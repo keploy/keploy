@@ -1285,9 +1285,11 @@ func TestAnUnservedRecordingAtTheCallsOwnInstantIsAnEarlierPlace(t *testing.T) {
 // the caller hands it: as an earlier place F served (a Raw), or as one F
 // gave the application that no earlier place of the call's own test is
 // (GivenEarlier). A value it holds whole is refused naming it either way,
-// the reason saying it was recorded at the call's own instant; one recorded
-// a moment after the call, which the caller hands only as what F gave, is
-// no source of it.
+// the reason saying it was recorded at the call's own instant: handed as an
+// earlier place, it is read as one made after the call too, the stricter
+// reading (TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays). One
+// recorded a moment after the call, which the caller hands only as what F
+// gave, is no source of it.
 func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing.T) {
 	const p = "body.msg_id"
 	const recID, liveID = "k1b2e4d70", "k5d0e8a33"
@@ -1310,8 +1312,15 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing
 		if same.Kind == KindNoise || !strings.Contains(same.Why, "mock-50") || !strings.Contains(same.Why, atCallWords) {
 			t.Errorf("FALSE GREEN? set %v, recorded at the call's own instant: %s (%s); want it refused naming mock-50 and the instant, as one recorded a moment before is: %s (%s)", viaSet, same.Kind, same.Why, before.Kind, before.Why)
 		}
-		if same.Kind != before.Kind {
-			t.Errorf("set %v: recorded at the call's own instant %s, a moment before %s; want the same verdict", viaSet, same.Kind, before.Kind)
+		// At least the verdict of one recorded a moment before: read as an
+		// earlier place too, the value it holds whole is bound to it there,
+		// and read as one made after the call, which F alone served, it is
+		// refused; the stricter reading decides (classifyGiven).
+		if same.Kind != before.Kind && same.Kind != KindUnaccounted {
+			t.Errorf("set %v: recorded at the call's own instant %s, a moment before %s; want that verdict or a refusal", viaSet, same.Kind, before.Kind)
+		}
+		if !viaSet && same.Kind != KindUnaccounted {
+			t.Errorf("FALSE GREEN? set %v, recorded at the call's own instant, handed as an earlier place F served: %s (%s); want it refused, as read as one made after the call", viaSet, same.Kind, same.Why)
 		}
 		// A Raw F served is an earlier place whenever it was recorded
 		// (Raw.earlierThan); the caller hands one recorded after the call
@@ -1511,5 +1520,107 @@ func TestARecordingOfAnotherCallAtTheCallsOwnInstantIsWhereTheRecordedMomentStan
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "the moment record's full round saw in it stands in mock-42 at spec.resp.body, and the moment it was recorded with stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was "+atCallWords) {
 			t.Errorf("FALSE GREEN? the own place and another call's recording at the call's own instant (set %v): %s (%s); want it refused naming both", viaSet, ln.Kind, ln.Why)
 		}
+	}
+}
+
+// A recording record's full round gave the application before the call,
+// made at the call's own instant, cannot be shown from the record to have
+// been given to the recorded application before the call or after it, so it
+// is read both ways and refused where either reading refuses: as an earlier
+// place of the call's own test (one recorded a moment before the call), and
+// as one made at or after the call, which only what F served there counts
+// for. Handed as an earlier place, served in the test or before it, or
+// unserved where the set shows F gave it, it gets the verdict of the
+// stricter reading: 15:50:40 rounds to F's minute and cuts down to the
+// recorded one, which an earlier place both runs were given shows no copy
+// of, while what F alone was served there shows F's minute copied from it,
+// so it is refused naming it and its instant, never noise. The same
+// recording made a second before the call is read once, as an earlier place
+// (controls), and the recorded minute alone stays noise where nothing names
+// F's minute.
+func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	before := at.Add(-time.Minute)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
+	base := recT.Truncate(time.Minute)
+	const (
+		noise   = "noise"
+		bound   = "variable"
+		refused = "refused"
+	)
+	for _, tc := range []struct {
+		name    string
+		sent    time.Duration
+		withOwn bool
+		atCall  string // the verdict at the call's own instant
+		before  string // the verdict a second before the call (control)
+		why     string // what the refusal at the call's own instant says
+	}{
+		{"F's minute and more", 65 * time.Second, false, refused, refused, "mock-44 at spec.resp.body (" + atCallWords + ")"},
+		{"F's minute and more, beside the own place", 65 * time.Second, true, refused, bound, "mock-44 at spec.resp.body holds, which record's full round gave the application in its place"},
+		{"F's minute", 60 * time.Second, false, refused, refused, "mock-44 at spec.resp.body (" + atCallWords + ")"},
+		{"rounds to F's minute, cuts down to the recorded one", 40 * time.Second, false, refused, noise, "stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was " + atCallWords + ", yet may as well have been made after the call, so keploy reads it both ways: as one made after the call, keploy follows no value of it but what record's full round served there, so it cannot tell"},
+		{"rounds to F's minute, cuts down to the recorded one, beside the own place", 40 * time.Second, true, refused, refused, "mock-44 at spec.resp.body holds as the recording gave it (" + atCallWords + ")"},
+		{"the recorded minute alone", 10 * time.Second, false, noise, noise, ""},
+		{"the recorded minute alone, beside the own place", 10 * time.Second, true, refused, bound, "stands 1m0s after the moment mock-44 at spec.resp.body holds as the recording gave it (" + atCallWords + ")"},
+	} {
+		for _, hand := range []string{"served in the test", "served before the test", "unserved, the set showing F gave it"} {
+			verdict := func(when time.Time) (string, string) {
+				dc := NewDriftCache()
+				m := sentAtReceive("mock-44", when, base.Add(tc.sent).Format(time.RFC3339))
+				var nb Raw
+				var given GivenEarlier
+				switch hand {
+				case "served in the test":
+					nb = dc.RawOf(m, true).ServedAs(1)
+				case "served before the test":
+					nb = dc.RawOf(m, true)
+				default:
+					nb = dc.RawOf(m, false)
+					given = func() ([]GivenPlaces, error) {
+						return []GivenPlaces{PlacesOf(dc.RawOf(m, true).ServedAs(1))}, nil
+					}
+				}
+				raw := []Raw{nb}
+				if tc.withOwn {
+					raw = append(raw, dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3))
+				}
+				ln := ClassifyGiven(dc, []string{p}, live, rec, at, nil, raw, nil, nil, given)[0]
+				switch ln.Kind {
+				case KindNoise:
+					return noise, ln.Why
+				case KindVariable:
+					return bound, ln.Why
+				case KindUnaccounted:
+					return refused, ln.Why
+				}
+				return string(ln.Kind), ln.Why
+			}
+			if got, why := verdict(at.Add(-time.Second)); got != tc.before {
+				t.Errorf("%s, %s, recorded a second before the call: %s (%s); want %s, read once as an earlier place", tc.name, hand, got, why, tc.before)
+			}
+			got, why := verdict(at)
+			if got != tc.atCall || tc.why != "" && !strings.Contains(why, tc.why) {
+				t.Errorf("FALSE GREEN? %s, %s, recorded at the call's own instant: %s (%s); want %s, the stricter of both readings: %q", tc.name, hand, got, why, tc.atCall, tc.why)
+			}
+		}
+	}
+	// The set cannot be read: an unserved recording at the call's own
+	// instant may be one F gave, so it is read both ways, and the second
+	// reading refuses with the set's error what reaches the set, where the
+	// first binds the value to the own place without reading the set.
+	dc := NewDriftCache()
+	raw := []Raw{
+		dc.RawOf(sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339)), false),
+		dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3),
+	}
+	ln := ClassifyGiven(dc, []string{p}, live, rec, at, nil, raw, nil, nil, func() ([]GivenPlaces, error) {
+		return nil, errors.New("disk gone")
+	})[0]
+	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "disk gone") {
+		t.Errorf("FALSE GREEN? the set unread, an unserved recording at the call's own instant beside the own place: %s (%s); want it refused with the set's error", ln.Kind, ln.Why)
 	}
 }

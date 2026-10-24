@@ -400,6 +400,8 @@ type givenMoment struct {
 	m           moment
 	mock, where string
 	at          time.Time
+	// late is Raw.late: the reason says the recording is read both ways.
+	late bool
 }
 
 // answerMoments are the instants of x's answer as F gave the application
@@ -417,7 +419,7 @@ func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
 		for _, form := range []string{t, dc.rawExtra(t)} {
 			for _, sp := range dc.spansOf(form) {
 				if sp.keyed {
-					out = append(out, givenMoment{m: sp.moment(), mock: x.mock, where: where, at: x.at})
+					out = append(out, givenMoment{m: sp.moment(), mock: x.mock, where: where, at: x.at, late: x.late})
 				}
 			}
 		}
@@ -494,7 +496,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 	for _, g := range op.answers {
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.live, e.rec, e.rules) {
-				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock)
+				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock)
 			}
 		}
 	}
@@ -513,7 +515,7 @@ func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, serv
 		}
 		for _, e := range echoed {
 			if namesMomentApart(g.m, e.rec, e.live, e.rules) {
-				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock)
+				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock)
 			}
 		}
 	}
@@ -566,11 +568,13 @@ type givenWords struct {
 	mock           string
 	at             time.Time
 	words, stamped [][]string
+	// late is Raw.late: the reason says the recording is read both ways.
+	late bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late}
 	plain := dc.answerWords(x, false)
 	kept := plain
 	if len(x.stamps) > 0 {

@@ -140,6 +140,11 @@ type Raw struct {
 	// F gave there by an offset, or copied from its answer word for word or
 	// as a moment, is refused, naming it.
 	elsewhere bool
+	// late: an earlier place of the call's own test recorded at the call's
+	// own instant, read here as one made at or after the call
+	// (givenAtCall): a reason naming it says it is read both ways
+	// (givenWhose), never that it is no place of the call's own test.
+	late bool
 	// read: the text was read from the mock (RawOf).
 	read bool
 	// text is Text; answerClock is AnswerClock.
@@ -449,10 +454,119 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // classifyGiven is ClassifyGiven, its word rule read as mode says
 // (follows.go): pending is the reading the confirming round decides
 // (followC).
+//
+// A recording record's full round gave the application before the call that
+// was made at the call's own instant (a fixture's whole second, or two calls
+// of one clock tick) cannot be shown, from the record, to have been given to
+// the recorded application before the call or after it. So it is read both
+// ways, and a drift is learned by the stricter of the two (stricterOf): as an
+// earlier place of the call's own test, as one recorded a moment before the
+// call is (Raw.earlierThan), and as a recording made at or after the call,
+// which only what F served there counts for (OfAnotherTest: the offset rule,
+// the word rule and the echo of what F gave, never a variable's search or
+// the call's own echo). Read as an earlier place only, an instant of its
+// answer that names the moment F saw by one rule and the recorded moment by
+// another (15:50:40, rounded and cut to the minute) is the place both runs
+// were given, so no copy, and the value would be learned as noise, while the
+// same recording read as made after the call shows F's copy of what it
+// served there, and refuses it.
 func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, mode followMode, pending *Pending) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
+	given = givenOnce(given)
+	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, mode, pending)
+	late, ok := givenAtCall(raw, at, given)
+	if !ok {
+		return out
+	}
+	alone := classifyRead(dc, drift, live, rec, at, earlier, late, resp, w, given, mode, pending)
+	for i := range out {
+		out[i] = stricterOf(out[i], alone[i])
+	}
+	return out
+}
+
+// givenOnce is given read at most once, however often it is asked: both
+// readings of a call (classifyGiven) read the set as one.
+func givenOnce(given GivenEarlier) GivenEarlier {
+	if given == nil {
+		return nil
+	}
+	var (
+		read bool
+		set  []GivenPlaces
+		err  error
+	)
+	return func() ([]GivenPlaces, error) {
+		if !read {
+			set, err = given()
+			read = true
+		}
+		return set, err
+	}
+}
+
+// givenAtCall is raw with each earlier place of the call's own test that
+// was recorded at the call's own instant (at) and that F gave the
+// application before the call (served in the test or before it: Raw.served;
+// or anywhere earlier in the running set: given lists it) read as a
+// recording made at or after the call is (OfAnotherTest), and whether there
+// was one. The set is read only where such a place was not handed as served,
+// and where it cannot be read, the place is taken as one F gave, the
+// fail-closed side: the second reading then refuses what reaches the set.
+func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
+	var (
+		out     []Raw
+		gave    map[string]bool
+		gaveAll bool
+		asked   bool
+	)
+	for i, x := range raw {
+		if x.elsewhere || !x.at.Equal(at) {
+			continue
+		}
+		if !x.served {
+			if given == nil {
+				continue
+			}
+			if !asked {
+				asked = true
+				set, err := given()
+				gaveAll = err != nil
+				gave = make(map[string]bool, len(set))
+				for _, g := range set {
+					gave[g.mock+"\x00"+g.at.String()] = true
+				}
+			}
+			if !gaveAll && !gave[x.mock+"\x00"+x.at.String()] {
+				continue
+			}
+		}
+		if out == nil {
+			out = append([]Raw(nil), raw...)
+		}
+		out[i] = x.OfAnotherTest()
+		out[i].late = true
+	}
+	return out, out != nil
+}
+
+// stricterOf is the verdict of a drift read two ways (classifyGiven): the
+// refusal of either, the earlier place's (asPlace) first; else what asPlace
+// learned. The second reading reads fewer places of the call's own test and
+// no more of anything else, so it finds no variable, echo or pending word
+// that the first does not: only a refusal of its own.
+func stricterOf(asPlace, asLate Learned) Learned {
+	if asPlace.Kind != KindUnaccounted && asLate.Kind == KindUnaccounted {
+		return asLate
+	}
+	return asPlace
+}
+
+// classifyRead is classifyGiven of raw as handed: each Raw read as the one
+// place it is.
+func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, mode followMode, pending *Pending) []Learned {
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	unreadRaw := rawUnread(raw)

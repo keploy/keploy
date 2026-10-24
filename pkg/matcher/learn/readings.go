@@ -892,7 +892,7 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
 			}
 		}
 		return ""
@@ -905,9 +905,16 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 // recorded after the call, no earlier place of any test's call; recorded at
 // the call's own instant, one keploy reads as given to the application
 // before the call (the fail-closed side: it may have been made before it,
-// or after it), yet no earlier place of the call's own test.
-func givenWhose(gat, at time.Time) string {
+// or after it), yet no earlier place of the call's own test. late, an
+// earlier place of the call's own test made at the call's own instant that
+// is read as one made after the call too (Raw.late, classifyGiven): it may
+// as well have been made after the call, so keploy reads it both ways, and
+// as one made after the call follows no value of it but what record's full
+// round served there.
+func givenWhose(gat, at time.Time, late bool) string {
 	switch {
+	case late:
+		return "was " + atCallWords + ", yet may as well have been made after the call, so keploy reads it both ways: as one made after the call, keploy follows no value of it but what record's full round served there"
 	case gat.Equal(at):
 		return "was " + atCallWords + ", yet as no earlier place of the call's own test: keploy follows no value of it"
 	case gat.After(at):
