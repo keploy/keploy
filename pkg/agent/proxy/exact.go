@@ -93,6 +93,15 @@ type exactView struct {
 	// of, by name, as ServeExactWorker last said when the view was
 	// installed: shown whether a test is open or not.
 	worker map[string]struct{}
+	// stretch is, of those, a timer's recordings' stretches of writes, as
+	// ServeExactStretches last said when the view was installed: one is
+	// shown only within its own (inStretch). answered tells whether a call
+	// of the staging consumed a write (MockManager.consumedInSet).
+	stretch  map[string]models.Stretch
+	answered func(name string) bool
+	// passed is the writes ending a stretch that the run has gone past
+	// without them (ServeExactStretches): each counts as answered.
+	passed map[string]bool
 	// poolKey is the key of that slice: its stateful cursors are its own.
 	poolKey string
 	// cand marks, by position in owned, the recordings the open test shares
@@ -146,6 +155,11 @@ type exactState struct {
 	// worker is the worker scope's reachable mocks (ServeExactWorker), which
 	// each view installed after it shows.
 	worker atomic.Pointer[map[string]struct{}]
+	// stretch is a timer's worker-scope recordings' stretches
+	// (ServeExactStretches), which each view installed after it keeps to, and
+	// passed the writes ending them that the run has gone past.
+	stretch atomic.Pointer[map[string]models.Stretch]
+	passed  atomic.Pointer[map[string]bool]
 	// begun is the mocks the tests begun in the current staging own
 	// (StagedOwnerBegun); named, those a miss's diagnosis named
 	// (FindStagedNotOwned), each once.
@@ -920,6 +934,31 @@ func (m *MockManager) ServeExactWorker(names []string) {
 	m.exact.worker.Store(&set)
 }
 
+// ServeExactStretches names the stretch of the set's writes each of a timer's
+// worker-scope recordings answers within (models.MockEntry.Stretch), whole,
+// and the writes ending a stretch that the run has gone past without them
+// (passed: the run began a test recorded after the write): each view installed
+// after it shows such a recording only once its After write answered a call of
+// the staging or was passed, and while its Until write has not
+// (agent.ExactStretchServer). A worker-scope mock it does not name is shown
+// wherever its place is reached. It installs no view itself.
+func (m *MockManager) ServeExactStretches(stretches map[string]models.Stretch, passed []string) {
+	set := make(map[string]models.Stretch, len(stretches))
+	for n, st := range stretches {
+		if n != "" {
+			set[n] = st
+		}
+	}
+	gone := make(map[string]bool, len(passed))
+	for _, n := range passed {
+		if n != "" {
+			gone[n] = true
+		}
+	}
+	m.exact.stretch.Store(&set)
+	m.exact.passed.Store(&gone)
+}
+
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
 // and so does the window signal.
@@ -927,6 +966,12 @@ func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if w := m.exact.worker.Load(); w != nil {
 		v.worker = *w
+	}
+	if s := m.exact.stretch.Load(); s != nil && len(*s) > 0 {
+		v.stretch, v.answered = *s, m.consumedInSet
+		if p := m.exact.passed.Load(); p != nil {
+			v.passed = *p
+		}
 	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
@@ -1093,9 +1138,10 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 
 // shows reports whether the view shows mk among the staged mocks: a
 // protocol-phase mock always; a worker-scope mock the run has reached the
-// place of, whether a test is open or not; any other data-plane mock only
-// between tests, and only in the pool slice served. The open test's own mocks are read from the view
-// itself (unanswered), never from the staged trees.
+// place of, whether a test is open or not, a timer's only within its stretch
+// (inStretch); any other data-plane mock only between tests, and only in the
+// pool slice served. The open test's own mocks are read from the view itself
+// (unanswered), never from the staged trees.
 func (v *exactView) shows(mk *models.Mock) bool {
 	if mk == nil {
 		return false
@@ -1110,7 +1156,7 @@ func (v *exactView) shows(mk *models.Mock) bool {
 		return true
 	}
 	if v.isWorker(mk.Name) {
-		return true
+		return v.inStretch(mk.Name)
 	}
 	if v.test != "" {
 		return false
@@ -1124,6 +1170,47 @@ func (v *exactView) shows(mk *models.Mock) bool {
 func (v *exactView) isWorker(name string) bool {
 	_, ok := v.worker[name]
 	return ok
+}
+
+// inStretch reports whether the run is within the stretch of writes the
+// worker-scope mock name answers within (ServeExactStretches): the write
+// before it has answered a call of the staging or the run has gone past it,
+// and the one after it has neither. Its answer is the state those writes left,
+// so a call made before the first or after the second would read a state the
+// recording never saw. One of the run's other recordings (models.Stretch.With)
+// answered in the staging opens it as well: the run has reached the state
+// they read, whatever write it made before them. A mock with no stretch is
+// always within its own.
+func (v *exactView) inStretch(name string) bool {
+	st, ok := v.stretch[name]
+	if !ok || v.answered == nil {
+		return true
+	}
+	done := func(write string) bool { return v.passed[write] || v.answered(write) }
+	open := st.After == "" || done(st.After)
+	for _, n := range st.With {
+		if open {
+			break
+		}
+		open = v.answered(n)
+	}
+	return open && (st.Until == "" || !done(st.Until))
+}
+
+// lastOfRun reports whether name is the last of a timer's recordings of one
+// call within its stretch (models.Stretch.Run) still unanswered in the
+// staging: every other recording of its run the view shows has answered.
+func (v *exactView) lastOfRun(name string) bool {
+	st, ok := v.stretch[name]
+	if !ok || st.Run == "" {
+		return false
+	}
+	for n, o := range v.stretch {
+		if n != name && o.Run == st.Run && v.isWorker(n) && !v.spentOutside(n) {
+			return false
+		}
+	}
+	return true
 }
 
 // spentOutside reports whether name, a data-plane recording, was consumed
@@ -1280,12 +1367,21 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 	// spent for the staging: it answers at most one request in the set.
 	if (v.test == "" || worker) && !mk.IsProtocolPhase() {
 		m.prepareOutside()
+		// The last of a timer's recordings of one call within its stretch
+		// answers again once the rest of its run have, and is not spent: the
+		// run's recordings all answered alike, so this is the answer the
+		// recording holds for every such call the stretch makes, as the pool
+		// answers a call once, then its last.
+		again := worker && v.lastOfRun(mk.Name)
 		// The view's closed check and the spend are one step: no begin or
 		// end lands between them.
 		v.mu.Lock()
 		verdict := exactRefused
 		if !v.closed {
-			verdict = m.consumeOutside(mk)
+			verdict = exactServed
+			if !again {
+				verdict = m.consumeOutside(mk)
+			}
 		}
 		v.mu.Unlock()
 		if verdict == exactServed {

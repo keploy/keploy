@@ -374,7 +374,8 @@ func (m *mockService) Record(ctx context.Context) error {
 		// Under the proven switch a protocol-phase mock is the pool's, never
 		// a test's (design v14 §5.2): the mapping lists data-plane mocks only.
 		protocol := provenswitch.On() && mk.IsProtocolPhase()
-		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef})
+		fp, write := callFingerprint(mk)
+		recorded = append(recorded, capturedMock{name: mk.Name, ts: models.PlaceOf(mk), pid: mk.SourcePID, boot: kind == "config" || kind == "connection", protocol: protocol, start: mk.Start, ref: mk.StartRef, fp: fp, write: write, ans: answerOf(mk), sess: sessionOf(mk)})
 	}
 	go func() {
 		defer utils.Recover(m.logger)
@@ -768,6 +769,18 @@ func (m *mockService) Record(ctx context.Context) error {
 				byTest, owned = plan.tests, plan.perTest
 			}
 			byCase := correlateCases(windows, owned, capture.list(), stepWindows(windows))
+			var startup, worker []models.MockEntry
+			if len(starts) == 0 {
+				startup = startupMocks(windows, withoutRetries(recorded, retries), m.claims)
+			}
+			_, timers := m.mappingDB.(WorkerMapper)
+			timers = timers && provenswitch.On()
+			if timers {
+				// The calls a repeating timer made, as the tests' harness
+				// reported them: the worker scope's, each answered within its
+				// stretch of the set's writes.
+				byTest, worker = timerScope(windows, dataPlane(recorded), byTest)
+			}
 			for _, w := range windows {
 				if _, ok := byTest[w.Name]; !ok {
 					byTest[w.Name] = nil
@@ -805,7 +818,15 @@ func (m *mockService) Record(ctx context.Context) error {
 				m.upsertCases(persistCtx, name, byCase, nil, suites)
 				m.upsertBoots(persistCtx, name, plan.boots)
 			} else {
-				m.upsertCases(persistCtx, name, byCase, startupMocks(windows, withoutRetries(recorded, retries), m.claims), suites)
+				m.upsertCases(persistCtx, name, byCase, startup, suites)
+			}
+			if timers {
+				if err := m.upsertWorker(persistCtx, name, worker); err != nil {
+					m.propagateExit(appErr, "record")
+					stopReason = "keploy could not write the calls a timer made to the set's worker scope (mappings.yaml)"
+					utils.LogError(m.logger, err, stopReason, zap.String("mock-set", name), zap.String("next_step", "free the disk or fix the set directory's permissions, then record again"))
+					return fmt.Errorf("%s: %w", stopReason, err)
+				}
 			}
 			if provenswitch.On() {
 				m.upsertKeyGiven(persistCtx, name, keyGiven(m.claims))
@@ -1077,6 +1098,18 @@ type capturedMock struct {
 	protocol bool
 	start    string
 	ref      string
+	// fp is an HTTP call's fingerprint (callFingerprint): what a test's
+	// harness names a timer's call by (models.CauseReq). Empty for any other
+	// kind.
+	fp string
+	// write: an HTTP call its parser does not declare a read
+	// (models.IsReadCall): what can end a timer's stretch.
+	write bool
+	// ans is an HTTP call's recorded answer (answerOf): a timer's recordings
+	// that answered alike share one stretch. sess is the session it was made
+	// in (sessionOf): only recordings of one session share a run.
+	ans  string
+	sess string
 }
 
 // stagingSetID returns the staging set name record captures into while recording

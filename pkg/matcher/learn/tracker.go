@@ -155,6 +155,49 @@ func (t *Tracker) NewSet() {
 	t.mu.Unlock()
 }
 
+// Warm reads, in the background, what each of the mocks' texts reads as
+// (ReadRaw: its other forms and its words by reading) into the set's text
+// cache, the one every test's learn step of the set reads (Begin keeps it):
+// a learned call then finds the set's recordings read, instead of reading
+// every recording made before it while its caller waits. What a text reads
+// as is the same whenever it is read, so this changes when the reading is
+// done, never what any call learns. It stops once another set starts
+// (NewSet): that set's cache is another.
+func (t *Tracker) Warm(lists ...[]*models.Mock) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	c := t.texts
+	t.mu.Unlock()
+	if c == nil {
+		return
+	}
+	var mocks []*models.Mock
+	for _, l := range lists {
+		mocks = append(mocks, l...)
+	}
+	if len(mocks) == 0 {
+		return
+	}
+	go func() {
+		for _, m := range mocks {
+			t.mu.Lock()
+			current := t.texts == c
+			t.mu.Unlock()
+			if !current {
+				return
+			}
+			if m == nil {
+				continue
+			}
+			if r, err := ReadRaw(m, false); err == nil && r.Text != "" {
+				c.tokensOf(r.Text)
+			}
+		}
+	}()
+}
+
 // mockID is a served mock's identity: its name, which is unique within one
 // set's recording only, with its kind and recorded times.
 func mockID(m *models.Mock) string {

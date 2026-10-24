@@ -5,11 +5,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -341,9 +344,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if lmiss != nil {
 						why = lmiss.res.Why
 					}
+					// Who sent it and what it sent, without its content: the
+					// process (its pid and executable), its User-Agent, and
+					// its body's length and hash (sha256's first 8 bytes, as
+					// a recording's request body is hashed offline).
+					exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", opts.SrcPid))
+					sum := sha256.Sum256([]byte(input.body))
 					h.Logger.Info("KPWHY no answer for a call", zap.String("call", diagCall(input)), zap.String("closest", report.ClosestMock),
 						zap.String("phase", report.MatchPhase), zap.Int("extra_of_recorded", n), zap.String("learn_why", why),
-						zap.String("diff", report.Diff), zap.String("next_step", report.NextSteps))
+						zap.String("diff", report.Diff), zap.String("next_step", report.NextSteps),
+						zap.Uint32("src_pid", opts.SrcPid), zap.String("src_exe", exe), zap.String("user_agent", input.header.Get("User-Agent")),
+						zap.Int("body_len", len(input.body)), zap.String("body_sha", hex.EncodeToString(sum[:8])))
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-

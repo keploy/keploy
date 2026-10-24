@@ -1156,11 +1156,39 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+	worker := heldWorker(mp, table, loaded)
+	if err := pp.PushProvenTable(ctx, table, pool, worker); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope", len(worker)), zap.String("mock-set", name))
 	return nil
+}
+
+// heldWorker is the set's worker scope (mappings' worker:) of the mocks the
+// agent holds that no test lists: a mock keploy never hands the agent is no
+// one's, and the call it recorded misses.
+func heldWorker(mp *models.Mapping, table map[string][]string, loaded []*models.Mock) []models.MockEntry {
+	if mp == nil || len(mp.Worker) == 0 {
+		return nil
+	}
+	held := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			held[mk.Name] = true
+		}
+	}
+	for _, names := range table {
+		for _, n := range names {
+			held[n] = false
+		}
+	}
+	var out []models.MockEntry
+	for _, e := range mp.Worker {
+		if held[e.Name] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
@@ -1207,11 +1235,12 @@ func heldOnly(table map[string][]string, loaded []*models.Mock) map[string][]str
 }
 
 // poolSlices is each key's pool slice of a recording (design v14 §5.2): every
-// loaded mock no test's mapping lists, under the key its mappings' startup:
-// entry gives it, else models.PoolKeyNone (an older recording's, or one made
-// outside every claim). unknown lists, sorted, the names the table or the
-// startup entries give that no decoded mock has (a mock the agent never holds,
-// a connection failure, is decoded, and in no slice).
+// loaded mock no test's mapping lists and the set's worker scope does not
+// hold (mappings' worker:), under the key its mappings' startup: entry gives
+// it, else models.PoolKeyNone (an older recording's, or one made outside
+// every claim). unknown lists, sorted, the names the table, the worker scope
+// or the startup entries give that no decoded mock has (a mock the agent
+// never holds, a connection failure, is decoded, and in no slice).
 func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded []*models.Mock) (pool map[string][]string, unknown []string) {
 	have := make(map[string]bool, len(decoded))
 	for _, mk := range decoded {
@@ -1238,6 +1267,18 @@ func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded [
 	pool = map[string][]string{}
 	keyed := map[string]bool{}
 	if mp != nil {
+		// The worker scope's are in no slice: each answers only within its
+		// stretch, whether a test is open or not (models.ScopeTableReq.Worker).
+		for _, e := range mp.Worker {
+			if e.Name == "" || mapped[e.Name] {
+				continue
+			}
+			if !have[e.Name] {
+				missing[e.Name] = true
+				continue
+			}
+			keyed[e.Name] = true
+		}
 		for _, e := range mp.Startup {
 			if e.Name == "" || mapped[e.Name] || keyed[e.Name] {
 				continue

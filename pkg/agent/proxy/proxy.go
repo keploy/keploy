@@ -4304,6 +4304,13 @@ func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*mod
 		stage(m)
 		p.dnsCache.Purge()
 	}
+	// Under the proven switch, the learn step reads what each recording of
+	// the set reads as (learn.Tracker.Warm) from the staging on, in the
+	// background: a learned call then finds them read, instead of reading
+	// every recording made before it while it waits.
+	if provenswitch.On() {
+		p.learnTracker.Warm(filtered, unFiltered)
+	}
 	// A test set's staging (from models.BaseTime, the first since its Mock,
 	// under the proven switch): what was missed until its mocks were in is
 	// not the set's (cutMissesAtSetStart).
@@ -4572,6 +4579,15 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 		return errNoMockManager
 	}
 	m.ServeExactWorker(names)
+	return nil
+}
+
+func (p *Proxy) ServeExactStretches(stretches map[string]models.Stretch, passed []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactStretches(stretches, passed)
 	return nil
 }
 

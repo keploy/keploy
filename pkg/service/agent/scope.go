@@ -266,7 +266,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if len(meta.unread) > 0 {
 			ev = withUnread(ev, meta.unread)
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real, Given: meta.given})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real, Given: meta.given, Timers: meta.timers})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -448,6 +448,9 @@ type scopeMeta struct {
 	// given is, in a record, what the test's harness gave while it was open
 	// (Give), in order.
 	given []models.GivenValue
+	// timers are, in a record, the test's calls its harness saw a repeating
+	// timer make while it was open (Cause), in order.
+	timers []models.TimerCall
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {

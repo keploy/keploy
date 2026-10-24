@@ -30,6 +30,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 var Emoji = "\U0001F430" + " Keploy:"
@@ -1309,6 +1310,16 @@ func relayRawPassthrough(clientConn, destConn net.Conn, idle time.Duration) {
 		// waiting would just hold the caller for the full idle window on
 		// the very common "one side ends cleanly, the other resets".
 		if i == 1 {
+			return
+		}
+		// A reset ends both halves of the connection it came from (unlike a
+		// tls.Conn's read half, which can fail alone): the survivor either
+		// writes to that connection or reads from it, so it can deliver
+		// nothing more. Holding the other connection open would only keep
+		// its peer from seeing the end, which over the wire it sees at once:
+		// a client that resets an idle connection would leave the server
+		// holding its side for the whole window.
+		if errors.Is(res.err, syscall.ECONNRESET) {
 			return
 		}
 		// Let the survivor run while it is still delivering. The survivor

@@ -622,10 +622,12 @@ func (m *MockManager) ResetForReplaySession() {
 	// previous session answers an application kept alive across them.
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
-	// Nor any of its worker scope (models.Mapping.Worker), or its recording
-	// source: names are unique only within a set, and the next set names its
-	// own.
+	// Nor any of its worker scope (models.Mapping.Worker) and its timers'
+	// stretches, or its recording source: names are unique only within a
+	// set, and the next set names its own.
 	m.exact.worker.Store(nil)
+	m.exact.stretch.Store(nil)
+	m.exact.passed.Store(nil)
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
 	// Nor its scope table's pool names (SetPoolNames): until the next

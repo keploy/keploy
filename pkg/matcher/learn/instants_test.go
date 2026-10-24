@@ -87,3 +87,28 @@ func TestTokenValue(t *testing.T) {
 		}
 	}
 }
+
+// A name the test made with an instant in it ("e2e-mock-<ms>", atg-features'
+// RBAC Smart Test Set), sent first on its own (noise there: its answer does
+// not echo it) and then inside a longer value (a mock's YAML). F moved the
+// instant by the lead, so the name's run moved only in its clock word, word
+// for word the same otherwise: learned as noise, as the name alone is, not
+// refused for the earlier place that holds it.
+func TestClassifyInARunThatMovedOnlyInItsClockWordIsNoise(t *testing.T) {
+	at := time.Date(2026, 10, 24, 10, 43, 20, 0, time.UTC)
+	rec, live := "e2e-mock-1792838439174", "e2e-mock-1792838500715"
+	yaml := func(n string) string {
+		return "version: api.keploy.io/v1beta1\nkind: Http\nname: " + n + "\nspec: {}\n"
+	}
+	name := seenAt("mock-461", "body.variables.name", rec, live, at.Add(-time.Second))
+	if got := classifyLeaf("body.variables.mockYaml", yaml(rec), yaml(live), at, []Earlier{name}, nil, nil); got.Kind != KindNoise {
+		t.Fatalf("learned %s (%s), want noise", got.Kind, got.Why)
+	}
+
+	// A run that changed in more than its clock word (the role it names, as
+	// well as the instant) is still refused where an earlier place holds it.
+	other := yaml("e2e-role-1792838500715")
+	if got := classifyLeaf("body.variables.mockYaml", yaml(rec), other, at, []Earlier{name}, nil, nil); got.Kind == KindNoise || got.Kind == KindEcho {
+		t.Fatalf("a run that changed beyond its clock word was learned as %s", got.Kind)
+	}
+}
