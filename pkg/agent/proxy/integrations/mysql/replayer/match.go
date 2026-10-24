@@ -308,12 +308,18 @@ type matchOptions struct {
 // the store (integrations.MarkCallRound), and the matcher and its miss read
 // the store held to that mark (integrations.HoldToRound): once the replay
 // stages a test set again, the command finds nothing of it to be answered
-// with, nor compared with, and misses saying so (restagedCommandNote).
+// with, nor compared with, and misses saying so (restagedCommandNote). A
+// store that marks the command's round but cannot hold it reads nothing for
+// it, and the miss says why (integrations.UnheldWhy).
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, matchOptions{})
-	if !ok && (err == nil || errors.Is(err, errConsumeRefused)) && restaged() {
+	// A store that marked the command's round but could not hold it read
+	// nothing for it (integrations.HoldToRound fails closed): the miss says
+	// why.
+	unheld := integrations.UnheldWhy(db)
+	if !ok && (err == nil || errors.Is(err, errConsumeRefused)) && (restaged() || unheld != "") {
 		// A consume the hold refused is the restage's miss too.
 		err = nil
 		if miss == nil {
@@ -321,6 +327,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 		}
 		miss.restaged = true
 		miss.nextSteps = restagedCommandNote
+		if unheld != "" {
+			miss.nextSteps = unheld
+		}
 	}
 	return resp, ok, miss, err
 }

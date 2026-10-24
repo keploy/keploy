@@ -25,6 +25,12 @@ type stagedDb struct {
 
 func (d stagedDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
 
+// HoldToRound implements integrations.RoundHolder: d never stages again, so
+// it holds every call it marks as it is.
+func (d stagedDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
 func (d stagedDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
 	if !call.Read() {
 		return "", false

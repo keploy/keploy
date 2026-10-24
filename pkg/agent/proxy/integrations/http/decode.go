@@ -364,6 +364,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				if restaged {
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
+				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
+					// The store marked the request's round but could not
+					// hold it: its matcher read nothing (HoldToRound).
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-

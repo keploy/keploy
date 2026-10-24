@@ -202,6 +202,64 @@ func TestACallHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *testing.T) {
 	}
 }
 
+// A replay's call of one test set held after its first read of the round
+// while the replay stages the next set is never answered by what record's
+// full round learned onto the next set's recording (learnedMatch, the first
+// matcher a replay asks under the switch): the next set's open test owns a
+// recording that learned the one header the call differs in, and the learned
+// match reads the store held to the call's first read, which finds nothing
+// once the staging moved. The call misses saying the set was staged again
+// under it, and the recording, never spent, answers the next set's own call
+// through its learned noise. On the bare store and on a connection's view.
+func TestALearnedMatchHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, vw := range []struct {
+		name string
+		of   func(*heldFirstRead) integrations.MockMemDb
+	}{
+		{"the store", func(h *heldFirstRead) integrations.MockMemDb { return h }},
+		{"a connection's view", func(h *heldFirstRead) integrations.MockMemDb { return &scopedMockDb{MockMemDb: h} }},
+	} {
+		t.Run(vw.name, func(t *testing.T) {
+			now := time.Now()
+			users := r3Mock("s1-users", now, "GET", "/users/a", "", `{"name":"a"}`)
+			next := r3Mock("s2-jobs", now.Add(time.Second), "GET", "/jobs/1", "", `{"job":1}`)
+			next.Spec.HTTPReq.Header["X-Req-Id"] = "recorded"
+			next.Spec.ReqBodyNoise = map[string][]string{"header.x-req-id": {}}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			stage := func(own *models.Mock, test string) {
+				mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, now.Add(time.Hour))
+				mm.ServeExactTest(test, []*models.Mock{own})
+			}
+			stage(users, "T1")
+			held := &heldFirstRead{MockManager: mm, moved: func() { stage(next, "T2") }}
+			db := vw.of(held)
+			call := "GET /jobs/1 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nX-Req-Id: live\r\n\r\n"
+
+			r := sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), call)
+			if !held.fired.Load() {
+				t.Fatal("precondition: the replay never staged the next set under the call")
+			}
+			if r == nil {
+				t.Fatalf("a call of the set before was answered with what record's full round learned onto the next set's %s", next.Name)
+			}
+			if r.NotOwned || r.ClosestMock == next.Name {
+				t.Fatalf("a call of the set before was diagnosed against the next set's %s: %+v", next.Name, r)
+			}
+			if !strings.Contains(r.NextSteps, "staged a test set again while it decided this request, so keploy answered it with no recording") {
+				t.Fatalf("the miss does not say the set was staged again under the call: %q", r.NextSteps)
+			}
+
+			// Never spent on the call before, it answers the next set's own
+			// call, which differs from it only in the learned header.
+			if r := sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), call); r != nil {
+				t.Fatalf("the next set's own call missed after a call of the set before: %+v", r)
+			}
+		})
+	}
+}
+
 // A call of one test set held after its first read of the round while the
 // replay stages the next set, whose open test has already answered a call
 // with the recording that is this call, is no call more than that test
@@ -294,5 +352,119 @@ func TestACallWhoseTestEndedUnderItIsNotItsOwnRecordingMadeElsewhere(t *testing.
 				t.Fatalf("a call of a test the replay ended was named as that test's own %s made elsewhere: %+v", own.Name, r)
 			}
 		})
+	}
+}
+
+// marksNoHold is a store that marks a call's round and looks up recordings
+// made elsewhere (integrations.StagedFinder) but does not hold a call to its
+// round (no integrations.RoundHolder): a parser-side wrapper that forgot to
+// forward it.
+type marksNoHold struct {
+	integrations.MockMemDb
+	f integrations.StagedFinder
+}
+
+func (w marksNoHold) MarkCallRound() integrations.CallRound { return w.f.MarkCallRound() }
+
+func (w marksNoHold) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	return w.f.FindStagedNotOwned(kind, call, match)
+}
+
+// A call marked by a store that cannot hold it to its round is never
+// answered from that store: integrations.HoldToRound fails closed, so the
+// call's matcher and its miss read nothing, and the miss says why. A call
+// marked in one set and held while the replay stages the next, whose open
+// test owns a recording that is the call itself, therefore misses, never
+// answered with the next set's recording nor told it was staged again; so
+// does a call whose staging never moved, since such a store cannot tell
+// that it did. For HTTP and Generic, on the store and on a connection's view
+// of it.
+func TestACallMarkedByAStoreThatCannotHoldItIsNeverAnsweredFromIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, vw := range []struct {
+		name string
+		of   func(marksNoHold) integrations.MockMemDb
+	}{
+		{"the store", func(w marksNoHold) integrations.MockMemDb { return w }},
+		{"a connection's view", func(w marksNoHold) integrations.MockMemDb { return &scopedMockDb{MockMemDb: w} }},
+	} {
+		for _, moves := range []bool{true, false} {
+			name := vw.name
+			if !moves {
+				name += ", staging never moved"
+			}
+			t.Run("HTTP on "+name, func(t *testing.T) {
+				now := time.Now()
+				users := r3Mock("s1-users", now, "GET", "/users/a", "", `{"name":"a"}`)
+				next := r3Mock("s2-jobs", now.Add(time.Second), "GET", "/jobs/1", "", `{"job":1}`)
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				stage := func(own *models.Mock, test string) {
+					mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, now.Add(time.Hour))
+					mm.ServeExactTest(test, []*models.Mock{own})
+				}
+				first := users
+				if !moves {
+					first = next
+				}
+				stage(first, "T1")
+				held := &heldFirstRead{MockManager: mm}
+				if moves {
+					held.moved = func() { stage(next, "T2") }
+				}
+				r := sendForMiss(t, vw.of(marksNoHold{MockMemDb: held, f: held}), models.OutgoingOptions{}, learn.NewTracker(), jobsCall)
+				if moves && !held.fired.Load() {
+					t.Fatal("precondition: the replay never staged the next set under the call")
+				}
+				if r == nil {
+					t.Fatalf("a call marked by a store that cannot hold it was answered with %s", next.Name)
+				}
+				if r.NotOwned || r.ClosestMock == next.Name {
+					t.Fatalf("a call marked by a store that cannot hold it was diagnosed against %s: %+v", next.Name, r)
+				}
+				if !strings.Contains(r.NextSteps, integrations.UnheldNote) || strings.Contains(r.NextSteps, "staged a test set again") {
+					t.Fatalf("the miss does not say its store could not hold it, alone: %q", r.NextSteps)
+				}
+				// The bare store holds: the recording, never spent, answers it.
+				if r := sendForMiss(t, mm, models.OutgoingOptions{}, learn.NewTracker(), jobsCall); r != nil {
+					t.Fatalf("the store that holds missed the call after: %+v", r)
+				}
+			})
+			t.Run("Generic on "+name, func(t *testing.T) {
+				mine := genericExchange("ex-mine", 0, "AUTH step2")
+				next := genericExchange("s2-ex", 2*time.Second, "AUTH step4")
+				first := mine
+				if !moves {
+					first = next
+				}
+				mm := stagedManager(t, nil, []*models.Mock{first})
+				mm.ServeExactTest("T1", []*models.Mock{first})
+				staged := false
+				if moves {
+					mm.exact.onMarked = func() {
+						mm.exact.onMarked = nil
+						mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now())
+						mm.ServeExactTest("S2-T1", []*models.Mock{next})
+						staged = true
+					}
+				}
+				r := genericServeIn(t, context.Background(), vw.of(marksNoHold{MockMemDb: mm, f: mm}), "AUTH step4")
+				if moves && !staged {
+					t.Fatal("precondition: the replay never staged the next set under the request")
+				}
+				if r == nil {
+					t.Fatalf("a request marked by a store that cannot hold it was answered with %s", next.Name)
+				}
+				if r.NotOwned || r.ClosestMock == next.Name {
+					t.Fatalf("a request marked by a store that cannot hold it was diagnosed against %s: %+v", next.Name, r)
+				}
+				if !strings.Contains(r.NextSteps, integrations.UnheldNote) || strings.Contains(r.NextSteps, "staged a test set again") {
+					t.Fatalf("the miss does not say its store could not hold it, alone: %q", r.NextSteps)
+				}
+				if r := genericServe(t, mm, "AUTH step4"); r != nil {
+					t.Fatalf("the store that holds missed the request after: %+v", r)
+				}
+			})
+		}
 	}
 }

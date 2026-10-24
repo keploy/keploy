@@ -280,6 +280,74 @@ func TestAMySQLCommandHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *testin
 	}
 }
 
+// marksNoHold is a store that marks a command's round
+// (integrations.StagedFinder) but does not hold it to that round (no
+// integrations.RoundHolder): a parser-side wrapper that forgot to forward it.
+type marksNoHold struct {
+	integrations.MockMemDb
+	f integrations.StagedFinder
+}
+
+func (w marksNoHold) MarkCallRound() integrations.CallRound { return w.f.MarkCallRound() }
+
+func (w marksNoHold) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	return w.f.FindStagedNotOwned(kind, call, match)
+}
+
+// A MySQL command marked by a store that cannot hold it to its round is
+// never answered from that store (integrations.HoldToRound fails closed),
+// whether or not the replay staged the next set under it, and the miss says
+// why, never that the set was staged again.
+func TestAMySQLCommandMarkedByAStoreThatCannotHoldItIsNeverAnsweredFromIt(t *testing.T) {
+	const query = "SELECT v FROM kv WHERE id = 1"
+	for _, moves := range []bool{true, false} {
+		t.Run(map[bool]string{true: "staging moved", false: "staging never moved"}[moves], func(t *testing.T) {
+			at := diffBase.Add(time.Millisecond)
+			mine := diffMock("s1-other", "c1", []mysql.Request{queryReq("SELECT 1")}, at, models.LifetimePerTest, "mocks")
+			next := diffMock("s2-kv", "c1", []mysql.Request{queryReq(query)}, at.Add(time.Second), models.LifetimePerTest, "mocks")
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			stage := func(own *models.Mock, test string) {
+				mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, time.Now().Add(time.Hour))
+				mm.ServeExactTest(test, []*models.Mock{own})
+			}
+			staged := false
+			marks := &stagedUnderMark{MockManager: mm}
+			if moves {
+				stage(mine, "T1")
+				marks.moved = func() { stage(next, "S2-T1"); staged = true }
+			} else {
+				stage(next, "T1")
+			}
+			conn := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
+			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: map[uint32]string{}}
+
+			resp, ok, miss, err := replayer.MatchForTest(conn, zap.NewNop(), queryReq(query), marksNoHold{MockMemDb: marks, f: marks}, dctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if moves && !staged {
+				t.Fatal("precondition: the replay never staged the next set under the command")
+			}
+			if ok {
+				t.Fatalf("a command marked by a store that cannot hold it was answered with %s: %q", next.Name, resp.Payload)
+			}
+			if strings.Contains(miss, next.Name) {
+				t.Fatalf("a command marked by a store that cannot hold it was diagnosed against %s: %s", next.Name, miss)
+			}
+			if !strings.Contains(miss, integrations.UnheldNote) || strings.Contains(miss, "staged a test set again") {
+				t.Fatalf("the miss does not say its store could not hold the command, alone: %s", miss)
+			}
+
+			// The bare store holds: the recording, never spent, answers it.
+			resp, ok, miss, err = replayer.MatchForTest(conn, zap.NewNop(), queryReq(query), mm, dctx)
+			if err != nil || !ok || resp.Payload != next.Name {
+				t.Fatalf("the store that holds did not answer the command with %s: ok=%v err=%v miss=%s", next.Name, ok, err, miss)
+			}
+		})
+	}
+}
+
 // aloft is a connection with one request aloft (learn.Flight): the parser's
 // ctx carries it as the proxy's kept connection does.
 type aloft struct{ f *learn.Flight }

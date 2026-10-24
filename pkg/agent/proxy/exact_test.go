@@ -1876,7 +1876,7 @@ func genericServe(t *testing.T, mm *MockManager, req string) *models.MockMismatc
 }
 
 // genericServeIn is genericServe with the parser's ctx made from ctx.
-func genericServeIn(t *testing.T, ctx context.Context, mm *MockManager, req string) *models.MockMismatchReport {
+func genericServeIn(t *testing.T, ctx context.Context, mm integrations.MockMemDb, req string) *models.MockMismatchReport {
 	t.Helper()
 	answered := make(chan bool, 1)
 	app, proxySide := net.Pipe()

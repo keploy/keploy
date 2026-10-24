@@ -421,16 +421,85 @@ type RoundHolder interface {
 
 // HoldToRound is db held to call (RoundHolder): the store a parser's matcher
 // reads for the call it marked, and its miss's diagnosis reads too. db
-// itself, never restaged, for the zero CallRound or a store that does not
-// hold.
+// itself, never restaged, for the zero CallRound (a store that marks no
+// round). A call db marked but cannot hold (db is no RoundHolder: a wrapper
+// that forwards StagedFinder and not RoundHolder) fails closed: the store
+// returned reads no recording and refuses every consume and write, so the
+// call is never answered with, nor diagnosed against, a recording of a set
+// the replay staged after its mark, and its miss says why (UnheldWhy).
 func HoldToRound(db MockMemDb, call CallRound) (MockMemDb, func() bool) {
-	if h, ok := db.(RoundHolder); ok && call.Read() {
+	if !call.Read() {
+		return db, notRestaged
+	}
+	if h, ok := db.(RoundHolder); ok {
 		return h.HoldToRound(call)
 	}
-	return db, notRestaged
+	return unheldRound{window: db}, notRestaged
 }
 
 func notRestaged() bool { return false }
+
+// UnheldNote is what a miss says when its call's store marked the call's
+// round but could not hold the call to it (HoldToRound's fail-closed store).
+const UnheldNote = "keploy answered this call with no recording and names none made elsewhere for it: its mock store marks the test set a call is made in but cannot hold the call to that set (the store does not implement integrations.RoundHolder), and a call is never answered from, nor diagnosed against, a store the replay could stage another test set into while it is decided."
+
+// UnheldTeller is an optional capability of a store HoldToRound returned:
+// why it reads nothing for its call, non-empty when it could not hold the
+// call to its round (HoldToRound's fail-closed store, or a view over one,
+// which forwards it).
+type UnheldTeller interface {
+	Unheld() string
+}
+
+// UnheldWhy is why db, a store HoldToRound returned, reads nothing for its
+// call when it could not hold the call to its round (UnheldNote); "" for a
+// store that holds or marks no round.
+func UnheldWhy(db MockMemDb) string {
+	if u, ok := db.(UnheldTeller); ok {
+		return u.Unheld()
+	}
+	return ""
+}
+
+// unheldRound is HoldToRound's fail-closed store, for a call a store marked
+// but cannot hold: every read finds no recording, every consume and write
+// door is refused, and no optional capability of the store is offered (a
+// lookup of a recording made elsewhere included). Only the store's test
+// window state, which names no recording, is read through.
+type unheldRound struct{ window WindowAware }
+
+func (unheldRound) Unheld() string { return UnheldNote }
+
+func (unheldRound) GetFilteredMocks() ([]*models.Mock, error)                 { return nil, nil }
+func (unheldRound) GetUnFilteredMocks() ([]*models.Mock, error)               { return nil, nil }
+func (unheldRound) GetMySQLCounts() (total, config, data int)                 { return 0, 0, 0 }
+func (unheldRound) GetFilteredMocksInWindow() ([]*models.Mock, error)         { return nil, nil }
+func (unheldRound) GetPerTestMocksInWindow() ([]*models.Mock, error)          { return nil, nil }
+func (unheldRound) GetSessionMocks() ([]*models.Mock, error)                  { return nil, nil }
+func (unheldRound) GetStartupMocks() ([]*models.Mock, error)                  { return nil, nil }
+func (unheldRound) GetStartupMocksByKind(models.Kind) ([]*models.Mock, error) { return nil, nil }
+func (unheldRound) GetSessionScopedMocks() ([]*models.Mock, error)            { return nil, nil }
+func (unheldRound) GetConnectionMocks(string) ([]*models.Mock, error)         { return nil, nil }
+func (unheldRound) SessionMockHitCounts() map[string]uint64                   { return nil }
+func (unheldRound) UpdateUnFilteredMock(*models.Mock, *models.Mock) bool      { return false }
+func (unheldRound) DeleteFilteredMock(models.Mock) bool                       { return false }
+func (unheldRound) DeleteUnFilteredMock(models.Mock) bool                     { return false }
+func (unheldRound) DeleteStartupMock(models.Mock) bool                        { return false }
+func (unheldRound) MarkMockAsUsed(models.Mock) bool                           { return false }
+
+func (u unheldRound) SetCurrentTestWindow(start, end time.Time) {
+	u.window.SetCurrentTestWindow(start, end)
+}
+func (u unheldRound) IsTestWindowActive() bool                  { return u.window.IsTestWindowActive() }
+func (u unheldRound) HasFirstTestFired() bool                   { return u.window.HasFirstTestFired() }
+func (u unheldRound) FirstTestWindowStart() time.Time           { return u.window.FirstTestWindowStart() }
+func (u unheldRound) WindowSnapshot() models.WindowSnapshot     { return u.window.WindowSnapshot() }
+func (u unheldRound) CurrentTestWindow() (time.Time, time.Time) { return u.window.CurrentTestWindow() }
+
+var (
+	_ MockMemDb    = unheldRound{}
+	_ UnheldTeller = unheldRound{}
+)
 
 // BegunOwnerReader is an optional MockMemDb extension under exact serving:
 // whether a staged mock (one StagedFinder names) is owned by a test that has

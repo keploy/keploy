@@ -129,6 +129,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					// the request's first read that found it moved found
 					// nothing (integrations.HoldToRound).
 					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedExchangeNote)
+				} else if why := integrations.UnheldWhy(db); why != "" {
+					// The store marked the request's round but could not
+					// hold it: its matcher read nothing (HoldToRound).
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundError (covers

@@ -421,8 +421,10 @@ var _ integrations.ServeTeller = (*scopedMockDb)(nil)
 // held to call, so a parser on a connection whose view was made before exact
 // serving began reads and consumes only while the staging is still its
 // call's, as on the bare manager, filtered by this worker's view. s itself,
-// never restaged, from a store that does not hold. The copy is one call's
-// (RoundHolder), as ServingFor's is.
+// never restaged, for a call of no round; over a store that marked the call
+// but cannot hold it, this view over the fail-closed store, which reads
+// nothing and tells why (Unheld). The copy is one call's (RoundHolder), as
+// ServingFor's is.
 func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	inner, restaged := integrations.HoldToRound(s.MockMemDb, call)
 	if inner == s.MockMemDb {
@@ -433,7 +435,14 @@ func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.Mo
 	return &c, restaged
 }
 
-var _ integrations.RoundHolder = (*scopedMockDb)(nil)
+// Unheld implements integrations.UnheldTeller: the store's, so a view over
+// the fail-closed store HoldToRound made says why its call read nothing.
+func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMemDb) }
+
+var (
+	_ integrations.RoundHolder  = (*scopedMockDb)(nil)
+	_ integrations.UnheldTeller = (*scopedMockDb)(nil)
+)
 
 // passThrough reports whether this view passes every read and consume
 // straight to the store it wraps: while the store serves each test exactly

@@ -100,8 +100,10 @@ type mockMiss struct {
 	// in place of the generic diff note and advice.
 	why       string
 	nextSteps string
-	// restaged is set when the replay staged a test set again under the
-	// command (matchCommand): the miss is no recording-side shortfall.
+	// restaged is set when the command's matcher, held to its first read,
+	// read nothing because of the hold (matchCommand): the replay staged a
+	// test set again under the command, or its store could not hold it
+	// (integrations.UnheldWhy). The miss is no recording-side shortfall.
 	restaged bool
 }
 
