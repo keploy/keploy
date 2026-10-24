@@ -1381,6 +1381,9 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
+	// Whichever door the parser consumed it through, the test's recording
+	// answered a call of the set (FindAnsweredEarlier).
+	m.noteAnswered(*owned)
 	m.bumpRevisionKind(owned.Kind)
 	m.bumpRevisionAll()
 }

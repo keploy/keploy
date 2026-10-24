@@ -126,12 +126,12 @@ func TestSameRequestToleratesOnlyHeaders(t *testing.T) {
 func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
-	miss := func(t *testing.T, path string) *models.MockMismatchReport {
+	miss := func(t *testing.T, path string, opts models.OutgoingOptions, shown ...*models.Mock) *models.MockMismatchReport {
 		t.Helper()
 		earlier := sapCount("mock-7", host, rec)
 		// The open test began 3 s after the recording at record time; the
 		// earlier call was answered an hour before this one at replay.
-		db := earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{
+		db := earlierDb{mockMemDb: &mockMemDb{mocks: shown}, answered: []integrations.AnsweredCall{{
 			Mock: earlier, AnsweredAt: time.Now().Add(-time.Hour), TestRecordedStart: rec.Add(3 * time.Second),
 		}}}
 		var reported error
@@ -140,7 +140,7 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 		defer app.Close()
 		done := make(chan error, 1)
 		go func() {
-			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, models.OutgoingOptions{})
+			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, opts)
 		}()
 		if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\nX-Request-Id: live-9\r\n\r\n"); err != nil {
 			t.Fatal(err)
@@ -164,9 +164,26 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 		}
 		return withReport.MismatchReport()
 	}
-	for _, on := range []string{"", "1"} {
+	for _, row := range []struct {
+		on   string
+		opts models.OutgoingOptions
+		// reason is judging's code the miss keeps: in record's full round
+		// the learn step finds no recorded call of the test for it.
+		reason string
+	}{
+		{"", models.OutgoingOptions{}, ""},
+		{"1", models.OutgoingOptions{}, ""},
+		{"1", models.OutgoingOptions{Learn: true}, models.MissUnmockedCall},
+	} {
+		on := row.on
 		t.Setenv(provenswitch.Env, on)
-		r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x")
+		if row.opts.Learn {
+			on += "+learn"
+		}
+		r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", row.opts)
+		if r.Reason != row.reason {
+			t.Fatalf("switch %q: the miss's reason is %q, want %q", on, r.Reason, row.reason)
+		}
 		if r.Repeat == nil || r.Repeat.Mock != "mock-7" || r.ClosestMock != "mock-7" {
 			t.Fatalf("switch %q: the miss of a repeated call is %+v (repeat %+v), want it named as mock-7", on, r, r.Repeat)
 		}
@@ -176,8 +193,18 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 		if !strings.Contains(r.NextSteps, "identical to mock-7") || !strings.Contains(r.NextSteps, "elapsed time") || len(r.FieldDiffs) != 0 {
 			t.Fatalf("switch %q: the next step is %q (diffs %v)", on, r.NextSteps, r.FieldDiffs)
 		}
-		if r := miss(t, "/sap/A_BusinessPartner/$count?$filter=other"); r.Repeat != nil {
+		if r := miss(t, "/sap/A_BusinessPartner/$count?$filter=other", row.opts); r.Repeat != nil {
 			t.Fatalf("switch %q: a call no earlier answer is got a note: %+v", on, r.Repeat)
 		}
+	}
+
+	// In record's full round a learn step that names a recorded call the
+	// request changed from keeps its reason and closest: the note joins only
+	// a call the test recorded nothing like (unmocked_call).
+	t.Setenv(provenswitch.Env, "1")
+	changed := onHost("mock-own", "/sap/A_BusinessPartner/$count?$filter=x&$top=1", host)
+	r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{Learn: true, LearnPool: true}, changed)
+	if r.Reason == models.MissUnmockedCall || r.Reason == "" || r.Repeat != nil || r.ClosestMock == "mock-7" {
+		t.Fatalf("a learn miss with reason %q got the note %+v (closest %q), want its own reason kept and no note", r.Reason, r.Repeat, r.ClosestMock)
 	}
 }

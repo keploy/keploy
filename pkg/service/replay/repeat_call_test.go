@@ -31,7 +31,7 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	keep := results[0].FailureInfo.UnmatchedCalls[0].Repeat
 
-	named := markRepeatOf(results, consumers)
+	named := markRepeatOf(results, consumers, nil)
 	calls := results[0].FailureInfo.UnmatchedCalls
 	if calls[0].Repeat.Test != "test-3" || !strings.Contains(calls[0].NextSteps, "test test-3's call") {
 		t.Fatalf("the repeat is named %q: %s", calls[0].Repeat.Test, calls[0].NextSteps)
@@ -56,5 +56,49 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	if rows[1].MismatchReport.Repeat.Test != "" || rows[2].MismatchReport.NextSteps != "as it was" {
 		t.Fatalf("rows that name no earlier test changed: %+v, %q", rows[1].MismatchReport.Repeat, rows[2].MismatchReport.NextSteps)
+	}
+}
+
+// The gap at record is measured from the call's own test's recorded request
+// where the replay has it, whether or not the agent knew the test's recorded
+// start (exact serving stages no window); the agent's note is not written
+// through. With no recorded request the agent's gap, or none, stays. The
+// end-of-run rows carry the gap measured, named test or not.
+func TestMarkRepeatOfMeasuresTheRecordGapFromTheTest(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	unknown := models.NewRepeatNote("mock-7", rec, rec, rec.Add(70*time.Second), time.Time{})
+	results := []models.TestResult{
+		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: unknown},
+		}}},
+		{TestCaseID: "test-12", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", rec, rec, rec.Add(80*time.Second), rec.Add(3*time.Second))},
+		}}},
+	}
+	store := NewTestFailureStore()
+	store.AddUnmatchedCallForTest("set-0", "test-9", results[0].FailureInfo.UnmatchedCalls[0])
+	tc := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, HTTPReq: models.HTTPReq{Timestamp: at}}
+	}
+	// test-9 began 40 s after the recording at record, and no other test
+	// consumed it (the note stays unnamed); test-12 has no recorded request
+	// time.
+	markRepeatOf(results, map[string][]string{"mock-7": {"test-9"}}, []*models.TestCase{tc("test-9", rec.Add(40*time.Second)), tc("test-12", time.Time{}), nil})
+	got := results[0].FailureInfo.UnmatchedCalls[0]
+	if !got.Repeat.RecordGapKnown || got.Repeat.RecordGapSeconds != 40 || !strings.Contains(got.NextSteps, "at record this test began 40.00s after it") {
+		t.Fatalf("the gap at record is %+v: %s", got.Repeat, got.NextSteps)
+	}
+	if likely, known := got.Repeat.ElapsedTimeExpiryLikely(); !likely || !known {
+		t.Fatalf("70s at replay after 40s at record is not read as a span that ran out: %v %v", likely, known)
+	}
+	if unknown.RecordGapKnown {
+		t.Fatal("measuring the gap wrote into the note the agent's report shares")
+	}
+	if n := results[1].FailureInfo.UnmatchedCalls[0].Repeat; !n.RecordGapKnown || n.RecordGapSeconds != 3 {
+		t.Fatalf("a test with no recorded request lost the agent's gap: %+v", n)
+	}
+	store.nameRepeats("set-0", results)
+	if row := store.GetFailures()[0].MismatchReport; !row.Repeat.RecordGapKnown || row.Repeat.RecordGapSeconds != 40 {
+		t.Fatalf("the end-of-run row's note is %+v", row.Repeat)
 	}
 }
