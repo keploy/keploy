@@ -53,7 +53,7 @@ func eStartup() []Raw {
 		ePg("mock-4", 200*time.Millisecond, "INSERT INTO customer (name, tier) VALUES ('Acme', 'gold')", nil, "INSERT 0 1"),
 	}
 	for i := range raw {
-		raw[i] = raw[i].ServedAs(i + 1)
+		raw[i] = raw[i].ServedAs(i + 1).ServedAsRecorded()
 	}
 	return raw
 }
@@ -155,7 +155,7 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 			{Side: Request, Leaf: Leaf{Path: "body.retries", Type: Number, Value: "7"}, Live: "7"},
 		}}}, eStartup(), "", ""},
 
-		{"F's word, at a payload F served that was recorded after the call", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(10*time.Millisecond)).ServedAs(2)), noRec, "mock-1"},
+		{"F's word, at a payload F served that was recorded after the call", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(10*time.Millisecond)).ServedAs(2).ServedAsRecorded()), noRec, "mock-1"},
 		{"F's word, at a leaf whose recorded text lacks it (an echo of what F served)", "82", "16", []Earlier{eLeaf(before, 6, "5150", "16")}, eStartup(), noRec, "mock-8"},
 		{"F's word, at a leaf recorded at the call's own instant", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt, 6, "7", "7")}, eStartup(), noRec, "mock-8"},
 		// Recorded after the call, the exchange is no earlier place of the
@@ -163,9 +163,10 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		// served at its leaf is refused there, naming it, before the rule.
 		{"F's word, at a leaf recorded after the call", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt.Add(time.Millisecond), 6, "7", "7")}, eStartup(), "appears in mock-8, a recording record's full round gave the application before the call that was recorded after the call", "mock-8"},
 		{"F's word, at a payload F did not serve", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond))), noF, "mock-1"},
+		{"F's word, at a payload F served changed", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond)).ServedAs(2)), noF, "mock-1"},
 		{"the recorded word, at a leaf F served drifted", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "83")}, eStartup(), noF, "mock-8"},
 		{"a word both values hold", "82 1", "4 1 1", nil, eStartup(), both, "mock-1"},
-		{"a payload whose recorded time keploy cannot read", "82", "1", nil, with(eStartup(), 1, mock1(time.Time{}).ServedAs(2)), untimed, "mock-1"},
+		{"a payload whose recorded time keploy cannot read", "82", "1", nil, with(eStartup(), 1, mock1(time.Time{}).ServedAs(2).ServedAsRecorded()), untimed, "mock-1"},
 		{"a leaf whose recorded time keploy cannot read", "took 82 ms", "took 7 ms", []Earlier{eLeaf(time.Time{}, 6, "7", "7")}, eStartup(), "keploy cannot read when the recording gave the application mock-8", "mock-8"},
 	} {
 		got := classifyF(t, tc.recorded, tc.live, tc.earlier, tc.raw, nil)
@@ -177,13 +178,87 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		}
 	}
 	// A word the recorded value held, at a payload: the recorded value is a
-	// copy of that payload's word as far as the recording shows, and is
-	// bound as a variable there (appearedIn) before the word rule reads it,
-	// whether F served the payload or not. The rule never makes it noise.
-	for _, raw := range [][]Raw{eStartup(), with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond)))} {
-		if got := classifyF(t, "1", "82", nil, raw, nil); got.Kind != KindVariable {
-			t.Errorf("1 recorded beside SELECT 1, 82 in F: %s (%q), want a variable of mock-1", got.Kind, got.Why)
+	// copy of that payload's word as far as the recording alone shows. F
+	// served the payload unchanged and the value moved, so it is no copy of
+	// it (a copy moves with its source): noise, naming the place set aside.
+	// Where F did not serve it, or served it changed, it stays a variable
+	// there (appearedIn), before the word rule reads it.
+	if got := classifyF(t, "1", "82", nil, eStartup(), nil); got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-1 at") || !strings.Contains(got.Why, "a copy moves with its source") {
+		t.Errorf("1 recorded beside SELECT 1 F served unchanged, 82 in F: %s (%q), want noise naming mock-1", got.Kind, got.Why)
+	}
+	for name, raw := range map[string][]Raw{
+		"F did not serve it":  with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond))),
+		"F served it changed": with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond)).ServedAs(2)),
+	} {
+		if got := classifyF(t, "1", "82", nil, raw, nil); got.Kind != KindVariable || got.From.Mock != "mock-1" {
+			t.Errorf("1 recorded beside SELECT 1, %s, 82 in F: %s (%q), want a variable of mock-1", name, got.Kind, got.Why)
 		}
+	}
+}
+
+// eHistory is Flyway's schema-history table, created 150ms before the
+// INSERT (after eStartup's places) and served by F after them: a statement
+// the application sent whose literals ("50" of VARCHAR(50), "200") stand
+// whole in it, served as the n-th serve.
+func eHistory(at time.Time, n int, asRecorded bool) Raw {
+	x := ePgAnswered("mock-5", eRecAt.Sub(at), at.Add(time.Millisecond), `CREATE TABLE "public"."flyway_schema_history" ("installed_rank" INT NOT NULL, "version" VARCHAR(50), "description" VARCHAR(200) NOT NULL)`, nil, "CREATE TABLE")
+	if n == 0 {
+		return x
+	}
+	x = x.ServedAs(n)
+	if asRecorded {
+		x = x.ServedAsRecorded()
+	}
+	return x
+}
+
+// Flyway's execution_time recorded as 50, a literal of the history table's
+// CREATE TABLE the application sent before (VARCHAR(50)): the recording
+// alone reads it a copy of that literal (a variable of mock-5). F sent the
+// statement again byte for byte, its "50" unchanged, and bound 7: the value
+// did not move with what it would be a copy of, so it is no copy (a copy
+// follows its source, coordinator 21:20), and it is learned as varying,
+// naming the reading set aside. The reading stands (a variable of mock-5)
+// where F did not observe the source (not served, served changed), where
+// the source holds F's value too (200), where the recording did not give
+// the application the source before the call; and the noise is refused
+// where F served the places in another order than the recording gave them.
+func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
+	before := eRecAt.Add(-150 * time.Millisecond)
+	startup := func(x Raw) []Raw { return append(eStartup(), x) }
+	got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), nil)
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
+		t.Errorf("50 recorded beside VARCHAR(50) F sent unchanged, 7 in F: %s (%q), want noise naming mock-5", got.Kind, got.Why)
+	}
+	if today := ClassifyGiven(NewDriftCache(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
+		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want a variable of mock-5 (the rule is ClassifyFollowing's)", today[0].Kind, today[0].Why)
+	}
+	for _, tc := range []struct {
+		name, live string
+		raw        []Raw
+	}{
+		{"F did not serve the CREATE TABLE", "7", startup(eHistory(before, 0, false))},
+		{"F served the CREATE TABLE changed", "7", startup(eHistory(before, 6, false))},
+		{"the CREATE TABLE holds F's value too", "200", startup(eHistory(before, 6, true))},
+		{"the CREATE TABLE was recorded after the call", "7", startup(eHistory(eRecAt.Add(10*time.Millisecond), 6, true))},
+		{"the CREATE TABLE was answered at the call's own instant", "7", startup(eHistory(eRecAt.Add(-time.Millisecond), 6, true))},
+	} {
+		if got := classifyF(t, "50", tc.live, nil, tc.raw, nil); got.Kind != KindVariable || got.From.Mock != "mock-5" {
+			t.Errorf("FALSE GREEN? 50 beside VARCHAR(50), %s, %s in F: %s (%q), want a variable of mock-5", tc.name, tc.live, got.Kind, got.Why)
+		}
+	}
+	// The call's recorded answer echoes the value: an echo beside a source
+	// set aside is refused, as one beside a word the rule let go is.
+	if got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), []Leaf{{Path: "rows[0][0]", Type: String, Value: "50"}}); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at") {
+		t.Errorf("FALSE GREEN? 50 beside VARCHAR(50) F sent unchanged, echoed in the answer, 7 in F: %s (%q), want refused naming mock-5", got.Kind, got.Why)
+	}
+	// F served the CREATE TABLE before Flyway's seed row (mock-4), which the
+	// recording gave the application first.
+	raw := startup(eHistory(before, 6, true))
+	raw[4] = raw[4].ServedAs(7).ServedAsRecorded()
+	got = classifyF(t, "50", "7", nil, raw, nil)
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at") || !strings.Contains(got.Why, "in a different order") {
+		t.Errorf("FALSE GREEN? 50 beside VARCHAR(50) F served out of the recording's order, 7 in F: %s (%q), want refused for the order, naming mock-5", got.Kind, got.Why)
 	}
 }
 
@@ -224,13 +299,13 @@ func TestARoundThatGaveTheEarlierAnswersInAnotherOrderThanTheRecordingRefuses(t 
 		raw  []Raw
 		want string
 	}{
-		{"F served b then a", []Raw{a.ServedAs(2), b.ServedAs(1)}, "the recording and record's full round gave the application the earlier answers in a different order (the 1st earlier answer was mock-a in the recording and mock-b in record's full round)" + tail},
-		{"F served a, b and a again", []Raw{a.ServedIn(1, 3), b.ServedAs(2)}, "(the recording gave 2 earlier answers, record's full round more)" + tail},
-		{"F served a where keploy does not number it", []Raw{a.WithServed(true), b.ServedAs(1)}, "keploy does not know where record's full round served mock-a among the other earlier answers it served" + tail},
-		{"F served a twice with a serve keploy cannot place between", []Raw{a.ServedIn(1, 3), b.ServedAs(4)}, "record's full round served mock-a more than once, with a serve between that is no earlier answer's, which keploy cannot place" + tail},
-		{"the recording gave a and b at one instant", []Raw{a.ServedAs(1), together.ServedAs(2)}, "the recording gave the application mock-a and mock-b at one instant, so keploy cannot tell the order it gave them in" + tail},
-		{"the recording gave c between them, F did not serve it", []Raw{a.ServedAs(1), c, b.ServedAs(2)}, "(the 2nd earlier answer was mock-c in the recording and mock-b in record's full round)" + tail},
-		{"F served a recording made after the call", []Raw{a.ServedAs(1), b.ServedAs(2), late.ServedAs(3)}, "(the recording gave 2 earlier answers, record's full round more)" + tail},
+		{"F served b then a", []Raw{a.ServedAs(2).ServedAsRecorded(), b.ServedAs(1).ServedAsRecorded()}, "the recording and record's full round gave the application the earlier answers in a different order (the 1st earlier answer was mock-a in the recording and mock-b in record's full round)" + tail},
+		{"F served a, b and a again", []Raw{a.ServedIn(1, 3).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}, "(the recording gave 2 earlier answers, record's full round more)" + tail},
+		{"F served a where keploy does not number it", []Raw{a.WithServed(true).ServedAsRecorded(), b.ServedAs(1).ServedAsRecorded()}, "keploy does not know where record's full round served mock-a among the other earlier answers it served" + tail},
+		{"F served a twice with a serve keploy cannot place between", []Raw{a.ServedIn(1, 3).ServedAsRecorded(), b.ServedAs(4).ServedAsRecorded()}, "record's full round served mock-a more than once, with a serve between that is no earlier answer's, which keploy cannot place" + tail},
+		{"the recording gave a and b at one instant", []Raw{a.ServedAs(1).ServedAsRecorded(), together.ServedAs(2).ServedAsRecorded()}, "the recording gave the application mock-a and mock-b at one instant, so keploy cannot tell the order it gave them in" + tail},
+		{"the recording gave c between them, F did not serve it", []Raw{a.ServedAs(1).ServedAsRecorded(), c, b.ServedAs(2).ServedAsRecorded()}, "(the 2nd earlier answer was mock-c in the recording and mock-b in record's full round)" + tail},
+		{"F served a recording made after the call", []Raw{a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded(), late.ServedAs(3).ServedAsRecorded()}, "(the recording gave 2 earlier answers, record's full round more)" + tail},
 	} {
 		got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil)
 		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) || !strings.Contains(got.Why, "appears in an earlier recording, in mock-") {
@@ -245,14 +320,14 @@ func TestARoundThatGaveTheEarlierAnswersInAnotherOrderThanTheRecordingRefuses(t 
 		name string
 		raw  []Raw
 	}{
-		{"F served a then b", []Raw{a.ServedAs(1), b.ServedAs(2)}},
-		{"F served a then b, numbered apart", []Raw{a.ServedAs(3), b.ServedAs(5)}},
+		{"F served a then b", []Raw{a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}},
+		{"F served a then b, numbered apart", []Raw{a.ServedAs(3).ServedAsRecorded(), b.ServedAs(5).ServedAsRecorded()}},
 		{"F served a then b, and an exchange after both", nil},
 	} {
 		var earlier []Earlier
 		raw := tc.raw
 		if raw == nil {
-			raw = []Raw{a.ServedAs(1), b.ServedAs(2)}
+			raw = []Raw{a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}
 			earlier = []Earlier{eLeaf(eRecAt.Add(-50*time.Millisecond), 3, "0", "0")}
 		}
 		if got := classifyF(t, "slot 82", "slot 7", earlier, raw, nil); got.Kind != KindNoise {
@@ -289,19 +364,19 @@ func TestTwoRequestsInFlightTogetherAreInAnOrderTheRecordingShowsOnlyOnOneConnec
 		raw  []Raw
 		want string
 	}{
-		{"answered in reverse order, F served a then b", []Raw{a.ServedAs(1), b.ServedAs(2)}, inFlight},
-		{"answered in reverse order, F served b then a", []Raw{a.ServedAs(2), b.ServedAs(1)}, inFlight},
-		{"a answered at the instant b's request was recorded", []Raw{eSpan("mock-a", 300*time.Millisecond, 250*time.Millisecond, "7").ServedAs(1), b.ServedAs(2)}, inFlight},
-		{"on one connection at positions that disagree with the requests", []Raw{a.SentOn("0", 2).ServedAs(1), b.SentOn("0", 1).ServedAs(2)},
+		{"answered in reverse order, F served a then b", []Raw{a.ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}, inFlight},
+		{"answered in reverse order, F served b then a", []Raw{a.ServedAs(2).ServedAsRecorded(), b.ServedAs(1).ServedAsRecorded()}, inFlight},
+		{"a answered at the instant b's request was recorded", []Raw{eSpan("mock-a", 300*time.Millisecond, 250*time.Millisecond, "7").ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}, inFlight},
+		{"on one connection at positions that disagree with the requests", []Raw{a.SentOn("0", 2).ServedAs(1).ServedAsRecorded(), b.SentOn("0", 1).ServedAs(2).ServedAsRecorded()},
 			"the recording carried mock-a and mock-b on one connection at positions that disagree with when their requests were recorded, so keploy cannot tell the order it gave them in" + tail},
-		{"on two connections at positions", []Raw{a.SentOn("0", 1).ServedAs(1), b.SentOn("1", 2).ServedAs(2)}, inFlight},
-		{"a's mock holds no answer time", []Raw{ePgAnswered("mock-a", 300*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-a", []models.PostgresV3Cells{{{Value: "7"}}}, "SELECT 1").ServedAs(1), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2)},
+		{"on two connections at positions", []Raw{a.SentOn("0", 1).ServedAs(1).ServedAsRecorded(), b.SentOn("1", 2).ServedAs(2).ServedAsRecorded()}, inFlight},
+		{"a's mock holds no answer time", []Raw{ePgAnswered("mock-a", 300*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-a", []models.PostgresV3Cells{{{Value: "7"}}}, "SELECT 1").ServedAs(1).ServedAsRecorded(), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2).ServedAsRecorded()},
 			"keploy cannot read when the recording answered mock-a (its mock holds no answer time it can read), so the recording cannot show the value does not follow that word"},
-		{"b's mock holds no answer time", []Raw{a.ServedAs(1), ePgAnswered("mock-b", 200*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-b", []models.PostgresV3Cells{{{Value: "9"}}}, "SELECT 1").ServedAs(2)},
+		{"b's mock holds no answer time", []Raw{a.ServedAs(1).ServedAsRecorded(), ePgAnswered("mock-b", 200*time.Millisecond, time.Time{}, "SELECT next_slot FROM mock-b", []models.PostgresV3Cells{{{Value: "9"}}}, "SELECT 1").ServedAs(2).ServedAsRecorded()},
 			"keploy cannot read when the recording answered mock-b (its mock holds no answer time it can read)" + tail},
-		{"a in flight when the application made the call", []Raw{eSpan("mock-a", 300*time.Millisecond, -50*time.Millisecond, "7").ServedAs(1)},
+		{"a in flight when the application made the call", []Raw{eSpan("mock-a", 300*time.Millisecond, -50*time.Millisecond, "7").ServedAs(1).ServedAsRecorded()},
 			"the recording did not give the application that word there before the call, so it cannot show the value does not follow it"},
-		{"a's answer recorded before its request", []Raw{eSpan("mock-a", 300*time.Millisecond, 400*time.Millisecond, "7").ServedAs(1), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2)},
+		{"a's answer recorded before its request", []Raw{eSpan("mock-a", 300*time.Millisecond, 400*time.Millisecond, "7").ServedAs(1).ServedAsRecorded(), eAnswer("mock-b", 200*time.Millisecond, "9").ServedAs(2).ServedAsRecorded()},
 			"keploy cannot read when the recording answered mock-a"},
 	} {
 		got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil)
@@ -316,9 +391,9 @@ func TestTwoRequestsInFlightTogetherAreInAnOrderTheRecordingShowsOnlyOnOneConnec
 		name string
 		raw  []Raw
 	}{
-		{"pipelined on one connection", []Raw{a.SentOn("0", 1).ServedAs(1), b.SentOn("0", 2).ServedAs(2)}},
-		{"sequential", []Raw{eSpan("mock-a", 300*time.Millisecond, 260*time.Millisecond, "7").ServedAs(1), b.ServedAs(2)}},
-		{"sequential on one connection, positions the other way", []Raw{eSpan("mock-a", 300*time.Millisecond, 260*time.Millisecond, "7").SentOn("0", 2).ServedAs(1), b.SentOn("0", 1).ServedAs(2)}},
+		{"pipelined on one connection", []Raw{a.SentOn("0", 1).ServedAs(1).ServedAsRecorded(), b.SentOn("0", 2).ServedAs(2).ServedAsRecorded()}},
+		{"sequential", []Raw{eSpan("mock-a", 300*time.Millisecond, 260*time.Millisecond, "7").ServedAs(1).ServedAsRecorded(), b.ServedAs(2).ServedAsRecorded()}},
+		{"sequential on one connection, positions the other way", []Raw{eSpan("mock-a", 300*time.Millisecond, 260*time.Millisecond, "7").SentOn("0", 2).ServedAs(1).ServedAsRecorded(), b.SentOn("0", 1).ServedAs(2).ServedAsRecorded()}},
 	} {
 		if got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil); got.Kind != KindNoise {
 			t.Errorf("%s, slot 82 at record, slot 7 in F: %s (%q), want noise", tc.name, got.Kind, got.Why)
@@ -340,7 +415,7 @@ func TestTwoRequestsInFlightTogetherAreInAnOrderTheRecordingShowsOnlyOnOneConnec
 func TestPlacesSentInOneWriteAreInTheOrderTheirConnectionCarriedThem(t *testing.T) {
 	first := eAnswer("mock-9", 300*time.Millisecond, "7").SentOn("0", 9)
 	second := eAnswer("mock-10", 300*time.Millisecond, "9").SentOn("0", 10)
-	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{first.ServedAs(1), second.ServedAs(2)}, nil); got.Kind != KindNoise {
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{first.ServedAs(1).ServedAsRecorded(), second.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindNoise {
 		t.Errorf("one write on one connection, F served it in the connection's order: %s (%q), want noise", got.Kind, got.Why)
 	}
 	const tail = ", so keploy cannot tell a copy from a varying value"
@@ -350,12 +425,12 @@ func TestPlacesSentInOneWriteAreInTheOrderTheirConnectionCarriedThem(t *testing.
 		raw  []Raw
 		want string
 	}{
-		{"F served them against the connection's order", []Raw{first.ServedAs(2), second.ServedAs(1)},
+		{"F served them against the connection's order", []Raw{first.ServedAs(2).ServedAsRecorded(), second.ServedAs(1).ServedAsRecorded()},
 			"the recording and record's full round gave the application the earlier answers in a different order (the 1st earlier answer was mock-9 in the recording and mock-10 in record's full round)" + tail},
-		{"one instant on two connections", []Raw{first.ServedAs(1), second.SentOn("1", 10).ServedAs(2)}, tie},
-		{"one instant, a position unknown", []Raw{first.ServedAs(1), second.SentOn("0", 0).ServedAs(2)}, tie},
-		{"one instant, no connection", []Raw{first.ServedAs(1), second.SentOn("", 10).ServedAs(2)}, tie},
-		{"one instant, one position twice", []Raw{first.ServedAs(1), second.SentOn("0", 9).ServedAs(2)}, tie},
+		{"one instant on two connections", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("1", 10).ServedAs(2).ServedAsRecorded()}, tie},
+		{"one instant, a position unknown", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("0", 0).ServedAs(2).ServedAsRecorded()}, tie},
+		{"one instant, no connection", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("", 10).ServedAs(2).ServedAsRecorded()}, tie},
+		{"one instant, one position twice", []Raw{first.ServedAs(1).ServedAsRecorded(), second.SentOn("0", 9).ServedAs(2).ServedAsRecorded()}, tie},
 	} {
 		got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil)
 		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) {
@@ -364,13 +439,13 @@ func TestPlacesSentInOneWriteAreInTheOrderTheirConnectionCarriedThem(t *testing.
 	}
 	// Three in one write, handed out of order: told by position, all three.
 	third := eAnswer("mock-11", 300*time.Millisecond, "x").SentOn("0", 11)
-	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{third.ServedAs(3), first.ServedAs(1), second.ServedAs(2)}, nil); got.Kind != KindNoise {
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{third.ServedAs(3).ServedAsRecorded(), first.ServedAs(1).ServedAsRecorded(), second.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindNoise {
 		t.Errorf("three in one write, F served them in the connection's order: %s (%q), want noise", got.Kind, got.Why)
 	}
 	// Distinct instants keep their time order whatever the positions say:
 	// positions order only requests in flight together.
 	early := eAnswer("mock-a", 400*time.Millisecond, "7").SentOn("0", 20)
-	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{early.ServedAs(1), second.ServedAs(2)}, nil); got.Kind != KindNoise {
+	if got := classifyF(t, "slot 82", "slot 7", nil, []Raw{early.ServedAs(1).ServedAsRecorded(), second.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindNoise {
 		t.Errorf("distinct instants: %s (%q), want noise by time order", got.Kind, got.Why)
 	}
 	// An exchange served leaf by leaf, in one write with a recording: its
@@ -383,20 +458,20 @@ func TestPlacesSentInOneWriteAreInTheOrderTheirConnectionCarriedThem(t *testing.
 		e.Payload = RawOf(&models.Mock{Name: "mock-8", Spec: models.MockSpec{ReqTimestampMock: at, ResTimestampMock: answered}}, true).SentOn(conn, pos).ServedAs(1)
 		return []Earlier{e}
 	}
-	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("0", 9, at.Add(time.Millisecond)), []Raw{second.ServedAs(2)}, nil); got.Kind != KindNoise {
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("0", 9, at.Add(time.Millisecond)), []Raw{second.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindNoise {
 		t.Errorf("an exchange in one write with mock-10, on its connection: %s (%q), want noise", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("1", 9, at.Add(time.Millisecond)), []Raw{second.ServedAs(2)}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "and mock-8 at one instant, so keploy cannot tell the order it gave them in") {
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("1", 9, at.Add(time.Millisecond)), []Raw{second.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "and mock-8 at one instant, so keploy cannot tell the order it gave them in") {
 		t.Errorf("FALSE GREEN? an exchange in one write with mock-10, on another connection: %s (%q), want refused", got.Kind, got.Why)
 	}
 	later := eAnswer("mock-12", 200*time.Millisecond, "9")
-	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, at.Add(time.Millisecond)), []Raw{later.ServedAs(2)}, nil); got.Kind != KindNoise {
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, at.Add(time.Millisecond)), []Raw{later.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindNoise {
 		t.Errorf("an exchange answered before a later request: %s (%q), want noise", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, time.Time{}), []Raw{later.ServedAs(2)}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "keploy cannot read when the recording answered mock-8") {
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, time.Time{}), []Raw{later.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "keploy cannot read when the recording answered mock-8") {
 		t.Errorf("FALSE GREEN? an exchange whose answer time keploy cannot read: %s (%q), want refused", got.Kind, got.Why)
 	}
-	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, eRecAt), []Raw{later.ServedAs(2)}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording did not give the application that word there before the call") {
+	if got := classifyF(t, "took 82 ms", "took 7 ms", leaf("", 0, eRecAt), []Raw{later.ServedAs(2).ServedAsRecorded()}, nil); got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the recording did not give the application that word there before the call") {
 		t.Errorf("FALSE GREEN? an exchange answered at the call's own instant: %s (%q), want refused", got.Kind, got.Why)
 	}
 }

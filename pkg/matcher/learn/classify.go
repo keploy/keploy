@@ -170,6 +170,10 @@ type Raw struct {
 	noTime bool
 	// read: the text was read from the mock (RawOf).
 	read bool
+	// asRecorded: F served r unchanged (ServedAsRecorded), so what F sent
+	// and gave the application there is r's recorded text: what the rule a
+	// copy follows its source reads of what F gave at r (follows.go).
+	asRecorded bool
 	// unread, of a Raw that was not read, says why where the place it stands
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
@@ -281,10 +285,28 @@ func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answe
 func (r Raw) WithServed(served bool) Raw {
 	r.served = served
 	if !served {
-		r.first, r.last = 0, 0
+		r.first, r.last, r.asRecorded = 0, 0, false
 	}
 	return r
 }
+
+// ServedAsRecorded is r, which F served (ServedIn, WithServed), as served
+// unchanged: the application sent its request byte for byte as recorded (no
+// part of it learned as noise or bound as a variable in F) and F gave it the
+// recorded answer byte for byte (no variable, template value or clock stamp
+// of F's own in it). An adapter says it only where it knows both. Under the
+// rule a copy follows its source (ClassifyFollowing) only such a recording
+// shows what F sent and gave the application there: a word of it F gave
+// (follows.excusedRaw), and a source the call's value moved away from while
+// it did not move (appearedIn). Of a Raw F did not serve it says nothing,
+// and keploy then reads that F gave nothing there (fail closed).
+func (r Raw) ServedAsRecorded() Raw {
+	r.asRecorded = r.served
+	return r
+}
+
+// AsRecorded reports whether F served r unchanged (ServedAsRecorded).
+func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
 
 // ServedAs is r as served once, the n-th serve of F's in the running set
 // (ServedIn(n, n)).
@@ -446,7 +468,10 @@ type Learned struct {
 	From Place
 	// Echo are an echo's places in the paired mock's recorded answer.
 	Echo []Leaf
-	// Why, of an unaccounted drift, is why it cannot be noise; of a variable
+	// Why, of an unaccounted drift, is why it cannot be noise; of noise
+	// record's full round learned past a source it served unchanged that
+	// the value moved away from (ClassifyFollowing), that source and why it
+	// is none (follows.refute); of a variable
 	// found in a raw mock's payload (From.Side "") or by the echo
 	// (From.Echo), the evidence: what was found, where, that nothing showed
 	// the value is a clock read, and how to correct it (evidence). It never
@@ -930,10 +955,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
 		if follow {
-			fol = &follows{dc: dc, rec: r.Value, live: l.Value}
+			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw); ok {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -995,12 +1020,23 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood
 		// beside is refused as the word rule refuses them.
-		if fol != nil && fol.first != "" {
+		//
+		// A source the search went past (follows.refute) counts as such a
+		// word, whether or not the word rule let one go there: noise only
+		// in the same order, and named in the noise it is learned as.
+		if fol != nil && (fol.first != "" || fol.refuted != "") {
 			switch ln.Kind {
 			case KindNoise:
 				ln = fol.followed(ln, at, served, all)
+				if ln.Kind == KindNoise && fol.refuted != "" {
+					ln.Why = fol.refuted + ", and keploy learns it as varying"
+				}
 			case KindEcho:
-				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.first, nil
+				why := fol.first
+				if why == "" {
+					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
+				}
+				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
 		out = append(out, ln)
@@ -1946,11 +1982,24 @@ func sources(e, v *valueDrift) (found, whole bool) {
 // raw mock served before or recorded before at (of which F saw no live
 // value).
 func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
-	return appearedIn(dc, dc.of(recorded, now), at, served, raw)
+	return appearedIn(dc, dc.of(recorded, now), at, served, raw, nil)
 }
 
 // appearedIn is appeared of the drifted value v, read in its call's window.
-func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
+//
+// Under the rule a copy follows its source (fol non-nil: record's full
+// round, ClassifyFollowing), a raw mock F served unchanged (Raw.AsRecorded)
+// whose payload holds a word of the recorded value (the value whole, or a
+// word of what it lost), but not the value F saw, is no place the value
+// came from: F sent and gave the application that payload byte for byte as
+// recorded, and the value moved, while a copy moves with its source. The
+// search goes on past it (fol.refuted names the first such place, which a
+// value learned as noise names: follows.refute); the word rule then reads
+// its words as the rule reads every word both runs gave (follows.excusedRaw,
+// followed). A place F did not serve, or served changed, or whose payload
+// holds the value F saw too, stays where the value came from. A leaf F
+// served as recorded (Seen.Live) is no place either way: it did not drift.
+func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
 	// or sent inside a longer value (a variable is bound where the
@@ -2054,7 +2103,11 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}, true
+				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}
+				if fol.refute(x, texts, v, p) {
+					break
+				}
+				return p, true
 			}
 		}
 	}

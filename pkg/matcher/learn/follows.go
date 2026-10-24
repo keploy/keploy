@@ -68,6 +68,44 @@ type follows struct {
 	// reason of a refusal for the order names.
 	first   string
 	refused string
+	// at is when the call's request was recorded. refuted, where the search
+	// for the value's source went past a place F served unchanged that the
+	// value moved away from (refute), names the first such place: what a
+	// value learned as noise says of it (followed).
+	at      time.Time
+	refuted string
+}
+
+// refute reports whether p, a place in x's payload (texts, as appearedIn
+// searched it) holding a word of v's recorded value, is no place the value
+// came from: F served x unchanged (Raw.AsRecorded), the recording gave the
+// application x before the call (recordedGave), and x does not hold the
+// value F saw, in any form. Both runs gave the application x's words there,
+// and the value moved while they did not: a copy moves with its source. The
+// first such place is named (refuted). Everywhere else (fol nil, a place F
+// did not serve or served changed, one the recording did not give before
+// the call or whose times keploy cannot read, one holding F's value too)
+// the place stays where the value came from.
+func (f *follows) refute(x Raw, texts [2]string, v *valueDrift, p Place) bool {
+	if f == nil || !x.AsRecorded() {
+		return false
+	}
+	if before, untimed := recordedGave(x.recordedAt(), x.answered, f.at, x.mock); !before || untimed != "" {
+		return false
+	}
+	for _, text := range texts {
+		if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
+			return false
+		}
+	}
+	if f.refuted == "" {
+		found := "its recorded value stands whole in " + placeAt(p)
+		if p.Held != v.rec && p.Held != v.decRec {
+			found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
+		}
+		f.refuted = found + ", which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it"
+	}
+	return true
 }
 
 // excused reports whether the word rule may pass over word t of the value,
@@ -116,7 +154,9 @@ func (f *follows) excusedSeen(e Earlier, ed *valueDrift, i int, t string, at tim
 
 // excusedRaw is excused of word t, found in reading i in x's payload: the
 // recording gave the application the payload where it recorded x's answer
-// strictly before the call (recordedGave), and F gave it where it served x. A payload's clock stamps
+// strictly before the call (recordedGave), and F gave it where it served x
+// unchanged (Raw.AsRecorded: a payload F served changed, F may have given
+// another word there, which keploy does not see). A payload's clock stamps
 // are read blanked: F may have stamped its own there, so a word that stands
 // only in one is no word both gave.
 func (f *follows) excusedRaw(x Raw, i int, t string, at time.Time, why string) bool {
@@ -125,7 +165,7 @@ func (f *follows) excusedRaw(x Raw, i int, t string, at time.Time, why string) b
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
 	held := f.dc.searchedTokens(x, false)[i][t]
-	return f.excused(t, before && held, x.served && held, untimed, why)
+	return f.excused(t, before && held, x.AsRecorded() && held, untimed, why)
 }
 
 // recordedGave reports whether the recording gave the application a place
@@ -159,7 +199,8 @@ func (dc *DriftCache) holdsWord(value, t string) bool {
 }
 
 // followed is the verdict on a drift record's full round would learn as
-// noise once the word rule let go the words fol found (fol.first non-empty):
+// noise once the word rule let go the words fol found (fol.first non-empty),
+// or once the search for its source went past a place (fol.refuted):
 // noise where the recording and F gave the application the places before
 // the call in the same order; refused otherwise, saying why. earlier and raw
 // are every place the classifier was handed (the call's own and those F gave
@@ -179,7 +220,11 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 		}
 	}
 	if why != "" {
-		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.first+"; "+why+", so keploy cannot tell a copy from a varying value", nil
+		lead := fol.first
+		if lead == "" {
+			lead = fol.refuted
+		}
+		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, lead+"; "+why+", so keploy cannot tell a copy from a varying value", nil
 	}
 	return ln
 }
