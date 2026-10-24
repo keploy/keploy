@@ -135,6 +135,12 @@ func (s exactStore) MarkCallRound() integrations.CallRound {
 	return integrations.NewCallRound(1, nil)
 }
 
+// HoldToRound implements integrations.RoundHolder: s never stages again, so
+// it holds every call it marks as it is.
+func (s exactStore) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return s, func() bool { return false }
+}
+
 func (s exactStore) FindStagedNotOwned(_ models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
 	if !s.exact || !call.Read() {
 		return "", false
