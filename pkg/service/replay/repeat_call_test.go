@@ -276,6 +276,58 @@ func TestMarkRepeatOfAnchorsOnlyOnARecordingMadeBeforeTheTest(t *testing.T) {
 	}
 }
 
+// A note whose gaps do not compare like for like is never counted as likely,
+// so the set's log line claims no cause for it: an unanchored note (no start
+// of the test known at either run, its replay gap running to the call) and a
+// note with no gap at record (the test's recorded start unknown, or its only
+// identical recording made after the test began then). Each gap here, read
+// alone, would point to an expiry: 69 s after the earlier answer at replay.
+func TestMarkRepeatOfCountsNoNoteWithUnknownGapsAsLikely(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	replay := rec.Add(time.Hour)
+	consumers := map[string][]string{"mock-7": {"test-3", "test-9"}}
+	replayStarts := map[string]time.Time{"test-9": replay.Add(70 * time.Second)}
+	for _, c := range []struct {
+		name         string
+		recordedAt   time.Time
+		testCases    []*models.TestCase
+		replayStarts map[string]time.Time
+		fromStart    bool
+	}{
+		{name: "unanchored", recordedAt: rec},
+		{name: "no recorded start", recordedAt: rec, replayStarts: replayStarts, fromStart: true},
+		{name: "twin recorded after the test began", recordedAt: rec.Add(10 * time.Second),
+			testCases:    []*models.TestCase{{Name: "test-9", HTTPReq: models.HTTPReq{Timestamp: rec.Add(9 * time.Second)}}},
+			replayStarts: replayStarts, fromStart: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+				{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(70*time.Second))},
+				{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(80*time.Second))},
+			}}}}
+			named, likely := markRepeatOf(results, consumers, c.testCases, nil, c.replayStarts)
+			if len(named) != 2 {
+				t.Fatalf("named %q, want both calls", named)
+			}
+			for _, call := range results[0].FailureInfo.UnmatchedCalls {
+				n := call.Repeat
+				if n.RecordGapKnown || n.ReplayGapFromStart != c.fromStart || n.ReplayGapSeconds < 69 {
+					t.Fatalf("the note is %+v, want no gap at record and a replay gap of at least 69s (from the test's start: %v)", n, c.fromStart)
+				}
+				if l, known := n.ElapsedTimeExpiryLikely(); l || known {
+					t.Fatalf("the note judges its cause (likely %v, known %v) from unlike gaps: %+v", l, known, n)
+				}
+			}
+			if likely != 0 {
+				t.Fatalf("%d of two notes with no gap at record count as likely, want 0", likely)
+			}
+			if cause := repeatMissCause(likely, len(named)); strings.Contains(cause, "likely") {
+				t.Fatalf("the set's log line claims a likely cause for notes that cannot judge one: %s", cause)
+			}
+		})
+	}
+}
+
 // The mirror: a recorded call the replay never made is named with the newest
 // identical recording (by fingerprint) that answered another test's call
 // before this test began at replay and was recorded before it, with that
@@ -568,9 +620,11 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 		t.Fatalf("in the branch markRepeatOf named calls in, RunTestSet writes the end-of-run rows with %v, want one r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)", named)
 	}
 	// Each branch's log line takes its cause clause from the counts its
-	// mark returned, never a fixed sentence that says "likely" of every
-	// call.
-	causes := map[string][]string{}
+	// mark returned, inside the message itself, never a fixed sentence that
+	// says "likely" of every call (with the clause moved to a field beside
+	// it); and it carries the likely count as a field of its own.
+	type warnLine struct{ causes, likelyWords, likelyFields []string }
+	lines := map[string]*warnLine{}
 	ast.Inspect(fn, func(n ast.Node) bool {
 		s, ok := n.(*ast.IfStmt)
 		if !ok || s.Init == nil {
@@ -588,11 +642,34 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 		for _, l := range init.Lhs {
 			lhs = append(lhs, printNode(t, fset, l))
 		}
+		w := &warnLine{}
+		lines[calleeName(call)] = w
 		ast.Inspect(s.Body, func(b ast.Node) bool {
-			if c, ok := b.(*ast.CallExpr); ok && (calleeName(c) == "repeatMissCause" || calleeName(c) == "repeatUnmadeCause") {
-				causes[calleeName(call)] = append(causes[calleeName(call)], strings.Join(lhs, ", ")+" -> "+printNode(t, fset, c))
+			warn, ok := b.(*ast.CallExpr)
+			if !ok || calleeName(warn) != "Warn" || len(warn.Args) == 0 {
+				return true
 			}
-			return true
+			ast.Inspect(warn.Args[0], func(m ast.Node) bool {
+				switch e := m.(type) {
+				case *ast.CallExpr:
+					if calleeName(e) == "repeatMissCause" || calleeName(e) == "repeatUnmadeCause" {
+						w.causes = append(w.causes, strings.Join(lhs, ", ")+" -> "+printNode(t, fset, e))
+					}
+				case *ast.BasicLit:
+					if strings.Contains(e.Value, "likely") {
+						w.likelyWords = append(w.likelyWords, e.Value)
+					}
+				}
+				return true
+			})
+			for _, a := range warn.Args[1:] {
+				if f, ok := a.(*ast.CallExpr); ok && len(f.Args) == 2 {
+					if key, ok := f.Args[0].(*ast.BasicLit); ok && key.Value == `"likely_elapsed_time"` {
+						w.likelyFields = append(w.likelyFields, printNode(t, fset, f))
+					}
+				}
+			}
+			return false
 		})
 		return false
 	})
@@ -600,8 +677,19 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 		"markRepeatOf":      "named, likely -> repeatMissCause(likely, len(named))",
 		"markUnmadeRepeats": "named, likely -> repeatUnmadeCause(likely, len(named))",
 	} {
-		if got := causes[mark]; len(got) != 1 || got[0] != want {
-			t.Errorf("RunTestSet's %s branch words its log line's cause with %v, want one %q", mark, got, want)
+		w := lines[mark]
+		if w == nil {
+			t.Errorf("RunTestSet has no branch on %s's result", mark)
+			continue
+		}
+		if len(w.causes) != 1 || w.causes[0] != want {
+			t.Errorf("RunTestSet's %s branch words its log line's message with the cause %v, want one %q", mark, w.causes, want)
+		}
+		if len(w.likelyWords) != 0 {
+			t.Errorf("RunTestSet's %s branch's log message says %v, which claims \"likely\" whatever the notes' gaps show", mark, w.likelyWords)
+		}
+		if len(w.likelyFields) != 1 || w.likelyFields[0] != `zap.Int("likely_elapsed_time", likely)` {
+			t.Errorf("RunTestSet's %s branch's log line carries the likely count as %v, want one zap.Int(\"likely_elapsed_time\", likely)", mark, w.likelyFields)
 		}
 	}
 	var writes []string
