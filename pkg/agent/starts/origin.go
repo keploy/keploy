@@ -16,7 +16,7 @@ import (
 //
 // Under the proven switch every recorded mock names the process that made its
 // call, as its origin's comm and argv[0] (models.Origin.Comm, Exe; a program a
-// go run built, by that go run: programOf): a reason
+// go run or go test built, by that go command: programOf): a reason
 // line that routes or moves a call names it, and a miss or an answered call
 // names it too (models.UnmatchedCall.Source). No committed file holds more of
 // its command line: the whole of it, with its secrets redacted
@@ -367,23 +367,81 @@ func (o *origins) logProcess(pid uint32, n procName, line string) {
 
 // programOf is what a committed file holds of process pid's program
 // (models.Origin.Exe), argv0 its argv[0]. A program the go tool built for a
-// go run and runs as its child is named by that go run: `go run` and its
-// target, without its build flags (goRunOf), read from its parent's command
-// line. Its own argv[0] is the binary the go tool built, in a dir it makes for
-// that one run (/tmp/go-build<random>/b001/exe/<name>) or, once built, in the
-// go build cache (<GOCACHE>/<hash>-d/<name>): a path the user never typed,
-// which changes from one record to the next, so a committed line naming it
-// would change with each. Any other program is its argv[0] (exeOf), as is one
-// whose parent cannot be read.
+// go run or a go test and runs as its child (builtByGo) is named by that go
+// command: `go run` and its target, or `go test` and its packages, without
+// build or test flags (goCommandOf), read from its parent's command line. Its
+// own argv[0] is the binary the go tool built, in a dir it makes for that one
+// command (/tmp/go-build<random>/b001/exe/<name> for a go run,
+// /tmp/go-build<random>/b001/<pkg>.test for a go test) or, for a go run's
+// program once built, in the go build cache (<GOCACHE>/<xx>/<hash>-d/<name>):
+// a path the user never typed, which changes from one record to the next, so
+// a committed line naming it would change with each. Only that child is: the
+// go tool's other children (git fetching a module, the compiler, vet, a
+// go test -exec program) are named by their own argv[0], never as the go
+// command. Any other program is its argv[0] (exeOf), as is one whose parent
+// cannot be read.
 func (r *Registry) programOf(cmd Commander, pid uint32, argv0 string) string {
+	if !builtByGo(argv0) {
+		return exeOf(argv0)
+	}
 	if parent, ok := r.proc.Parent(pid); ok && parent != 0 && parent != pid {
 		if _, argv, read := cmd.Command(parent); read {
-			if run, ok := goRunOf(argv); ok {
-				return run
+			if name, ok := goCommandOf(argv); ok {
+				return name
 			}
 		}
 	}
 	return exeOf(argv0)
+}
+
+// builtByGo reports whether argv0 is a binary the go tool built to run: in a
+// work dir it made for one command (go-build<digits>/b<digits>/..., under
+// GOTMPDIR or the temp dir), or a cached executable (<xx>/<64 hex>-d/<name>
+// in GOCACHE).
+func builtByGo(argv0 string) bool {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(argv0)), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if digitsAfter(parts[i], "go-build") && digitsAfter(parts[i+1], "b") {
+			return true
+		}
+	}
+	if n := len(parts); n >= 3 {
+		id, dir := parts[n-2], parts[n-3]
+		return len(id) == 66 && strings.HasSuffix(id, "-d") && isHex(id[:64]) && len(dir) == 2 && isHex(dir)
+	}
+	return false
+}
+
+// digitsAfter reports whether w is prefix and then one or more digits.
+func digitsAfter(w, prefix string) bool {
+	if !strings.HasPrefix(w, prefix) || len(w) == len(prefix) {
+		return false
+	}
+	for _, c := range w[len(prefix):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isHex(w string) bool {
+	for _, c := range w {
+		if !('0' <= c && c <= '9' || 'a' <= c && c <= 'f') {
+			return false
+		}
+	}
+	return w != ""
+}
+
+// goCommandOf names the go command that runs a program it built, argv the go
+// tool's command line: a go run (goRunOf) or a go test (goTestOf). ok is
+// false for any other command line.
+func goCommandOf(argv []string) (string, bool) {
+	if name, ok := goRunOf(argv); ok {
+		return name, true
+	}
+	return goTestOf(argv)
 }
 
 // goRunOf names the program a go run runs, argv the go tool's command line:
@@ -398,29 +456,8 @@ func goRunOf(argv []string) (string, bool) {
 	if len(argv) < 2 || filepath.Base(argv[0]) != "go" || argv[1] != "run" {
 		return "", false
 	}
-	i := 2
-	for i < len(argv) {
-		w := argv[i]
-		if w == "--" {
-			i++
-			break
-		}
-		if len(w) < 2 || w[0] != '-' {
-			break
-		}
-		name := strings.TrimPrefix(w[1:], "-")
-		switch {
-		case strings.Contains(name, "="):
-			i++
-		case goRunBoolFlags[name]:
-			i++
-		case goRunValueFlags[name]:
-			i += 2
-		default:
-			return "go run", true
-		}
-	}
-	if i >= len(argv) {
+	i, known := skipGoFlags(argv, 2, goRunBoolFlags, goRunValueFlags)
+	if !known || i >= len(argv) {
 		return "go run", true
 	}
 	end := i + 1
@@ -430,6 +467,61 @@ func goRunOf(argv []string) (string, bool) {
 		}
 	}
 	return "go run " + strings.Join(containerkey.RedactArgs(argv[i:end]), " "), true
+}
+
+// goTestOf names the test binaries a go test runs, argv the go tool's command
+// line: "go test " and its packages (`./...`, `./pkg/store`, the _test.go
+// files it names), as the command gives them, redacted as argv[0] is: the
+// words after its leading flags, up to the next flag. Never a build or test
+// flag nor its value (-ldflags, -run, -args and what follows it). "go test"
+// alone when it names no package (the current dir's), or when keploy cannot
+// tell which words are packages: a flag it does not know may take the next
+// word as its value. ok is false when argv is not a go test.
+func goTestOf(argv []string) (string, bool) {
+	if len(argv) < 2 || filepath.Base(argv[0]) != "go" || argv[1] != "test" {
+		return "", false
+	}
+	// A flag it does not know ends the flags it reads (skipGoFlags), and
+	// no package is read past a flag: no word after it is named.
+	i, _ := skipGoFlags(argv, 2, goTestBoolFlags, goTestValueFlags)
+	end := i
+	for end < len(argv) && !strings.HasPrefix(argv[end], "-") {
+		end++
+	}
+	if end == i {
+		return "go test", true
+	}
+	return "go test " + strings.Join(containerkey.RedactArgs(argv[i:end]), " "), true
+}
+
+// skipGoFlags is the index of the first word of argv from i on that is not
+// one of the go command's flags (bools: one word; values: two, unless written
+// -flag=value; "--" ends them), and known false at a flag it does not know:
+// the next word may be that flag's value. A test flag is known with its
+// test. prefix too. A go test's -args is not known: every word after it is
+// the test binary's, so no package follows it.
+func skipGoFlags(argv []string, i int, bools, values map[string]bool) (int, bool) {
+	for i < len(argv) {
+		w := argv[i]
+		if w == "--" {
+			return i + 1, true
+		}
+		if len(w) < 2 || w[0] != '-' {
+			return i, true
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(w[1:], "-"), "test.")
+		switch {
+		case strings.Contains(name, "="):
+			i++
+		case bools[name]:
+			i++
+		case values[name]:
+			i += 2
+		default:
+			return i, false
+		}
+	}
+	return i, true
 }
 
 // goRunBoolFlags and goRunValueFlags are go run's own flags (the go tool's
@@ -450,6 +542,29 @@ var (
 		"p": true, "pgo": true, "pkgdir": true, "tags": true, "toolexec": true,
 	}
 )
+
+// goTestBoolFlags and goTestValueFlags are go test's flags: its build flags
+// (go run's), its own (-c, -json, -o, -vet, -exec) and the test binary's it
+// takes on its command line (-run, -count, -v, ...).
+var (
+	goTestBoolFlags  = union(goRunBoolFlags, "artifacts", "benchmem", "c", "failfast", "fullpath", "short")
+	goTestValueFlags = union(goRunValueFlags, "bench", "benchtime", "blockprofile", "blockprofilerate",
+		"count", "coverprofile", "cpu", "cpuprofile", "fuzz", "fuzzcachedir", "fuzzminimizetime", "fuzztime",
+		"list", "memprofile", "memprofilerate", "mutexprofile", "mutexprofilefraction", "o", "outputdir",
+		"parallel", "run", "shuffle", "skip", "timeout", "trace", "vet")
+)
+
+// union is the flags of base and names.
+func union(base map[string]bool, names ...string) map[string]bool {
+	out := make(map[string]bool, len(base)+len(names))
+	for n := range base {
+		out[n] = true
+	}
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
+}
 
 // exeOf is what a committed file may hold of a process's argv[0]
 // (models.Origin.Exe): a process that sets its own title (setproctitle, a

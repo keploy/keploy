@@ -1,6 +1,7 @@
 package starts
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -280,6 +281,118 @@ func TestAGoRunProgramIsNamedByItsGoRun(t *testing.T) {
 	c.comm[303], c.argv[303] = "orders", []string{"/tmp/go-build1/b001/exe/orders"}
 	r := New(c, 0)
 	for pid, want := range map[uint32]string{300: "go", 301: "go run .", 302: "/tmp/go-build1/b001/exe/orders", 303: "/tmp/go-build1/b001/exe/orders"} {
+		if _, exe, ok := r.ProcessOf(pid); !ok || exe != want {
+			t.Errorf("pid %d is named %q, %v; want %q", pid, exe, ok, want)
+		}
+	}
+}
+
+// A test binary a go test built runs from the go tool's work dir for that one
+// go test, /tmp/go-build<random>/b001/<pkg>.test: keploy names it by its go
+// test and its packages, the same for two runs of the same command, never
+// its build or test flags, so the record's reason lines do not change from
+// one record to the next.
+func TestAGoTestBinaryIsNamedByItsGoTest(t *testing.T) {
+	record := func(dir string, goPid, testPid uint32, goArgv ...string) (*models.Origin, string) {
+		c := newCommander()
+		c.spawn(goPid, 1, at(0), "/usr/local/go/bin/go")
+		c.spawn(testPid, goPid, at(5), dir+"/b001/store.test")
+		c.comm[goPid], c.argv[goPid] = "go", goArgv
+		c.comm[testPid], c.argv[testPid] = "store.test", []string{dir + "/b001/store.test", "-test.paniconexit0", "-test.timeout=10m0s", "-test.v=true", "-test.run=TestOrders"}
+		r := New(c, 0)
+		r.NoteOrigin("7", testPid)
+		m := &models.Mock{Name: "mock-1", Spec: models.MockSpec{Metadata: map[string]string{"connID": "7"}}, Origin: &models.Origin{Clock: "proxy:run-1"}}
+		r.StampOrigin(m)
+		return m.Origin, models.NewWindowedMock(m).FileProcess()
+	}
+	first, firstLine := record("/tmp/go-build3136784009", 300, 301, "go", "test", "-v", "-ldflags=-X=main.key=s3cret", "-run", "TestOrders", "./...")
+	second, secondLine := record("/var/tmp/go-build3633416167", 900, 912, "/usr/local/go/bin/go", "test", "-v", "-ldflags=-X=main.key=s3cret", "-run", "TestOrders", "./...")
+	if want := "`store.test` (`go test ./...`)"; firstLine != want || secondLine != firstLine {
+		t.Fatalf("the two records name the test binary %q and %q; want both %q", firstLine, secondLine, want)
+	}
+	if first == nil || second == nil || *first != *second || first.Exe != "go test ./..." {
+		t.Fatalf("the two records' origins are %+v and %+v; want both go test ./...", first, second)
+	}
+
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"go", "test"}, "go test"},
+		{[]string{"go", "test", "./..."}, "go test ./..."},
+		{[]string{"go", "test", "./pkg/store", "./pkg/api", "-run", "TestOrders", "-count=1"}, "go test ./pkg/store ./pkg/api"},
+		{[]string{"go", "test", "-race", "-tags", "dev", "-ldflags", "-X main.key=s3cret", "-count", "1", "-timeout", "5m", "./pkg/store"}, "go test ./pkg/store"},
+		{[]string{"go", "test", "-test.run", "TestOrders", "--test.v", "-json", "-cover", "-coverprofile", "c.out", "."}, "go test ."},
+		{[]string{"go", "test", "-exec", "sudo", "-vet=off", "-o", "bin/x.test", "-p", "4", "./x"}, "go test ./x"},
+		{[]string{"go", "test", "store_test.go", "store.go", "-v"}, "go test store_test.go store.go"},
+		{[]string{"go", "test", "./x", "-args", "-token", "s3cret"}, "go test ./x"},
+		// Every word after -args is the test binary's: no package is named.
+		{[]string{"go", "test", "-args", "./x", "s3cret"}, "go test"},
+		// Its packages are redacted as argv[0] is.
+		{[]string{"go", "test", "example.com/tool@v1.2.0"}, "go test " + containerkey.RedactedText},
+		// A flag keploy does not know may take the next word as its
+		// value: no word is named.
+		{[]string{"go", "test", "-future", "s3cret", "./..."}, "go test"},
+		{[]string{"go", "test", "-run"}, "go test"},
+	} {
+		got, ok := goTestOf(tc.argv)
+		if !ok || got != tc.want {
+			t.Errorf("goTestOf(%q) = %q, %v; want %q", tc.argv, got, ok, tc.want)
+		}
+		if strings.Contains(got, "s3cret") {
+			t.Errorf("goTestOf(%q) names a flag's value: %q", tc.argv, got)
+		}
+	}
+	for _, argv := range [][]string{nil, {"go"}, {"go", "run", "."}, {"go", "vet", "./..."}, {"gotest", "test", "."}} {
+		if got, ok := goTestOf(argv); ok {
+			t.Errorf("goTestOf(%q) = %q; want no go test", argv, got)
+		}
+	}
+}
+
+// Only the program the go tool built for a go run or a go test is named by
+// that go command: the go tool's other children during the build (git
+// fetching a GOPRIVATE module, the compiler, vet) and a go test -exec
+// program are named by their own argv[0]. A go run's program the go build
+// cache holds once built is named by its go run, as one in a work dir is.
+func TestOnlyTheProgramTheGoToolBuiltIsNamedByItsGoCommand(t *testing.T) {
+	c := newCommander()
+	c.spawn(300, 1, at(0), "/usr/local/go/bin/go")
+	c.comm[300], c.argv[300] = "go", []string{"go", "run", "."}
+	c.spawn(400, 1, at(0), "/usr/local/go/bin/go")
+	c.comm[400], c.argv[400] = "go", []string{"go", "test", "-exec", "/usr/local/bin/wrap", "./pkg/store"}
+	gocache := "/home/u/.cache/go-build/9f/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08-d/orders"
+	// A dir named as a cache entry is, whose name is no hash.
+	notHash := "/home/u/.cache/go-build/9f/" + strings.Repeat("g", 64) + "-d/orders"
+	for pid, child := range map[uint32]struct {
+		parent uint32
+		argv0  string
+	}{
+		301: {300, "git"},
+		302: {300, "/usr/bin/git"},
+		303: {300, "/usr/local/go/pkg/tool/linux_amd64/compile"},
+		304: {300, "/usr/local/go/pkg/tool/linux_amd64/vet"},
+		305: {300, gocache},
+		306: {300, "/tmp/go-build1/b001/exe/orders"},
+		401: {400, "/usr/local/bin/wrap"},
+		402: {400, "/tmp/go-build22/b054/store.test"},
+		// A path that only looks like the go tool's dirs.
+		403: {400, "/tmp/go-builds/b001/store.test"},
+		404: {400, "/tmp/go-build22/bin/store.test"},
+		405: {300, notHash},
+	} {
+		c.spawn(pid, child.parent, at(5), child.argv0)
+		c.comm[pid], c.argv[pid] = filepath.Base(child.argv0), []string{child.argv0}
+	}
+	r := New(c, 0)
+	for pid, want := range map[uint32]string{
+		301: "git", 302: "/usr/bin/git",
+		303: "/usr/local/go/pkg/tool/linux_amd64/compile", 304: "/usr/local/go/pkg/tool/linux_amd64/vet",
+		305: "go run .", 306: "go run .",
+		401: "/usr/local/bin/wrap", 402: "go test ./pkg/store",
+		403: "/tmp/go-builds/b001/store.test", 404: "/tmp/go-build22/bin/store.test",
+		405: notHash,
+	} {
 		if _, exe, ok := r.ProcessOf(pid); !ok || exe != want {
 			t.Errorf("pid %d is named %q, %v; want %q", pid, exe, ok, want)
 		}

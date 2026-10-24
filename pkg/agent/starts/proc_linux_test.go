@@ -255,3 +255,91 @@ func TestAGoRunProgramIsNamedByItsGoRunOnThisHost(t *testing.T) {
 		t.Fatalf("two go runs of the app are named %q and %q; want both %q (their argv[0]s: %q, %q)", first, second, "go run .", firstArgv0, secondArgv0)
 	}
 }
+
+// A test binary a real go test built runs from the go tool's work dir for
+// that one go test: its argv[0] is a path that differs from one run to the
+// next. keploy names it by its go test and its packages, `go test ./`, the
+// same for two runs, its build and test flags left out.
+func TestAGoTestBinaryIsNamedByItsGoTestOnThisHost(t *testing.T) {
+	gobin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go tool on PATH to run a test with")
+	}
+	dir := t.TempDir()
+	for name, text := range map[string]string{
+		"go.mod": "module example.com/store\n\ngo 1.21\n",
+		// The test says its pid and runs until it is told to end (a file
+		// named done), so keploy reads it while it runs.
+		"store_test.go": "package store\n\nimport (\n\t\"os\"\n\t\"path/filepath\"\n\t\"strconv\"\n\t\"testing\"\n\t\"time\"\n)\n\n" +
+			"func TestHold(t *testing.T) {\n\tdir := os.Getenv(\"HOLD_DIR\")\n" +
+			"\tif err := os.WriteFile(filepath.Join(dir, \"pid.tmp\"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {\n\t\tt.Fatal(err)\n\t}\n" +
+			"\tif err := os.Rename(filepath.Join(dir, \"pid.tmp\"), filepath.Join(dir, \"pid\")); err != nil {\n\t\tt.Fatal(err)\n\t}\n" +
+			"\tfor {\n\t\tif _, err := os.Stat(filepath.Join(dir, \"done\")); err == nil {\n\t\t\treturn\n\t\t}\n\t\ttime.Sleep(10 * time.Millisecond)\n\t}\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(n int) (argv0, exe string) {
+		hold := t.TempDir()
+		cmd := exec.Command(gobin, "test", "-count=1", "-v", "-ldflags=-X=main.key=s3cret", "-run", "TestHold", "./")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GOFLAGS=", "GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "HOLD_DIR="+hold)
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		// The go tool and the test binary it runs are one process group,
+		// killed whole however the test ends.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		ended := make(chan error, 1)
+		go func() { ended <- cmd.Wait() }()
+		t.Cleanup(func() {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			<-ended
+			ended <- nil
+		})
+		// Wait for the test binary's pid, or for the go test to end
+		// without one: no wall-clock bound.
+		var raw []byte
+		for {
+			if raw, err = os.ReadFile(filepath.Join(hold, "pid")); err == nil {
+				break
+			}
+			select {
+			case err := <-ended:
+				ended <- err
+				t.Fatalf("go test %d ended before its test said its pid: %v", n, err)
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		pid, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 32)
+		if err != nil {
+			t.Fatalf("the test binary said %q", raw)
+		}
+		_, argv, _ := (sysProc{}).Command(uint32(pid))
+		if len(argv) > 0 {
+			argv0 = argv[0]
+		}
+		_, exe, ok := New(hostLocal{}, 0).ProcessOf(uint32(pid))
+		if !ok {
+			t.Fatalf("pid %d could not be read", pid)
+		}
+		if err := os.WriteFile(filepath.Join(hold, "done"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-ended; err != nil {
+			t.Fatalf("go test %d ended with %v", n, err)
+		}
+		ended <- nil
+		return argv0, exe
+	}
+	firstArgv0, first := run(1)
+	secondArgv0, second := run(2)
+	if first != "go test ./" || second != first {
+		t.Fatalf("two go tests' binaries are named %q and %q; want both %q (their argv[0]s: %q, %q)", first, second, "go test ./", firstArgv0, secondArgv0)
+	}
+	if firstArgv0 == secondArgv0 {
+		t.Logf("the two test binaries ran from one path, %q: the row does not show the work dir changing", firstArgv0)
+	}
+}
