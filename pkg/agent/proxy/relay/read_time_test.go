@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,6 +357,63 @@ func TestWatermark_HoldsAReadTheTLSLayerIsStillStamping(t *testing.T) {
 	awaitState(t, "the window to pass once the parser has the chunk", func() bool {
 		return w.Settled("", "", start, end)
 	})
+}
+
+// markSeeingSocket is a socket under a read-tracking conn that notes the
+// layer's mark each time a read reaches it, and hands out data.
+type markSeeingSocket struct {
+	net.Conn // nil: the read-tracking conn only reads it
+	layer    *atomic.Int64
+	data     []byte
+	marks    []int64
+}
+
+func (s *markSeeingSocket) Read(p []byte) (int, error) {
+	s.marks = append(s.marks, s.layer.Load())
+	n := copy(p, s.data)
+	s.data = s.data[n:]
+	if n == 0 {
+		return 0, io.EOF
+	}
+	return n, nil
+}
+
+// The read-tracking conn marks the layer as holding a read being stamped
+// (heldUnstamped) before it reads the clock for that read's stamp, so a look
+// that found the mark clear is older than the stamp. Were the clock read
+// first, a look in between would find no mark and pass a window that ends
+// then, and the chunk would come after it, stamped inside it (#4900). The
+// mark is clear while the read waits on the socket, and holds the stamp once
+// the read is stamped.
+func TestReadTrackingConn_MarksTheLayerBeforeItReadsTheClock(t *testing.T) {
+	var layer atomic.Int64
+	layer.Store(7) // the stamp an earlier read left
+	sock := &markSeeingSocket{layer: &layer, data: []byte("record")}
+	c := newReadTrackingConn(sock, &layer)
+	stamp := time.Unix(0, 1_700_000_000_000_000_000)
+	var atClock []int64
+	c.now = func() time.Time {
+		atClock = append(atClock, layer.Load())
+		return stamp
+	}
+
+	buf := make([]byte, 16)
+	n, err := c.Read(buf)
+	if err != nil || string(buf[:n]) != "record" {
+		t.Fatalf("Read = %q, %v; want record, nil", buf[:n], err)
+	}
+	if len(sock.marks) != 1 || sock.marks[0] != 0 {
+		t.Errorf("the layer's mark when the read reached the socket = %v, want [0]: cleared before the read", sock.marks)
+	}
+	if len(atClock) != 1 || atClock[0] != heldUnstamped {
+		t.Errorf("the layer's mark when the read's stamp was taken from the clock = %v, want [%d] (heldUnstamped)", atClock, heldUnstamped)
+	}
+	if got := layer.Load(); got != stamp.UnixNano() {
+		t.Errorf("the layer's mark after the read = %d, want the read's stamp %d", got, stamp.UnixNano())
+	}
+	if got := c.LastReadTime(); !got.Equal(stamp) {
+		t.Errorf("LastReadTime = %v, want the read's stamp %v", got, stamp)
+	}
 }
 
 // One read under a TLS layer brought in two records. The layer handed the

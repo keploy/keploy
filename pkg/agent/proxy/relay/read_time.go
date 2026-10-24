@@ -86,6 +86,11 @@ type readTrackingConn struct {
 	net.Conn
 	lastReadNano atomic.Int64
 	layer        *atomic.Int64
+	// now is the clock Read takes a read's stamp from (nil: time.Now); Read
+	// keeps that time unless the inner conn reports its own. It is per conn,
+	// so a test can see the layer's mark at the moment the clock is read
+	// without touching other conns.
+	now func() time.Time
 }
 
 func newReadTrackingConn(conn net.Conn, layer *atomic.Int64) *readTrackingConn {
@@ -98,6 +103,13 @@ func (c *readTrackingConn) markLayer(v int64) {
 	}
 }
 
+func (c *readTrackingConn) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
 func (c *readTrackingConn) Read(p []byte) (int, error) {
 	c.markLayer(0)
 	n, err := c.Conn.Read(p)
@@ -106,7 +118,7 @@ func (c *readTrackingConn) Read(p []byte) (int, error) {
 		return n, err
 	}
 	c.markLayer(heldUnstamped)
-	at := observedReadAt(c.Conn, time.Now()).UnixNano()
+	at := observedReadAt(c.Conn, c.clock()).UnixNano()
 	c.lastReadNano.Store(at)
 	c.markLayer(at)
 	return n, err
