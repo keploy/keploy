@@ -1358,3 +1358,62 @@ func TestAConsumeHeldToACallsMarkIsRefusedOnceTheSetIsStagedAgain(t *testing.T) 
 		t.Fatal("a call marked in the staging it consumed in says the set was staged again")
 	}
 }
+
+// TestAKeyedWalkOfAHeldStoreStopsWhereTheStagingMoved: the held store's keyed
+// walk of the session tier (the MySQL matcher's PREPARE and CLOSE read) gives
+// its caller no mock read once the replay stages a test set again, even when
+// the staging moves partway through the walk, and a walk made after the move
+// says the set was staged again even when it finds nothing to give.
+func TestAKeyedWalkOfAHeldStoreStopsWhereTheStagingMoved(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	first := r3Mock("t-jobs-1", now, "GET", "/jobs/1", "", `{"job":1}`)
+	second := r3Mock("t-jobs-2", now.Add(time.Millisecond), "GET", "/jobs/2", "", `{"job":2}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	stage := func() {
+		mocks := []*models.Mock{first, second}
+		mm.SetMocksWithWindow(nil, mocks, models.BaseTime, now.Add(time.Hour))
+		mm.ServeExactTest("T", mocks)
+	}
+	// Every mock of the set under the one key, so one walk reaches both.
+	oneKey := &integrations.MockIndex{Keys: func(*models.Mock) []string { return []string{"jobs"} }}
+	walk := func(db integrations.MockMemDb, key string, each func(*models.Mock)) (names []string) {
+		t.Helper()
+		if err := db.(integrations.SessionKeyReader).RangeSessionMocksWithKey(oneKey, key, func(mk *models.Mock) bool {
+			names = append(names, mk.Name)
+			each(mk)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return names
+	}
+	nothing := func(*models.Mock) {}
+
+	stage()
+	if got := walk(mm, "jobs", nothing); len(got) != 2 {
+		t.Fatalf("precondition: the walk reaches %v; want both of the set's recordings", got)
+	}
+
+	// The staging moves after the walk gave its caller the first mock.
+	held, restaged := mm.HoldToRound(mm.MarkCallRound())
+	got := walk(held, "jobs", func(*models.Mock) { stage() })
+	if len(got) != 1 {
+		t.Fatalf("a keyed walk the staging moved under gave %v; want only the mock it read before the move", got)
+	}
+	if !restaged() {
+		t.Fatal("a keyed walk the staging moved under does not say the set was staged again")
+	}
+
+	// A walk begun after the move, under a key nothing holds: it finds
+	// nothing either way, and must still say why.
+	held, restaged = mm.HoldToRound(mm.MarkCallRound())
+	stage()
+	if got := walk(held, "no such key", nothing); len(got) != 0 {
+		t.Fatalf("a keyed walk under a key nothing holds gave %v", got)
+	}
+	if !restaged() {
+		t.Fatal("a keyed walk made after the staging moved, finding nothing, does not say the set was staged again")
+	}
+}
