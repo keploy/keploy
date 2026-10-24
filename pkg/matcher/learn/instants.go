@@ -1103,8 +1103,9 @@ func tokensOfForms(forms []string) []map[string]bool {
 // its answer (models.MockSpec: an HTTP or HTTP/2 response, Mongo's, MySQL's,
 // Postgres v2's, gRPC's, DNS's, and a generic parser's response frames). A
 // kind whose spec holds its request and answer in one field (Postgres v3)
-// has none: no clock read of its answer is told (rule 2), and its instants
-// are followed.
+// has none here: a Postgres v3 query's answer stands below that field
+// (answerPath), and answerClock, which reads these alone, tells no clock
+// read of it (rule 2), so its instants are followed.
 var answerFields = jsonNames(answerFieldNames)
 
 // requestFields are the JSON names of the fields of a mock's spec that hold
@@ -1115,21 +1116,33 @@ var requestFields = jsonNames(requestFieldNames)
 
 // jsonNames are the JSON names of the fields of models.MockSpec named.
 func jsonNames(named []string) map[string]bool {
+	return jsonNamesOf(reflect.TypeOf(models.MockSpec{}), named)
+}
+
+// jsonNamesOf are the JSON names of the fields of st named.
+func jsonNamesOf(st reflect.Type, named []string) map[string]bool {
 	out := map[string]bool{}
-	st := reflect.TypeOf(models.MockSpec{})
 	for _, name := range named {
-		f, ok := st.FieldByName(name)
-		if !ok {
+		if _, ok := st.FieldByName(name); !ok {
 			// TestEveryAnswerFieldIsAnAnswer names it.
 			continue
 		}
-		tag := strings.Split(f.Tag.Get("json"), ",")[0]
-		if tag == "" {
-			tag = name
-		}
-		out[tag] = true
+		out[jsonName(st, name)] = true
 	}
 	return out
+}
+
+// jsonName is the JSON name of st's field name (name itself where its tag
+// names none).
+func jsonName(st reflect.Type, name string) string {
+	f, ok := st.FieldByName(name)
+	if !ok {
+		return name
+	}
+	if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" {
+		return tag
+	}
+	return name
 }
 
 // answerFieldNames are the Go names of answerFields.
@@ -1137,6 +1150,56 @@ var answerFieldNames = []string{"GenericResponses", "HTTPResp", "MongoResponses"
 
 // requestFieldNames are the Go names of requestFields.
 var requestFieldNames = []string{"GenericRequests", "HTTPReq", "MongoRequests", "PostgresRequestsV2", "GRPCReq", "MySQLRequests", "DNSReq", "HTTP2Req"}
+
+// postgresV3Query is where a Postgres v3 query's spec stands in a mock's
+// spec as RawOf reads it ("postgresV3.query."): the one field of the spec
+// that holds the query's request and its answer (models.PostgresV3QuerySpec).
+var postgresV3Query = jsonName(reflect.TypeOf(models.MockSpec{}), "PostgresV3") + "." +
+	jsonName(reflect.TypeOf(models.PostgresV3Spec{}), "Query") + "."
+
+// postgresV3QueryRequest are the JSON names of the fields of a Postgres v3
+// query's spec that hold no answer: what the application sent (its SQL, its
+// binds and their formats, the result formats it asked for) and what keploy
+// read from it to classify and pair it. Every other field of it (its
+// response, its side effects, and a field added later) holds its answer:
+// read as given, which only refuses more.
+var postgresV3QueryRequest = jsonNamesOf(reflect.TypeOf(models.PostgresV3QuerySpec{}), postgresV3QueryRequestNames)
+
+// postgresV3QueryRequestNames are the Go names of postgresV3QueryRequest.
+var postgresV3QueryRequestNames = []string{"Class", "Lifetime", "SQLAstHash", "SQLNormalized", "Relations", "ParamOIDs", "VolatilePositions", "InvocationID", "PrecedingTxState", "BindValues", "BindFormats", "Literals", "ResultFormats"}
+
+// postgresV3QueryField is the field of a Postgres v3 query's spec a raw
+// field at path stands in ("response" of "postgresV3.query.response.rows[0]"),
+// false where it stands in none.
+func postgresV3QueryField(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, postgresV3Query)
+	if !ok || rest == "" {
+		return "", false
+	}
+	return fieldRoot(rest), true
+}
+
+// answerPath reports whether a raw field at path stands in its spec's
+// answer: in one of answerFields, or in a field of a Postgres v3 query's
+// spec that holds its answer (any but postgresV3QueryRequest).
+func answerPath(path string) bool {
+	if answerFields[fieldRoot(path)] {
+		return true
+	}
+	f, ok := postgresV3QueryField(path)
+	return ok && !postgresV3QueryRequest[f]
+}
+
+// requestPath reports whether a raw field at path stands in its spec's
+// request: in one of requestFields, or in a field of a Postgres v3 query's
+// spec among postgresV3QueryRequest.
+func requestPath(path string) bool {
+	if requestFields[fieldRoot(path)] {
+		return true
+	}
+	f, ok := postgresV3QueryField(path)
+	return ok && postgresV3QueryRequest[f]
+}
 
 // answerClock are the moments of a protocol-phase mock's answer's own clock
 // reads (rule 2), of payload (its spec as RawOf reads it, dropKeys applied)

@@ -367,7 +367,7 @@ func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
 	text := dc.searched(x, false)[0]
 	answers := answerApart(x.fields)
 	for _, f := range x.fields {
-		if f.key || f.end > len(text) || answers && !answerFields[fieldRoot(f.path)] {
+		if f.key || f.end > len(text) || answers && !answerPath(f.path) {
 			continue
 		}
 		own := text[f.start:f.end]
@@ -503,7 +503,7 @@ func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
 		return out
 	}
 	for _, f := range x.fields {
-		if f.key || f.end > len(x.text) || !answerFields[fieldRoot(f.path)] {
+		if f.key || f.end > len(x.text) || !answerPath(f.path) {
 			continue
 		}
 		add(x.text[f.start:f.end], x.mock+" at "+f.describe())
@@ -711,7 +711,7 @@ func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
 	keys := clockKeys(x)
 	var forms []string
 	for _, f := range x.fields {
-		if f.end > len(text) || !answerFields[fieldRoot(f.path)] {
+		if f.end > len(text) || !answerPath(f.path) {
 			continue
 		}
 		for _, form := range textForms(text[f.start:f.end]) {
@@ -821,15 +821,17 @@ func fieldRoot(path string) string {
 }
 
 // answerApart reports whether the spec fields stand in holds its answer
-// apart from its request: one of them stands in one of the spec's answer
-// fields or request fields (answerFields, requestFields), and only those of
-// its answer are read. A recording of such a kind that holds no answer (a
-// generic parser's frames the application sent, that nothing answered) gave
-// the application nothing. A kind whose spec holds its request and its
-// answer in one field has neither, and all its fields are read.
+// apart from its request: one of them stands in the spec's answer or its
+// request (answerPath, requestPath: one of answerFields or requestFields, or
+// a field of a Postgres v3 query's spec), and only those of its answer are
+// read. A recording of such a kind that holds no answer (a generic parser's
+// frames the application sent, that nothing answered) gave the application
+// nothing. A kind whose spec holds its request and its answer in one field
+// with nothing below it to tell them apart (a Postgres v3 session, catalog,
+// data or generator recording) has neither, and all its fields are read.
 func answerApart(fields []rawField) bool {
 	for _, f := range fields {
-		if root := fieldRoot(f.path); answerFields[root] || requestFields[root] {
+		if answerPath(f.path) || requestPath(f.path) {
 			return true
 		}
 	}

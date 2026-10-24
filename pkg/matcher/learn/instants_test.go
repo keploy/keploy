@@ -574,6 +574,42 @@ func sameSet(a, b []string) bool {
 // red). So is every field that holds a request, among requestFields: a new
 // parser's recording that holds no answer would otherwise be read whole, as
 // if its request were something it gave the application (answerApart).
+// Every field of a Postgres v3 query's spec is named: its request among
+// postgresV3QueryRequestNames, or its answer here. A new field is read as its
+// answer (answerPath), which only refuses more, until it is named here.
+func TestEveryPostgresQueryFieldIsNamed(t *testing.T) {
+	answer := map[string]bool{"Response": true, "SideEffects": true}
+	st := reflect.TypeOf(models.PostgresV3QuerySpec{})
+	asked := map[string]bool{}
+	for _, n := range postgresV3QueryRequestNames {
+		if _, ok := st.FieldByName(n); !ok {
+			t.Errorf("models.PostgresV3QuerySpec has no field %s", n)
+		}
+		asked[n] = true
+	}
+	if len(postgresV3QueryRequest) != len(postgresV3QueryRequestNames) {
+		t.Errorf("postgresV3QueryRequest holds %d JSON names for %d fields", len(postgresV3QueryRequest), len(postgresV3QueryRequestNames))
+	}
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		if asked[f.Name] == answer[f.Name] {
+			t.Errorf("models.PostgresV3QuerySpec.%s: its request %v, its answer %v; name it as one", f.Name, asked[f.Name], answer[f.Name])
+		}
+		path := postgresV3Query + jsonName(st, f.Name) + "[0].value"
+		if answerPath(path) != answer[f.Name] || requestPath(path) != asked[f.Name] {
+			t.Errorf("%s: answerPath %v, requestPath %v", path, answerPath(path), requestPath(path))
+		}
+	}
+	if postgresV3Query != "postgresV3.query." {
+		t.Errorf("a Postgres v3 query stands at %q", postgresV3Query)
+	}
+	for _, path := range []string{"postgresV3", "postgresV3.type", "postgresV3.query", "postgresV3.session.serverVersion", "postgresV3.queryX.response"} {
+		if answerPath(path) || requestPath(path) {
+			t.Errorf("%s: read as a Postgres v3 query's answer %v or request %v", path, answerPath(path), requestPath(path))
+		}
+	}
+}
+
 func TestEveryAnswerFieldIsAnAnswer(t *testing.T) {
 	named := map[string]bool{}
 	st := reflect.TypeOf(models.MockSpec{})

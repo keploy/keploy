@@ -942,6 +942,69 @@ func TestARecordingThatHoldsNoAnswerGaveTheApplicationNothing(t *testing.T) {
 	}
 }
 
+// A Postgres v3 query recording holds its request and its answer in one
+// field of its spec, its answer (its response and its side effects) below
+// it (answerPath): what the application sent there (its SQL, its binds, its
+// literals) F never gave it. So a recording F served before the call (a
+// retried test's reusable recording, served once and paired again) is no
+// place its own recorded request gave the application: a value that changed
+// from a word its binds, literals or SQL hold is noise, while the same word
+// in its answer is refused, naming it. The offset rule reads no place of
+// its request either.
+func TestAPostgresQueryRecordingGaveTheApplicationOnlyItsAnswer(t *testing.T) {
+	const p, word, stamp = "bind.$1", "s-0c41b2", "2026-10-22T11:13:16Z"
+	cell := func(v string) models.PostgresV3Cells { return models.PostgresV3Cells{{Value: v}} }
+	for _, tc := range []struct {
+		name    string
+		q       models.PostgresV3QuerySpec
+		answers bool
+	}{
+		{"its binds", models.PostgresV3QuerySpec{SQLNormalized: "UPDATE sessions SET seen = $1 WHERE id = 7", BindValues: cell(word + " " + stamp)}, false},
+		{"its literals", models.PostgresV3QuerySpec{SQLNormalized: "UPDATE sessions SET seen = $1 WHERE id = 7", Literals: cell(word + " " + stamp)}, false},
+		{"its SQL", models.PostgresV3QuerySpec{SQLNormalized: "UPDATE sessions SET seen = '" + word + " " + stamp + "' WHERE id = 7"}, false},
+		{"its response's rows", models.PostgresV3QuerySpec{SQLNormalized: "SELECT seen FROM sessions WHERE id = 7", Response: &models.PostgresV3Response{Rows: []models.PostgresV3Cells{cell(word + " " + stamp)}, CommandComplete: "SELECT 1"}}, true},
+		{"its response's tag", models.PostgresV3QuerySpec{SQLNormalized: "SELECT seen FROM sessions WHERE id = 7", Response: &models.PostgresV3Response{CommandComplete: word + " " + stamp}}, true},
+		{"its side effects", models.PostgresV3QuerySpec{SQLNormalized: "SELECT nextval('seq')", SideEffects: &models.PostgresV3SideEffects{SequenceEmissions: []models.PostgresV3SeqEmission{{Sequence: word + " " + stamp, Value: 7}}}}, true},
+	} {
+		q := tc.q
+		q.Lifetime = "session"
+		m := &models.Mock{Name: "conn-2", Kind: models.PostgresV3, Spec: models.MockSpec{
+			PostgresV3:       &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &q},
+			ReqTimestampMock: r1Insert.Add(-time.Minute), ResTimestampMock: r1Insert.Add(-time.Minute + time.Millisecond)}}
+		dc := NewDriftCache()
+		x := dc.RawOf(m, true).ServedAs(2)
+		places := dc.keyedPlaces(x)
+		if len(places) > 0 != tc.answers {
+			t.Errorf("%s: %d places of the offset rule (%+v)", tc.name, len(places), places)
+		}
+		for _, kp := range places {
+			if !answerPath(kp.k.path) {
+				t.Errorf("%s: a place of the offset rule in what the application sent: %s", tc.name, kp.k.path)
+			}
+		}
+		// The recording the call pairs with again, which F served once
+		// already in the test: made at the call's own instant, given to the
+		// application before the call (GivenEarlier), no earlier place of the
+		// call's own test.
+		self := *m
+		self.Spec.ReqTimestampMock, self.Spec.ResTimestampMock = r1Insert, r1Insert.Add(time.Millisecond)
+		paired := func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(dc.RawOf(&self, true).ServedAs(1))}, nil }
+		for _, given := range []struct {
+			name  string
+			raw   []Raw
+			given GivenEarlier
+		}{{"in another test", []Raw{x.OfAnotherTest()}, nil}, {"in the test, the recording the call pairs with", nil, paired}} {
+			ln := ClassifyGiven(dc, []string{p}, strLeaf(p, "s-9d8e7f"), strLeaf(p, word), r1Insert, nil, given.raw, nil, nil, given.given)[0]
+			switch {
+			case !tc.answers && ln.Kind != KindNoise:
+				t.Errorf("a word in %s, served %s: %s (%s); want noise", tc.name, given.name, ln.Kind, ln.Why)
+			case tc.answers && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "appears in conn-2, a recording record's full round gave the application before the call")):
+				t.Errorf("a word in %s, served %s: %s (%s); want it refused, naming conn-2", tc.name, given.name, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
 // The recordings F gave the application earlier in the set (GivenEarlier)
 // are read only when a changed instant reaches the offset rule or a word of
 // what changed the word rule, once for the call, and as places of those
