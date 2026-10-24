@@ -350,6 +350,62 @@ func TestAGoTestBinaryIsNamedByItsGoTest(t *testing.T) {
 	}
 }
 
+// Under `go test -exec <prog>` the test binary the go tool built is the exec
+// program's child (sudo's, or the child sudo runs it under), not the go
+// tool's: it is named by the go test all the same, the same in two records.
+// No go command within goCommandDepth ancestors, or one above another
+// program the go tool built, names it: it is its own argv[0].
+func TestAGoTestBinaryRunUnderAnExecProgramIsNamedByItsGoTest(t *testing.T) {
+	record := func(dir string, base uint32, between ...string) string {
+		c := newCommander()
+		c.spawn(base, 1, at(0), "/usr/local/go/bin/go")
+		c.comm[base], c.argv[base] = "go", []string{"go", "test", "-exec", "sudo -E", "-run", "TestProbe", "./pkg/ebpf"}
+		parent := base
+		for i, prog := range between {
+			pid := base + uint32(i) + 1
+			c.spawn(pid, parent, at(1), prog)
+			c.comm[pid], c.argv[pid] = filepath.Base(prog), []string{prog, "-E", dir + "/b001/ebpf.test"}
+			parent = pid
+		}
+		test := base + 50
+		c.spawn(test, parent, at(5), dir+"/b001/ebpf.test")
+		c.comm[test], c.argv[test] = "ebpf.test", []string{dir + "/b001/ebpf.test", "-test.paniconexit0", "-test.run=TestProbe"}
+		r := New(c, 0)
+		r.NoteOrigin("7", test)
+		m := &models.Mock{Name: "mock-1", Spec: models.MockSpec{Metadata: map[string]string{"connID": "7"}}, Origin: &models.Origin{Clock: "proxy:run-1"}}
+		r.StampOrigin(m)
+		return models.NewWindowedMock(m).FileProcess()
+	}
+	const want = "`ebpf.test` (`go test ./pkg/ebpf`)"
+	for _, between := range [][]string{
+		{"/usr/bin/sudo"},
+		// sudo running the command under a child of its own (use_pty).
+		{"/usr/bin/sudo", "/usr/bin/sudo"},
+	} {
+		first := record("/tmp/go-build3136784009", 300, between...)
+		second := record("/var/tmp/go-build3633416167", 900, between...)
+		if first != want || second != first {
+			t.Errorf("under %q the two records name the test binary %q and %q; want both %q", between, first, second, want)
+		}
+	}
+	// No go command within goCommandDepth ancestors: its own argv[0].
+	deep := []string{"/usr/bin/sudo", "/usr/bin/a", "/usr/bin/b", "/usr/bin/c"}
+	if len(deep) < goCommandDepth {
+		t.Fatalf("the deep chain %q is within goCommandDepth %d", deep, goCommandDepth)
+	}
+	if got := record("/tmp/go-build1", 300, deep...); got != "`ebpf.test` (`/tmp/go-build1/b001/ebpf.test`)" {
+		t.Errorf("a test binary %d ancestors below its go test is named %q; want its own argv[0]", len(deep)+1, got)
+	}
+	if got := record("/tmp/go-build1", 300, deep[:goCommandDepth-1]...); got != want {
+		t.Errorf("a test binary %d ancestors below its go test is named %q; want %q", goCommandDepth, got, want)
+	}
+	// Above another program the go tool built (an exec program go run
+	// built): that program's go command, not this one's.
+	if got := record("/tmp/go-build1", 300, "/tmp/go-build7/b001/exe/wrap"); got != "`ebpf.test` (`/tmp/go-build1/b001/ebpf.test`)" {
+		t.Errorf("a test binary run by another program the go tool built is named %q; want its own argv[0]", got)
+	}
+}
+
 // Only the program the go tool built for a go run or a go test is named by
 // that go command: the go tool's other children during the build (git
 // fetching a GOPRIVATE module, the compiler, vet) and a go test -exec
@@ -364,6 +420,10 @@ func TestOnlyTheProgramTheGoToolBuiltIsNamedByItsGoCommand(t *testing.T) {
 	gocache := "/home/u/.cache/go-build/9f/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08-d/orders"
 	// A dir named as a cache entry is, whose name is no hash.
 	notHash := "/home/u/.cache/go-build/9f/" + strings.Repeat("g", 64) + "-d/orders"
+	// A cache entry's look-alikes: its two-character dir no hex, and its
+	// hash with no -d.
+	notHexDir := "/home/u/.cache/go-build/zz/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08-d/orders"
+	notDash := "/home/u/.cache/go-build/9f/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08-x/orders"
 	for pid, child := range map[uint32]struct {
 		parent uint32
 		argv0  string
@@ -380,6 +440,8 @@ func TestOnlyTheProgramTheGoToolBuiltIsNamedByItsGoCommand(t *testing.T) {
 		403: {400, "/tmp/go-builds/b001/store.test"},
 		404: {400, "/tmp/go-build22/bin/store.test"},
 		405: {300, notHash},
+		406: {300, notHexDir},
+		407: {300, notDash},
 	} {
 		c.spawn(pid, child.parent, at(5), child.argv0)
 		c.comm[pid], c.argv[pid] = filepath.Base(child.argv0), []string{child.argv0}
@@ -391,7 +453,7 @@ func TestOnlyTheProgramTheGoToolBuiltIsNamedByItsGoCommand(t *testing.T) {
 		305: "go run .", 306: "go run .",
 		401: "/usr/local/bin/wrap", 402: "go test ./pkg/store",
 		403: "/tmp/go-builds/b001/store.test", 404: "/tmp/go-build22/bin/store.test",
-		405: notHash,
+		405: notHash, 406: notHexDir, 407: notDash,
 	} {
 		if _, exe, ok := r.ProcessOf(pid); !ok || exe != want {
 			t.Errorf("pid %d is named %q, %v; want %q", pid, exe, ok, want)

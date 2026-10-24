@@ -367,32 +367,55 @@ func (o *origins) logProcess(pid uint32, n procName, line string) {
 
 // programOf is what a committed file holds of process pid's program
 // (models.Origin.Exe), argv0 its argv[0]. A program the go tool built for a
-// go run or a go test and runs as its child (builtByGo) is named by that go
-// command: `go run` and its target, or `go test` and its packages, without
-// build or test flags (goCommandOf), read from its parent's command line. Its
-// own argv[0] is the binary the go tool built, in a dir it makes for that one
-// command (/tmp/go-build<random>/b001/exe/<name> for a go run,
-// /tmp/go-build<random>/b001/<pkg>.test for a go test) or, for a go run's
-// program once built, in the go build cache (<GOCACHE>/<xx>/<hash>-d/<name>):
-// a path the user never typed, which changes from one record to the next, so
-// a committed line naming it would change with each. Only that child is: the
-// go tool's other children (git fetching a module, the compiler, vet, a
-// go test -exec program) are named by their own argv[0], never as the go
-// command. Any other program is its argv[0] (exeOf), as is one whose parent
-// cannot be read.
+// go run or a go test (builtByGo) is named by that go command: `go run` and
+// its target, or `go test` and its packages, without build or test flags
+// (goCommandOf). The go command is its nearest ancestor that is one, at most
+// goCommandDepth up: its parent, or, under `go test -exec <prog>` (`-exec
+// sudo` runs a test privileged), the go command that started the exec
+// program it runs under; never one above another program the go tool built,
+// whose go command that is. Its own argv[0] is the binary the go tool built,
+// in a dir it makes for that one command (/tmp/go-build<random>/b001/exe/<name>
+// for a go run, /tmp/go-build<random>/b001/<pkg>.test for a go test) or, for
+// a go run's program once built, in the go build cache
+// (<GOCACHE>/<xx>/<hash>-d/<name>): a path the user never typed, which
+// changes from one record to the next, so a committed line naming it would
+// change with each. Only that program is: the go tool's other children (git
+// fetching a module, the compiler, vet, a go test -exec program) are named by
+// their own argv[0], never as the go command. Any other program is its
+// argv[0] (exeOf), as is one with no go command among the ancestors keploy
+// reads, or whose ancestors cannot be read.
 func (r *Registry) programOf(cmd Commander, pid uint32, argv0 string) string {
 	if !builtByGo(argv0) {
 		return exeOf(argv0)
 	}
-	if parent, ok := r.proc.Parent(pid); ok && parent != 0 && parent != pid {
-		if _, argv, read := cmd.Command(parent); read {
-			if name, ok := goCommandOf(argv); ok {
-				return name
-			}
+	at := pid
+	for range goCommandDepth {
+		parent, ok := r.proc.Parent(at)
+		if !ok || parent == 0 || parent == at {
+			break
 		}
+		_, argv, read := cmd.Command(parent)
+		if !read {
+			break
+		}
+		if name, ok := goCommandOf(argv); ok {
+			return name
+		}
+		if len(argv) > 0 && builtByGo(argv[0]) {
+			// Another program the go tool built: the go command above it
+			// runs that program, not this one.
+			break
+		}
+		at = parent
 	}
 	return exeOf(argv0)
 }
+
+// goCommandDepth bounds how far up from a program the go tool built
+// programOf looks for the go command that runs it: its parent, an exec
+// program (go test -exec sudo, which may run it under a child of its own),
+// and one more.
+const goCommandDepth = 4
 
 // builtByGo reports whether argv0 is a binary the go tool built to run: in a
 // work dir it made for one command (go-build<digits>/b<digits>/..., under
