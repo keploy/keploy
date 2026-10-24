@@ -5287,7 +5287,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// come.
 		if r.exact != nil && r.exact.background && captureOpened {
 			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks, stopDrained); len(unanswered) > 0 {
-				r.logger.Info("background recordings of this test set that its end had not read answered: background serving neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
+				r.logger.Info("background recordings of this test set that its end had not read answered: proven routing neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID),
 					zap.Int("count", len(unanswered)),
 					zap.Strings("mocks", unanswered[:min(len(unanswered), 20)]),

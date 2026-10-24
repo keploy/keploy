@@ -16,7 +16,7 @@ import "sync"
 //     registers it, so keploy alone, or a keploy relinked without the
 //     judging, serves every set by today's rules and ships nothing looser;
 //   - the proven switch is on;
-//   - the set's mappings.yaml carries the mark of a background-routing record
+//   - the set's mappings.yaml carries the mark of a proven-routing record
 //     (models.RecordedWithS12Routing in models.Mapping.RecordedWith): a set
 //     recorded before, or by a build without the judging, keeps today's rules
 //     whatever replays it, so an upgrade relaxes no old set.

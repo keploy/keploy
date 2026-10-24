@@ -84,14 +84,14 @@ type MockEntry struct {
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
-// record recorded under background routing and serving: only such a set
+// record recorded under proven routing: only such a set
 // is served by the looser background rules (no worker-scope check at the set's end, the
 // pool inside tests, background writes answered by kind), and only by a build
 // whose judging enables them (replay.RegisterS12Serving), under the proven
 // switch. Every other set keeps today's rules (the compatibility audit's B3).
 const RecordedWithS12Routing = "s12-routing"
 
-// MappingDoc is mappings.yaml's document, Mapping, by the name the background-routing
+// MappingDoc is mappings.yaml's document, Mapping, by the name the proven-routing
 // contract gives it (MappingDoc.RecordedWith).
 type MappingDoc = Mapping
 
@@ -236,7 +236,7 @@ type Mapping struct {
 	Shared []MockEntry `json:"shared,omitempty" yaml:"shared,omitempty" bson:"shared,omitempty"`
 	// RecordedWith names, set-wide, what keploy record recorded the set with
 	// that changes how it is served: RecordedWithS12Routing for a set a
-	// background-routing record wrote (routed at record, its background served by the background rules).
+	// proven-routing record wrote (routed at record, its background served by the background rules).
 	// keploy record writes it under the proven switch. Read and kept by each
 	// rewrite of mappings.yaml, whatever the switch, and by a writer that
 	// names none; omitted when empty, so a file without it is written as

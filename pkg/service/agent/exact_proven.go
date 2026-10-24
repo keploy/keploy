@@ -253,8 +253,13 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		a.testWorker, a.testBegun = nil, nil
 		a.testBegunAt, a.testBg = nil, nil
 		a.scopeMu.Unlock()
-		// The previous set's background rules go too.
-		if err := a.serveBackgroundExactly(es, "", nil, nil); err != nil {
+		// The previous set's background rules go too, and the set's own
+		// rules come first: every view this staging installs reads the set
+		// as served by the rules it was recorded under (a marked set's
+		// background names no recording until its mocks are staged), so a
+		// call one of them refuses is never told the set was recorded
+		// without proven routing.
+		if err := a.stageBackgroundExactly(es, a.stagingRules(ex)); err != nil {
 			return err
 		}
 		if err := a.serveWorkerExactly(es); err != nil {
@@ -307,8 +312,8 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 			// A proxy that cannot serve the background rules serves the set by
 			// today's, and the agent says so (ServedBackground): the replay
 			// keeps today's checks.
-			a.logger.Info("this keploy agent's proxy cannot serve a test set's background by the background rules it was recorded under; the set is served by today's rules, which check its worker scope at the set's end",
-				zap.String("next_step", "nothing to do for this run: its checks are today's, and its verdicts hold. This agent's proxy (a mode or a build that predates background serving) serves no set by the background rules; replay with one that does to have the set served by them"))
+			a.logger.Info("this keploy agent's proxy cannot serve a test set by the proven routing it was recorded under: its background is served as in a set recorded without proven routing, its worker scope checked at the set's end",
+				zap.String("next_step", "nothing to do for this run: its checks are today's, and its verdicts hold. This agent's proxy (a mode or a build that predates proven routing) serves no set by proven routing; replay with one that does to have the set served by it"))
 			bg = nil
 		}
 		a.scopeMu.Lock()
@@ -575,7 +580,7 @@ type testBackground struct {
 // switch; nil for today's rules. A mock it cannot read counts as having a
 // sibling: it stays gated by its place.
 func (a *Agent) settleBackground(ex *models.ExactServing) *testBackground {
-	if ex == nil || ex.Background != models.RecordedWithS12Routing || !provenswitch.On() {
+	if a.stagingRules(ex) == "" {
 		return nil
 	}
 	if len(ex.Worker) == 0 {
@@ -706,6 +711,30 @@ func reachableWorker(worker []models.MockEntry, begun map[string]bool, begunAt m
 		out = append(out, r.name)
 	}
 	return out
+}
+
+// stagingRules is the rules a staging of ex is served by, before its
+// background is settled: the background rules exactly when settleBackground
+// settles one (a staging that names them, under the proven switch), else
+// today's ("").
+func (a *Agent) stagingRules(ex *models.ExactServing) string {
+	if ex == nil || ex.Background != models.RecordedWithS12Routing || !provenswitch.On() {
+		return ""
+	}
+	return models.RecordedWithS12Routing
+}
+
+// stageBackgroundExactly opens a set's staging in the proxy under rules
+// (coreAgent.ExactBackgroundServer.StageExactBackground), before the staging
+// installs any view: the previous set's background goes, and every view of
+// the staging reads the set's rules. A proxy that cannot serve the background
+// rules serves every set by today's, and needs nothing.
+func (a *Agent) stageBackgroundExactly(es coreAgent.ExactServer, rules string) error {
+	bs, ok := es.(coreAgent.ExactBackgroundServer)
+	if !ok {
+		return nil
+	}
+	return bs.StageExactBackground(rules)
 }
 
 // serveBackgroundExactly tells the proxy the rules the staged set's background

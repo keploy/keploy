@@ -4628,6 +4628,17 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	return nil
 }
 
+// StageExactBackground implements agent.ExactBackgroundServer
+// (exact_background.go).
+func (p *Proxy) StageExactBackground(rules string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.StageExactBackground(rules)
+	return nil
+}
+
 // ServeExactBackground implements agent.ExactBackgroundServer
 // (exact_background.go).
 func (p *Proxy) ServeExactBackground(rules string, pool, worker []string) error {

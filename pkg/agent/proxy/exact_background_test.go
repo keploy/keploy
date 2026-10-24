@@ -163,6 +163,67 @@ func TestPairingIsOffWithoutLearn(t *testing.T) {
 	}
 }
 
+// A set's staging opens under the rules it was recorded under
+// (StageExactBackground) before any view of it is installed, so the view it
+// serves while its mocks are staged, before its background is named, reads
+// the set as served by proven routing (integrations.S12Background, the
+// snapshot's Background): a call that view refuses is never told the set was
+// recorded without it. That view names no recording of the background,
+// though the trees still hold the previous set's under names this set may
+// give its own, and pairs nothing; once the background is named, the set
+// pairs. A set staged under today's rules, and any set without the switch,
+// reads as today's.
+func TestAStagingReadsItsSetsRulesBeforeItsBackgroundIsNamed(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.SetPairing(true)
+	// The previous set, served by the background rules.
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	// The next set's staging: its rules, then the view it serves while its
+	// mocks are staged (no pool).
+	mm.StageExactBackground(models.RecordedWithS12Routing)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if !integrations.S12Background(mm) {
+		t.Fatal("while a marked set is staged, its view reads the set as served by today's rules")
+	}
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP, Pairing: true})
+	if !ok || !snap.Background {
+		t.Fatalf("while a marked set is staged, its snapshot (ok %v) reads Background %v; want true", ok, snap.Background)
+	}
+	if len(snap.BackgroundUnused) != 0 || len(snap.Candidates) != 0 {
+		t.Fatalf("while a marked set is staged, its snapshot names the background %v and the candidates %v; want none of the trees' recordings", exactNames(snap.BackgroundUnused), exactNames(snap.Candidates))
+	}
+	if b := mm.Background(models.HTTP); b != nil {
+		t.Fatalf("while a marked set is staged, the trees' recordings are its background: %v", exactNames(b))
+	}
+	if c := mm.PairingCandidates(models.HTTP); c != nil {
+		t.Fatalf("while a marked set is staged, it pairs with the trees' recordings: %v", exactNames(c))
+	}
+	if mm.ClaimPairing(ms["other"]) {
+		t.Fatal("while a marked set is staged, it claims a pairing")
+	}
+	// Its background named, the set pairs.
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+	if !integrations.S12Background(mm) {
+		t.Fatal("a marked set staged reads as served by today's rules")
+	}
+	equalNames(t, "the candidates once the background is named", mm.PairingCandidates(models.HTTP), "own", "other")
+	// A set staged under today's rules reads as today's from its staging on.
+	mm.StageExactBackground("")
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if integrations.S12Background(mm) {
+		t.Fatal("an unmarked set's staging reads the set as served by the background rules")
+	}
+	// And so does a marked one without the switch.
+	t.Setenv(provenswitch.Env, "")
+	mm.StageExactBackground(models.RecordedWithS12Routing)
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	if integrations.S12Background(mm) {
+		t.Fatal("without the switch a marked set's staging reads the set as served by the background rules")
+	}
+}
+
 // A recording is claimed for one pairing in a staging, and never one the open
 // test owns, one a call consumed, or one of the background; a claim is no
 // consumption, and the next staging claims afresh.

@@ -96,10 +96,10 @@ func (r *Recorder) newWindowMappings() *windowMappings {
 	}
 	if r.config.Record.Synchronous || r.config.DisableMapping {
 		if replay.S12Serving() && r.logger != nil {
-			r.logger.Info("this recording does not route background writes nor mark its test set for background serving: a recording made with --sync, or with mapping disabled, derives no test windows, so its set is served by the rules of a set recorded before background serving, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
+			r.logger.Info("this recording does not route background writes nor mark its test set for proven routing: a recording made with --sync, or with mapping disabled, derives no test windows, so its set is served as a set recorded without proven routing, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
 				zap.Bool("sync", r.config.Record.Synchronous),
 				zap.Bool("mappingDisabled", r.config.DisableMapping),
-				zap.String("next_step", "record without --sync, with mapping on, for background routing and serving"))
+				zap.String("next_step", "record without --sync, with mapping on, for proven routing"))
 		}
 		return nil
 	}
@@ -191,7 +191,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		// record's judging judges what that serving answers.
 		if marker, s12 := s12Record(db); s12 && drained {
 			if err := marker.MarkRecordedWith(ctx, testSetID, models.RecordedWithS12Routing); err != nil {
-				logger.Error("failed to mark the test set as recorded under background routing and serving (mappings.yaml recordedWith)",
+				logger.Error("failed to mark the test set as recorded under proven routing (mappings.yaml recordedWith)",
 					zap.String("testSetID", testSetID),
 					zap.Error(err),
 					zap.String("next_step", "fix the error above and re-record this test set"))
@@ -207,7 +207,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return
 	}
-	// A set this build records with background routing (s12Record) is marked so, and its
+	// A set this build records with proven routing (s12Record) is marked so, and its
 	// in-flight writes are routed: only background serving serves
 	// a routed write by its kind.
 	marker, s12 := s12Record(db)
@@ -299,7 +299,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// answered exactly, never looser.
 	if s12 {
 		if err := marker.MarkRecordedWith(ctx, testSetID, models.RecordedWithS12Routing); err != nil {
-			logger.Error("failed to mark the test set as recorded under background routing and serving (mappings.yaml recordedWith): its writes routed to the worker scope are served by the rules of a set recorded before background serving, exactly, and required by the set's end",
+			logger.Error("failed to mark the test set as recorded under proven routing (mappings.yaml recordedWith): its writes routed to the worker scope are served as in a set recorded without proven routing, exactly, and required by the set's end",
 				zap.String("testSetID", testSetID),
 				zap.Error(err),
 				zap.String("next_step", "fix the error above and re-record this test set"))
@@ -431,13 +431,13 @@ type recordedWithMarker interface {
 	MarkRecordedWith(ctx context.Context, testSetID, feature string) error
 }
 
-// s12Record reports whether this recording is a background-routing record, routing its
+// s12Record reports whether this recording is a proven-routing record, routing its
 // in-flight writes and marking its set models.RecordedWithS12Routing, and the
 // store that marks it: under the proven switch, while this build's judging
 // enables background serving (replay.S12Serving: keploy enterprise registers it),
 // into a store that keeps the mark. Any other recording routes and marks
 // nothing, so its set is served by today's rules, as every set recorded before
-// background routing is: keploy alone records nothing background serving would serve.
+// proven routing is: keploy alone records nothing background serving would serve.
 func s12Record(db MappingDb) (recordedWithMarker, bool) {
 	if !provenswitch.On() || !replay.S12Serving() {
 		return nil, false

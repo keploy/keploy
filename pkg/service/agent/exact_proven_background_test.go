@@ -103,15 +103,38 @@ func TestReachableWorkerGatesSiblingsAndOrdersByPlace(t *testing.T) {
 
 // backgroundExactProxy is a workerExactProxy that serves the background
 // rules (coreAgent.ExactBackgroundServer): it keeps each set of rules it is
-// told, with its pool and worker scope.
+// told, a staging's opening ("stage:" and its rules) or a background named
+// (with its pool and worker scope), and the rules each view it is told to
+// install (ServeExactPool, ServeExactTest) reads, as the proxy's view does.
 type backgroundExactProxy struct {
 	workerExactProxy
 	rules []string
+	// inForce is the rules the next view installed reads; views, those each
+	// view installed read, in order.
+	inForce string
+	views   []string
+}
+
+func (p *backgroundExactProxy) StageExactBackground(rules string) error {
+	p.rules = append(p.rules, "stage:"+rules)
+	p.inForce = rules
+	return nil
 }
 
 func (p *backgroundExactProxy) ServeExactBackground(rules string, pool, worker []string) error {
 	p.rules = append(p.rules, rules+"|"+strings.Join(pool, ",")+"|"+strings.Join(worker, ","))
+	p.inForce = rules
 	return nil
+}
+
+func (p *backgroundExactProxy) ServeExactPool(key string, pool []string) error {
+	p.views = append(p.views, p.inForce)
+	return p.workerExactProxy.ServeExactPool(key, pool)
+}
+
+func (p *backgroundExactProxy) ServeExactTest(test string, own []*models.Mock) error {
+	p.views = append(p.views, p.inForce)
+	return p.workerExactProxy.ServeExactTest(test, own)
 }
 
 func (p *backgroundExactProxy) SetRecordedOfKind(func(models.Kind, func(string, func() (*models.Mock, error)) bool) error) error {
@@ -199,14 +222,18 @@ func TestSettleBackgroundNeedsTheSwitch(t *testing.T) {
 	}
 }
 
-// A staging that names the background rules (models.ExactServing.Background) tells the
-// proxy so, with the set's pool and whole worker scope, after withdrawing the
-// previous set's; and it reaches a worker-scope recording with no identical
-// sibling from the set's start, though it is placed after a test not begun. A
-// staging that names none is today's: the previous set's rules are withdrawn,
-// none told, and the placed recording waits for its test. A proxy that cannot
-// serve the background rules is staged by today's, and the agent says so. Without the
-// switch nothing is staged exactly.
+// A staging that names the background rules (models.ExactServing.Background) opens
+// under them, withdrawing the previous set's, before it installs any view, so
+// every view it installs reads the set as served by them (the view it serves
+// while the set's mocks are staged among them: a call that view refuses is
+// never told the set was recorded without proven routing); it then tells the
+// proxy the set's pool and whole worker scope; and it reaches a worker-scope
+// recording with no identical sibling from the set's start, though it is
+// placed after a test not begun. A staging that names none is today's: it
+// opens under today's rules, the previous set's withdrawn, every view reads
+// today's, and the placed recording waits for its test. A proxy that cannot
+// serve the background rules is staged by today's, and the agent says so.
+// Without the switch nothing is staged exactly.
 func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *testing.T) {
 	defer models.RegisterExactKey(models.HTTP, func(m *models.Mock) (string, bool) {
 		return m.Spec.HTTPReq.URL, true
@@ -216,14 +243,16 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 		on        bool
 		rules     string
 		wantRules []string
+		wantViews []string
 		reached   []string
 	}{
 		{"the background rules", true, models.RecordedWithS12Routing,
-			[]string{"||", models.RecordedWithS12Routing + "|boot-config|w-delete,w-poll"}, []string{"w-delete", "w-poll"}},
-		{"today's rules", true, "", []string{"||"}, []string{"w-delete"}},
-		{"the background rules, a proxy that cannot serve them", true, models.RecordedWithS12Routing, nil, []string{"w-delete"}},
+			[]string{"stage:" + models.RecordedWithS12Routing, models.RecordedWithS12Routing + "|boot-config|w-delete,w-poll"},
+			[]string{models.RecordedWithS12Routing, models.RecordedWithS12Routing}, []string{"w-delete", "w-poll"}},
+		{"today's rules", true, "", []string{"stage:"}, []string{"", ""}, []string{"w-delete"}},
+		{"the background rules, a proxy that cannot serve them", true, models.RecordedWithS12Routing, nil, nil, []string{"w-delete"}},
 		// Without the switch nothing is staged exactly: nothing is told.
-		{"the background rules named without the switch", false, models.RecordedWithS12Routing, nil, nil},
+		{"the background rules named without the switch", false, models.RecordedWithS12Routing, nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.on {
@@ -259,6 +288,9 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 			}
 			if !reflect.DeepEqual(p.rules, tc.wantRules) {
 				t.Fatalf("the proxy was told the rules %q; want %q", p.rules, tc.wantRules)
+			}
+			if !reflect.DeepEqual(p.views, tc.wantViews) {
+				t.Fatalf("the views the staging installed read the rules %q; want %q", p.views, tc.wantViews)
 			}
 			if tc.reached == nil {
 				if len(p.workers) != 0 {

@@ -13,7 +13,7 @@ import (
 // THE BACKGROUND RULES IN EXACT SERVING (replay.RegisterS12Serving).
 //
 // A set staged under the background rules (ServeExactBackground, which the
-// agent calls only for a set a background-routing record marked, models.RecordedWithS12Routing,
+// agent calls only for a set a proven-routing record marked, models.RecordedWithS12Routing,
 // replayed by a build whose judging enables them) has a background: its worker scope and its pool,
 // the recordings no test owns. Exact serving then differs from today's in
 // four ways, and only for such a set:
@@ -36,10 +36,13 @@ import (
 // Any other set is served exactly as before: none of this applies.
 
 // backgroundState is a staged set's background under the background rules: its pool
-// and its whole worker scope, by name.
+// and its whole worker scope, by name. A settling one (StageExactBackground)
+// is a set staged under them whose background is not named yet: it names no
+// recording, and pairs none.
 type backgroundState struct {
-	pool   map[string]struct{}
-	worker map[string]struct{}
+	pool     map[string]struct{}
+	worker   map[string]struct{}
+	settling bool
 }
 
 // has reports whether name is one of the background's recordings.
@@ -63,13 +66,33 @@ func (b *backgroundState) inPool(name string) bool {
 	return ok
 }
 
+// StageExactBackground opens a set's staging under rules, before any view of
+// the staging is installed: the previous set's background goes, and when rules
+// is models.RecordedWithS12Routing (under the proven switch) the views the
+// staging installs before its background is named (ServeExactBackground) read
+// the set as served by them (BackgroundCursorOf, RoundSnapshot.Background),
+// so a call those views refuse is never told the set was recorded without
+// proven routing. Such a view names no recording of the background, since
+// the trees still hold the previous set's, whose names may be this set's
+// (names are unique only within a set), and pairs nothing (pairing). Any
+// other rules are today's, as ServeExactBackground's. It installs no view
+// itself.
+func (m *MockManager) StageExactBackground(rules string) {
+	if rules == models.RecordedWithS12Routing && provenswitch.On() {
+		m.exact.bg.Store(&backgroundState{settling: true})
+		return
+	}
+	m.exact.bg.Store(nil)
+}
+
 // ServeExactBackground sets the rules the staged set's background is served
 // by: the background rules when rules is models.RecordedWithS12Routing (with the set's pool
 // and its whole worker scope by name), today's for any other rules (pool and
 // worker unread). It
 // installs no view itself: the next ServeExactTest or ServeExactPool shows it.
-// The agent calls it at each set's staging, before the set's first view, so a
-// set never inherits the previous one's rules.
+// The agent calls it at each set's staging, once the set's mocks are staged
+// and before the view that serves them, so a set never inherits the previous
+// one's rules.
 func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) {
 	if rules != models.RecordedWithS12Routing || !provenswitch.On() {
 		m.exact.bg.Store(nil)
@@ -88,7 +111,7 @@ func (m *MockManager) ServeExactBackground(rules string, pool, worker []string) 
 	}
 	m.exact.bg.Store(b)
 	if m.logger != nil {
-		m.logger.Debug("exact serving: the set's background is served by the background rules",
+		m.logger.Debug("exact serving: the set's background is served by proven routing",
 			zap.Int("pool", len(b.pool)), zap.Int("worker", len(b.worker)))
 	}
 }
@@ -340,13 +363,14 @@ func (m *MockManager) backgroundCursorKey(key string) string {
 var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set
-// served by the background rules, while the session pairs; nil when none is.
+// served by the background rules, its background named (not settling), while
+// the session pairs; nil when none is.
 func (m *MockManager) pairing() (*exactView, uint64) {
 	if !m.exact.pairs.Load() {
 		return nil, 0
 	}
 	v := m.exactView()
-	if v == nil || v.bg == nil {
+	if v == nil || v.bg == nil || v.bg.settling {
 		return nil, 0
 	}
 	return v, m.stagingEpoch.Load()

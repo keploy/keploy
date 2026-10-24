@@ -469,7 +469,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 
 // MarkRecordedWith adds feature to what the set's mappings.yaml says keploy
 // record recorded it with (models.Mapping.RecordedWith), keeping every other
-// section as it is: keploy record marks a set a background-routing record wrote
+// section as it is: keploy record marks a set a proven-routing record wrote
 // (models.RecordedWithS12Routing). A mark the file carries already writes
 // nothing. A set with no mapping file marks none, and says so: a recording
 // that wrote none has nothing to serve by the mark.

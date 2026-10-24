@@ -125,10 +125,12 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 // proven-routing record marked (no recordedWith: s12-routing, or only marks
 // this keploy does not know) also had its varying fields never learned, and
 // the replay says so once for the set: which set, what it carries, that its
-// calls are matched exactly and its varying fields were never learned, and
-// how to record it again so that they are (under the switch with this build
-// when it enables proven routing; with keploy enterprise when it does not).
-// It never says the set is served by today's rules. A marked set says nothing
+// calls are matched exactly and its varying fields were never learned, so a
+// call carrying a new value of one is refused, and how to record it
+// again so that they are (under the switch with this build when it enables
+// proven routing; with keploy enterprise when it does not), in the line itself
+// and in full in its next step. It never says the set is served by today's
+// rules. A marked set says nothing
 // of the kind, and neither does a replay without the switch.
 func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsVaryingFieldsWereNeverLearned(t *testing.T) {
 	const line = "this test set was recorded without proven routing"
@@ -169,8 +171,13 @@ func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsVaryi
 				return
 			}
 			e := said[0]
-			if !strings.Contains(e.Message, "its calls are matched exactly") || !strings.Contains(e.Message, "its varying fields were never learned") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
-				t.Fatalf("the line does not say the set's calls are matched exactly and its varying fields were never learned, for want of the mark: %q", e.Message)
+			if !strings.Contains(e.Message, "its calls are matched exactly") || !strings.Contains(e.Message, "its varying fields (those that vary between runs) were never learned, so a call whose value of one differs from its recording is refused") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
+				t.Fatalf("the line does not say the set's calls are matched exactly and its varying fields were never learned, so they are refused, for want of the mark: %q", e.Message)
+			}
+			// The line itself says how to correct it, as its next step does
+			// in full.
+			if fix := "to correct it, record the test set again with KEPLOY_PROVEN=1"; !strings.Contains(e.Message, fix) || strings.Contains(tc.next, "enterprise") != strings.Contains(e.Message, "using keploy enterprise to learn them") {
+				t.Fatalf("the line does not say how to correct it (%q, %s): %q", fix, tc.next, e.Message)
 			}
 			fields := e.ContextMap()
 			if fields["testSetID"] != "test-set-0" {

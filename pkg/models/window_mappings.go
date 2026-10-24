@@ -180,7 +180,7 @@ type RoutedWrite struct {
 
 // DeriveOptions are the window derivation's options.
 type DeriveOptions struct {
-	// RouteInFlightWrites is background routing at record: a call
+	// RouteInFlightWrites is proven routing at record: a call
 	// the in-flight rule gives to the test it was in flight into that is a
 	// by-kind write (WindowedMock.WriteKind) whose request was stamped on the
 	// clock that test's window start was (equal non-empty Clock), is no

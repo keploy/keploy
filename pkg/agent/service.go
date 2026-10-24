@@ -568,12 +568,15 @@ type ExactWorkerServer interface {
 // ExactBackgroundServer is implemented by a proxy that serves a test set's
 // background (its worker scope and its pool) by the background rules under
 // exact serving (models.RecordedWithS12Routing, replay.RegisterS12Serving):
-// ServeExactBackground sets, at each set's staging, the rules the set is
-// served by, with its pool and its whole worker scope by name; any rules but
+// StageExactBackground opens each set's staging under the rules the set is
+// served by, before the staging installs a view, so every view of the
+// staging reads the set's rules; ServeExactBackground then names the set's
+// pool and its whole worker scope, once its mocks are staged; any rules but
 // the background rules are today's. A proxy that does not implement it serves every set by
 // today's rules, and the agent says so to the replay
 // (models.BackgroundRulesHeader), which then keeps today's checks.
 type ExactBackgroundServer interface {
+	StageExactBackground(rules string) error
 	ServeExactBackground(rules string, pool, worker []string) error
 }
 
