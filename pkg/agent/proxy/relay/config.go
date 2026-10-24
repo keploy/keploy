@@ -169,6 +169,10 @@ type Config struct {
 	// stallClock measures ConsumerStallGrace (stall.Meter); nil is the
 	// process's own runnable clock. Tests set it to drive the window.
 	stallClock stall.Clock
+	// readClock is the clock a forwarder takes a chunk's read stamp from
+	// when its socket reports none (nil: time.Now). Tests set it to see the
+	// forwarder's hand at the moment the stamp is taken.
+	readClock func() time.Time
 	// beforeTee, when set, runs on a forwarder after it has written a chunk
 	// on and before it tees it. Tests set it to hold one direction's tee
 	// back, so the other direction's later capture is teed first.

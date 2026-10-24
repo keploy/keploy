@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -159,6 +160,53 @@ func TestWatermark_HoldsAChunkInTheForwardersHand(t *testing.T) {
 	}
 	if w.Settled("", "", got.Add(-time.Second), got) {
 		t.Fatal("Settled: true for a test case over a chunk still in the forwarder's hand")
+	}
+}
+
+// A forwarder marks a chunk it read as in its hand, being stamped
+// (heldUnstamped), before it reads the clock for the chunk's stamp, so a look
+// that found its hand empty is older than the stamp. Were the clock read
+// first, a look in between would find nothing in hand and pass a window that
+// ends then, and the chunk would come after it, stamped inside it (#4900).
+// Both directions' forwarders stamp a chunk the same way, and a socket that
+// reports no read time of its own leaves the chunk the clock's time.
+func TestWatermark_AForwarderMarksAChunkBeforeItReadsTheClock(t *testing.T) {
+	for _, dir := range []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest} {
+		t.Run(dir.String(), func(t *testing.T) {
+			var reading atomic.Pointer[tee] // the forwarder's tee, once the relay exists
+			stamp := time.Unix(0, 1_700_000_000_000_000_000)
+			var mu sync.Mutex
+			var atClock []int64
+			h := newHarness(t, Config{readClock: func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				atClock = append(atClock, reading.Load().progress.held.Load())
+				return stamp
+			}})
+			var stream *fakeconn.FakeConn
+			if dir == fakeconn.FromClient {
+				reading.Store(h.r.teeC2D)
+				stream = h.r.ClientStream()
+				h.writeClient([]byte("ping"))
+				h.readDest(4)
+			} else {
+				reading.Store(h.r.teeD2C)
+				stream = h.r.DestStream()
+				h.writeDest([]byte("pong"))
+				h.readClient(4)
+			}
+
+			// Written on, so stamped: the clock was read once, for this chunk.
+			mu.Lock()
+			got := append([]int64(nil), atClock...)
+			mu.Unlock()
+			if len(got) != 1 || got[0] != heldUnstamped {
+				t.Errorf("the forwarder's hand when the chunk's stamp was taken from the clock = %v, want [%d] (heldUnstamped)", got, heldUnstamped)
+			}
+			if c := readChunk(t, stream); !c.ReadAt.Equal(stamp) {
+				t.Errorf("the chunk's stamp = %v, want the clock's %v", c.ReadAt, stamp)
+			}
+		})
 	}
 }
 
