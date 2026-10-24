@@ -10,9 +10,13 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // mainThreadExitsEnv makes this test binary, started with it set to a file's
@@ -105,10 +109,14 @@ func TestRunningThreadTellsAProcessWhoseMainThreadExitedFromAZombie(t *testing.T
 	}
 }
 
-// RunningThread reads each thread's stat for its state alone: a thread being
-// released (Z or X, its parent and group gone) is none that runs, and one
-// listed whose stat is gone exited meanwhile; a listing, or a thread's stat,
-// that cannot be read is an error, never a process taken for exited.
+// RunningThread reads each thread's stat for its state and start time: a
+// thread being released (Z or X, its parent and group gone) is none that
+// runs, and one listed whose stat is gone exited meanwhile. A listing in which
+// none runs stands only where the process's count of its threads holds no
+// thread but those it found exited, still there and the same: else one that
+// runs was left out, and the threads are listed again. A listing, a thread's
+// stat or the process's, that cannot be read is an error, never a process
+// taken for exited.
 func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 	root := t.TempDir()
 	thread := func(pid, tid int, line string) {
@@ -129,10 +137,129 @@ func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 	thread(7, 8, "8 (worker) Z 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n")
 	thread(7, 9, "9 (worker) X 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n")
 	thread(7, 10, "") // gone before its stat was read
+	// The process's count of its threads: its main thread, 8 and 9, none of
+	// them released.
+	process := func(pid, threads int) {
+		if err := os.WriteFile(filepath.Join(root, strconv.Itoa(pid), "stat"), []byte(fmt.Sprintf("%d (worker) Z 4242 %d %d 0 -1 0 0 0 0 0 0 0 0 0 20 0 %d 0 780 0 0\n", pid, pid, pid, threads)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	process(7, 3)
 	if tid, runs, err := RunningThread(root, 7); err != nil || runs {
 		t.Fatalf("RunningThread = %d, %v, %v; want none running, every thread exited or released", tid, runs, err)
 	}
-	thread(7, 11, line(11, "S"))
+	// What a process's threads come to between RunningThread's reads: a
+	// stat that is a FIFO whose writer, as RunningThread opens it, moves the
+	// threads on (put, take) and only then gives the line.
+	put := func(tid int, line string) {
+		dir := filepath.Join(root, "7", "task", strconv.Itoa(tid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Error(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(line), 0o644); err != nil {
+			t.Error(err)
+		}
+	}
+	take := func(tid int) {
+		if err := os.RemoveAll(filepath.Join(root, "7", "task", strconv.Itoa(tid))); err != nil {
+			t.Error(err)
+		}
+	}
+	count := func(threads int) string {
+		return fmt.Sprintf("7 (worker) Z 4242 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 %d 0 780 0 0\n", threads)
+	}
+	processStat := filepath.Join(root, "7", "stat")
+	leaderStat := filepath.Join(root, "7", "task", "7", "stat")
+	zombie8 := "8 (worker) Z 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n"
+	// A listing that left out a thread that runs: another was released as
+	// it was taken, so the kernel's walk of the threads ended early. The
+	// process counts that thread (4: its main thread, 8, 9 and 11), so the
+	// threads are listed again, and it is found.
+	stop := serveStat(t, processStat, func(int) string {
+		put(11, line(11, "S"))
+		return count(4)
+	})
+	if tid, runs, err := RunningThread(root, 7); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, left out of the first listing but counted, sleeping", tid, runs, err)
+	}
+	stop()
+	take(11)
+	// The same, where a thread the listing found exited was released before
+	// the count was read (3: its main thread, 9 and 11): the count is held
+	// against the exited threads still there, not those listed.
+	stop = serveStat(t, processStat, func(int) string {
+		take(8)
+		put(11, line(11, "S"))
+		return count(3)
+	})
+	if tid, runs, err := RunningThread(root, 7); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, left out of the first listing while 8 was released, sleeping", tid, runs, err)
+	}
+	stop()
+	take(11)
+	put(8, zombie8)
+	// And where the kernel gave 8's tid, after the count was read, to
+	// another thread, a zombie by the time it is read again: not the thread
+	// the listing found exited (its start time is another), so not one the
+	// count held.
+	stopLeader := serveStat(t, leaderStat, func(n int) string {
+		if n == 2 { // read again, after the count
+			put(8, "8 (worker) Z 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060999 0 0\n")
+		}
+		return line(7, "Z")
+	})
+	stop = serveStat(t, processStat, func(int) string {
+		take(8)
+		put(11, line(11, "S"))
+		return count(3)
+	})
+	if tid, runs, err := RunningThread(root, 7); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, its count not made up by another thread given 8's tid", tid, runs, err)
+	}
+	stop()
+	stopLeader()
+	take(11)
+	put(8, zombie8)
+	// A thread released after the count was read (9, as the main thread is
+	// read again): the count holds a thread no longer there, so the threads
+	// are listed again, and counted again (2: its main thread and 8), and
+	// none runs.
+	stopLeader = serveStat(t, leaderStat, func(n int) string {
+		if n == 2 {
+			take(9)
+		}
+		return line(7, "Z")
+	})
+	stop = serveStat(t, processStat, func(n int) string {
+		if n == 1 {
+			return count(3)
+		}
+		return count(2)
+	})
+	if tid, runs, err := RunningThread(root, 7); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, 9 released after the count", tid, runs, err)
+	}
+	stop()
+	stopLeader()
+	// A count of 0: the stat of a main thread released as it was read (here
+	// a thread of it ran an exec and holds its pid now, found at the next
+	// listing), never a count every exited thread makes up.
+	stop = serveStat(t, processStat, func(n int) string {
+		if n == 1 {
+			put(11, line(11, "S"))
+			return count(0)
+		}
+		return count(4)
+	})
+	if tid, runs, err := RunningThread(root, 7); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, a count of 0 taken for none", tid, runs, err)
+	}
+	stop()
+	put(7, line(7, "Z"))
+	put(8, zombie8)
+	put(9, "9 (worker) X 0 -1 -1 0 -1 4227084 100 0 0 0 0 0 0 0 25 5 0 0 6060366 0 0\n")
+	process(7, 4)
+	put(11, line(11, "S"))
 	if tid, runs, err := RunningThread(root, 7); err != nil || !runs || tid != 11 {
 		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, sleeping", tid, runs, err)
 	}
@@ -151,6 +278,23 @@ func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 	if _, _, err := RunningThread(root, 13); err == nil || !strings.Contains(err.Error(), "no state") {
 		t.Fatalf("a stat with no state: err %v; want it said", err)
 	}
+	// A process's count of its threads that cannot be read, or is not in
+	// its stat line: an error, never a listing in which none runs taken for
+	// every thread there.
+	thread(15, 15, line(15, "Z"))
+	if err := os.MkdirAll(filepath.Join(root, "15", "stat"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RunningThread(root, 15); err == nil || !strings.Contains(err.Error(), "process 15's stat") {
+		t.Fatalf("a process stat that could not be read: err %v; want it said", err)
+	}
+	thread(16, 16, line(16, "Z"))
+	if err := os.WriteFile(filepath.Join(root, "16", "stat"), []byte("16 (worker) Z 4242 16 16 0 -1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RunningThread(root, 16); err == nil || !strings.Contains(err.Error(), "no thread count") {
+		t.Fatalf("a process stat with no thread count: err %v; want it said", err)
+	}
 	// A listing of the threads that cannot be read.
 	if err := os.MkdirAll(filepath.Join(root, "14"), 0o755); err != nil {
 		t.Fatal(err)
@@ -161,6 +305,74 @@ func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 	if _, _, err := RunningThread(root, 14); err == nil {
 		t.Fatal("threads that could not be listed read as none running")
 	}
+}
+
+// serveStat makes path, a stat in a test's /proc, a FIFO whose writer, on
+// each open of it in turn, calls line with the open's number (from 1) and
+// gives what it returns: what line does to the /proc first is done between
+// a reader's reads. Past 100 opens it gives a line that does not parse,
+// failing the test. Each open is given a FIFO of its own: the writer puts a
+// new one at path before it closes the one it wrote, so a reader reads one
+// line to its end, and the next open waits for the next. stop, which the
+// test's end calls too, ends the writer and leaves no file at path.
+func serveStat(t *testing.T, path string, line func(n int) string) (stop func()) {
+	t.Helper()
+	fifo := func() error {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return unix.Mkfifo(path, 0o600)
+	}
+	if err := fifo(); err != nil {
+		t.Fatal(err)
+	}
+	var done atomic.Bool
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		for n := 1; ; n++ {
+			f, err := os.OpenFile(path, os.O_WRONLY, 0)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if done.Load() {
+				_ = f.Close()
+				return
+			}
+			l := line(n)
+			if n > 100 {
+				// RunningThread reading on and on: a line no stat has ends
+				// it, with an error, rather than the test's time.
+				t.Errorf("%s read %d times", path, n)
+				l = "garbled\n"
+			}
+			_, werr := f.WriteString(l)
+			ferr := fifo()
+			_ = f.Close()
+			if werr != nil || ferr != nil {
+				t.Error(werr, ferr)
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			done.Store(true)
+			// A reader that takes nothing frees the writer from its open.
+			r, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK, 0)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			<-ended
+			_ = r.Close()
+			_ = os.Remove(path)
+		})
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 // startZombie starts a child that exits at once and is not waited for, and
