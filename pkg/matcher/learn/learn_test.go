@@ -438,6 +438,49 @@ func TestADriftedValueBesideAPostgresRecordingsWireTypingIsNoise(t *testing.T) {
 	}
 }
 
+// The SQL text of an earlier Postgres recording names its parameters by
+// position: the 4 of Flyway's "c.relkind = $4" probe is no value, so a
+// duration the app bound later (execution_time, 58 ms at record, 4 in F) is
+// not refused for it. A 4 the statement holds as text (a constant, a quoted
+// name, a dollar-quoted body, a comment) is still evidence the value may have
+// come from there, and so is all that follows what the scan cannot read for
+// certain: the drift is refused.
+func TestADriftedValueBesideAnEarlierStatementsPlaceholderIsNoise(t *testing.T) {
+	recAt := time.Date(2026, 10, 24, 6, 22, 0, 748987707, time.UTC)
+	classify := func(sql string) Kind {
+		earlier := &models.Mock{Name: "mock-14", Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: recAt.Add(-40 * time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: sql,
+				BindValues:    models.PostgresV3Cells{{Value: "public"}, {Value: "flyway_schema_history"}, {Value: "r"}},
+			}},
+		}}
+		rec := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: "58"}}}
+		live := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: "4"}}}
+		out := Classify(NewDriftCache(), []string{"bind.$8"}, live, rec, recAt, nil, []Raw{RawOf(earlier, false)}, nil)
+		if len(out) != 1 {
+			t.Fatalf("%q: %+v", sql, out)
+		}
+		return out[0].Kind
+	}
+	probe := "SELECT EXISTS (\n  SELECT $3\n  FROM pg_catalog.pg_class c\n  WHERE n.nspname = $1\n  AND c.relname = $2\n  AND c.relkind = $4\n)"
+	if k := classify(probe); k != KindNoise {
+		t.Errorf("a 4 beside an earlier statement's $4 placeholder: %s, want noise", k)
+	}
+	for _, sql := range []string{
+		"SELECT $1 WHERE c.relkind = '4'",
+		`SELECT $1 WHERE c.relname = E'it\'s 4'`,
+		`SELECT "col 4" FROM t WHERE x = $1`,
+		"CREATE FUNCTION f() RETURNS int AS $fn$ SELECT 4 $fn$ LANGUAGE sql",
+		"-- migration 4\nSELECT $1",
+		`SELECT $1 WHERE x = 'a\' AND y = $4`,
+	} {
+		if k := classify(sql); k != KindUnaccounted {
+			t.Errorf("a 4 the earlier statement %q holds as text: %s, want it refused (unaccounted)", sql, k)
+		}
+	}
+}
+
 // F runs each test FullRoundLead past its recorded instant from when it
 // begins, so an app that reads its clock late in F (a loaded box) binds a
 // value the lead does not account for: it drifted, and it flowed from

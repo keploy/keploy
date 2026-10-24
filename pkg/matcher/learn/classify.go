@@ -1164,14 +1164,17 @@ func RawOf(m *models.Mock, served bool) Raw {
 //   - the wire's typing of what was sent and answered: the parameter types
 //     and formats, the result formats, and each answer column's type, size,
 //     modifier, table, column number and format (its name stays).
+//   - the numbers of its SQL text's placeholders ($4 is read "$"): a
+//     parameter's position, not a value (withoutPlaceholders).
 //
 // None is a value the app sent or was answered, and none can drift between
 // record and replay: the replay serves them from the recording. Read as
 // payload, a small number among them (a parameter type 23, a size 4, a
 // column number 8) was a value that flowed from that recording, and a
 // duration or count the app bound (Flyway's execution_time) was refused as
-// changed at random, by the milliseconds it took. The SQL text, the bound
-// values and constants, the rows, the command tag, the error, the copy and
+// changed at random, by the milliseconds it took. The rest of the SQL text
+// (its constants, quoted names, bodies and comments), the bound values and
+// constants, the rows, the command tag, the error, the copy and
 // the row mutations are read as before. spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
 	pg := spec.PostgresV3
@@ -1181,6 +1184,7 @@ func payloadSpec(spec models.MockSpec) models.MockSpec {
 	q := *pg.Query
 	q.InvocationID, q.SQLAstHash, q.Class, q.Lifetime, q.PrecedingTxState = "", "", "", "", ""
 	q.VolatilePositions, q.ParamOIDs, q.BindFormats, q.ResultFormats = nil, nil, nil, nil
+	q.SQLNormalized = withoutPlaceholders(q.SQLNormalized)
 	if q.Response != nil {
 		resp := *q.Response
 		if len(resp.RowDescription) > 0 {
