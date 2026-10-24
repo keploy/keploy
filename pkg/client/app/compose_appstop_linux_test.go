@@ -126,15 +126,31 @@ func exitedOf(t *testing.T, pid int) <-chan struct{} {
 // the press was taken; read it once the stop is over.
 func pressAtOffer(t *testing.T, a *App, ready <-chan struct{}) (taken *atomic.Bool) {
 	t.Helper()
+	taken, _ = pressAtNthOffer(t, a, 1, ready)
+	return taken
+}
+
+// pressAtNthOffer is pressAtOffer at each of the stop's first nth offers,
+// the nth once ready fires: each of a stop's waits offers once (a kill's
+// wait after the stop's own is the second). taken says whether the nth press
+// was taken. logs is what a's stop said, at Info and above.
+func pressAtNthOffer(t *testing.T, a *App, nth int32, ready <-chan struct{}) (taken *atomic.Bool, logs *observer.ObservedLogs) {
+	t.Helper()
 	offer := utils.StopOffer
 	utils.StopOffer = 0
 	t.Cleanup(func() { utils.StopOffer = offer; utils.ClearInterrupted(); utils.ResetInterruptedAgain() })
 	utils.MarkInterrupted()
 	taken = &atomic.Bool{}
-	var offered atomic.Bool
-	core, _ := observer.New(zapcore.InfoLevel)
+	var offers atomic.Int32
+	core, logs := observer.New(zapcore.InfoLevel)
 	a.logger = zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
-		if strings.Contains(e.Message, "press Ctrl+C again") && offered.CompareAndSwap(false, true) {
+		if !strings.Contains(e.Message, "press Ctrl+C again") {
+			return nil
+		}
+		switch n := offers.Add(1); {
+		case n < nth:
+			utils.MarkInterruptedAgain()
+		case n == nth:
 			if ready != nil {
 				<-ready
 			}
@@ -142,7 +158,7 @@ func pressAtOffer(t *testing.T, a *App, ready <-chan struct{}) (taken *atomic.Bo
 		}
 		return nil
 	}))
-	return taken
+	return taken, logs
 }
 
 // keploy's stop of a compose app whose processes it reads waits for the

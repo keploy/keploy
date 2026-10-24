@@ -41,9 +41,13 @@ type eventDocker struct {
 	// killLags: a SIGKILL ends the container's main process, as the
 	// kernel does, and the daemon, slow to take that exit, calls the
 	// container running on (holding its name) until halt. killErr, set:
-	// the daemon refuses every kill with it.
-	killLags bool
-	killErr  error
+	// the daemon refuses every kill with it. killMissed, set: the container
+	// stops as the kill comes, its main process exiting and the daemon
+	// saying so (gone, set: removed), and the daemon refuses the kill with
+	// it, as one of a container no longer running.
+	killLags   bool
+	killErr    error
+	killMissed error
 	// inspectErr, set: the daemon does not describe the container (a
 	// starved daemon's inspect runs out), though it has it.
 	inspectErr error
@@ -110,6 +114,10 @@ func (d *eventDocker) ContainerKill(_ context.Context, _ string, signal string) 
 	switch {
 	case d.killErr != nil:
 		return d.killErr
+	case d.killMissed != nil:
+		_ = syscall.Kill(d.pid, syscall.SIGKILL)
+		d.halt()
+		return d.killMissed
 	case signal == "SIGKILL" && d.killLags:
 		_ = syscall.Kill(d.pid, syscall.SIGKILL)
 	case signal == "SIGKILL":
@@ -504,6 +512,54 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 		}
 		if n := logs.FilterMessageSnippet("had not stopped after keploy killed it").Len(); n != 1 {
 			t.Fatalf("the stop said the container running on after the kill %d times; want once", n)
+		}
+	})
+	// A container that stopped as the kill came, the daemon refusing the
+	// kill as one of a container not running (or gone): no kill reached it,
+	// and the stop says it did not kill.
+	for _, missed := range []struct {
+		name string
+		err  error
+		gone bool
+	}{
+		{"not running", errdefs.Conflict(errors.New(`container "app" is not running`)), false},
+		{"gone", errdefs.NotFound(errors.New("no such container: app")), true},
+	} {
+		t.Run("after its kill, which the daemon refused as one of a container "+missed.name+", it had stopped", func(t *testing.T) {
+			shortStall(t, 300*time.Millisecond)
+			main := started(t, "sleep", "600")
+			d := &eventDocker{seen: true, gone: missed.gone, killMissed: missed.err, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+			client := started(t, "sleep", "600")
+			a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+			killed, err := a.stopDockerRunByEvents(client)
+			if err != nil || killed != "" || strings.Join(d.kills, ",") != "SIGKILL" {
+				t.Fatalf("said %q (err %v) after kills %v; want a kill that reached nothing not said as one, and the stop through", killed, err, d.kills)
+			}
+		})
+	}
+	// A press of Ctrl+C in the wait after the kill, the daemon not having
+	// said the container stopped (every process of it gone), is no stop:
+	// the stop fails and says so, once, as the lagged stop does. Each wait
+	// offers once: the press at the first offer is the kill's, the second
+	// press is in the kill's wait, once the kill has ended the main
+	// process. No stall bound is reached: the presses alone end the waits.
+	t.Run("after its kill, Ctrl+C is pressed before the daemon says it stopped", func(t *testing.T) {
+		shortStall(t, time.Hour)
+		main := started(t, "sleep", "600")
+		d := &eventDocker{seen: true, killLags: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+		client := started(t, "sleep", "600")
+		a := &App{docker: d, container: "app"}
+		taken, logs := pressAtNthOffer(t, a, 2, exitedOf(t, main.Process.Pid))
+		killed, err := a.stopDockerRunByEvents(client)
+		if !taken.Load() || killed != "keploy killed its container at the press of Ctrl+C, before it had stopped" || strings.Join(d.kills, ",") != "SIGKILL" {
+			t.Fatalf("said %q after kills %v, the second press taken %v; want the press's kill said, and the second press taken in the wait after it", killed, d.kills, taken.Load())
+		}
+		const want = `keploy stopped waiting for the docker daemon to say its container "app" had stopped at the press of Ctrl+C`
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("the stop ended with %v, the daemon holding the container %v; want the press in the wait after the kill an error, not a stop", err, d.holds())
+		}
+		if n := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet(want).Len(); n != 1 {
+			t.Fatalf("the stop said the press in the wait after the kill %d times at Warn; want once, as the run's end does not carry its error on", n)
 		}
 	})
 	// A container keploy never saw is waited for by its docker client: its
