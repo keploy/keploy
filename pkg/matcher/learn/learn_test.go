@@ -253,7 +253,7 @@ func TestClassify(t *testing.T) {
 		respLeaves = append(respLeaves, l)
 	}
 	earlier := []Earlier{
-		{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{
 			// A string here, a number at the drifted leaf: the value flowed
 			// whatever its type.
 			{Side: Request, Leaf: Leaf{Path: "body.ref", Noise: "body.ref", Type: String, Value: "12345"}, Live: "54321", Place: "body.ref"},
@@ -1132,7 +1132,7 @@ func TestClassifyLearnsFreshValuesThatShareWhatDidNotChange(t *testing.T) {
 		return "Bearer " + b64u(`{"alg":"HS256","typ":"JWT"}`) + "." + b64u(`{"jti":"`+jti+`","iat":`+strconv.FormatInt(iat, 10)+`}`) + "." + b64u("\x01\x02"+jti[:3]+"\xfe\xff")
 	}
 	seen := func(rec, live string) []Earlier {
-		return []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		return []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 			{Side: Request, Leaf: Leaf{Path: "header.authorization", Noise: "header.authorization", Type: String, Value: rec}, Live: live, Place: "header.authorization"},
 		}}}
 	}
@@ -1160,7 +1160,7 @@ func TestClassifyLearnsFreshValuesThatShareWhatDidNotChange(t *testing.T) {
 func TestClassifyAWholeClockValueAnEarlierCallHeldInsideALongerOne(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
 	rec, live := "2026-10-14T10:00:41Z", "2026-10-14T10:01:42Z"
-	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.note", Noise: "body.note", Type: String, Value: "created at " + rec + " by u1"}, Live: "created at " + live + " by u1", Place: "body.note"},
 	}}}
 	if got := classifyOne(rec, live, at, e, nil, nil); got.Kind != KindNoise {
@@ -1312,7 +1312,7 @@ func TestMovedWords(t *testing.T) {
 // words appear earlier in the test.
 func TestClassifyLearnsFreshTokensAroundWordsThatStayed(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
-	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "url.query.user", Noise: "url.query.user", Type: String, Value: "acct_7Q2K9"}, Live: "acct_7Q2K9", Place: "url.query.user"},
 		{Side: Request, Leaf: Leaf{Path: "body.trace", Noise: "body.trace", Type: String, Value: "user42 trace"}, Live: "user42 trace", Place: "body.trace"},
 	}}}

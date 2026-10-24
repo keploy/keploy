@@ -252,9 +252,10 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 		if e.Payload.read {
 			add(e.Payload, true)
-		} else if op.unread == "" && e.Payload.fromMock() {
-			// What RawOf could not read is no place the rule can search: a
-			// value built on its answer would pass as the lead's move.
+		} else if op.unread == "" {
+			// What RawOf could not read, and an exchange that came with no
+			// payload at all, is no place the rule can search: a value
+			// built on its answer would pass as the lead's move.
 			op.unread = payloadUnread(e)
 		}
 	}
@@ -476,9 +477,10 @@ func (g GivenPlaces) ServedIn(first, last int) GivenPlaces {
 
 // payloadUnread is why every changed instant the offset rule reads and every
 // word the word rule reads is refused where e, an exchange a learn step
-// served leaf by leaf, came with a payload RawOf could not read
-// (Earlier.Payload): its answer's places cannot be searched, so whether what
-// changed was built on them cannot be told.
+// served leaf by leaf, came with a payload RawOf could not read, or with
+// none at all (Earlier.Payload the zero Raw: a producer that gives none):
+// its answer's places cannot be searched, so whether what changed was built
+// on them cannot be told.
 func payloadUnread(e Earlier) string {
 	name := e.Payload.mock
 	if name == "" {
@@ -487,7 +489,11 @@ func payloadUnread(e Earlier) string {
 	if name == "" {
 		name = "an exchange of the test"
 	}
-	return "keploy could not read " + name + ", an exchange F served the application leaf by leaf before the call, from its mock (learn.RawOf), so it cannot tell whether what changed was built on its answer: a fault of keploy's, which keploy reports rather than learn anything"
+	read := "could not read " + name + ", an exchange record's full round served the application leaf by leaf before the call, from its mock (learn.RawOf)"
+	if !e.Payload.fromMock() {
+		read = "was given no payload of " + name + ", an exchange record's full round served the application leaf by leaf before the call (learn.Earlier.Payload)"
+	}
+	return "keploy " + read + ", so it cannot tell whether what changed was built on its answer: a fault of keploy's, which keploy reports rather than learn anything"
 }
 
 // placesUnread is rawUnread of the recordings set holds.

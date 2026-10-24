@@ -428,7 +428,7 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 				more, err := given()
 				switch {
 				case err != nil:
-					unread = "keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
+					unread = "keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: " + err.Error()
 				default:
 					unread, set = placesUnread(more), more
 				}

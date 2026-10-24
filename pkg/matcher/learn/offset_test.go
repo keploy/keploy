@@ -105,15 +105,19 @@ func unreadPayload(m *models.Mock) Raw {
 	return Raw{mock: r.mock, at: r.at, served: r.served, call: r.call}
 }
 
-// An exchange F served leaf by leaf whose payload RawOf could not read is a
-// place the offset rule and the word rule cannot search, never one they
-// drop: an instant built on it by an offset and a word copied from its
-// answer are each refused, naming it and why, never learned as noise. An
-// exchange whose adapter gave no payload (the zero Raw) is read as before.
+// An exchange F served leaf by leaf whose payload RawOf could not read, or
+// whose adapter gave no payload at all (the zero Raw), is a place the offset
+// rule and the word rule cannot search, never one they drop: an instant
+// built on it by an offset and a word copied from its answer are each
+// refused, naming it and why, never learned as noise. Its payload read from
+// its mock is searched, and refuses nothing for want of a reading.
 func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 	receive, delivered := offReceives()
 	const p = "body.visible_after"
-	const why = "keploy could not read mock-11, an exchange F served the application leaf by leaf before the call, from its mock (learn.RawOf)"
+	why := map[string]string{
+		"unread":     "keploy could not read mock-11, an exchange record's full round served the application leaf by leaf before the call, from its mock (learn.RawOf)",
+		"none given": "keploy was given no payload of mock-11, an exchange record's full round served the application leaf by leaf before the call (learn.Earlier.Payload)",
+	}
 	for _, row := range []struct {
 		name      string
 		rec, live Shape
@@ -121,21 +125,33 @@ func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 		{"an instant by an offset", strLeaf(p, offSent.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, offGot.Add(5*time.Minute).Format("2006-01-02T15:04Z07:00"))},
 		{"a word", strLeaf(p, "slot-7"), strLeaf(p, "slot-9")},
 	} {
-		for _, payload := range []string{"unread", "none given"} {
+		for _, payload := range []string{"unread", "none given", "read"} {
 			dc := NewDriftCache()
 			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock}
-			if payload == "unread" {
+			switch payload {
+			case "unread":
 				e.Payload = unreadPayload(delivered)
+			case "read":
+				e.Payload = dc.RawOf(delivered, true)
 			}
 			ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, []Earlier{e}, []Raw{dc.RawOf(receive, false)}, nil, nil)[0]
 			switch {
-			case payload == "unread" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, why)):
-				t.Fatalf("%s, %s payload: %s (%s); want it refused, naming mock-11's unread payload", row.name, payload, ln.Kind, ln.Why)
-			case payload != "unread" && strings.Contains(ln.Why, "could not read"):
-				t.Fatalf("%s, %s payload: %s (%s); want no unread place where the adapter gave no payload", row.name, payload, ln.Kind, ln.Why)
+			case payload != "read" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, why[payload])):
+				t.Fatalf("%s, %s payload: %s (%s); want it refused, naming mock-11's payload as %s", row.name, payload, ln.Kind, ln.Why, payload)
+			case payload == "read" && strings.Contains(ln.Why, "mock-11, an exchange record's full round served the application leaf by leaf"):
+				t.Fatalf("%s, %s payload: %s (%s); want no unread place where the adapter gave a payload read from its mock", row.name, payload, ln.Kind, ln.Why)
 			}
 		}
 	}
+}
+
+// payloadOf is the payload a producer gives of mock, an exchange it served
+// leaf by leaf, recorded at at, in a row whose subject is the exchange's
+// leaves: read from the mock (RawOf), holding nothing beyond them. A leafed
+// exchange with no payload at all is refused, naming it
+// (TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt).
+func payloadOf(mock string, at time.Time) Raw {
+	return RawOf(&models.Mock{Name: mock, Spec: models.MockSpec{ReqTimestampMock: at}}, true)
 }
 
 // At the day too: a due date two days before the delivered message's sent
@@ -341,7 +357,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		}
 	}
 	// Text: the slot an earlier call sent, which drifted with it.
-	call := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Noise: "body.slot", Type: String, Value: "2026-10-22T11:20Z"}, Live: "2026-10-22T11:21Z", Place: "body.slot"}}}}
+	call := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Noise: "body.slot", Type: String, Value: "2026-10-22T11:20Z"}, Live: "2026-10-22T11:21Z", Place: "body.slot"}}}}
 	if ln := one(Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:20Z"}, Leaf{Path: p, Noise: p, Type: String, Value: "book 2026-10-22T11:21Z"}, at, call); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "in mock-1 at body.slot") {
 		t.Errorf("text six minutes after its call: %s (%s); want it refused, its word at mock-1's body.slot", ln.Kind, ln.Why)
 	}
@@ -361,7 +377,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		dc := NewDriftCache()
 		dc.zone = z.zone
 		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second+FullRoundLead).In(ist).Format("2006-01-02 15:04:05")}}}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second).In(ist).Format("2006-01-02 15:04:05")}}}, at,
-			[]Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Add(-time.Second).In(ist).Format("15:04:05")}, Live: "x", Place: "body.at"}}}}, nil, nil, nil)[0]
+			[]Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Add(-time.Second).In(ist).Format("15:04:05")}, Live: "x", Place: "body.at"}}}}, nil, nil, nil)[0]
 		if (ln.Kind == KindNoise) != z.noise {
 			t.Errorf("an IST wall clock of no zone read just before its call, %s: %s (%s); want noise %v", z.name, ln.Kind, ln.Why, z.noise)
 		}
@@ -733,7 +749,7 @@ func TestAnotherTestsRecordingIsAPlaceOfTheOffsetAndWordRulesAlone(t *testing.T)
 			x = x.OfAnotherTest()
 		}
 		ln := ClassifyIn(NewDriftCache(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
-		if want := map[bool]Kind{false: KindVariable, true: KindUnaccounted}[another]; ln.Kind != want || another && !strings.Contains(ln.Why, "appears in pg-3, a recording F gave the application before the call that is another test's") {
+		if want := map[bool]Kind{false: KindVariable, true: KindUnaccounted}[another]; ln.Kind != want || another && !strings.Contains(ln.Why, "appears in pg-3, a recording record's full round gave the application before the call that is another test's") {
 			t.Errorf("another test's %v: %s from %+v (%s); want %s", another, ln.Kind, ln.From, ln.Why, want)
 		}
 	}
@@ -777,8 +793,8 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 		want      string // "" noise
 	}{
 		{"a word of the value in another test's answer's own clock stamp alone", stamped, "slot-03", "slot-17", ""},
-		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording F gave the application before the call that is another test's"},
-		{"the recorded id in another test's answer recorded before the call", receiveOf("mock-13", recID, before), recID, liveID, "a word of its recorded value (its characters 1 to 8) appears in mock-13, a recording F gave the application before the call that is another test's"},
+		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording record's full round gave the application before the call that was recorded after the call"},
+		{"the recorded id in another test's answer recorded before the call", receiveOf("mock-13", recID, before), recID, liveID, "a word of its recorded value (its characters 1 to 8) appears in mock-13, a recording record's full round gave the application before the call that is another test's"},
 		{"the recorded id in another test's answer recorded after the call", receiveOf("mock-14", recID, after), recID, liveID, ""},
 		{"the live id in another test's request alone", sentOnly, recID, liveID, ""},
 	} {
@@ -824,8 +840,8 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 		return Seen{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: true}
 	}
 	own := []Earlier{
-		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
-		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
+		{Mock: "mock-1", At: r1Insert.Add(-3 * time.Second), Payload: payloadOf("mock-1", r1Insert.Add(-3*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:14:44 GMT")}},
+		{Mock: "mock-2", At: r1Insert.Add(-2 * time.Second), Payload: payloadOf("mock-2", r1Insert.Add(-2*time.Second)), Own: true, Seen: []Seen{date("Wed, 21 Oct 2026 08:15:44 GMT")}},
 	}
 	// The value's instant moves by the lead, so its minute and second are
 	// clock words the word rules skip; only "03" -> "54" changed besides.
@@ -849,7 +865,7 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 			x := dc.RawOf(other, true).ServedAs(3).OfAnotherTest()
 			ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, earlier, []Raw{x}, nil, nil)[0]
 			if stampHolds && echoed {
-				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21, a recording F gave the application before the call that is another test's") {
+				if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "a word of what record's full round saw in it (its characters 6 to 7) appears in mock-21, a recording record's full round gave the application before the call that is another test's") {
 					t.Errorf("another test's stamp holds 54, the value echoes a stamp: %s (%s); want it refused, naming mock-21", ln.Kind, ln.Why)
 				}
 				continue
@@ -894,7 +910,7 @@ func TestARecordingThatHoldsNoAnswerGaveTheApplicationNothing(t *testing.T) {
 		switch {
 		case !answered && ln.Kind != KindNoise:
 			t.Errorf("a word the application sent in another test: %s (%s); want noise", ln.Kind, ln.Why)
-		case answered && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "appears in gen-1, a recording F gave the application before the call that is another test's")):
+		case answered && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "appears in gen-1, a recording record's full round gave the application before the call that is another test's")):
 			t.Errorf("a word F answered in another test: %s (%s); want it refused, naming gen-1", ln.Kind, ln.Why)
 		}
 	}
@@ -951,7 +967,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	// A value of no changed instant whose word F gave earlier in the set:
 	// refused, naming it, never bound; the set read once for the call.
 	dc = NewDriftCache()
-	if ln := ClassifyGiven(dc, []string{q, "body.user2"}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-77").Leaves[q], "body.user2": strLeaf(q, "u-77").Leaves[q]}}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-12").Leaves[q], "body.user2": strLeaf(q, "u-12").Leaves[q]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil)); ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "appears in pg-3, a recording F gave the application before the call that is another test's") || ln[1].Kind != KindUnaccounted || reads != 1 {
+	if ln := ClassifyGiven(dc, []string{q, "body.user2"}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-77").Leaves[q], "body.user2": strLeaf(q, "u-77").Leaves[q]}}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-12").Leaves[q], "body.user2": strLeaf(q, "u-12").Leaves[q]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil)); ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "appears in pg-3, a recording record's full round gave the application before the call that is another test's") || ln[1].Kind != KindUnaccounted || reads != 1 {
 		t.Errorf("a word F gave earlier in the set: %s (%s), the set read %d times; want it refused, naming pg-3, the set read once", ln[0].Kind, ln[0].Why, reads)
 	}
 	// A changed instant built on what F gave earlier in the set by an
@@ -968,7 +984,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 		err  error
 		want string
 	}{
-		"an answer not read back": {nil, errors.New(`read back the recorded answer of "mock-9": gone`), `keploy cannot read back a recording F gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: read back the recorded answer of "mock-9"`},
+		"an answer not read back": {nil, errors.New(`read back the recorded answer of "mock-9": gone`), `keploy cannot read back a recording record's full round gave the application earlier in the test set, so it cannot tell whether what changed came from it or was built on it: read back the recorded answer of "mock-9"`},
 		"a recording not read":    {[]Raw{{mock: "mock-9"}}, nil, "keploy could not read mock-9"},
 	} {
 		for _, leaf := range []string{p, q} {

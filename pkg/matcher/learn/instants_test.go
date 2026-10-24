@@ -1086,7 +1086,7 @@ func TestAPickFromADenseTimetableStaysChecked(t *testing.T) {
 // out every exchange it served so), each departure as recorded and as F
 // served it: its recorded value.
 func servedTimetable(at time.Time, departures ...string) []Earlier {
-	e := Earlier{Mock: "mock-0", At: at, Own: true, Seen: []Seen{
+	e := Earlier{Mock: "mock-0", At: at, Payload: payloadOf("mock-0", at), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "url.path.1", Noise: "url.path.1", Type: String, Value: "timetable"}, Live: "timetable"},
 		{Side: Response, Leaf: Leaf{Path: "body.date", Noise: "body.date", Type: String, Value: "2026-10-22"}, Live: "2026-10-22"},
 	}}
@@ -1199,7 +1199,7 @@ func TestAPickFromATimetableTheTestWasServedStaysChecked(t *testing.T) {
 func TestAServedDateHeaderIsNoSourceButIsEchoed(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
 	date := func(v string, stamp bool) []Earlier {
-		return []Earlier{{Mock: "mock-3", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		return []Earlier{{Mock: "mock-3", At: at.Add(-time.Second), Payload: payloadOf("mock-3", at.Add(-time.Second)), Own: true, Seen: []Seen{
 			{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: v}, Live: v, Stamp: stamp},
 		}}}
 	}
@@ -1222,7 +1222,7 @@ func TestAServedDateHeaderIsNoSourceButIsEchoed(t *testing.T) {
 	// A stamp F served otherwise than recorded (a variable's value answered
 	// there) is no stamp: rule 3's premise, that F served the stamp the
 	// recording holds, fails, and its words drifted with the value's.
-	moved := []Earlier{{Mock: "mock-3", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	moved := []Earlier{{Mock: "mock-3", At: at.Add(-time.Second), Payload: payloadOf("mock-3", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: "Thu, 22 Oct 2026 11:14:16 GMT"}, Live: "Thu, 22 Oct 2026 11:15:46 GMT", Stamp: true},
 	}}}
 	if ln := ClassifyIn(NewDriftCache(), []string{p}, l, r, at, moved, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-3" {
@@ -1232,7 +1232,7 @@ func TestAServedDateHeaderIsNoSourceButIsEchoed(t *testing.T) {
 	// value lost but whose words F served it did not gain, is no co-drift
 	// source; it is no stamp either, and a word it held when recorded is
 	// unaccounted for.
-	otherwise := []Earlier{{Mock: "mock-3", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	otherwise := []Earlier{{Mock: "mock-3", At: at.Add(-time.Second), Payload: payloadOf("mock-3", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: "Thu, 22 Oct 2026 11:14:16 GMT"}, Live: "Thu, 22 Oct 2026 11:17:46 GMT", Stamp: true},
 	}}}
 	if ln := ClassifyIn(NewDriftCache(), []string{p}, l, r, at, otherwise, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "mock-3 at header.date") {
@@ -1274,7 +1274,7 @@ func TestAServedDateHeaderIsNoSourceButIsEchoed(t *testing.T) {
 	// An answer F served with this run's value of a variable (its epoch
 	// second moved with the lead), which the app writes as an instant: the
 	// echo reads what F served, and the value is a variable of that leaf.
-	expiry := []Earlier{{Mock: "mock-5", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	expiry := []Earlier{{Mock: "mock-5", At: at.Add(-time.Second), Payload: payloadOf("mock-5", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "body.exp", Noise: "body.exp", Type: Number, Value: "1792667656"}, Live: "1792667717"},
 	}}}
 	if ln := classifyDeparture("2026-10-22T11:14:16Z", "2026-10-22T11:15:17Z", at, nil, expiry); ln.Kind != KindVariable || ln.From.Mock != "mock-5" || ln.From.Path != "body.exp" {
@@ -1868,7 +1868,7 @@ func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(2026, 10, 22, h, m, 0, 0, time.UTC), time.Minute)}}
 	}
 	for _, created := range []string{"2026-10-22T11:14:40.120Z", "2026-10-22T11:14:20.000Z"} {
-		served := []Earlier{{Mock: "mock-3", At: at.Add(-5 * time.Second), Seen: []Seen{
+		served := []Earlier{{Mock: "mock-3", At: at.Add(-5 * time.Second), Payload: payloadOf("mock-3", at.Add(-5*time.Second)), Seen: []Seen{
 			{Side: Response, Leaf: Leaf{Path: "body.created_at", Noise: "body.created_at", Type: String, Value: created}, Live: created},
 		}}}
 		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
@@ -1982,7 +1982,7 @@ func TestAValueBuiltOnAGivenDateIsTheEchos(t *testing.T) {
 		v, _ := DecodeJSON([]byte(body))
 		leaves := map[string]Leaf{}
 		JSONLeaves("body", v, leaves)
-		e := Earlier{Mock: "mock-1", At: at.Add(-time.Second), Own: true}
+		e := Earlier{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true}
 		for _, path := range []string{"body.dates[0]", "body.dates[1]"} {
 			if l, ok := leaves[path]; ok {
 				e.Seen = append(e.Seen, Seen{Side: Response, Leaf: l, Live: l.Value})
@@ -2036,7 +2036,7 @@ func TestTheZoneSearchReadsWallClocksOfNoZoneAgainstRecordings(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
 	leaf := func(mock, rec, live string) Earlier {
-		return Earlier{Mock: mock, At: at.Add(-time.Second), Seen: []Seen{
+		return Earlier{Mock: mock, At: at.Add(-time.Second), Payload: payloadOf(mock, at.Add(-time.Second)), Seen: []Seen{
 			{Side: Response, Leaf: Leaf{Path: "body.sentAt", Noise: "body.sentAt", Type: String, Value: rec}, Live: live},
 		}}
 	}
@@ -2069,7 +2069,7 @@ func TestATypedInstantIsNoZonedInstantsWallClock(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 20, 0, 0, time.UTC)
 	const p = "body.processed_at"
 	typed := func(t time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, t, time.Second)}} }
-	served := []Earlier{{Mock: "mock-4", At: at.Add(-time.Second), Seen: []Seen{
+	served := []Earlier{{Mock: "mock-4", At: at.Add(-time.Second), Payload: payloadOf("mock-4", at.Add(-time.Second)), Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "body.sentAt", Noise: "body.sentAt", Type: String, Value: "2026-10-22T16:44:16+05:30"}, Live: "2026-10-22T16:46:16+05:30"},
 	}}}
 	ln := ClassifyIn(NewDriftCache(), []string{p}, typed(time.Date(2026, 10, 22, 16, 46, 16, 0, time.UTC)), typed(time.Date(2026, 10, 22, 16, 44, 16, 0, time.UTC)), at, served, nil, nil, nil)[0]
@@ -2087,7 +2087,7 @@ func TestAWallClockOfNoZoneFitOnOneSideIsNoEcho(t *testing.T) {
 	dt := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
-	served := []Earlier{{Mock: "mock-4", At: at.Add(-time.Second), Seen: []Seen{
+	served := []Earlier{{Mock: "mock-4", At: at.Add(-time.Second), Payload: payloadOf("mock-4", at.Add(-time.Second)), Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "body.sentAt", Noise: "body.sentAt", Type: String, Value: "1792667656473"}, Live: "1792667776784"},
 	}}}
 	// F's 16:46:16 is mock-4's live SentTimestamp in +05:30; the recorded

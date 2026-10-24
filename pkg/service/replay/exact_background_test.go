@@ -121,15 +121,17 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 	}
 }
 
-// Under the switch, a set no background-routing record marked (no
-// recordedWith: s12-routing, or only marks this keploy does not know) is
-// served by today's rules, and the replay says so once for the set: which set,
-// what it carries, and how to record it so that background serving serves it
-// (again under the switch with this build when it enables background serving;
-// with keploy enterprise when it does not). A marked set says nothing of
-// the kind, and neither does a replay without the switch.
-func TestUnderTheSwitchAnUnmarkedSetSaysOnceItIsServedByTodaysRules(t *testing.T) {
-	const line = "this test set was recorded without background routing"
+// Under the switch, every set's calls are matched exactly; a set no
+// proven-routing record marked (no recordedWith: s12-routing, or only marks
+// this keploy does not know) also had its varying fields never learned, and
+// the replay says so once for the set: which set, what it carries, that its
+// calls are matched exactly and its varying fields were never learned, and
+// how to record it again so that they are (under the switch with this build
+// when it enables proven routing; with keploy enterprise when it does not).
+// It never says the set is served by today's rules. A marked set says nothing
+// of the kind, and neither does a replay without the switch.
+func TestUnderTheSwitchAnUnmarkedSetSaysOnceItsCallsAreMatchedExactlyAndItsVaryingFieldsWereNeverLearned(t *testing.T) {
+	const line = "this test set was recorded without proven routing"
 	for _, tc := range []struct {
 		name         string
 		on           bool
@@ -167,8 +169,8 @@ func TestUnderTheSwitchAnUnmarkedSetSaysOnceItIsServedByTodaysRules(t *testing.T
 				return
 			}
 			e := said[0]
-			if !strings.Contains(e.Message, "served by today's rules") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
-				t.Fatalf("the line does not say the set is served by today's rules for want of the mark: %q", e.Message)
+			if !strings.Contains(e.Message, "its calls are matched exactly") || !strings.Contains(e.Message, "its varying fields were never learned") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
+				t.Fatalf("the line does not say the set's calls are matched exactly and its varying fields were never learned, for want of the mark: %q", e.Message)
 			}
 			fields := e.ContextMap()
 			if fields["testSetID"] != "test-set-0" {
@@ -179,8 +181,11 @@ func TestUnderTheSwitchAnUnmarkedSetSaysOnceItIsServedByTodaysRules(t *testing.T
 				t.Fatalf("the line says the set carries %v; want %v", fields["recordedWith"], tc.recordedWith)
 			}
 			next, _ := fields["next_step"].(string)
-			if !strings.Contains(next, "record the test set again with KEPLOY_PROVEN=1") || !strings.Contains(next, tc.next) {
-				t.Fatalf("the line's next step %q does not say to record the set again under the switch %s", next, tc.next)
+			if !strings.Contains(next, "record the test set again with KEPLOY_PROVEN=1") || !strings.Contains(next, tc.next) || !strings.Contains(next, "learns") {
+				t.Fatalf("the line's next step %q does not say to record the set again under the switch %s, which learns its varying fields", next, tc.next)
+			}
+			if strings.Contains(e.Message+next, "today's rules") {
+				t.Fatalf("the line says the set is served by today's rules: %q (next step %q)", e.Message, next)
 			}
 		})
 	}

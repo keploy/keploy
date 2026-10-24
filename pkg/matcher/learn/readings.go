@@ -875,11 +875,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				whose := "another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
+				whose := "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
 				if !g.at.Before(at) {
-					whose = "another test's or was recorded after the call, so no earlier place of the call's own test (the recording made the call before it): keploy follows no value of another test's, nor of a recording made after the call"
+					whose = "was recorded after the call, so it is no earlier place of the call's own test (record made the call before it): keploy follows no value of a recording made after the call"
 				}
-				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording F gave the application before the call that is " + whose + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + whose + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
 			}
 		}
 		return ""

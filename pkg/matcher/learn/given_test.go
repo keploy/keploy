@@ -849,7 +849,7 @@ func TestAClientTestFollowsAnInstantTheLeadMoved(t *testing.T) {
 	str := func(v string) Shape {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
 	}
-	call := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Noise: "body.slot", Type: String, Value: "2026-10-22T11:20Z"}, Live: "2026-10-22T11:21Z", Place: "body.slot"}}}}
+	call := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.slot", Noise: "body.slot", Type: String, Value: "2026-10-22T11:20Z"}, Live: "2026-10-22T11:21Z", Place: "body.slot"}}}}
 	if ln := ClassifyIn(clientTestCache(), []string{p}, str("book 2026-10-22T11:21Z"), str("book 2026-10-22T11:20Z"), at, call, nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Path != "body.slot" {
 		t.Errorf("a client test: %s from %+v (%s); want a variable of mock-1's body.slot", ln.Kind, ln.From, ln.Why)
 	}
@@ -1132,9 +1132,11 @@ func TestARequestBodyOfNoDeclaredTypeIsReadWhereItsBytesAreText(t *testing.T) {
 // 8 of length 65, before "s17"): a word of what changed that it holds glued
 // to the bytes around it is refused, the reason naming the body as one that
 // declares no media type, never learned as noise, as the same bytes declared
-// application/x-protobuf are refused too. A body declared text is read by
-// its words, a glued word no word of it; the base64 a binary part keeps
-// frames no words; and a value the body does not hold is noise.
+// application/x-protobuf are refused too, and so is a body that one side
+// declares and the other does not, whichever side it is. A body both sides
+// declare text is read by its words, a glued word no word of it; the base64
+// a binary part keeps frames no words; and a value the body does not hold is
+// noise.
 func TestAWordGluedInARequestBodyOfNoDeclaredTypeIsRefused(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
 	const p = "body.slot"
@@ -1169,6 +1171,7 @@ func TestAWordGluedInARequestBodyOfNoDeclaredTypeIsRefused(t *testing.T) {
 		{"a JSON leaf's word glued", "", "body", `{"slot":"BAs17"}`, "s17", "s18", KindUnaccounted, "in test case test-1 at body.slot, " + glued},
 		{"the same bytes declared a protobuf", "application/x-protobuf", "body", framed, "s17", "s18", KindUnaccounted, mediaUnread("application/x-protobuf")},
 		{"recorded declared text, sent declaring none", "text/plain|", "body", framed, "s17", "s18", KindUnaccounted, "in test case test-1 at body, " + glued},
+		{"recorded declaring none, sent declared text", "|text/plain", "body", framed, "s17", "s18", KindUnaccounted, "in test case test-1 at body, " + glued},
 		{"the same bytes declared text", "text/plain", "body", framed, "s17", "s18", KindNoise, ""},
 		{"a value it does not hold", "", "body", framed, "n-5f2a91", "n-77c0d3", KindNoise, ""},
 		{"a word of the base64 only", "", "binary", base64.StdEncoding.EncodeToString([]byte("text here")), "dGV4", "dGV5", KindNoise, ""},

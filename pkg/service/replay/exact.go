@@ -304,9 +304,10 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 // serving serves testSetID (s12_serving.go): its mappings.yaml carries a
 // background-routing record's mark (recordedWith holds models.RecordedWithS12Routing) and a
 // registered func enables it (S12Serving). A set without the mark, and a
-// marked set this build does not enable it for, is served by today's rules,
-// said once per set (the caller asks once, as the set's mocks load): every
-// recorded background call answered exactly, and required by its end.
+// marked set this build does not enable it for, has every recorded
+// background call answered exactly and required by its end; for a set
+// without the mark that is said once per set (the caller asks once, as the
+// set's mocks load), with what it means under the switch.
 func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
 	if !(&models.Mapping{RecordedWith: recordedWith}).WasRecordedWith(models.RecordedWithS12Routing) {
 		r.sayRecordedWithoutRouting(testSetID, recordedWith)
@@ -321,18 +322,19 @@ func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
 	return false
 }
 
-// sayRecordedWithoutRouting says that testSetID, which no background-routing
+// sayRecordedWithoutRouting says that testSetID, which no proven-routing
 // record marked (models.RecordedWithS12Routing: a set recorded before
-// background routing, with --sync or mapping off, or by a keploy build with no
-// judging), is served under the proven switch by today's rules, as on a
-// keploy without it, and how to record it so that background serving serves
-// it: under the switch, with the judging background serving rests on.
+// proven routing, with --sync or mapping off, or by a keploy build with no
+// judging), is matched exactly under the proven switch, as every set is,
+// with every recorded background call required by the set's end, and that
+// its varying fields were never learned, since only a proven-routing record
+// learns them; and how to record it again so that they are.
 func (r *Replayer) sayRecordedWithoutRouting(testSetID string, recordedWith []string) {
-	next := "for background serving, record the test set again with " + provenswitch.Env + "=1, without --sync and with mapping on: that recording routes the set's background writes and marks its mappings.yaml recordedWith: " + models.RecordedWithS12Routing
+	next := "record the test set again with " + provenswitch.Env + "=1, without --sync and with mapping on: that recording learns its varying fields, routes its background calls and marks its mappings.yaml recordedWith: " + models.RecordedWithS12Routing
 	if !S12Serving() {
-		next = "for background serving, record the test set again with " + provenswitch.Env + "=1 using keploy enterprise, whose judging background serving rests on: this keploy build records and serves every set by today's rules"
+		next = "record the test set again with " + provenswitch.Env + "=1 using keploy enterprise, whose judging learns a set's varying fields and routes its background calls: this keploy build marks no set it records"
 	}
-	r.logger.Info("this test set was recorded without background routing (its mappings.yaml does not carry recordedWith: "+models.RecordedWithS12Routing+"), so it is served by today's rules: its worker scope and pool as for a set recorded before background serving, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
+	r.logger.Info("this test set was recorded without proven routing (its mappings.yaml does not carry recordedWith: "+models.RecordedWithS12Routing+"): under "+provenswitch.Env+"=1 its calls are matched exactly, every recorded background call required by the set's end, and its varying fields were never learned",
 		zap.String("testSetID", testSetID),
 		zap.Strings("recordedWith", recordedWith),
 		zap.String("next_step", next))

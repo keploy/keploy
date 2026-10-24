@@ -2969,7 +2969,7 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 		t.Fatal(err)
 	}
 	if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.pooled) != 0 ||
-		!strings.Contains(miss.res.Why, "a word of what record's full round saw in it (its characters 1 to 2) appears in mock-1, a recording F gave the application before the call that is another test's") {
+		!strings.Contains(miss.res.Why, "a word of what record's full round saw in it (its characters 1 to 2) appears in mock-1, a recording record's full round gave the application before the call that was recorded after the call") {
 		t.Fatalf("served %v miss %+v; want body.counter refused naming mock-1, never noise nor bound", got, miss)
 	}
 }
@@ -2980,7 +2980,8 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 // made the call before it. A value of the test's own call that changed to a
 // word of that mock's answer (an id, a whole id, an instant, copied word for
 // word) is bound to nothing and refused, naming the mock and that it was
-// recorded after the call; never learned as noise.
+// recorded after the call, never calling it another test's (it is the
+// call's own test's); never learned as noise.
 func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServedBefore(t *testing.T) {
 	inst := learnAt.Add(5 * time.Minute).Format(time.RFC3339)
 	for _, tc := range []struct{ name, rec, live, answer string }{
@@ -3006,7 +3007,8 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 				}
 				if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.consumed) != 0 ||
 					!strings.Contains(miss.res.Why, "body.ref changed") ||
-					!strings.Contains(miss.res.Why, "appears in mock-2, a recording F gave the application before the call that is another test's or was recorded after the call") {
+					!strings.Contains(miss.res.Why, "appears in mock-2, a recording record's full round gave the application before the call that was recorded after the call") ||
+					strings.Contains(miss.res.Why, "another test's") {
 					t.Fatalf("served %v miss %+v consumed %d; want body.ref refused naming mock-2 as recorded after the call, never noise nor bound", got, miss, len(db.consumed))
 				}
 			})

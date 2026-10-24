@@ -350,7 +350,7 @@ func TestATypedPickFromAServedTimetableStaysChecked(t *testing.T) {
 // is the instant's. One that held another recorded moment is no source.
 func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 	sent := func(rec, live string) []Earlier {
-		return []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Own: true, Seen: []Seen{
+		return []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Payload: payloadOf("mock-1", qnInsert.Add(-time.Second)), Own: true, Seen: []Seen{
 			{Side: Request, Leaf: Leaf{Path: "header.x-sent-at", Noise: "header.x-sent-at", Type: String, Value: rec}, Live: live},
 		}}}
 	}
@@ -408,7 +408,7 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 	}
 	// Nor is an answer's own clock stamp, served as recorded, a place an
 	// instant came from (rule 3).
-	stampAt := []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Own: true, Seen: []Seen{
+	stampAt := []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Payload: payloadOf("mock-1", qnInsert.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: "2026-10-23T03:40:10.740Z"}, Live: "2026-10-23T03:40:10.740Z", Stamp: true},
 	}}}
 	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), stampAt, nil); ln.Kind != KindNoise {
@@ -442,7 +442,7 @@ func TestAValueReadWordByWordMeetsATypedInstantByItsMoment(t *testing.T) {
 		return ClassifyIn(dc, []string{p}, l, r, qnInsert, earlier, nil, resp, w)[0]
 	}
 	typedSeen := func(rec, live time.Time) []Earlier {
-		return []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Own: true, Seen: []Seen{
+		return []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Payload: payloadOf("mock-1", qnInsert.Add(-time.Second)), Own: true, Seen: []Seen{
 			{Side: Request, Leaf: qnTyped(rec), Live: qnTyped(live).Value},
 		}}}
 	}
