@@ -1599,3 +1599,32 @@ func TestKeployMockReplayPassesAStretchsWriteWhoseTestDidNotRun(t *testing.T) {
 	require.Equal(t, []string{"200 c", "200 one"}, got, "the run is past TestB's write once TestC, recorded after it, begins")
 	require.Empty(t, e.Action, "TestC failed: %s", e.Reason)
 }
+
+// A test's own read recorded after the write that changed its answer waits for
+// that write (SetScopeBounds): a timer's call made sooner than recorded, before
+// the write, takes the timer's recording, not the test's later one, so the page
+// never reads a state the recording saw only after the write.
+func TestKeployMockReplayHoldsATestsReadBackUntilItsWrite(t *testing.T) {
+	mocks := []*models.Mock{
+		pingMock("page-1", "/page", "dirty", t0.Add(time.Second)),
+		pingMock("commit", "/commit", "ok", t0.Add(2*time.Second)),
+		pingMock("page-own", "/page", "clean", t0.Add(3*time.Second)),
+	}
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := newServingProxy()
+	a.Proxy = p
+	ctx := context.Background()
+	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{"o::TestA": {"commit", "page-own"}}))
+	require.NoError(t, a.SetScopeBounds(ctx, []models.MockEntry{
+		{Name: "page-own", Kind: "Http", Stretch: &models.Stretch{After: "commit"}},
+	}))
+	require.NoError(t, a.SetScopeWorker(ctx, []models.MockEntry{
+		{Name: "page-1", Kind: "Http", Place: "o::TestA", Cause: models.CauseTimer, Stretch: &models.Stretch{Until: "commit", Run: "r1"}},
+	}))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p, "TestA", "/page", "/page", "/commit", "/page")
+	require.Equal(t, []string{"200 dirty", "200 dirty", "200 ok", "200 clean"}, got, "the test's own read answered before its write")
+	require.Empty(t, e.Action, "TestA failed: %s", e.Reason)
+}

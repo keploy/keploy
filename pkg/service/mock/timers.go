@@ -213,6 +213,14 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 		byCall[call] = append(byCall[call], mk)
 	}
 	stretch := map[string]*models.Stretch{}
+	// Where each of a timer's runs of a call ended: the write after its last
+	// recording, when that was, and what the run answered.
+	type runEnd struct {
+		until string
+		at    time.Time
+		ans   string
+	}
+	ends := map[string][]runEnd{}
 	for _, fp := range calls {
 		recs := byCall[fp]
 		for i := 0; i < len(recs); {
@@ -225,17 +233,57 @@ func timerScope(windows []models.ScopeWindow, mocks []capturedMock, byTest map[s
 			if k := at(recs[i]); k > 0 {
 				st.After = writes[k-1].name
 			}
-			if k := at(recs[j]); k < len(writes) {
+			k := at(recs[j])
+			if k < len(writes) {
 				st.Until = writes[k].name
 			}
+			timed := false
 			for _, mk := range recs[i : j+1] {
 				if timer[mk.name] {
 					stretch[mk.name] = st
+					timed = true
 				} else {
 					st.With = append(st.With, mk.name)
 				}
 			}
+			if timed && st.Until != "" {
+				ends[fp] = append(ends[fp], runEnd{until: st.Until, at: writes[k].ts, ans: recs[i].ans})
+			}
 			i = j + 1
+		}
+	}
+	// A test's own read of the call, recorded after the write that ended a
+	// run of the timer's and answered otherwise than the run, read what that
+	// write left. Exact serving answers a test's own recordings first, so a
+	// replay that makes the timer's call before that write (the timer fired
+	// sooner) would take it from the test there and read a state the
+	// recording never saw before the write. It answers only once the run has
+	// passed the write (Stretch.After; the latest such write before it).
+	type ownedAt struct {
+		test string
+		i    int
+	}
+	pos := map[string]ownedAt{}
+	for test, entries := range byTest {
+		for i := range entries {
+			pos[entries[i].Name] = ownedAt{test, i}
+		}
+	}
+	for _, fp := range calls {
+		for _, mk := range byCall[fp] {
+			p, owned := pos[mk.name]
+			if timer[mk.name] || !owned || mk.ans == "" {
+				continue
+			}
+			bound := ""
+			for _, e := range ends[fp] {
+				if e.at.Before(mk.ts) && e.ans != mk.ans {
+					bound = e.until
+				}
+			}
+			if bound != "" {
+				byTest[p.test][p.i].Stretch = &models.Stretch{After: bound}
+			}
 		}
 	}
 	var worker []models.MockEntry

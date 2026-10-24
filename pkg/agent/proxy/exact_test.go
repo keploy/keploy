@@ -1824,3 +1824,32 @@ func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
 		t.Fatal("a new replay session reads the last session's pool names")
 	}
 }
+
+// A test's own read recorded after a write that changed what it reads (a
+// branch page after the commit) waits for that write: before it, the test's
+// mocks do not show it, so a timer's call made sooner cannot take the
+// after-commit answer; once the commit has answered, it shows. A read of the
+// test with no bound shows throughout.
+func TestATestsReadThatWaitsForAWriteShowsOnlyAfterIt(t *testing.T) {
+	pre := httpCall("page-before", 0, "/page")
+	commit := httpCall("commit", time.Second, "/commit")
+	post := httpCall("page-after", 2*time.Second, "/page")
+	mm := stagedManager(t, nil, []*models.Mock{pre, commit, post})
+	shown := func(what string, want ...string) {
+		t.Helper()
+		pt, _ := mm.GetPerTestMocksInWindow()
+		if got := strings.Join(exactNames(pt), ","); got != strings.Join(want, ",") {
+			t.Fatalf("%s: the test shows %s, want %s", what, got, strings.Join(want, ","))
+		}
+	}
+
+	mm.ServeExactStretches(map[string]models.Stretch{"page-after": {After: "commit"}}, nil)
+	mm.ServeExactWorker(nil)
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T1", []*models.Mock{pre, commit, post})
+	shown("before the commit", "page-before", "commit")
+	if !mm.DeleteFilteredMock(*commit) {
+		t.Fatal("the commit was refused")
+	}
+	shown("after the commit", "page-before", "page-after")
+}

@@ -1129,7 +1129,7 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 	defer v.mu.Unlock()
 	out := make([]*models.Mock, 0, len(v.owned))
 	for i, mk := range v.owned {
-		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) {
+		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) && v.ownedReached(mk.Name) {
 			out = append(out, mk)
 		}
 	}
@@ -1195,6 +1195,18 @@ func (v *exactView) inStretch(name string) bool {
 		open = v.answered(n)
 	}
 	return open && (st.Until == "" || !done(st.Until))
+}
+
+// ownedReached reports whether the test's own recording name may answer yet:
+// one that waits for a write (models.ScopeTableReq.Bounds, a stretch with
+// After alone) only once that write has answered a call of the staging or
+// the run has gone past it; every other always. The caller holds v.mu.
+func (v *exactView) ownedReached(name string) bool {
+	st, ok := v.stretch[name]
+	if !ok || st.After == "" || v.answered == nil {
+		return true
+	}
+	return v.passed[st.After] || v.answered(st.After)
 }
 
 // lastOfRun reports whether name is the last of a timer's recordings of one

@@ -294,6 +294,11 @@ type ScopeTableReq struct {
 	// is in a pool slice. Each answers at most one call, and only within its
 	// stretch (MockEntry.Stretch).
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Bounds is, under the proven switch, the tests' own reads that answer
+	// only once the run has passed a write (MockEntry.Stretch.After): a read
+	// recorded after the write that ended a timer's run of the same call,
+	// whose answer differs from the run's.
+	Bounds []MockEntry `json:"bounds,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

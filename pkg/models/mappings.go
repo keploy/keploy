@@ -56,7 +56,10 @@ type MockEntry struct {
 	Cause string `json:"cause,omitempty" yaml:"cause,omitempty" bson:"cause,omitempty"`
 	// Stretch is, for a timer's recording (Cause), the stretch of the set's
 	// writes it was recorded in: it answers only after its After write and
-	// before its Until write were answered.
+	// before its Until write were answered. For a test's own read of a
+	// timer's call, recorded after the write that ended a run of the timer's
+	// and answered otherwise than the run, it is After alone: the read
+	// answers only once the run has passed that write.
 	Stretch *Stretch `json:"stretch,omitempty" yaml:"stretch,omitempty" bson:"stretch,omitempty"`
 	// Unresolved says, under the proven switch, that keploy record's full
 	// round could not tell which test of its group made this mock's call,

@@ -79,14 +79,14 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	worker := []models.MockEntry{{Name: "mock-2", Kind: "Http", Cause: models.CauseTimer, Stretch: &models.Stretch{After: "mock-1"}}}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, worker); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, worker, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -99,7 +99,7 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
 	}

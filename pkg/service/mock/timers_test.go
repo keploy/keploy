@@ -280,3 +280,49 @@ func TestTimerScopeLeavesAReadThatAnsweredOtherwiseOutOfTheRun(t *testing.T) {
 		t.Fatalf("stretches %+v, want %+v", stretch, want)
 	}
 }
+
+// A branch page the test reads (one uncommitted change), then a timer reads
+// again (the same), then the test commits and reads it (none): the timer's
+// run ends at the commit. The test's own read after it answered otherwise,
+// so it answers only once the run has passed the commit (Stretch.After); the
+// test's read before it, in the run, carries no bound, nor does a later read
+// that answered as the run did.
+func TestTimerScopeBoundsATestsReadThatTheRunsEndChanged(t *testing.T) {
+	page := timerKey("POST", "localhost:8083", "/query", "branchPage")
+	mocks := []capturedMock{
+		{name: "mock-0", ts: at(1), fp: page, ans: "uncommitted-1"}, // the test's own read
+		{name: "mock-1", ts: at(2), fp: page, ans: "uncommitted-1"}, // the timer's
+		{name: "mock-2", ts: at(3), fp: timerKey("POST", "localhost:8083", "/query", "commit"), write: true},
+		{name: "mock-3", ts: at(4), fp: page, ans: "uncommitted-0"}, // the test's own, after the commit
+		{name: "mock-4", ts: at(5), fp: timerKey("POST", "localhost:8083", "/query", "edit"), write: true},
+		{name: "mock-5", ts: at(6), fp: page, ans: "uncommitted-1"}, // answered as the run did
+	}
+	windows := []models.ScopeWindow{{Name: "T1", Timers: []models.TimerCall{{Method: "POST", Host: "localhost:8083", URL: "/query", Body: "branchPage", N: 1}}}}
+	byTest := map[string][]models.MockEntry{"T1": {{Name: "mock-0"}, {Name: "mock-1"}, {Name: "mock-2"}, {Name: "mock-3"}, {Name: "mock-4"}, {Name: "mock-5"}}}
+	got, worker := timerScope(windows, mocks, byTest)
+	if len(worker) != 1 || worker[0].Name != "mock-1" || worker[0].Stretch.Until != "mock-2" {
+		t.Fatalf("worker %+v, want mock-1 until the commit", worker)
+	}
+	bounds := map[string]string{}
+	for _, e := range got["T1"] {
+		if e.Stretch != nil {
+			bounds[e.Name] = e.Stretch.After
+		}
+	}
+	if want := map[string]string{"mock-3": "mock-2"}; !reflect.DeepEqual(bounds, want) {
+		t.Fatalf("bounds %v, want %v", bounds, want)
+	}
+}
+
+// heldBounds sends the agent only the bound reads it holds, by name.
+func TestHeldBoundsSendsTheBoundReadsTheAgentHolds(t *testing.T) {
+	mappings := map[string][]models.MockEntry{
+		"T1": {{Name: "mock-0"}, {Name: "mock-3", Stretch: &models.Stretch{After: "mock-2"}}},
+		"T2": {{Name: "mock-9", Stretch: &models.Stretch{After: "mock-8"}}},
+	}
+	table := map[string][]string{"T1": {"mock-0", "mock-3"}}
+	got := heldBounds(mappings, table)
+	if len(got) != 1 || got[0].Name != "mock-3" || got[0].Stretch.After != "mock-2" {
+		t.Fatalf("bounds %+v, want mock-3 after mock-2 alone", got)
+	}
+}

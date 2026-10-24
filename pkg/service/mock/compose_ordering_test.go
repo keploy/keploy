@@ -74,6 +74,7 @@ type composeInstr struct {
 	// proven table push sent, and worker its worker scope.
 	table, pool map[string][]string
 	worker      []models.MockEntry
+	bounds      []models.MockEntry
 	// begins is what the last push of the tests' recorded begins sent, and
 	// beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -219,8 +220,8 @@ func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) erro
 
 // PushProvenTable takes the per-test table, the pool slices and the worker
 // scope (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, worker []models.MockEntry) error {
-	f.table, f.pool, f.worker = table, pool, worker
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, worker, bounds []models.MockEntry) error {
+	f.table, f.pool, f.worker, f.bounds = table, pool, worker, bounds
 	return nil
 }
 

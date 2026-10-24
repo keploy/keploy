@@ -195,6 +195,7 @@ type Agent struct {
 	testWorker   []models.MockEntry   // keploy test and keploy mock replay, proven switch: the set's worker scope, each mock with its place and a timer's with its stretch (exact_proven.go)
 	testBegun    map[string]bool      // keploy test and keploy mock replay, proven switch: the set's test cases begun since its staging (exact_proven.go)
 	testEdgeAt   map[string]time.Time // keploy mock replay, proven switch: when each write ending a timer's stretch was recorded (SetScopeWorker)
+	testBounds   []models.MockEntry   // keploy mock replay, proven switch: the tests' own reads that answer only once the run has passed a write (SetScopeBounds)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: test name -> what its harness gave in its recording, and claim
 	// key -> what the key's harness gave outside every test (SetTestGiven).
@@ -656,7 +657,7 @@ func (a *Agent) resetScopeState() {
 	a.testGiven, a.keyGiven = nil, nil
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
-	a.testWorker, a.testBegun, a.testEdgeAt = nil, nil, nil
+	a.testWorker, a.testBegun, a.testEdgeAt, a.testBounds = nil, nil, nil, nil
 	a.scopeMu.Unlock()
 }
 

@@ -1157,7 +1157,8 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
 	worker := heldWorker(mp, table, loaded)
-	if err := pp.PushProvenTable(ctx, table, pool, worker); err != nil {
+	bounds := heldBounds(mappings, table)
+	if err := pp.PushProvenTable(ctx, table, pool, worker, bounds); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("worker scope", len(worker)), zap.String("mock-set", name))
@@ -1188,6 +1189,27 @@ func heldWorker(mp *models.Mapping, table map[string][]string, loaded []*models.
 			out = append(out, e)
 		}
 	}
+	return out
+}
+
+// heldBounds is the tests' own reads, of the mocks the agent holds (table),
+// that answer only once the run has passed a write (MockEntry.Stretch).
+func heldBounds(mappings map[string][]models.MockEntry, table map[string][]string) []models.MockEntry {
+	held := map[string]bool{}
+	for _, names := range table {
+		for _, n := range names {
+			held[n] = true
+		}
+	}
+	var out []models.MockEntry
+	for _, entries := range mappings {
+		for _, e := range entries {
+			if e.Stretch != nil && e.Stretch.After != "" && held[e.Name] {
+				out = append(out, e)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 

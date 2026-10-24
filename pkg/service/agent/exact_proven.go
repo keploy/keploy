@@ -483,6 +483,13 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 			stretches[e.Name] = *e.Stretch
 		}
 	}
+	// A test's own read that waits for a write (SetScopeBounds): the proxy
+	// shows it, among its test's, only once the run has passed the write.
+	for _, e := range a.testBounds {
+		if e.Stretch != nil {
+			stretches[e.Name] = models.Stretch{After: e.Stretch.After}
+		}
+	}
 	// The run is past every write recorded before the latest recorded begin
 	// of the tests begun since the staging: a write of a test that did not
 	// run (or that the run made elsewhere) holds no stretch shut or open.
@@ -501,9 +508,13 @@ func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 		}
 	}
 	has := len(a.testWorker) > 0
+	bounds := len(a.testBounds) > 0
 	a.scopeMu.Unlock()
 	ws, ok := es.(coreAgent.ExactWorkerServer)
 	if !ok {
+		if bounds {
+			return errors.New("this keploy agent's proxy cannot hold a test's reads back until a write")
+		}
 		if has {
 			return errors.New("this keploy agent's proxy cannot serve a test set's worker scope, the calls no test case owns")
 		}
@@ -533,7 +544,10 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker []models.MockEntry) e
 	defer a.wire.unlock()
 	var edges []string
 	seen := map[string]bool{}
-	for _, e := range worker {
+	a.scopeMu.Lock()
+	bounds := a.testBounds
+	a.scopeMu.Unlock()
+	for _, e := range append(append([]models.MockEntry(nil), worker...), bounds...) {
 		if e.Stretch == nil {
 			continue
 		}
@@ -560,6 +574,23 @@ func (a *Agent) SetScopeWorker(ctx context.Context, worker []models.MockEntry) e
 	a.testWorker = append([]models.MockEntry(nil), worker...)
 	a.testBegun = map[string]bool{}
 	a.testEdgeAt = edgeAt
+	a.scopeMu.Unlock()
+	return nil
+}
+
+// SetScopeBounds installs the tests' own reads that answer only once the run
+// has passed a write (models.ScopeTableReq.Bounds): each is shown among its
+// test's mocks only after its Stretch.After write has answered or the run has
+// gone past it (serveWorkerExactly says them to the proxy with the worker
+// scope's stretches; SetScopeWorker, which comes next, reads when the writes
+// were recorded). A table without them leaves none of the previous set's.
+func (a *Agent) SetScopeBounds(ctx context.Context, bounds []models.MockEntry) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.scopeMu.Lock()
+	a.testBounds = append([]models.MockEntry(nil), bounds...)
 	a.scopeMu.Unlock()
 	return nil
 }
