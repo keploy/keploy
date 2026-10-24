@@ -35,15 +35,48 @@ func TestFromClientIsAfterWhatWasReadBeforeItOverAPipe(t *testing.T) {
 		t.Fatalf("Read = %q, %v", buf[:n], err)
 	}
 	req := u.FromClient() // the destination's chunk is read, not yet numbered
-	early := u.FromDest()
+	early, _ := u.FromDest()
 	go func() { _, _ = dest.Write([]byte("answer")) }()
 	n, err := u.Read(buf)
 	if err != nil || string(buf[:n]) != "answer" {
 		t.Fatalf("Read = %q, %v", buf[:n], err)
 	}
-	answer := u.FromDest()
+	answer, _ := u.FromDest()
 	if !before(early, req) || !before(req, answer) {
 		t.Fatalf("early %d, request %d, answer %d: want early < request < answer", early, req, answer)
+	}
+}
+
+// Nothing the destination sends is after the client's FIN while the client has
+// not closed, and once it has, what is read after the FIN is after it, over a
+// conn that is not a socket too, where what the destination sent is what was
+// read.
+func TestFromDestIsAfterTheClientClosedOnlyOnceItHasOverAPipe(t *testing.T) {
+	t.Parallel()
+	u, dest := pipeUpstream(t)
+	buf := make([]byte, 16)
+	read := func(want string) (uint32, bool) {
+		t.Helper()
+		go func() { _, _ = dest.Write([]byte(want)) }()
+		if n, err := u.Read(buf); err != nil || string(buf[:n]) != want {
+			t.Fatalf("Read = %q, %v; want %q", buf[:n], err, want)
+		}
+		return u.FromDest()
+	}
+	greeting, greetingAfter := read("greeting")
+	req := u.FromClient()
+	answer, answerAfter := read("answer")
+	if greetingAfter || answerAfter {
+		t.Fatal("a chunk is taken for one after the client closed, while the client has not")
+	}
+	fin := u.ClientClosed()
+	late, lateAfter := read("late")
+	if !before(greeting, req) || !before(req, answer) || !before(answer, fin) || !before(fin, late) {
+		t.Fatalf("greeting %d, request %d, answer %d, FIN %d, late %d: want them in that order",
+			greeting, req, answer, fin, late)
+	}
+	if !lateAfter {
+		t.Fatal("what the destination sent after the FIN is not taken for one after the client closed")
 	}
 }
 
@@ -108,7 +141,8 @@ func TestFromDestTakesTheFirstCutItDoesNotPass(t *testing.T) {
 	var got []uint32
 	for _, read := range []uint64{2, 3, 5, 7, 9} {
 		u.read = read // the chunk read from the destination ends here
-		got = append(got, u.FromDest())
+		seq, _ := u.FromDest()
+		got = append(got, seq)
 	}
 	if !before(got[0], q1) || got[0] != got[1] {
 		t.Fatalf("bytes up to 3 numbered %d and %d, the first request %d: want both before it", got[0], got[1], q1)

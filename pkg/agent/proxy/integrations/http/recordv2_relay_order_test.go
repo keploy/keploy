@@ -40,6 +40,15 @@ type relayedConn struct {
 	core      zapcore.Core
 	logs      *observer.ObservedLogs
 	done      chan error
+	// wrapSrc, when set, is the proxy's end of the client connection as
+	// the relay is handed it, over src.
+	wrapSrc func(net.Conn) net.Conn
+	// sess is the session recordV2 records; relayDone is closed once the
+	// relay has ended.
+	sess      *supervisor.Session
+	relayDone chan struct{}
+	// grace is the relay's HalfCloseGrace (0: its default).
+	grace time.Duration
 }
 
 // loopback returns the two ends of a loopback TCP connection.
@@ -78,24 +87,45 @@ func newRelayedConn(t *testing.T) *relayedConn {
 
 func (c *relayedConn) start(t *testing.T) {
 	t.Helper()
-	r := relay.New(relay.Config{Logger: zap.NewNop()}, c.src, connseq.NewUpstream(c.dst))
-	ctx, cancel := context.WithCancel(context.Background())
-	relayDone := make(chan struct{})
-	go func() { defer close(relayDone); _ = r.Run(ctx) }()
+	c.startRelay(t)
+	c.startParser(t)
+}
+
+// startRelay starts the relay alone; recordV2 starts later (startParser), as
+// a parser running behind its capture reads what it was handed later.
+func (c *relayedConn) startRelay(t *testing.T) {
+	t.Helper()
 	// The relay carries the connection from its first byte: its session is
-	// never one the capture joined mid-way (JoinedMidConnection).
-	sess := &supervisor.Session{
-		ClientStream: r.ClientStream(), DestStream: r.DestStream(), Mocks: c.mocks, Mgr: c.mgr, Orphans: c.spans,
+	// never one the capture joined mid-way (JoinedMidConnection). It ends the
+	// destination's stream where the client stopped taking it, and says so on
+	// the session, as the proxy wires it (recordViaSupervisor).
+	c.sess = &supervisor.Session{
+		Mocks: c.mocks, Mgr: c.mgr, Orphans: c.spans,
 		Logger: zap.New(zapcore.NewTee(zaptest.NewLogger(t).Core(), c.core)), ClientConnID: "relayed-1",
 		Ctx: context.Background(),
 	}
-	go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(context.Background(), sess) }()
+	src := c.src
+	if c.wrapSrc != nil {
+		src = c.wrapSrc(src)
+	}
+	r := relay.New(relay.Config{Logger: zap.NewNop(), HalfCloseGrace: c.grace, ClientStopped: c.sess.MarkEndedWhereClientStopped}, src, connseq.NewUpstream(c.dst))
+	c.sess.ClientStream, c.sess.DestStream = r.ClientStream(), r.DestStream()
+	ctx, cancel := context.WithCancel(context.Background())
+	c.relayDone = make(chan struct{})
+	relayDone := c.relayDone
+	go func() { defer close(relayDone); _ = r.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		_ = c.app.Close()
 		_ = c.dest.Close()
 		<-relayDone
 	})
+}
+
+// startParser starts recordV2 on the relay's capture (startRelay).
+func (c *relayedConn) startParser(t *testing.T) {
+	t.Helper()
+	go func() { c.done <- (&HTTP{Logger: zaptest.NewLogger(t)}).recordV2(context.Background(), c.sess) }()
 }
 
 // received is the socket c's count of the bytes it has received, read or not.
@@ -199,6 +229,14 @@ func TestRecordV2_ThroughTheRelayA408SentBeforeTheNextRequestIsNotItsAnswer(t *t
 		write(t, c.dest, c.dst, idleTimeout) // at the proxy, read by the relay or not
 		write(t, c.app, c.src, jdkRequest(8))
 		relayed(t, c.dest, jdkRequest(8))
+		// In half the rounds the client reads the 408 before it closes, so the
+		// parser has it. In the others it closes without, and the relay may
+		// write the 408 to it once it has closed, which it refuses: then the
+		// 408 is no part of the capture (relay: client_took.go). The request
+		// is recorded with no answer either way.
+		if i%2 == 0 {
+			relayed(t, c.app, idleTimeout)
+		}
 		mocks := c.end(t)
 		assertPairs(t, mocks, 7)
 		if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
@@ -224,14 +262,30 @@ func TestRecordV2_ThroughTheRelayA408BeforeTheFirstRequestAnswersNoRequest(t *te
 		write(t, c.app, c.src, jdkRequest(7))
 		c.start(t)
 		relayed(t, c.dest, jdkRequest(7))
+		// In half the rounds the client reads the 408 before it closes, so the
+		// parser has it, and says it dropped it. In the others it closes
+		// without, and the relay may write the 408 to it once it has closed,
+		// which it refuses: then the 408 is no part of the capture (relay:
+		// client_took.go), and the destination's stream ended where the
+		// client stopped. One of the two, never both nor neither. Nothing is
+		// recorded or left out either way.
+		read := i%2 == 0
+		if read {
+			relayed(t, c.app, idleTimeout)
+		}
 		mocks := c.end(t)
 		if len(mocks) != 0 {
 			t.Fatalf("round %d: recorded %d mock(s), the first %s -> %q; want none: the request got no answer", i,
 				len(mocks), mocks[0].Spec.HTTPReq.URL, mocks[0].Spec.HTTPResp.Body)
 		}
-		if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 || c.droppedLines() != 1 {
-			t.Fatalf("round %d: left out %v (%d counted, %d Debug lines); want nothing left out and a Debug line for the 408",
-				i, s, c.mgr.MocksLeftOut(), c.droppedLines())
+		dropped, stopped := c.droppedLines(), c.sess.EndedWhereClientStopped()
+		if s := c.spans.all(); len(s) != 0 || c.mgr.MocksLeftOut() != 0 {
+			t.Fatalf("round %d: left out %v (%d counted); want nothing left out", i, s, c.mgr.MocksLeftOut())
+		}
+		if read && (dropped != 1 || stopped) || !read && (dropped == 1) == stopped || dropped > 1 {
+			t.Fatalf("round %d: %d Debug lines for the 408, the stream ended where the client stopped: %v; want the line "+
+				"when the client read the 408, and else either the line or the stream ended there, not both",
+				i, dropped, stopped)
 		}
 	}
 }

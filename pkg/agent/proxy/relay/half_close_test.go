@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"io"
 	"net"
@@ -40,6 +41,17 @@ type halfCloseHarness struct {
 
 func newHalfCloseHarness(t *testing.T, cfg Config) *halfCloseHarness {
 	t.Helper()
+	return newHalfCloseHarnessOver(t, cfg, nil)
+}
+
+// newHalfCloseHarnessOver is newHalfCloseHarness with the relay's destination
+// conn made by wrap from the Upstream over the proxy's end (nil: the Upstream
+// itself). A wrapper over the Upstream, not under it, keeps the numbering by
+// the socket's count (connseq.Upstream), as the relay numbers in production;
+// it must read through the Upstream and expose it (NetConn), which relay.New
+// finds the Upstream by.
+func newHalfCloseHarnessOver(t *testing.T, cfg Config, wrap func(*connseq.Upstream) net.Conn) *halfCloseHarness {
+	t.Helper()
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
 	}
@@ -73,7 +85,12 @@ func newHalfCloseHarness(t *testing.T, cfg Config) *halfCloseHarness {
 	clientApp, srcProxy := pair()
 	dstProxy, destSvc := pair()
 
-	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
+	u := connseq.NewUpstream(dstProxy)
+	var dst net.Conn = u
+	if wrap != nil {
+		dst = wrap(u)
+	}
+	r := New(cfg, srcProxy, dst)
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &halfCloseHarness{clientApp: clientApp, destSvc: destSvc, r: r, done: make(chan struct{})}
 	go func() {
@@ -158,6 +175,131 @@ func TestHalfClose_ClientShutdownStillReceivesReply(t *testing.T) {
 	if !bytes.Equal(got, reply) {
 		t.Fatalf("client received % x, want % x", got, reply)
 	}
+}
+
+// The relay numbers the client's FIN as it reads it, before it forwards it, and
+// marks every chunk the destination sends after it
+// (fakeconn.Chunk.AfterClientClose): the destination's answer to the FIN
+// always, since it can come only once the FIN is forwarded. It still forwards
+// that answer, and a client that half-closed reads it: what the mark means is
+// the protocol's. What the destination answered before the FIN, and every
+// chunk from the client, is not marked. With half-close turned off the relay
+// tears the connection down at the FIN instead of forwarding it, and the FIN
+// is still numbered.
+func TestHalfClose_TheDestinationsBytesAfterTheClientsFINAreMarked(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		grace time.Duration
+	}{{"default grace", 0}, {"half-close off", -1}} {
+		grace := row.grace
+		t.Run(row.name, func(t *testing.T) {
+			// As the relay forwards the FIN (CloseWrite on its end of the
+			// destination connection), a probe takes the next number: the
+			// FIN must already have one below it, or the destination's
+			// answer to it could be numbered before it.
+			var probe uint32
+			h := newHalfCloseHarnessOver(t, Config{HalfCloseGrace: grace}, func(u *connseq.Upstream) net.Conn {
+				return &closeWriteProbe{Upstream: u, onCloseWrite: func() { probe = u.FromClient() }}
+			})
+			readFull := func(c net.Conn, n int) string {
+				t.Helper()
+				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+				b := make([]byte, n)
+				if _, err := io.ReadFull(c, b); err != nil {
+					t.Fatalf("read %d bytes: %v", n, err)
+				}
+				return string(b)
+			}
+			if _, err := h.clientApp.Write([]byte("request")); err != nil {
+				t.Fatal(err)
+			}
+			readFull(h.destSvc, len("request"))
+			if _, err := h.destSvc.Write([]byte("answer")); err != nil {
+				t.Fatal(err)
+			}
+			readFull(h.clientApp, len("answer"))
+			if err := h.clientApp.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatalf("half-close: %v", err)
+			}
+			if grace >= 0 {
+				// The destination answers the FIN once the relay has
+				// forwarded it, and the half-closed client reads that.
+				_ = h.destSvc.SetReadDeadline(time.Now().Add(5 * time.Second))
+				if rest, err := io.ReadAll(h.destSvc); err != nil || len(rest) != 0 {
+					t.Fatalf("the destination read %d more bytes, %v, before the FIN", len(rest), err)
+				}
+				if _, err := h.destSvc.Write([]byte("after the FIN")); err != nil {
+					t.Fatal(err)
+				}
+				if got := readFull(h.clientApp, len("after the FIN")); got != "after the FIN" {
+					t.Fatalf("the half-closed client read %q", got)
+				}
+				_ = h.destSvc.Close()
+			}
+			select {
+			case <-h.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the relay did not return once both sides had closed")
+			}
+			// What a stream carried, marked and not, in order: how the
+			// bytes were split into chunks is the sockets' to say.
+			drain := func(fc *fakeconn.FakeConn) (before, after string) {
+				for {
+					c, err := fc.ReadChunk()
+					if err != nil {
+						return before, after
+					}
+					if c.AfterClientClose {
+						after += string(c.Bytes)
+					} else if after != "" {
+						t.Fatalf("an unmarked chunk %q came after a marked one", c.Bytes)
+					} else {
+						before += string(c.Bytes)
+					}
+				}
+			}
+			wantAfter := ""
+			if grace >= 0 {
+				wantAfter = "after the FIN"
+			}
+			if before, after := drain(h.r.DestStream()); before != "answer" || after != wantAfter {
+				t.Fatalf("the destination's bytes were %q unmarked and %q marked, want %q and %q", before, after, "answer", wantAfter)
+			}
+			if before, after := drain(h.r.ClientStream()); before != "request" || after != "" {
+				t.Fatalf("the client's bytes were %q unmarked and %q marked, want the request alone, unmarked", before, after)
+			}
+			// The FIN was numbered as the relay read it: before the relay
+			// forwarded it, and, with half-close off, where it forwards
+			// nothing, before the relay returned. (ClientClosed numbers it
+			// once, and gives that number again.)
+			if grace < 0 {
+				if probe != 0 {
+					t.Fatal("the relay forwarded the FIN with half-close off")
+				}
+				probe = h.r.order.FromClient()
+			} else if probe == 0 {
+				t.Fatal("the relay did not forward the client's FIN")
+			}
+			if fin := h.r.order.ClientClosed(); !(fakeconn.Chunk{ConnSeq: fin}).CapturedBefore(probe) {
+				t.Fatalf("the client's FIN is numbered %d, not before %d, taken as the relay forwarded it (or returned)", fin, probe)
+			}
+		})
+	}
+}
+
+// closeWriteProbe is a destination conn over an Upstream that calls
+// onCloseWrite as the relay half-closes it, before the Upstream does. It
+// exposes the Upstream (NetConn), so the relay numbers through it.
+type closeWriteProbe struct {
+	*connseq.Upstream
+	onCloseWrite func()
+}
+
+func (c *closeWriteProbe) NetConn() net.Conn { return c.Upstream }
+
+func (c *closeWriteProbe) CloseWrite() error {
+	c.onCloseWrite()
+	return c.Upstream.CloseWrite()
 }
 
 // The bound is what keeps the original protection: a peer that answers

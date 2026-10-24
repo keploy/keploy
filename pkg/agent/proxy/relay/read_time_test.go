@@ -104,6 +104,29 @@ func upgradedSideThrough(t *testing.T, dest bool, layer func(net.Conn) net.Conn)
 // socket through src (newHarnessOver).
 func upgradedSideOver(t *testing.T, dest bool, src, layer func(net.Conn) net.Conn) *relayHarness {
 	t.Helper()
+	h := upgradedSideUndrainedOver(t, dest, src, layer)
+	// The forwarder writes each chunk on before it tees it, and a pipe's
+	// Write waits for its reader: the far end takes whatever comes.
+	far := h.destSvc
+	if dest {
+		far = h.clientApp
+	}
+	go func() { _, _ = io.Copy(io.Discard, far) }()
+	return h
+}
+
+// upgradedSideUndrained is upgradedSideThrough with the far end of the
+// upgraded side left to the row: nothing reads it, so the forwarder's Write
+// of what the layer hands on waits until the row reads.
+func upgradedSideUndrained(t *testing.T, dest bool, layer func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
+	return upgradedSideUndrainedOver(t, dest, nil, layer)
+}
+
+// upgradedSideUndrainedOver is upgradedSideUndrained with the relay reading
+// the client's socket through src (newHarnessOver).
+func upgradedSideUndrainedOver(t *testing.T, dest bool, src, layer func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
 	h := newHarnessOver(t, Config{TLSUpgradeFn: func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
 		// isClient: the relay is the TLS client, on the destination side.
 		if isClient != dest {
@@ -124,13 +147,6 @@ func upgradedSideOver(t *testing.T, dest bool, src, layer func(net.Conn) net.Con
 	case <-time.After(30 * time.Second):
 		t.Fatal("no ack for the TLS upgrade")
 	}
-	// The forwarder writes each chunk on before it tees it, and a pipe's
-	// Write waits for its reader: the far end takes whatever comes.
-	far := h.destSvc
-	if dest {
-		far = h.clientApp
-	}
-	go func() { _, _ = io.Copy(io.Discard, far) }()
 	return h
 }
 
@@ -333,8 +349,13 @@ func TestWatermark_HoldsAReadTheTLSLayerIsStillStamping(t *testing.T) {
 	if h.r.teeC2D.progress.first.Load() != 0 || h.r.teeD2C.progress.first.Load() != 0 {
 		t.Fatal("the connection read a chunk before the layer's read: the row needs one that has read nothing yet")
 	}
-	if h.r.carriedNothingIn(start.UnixNano(), end.UnixNano()) {
-		t.Error("carriedNothingIn: true on a connection whose TLS layer holds bytes it is stamping")
+	if h.r.carriedNothingIn(start.UnixNano(), end.UnixNano(), unstampedInAnyWindow) {
+		t.Error("carriedNothingIn: true, in the verdict's view, on a connection whose TLS layer holds bytes it is stamping")
+	}
+	// HeldProgress's view passes over a mark not stamped yet, and this
+	// connection has no stamp anywhere else.
+	if !h.r.carriedNothingIn(start.UnixNano(), end.UnixNano(), stampsOnly) {
+		t.Error("carriedNothingIn: false, in HeldProgress's view, on a connection with no stamp yet")
 	}
 	if w.Settled("", "", start, end) {
 		t.Error("Settled: true for a window over bytes the TLS layer is stamping")

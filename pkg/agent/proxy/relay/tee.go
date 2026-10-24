@@ -191,6 +191,19 @@ type tee struct {
 	// closed is set by close(); push refuses afterwards and drain exits
 	// once q is empty.
 	closed bool
+	// awaiting is the destination chunks the forwarder wrote to a client
+	// after its FIN that wait for the client's answer before they are
+	// pushed or refused (client_took.go), oldest first. They are newer than
+	// every chunk on q, and count as unconsumed for the capture watermark
+	// (oldestUnconsumed). They are not counted against the tee's cap or
+	// memory check until they are pushed, which is where a chunk dropped for
+	// either is stamped: when the client's answer came. What waits is
+	// bounded by what the client's socket takes before the client answers:
+	// a client that reads acknowledges within a delayed acknowledgement
+	// (sooner for bulk data), a closed one resets on the first chunk, and
+	// for one that answers nothing the forwarder's Write blocks once the
+	// socket's send buffer is full.
+	awaiting []fakeconn.Chunk
 
 	// wake is a capacity-1 doorbell. push signals it non-blockingly after
 	// appending; drain waits on it when q is empty. A signal can be
@@ -758,6 +771,50 @@ func (t *tee) close() {
 		// Wake a drain parked on an empty queue so it can observe closed.
 		close(t.shutdown)
 	})
+}
+
+// await sets c aside until the client's answer decides it (client_took.go):
+// it is neither queued nor refused yet, and the capture watermark counts it as
+// unconsumed. Called on the forwarder, which still holds c (its held stamp),
+// so a look that misses it here finds it held.
+func (t *tee) await(c fakeconn.Chunk) {
+	t.mu.Lock()
+	t.awaiting = append(t.awaiting, c)
+	t.mu.Unlock()
+}
+
+// awaitingLen is how many chunks wait for the client's answer.
+func (t *tee) awaitingLen() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.awaiting)
+}
+
+// firstAwaiting is the oldest chunk waiting for the client's answer; ok is
+// false when none is.
+func (t *tee) firstAwaiting() (c fakeconn.Chunk, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.awaiting) == 0 {
+		return fakeconn.Chunk{}, false
+	}
+	return t.awaiting[0], true
+}
+
+// doneAwaiting lets go of the oldest chunk waiting for the client's answer,
+// once it was pushed (it is on the queue now) or refused. The backing array
+// is let go of with the last one.
+func (t *tee) doneAwaiting() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.awaiting) == 0 {
+		return
+	}
+	t.awaiting[0] = fakeconn.Chunk{}
+	t.awaiting = t.awaiting[1:]
+	if len(t.awaiting) == 0 {
+		t.awaiting = nil
+	}
 }
 
 // waitDone blocks until the drain goroutine has exited. Used by the relay
