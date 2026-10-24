@@ -64,7 +64,10 @@ func (t *Tools) Normalize(ctx context.Context) error {
 func (t *Tools) normalizeTestSet(ctx context.Context, testRun string, testSet config.SelectedTests) error {
 	testSetID := testSet.TestSet
 	testCases := testSet.Tests
-	rw := testdb.BeginSetRewrite(t.logger, t.config.Path, testSetID)
+	rw, err := testdb.BeginSetRewrite(t.logger, t.config.Path, testSetID)
+	if err != nil {
+		return err
+	}
 	defer rw.Done()
 	// Check if test set is sanitized (has secret.yaml)
 	// If yes, desanitize before normalization

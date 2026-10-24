@@ -870,6 +870,26 @@ func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 		if m := MarkExit([]Reached{{PID: os.Getpid(), Start: st.StartTime}}); m.Running != 1 || m.Threads == 0 {
 			t.Fatalf("this process read as %+v", m)
 		}
+		// Its threads are its count of them (processThreads), not a
+		// listing, which can leave out one that runs.
+		count := processThreads
+		t.Cleanup(func() { processThreads = count })
+		processThreads = func(pid int) int {
+			if pid != os.Getpid() {
+				t.Errorf("threads counted of %d; want only this process's (%d)", pid, os.Getpid())
+			}
+			return 4242
+		}
+		if m := MarkExit([]Reached{{PID: os.Getpid(), Start: st.StartTime}}); m.Threads != 4242 {
+			t.Fatalf("this process's threads: %d; want 4242, its count", m.Threads)
+		}
+		processThreads = count
+	}
+	if n := processThreads(os.Getpid()); n == 0 {
+		t.Fatal("this process counts no threads")
+	}
+	if n := processThreads(1<<22 + 1); n != 0 {
+		t.Fatalf("a pid beyond pid_max counts %d threads; want 0", n)
 	}
 }
 
