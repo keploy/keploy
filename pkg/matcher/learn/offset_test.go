@@ -1928,3 +1928,83 @@ func TestAnExchangeWithNoRecordedTimeIsReadBothWays(t *testing.T) {
 		}
 	}
 }
+
+// A recording F served in the test before the call whose recorded time
+// keploy cannot read (the zero time) is read both ways, as an exchange served
+// leaf by leaf is (TestAnExchangeWithNoRecordedTimeIsReadBothWays): the
+// record cannot show it was given to the recorded application before the
+// call or after it, so it is read as one made at the call's own instant, and
+// refused where either reading refuses. A minute F's run rounded from what F
+// served there (15:50:40 to 15:51, recorded 15:50) names both moments read
+// as an earlier place, yet copies what F served read as one made after the
+// call: refused, naming the recording and saying keploy cannot read when it
+// was recorded, beside the own place or not. What names the recorded minute
+// alone (15:50:10) is noise. Each verdict is the one the same recording made
+// at the call's own instant gets, served or not.
+func TestARecordingWithNoRecordedTimeIsReadBothWays(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
+	base := recT.Truncate(time.Minute)
+	for _, f := range []struct {
+		name string
+		sent string
+		copy bool
+	}{
+		{"15:50:40, rounded to F's minute", base.Add(40 * time.Second).Format(time.RFC3339), true},
+		{"15:51:05, cut to F's minute", base.Add(65 * time.Second).Format(time.RFC3339), true},
+		{"15:50:10, the recorded minute alone", base.Add(10 * time.Second).Format(time.RFC3339), false},
+	} {
+		for _, mode := range []string{"served", "not served", "not served in the test, given earlier in the set"} {
+			served := mode == "served"
+			for _, withOwn := range []bool{false, true} {
+				name := f.name + ", " + mode
+				var ownRaw []Raw
+				if withOwn {
+					name += ", beside the own place"
+					ownRaw = []Raw{RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)}
+				}
+				nb := func(rat time.Time) []Raw {
+					x := RawOf(sentAtReceive("mock-44", rat, f.sent), served)
+					if served {
+						x = x.ServedAs(1)
+					}
+					return append([]Raw{x}, ownRaw...)
+				}
+				read := func(rat time.Time) Learned {
+					var given GivenEarlier
+					if mode != "served" && mode != "not served" {
+						given = func() ([]GivenPlaces, error) {
+							return []GivenPlaces{PlacesOf(RawOf(sentAtReceive("mock-44", rat, f.sent), true).ServedAs(1))}, nil
+						}
+					}
+					return ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, nil, nb(rat), nil, nil, given)[0]
+				}
+				got, twin := read(time.Time{}), read(at)
+				if got.Kind != twin.Kind {
+					t.Errorf("%s: %s (%s); the same recording made at the call's own instant is %s (%s)", name, got.Kind, got.Why, twin.Kind, twin.Why)
+				}
+				if !served {
+					continue
+				}
+				if !f.copy {
+					if !withOwn && got.Kind != KindNoise {
+						t.Errorf("%s: %s (%s); want noise", name, got.Kind, got.Why)
+					}
+					continue
+				}
+				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44") {
+					t.Errorf("FALSE GREEN? %s: %s (%s); want it refused, naming mock-44", name, got.Kind, got.Why)
+				}
+				// Read as an earlier place, 15:50:40 names both moments:
+				// only the reading as one made after the call refuses it,
+				// and says why.
+				if f.sent == base.Add(40*time.Second).Format(time.RFC3339) && !withOwn && !strings.Contains(got.Why, "recorded at a time keploy cannot read, so keploy reads it as given to the application before the call, yet may as well have been made after the call, so keploy reads it both ways") {
+					t.Errorf("%s: %s; want the reason to say keploy cannot read when mock-44 was recorded, so it reads it both ways", name, got.Why)
+				}
+			}
+		}
+	}
+}

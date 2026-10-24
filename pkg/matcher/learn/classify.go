@@ -598,6 +598,7 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 	}
 	given = givenOnce(given)
 	earlier = timedEarlier(earlier, at)
+	raw = timedRaw(raw, at)
 	earlier, raw = leafedAfterCall(earlier, raw, at)
 	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
 	late, ok := givenAtCall(raw, at, given)
@@ -674,6 +675,33 @@ func timedEarlier(earlier []Earlier, at time.Time) []Earlier {
 	}
 	if out == nil {
 		return earlier
+	}
+	return out
+}
+
+// timedRaw is raw with each recording of the call's own test whose recorded
+// time keploy cannot read (the zero time) read as one made at the call's own
+// instant (at), and marked so (noTime), as timedEarlier reads an exchange
+// served leaf by leaf: the record cannot show it was given to the recorded
+// application before the call or after it, so it is read both ways
+// (givenAtCall), refused where either reading refuses, and a reason naming
+// it says keploy cannot read when it was recorded. A recording of another
+// test's (OfAnotherTest) is no place of the call's own test in either
+// reading, and stays. raw is returned as it is where there is none.
+func timedRaw(raw []Raw, at time.Time) []Raw {
+	var out []Raw
+	for i, x := range raw {
+		if x.elsewhere || x.noTime || !x.at.IsZero() || at.IsZero() {
+			continue
+		}
+		if out == nil {
+			out = append([]Raw(nil), raw...)
+		}
+		x.at, x.noTime = at, true
+		out[i] = x
+	}
+	if out == nil {
+		return raw
 	}
 	return out
 }
@@ -837,9 +865,12 @@ func givenOnce(given GivenEarlier) GivenEarlier {
 // application before the call (served in the test or before it: Raw.served;
 // or anywhere earlier in the running set: given lists it) read as a
 // recording made at or after the call is (OfAnotherTest), and whether there
-// was one. The set is read only where such a place was not handed as served,
-// and where it cannot be read, the place is taken as one F gave, the
-// fail-closed side: the second reading then refuses what reaches the set.
+// was one. One whose recorded time keploy cannot read (timedRaw) is such a
+// place, and is looked up in the set by the time its mock was recorded with
+// (the zero time), as the set lists it. The set is read only where such a
+// place was not handed as served, and where it cannot be read, the place is
+// taken as one F gave, the fail-closed side: the second reading then refuses
+// what reaches the set.
 func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
 	var (
 		out     []Raw
@@ -864,7 +895,7 @@ func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
 					gave[g.mock+"\x00"+g.at.String()] = true
 				}
 			}
-			if !gaveAll && !gave[x.mock+"\x00"+x.at.String()] {
+			if !gaveAll && !gave[x.mock+"\x00"+x.recordedAt().String()] {
 				continue
 			}
 		}

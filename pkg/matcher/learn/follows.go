@@ -221,6 +221,14 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 	}
 	if why != "" {
 		lead := fol.first
+		// No call reaches this today, and no row does: refute sets a source
+		// aside only where F served it as recorded, the recording gave it
+		// before the call and F's value is not in it, and the word rule
+		// then reads the same word at the same place on the same terms
+		// (excused), so it lets the word go there and sets first before a
+		// value is learned as noise. Should the two searches ever part, the
+		// refusal still names the source set aside (fail closed), and the
+		// echo's refusal in classifyRead does the same.
 		if lead == "" {
 			lead = fol.refuted
 		}
