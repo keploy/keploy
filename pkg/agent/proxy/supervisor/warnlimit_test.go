@@ -3,6 +3,7 @@ package supervisor
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -112,8 +113,89 @@ func TestWarnLimitersAllowOrBoundHoldsUnderRacingCallers(t *testing.T) {
 			}
 			return true
 		})
-		if kinds != maxOpenKinds || ls.open.Load() != maxOpenKinds {
-			t.Fatalf("round %d: %d keys kept apart (%d counted), want %d", round, kinds, ls.open.Load(), maxOpenKinds)
+		if kinds != maxOpenKinds || ls.open != maxOpenKinds {
+			t.Fatalf("round %d: %d keys kept apart (%d counted), want %d", round, kinds, ls.open, maxOpenKinds)
 		}
+	}
+}
+
+// A key one caller is still adding takes no room from another key: with room
+// left for two more kinds, a key two callers add at once takes one of them,
+// and a third caller's new key takes the other. And a caller that finds the
+// last room taken by a key it is adding too is limited as that key, not as
+// overflow. The first caller is held as it goes to add its key, while the
+// others call.
+func TestWarnLimitersAllowOrAKeyBeingAddedTakesItsRoomOnce(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		room int    // kinds left to add before the bound
+		next string // the third caller's new key, after the other two
+		want string // the kind it is limited as
+	}{
+		{name: "two rooms: the next key gets the other", room: 2, next: "m", want: "m"},
+		{name: "one room: the next key is overflow", room: 1, next: "m", want: "overflow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clock := time.Unix(1_000, 0)
+			ls := &WarnLimiters{every: time.Minute, now: func() time.Time { return clock }}
+			for i := 0; i < maxOpenKinds-tc.room; i++ {
+				ls.AllowOr(fmt.Sprintf("key-%d", i), "overflow")
+			}
+			held, release := make(chan struct{}), make(chan struct{})
+			releaseFirst := sync.OnceFunc(func() { close(release) })
+			t.Cleanup(releaseFirst) // a failed row does not leave the first caller held
+			var first atomic.Bool
+			ls.adding = func(key string) {
+				if key == "k" && first.CompareAndSwap(false, true) {
+					close(held)
+					<-release
+				}
+			}
+			type result struct {
+				ok   bool
+				kind string
+			}
+			firstDone := make(chan result, 1)
+			go func() {
+				ok, _, kind := ls.AllowOr("k", "overflow")
+				firstDone <- result{ok, kind}
+			}()
+			<-held
+
+			if ok, _, kind := ls.AllowOr("k", "overflow"); !ok || kind != "k" {
+				t.Fatalf("the second caller of k, beside the first: AllowOr = (%v, %q), want (true, %q)", ok, kind, "k")
+			}
+			if tc.room > 1 {
+				if _, _, kind := ls.AllowOr(tc.next, "overflow"); kind != tc.want {
+					t.Fatalf("a new key %q while k is being added: limited as %q, want %q", tc.next, kind, tc.want)
+				}
+			}
+			releaseFirst()
+			if r := <-firstDone; r.ok || r.kind != "k" {
+				t.Fatalf("the first caller of k: AllowOr = (%v, %q), want (false, %q): held back behind the second's", r.ok, r.kind, "k")
+			}
+			if tc.room == 1 {
+				if _, _, kind := ls.AllowOr(tc.next, "overflow"); kind != tc.want {
+					t.Fatalf("a new key %q once k took the last room: limited as %q, want %q", tc.next, kind, tc.want)
+				}
+			}
+
+			clock = clock.Add(time.Minute)
+			if ok, heldBack, kind := ls.AllowOr("k", "overflow"); !ok || heldBack != 1 || kind != "k" {
+				t.Fatalf("k past the interval: AllowOr = (%v, %d, %q), want (true, 1, %q): the first caller's is counted under k", ok, heldBack, kind, "k")
+			}
+			kinds := 0
+			ls.kinds.Range(func(k, _ any) bool {
+				if k != "overflow" {
+					kinds++
+				}
+				return true
+			})
+			if kinds != maxOpenKinds {
+				t.Fatalf("%d keys kept apart, want %d", kinds, maxOpenKinds)
+			}
+		})
 	}
 }

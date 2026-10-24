@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -27,8 +26,16 @@ type WarnLimiters struct {
 	now   func() time.Time // time.Now; tests set it
 	kinds sync.Map         // key -> *warnLimiter
 
-	// open counts the kinds AllowOr has added, up to maxOpenKinds.
-	open atomic.Int64
+	// addMu is held while AllowOr adds a kind. open counts the kinds it has
+	// added, up to maxOpenKinds, and changes only under addMu, as each is
+	// stored: a caller adding a key another caller adds at the same time
+	// counts it once, and holds no room while it decides.
+	addMu sync.Mutex
+	open  int
+
+	// adding, when set (tests), runs as AllowOr finds key unseen and goes to
+	// add it.
+	adding func(key string)
 }
 
 // maxOpenKinds is how many kinds AllowOr keeps apart in one WarnLimiters.
@@ -59,19 +66,31 @@ func (ls *WarnLimiters) Allow(key string) (ok bool, heldBack uint64) {
 // It returns the kind the warning was limited as.
 func (ls *WarnLimiters) AllowOr(key, overflow string) (ok bool, heldBack uint64, kind string) {
 	if _, found := ls.kinds.Load(key); !found {
-		switch {
-		case ls.open.Add(1) > maxOpenKinds:
-			ls.open.Add(-1)
-			key = overflow
-		default:
-			if _, loaded := ls.kinds.LoadOrStore(key, &warnLimiter{}); loaded {
-				// Another caller added it first, and counted it.
-				ls.open.Add(-1)
-			}
-		}
+		key = ls.addOpen(key, overflow)
 	}
 	ok, heldBack = ls.Allow(key)
 	return ok, heldBack, key
+}
+
+// addOpen gives key, which AllowOr has not found, a kind of its own while
+// fewer than maxOpenKinds are kept, and returns the kind to limit it as: key,
+// or overflow once the bound is reached. It looks again under addMu, so a key
+// another caller added meanwhile is limited as itself, and counted once.
+func (ls *WarnLimiters) addOpen(key, overflow string) string {
+	if ls.adding != nil {
+		ls.adding(key)
+	}
+	ls.addMu.Lock()
+	defer ls.addMu.Unlock()
+	if _, found := ls.kinds.Load(key); found {
+		return key
+	}
+	if ls.open >= maxOpenKinds {
+		return overflow
+	}
+	ls.kinds.Store(key, &warnLimiter{})
+	ls.open++
+	return key
 }
 
 // Reset forgets every warning let through and held back so far (tests). The
