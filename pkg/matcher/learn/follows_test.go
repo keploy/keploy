@@ -266,3 +266,63 @@ func TestAWordBothRoundsHeldIsRefusedWhereOnlyTheConfirmingRoundFindsIt(t *testi
 		t.Errorf(`"82 1" at record, "16 1" in F, "4 1 1" in C beside SELECT 1: %s (%q), want refused naming mock-1`, got.Kind, got.Why)
 	}
 }
+
+// eAnswer is a start-up recording made before at that answers one row, the
+// word word: a place whose word the application may copy.
+func eAnswer(name string, before time.Duration, word string) Raw {
+	return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: eRecAt.Add(-before),
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: "SELECT next_slot FROM " + name, Response: &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: word}}}, CommandComplete: "SELECT 1"},
+		}},
+	}}, false)
+}
+
+// An application that copies the last answer it got takes a different word
+// in each round where the rounds served the same answers in another order:
+// mock-a answers 7 and mock-b 9; record served a then b and recorded "slot
+// 9". F served b then a and saw "slot 7", C served a then b and saw "slot
+// 9": each round shows
+// the value no copy of the word the other took, yet it is a copy in both.
+// Noise only where both rounds served the same places in the same order;
+// otherwise refused, saying why. Each subcase was noise before.
+func TestAConfirmingRoundThatServedTheEarlierAnswersInAnotherOrderRefuses(t *testing.T) {
+	a := eAnswer("mock-a", 300*time.Millisecond, "7")
+	b := eAnswer("mock-b", 200*time.Millisecond, "9")
+	const diff = "the rounds served the earlier answers in a different order, so keploy cannot tell a copy from a varying value"
+	for _, tc := range []struct {
+		name       string
+		f, c       []Raw
+		fLive      string
+		cLive      string
+		want, also string
+	}{
+		{"F served b then a, C a then b", []Raw{a.ServedAs(2), b.ServedAs(1)}, []Raw{a.ServedAs(1), b.ServedAs(2)}, "7", "9", diff, "the 1st earlier answer was mock-b in record's full round and mock-a in the confirming round"},
+		{"F served a, b and a again; C a then b", []Raw{a.ServedIn(1, 3), b.ServedAs(2)}, []Raw{a.ServedAs(1), b.ServedAs(2)}, "7", "9", diff, "the confirming round gave 2 earlier answers, record's full round more"},
+		{"F served a and b in an order keploy does not number", []Raw{a.WithServed(true), b.ServedAs(1)}, []Raw{a.ServedAs(1), b.ServedAs(2)}, "7", "9", "keploy does not know where record's full round served mock-a among the other earlier answers it served, so keploy cannot tell a copy from a varying value", ""},
+		{"C served a and b in an order keploy does not number", []Raw{a.ServedAs(2), b.ServedAs(1)}, []Raw{a.ServedAs(1), b.WithServed(true)}, "7", "9", "keploy does not know where the confirming round served mock-b among the other earlier answers it served, so keploy cannot tell a copy from a varying value", ""},
+		{"F served a twice with a serve keploy cannot place between", []Raw{a.ServedIn(1, 3), b.ServedAs(4)}, []Raw{a.ServedIn(1, 3), b.ServedAs(4)}, "7", "9", "record's full round served mock-a more than once, with a serve between that is no earlier answer's, which keploy cannot place, so keploy cannot tell a copy from a varying value", ""},
+	} {
+		got := classifyRounds(t, "bind.$8", "slot 82", eRecAt, []eRound{{name: "F", live: "slot " + tc.fLive, raw: tc.f}, {name: "C", live: "slot " + tc.cLive, raw: tc.c}})
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) || !strings.Contains(got.Why, tc.also) || !strings.Contains(got.Why, "appears in an earlier recording, in mock-") {
+			t.Errorf("FALSE GREEN? %s, slot 82 at record, slot %s in F, slot %s in C: %s (%q), want refused: %q (%q)", tc.name, tc.fLive, tc.cLive, got.Kind, got.Why, tc.want, tc.also)
+		}
+	}
+	// The control: the same places served in the same order in both rounds
+	// (numbered apart: other serves of the set between them), and values
+	// that differ, are a varying value (a copy follows its source).
+	for _, tc := range []struct {
+		name string
+		f, c []Raw
+	}{
+		{"both served a then b", []Raw{a.ServedAs(1), b.ServedAs(2)}, []Raw{a.ServedAs(1), b.ServedAs(2)}},
+		{"both served a then b, numbered apart", []Raw{a.ServedAs(3), b.ServedAs(5)}, []Raw{a.ServedAs(10), b.ServedAs(12)}},
+		{"both served a, b and a again", []Raw{a.ServedIn(1, 3), b.ServedAs(2)}, []Raw{a.ServedIn(4, 6), b.ServedAs(5)}},
+		{"neither round served them (the recording's order)", []Raw{a, b}, []Raw{a, b}},
+	} {
+		got := classifyRounds(t, "bind.$8", "slot 82", eRecAt, []eRound{{name: "F", live: "slot 7", raw: tc.f}, {name: "C", live: "slot 9", raw: tc.c}})
+		if got.Kind != KindNoise {
+			t.Errorf("%s, slot 82 at record, slot 7 in F, slot 9 in C: %s (%q), want noise", tc.name, got.Kind, got.Why)
+		}
+	}
+}

@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"fmt"
+	"sort"
 	"time"
 )
 
@@ -54,6 +56,12 @@ type Pending struct {
 	// before it (Earlier.Seen), each with the value it saw there.
 	Raw  []string       `json:"raw,omitempty" yaml:"raw,omitempty"`
 	Seen []PendingPlace `json:"seen,omitempty" yaml:"seen,omitempty"`
+	// Order is the places record's full round gave the application before
+	// the call, in the order it gave them (givenOrder); Untold, where that
+	// order cannot be told, says why. The confirming round learns noise only
+	// where it gave the same places in the same order.
+	Order  []string `json:"order,omitempty" yaml:"order,omitempty"`
+	Untold string   `json:"untold,omitempty" yaml:"untold,omitempty"`
 }
 
 // PendingWord is one word the word rule found at an earlier place in a
@@ -237,7 +245,147 @@ func pendingWhy(w PendingWord) string {
 // call it: a pending reading answered and never decided is a pass nothing
 // judged.
 func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, followF, nil)
+	out := classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, followF, nil)
+	for _, ln := range out {
+		if ln.Pending != nil {
+			ln.Pending.Order, ln.Pending.Untold = givenOrder(at, earlier, raw, "record's full round")
+		}
+	}
+	return out
+}
+
+// givenOrder is the places a round gave the application before a call
+// recorded at at, in the order it gave them: the test case's request first;
+// then the recordings no round served (read as places the recording shows
+// the application was given: the same in every round), in the order they
+// were recorded; then what the round served, in the one order it served the
+// set's mocks in (Raw.ServedIn, the first and the last of each mock's
+// serves; an exchange's by its payload's, InServeOrder). untold, where that
+// order cannot be told, says why, naming the round: a served place the
+// order does not number, beside another the round served (two serves the
+// round gave in an order keploy cannot establish are unordered, never
+// ordered by when keploy noted them), or a mock served more than once with
+// a serve between its first and its last that is no place's (it may have
+// been that mock's own, unnumbered).
+//
+// An application that copies an answer by its position (the last one it
+// got) takes a different word in each round where the rounds gave the same
+// answers in another order, and each round shows the value no copy of the
+// word the other took: the order is what tells that copy from a varying
+// value (Pending.Decide).
+func givenOrder(at time.Time, earlier []Earlier, raw []Raw, round string) (order []string, untold string) {
+	type serve struct {
+		n    int
+		mock string
+	}
+	type span struct {
+		first, last int
+		mock        string
+	}
+	var fixed []Raw
+	var serves []serve
+	var spans []span
+	unordered := ""
+	placed := 0
+	add := func(mock string, first, last int) {
+		placed++
+		if first == 0 {
+			unordered = mock
+			return
+		}
+		serves = append(serves, serve{first, mock})
+		if last != first {
+			serves = append(serves, serve{last, mock})
+			spans = append(spans, span{first, last, mock})
+		}
+	}
+	for _, e := range earlier {
+		switch {
+		case e.Given:
+			order = append(order, "the test case's request")
+		case e.Payload.Read():
+			add(e.Mock, e.Payload.first, e.Payload.last)
+		default:
+			add(e.Mock, 0, 0)
+		}
+	}
+	for _, x := range raw {
+		switch {
+		case !x.earlierThan(at):
+		case !x.served:
+			fixed = append(fixed, x)
+		default:
+			add(x.mock, x.first, x.last)
+		}
+	}
+	if unordered != "" && placed > 1 {
+		return nil, "keploy does not know where " + round + " served " + unordered + " among the other earlier answers it served"
+	}
+	sort.SliceStable(serves, func(i, j int) bool {
+		if serves[i].n != serves[j].n {
+			return serves[i].n < serves[j].n
+		}
+		return serves[i].mock < serves[j].mock
+	})
+	var nums []int
+	for _, v := range serves {
+		if len(nums) == 0 || nums[len(nums)-1] != v.n {
+			nums = append(nums, v.n)
+		}
+	}
+	for _, s := range spans {
+		// The serves strictly between s's first and last that some place's
+		// first or last numbers: fewer than the numbers between leaves a
+		// serve keploy cannot place, which may be s's mock's own.
+		between := sort.SearchInts(nums, s.last) - sort.SearchInts(nums, s.first+1)
+		if between < s.last-s.first-1 {
+			return nil, round + " served " + s.mock + " more than once, with a serve between that is no earlier answer's, which keploy cannot place"
+		}
+	}
+	sort.SliceStable(fixed, func(i, j int) bool {
+		if !fixed[i].at.Equal(fixed[j].at) {
+			return fixed[i].at.Before(fixed[j].at)
+		}
+		return fixed[i].mock < fixed[j].mock
+	})
+	for _, x := range fixed {
+		order = append(order, x.mock)
+	}
+	for _, v := range serves {
+		order = append(order, v.mock)
+	}
+	return order, ""
+}
+
+// orderDiff says where two rounds' orders of the places they gave the
+// application (givenOrder) first differ; "" where they do not.
+func orderDiff(f, c []string) string {
+	for i := 0; i < len(f) || i < len(c); i++ {
+		switch {
+		case i >= len(f):
+			return fmt.Sprintf("record's full round gave %d earlier answers, the confirming round more", len(f))
+		case i >= len(c):
+			return fmt.Sprintf("the confirming round gave %d earlier answers, record's full round more", len(c))
+		case f[i] != c[i]:
+			return fmt.Sprintf("the %s earlier answer was %s in record's full round and %s in the confirming round", ordinal(i+1), f[i], c[i])
+		}
+	}
+	return ""
+}
+
+// ordinal is n as an English ordinal: 1st, 2nd, 3rd, 4th, 11th, 21st.
+func ordinal(n int) string {
+	suffix := "th"
+	switch {
+	case n%100 >= 11 && n%100 <= 13:
+	case n%10 == 1:
+		suffix = "st"
+	case n%10 == 2:
+		suffix = "nd"
+	case n%10 == 3:
+		suffix = "rd"
+	}
+	return fmt.Sprintf("%d%s", n, suffix)
 }
 
 // Decide is the confirming round's verdict on a drift record's full round
@@ -286,6 +434,21 @@ func (p *Pending) Decide(dc *DriftCache, live, rec Leaf, at time.Time, earlier [
 			return refuse(w.Why + "; the confirming round did not give the application that word there before the call, so it cannot show the value does not follow it")
 		}
 		return refuse(w.Why + "; the confirming round's value held that word too, where the place still gave it, so keploy cannot tell the value does not follow it")
+	}
+	// A copy by position (the last answer the application got) takes
+	// another word in a round that gave the answers in another order, and
+	// each round shows it no copy of the other's: noise only where both
+	// rounds gave the same places in the same order (givenOrder), so the
+	// word's source stands at the same position in each.
+	order, untold := givenOrder(at, earlier, raw, "the confirming round")
+	switch {
+	case p.Untold != "":
+		return refuse(first.Why + "; " + p.Untold + ", so keploy cannot tell a copy from a varying value")
+	case untold != "":
+		return refuse(first.Why + "; " + untold + ", so keploy cannot tell a copy from a varying value")
+	}
+	if d := orderDiff(p.Order, order); d != "" {
+		return refuse(first.Why + "; the rounds served the earlier answers in a different order, so keploy cannot tell a copy from a varying value (" + d + ")")
 	}
 	return Learned{Kind: KindNoise, Recorded: rec, Live: live}
 }

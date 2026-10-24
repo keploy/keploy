@@ -1606,12 +1606,25 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 			if got != tc.atCall || tc.why != "" && !strings.Contains(why, tc.why) {
 				t.Errorf("FALSE GREEN? %s, %s, recorded at the call's own instant: %s (%s); want %s, the stricter of both readings: %q", tc.name, hand, got, why, tc.atCall, tc.why)
 			}
+			// Where the earlier place's reading binds the value (beside
+			// the own place) and the late one refuses it, the value is
+			// refused (fail closed), and the reason says where the first
+			// reading would have bound it; elsewhere it names no binding.
+			bindsAt := map[string]string{
+				"F's minute and more, beside the own place":       "mock-42 at spec.resp.body",
+				"the recorded minute alone, beside the own place": "mock-44 at spec.resp.body (" + atCallWords,
+			}[tc.name]
+			if says := strings.Contains(why, "; read as a recording made before the call, the value would be a variable bound at "+bindsAt) && strings.HasSuffix(why, ", yet keploy refuses a value either reading refuses"); says != (bindsAt != "") {
+				t.Errorf("%s, %s, recorded at the call's own instant: %q; want it to name the earlier place's binding at %q: %v", tc.name, hand, why, bindsAt, bindsAt != "")
+			}
 		}
 	}
 	// The set cannot be read: an unserved recording at the call's own
 	// instant may be one F gave, so it is read both ways, and the second
 	// reading refuses with the set's error what reaches the set, where the
-	// first binds the value to the own place without reading the set.
+	// first binds the value to the own place without reading the set. A
+	// value one reading binds and the other refuses is refused (fail
+	// closed), and the reason says where the first would have bound it.
 	dc := NewDriftCache()
 	raw := []Raw{
 		dc.RawOf(sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339)), false),
@@ -1620,7 +1633,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	ln := ClassifyGiven(dc, []string{p}, live, rec, at, nil, raw, nil, nil, func() ([]GivenPlaces, error) {
 		return nil, errors.New("disk gone")
 	})[0]
-	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "disk gone") {
-		t.Errorf("FALSE GREEN? the set unread, an unserved recording at the call's own instant beside the own place: %s (%s); want it refused with the set's error", ln.Kind, ln.Why)
+	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "disk gone") || !strings.Contains(ln.Why, "; read as a recording made before the call, the value would be a variable bound at mock-44 at ") || !strings.HasSuffix(ln.Why, ", yet keploy refuses a value either reading refuses") {
+		t.Errorf("FALSE GREEN? the set unread, an unserved recording at the call's own instant beside the own place: %s (%s); want it refused with the set's error, saying the earlier place's reading binds it", ln.Kind, ln.Why)
 	}
 }

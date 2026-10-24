@@ -4097,8 +4097,11 @@ func TestLearnMatchAServedRecordingAtTheCallsOwnInstantGetsTheVerdictOfOneAMomen
 				// variable this protocol cannot bind yet), the reading as a
 				// recording made after the call refuses it on its own, and
 				// its reason says the recording is read both ways
-				// (TestLearnMatchAServedRecordingAtTheCallsOwnInstantIsReadBothWays).
-				late := strings.Contains(beforeWhy, "keploy follows it as a value from there") && strings.Contains(equalWhy, " changed, and a word of its recorded value") && strings.Contains(equalWhy, "appears in mock-2, a recording record's full round gave the application before the call that was recorded at the call's own instant, so keploy reads it as given to the application before the call, yet may as well have been made after the call, so keploy reads it both ways")
+				// (TestLearnMatchAServedRecordingAtTheCallsOwnInstantIsReadBothWays),
+				// and where the first reading would have bound it: either
+				// reading refusing refuses the value (fail closed).
+				late := strings.Contains(beforeWhy, "keploy follows it as a value from there") && strings.Contains(equalWhy, " changed, and a word of its recorded value") && strings.Contains(equalWhy, "appears in mock-2, a recording record's full round gave the application before the call that was recorded at the call's own instant, so keploy reads it as given to the application before the call, yet may as well have been made after the call, so keploy reads it both ways") &&
+					strings.Contains(equalWhy, "; read as a recording made before the call, the value would be a variable bound at mock-2 ") && strings.HasSuffix(equalWhy, ", yet keploy refuses a value either reading refuses")
 				if want == beforeWhy || equalWhy != want && !late {
 					t.Errorf("%s, recorded at the call's own instant: %q; want what one recorded a moment before gets, saying the instant: %q, or, read as made after the call too, its refusal", name, equalWhy, want)
 				}

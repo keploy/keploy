@@ -469,7 +469,9 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // another (15:50:40, rounded and cut to the minute) is the place both runs
 // were given, so no copy, and the value would be learned as noise, while the
 // same recording read as made after the call shows F's copy of what it
-// served there, and refuses it.
+// served there, and refuses it. A value the first reading binds (a variable
+// or an echo) and the second refuses is refused too, and its reason names
+// where the first would have bound it (stricterOf): fail closed.
 func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, mode followMode, pending *Pending) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
@@ -557,11 +559,34 @@ func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
 // learned. The second reading reads fewer places of the call's own test and
 // no more of anything else, so it finds no variable, echo or pending word
 // that the first does not: only a refusal of its own.
+//
+// A value the earlier place's reading binds (a variable, or an echo) and
+// the late reading refuses is refused too (fail closed): the recording may
+// as well have been made after the call, where nothing binds it, and the
+// value may be a copy of what F served there. Its reason says so, naming
+// where the first reading would have bound it. That refuses an application
+// that really did copy the value from a recording made at the call's own
+// instant (a false red, never a false green).
 func stricterOf(asPlace, asLate Learned) Learned {
 	if asPlace.Kind != KindUnaccounted && asLate.Kind == KindUnaccounted {
+		if b := boundAt(asPlace); b != "" {
+			asLate.Why += "; read as a recording made before the call, the value would be " + b + ", yet keploy refuses a value either reading refuses"
+		}
 		return asLate
 	}
 	return asPlace
+}
+
+// boundAt says where a reading binds its drifted value: a variable of the
+// place it came from, or an echo of the call's answer; "" for any other.
+func boundAt(ln Learned) string {
+	switch ln.Kind {
+	case KindVariable:
+		return "a variable bound at " + placeAt(ln.From)
+	case KindEcho:
+		return "an echo of the call's own answer"
+	}
+	return ""
 }
 
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
