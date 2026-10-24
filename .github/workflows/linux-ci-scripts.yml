@@ -123,11 +123,11 @@ jobs:
           fi
 
   compose-proven-setend:
-    # Four cases, a few seconds; each bounds the hang it tests for at 60 s.
+    # Seven cases, a few seconds; each bounds the hang it tests for at 60 s.
     timeout-minutes: 5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped)
+      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped; await of a log not there yet)
         run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh

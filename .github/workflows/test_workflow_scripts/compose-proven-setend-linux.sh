@@ -201,27 +201,49 @@ YML
 
 # await LOG PID PATTERN N: 0 once LOG has N whole lines that carry PATTERN, 1
 # when keploy (PID) exited first.
+#
+# LOG is opened by the job that runs keploy: its redirection is made in that
+# backgrounded shell, after the lane has gone on to call await, and on a
+# loaded host await can look first. A LOG not there yet is waited for while
+# keploy runs, and said once; before, await's open failed, and a keploy just
+# starting was taken for one that had exited ("keploy exited before the app
+# listened"). Whether keploy has exited is read before each read of LOG, so a
+# line it wrote before it exited is never missed.
 await() {
   python3 - "$@" <<'PY'
 import sys, time
 log, pid, pattern, n = sys.argv[1], int(sys.argv[2]), sys.argv[3].encode(), int(sys.argv[4])
-seen, buf = 0, b""
-with open(log, "rb") as f:
+def exited():
+    try:
+        with open("/proc/%d/stat" % pid) as st:
+            return st.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+f, said, seen, buf = None, False, 0, b""
+while True:
+    gone = exited()
+    if f is None:
+        try:
+            f = open(log, "rb")
+        except FileNotFoundError:
+            if gone:
+                sys.exit(1)
+            if not said:
+                print("await: %s is not there yet; waiting for it while keploy (pid %d) runs" % (log, pid), file=sys.stderr, flush=True)
+                said = True
+            time.sleep(0.2)
+            continue
     while True:
         chunk = f.read(65536)
-        if chunk:
-            *lines, buf = (buf + chunk).split(b"\n")
-            seen += sum(pattern in l for l in lines)
-            if seen >= n:
-                sys.exit(0)
-            continue
-        try:
-            with open("/proc/%d/stat" % pid) as st:
-                if st.read().rsplit(")", 1)[1].split()[0] == "Z":
-                    sys.exit(1)
-        except FileNotFoundError:
-            sys.exit(1)
-        time.sleep(0.2)
+        if not chunk:
+            break
+        *lines, buf = (buf + chunk).split(b"\n")
+        seen += sum(pattern in l for l in lines)
+        if seen >= n:
+            sys.exit(0)
+    if gone:
+        sys.exit(1)
+    time.sleep(0.2)
 PY
 }
 test_files() { sudo sh -c 'ls keploy/test-set-*/tests/ 2>/dev/null' | grep -c '\.yaml$'; }
