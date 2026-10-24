@@ -38,10 +38,16 @@ import (
 // miss a chunk moving between two of them (oldestUnconsumed).
 
 // heldUnstamped is held while the forwarder has a chunk in hand and has not yet
-// stamped it, and layer while the layer under it stamps a read. The stamp, once
-// taken, is no earlier than when the mark was set, so a look that read the
-// clock before it saw the mark clear can tell that no chunk the forwarder, or
-// the layer, holds is from before then.
+// stamped it, and layer while the layer under it stamps a read. A stamp, once
+// taken, is no earlier than when the first mark over its bytes was set: a
+// record a TLS layer hands on takes the stamp of the read under it, taken
+// after the layer set its mark and before the forwarder sets held (the stamp
+// of a stash the handshake reads first is never a record's: readTrackingConn),
+// and the forwarder's own stamp, from the clock, is taken after it set held.
+// So a look that read the clock before it saw both marks clear can tell that
+// no chunk the forwarder, or the layer, holds is from before then; one that
+// saw only held clear cannot, as the layer's mark may hold the stamp of a
+// record the forwarder takes next.
 const heldUnstamped int64 = -1
 
 // teeProgress is one direction's capture progress. held, first and last are

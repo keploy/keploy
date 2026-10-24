@@ -763,8 +763,11 @@ func (r *Relay) forward(
 		// without the parser observing a torn read.
 		var chunk fakeconn.Chunk
 		if n > 0 {
-			// In hand from here, before it is stamped: its stamp is then no
-			// earlier than a look that found nothing in hand (heldUnstamped).
+			// In hand from here, before it is stamped: a stamp read from the
+			// clock below is then no earlier than a look that found nothing
+			// in hand. One a TLS conn gives is its layer's read's, no earlier
+			// than a look that found nothing in the layer's hand either
+			// (heldUnstamped).
 			t.noteReading()
 			chunk.Dir = dir
 			chunk.ReadAt = observedReadAt(src, r.readNow())
