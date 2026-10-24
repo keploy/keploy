@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -123,7 +124,7 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	recorded.reset()
 	defer recorded.reset()
 
-	port := uint32(mustPort(t, refusedAddr(t, "tcp")))
+	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 
 	p := selfCallProxy()
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}

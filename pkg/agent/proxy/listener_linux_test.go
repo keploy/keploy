@@ -7,12 +7,14 @@ import (
 	"os"
 	"strconv"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 )
 
 func TestListenerOwnerFindsThisProcessListening(t *testing.T) {
-	// The port stays held once the listener closes (sharedPort), for the
-	// check that a closed port has no owner.
-	l := listenShared(t, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(sharedPort(t))))
+	// The port stays held once the listener closes (testnet.SharedPort),
+	// for the check that a closed port has no owner.
+	l := testnet.ListenShared(t, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t))))
 	port := uint32(l.Addr().(*net.TCPAddr).Port)
 	pid, ok := listenerOwner(net.ParseIP("127.0.0.1"), port)
 	if !ok || pid != os.Getpid() {

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 )
 
 func TestRefusedLocallyOnlyForALocalPortWithNothingListening(t *testing.T) {
-	addr := refusedAddr(t, "tcp")
+	addr := testnet.RefusedAddr(t, "tcp")
 	_, err := net.Dial("tcp", addr)
 	if err == nil {
 		t.Fatal("expected the dial to be refused")

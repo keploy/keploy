@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -88,7 +89,7 @@ func TestFirstReadStoppedBeforeItBeganStillSeesWhatArrived(t *testing.T) {
 // report: the probe says client-read-error with no error, however the two
 // ends' outcomes interleave.
 func TestProbeAClientThatLeftIsNotADialFailure(t *testing.T) {
-	addr := refusedAddr(t, "tcp")
+	addr := testnet.RefusedAddr(t, "tcp")
 	p := testProxy(t)
 	app, srcConn := clientPair(t)
 	_ = app.Close()
@@ -105,7 +106,7 @@ func TestProbeAClientThatLeftIsNotADialFailure(t *testing.T) {
 // end spoke: the probe returns the dial's failure for the caller to report,
 // rather than letting generic dispatch dial the same address again.
 func TestProbeADialFailureEndsTheConnection(t *testing.T) {
-	addr := refusedAddr(t, "tcp")
+	addr := testnet.RefusedAddr(t, "tcp")
 	p := testProxy(t)
 	app, srcConn := clientPair(t)
 	if _, err := io.WriteString(app, "publish 1\n"); err != nil {
