@@ -637,7 +637,8 @@ func (r *Replayer) GetMockMismatchFailures() []TestFailure {
 	return r.mockMismatchFailures.GetFailures()
 }
 
-// GetTestRunID returns the current test run ID.
+// GetTestRunID returns the run the latest Start named, the directory of its
+// reports: "" until it names one, and for a Start that stopped before it did.
 func (r *Replayer) GetTestRunID() string {
 	return r.testRunID
 }
@@ -727,6 +728,22 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// Marks of tests with no verdict are this run's, read by the exit code
 	// below on every way out, the earliest included.
 	r.forgetNoVerdicts()
+	// So are the run's id, its totals, reports and failures, and the test
+	// sets whose misses it could not attribute, which its getters, exit code
+	// and end read: all cleared here, before the exit code's defer is
+	// registered. The run id stays "" until this Start names its run, just
+	// before its first test set.
+	r.testRunID, r.testRunTestSets = "", nil
+	r.forgetUnattributed()
+	r.completeTestReportMu.Lock()
+	r.completeTestReport = make(map[string]TestReportVerdict)
+	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
+	r.consumedMockNames = make(map[string]struct{})
+	r.totalTestTimeTaken = 0
+	r.completeTestReportMu.Unlock()
+	r.forgetQuarantined()
+	r.failedTCsBySetID = make(map[string][]string)
+	r.mockMismatchFailures = NewTestFailureStore()
 	defer func() { r.armStartExitCode(stoppedByItsUser(parentCtx), err, testRunResult, verdictReached) }()
 
 	// A mock.real keploy cannot read is refused before anything runs (proven
@@ -849,16 +866,6 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 			return fmt.Errorf("cannot replay against the base path: %w", err)
 		}
 	}
-
-	r.completeTestReportMu.Lock()
-	r.completeTestReport = make(map[string]TestReportVerdict)
-	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
-	r.consumedMockNames = make(map[string]struct{})
-	r.totalTestTimeTaken = 0
-	r.completeTestReportMu.Unlock()
-	r.forgetQuarantined()
-	r.failedTCsBySetID = make(map[string][]string)
-	r.mockMismatchFailures = NewTestFailureStore()
 
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
@@ -6394,9 +6401,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// In Docker Compose mode, RunTestSet's defer block stops the agent container.
 	// We must call AfterTestRun HERE (before defer fires) while the agent is alive.
+	// Start sets r.testRunTestSets for the run whose id it passes in as
+	// testRunID, so when Start calls this the two name the same run.
 	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
 		r.afterTestRunCalled = true
-		if hookErr := r.hookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
+		if hookErr := r.hookImpl.AfterTestRun(ctx, testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
 			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
@@ -8480,6 +8489,15 @@ func (r *Replayer) noteUnattributed(testSetID string) {
 		r.unattributedSets = map[string]bool{}
 	}
 	r.unattributedSets[testSetID] = true
+}
+
+// forgetUnattributed clears the test sets noteUnattributed recorded, as a run
+// starts: they are a run's, and an earlier run's named at this one's end
+// sets that this run may not have replayed at all.
+func (r *Replayer) forgetUnattributed() {
+	r.unattributedMu.Lock()
+	defer r.unattributedMu.Unlock()
+	r.unattributedSets = nil
 }
 
 // sayUnattributed names, at the run's end, the test sets with a test whose
