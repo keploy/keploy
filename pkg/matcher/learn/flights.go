@@ -114,7 +114,11 @@ func NoRequest() *Flight { return noRequest }
 // those that lift before it lands. A serve told in it (Tracker.ServedMockIn)
 // is in F's order once it landed, if none of those was a serve by the read;
 // and after f's serves, as F claimed them, as a serve made in f's own
-// request is. A nil f, or NoRequest, is a serve in no request: NoRequest.
+// request is. f itself is left out of those it overlaps: f is always a
+// serve, so with it every serve f caused would be in no order keploy can
+// tell (Order.Of: 0, 0), which is what keploy read of a push before it could
+// be told in its cause. A nil f, or NoRequest, is a serve in no request:
+// NoRequest.
 func (f *Flight) LiftCaused() *Flight {
 	if f == nil || f.t == nil {
 		return noRequest
@@ -209,6 +213,9 @@ func (t *Tracker) flightOfLocked(protocol bool, in *Flight) *Flight {
 // was a serve by then. o.t.mu is held.
 func (o Order) told(s int) bool {
 	if !o.flying {
+		// A serve made in no request (NoRequest) is told here too. The
+		// agent never reaches that: a push is consumed on a connection the
+		// application subscribed on, and that SUBSCRIBE lifted it.
 		return true
 	}
 	f := o.flights[s]
