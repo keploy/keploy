@@ -148,7 +148,10 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		{"F's word, at a payload F served that was recorded after the call", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(10*time.Millisecond)).ServedAs(2)), noRec, "mock-1"},
 		{"F's word, at a leaf whose recorded text lacks it (an echo of what F served)", "82", "16", []Earlier{eLeaf(before, 6, "5150", "16")}, eStartup(), noRec, "mock-8"},
 		{"F's word, at a leaf recorded at the call's own instant", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt, 6, "7", "7")}, eStartup(), noRec, "mock-8"},
-		{"F's word, at a leaf recorded after the call", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt.Add(time.Millisecond), 6, "7", "7")}, eStartup(), noRec, "mock-8"},
+		// Recorded after the call, the exchange is no earlier place of the
+		// call's own test: only what F served there counts, so the word F
+		// served at its leaf is refused there, naming it, before the rule.
+		{"F's word, at a leaf recorded after the call", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt.Add(time.Millisecond), 6, "7", "7")}, eStartup(), "appears in mock-8, a recording record's full round gave the application before the call that was recorded after the call", "mock-8"},
 		{"F's word, at a payload F did not serve", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond))), noF, "mock-1"},
 		{"the recorded word, at a leaf F served drifted", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "83")}, eStartup(), noF, "mock-8"},
 		{"a word both values hold", "82 1", "4 1 1", nil, eStartup(), both, "mock-1"},

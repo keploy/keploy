@@ -4198,3 +4198,82 @@ func TestLearnMatchAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing
 		}
 	}
 }
+
+// An exchange keploy's HTTP learn step served leaf by leaf in the test
+// before the call, whose request was recorded after the call's (later in the
+// call's own test's window), gave the recorded application nothing before
+// the call: only what F served there counts, so a minute F's run copied from
+// its answer (10:00:40 rounded to F's minute, 10:01:05 cut to it) is refused
+// naming the exchange, never noise because its leaves were read as an
+// earlier place both runs were given. One recorded at the call's own instant
+// is read both ways and refused so too. Recorded a second before the call
+// (control), 10:00:40 names both runs' minutes at a place both runs were
+// given, and stays noise; the recorded minute alone (10:00:10) names no
+// minute of F's, and stays noise wherever the exchange was recorded.
+func TestLearnMatchAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
+	minute := func(t time.Time) string { return t.Format("2006-01-02T15:04Z07:00") }
+	call := 2 * time.Second
+	for _, tc := range []struct {
+		name string
+		sent time.Duration
+		copy bool
+	}{
+		{"rounds to F's minute, cuts down to the recorded one", 40 * time.Second, true},
+		{"F's minute and more", 65 * time.Second, true},
+		{"the recorded minute alone", 10 * time.Second, false},
+	} {
+		verdict := func(nat time.Duration) (string, string) {
+			h, n, opts := learnOn(t)
+			nb := learnRecorded("mock-0", nat, "POST", "/v1/receive", `{"max":10}`, nil, `{"Messages":[{"SentTimestamp":"`+learnAt.Add(tc.sent).Format(time.RFC3339)+`"}]}`)
+			own := learnRecorded("mock-1", call, "POST", "/v1/messages", `{"sent_at":"`+minute(learnAt.Add(call))+`"}`, nil, `{}`)
+			db := &learnDb{perTest: []*models.Mock{nb, own}}
+			tr := learn.NewTracker()
+			tr.Begin()
+			ctx := learn.WithTracker(context.Background(), tr)
+			first := live("POST", "/v1/receive", `{"max":10}`, nil)
+			first.arrived = learnAt.Add(61 * time.Second)
+			if got, miss, err := h.learnMatch(ctx, first, db, n, opts); err != nil || miss != nil || got == nil || got.Name != "mock-0" {
+				t.Fatalf("%s: the receive is paired with mock-0 and served leaf by leaf: %v %+v %v", tc.name, got, miss, err)
+			}
+			in := live("POST", "/v1/messages", `{"sent_at":"`+minute(learnAt.Add(call+time.Minute))+`"}`, nil)
+			in.arrived = learnAt.Add(call + time.Minute)
+			got, miss, err := h.learnMatch(ctx, in, db, n, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if miss == nil {
+				return fmt.Sprintf("served %v", got != nil), ""
+			}
+			return "refused", miss.res.Why
+		}
+		for _, rc := range []struct {
+			name string
+			at   time.Duration
+		}{
+			{"recorded later in the call's own test's window", call + 30*time.Second},
+			{"recorded at the call's own instant", call},
+		} {
+			got, why := verdict(rc.at)
+			if !tc.copy {
+				if got != "served true" {
+					t.Errorf("%s, %s: %s (%s); want noise, no minute of F's named", tc.name, rc.name, got, why)
+				}
+				continue
+			}
+			if got != "refused" || !strings.Contains(why, "mock-0 at spec.resp.body") {
+				t.Errorf("FALSE GREEN? %s, %s: %s (%s); want it refused naming mock-0, the exchange F served the minute's source in", tc.name, rc.name, got, why)
+			}
+			// Where only the second reading refuses, the reason says the
+			// exchange is read both ways.
+			if rc.at == call && tc.sent == 40*time.Second && !strings.Contains(why, "so keploy reads it both ways") {
+				t.Errorf("%s, %s: %q; want it to say the exchange is read both ways", tc.name, rc.name, why)
+			}
+		}
+		if tc.sent == 65*time.Second {
+			continue
+		}
+		if got, why := verdict(call - time.Second); got != "served true" {
+			t.Errorf("%s, recorded a second before the call: %s (%s); want noise, an earlier place both runs were given showing no copy", tc.name, got, why)
+		}
+	}
+}

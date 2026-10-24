@@ -157,7 +157,7 @@ func TestTheTestRequestIsAnEarlierPlace(t *testing.T) {
 	// A call of the test that sent it, inside a longer value, names it
 	// before the request does: what the application was given ranks as an
 	// answer does.
-	call := Earlier{Mock: "mock-2", At: at.Add(time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.q", Noise: "body.q", Type: String, Value: "for ord-77 now"}, Live: "for ord-78 now", Place: "body.q"}}}
+	call := Earlier{Mock: "mock-2", At: at.Add(-time.Second), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.q", Noise: "body.q", Type: String, Value: "for ord-77 now"}, Live: "for ord-78 now", Place: "body.q"}}}
 	if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("ord-78"), shape("ord-77"), at, append(append([]Earlier(nil), given...), call), nil, nil, nil)[0]; ln.Kind != KindVariable || ln.From.Mock != "mock-2" || ln.From.Path != "body.q" {
 		t.Errorf("sent by a call too: %s from %+v (%s); want a variable of mock-2's body.q", ln.Kind, ln.From, ln.Why)
 	}

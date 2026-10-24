@@ -1637,3 +1637,138 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 		t.Errorf("FALSE GREEN? the set unread, an unserved recording at the call's own instant beside the own place: %s (%s); want it refused with the set's error, saying the earlier place's reading binds it", ln.Kind, ln.Why)
 	}
 }
+
+// leafedOf is m as an adapter that serves an exchange leaf by leaf hands it
+// (Earlier, as keploy's HTTP learn step's earlierOf does): each leaf of its
+// JSON request and answer, as F served it, with its variable place, and its
+// payload, served as the n-th serve of F's in the set.
+func leafedOf(m *models.Mock, own bool, n int) Earlier {
+	e := Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own, Payload: RawOf(m, true).ServedAs(n)}
+	for _, part := range []struct {
+		side Side
+		body string
+	}{{Request, m.Spec.HTTPReq.Body}, {Response, m.Spec.HTTPResp.Body}} {
+		v, ok := DecodeJSON([]byte(part.body))
+		if !ok {
+			continue
+		}
+		leaves := map[string]Leaf{}
+		JSONLeaves("body", v, leaves)
+		for _, l := range leaves {
+			place, _ := VarPlace(l, true)
+			e.Seen = append(e.Seen, Seen{Side: part.side, Leaf: l, Live: l.Value, Place: place})
+		}
+	}
+	return e
+}
+
+// An exchange F served leaf by leaf in the test before the call (Earlier)
+// that was recorded after the call (later in the call's own test's window,
+// or in a later test's) gave the recorded application nothing before the
+// call: it is read as a recording made after the call is, which only what F
+// served there counts for (the offset rule, the word rule and the echo of
+// what F gave, never a variable's search), and one recorded at the call's
+// own instant is read both ways, refused where either reading refuses, as
+// the same recording handed as a Raw is. A copy of what F served there
+// (15:51:05 cut to F's minute, 15:51:00, the minute verbatim, 15:50:40
+// rounded to it), beside the own place or not, is refused naming the
+// recording it was copied from, never learned as noise because its leaves
+// were read as an earlier place both runs were given. The recorded minute
+// alone (15:50:10) names no moment of F's, so it gets the verdict the same
+// recording handed as a Raw gets.
+func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
+	base := recT.Truncate(time.Minute)
+	for _, f := range []struct {
+		name string
+		sent string
+		copy bool
+	}{
+		{"15:51:05, cut to F's minute", base.Add(65 * time.Second).Format(time.RFC3339), true},
+		{"15:51:00, F's minute", base.Add(60 * time.Second).Format(time.RFC3339), true},
+		{"the minute 15:51 verbatim", base.Add(time.Minute).Format(minute), true},
+		{"15:50:40, rounded to F's minute", base.Add(40 * time.Second).Format(time.RFC3339), true},
+		{"15:50:10, the recorded minute alone", base.Add(10 * time.Second).Format(time.RFC3339), false},
+	} {
+		for _, rc := range []struct {
+			name string
+			at   time.Time
+			own  bool
+		}{
+			{"recorded later in the call's own test's window", at.Add(30 * time.Second), true},
+			{"recorded in a later test's window", at.Add(2 * time.Minute), false},
+			{"recorded at the call's own instant", at, true},
+		} {
+			for _, withOwn := range []bool{false, true} {
+				for _, nbFirst := range []bool{true, false} {
+					name := f.name + "/" + rc.name
+					if withOwn {
+						name += "/beside the own place"
+					}
+					if !nbFirst {
+						name += "/served after it"
+					}
+					nbN, ownN := 1, 2
+					if !nbFirst {
+						nbN, ownN = 2, 1
+					}
+					nb := sentAtReceive("mock-44", rc.at, f.sent)
+					var ownRaw []Raw
+					if withOwn {
+						ownRaw = []Raw{RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(ownN)}
+					}
+					// The same recording handed as a Raw, as the adapters
+					// hand one: recorded after the call, a place of no
+					// test's call; at its own instant, an earlier place.
+					twin := RawOf(nb, true).ServedAs(nbN)
+					if rc.at.After(at) {
+						twin = twin.OfAnotherTest()
+					}
+					asRaw := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, nil, append([]Raw{twin}, ownRaw...), nil, nil, nil)[0]
+					got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, rc.own, nbN)}, ownRaw, nil, nil, nil)[0]
+					if f.copy && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44")) {
+						t.Errorf("FALSE GREEN? %s: %s (%s); want it refused naming mock-44, whose answer F served before the call", name, got.Kind, got.Why)
+					}
+					if got.Kind != asRaw.Kind {
+						t.Errorf("%s: %s (%s); the same recording handed as a Raw is %s (%s)", name, got.Kind, got.Why, asRaw.Kind, asRaw.Why)
+					}
+				}
+			}
+		}
+	}
+	// What F served there counts, not only what the recording holds: an
+	// exchange recorded after the call whose answer F served with another
+	// value than recorded at a leaf (a template value: 15:51:05 where the
+	// recording holds 15:50:10) gave the application F's value, so F's
+	// minute cut from it is refused naming the exchange, while the same
+	// leaf served as recorded is the recorded minute alone.
+	for _, servedAs := range []string{base.Add(65 * time.Second).Format(time.RFC3339), base.Add(10 * time.Second).Format(time.RFC3339)} {
+		nb := sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339))
+		e := leafedOf(nb, true, 1)
+		for i := range e.Seen {
+			if e.Seen[i].Leaf.Path == "body.Messages[0].SentAt" {
+				e.Seen[i].Live = servedAs
+			}
+		}
+		got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]
+		copied := servedAs != base.Add(10*time.Second).Format(time.RFC3339)
+		if copied && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44 at spec.resp.body.Messages[0].SentAt")) {
+			t.Errorf("FALSE GREEN? F served %s at a leaf of an exchange recorded after the call that holds 15:50:10: %s (%s); want it refused naming the leaf F served it at", servedAs, got.Kind, got.Why)
+		}
+		if !copied && got.Kind != KindNoise {
+			t.Errorf("the leaf served as recorded, 15:50:10, names no moment of F's: %s (%s); want noise", got.Kind, got.Why)
+		}
+	}
+	// An exchange recorded after the call that came with no payload is a
+	// recording whose text cannot be told: every drift is refused, naming
+	// it and why, never read as nothing.
+	e := leafedOf(sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339)), true, 1)
+	e.Payload = Raw{}
+	if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]; got.Kind != KindUnaccounted || !strings.Contains(got.Why, "was given no payload of mock-44") {
+		t.Errorf("FALSE GREEN? an exchange recorded after the call with no payload: %s (%s); want it refused, naming it", got.Kind, got.Why)
+	}
+}

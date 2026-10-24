@@ -68,7 +68,11 @@ type Seen struct {
 // leaf by leaf: a variable found there has a place a runtime can bind it at.
 type Earlier struct {
 	Mock string
-	// At is when the mock's request was recorded.
+	// At is when the mock's request was recorded. One recorded after the
+	// call gave the recorded application nothing before the call: it is read
+	// as a recording made after the call is, which only what F served there
+	// counts for, never by its leaves (leafedAfterCall); one recorded at the
+	// call's own instant is read both ways (leafedAtCall, classifyGiven).
 	At time.Time
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
@@ -147,6 +151,9 @@ type Raw struct {
 	late bool
 	// read: the text was read from the mock (RawOf).
 	read bool
+	// unread, of a Raw that was not read, says why where the place it stands
+	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
+	unread string
 	// text is Text; answerClock is AnswerClock.
 	text        string
 	answerClock []time.Time
@@ -468,21 +475,152 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // served there, and refuses it. A value the first reading binds (a variable
 // or an echo) and the second refuses is refused too, and its reason names
 // where the first would have bound it (stricterOf): fail closed.
+//
+// An exchange served leaf by leaf (Earlier) is read by when its request was
+// recorded as a Raw is: recorded after the call, as a recording made after
+// the call in both readings (leafedAfterCall); at the call's own instant,
+// both ways (leafedAtCall). Its leaves would otherwise read as an earlier
+// place both runs were given, where a minute F's run rounded from what F
+// served there names both moments and is learned as noise.
 func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
 	given = givenOnce(given)
+	earlier, raw = leafedAfterCall(earlier, raw, at)
 	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
 	late, ok := givenAtCall(raw, at, given)
 	if !ok {
+		late = raw
+	}
+	lateEarlier, leafedLate := leafedAtCall(earlier, at)
+	if !ok && len(leafedLate) == 0 {
 		return out
 	}
-	alone := classifyRead(dc, drift, live, rec, at, earlier, late, resp, w, given, follow)
+	if len(leafedLate) > 0 {
+		late = append(append([]Raw(nil), late...), leafedLate...)
+	}
+	alone := classifyRead(dc, drift, live, rec, at, lateEarlier, late, resp, w, given, follow)
 	for i := range out {
 		out[i] = stricterOf(out[i], alone[i])
 	}
 	return out
+}
+
+// leafedAfterCall is earlier without each exchange served leaf by leaf
+// (Earlier) whose request was recorded after the call (at), and raw with
+// each of them as a recording F gave the application before the call that is
+// no earlier place of the call's own test (lateOf): it gave the recorded
+// application nothing before the call, wherever F served it this run, so
+// only what F served there counts (the offset rule, the word rule and the
+// echo of what F gave), as for a Raw recorded after the call, never its
+// leaves as a place both runs were given, which a variable binds at or which
+// shows a moment of F's no copy. The test case's own request (Given) is no
+// recording, and stays.
+func leafedAfterCall(earlier []Earlier, raw []Raw, at time.Time) ([]Earlier, []Raw) {
+	var kept []Earlier
+	var moved []Raw
+	for i, e := range earlier {
+		if e.Given || !e.At.After(at) {
+			if moved != nil {
+				kept = append(kept, e)
+			}
+			continue
+		}
+		if moved == nil {
+			kept = append([]Earlier(nil), earlier[:i]...)
+		}
+		moved = append(moved, e.lateOf(false)...)
+	}
+	if moved == nil {
+		return earlier, raw
+	}
+	return kept, append(append([]Raw(nil), raw...), moved...)
+}
+
+// leafedAtCall is earlier without each exchange served leaf by leaf whose
+// request was recorded at the call's own instant (at), and each of them as a
+// recording made at or after the call (lateOf), for the second reading of
+// the call (classifyGiven): F served it in the test before the call, so it is
+// read both ways, as a Raw made at that instant is (givenAtCall). late is nil
+// where there is none, and earlier is then returned as it is.
+func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) {
+	for i, e := range earlier {
+		if e.Given || !e.At.Equal(at) {
+			if late != nil {
+				kept = append(kept, e)
+			}
+			continue
+		}
+		if late == nil {
+			kept = append([]Earlier(nil), earlier[:i]...)
+		}
+		late = append(late, e.lateOf(true)...)
+	}
+	if late == nil {
+		return earlier, nil
+	}
+	return kept, late
+}
+
+// lateOf is e, an exchange F served leaf by leaf before the call, as a
+// recording F gave the application before the call that is no earlier place
+// of the call's own test (Raw.OfAnotherTest), each served (late: one made at
+// the call's own instant, read both ways: Raw.late): its payload, and what F
+// served at each leaf of its answer (servedAnswer), since only what F served
+// there counts. An exchange whose payload could not be read, or that came
+// with none, is a recording whose text cannot be told: every drift is
+// refused with payloadUnread's reason (rawUnread), never learned on the
+// strength of its absence.
+func (e Earlier) lateOf(late bool) []Raw {
+	x := e.Payload
+	if !x.read {
+		x = Raw{mock: e.Mock, at: e.At, unread: payloadUnread(e)}
+	}
+	x.served = true
+	out := []Raw{x}
+	if a, ok := e.servedAnswer(); ok {
+		out = append(out, a)
+	}
+	for i := range out {
+		out[i] = out[i].OfAnotherTest()
+		out[i].late = late
+	}
+	return out
+}
+
+// servedAnswer is what F served at each leaf of e's answer (Seen of its
+// Response, Live; never its answer's stamp), as a recording's text whose
+// fields stand where the payload's answer does ("spec.resp.<leaf>"), served
+// as the payload was: the values F gave the application there, a template
+// value too, which its payload, the recording, may not hold. Its fields are
+// the leaves' alone, none a key, and its moments the offset rule reads as
+// the payload's (one recording, read once). false where e names no leaf of
+// its answer.
+func (e Earlier) servedAnswer() (Raw, bool) {
+	root := "Res"
+	for _, f := range e.Payload.fields {
+		if r := fieldRoot(f.path); answerFields[r] {
+			root = r
+			break
+		}
+	}
+	x := Raw{mock: e.Mock, at: e.At, served: true, read: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call}
+	var sb strings.Builder
+	for _, s := range e.Seen {
+		if s.Side != Response || s.Stamp {
+			continue
+		}
+		start := sb.Len()
+		sb.WriteString(s.Live)
+		x.fields = append(x.fields, rawField{start: start, end: sb.Len(), path: root + "." + s.Leaf.Path})
+		sb.WriteByte('\n')
+	}
+	if len(x.fields) == 0 {
+		return Raw{}, false
+	}
+	x.text = sb.String()
+	return x, true
 }
 
 // givenOnce is given read at most once, however often it is asked: both
@@ -718,6 +856,9 @@ func rawUnread(raw []Raw) string {
 	for _, x := range raw {
 		if x.read {
 			continue
+		}
+		if x.unread != "" {
+			return x.unread
 		}
 		name := "a recording of the test"
 		if x.mock != "" {
