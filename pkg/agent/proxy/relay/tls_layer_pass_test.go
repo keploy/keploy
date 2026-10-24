@@ -33,9 +33,9 @@ func TestTheTLSLayerReachesThroughTheRelaysWrappers(t *testing.T) {
 	h := &layerHolder{Conn: a}
 	layer := tls.Server(b, &tls.Config{})
 	for name, c := range map[string]net.Conn{
-		"readTrackingConn":                 newReadTrackingConn(h),
-		"readTrackingConn, prependingConn": newReadTrackingConn(newPrependingConn(h, []byte("hello"))),
-		"under a util.SafeConn":            newReadTrackingConn(util.NewSafeConn(h, zap.NewNop())),
+		"readTrackingConn":                 newReadTrackingConn(h, nil),
+		"readTrackingConn, prependingConn": newReadTrackingConn(newPrependingConn(h, []byte("hello")), nil),
+		"under a util.SafeConn":            newReadTrackingConn(util.NewSafeConn(h, zap.NewNop()), nil),
 	} {
 		h.held = nil
 		pTls.PassTLSLayer(c, layer)

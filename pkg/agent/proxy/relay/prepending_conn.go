@@ -82,7 +82,16 @@ func (p *prependingConn) Read(b []byte) (int, error) {
 	}
 	n, err := p.Conn.Read(b)
 	if n > 0 {
-		p.lastReadNano.Store(observedReadAt(p.Conn, time.Now()).UnixNano())
+		// Past the prefix the bytes are the socket's, read now: say when
+		// only if the conn under says so, and leave it to the conn above
+		// otherwise, which takes its stamp only once it has told the capture
+		// watermark it holds them (readTrackingConn). A stamp taken here
+		// would be older than that.
+		var at int64
+		if ts := observedReadAt(p.Conn, time.Time{}); !ts.IsZero() {
+			at = ts.UnixNano()
+		}
+		p.lastReadNano.Store(at)
 	}
 	return n, err
 }
