@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -221,6 +222,54 @@ func TestAStagingReadsItsSetsRulesBeforeItsBackgroundIsNamed(t *testing.T) {
 	mm.ServeExactPool(models.PoolKeyNone, nil)
 	if integrations.S12Background(mm) {
 		t.Fatal("without the switch a marked set's staging reads the set as served by the background rules")
+	}
+}
+
+// The proxy the agent stages through (agent.ExactBackgroundServer) opens a
+// set's staging under its rules on the manager, in the agent's order: the
+// rules, then the view served while the mocks are staged, then the named
+// background. Its staging is the only thing that drops the previous set's
+// background, so the window view reads the next set's rules and names none of
+// the previous set's recordings, though the trees still hold them; a set
+// staged under today's rules reads as today's from its staging on.
+func TestTheProxyStagesASetsRulesOnItsManagerBeforeItsFirstView(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.SetPairing(true)
+	p := &Proxy{}
+	p.setMockManager(mm)
+	var es agent.ExactBackgroundServer = p
+	// The previous set, served by the background rules.
+	if err := es.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"}); err != nil {
+		t.Fatal(err)
+	}
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	for _, tc := range []struct {
+		rules  string
+		marked bool
+	}{
+		{models.RecordedWithS12Routing, true},
+		{"", false},
+	} {
+		if err := es.StageExactBackground(tc.rules); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.ServeExactPool(models.PoolKeyNone, nil); err != nil {
+			t.Fatal(err)
+		}
+		if integrations.S12Background(mm) != tc.marked {
+			t.Fatalf("a set staged under %q through the proxy reads proven routing %v; want %v", tc.rules, !tc.marked, tc.marked)
+		}
+		snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP, Pairing: true})
+		if !ok || snap.Background != tc.marked || len(snap.BackgroundUnused) != 0 {
+			t.Fatalf("a set staged under %q through the proxy: snapshot ok %v, Background %v, background %v; want %v and none of the previous set's", tc.rules, ok, snap.Background, exactNames(snap.BackgroundUnused), tc.marked)
+		}
+		if b := mm.Background(models.HTTP); b != nil {
+			t.Fatalf("a set staged under %q through the proxy names the previous set's background %v", tc.rules, exactNames(b))
+		}
+	}
+	// Without a manager the proxy refuses to stage.
+	if err := (&Proxy{}).StageExactBackground(models.RecordedWithS12Routing); err == nil {
+		t.Fatal("a proxy with no mock manager staged a set's rules")
 	}
 }
 
