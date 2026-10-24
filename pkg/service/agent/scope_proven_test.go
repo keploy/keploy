@@ -858,6 +858,14 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Equal(t, "SELECT ?", pg.ActualSummary)
 	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})
 	require.Empty(t, redis.ActualSummary, "a protocol keploy has no shape for keeps no call text")
+
+	// A repeat note names recordings, a test and times, never a value the app
+	// sent: it is kept, on a copy, so judging can name the earlier test.
+	note := &models.RepeatNote{Mock: "mock-54", Test: "get-by-id-1", ReplayGapSeconds: 8, ReplayGapFromStart: true, RecordGapSeconds: 2.95, RecordGapKnown: true, RecordedLast: "mock-54"}
+	rep := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /bp/202", ClosestMock: "mock-54", Repeat: note})
+	require.NotNil(t, rep.Repeat, "the repeat note was dropped")
+	require.Equal(t, *note, *rep.Repeat)
+	require.NotSame(t, note, rep.Repeat, "the note is the miss's own: written on a copy")
 }
 
 // A miss, its reason text and a recorded mock's name keep an HTTP call's
