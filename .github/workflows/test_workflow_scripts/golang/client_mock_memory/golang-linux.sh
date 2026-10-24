@@ -139,21 +139,34 @@ for f in "${mock_files[@]}"; do
 done
 
 # The replay, its keploy test process sampled for its peak RSS until it ends.
+#
+# CI runs this under `bash -e`, so no command here may fail unchecked: the
+# step would end with that command's exit code and print neither keploy
+# test's log nor why. The shell reaps keploy test as soon as it exits, so
+# its /proc/<pid>/status can be gone between `kill -0` and the read below
+# (awk exits 2 on a file it cannot open): that read failing means keploy test
+# has ended, and the sampling stops. keploy test's own exit code is kept and
+# judged after its log is printed.
 "$REPLAY_BIN" test -c "./http-pokeapi" --delay 7 --generateGithubActions=false > test_logs.txt 2>&1 &
 test_pid=$!
 peak_kb=0
 while kill -0 "$test_pid" 2>/dev/null; do
-    hwm=$(awk '/^VmHWM:/ {print $2}' "/proc/$test_pid/status" 2>/dev/null)
+    hwm=$(awk '/^VmHWM:/ {print $2}' "/proc/$test_pid/status" 2>/dev/null) || break
     if [ -n "$hwm" ] && [ "$hwm" -gt "$peak_kb" ]; then
         peak_kb=$hwm
     fi
     sleep 0.5
 done
-wait "$test_pid"
-test_exit=$?
+test_exit=0
+wait "$test_pid" || test_exit=$?
 cat test_logs.txt
 peak_mb=$(( peak_kb / 1024 ))
 echo "keploy test exited $test_exit; its peak RSS was ${peak_mb} MiB, the largest mocks.yaml ${largest_mb} MiB"
+
+if [ "$test_exit" -ne 0 ]; then
+    echo "::error::keploy test exited $test_exit (its log is above); it exits 0 when every test set passes"
+    exit 1
+fi
 
 if grep "ERROR" test_logs.txt; then
     echo "::error::Error found in the replay"
@@ -172,10 +185,12 @@ if [ ${#reports[@]} -ne ${#mock_files[@]} ]; then
     exit 1
 fi
 for report_file in "${reports[@]}"; do
-    test_status=$(grep 'status:' "$report_file" | head -n 1 | awk '{print $2}')
-    echo "$(basename "$report_file"): $test_status"
+    # One awk, not a grep pipeline: under `bash -e -o pipefail` a report
+    # with no status line would end the step here without saying which.
+    test_status=$(awk '/status:/ {print $2; exit}' "$report_file")
+    echo "$(basename "$report_file"): ${test_status:-no status}"
     if [ "$test_status" != "PASSED" ]; then
-        echo "::error::$(basename "$report_file") is $test_status with ${INFLATE_MB} unused 1 MiB mocks in its mocks.yaml"
+        echo "::error::$(basename "$report_file") is ${test_status:-without a status} with ${INFLATE_MB} unused 1 MiB mocks in its mocks.yaml"
         exit 1
     fi
 done
