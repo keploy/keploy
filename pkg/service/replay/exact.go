@@ -303,11 +303,13 @@ func (r *Replayer) provenMappingsOf(ctx context.Context, testSetID string) (map[
 // s12Serves reports, under the proven switch (the caller's), whether background
 // serving serves testSetID (s12_serving.go): its mappings.yaml carries a
 // background-routing record's mark (recordedWith holds models.RecordedWithS12Routing) and a
-// registered func enables it (S12Serving). A marked set this build does not
-// enable it for is served by today's rules, said once per set: every
+// registered func enables it (S12Serving). A set without the mark, and a
+// marked set this build does not enable it for, is served by today's rules,
+// said once per set (the caller asks once, as the set's mocks load): every
 // recorded background call answered exactly, and required by its end.
 func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
 	if !(&models.Mapping{RecordedWith: recordedWith}).WasRecordedWith(models.RecordedWithS12Routing) {
+		r.sayRecordedWithoutRouting(testSetID, recordedWith)
 		return false
 	}
 	if S12Serving() {
@@ -317,6 +319,23 @@ func (r *Replayer) s12Serves(testSetID string, recordedWith []string) bool {
 		zap.String("testSetID", testSetID),
 		zap.String("next_step", "replay it with the keploy build that recorded it (keploy enterprise), whose judging background serving rests on"))
 	return false
+}
+
+// sayRecordedWithoutRouting says that testSetID, which no background-routing
+// record marked (models.RecordedWithS12Routing: a set recorded before
+// background routing, with --sync or mapping off, or by a keploy build with no
+// judging), is served under the proven switch by today's rules, as on a
+// keploy without it, and how to record it so that background serving serves
+// it: under the switch, with the judging background serving rests on.
+func (r *Replayer) sayRecordedWithoutRouting(testSetID string, recordedWith []string) {
+	next := "for background serving, record the test set again with " + provenswitch.Env + "=1, without --sync and with mapping on: that recording routes the set's background writes and marks its mappings.yaml recordedWith: " + models.RecordedWithS12Routing
+	if !S12Serving() {
+		next = "for background serving, record the test set again with " + provenswitch.Env + "=1 using keploy enterprise, whose judging background serving rests on: this keploy build records and serves every set by today's rules"
+	}
+	r.logger.Info("this test set was recorded without background routing (its mappings.yaml does not carry recordedWith: "+models.RecordedWithS12Routing+"), so it is served by today's rules: its worker scope and pool as for a set recorded before background serving, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
+		zap.String("testSetID", testSetID),
+		zap.Strings("recordedWith", recordedWith),
+		zap.String("next_step", next))
 }
 
 // confirmBackground keeps background serving for the staged set only when the agent

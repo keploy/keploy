@@ -121,6 +121,71 @@ func TestUnderTheSwitchOnlyAMarkedAndEnabledSetDropsTheWorkerScopesEnd(t *testin
 	}
 }
 
+// Under the switch, a set no background-routing record marked (no
+// recordedWith: s12-routing, or only marks this keploy does not know) is
+// served by today's rules, and the replay says so once for the set: which set,
+// what it carries, and how to record it so that background serving serves it
+// (again under the switch with this build when it enables background serving;
+// with keploy enterprise when it does not). A marked set says nothing of
+// the kind, and neither does a replay without the switch.
+func TestUnderTheSwitchAnUnmarkedSetSaysOnceItIsServedByTodaysRules(t *testing.T) {
+	const line = "this test set was recorded without background routing"
+	for _, tc := range []struct {
+		name         string
+		on           bool
+		recordedWith []string
+		enabled      *bool
+		said         int
+		next         string
+	}{
+		{"unmarked, enabled", true, nil, new(true), 1, "without --sync and with mapping on"},
+		{"an unknown mark only, enabled", true, []string{"s13-something"}, new(true), 1, "without --sync and with mapping on"},
+		{"unmarked, none registered", true, nil, nil, 1, "using keploy enterprise"},
+		{"unmarked, registered off", true, nil, new(false), 1, "using keploy enterprise"},
+		{"marked and enabled", true, []string{models.RecordedWithS12Routing}, new(true), 0, ""},
+		{"marked, none registered", true, []string{models.RecordedWithS12Routing}, nil, 0, ""},
+		{"unmarked, without the switch", false, nil, new(true), 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, tc.on)
+			fastWorkerWait(t)
+			enableS12(t, tc.enabled)
+			h := newPartialRunHarness(t, 1, 0)
+			core, logs := observer.New(zap.InfoLevel)
+			h.replayer.logger = zap.New(core)
+			pinWindows(h)
+			h.replayer.config.Command = "./app"
+			h.mocks.filtered = []*models.Mock{httpAt("mock-boot", 500), httpAt("mock-a", 1010)}
+			s12MappingFile(t, h, tc.recordedWith)
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})}
+			h.run(t)
+			said := logs.FilterMessageSnippet(line).All()
+			if len(said) != tc.said {
+				t.Fatalf("the replay said %d %q lines; want %d", len(said), line, tc.said)
+			}
+			if tc.said == 0 {
+				return
+			}
+			e := said[0]
+			if !strings.Contains(e.Message, "served by today's rules") || !strings.Contains(e.Message, "recordedWith: "+models.RecordedWithS12Routing) {
+				t.Fatalf("the line does not say the set is served by today's rules for want of the mark: %q", e.Message)
+			}
+			fields := e.ContextMap()
+			if fields["testSetID"] != "test-set-0" {
+				t.Fatalf("the line names set %v; want test-set-0", fields["testSetID"])
+			}
+			got, _ := fields["recordedWith"].([]interface{})
+			if len(got) != len(tc.recordedWith) || (len(got) == 1 && got[0] != tc.recordedWith[0]) {
+				t.Fatalf("the line says the set carries %v; want %v", fields["recordedWith"], tc.recordedWith)
+			}
+			next, _ := fields["next_step"].(string)
+			if !strings.Contains(next, "record the test set again with KEPLOY_PROVEN=1") || !strings.Contains(next, tc.next) {
+				t.Fatalf("the line's next step %q does not say to record the set again under the switch %s", next, tc.next)
+			}
+		})
+	}
+}
+
 // An agent that does not say it serves the staged set by the background rules (one
 // that predates them, or runs without the switch) serves it by today's, so
 // the replay keeps today's check: the set's end requires its worker scope,
