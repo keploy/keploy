@@ -143,8 +143,9 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
-	// answered keeps the per-test recordings that answered a call in this
-	// test set, by request key, for a miss's diagnosis (FindAnsweredEarlier).
+	// answered keeps, of the per-test recordings that answered a call in this
+	// test set, the request side, by request key and bounded by bytes, for a
+	// miss's diagnosis (FindAnsweredEarlier).
 	// Reset with consumedPersistent.
 	answered answeredLog
 
