@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,8 +39,11 @@ import (
 // utils.StopStallBudget of the time both they and keploy could run
 // (utils.ExitClock), or at the user's Ctrl+C, which it offers: docker's own
 // stop and removal on a starved host take as long as they take, and are no
-// kill (P101-b-k). killed says why it had to kill, "" when it did not. The
-// drains wait for it (utils.BeginAppStop).
+// kill (P101-b-k). A kill is through only on the same word as the stop: the
+// daemon's, which comes after the kernel's, waited for at the same rule; a
+// kill the daemon does not confirm fails the stop and says so. killed says
+// why it had to kill, "" when it did not. The drains wait for it
+// (utils.BeginAppStop).
 //
 // What it cannot read it does not take for a stall of the app's. A container
 // whose processes keploy cannot see (the daemon in another PID namespace:
@@ -162,12 +166,34 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 		}
 	}
 	// The client's group, while the client is the process keploy started.
+	var clientErr error
 	select {
 	case <-clientGone:
-		return why, nil
 	default:
+		clientErr = utils.SendSignal(a.logger, -client.PID, syscall.SIGKILL)
 	}
-	return why, utils.SendSignal(a.logger, -client.PID, syscall.SIGKILL)
+	// The kill ends the container in the kernel first, and the daemon takes
+	// that exit later, as it does a stop's: until it has, it calls the
+	// container running and holds its name, and the next start's docker run
+	// (its force-remove of the old name first) meets it. So the kill is
+	// through only on the same word as the stop (stopped), waited for at the
+	// same rule, event-driven; a container the daemon does not say has
+	// stopped fails the stop, said as the lagged stop is.
+	after, _, lagged := utils.WaitStopByEvents(a.logger, stopped, procs, a.teardown.Load())
+	if after == utils.StopExited {
+		return why, clientErr
+	}
+	var stuck error
+	switch {
+	case lagged:
+		stuck = a.containerStopLagged(after)
+	case seen:
+		stuck = fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
+	default:
+		stuck = fmt.Errorf("the application's docker client had not exited after keploy killed it (its container %q keploy could not find)", a.container)
+	}
+	a.logger.Warn(stuck.Error()+"; the next start of the application may meet the container still there", zap.String("container", a.container))
+	return why, errors.Join(clientErr, stuck)
 }
 
 // containerWatch is what keploy reads of a container it stops: whether the
