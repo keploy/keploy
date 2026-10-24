@@ -43,6 +43,14 @@ type relayHarness struct {
 
 func newHarness(t *testing.T, cfg Config) *relayHarness {
 	t.Helper()
+	return newHarnessOver(t, cfg, nil)
+}
+
+// newHarnessOver is newHarness with the relay reading the client's socket
+// through src(srcProxy), for a row that needs that socket to do more than a
+// pipe does (nil: srcProxy itself).
+func newHarnessOver(t *testing.T, cfg Config, src func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
 	clientApp, srcProxy := net.Pipe()
 	dstProxy, destSvc := net.Pipe()
 
@@ -51,7 +59,11 @@ func newHarness(t *testing.T, cfg Config) *relayHarness {
 		cfg.Logger = zap.NewNop()
 	}
 
-	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
+	relaySrc := srcProxy
+	if src != nil {
+		relaySrc = src(srcProxy)
+	}
+	r := New(cfg, relaySrc, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &relayHarness{
