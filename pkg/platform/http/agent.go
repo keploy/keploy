@@ -1443,9 +1443,21 @@ func decodeStoreMocksResp(res *http.Response) error {
 	// truncated value rather than on an empty body — hence the bare
 	// "storemocks http 500" this used to give. Unchanged for an old agent;
 	// a new one now carries its reason in ErrorMsg.
+	//
+	// A 400 whose reply is that truncated value (a type and then the end,
+	// io.ErrUnexpectedEOF) is the agent from before the stream: it fails to
+	// read the stream's header on every call, and nothing else answers 400 so.
+	// An agent that reads the stream but not its reason in ErrorMsg (keploy
+	// v3.5.85 to v3.6.61) answers 400 only to a header it cannot read, which
+	// this side sends compressed only to an agent that says it reads zstd
+	// (v3.6.99 on). An empty 400, from a proxy in front of the agent, ends at
+	// io.EOF and is not blamed on the agent.
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		var fail models.AgentResp
 		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
+			if res.StatusCode == http.StatusBadRequest && errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("storemocks http %d: %w", res.StatusCode, models.ErrAgentPredatesMockStream)
+			}
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
 		}
 		if msg := fail.ErrorMsg; msg != "" {
