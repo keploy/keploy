@@ -173,6 +173,13 @@ type exactState struct {
 	// with each view as installExact is about to publish it in view: it
 	// sees the view as a reader loading view first will.
 	beforePublish func(*exactView)
+	// afterPublish, set only by tests and before any install, is called
+	// with each view as installExact's last step before it returns: the
+	// view published, the view before it closed, every kind's revision and
+	// the window signal moved. It sees what a reader the signal woke reads.
+	// It runs with no view's lock held; on a test's view the install lock is
+	// held, and on the open doors the variables' lock too.
+	afterPublish func(*exactView)
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
 	poolNames atomic.Pointer[map[string]struct{}]
@@ -809,8 +816,9 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	install := func() {
 		// Stamped as it is installed: what the tracker's open test is when
-		// the view starts serving. The lock is taken here, on both doors, so
-		// on OpenExactTest's it is held under the variables' lock.
+		// the view starts serving. The lock is taken here, on every door, so
+		// on the open doors (OpenExactTest, OpenExactTestConcurrent) it is
+		// held under the variables' lock.
 		m.exact.installMu.Lock()
 		defer m.exact.installMu.Unlock()
 		v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
@@ -1023,10 +1031,12 @@ func (m *MockManager) ServeExactWorker(names []string) {
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
 // and so does the window signal. v is complete as it is published: what the
-// door installing it gives it (its test and its mocks, and a test's view's
-// stamp) and what this gives it from the manager (the outside answers, the
-// staging epoch and the worker set) are all set before the swap that
-// publishes it.
+// door installing it gives it (its test and its mocks; on a test's view,
+// its stamp and the claims a shared recording is answered under; on a
+// concurrent door's view, which of its mocks are shared; on a pool view, its
+// pool names) and what this gives it
+// from the manager (the outside answers, the staging epoch and the worker
+// set) are all set before the swap that publishes it.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if w := m.exact.worker.Load(); w != nil {
@@ -1052,6 +1062,9 @@ func (m *MockManager) installExact(v *exactView) {
 	}
 	m.bumpRevisionAll()
 	m.signalWindowChange()
+	if m.exact.afterPublish != nil {
+		m.exact.afterPublish(v)
+	}
 	if m.logger != nil {
 		m.logger.Debug("exact serving", zap.String("test", v.test), zap.Int("test_mocks", len(v.owned)),
 			zap.String("pool_key", v.poolKey), zap.Int("pool_mocks", len(v.pool)))
