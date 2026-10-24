@@ -270,6 +270,10 @@ type tee struct {
 	// FakeConn its parser reads (fakeconn.FakeConn.Consumed). Set by [New]
 	// before the drain starts.
 	consumed func() int64
+	// processedThrough is how far into this direction's stream its parser
+	// is done (fakeconn.FakeConn.ProcessedThrough). Set by [New] before the
+	// drain starts.
+	processedThrough func() (int64, bool)
 
 	// readerLag, when positive, delays each chunk's delivery to the parser
 	// until this long after it was read ([Config.ReaderLag]). Read-only

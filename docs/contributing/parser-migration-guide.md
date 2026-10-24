@@ -92,7 +92,10 @@ The V2 session (`*supervisor.Session`) exposes:
 
 #### Reading request/response bytes
 
-Use `ReadChunk` for timestamps, `Read` for byte streams:
+A parser that reads each stream in its own loop, one chunk at a time,
+uses `ReadChunk` for timestamps and `Read` for byte streams. A parser that
+reads ahead of itself (reader goroutines that queue chunks for its loop)
+uses `ReadAhead` instead; see below.
 
 ```go
 chunk, err := sess.ClientStream.ReadChunk()
@@ -116,6 +119,62 @@ case in flight at that moment. Response bytes the capture lost are not yours
 to report there: a parser that cannot re-align after a hole is no longer fed,
 and the capture leaves out the test cases the connection carries from the
 loss on itself.
+
+#### A parser that reads ahead: `ReadAhead` and `MarkProcessed`
+
+A parser whose reader goroutines take chunks and queue them on a channel
+for its loop reads with `ReadAhead`, never `ReadChunk` or `Read`. Each
+read marks the chunk taken (`Consumed`) but not processed (`Processed`).
+The loop says it is done with a chunk by calling
+`sess.MarkProcessed(dir, chunk)`. Without that, the capture cannot tell
+what the parser processed from what its reader took and queued:
+
+- When the parser stops, what it took and never processed is `Consumed`
+  less `Processed`, and the test cases its connection carried past where
+  its loop got (`ProcessedThrough`) are left out. A parser that reads
+  ahead with `ReadChunk` has everything its readers queued counted as
+  processed, so test cases whose mocks it never emitted would be kept.
+- A stop that waits for the parsers to catch up waits on what the loop
+  processed, not on what the reader took.
+
+The rules:
+
+1. Mark a chunk once the loop is **done** with it: it has emitted every
+   mock the chunk completes. Marking it as the loop takes it is wrong: a
+   chunk in the loop's hand when the parser fails would count as
+   processed.
+2. Mark each stream's chunks **in the order `ReadAhead` handed them out**,
+   once each. `MarkProcessed` counts bytes, not which bytes, so marking out
+   of order or twice says the parser processed bytes it has not. A
+   partial chunk, or bytes of several with the times of the last, may be
+   marked too.
+3. A loop turn that took no chunk marks nothing.
+4. Read the first chunk the same way, if the parser reads it before
+   starting its readers.
+5. `SkipThrough`, `DiscardBefore` and the floor assume a parser that
+   reads synchronously: past a discard, `ProcessedThrough` is not exact
+   until the parser has processed all it read ahead. Do not mix them with
+   `ReadAhead`.
+
+The Generic recorder (`pkg/agent/proxy/integrations/generic/encode_v2.go`)
+is the reference. Its loop keeps the chunk it took last in hand and marks
+it at the top of the next turn, once that chunk's mocks are emitted. In
+outline:
+
+```go
+var inHand chunkEvent
+for {
+    sess.MarkProcessed(inHand.dir, fakeconn.Chunk{
+        Bytes: inHand.bytes, ReadAt: inHand.readAt, WrittenAt: inHand.writtenAt})
+    inHand = chunkEvent{}
+    ev, ok := <-events // queued by the readers, which read with ReadAhead
+    if !ok {
+        break
+    }
+    inHand = ev
+    // ... pair, and emit the mocks ev completes ...
+}
+```
 
 #### Pairing a request with its response: `NextRequest`
 
@@ -317,7 +376,10 @@ Three parsers are migrated on PR #4113 — use them as templates:
   Mid-stream TLS via `directive.UpgradeTLS`. Full handshake + auth +
   query state machine.
 - **Generic** — `pkg/agent/proxy/integrations/generic/encode_v2.go`.
-  Concurrent reader goroutines pair request/response.
+  Concurrent reader goroutines read ahead (`ReadAhead`), the loop pairs
+  request and response, and it marks each chunk processed
+  (`MarkProcessed`) once it has emitted what the chunk completes. Use it
+  as the template for any parser that reads ahead.
 
 ## Things that bite people
 
