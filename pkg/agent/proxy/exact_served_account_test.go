@@ -786,36 +786,38 @@ func TestAReaderBesideTheInstallsAlwaysReadsTheTestsViewStamped(t *testing.T) {
 }
 
 // A view is published with what its door reads from the pool view it
-// closes, on all four test doors and on the pool door, for four shapes of
+// closes, on all four test doors and on the pool door, for five shapes of
 // the pool view's ahead: a test's two calls in flight, one answered in the
-// gap; two calls, none answered; one call, not answered; one call, answered.
+// gap; two calls, both answered; two calls, none answered; one call, not
+// answered; one call, answered.
 // Each shape runs twice: with the pool view naming a pool-slice recording,
 // which it serves too, and with it naming none, as for a set whose recording
 // made no mocks outside tests. A test's view is published with the answered
-// call, if any, consumed, in the order it was answered and marked carried,
-// with no other call marked answered, and with every one of the calls marked
-// in flight (the pool view served them all as the test's calls in flight,
-// answered or not). A pool view that replaces it, naming the calls again, is
-// published with the answered call kept consumed, in order and with the copy
-// it answered with. A view published without its consumed marks would answer
-// that recording a second time to a reader that loads it first; a test's
-// view published without its in-flight marks would have a learn step take
-// the test's call in flight for the pool's (InFlightIntoOpenTest false), so
-// two reads in the window where a test's calls in flight arrive would
-// disagree. The seam before the swap checks the marks as the view is
-// published. The row also checks what the marks rest on: no consume of the
-// pool view is served after the door read its answers. A parser that read
-// the pool view before the door began holds its copies of the pool-slice
-// recording, if the view names one, and of the call the gap did not answer,
-// if any, and consumes them as closeAhead returns, the door's read done
-// (exactState.aheadRead), and again at the seam before the swap. At both the
-// pool view must be closed (read under its lock) and each consume refused;
-// the variant with no copy held (one call, answered, with no pool names) has
-// no consume to refuse there, only the close to check. Served there, the
-// call's answer would be left out of the door's view, built from the read:
-// that view would answer the same recording a second time, and the first
-// answer would never be flagged as the test's; and the pool would answer a
-// call made as the door began a view that does not show the pool.
+// calls, if any, consumed, in the order they were answered and marked
+// carried, with no other call marked answered, and with every one of the
+// calls marked in flight (the pool view served them all as the test's calls
+// in flight, answered or not). A pool view that replaces it, naming the calls
+// again, is published with the answered calls kept consumed, in order and
+// with the copies they were answered with. A view published without its
+// consumed marks would answer that recording a second time to a reader that
+// loads it first; a test's view published without its in-flight marks would
+// have a learn step take the test's call in flight for the pool's
+// (InFlightIntoOpenTest false), so two reads in the window where a test's
+// calls in flight arrive would disagree. The seam before the swap checks the
+// marks as the view is published. The row also checks what the marks rest
+// on: no consume of the pool view is served after the door read its
+// answers. A parser that read the pool view before the door began holds its
+// copies of the pool-slice recording, if the view names one, and of one call
+// the gap did not answer, if any, and consumes them as closeAhead returns,
+// the door's read done (exactState.aheadRead), and again at the seam before
+// the swap. At both the pool view must be closed (read under its lock) and
+// each consume refused; the variants with no copy held (every call
+// answered, one or two, with no pool names) have no consume to refuse there,
+// only the close to check. Served there, the call's answer would be left
+// out of the door's view, built from the read: that view would answer the
+// same recording a second time, and the first answer would never be flagged
+// as the test's; and the pool would answer a call made as the door began a
+// view that does not show the pool.
 // A seam inside closeAhead's hold of the pool view's lock
 // (exactState.aheadLocked) checks that it runs inside a hold of that lock
 // (TryLock fails) and that the view is already closed there, so a close left
@@ -825,10 +827,10 @@ func TestAReaderBesideTheInstallsAlwaysReadsTheTestsViewStamped(t *testing.T) {
 // the seam left together in that hold, passes, as no row can place a consume
 // between the read and that hold, where correct code has no point. At
 // installExact's end (exactState.afterPublish), on the install's goroutine,
-// a reader answers the answered call again and must miss, and on a test's
+// a reader answers each answered call again and must miss, and on a test's
 // view must find every call in flight into the open test. Every check is
 // placed, not raced, so a mark set after the swap or after the install, or a
-// close left out for one of the four shapes, with pool names or without
+// close left out for one of the five shapes, with pool names or without
 // them, fails the row every run; a mark set under the view's lock with that
 // lock still held at the end seam hangs the row instead (its reader takes
 // the view's lock), until go test's timeout fails it. The concurrent doors
@@ -847,6 +849,7 @@ func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T
 	}
 	for _, shape := range []gapFixture{
 		{name: "TwoCallsOneAnswered", fetch: true, other: true, answer: true},
+		{name: "TwoCallsBothAnswered", fetch: true, other: true, answer: true, answerOther: true},
 		{name: "TwoCallsNoneAnswered", fetch: true, other: true},
 		{name: "OneCallNoneAnswered", other: true},
 		{name: "OneCallAnswered", fetch: true, answer: true},
@@ -872,12 +875,13 @@ func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T
 // gapFixture is a shape of the pool view's ahead in
 // TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight, and
 // whether the pool view names a pool-slice recording: which of t2's calls
-// are in flight as the pool view begins (fetch, other), and whether the gap
-// answers fetch. It never answers other. named: the pool view names the
-// pool-slice recording gap-pool, and so serves it too.
+// are in flight as the pool view begins (fetch, other), and which of them
+// the gap answers: answer, fetch; answerOther, other too, after fetch (only
+// with answer). named: the pool view names the pool-slice recording
+// gap-pool, and so serves it too.
 type gapFixture struct {
-	name                        string
-	fetch, other, answer, named bool
+	name                                     string
+	fetch, other, answer, answerOther, named bool
 }
 
 // gapDoor is a door of that row. pool: it installs a pool view that names
@@ -901,7 +905,18 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		other = httpCall("t2-other", 2e9, "/other")
 		calls = append(calls, other)
 	}
-	answer, pool := fixture.answer, door.pool
+	// answered are the calls the gap answers, in the order it answers them;
+	// unanswered is other if the gap does not answer it.
+	var answered []*models.Mock
+	if fixture.answer {
+		answered = append(answered, fetch)
+	}
+	unanswered := other
+	if fixture.answerOther {
+		answered = append(answered, other)
+		unanswered = nil
+	}
+	pool := door.pool
 	slice := httpCall("gap-pool", 3e9, "/pool")
 	shared := httpCall("t3-shared", 4e9, "/shared")
 	mm := stagedManager(t, nil, append([]*models.Mock{slice, shared}, calls...))
@@ -910,16 +925,31 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		names = []string{slice.Name}
 	}
 	mm.ServeExactPool("k", names, calls...)
-	if answer {
-		if got := pollFirst(t, mm, fetch.Name); got != fetch.Name {
-			t.Fatalf("precondition: the pool view did not answer t2's call in flight in the gap: %s", got)
+	for _, mk := range answered {
+		if got := pollFirst(t, mm, mk.Name); got != mk.Name {
+			t.Fatalf("precondition: the pool view did not answer t2's call in flight %s in the gap: %s", mk.Name, got)
 		}
 	}
 	// held are a parser's copies of the pool-slice recording, if the pool
-	// view names it, and of the call the gap did not answer, if any, read
-	// from the pool view before the door begins: the pool view's own
-	// copies, so their consumes are refused only if that view is closed.
+	// view names it, and of unanswered, if any, read from the pool view
+	// before the door begins: the pool view's own copies, so their consumes
+	// are refused only if that view is closed.
 	gapView := mm.exact.view.Load()
+	// answeredWith is the copy the pool view answered each answered call
+	// with, which a pool view naming the calls again must keep.
+	answeredWith := make(map[string]*models.Mock, len(answered))
+	gapView.mu.Lock()
+	for _, mk := range answered {
+		if i, ok := gapView.index[mk.Name]; ok {
+			answeredWith[mk.Name] = gapView.served[i]
+		}
+	}
+	gapView.mu.Unlock()
+	for _, mk := range answered {
+		if answeredWith[mk.Name] == nil {
+			t.Fatalf("precondition: the pool view keeps no copy it answered %s with", mk.Name)
+		}
+	}
 	mocks, err := mm.GetSessionScopedMocks()
 	if err != nil {
 		t.Fatalf("precondition: reading the pool view: %v", err)
@@ -931,7 +961,7 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		case mk.Name == slice.Name:
 			nSlice++
 			held = append(held, mk)
-		case other != nil && mk.Name == other.Name:
+		case unanswered != nil && mk.Name == unanswered.Name:
 			nOther++
 			held = append(held, mk)
 		}
@@ -940,7 +970,7 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 	if fixture.named {
 		wantSlice = 1
 	}
-	if other != nil {
+	if unanswered != nil {
 		wantOther = 1
 	}
 	if nSlice != wantSlice || nOther != wantOther {
@@ -1019,24 +1049,32 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 			t.Errorf("the view being replaced at the seam was not the pool view the gap answered from")
 		}
 		refused("at the seam before the swap,")
-		if answer {
-			i, ok := v.index[fetch.Name]
-			if !ok || !v.consumed[i] || !slices.Equal(v.order, []int{i}) {
-				t.Errorf("the door's view was about to be published without the call the pool view answered in the gap marked answered (in the view %v, consumed %v, order %v): a reader loading it first answers that recording a second time", ok, ok && v.consumed[i], v.order)
-			}
-			if pool {
-				if !ok || v.served[i] == nil {
-					t.Errorf("the pool view was about to be published without the copy %s answered with: its consume, flagged as the next test opens, would say nothing of what it answered", fetch.Name)
+		if len(answered) > 0 {
+			var order []int
+			for _, mk := range answered {
+				i, ok := v.index[mk.Name]
+				if !ok || !v.consumed[i] {
+					t.Errorf("the door's view was about to be published without %s, which the pool view answered in the gap, marked answered (in the view %v): a reader loading it first answers that recording a second time", mk.Name, ok)
+					continue
 				}
-			} else if !v.carried[fetch.Name] {
-				t.Errorf("t2's view was about to be published without %s marked carried: the variables its answer bound are not this test's", fetch.Name)
+				order = append(order, i)
+				if pool {
+					if v.served[i] != answeredWith[mk.Name] {
+						t.Errorf("the pool view was about to be published without the copy %s answered with (it keeps %p; want %p): its consume, flagged as the next test opens, would say nothing of what it answered", mk.Name, v.served[i], answeredWith[mk.Name])
+					}
+				} else if !v.carried[mk.Name] {
+					t.Errorf("t2's view was about to be published without %s marked carried: the variables its answer bound are not this test's", mk.Name)
+				}
+			}
+			if !slices.Equal(v.order, order) {
+				t.Errorf("the door's view was about to be published with the answered order %v; want %v, the calls the pool view answered in the gap in the order it answered them", v.order, order)
 			}
 		} else if len(v.order) != 0 || len(v.carried) != 0 || slices.Contains(v.consumed, true) {
 			t.Errorf("the door's view was about to be published with a call marked answered (consumed %v, order %v, carried %v), though the gap answered none", v.consumed, v.order, v.carried)
 		}
-		if other != nil {
-			if j, ok := v.index[other.Name]; !ok || v.consumed[j] || v.carried[other.Name] {
-				t.Errorf("the door's view was about to be published with %s, which the gap did not answer, marked answered or left out (in the view %v)", other.Name, ok)
+		if unanswered != nil {
+			if j, ok := v.index[unanswered.Name]; !ok || v.consumed[j] || v.carried[unanswered.Name] {
+				t.Errorf("the door's view was about to be published with %s, which the gap did not answer, marked answered or left out (in the view %v)", unanswered.Name, ok)
 			}
 		}
 		if pool {
@@ -1056,9 +1094,9 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		if mm.exact.view.Load() != v {
 			t.Errorf("the door's view was not the view served at installExact's end")
 		}
-		if answer {
-			if got := pollFirst(t, mm, fetch.Name); got != "a miss" {
-				t.Errorf("a reader at installExact's end answered %q with the door's view served; want a miss: the recording the pool view answered in the gap answered a second time", got)
+		for _, mk := range answered {
+			if got := pollFirst(t, mm, mk.Name); got != "a miss" {
+				t.Errorf("a reader at installExact's end answered %q for %s with the door's view served; want a miss: the recording the pool view answered in the gap answered a second time", got, mk.Name)
 			}
 		}
 		if pool {
@@ -1074,20 +1112,15 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 	if heldChecked != 1 || readChecked != 1 || seamChecked != 1 || endChecked != 1 {
 		t.Fatalf("the door's install ran the seam in closeAhead's hold %d times, the one at closeAhead's return %d times, the one before the swap %d times and the one at installExact's end %d times; want 1 of each", heldChecked, readChecked, seamChecked, endChecked)
 	}
-	// Once the door returns, the answered call still misses, and each call
+	// Once the door returns, each answered call still misses, and each call
 	// the gap did not answer answers.
-	if answer {
-		if got := pollFirst(t, mm, fetch.Name); got != "a miss" {
-			t.Errorf("once the door returned, a reader answered %q; want a miss", got)
+	for _, mk := range calls {
+		want := mk.Name
+		if slices.Contains(answered, mk) {
+			want = "a miss"
 		}
-	} else if fetch != nil {
-		if got := pollFirst(t, mm, fetch.Name); got != fetch.Name {
-			t.Errorf("once the door returned, t2's call in flight answered %q; want %s", got, fetch.Name)
-		}
-	}
-	if other != nil {
-		if got := pollFirst(t, mm, other.Name); got != other.Name {
-			t.Errorf("once the door returned, t2's call in flight answered %q; want %s", got, other.Name)
+		if got := pollFirst(t, mm, mk.Name); got != want {
+			t.Errorf("once the door returned, a reader answered %q for t2's call in flight %s; want %s", got, mk.Name, want)
 		}
 	}
 }
