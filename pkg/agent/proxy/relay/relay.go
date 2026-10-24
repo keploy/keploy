@@ -697,7 +697,7 @@ func (r *Relay) forward(
 			// earlier than a look that found nothing in hand (heldUnstamped).
 			t.noteReading()
 			chunk.Dir = dir
-			chunk.ReadAt = observedReadAt(src, time.Now())
+			chunk.ReadAt = observedReadAt(src, r.readNow())
 			t.noteCarried(chunk.ReadAt)
 			if dir == fakeconn.FromClient {
 				chunk.ConnSeq = r.order.FromClient()
@@ -975,6 +975,15 @@ func (r *Relay) forward(
 			return err
 		}
 	}
+}
+
+// readNow is the time a forwarder stamps a chunk it read with when its socket
+// reports none ([Config.readClock]; nil: time.Now).
+func (r *Relay) readNow() time.Time {
+	if f := r.cfg.readClock; f != nil {
+		return f()
+	}
+	return time.Now()
 }
 
 // currentPauseCh snapshots the current pause channel under the mutex.
