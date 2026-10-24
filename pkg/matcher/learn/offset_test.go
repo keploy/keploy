@@ -631,6 +631,31 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 	if ln := ClassifyIn(dc, []string{p}, strLeaf(p, sentB.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, sentA.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), r1Insert, nil, []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(1)}, nil, nil)[0]; ln.Kind != KindUnaccounted {
 		t.Errorf("B alone served, after the call: %s (%s); want it refused", ln.Kind, ln.Why)
 	}
+	// One of the two recorded at the call's own instant, F serving them in
+	// the order they were recorded in: the recording may never have given
+	// that one before the call (the equal instant read fail-closed), so the
+	// recorded order is no order both runs gave the application, and a
+	// value on A's moment as recorded and B's as F gave is refused, built on
+	// both by an offset, as in the other order.
+	for _, c := range []struct {
+		name         string
+		a, b         *models.Mock
+		firstA, gave string
+	}{
+		{"B at the call's own instant, F serving A then B", a, receive("mock-11", sentB, r1Insert), "", ", and"},
+		{"A at the call's own instant, F serving B then A", receive("mock-4", sentA, r1Insert), receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 14, 15, 101e6, time.UTC)), "b", " (recorded at the call's own instant, so keploy reads it as given to the application before the call), and"},
+	} {
+		dc := NewDriftCache()
+		ra, rb := dc.RawOf(c.a, true).ServedAs(1), dc.RawOf(c.b, true).ServedAs(2)
+		if c.firstA == "b" {
+			ra, rb = dc.RawOf(c.a, true).ServedAs(2), dc.RawOf(c.b, true).ServedAs(1)
+		}
+		ln := ClassifyIn(dc, []string{p}, strLeaf(p, sentB.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, sentA.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), r1Insert, nil, []Raw{ra, rb}, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "the moment mock-4 at spec.resp.body holds as the recording gave it"+c.gave) ||
+			!strings.Contains(ln.Why, "the moment mock-11 at spec.resp.body holds, which record's full round gave the application in its place") {
+			t.Errorf("FALSE GREEN? in the recorded order, %s: %s (%s); want it refused, built on mock-4 and mock-11 by an offset", c.name, ln.Kind, ln.Why)
+		}
+	}
 }
 
 // inRecordedOrder: one recording is in its own order; two are in the
@@ -1133,7 +1158,10 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 // recorded one); one that names the recorded moment alone shows no copy,
 // noise, unless the recording at the call's own instant, read as one the
 // recorded application may have been given, names it by the rule by which
-// the call's own place names F's.
+// the call's own place names F's. Beside the own place, the offset rule
+// reads such a recording as the recording gave it (the equal instant read
+// fail-closed) against the own place F gave, and refuses naming both and
+// that it was recorded at the call's own instant.
 func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 	const p = "body.sent_at"
 	at := r1Insert
@@ -1160,11 +1188,12 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 			{"the recorded minute alone, beside the own place", base.Add(10 * time.Second), true, ""},
 		} {
 			want := tc.want
-			if when.at.Equal(at) && tc.withOwn && want == "" {
-				// The own place's 11:14:45 rounds to F's minute; the
-				// neighbour's 11:14:10, which the recorded application may
-				// have been given before the call, rounds to the recorded one.
-				want = "the moment record's full round saw in it stands in mock-42 at spec.resp.body, and the moment it was recorded with stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call"
+			if when.at.Equal(at) && tc.withOwn && tc.sent != base.Add(65*time.Second) {
+				// The neighbour, which the recorded application may have
+				// been given before the call, as the recording gave it, and
+				// the own place F gave stand a whole minute apart or at one
+				// minute: the offset rule refuses naming both.
+				want = " the moment mock-44 at spec.resp.body holds as the recording gave it (recorded at the call's own instant, so keploy reads it as given to the application before the call), and record's full round saw it "
 			}
 			for _, viaSet := range []bool{false, true} {
 				dc := NewDriftCache()
@@ -1315,5 +1344,42 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	})[0]
 	if ln.Kind != KindNoise {
 		t.Errorf("the own place and a neighbour recorded after the call: %s (%s); want noise, the later recording no source of the recorded moment", ln.Kind, ln.Why)
+	}
+}
+
+// A place recorded at the call's own instant counts, for the offset rule, as
+// one the recording gave the application before the call (the fail-closed
+// reading every rule takes of the equal instant): a value built by an offset
+// on what such a recording held, matched by what F gave in its place, is
+// refused as one recorded a moment before the call is, never noise, and the
+// reason says the recording was made at the call's own instant.
+func TestAnOffsetOnARecordingAtTheCallsOwnInstantIsRefused(t *testing.T) {
+	sent := time.Date(2026, 10, 21, 23, 58, 16, 473e6, time.UTC)
+	got := sent.Add(2*time.Minute + 311*time.Millisecond)
+	attrs := func(at time.Time) string {
+		return `{"SentTimestamp": "` + strconv.FormatInt(at.UnixMilli(), 10) + `"}`
+	}
+	const p = "body.due"
+	day := 24 * time.Hour
+	verdict := func(when time.Time) Learned {
+		receive, delivered := r1Receive(attrs(sent)), r1Receive(attrs(got))
+		delivered.Name = "mock-11"
+		for _, m := range []*models.Mock{receive, delivered} {
+			m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
+		}
+		for _, m := range []*models.Mock{receive, delivered} {
+			m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = when, when
+		}
+		dc := NewDriftCache()
+		raw := []Raw{dc.RawOf(receive, true).ServedAs(2).OfAnotherTest(), dc.RawOf(delivered, true).ServedAs(1).OfAnotherTest()}
+		return ClassifyIn(dc, []string{p}, strLeaf(p, got.Add(-2*day).Format("2006-01-02")), strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), r1Insert, nil, raw, nil, nil)[0]
+	}
+	before, same := verdict(r1Insert.Add(-time.Second)), verdict(r1Insert)
+	if before.Kind != KindUnaccounted || !strings.Contains(before.Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") {
+		t.Fatalf("an offset on a recording made a moment before the call: %s (%s); want it refused naming the offset", before.Kind, before.Why)
+	}
+	const gave = " holds as the recording gave it"
+	if want := strings.Replace(before.Why, gave, gave+" (recorded at the call's own instant, so keploy reads it as given to the application before the call)", 1); same.Kind != before.Kind || same.Why != want {
+		t.Errorf("FALSE GREEN? an offset on a recording made at the call's own instant: %s (%s); want what one a moment before gets, saying when it was recorded: %s (%s)", same.Kind, same.Why, before.Kind, want)
 	}
 }

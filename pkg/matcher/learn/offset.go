@@ -85,15 +85,20 @@ import (
 // place's moment as F gave it, hf); at, when its mock's request was
 // recorded, and first and last, the first and the last of F's serves of it
 // in the set (Raw.ServedIn; 0 where it did not or that is not known): the
-// two orders the two runs gave the application their recordings in.
+// two orders the two runs gave the application their recordings in. A place
+// whose mock was recorded at the call's own instant (atCall: a fixture's
+// whole second) is recorded, as every rule reads the equal instant, the
+// fail-closed reading: the recording may have given it before the call. It
+// is never one the recording surely gave, which only lets a pair go
+// (inRecordedOrder).
 type offsetPlace struct {
-	m               moment
-	mock            string
-	where           string
-	call            string
-	recorded, given bool
-	at              time.Time
-	first, last     int
+	m                       moment
+	mock                    string
+	where                   string
+	call                    string
+	recorded, given, atCall bool
+	at                      time.Time
+	first, last             int
 }
 
 // inRecordedOrder reports whether F gave the application the recordings of
@@ -285,8 +290,11 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		op.answers = append(op.answers, g.answer...)
 		others = append(others, g)
 	}
+	// A place recorded at the call's own instant is read as the recording
+	// gave it before the call, as every rule reads the equal instant: the
+	// fail-closed reading, which an offset on it refuses.
 	put := func(kp keyedPlace, mock, call string, rat time.Time, given bool, first, last int) {
-		op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mock, where: kp.where, call: call, recorded: rat.Before(at), given: given, at: rat, first: first, last: last})
+		op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mock, where: kp.where, call: call, recorded: !rat.After(at), given: given, atCall: rat.Equal(at), at: rat, first: first, last: last})
 	}
 	for _, p := range payloads {
 		for _, kp := range dc.keyedPlaces(p.x) {
@@ -856,9 +864,12 @@ func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 					// recording did: two recordings F gave in the test and
 					// the recording gave before the call, in one order, are
 					// no place F gave in another's (and neither is one
-					// recording's two instants).
+					// recording's two instants). A recording made at the
+					// call's own instant the recording may never have
+					// given before the call, so F's serving it after the
+					// other is no order both runs gave: the pair stays.
 					hr, hf := list[i], list[j]
-					if !hf.given || hf.call != hr.call || hr.given && hf.recorded && inRecordedOrder(hr, hf) {
+					if !hf.given || hf.call != hr.call || hr.given && !hr.atCall && hf.recorded && !hf.atCall && inRecordedOrder(hr, hf) {
 						continue
 					}
 					if m, ok := offsetBetween(p, list[i], list[j]); ok {
@@ -927,7 +938,11 @@ func offsetWhy(m offsetMatch) string {
 		rel = (-off).String() + " before"
 	}
 	unit := unitName(max(m.rec.res, m.live.res))
-	why := "its moment, to the " + unit + ", stands " + rel + " the moment " + m.hr.where + " holds as the recording gave it, and record's full round saw it " + rel + " the moment " + m.hf.where + " holds, which record's full round gave the application in its place: a value built on what the application was given by an offset moves so, as a read of the clock does, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it is built on " + m.hf.mock + "'s instant, which keploy cannot follow with an offset yet"
+	gave := " holds as the recording gave it"
+	if m.hr.atCall {
+		gave += " (recorded at the call's own instant, so keploy reads it as given to the application before the call)"
+	}
+	why := "its moment, to the " + unit + ", stands " + rel + " the moment " + m.hr.where + gave + ", and record's full round saw it " + rel + " the moment " + m.hf.where + " holds, which record's full round gave the application in its place: a value built on what the application was given by an offset moves so, as a read of the clock does, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it is built on " + m.hf.mock + "'s instant, which keploy cannot follow with an offset yet"
 	if m.hr.mock != m.hf.mock && (m.hr.given && m.hr.first == 0 || m.hf.given && m.hf.first == 0) {
 		// Both runs gave both: the order F gave them in is what is not
 		// known (Order.Of), most often two requests aloft at once.
