@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -12,7 +13,10 @@ import (
 // repeatOfAnswered is, for a request no mock answered, the per-test recording
 // of an earlier test of the set that already answered an identical request at
 // this replay (integrations.AnsweredFinder), with when it answered; ok is
-// false when there is none, or the store keeps no such history.
+// false when there is none, when the store keeps no such history, and when
+// the open test has a recording of its own under the call's request keys
+// that it has not consumed (ownRecordingUnder): its diff is the miss's
+// explanation then.
 //
 // Identical is the request as the strict comparison reads it (strictDiff),
 // configured and learned noise applied, headers aside but for the
@@ -34,7 +38,38 @@ func repeatOfAnswered(ctx context.Context, input *req, mockDb integrations.MockM
 		path = input.url.Path
 	}
 	target := strings.Join(input.header.Values(amzTargetHeader), ",")
-	return f.FindAnsweredEarlier(models.HTTP, RequestKeysOf(input.method, path, target, n.loose()), match)
+	keys := RequestKeysOf(input.method, path, target, n.loose())
+	if ownRecordingUnder(mockDb, keys) {
+		return integrations.AnsweredCall{}, false
+	}
+	return f.FindAnsweredEarlier(models.HTTP, keys, match)
+}
+
+// ownRecordingUnder reports whether the open test has a recording of its own
+// under any of keys (models.RequestKeys) that no call of it consumed yet: a
+// recording its call may be, changed. The miss then names that recording as
+// its closest, with what differs, and gets no repeat note: an earlier test's
+// identical recording does not explain a request the application changed, and
+// a note there would hide the change behind a cache. A store whose per-test
+// read fails counts as having one: no note is the side that hides nothing.
+func ownRecordingUnder(mockDb integrations.MockMemDb, keys []string) bool {
+	perTest, err := mockDb.GetPerTestMocksInWindow()
+	if err != nil {
+		return true
+	}
+	perTest = integrations.WithoutSpent(mockDb, perTest)
+	owned := openTestOwner(mockDb, perTest)
+	for _, m := range FilterHTTPMocks(perTest) {
+		if m == nil || !owned(m) {
+			continue
+		}
+		for _, k := range recordedRequestKeys(m) {
+			if slices.Contains(keys, k) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sameRequest reports whether a strict comparison's differences leave the

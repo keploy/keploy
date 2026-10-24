@@ -38,6 +38,16 @@ func (d earlierDb) FindAnsweredEarlier(kind models.Kind, keys []string, match fu
 	return integrations.AnsweredCall{}, false
 }
 
+// ownDb is earlierDb whose per-test read shows the open test's own
+// recordings, none of them consumed.
+type ownDb struct {
+	earlierDb
+	own []*models.Mock
+}
+
+func (d ownDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return d.own, nil }
+func (d ownDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return d.own, nil }
+
 // sapCount is a recording of the call a cache fills: a GET with a query.
 func sapCount(name, host string, recordedAt time.Time) *models.Mock {
 	m := onHost(name, "/sap/A_BusinessPartner/$count?$filter=x", host)
@@ -126,14 +136,16 @@ func TestSameRequestToleratesOnlyHeaders(t *testing.T) {
 func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	// own are the open test's own recordings its per-test read shows.
+	var own []*models.Mock
 	miss := func(t *testing.T, path string, opts models.OutgoingOptions, shown ...*models.Mock) *models.MockMismatchReport {
 		t.Helper()
 		earlier := sapCount("mock-7", host, rec)
 		// The open test began 3 s after the recording at record time; the
 		// earlier call was answered an hour before this one at replay.
-		db := earlierDb{mockMemDb: &mockMemDb{mocks: shown}, answered: []integrations.AnsweredCall{{
+		db := ownDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{mocks: shown}, answered: []integrations.AnsweredCall{{
 			Mock: earlier, AnsweredAt: time.Now().Add(-time.Hour), TestRecordedStart: rec.Add(3 * time.Second),
-		}}}
+		}}}, own: own}
 		var reported error
 		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
 		app, prox := net.Pipe()
@@ -196,6 +208,25 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 		if r := miss(t, "/sap/A_BusinessPartner/$count?$filter=other", row.opts); r.Repeat != nil {
 			t.Fatalf("switch %q: a call no earlier answer is got a note: %+v", on, r.Repeat)
 		}
+	}
+
+	// The open test's own recording of the endpoint, unconsumed, that the
+	// call differs from in its query: the call may be that recording
+	// changed, so the miss names it as its closest, with the query's diff,
+	// and gets no note, with the switch on or off. An own recording of
+	// another endpoint leaves the note.
+	for _, on := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, on)
+		own = []*models.Mock{onHost("mock-own", "/sap/A_BusinessPartner/$count?$filter=y", host)}
+		r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{})
+		if r.Repeat != nil || r.ClosestMock != "mock-own" || len(r.FieldDiffs) == 0 || strings.Contains(r.NextSteps, "identical to") {
+			t.Fatalf("switch %q: a call that differs from the test's own recording got closest %q, diffs %v, note %+v, next step %q; want mock-own with its diff and no note", on, r.ClosestMock, r.FieldDiffs, r.Repeat, r.NextSteps)
+		}
+		own = []*models.Mock{onHost("mock-own", "/sap/A_Customer?$filter=y", host)}
+		if r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{}); r.Repeat == nil || r.Repeat.Mock != "mock-7" {
+			t.Fatalf("switch %q: the test's own recording of another endpoint took the note away: %+v", on, r)
+		}
+		own = nil
 	}
 
 	// In record's full round a learn step that names a recorded call the
