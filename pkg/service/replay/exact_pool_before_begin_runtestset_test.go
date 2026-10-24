@@ -224,20 +224,13 @@ func lastReadAfterPool(events []string, test, read string) (bool, bool) {
 	return made, after
 }
 
-// A streamed test case that fails ends with the pool served, on every exit
-// the streaming pass has, before its last read of what it consumed and
-// before its capture window is read: the agent's learn tracker ends it and
-// begins the next test case only over the pool, and a call the application
-// makes after the read is the pool's, not one of the failed test's that its
-// read leaves to the next test's.
-// Before, these exits served no pool: the next test case's tracker began
-// over the failed one's view, and the store answered the next test's calls
-// from that view while the tracker filed what the failed one served as
-// served before the next. A value one of its recordings held was learned as
-// noise onto a recording of the failed test (integrations' Postgres and
-// Mongo learn steps).
-func TestAFailedStreamedTestEndsWithThePoolServed(t *testing.T) {
-	for _, tc := range []struct {
+// failedStreamExits are the streaming pass's exits on which test-1 fails
+// after its view is served, each by the hooks that drive it.
+func failedStreamExits() []struct {
+	name  string
+	hooks func() TestHooks
+} {
+	return []struct {
 		name  string
 		hooks func() TestHooks
 	}{
@@ -253,7 +246,23 @@ func TestAFailedStreamedTestEndsWithThePoolServed(t *testing.T) {
 		{name: "the answer is of another type", hooks: func() TestHooks {
 			return prHooks{wrongType: true}
 		}},
-	} {
+	}
+}
+
+// A streamed test case that fails ends with the pool served, on every exit
+// the streaming pass has after its view is served, before its last read of
+// what it consumed and before its capture window is read: the agent's learn
+// tracker ends it and begins the next test case only over the pool, and a
+// call the application makes after the read is the pool's, not one of the
+// failed test's that its read leaves to the next test's.
+// Before, these exits served no pool: the next test case's tracker began
+// over the failed one's view, and the store answered the next test's calls
+// from that view while the tracker filed what the failed one served as
+// served before the next. A value one of its recordings held was learned as
+// noise onto a recording of the failed test (integrations' Postgres and
+// Mongo learn steps).
+func TestAFailedStreamedTestEndsWithThePoolServed(t *testing.T) {
+	for _, tc := range failedStreamExits() {
 		t.Run(tc.name, func(t *testing.T) {
 			h, vi := exactViewRun(t, nil, "test-1", "test-2", "test-3")
 			h.replayer.hookImpl = consumedNoted{TestHooks: tc.hooks(), vi: vi}
@@ -718,28 +727,33 @@ func TestAFailedViewCallIsFollowedByThePoolBeforeTheNextTestBegins(t *testing.T)
 }
 
 // A failed streamed test case whose pool call the agent does not take, as it
-// ends, says so at the warn level, naming the test case and why: the next
+// ends, says so at the warn level, naming the test case and why, on every
+// exit the streaming pass has after the test case's view is served: the next
 // test case's loop head serves the pool again before it begins.
 func TestAFailedStreamedTestWhosePoolTheAgentDidNotTakeSaysSo(t *testing.T) {
-	// test-1's end is the set's first pool call.
-	h, vi := exactViewRun(t, func(n int) bool { return n == 1 }, "test-1", "test-2", "test-3")
-	h.replayer.hookImpl = prHooks{simErr: map[string]error{"test-1": errors.New("connection refused")}}
-	logs := observeLog(h)
-	h.run(t)
-	events := vi.trace()
-	if !hasEvent(events, "pool-failed") || !hasEvent(events, "test:test-2") {
-		t.Fatalf("precondition: test-1's pool call did not fail, or test-2 never opened: %v", events)
-	}
-	said := logs.FilterMessageSnippet("keploy could not serve the test set's pool as a failed streaming test case ended").All()
-	if len(said) != 1 {
-		t.Fatalf("the pool call test-1's failed exit made, which the agent did not take, was said %d times; want once: %v", len(said), events)
-	}
-	fields := said[0].ContextMap()
-	if said[0].Level != zapcore.WarnLevel || fields["testCase"] != "test-1" || !strings.Contains(fmt.Sprint(fields["error"]), "the agent did not take the pool call") {
-		t.Errorf("the line is at %v with %v; want warn, test-1 and the agent's error", said[0].Level, fields)
-	}
-	if bad := overATestView(events); bad != "" {
-		t.Errorf("a test began over a test's view, %s: %v", bad, events)
+	for _, tc := range failedStreamExits() {
+		t.Run(tc.name, func(t *testing.T) {
+			// test-1's end is the set's first pool call.
+			h, vi := exactViewRun(t, func(n int) bool { return n == 1 }, "test-1", "test-2", "test-3")
+			h.replayer.hookImpl = tc.hooks()
+			logs := observeLog(h)
+			h.run(t)
+			events := vi.trace()
+			if !hasEvent(events, "pool-failed") || !hasEvent(events, "test:test-2") {
+				t.Fatalf("precondition: test-1's pool call did not fail, or test-2 never opened: %v", events)
+			}
+			said := logs.FilterMessageSnippet("keploy could not serve the test set's pool as a failed streaming test case ended").All()
+			if len(said) != 1 {
+				t.Fatalf("the pool call test-1's failed exit made, which the agent did not take, was said %d times; want once: %v", len(said), events)
+			}
+			fields := said[0].ContextMap()
+			if said[0].Level != zapcore.WarnLevel || fields["testCase"] != "test-1" || !strings.Contains(fmt.Sprint(fields["error"]), "the agent did not take the pool call") {
+				t.Errorf("the line is at %v with %v; want warn, test-1 and the agent's error", said[0].Level, fields)
+			}
+			if bad := overATestView(events); bad != "" {
+				t.Errorf("a test began over a test's view, %s: %v", bad, events)
+			}
+		})
 	}
 }
 
