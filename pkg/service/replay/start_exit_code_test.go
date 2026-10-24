@@ -225,3 +225,41 @@ func TestAStartStoppedBeforeItsFirstSetCarriesNoEarlierRun(t *testing.T) {
 		t.Fatalf("the test sets an earlier run could not attribute misses of are this run's: %v", r.unattributedSets)
 	}
 }
+
+// tooOldAgentInstr is the stand-in agent of a compose stack whose /storemocks
+// answers as a keploy agent older than models.MockStreamMinAgentVersion does,
+// in the error the agent client returns for it.
+type tooOldAgentInstr struct{ *composeInstr }
+
+func (*tooOldAgentInstr) StoreMocks(context.Context, []*models.Mock, []*models.Mock) error {
+	return fmt.Errorf("storemocks http 400: %w", models.ErrAgentPredatesMockStream)
+}
+
+// A test set that fails on its agent's mock store fails the run, and Start's
+// error has to keep the store's cause, not only its text. A caller that knows
+// which agent it ran tells an agent too old for the mock stream by
+// errors.Is(err, models.ErrAgentPredatesMockStream): k8s-proxy names its replay
+// pods' agent image and keeps a recording's tests that such a replay could
+// never persist. Start rebuilt the error from its message, so the cause was
+// gone and k8s-proxy could only relay "storemocks http 400".
+func TestStartKeepsTheCauseOfAFailedTestSet(t *testing.T) {
+	c := &composeInstr{}
+	h := composeHarness(t, c)
+	h.mocks.filtered = []*models.Mock{{Name: "mock-a", Kind: models.HTTP}}
+	h.replayer.instrumentation = &tooOldAgentInstr{composeInstr: c}
+	h.replayer.config.Test.Mocking = true
+	h.replayer.config.Command = "docker compose up"
+	h.replayer.config.Test.MaxFlakyChecks = 1
+	saved := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved })
+	utils.ErrCode = 0
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	err := h.replayer.Start(ctx)
+	if !errors.Is(err, models.ErrAgentPredatesMockStream) {
+		t.Fatalf("Start: %v; want an error that is models.ErrAgentPredatesMockStream", err)
+	}
+	if want := "failed to run test set: storemocks http 400: " + models.ErrAgentPredatesMockStream.Error(); err.Error() != want {
+		t.Fatalf("Start: %q; want %q", err.Error(), want)
+	}
+}

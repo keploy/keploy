@@ -1202,7 +1202,10 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 				}
 				stopReason = fmt.Sprintf("failed to run test set: %v", err)
 				utils.LogError(r.logger, err, stopReason)
-				return fmt.Errorf("%s", stopReason)
+				// Wrapped, not rebuilt from stopReason: a caller tells an
+				// agent too old for the mock stream by its cause
+				// (models.ErrAgentPredatesMockStream).
+				return fmt.Errorf("failed to run test set: %w", err)
 			}
 			switch testSetStatus {
 			case models.TestSetStatusAppHalted:
