@@ -5183,9 +5183,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	unclaimedReason := ""
 	// workerMissing: under the proven switch, the set's worker-scope calls
 	// its run reached the place of that the application never made
-	// (awaitWorkerScope); workerUnread, why keploy could not read what they
-	// answered, which leaves the set not judged.
+	// (awaitWorkerScope); workerUnmade, those names as the report carries
+	// them, every one, where failure_reason names the first 20; workerUnread,
+	// why keploy could not read what they answered, which leaves the set not
+	// judged.
 	var workerMissing []string
+	var workerUnmade []string
 	var workerUnread error
 	// appNotStopped is why the set's end was read with its app still running
 	// (P101-c), "" when keploy stopped it first.
@@ -5373,6 +5376,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				r.markNotJudged(testSetID)
 			} else if len(workerMissing) > 0 {
 				unclaimedReason = workerWhy(workerMissing)
+				workerUnmade = slices.Clone(workerMissing)
 				r.logger.Error("test-set failed: "+unclaimedReason+" ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID), zap.Strings("mocks", workerMissing),
 					zap.String("next_step", "if the application no longer makes these calls on its own, record the test set again"))
@@ -5911,6 +5915,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		RealListed:          realListed,
 		RealFailure:         realWhy,
 		UnclaimedCalls:      unclaimed,
+		WorkerUnmade:        workerUnmade,
 		AppNotStopped:       appNotStopped,
 		Proven:              provenswitch.On(),
 	}
