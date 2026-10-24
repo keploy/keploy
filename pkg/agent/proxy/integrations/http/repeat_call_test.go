@@ -333,6 +333,58 @@ func (roundGateScope) Moved() string { return "" }
 
 var _ integrations.RoundReader = roundGateDb{}
 
+// restagedDb is earlierDb with a call the replay staged another set under
+// while the call was decided. The store itself names the answered recording
+// it holds (the other set's: recordings' names restart in each set). The
+// store held to the call's round names none and says the call was
+// restaged, as the agent's held store does once the staging moved
+// (heldScope.FindAnsweredEarlier and FindStagedNotOwned).
+type restagedDb struct{ earlierDb }
+
+func (restagedDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+
+func (restagedDb) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*models.Mock) bool) (string, bool) {
+	return "", false
+}
+
+func (d restagedDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return restagedHeld{earlierDb{mockMemDb: d.mockMemDb}}, func() bool { return true }
+}
+
+// restagedHeld is restagedDb held to the call's round once the replay
+// staged another set under the call.
+type restagedHeld struct{ earlierDb }
+
+func (restagedHeld) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+
+func (restagedHeld) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*models.Mock) bool) (string, bool) {
+	return "", true
+}
+
+// A miss's repeat note is asked of the store held to the call's round
+// (integrations.HoldToRound), as every other diagnosis of the miss is: once
+// the replay staged another set under the call, and that set's own mock-7
+// answered, the call is named no repeat of mock-7, and its miss says it was
+// restaged.
+func TestARepeatNoteIsAskedOfTheStoreHeldToTheCallsRound(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	t.Setenv(provenswitch.Env, "1")
+	other := sapCount("mock-7", host, time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC))
+	db := restagedDb{earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{
+		Mock: other, AnsweredAt: time.Now().Add(-time.Minute),
+	}}}}
+	if a, ok := db.FindAnsweredEarlier(models.HTTP, nil, func(*models.Mock) bool { return true }); !ok || a.Mock.Name != "mock-7" {
+		t.Fatalf("precondition: the store itself names %v (%v); want the other set's mock-7", a.Mock, ok)
+	}
+	r := missReport(t, db, addr, host, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{})
+	if r.Repeat != nil || r.ClosestMock == "mock-7" || strings.Contains(r.NextSteps, "identical to") {
+		t.Fatalf("a call the replay restaged under is named a repeat: %+v (closest %q, next step %q); want no note", r.Repeat, r.ClosestMock, r.NextSteps)
+	}
+	if !strings.Contains(r.NextSteps, restagedNote) {
+		t.Fatalf("the restaged call's next step is %q; want it to say the replay staged a set again", r.NextSteps)
+	}
+}
+
 // Under exact serving a call that is another test's recording no read shows
 // stays named as that recording made elsewhere (not owned): it is the reason
 // the call missed, and its closest. When an earlier test's identical
