@@ -255,3 +255,14 @@ func TestAConfirmingValueFoundAtAPlaceOnlyItGaveRefuses(t *testing.T) {
 		t.Errorf("1 in F, 7 in C beside mock-7's 7 that only C gave: %s (%q), want refused naming mock-7", got.Kind, got.Why)
 	}
 }
+
+// A word both rounds' values held where the place gave it in both shows no
+// round the value does not follow it, even where record's full round did
+// not find it (it stood unchanged there) and the confirming round finds it
+// only as a word held once more: refused.
+func TestAWordBothRoundsHeldIsRefusedWhereOnlyTheConfirmingRoundFindsIt(t *testing.T) {
+	got := classifyRounds(t, "bind.$8", "82 1", eRecAt, eRounds("16 1", "4 1 1"))
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-1") {
+		t.Errorf(`"82 1" at record, "16 1" in F, "4 1 1" in C beside SELECT 1: %s (%q), want refused naming mock-1`, got.Kind, got.Why)
+	}
+}
