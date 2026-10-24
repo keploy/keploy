@@ -18,7 +18,9 @@ import (
 // teardown's own, the one keploy record stops the app with too: an interrupt,
 // then a wait for the app's exit event (each of a native app's process
 // groups' leaders exiting, read on its pidfd; a docker run app's container
-// stopping: the daemon's wait, its main process's exit, its client's exit),
+// stopping: the daemon's wait; its main process's exit or its client's exit
+// only where that wait failed twice, its client's exit for a container keploy
+// never saw),
 // then a kill only when the app made no progress on its way out for
 // utils.StopStallBudget of the time both it and keploy could run
 // (utils.WaitExitByEvents, utils.ExitClock; the watchdog's stall bound), or

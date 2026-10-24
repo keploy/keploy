@@ -19,6 +19,8 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // eventDocker is a daemon holding one app container, whose main process is
@@ -28,6 +30,14 @@ type eventDocker struct {
 	docker.Client
 	seen bool
 	gone bool // removed by the wait (--rm): the wait says no such container
+	// exitOnWait: the container's main process exits as keploy first asks
+	// the daemon to wait for it (keploy's interrupt reached it), and the
+	// daemon, slow to take that exit, calls the container running on until
+	// halt. waitFails: that many of the daemon's waits fail at once (-1:
+	// every one), as a stream that broke.
+	exitOnWait bool
+	waitFails  int
+	waits      int
 	// inspectErr, set: the daemon does not describe the container (a
 	// starved daemon's inspect runs out), though it has it.
 	inspectErr error
@@ -55,6 +65,21 @@ func (d *eventDocker) ContainerWait(ctx context.Context, _ string, _ container.W
 	out, errs := make(chan container.WaitResponse, 1), make(chan error, 1)
 	if !d.seen {
 		errs <- errdefs.NotFound(errors.New("no such container"))
+		return out, errs
+	}
+	d.mu.Lock()
+	d.waits++
+	exit := d.exitOnWait && d.waits == 1
+	fail := d.waitFails != 0
+	if d.waitFails > 0 {
+		d.waitFails--
+	}
+	d.mu.Unlock()
+	if exit {
+		_ = syscall.Kill(d.pid, syscall.SIGKILL)
+	}
+	if fail {
+		errs <- errors.New("the daemon's stream broke")
 		return out, errs
 	}
 	go func() {
@@ -230,22 +255,94 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 			t.Fatalf("the kill came once the other process had closed its files (%d left): its progress was read for the container's", n)
 		}
 	})
-	// A starved daemon is slow to say what it did: its word is not the only
-	// event. The container's main process exiting is its stop, though the
-	// daemon has not said so yet; and a daemon whose inspect ran out is
+	// A starved daemon is slow to say what it did. The container's main
+	// process exiting, and every process of it gone, is the kernel's word,
+	// which comes first, and is no kill, and no stop either: the daemon
+	// calls the container running until it has taken the exit, its docker
+	// client waits on it (exec kills that client once the command's
+	// WaitDelay has run out after the stop), and the next start's docker run
+	// meets the name of a container the daemon holds. Taken for the stop,
+	// the main process's exit ended it with the daemon still calling the
+	// container running. The stop is through on the daemon's word; a daemon
+	// that never says so is an error once the bound on no news has passed,
+	// or at Ctrl+C, and no kill, as nothing of the container's runs, and the
+	// stop says so (the run's end does not carry its error on). A wait that
+	// fails is asked again; only where that fails too does the main
+	// process's exit stand for the stop. A daemon whose inspect ran out is
 	// still asked to wait, and its word taken, not the docker client's
 	// silence for a stall of the app's.
-	t.Run("its main process exits before the daemon says so", func(t *testing.T) {
-		shortStall(t, 3*time.Second)
-		// A process of it outlives the main one: the main one's exit is
-		// the container's stop all the same (docker ends the rest with it).
-		main := started(t, "sh", "-c", "sleep 600 & sleep 1")
-		d := &eventDocker{seen: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+	t.Run("its main process exits, and the daemon never says so", func(t *testing.T) {
+		shortStall(t, 300*time.Millisecond)
+		main := started(t, "sleep", "600")
+		d := &eventDocker{seen: true, exitOnWait: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
 		client := started(t, "sleep", "600") // its client, waiting on the daemon
+		core, logs := observer.New(zapcore.WarnLevel)
+		a := &App{logger: zap.New(core), docker: d, container: "app"}
+		killed, err := a.stopDockerRunByEvents(client)
+		if err == nil || !strings.Contains(err.Error(), `the application's processes had exited, but the docker daemon had not said its container "app" had stopped 300ms of keploy's runnable time later`) || killed != "" || len(d.kills) != 0 {
+			t.Fatalf("said %q (err %v) after kills %v; want the daemon's silence an error, no kill", killed, err, d.kills)
+		}
+		if n := logs.FilterMessageSnippet("the docker daemon had not said its container").Len(); n != 1 {
+			t.Fatalf("the stop said the daemon's silence %d times; want once, as the run's end does not carry its error on", n)
+		}
+	})
+	t.Run("its main process exits before the daemon says so", func(t *testing.T) {
+		main := started(t, "sleep", "600")
+		d := &eventDocker{seen: true, exitOnWait: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+		gone := exitedOf(t, main.Process.Pid)
+		over := make(chan struct{})
+		defer close(over)
+		go func() {
+			select {
+			case <-gone:
+				d.halt()
+			case <-over:
+			}
+		}()
+		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
-		killed, _ := a.stopDockerRunByEvents(client)
-		if killed != "" || len(d.kills) != 0 {
-			t.Fatalf("said %q after kills %v; want the main process's exit taken for the container's stop", killed, d.kills)
+		killed, err := a.stopDockerRunByEvents(client)
+		if err != nil || killed != "" || len(d.kills) != 0 {
+			t.Fatalf("said %q (err %v) after kills %v; want the stop through on the daemon's word, no kill", killed, err, d.kills)
+		}
+	})
+	// The stop offers to end at Ctrl+C at its first look (the run
+	// interrupted, the offer at once), and the press comes in that look,
+	// once the main process has exited: the wait for the daemon ends on
+	// it. The stall bound is 10s, so a press the stop loses fails the row
+	// (the daemon's silence an error after the bound), not holds it.
+	t.Run("its main process exits, and Ctrl+C is pressed at the stop's offer before the daemon says so", func(t *testing.T) {
+		shortStall(t, 10*time.Second)
+		main := started(t, "sleep", "600")
+		d := &eventDocker{seen: true, exitOnWait: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+		client := started(t, "sleep", "600")
+		a := &App{docker: d, container: "app"}
+		taken := pressAtOffer(t, a, exitedOf(t, main.Process.Pid))
+		killed, err := a.stopDockerRunByEvents(client)
+		if err == nil || !strings.Contains(err.Error(), "at the press of Ctrl+C") || killed != "" || len(d.kills) != 0 || !taken.Load() {
+			t.Fatalf("said %q (err %v) after kills %v, the press taken %v; want the press to end the wait for the daemon, no kill", killed, err, d.kills, taken.Load())
+		}
+	})
+	t.Run("its main process exits, and every wait of the daemon's fails", func(t *testing.T) {
+		shortStall(t, 300*time.Millisecond)
+		main := started(t, "sleep", "600")
+		d := &eventDocker{seen: true, exitOnWait: true, waitFails: -1, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+		client := started(t, "sleep", "600")
+		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		killed, err := a.stopDockerRunByEvents(client)
+		if err != nil || killed != "" || len(d.kills) != 0 || d.waits != 2 {
+			t.Fatalf("said %q (err %v) after kills %v and %d waits; want the wait asked twice, then the main process's exit taken for the stop, no kill", killed, err, d.kills, d.waits)
+		}
+	})
+	t.Run("its main process exits, the daemon's wait fails once, and the daemon never says so", func(t *testing.T) {
+		shortStall(t, 300*time.Millisecond)
+		main := started(t, "sleep", "600")
+		d := &eventDocker{seen: true, exitOnWait: true, waitFails: 1, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
+		client := started(t, "sleep", "600")
+		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		killed, err := a.stopDockerRunByEvents(client)
+		if err == nil || !strings.Contains(err.Error(), "the docker daemon had not said its container") || killed != "" || len(d.kills) != 0 {
+			t.Fatalf("said %q (err %v) after kills %v; want the wait asked again, and the daemon's silence an error", killed, err, d.kills)
 		}
 	})
 	// A client that exits with its container still running (a shell

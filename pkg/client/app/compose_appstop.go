@@ -615,7 +615,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	case end == utils.StopExited:
 		return "", nil
 	case lagged:
-		return "", a.composeStopLagged(end)
+		return "", a.containerStopLagged(end)
 	}
 	switch end {
 	case utils.StopPressed:
@@ -640,17 +640,19 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// would meet.
 	if end, _, lagged := utils.WaitStopByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
 		if lagged {
-			return killed, a.composeStopLagged(end)
+			return killed, a.containerStopLagged(end)
 		}
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
 	return killed, nil
 }
 
-// composeStopLagged is the stop's error where the app's processes exited but
-// the daemon did not say its container had stopped (utils.WaitStopByEvents):
-// a start now could be the daemon's no-op on a container it calls running.
-func (a *App) composeStopLagged(end utils.StopEnd) error {
+// containerStopLagged is the stop's error where the app's processes exited
+// but the daemon did not say its container had stopped
+// (utils.WaitStopByEvents), a compose app's or a docker run app's: a compose
+// start now could be the daemon's no-op on a container it calls running, and
+// a docker run's next start meets the name of a container the daemon holds.
+func (a *App) containerStopLagged(end utils.StopEnd) error {
 	if end == utils.StopPressed {
 		return fmt.Errorf("the application's processes had exited, and keploy stopped waiting for the docker daemon to say its container %q had stopped at the press of Ctrl+C", a.container)
 	}

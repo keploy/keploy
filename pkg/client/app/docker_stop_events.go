@@ -19,12 +19,22 @@ import (
 // stopDockerRunByEvents is the stop of a `docker run` app, under the proven
 // switch, at a test set's or a recording's end, the SIGINT sent to its
 // docker client. It waits for the app's container to stop: the daemon's wait
-// saying so (an event, not a poll), the container's main process exiting
-// (its pidfd), or, where nothing better can be asked (a container never
-// seen, or one whose wait the daemon failed), its docker client exiting,
-// which an attached client does once its container stops. While it waits the container's processes make
-// progress on their way out (utils.ExitMark); once they are all gone the
-// container has stopped. It kills only when they made none for
+// saying so (an event, not a poll), or, where nothing better can be asked (a
+// container never seen, or one whose wait the daemon failed, and failed again
+// when asked once more), the container's main process exiting (its pidfd) or
+// its docker client exiting, which an attached client does once its
+// container stops. The kernel's word (the main process's exit, every process
+// of the container gone) comes before the daemon's, which a starved daemon is
+// slow to give, and is no stop: the daemon calls the container running until
+// it has taken the exit, its docker client waits on it (and exec kills that
+// client once the command's WaitDelay has run out after the stop), and the
+// next start's `docker run` meets the name of a container the daemon still
+// holds. So the stop waits on for the daemon's word in the same wait
+// (utils.WaitStopByEvents); every process gone and no word from the daemon
+// for the bound on no news, or at the user's Ctrl+C, the stop fails and says
+// so, with no kill, as nothing of the container's runs. While it waits the
+// container's processes make progress on their way out (utils.ExitMark). It
+// kills only when they made none for
 // utils.StopStallBudget of the time both they and keploy could run
 // (utils.ExitClock), or at the user's Ctrl+C, which it offers: docker's own
 // stop and removal on a starved host take as long as they take, and are no
@@ -68,22 +78,35 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 		// the daemon failed. A client that went with its container still
 		// running (a shell around it that died on the interrupt, a client
 		// that does not proxy signals) leaves the container's own events,
-		// and the stall rule, to decide.
+		// and the stall rule, to decide. So is the main process's exit:
+		// the kernel's word, which comes before the daemon's.
 		clientExit, clientExited, waitFailed := clientGone, false, !seen
+		var mainExit <-chan struct{}
+		askedAgain := false
 		for {
 			select {
 			case <-daemonSaid:
 			case err := <-waitErr:
 				if !errdefs.IsNotFound(err) {
+					if !askedAgain {
+						// A stream that broke (a daemon restarted, an
+						// answer that did not decode) is asked again: a
+						// wait asked again of a container that has
+						// stopped answers at once.
+						askedAgain = true
+						a.logger.Debug("the daemon's wait for the app's container failed; asking for it again", zap.Error(err))
+						daemonSaid, waitErr = a.docker.ContainerWait(ctx, a.container, container.WaitConditionNotRunning)
+						continue
+					}
 					// No news of the container (removed, once seen, is
 					// stopped): the other events stand.
-					a.logger.Debug("the daemon's wait for the app's container failed; waiting for its other events", zap.Error(err))
-					daemonSaid, waitErr, waitFailed = nil, nil, true
+					a.logger.Debug("the daemon's wait for the app's container failed again; waiting for its other events", zap.Error(err))
+					daemonSaid, waitErr, waitFailed, mainExit = nil, nil, true, mainGone
 					if !clientExited {
 						continue
 					}
 				}
-			case <-mainGone:
+			case <-mainExit:
 			case <-clientExit:
 				clientExit, clientExited = nil, true
 				if !waitFailed {
@@ -99,10 +122,20 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	}()
 
 	var why string
-	stop, bound := utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load())
-	switch stop {
-	case utils.StopExited:
+	// lagged: it ended, stalled or at Ctrl+C, with every one of the
+	// container's processes gone, and there is nothing to kill. The run's
+	// end does not carry the stop's error on (the run was cancelled), so
+	// the stop says it.
+	stop, bound, lagged := utils.WaitStopByEvents(a.logger, stopped, procs, a.teardown.Load())
+	switch {
+	case stop == utils.StopExited:
 		return "", nil
+	case lagged:
+		err := a.containerStopLagged(stop)
+		a.logger.Warn(err.Error()+"; the next start of the application may meet the container still there", zap.String("container", a.container))
+		return "", err
+	}
+	switch stop {
 	case utils.StopPressed:
 		why = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 		if !seen {
