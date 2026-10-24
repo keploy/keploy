@@ -1213,6 +1213,33 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 	}
 }
 
+// A recording of the test that record's full round did not serve, made at
+// the call's own instant (a fixture's whole second), may have been made
+// before the call: it is an earlier place, read as one recorded a moment
+// before the call is, so the id it answered with, which the value now holds,
+// is refused as one found there, never noise. One recorded a moment after
+// the call is no earlier place.
+func TestAnUnservedRecordingAtTheCallsOwnInstantIsAnEarlierPlace(t *testing.T) {
+	const p = "body.message_id"
+	recID, liveID := "ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323", "0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"
+	at := r1Insert
+	verdict := func(when time.Time) Learned {
+		dc := NewDriftCache()
+		x := dc.RawOf(receiveOf("mock-50", liveID, when), false)
+		return ClassifyIn(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, []Raw{x}, nil, nil)[0]
+	}
+	before, same, after := verdict(at.Add(-time.Second)), verdict(at), verdict(at.Add(time.Second))
+	if before.Kind == KindNoise || !strings.Contains(before.Why, "mock-50") {
+		t.Fatalf("recorded a moment before the call: %s (%s); want it refused naming mock-50", before.Kind, before.Why)
+	}
+	if same.Kind != before.Kind || same.Why != before.Why {
+		t.Errorf("FALSE GREEN? recorded at the call's own instant: %s (%s); want what one recorded a moment before gets: %s (%s)", same.Kind, same.Why, before.Kind, before.Why)
+	}
+	if after.Kind != KindNoise {
+		t.Errorf("recorded a moment after the call: %s (%s); want noise, no earlier place", after.Kind, after.Why)
+	}
+}
+
 // requestOnly is a receive whose request, which the application sent, holds
 // sentAt, and whose answer holds no instant, recorded at at.
 func requestOnly(name string, at time.Time, sentAt string) *models.Mock {
