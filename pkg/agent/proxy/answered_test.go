@@ -150,3 +150,64 @@ func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 		t.Fatalf("found %v, want the one answered last", got.Mock)
 	}
 }
+
+// Under exact serving a test's recording that answered through any door (a
+// delete, or the door that keeps a stateful recording, MarkMockAsUsed) is
+// found by a later test's lookup, the later test's own is not, and the
+// recorded start is not known (exact serving stages no window). Without exact
+// serving, a per-test recording MarkMockAsUsed keeps answered too.
+func TestFindAnsweredEarlierUnderExactServing(t *testing.T) {
+	byURL(t)
+	all := func(*models.Mock) bool { return true }
+	doors := map[string]func(mm *MockManager, m *models.Mock) bool{
+		"DeleteFilteredMock": func(mm *MockManager, m *models.Mock) bool { return mm.DeleteFilteredMock(*m) },
+		"MarkMockAsUsed":     func(mm *MockManager, m *models.Mock) bool { return mm.MarkMockAsUsed(*m) },
+	}
+	for door, consume := range doors {
+		t.Run(door, func(t *testing.T) {
+			first := keyedRecording("mock-1", models.HTTP, 1, "/count", exactT0)
+			second := keyedRecording("mock-2", models.HTTP, 2, "/count", exactT0.Add(10*time.Second))
+			mm := stagedManager(t, []*models.Mock{first, second}, nil)
+			mm.ServeExactTest("T1", []*models.Mock{first})
+			pt, _ := mm.GetPerTestMocksInWindow()
+			if len(pt) != 1 || !consume(mm, pt[0]) {
+				t.Fatalf("the first test's recording did not answer (%d shown)", len(pt))
+			}
+			mm.ServeExactTest("T2", []*models.Mock{second})
+			pt, _ = mm.GetPerTestMocksInWindow()
+			if len(pt) != 1 || !consume(mm, pt[0]) {
+				t.Fatal("the second test's recording did not answer")
+			}
+			got, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all)
+			if !ok || got.Mock.Name != first.Name {
+				t.Fatalf("found %v (%v), want the first test's %s, not the open test's own", got.Mock, ok, first.Name)
+			}
+			if !got.TestRecordedStart.IsZero() {
+				t.Fatalf("exact serving knows no recorded start, got %v", got.TestRecordedStart)
+			}
+		})
+	}
+
+	t.Run("MarkMockAsUsed without exact serving", func(t *testing.T) {
+		t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+		kept := keyedRecording("mock-1", models.HTTP, 1, "/count", t0)
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		defer mm.Close()
+		// A session recording answers every test that asks: one it served
+		// after is no earlier test's answer.
+		session := keyedRecording("mock-s", models.HTTP, 2, "/count", t0)
+		session.TestModeInfo.IsFiltered, session.TestModeInfo.Lifetime = false, models.LifetimeSession
+		mm.SetMocksWithWindow([]*models.Mock{kept}, []*models.Mock{session}, t0.Add(-time.Second), t0.Add(time.Second))
+		staged, _ := mm.GetFilteredMocks()
+		if len(staged) != 1 || !mm.MarkMockAsUsed(*staged[0]) {
+			t.Fatal("the kept recording did not answer")
+		}
+		if !mm.MarkMockAsUsed(*session) {
+			t.Fatal("the session recording did not answer")
+		}
+		mm.SetMocksWithWindow(nil, []*models.Mock{session}, t0.Add(5*time.Second), t0.Add(15*time.Second))
+		if got, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all); !ok || got.Mock.Name != kept.Name {
+			t.Fatalf("found %v (%v), want %s, not the session recording", got.Mock, ok, kept.Name)
+		}
+	})
+}

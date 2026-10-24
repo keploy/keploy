@@ -2,6 +2,7 @@ package replay
 
 import (
 	"fmt"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -15,9 +16,21 @@ const repeatRecordCommand = "keploy record"
 // (UnmatchedCall.Repeat, set by the parser), the test whose call that
 // recording answered at this replay (consumers: the tests that consumed each
 // mock, in the order they ran), and writes the call's next step again with
-// that test named. A recording no other test consumed is left unnamed. It
-// returns one line per call it named, for the set's log.
-func markRepeatOf(results []models.TestResult, consumers map[string][]string) []string {
+// that test named. A recording no other test consumed is left unnamed. The
+// gap at record is measured again from the call's own test's recorded
+// request (testCases), where it has one: the agent knows the test's recorded
+// start only when it stages the test by its window, which exact serving
+// does not. It returns one line per call it named, for the set's log.
+func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase) []string {
+	began := make(map[string]time.Time, len(testCases))
+	for _, tc := range testCases {
+		if tc == nil {
+			continue
+		}
+		if req, _ := recordReqResTimestamps(tc); !req.IsZero() {
+			began[tc.Name] = req
+		}
+	}
 	var named []string
 	for i := range results {
 		r := &results[i]
@@ -26,10 +39,16 @@ func markRepeatOf(results []models.TestResult, consumers map[string][]string) []
 			if c.Repeat == nil || c.Repeat.Mock == "" {
 				continue
 			}
-			if c.Repeat.Test == "" {
-				c.Repeat = c.Repeat.Clone()
-				c.Repeat.Test = earlierConsumer(consumers[c.Repeat.Mock], r.TestCaseID)
+			// The note is the agent's: written on a copy, never through.
+			n := c.Repeat.Clone()
+			if n.Test == "" {
+				n.Test = earlierConsumer(consumers[n.Mock], r.TestCaseID)
 			}
+			if start := began[r.TestCaseID]; !start.IsZero() && !n.RecordedAt.IsZero() {
+				gap := models.NewRepeatNote(n.Mock, time.Time{}, n.RecordedAt, time.Time{}, start)
+				n.RecordGapSeconds, n.RecordGapKnown = gap.RecordGapSeconds, gap.RecordGapKnown
+			}
+			c.Repeat = n
 			c.NextSteps = c.Repeat.Explain(repeatRecordCommand)
 			named = append(named, repeatLine(r.TestCaseID, c))
 		}
@@ -62,13 +81,14 @@ func repeatLine(test string, c *models.UnmatchedCall) string {
 }
 
 // nameRepeats writes into the end-of-run mismatch rows of testSetID the
-// earlier tests markRepeatOf named on results, so the table the CLI prints
-// says the same as the report.
+// notes markRepeatOf completed on results (the earlier test named, the gap
+// at record measured), so the table the CLI prints says the same as the
+// report.
 func (tfs *TestFailureStore) nameRepeats(testSetID string, results []models.TestResult) {
 	byTest := map[string]map[string]*models.RepeatNote{}
 	for i := range results {
 		for _, c := range results[i].FailureInfo.UnmatchedCalls {
-			if c.Repeat == nil || c.Repeat.Test == "" {
+			if c.Repeat == nil {
 				continue
 			}
 			if byTest[results[i].TestCaseID] == nil {

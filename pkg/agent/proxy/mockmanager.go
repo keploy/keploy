@@ -3376,7 +3376,6 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	m.observeServedCopy(mock)
 	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
-		m.noteAnswered(mock)
 		return true
 	case exactRefused:
 		return false
@@ -3967,6 +3966,11 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 		return false
+	}
+	// A per-test recording this door keeps (HTTP's stateful one, kept for
+	// its test's repeats) answered a call too (FindAnsweredEarlier).
+	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
+		m.noteAnswered(mock)
 	}
 	return true
 }
