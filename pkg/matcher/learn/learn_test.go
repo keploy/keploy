@@ -372,6 +372,115 @@ func TestRawOfLeavesOutAPostgresInvocationsWhereAndWhen(t *testing.T) {
 	}
 }
 
+// A Postgres recording's statement hash, class, lifetime and transaction
+// state are keploy's own words for it, and its parameter types and formats,
+// result formats and column descriptions (type, size, modifier, table,
+// column number, format) are the wire's typing of what was sent and
+// answered: none is a value the app sent or was answered, and none can drift
+// between record and replay, since the replay serves them from the
+// recording. Read as payload, a small number among them (a parameter type
+// 23, a size 4, a column number 8) was a value that flowed from that
+// recording, and a duration or count the app bound (Flyway's
+// execution_time) was refused as changed at random, by the milliseconds it
+// took. Its SQL text, bound values, constants, rows, command tag and error
+// are still read, and the recording itself is not changed.
+func TestADriftedValueBesideAPostgresRecordingsWireTypingIsNoise(t *testing.T) {
+	recAt := time.Date(2026, 10, 24, 6, 22, 0, 748987707, time.UTC)
+	q := &models.PostgresV3QuerySpec{
+		Class:             "MIGRATION",
+		Lifetime:          "session",
+		SQLAstHash:        "sha256:7067aaf1b13e7d7abaab8908ee6cc0b3b88678e98d785f4abe570c5d5abeec08",
+		SQLNormalized:     `SELECT "installed_rank", "execution_time" FROM "public"."flyway_schema_history" WHERE "installed_rank" > $1 AND "checksum" = 1931`,
+		ParamOIDs:         []uint32{23, 1043},
+		VolatilePositions: []int{6},
+		PrecedingTxState:  "in_tx",
+		BindValues:        models.PostgresV3Cells{{Value: "-1"}, {Value: "4242"}},
+		BindFormats:       []int{0, 0},
+		ResultFormats:     []int{1, 1},
+		Response: &models.PostgresV3Response{
+			RowDescription: []models.PostgresV3ColumnDescriptor{
+				{Name: "installed_rank", TableOID: 16385, ColAttrNum: 8, TypeOID: 23, TypeSize: 4, TypeMod: 77, Format: 1},
+				{Name: "execution_time", TableOID: 16385, ColAttrNum: 9, TypeOID: 20, TypeSize: 8, TypeMod: -1, Format: 1},
+			},
+			Rows:            []models.PostgresV3Cells{{{Value: "5150"}, {Value: "3"}}},
+			CommandComplete: "SELECT 61",
+			Error:           &models.PostgresV3Error{Severity: "ERROR", Code: "23505", Message: "duplicate key 909"},
+		},
+		SideEffects: &models.PostgresV3SideEffects{TxTransition: "in_tx"},
+	}
+	before := *q
+	earlier := &models.Mock{Name: "mock-59", Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: recAt.Add(-4 * time.Millisecond),
+		PostgresV3:       &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: q},
+	}}
+	raw := []Raw{RawOf(earlier, false)}
+	classify := func(recorded string) Kind {
+		rec := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: recorded}}}
+		live := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: recorded + "37"}}}
+		out := Classify(NewDriftCache(), []string{"bind.$8"}, live, rec, recAt, nil, raw, nil)
+		if len(out) != 1 {
+			t.Fatalf("recorded %s: %+v", recorded, out)
+		}
+		return out[0].Kind
+	}
+	for _, typing := range []string{"23", "1043", "16385", "8", "9", "20", "4", "77", "6", "7067aaf1b13e7d7abaab8908ee6cc0b3b88678e98d785f4abe570c5d5abeec08", "MIGRATION", "in_tx"} {
+		if k := classify(typing); k != KindNoise {
+			t.Errorf("a value %s, which the earlier recording holds only in its wire typing or keploy's words for it: %s, want noise", typing, k)
+		}
+	}
+	for _, payload := range []string{"4242", "5150", "61", "909", "1931"} {
+		if k := classify(payload); k != KindVariable {
+			t.Errorf("a value %s the earlier recording's payload holds: %s, want a variable", payload, k)
+		}
+	}
+	if !reflect.DeepEqual(*q, before) {
+		t.Fatalf("RawOf changed the recording: %+v, was %+v", *q, before)
+	}
+}
+
+// The SQL text of an earlier Postgres recording names its parameters by
+// position: the 4 of Flyway's "c.relkind = $4" probe is no value, so a
+// duration the app bound later (execution_time, 58 ms at record, 4 in F) is
+// not refused for it. A 4 the statement holds as text (a constant, a quoted
+// name, a dollar-quoted body, a comment) is still evidence the value may have
+// come from there, and so is all that follows what the scan cannot read for
+// certain: the drift is refused.
+func TestADriftedValueBesideAnEarlierStatementsPlaceholderIsNoise(t *testing.T) {
+	recAt := time.Date(2026, 10, 24, 6, 22, 0, 748987707, time.UTC)
+	classify := func(sql string) Kind {
+		earlier := &models.Mock{Name: "mock-14", Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: recAt.Add(-40 * time.Millisecond),
+			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+				SQLNormalized: sql,
+				BindValues:    models.PostgresV3Cells{{Value: "public"}, {Value: "flyway_schema_history"}, {Value: "r"}},
+			}},
+		}}
+		rec := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: "58"}}}
+		live := Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Value: "4"}}}
+		out := Classify(NewDriftCache(), []string{"bind.$8"}, live, rec, recAt, nil, []Raw{RawOf(earlier, false)}, nil)
+		if len(out) != 1 {
+			t.Fatalf("%q: %+v", sql, out)
+		}
+		return out[0].Kind
+	}
+	probe := "SELECT EXISTS (\n  SELECT $3\n  FROM pg_catalog.pg_class c\n  WHERE n.nspname = $1\n  AND c.relname = $2\n  AND c.relkind = $4\n)"
+	if k := classify(probe); k != KindNoise {
+		t.Errorf("a 4 beside an earlier statement's $4 placeholder: %s, want noise", k)
+	}
+	for _, sql := range []string{
+		"SELECT $1 WHERE c.relkind = '4'",
+		`SELECT $1 WHERE c.relname = E'it\'s 4'`,
+		`SELECT "col 4" FROM t WHERE x = $1`,
+		"CREATE FUNCTION f() RETURNS int AS $fn$ SELECT 4 $fn$ LANGUAGE sql",
+		"-- migration 4\nSELECT $1",
+		`SELECT $1 WHERE x = 'a\' AND y = $4`,
+	} {
+		if k := classify(sql); k != KindUnaccounted {
+			t.Errorf("a 4 the earlier statement %q holds as text: %s, want it refused (unaccounted)", sql, k)
+		}
+	}
+}
+
 // F runs each test FullRoundLead past its recorded instant from when it
 // begins, so an app that reads its clock late in F (a loaded box) binds a
 // value the lead does not account for: it drifted, and it flowed from

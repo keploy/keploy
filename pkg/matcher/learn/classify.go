@@ -1151,22 +1151,58 @@ func RawOf(m *models.Mock, served bool) Raw {
 	return r
 }
 
-// payloadSpec is spec without what says, below the spec's own fields
-// (payloadKeys), where and when it was recorded: a Postgres query's
-// invocation id (its statement's hash, connection, recorded instant and
-// sequence; models.PostgresV3QuerySpec.InvocationID). Its date and time words
-// are the recording's own clock, and a value found there did not flow from
-// it: read as payload, a clock the app read late in F (past what the lead
-// accounts for) was a value from that recording, refused as changed. spec is
-// not changed: the copy is.
+// payloadSpec is spec without what, below the spec's own fields
+// (payloadKeys), says where, when and how it was recorded rather than what it
+// carried. Of a Postgres query (models.PostgresV3QuerySpec) that is:
+//
+//   - its invocation id (its statement's hash, connection, recorded instant
+//     and sequence). Its date and time words are the recording's own clock:
+//     read as payload, a clock the app read late in F (past what the lead
+//     accounts for) was a value from that recording, refused as changed.
+//   - keploy's own words for it: its statement's hash, class, lifetime, the
+//     transaction state it ran in and moved to, its volatile positions.
+//   - the wire's typing of what was sent and answered: the parameter types
+//     and formats, the result formats, and each answer column's type, size,
+//     modifier, table, column number and format (its name stays).
+//   - the numbers of its SQL text's placeholders ($4 is read "$"): a
+//     parameter's position, not a value (withoutPlaceholders).
+//
+// None is a value the app sent or was answered, and none can drift between
+// record and replay: the replay serves them from the recording. Read as
+// payload, a small number among them (a parameter type 23, a size 4, a
+// column number 8) was a value that flowed from that recording, and a
+// duration or count the app bound (Flyway's execution_time) was refused as
+// changed at random, by the milliseconds it took. The rest of the SQL text
+// (its constants, quoted names, bodies and comments), the bound values and
+// constants, the rows, the command tag, the error, the copy and
+// the row mutations are read as before. spec is not changed: the copy is.
 func payloadSpec(spec models.MockSpec) models.MockSpec {
-	if pg := spec.PostgresV3; pg != nil && pg.Query != nil && pg.Query.InvocationID != "" {
-		q := *pg.Query
-		q.InvocationID = ""
-		p := *pg
-		p.Query = &q
-		spec.PostgresV3 = &p
+	pg := spec.PostgresV3
+	if pg == nil || pg.Query == nil {
+		return spec
 	}
+	q := *pg.Query
+	q.InvocationID, q.SQLAstHash, q.Class, q.Lifetime, q.PrecedingTxState = "", "", "", "", ""
+	q.VolatilePositions, q.ParamOIDs, q.BindFormats, q.ResultFormats = nil, nil, nil, nil
+	q.SQLNormalized = withoutPlaceholders(q.SQLNormalized)
+	if q.Response != nil {
+		resp := *q.Response
+		if len(resp.RowDescription) > 0 {
+			resp.RowDescription = make([]models.PostgresV3ColumnDescriptor, len(q.Response.RowDescription))
+			for i, c := range q.Response.RowDescription {
+				resp.RowDescription[i] = models.PostgresV3ColumnDescriptor{Name: c.Name}
+			}
+		}
+		q.Response = &resp
+	}
+	if q.SideEffects != nil {
+		se := *q.SideEffects
+		se.TxTransition = ""
+		q.SideEffects = &se
+	}
+	p := *pg
+	p.Query = &q
+	spec.PostgresV3 = &p
 	return spec
 }
 
