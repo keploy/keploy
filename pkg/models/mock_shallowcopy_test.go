@@ -26,6 +26,7 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 		Origin:       &Origin{Clock: "proxy:run-1", Comm: "sqs", Exe: "./sqs"},
 	}
 	m.SetResponseHydrator(func() (*HTTPResp, []MongoResponse, error) { return nil, nil, nil })
+	m.onDisk = &payloadOnDisk{at: PayloadAt{Offset: 5, Length: 9, Name: "m"}}
 	m.MarkPooled()
 
 	c := m.ShallowCopy()
@@ -41,10 +42,13 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 	if !c.HasSpilledResponse() {
 		t.Error("the response hydrator was not carried over")
 	}
+	if c.onDisk != m.onDisk {
+		t.Error("where the payload was left on disk was not carried over")
+	}
 	cv, mv := reflect.ValueOf(*c), reflect.ValueOf(*m)
 	for i := 0; i < cv.NumField(); i++ {
 		switch name := cv.Type().Field(i).Name; name {
-		case "pooled", "responseHydrator": // checked above
+		case "pooled", "responseHydrator", "onDisk": // checked above
 		default:
 			if !reflect.DeepEqual(cv.Field(i).Interface(), mv.Field(i).Interface()) {
 				t.Errorf("field %s was not copied", name)

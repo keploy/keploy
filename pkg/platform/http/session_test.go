@@ -94,6 +94,33 @@ func TestSessionKeepsNothingItWillNotUse(t *testing.T) {
 	}
 }
 
+// A restarted agent is not sent the mocks of a test set that has run, whose
+// mock file was rewritten once it ended (models.ErrPayloadFileReplaced): the
+// set being set up stores its own. The rest of the setup is made again.
+func TestSessionReapplyGoesOnPastStoredMocksOfASetThatHasRun(t *testing.T) {
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepMockOutgoing, noteStep(&got, &mu, "outgoing"))
+	s.record(stepStoreMocks, func(context.Context) error {
+		return fmt.Errorf("failed to send the mocks to the agent: %w", models.ErrPayloadFileReplaced)
+	})
+	s.record(stepMockParams, noteStep(&got, &mu, "params"))
+	s.record(stepAgentReady, noteStep(&got, &mu, "ready"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatalf("reapply: %v", err)
+	}
+	if want := "outgoing params ready"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+
+	// Any other failure to store the mocks still fails the setup.
+	s.record(stepStoreMocks, func(context.Context) error { return fmt.Errorf("agent down") })
+	if err := s.reapply(context.Background(), zap.NewNop()); err == nil {
+		t.Fatal("a store that failed for another reason did not fail the setup")
+	}
+}
+
 // The replayer goes on changing the consumed-mocks map it hands over; the
 // copy recorded is the call as it was made.
 func TestCopyMockParamsSharesNothing(t *testing.T) {
@@ -297,9 +324,11 @@ type restartingAgent struct {
 	// the calls other than health checks that met it.
 	down      bool
 	downCalls int
-	// refuse answers a path's nth connection 503; hang keeps it open after
-	// its item, as an agent that vanished without closing it, until release
-	// is closed; slow answers it slowBy late.
+	// refuse answers a path's nth connection 503 (the agent's readiness,
+	// with the CA setup failure an agent latches until it is started
+	// again); hang keeps it open after its item, as an agent that vanished
+	// without closing it, until release is closed; slow answers it slowBy
+	// late.
 	refuse, hang, slow map[string]int
 	release            chan struct{}
 	slowBy             time.Duration
@@ -335,7 +364,14 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		}
 		r.mu.Unlock()
 		switch req.URL.Path {
-		case "/agent/agent/ready", "/agent/health":
+		case "/agent/agent/ready":
+			if r.refuse[req.URL.Path] == n {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "%s the agent could not set its CA up", agentCASetupFailed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/agent/health":
 			w.WriteHeader(http.StatusOK)
 		case "/agent/outgoing":
 			if r.refuse[req.URL.Path] == n {

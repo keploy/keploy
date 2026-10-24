@@ -20,10 +20,12 @@ type agentInstanceWatcher interface {
 // all of it. An agent started again in its place mid-set (kubelet
 // restarting a crashed sidecar, docker restarting a container) answers at
 // the same address holding none of what the one before saw, and its reads
-// say nothing was missed. nil when the run has no agent, or the
-// instrumentation cannot tell which process answers it.
+// say nothing was missed. A run with no command keploy starts but an agent
+// (the application already up beside it: a Kubernetes sidecar's) is watched
+// too: its set's evidence is held in the agent all the same. nil when the run
+// has no agent, or the instrumentation cannot tell which process answers it.
 func (r *Replayer) watchAgent() models.AgentInstanceWatch {
-	if !r.instrument || r.noAgent || !provenswitch.On() {
+	if r.noAgent || !provenswitch.On() {
 		return nil
 	}
 	w, ok := r.instrumentation.(agentInstanceWatcher)

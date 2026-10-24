@@ -581,16 +581,46 @@ type Replayer struct {
 	// lossMark is, under the proven switch, where the next test set's tests
 	// count the agent's capture losses from (pidmaps.go); lossMarked is
 	// whether this run has taken one yet; lossLast is the latest per-test
-	// read, which the set's end counts what is left from.
-	lossMark     captureLossMark
-	lossMarked   bool
-	lossLast     models.CaptureLosses
-	lossLastRead bool
+	// read, which the set's end counts what is left from, and lossLastAgent
+	// the agent process that answered it.
+	lossMark      captureLossMark
+	lossMarked    bool
+	lossLast      models.CaptureLosses
+	lossLastRead  bool
+	lossLastAgent string
+	// lossAgent is the agent process that answered the latest capture-loss
+	// read naming one; lossBasesAgent, the one the bases below that outlive
+	// a test set were read from (lossAppBase, lossRunStart, lossRunBase).
+	// Where they differ the agent was started again, and those bases count
+	// nothing of the new one's (lossBasesAt), until keploy starts the
+	// application anew under it (appStartsAnew).
+	lossAgent      string
+	lossBasesAgent string
 	// lossRunBase is the run's first capture-loss mark, from which what
 	// keploy cannot capture at all is counted for the whole run (decision
 	// 20: a Unix-socket connection outlives the test set it was opened in).
 	lossRunBase    models.CaptureLosses
 	lossRunBaseSet bool
+	// lossAppBase is the capture-loss mark the running application started
+	// after, from which a process of the application's keploy could not
+	// place (models.CaptureLossKind.AppLife) is counted: moved only where
+	// keploy starts an application anew (appStartsAnew), so an application
+	// kept running across sets (--keep-app-alive) keeps it; nil (the hooks'
+	// load) for an application keploy did not start. lossAppRunsOn says the
+	// last set's stop did not end its application, which then runs on under
+	// the next set's start, with what it lost, and lossAppRunsOnWhy why.
+	// lossAppKept says why the running application is older than the set
+	// RunTestSet runs ("" where it started for it): what a set's tests are
+	// charged from before the set began is said with it (appLossesCarriedIn).
+	lossAppBase      models.CaptureLosses
+	lossAppRunsOn    bool
+	lossAppRunsOnWhy string
+	lossAppKept      string
+	// lossRunStart is the run's first capture-loss mark, from which a process
+	// that outlives the application is counted (a refused exclusion);
+	// lossRunStartSet, whether it was taken.
+	lossRunStart    models.CaptureLosses
+	lossRunStartSet bool
 	// setEnd is how the final report of the test set RunTestSet is running
 	// ends it, once it has one (noteSetEnd): the status it says, and why
 	// (tellSetEnd); setEndCalls, the calls it charged to the set
@@ -614,7 +644,8 @@ func (r *Replayer) GetMockMismatchFailures() []TestFailure {
 	return r.mockMismatchFailures.GetFailures()
 }
 
-// GetTestRunID returns the current test run ID.
+// GetTestRunID returns the run the latest Start named, the directory of its
+// reports: "" until it names one, and for a Start that stopped before it did.
 func (r *Replayer) GetTestRunID() string {
 	return r.testRunID
 }
@@ -704,6 +735,22 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// Marks of tests with no verdict are this run's, read by the exit code
 	// below on every way out, the earliest included.
 	r.forgetNoVerdicts()
+	// So are the run's id, its totals, reports and failures, and the test
+	// sets whose misses it could not attribute, which its getters, exit code
+	// and end read: all cleared here, before the exit code's defer is
+	// registered. The run id stays "" until this Start names its run, just
+	// before its first test set.
+	r.testRunID, r.testRunTestSets = "", nil
+	r.forgetUnattributed()
+	r.completeTestReportMu.Lock()
+	r.completeTestReport = make(map[string]TestReportVerdict)
+	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
+	r.consumedMockNames = make(map[string]struct{})
+	r.totalTestTimeTaken = 0
+	r.completeTestReportMu.Unlock()
+	r.forgetQuarantined()
+	r.failedTCsBySetID = make(map[string][]string)
+	r.mockMismatchFailures = NewTestFailureStore()
 	defer func() { r.armStartExitCode(stoppedByItsUser(parentCtx), err, testRunResult, verdictReached) }()
 
 	// A mock.real keploy cannot read is refused before anything runs (proven
@@ -827,16 +874,6 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 		}
 	}
 
-	r.completeTestReportMu.Lock()
-	r.completeTestReport = make(map[string]TestReportVerdict)
-	r.totalTests, r.totalTestPassed, r.totalTestFailed, r.totalTestObsolete, r.totalTestIgnored = 0, 0, 0, 0, 0
-	r.consumedMockNames = make(map[string]struct{})
-	r.totalTestTimeTaken = 0
-	r.completeTestReportMu.Unlock()
-	r.forgetQuarantined()
-	r.failedTCsBySetID = make(map[string][]string)
-	r.mockMismatchFailures = NewTestFailureStore()
-
 	testRunID, err := r.GetNextTestRunID(ctx)
 	if err != nil {
 		stopReason = fmt.Sprintf("failed to get next test run id: %v", err)
@@ -929,8 +966,12 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	// RunTestSet, which marks it there.
 	r.pidMarked, r.lossMarked = false, false
 	r.lossRunBase, r.lossRunBaseSet = nil, false
+	r.lossAppBase, r.lossAppRunsOn, r.lossAppRunsOnWhy, r.lossAppKept = nil, false, "", ""
+	r.lossRunStart, r.lossRunStartSet = nil, false
+	r.lossLastAgent, r.lossAgent, r.lossBasesAgent = "", "", ""
 	if r.instrument && cmdType != utils.DockerCompose {
 		r.markPIDMaps(ctx)
+		r.appStartsAnew() // the run's first application starts after it
 	}
 
 	// --keep-app-alive: start the user app ONCE on the outer errgroup
@@ -1790,6 +1831,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if agentWatch != nil {
 		defer agentWatch.Stop()
 	}
+	// An agent started again since the last set's end counts afresh: this
+	// set counts from its start (markAgentChange).
+	r.markAgentChange(ctx, serveTest)
 
 	// The set's own teardown scope, part of its run's: what keploy sees the
 	// stop of the set's app (and the daemons it left) do moves it, and the
@@ -2020,8 +2064,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// not read.
 	composeHalted := false
 	// appStopKilled is that why, as the app's run returned it; read once the
-	// run has returned.
-	var appStopKilled string
+	// run has returned. appLeftRunning is what of the app its stop left
+	// running (models.AppError.LeftRunning), read then too.
+	var appStopKilled, appLeftRunning string
 
 	cmdType := utils.CmdType(r.config.CommandType)
 	// Check if mappings are present and decide filtering strategy
@@ -2089,6 +2134,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// guard's among them) agrees with what was sent. The compose and the
 	// native path both load through it.
 	loadMocksForAgent := func() (filtered, unfiltered []*models.Mock, err error) {
+		if _, ok := r.hookImpl.(wholeSetMockMutator); ok {
+			return nil, nil, errWholeSetMockMutator
+		}
 		useMappingBased, expectedTestMockMappings, startupMockNames = r.determineMockingStrategy(ctx, testSetID, isMappingEnabled)
 		// fromWindows: under the proven switch, a set with no mappings.yaml,
 		// whose test windows say what each test case owns once its mocks are
@@ -2186,7 +2234,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			}
 		}
 		// Get all mocks for mapping-based filtering
-		filtered, unfiltered, lookup, skipped, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
+		filtered, unfiltered, payloads, lookup, skipped, err := r.loadTestSetMocks(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2201,25 +2249,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Debug("no mocks found for test set", zap.String("testSetID", testSetID))
 		}
 		filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
-
-		// Extract host domains from mocks for telemetry (HTTP and gRPC only)
-		if r.runDomainSet != nil {
-			for _, m := range filtered {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-			for _, m := range unfiltered {
-				r.runDomainSet.AddAll(telemetry.ExtractDomainsFromMock(m))
-			}
-		}
-
-		if mutator, ok := r.hookImpl.(MockMutator); ok {
-			if err := mutator.AfterGetMocks(ctx, filtered, unfiltered); err != nil {
-				return nil, nil, err
-			}
-			// Honour any reusable retagging the mutator applied (e.g. the mongo/v2
-			// stable-metadata promotion): move retagged mocks from the per-test pool
-			// into the reusable pool so SetMocksWithWindow does not window-filter them.
-			filtered, unfiltered = rebalanceReusableMocks(filtered, unfiltered)
+		if err := r.mutatePayloads(ctx, payloads, filtered, unfiltered); err != nil {
+			utils.LogError(r.logger, err, "failed to prepare the mocks' payloads for the agent")
+			return nil, nil, err
 		}
 
 		if err := r.instrumentation.StoreMocks(ctx, filtered, unfiltered); err != nil {
@@ -2230,7 +2262,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if r.exactServing() {
 			r.exact = newExactPlan(expectedTestMockMappings, workerScope, filtered, unfiltered)
 			r.exact.noteAhead(expectedTestMockMappings, testCases)
-			r.exact.share = newSharePlan(conc, workerScope, filtered, unfiltered)
+			if r.exact.share, err = newSharePlan(ctx, conc, workerScope, filtered, unfiltered); err != nil {
+				return nil, nil, err
+			}
 			// keploy record's full round shares the recordings made while
 			// several tests' requests were open between those tests, when
 			// the agent serves them (models.ExactConcurrentHeader, read
@@ -2441,6 +2475,12 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// has taken one (pidMarked: the first test set can end before here).
 		if !serveTest || !r.pidMarked {
 			r.markPIDMaps(ctx)
+			// A stack this set started, or one reused whose app starts for
+			// the first time, starts its app anew; one started again below
+			// is anew only where its start says so.
+			if composeRestart == nil {
+				r.appStartsAnew()
+			}
 		}
 
 		err = r.instrumentation.MakeAgentReadyForDockerCompose(ctx)
@@ -2456,11 +2496,22 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// stopped, started again now: this set is staged on the agent and
 		// its pids are marked, so its startup is this set's.
 		if composeRestart != nil {
-			if err := composeRestart.StartComposeApp(ctx); err != nil {
+			anew, err := composeRestart.StartComposeApp(ctx)
+			if err != nil {
+				// The base stays: the daemon may have carried the start out.
 				utils.LogError(r.logger, err, "keploy could not start the application's container again for this test-set", zap.String("test-set", testSetID))
 				return models.TestSetStatusAppHalted, err
 			}
 			r.composeAppStopped = false
+			// Only a start of a container that was not running is a new
+			// app; one that ran on (a stop that did not end it, a start told
+			// failed that the daemon carried out) keeps its base, and what
+			// its processes lost.
+			if anew {
+				r.appStartsAnew()
+			} else {
+				r.lossAppKept = "keploy found the application's container still running when it started it for this test-set (its stop at an earlier test-set's end did not end it, or a start keploy was told failed was carried out by the docker daemon)"
+			}
 		}
 
 		// Wait for the user application to become ready before firing the first test.
@@ -2505,9 +2556,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// Re-register with the replacement, or fail this test set loudly rather
 		// than proceeding mockless.
 		if err := r.ensureAgentHoldsStoredMocks(ctx, testRunID, testSetID, outgoingOpts, filteredMocks, unfilteredMocks,
-			totalConsumedMocks, useMappingBased, testCases, agentWatch); err != nil {
+			totalConsumedMocks, useMappingBased, testCases); err != nil {
 			return models.TestSetStatusFailed, err
 		}
+		// An agent the retry started in place of the one before, while the
+		// app had never started, holds all of this set's evidence; any
+		// other agent found replaced does not (agentStartedBeforeApp).
+		r.agentStartedBeforeApp(ctx, agentWatch)
 	}
 
 	// A base path replays against an app that is already running, with nothing
@@ -2596,15 +2651,30 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						stopApp(models.ErrAppStoppedForSetEnd)
 						select {
 						case <-appExited:
+							// Ended, but for what its stop left running,
+							// which runs on with what it lost.
+							r.lossAppRunsOn = appLeftRunning != ""
+							r.lossAppRunsOnWhy = ""
+							if r.lossAppRunsOn {
+								r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end left running %s", testSetID, appLeftRunning)
+								r.logger.Error("the stop of the application at the test-set's end left part of it running: what keploy could not capture of its processes runs on into the next test-set, whose tests are charged it ("+provenswitch.Env+"=1)",
+									zap.String("test-set", testSetID),
+									zap.String("leftRunning", appLeftRunning),
+									zap.String("next_step", "make the application's daemons end when it is stopped (stop them in its own shutdown), or start them before keploy, where they are outside dependencies"))
+							}
 							return appStopKilled
 						case <-runTestSetCtx.Done():
+							r.lossAppRunsOn = true // not known to have ended
+							r.lossAppRunsOnWhy = fmt.Sprintf("the stop of the application at test-set %s's end was not waited out (the test-set's run ended first)", testSetID)
 							return ""
 						}
 					}
 				}
 				// Under the proven switch: the listens the agent saw before
-				// this set's application starts are not this one's.
+				// this set's application starts are not this one's, nor what
+				// an earlier application's processes lost.
 				r.markReadiness(runTestSetCtx)
+				r.appStartsAnew()
 				runTestSetErrGrp.Go(func() error {
 					if appExited != nil {
 						defer close(appExited)
@@ -2613,7 +2683,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErr = r.RunApplication(appCtx, models.RunOptions{
 						AppCommand: conf.AppCommand,
 					})
-					appStopKilled = appErr.StopKilled
+					appStopKilled, appLeftRunning = appErr.StopKilled, appErr.LeftRunning
 					if appErr != (models.AppError{}) {
 						setLastAppErr(appErr)
 					}
@@ -2626,6 +2696,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					appErrChan <- appErr
 					return nil
 				})
+			} else {
+				// One application, started once in Start, serves every set:
+				// what its processes lost in an earlier one taints this one.
+				r.lossAppKept = "the application is kept alive across test-sets (--keep-app-alive): keploy started it once, before the first test-set, and it runs on into this one"
 			}
 
 			// Checking for errors in the mocking and application
@@ -2969,6 +3043,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.lossRunBase, r.lossRunBaseSet = nil, true
 		}
 		r.markCaptureLosses(runTestSetCtx)
+		// So is what its processes lost: keploy starts no application, so
+		// nothing moves lossAppBase from the hooks' load (nil).
+	}
+	if !r.instrument && !r.noAgent {
+		r.lossAppKept = "keploy does not start the application (no command): it was up before keploy's first read, and the one application serves every test-set"
 	}
 
 	// Separate replay into regular and streaming buckets. Regular tests can use the
@@ -4022,7 +4101,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 									testCaseResult.FailureInfo.MatchedCalls = append(testCaseResult.FailureInfo.MatchedCalls, models.MatchedCall{
 										MockName: m.Name,
 										Protocol: protocol,
-										Summary:  info.summary,
+										Summary:  info.summaryOf(),
 									})
 								}
 							}
@@ -5516,7 +5595,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	if uncapturable, lost := testsKeployCannotCapture(testCaseResults); len(uncapturable) > 0 && (testSetStatus == models.TestSetStatusPassed || testSetStatus == models.TestSetStatusFailed || notJudged != "") {
 		what := lost.NotJudgedText()
 		notJudged = alsoNotJudged(notJudged, notCapturableReason(uncapturable, what))
-		r.logger.Error("test-set is not judged: the application called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached, while some of its tests ran ("+provenswitch.Env+"=1)",
+		r.logger.Error("test-set is not judged: while some of its tests ran, the application called what keploy cannot capture, a TLS client abandoned its handshake, the Docker daemon did not answer keploy's read of a container a call reached, or keploy's agent had been started again under the running application ("+provenswitch.Env+"=1)",
 			zap.String("test-set", testSetID),
 			zap.Strings("tests", uncapturable),
 			zap.String("reason", what),
@@ -5716,12 +5795,25 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// Under the proven switch, what the agent lost after this set's last
 	// per-test read is the set's own, charged to none of its tests: the set
 	// fails with it, and it holds the prune and mappings.yaml, as above. The
-	// next test set's tests count from here.
+	// next test set's tests count from here, and so does an application the
+	// next set starts anew (appStartsAnew).
+	// What its tests were charged of the application's processes from before
+	// it began is said with why the application ran on into it: read before
+	// the set's end moves the mark.
+	var carriedIn string
+	if carried := r.appLossesCarriedIn(); len(carried) > 0 {
+		carriedIn = appLossesCarriedInReason(carried, r.lossAppKept)
+		r.logger.Error("test-set failed: a process of the application's that keploy could not capture before this test-set began runs on in it, and taints its tests ("+provenswitch.Env+"=1)",
+			zap.String("test-set", testSetID),
+			zap.String("lost", carried.Text()),
+			zap.String("why", r.lossAppKept),
+			zap.String("next_step", "see the earlier test-set's report for where it was lost; each test charged with it says what to do"))
+	}
 	late, lateErr := r.endCaptureLosses(context.WithoutCancel(ctx))
 	// A call keploy cannot capture at all (decision 20) is no loss of what it
 	// saw: below, it leaves the set without a verdict, never failed.
 	lateJudged, lateNotJudged := late.Split()
-	for _, t := range []string{lateJudged.Text(), realUncaptured} {
+	for _, t := range []string{carriedIn, lateJudged.Text(), realUncaptured} {
 		if t == "" {
 			continue
 		}
@@ -6432,9 +6524,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 	// In Docker Compose mode, RunTestSet's defer block stops the agent container.
 	// We must call AfterTestRun HERE (before defer fires) while the agent is alive.
+	// Start sets r.testRunTestSets for the run whose id it passes in as
+	// testRunID, so when Start calls this the two name the same run.
 	if r.isLastTestSet && r.instrument && cmdType == utils.DockerCompose {
 		r.afterTestRunCalled = true
-		if hookErr := r.hookImpl.AfterTestRun(ctx, r.testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
+		if hookErr := r.hookImpl.AfterTestRun(ctx, testRunID, r.testRunTestSets, models.TestCoverage{}); hookErr != nil {
 			utils.LogError(r.logger, hookErr, "failed to execute after test run hook")
 		}
 	}
@@ -6494,17 +6588,25 @@ func (r *Replayer) getTestSetMocks(ctx context.Context, reader pkg.TestSetMocksR
 // running test expects from, and the session half from the session pool it
 // loaded when the prune had nothing to drop, else from a read of its own.
 //
-// The lookup is built here, before AfterGetMocks may change the mocks in place
-// (a mutator decrypts them, for one), so it describes them as they are on disk.
-// skipped is the documents the store's decoders skipped (models.TestSetMocks
-// Skipped and SkippedWindowed); none from a store that reads one pool per
-// call.
-func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, lookup map[string]mockDisplayInfo, skipped skippedDocs, err error) {
-	reader, ok := r.mockDB.(pkg.TestSetMocksReader)
-	if !ok {
+// A store that indexes the set's mock file (pkg.TestSetMockIndexReader) leaves
+// each mock's payload in the file: the mocks returned are small entries, whose
+// payloads (payloads) are read back one at a time as they are sent. The lookup
+// is built from what each mock kept of its payload, so it describes the mocks
+// as they are on disk, before a MockPayloadMutator changes one.
+// skipped is the documents of the mock file the store's decoders skipped
+// (models.TestSetMocks Skipped and SkippedWindowed); none from a store that
+// reads one pool per call.
+func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, payloads models.PayloadSource, lookup map[string]mockDisplayInfo, skipped skippedDocs, err error) {
+	var set models.TestSetMocks
+	switch reader := r.mockDB.(type) {
+	case pkg.TestSetMockIndexReader:
+		set, err = reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	case pkg.TestSetMocksReader:
+		set, err = reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	default:
 		filtered, unfiltered, err = r.GetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 		if err != nil {
-			return nil, nil, nil, skippedDocs{}, err
+			return nil, nil, nil, nil, skippedDocs{}, err
 		}
 		allSession := unfiltered
 		if len(mocksThatHaveMappings) > 0 {
@@ -6515,13 +6617,60 @@ func (r *Replayer) loadTestSetMocks(ctx context.Context, testSetID string, mocks
 				allSession = nil
 			}
 		}
-		return filtered, unfiltered, newMockLookup(filtered, allSession), skippedDocs{}, nil
+		return filtered, unfiltered, nil, newMockLookup(filtered, allSession), skippedDocs{}, nil
 	}
-	set, err := r.getTestSetMocks(ctx, reader, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
-		return nil, nil, nil, skippedDocs{}, err
+		// The pass that failed is the one the per-test pool was read in.
+		utils.LogError(r.logger, err, "failed to get filtered mocks")
+		return nil, nil, nil, nil, skippedDocs{}, err
 	}
-	return set.Filtered, set.Unfiltered, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+	return set.Filtered, set.Unfiltered, set.Payloads, newMockLookup(set.AllPerTest, set.AllSession), skippedDocs{kinds: set.Skipped, windowed: set.SkippedWindowed}, nil
+}
+
+// errWholeSetMockMutator refuses a run whose hooks still implement
+// AfterGetMocks (wholeSetMockMutator).
+var errWholeSetMockMutator = errors.New("the replay hooks implement AfterGetMocks, which keploy no longer calls: a test set's mocks are no longer loaded whole before they are sent to the agent, so a hook that changes them (a decryption) has to implement MutateMockPayload (replay.MockPayloadMutator), which is handed one mock at a time")
+
+// payloadMutator is what each mock goes through on its way to the agent: its
+// host domains are noted for telemetry (HTTP and gRPC only), and its payload
+// is changed by the hooks' MockPayloadMutator. nil when neither is wanted.
+func (r *Replayer) payloadMutator() models.PayloadMutator {
+	hook, _ := r.hookImpl.(MockPayloadMutator)
+	domains := r.runDomainSet
+	if hook == nil && domains == nil {
+		return nil
+	}
+	return func(ctx context.Context, m *models.Mock) error {
+		if domains != nil {
+			domains.AddAll(telemetry.ExtractDomainsFromMock(m))
+		}
+		if hook != nil {
+			return hook.MutateMockPayload(ctx, m)
+		}
+		return nil
+	}
+}
+
+// mutatePayloads has each of a test set's mocks go through payloadMutator on
+// its way to the agent: a mock whose payload the read left on disk each time
+// its payload is read back to be sent (payloads), one held whole (a gob
+// file's, or a store's that indexes no file) now, once.
+func (r *Replayer) mutatePayloads(ctx context.Context, payloads models.PayloadSource, pools ...[]*models.Mock) error {
+	mutate := r.payloadMutator()
+	if payloads != nil {
+		payloads.SetPayloadMutator(mutate)
+	}
+	for _, pool := range pools {
+		for _, m := range pool {
+			if m == nil || m.PayloadOnDisk() {
+				continue
+			}
+			if err := models.MutatePayload(ctx, m, mutate); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // skippedDocs is the documents of a set's mock file the store's decoders
@@ -6543,6 +6692,14 @@ func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[str
 	logFailed := func(pool string, err error) {
 		r.logger.Debug("failed to read the "+pool+" mocks for the report's mock lookup; the report will not describe them",
 			zap.String("testSetID", testSetID), zap.Error(err))
+	}
+	if reader, ok := r.mockDB.(pkg.TestSetMockIndexReader); ok {
+		set, err := reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
+		if err != nil {
+			logFailed("per-test and session", err)
+			return map[string]mockDisplayInfo{}
+		}
+		return newMockLookup(set.AllPerTest, set.AllSession)
 	}
 	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
 		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
@@ -6578,9 +6735,14 @@ func newMockLookup(perTest, session []*models.Mock) map[string]mockDisplayInfo {
 }
 
 // addMockDisplayInfo adds each mock's display info to the lookup, keyed by
-// name; a later mock of the same name replaces an earlier one.
+// name; a later mock of the same name replaces an earlier one. A mock whose
+// payload is on disk is kept itself, and asked when a report names it.
 func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock) {
 	for _, mock := range mocks {
+		if mock.PayloadOnDisk() {
+			lookup[mock.Name] = mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}
+			continue
+		}
 		lookup[mock.Name] = mockDisplayInfo{
 			summary:  models.MockSummaryFromSpec(mock),
 			protocol: string(mock.Kind),
@@ -6865,12 +7027,12 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // replacement is detected every later filter-params send carries the CLI's own
 // consumption history (see agentHistoryIncompleteForRun).
 //
-// agentWatch, under the proven switch, is the set's watch of the agent's
-// process (watchAgent). Once the replacement is set up again it keeps to the
-// replacement: the app never ran against the agent it replaced (compose's
-// retry runs only while the app's container was never started), so none of
-// the set's evidence was on that one.
-func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase, agentWatch models.AgentInstanceWatch) error {
+// Whether the replacement holds this set's evidence is not decided here,
+// where it is noticed, but from whether the application ran against the
+// agent it replaced (agentStartedBeforeApp, after this): an agent found
+// replaced here may be the bring-up retry's whose setup did not take, or one
+// docker started again under an app that had started.
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -6974,10 +7136,6 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		}
 		utils.LogError(r.logger, err, "Failed to make the request to make agent ready for the docker compose")
 	}
-	if agentWatch != nil {
-		agentWatch.Accept()
-	}
-
 	confirmed, err := r.probeMockStats(ctx)
 	if err != nil {
 		if errors.Is(err, models.ErrMockStatsUnsupported) {
@@ -8470,6 +8628,15 @@ func (r *Replayer) noteUnattributed(testSetID string) {
 	r.unattributedSets[testSetID] = true
 }
 
+// forgetUnattributed clears the test sets noteUnattributed recorded, as a run
+// starts: they are a run's, and an earlier run's named at this one's end
+// sets that this run may not have replayed at all.
+func (r *Replayer) forgetUnattributed() {
+	r.unattributedMu.Lock()
+	defer r.unattributedMu.Unlock()
+	r.unattributedSets = nil
+}
+
 // sayUnattributed names, at the run's end, the test sets with a test whose
 // misses keploy could not all read: a miss may be missing from a test of
 // theirs, or have been read with another test's, so no noise may be learned
@@ -8680,50 +8847,6 @@ func isReusableTierMock(m *models.Mock) bool {
 		}
 	}
 	return false
-}
-
-// rebalanceReusableMocks moves any mock that a MockMutator.AfterGetMocks
-// re-tagged as reusable (isReusableTierMock — Lifetime Session/Connection or
-// metadata type config/connection) out of the per-test `filtered` pool and into
-// the reusable `unfiltered` pool, and returns the adjusted slices.
-//
-// It exists because AfterGetMocks receives the two pools BY VALUE: a mutator can
-// retag a mock's Lifetime/metadata in place, but it cannot move a mock between
-// the slices (a shrink of `filtered` or a grow of `unfiltered` does not
-// propagate to the caller). Since the agent's SetMocksWithWindow window-filters
-// every mock in `filtered` regardless of its per-mock tag, a mock retagged
-// reusable but left in `filtered` would still be dropped when it fires outside
-// its record-time window — defeating the retag. Running this immediately after
-// AfterGetMocks honours the retag by physically re-partitioning.
-//
-// Memory: `filtered` is compacted in place (its backing array is reused via the
-// [:0] read/write cursor); `unfiltered` grows only by the promoted count. No
-// second copy of the corpus is allocated. Relative order within each pool is
-// preserved. Safe on nil/empty inputs.
-func rebalanceReusableMocks(filtered, unfiltered []*models.Mock) ([]*models.Mock, []*models.Mock) {
-	if len(filtered) == 0 {
-		return filtered, unfiltered
-	}
-	keep := filtered[:0]
-	for _, m := range filtered {
-		if m == nil {
-			// A nil entry can never match; drop it from the per-test pool rather
-			// than carrying it forward (SetMocksWithWindow skips nils anyway).
-			continue
-		}
-		// A window-bound mock (a connection failure) stays per-test even when
-		// a mutator re-tagged it reusable: moving it to the reusable pool
-		// would serve a failure recorded in one test to every test. This
-		// keploy never reaches it (its only caller has dropped the connection
-		// failures, which it does not replay, by models.AgentBound); it is
-		// here for the keploy that replays them, which keeps them in the pools.
-		if isReusableTierMock(m) && !models.WindowBound(m.Kind) {
-			unfiltered = append(unfiltered, m)
-			continue
-		}
-		keep = append(keep, m)
-	}
-	return keep, unfiltered
 }
 
 // isReusableTierState is the MockState (consumed-mock) equivalent of

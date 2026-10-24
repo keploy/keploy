@@ -3408,6 +3408,15 @@ type TestSetMocksReader interface {
 	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
 }
 
+// TestSetMockIndexReader is an optional extension of the mock store a replay
+// loads a test set's mocks from: GetTestSetMocks that leaves each mock's
+// payload in the set's mock file (models.Mock.LeavePayloadOnDisk), so the
+// replay holds a small entry per mock, and reads a payload back only to send
+// the mock to the agent (models.Mock.WithPayload).
+type TestSetMockIndexReader interface {
+	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages

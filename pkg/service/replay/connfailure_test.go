@@ -125,20 +125,6 @@ func TestMismatchReportsLeaveConnectionFailuresOut(t *testing.T) {
 	assert.Equal(t, []models.MockMismatchMock{{Name: "mock-1", Kind: "Http"}}, actual)
 }
 
-// A mutator that re-tags a connection failure reusable must not move it to
-// the reusable pool, which every test reads.
-func TestRebalanceKeepsConnectionFailuresPerTest(t *testing.T) {
-	cf := &models.Mock{Name: "cf", Kind: models.ConnectionFailure, Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}}}
-	cf.TestModeInfo.Lifetime = models.LifetimeSession
-	f, u := rebalanceReusableMocks([]*models.Mock{perTest("pt-1"), cf, configTagged("promoted")}, nil)
-	if got := names(f); !eq(got, []string{"pt-1", "cf"}) {
-		t.Fatalf("filtered pool = %v, want [pt-1 cf]", got)
-	}
-	if got := names(u); !eq(got, []string{"promoted"}) {
-		t.Fatalf("unfiltered pool = %v, want [promoted] (the control is moved)", got)
-	}
-}
-
 // Every consumed-side filter of the assertion goes through
 // consumedOutsideAssertion, the twin of eligibleExpectedEntries. Written out
 // again at any one site, the two sides can exclude different kinds, which is

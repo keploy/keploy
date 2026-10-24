@@ -2757,23 +2757,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtxCancel()
 
 		if srcConn != nil {
-			err := srcConn.Close()
-			if err != nil {
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					utils.LogError(p.logger, err, "failed to close the source connection", zap.Any("clientConnID", clientConnID))
-				}
-			}
+			util.LogCloseErr(p.logger, srcConn.Close(), "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 		}
 
 		if dstConn != nil {
-			err = dstConn.Close()
-			if err != nil {
-				// Use string matching as a last resort to check for the specific error
-				if !strings.Contains(err.Error(), "use of closed network connection") {
-					// Log other errors
-					utils.LogError(p.logger, err, "failed to close the destination connection")
-				}
-			}
+			util.LogCloseErr(p.logger, dstConn.Close(), "failed to close the destination connection")
 		}
 
 		err = parserErrGrp.Wait()

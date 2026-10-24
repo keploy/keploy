@@ -155,7 +155,10 @@ func TestRunTestSet_AMissReadFromTheAgentThatSawItFailsItsTest(t *testing.T) {
 // The agent is started again while the set runs: the agent that answers
 // keploy's reads after holds none of what the one before saw (test-1's call
 // no mock answered, when the restart comes before its read). The set has no
-// verdict, and says why; it is neither PASSED nor FAILED.
+// verdict, and says why; it is neither PASSED nor FAILED. So for a run with
+// no command, whose application and agent keploy does not start (a
+// Kubernetes sidecar's): its set's evidence is held in the agent all the
+// same.
 func TestRunTestSet_AnAgentStartedAgainMidSetLeavesTheSetUnjudged(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -169,27 +172,36 @@ func TestRunTestSet_AnAgentStartedAgainMidSetLeavesTheSetUnjudged(t *testing.T) 
 		// what test-2 did is lost. FAILED says more than keploy knows.
 		{"after a test failed on a miss", 1, 2},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			provenOn(t, true)
-			h := newPartialRunHarness(t, 2, 0)
-			o := newOverTheWire(t, h, tc.missedIn, tc.restartAt)
-			status := h.run(t)
-			if o.reads < tc.restartAt {
-				t.Fatalf("fixture: %d reads of the agent's misses, the restart was set before read %d", o.reads, tc.restartAt)
+		for _, noCommand := range []bool{false, true} {
+			name := tc.name
+			if noCommand {
+				// An application keploy does not start (no -c), up beside
+				// an agent it did not start either: a Kubernetes sidecar's.
+				name += ", no command"
 			}
-			if status != models.TestSetStatusInternalErr {
-				t.Fatalf("status %s; a set whose agent was started again while it ran has no verdict", status)
-			}
-			if !h.replayer.notJudged("test-set-0") {
-				t.Fatal("the set is not recorded as not judged")
-			}
-			reason := h.report.report.FailureReason
-			for _, want := range []string{"agent was started again while the test-set ran", "process-1", "process-2"} {
-				if !strings.Contains(reason, want) {
-					t.Fatalf("failure reason %q does not say %q", reason, want)
+			t.Run(name, func(t *testing.T) {
+				provenOn(t, true)
+				h := newPartialRunHarness(t, 2, 0)
+				h.replayer.instrument = !noCommand
+				o := newOverTheWire(t, h, tc.missedIn, tc.restartAt)
+				status := h.run(t)
+				if o.reads < tc.restartAt {
+					t.Fatalf("fixture: %d reads of the agent's misses, the restart was set before read %d", o.reads, tc.restartAt)
 				}
-			}
-		})
+				if status != models.TestSetStatusInternalErr {
+					t.Fatalf("status %s; a set whose agent was started again while it ran has no verdict", status)
+				}
+				if !h.replayer.notJudged("test-set-0") {
+					t.Fatal("the set is not recorded as not judged")
+				}
+				reason := h.report.report.FailureReason
+				for _, want := range []string{"agent was started again while the test-set ran", "process-1", "process-2"} {
+					if !strings.Contains(reason, want) {
+						t.Fatalf("failure reason %q does not say %q", reason, want)
+					}
+				}
+			})
+		}
 	}
 }
 

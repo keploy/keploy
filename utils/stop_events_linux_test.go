@@ -819,6 +819,30 @@ func stopJudgingAnAppHeldInTheKernel(t *testing.T, mode storageMode, bound, hung
 // A process's way out is read on its exit marks: one ending, a thread ending,
 // a file closed, storage read or written while it waits on it. A count that
 // rises and falls back is none.
+// A process whose main thread exited while another runs on is on no way out
+// of its own: MarkExit counts it running, with its threads and its open
+// files, read through the thread that runs (its main thread shows none),
+// until every thread of it has exited.
+func TestMarkExitCountsAProcessWhoseMainThreadExited(t *testing.T) {
+	cmd := startMainThreadExited(t)
+	st, ok := ReadProcStat(cmd.Process.Pid)
+	if !ok {
+		t.Fatal("premise: its stat could not be read")
+	}
+	p := Reached{PID: cmd.Process.Pid, Start: st.StartTime}
+	if m := MarkExit([]Reached{p}); m.Running != 1 || m.Threads < 2 || m.Fds == 0 {
+		t.Fatalf("MarkExit = %+v; want it running, with its threads and open files", m)
+	}
+	_ = cmd.Process.Kill()
+	deadline := time.Now().Add(time.Minute) // turns a hang into a failure
+	for MarkExit([]Reached{p}).Running != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("MarkExit still counts process %d running after its kill", p.PID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestTheExitRatchetTakesOnlyProgress(t *testing.T) {
 	var r ExitRatchet
 	r.Advance(ExitMark{Running: 2, Threads: 4, Fds: 10})
@@ -1005,4 +1029,18 @@ while [ ! -e go ]; do sleep 0.01; done`)
 		t.Fatal("the wait did not end with the app's exit")
 	}
 	awaitReaped(t, "the app", reaped)
+}
+
+// MarkExit counts as running a process whose stat says Z and whose threads
+// could not be read, as Exited does; read, the same zombie has exited.
+func TestMarkExitCountsAProcessWhoseThreadsCouldNotBeReadAsRunning(t *testing.T) {
+	pid, st := startZombie(t)
+	procs := []Reached{{PID: pid, Start: st.StartTime}}
+	if m := MarkExit(procs); m.Running != 0 {
+		t.Fatalf("zombie %d, its threads read: %d running; want 0", pid, m.Running)
+	}
+	threadsUnreadable(t)
+	if m := MarkExit(procs); m.Running != 1 {
+		t.Fatalf("zombie %d, its threads not read: %d running; want 1: the read failed, so it is not known to have ended", pid, m.Running)
+	}
 }

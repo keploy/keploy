@@ -28,7 +28,13 @@
 #   5. 3 under the proven switch (KEPLOY_PROVEN=1): the recreated agent, which
 #      runs in a container with no Docker socket, must be given keploy's list
 #      of the daemon's containers again before its session is made again, so
-#      the app's calls to the dependency carry its container key.
+#      the app's calls to the dependency carry its container key;
+#   6. test (replay) of 5's recording under the proven switch, the dependency
+#      crashing once again: the retry recreates the agent while the app's
+#      container is only created, so the agent keploy sets up again is the
+#      one the app runs against from its start. The set must be judged, and
+#      pass, with no test charged agent_started_again (that kind is for an
+#      agent started again while the application ran on).
 #
 # Env: RECORD_BIN and REPLAY_BIN (the keploy binaries under test). The agent
 # image must be loaded as ghcr.io/keploy/keploy:v3-dev
@@ -203,6 +209,34 @@ if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ] || [ "$(sort -u <<<"$keys" | 
   fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
 fi
 [ "$FAIL" -eq "$before" ] && echo "ok: recreated-proven: all $mocks mocks carry the dependency's container key"
+
+# 6. Replay 5's recording under the proven switch, the dependency crashing
+# once again (a new volume) and the agent recreated by the retry before the
+# app starts.
+cleanup
+before=$FAIL
+# shellcheck disable=SC2024 # the log is this user's, so the shell redirects
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 timeout -k 10 300 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
+  --container-name retryapp --delay 10 --disable-tele > replay-proven.log 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "replay-proven: keploy test exited $rc"
+how=$(retried replay-proven) || fail "replay-proven: the dependency crash was not retried"
+setup_again replay-proven || fail "replay-proven: the agent compose recreated was not set up again"
+summary=$(sed -E 's/\x1b\[[0-9;]*m//g' replay-proven.log | { grep -E 'Total test (passed|failed):' || true; } | tr -s ' \t' ' ' | tr '\n' ' ')
+if ! grep -q 'Total test failed: 0' <<<"$summary" || grep -q 'Total test passed: 0' <<<"$summary"; then
+  fail "replay-proven: want every test passed on the recreated agent: ${summary:-no summary}"
+fi
+report=$(sudo sh -c 'ls -1dt keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | head -n1')
+status=$( (sudo grep -m1 '^status:' "${report:-/nonexistent}" 2>/dev/null || true) | awk '{print $2}')
+charged=$( (sudo grep -c 'kind: agent_started_again' "${report:-/nonexistent}" 2>/dev/null || true) | head -n1)
+[ "$status" = PASSED ] || fail "replay-proven: test-set-0's report ${report:-(none)} says status ${status:-(none)}, want PASSED: the retry's agent is the one the app ran against"
+[ "${charged:-0}" -eq 0 ] || fail "replay-proven: $charged test(s) charged agent_started_again, want none: the agent was recreated before the app started"
+if [ "$FAIL" -ne "$before" ]; then
+  [ -z "$report" ] || sudo grep -m1 '^failure_reason:' "$report" | cut -c1-700
+  tail -80 replay-proven.log
+else
+  echo "ok: replay-proven: $how; $summary; test-set-0 $status, none charged agent_started_again"
+fi
 
 if [ "$FAIL" -ne 0 ]; then
   echo "compose-dep-retry e2e: FAILED"

@@ -258,9 +258,19 @@ type FailureInfo struct {
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
-	//   - every kind but real_uncaptured: what the agent lost since the test
-	//     set began, as this test ended. A loss taints the test running when
-	//     it happened and every later test of the set (design v14 §3.2).
+	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
+	//     other kind): what the agent lost since the test set began, as this
+	//     test ended. Such a loss taints the test running when it happened
+	//     and every later test of the set (design v14 §3.2); a process of the
+	//     application's that keploy could not place (AppLife) taints every
+	//     test since that application started, in this set or an earlier one
+	//     it served (--keep-app-alive), and one that outlives the application
+	//     every test since the run began.
+	//   - a test's own kind that is judged (CaptureLossKind.PerTest:
+	//     tls_handshake_failed, capture_unread, connection_unrecorded; the
+	//     other test's own kinds are not judged, CannotCapture, or evidence):
+	//     what the agent lost while this test ran, since the previous test
+	//     ended, for this test alone.
 	//   - real_uncaptured (class e, mock.real): the connections keploy could
 	//     neither capture nor relay as real that were undecided or used while
 	//     this test ran, counted for this test alone. One undecided across
@@ -277,8 +287,10 @@ type FailureInfo struct {
 	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
 	// all that the application did while this test or one before it ran
 	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
-	// see): the test has no verdict (NotJudged), and its set is not judged.
-	// Never a failure.
+	// see), and every other loss that leaves a test without a verdict
+	// (CaptureLossKind.NotJudged: an agent started again while the
+	// application ran on, agent_started_again, among them): the test has no
+	// verdict, and its set is not judged. Never a failure.
 	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
 	// StreamHeldOpen says, under KEPLOY_PROVEN=1, why the app's stream was
 	// not read to its end: the app kept it open on keepalives, past its
@@ -732,6 +744,12 @@ type MockOutcome struct {
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
 func MockSummaryFromSpec(mock *Mock) string {
+	if d := mock.onDisk; d != nil {
+		if d.longSummary {
+			return d.display(mock, MockSummaryFromSpec, string(mock.Kind))
+		}
+		return d.summary
+	}
 	if mock.Spec.HTTPReq != nil {
 		return string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
 	}
