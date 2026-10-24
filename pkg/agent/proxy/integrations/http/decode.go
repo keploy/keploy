@@ -332,6 +332,23 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				} else if lmiss != nil {
 					lmiss.explain(report)
 				}
+				// A call identical to one an earlier test made, whose
+				// recording already answered: the application asked again
+				// where its recording did not (models.RepeatNote). In
+				// record's full round the learn step finds no recorded call
+				// of the test for it (unmocked_call), which the note keeps
+				// as judging's code and explains; a learn reason that names
+				// a recorded call of the test the request changed from is
+				// kept as it is. A call made elsewhere keeps that reason and
+				// its closest and gets the note beside it (markRepeat): at
+				// record a test in between refilled the cache with the same
+				// call, which this replay, inside the cache's span there,
+				// never made, so its recording is what the call matches.
+				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
+					if a, ok := repeatOfAnswered(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise)); ok {
+						markRepeat(report, a)
+					}
+				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
 					// agnostic mock-mismatch WARN is emitted once in

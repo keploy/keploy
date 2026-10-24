@@ -143,6 +143,11 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
+	// answered keeps, of the per-test recordings that answered a call in this
+	// test set, the request side, by request key and bounded by bytes, for a
+	// miss's diagnosis (FindAnsweredEarlier).
+	// Reset with consumedPersistent.
+	answered answeredLog
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -511,6 +516,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		logger:              logger,
 	}
 	mm.setGen.Store(1)
+	mm.answered.fence(1)
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -683,6 +689,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// A reset that starts another test set says so (ArmSetFence), and its
 	// boundary staging drops them instead: they were consumed of the previous
 	// set's pool.
+	m.answered.reset()
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
@@ -3425,6 +3432,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}
+		// The log refuses a mock an earlier set pooled itself, as the flag
+		// does (answeredLog.note).
+		m.noteAnswered(mock)
 	}
 
 	// Bump per-kind only if that tree changed; global only if global changed
@@ -3958,6 +3968,11 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 		return false
+	}
+	// A per-test recording this door keeps (HTTP's stateful one, kept for
+	// its test's repeats) answered a call too (FindAnsweredEarlier).
+	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
+		m.noteAnswered(mock)
 	}
 	return true
 }
@@ -4506,7 +4521,9 @@ func (m *MockManager) ArmSetFence() {
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
 	m.consumedMu.Lock()
-	m.setGen.Add(1)
+	// The answered log follows the generation (answeredLog.fence); its
+	// lock is a leaf.
+	m.answered.fence(m.setGen.Add(1))
 	dropped := len(m.consumedList)
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)

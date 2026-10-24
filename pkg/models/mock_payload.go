@@ -76,6 +76,8 @@ type payloadOnDisk struct {
 	// a report naming the mock does.
 	summary, target         string
 	longSummary, longTarget bool
+	// fingerprint is RequestFingerprint's.
+	fingerprint string
 	// matched has the bit of each registry in onDiskPredicates that matched
 	// the mock.
 	matched uint8
@@ -111,6 +113,7 @@ func (m *Mock) LeavePayloadOnDisk(src PayloadSource, at PayloadAt) {
 		mysqlStatementLifecycle: m.IsMySQLStatementLifecycle(),
 		mysqlSessionReusable:    mysqlIsSessionReusableCommand(m),
 	}
+	d.fingerprint = requestFingerprint(m)
 	d.summary, d.longSummary = keptDisplay(MockSummaryFromSpec(m))
 	d.target, d.longTarget = keptDisplay(MockTargetFromSpec(m))
 	for i, r := range onDiskPredicates {

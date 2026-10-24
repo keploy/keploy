@@ -2012,6 +2012,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// consumers are the tests that consumed each mock, by name: whose an
 	// unconsumed test mock went to, when a sibling's (markConsumedBy).
 	consumers := map[string][]string{}
+	// replayStarts is when each test began at this replay, its latest
+	// attempt's (markUnmadeRepeats).
+	replayStarts := map[string]time.Time{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
 	// perTestRegion names the per-test mocks this set hands the agent, the
 	// only ones an agent that says so reads consumed entries for (see
@@ -3300,6 +3303,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
 			started := time.Now().UTC()
+			replayStarts[testCase.Name] = started
 
 			// What is sent: the request with this run's template values, on a
 			// copy. testCase stays as written.
@@ -4406,6 +4410,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// CompareHTTPStream below, so in-stream mock consumption can
 			// continue after this call returns.
 			started := time.Now().UTC()
+			replayStarts[tc.Name] = started
 			// Sent with this run's template values, on a copy; what it is
 			// expected to stream, likewise (a streamed response never
 			// captures).
@@ -5121,6 +5126,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
+	// A call no mock answered that repeats a recording an earlier test made,
+	// which already answered at this replay, is named with that test: the
+	// application asked again where its recording did not, perhaps as an
+	// answer it kept for a span of elapsed time ran out (models.RepeatNote).
+	// The line claims that cause only when every note's gaps support it.
+	if named, likely := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
+		r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)
+		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: "+repeatMissCause(likely, len(named))+"; each is named under unmatched_calls.repeat_of",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.Int("count", len(named)),
+			zap.Int("likely_elapsed_time", likely),
+			zap.String("next_step", "record with that cache disabled or its span longer than the replay, or make the call in every test that needs it"))
+	}
+	// Its mirror, for a replay faster than the recording: a recorded call
+	// this replay never made, identical to a recording an earlier test made
+	// that answered at this replay, is named with that recording; the
+	// application may still have held the earlier answer, which the line
+	// claims only when every note's gaps support it.
+	if named, likely := markUnmadeRepeats(testCaseResults, consumers, totalConsumedMocks, mockLookup, replayStarts, testCases); len(named) > 0 {
+		r.logger.Warn("tests did not make a recorded call identical to one an earlier test made, which keploy answered at this replay with that test's recording: "+repeatUnmadeCause(likely, len(named))+"; each is named under unconsumed_mocks.repeat_of",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.Int("count", len(named)),
+			zap.Int("likely_elapsed_time", likely),
+			zap.String("next_step", "record with that cache disabled, or make the call in every test that needs it"))
 	}
 	// Under the proven switch a test whose call got no recorded answer fails,
 	// before the hook, so the hook sees the verdicts it is to act on. The loop
@@ -6621,9 +6653,12 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			continue
 		}
 		lookup[mock.Name] = mockDisplayInfo{
-			summary:  models.MockSummaryFromSpec(mock),
-			protocol: string(mock.Kind),
-			target:   mockTargetFromSpec(mock),
+			summary:    models.MockSummaryFromSpec(mock),
+			protocol:   string(mock.Kind),
+			target:     mockTargetFromSpec(mock),
+			request:    mock.RequestFingerprint(),
+			recordedAt: mock.Spec.ReqTimestampMock,
+			lifetime:   mock.TestModeInfo.Lifetime,
 		}
 	}
 }
