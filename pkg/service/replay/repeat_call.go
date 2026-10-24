@@ -17,13 +17,17 @@ const repeatRecordCommand = "keploy record"
 // (UnmatchedCall.Repeat, set by the parser), the test whose call that
 // recording answered at this replay (consumers: the tests that consumed each
 // mock, in the order they ran), and writes the call's next step again with
-// that test named. A recording no other test consumed is left unnamed. The
-// gap at record is measured again from the call's own test's recorded
-// request (testCases), where it has one: the agent knows the test's recorded
-// start only when it stages the test by its window, which exact serving
-// does not. It returns one line per call it named, for the set's log.
-func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase) []string {
+// that test named. A recording no other test consumed is left unnamed. It
+// measures both gaps start to start (models.RepeatNote.Anchor): at this
+// replay from that answer to when the call's test began (replayStarts); at
+// record from the newest identical per-test recording made before the test
+// began then (recordAnchor over lookup, testCases), which may be another
+// test's than the one that answered: that test's call was never made again
+// while the cache stayed fresh at this replay. It returns one line per call
+// it named, for the set's log.
+func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time) []string {
 	began := recordedStarts(testCases)
+	var recorded map[string][]recordedTwin
 	var named []string
 	for i := range results {
 		r := &results[i]
@@ -32,21 +36,77 @@ func markRepeatOf(results []models.TestResult, consumers map[string][]string, te
 			if c.Repeat == nil || c.Repeat.Mock == "" {
 				continue
 			}
+			if recorded == nil {
+				recorded = recordedTwins(lookup)
+			}
 			// The note is the agent's: written on a copy, never through.
 			n := c.Repeat.Clone()
 			if n.Test == "" {
 				n.Test = earlierConsumer(consumers[n.Mock], r.TestCaseID)
 			}
-			if start := began[r.TestCaseID]; !start.IsZero() && !n.RecordedAt.IsZero() {
-				gap := models.NewRepeatNote(n.Mock, time.Time{}, n.RecordedAt, time.Time{}, start)
-				n.RecordGapSeconds, n.RecordGapKnown = gap.RecordGapSeconds, gap.RecordGapKnown
+			start := began[r.TestCaseID]
+			last, ok := recordAnchor(recorded[lookup[n.Mock].requestOf()], start)
+			if !ok {
+				last = recordedTwin{name: n.Mock, recordedAt: n.RecordedAt}
 			}
+			n.Anchor(replayStarts[r.TestCaseID], start, last.name, last.recordedAt)
 			c.Repeat = n
 			c.NextSteps = c.Repeat.Explain(repeatRecordCommand)
 			named = append(named, repeatLine(r.TestCaseID, c))
 		}
 	}
 	return named
+}
+
+// recordedTwin is a per-test recording of the set, with when its request was
+// recorded (recordAnchor).
+type recordedTwin struct {
+	name       string
+	recordedAt time.Time
+}
+
+// recordedTwins is every per-test recording of lookup with a request
+// fingerprint (models.Mock.RequestFingerprint) and a recorded time, by
+// fingerprint, oldest first (names break a tie). A session or connection
+// recording is in none: only a test's own recording says the application
+// asked then, and "" is no request.
+func recordedTwins(lookup map[string]mockDisplayInfo) map[string][]recordedTwin {
+	out := map[string][]recordedTwin{}
+	for name, info := range lookup {
+		if info.lifetimeOf() != models.LifetimePerTest {
+			continue
+		}
+		fp, at := info.requestOf(), info.recordedAtOf()
+		if fp == "" || at.IsZero() {
+			continue
+		}
+		out[fp] = append(out[fp], recordedTwin{name: name, recordedAt: at})
+	}
+	for _, list := range out {
+		sort.Slice(list, func(a, b int) bool {
+			if !list[a].recordedAt.Equal(list[b].recordedAt) {
+				return list[a].recordedAt.Before(list[b].recordedAt)
+			}
+			return list[a].name < list[b].name
+		})
+	}
+	return out
+}
+
+// recordAnchor is, of twins (oldest first), the one recorded last before
+// start: at record, the identical call that last gave the application the
+// answer before the test began, which an answer kept for a span of elapsed
+// time was kept from. ok is false for none, or start unknown.
+func recordAnchor(twins []recordedTwin, start time.Time) (recordedTwin, bool) {
+	if start.IsZero() {
+		return recordedTwin{}, false
+	}
+	for i := len(twins) - 1; i >= 0; i-- {
+		if twins[i].recordedAt.Before(start) {
+			return twins[i], true
+		}
+	}
+	return recordedTwin{}, false
 }
 
 // recordedStarts is when each test of testCases began at record: its
@@ -76,10 +136,13 @@ func recordedStarts(testCases []*models.TestCase) map[string]time.Time {
 // is when each first answered; replayStarts is when each test began at this
 // replay (a test missing from it counts its result's Started, to the
 // second). A session or connection recording is no earlier twin: only a
-// test's own recording says that test made the call. It returns one line per
-// note, for the set's log.
+// test's own recording says that test made the call. The gap at record runs
+// from the newest identical per-test recording made before this test began
+// then (recordAnchor), as markRepeatOf's does. It returns one line per note,
+// for the set's log.
 func markUnmadeRepeats(results []models.TestResult, consumers map[string][]string, consumed map[string]models.MockState, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time, testCases []*models.TestCase) []string {
 	var byRequest map[string][]answeredTwin
+	var recorded map[string][]recordedTwin
 	var recordStarts map[string]time.Time
 	var named []string
 	for i := range results {
@@ -91,6 +154,7 @@ func markUnmadeRepeats(results []models.TestResult, consumers map[string][]strin
 			}
 			if byRequest == nil {
 				byRequest = answeredTwins(consumers, consumed, lookup)
+				recorded = recordedTwins(lookup)
 				recordStarts = recordedStarts(testCases)
 			}
 			info := lookup[u.Name]
@@ -102,13 +166,19 @@ func markUnmadeRepeats(results []models.TestResult, consumers map[string][]strin
 			if !ok {
 				continue
 			}
-			n := models.NewRepeatNote(twin.name, twin.answeredAt, twin.recordedAt, began, recordStarts[r.TestCaseID])
+			n := models.NewRepeatNote(twin.name, twin.answeredAt, twin.recordedAt, time.Time{})
+			start := recordStarts[r.TestCaseID]
+			last, ok := recordAnchor(recorded[info.requestOf()], start)
+			if !ok {
+				last = recordedTwin{name: twin.name, recordedAt: twin.recordedAt}
+			}
+			n.Anchor(began, start, last.name, last.recordedAt)
 			n.Test = by
 			u.RepeatOf = n
 			u.NextSteps = n.ExplainUnmade(repeatRecordCommand)
 			line := fmt.Sprintf("%s: recorded %s was not called; identical to %s, answered for %s %.2fs before this test began at replay", r.TestCaseID, u.Name, n.Mock, by, n.ReplayGapSeconds)
 			if n.RecordGapKnown {
-				line += fmt.Sprintf(", %.2fs before it at record", n.RecordGapSeconds)
+				line += fmt.Sprintf(", %.2fs after %s at record", n.RecordGapSeconds, n.RecordedLast)
 			}
 			named = append(named, line)
 		}
@@ -196,9 +266,13 @@ func repeatLine(test string, c *models.UnmatchedCall) string {
 	if by == "" {
 		by = "an earlier test"
 	}
-	line := fmt.Sprintf("%s: %s repeats %s, answered for %s %.2fs earlier at replay", test, c.ActualSummary, n.Mock, by, n.ReplayGapSeconds)
+	when := "earlier"
+	if n.ReplayGapFromStart {
+		when = "before this test began"
+	}
+	line := fmt.Sprintf("%s: %s repeats %s, answered for %s %.2fs %s at replay", test, c.ActualSummary, n.Mock, by, n.ReplayGapSeconds, when)
 	if n.RecordGapKnown {
-		line += fmt.Sprintf(", %.2fs apart at record", n.RecordGapSeconds)
+		line += fmt.Sprintf(", %.2fs after %s at record", n.RecordGapSeconds, n.RecordedLast)
 	}
 	return line
 }

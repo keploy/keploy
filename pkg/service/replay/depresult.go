@@ -28,6 +28,9 @@ type mockDisplayInfo struct {
 	// its request's time at record, for a mock whose payload is in memory.
 	request    string
 	recordedAt time.Time
+	// lifetime is the mock's (models.TestModeInfo.Lifetime), for a mock
+	// whose payload is in memory.
+	lifetime models.Lifetime
 	// onDisk is the mock when a replay's read left its payload on disk
 	// (models.Mock.LeavePayloadOnDisk): its summary and target, which can
 	// carry a whole recorded command, are worked out when a report names it
@@ -57,6 +60,14 @@ func (i mockDisplayInfo) recordedAtOf() time.Time {
 		return i.onDisk.Spec.ReqTimestampMock
 	}
 	return i.recordedAt
+}
+
+// lifetimeOf is the mock's lifetime (models.TestModeInfo.Lifetime).
+func (i mockDisplayInfo) lifetimeOf() models.Lifetime {
+	if i.onDisk != nil {
+		return i.onDisk.TestModeInfo.Lifetime
+	}
+	return i.lifetime
 }
 
 // targetOf is the mock's target (mockTargetFromSpec).

@@ -17,7 +17,7 @@ import (
 func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	note := func(mock string) *models.RepeatNote {
-		return models.NewRepeatNote(mock, rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
+		return anchoredNote(mock, rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
 	}
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
@@ -33,7 +33,7 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	keep := results[0].FailureInfo.UnmatchedCalls[0].Repeat
 
-	named := markRepeatOf(results, consumers, nil)
+	named := markRepeatOf(results, consumers, nil, nil, nil)
 	calls := results[0].FailureInfo.UnmatchedCalls
 	if calls[0].Repeat.Test != "test-3" || !strings.Contains(calls[0].NextSteps, "test test-3's call") {
 		t.Fatalf("the repeat is named %q: %s", calls[0].Repeat.Test, calls[0].NextSteps)
@@ -47,7 +47,7 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	if calls[2].NextSteps != "as it was" {
 		t.Fatalf("a call with no note was rewritten: %q", calls[2].NextSteps)
 	}
-	if len(named) != 2 || !strings.Contains(named[0], "test-9: GET /count repeats mock-7, answered for test-3 6.00s earlier at replay, 2.00s apart at record") {
+	if len(named) != 2 || !strings.Contains(named[0], "test-9: GET /count repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
 		t.Fatalf("the set log lines are %q", named)
 	}
 
@@ -61,20 +61,21 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 }
 
-// The gap at record is measured from the call's own test's recorded request
-// where the replay has it, whether or not the agent knew the test's recorded
-// start (exact serving stages no window); the agent's note is not written
-// through. With no recorded request the agent's gap, or none, stays. The
-// end-of-run rows carry the gap measured, named test or not.
+// The gap at record is measured to the call's own test's recorded request
+// where the replay has it (the agent, which does not hold the set's
+// recordings, measures none), and the gap at replay to when the test began;
+// the agent's note is not written through. With no recorded request the
+// note's gap, or none, stays. The end-of-run rows carry the gap measured,
+// named test or not.
 func TestMarkRepeatOfMeasuresTheRecordGapFromTheTest(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
-	unknown := models.NewRepeatNote("mock-7", rec, rec, rec.Add(70*time.Second), time.Time{})
+	unknown := models.NewRepeatNote("mock-7", rec, rec, rec.Add(70*time.Second))
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
 			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: unknown},
 		}}},
 		{TestCaseID: "test-12", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
-			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", rec, rec, rec.Add(80*time.Second), rec.Add(3*time.Second))},
+			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: anchoredNote("mock-7", rec, rec, rec.Add(80*time.Second), rec.Add(3*time.Second))},
 		}}},
 	}
 	store := NewTestFailureStore()
@@ -85,15 +86,15 @@ func TestMarkRepeatOfMeasuresTheRecordGapFromTheTest(t *testing.T) {
 	// test-9 began 40 s after the recording at record, and no other test
 	// consumed it (the note stays unnamed); test-12 has no recorded request
 	// time.
-	markRepeatOf(results, map[string][]string{"mock-7": {"test-9"}}, []*models.TestCase{tc("test-9", rec.Add(40*time.Second)), tc("test-12", time.Time{}), nil})
+	markRepeatOf(results, map[string][]string{"mock-7": {"test-9"}}, []*models.TestCase{tc("test-9", rec.Add(40*time.Second)), tc("test-12", time.Time{}), nil}, nil, map[string]time.Time{"test-9": rec.Add(70 * time.Second)})
 	got := results[0].FailureInfo.UnmatchedCalls[0]
-	if !got.Repeat.RecordGapKnown || got.Repeat.RecordGapSeconds != 40 || !strings.Contains(got.NextSteps, "at record this test began 40.00s after it") {
+	if !got.Repeat.RecordGapKnown || got.Repeat.RecordGapSeconds != 40 || got.Repeat.RecordedLast != "mock-7" || !got.Repeat.ReplayGapFromStart || !strings.Contains(got.NextSteps, "at record this test began 40.00s after it,") {
 		t.Fatalf("the gap at record is %+v: %s", got.Repeat, got.NextSteps)
 	}
 	if likely, known := got.Repeat.ElapsedTimeExpiryLikely(); !likely || !known {
 		t.Fatalf("70s at replay after 40s at record is not read as a span that ran out: %v %v", likely, known)
 	}
-	if unknown.RecordGapKnown {
+	if unknown.RecordGapKnown || unknown.ReplayGapFromStart {
 		t.Fatal("measuring the gap wrote into the note the agent's report shares")
 	}
 	if n := results[1].FailureInfo.UnmatchedCalls[0].Repeat; !n.RecordGapKnown || n.RecordGapSeconds != 3 {
@@ -102,6 +103,72 @@ func TestMarkRepeatOfMeasuresTheRecordGapFromTheTest(t *testing.T) {
 	store.nameRepeats("set-0", results)
 	if row := store.GetFailures()[0].MismatchReport; !row.Repeat.RecordGapKnown || row.Repeat.RecordGapSeconds != 40 {
 		t.Fatalf("the end-of-run row's note is %+v", row.Repeat)
+	}
+}
+
+// At record the cache is refilled in between: test-5 made the call again
+// (mock-8) after test-3's (mock-7), and test-9 made none. At this replay
+// test-5's call was never made again, the cache still fresh, so mock-7 is
+// the one that answered last; the gap at record runs from mock-8, the newest
+// identical per-test recording made before test-9 began, and names it. A
+// newer identical session recording, one made after test-9 began, and one of
+// another request are no anchor.
+func TestMarkRepeatOfAnchorsOnTheNewestIdenticalRecording(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	replay := rec.Add(time.Hour)
+	mk := func(name, query string, at time.Time, lt models.Lifetime) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at,
+			HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://sap/count" + query}}}
+		m.TestModeInfo.Lifetime = lt
+		return m
+	}
+	lookup := map[string]mockDisplayInfo{}
+	addMockDisplayInfo(lookup, []*models.Mock{
+		mk("mock-7", "", rec, models.LifetimePerTest),                             // test-3's, answered at replay
+		mk("mock-8", "", rec.Add(4*time.Second), models.LifetimePerTest),          // test-5's refill
+		mk("mock-11", "", rec.Add(5*time.Second), models.LifetimeSession),         // a session recording
+		mk("mock-12", "?x=1", rec.Add(8*time.Second), models.LifetimePerTest),     // another request
+		mk("mock-13", "", rec.Add(9*time.Second), models.LifetimePerTest),         // test-9 began before it
+		mk("mock-14", "", rec.Add(8500*time.Millisecond), models.LifetimePerTest), // the newest, at the start's instant less 0.5s
+	})
+	// test-9 began at record 9 s after mock-7, 0.5 s after mock-14; at
+	// replay 6.5 s after mock-7 answered.
+	run := func(drop ...string) *models.RepeatNote {
+		l := map[string]mockDisplayInfo{}
+		for k, v := range lookup {
+			l[k] = v
+		}
+		for _, d := range drop {
+			delete(l, d)
+		}
+		results := []models.TestResult{{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay, rec, replay.Add(7*time.Second))},
+		}}}}
+		tcs := []*models.TestCase{{Name: "test-9", HTTPReq: models.HTTPReq{Timestamp: rec.Add(9 * time.Second)}}}
+		markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, l, map[string]time.Time{"test-9": replay.Add(6500 * time.Millisecond)})
+		return results[0].FailureInfo.UnmatchedCalls[0].Repeat
+	}
+	if n := run(); n.RecordedLast != "mock-14" || n.RecordGapSeconds != 0.5 {
+		t.Fatalf("anchored on %q, %.2fs; want mock-14, 0.50s", n.RecordedLast, n.RecordGapSeconds)
+	}
+	n := run("mock-14")
+	if n.RecordedLast != "mock-8" || n.RecordGapSeconds != 5 || n.ReplayGapSeconds != 6.5 || !n.ReplayGapFromStart {
+		t.Fatalf("the note is %+v, want 6.50s at replay from test-9's start and 5.00s at record from mock-8", n)
+	}
+	if likely, known := n.ElapsedTimeExpiryLikely(); !likely || !known {
+		t.Fatalf("6.5s at replay after a refill 5s before the test at record is not an expiry: %v %v", likely, known)
+	}
+	if s := n.Explain(repeatRecordCommand); !strings.Contains(s, "at record this test began 5.00s after mock-8, the newest identical recording made before it") || !strings.Contains(s, "likely kept") {
+		t.Fatalf("the next step: %s", s)
+	}
+	// With no identical per-test recording but the twin before the test, the
+	// gap runs from the twin, and here says the cause is less likely.
+	if n := run("mock-14", "mock-8"); n.RecordedLast != "mock-7" || n.RecordGapSeconds != 9 {
+		t.Fatalf("with the refill gone, anchored on %q, %.2fs; want mock-7, 9.00s", n.RecordedLast, n.RecordGapSeconds)
+	}
+	// A twin the lookup does not know is measured from its own recording.
+	if n := run("mock-7", "mock-8", "mock-14"); n.RecordedLast != "mock-7" || n.RecordGapSeconds != 9 {
+		t.Fatalf("a twin the lookup lacks is anchored on %q, %.2fs; want mock-7, 9.00s", n.RecordedLast, n.RecordGapSeconds)
 	}
 }
 
@@ -118,6 +185,11 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at,
 			HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://sap/rates", Body: body}}}
 	}
+	session := func(name string, at time.Time) *models.Mock {
+		m := http(name, "", at)
+		m.TestModeInfo.Lifetime = models.LifetimeSession
+		return m
+	}
 	lookup := map[string]mockDisplayInfo{}
 	addMockDisplayInfo(lookup, []*models.Mock{
 		http("mock-1", "", rec.Add(time.Second)),      // test-1's: the oldest twin
@@ -125,7 +197,7 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 		http("mock-3", "", rec.Add(3*time.Second)),    // test-3's: answered after test-9 began
 		http("mock-4", "", rec.Add(4*time.Second)),    // test-9's own: consumed by it alone
 		http("mock-5", "", rec.Add(80*time.Second)),   // test-5's: recorded after mock-9
-		http("mock-6", "", rec.Add(5*time.Second)),    // a session recording
+		session("mock-6", rec.Add(5*time.Second)),     // a session recording
 		http("mock-7", "other", rec.Add(time.Second)), // another request
 		http("mock-9", "", rec.Add(70*time.Second)),   // test-9's unconsumed recording
 		http("mock-10", "", rec.Add(71*time.Second)),  // test-9's, consumed by a sibling
@@ -167,8 +239,10 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 	if n == nil || n.Mock != "mock-2" || n.Test != "test-2" {
 		t.Fatalf("the unmade call's twin is %+v, want mock-2 of test-2", n)
 	}
-	if n.ReplayGapSeconds != 2 || !n.RecordGapKnown || n.RecordGapSeconds != 67 {
-		t.Fatalf("the gaps are %+v, want 2s at replay and 67s at record", n)
+	// At record the gap runs from the newest identical per-test recording
+	// before test-9 began (mock-4), not from the twin.
+	if n.ReplayGapSeconds != 2 || !n.RecordGapKnown || n.RecordGapSeconds != 65 || n.RecordedLast != "mock-4" {
+		t.Fatalf("the gaps are %+v, want 2s at replay and 65s at record, from mock-4", n)
 	}
 	if !strings.Contains(u[0].NextSteps, "test test-2's call") || !strings.Contains(u[0].NextSteps, "likely still held") {
 		t.Fatalf("the unmade call's next step: %s", u[0].NextSteps)
@@ -178,7 +252,7 @@ func TestMarkUnmadeRepeatsNamesTheEarlierTwin(t *testing.T) {
 			t.Fatalf("a recording with another explanation, or of no fingerprinted kind, was noted: %+v", other)
 		}
 	}
-	if len(named) != 1 || named[0] != "test-9: recorded mock-9 was not called; identical to mock-2, answered for test-2 2.00s before this test began at replay, 67.00s before it at record" {
+	if len(named) != 1 || named[0] != "test-9: recorded mock-9 was not called; identical to mock-2, answered for test-2 2.00s before this test began at replay, 65.00s after mock-4 at record" {
 		t.Fatalf("the set log lines are %q", named)
 	}
 
@@ -272,3 +346,13 @@ func (noPayloads) LoadPayload(context.Context, models.PayloadAt) (*models.Mock, 
 }
 func (noPayloads) SetPayloadMutator(models.PayloadMutator) {}
 func (noPayloads) PayloadMutator() models.PayloadMutator   { return nil }
+
+// anchoredNote is the note of a call identical to mock, which answered at
+// answered and was recorded at rec, in a test that began at replayStart at
+// this replay and at recordStart at record, measured from mock itself
+// (models.RepeatNote.Anchor).
+func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time) *models.RepeatNote {
+	n := models.NewRepeatNote(mock, answered, rec, time.Time{})
+	n.Anchor(replayStart, recordStart, mock, rec)
+	return n
+}

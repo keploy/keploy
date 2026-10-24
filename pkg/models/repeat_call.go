@@ -59,24 +59,51 @@ type RepeatNote struct {
 	// RecordGapSeconds is how long after Mock's call was recorded the test
 	// that made this call began, at record time; RecordGapKnown is false when
 	// that test's recorded start is not known, and RecordGapSeconds is then 0.
-	ReplayGapSeconds float64 `json:"replay_gap_seconds" yaml:"replay_gap_seconds"`
-	RecordGapSeconds float64 `json:"record_gap_seconds,omitempty" yaml:"record_gap_seconds,omitempty"`
-	RecordGapKnown   bool    `json:"record_gap_known,omitempty" yaml:"record_gap_known,omitempty"`
+	// ReplayGapFromStart says ReplayGapSeconds runs to when this call's test
+	// began at this replay, as RecordGapSeconds does at record, so the two
+	// compare like for like (Anchor); false while it runs to the call (the
+	// agent's note, which knows the call, not the test).
+	ReplayGapSeconds   float64 `json:"replay_gap_seconds" yaml:"replay_gap_seconds"`
+	ReplayGapFromStart bool    `json:"replay_gap_from_start,omitempty" yaml:"replay_gap_from_start,omitempty"`
+	RecordGapSeconds   float64 `json:"record_gap_seconds,omitempty" yaml:"record_gap_seconds,omitempty"`
+	RecordGapKnown     bool    `json:"record_gap_known,omitempty" yaml:"record_gap_known,omitempty"`
+	// RecordedLast is the recording RecordGapSeconds runs from: of the
+	// set's per-test recordings identical to Mock, the newest made before
+	// this call's test began at record (Mock itself when that is the one).
+	// An application that keeps an answer for a span of elapsed time was
+	// last given it by that call at record, which another test may have made
+	// after Mock's: that test's call, the cache still fresh at this replay,
+	// was never made again, so its recording is not the one that answered.
+	// Empty while the record gap is not known.
+	RecordedLast string `json:"recorded_last,omitempty" yaml:"recorded_last,omitempty"`
 }
 
 // NewRepeatNote is the note of a call made at missAt, identical to mock,
 // which answered an earlier call at answeredAt and was recorded at
-// recordedAt, in a test that began at record time at testRecordedStart (zero
-// when not known).
-func NewRepeatNote(mock string, answeredAt, recordedAt, missAt, testRecordedStart time.Time) *RepeatNote {
+// recordedAt. Its record gap is not known until Anchor measures it.
+func NewRepeatNote(mock string, answeredAt, recordedAt, missAt time.Time) *RepeatNote {
 	n := &RepeatNote{Mock: mock, AnsweredAt: answeredAt, RecordedAt: recordedAt}
 	if !answeredAt.IsZero() && !missAt.IsZero() {
 		n.ReplayGapSeconds = gapSeconds(missAt.Sub(answeredAt))
 	}
-	if !testRecordedStart.IsZero() && !recordedAt.IsZero() {
-		n.RecordGapSeconds, n.RecordGapKnown = gapSeconds(testRecordedStart.Sub(recordedAt)), true
-	}
 	return n
+}
+
+// Anchor measures n's two gaps start to start: at this replay from when Mock
+// answered the earlier call (AnsweredAt) to replayStart, when this call's
+// test began; at record from recordedLastAt, when recordedLast was recorded
+// (RecordedLast), to recordStart, when the test began then. A zero time
+// leaves its gap as it was.
+func (n *RepeatNote) Anchor(replayStart, recordStart time.Time, recordedLast string, recordedLastAt time.Time) {
+	if n == nil {
+		return
+	}
+	if !replayStart.IsZero() && !n.AnsweredAt.IsZero() {
+		n.ReplayGapSeconds, n.ReplayGapFromStart = gapSeconds(replayStart.Sub(n.AnsweredAt)), true
+	}
+	if !recordStart.IsZero() && !recordedLastAt.IsZero() && recordedLast != "" {
+		n.RecordGapSeconds, n.RecordGapKnown, n.RecordedLast = gapSeconds(recordStart.Sub(recordedLastAt)), true, recordedLast
+	}
 }
 
 // gapSeconds is d in seconds, to the hundredth, never below zero: two clocks
@@ -98,11 +125,13 @@ func (n *RepeatNote) Clone() *RepeatNote {
 }
 
 // ElapsedTimeExpiryLikely reports whether the gaps look like a span measured
-// in elapsed time that the recording stayed inside and the replay passed: the
-// call came later after its earlier twin at replay than its test came after
-// that twin at record. Unknown when the record gap is not known.
+// in elapsed time that the recording stayed inside and the replay passed:
+// the test came later after its earlier twin's call at replay than after the
+// newest identical call before it at record (RecordedLast). Unknown when the
+// record gap is not known, or the replay gap runs to the call, not to the
+// test's start (ReplayGapFromStart): unlike gaps say nothing.
 func (n *RepeatNote) ElapsedTimeExpiryLikely() (likely, known bool) {
-	if n == nil || !n.RecordGapKnown {
+	if n == nil || !n.RecordGapKnown || !n.ReplayGapFromStart {
 		return false, false
 	}
 	return n.ReplayGapSeconds > n.RecordGapSeconds, true
@@ -123,9 +152,13 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	} else {
 		b.WriteString(", a recording of an earlier test of this set that already answered that test's call at this replay. ")
 	}
-	fmt.Fprintf(&b, "At replay this call came %s after that one", formatGap(n.ReplayGapSeconds))
+	if n.ReplayGapFromStart {
+		fmt.Fprintf(&b, "At replay this test began %s after that call", formatGap(n.ReplayGapSeconds))
+	} else {
+		fmt.Fprintf(&b, "At replay this call came %s after that one", formatGap(n.ReplayGapSeconds))
+	}
 	if n.RecordGapKnown {
-		fmt.Fprintf(&b, "; at record this test began %s after it", formatGap(n.RecordGapSeconds))
+		fmt.Fprintf(&b, "; at record this test began %s after %s", formatGap(n.RecordGapSeconds), n.recordedLastPhrase())
 	}
 	b.WriteString(", and this test's recording has no such call. ")
 	switch likely, known := n.ElapsedTimeExpiryLikely(); {
@@ -140,6 +173,15 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	return b.String()
 }
 
+// recordedLastPhrase names, in a sentence, the recording the record gap runs
+// from (RecordedLast): "it" when that is Mock.
+func (n *RepeatNote) recordedLastPhrase() string {
+	if n.RecordedLast == "" || n.RecordedLast == n.Mock {
+		return "it"
+	}
+	return n.RecordedLast + ", the newest identical recording made before it"
+}
+
 // formatGap renders a gap in seconds for a sentence.
 func formatGap(s float64) string {
 	return fmt.Sprintf("%.2fs", s)
@@ -150,7 +192,7 @@ func formatGap(s float64) string {
 // earlier twin at replay than at record, as a span the recording passed and
 // the replay stayed inside does. Unknown when the record gap is not known.
 func (n *RepeatNote) ElapsedTimeFreshLikely() (likely, known bool) {
-	if n == nil || !n.RecordGapKnown {
+	if n == nil || !n.RecordGapKnown || !n.ReplayGapFromStart {
 		return false, false
 	}
 	return n.ReplayGapSeconds < n.RecordGapSeconds, true
@@ -173,7 +215,7 @@ func (n *RepeatNote) ExplainUnmade(recordCmd string) string {
 	}
 	fmt.Fprintf(&b, "At replay this test began %s after that call", formatGap(n.ReplayGapSeconds))
 	if n.RecordGapKnown {
-		fmt.Fprintf(&b, "; at record it began %s after it", formatGap(n.RecordGapSeconds))
+		fmt.Fprintf(&b, "; at record it began %s after %s", formatGap(n.RecordGapSeconds), n.recordedLastPhrase())
 	}
 	b.WriteString(". ")
 	switch likely, known := n.ElapsedTimeFreshLikely(); {
@@ -205,6 +247,9 @@ func (n *RepeatNote) Brief(unmade bool) string {
 	s += " " + formatGap(n.ReplayGapSeconds) + " earlier at replay"
 	if n.RecordGapKnown {
 		s += " and " + formatGap(n.RecordGapSeconds) + " earlier at record"
+		if n.RecordedLast != "" && n.RecordedLast != n.Mock {
+			s += " (from " + n.RecordedLast + ")"
+		}
 	}
 	likely, _ := n.ElapsedTimeExpiryLikely()
 	if unmade {

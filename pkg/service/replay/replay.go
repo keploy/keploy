@@ -5131,7 +5131,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// which already answered at this replay, is named with that test: the
 	// application asked again where its recording did not, likely as an
 	// answer it kept for a span of elapsed time ran out (models.RepeatNote).
-	if named := markRepeatOf(testCaseResults, consumers, testCases); len(named) > 0 {
+	if named := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
 		r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)
 		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: likely the application kept the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that the recording stayed inside and this replay passed; each is named under unmatched_calls.repeat_of",
 			zap.String("test-set", testSetID),
@@ -6654,6 +6654,7 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			target:     mockTargetFromSpec(mock),
 			request:    mock.RequestFingerprint(),
 			recordedAt: mock.Spec.ReqTimestampMock,
+			lifetime:   mock.TestModeInfo.Lifetime,
 		}
 	}
 }

@@ -108,15 +108,11 @@ func (m *MockManager) noteAnswered(mk models.Mock) {
 // recordings of kind that answered a call earlier in this test set, under any
 // of keys, the one answered last that match accepts, and is not the open
 // test's own (recorded inside its window, or in its exact view). ok is false
-// when there is none. TestRecordedStart is when the open test began at record
-// time, zero when no window is set.
+// when there is none.
 func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
 	if match == nil || len(keys) == 0 {
 		return integrations.AnsweredCall{}, false
 	}
-	m.windowMu.RLock()
-	start := m.windowStart
-	m.windowMu.RUnlock()
 	own := func(mk *models.Mock) bool {
 		if v := m.exactView(); v != nil {
 			if _, ok := v.index[mk.Name]; ok {
@@ -137,7 +133,7 @@ func (m *MockManager) FindAnsweredEarlier(kind models.Kind, keys []string, match
 	if best.mock == nil {
 		return integrations.AnsweredCall{}, false
 	}
-	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at, TestRecordedStart: start}, true
+	return integrations.AnsweredCall{Mock: best.mock, AnsweredAt: best.at}, true
 }
 
 var _ integrations.AnsweredFinder = (*MockManager)(nil)

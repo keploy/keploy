@@ -344,13 +344,11 @@ type AnsweredFinder interface {
 	FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (AnsweredCall, bool)
 }
 
-// AnsweredCall is what AnsweredFinder found: the recording, when it answered
-// at this replay, and when the open test began at record time (zero when the
-// store does not know).
+// AnsweredCall is what AnsweredFinder found: the recording, and when it
+// answered at this replay.
 type AnsweredCall struct {
-	Mock              *models.Mock
-	AnsweredAt        time.Time
-	TestRecordedStart time.Time
+	Mock       *models.Mock
+	AnsweredAt time.Time
 }
 
 // StagedFinder is an optional MockMemDb extension under exact serving (the

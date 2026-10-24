@@ -130,8 +130,8 @@ func TestSameRequestToleratesOnlyHeaders(t *testing.T) {
 
 // The HTTP parser's miss on a call identical to an earlier test's answered
 // recording names that recording as the call's closest, with the note
-// (models.RepeatNote): the gaps from the store's times and the call's, and
-// the likely cause, with the switch on or off. A call no earlier answer is
+// (models.RepeatNote): the gap at replay from the store's time and the
+// call's, and the recording's time at record, with the switch on or off. A call no earlier answer is
 // gets no note.
 func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
@@ -141,10 +141,9 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 	miss := func(t *testing.T, path string, opts models.OutgoingOptions, shown ...*models.Mock) *models.MockMismatchReport {
 		t.Helper()
 		earlier := sapCount("mock-7", host, rec)
-		// The open test began 3 s after the recording at record time; the
-		// earlier call was answered an hour before this one at replay.
+		// The earlier call was answered an hour before this one at replay.
 		db := ownDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{mocks: shown}, answered: []integrations.AnsweredCall{{
-			Mock: earlier, AnsweredAt: time.Now().Add(-time.Hour), TestRecordedStart: rec.Add(3 * time.Second),
+			Mock: earlier, AnsweredAt: time.Now().Add(-time.Hour),
 		}}}, own: own}
 		var reported error
 		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
@@ -199,8 +198,10 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 		if r.Repeat == nil || r.Repeat.Mock != "mock-7" || r.ClosestMock != "mock-7" {
 			t.Fatalf("switch %q: the miss of a repeated call is %+v (repeat %+v), want it named as mock-7", on, r, r.Repeat)
 		}
-		if !r.Repeat.RecordGapKnown || r.Repeat.RecordGapSeconds != 3 || r.Repeat.ReplayGapSeconds < 3600 {
-			t.Fatalf("switch %q: the gaps are %+v, want 3s at record and an hour at replay", on, r.Repeat)
+		// The gap at record, and so the likely cause, the replay measures
+		// from the set's recordings, which the agent does not hold.
+		if r.Repeat.RecordGapKnown || r.Repeat.ReplayGapFromStart || r.Repeat.ReplayGapSeconds < 3600 || !r.Repeat.RecordedAt.Equal(rec) {
+			t.Fatalf("switch %q: the gaps are %+v, want an hour at replay, to the call, recorded at %v, and none at record", on, r.Repeat, rec)
 		}
 		if !strings.Contains(r.NextSteps, "identical to mock-7") || !strings.Contains(r.NextSteps, "elapsed time") || len(r.FieldDiffs) != 0 {
 			t.Fatalf("switch %q: the next step is %q (diffs %v)", on, r.NextSteps, r.FieldDiffs)
