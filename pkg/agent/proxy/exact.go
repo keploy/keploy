@@ -169,21 +169,29 @@ func (v *exactView) hear(mk *models.Mock) {
 // for a replay session (view nil), off again at the next one.
 type exactState struct {
 	view atomic.Pointer[exactView]
-	// beforePublish, set only by tests and before any install, is called
-	// with each view as installExact is about to publish it in view: it
-	// sees the view as a reader loading view first will.
+	// beforePublish, set only by tests and before the install it is to see,
+	// is called with each view as installExact is about to publish it in
+	// view: it sees the view as a reader loading view first will.
 	beforePublish func(*exactView)
-	// afterPublish, set only by tests and before any install, is called
-	// with each view as installExact's last step before it returns: the
-	// view published, the view before it closed, every kind's revision and
-	// the window signal moved. It sees what a reader the signal woke reads.
+	// afterPublish, set only by tests and before the install it is to see,
+	// is called with each view as installExact's last step before it
+	// returns: the view published, the view before it closed, every kind's
+	// revision and the window signal moved. It sees what a reader the signal
+	// woke reads.
 	// It runs with no view's lock held; on a test's view the install lock is
 	// held, and on the open doors the variables' lock too.
 	afterPublish func(*exactView)
-	// aheadRead, set only by tests and before any install, is called with
-	// the pool view closeAhead closed and read, as closeAhead returns: the
-	// view's lock released, before the door builds its view from what it
-	// read. It runs with no view's lock and no install lock held.
+	// aheadLocked, set only by tests and before the install it is to see, is
+	// called with the pool view closeAhead closes and reads, at the end of
+	// the hold of that view's lock in which it does both. The lock is still
+	// held, so it must not take it, nor read or consume through the manager
+	// (each takes the view's lock). No install lock is held.
+	aheadLocked func(*exactView)
+	// aheadRead, set only by tests and before the install it is to see, is
+	// called with the pool view closeAhead closed and read, as closeAhead
+	// returns: the view's lock released, before the door builds its view
+	// from what it read. It runs with no view's lock and no install lock
+	// held.
 	aheadRead func(*exactView)
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
@@ -863,24 +871,32 @@ type aheadAnswer struct{ owned, served *models.Mock }
 // closeAhead closes the view being served, if it is a pool view that answers
 // the next test's mocks in flight when it began (ServeExactPool's ahead), and
 // returns those that answered, in the order they did, and the names of all of
-// them. Closed in the same hold of its lock as the read, so no consume lands
+// them. It closes the view whatever of its ahead the view answered, all, some
+// or none, in the same hold of its lock as the read, so no consume lands
 // between the read and the next view: one after it is refused (exactConsume).
 func (m *MockManager) closeAhead() (answered []aheadAnswer, ahead []string) {
 	prev := m.exact.view.Load()
 	if prev == nil || prev.test != "" || len(prev.owned) == 0 {
 		return nil, nil
 	}
-	prev.mu.Lock()
-	prev.closed = true
-	answered = make([]aheadAnswer, 0, len(prev.order))
-	for _, i := range prev.order {
-		answered = append(answered, aheadAnswer{owned: prev.owned[i], served: prev.served[i]})
-	}
-	ahead = make([]string, 0, len(prev.owned))
-	for _, mk := range prev.owned {
-		ahead = append(ahead, mk.Name)
-	}
-	prev.mu.Unlock()
+	// One hold, released by its defer even if a test's seam in it stops
+	// the goroutine.
+	func() {
+		prev.mu.Lock()
+		defer prev.mu.Unlock()
+		prev.closed = true
+		answered = make([]aheadAnswer, 0, len(prev.order))
+		for _, i := range prev.order {
+			answered = append(answered, aheadAnswer{owned: prev.owned[i], served: prev.served[i]})
+		}
+		ahead = make([]string, 0, len(prev.owned))
+		for _, mk := range prev.owned {
+			ahead = append(ahead, mk.Name)
+		}
+		if m.exact.aheadLocked != nil {
+			m.exact.aheadLocked(prev)
+		}
+	}()
 	if m.exact.aheadRead != nil {
 		m.exact.aheadRead(prev)
 	}
