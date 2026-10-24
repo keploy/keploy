@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -105,6 +106,9 @@ type mockMiss struct {
 	// test set again under the command, or its store could not hold it
 	// (integrations.UnheldWhy). The miss is no recording-side shortfall.
 	restaged bool
+	// call is the command's first read of the round (matchCommand), for its
+	// report to say whether that read found a staging (integrations.StampMark).
+	call integrations.CallRound
 }
 
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement

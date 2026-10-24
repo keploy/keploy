@@ -5,6 +5,7 @@ import (
 	"io"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -58,5 +59,62 @@ func TestACommandMissNamesItsDestination(t *testing.T) {
 	}
 	if rep := r.MismatchReport(); rep.Destination != testDBAddr || rep.ActualSummary != "COM_QUERY SELECT 1" {
 		t.Fatalf("report %+v; want the miss of COM_QUERY SELECT 1 at %s", *rep, testDBAddr)
+	}
+}
+
+// markingDb is fakeMockDb marking every command's round, of a staging view
+// when staging (integrations.StagedFinder), and holding it to that round
+// (integrations.RoundHolder): the replay never moves under it.
+type markingDb struct {
+	*fakeMockDb
+	staging bool
+}
+
+func (m markingDb) MarkCallRound() integrations.CallRound {
+	return integrations.NewCallRound(1, nil).InStaging(m.staging)
+}
+
+func (markingDb) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*models.Mock) bool) (string, bool) {
+	return "", false
+}
+
+func (m markingDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return m, func() bool { return false }
+}
+
+// A command-phase miss carries where its command first read the round
+// (integrations.StampMark): the proxy tells the miss it was made while the
+// set's mocks were being staged from that mark, where the command was
+// decided, never from the view serving as the miss reaches it. A store that
+// marks no round leaves it unmarked.
+func TestACommandMissCarriesWhereItsCommandWasMarked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		db   func(*fakeMockDb) integrations.MockMemDb
+		want models.RoundMark
+	}{
+		{"marked in a staging", func(f *fakeMockDb) integrations.MockMemDb { return markingDb{f, true} }, models.RoundMarkedStaging},
+		{"marked in a staged set", func(f *fakeMockDb) integrations.MockMemDb { return markingDb{f, false} }, models.RoundMarkedSettled},
+		{"a store that marks no round", func(f *fakeMockDb) integrations.MockMemDb { return f }, models.RoundUnmarked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, done := replay(t, tc.db(&fakeMockDb{session: []*models.Mock{nativeHandshake()}}))
+			client.greetAndAnswer("app", mysql.Native)
+			if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
+				t.Fatalf("the client read %x after its handshake; want the recorded OK", ok)
+			}
+			client.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1"...))
+			if got, err := io.ReadAll(client.c); len(got) != 0 || err != nil {
+				t.Fatalf("the client read %q, %v after its query; want its connection closed unanswered", got, err)
+			}
+			err := <-done
+			var r reportCarrier
+			if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+				t.Fatalf("Replay returned %v; want the query's miss with its report", err)
+			}
+			if got := r.MismatchReport().Mark; got != tc.want {
+				t.Fatalf("the command's miss carries mark %d; want %d", got, tc.want)
+			}
+		})
 	}
 }

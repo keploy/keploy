@@ -516,7 +516,9 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // (integrations.StagedFinder): the staging and the view in force, read
 // together under the round lock, in O(1). The view is kept, never copied: a
 // view is not changed once installed, and tells its own by name later, for
-// a miss's lookup. The zero CallRound without exact serving.
+// a miss's lookup, and whether it is a staging's (exactView.staging), for
+// the miss to say so (integrations.StampMark). The zero CallRound without
+// exact serving.
 func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r := &m.exact.round
 	r.mu.Lock()
@@ -529,7 +531,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	if v == nil {
 		return integrations.CallRound{}
 	}
-	return integrations.NewCallRound(epoch, v.holds)
+	return integrations.NewCallRound(epoch, v.holds).InStaging(v.staging)
 }
 
 // holds reports whether the view holds the recording name as its own (the
@@ -1308,6 +1310,25 @@ func (m *MockManager) exactMissKind() string {
 func (m *MockManager) exactMissStaging() bool {
 	v := m.exactView()
 	return v != nil && v.staging
+}
+
+// missMadeInStaging reports whether the miss of report r was made while a
+// set's mocks were being staged. A parser that marked the call's round says
+// it (models.MockMismatchReport.Mark): the miss was decided where the call
+// was marked, and the view serving as the report reaches the proxy can be
+// the next staging's (a call decided under a staged set's view) or a staged
+// set's (a call decided under the staging before it). For a miss of a parser
+// that marks no round, the view serving now (exactMissStaging).
+func (m *MockManager) missMadeInStaging(r *models.MockMismatchReport) bool {
+	if r != nil {
+		switch r.Mark {
+		case models.RoundMarkedStaging:
+			return true
+		case models.RoundMarkedSettled:
+			return false
+		}
+	}
+	return m.exactMissStaging()
 }
 
 // unanswered is the view's test mocks that have not answered, of kind (every

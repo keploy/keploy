@@ -331,6 +331,9 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 			miss.nextSteps = unheld
 		}
 	}
+	if miss != nil {
+		miss.call = call
+	}
 	return resp, ok, miss, err
 }
 

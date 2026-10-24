@@ -471,6 +471,80 @@ func TestAMissMadeWhileASetIsStagedSaysSo(t *testing.T) {
 	}
 }
 
+// A miss is told it was made while the replay staged a set's mocks only
+// where its call was decided: where the call first read the round, as its
+// parser marked it (integrations.StampMark), never from the view serving
+// when the miss reaches the proxy. A call decided under a staged set's view
+// whose report reaches the proxy once the next set's staging opened is not
+// told so; a call decided in a staging whose report reaches the proxy once
+// the set is staged is. HTTP (replay's matcher and record's full round) and
+// Generic alike. A miss of a parser that marks no round is told from the
+// view serving then (TestAMissMadeWhileASetIsStagedSaysSo).
+func TestAMissIsToldOfAStagingOnlyWhereItsCallWasDecided(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	opening := func(mm *MockManager) {
+		mm.StageExactBackground(models.RecordedWithS12Routing)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	settling := func(mm *MockManager) {
+		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	settled := func(mm *MockManager) { opening(mm); settling(mm) }
+	serve := map[string]func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport{
+		"HTTP replay": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), jobsCall)
+		},
+		"HTTP record's full round": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{Learn: true, LearnPool: true}, learn.NewTracker(), jobsCall)
+		},
+		"Generic": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return genericServeIn(t, context.Background(), db, "AUTH step4")
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		told          bool
+	}{
+		{"decided under a staged set, reported in the next staging", settled, opening, false},
+		{"decided in a staging, reported once the set is staged", opening, settling, true},
+	} {
+		for parser, send := range serve {
+			t.Run(parser+": "+tc.name, func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				p.setMockManager(mm)
+				tc.before(mm)
+				if mm.exactMissStaging() != tc.told {
+					t.Fatalf("precondition: the call's view reads as a staging's: %v", !tc.told)
+				}
+				db := &heldFirstRead{MockManager: mm, moved: func() { tc.under(mm) }}
+				r := send(t, db)
+				if r == nil {
+					t.Fatal("the call was answered")
+				}
+				if !db.fired.Load() {
+					t.Fatal("precondition: the replay never moved under the call")
+				}
+				if mm.exactMissStaging() == tc.told {
+					t.Fatalf("precondition: the view serving as the miss is reported reads as a staging's: %v", tc.told)
+				}
+				p.BeginTestErrorCapture()
+				p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, r))
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil || len(got) != 1 {
+					t.Fatalf("want the one call, got %+v (%v)", got, err)
+				}
+				if told := strings.HasPrefix(got[0].NextSteps, stagingMissNote); told != tc.told {
+					t.Fatalf("WRONG REASON: the call's next steps %q tell the staging %v; want %v", got[0].NextSteps, told, tc.told)
+				}
+			})
+		}
+	}
+}
+
 // A pool slice's per-test-lifetime mock (a Postgres query a second test
 // process's TestMain made) is staged in the startup tree only. Between tests
 // every reusable read shows it, whichever tier a parser reads: after a test

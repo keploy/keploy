@@ -205,6 +205,9 @@ type RoundSnapshot struct {
 	Open bool
 	// Background: the set is served by the background rules.
 	Background bool
+	// Staging: the store's view is one the replay serves while it stages a
+	// set's mocks, where no recording answers a call (CallRound.Staging).
+	Staging bool
 	// PerTest, Session, Startup and SessionScoped are what
 	// GetPerTestMocksInWindow (and GetFilteredMocks), GetSessionMocks,
 	// GetStartupMocks and GetSessionScopedMocks show, of every kind.
@@ -279,10 +282,10 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 
 // CallRound is s, a store's snapshot of the round, as a call's first read
 // of it (CallRound): its staging, and every recording its view held as its
-// own (Owner is not OwnerNone).
+// own (Owner is not OwnerNone), and whether that view was a staging's.
 func (s RoundSnapshot) CallRound() CallRound {
 	owners := s.owners
-	return NewCallRound(s.At.Epoch, func(name string) bool { return owners[name] != OwnerNone })
+	return NewCallRound(s.At.Epoch, func(name string) bool { return owners[name] != OwnerNone }).InStaging(s.Staging)
 }
 
 // Claimant is the test that took the shared recording m (OwnerSharedTaken).

@@ -119,6 +119,9 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					answered = answeredExchanges(db)
 				}
 				report := buildGenericMismatchReport(ctx, genericRequests, db, answered)
+				// The miss was decided where the request first read the
+				// round: whether that read found a staging is told from it.
+				integrations.StampMark(report, call)
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" {

@@ -321,7 +321,30 @@ type MockMismatchReport struct {
 	// parser fills it: it stays empty on an answer (see Answer), and on a
 	// miss the replay names the owner (UnmatchedCall.RecordedIn).
 	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Mark is where the call's parser found it when the call first read the
+	// round (integrations.StampMark), under the proven switch: the miss was
+	// decided there, so the proxy says whether it was made while the set's
+	// mocks were being staged from it, never from the view serving when the
+	// miss reaches the proxy, which can be the next staging's. RoundUnmarked
+	// (the zero value) from a parser that marks no round. Never written to a
+	// report: the proxy's sink reads it in the agent.
+	Mark RoundMark `json:"-" yaml:"-"`
 }
+
+// RoundMark is where a call was when its first read of the round was made
+// (MockMismatchReport.Mark).
+type RoundMark uint8
+
+const (
+	// RoundUnmarked: the call's parser marks no round.
+	RoundUnmarked RoundMark = iota
+	// RoundMarkedSettled: the call's first read found a test's view, or a
+	// pool view of a staged set.
+	RoundMarkedSettled
+	// RoundMarkedStaging: the call's first read found the replay staging the
+	// set's mocks, where no recording answers a call.
+	RoundMarkedStaging
+)
 
 // ErrAnswered is what an answer report travels as (ReportAnswer): no miss;
 // nothing returns it.

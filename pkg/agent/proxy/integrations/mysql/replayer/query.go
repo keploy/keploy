@@ -212,6 +212,9 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// from an empty mock pool.
 					CandidateCount: miss.candidateCount,
 				}
+				// The miss was decided where the command first read the
+				// round: whether that read found a staging is told from it.
+				integrations.StampMark(report, miss.call)
 				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged {
 					// The pool held no data mock for the command phase to compare
 					// against — at most handshake/config mocks survived the

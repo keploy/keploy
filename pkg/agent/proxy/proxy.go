@@ -5607,8 +5607,8 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
 				proxyErr.Recorded = 0
 			}
 			// A miss made while the replay was staging the set's mocks says
-			// so (stagingMissNote).
-			proxyErr.Staging = m.exactMissStaging()
+			// so (stagingMissNote), told where its call was decided.
+			proxyErr.Staging = m.missMadeInStaging(proxyErr.MismatchReport)
 		}
 	}
 	// Single, protocol-agnostic mock-mismatch log. EVERY parser's MockOutgoing

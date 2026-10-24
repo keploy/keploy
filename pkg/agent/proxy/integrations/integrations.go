@@ -371,12 +371,15 @@ type StagedKeyFinder interface {
 // that read's view held as its own (the open test's, in flight into it,
 // shared with it, a pool view's ahead). A store makes it in O(1), keeping
 // what it needs to tell them later (StagedFinder.MarkCallRound); a round
-// snapshot is one too (RoundSnapshot.CallRound). The zero CallRound is of no
+// snapshot is one too (RoundSnapshot.CallRound). It also says whether that
+// view was one the replay serves while it stages a set's mocks (Staging),
+// for the call's miss to say so (StampMark). The zero CallRound is of no
 // read.
 type CallRound struct {
-	read  bool
-	epoch uint64
-	held  func(name string) bool
+	read    bool
+	staging bool
+	epoch   uint64
+	held    func(name string) bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -393,6 +396,35 @@ func (c CallRound) Epoch() uint64 { return c.epoch }
 
 // Held reports whether the read's view held the recording name as its own.
 func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// InStaging is c, of a read whose view the replay served while it staged a
+// set's mocks (a staging view: no recording answers a call there) when
+// staging is true. A store sets it as it marks the call, from the view it
+// read.
+func (c CallRound) InStaging(staging bool) CallRound {
+	c.staging = staging
+	return c
+}
+
+// Staging reports whether c's read found the replay staging a set's mocks.
+func (c CallRound) Staging() bool { return c.staging }
+
+// StampMark writes onto r, the miss report of the call marked call, where
+// that call was when it first read the round (models.MockMismatchReport.Mark):
+// the proxy says from it whether the miss was made while the set's mocks were
+// being staged. A miss is decided where its call was marked, and the view
+// serving when the report reaches the proxy can be the next staging's, or the
+// staged set's after the call's staging. Nothing for the zero CallRound (a
+// store that marks no round): the proxy reads the view serving then.
+func StampMark(r *models.MockMismatchReport, call CallRound) {
+	if r == nil || !call.Read() {
+		return
+	}
+	r.Mark = models.RoundMarkedSettled
+	if call.Staging() {
+		r.Mark = models.RoundMarkedStaging
+	}
+}
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the
 // zero CallRound from a store that names no recording made elsewhere.
