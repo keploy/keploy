@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,13 +97,20 @@ func upgradedDestThrough(t *testing.T, layer func(net.Conn) net.Conn) *relayHarn
 
 func upgradedSideThrough(t *testing.T, dest bool, layer func(net.Conn) net.Conn) *relayHarness {
 	t.Helper()
-	h := newHarness(t, Config{TLSUpgradeFn: func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
+	return upgradedSideOver(t, dest, nil, layer)
+}
+
+// upgradedSideOver is upgradedSideThrough with the relay reading the client's
+// socket through src (newHarnessOver).
+func upgradedSideOver(t *testing.T, dest bool, src, layer func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
+	h := newHarnessOver(t, Config{TLSUpgradeFn: func(_ context.Context, conn net.Conn, isClient bool, _ *tls.Config) (net.Conn, error) {
 		// isClient: the relay is the TLS client, on the destination side.
 		if isClient != dest {
 			return conn, nil
 		}
 		return layer(conn), nil
-	}})
+	}}, src)
 	d := directive.UpgradeTLS(nil, &tls.Config{}, "client-side upgrade")
 	if dest {
 		d = directive.UpgradeTLS(&tls.Config{}, nil, "dest-side upgrade")
@@ -268,6 +277,83 @@ func TestWatermark_HoldsAReplyTheDestTLSLayerReadAndHasNotHandedOn(t *testing.T)
 	}
 	awaitParserWaiting(t, h.r.DestStream())
 	awaitState(t, "the window to pass once the parser has the reply", func() bool {
+		return w.Settled("", "", start, end)
+	})
+}
+
+// stampWaitingConn is a socket that reports when it read its bytes
+// (readTimeProvider), as prependingConn does for a stash, and whose first
+// report waits for the row. The read-tracking conn over it asks for that
+// report after its read returned bytes and before it marks the layer with the
+// read's stamp, so the row holds it in the step between the two, as a
+// goroutine preempted there would be.
+type stampWaitingConn struct {
+	net.Conn
+	asked, release chan struct{}
+	once           sync.Once
+}
+
+func (c *stampWaitingConn) LastReadTime() time.Time {
+	c.once.Do(func() {
+		close(c.asked)
+		<-c.release
+	})
+	return time.Time{}
+}
+
+// The read under a TLS layer returned bytes, and the read-tracking conn is
+// taking their stamp: it has marked the layer as stamping a read and not yet
+// stored the stamp, which it took from the clock before this look. The look
+// finds the forwarder's hand and the queue empty, and, on a connection that
+// has read nothing before, no chunk at all: only the layer's mark says the
+// bytes are there. The watermark holds a window that ends now, and names the
+// connection that holds it, until the parser has the chunk.
+func TestWatermark_HoldsAReadTheTLSLayerIsStillStamping(t *testing.T) {
+	stamp := &stampWaitingConn{asked: make(chan struct{}), release: make(chan struct{})}
+	h := upgradedSideOver(t, false, func(c net.Conn) net.Conn {
+		stamp.Conn = c
+		return stamp
+	}, func(c net.Conn) net.Conn { return &layerConn{Conn: c} })
+	t.Cleanup(func() {
+		select {
+		case <-stamp.release:
+		default:
+			close(stamp.release)
+		}
+	})
+	w := NewWatermark()
+	defer w.Track(h.r, "conn-1")()
+	chunks := chunksOf(h.r.ClientStream())
+	awaitParserWaiting(t, h.r.ClientStream())
+
+	go func() { _, _ = h.clientApp.Write([]byte("query")) }()
+	await(t, stamp.asked, "the read-tracking conn to stamp the read")
+	end := time.Now()
+	start := end.Add(-time.Second)
+	if h.r.teeC2D.progress.first.Load() != 0 || h.r.teeD2C.progress.first.Load() != 0 {
+		t.Fatal("the connection read a chunk before the layer's read: the row needs one that has read nothing yet")
+	}
+	if h.r.carriedNothingIn(start.UnixNano(), end.UnixNano()) {
+		t.Error("carriedNothingIn: true on a connection whose TLS layer holds bytes it is stamping")
+	}
+	if w.Settled("", "", start, end) {
+		t.Error("Settled: true for a window over bytes the TLS layer is stamping")
+	}
+	if b := w.HeldBy("", "", start, end, 0); b == nil ||
+		!strings.HasPrefix(b.String(), "conn-1: ") || !strings.Contains(b.String(), "being stamped") {
+		t.Errorf("HeldBy = %v, want conn-1, with a chunk being stamped", b)
+	}
+	close(stamp.release)
+
+	c := nextChunk(t, chunks)
+	if string(c.Bytes) != "query" {
+		t.Fatalf("chunk = %q, want query", c.Bytes)
+	}
+	if c.ReadAt.After(end) {
+		t.Fatalf("chunk stamped %v, after the window's end %v: the row did not hold the read in its stamp", c.ReadAt, end)
+	}
+	awaitParserWaiting(t, h.r.ClientStream())
+	awaitState(t, "the window to pass once the parser has the chunk", func() bool {
 		return w.Settled("", "", start, end)
 	})
 }
