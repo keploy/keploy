@@ -145,35 +145,7 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 		db := ownDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{mocks: shown}, answered: []integrations.AnsweredCall{{
 			Mock: earlier, AnsweredAt: time.Now().Add(-time.Hour),
 		}}}, own: own}
-		var reported error
-		ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
-		app, prox := net.Pipe()
-		defer app.Close()
-		done := make(chan error, 1)
-		go func() {
-			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, opts)
-		}()
-		if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\nX-Request-Id: live-9\r\n\r\n"); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
-		if err != nil {
-			t.Fatalf("the app got no answer: %v", err)
-		}
-		_ = resp.Body.Close()
-		_ = app.Close()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the parser did not return after the miss")
-		}
-		var withReport interface {
-			MismatchReport() *models.MockMismatchReport
-		}
-		if !errors.As(reported, &withReport) || withReport.MismatchReport() == nil {
-			t.Fatalf("the miss was reported as %v, with no mismatch report", reported)
-		}
-		return withReport.MismatchReport()
+		return missReport(t, db, addr, host, path, opts)
 	}
 	for _, row := range []struct {
 		on   string
@@ -238,5 +210,95 @@ func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
 	r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{Learn: true, LearnPool: true}, changed)
 	if r.Reason == models.MissUnmockedCall || r.Reason == "" || r.Repeat != nil || r.ClosestMock == "mock-7" {
 		t.Fatalf("a learn miss with reason %q got the note %+v (closest %q), want its own reason kept and no note", r.Reason, r.Repeat, r.ClosestMock)
+	}
+}
+
+// missReport is the mismatch report of a GET of path to host (addr) the
+// HTTP parser answers from db, with a request id no recording carries.
+func missReport(t *testing.T, db integrations.MockMemDb, addr, host, path string, opts models.OutgoingOptions) *models.MockMismatchReport {
+	t.Helper()
+	var reported error
+	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
+	app, prox := net.Pipe()
+	defer app.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, opts)
+	}()
+	if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\nX-Request-Id: live-9\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatalf("the app got no answer: %v", err)
+	}
+	_ = resp.Body.Close()
+	_ = app.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser did not return after the miss")
+	}
+	var withReport interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(reported, &withReport) || withReport.MismatchReport() == nil {
+		t.Fatalf("the miss was reported as %v, with no mismatch report", reported)
+	}
+	return withReport.MismatchReport()
+}
+
+// gateDb is earlierDb under exact serving: staged are other tests'
+// recordings no read shows (integrations.StagedFinder), and consumed the open
+// test's recordings that already answered a call of it
+// (integrations.ExactConsumedReader).
+type gateDb struct {
+	earlierDb
+	staged   []*models.Mock
+	consumed []*models.Mock
+}
+
+func (d gateDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	for _, m := range d.staged {
+		if m.Kind == kind && match(m) {
+			return m.Name
+		}
+	}
+	return ""
+}
+
+func (d gateDb) ConsumedTestMocks() []*models.Mock { return d.consumed }
+
+// Under exact serving the note joins only a miss nothing else explains. A
+// call that is another test's recording no read shows stays named as that
+// recording made elsewhere (not owned), which judging moves to the worker
+// scope: never also as a repeat, whose closest and next step would replace
+// it while NotOwned stayed. A call the test recorded fewer times than it made
+// stays one call more than recorded (extra_call), the test's own recording
+// its closest. Each has an earlier test's identical recording that answered,
+// which alone gives the note.
+func TestARepeatNoteLeavesANotOwnedAndAnExtraCallAsTheyAre(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/sap/A_BusinessPartner/$count?$filter=x"
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	earlier := earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{
+		Mock: sapCount("mock-7", host, rec), AnsweredAt: time.Now().Add(-time.Hour),
+	}}}
+	if r := missReport(t, gateDb{earlierDb: earlier}, addr, host, path, models.OutgoingOptions{}); r.Repeat == nil || r.Repeat.Mock != "mock-7" || r.NotOwned || r.MissKind == models.MissExtraCall {
+		t.Fatalf("with nothing else to explain it the miss is %+v (repeat %+v), want the note on mock-7", r, r.Repeat)
+	}
+
+	elsewhere := onHost("mock-w", path, host)
+	elsewhere.Spec.HTTPReq.Header["X-Request-Id"] = "live-9"
+	r := missReport(t, gateDb{earlierDb: earlier, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{})
+	if !r.NotOwned || r.ClosestMock != "mock-w" || r.Repeat != nil || strings.Contains(r.NextSteps, "identical to mock-7") {
+		t.Fatalf("a call made elsewhere is closest %q, not owned %v, note %+v, next step %q; want mock-w made elsewhere and no note", r.ClosestMock, r.NotOwned, r.Repeat, r.NextSteps)
+	}
+
+	own := onHost("mock-own", path, host)
+	r = missReport(t, gateDb{earlierDb: earlier, consumed: []*models.Mock{own}}, addr, host, path, models.OutgoingOptions{})
+	if r.MissKind != models.MissExtraCall || r.Recorded != 1 || r.Repeat != nil || strings.Contains(r.NextSteps, "identical to mock-7") {
+		t.Fatalf("one call more than recorded is kind %q (recorded %d), note %+v, next step %q; want extra_call, recorded once, and no note", r.MissKind, r.Recorded, r.Repeat, r.NextSteps)
 	}
 }

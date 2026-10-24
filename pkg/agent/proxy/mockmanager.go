@@ -516,6 +516,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		logger:              logger,
 	}
 	mm.setGen.Store(1)
+	mm.answered.fence(1)
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -3431,9 +3432,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}
-		if consumed {
-			m.noteAnswered(mock)
-		}
+		// The log refuses a mock an earlier set pooled itself, as the flag
+		// does (answeredLog.note).
+		m.noteAnswered(mock)
 	}
 
 	// Bump per-kind only if that tree changed; global only if global changed
@@ -4519,9 +4520,10 @@ func (m *MockManager) ArmSetFence() {
 // flags before both or is refused after (flagMockAsUsed). Caller holds
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
-	m.answered.reset()
 	m.consumedMu.Lock()
-	m.setGen.Add(1)
+	// The answered log follows the generation (answeredLog.fence); its
+	// lock is a leaf.
+	m.answered.fence(m.setGen.Add(1))
 	dropped := len(m.consumedList)
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)
