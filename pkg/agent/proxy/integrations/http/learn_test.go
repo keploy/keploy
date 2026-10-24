@@ -3912,7 +3912,8 @@ func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
 // One whose own request came is learned from as before. Each close is forced
 // through the tracker's OnAwait, through no clock, 200 times, from a store
 // read one read after another and from one read in one snapshot of the
-// round (integrations.RoundReader).
+// round (integrations.RoundReader), showing the test's view or, the test
+// ended on it first, its pool view.
 func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 	h, n, opts := learnOn(t)
 	request := func(test string) *models.TestRequest {
@@ -3932,29 +3933,50 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 		}
 		return decided{out: "served " + served.Name}
 	}
-	const movedWhy = "keploy record's full round read this request in the test that was open, and the replay ended that test before keploy could answer it"
+	// The miss names the test the call was read in: by its view's name
+	// where the store reads its round in one snapshot, as the test then
+	// running where it does not.
+	movedWhy := func(where string) string {
+		return "keploy record's full round read this request " + where + ", and the replay ended that test before keploy could answer it"
+	}
+	// came is what a call whose own request came gets.
+	const served = "served mock-0"
 	stores := []struct {
-		name string
-		of   func(*learnDb) integrations.MockMemDb
+		name, where, came string
+		of                func(*learnDb) integrations.MockMemDb
 	}{
-		{"read one after another", func(ld *learnDb) integrations.MockMemDb { return ld }},
-		{"read in one snapshot of the round", func(ld *learnDb) integrations.MockMemDb {
+		{"read one after another", "in the test then running", served, func(ld *learnDb) integrations.MockMemDb { return ld }},
+		{"read in one snapshot of the round", "in test-2", served, func(ld *learnDb) integrations.MockMemDb {
 			return &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}, test: "test-2"}
 		}},
+		// The store shows its pool view while the tracker awaits the
+		// test's request (the test ended on the store first): a window
+		// the tracker then closes unread is a round that moved, though the
+		// two agree again, between tests. One whose request came is read
+		// as between tests, where mock-0 is learned nothing onto.
+		{"read in one snapshot of the round, the store's test ended", "in the test then running",
+			"miss its closest recorded call is not one the learn step may learn onto (another test's, or the pool's outside a full record): body.nonce changed",
+			func(ld *learnDb) integrations.MockMemDb {
+				return &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}}
+			}},
 	}
 	closes := []struct {
 		name  string
 		close func(*learn.Tracker)
-		want  string
+		moved bool
 	}{
-		{"its own request came", func(tr *learn.Tracker) { tr.Give(learn.GivenRequest(request("test-2"))) }, "served mock-0"},
-		{"its window ended unread", (*learn.Tracker).End, "miss " + movedWhy},
-		{"the next test began", (*learn.Tracker).Begin, "miss " + movedWhy},
-		{"the next test began awaiting its own request", (*learn.Tracker).BeginAwaiting, "miss " + movedWhy},
-		{"the next set began", (*learn.Tracker).NewSet, "miss " + movedWhy},
+		{"its own request came", func(tr *learn.Tracker) { tr.Give(learn.GivenRequest(request("test-2"))) }, false},
+		{"its window ended unread", (*learn.Tracker).End, true},
+		{"the next test began", (*learn.Tracker).Begin, true},
+		{"the next test began awaiting its own request", (*learn.Tracker).BeginAwaiting, true},
+		{"the next set began", (*learn.Tracker).NewSet, true},
 	}
 	for _, store := range stores {
 		for _, c := range closes {
+			want := store.came
+			if c.moved {
+				want = "miss " + movedWhy(store.where)
+			}
 			for i := 0; i < 200; i++ {
 				db := store.of(&learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}})
 				tr := learn.NewTracker()
@@ -3986,21 +4008,68 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 					d = <-got
 					d.out = "waited for the next test's request, then " + d.out
 				}
-				if d.out != c.want {
-					t.Fatalf("%s, %s: %s; want %s", store.name, c.name, d.out, c.want)
+				if d.out != want {
+					t.Fatalf("%s, %s: %s; want %s", store.name, c.name, d.out, want)
 				}
-				if d.miss == nil {
+				if !c.moved {
 					continue
 				}
 				// The miss says where the call was read and what moved, and
 				// gives no reason: nothing of the request was compared.
 				r := &models.MockMismatchReport{}
 				d.miss.explain(r)
-				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy+": keploy learns nothing of a call in a round it was not made in") {
+				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy(store.where)+": keploy learns nothing of a call in a round it was not made in") {
 					t.Fatalf("%s, %s: the miss reads reason %q, next steps %q; want no reason, and the round that moved", store.name, c.name, r.Reason, r.NextSteps)
 				}
 			}
 		}
+	}
+}
+
+// A call that waited for its test case's request in test-2, read with the
+// store showing test-2's view and the tracker test-2 open, is held to that
+// view: a store that then shows another test's view while the tracker keeps
+// test-2 open moved the round under the call, and the call misses once its
+// request came. Only where the first pass found the two apart is the
+// store's install a catch-up (learnRound.movedFrom); a store that binds no
+// view to the tracker's test, as this one, agrees with the tracker on
+// whichever test's view it shows.
+func TestLearnMatchACallIsHeldToTheViewItsFirstPassReadAgreed(t *testing.T) {
+	h, n, opts := learnOn(t)
+	call := live("POST", "/v1/nonce", `{"nonce":"n-77c0d3"}`, nil)
+	db := &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}}}, test: "test-2"}
+	tr := learn.NewTracker()
+	waiting := make(chan struct{}, 1)
+	tr.OnAwait(func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	})
+	tr.BeginAwaiting()
+	type decided struct {
+		served *models.Mock
+		miss   *learnMiss
+		err    error
+	}
+	got := make(chan decided, 1)
+	go func() {
+		served, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts)
+		got <- decided{served, miss, err}
+	}()
+	select {
+	case <-waiting:
+	case d := <-got:
+		t.Fatalf("decided before its request came: %+v", d)
+	}
+	// The store shows test-3's view; the call's wait is the only reader,
+	// and it reads after the Give below.
+	db.test = "test-3"
+	tr.Give(learn.GivenRequest(&models.TestRequest{Test: "test-2", Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"q":"books"}`, Sent: `{"q":"books"}`}}}))
+	d := <-got
+	const why = "keploy record's full round read this request in test-2, and the replay ended that test before keploy could answer it"
+	if d.err != nil || d.served != nil || d.miss == nil || !d.miss.moved || d.miss.res.Why != why {
+		t.Fatalf("a call read in test-2's view, decided once the store showed test-3's: %+v; want the moved miss %q", d, why)
 	}
 }
 

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -384,8 +385,8 @@ func TestALearnStepReadsTheRoundOnceMoreAfterAnInstall(t *testing.T) {
 
 // A take refused because the learn tracker began or ended a test between a
 // pass's read and its take is read again: the boundary moves the round's
-// generation, not the store's revision, and the next pass, of the round as
-// it is now, serves the call. Told by the store's revision alone, the
+// generation, not the store's revision, and the next pass, on the store's
+// same view, with the tracker caught up with it, serves the call. Told by the store's revision alone, the
 // refusal read as a recording the store would not hand out, and a call its
 // recording answers exactly missed: a false red. Two schedules the replay
 // makes: keploy mock's scope flow opens a test's view before the tracker
@@ -440,10 +441,11 @@ func TestALearnStepReadsAgainATakeALearnBoundaryRefused(t *testing.T) {
 
 // A call that waited for its test case's request, whose take a learn
 // boundary then refused (the replay ended the test on the store, its pool
-// view, before the tracker), is read again as the round now stands, as a
-// call made after the request is: the hold to the round a call waited in is
-// the pass after the wait's alone, and where the call fell, in the gap
-// before its test case's request or after it, decides nothing.
+// view, before the tracker), is read again, as a call made after the request
+// is: the store's view is the one the call's first pass read, and the
+// tracker only caught up with it (learnRound.movedFrom's retake). Where the
+// call fell, in the gap before its test case's request or after it, decides
+// nothing.
 func TestALearnStepReadsAgainATakeALearnBoundaryRefusedAfterItsWait(t *testing.T) {
 	for _, waits := range []bool{false, true} {
 		t.Run(map[bool]string{false: "a call made after the request", true: "a call that waited for it"}[waits], func(t *testing.T) {
@@ -492,6 +494,393 @@ func TestALearnStepReadsAgainATakeALearnBoundaryRefusedAfterItsWait(t *testing.T
 			}
 			if code != http.StatusOK || got != `{"order":0}` {
 				t.Fatalf("a call whose take a learn boundary refused got %d %s; want the pool's mock-pool, read again", code, got)
+			}
+		})
+	}
+}
+
+// heldOrders stages, under exact serving, the pool's mock-pool (POST /orders
+// {"item":"apple"}), test-1's own mock-own1 ({"item":"pear"}) and test-2's
+// own mock-own2 ({"item":"plum"}), served by proven routing or by today's
+// rules, and serves the pool view. The proxy holds the manager, as the
+// agent's does, so the learn tracker's boundaries reach it.
+func heldOrders(t *testing.T, routed bool) (*Proxy, *MockManager) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
+		{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+	})
+	mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2}, nil, models.BaseTime, now.Add(time.Hour))
+	if routed {
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
+	}
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	return p, mm
+}
+
+// heldMiss fails t unless the call was answered by nothing, learned nothing
+// onto any recording, and missed once, with no reason, saying where keploy
+// read it (where) and what the replay moved (moved).
+func heldMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, where, moved string) {
+	t.Helper()
+	for name, st := range r3States(mm) {
+		if len(st.ReqBodyNoise) > 0 {
+			t.Errorf("%s learned %v as noise from a call of another round", name, st.ReqBodyNoise)
+		}
+	}
+	if code == http.StatusOK {
+		t.Fatalf("a call whose take the replay refused by moving its round got %d %s; want a miss", code, got)
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	movedWhy := "keploy record's full round read this request " + where + ", and the replay " + moved + " before keploy could answer it"
+	if len(misses) != 1 || misses[0].Reason != "" || !strings.Contains(misses[0].NextSteps, movedWhy) {
+		t.Fatalf("the miss reads %+v; want one, with no reason, saying %q", misses, movedWhy)
+	}
+}
+
+// A call of a test whose take the replay refused by moving the store's view
+// under it (it ended the test, or ended it and began the next) is decided in
+// the round it was made in or in none: it misses, saying the replay ended
+// its test, and nothing is learned onto the pool's or the next test's
+// recordings. Read again as the round then stood, the call (exactly test-1's
+// own mock-own1) was answered between tests from mock-pool, or in test-2
+// from test-2's own mock-own2, and the item it differs from them in learned
+// there as noise: a false green whose verdict depended on where the
+// boundary fell. Both orders of the end (the store's pool view first, the
+// tracker's End first), and the store's move alone under the call (its pool
+// view, and test-2's view where test-2 begins, while the tracker still has
+// test-1 open: there, before, the call was read again in a round whose
+// recordings no test owns), under today's rules and proven routing, for a
+// call made after its test case's request and for one that waited for it.
+func TestALearnStepDecidesNothingOfACallInARoundTheStoreMovedOnFrom(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		for _, next := range []bool{false, true} {
+			for _, order := range []string{"the store ends it first", "the tracker ends it first", "the store alone ends it under the call"} {
+				for _, waits := range []bool{false, true} {
+					name := map[bool]string{false: "today's rules", true: "proven routing"}[routed] + "/" +
+						map[bool]string{false: "the test ends", true: "the next test begins"}[next] + "/" +
+						order + "/" +
+						map[bool]string{false: "a call made after its request", true: "a call that waited for it"}[waits]
+					t.Run(name, func(t *testing.T) {
+						p, mm := heldOrders(t, routed)
+						mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+						if waits {
+							p.ContinueTestCaseCapture()
+						} else {
+							p.ContinueTestErrorCapture()
+						}
+						// The boundary lands as the call's take is about to
+						// take the round lock: after its read, before its
+						// check.
+						var moved atomic.Bool
+						mm.exact.round.onWait = func() {
+							if !moved.CompareAndSwap(false, true) {
+								return
+							}
+							switch order {
+							case "the store ends it first":
+								mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+								p.EndTestErrorCapture()
+							case "the tracker ends it first":
+								p.EndTestErrorCapture()
+								mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+							default:
+								mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+							}
+							if next {
+								mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+								if order != "the store alone ends it under the call" {
+									p.ContinueTestErrorCapture()
+								}
+							}
+						}
+						t.Cleanup(func() { mm.exact.round.onWait = nil })
+						opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+						var code int
+						var got string
+						if !waits {
+							code, got = r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`))
+						} else {
+							waiting := make(chan struct{}, 1)
+							p.learnTracker.OnAwait(func() {
+								select {
+								case waiting <- struct{}{}:
+								default:
+								}
+							})
+							sent := make(chan struct{})
+							go func() {
+								defer close(sent)
+								code, got = r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`))
+							}()
+							select {
+							case <-waiting:
+							case <-sent:
+								t.Fatalf("precondition: the call did not wait for its test case's request (got %d %s)", code, got)
+							}
+							p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+							<-sent
+						}
+						if !moved.Load() {
+							t.Fatal("precondition: no boundary landed under the call's take")
+						}
+						heldMiss(t, p, mm, code, got, "in test-1", "ended that test")
+					})
+				}
+			}
+		}
+	}
+}
+
+// A call made while the store showed test-1's view that the learn tracker
+// had not begun yet (keploy mock's scope flow opens the view first) is of
+// test-1 by the store's view: once the replay ended test-1 on the store under
+// its take, the tracker never having begun it, the two agree again, between
+// tests, but the store moved on and the tracker caught up with nothing. The
+// call misses, saying keploy read it while the store showed test-1's view
+// with no test open on the tracker; read again between tests, it was
+// answered from mock-pool and its item learned there as noise.
+func TestALearnStepDecidesNothingOfACallOnceTheStoreEndedATestTheTrackerNeverBegan(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			p, mm := heldOrders(t, routed)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			var moved atomic.Bool
+			mm.exact.round.onWait = func() {
+				if moved.CompareAndSwap(false, true) {
+					mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				}
+			}
+			t.Cleanup(func() { mm.exact.round.onWait = nil })
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"pear"}`))
+			if !moved.Load() {
+				t.Fatal("precondition: no boundary landed under the call's take")
+			}
+			heldMiss(t, p, mm, code, got, "while keploy's store showed test-1's view, with no test open on its learn tracker", "ended that test")
+		})
+	}
+}
+
+// A call whose take the tracker's begin of the test the store shows refused
+// (keploy mock's scope flow opens the view first), that test awaiting its
+// test case's request, is read again in that test's round, waits there for
+// the request, and is answered once it came: the round the tracker caught
+// up with is the call's from then on (learnRound.movedFrom), so the pass
+// after the wait is held to it, not to the first pass's, read before the
+// test began, which would read the begun test as a move.
+func TestALearnStepWaitsInTheRoundTheTrackerCaughtUpWith(t *testing.T) {
+	p, mm := s12Orders(t)
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+	var moved atomic.Bool
+	mm.exact.round.onWait = func() {
+		if moved.CompareAndSwap(false, true) {
+			p.ContinueTestCaseCapture()
+		}
+	}
+	t.Cleanup(func() { mm.exact.round.onWait = nil })
+	waiting := make(chan struct{}, 1)
+	p.learnTracker.OnAwait(func() {
+		select {
+		case waiting <- struct{}{}:
+		default:
+		}
+	})
+	sent := make(chan struct{})
+	var code int
+	var got string
+	go func() {
+		defer close(sent)
+		code, got = r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, "GET /status HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
+	}()
+	select {
+	case <-waiting:
+	case <-sent:
+		t.Fatalf("precondition: the call did not wait for its test case's request (got %d %s)", code, got)
+	}
+	if !moved.Load() {
+		t.Fatal("precondition: the tracker's begin did not land under the call's take")
+	}
+	p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+	<-sent
+	if code != http.StatusOK || got != `{"up":1}` {
+		t.Fatalf("a call read again in the test the tracker began under its take, its request come, got %d %s; want test-1's mock-own1", code, got)
+	}
+}
+
+// A take refused as the learn tracker moved to another test while the
+// store's view stood is no catch-up of the tracker's, though the two may
+// agree after it: the call misses. Between tests the tracker's End of the
+// test it still had open (the store ended it first) is the one catch-up a
+// pool view has; End then a new set moves the tracker to the next set's
+// number, between tests too, and the call was decided against the next
+// set's places, the old set's recording written into its history. Where the
+// store shows test-1's view the tracker ended first, the tracker's begin of
+// the next test, before the store opened it, agrees with no view.
+func TestALearnStepDecidesNothingOfACallOnceTheTrackerMovedToAnotherTest(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, where, moved string
+		at                       func(p *Proxy, mm *MockManager)
+		boundary                 func(p *Proxy, mm *MockManager)
+	}{
+		// A call no recording is exactly (none is named as made
+		// elsewhere), which the round between tests pairs with mock-pool.
+		{"the store ended test-1, then the tracker ended it and began a new set", `{"item":"fig"}`,
+			"in the test then running", "ended that test",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			},
+			func(p *Proxy, mm *MockManager) {
+				p.EndTestErrorCapture()
+				p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+			}},
+		{"the tracker ended test-1, then began the next test before the store opened it", `{"item":"pear"}`,
+			"while keploy's store showed test-1's view, with no test open on its learn tracker", "began a test",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				p.EndTestErrorCapture()
+			},
+			func(p *Proxy, mm *MockManager) { p.ContinueTestErrorCapture() }},
+	} {
+		for _, routed := range []bool{false, true} {
+			t.Run(tc.name+"/"+map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				tc.at(p, mm)
+				var moved atomic.Bool
+				mm.exact.round.onWait = func() {
+					if moved.CompareAndSwap(false, true) {
+						tc.boundary(p, mm)
+					}
+				}
+				t.Cleanup(func() { mm.exact.round.onWait = nil })
+				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(tc.body))
+				if !moved.Load() {
+					t.Fatal("precondition: no boundary landed under the call's take")
+				}
+				heldMiss(t, p, mm, code, got, tc.where, tc.moved)
+			})
+		}
+	}
+}
+
+// A take refused as the store installed another view under it is no
+// catch-up where the tracker did not lead: between tests the store serving
+// another pool view (its recordings may be others), a store that ended
+// test-1 before the tracker opening test-2's view while the tracker still
+// has test-1 open, and a staging of the set again. The call misses, saying
+// what moved, and is learned onto nothing; read again, it was paired with
+// mock-pool between tests and its item learned there as noise.
+func TestALearnStepDecidesNothingOfACallOnceTheStoreMovedItsViewAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, where, moved string
+		at                       func(p *Proxy, mm *MockManager)
+		boundary                 func(p *Proxy, mm *MockManager)
+	}{
+		{"between tests, the store serves another pool view", `{"item":"fig"}`,
+			"in the round between tests", "served another view of its recordings between tests",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.EndTestErrorCapture()
+			},
+			func(p *Proxy, mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"}) }},
+		{"the store ended test-1, then opened test-2 while the tracker had test-1 open", `{"item":"fig"}`,
+			"in the test then running", "ended that test",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			},
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+			}},
+		{"the replay stages the set again in test-1", `{"item":"pear"}`,
+			"in test-1", "staged a test set again",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+			},
+			func(p *Proxy, mm *MockManager) {
+				mm.SetMocksWithWindow(mm.StagedMocks(), nil, models.BaseTime, time.Now().Add(time.Hour))
+			}},
+	} {
+		for _, routed := range []bool{false, true} {
+			t.Run(tc.name+"/"+map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				tc.at(p, mm)
+				var moved atomic.Bool
+				mm.exact.round.onWait = func() {
+					if moved.CompareAndSwap(false, true) {
+						tc.boundary(p, mm)
+					}
+				}
+				t.Cleanup(func() { mm.exact.round.onWait = nil })
+				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(tc.body))
+				if !moved.Load() {
+					t.Fatal("precondition: no boundary landed under the call's take")
+				}
+				heldMiss(t, p, mm, code, got, tc.where, tc.moved)
+			})
+		}
+	}
+}
+
+// A drifted call read where the store ended test-1 before the learn tracker
+// (its pool view, the tracker's test-1 open), as between tests, is decided
+// the same way whether the tracker's End lands under its take or after the
+// call: the take refused by the End is read again, the tracker having
+// caught up with the store's view (learnRound.movedFrom). Missed there, the
+// verdict depended on where the End fell.
+func TestALearnStepDecidesADriftedCallAlikeWhereverTheTrackersEndFell(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			type outcome struct {
+				code  int
+				got   string
+				noise string
+			}
+			var out [2]outcome
+			for i, under := range []bool{false, true} {
+				p, mm := heldOrders(t, routed)
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				var moved atomic.Bool
+				if under {
+					mm.exact.round.onWait = func() {
+						if moved.CompareAndSwap(false, true) {
+							p.EndTestErrorCapture()
+						}
+					}
+				}
+				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"fig"}`))
+				mm.exact.round.onWait = nil
+				if under && !moved.Load() {
+					t.Fatal("precondition: the End did not land under the call's take")
+				}
+				if !under {
+					p.EndTestErrorCapture()
+				}
+				out[i] = outcome{code, got, fmt.Sprint(r3States(mm)["mock-pool"].ReqBodyNoise)}
+			}
+			if out[0] != out[1] {
+				t.Fatalf("the call got %+v with the End after it, and %+v with the End under its take; want one verdict", out[0], out[1])
 			}
 		})
 	}

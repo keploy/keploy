@@ -380,6 +380,12 @@ func (s RoundSnapshot) ExactBackground() bool {
 	return s.Background && s.Test != ""
 }
 
+// ViewGen is the generation the view in force at the snapshot was installed
+// at (RoundParts.ViewGen): it tells one view from the next, a pool view
+// after a pool view too, where At.Gen moves at the learn tracker's
+// boundaries as well.
+func (s RoundSnapshot) ViewGen() uint64 { return s.viewGen }
+
 // TakenInView is what the open view's own answered, carried ahead answers
 // included, in the order they did (Consumed): in a test, what competes as
 // spent. None in a pool view.
