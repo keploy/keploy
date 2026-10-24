@@ -404,6 +404,15 @@ type UnconsumedMock struct {
 	Stated  string `json:"stated,omitempty" yaml:"stated,omitempty"`
 	Closest string `json:"closest,omitempty" yaml:"closest,omitempty"`
 	Unkept  int    `json:"unkept,omitempty" yaml:"unkept,omitempty"`
+	// RepeatOf says that this recorded call, which this replay never made, is
+	// identical to a recording an earlier test of the set made, which
+	// answered that test's call at this replay: an application that keeps an
+	// answer for a span of elapsed time asked again at record, where the
+	// recording ran past the span, and not at a faster replay
+	// (models.RepeatNote). NextSteps is its sentence (ExplainUnmade). Both are
+	// empty when no such recording is known.
+	RepeatOf  *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
+	NextSteps string      `json:"next_steps,omitempty" yaml:"next_steps,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -503,6 +512,11 @@ type UnmatchedCall struct {
 	// (Mapping.Groups): with whom, and which of them its recording was
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// Repeat mirrors MockMismatchReport.Repeat: the call is identical to a
+	// recording an earlier test of the set made (ClosestMock), which already
+	// answered that test's call at this replay; the replay names that test
+	// (RepeatNote.Test). nil otherwise.
+	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
 }
 
 // ConcurrentNote is what keploy knows of a call made by a test that was

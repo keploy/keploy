@@ -1,0 +1,304 @@
+package http
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
+
+// earlierDb is a mockMemDb whose reads show nothing, that remembers the
+// recordings that answered earlier in the set (integrations.AnsweredFinder):
+// answered, oldest first. asked are the keys each lookup asked by.
+type earlierDb struct {
+	*mockMemDb
+	answered []integrations.AnsweredCall
+	asked    *[][]string
+}
+
+func (d earlierDb) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	if d.asked != nil {
+		*d.asked = append(*d.asked, keys)
+	}
+	for i := len(d.answered) - 1; i >= 0; i-- {
+		a := d.answered[i]
+		if a.Mock.Kind == kind && match(a.Mock) {
+			return a, true
+		}
+	}
+	return integrations.AnsweredCall{}, false
+}
+
+// ownDb is earlierDb whose per-test read shows the open test's own
+// recordings, none of them consumed.
+type ownDb struct {
+	earlierDb
+	own []*models.Mock
+}
+
+func (d ownDb) GetPerTestMocksInWindow() ([]*models.Mock, error)  { return d.own, nil }
+func (d ownDb) GetFilteredMocksInWindow() ([]*models.Mock, error) { return d.own, nil }
+
+// sapCount is a recording of the call a cache fills: a GET with a query.
+func sapCount(name, host string, recordedAt time.Time) *models.Mock {
+	m := onHost(name, "/sap/A_BusinessPartner/$count?$filter=x", host)
+	m.Spec.HTTPReq.Header["X-Request-Id"] = "rec-1"
+	m.Spec.ReqTimestampMock = recordedAt
+	return m
+}
+
+// A request identical to an earlier answered recording, by method,
+// destination, path, query and body, is found, whatever other header it
+// carries (a request id); one that differs in the query, the path, the
+// destination or the X-Amz-Target, an AWS call's action, is not. A store that
+// keeps no answered history finds nothing.
+func TestARepeatIsTheSameRequestHeadersAside(t *testing.T) {
+	const host = "localhost:8099"
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	earlier := sapCount("mock-7", host, rec)
+	db := earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{Mock: earlier, AnsweredAt: rec}}}
+	n := newHTTP().newStrictNoise(nil, nil, nil)
+	ctx := context.Background()
+	live := func(path string) *req {
+		r := getTo("/sap/A_BusinessPartner/$count", host)
+		r.url.RawQuery = path
+		r.header.Set("X-Request-Id", "live-2")
+		return r
+	}
+	if a, ok := repeatOfAnswered(ctx, live("$filter=x"), db, n); !ok || a.Mock != earlier {
+		t.Fatalf("an identical request with another request id found %v (%v), want %s", a.Mock, ok, earlier.Name)
+	}
+	if a, ok := repeatOfAnswered(ctx, live("$filter=y"), db, n); ok {
+		t.Fatalf("a request with another query was taken for a repeat of %s", a.Mock.Name)
+	}
+	other := getTo("/sap/A_BusinessPartner/$count", "otherhost:8099")
+	other.url.RawQuery = "$filter=x"
+	if a, ok := repeatOfAnswered(ctx, other, db, n); ok {
+		t.Fatalf("a request to another destination was taken for a repeat of %s", a.Mock.Name)
+	}
+	if _, ok := repeatOfAnswered(ctx, live("$filter=x"), &mockMemDb{mocks: []*models.Mock{earlier}}, n); ok {
+		t.Fatal("a store that keeps no answered history found a repeat")
+	}
+
+	// The X-Amz-Target names the action: two calls that differ only there
+	// are two calls.
+	sqs := onHost("mock-sqs", "/", host)
+	sqs.Spec.HTTPReq.Header["X-Amz-Target"] = "AmazonSQS.SendMessage"
+	amz := earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{Mock: sqs, AnsweredAt: rec}}}
+	call := getTo("/", host)
+	call.header.Set("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+	if a, ok := repeatOfAnswered(ctx, call, amz, n); ok {
+		t.Fatalf("a call of another X-Amz-Target was taken for a repeat of %s", a.Mock.Name)
+	}
+	call.header.Set("X-Amz-Target", "AmazonSQS.SendMessage")
+	if _, ok := repeatOfAnswered(ctx, call, amz, n); !ok {
+		t.Fatal("a call of the same X-Amz-Target was not taken for a repeat")
+	}
+}
+
+// sameRequest tolerates a difference in a header, never in the X-Amz-Target
+// nor in any other field.
+func TestSameRequestToleratesOnlyHeaders(t *testing.T) {
+	f := func(path string) strictField { return field(models.MockFieldDiff{Path: path}) }
+	rows := []struct {
+		diffs []strictField
+		same  bool
+	}{
+		{nil, true},
+		{[]strictField{f("header.x-request-id"), f("header.Date")}, true},
+		{[]strictField{f("header.X-Amz-Target")}, false},
+		{[]strictField{f("header.x-request-id"), f("query.$filter")}, false},
+		{[]strictField{f("body.id")}, false},
+		{[]strictField{f("method")}, false},
+		{[]strictField{f("host")}, false},
+	}
+	for _, r := range rows {
+		if got := sameRequest(r.diffs); got != r.same {
+			t.Errorf("sameRequest(%v) = %v, want %v", r.diffs, got, r.same)
+		}
+	}
+}
+
+// The HTTP parser's miss on a call identical to an earlier test's answered
+// recording names that recording as the call's closest, with the note
+// (models.RepeatNote): the gap at replay from the store's time and the
+// call's, and the recording's time at record, with the switch on or off. A call no earlier answer is
+// gets no note.
+func TestAMissOnARepeatedCallNamesTheEarlierRecording(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	// own are the open test's own recordings its per-test read shows.
+	var own []*models.Mock
+	miss := func(t *testing.T, path string, opts models.OutgoingOptions, shown ...*models.Mock) *models.MockMismatchReport {
+		t.Helper()
+		earlier := sapCount("mock-7", host, rec)
+		// The earlier call was answered an hour before this one at replay.
+		db := ownDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{mocks: shown}, answered: []integrations.AnsweredCall{{
+			Mock: earlier, AnsweredAt: time.Now().Add(-time.Hour),
+		}}}, own: own}
+		return missReport(t, db, addr, host, path, opts)
+	}
+	for _, row := range []struct {
+		on   string
+		opts models.OutgoingOptions
+		// reason is judging's code the miss keeps: in record's full round
+		// the learn step finds no recorded call of the test for it.
+		reason string
+	}{
+		{"", models.OutgoingOptions{}, ""},
+		{"1", models.OutgoingOptions{}, ""},
+		{"1", models.OutgoingOptions{Learn: true}, models.MissUnmockedCall},
+	} {
+		on := row.on
+		t.Setenv(provenswitch.Env, on)
+		if row.opts.Learn {
+			on += "+learn"
+		}
+		r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", row.opts)
+		if r.Reason != row.reason {
+			t.Fatalf("switch %q: the miss's reason is %q, want %q", on, r.Reason, row.reason)
+		}
+		if r.Repeat == nil || r.Repeat.Mock != "mock-7" || r.ClosestMock != "mock-7" {
+			t.Fatalf("switch %q: the miss of a repeated call is %+v (repeat %+v), want it named as mock-7", on, r, r.Repeat)
+		}
+		// The gap at record, and so the likely cause, the replay measures
+		// from the set's recordings, which the agent does not hold.
+		if r.Repeat.RecordGapKnown || r.Repeat.ReplayGapFromStart || r.Repeat.ReplayGapSeconds < 3600 || !r.Repeat.RecordedAt.Equal(rec) {
+			t.Fatalf("switch %q: the gaps are %+v, want an hour at replay, to the call, recorded at %v, and none at record", on, r.Repeat, rec)
+		}
+		if !strings.Contains(r.NextSteps, "identical to mock-7") || !strings.Contains(r.NextSteps, "elapsed time") || len(r.FieldDiffs) != 0 {
+			t.Fatalf("switch %q: the next step is %q (diffs %v)", on, r.NextSteps, r.FieldDiffs)
+		}
+		if r := miss(t, "/sap/A_BusinessPartner/$count?$filter=other", row.opts); r.Repeat != nil {
+			t.Fatalf("switch %q: a call no earlier answer is got a note: %+v", on, r.Repeat)
+		}
+	}
+
+	// The open test's own recording of the endpoint, unconsumed, that the
+	// call differs from in its query: the call may be that recording
+	// changed, so the miss names it as its closest, with the query's diff,
+	// and gets no note, with the switch on or off. An own recording of
+	// another endpoint leaves the note.
+	for _, on := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, on)
+		own = []*models.Mock{onHost("mock-own", "/sap/A_BusinessPartner/$count?$filter=y", host)}
+		r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{})
+		if r.Repeat != nil || r.ClosestMock != "mock-own" || len(r.FieldDiffs) == 0 || strings.Contains(r.NextSteps, "identical to") {
+			t.Fatalf("switch %q: a call that differs from the test's own recording got closest %q, diffs %v, note %+v, next step %q; want mock-own with its diff and no note", on, r.ClosestMock, r.FieldDiffs, r.Repeat, r.NextSteps)
+		}
+		own = []*models.Mock{onHost("mock-own", "/sap/A_Customer?$filter=y", host)}
+		if r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{}); r.Repeat == nil || r.Repeat.Mock != "mock-7" {
+			t.Fatalf("switch %q: the test's own recording of another endpoint took the note away: %+v", on, r)
+		}
+		own = nil
+	}
+
+	// In record's full round a learn step that names a recorded call the
+	// request changed from keeps its reason and closest: the note joins only
+	// a call the test recorded nothing like (unmocked_call).
+	t.Setenv(provenswitch.Env, "1")
+	changed := onHost("mock-own", "/sap/A_BusinessPartner/$count?$filter=x&$top=1", host)
+	r := miss(t, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{Learn: true, LearnPool: true}, changed)
+	if r.Reason == models.MissUnmockedCall || r.Reason == "" || r.Repeat != nil || r.ClosestMock == "mock-7" {
+		t.Fatalf("a learn miss with reason %q got the note %+v (closest %q), want its own reason kept and no note", r.Reason, r.Repeat, r.ClosestMock)
+	}
+}
+
+// missReport is the mismatch report of a GET of path to host (addr) the
+// HTTP parser answers from db, with a request id no recording carries.
+func missReport(t *testing.T, db integrations.MockMemDb, addr, host, path string, opts models.OutgoingOptions) *models.MockMismatchReport {
+	t.Helper()
+	var reported error
+	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { reported = err })
+	app, prox := net.Pipe()
+	defer app.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, opts)
+	}()
+	if _, err := io.WriteString(app, "GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\nX-Request-Id: live-9\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatalf("the app got no answer: %v", err)
+	}
+	_ = resp.Body.Close()
+	_ = app.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the parser did not return after the miss")
+	}
+	var withReport interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(reported, &withReport) || withReport.MismatchReport() == nil {
+		t.Fatalf("the miss was reported as %v, with no mismatch report", reported)
+	}
+	return withReport.MismatchReport()
+}
+
+// gateDb is earlierDb under exact serving: staged are other tests'
+// recordings no read shows (integrations.StagedFinder), and consumed the open
+// test's recordings that already answered a call of it
+// (integrations.ExactConsumedReader).
+type gateDb struct {
+	earlierDb
+	staged   []*models.Mock
+	consumed []*models.Mock
+}
+
+func (d gateDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+	for _, m := range d.staged {
+		if m.Kind == kind && match(m) {
+			return m.Name
+		}
+	}
+	return ""
+}
+
+func (d gateDb) ConsumedTestMocks() []*models.Mock { return d.consumed }
+
+// Under exact serving the note joins only a miss nothing else explains. A
+// call that is another test's recording no read shows stays named as that
+// recording made elsewhere (not owned), which judging moves to the worker
+// scope: never also as a repeat, whose closest and next step would replace
+// it while NotOwned stayed. A call the test recorded fewer times than it made
+// stays one call more than recorded (extra_call), the test's own recording
+// its closest. Each has an earlier test's identical recording that answered,
+// which alone gives the note.
+func TestARepeatNoteLeavesANotOwnedAndAnExtraCallAsTheyAre(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	const path = "/sap/A_BusinessPartner/$count?$filter=x"
+	t.Setenv(provenswitch.Env, "1")
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	earlier := earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{
+		Mock: sapCount("mock-7", host, rec), AnsweredAt: time.Now().Add(-time.Hour),
+	}}}
+	if r := missReport(t, gateDb{earlierDb: earlier}, addr, host, path, models.OutgoingOptions{}); r.Repeat == nil || r.Repeat.Mock != "mock-7" || r.NotOwned || r.MissKind == models.MissExtraCall {
+		t.Fatalf("with nothing else to explain it the miss is %+v (repeat %+v), want the note on mock-7", r, r.Repeat)
+	}
+
+	elsewhere := onHost("mock-w", path, host)
+	elsewhere.Spec.HTTPReq.Header["X-Request-Id"] = "live-9"
+	r := missReport(t, gateDb{earlierDb: earlier, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{})
+	if !r.NotOwned || r.ClosestMock != "mock-w" || r.Repeat != nil || strings.Contains(r.NextSteps, "identical to mock-7") {
+		t.Fatalf("a call made elsewhere is closest %q, not owned %v, note %+v, next step %q; want mock-w made elsewhere and no note", r.ClosestMock, r.NotOwned, r.Repeat, r.NextSteps)
+	}
+
+	own := onHost("mock-own", path, host)
+	r = missReport(t, gateDb{earlierDb: earlier, consumed: []*models.Mock{own}}, addr, host, path, models.OutgoingOptions{})
+	if r.MissKind != models.MissExtraCall || r.Recorded != 1 || r.Repeat != nil || strings.Contains(r.NextSteps, "identical to mock-7") {
+		t.Fatalf("one call more than recorded is kind %q (recorded %d), note %+v, next step %q; want extra_call, recorded once, and no note", r.MissKind, r.Recorded, r.Repeat, r.NextSteps)
+	}
+}

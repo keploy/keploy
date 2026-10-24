@@ -5128,6 +5128,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					// step decided it: judging's evidence.
 					Reason:     parserErr.MismatchReport.Reason,
 					Concurrent: parserErr.MismatchReport.Concurrent,
+					Repeat:     parserErr.MismatchReport.Repeat.Clone(),
 				})
 			} else if errors.Is(parserErr.Err, models.ErrNoMockMatched) {
 				// A genuine miss without a structured report must still reach

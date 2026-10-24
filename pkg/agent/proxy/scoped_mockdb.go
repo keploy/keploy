@@ -351,7 +351,17 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// FindAnsweredEarlier forwards the store's lookup of a recording that
+// answered an identical call earlier in the set (integrations.AnsweredFinder).
+func (s *scopedMockDb) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	if f, ok := s.MockMemDb.(integrations.AnsweredFinder); ok {
+		return f.FindAnsweredEarlier(kind, keys, match)
+	}
+	return integrations.AnsweredCall{}, false
+}
+
 var (
+	_ integrations.AnsweredFinder      = (*scopedMockDb)(nil)
 	_ integrations.ExactServingReader  = (*scopedMockDb)(nil)
 	_ integrations.ExactConsumedReader = (*scopedMockDb)(nil)
 )
