@@ -1181,4 +1181,21 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 			t.Errorf("the own place and another test's neighbour (set %v): %s (%s); want it refused naming both", viaSet, ln.Kind, ln.Why)
 		}
 	}
+	// The same neighbour recorded after the call (the HTTP and the Mongo
+	// learn steps read one F served in the test as this too): F gave it to
+	// the application before the call, but the recording made the call
+	// before it, so it is no place the recorded moment came from, and F's
+	// moment is no cut of it. The own place's instant names both moments
+	// (no copy alone), so nothing shows a copy: the value is noise, never
+	// refused naming the later recording as where the recorded moment
+	// stands.
+	dc = NewDriftCache()
+	own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
+	late := dc.RawOf(sentAtReceive("mock-44", after, base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
+	ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil, func() ([]GivenPlaces, error) {
+		return []GivenPlaces{PlacesOf(late)}, nil
+	})[0]
+	if ln.Kind != KindNoise {
+		t.Errorf("the own place and a neighbour recorded after the call: %s (%s); want noise, the later recording no source of the recorded moment", ln.Kind, ln.Why)
+	}
 }
