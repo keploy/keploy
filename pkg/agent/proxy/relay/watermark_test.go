@@ -128,7 +128,14 @@ func TestWatermark_AConnectionIdleOverAWindowDoesNotHoldIt(t *testing.T) {
 	defer w.Track(h.r, "conn-1")()
 
 	h.writeClient([]byte("early"))
-	h.readDest(5) // never read by the parser, perhaps still in the forwarder's hand
+	h.readDest(5) // never read by the parser
+	// The forwarder marked "early" held before its Write, so once the mark
+	// is clear it has let the chunk go to the parser's queue: this row is
+	// about an idle connection, not a chunk still in the forwarder's hand
+	// (TestWatermark_AChunkInTheForwardersHandDoesNotHoldALaterWindow's).
+	awaitState(t, "the forwarder to let go of the chunk", func() bool {
+		return h.r.teeC2D.progress.held.Load() == 0
+	})
 	// The window starts after the chunk's stamp, which the forwarder took
 	// before its Write.
 	start := time.Now()
