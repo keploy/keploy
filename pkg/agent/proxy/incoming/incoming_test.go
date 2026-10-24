@@ -357,3 +357,68 @@ func TestReplayConnHalfClosesTheConnectionUnderneath(t *testing.T) {
 		t.Fatalf("read %q (%v) after the half-close, want what was read ahead, then what the client sent", got, err)
 	}
 }
+
+// The live handler of a self-call reaches the app over the connection keploy
+// dialled while it held the caller's connect (util.WithPredialed): the app's
+// listener sees the one connection the caller made, not a second one beside
+// an idle held one that its close() would wait for.
+func TestServeLiveReachesTheAppOverTheConnectionDialledForIt(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+	accepted := make(chan int, 4)
+	got := make(chan string, 4)
+	go func() {
+		for i := 1; ; i++ {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- i
+			go func(i int, c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4)
+				_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				n, _ := io.ReadFull(c, buf)
+				got <- strconv.Itoa(i) + " " + string(buf[:n])
+				_, _ = c.Write([]byte("PONG"))
+			}(i, c)
+		}
+	}()
+	held, err := net.Dial("tcp4", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	pre := util.Adopt(addr, held)
+
+	pm := &IngressProxyManager{logger: zap.NewNop()}
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	go pm.ServeLive(util.WithPredialed(context.Background(), pre), srv, addr, uint16(ln.Addr().(*net.TCPAddr).Port))
+	_ = cli.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := cli.Write([]byte("PING")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(cli, buf); err != nil || string(buf) != "PONG" {
+		t.Fatalf("the app's answer must reach the caller: got %q (%v)", string(buf), err)
+	}
+	if r := <-got; r != "1 PING" {
+		t.Fatalf("the call must reach the app on the connection dialled for it (1 PING), got %q", r)
+	}
+	select {
+	case i := <-accepted:
+		if i != 1 {
+			t.Fatalf("the app's listener accepted connection %d", i)
+		}
+	default:
+	}
+	select {
+	case i := <-accepted:
+		t.Fatalf("the app's listener accepted a second connection (%d) the caller never made", i)
+	default:
+	}
+}

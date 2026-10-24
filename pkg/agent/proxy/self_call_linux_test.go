@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -269,4 +270,73 @@ func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
 	}
 	_ = cli.Close()
 	<-done
+}
+
+// A self-call reaches the run's own listener over the connection keploy dialled
+// while it held the caller's connect: the listener sees the one connection the
+// caller made. A second dial left the held one open with nothing sent on it,
+// which a Node server counts as busy, so its close() waited until the caller's
+// connection ended (agent-oauth's loopback client, 120 s).
+func TestServeTreeListenerRelaysASelfCallOverTheConnectionDialledForIt(t *testing.T) {
+	recorded.reset()
+	defer recorded.reset()
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	addr := l.Addr().String()
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	type read struct {
+		conn int
+		data string
+	}
+	reads := make(chan read, 4)
+	go func() {
+		for i := 1; ; i++ {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func(i int, c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 4)
+				_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				n, _ := io.ReadFull(c, buf)
+				reads <- read{i, string(buf[:n])}
+				_, _ = c.Write([]byte("PONG"))
+			}(i, c)
+		}
+	}()
+	held, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre := util.Adopt(addr, held)
+
+	p := selfCallProxy()
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	go func() {
+		_, _, _ = p.serveTreeListener(util.WithPredialed(context.Background(), pre), srv, dest, addr, "1")
+	}()
+	_ = cli.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := cli.Write([]byte("PING")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(cli, buf); err != nil || string(buf) != "PONG" {
+		t.Fatalf("the listener's answer must reach the caller: got %q (%v)", string(buf), err)
+	}
+	for r := range reads {
+		if r.data == "PING" {
+			if r.conn != 1 {
+				t.Fatalf("the call reached the listener on connection %d, not on the one dialled for it (1)", r.conn)
+			}
+			break
+		}
+		t.Fatalf("connection %d reached the listener and carried nothing", r.conn)
+	}
 }
