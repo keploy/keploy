@@ -875,15 +875,22 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				whose := "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
-				if !g.at.Before(at) {
-					whose = "was recorded after the call, so it is no earlier place of the call's own test (record made the call before it): keploy follows no value of a recording made after the call"
-				}
-				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + whose + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
 			}
 		}
 		return ""
 	})
+}
+
+// givenWhose says whose a recording F gave the application before a call
+// recorded at at is, that no earlier place of the call's own test is
+// (givenWhy, echoedElsewhere), its request recorded at gat: another test's,
+// or, recorded after the call, no earlier place of any test's call.
+func givenWhose(gat, at time.Time) string {
+	if !gat.Before(at) {
+		return "was recorded after the call, so it is no earlier place of the call's own test (record made the call before it): keploy follows no value of a recording made after the call"
+	}
+	return "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
 }
 
 // wordOf names t, a word of v's recorded value (recorded) or of what F saw,

@@ -2976,18 +2976,24 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 
 // A mock F served before the test (at the start-up, or in the previous
 // test) but recorded after the call is no earlier place of the call's own
-// test for any rule but the offset rule and the word rule: the recording
-// made the call before it. A value of the test's own call that changed to a
-// word of that mock's answer (an id, a whole id, an instant, copied word for
-// word) is bound to nothing and refused, naming the mock and that it was
-// recorded after the call, never calling it another test's (it is the
-// call's own test's); never learned as noise.
+// test for any rule but the offset rule, the word rule and the echo of what
+// F gave the application there: the recording made the call before it. A
+// value of the test's own call that changed to a word of that mock's answer
+// (an id, a whole id, an instant, copied word for word) is bound to nothing
+// and refused, naming the mock and that it was recorded after the call,
+// never calling it another test's (it is the call's own test's); never
+// learned as noise. So is a time copied from it that moved as the lead moves
+// a read of the clock (a read before the call, and the mock's answer that
+// read a lead later), which the word rule leaves to the clock: the echo reads
+// the moment F gave the application there.
 func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServedBefore(t *testing.T) {
 	inst := learnAt.Add(5 * time.Minute).Format(time.RFC3339)
-	for _, tc := range []struct{ name, rec, live, answer string }{
-		{"a word", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"42"}`},
-		{"an id", `{"ref":"ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323"}`, `{"ref":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, `{"id":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`},
-		{"an instant", `{"ref":"` + learnAt.Add(-3*time.Hour).Format(time.RFC3339) + `"}`, `{"ref":"` + inst + `"}`, `{"at":"` + inst + `"}`},
+	read, copied := learnAt.Add(-30*time.Second).Format(time.RFC3339), learnAt.Add(31*time.Second).Format(time.RFC3339)
+	for _, tc := range []struct{ name, rec, live, answer, found string }{
+		{"a word", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"42"}`, "appears in mock-2"},
+		{"an id", `{"ref":"ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323"}`, `{"ref":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, `{"id":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, "appears in mock-2"},
+		{"an instant", `{"ref":"` + learnAt.Add(-3*time.Hour).Format(time.RFC3339) + `"}`, `{"ref":"` + inst + `"}`, `{"at":"` + inst + `"}`, "appears in mock-2"},
+		{"a time the lead moved", `{"ref":"` + read + `"}`, `{"ref":"` + copied + `"}`, `{"at":"` + copied + `"}`, "the moment record's full round saw in it stands in mock-2 at spec.resp.body"},
 	} {
 		for _, where := range []string{"at the start-up", "in the previous test"} {
 			t.Run(tc.name+", "+where, func(t *testing.T) {
@@ -3007,7 +3013,8 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 				}
 				if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.consumed) != 0 ||
 					!strings.Contains(miss.res.Why, "body.ref changed") ||
-					!strings.Contains(miss.res.Why, "appears in mock-2, a recording record's full round gave the application before the call that was recorded after the call") ||
+					!strings.Contains(miss.res.Why, tc.found) ||
+					!strings.Contains(miss.res.Why, tc.found+", a recording record's full round gave the application before the call that was recorded after the call") ||
 					strings.Contains(miss.res.Why, "another test's") {
 					t.Fatalf("served %v miss %+v consumed %d; want body.ref refused naming mock-2 as recorded after the call, never noise nor bound", got, miss, len(db.consumed))
 				}

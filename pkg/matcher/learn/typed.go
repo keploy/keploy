@@ -269,6 +269,13 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
 		return ln
 	}
+	// A copy of what F gave the application in another test or in a
+	// recording made after the call, or a pick from it (the echo of those
+	// places), before any provenance excuses it.
+	if why := dc.echoedElsewhere([]driftedInstant{{rec: rec, live: live}}, at, served, raw, places); why != "" {
+		ln.Kind, ln.Why = KindUnaccounted, why
+		return ln
+	}
 	if !instantClock(rt, lt, rres, lres, w, !dc.clientTests, at) {
 		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
 		switch {

@@ -37,7 +37,12 @@ import (
 // timetable's next departure, the next of the slots the request lists), or a
 // copy of it, which moves as a read of the clock does. It is then a variable
 // of the place holding the moment it was recorded with, or, held nowhere,
-// refused (unaccounted). A place holds a moment as an instant of it in any
+// refused (unaccounted). What F gave the application at a place no earlier
+// place of the call's own test is (another test's recording, or one recorded
+// after the call, wherever F served it: echoedElsewhere) is read so too, the
+// moment F served there, and the moment its recording holds only where it
+// was recorded before the call; a value it finds there is refused, naming
+// it, never a variable. A place holds a moment as an instant of it in any
 // layout, at the value's own precision (an instant the place holds finer, cut
 // to the value's resolution or to a coarser one the value is whole at,
 // truncated or rounded: a stored second of a served millisecond), as the
@@ -563,20 +568,22 @@ func (dc *DriftCache) namesApart(text string, m, other moment, rules map[cutRule
 		return false
 	}
 	for _, sp := range dc.spansOf(text) {
-		if !sp.keyed {
-			continue
-		}
-		h := sp.moment()
-		if cuts(h, m, func(c cutRule) bool {
-			if rules != nil && !rules[c] {
-				return false
-			}
-			return !cuts(h, other, func(d cutRule) bool { return d == c })
-		}) {
+		if sp.keyed && namesMomentApart(sp.moment(), m, other, rules) {
 			return true
 		}
 	}
 	return false
+}
+
+// namesMomentApart reports whether h, an instant a place holds, names m by a
+// rule of rules (any, nil) by which it does not name other (cuts).
+func namesMomentApart(h, m, other moment, rules map[cutRule]bool) bool {
+	return cuts(h, m, func(c cutRule) bool {
+		if rules != nil && !rules[c] {
+			return false
+		}
+		return !cuts(h, other, func(d cutRule) bool { return d == c })
+	})
 }
 
 // heldIn are the moments texts hold, each read once per test (spansOf).

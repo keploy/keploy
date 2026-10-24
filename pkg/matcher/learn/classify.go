@@ -132,11 +132,12 @@ type Raw struct {
 	// elsewhere: a recording F gave the application before the call that
 	// is no earlier place of the call's own test (OfAnotherTest): another
 	// recorded test's, or one F served in an earlier test than the
-	// previous one. Only the offset rule (offsetPlacesOf) and the word rule
-	// (givenWhy) read it, never a variable's or an echo's search, so that
-	// a call of one test binds no value of another's, while a value built
-	// on what F gave there by an offset, or copied from its answer word for
-	// word, is refused, naming it.
+	// previous one. Only the offset rule (offsetPlacesOf), the word rule
+	// (givenWhy) and the echo of what F gave there (echoedElsewhere) read
+	// it, never a variable's search or the call's own echo, so that a call
+	// of one test binds no value of another's, while a value built on what
+	// F gave there by an offset, or copied from its answer word for word or
+	// as a moment, is refused, naming it.
 	elsewhere bool
 	// read: the text was read from the mock (RawOf).
 	read bool
@@ -238,8 +239,8 @@ func (r Raw) Span() (first, last int) { return r.first, r.last }
 // OfAnotherTest is r as a recording F gave the application before the call
 // that is no earlier place of the call's own test (another recorded test's,
 // or one served in an earlier test than the previous one): a place the
-// offset rule and the word rule read, and no other rule does
-// (Raw.elsewhere).
+// offset rule, the word rule and the echo of what F gave there read, and no
+// other rule does (Raw.elsewhere).
 func (r Raw) OfAnotherTest() Raw {
 	r.elsewhere = true
 	return r
@@ -359,7 +360,10 @@ type Learned struct {
 //     it came from nowhere (unaccounted): refused, never noise. So is one a
 //     word of which F gave the application in another test (givenWhy): a
 //     value copied from another test's answer word for word is followed
-//     nowhere, and refused naming it.
+//     nowhere, and refused naming it; and so is one whose changed instant
+//     the echo finds in what F gave the application there, or in a
+//     recording made after the call (echoedElsewhere), which moved as a read
+//     of the clock does.
 //
 // A leaf its protocol types as one instant (Instant) is read whole, never
 // word by word, and is noise only where its provenance shows a read of the
@@ -392,10 +396,11 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 // GivenEarlier reads the recordings F gave the application earlier in the
 // running set that no other rule reads (an earlier test's than the previous
 // one, another recorded test's, the call's own paired recording F served
-// before it), each as F served it (GivenPlaces.ServedIn), for the offset rule
-// and the word rule alone: their places and their answers' words, read once
-// for the set, without their text (Order.GivenPlaces). It is read only where
-// a changed instant reaches the offset rule, or a word of what changed
+// before it), each as F served it (GivenPlaces.ServedIn), for the offset rule,
+// the word rule and the echo of what F gave there (echoedElsewhere) alone:
+// their places, their answers' words and instants, read once for the set,
+// without their text (Order.GivenPlaces). It is read only where a changed
+// instant reaches the offset rule or the echo, or a word of what changed
 // reaches the word rule (givenWhy), and then once for the call. An error, or
 // a recording it could not read (GivenPlaces.Read), names one whose text
 // cannot be told: every changed instant or word that reaches either rule is
@@ -403,8 +408,8 @@ func ClassifyIn(dc *DriftCache, drift []string, live, rec Shape, at time.Time, e
 type GivenEarlier func() ([]GivenPlaces, error)
 
 // ClassifyGiven is ClassifyIn with the recordings F gave the application
-// earlier in the set (given; nil: none), which the offset rule and the word
-// rule read beside raw's.
+// earlier in the set (given; nil: none), which the offset rule, the word rule
+// and the echo of what F gave there read beside raw's.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
@@ -481,8 +486,13 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 				why = offsetWhy(m)
 			} else if why = unaccounted(dc, v, at, served, raw); why == "" {
 				// Nor a word of it in what F gave the application in
-				// another test.
-				why = givenWhy(dc, v, at, served, raw, places)
+				// another test or in a recording made after the call, nor
+				// an instant of it copied from there, or picked from it,
+				// which the word rule leaves to the clock (the echo of
+				// those places).
+				if why = givenWhy(dc, v, at, served, raw, places); why == "" {
+					why = dc.echoedElsewhere(v.instants, at, served, raw, places)
+				}
 			}
 			// In keploy mock's client tests, a changed instant only where the
 			// call's window shows it a read of the application's clock.

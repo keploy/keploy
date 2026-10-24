@@ -178,6 +178,10 @@ type offsetPlaces struct {
 	// (Raw.OfAnotherTest, and set's), in raw's order, then set's: the word
 	// rule reads them (givenWhy).
 	words []givenWords
+	// answers are the instants the answers of those recordings hold, as F
+	// gave them the application (answerMoments): the echo reads them
+	// (echoedElsewhere).
+	answers []givenMoment
 }
 
 // offsetPlacesOf reads the places the offset rule reads for a call recorded
@@ -262,6 +266,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 	for _, x := range raw {
 		if x.read && x.elsewhere {
 			op.words = append(op.words, dc.wordsOf(x))
+			op.answers = append(op.answers, dc.answerMoments(x)...)
 		}
 	}
 	var others []GivenPlaces
@@ -277,6 +282,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			continue
 		}
 		op.words = append(op.words, g.words)
+		op.answers = append(op.answers, g.answer...)
 		others = append(others, g)
 	}
 	put := func(kp keyedPlace, mock, call string, rat time.Time, given bool, first, last int) {
@@ -341,9 +347,10 @@ func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
 }
 
 // GivenPlaces is a recording F gave the application earlier in the running
-// set, as the offset rule and the word rule read it (GivenEarlier): its
-// instants where the offset rule reads them (keyedPlaces), the words of its
-// answer (givenWords), and none of its text, so that each of the set's
+// set, as the offset rule, the word rule and the echo read it (GivenEarlier):
+// its instants where the offset rule reads them (keyedPlaces), the words of
+// its answer (givenWords), the instants its answer holds as F gave them
+// (answerMoments), and none of its text, so that each of the set's
 // recordings is read once for the set (Order.GivenPlaces) and its text is
 // not held; and where F served it in the set (ServedIn).
 type GivenPlaces struct {
@@ -353,6 +360,7 @@ type GivenPlaces struct {
 	first, last int
 	places      []keyedPlace
 	words       givenWords
+	answer      []givenMoment
 }
 
 // PlacesOf is x as the offset rule and the word rule read it among the
@@ -366,7 +374,130 @@ func PlacesOf(x Raw) GivenPlaces {
 		k := &places[i]
 		k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
 	}
-	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.read, first: x.first, last: x.last, places: places, words: dc.wordsOf(x)}
+	answer := dc.answerMoments(x)
+	for i := range answer {
+		a := &answer[i]
+		a.mock, a.where = strings.Clone(a.mock), strings.Clone(a.where)
+	}
+	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.read, first: x.first, last: x.last, places: places, words: dc.wordsOf(x), answer: answer}
+}
+
+// givenMoment is an instant the answer of a recording F gave the application
+// before the call holds, at a place no earlier place of the call's own test
+// is (another recorded test's, or one F gave earlier in the running set:
+// Raw.OfAnotherTest, GivenEarlier), as the echo reads it (echoedElsewhere):
+// its moment, its recording (mock, at: when its request was recorded), and
+// where it stands ("<mock> at <field>", "<mock>'s payload").
+type givenMoment struct {
+	m           moment
+	mock, where string
+	at          time.Time
+}
+
+// answerMoments are the instants of x's answer as F gave the application
+// them (givenMoment): of each field of its answer (of a kind whose spec holds
+// its request and its answer in one field, or a recording with no fields
+// read, its whole text: answerApart), in its text and its other declared
+// forms, as it stands, its stamps and its answer's own clock reads too, as
+// the echo reads every place (rules 2 and 3): F served that answer, and a
+// value F's run copied from it moved as F's clock did. What F gives the
+// application is an answer, never a request the application sent in another
+// test.
+func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
+	var out []givenMoment
+	add := func(t, where string) {
+		for _, form := range []string{t, dc.rawExtra(t)} {
+			for _, sp := range dc.spansOf(form) {
+				if sp.keyed {
+					out = append(out, givenMoment{m: sp.moment(), mock: x.mock, where: where, at: x.at})
+				}
+			}
+		}
+	}
+	if !answerApart(x.fields) {
+		add(x.text, x.mock+"'s payload")
+		return out
+	}
+	for _, f := range x.fields {
+		if f.key || f.end > len(x.text) || !answerFields[fieldRoot(f.path)] {
+			continue
+		}
+		add(x.text[f.start:f.end], x.mock+" at "+f.describe())
+	}
+	return out
+}
+
+// echoedElsewhere says why the echo refuses a drifted value whose changed
+// instants (pairs: each as recorded and as F saw it) the call's own places
+// do not account for (unaccounted, classifyInstant), "" when it does not:
+// one of them is a copy of what F gave the application before the call at a
+// place no earlier place of the call's own test is, or a pick from it by the
+// application's clock (echoedPairs), which moves as a read of the clock does.
+// The echo reads, as what F gave the application, every place the call's own
+// echo reads (earlierMoments) and the answers of those recordings
+// (places().answers: another recorded test's, Raw.OfAnotherTest, and every
+// one F gave earlier in the running set, GivenEarlier, wherever and whenever
+// it was recorded: one F served in this test before the call, at the
+// start-up or in an earlier test, recorded after the call, too); and, as
+// what the recordings gave it, the call's own places' (recordedMoments) and
+// only those of these recordings that were recorded before the call, which
+// the recording gave the application too: a recording made after the call
+// holds nothing the recorded value was built on. No variable is bound there
+// (keploy follows no value of another test's, nor of a recording made after
+// the call): the value is refused, naming the place that holds the moment F
+// saw (or, where that is a place of the call's own test, the one of those
+// recordings that holds the moment it was recorded with by the same rule),
+// never learned as noise. It reads the set (places) only where a changed
+// instant asks, and only after the offset rule, which refuses every changed
+// instant where one of those recordings could not be read (places().unread).
+func (dc *DriftCache) echoedElsewhere(pairs []driftedInstant, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
+	if len(pairs) == 0 {
+		return ""
+	}
+	op := places()
+	if len(op.answers) == 0 {
+		return ""
+	}
+	held, recorded := dc.earlierMoments(at, served, raw), dc.recordedMoments(at, served, raw)
+	for _, g := range op.answers {
+		held.addMoment(g.m)
+		if g.at.Before(at) {
+			recorded.addMoment(g.m)
+		}
+	}
+	echoed := echoedPairs(pairs, held, recorded)
+	if len(echoed) == 0 {
+		return ""
+	}
+	for _, g := range op.answers {
+		for _, e := range echoed {
+			if namesMomentApart(g.m, e.live, e.rec, e.rules) {
+				return "the moment record's full round saw in it stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at) + ", so it cannot tell whether the value is a copy of what the application was given there, or a pick from it by its clock, which moves as a read of the clock does, or a read of the clock. " + correction(g.mock)
+			}
+		}
+	}
+	// The moment F saw stands at a place of the call's own test, which the
+	// call's own echo takes for no copy (an instant there names both
+	// moments), while one of those recordings, made before the call, names
+	// the moment the value was recorded with by the rule that names F's
+	// (oneCut): a copy all the same.
+	where := dc.heldAt(echoed, at, served, raw)
+	if where == "" {
+		where = "earlier in the test set"
+	}
+	for _, g := range op.answers {
+		if !g.at.Before(at) {
+			continue
+		}
+		for _, e := range echoed {
+			if namesMomentApart(g.m, e.rec, e.live, e.rules) {
+				return "the moment record's full round saw in it stands " + where + ", and the moment it was recorded with stands in " + g.where + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at) + ", so it cannot tell whether the value is a copy of what the application was given, cut by one rule in both runs, or a read of the clock. " + correction(g.mock)
+			}
+		}
+	}
+	// Unreached but where an instant names both moments by one rule: refused
+	// all the same.
+	return pickUnaccounted(where)
 }
 
 // givenWords are the words of a recording's answer where the word rule
