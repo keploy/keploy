@@ -29,11 +29,19 @@ func ExactServing(db MockMemDb) bool {
 // name is a refusal: the mock may not answer, and the parser matches again
 // against what the store shows now, or misses.
 //
-// It is one only while db serves exactly, and only for a named mock. Without
-// exact serving MarkMockAsUsed's false only ever said its bookkeeping failed,
-// and the mock answers as before. MarkMockAsUsed turns a mock with no name
-// away before it asks the view, so that false is bookkeeping too, and
-// refusing it would have a parser match it again forever.
+// It is one while db serves exactly, for a named mock. Without exact serving
+// MarkMockAsUsed's false only ever said its bookkeeping failed, and the mock
+// answers as before. MarkMockAsUsed turns a mock with no name away before it
+// asks the view, so that false is bookkeeping too, and refusing it would have
+// a parser match it again forever.
+//
+// It is one too, for any mock, from a store HoldToRound returned that could
+// not hold its call to its round (UnheldWhy: the fail-closed store, or a view
+// over one). That store refuses every consume and offers no exact serving,
+// so read by exact serving alone its false would be bookkeeping, and the
+// parser would answer with a recording the hold never let it read. Every
+// read of it finds no recording, so a parser that matches again misses,
+// and saying so (UnheldNote).
 //
 // The other doors need no such question. A delete door's false
 // (DeleteFilteredMock, DeleteUnFilteredMock, DeleteStartupMock) already says
@@ -45,6 +53,9 @@ func ExactServing(db MockMemDb) bool {
 // serving it is also a mock the view shows that the tree it updates does not
 // hold, so a parser that updates a reusable mock asks MarkMockAsUsed after it.
 func ConsumeRefused(db MockMemDb, name string) bool {
+	if UnheldWhy(db) != "" {
+		return true
+	}
 	return name != "" && ExactServing(db)
 }
 
