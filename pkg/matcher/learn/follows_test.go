@@ -156,6 +156,10 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		}}}, eStartup(), "", ""},
 
 		{"F's word, at a payload F served that was recorded after the call", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(10*time.Millisecond)).ServedAs(2).ServedAsRecorded()), noRec, "mock-1"},
+		// Asked before the call but answered at its own instant: the
+		// recording cannot show the application had the answer before the
+		// call, so it gave the application no word there before it.
+		{"F's word, at a payload F served that was answered at the call's own instant", "82", "7", nil, append(eStartup(), ePgAnswered("mock-5", 10*time.Millisecond, eRecAt, "SELECT 7", []models.PostgresV3Cells{{{Value: "7"}}}, "SELECT 1").ServedAs(6).ServedAsRecorded()), noRec, "mock-5"},
 		{"F's word, at a leaf whose recorded text lacks it (an echo of what F served)", "82", "16", []Earlier{eLeaf(before, 6, "5150", "16")}, eStartup(), noRec, "mock-8"},
 		{"F's word, at a leaf recorded at the call's own instant", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt, 6, "7", "7")}, eStartup(), noRec, "mock-8"},
 		// Recorded after the call, the exchange is no earlier place of the

@@ -797,13 +797,17 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
 			// test of the set: the set's start-up's. The test case's own
-			// request (Earlier.Given) is the test's earliest place.
+			// request (Earlier.Given) is the test's earliest place. Another
+			// exchange of the start-up (Earlier.StartUp) is an earlier place
+			// of a call made at the start-up too, when no test runs.
 			where := "earlier in the test"
 			switch {
 			case e.Run:
 				where = "in the test set's start-up"
 			case e.Given:
 				where = "in what the test case gave the application"
+			case e.StartUp:
+				where = "earlier in the recording"
 			}
 			for _, s := range e.Seen {
 				// An answer's own clock stamp is no place a value came

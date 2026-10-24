@@ -80,6 +80,11 @@ type Earlier struct {
 	// Run: served while no test was open (Tracker.Served): a variable bound
 	// at it is the run's, which every later test uses (Tracker.RunName).
 	Run bool
+	// StartUp: served before the set's first test began (Tracker.Served),
+	// so the call it is an earlier place of was made then too: no test was
+	// running, and a reason names the place as earlier in the recording,
+	// never earlier in the test. Only the wording reads it.
+	StartUp bool
 	// Given: the place is no mock but the running keploy test case's own
 	// request (GivenRequest, Tracker.Give), each part as recorded (Leaf) and
 	// as keploy test sent it (Live): what the application was given before

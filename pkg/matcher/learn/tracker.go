@@ -825,17 +825,19 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 // the next, lands there too, and the next Begin forgets it. Served before the
 // set's first test began (the start-up's), it is the run's when it carried a
 // value the run made (Earlier.Run): an earlier place of every test of the
-// set. A set has no test's own exchange (Own) before its first test: one
-// served then took its scope from the previous set, and is nobody's.
+// set. Either way it is the start-up's (Earlier.StartUp). A set has no
+// test's own exchange (Own) before its first test: one served then took its
+// scope from the previous set, and is nobody's.
 func (t *Tracker) Served(n uint64, e Earlier) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
+	e.StartUp = !t.open && !t.began
 	switch {
 	case t.epoch != n:
-	case !t.open && !t.began && e.Own:
-	case !t.open && !t.began && drifted(e):
+	case e.StartUp && e.Own:
+	case e.StartUp && drifted(e):
 		e.Run = true
 		t.run = append(t.run, e)
 	default:
