@@ -98,13 +98,25 @@ import (
 // What a client's stack acknowledged is not always what the application read,
 // and the socket cannot tell the two apart. It goes wrong both ways:
 //
-//   - Recorded though unread: a chunk a half-closed client's stack
-//     acknowledged is teed, even when the application then leaves it unread
-//     and closes its socket (unread data makes the close a reset): an
-//     acknowledgement is not a read, and a teed chunk is not taken back. Only
-//     the chunks written after the reset are refused. This mirrors a client
-//     that resets with no FIN before, whose chunks are all teed. The
-//     recording then holds a reply the application did not read.
+//   - Recorded though unread: an acknowledgement is not a read, and a teed
+//     chunk is not taken back, so the recording can hold a reply the
+//     application did not read. Four paths tee such a chunk:
+//       - a chunk a half-closed client's stack acknowledged, which the
+//         application then leaves unread and closes its socket on (unread
+//         data makes the close a reset). Only the chunks written after the
+//         reset are refused.
+//       - every chunk to a client that resets with no FIN before (it closed
+//         with bytes unread in its receive queue), since what it read may be
+//         in the last one.
+//       - a chunk written while the client's FIN was still on its way
+//         (above).
+//       - a chunk the client had answered neither way when the last look
+//         came, at the relay's end or the recording's stop (above): no
+//         answer by then refuses nothing. That is a client whose host
+//         vanished, which sends neither an acknowledgement nor a reset, or a
+//         closed client whose reset had not landed when the recording's stop
+//         made the next look the last (resolve takes that look at once, so
+//         the window is about one loopback round trip).
 //   - Refused though read: a half-closed client that resets before its
 //     acknowledgement of a chunk went out (it read the chunk in part and
 //     closed with the rest unread, or read all of it and closed abortively,
