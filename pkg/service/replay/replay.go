@@ -5122,6 +5122,18 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.String("next_step", "record the test set again so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
 	}
+	// A call no mock answered that repeats a recording an earlier test made,
+	// which already answered at this replay, is named with that test: the
+	// application asked again where its recording did not, likely as an
+	// answer it kept for a span of elapsed time ran out (models.RepeatNote).
+	if named := markRepeatOf(testCaseResults, consumers); len(named) > 0 {
+		r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)
+		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: likely the application kept the earlier answer for a span of elapsed time (a cache with expire-after-write, a token, a refresh window) that the recording stayed inside and this replay passed; each is named under unmatched_calls.repeat_of",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.Int("count", len(named)),
+			zap.String("next_step", "record with that cache disabled or its span longer than the replay, or make the call in every test that needs it"))
+	}
 	// Under the proven switch a test whose call got no recorded answer fails,
 	// before the hook, so the hook sees the verdicts it is to act on. The loop
 	// failed each already (earlyMissed, streamMissed); this finds one only if a

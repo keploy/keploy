@@ -295,6 +295,10 @@ type MockMismatchReport struct {
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
 	// the tests the call's recordings were made beside.
 	Concurrent *ConcurrentNote
+	// Repeat says the call is identical to a recording an earlier test of
+	// the set made, which already answered that test's call at this replay
+	// (RepeatNote); nil otherwise. ClosestMock is then that recording.
+	Repeat *RepeatNote
 }
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call

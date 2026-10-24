@@ -331,6 +331,28 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// AnsweredFinder is an optional MockMemDb extension: of the per-test
+// recordings of kind that answered a call earlier in the test set staged now,
+// indexed under any of keys (models.RequestKeys), the one answered last that
+// match accepts and that the open test does not own. A parser that finds no
+// mock for a call asks it whether the call repeats one an earlier test made
+// (models.RepeatNote): the cue of an application that kept the earlier
+// answer for a span of elapsed time the replay passed. For a miss's
+// diagnosis only: the recording is never served. Every MockMemDb wrapper
+// must forward it.
+type AnsweredFinder interface {
+	FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (AnsweredCall, bool)
+}
+
+// AnsweredCall is what AnsweredFinder found: the recording, when it answered
+// at this replay, and when the open test began at record time (zero when the
+// store does not know).
+type AnsweredCall struct {
+	Mock              *models.Mock
+	AnsweredAt        time.Time
+	TestRecordedStart time.Time
+}
+
 // StagedFinder is an optional MockMemDb extension under exact serving (the
 // proven switch): the name of a staged mock of kind that the open view does
 // not show and no call of the set consumed, for which match reports true: a

@@ -503,6 +503,11 @@ type UnmatchedCall struct {
 	// (Mapping.Groups): with whom, and which of them its recording was
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// Repeat mirrors MockMismatchReport.Repeat: the call is identical to a
+	// recording an earlier test of the set made (ClosestMock), which already
+	// answered that test's call at this replay; the replay names that test
+	// (RepeatNote.Test). nil otherwise.
+	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
 }
 
 // ConcurrentNote is what keploy knows of a call made by a test that was

@@ -1236,7 +1236,8 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone()}
+		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		Repeat: m.Repeat.Clone()}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (models.MissShape) still writes them {}. Any other place
 	// can name a JSON key that is a value.
