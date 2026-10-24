@@ -91,3 +91,12 @@ func TestAUseOfAContainerWhoseReadStalledIsACaptureLoss(t *testing.T) {
 		}
 	}
 }
+
+func lossesOf(p *Proxy, kind models.CaptureLossKind) uint64 {
+	for _, l := range p.losses.Snapshot() {
+		if l.Kind == kind {
+			return l.Count
+		}
+	}
+	return 0
+}
