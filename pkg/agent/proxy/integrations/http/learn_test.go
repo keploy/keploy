@@ -2974,10 +2974,11 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 	}
 }
 
-// A mock F served before the test (at the start-up, or in the previous
-// test) but recorded after the call is no earlier place of the call's own
-// test for any rule but the offset rule, the word rule and the echo of what
-// F gave the application there: the recording made the call before it. A
+// A mock F served before the call (at the start-up, in the previous test, or
+// earlier in the call's own test) but recorded after the call is no earlier
+// place of the call's own test for any rule but the offset rule, the word
+// rule and the echo of what F gave the application there: the recording
+// made the call before it. A
 // value of the test's own call that changed to a word of that mock's answer
 // (an id, a whole id, an instant, copied word for word) is bound to nothing
 // and refused, naming the mock and that it was recorded after the call,
@@ -2995,18 +2996,20 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 		{"an instant", `{"ref":"` + learnAt.Add(-3*time.Hour).Format(time.RFC3339) + `"}`, `{"ref":"` + inst + `"}`, `{"at":"` + inst + `"}`, "appears in mock-2"},
 		{"a time the lead moved", `{"ref":"` + read + `"}`, `{"ref":"` + copied + `"}`, `{"at":"` + copied + `"}`, "the moment record's full round saw in it stands in mock-2 at spec.resp.body"},
 	} {
-		for _, where := range []string{"at the start-up", "in the previous test"} {
+		for _, where := range []string{"at the start-up", "in the previous test", "earlier in the test"} {
 			t.Run(tc.name+", "+where, func(t *testing.T) {
 				h, n, opts := learnOn(t)
 				call := learnRecorded("mock-1", time.Millisecond, "POST", "/v1/messages", tc.rec, nil, `{}`)
 				late := learnRecorded("mock-2", 5*time.Millisecond, "GET", "/stats", "", nil, tc.answer)
 				db := &learnDb{perTest: []*models.Mock{call}}
 				tr := learn.NewTracker()
-				if where == "in the previous test" {
+				if where != "at the start-up" {
 					tr.Begin()
 				}
 				tr.ServedMock(late)
-				tr.Begin()
+				if where != "earlier in the test" {
+					tr.Begin()
+				}
 				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", tc.live, nil), db, n, opts)
 				if err != nil {
 					t.Fatal(err)
@@ -3020,6 +3023,74 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 				}
 			})
 		}
+	}
+}
+
+// A word the call's value was recorded with that only a mock recorded after
+// the call holds is no earlier place of the call, wherever F served that
+// mock before the call, earlier in the test included: the recording made
+// the call before it, so its answer is never read as "the test's recording
+// holds earlier". The control, the same mock recorded before the call and
+// served earlier in the test, is an earlier place the value was copied from.
+func TestLearnMatchAWordOnlyAMockRecordedAfterTheCallHoldsIsNoEarlierPlace(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after bool
+	}{{"recorded after the call", true}, {"recorded before the call", false}} {
+		for _, where := range []string{"at the start-up", "earlier in the test"} {
+			t.Run(tc.name+", "+where, func(t *testing.T) {
+				h, n, opts := learnOn(t)
+				callAt, lateAt := 5*time.Millisecond, time.Millisecond
+				if tc.after {
+					callAt, lateAt = time.Millisecond, 5*time.Millisecond
+				}
+				call := learnRecorded("mock-1", callAt, "POST", "/v1/messages", `{"ref":"7"}`, nil, `{}`)
+				late := learnRecorded("mock-2", lateAt, "GET", "/stats", "", nil, `{"count":"7"}`)
+				db := &learnDb{perTest: []*models.Mock{call}}
+				tr := learn.NewTracker()
+				if where == "earlier in the test" {
+					tr.Begin()
+				}
+				tr.ServedMock(late)
+				if where != "earlier in the test" {
+					tr.Begin()
+				}
+				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", `{"ref":"42"}`, nil), db, n, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.after {
+					if got == nil || miss != nil || len(db.consumed) != 1 {
+						t.Fatalf("served %v miss %+v consumed %d; want the call served, body.ref learned as noise: mock-2, recorded after the call, holds no earlier place of it", got, miss, len(db.consumed))
+					}
+					return
+				}
+				if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.consumed) != 0 ||
+					!strings.Contains(miss.res.Why, "body.ref carries a value the test's recording holds earlier (in mock-2)") {
+					t.Fatalf("served %v miss %+v consumed %d; want body.ref refused as a value of mock-2, recorded before the call", got, miss, len(db.consumed))
+				}
+			})
+		}
+	}
+}
+
+// The test's own recording with no recorded time: which recordings came
+// before it cannot be told, so whether what changed came from one cannot
+// either; the learn step learns nothing from it and says why.
+func TestLearnMatchAnOwnRecordingWithNoRecordedTimeLearnsNothing(t *testing.T) {
+	h, n, opts := learnOn(t)
+	call := learnRecorded("mock-1", time.Millisecond, "POST", "/v1/messages", `{"ref":"7"}`, nil, `{}`)
+	call.Spec.ReqTimestampMock, call.Spec.ResTimestampMock = time.Time{}, time.Time{}
+	db := &learnDb{perTest: []*models.Mock{call}}
+	tr := learn.NewTracker()
+	tr.Begin()
+	got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", `{"ref":"42"}`, nil), db, n, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.consumed) != 0 ||
+		!strings.Contains(miss.res.Why, "keploy cannot tell which recordings of the test set came before mock-1, which has no recorded time") {
+		t.Fatalf("served %v miss %+v consumed %d; want the call refused, naming mock-1's missing recorded time", got, miss, len(db.consumed))
 	}
 }
 

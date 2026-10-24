@@ -788,10 +788,11 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 
 // earlierRaw are the mocks of the test's recording that came before a
 // request recorded at at, as Classify reads them when no leaf names their
-// values: every mock any parser served earlier in the test (served), every
-// one F served before the test began that is an earlier place of the call's
-// own test and was recorded before it (given: in the previous test, at the
-// start-up, between tests; ofPairedTest), and every mock recorded before it
+// values: every mock any parser served earlier in the test that was
+// recorded before it (served), every one F served before the test began
+// that is an earlier place of the call's own test and was recorded before
+// it (given: in the previous test, at the start-up, between tests;
+// ofPairedTest), and every mock recorded before it
 // that the scope shows or that the store stages, served or not (visible: a
 // start-up call a kept-alive app never makes again in F is one). Each is
 // read once. The paired mock is not one, and neither is an exchange the
@@ -803,9 +804,14 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 // order F served the set's mocks in,
 // across its start-up, its tests and the gaps between them (order, as the
 // read of the places saw it; 0, an order keploy cannot tell, which the
-// offset rule fails closed on). Every other mock F served in the set is a
-// place of the offset rule alone, read only where it needs them
-// (givenEarlier). dc keeps each mock's text for the test, read with its
+// offset rule fails closed on). Every other mock F served in the set
+// (another test's, or one recorded after the call, served in the test or
+// before it) is read by the offset rule and, for the words and the
+// instants of its answer, by the word rule and the echo (givenEarlier): a
+// value built on it, or copied word for word from what it answered, is
+// refused naming it, never learned as noise. The paired mock has a
+// recorded time here: the learn step learns nothing from one with none, as
+// without it every mock F served would read as recorded after the call. dc keeps each mock's text for the test, read with its
 // answer (DriftCache.ReadRaw). err names one whose answer the agent parked
 // on disk and that cannot be read back, and why; no mock is then returned,
 // since what it held cannot be told.
@@ -838,10 +844,19 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visibl
 	for _, m := range served {
 		prev.See(m)
 	}
-	for i, list := range [][]*models.Mock{served, given} {
+	for _, list := range [][]*models.Mock{served, given} {
 		spans := order.Spans(list)
 		for k, m := range list {
-			if m == nil || leafed[m.Name] || i == 1 && !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
+			// What F served, in the test or before it, is an earlier
+			// place where it was recorded before the call. One recorded
+			// after it gave the recorded application nothing before the
+			// call, wherever F served it this run (at the start-up, in an
+			// earlier test, or in this test before the call): the offset
+			// rule, the word rule and the echo read it as what F gave this
+			// run alone (givenEarlier), so a value copied from what F gave
+			// is refused naming it, and a word the value was recorded with
+			// that only it holds decides nothing.
+			if m == nil || leafed[m.Name] || !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
 				continue
 			}
 			if err := add(m, true, spans[k]); err != nil {
@@ -892,7 +907,9 @@ func rawID(m *models.Mock) string {
 // with paired: every mock of set (those F served in the running set before
 // the call, as the read of the places saw it) that earlierRaw reads no place
 // of (read: those it read as F served them, the test's served and its given
-// recorded before the call), each as F served it, by order. The paired mock
+// recorded before the call), each as F served it, by order: a mock F served
+// in the test before the call but recorded after it is read here, as one F
+// served before the test is, never as an earlier place. The paired mock
 // is one where F served it before the call (in the set: a pool's reusable
 // recording F gave the application at the start-up, or earlier in the
 // test), which earlierRaw never reads: recorded at the call's own instant,
@@ -909,14 +926,11 @@ func givenEarlier(paired *models.Mock, set, served, given []*models.Mock, earlie
 			skip[e.Mock] = true
 		}
 		read := map[string]bool{}
-		for _, m := range served {
-			if m != nil && m.Name != paired.Name {
-				read[rawID(m)] = true
-			}
-		}
-		for _, m := range given {
-			if m != nil && m.Name != paired.Name && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
-				read[rawID(m)] = true
+		for _, list := range [][]*models.Mock{served, given} {
+			for _, m := range list {
+				if m != nil && m.Name != paired.Name && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) {
+					read[rawID(m)] = true
+				}
 			}
 		}
 		out := make([]learn.GivenPlaces, 0, len(set))
@@ -1082,10 +1096,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if stuck(m, read.at) {
 				return refused(m, res, sc)
 			}
-			if !own && m.Spec.ReqTimestampMock.IsZero() {
-				// A pool mock's earlier places are every recording made
-				// before it: of one with no recorded time, none can be
-				// told, so where its value came from cannot be either.
+			if m.Spec.ReqTimestampMock.IsZero() {
+				// A mock's earlier places are the recordings made before
+				// it (a pool mock's, every one; the test's own, those of
+				// its test, and what F served in it recorded before it):
+				// of one with no recorded time, none can be told, so
+				// where its value came from cannot be either.
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, "keploy cannot tell which recordings of the test set came before "+m.Name+", which has no recorded time, so it cannot tell whether what changed came from one"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
