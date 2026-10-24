@@ -34,6 +34,9 @@ type answeredLog struct {
 	queue []*answeredEntry
 	live  int // entries in some key's list
 	bytes int // the live entries' sizes
+	// set is the test set generation (MockManager.setGen) whose answers the
+	// log holds, moved by fence.
+	set uint64
 }
 
 // answeredEntry is one recording that answered, and when.
@@ -55,7 +58,10 @@ const (
 )
 
 // note records that mk answered a call at at. A recording of a kind that
-// declares no request keys is not kept, nor one over answeredMaxEntryBytes.
+// declares no request keys is not kept, nor one over answeredMaxEntryBytes,
+// nor one an earlier test set's staging pooled (TestModeInfo.StagedSet):
+// a consume of it is no answer of this set (errPreviousSet), however late
+// after the fence the parser that held it gets here.
 func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	if mk == nil || mk.Name == "" {
 		return
@@ -71,6 +77,9 @@ func (l *answeredLog) note(mk *models.Mock, at time.Time) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if g := mk.TestModeInfo.StagedSet; g != 0 && g != l.set {
+		return
+	}
 	if l.byKey == nil {
 		l.byKey = map[string][]*answeredEntry{}
 	}
@@ -179,6 +188,17 @@ func (l *answeredLog) reset() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+}
+
+// fence empties the log for the test set of generation set, which from now
+// on refuses a note of a mock another set pooled (note). Under the one lock
+// a note takes: a note of the previous set's mock lands before and is
+// emptied, or after and is refused.
+func (l *answeredLog) fence(set uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.byKey, l.queue, l.live, l.bytes = nil, nil, 0, 0
+	l.set = set
 }
 
 // answeredProbe is what the log keeps of mk: a copy with its name, kind,

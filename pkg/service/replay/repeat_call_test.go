@@ -19,21 +19,31 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	note := func(mock string) *models.RepeatNote {
 		return anchoredNote(mock, rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))
 	}
+	named := func(mock, test string) *models.RepeatNote {
+		n := note(mock)
+		n.Test = test
+		return n
+	}
 	results := []models.TestResult{
 		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
 			{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7")},
 			{ActualSummary: "GET /alone", ClosestMock: "mock-8", Repeat: note("mock-8")},
 			{ActualSummary: "GET /other", NextSteps: "as it was"},
+			{ActualSummary: "GET /named", ClosestMock: "mock-6", Repeat: named("mock-6", "test-4")},
 		}}},
 	}
-	consumers := map[string][]string{"mock-7": {"test-9", "test-3", "test-5"}, "mock-8": {"test-9"}}
+	consumers := map[string][]string{"mock-7": {"test-9", "test-3", "test-5"}, "mock-8": {"test-9"}, "mock-6": {"test-2", "test-4"}}
 	store := NewTestFailureStore()
 	for _, c := range results[0].FailureInfo.UnmatchedCalls {
 		store.AddUnmatchedCallForTest("set-0", "test-9", c)
 	}
+	// Another set's row of a test of the same name, repeating the same
+	// recording name: another set's recordings, which this set's end does
+	// not name.
+	store.AddUnmatchedCallForTest("set-1", "test-9", models.UnmatchedCall{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7"), NextSteps: "set-1's"})
 	keep := results[0].FailureInfo.UnmatchedCalls[0].Repeat
 
-	named := markRepeatOf(results, consumers, nil, nil, nil)
+	lines := markRepeatOf(results, consumers, nil, nil, nil)
 	calls := results[0].FailureInfo.UnmatchedCalls
 	if calls[0].Repeat.Test != "test-3" || !strings.Contains(calls[0].NextSteps, "test test-3's call") {
 		t.Fatalf("the repeat is named %q: %s", calls[0].Repeat.Test, calls[0].NextSteps)
@@ -47,8 +57,13 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	if calls[2].NextSteps != "as it was" {
 		t.Fatalf("a call with no note was rewritten: %q", calls[2].NextSteps)
 	}
-	if len(named) != 2 || !strings.Contains(named[0], "test-9: GET /count repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
-		t.Fatalf("the set log lines are %q", named)
+	// A note that names its earlier test already keeps it, whoever else
+	// consumed the recording first.
+	if calls[3].Repeat.Test != "test-4" || !strings.Contains(calls[3].NextSteps, "test test-4's call") {
+		t.Fatalf("a note that named test-4 now names %q: %s", calls[3].Repeat.Test, calls[3].NextSteps)
+	}
+	if len(lines) != 3 || !strings.Contains(lines[0], "test-9: GET /count repeats mock-7, answered for test-3 6.00s before this test began at replay, 2.00s after mock-7 at record") {
+		t.Fatalf("the set log lines are %q", lines)
 	}
 
 	store.nameRepeats("set-0", results)
@@ -58,6 +73,9 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	if rows[1].MismatchReport.Repeat.Test != "" || rows[2].MismatchReport.NextSteps != "as it was" {
 		t.Fatalf("rows that name no earlier test changed: %+v, %q", rows[1].MismatchReport.Repeat, rows[2].MismatchReport.NextSteps)
+	}
+	if rows[4].TestSetID != "set-1" || rows[4].MismatchReport.Repeat.Test != "" || rows[4].MismatchReport.NextSteps != "set-1's" {
+		t.Fatalf("another set's row was named by this set's end: %+v, %q", rows[4].MismatchReport.Repeat, rows[4].MismatchReport.NextSteps)
 	}
 }
 

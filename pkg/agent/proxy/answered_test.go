@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -89,6 +90,14 @@ func TestFindAnsweredEarlierNamesAnEarlierTestsAnsweredRecording(t *testing.T) {
 	}
 	if got.AnsweredAt.IsZero() {
 		t.Fatal("the recording found carries no time it answered")
+	}
+	// A parser reads the store through the worker-scope wrap, which must
+	// forward the lookup (integrations.AnsweredFinder).
+	var wrapped integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	if f, ok := wrapped.(integrations.AnsweredFinder); !ok {
+		t.Fatal("the worker-scope wrap is no AnsweredFinder")
+	} else if w, ok := f.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all); !ok || w.Mock.Name != earlier.Name || !w.AnsweredAt.Equal(got.AnsweredAt) {
+		t.Fatalf("through the worker-scope wrap found %v (%v), want %s as the store found it", w.Mock, ok, earlier.Name)
 	}
 	if _, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/other"}, all); ok {
 		t.Fatal("found a recording under a key it is not under")
@@ -370,4 +379,43 @@ func TestFindAnsweredEarlierUnderExactServing(t *testing.T) {
 			t.Fatalf("found %v (%v), want %s, not the session recording", got.Mock, ok, kept.Name)
 		}
 	})
+}
+
+// A consume of a mock the previous test set's staging pooled is no answer of
+// this set (errPreviousSet): the parser matches again against this set's
+// pool, and the log keeps nothing of it, however late after the fence the
+// consume door that took it gets to the note (its flag passed before the
+// fence), so a miss of this set is never named as a repeat of a call only
+// the previous set made. One of this set's own is kept.
+func TestFindAnsweredEarlierLeavesOutAPreviousSetsConsume(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	all := func(*models.Mock) bool { return true }
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	mm.SetMocksWithWindow([]*models.Mock{keyedRecording("mock-1", models.HTTP, 1, "/count", t0)}, nil, t0.Add(-time.Second), t0.Add(time.Second))
+	staged, _ := mm.GetFilteredMocks()
+	if len(staged) != 1 || staged[0].TestModeInfo.StagedSet == 0 {
+		t.Fatalf("staged %v, want mock-1 stamped with its set", staged)
+	}
+	held := *staged[0]
+	// The next set begins while a parser still holds the previous set's copy.
+	mm.dropPreviousSetConsumes()
+	if mm.DeleteFilteredMock(held) {
+		t.Fatal("a mock the previous set pooled was consumed in this set")
+	}
+	mm.noteAnswered(held)
+	// A later test of this set opens: mock-1 is no recording of its.
+	mm.SetMocksWithWindow([]*models.Mock{keyedRecording("mock-2", models.HTTP, 2, "/count", t0.Add(2*time.Second))}, nil, t0.Add(time.Second), t0.Add(3*time.Second))
+	if got, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all); ok {
+		t.Fatalf("the previous set's consume of %s is in this set's answered log", got.Mock.Name)
+	}
+	staged, _ = mm.GetFilteredMocks()
+	if len(staged) != 1 || !mm.DeleteFilteredMock(*staged[0]) {
+		t.Fatalf("this set's mock-2 did not answer: %v", staged)
+	}
+	mm.SetCurrentTestWindow(t0.Add(5*time.Second), t0.Add(15*time.Second))
+	if got, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all); !ok || got.Mock.Name != "mock-2" {
+		t.Fatalf("found %v (%v), want this set's mock-2", got.Mock, ok)
+	}
 }
