@@ -3,6 +3,8 @@ package replay
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -373,4 +375,77 @@ func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time
 	n := models.NewRepeatNote(mock, answered, rec, time.Time{})
 	n.Anchor(replayStart, recordStart, mock, rec)
 	return n
+}
+
+// RunTestSet completes the parsers' repeat notes once the set has run, with
+// the set's own results, consumers, test cases, mock lookup and test starts
+// (markRepeatOf); writes them into the end-of-run rows in the branch that
+// named any, after they are complete (nameRepeats), so the table says what
+// the report says; names the mirror on unconsumed recordings
+// (markUnmadeRepeats); and notes when each test began, on the main path and
+// the streaming one (replayStarts), which is what lets a note judge its cause
+// from two gaps that both run to a test's start. Each seam's behaviour is
+// tested above; this pins that RunTestSet calls it (depresult_wiring_test.go
+// says why the wiring is read from the source).
+func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
+	fset, fn := runTestSetSource(t)
+	for _, c := range []struct {
+		call string
+		want []string
+	}{
+		{"markRepeatOf", []string{"testCaseResults", "consumers", "testCases", "mockLookup", "replayStarts"}},
+		{"markUnmadeRepeats", []string{"testCaseResults", "consumers", "totalConsumedMocks", "mockLookup", "replayStarts", "testCases"}},
+	} {
+		sites := callArgIdents(fn, c.call)
+		if len(sites) != 1 {
+			t.Fatalf("RunTestSet calls %s %d times, want once", c.call, len(sites))
+		}
+		for _, w := range c.want {
+			if !sites[0][w] {
+				t.Errorf("RunTestSet's %s no longer passes %s: it passes %v", c.call, w, sortedKeys(sites[0]))
+			}
+		}
+	}
+	var named []string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		s, ok := n.(*ast.IfStmt)
+		if !ok || s.Init == nil {
+			return true
+		}
+		init, ok := s.Init.(*ast.AssignStmt)
+		if !ok || len(init.Rhs) != 1 {
+			return true
+		}
+		if call, ok := init.Rhs[0].(*ast.CallExpr); !ok || calleeName(call) != "markRepeatOf" {
+			return true
+		}
+		for _, st := range s.Body.List {
+			if es, ok := st.(*ast.ExprStmt); ok {
+				if call, ok := es.X.(*ast.CallExpr); ok && calleeName(call) == "nameRepeats" {
+					named = append(named, printNode(t, fset, call))
+				}
+			}
+		}
+		return false
+	})
+	if len(named) != 1 || named[0] != "r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)" {
+		t.Fatalf("in the branch markRepeatOf named calls in, RunTestSet writes the end-of-run rows with %v, want one r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)", named)
+	}
+	var writes []string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		a, ok := n.(*ast.AssignStmt)
+		if !ok || len(a.Lhs) != 1 {
+			return true
+		}
+		if ix, ok := a.Lhs[0].(*ast.IndexExpr); ok {
+			if id, ok := ix.X.(*ast.Ident); ok && id.Name == "replayStarts" {
+				writes = append(writes, printNode(t, fset, a))
+			}
+		}
+		return true
+	})
+	sort.Strings(writes)
+	if want := []string{"replayStarts[tc.Name] = started", "replayStarts[testCase.Name] = started"}; strings.Join(writes, "; ") != strings.Join(want, "; ") {
+		t.Fatalf("RunTestSet notes the tests' starts as %v, want %v: without a start a note's replay gap runs to the call, and its cause is not judged", writes, want)
+	}
 }
