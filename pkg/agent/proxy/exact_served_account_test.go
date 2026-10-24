@@ -798,14 +798,25 @@ func TestAReaderBesideTheInstallsAlwaysReadsTheTestsViewStamped(t *testing.T) {
 // without its in-flight marks would have a learn step take the test's call
 // in flight for the pool's (InFlightIntoOpenTest false), so two reads in
 // the window where a test's calls in flight arrive would disagree. The seam
-// before the swap checks the marks as the view is published. At
-// installExact's end (exactState.afterPublish), on the install's goroutine,
-// a reader answers the answered call again and must miss, and on a test's
-// view must find both calls in flight into the open test. Both reads are
-// placed, not raced, so a mark set after the swap or after the install fails
-// the row every run; one set under the view's lock with that lock still held
-// at the end seam hangs the row instead (its reader takes the view's lock),
-// until go test's timeout fails it.
+// before the swap checks the marks as the view is published. The row also
+// checks what the marks rest on: no consume of the pool view is served
+// after the door read its answers. A parser that read the pool view before
+// the door began holds its copy of the call the gap did not answer, and
+// consumes it as closeAhead returns, the door's read done
+// (exactState.aheadRead), and again at the seam before the swap. At both
+// the pool view must be closed (read under its lock) and the consume
+// refused. Served there, the answer would be left out of the door's view,
+// built from the read: that view would answer the same recording a second
+// time, and the first answer would never be flagged as the test's. That the
+// close is made in the same hold of the pool view's lock as the read is
+// closeAhead's code; no seam sits inside that hold. At installExact's end
+// (exactState.afterPublish), on the install's goroutine, a reader answers
+// the answered call again and must miss, and on a test's view must find
+// both calls in flight into the open test. Both reads are placed, not
+// raced, so a mark set after the swap or after the install fails the row
+// every run; one set under the view's lock with that lock still held at the
+// end seam hangs the row instead (its reader takes the view's lock), until
+// go test's timeout fails it.
 func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T) {
 	for _, door := range []struct {
 		name string
@@ -829,6 +840,38 @@ func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T
 			if got := pollFirst(t, mm, answered.Name); got != answered.Name {
 				t.Fatalf("precondition: the pool view did not answer t2's call in flight in the gap: %s", got)
 			}
+			// held is a parser's copy of the call the gap did not answer,
+			// read from the pool view before the door begins: the pool
+			// view's own copy, so its consume is refused only if that view
+			// is closed.
+			gapView := mm.exact.view.Load()
+			mocks, err := mm.GetSessionScopedMocks()
+			if err != nil {
+				t.Fatalf("precondition: reading the pool view: %v", err)
+			}
+			var held *models.Mock
+			for _, mk := range mocks {
+				if mk.Name == inflight.Name {
+					held = mk
+				}
+			}
+			if held == nil || held.TestModeInfo.ServedIn != gapView.gen {
+				t.Fatalf("precondition: the pool view does not show its own copy of t2's call in flight %s", inflight.Name)
+			}
+			// refused checks, at a seam after the door read the pool view's
+			// answers, that the pool view is closed and that a consume of
+			// the held copy is refused.
+			refused := func(where string) {
+				gapView.mu.Lock()
+				closed := gapView.closed
+				gapView.mu.Unlock()
+				if !closed {
+					t.Errorf("%s the pool view the door read its answers from was still open: a consume after the read is served and left out of the door's view", where)
+				}
+				if mm.DeleteUnFilteredMock(*held) {
+					t.Errorf("%s a parser's copy of %s, read from the pool view before the door began, was served after the door read the pool view's answers: the door's view leaves it out, so it answers that recording a second time, and the first answer is never flagged as the test's", where, inflight.Name)
+				}
+			}
 			// ours is the view the door installs: a test's view, or the
 			// pool view of key k2.
 			ours := func(v *exactView) bool {
@@ -837,7 +880,15 @@ func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T
 				}
 				return v.test != ""
 			}
-			seamChecked, endChecked := 0, 0
+			readChecked, seamChecked, endChecked := 0, 0, 0
+			mm.exact.aheadRead = func(prev *exactView) {
+				readChecked++
+				if prev != gapView {
+					t.Errorf("closeAhead read a pool view other than the one the gap answered from")
+					return
+				}
+				refused("as closeAhead returned,")
+			}
 			mm.exact.beforePublish = func(v *exactView) {
 				if !ours(v) {
 					return
@@ -846,6 +897,11 @@ func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T
 				if mm.exact.view.Load() == v {
 					t.Errorf("the door's view was already published as the seam saw it: the row reads a view as it is published only if beforePublish runs before the swap")
 				}
+				// The view being replaced is the pool view the door read.
+				if mm.exact.view.Load() != gapView {
+					t.Errorf("the view being replaced at the seam was not the pool view the gap answered from")
+				}
+				refused("at the seam before the swap,")
 				i, ok := v.index[answered.Name]
 				if !ok || !v.consumed[i] || !slices.Equal(v.order, []int{i}) {
 					t.Errorf("the door's view was about to be published without the call the pool view answered in the gap marked answered (in the view %v, consumed %v, order %v): a reader loading it first answers that recording a second time", ok, ok && v.consumed[i], v.order)
@@ -887,8 +943,8 @@ func TestATestsViewIsPublishedWithTheGapsAnswersAndItsCallsInFlight(t *testing.T
 				}
 			}
 			door.install(mm, []*models.Mock{answered, inflight})
-			if seamChecked != 1 || endChecked != 1 {
-				t.Fatalf("the door's install ran the seam before the swap %d times and the one at installExact's end %d times; want 1 and 1", seamChecked, endChecked)
+			if readChecked != 1 || seamChecked != 1 || endChecked != 1 {
+				t.Fatalf("the door's install ran the seam at closeAhead's return %d times, the one before the swap %d times and the one at installExact's end %d times; want 1, 1 and 1", readChecked, seamChecked, endChecked)
 			}
 			// Once the door returns the answered call still misses, and the
 			// other answers.

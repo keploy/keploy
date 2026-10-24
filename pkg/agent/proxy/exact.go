@@ -180,6 +180,11 @@ type exactState struct {
 	// It runs with no view's lock held; on a test's view the install lock is
 	// held, and on the open doors the variables' lock too.
 	afterPublish func(*exactView)
+	// aheadRead, set only by tests and before any install, is called with
+	// the pool view closeAhead closed and read, as closeAhead returns: the
+	// view's lock released, before the door builds its view from what it
+	// read. It runs with no view's lock and no install lock held.
+	aheadRead func(*exactView)
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
 	poolNames atomic.Pointer[map[string]struct{}]
@@ -858,14 +863,14 @@ type aheadAnswer struct{ owned, served *models.Mock }
 // closeAhead closes the view being served, if it is a pool view that answers
 // the next test's mocks in flight when it began (ServeExactPool's ahead), and
 // returns those that answered, in the order they did, and the names of all of
-// them. Closed first, so no consume lands between the read and the next view.
+// them. Closed in the same hold of its lock as the read, so no consume lands
+// between the read and the next view: one after it is refused (exactConsume).
 func (m *MockManager) closeAhead() (answered []aheadAnswer, ahead []string) {
 	prev := m.exact.view.Load()
 	if prev == nil || prev.test != "" || len(prev.owned) == 0 {
 		return nil, nil
 	}
 	prev.mu.Lock()
-	defer prev.mu.Unlock()
 	prev.closed = true
 	answered = make([]aheadAnswer, 0, len(prev.order))
 	for _, i := range prev.order {
@@ -874,6 +879,10 @@ func (m *MockManager) closeAhead() (answered []aheadAnswer, ahead []string) {
 	ahead = make([]string, 0, len(prev.owned))
 	for _, mk := range prev.owned {
 		ahead = append(ahead, mk.Name)
+	}
+	prev.mu.Unlock()
+	if m.exact.aheadRead != nil {
+		m.exact.aheadRead(prev)
 	}
 	return answered, ahead
 }
