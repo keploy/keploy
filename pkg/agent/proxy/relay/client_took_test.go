@@ -155,12 +155,22 @@ func (h *tookHarness) write(ctx context.Context, b string, mark string) chunkFat
 	return h.r.destWritten(ctx, h.t, &h.seq, fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte(b), ReadAt: time.Now()}, finBefore, from, mark)
 }
 
-// queuedWithin waits until the tee has queued want, in order.
-func (h *tookHarness) queuedWithin(t *testing.T, want ...string) {
+// queuedWithin waits until the tee has queued want, in order, and returns how
+// many chunks were still set aside then. It reads both under the relay's
+// verdictMu, between resolve's passes: a pass (settle) holds that lock while
+// it pushes a chunk set aside and then lets go of it (doneAwaiting), so a read
+// outside it can find the chunk being settled on the queue and still set aside.
+func (h *tookHarness) queuedWithin(t *testing.T, want ...string) (aside int) {
 	t.Helper()
-	for limit := time.Now().Add(10 * time.Second); !equal(h.queued(), want); {
+	for limit := time.Now().Add(10 * time.Second); ; {
+		h.r.verdictMu.Lock()
+		q, n := h.queued(), h.t.awaitingLen()
+		h.r.verdictMu.Unlock()
+		if equal(q, want) {
+			return n
+		}
 		if time.Now().After(limit) {
-			t.Fatalf("queued %q, want %q", h.queued(), want)
+			t.Fatalf("queued %q, want %q", q, want)
 		}
 		time.Sleep(50 * time.Microsecond)
 	}
@@ -407,8 +417,7 @@ func TestClientTookDecidesFromWhatTheClientsSocketSays(t *testing.T) {
 		// one (bytes 0-2) and two (3-5) are taken: they are teed, in order,
 		// while three waits for its own answer, with its mark.
 		h.sock.set(finned(4))
-		h.queuedWithin(t, "one", "two")
-		if n, m := h.t.awaitingLen(), h.gotMarks(); n != 1 || len(m) != 0 {
+		if n, m := h.queuedWithin(t, "one", "two"), h.gotMarks(); n != 1 || len(m) != 0 {
 			t.Fatalf("%d aside, marked %q, while three is unanswered; want 1, nothing", n, m)
 		}
 		h.sock.set(finned(12))
