@@ -321,6 +321,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report)
+				} else if n == 0 && report != nil {
+					// A call identical to one an earlier test made, whose
+					// recording already answered: the application asked
+					// again where its recording did not (models.RepeatNote).
+					if a, ok := repeatOfAnswered(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise)); ok {
+						markRepeat(report, a)
+					}
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-

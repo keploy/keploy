@@ -143,6 +143,10 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
+	// answered keeps the per-test recordings that answered a call in this
+	// test set, by request key, for a miss's diagnosis (FindAnsweredEarlier).
+	// Reset with consumedPersistent.
+	answered answeredLog
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -683,6 +687,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// A reset that starts another test set says so (ArmSetFence), and its
 	// boundary staging drops them instead: they were consumed of the previous
 	// set's pool.
+	m.answered.reset()
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
@@ -3371,6 +3376,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	m.observeServedCopy(mock)
 	switch m.exactConsumeValue(mock, true) {
 	case exactServed:
+		m.noteAnswered(mock)
 		return true
 	case exactRefused:
 		return false
@@ -3424,6 +3430,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			} else {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
+		}
+		if consumed {
+			m.noteAnswered(mock)
 		}
 	}
 
@@ -4505,6 +4514,7 @@ func (m *MockManager) ArmSetFence() {
 // flags before both or is refused after (flagMockAsUsed). Caller holds
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
+	m.answered.reset()
 	m.consumedMu.Lock()
 	m.setGen.Add(1)
 	dropped := len(m.consumedList)
