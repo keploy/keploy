@@ -22,7 +22,8 @@ import (
 //     the read that brought them in (readTrackingConn) until it hands the
 //     record to the forwarder, and can hold more records than it hands on in
 //     one Read;
-//   - in the forwarder's hand, between the read and the push (held);
+//   - in the forwarder's hand, from the read until the forwarder's next
+//     iteration, past the push (held);
 //   - on the tee's queue (tee.q);
 //   - delivered: taken off the queue by the drain, in the drain's hand, on the
 //     FakeConn-facing channel, or in the FakeConn partly read (delivered);
@@ -44,8 +45,10 @@ const heldUnstamped int64 = -1
 // the forwarder's; delivered and deliveredBytes are guarded by tee.mu.
 type teeProgress struct {
 	// held is the stamp (UnixNano) of the chunk the forwarder has read and not
-	// yet queued, refused or stashed: 0 when it holds none, heldUnstamped
-	// while it is stamping one.
+	// let go of yet: set from its Read, and cleared at the top of the
+	// forwarder's next iteration, once it has queued, refused or stashed the
+	// chunk and told of it. 0 when it holds none, heldUnstamped while it is
+	// stamping one.
 	held atomic.Int64
 	// layer is the stamp (UnixNano) of the read under the layer the forwarder
 	// reads through (a TLS layer over a readTrackingConn), when that layer
@@ -215,24 +218,73 @@ func (t *tee) directionState() string {
 	return fmt.Sprintf("%s: %s, parser took %d of %d bytes%s", t.dir, where, consumed, t.acceptedBytes(), layer)
 }
 
+// stampView is how a look at a connection's progress takes a chunk in a
+// forwarder's hand, or a read under its TLS layer, that is not stamped yet
+// (heldUnstamped).
+type stampView bool
+
+const (
+	// unstampedInAnyWindow: the chunk can be stamped within any window,
+	// whatever else the connection carried, so it holds them all, for the
+	// moment between the Read and the stamp. The verdict looks so
+	// (Watermark.behind): it must not be final while a chunk can still land
+	// in its window.
+	unstampedInAnyWindow stampView = true
+	// stampsOnly: the chunk is passed over until it is stamped, and the
+	// stamps decide. Watermark.HeldProgress looks so: it counts the
+	// connections the stamps show behind a window, and one that carried
+	// nothing within it, or whose parser is past it, would otherwise move the
+	// count each time its forwarder stamps a chunk.
+	stampsOnly stampView = false
+)
+
 // carriedNothingIn reports whether this connection carried no byte stamped
 // within [start, end]: its first chunk came after end, or its newest before
-// start with none in the forwarders' hands or their TLS layers'.
-func (r *Relay) carriedNothingIn(start, end int64) bool {
-	inHand := r.teeC2D.progress.layer.Load() != 0 || r.teeD2C.progress.layer.Load() != 0 ||
-		r.teeC2D.progress.held.Load() != 0 || r.teeD2C.progress.held.Load() != 0
+// start. A chunk in a forwarder's hand counts by its stamp once it has one: the
+// stamp is final (noteCarried), and a window it falls in is held by
+// passedThrough until the parser has the chunk. So a forwarder whose Write to a
+// slow reader blocks, or that is descheduled before it queues the chunk, holds
+// only the windows that chunk was stamped in, not every later one. Bytes in
+// the hand of the TLS layer a forwarder reads through count the same, by the
+// stamp of the read that brought them (layer), which the record the layer
+// hands on takes: the layer keeps that mark while the forwarder holds the
+// record, as it reads again only on the forwarder's next Read, so a TLS
+// forwarder blocked in its Write holds no later window either. A mark not
+// stamped yet (heldUnstamped) is taken as view says. The marks are read
+// before first and last: noteCarried stores held first, and the layer clears
+// its mark only as it reads again, after the forwarder has stored the stamps
+// of every chunk from the read before, so a stamp this look missed in first
+// or last is in a mark, or taken after the look (a record a layer hands on
+// over a read it makes inside the forwarder's Read takes that read's stamp,
+// or the forwarder's, both after the mark they follow was cleared and seen
+// clear), and a mark's stamp counts toward the connection's
+// first as well as its newest (a direction's first chunk is in held, and for
+// TLS in layer, before it is in first).
+func (r *Relay) carriedNothingIn(start, end int64, view stampView) bool {
+	marks := [4]int64{
+		r.teeC2D.progress.layer.Load(), r.teeD2C.progress.layer.Load(),
+		r.teeC2D.progress.held.Load(), r.teeD2C.progress.held.Load(),
+	}
 	first := minNonZero(r.teeC2D.progress.first.Load(), r.teeD2C.progress.first.Load())
+	newest := max(r.teeC2D.progress.last.Load(), r.teeD2C.progress.last.Load())
+	for _, m := range marks {
+		if m == heldUnstamped {
+			if view == unstampedInAnyWindow {
+				return false
+			}
+			continue
+		}
+		first = minNonZero(first, m)
+		newest = max(newest, m)
+	}
 	if first == 0 {
 		// Nothing read yet: whatever it reads is stamped from now on.
-		return !inHand
+		return true
 	}
 	if first > end {
 		return true
 	}
-	if inHand {
-		return false
-	}
-	return max(r.teeC2D.progress.last.Load(), r.teeD2C.progress.last.Load()) < start
+	return newest < start
 }
 
 func minNonZero(a, b int64) int64 {
@@ -255,10 +307,13 @@ func minNonZero(a, b int64) int64 {
 // the middle of a chunk is taken as done with it: the same reading the
 // enterprise capture watermark makes of such a parser.
 //
+// A chunk in a forwarder's hand not stamped yet is taken as view says.
+//
 // When it is not done it says why (for what holds the watermark).
-func (r *Relay) passedThrough(t int64) (bool, string) {
+func (r *Relay) passedThrough(t int64, view stampView) (bool, string) {
 	for _, tt := range [2]*tee{r.teeC2D, r.teeD2C} {
-		if at, unstamped, ok := tt.oldestUnconsumed(); ok && (unstamped || at <= t) {
+		at, unstamped, ok := tt.oldestUnconsumed()
+		if ok && (unstamped && view == unstampedInAnyWindow || !unstamped && at <= t) {
 			return false, tt.directionState()
 		}
 	}
@@ -266,7 +321,7 @@ func (r *Relay) passedThrough(t int64) (bool, string) {
 	if last > t {
 		return true, ""
 	}
-	if r.caughtUp() {
+	if r.caughtUp(view) {
 		return true, ""
 	}
 	return false, fmt.Sprintf("parser is working on what it took (last read %s); %s; %s",
@@ -275,15 +330,18 @@ func (r *Relay) passedThrough(t int64) (bool, string) {
 
 // caughtUp reports whether the parser has consumed every byte the connection
 // carried and is blocked waiting for more on at least one direction, and
-// stayed so across the look.
-func (r *Relay) caughtUp() bool {
+// stayed so across the look. A chunk in a forwarder's hand not stamped yet is
+// taken as view says: with stampsOnly it is not yet carried.
+func (r *Relay) caughtUp(view stampView) bool {
 	wc, nc := r.clientStream.Waiting()
 	wd, nd := r.destStream.Waiting()
 	if !wc && !wd {
 		return false
 	}
 	for _, tt := range [2]*tee{r.teeC2D, r.teeD2C} {
-		if tt.progress.held.Load() != 0 || tt.consumed == nil || tt.consumed() < tt.acceptedBytes() {
+		held := tt.progress.held.Load()
+		if held > 0 || held == heldUnstamped && view == unstampedInAnyWindow ||
+			tt.consumed == nil || tt.consumed() < tt.acceptedBytes() {
 			return false
 		}
 	}
