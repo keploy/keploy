@@ -311,6 +311,12 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 						if want && (ln.Kind != KindVariable || ln.From.Mock != "mock-4") || !want && ln.Kind != KindNoise {
 							t.Errorf("%s, no protocol-phase answer's clock read (early %v), F's value in no payload, %s, typed %v: %s from %q; want a variable %v", recorded[i], m == early, wname, typed, ln.Kind, ln.From.Mock, want)
 						}
+						// The variable names the field the value stands
+						// in, as the mock file names it: held whole as
+						// the reading writes it, the receive's body.
+						if sameText(recorded[i], typed) && (ln.From.Field != "spec.resp.body" || !strings.Contains(ln.Why, "mock-4 at spec.resp.body")) {
+							t.Errorf("%s, held whole (early %v), %s, typed %v: from %q at %q (%s); want it named at mock-4's spec.resp.body", recorded[i], m == early, wname, typed, ln.From.Mock, ln.From.Field, ln.Why)
+						}
 					}
 				}
 			}
