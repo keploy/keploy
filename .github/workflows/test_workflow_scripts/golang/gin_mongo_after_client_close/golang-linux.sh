@@ -26,8 +26,11 @@
 #     the app after its close ("did not take what the destination sent it
 #     after", --debug, on a connection to 27017);
 #   - when keploy record exits non-zero, logs an ERROR or a data race;
-#   - unless keploy test then passes the three test cases (a sanity check of
+#   - unless keploy test then passes the two test cases (a sanity check of
 #     the recording; a replay of main's recording passes too).
+# The two test cases are the sample's POST /url calls, which only MongoDB
+# answers. The lane leaves out the sample's GET /verify-email: it resolves a
+# public mail domain's MX record, and no test case may depend on public DNS.
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_scripts/docker-build-retry.sh"
@@ -80,7 +83,7 @@ record_bad() {
     awk '(/ERROR/ && !/failed to read from connection.*use of closed network connection/) || /WARNING: DATA RACE/ { print; found = 1 } END { exit !found }' "$1"
 }
 app_listening() { (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; }
-three_captured() { log_captured record.txt post-url:2 get-verify-email:1; }
+two_captured() { log_captured record.txt post-url:2; }
 
 # keploy record and the tee that copies its output to the step's log are both
 # this shell's own background jobs, joined by a FIFO (as go-retry.sh joins go
@@ -101,11 +104,9 @@ curl --fail --show-error --max-time 30 --request POST --url http://localhost:808
     --header 'content-type: application/json' --data '{"url": "https://facebook.com"}' || exit 1
 curl --fail --show-error --max-time 30 --request POST --url http://localhost:8080/url \
     --header 'content-type: application/json' --data '{"url": "https://google.com"}' || exit 1
-curl --fail --show-error --max-time 30 --request GET \
-    --url 'http://localhost:8080/verify-email?email=test@gmail.com' --header 'Accept: application/json' || exit 1
-# Stopped as soon as keploy has the three test cases: inside the monitor's
+# Stopped as soon as keploy has the two test cases: inside the monitor's
 # first awaitable wait.
-await_ready "the three test cases" "$rec_pid" record.txt record_bad three_captured || exit 1
+await_ready "the two test cases" "$rec_pid" record.txt record_bad two_captured || exit 1
 echo "stopping keploy record (pid $rec_keploy)"
 kill -INT "$rec_keploy" 2>/dev/null || true
 wait_recording_end "$rec_pid" record.txt || exit 1
@@ -158,8 +159,8 @@ report=./keploy/reports/test-run-0/test-set-0-report.yaml
 status=$(grep -m1 '^status:' "$report" 2>/dev/null | awk '{print $2}')
 total=$(grep -m1 '^total:' "$report" 2>/dev/null | awk '{print $2}')
 echo "$(basename "$report"): ${status:-none}, ${total:-0} tests"
-if [ "$status" != "PASSED" ] || [ "${total:-0}" -ne 3 ]; then
-    echo "::error::keploy test did not pass the three recorded test cases"
+if [ "$status" != "PASSED" ] || [ "${total:-0}" -ne 2 ]; then
+    echo "::error::keploy test did not pass the two recorded test cases"
     exit 1
 fi
 echo "✅ no reply sent after the app's close was recorded, and the recording replays"
