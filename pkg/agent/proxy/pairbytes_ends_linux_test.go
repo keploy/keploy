@@ -77,7 +77,7 @@ func TestAResetAfterTheTargetWasReadIsNoLoss(t *testing.T) {
 	}
 }
 
-// The proxy resets the connection itself (resetOnClose, a refused mock.real
+// The proxy resets the connection itself (util.ResetOnClose, a refused mock.real
 // destination) after every byte arrived: nothing the application wrote was
 // lost.
 func TestTheProxysResetAfterTheBytesArrivedIsNoLoss(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"go.keploy.io/server/v3/pkg/agent"
-	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -206,8 +205,8 @@ type noSessionPassthrough struct {
 func (pt *noSessionPassthrough) end(abort bool) {
 	pt.once.Do(func() {
 		if abort {
-			resetOnClose(pt.src)
-			resetOnClose(pt.dst)
+			util.ResetOnClose(pt.src)
+			util.ResetOnClose(pt.dst)
 		}
 		_ = pt.src.Close()
 		_ = pt.dst.Close()
@@ -235,25 +234,6 @@ func (pt *noSessionPassthrough) relay() {
 	for i := 0; i < 2; i++ {
 		if err := <-done; err != nil {
 			pt.end(true)
-		}
-	}
-}
-
-// resetOnClose makes c's socket send a reset rather than a FIN when it is
-// closed (SO_LINGER 0), looking beneath the wrappers the proxy puts on its
-// connections. It does nothing to a connection with no TCP socket beneath it.
-func resetOnClose(c net.Conn) {
-	for i := 0; i < 8 && c != nil; i++ { // bounded: a cycle must not hang
-		switch v := c.(type) {
-		case interface{ SetLinger(sec int) error }:
-			_ = v.SetLinger(0)
-			return
-		case *connseq.Upstream:
-			c = v.Conn
-		case interface{ NetConn() net.Conn }:
-			c = v.NetConn()
-		default:
-			return
 		}
 	}
 }

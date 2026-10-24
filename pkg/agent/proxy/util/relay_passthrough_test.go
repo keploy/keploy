@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -751,5 +754,144 @@ func TestRelayRawPassthrough_CleanThenResetReturnsPromptly(t *testing.T) {
 			"were already available, so there was nothing to drain — waiting anyway burns a "+
 			"full window of dead time on every clean-then-reset connection, and in production "+
 			"that window is %v.", elapsed, testDrainIdle, RelayDrainIdle)
+	}
+}
+
+// TestRelayRawPassthrough_PassesAResetOnAndEndsOnIt: a peer that resets is
+// gone both ways, so the other peer is reset too and the relay ends on that
+// event, with no survivor drain.
+//
+// The client orientation is the eager client: it speaks, then closes with
+// the reply unread, which the kernel turns into a reset. Its destination is
+// left waiting for the next request (an SMTP server after its reply). Before
+// the fix the reset was not passed on, the destination never learned the
+// client was gone, and the relay waited out a whole idle window on it: 30s
+// per connection in production, TestAMarkedDestinationKeepsItsMarkWithoutEvidence
+// stalling under load.
+//
+// No clock decides anything here. The drain is an event the test sees (it is
+// handed to relayRaw), and so is the waiting peer's read, which returns when
+// the test closes the relay's sockets as its caller does.
+func TestRelayRawPassthrough_PassesAResetOnAndEndsOnIt(t *testing.T) {
+	for _, destResets := range []bool{false, true} {
+		name := "the client resets"
+		if destResets {
+			name = "the destination resets"
+		}
+		t.Run(name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			appSide, appPeer := tcpPair(t, ln)
+			destSide, destPeer := tcpPair(t, ln)
+			t.Cleanup(func() {
+				_ = appSide.Close()
+				_ = appPeer.Close()
+				_ = destSide.Close()
+				_ = destPeer.Close()
+			})
+
+			drained := make(chan struct{})
+			returned := make(chan struct{})
+			go func() {
+				relayRaw(NewSafeConn(appSide, zap.NewNop()), NewSafeConn(destSide, zap.NewNop()),
+					func(finished <-chan copyOutcome, _ func() int64) {
+						close(drained)
+						<-finished // the test's close of the sockets ends it
+					})
+				close(returned)
+			}()
+
+			// The request reaches the destination, which then waits.
+			req := []byte("EHLO eager\r\n")
+			if _, err := appPeer.Write(req); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := io.ReadFull(destPeer, make([]byte, len(req))); err != nil {
+				t.Fatalf("the request did not reach the destination: %v", err)
+			}
+
+			gone, waiting := appPeer, destPeer
+			if destResets {
+				gone, waiting = destPeer, appPeer
+			}
+			if err := gone.(*net.TCPConn).SetLinger(0); err != nil {
+				t.Fatalf("linger: %v", err)
+			}
+			_ = gone.Close()
+
+			select {
+			case <-returned:
+			case <-drained:
+				t.Fatal("the relay waited on a survivor after a peer reset. The survivor writes " +
+					"to the peer that is gone, so it can deliver nothing, and the other peer, " +
+					"never told, waits for the next request: the relay holds the connection " +
+					"for a whole idle window, " + RelayDrainIdle.String() + " in production")
+			}
+			// The caller closes the real sockets once the relay returns.
+			_ = appSide.Close()
+			_ = destSide.Close()
+			_, err = waiting.Read(make([]byte, 1))
+			if !neterr.IsConnReset(err) {
+				t.Fatalf("the waiting peer read %v; want a reset. A FIN, or nothing, tells it "+
+					"the other peer ended cleanly or is still there, when it reset", err)
+			}
+		})
+	}
+}
+
+// TestRelayRawPassthrough_AResetWriteStillDrainsTheSurvivor: a write that
+// fails with a reset says the DESTINATION of that write is gone, not the
+// source of the copy. The other direction reads that gone peer and may still
+// hold what it sent before its reset (a server's 413 before it resets an
+// upload it will not read), so the relay drains it rather than ending at
+// once, and the source is not reset. Telling the two apart is why the relay
+// reads the error of the copy's source (ReadRecorder) and not io.Copy's.
+func TestRelayRawPassthrough_AResetWriteStillDrainsTheSurvivor(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	appSide, appPeer := tcpPair(t, ln)
+	destSide, destPeer := tcpPair(t, ln)
+	t.Cleanup(func() {
+		_ = appSide.Close()
+		_ = appPeer.Close()
+		_ = destSide.Close()
+		_ = destPeer.Close()
+	})
+
+	drained := make(chan struct{})
+	returned := make(chan struct{})
+	dest := &deadWriteConn{Conn: destSide, writeErr: &net.OpError{Op: "write", Net: "tcp",
+		Err: &os.SyscallError{Syscall: "write", Err: syscall.ECONNRESET}}}
+	go func() {
+		relayRaw(NewSafeConn(appSide, zap.NewNop()), NewSafeConn(dest, zap.NewNop()),
+			func(finished <-chan copyOutcome, _ func() int64) {
+				close(drained)
+				<-finished
+			})
+		close(returned)
+	}()
+	if _, err := appPeer.Write([]byte("upload")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case <-drained:
+	case <-returned:
+		t.Fatal("the relay ended at once on a failed write, as if the copy's source had reset. " +
+			"The survivor still reads the gone peer and may hold its last reply; ending now " +
+			"lets the caller's close drop it")
+	}
+	reply := []byte("413 too large\r\n")
+	if _, err := destPeer.Write(reply); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(reply))
+	if _, err := io.ReadFull(appPeer, got); err != nil || !bytes.Equal(got, reply) {
+		t.Fatalf("the client got %q, %v; want the destination's reply %q", got, err, reply)
 	}
 }

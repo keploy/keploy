@@ -1156,6 +1156,10 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 type copyOutcome struct {
 	idx int
 	err error
+	// peerReset is set when the copy's SOURCE peer reset the connection
+	// (PassOnReset): that peer is gone both ways, so the other direction,
+	// which writes to it, has nothing left to deliver.
+	peerReset bool
 }
 
 // WaitForSurvivor blocks until the surviving copy direction finishes or
@@ -1199,8 +1203,12 @@ func WaitForSurvivor[T any](finished <-chan T, delivered func() int64, idle time
 // same way for all of these, so err is the only thing that separates
 // them.
 //
-// WHEN ONE DIRECTION BREAKS, LET THE OTHER KEEP GOING WHILE IT IS STILL
-// MAKING PROGRESS, and abandon it only once it stalls.
+// PASS A RESET ON AS A RESET, AND END ON IT. A peer that resets is gone in
+// both directions, so the other peer is reset too (PassOnReset) and the
+// relay returns at once: there is no survivor to wait for.
+//
+// WHEN ONE DIRECTION BREAKS OTHERWISE, LET THE OTHER KEEP GOING WHILE IT IS
+// STILL MAKING PROGRESS, and abandon it only once it stalls.
 //
 // Waiting unconditionally wedges the CALLER, and that is the cost worth
 // naming. The survivor is blocked reading a socket whose peer will never
@@ -1231,22 +1239,45 @@ func RelayRawPassthrough(clientConn, destConn net.Conn) {
 // production window. Production has exactly one caller, above, and it
 // always passes RelayDrainIdle.
 func relayRawPassthrough(clientConn, destConn net.Conn, idle time.Duration) {
+	relayRaw(clientConn, destConn, func(finished <-chan copyOutcome, delivered func() int64) {
+		WaitForSurvivor(finished, delivered, idle)
+	})
+}
+
+// relayRaw is the relay with the survivor drain as a parameter, so a test
+// can see whether the relay waits on a survivor at all, as an event, without
+// a clock.
+func relayRaw(clientConn, destConn net.Conn, drain func(finished <-chan copyOutcome, delivered func() int64)) {
 	done := make(chan copyOutcome, 2)
 	// counters[i] counts what direction i has delivered to its destination.
 	// Both are built before either goroutine starts.
 	counters := [2]*countingWriter{{w: destConn}, {w: clientConn}}
 	cp := func(idx int, dst, src net.Conn) {
-		_, err := io.Copy(counters[idx], src)
+		from := &ReadRecorder{R: src}
+		_, err := io.Copy(counters[idx], from)
 		if err == nil {
 			_ = CloseWriteIfPossible(dst)
 		}
-		done <- copyOutcome{idx: idx, err: err}
+		// Passed on the moment it is seen, whichever direction sees it
+		// and whenever: a reset that ends the survivor during a drain
+		// reaches the other peer too.
+		reset := err != nil && PassOnReset(dst, from.Err)
+		done <- copyOutcome{idx: idx, err: err, peerReset: reset}
 	}
 	go cp(0, destConn, clientConn)
 	go cp(1, clientConn, destConn)
 
 	for i := 0; i < 2; i++ {
 		res := <-done
+		// A peer that reset is gone both ways. The survivor writes to it,
+		// so there is nothing left to drain: end on this event, and the
+		// caller's close sends the reset PassOnReset passed on. Draining
+		// instead waits out a whole idle window on a destination that is
+		// waiting for the gone client's next request (an eager client
+		// that closes with the reply unread resets; 30s per connection).
+		if res.peerReset {
+			return
+		}
 		if res.err == nil {
 			continue
 		}
@@ -1258,7 +1289,7 @@ func relayRawPassthrough(clientConn, destConn net.Conn, idle time.Duration) {
 		}
 		// Let the survivor run while it is still delivering. The survivor
 		// is the direction that did NOT just report.
-		WaitForSurvivor(done, counters[1-res.idx].n.Load, idle)
+		drain(done, counters[1-res.idx].n.Load)
 		return
 	}
 }
