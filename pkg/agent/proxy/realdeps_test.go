@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -907,22 +910,32 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			if pre != nil {
 				pre.CloseIfUnused()
 			}
-			// A listener hands its connections on in the order they reached
-			// it, and drops one still in its queue when it closes, uncounted.
-			// So take every accept up to a connection dialled after all the
-			// others before closing it.
+			// A listener drops a connection still in its queue when it
+			// closes, uncounted. So before closing it, the test dials one
+			// more connection and takes accepts until that one and every
+			// other connection the test dialled have been accepted, in
+			// whatever order they come: a connect can return before the
+			// destination's side of it is queued. A connection the run
+			// itself dialled (keploy relaying, which this checks it never
+			// does) is caught if it was accepted by then: the last dial
+			// gives it that long, and cannot make sure of it.
 			last, err := net.Dial("tcp", dst)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = last.Close() })
-			var reached []string
-			for {
-				from := awaitEvent(t, acceptedFrom, "the destination accepting the connection dialled last")
-				if from == last.LocalAddr().String() {
-					break
-				}
-				reached = append(reached, from)
+			lastFrom := last.LocalAddr().String()
+			awaited := map[string]bool{lastFrom: true}
+			for _, from := range dialled {
+				awaited[from] = true
 			}
-			require.Equal(t, dialled, reached, "the connections the destination accepted")
+			var accepted []string // in the order the destination took them
+			for len(awaited) > 0 {
+				from := awaitEvent(t, acceptedFrom, fmt.Sprintf("the destination accepting %v (it has accepted %v; the last dial is from %s)",
+					slices.Sorted(maps.Keys(awaited)), accepted, lastFrom))
+				delete(awaited, from)
+				accepted = append(accepted, from)
+			}
+			reached := slices.DeleteFunc(slices.Clone(accepted), func(from string) bool { return from == lastFrom })
+			require.ElementsMatch(t, dialled, reached, "the connections the destination accepted")
 			_ = ln.Close()
 			awaitEvent(t, acceptLoop, "the destination's accept loop ending")
 			run := p.RealRun()
