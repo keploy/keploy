@@ -820,7 +820,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
 					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
-					if fol.excused(i, t, recorded, e.Mock, s.Leaf.Path, why) {
+					if fol.excusedSeen(e, ed, i, t, at, why) {
 						continue
 					}
 					return why
@@ -841,13 +841,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				if x.at.Equal(at) {
 					note = atCallNote
 				}
-				at := x.mock + "'s payload"
+				place := x.mock + "'s payload"
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
-					at = x.mock + " at " + f
+					place = x.mock + " at " + f
 				}
-				at += note
-				why := word(t, recorded) + " appears in an earlier recording, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
-				if fol.excused(i, t, recorded, x.mock, "", why) {
+				place += note
+				why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				if fol.excusedRaw(x, i, t, at, why) {
 					continue
 				}
 				return why

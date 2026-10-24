@@ -365,9 +365,6 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
-	// Pending, of a provisional reading (KindPending), is what record's
-	// full round saw, for the confirming round to decide (Pending.Decide).
-	Pending *Pending
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -448,12 +445,11 @@ type GivenEarlier func() ([]GivenPlaces, error)
 // earlier in the set (given; nil: none), which the offset rule, the word rule
 // and the echo of what F gave there read beside raw's.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
-	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, followNone, nil)
+	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, false)
 }
 
-// classifyGiven is ClassifyGiven, its word rule read as mode says
-// (follows.go): pending is the reading the confirming round decides
-// (followC).
+// classifyGiven is ClassifyGiven, its word rule read under the rule a copy
+// follows its source where follow is set (ClassifyFollowing, follows.go).
 //
 // A recording record's full round gave the application before the call that
 // was made at the call's own instant (a fixture's whole second, or two calls
@@ -472,17 +468,17 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 // served there, and refuses it. A value the first reading binds (a variable
 // or an echo) and the second refuses is refused too, and its reason names
 // where the first would have bound it (stricterOf): fail closed.
-func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, mode followMode, pending *Pending) []Learned {
+func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
 	given = givenOnce(given)
-	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, mode, pending)
+	out := classifyRead(dc, drift, live, rec, at, earlier, raw, resp, w, given, follow)
 	late, ok := givenAtCall(raw, at, given)
 	if !ok {
 		return out
 	}
-	alone := classifyRead(dc, drift, live, rec, at, earlier, late, resp, w, given, mode, pending)
+	alone := classifyRead(dc, drift, live, rec, at, earlier, late, resp, w, given, follow)
 	for i := range out {
 		out[i] = stricterOf(out[i], alone[i])
 	}
@@ -557,8 +553,8 @@ func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
 // stricterOf is the verdict of a drift read two ways (classifyGiven): the
 // refusal of either, the earlier place's (asPlace) first; else what asPlace
 // learned. The second reading reads fewer places of the call's own test and
-// no more of anything else, so it finds no variable, echo or pending word
-// that the first does not: only a refusal of its own.
+// no more of anything else, so it finds no variable or echo that the first
+// does not: only a refusal of its own.
 //
 // A value the earlier place's reading binds (a variable, or an echo) and
 // the late reading refuses is refused too (fail closed): the recording may
@@ -591,7 +587,7 @@ func boundAt(ln Learned) string {
 
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
 // place it is.
-func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, mode followMode, pending *Pending) []Learned {
+func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
 	served := append([]Earlier(nil), earlier...)
 	sort.SliceStable(served, func(i, j int) bool { return served[i].At.Before(served[j].At) })
 	unreadRaw := rawUnread(raw)
@@ -636,8 +632,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
-		if mode != followNone {
-			fol = &follows{dc: dc, at: at, served: served, raw: raw, live: l.Value, pending: pending}
+		if follow {
+			fol = &follows{dc: dc, rec: r.Value, live: l.Value}
 		}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw); ok {
@@ -699,16 +695,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 		}
 		// Words the word rule let go in record's full round: noise only
-		// once the confirming round shows the value follows none of them
-		// (Pending.Decide); anything else they stood beside is refused as
-		// the word rule refuses them.
-		if mode == followF && len(fol.words) > 0 {
+		// where the recording and F gave the application the places before
+		// the call in the same order (follows.followed); an echo they stood
+		// beside is refused as the word rule refuses them.
+		if fol != nil && fol.first != "" {
 			switch ln.Kind {
 			case KindNoise:
-				ln.Kind, ln.Pending = KindPending, pendingOf(r, l, at, served, raw, fol.words)
-				ln.Why = pendingWhy(fol.words[0])
+				ln = fol.followed(ln, at, served, all)
 			case KindEcho:
-				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.words[0].Why, nil
+				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.first, nil
 			}
 		}
 		out = append(out, ln)

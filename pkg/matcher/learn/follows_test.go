@@ -1,12 +1,12 @@
 package learn
 
-// Rows of the rule a copy follows its source (follows.go), from the Flyway
-// item's probe: Flyway's start-up INSERT into flyway_schema_history binds
-// execution_time, the milliseconds the migration took (82 at record, a digit
-// or two in each replay round), whose live word is a word of an earlier
-// start-up recording's payload that does not drift ("1" of "SELECT 1", "16"
-// of "PostgreSQL 16.4"). Record's full round answers it provisionally and
-// the confirming round decides.
+// Rows of the rule a copy follows its source (follows.go), the recording
+// being the second observation: record's full round (F) decides alone. From
+// the Flyway item's probe: Flyway's start-up INSERT into
+// flyway_schema_history binds execution_time, the milliseconds the migration
+// took (82 at record, a digit or two in F), whose word is a word of an
+// earlier start-up recording's payload that does not drift ("1" of "SELECT
+// 1", "16" of "PostgreSQL 16.4").
 
 import (
 	"strings"
@@ -19,310 +19,231 @@ import (
 // eRecAt is the recorded instant of the INSERT (the lane's recording).
 var eRecAt = time.Date(2026, 10, 24, 9, 55, 53, 938177550, time.UTC)
 
+// ePg is a Postgres query recording made before eRecAt, answering rows and
+// tag: a start-up place whose words the application may copy.
+func ePg(name string, before time.Duration, sql string, rows []models.PostgresV3Cells, tag string) Raw {
+	return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: eRecAt.Add(-before),
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
+			SQLNormalized: sql,
+			Response:      &models.PostgresV3Response{Rows: rows, CommandComplete: tag},
+		}},
+	}}, false)
+}
+
 // eStartup is what the application received before the INSERT, at record
-// and (served from these recordings) in F and C: the JDBC session set-up,
-// HikariCP's validation query, Flyway's server probe, the schema-history
-// table, and the migration's own seed row. None of it drifts.
+// and, served from these recordings in the order they were recorded, in F:
+// the JDBC session set-up, HikariCP's validation query, Flyway's server
+// probe, the schema-history table, and the migration's own seed row. None of
+// it drifts.
 func eStartup() []Raw {
-	pg := func(name string, before time.Duration, sql string, rows []models.PostgresV3Cells, tag string) Raw {
-		return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
-			ReqTimestampMock: eRecAt.Add(-before),
+	raw := []Raw{
+		ePg("mock-0", 900*time.Millisecond, "SET application_name = 'PostgreSQL JDBC Driver'", nil, "SET"),
+		ePg("mock-1", 850*time.Millisecond, "SELECT 1", []models.PostgresV3Cells{{{Value: "1"}}}, "SELECT 1"),
+		ePg("mock-2", 800*time.Millisecond, "SELECT version()", []models.PostgresV3Cells{{{Value: "PostgreSQL 16.4 (Debian 16.4-1.pgdg120+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit"}}}, "SELECT 1"),
+		ePg("mock-3", 300*time.Millisecond, `CREATE TABLE "public"."flyway_schema_history" ("installed_rank" INT NOT NULL, "execution_time" INTEGER NOT NULL)`, nil, "CREATE TABLE"),
+		ePg("mock-4", 200*time.Millisecond, "INSERT INTO customer (name, tier) VALUES ('Acme', 'gold')", nil, "INSERT 0 1"),
+	}
+	for i := range raw {
+		raw[i] = raw[i].ServedAs(i + 1)
+	}
+	return raw
+}
+
+// classifyF is record's full round's verdict on the call, recorded with
+// recorded at path and seen with live, under the rule a copy follows its
+// source.
+func classifyF(t *testing.T, recorded, live string, earlier []Earlier, raw []Raw, resp []Leaf) Learned {
+	t.Helper()
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
+	got := ClassifyFollowing(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
+	}
+	return got[0]
+}
+
+// with is raw with its i-th place replaced by x.
+func with(raw []Raw, i int, x Raw) []Raw {
+	out := append([]Raw(nil), raw...)
+	out[i] = x
+	return out
+}
+
+// Flyway's execution_time, 82 at record, a start-up word in F: the recording
+// gave the application that word at the same place before the call and its
+// value lacked it, so the value is no copy of it, and it is learned as
+// varying (noise) in F alone. ClassifyGiven, the rule's absence, still
+// refuses it.
+func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
+	for _, tc := range []struct{ f, matched string }{
+		{"1", `"1" of SELECT 1 and INSERT 0 1`},
+		{"16", `"16" of PostgreSQL 16.4`},
+		{"4", `"4" of PostgreSQL 16.4`},
+		{"0", `"0" of INSERT 0 1`},
+		{"64", `"64" of 64-bit`},
+	} {
+		if got := classifyF(t, "82", tc.f, nil, eStartup(), nil); got.Kind != KindNoise {
+			t.Errorf("execution_time 82 at record, %s in F (%s): %s (%q), want noise", tc.f, tc.matched, got.Kind, got.Why)
+		}
+		path := "bind.$8"
+		today := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
+		if today[0].Kind != KindUnaccounted {
+			t.Errorf("ClassifyGiven, execution_time 82 at record, %s in F: %s, want refused (the rule is ClassifyFollowing's)", tc.f, today[0].Kind)
+		}
+	}
+}
+
+// eLeaf is an exchange record's full round served before the call, recorded
+// at at, served as the n-th serve of the set, whose leaf body.retries held
+// recorded at record and was served as live.
+func eLeaf(at time.Time, n int, recorded, live string) Earlier {
+	return Earlier{Mock: "mock-8", At: at, Payload: payloadOf("mock-8", at).ServedAs(n), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.retries", Type: Number, Value: recorded}, Live: live},
+	}}
+}
+
+// The rule holds for every kind of word the word rule finds: one the value
+// F saw holds (found as F gave it) or one the recorded value held (found as
+// the recording gave it), at a recording's payload or at a leaf of an
+// exchange F served. Each is noise where both runs gave the word there
+// before the call and the value of one of them lacks it; and refused, saying
+// which condition failed, where the recording did not give it (made at or
+// after the call, or the leaf's recorded text lacks it: a real echo, whose
+// source moved with it), where F did not (not served, or served drifted),
+// where both values hold it, or where keploy cannot read when the recording
+// gave it.
+func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
+	before := eRecAt.Add(-50 * time.Millisecond)
+	const (
+		noRec   = "the recording did not give the application that word there before the call"
+		noF     = "record's full round did not give the application that word there before the call"
+		both    = "the recorded value and the value record's full round saw both hold that word"
+		untimed = "keploy cannot read when the recording gave the application mock-1 (its mock holds no recorded time)"
+	)
+	mock1 := func(at time.Time) Raw {
+		return RawOf(&models.Mock{Name: "mock-1", Kind: models.PostgresV3, Spec: models.MockSpec{
+			ReqTimestampMock: at,
 			PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
-				SQLNormalized: sql,
-				Response:      &models.PostgresV3Response{Rows: rows, CommandComplete: tag},
+				SQLNormalized: "SELECT 1", Response: &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: "1"}}}, CommandComplete: "SELECT 1"},
 			}},
 		}}, false)
 	}
-	return []Raw{
-		pg("mock-0", 900*time.Millisecond, "SET application_name = 'PostgreSQL JDBC Driver'", nil, "SET"),
-		pg("mock-1", 850*time.Millisecond, "SELECT 1", []models.PostgresV3Cells{{{Value: "1"}}}, "SELECT 1"),
-		pg("mock-2", 800*time.Millisecond, "SELECT version()", []models.PostgresV3Cells{{{Value: "PostgreSQL 16.4 (Debian 16.4-1.pgdg120+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit"}}}, "SELECT 1"),
-		pg("mock-3", 300*time.Millisecond, `CREATE TABLE "public"."flyway_schema_history" ("installed_rank" INT NOT NULL, "execution_time" INTEGER NOT NULL)`, nil, "CREATE TABLE"),
-		pg("mock-4", 200*time.Millisecond, "INSERT INTO customer (name, tier) VALUES ('Acme', 'gold')", nil, "INSERT 0 1"),
-	}
-}
+	for _, tc := range []struct {
+		name           string
+		recorded, live string
+		earlier        []Earlier
+		raw            []Raw
+		want           string // "" noise; else the refusal holds it
+		at             string // the place the refusal names
+	}{
+		{"F's word, at a payload both gave", "82", "1", nil, eStartup(), "", ""},
+		{"F's word, at a leaf both gave", "took 82 ms", "took 7 ms", []Earlier{eLeaf(before, 6, "7", "7")}, eStartup(), "", ""},
+		{"the recorded word, at a leaf both gave", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "82")}, eStartup(), "", ""},
+		{"F's word, at the test case's request both gave", "took 82 ms", "took 7 ms", []Earlier{{Mock: givenPlace("test-1"), Given: true, Seen: []Seen{
+			{Side: Request, Leaf: Leaf{Path: "body.retries", Type: Number, Value: "7"}, Live: "7"},
+		}}}, eStartup(), "", ""},
 
-// eRound is one replay round's observation of the call: the value the
-// application bound for the drifted field, and the earlier places that
-// round read (Seen leaves carry what that round served, in Live).
-type eRound struct {
-	name    string
-	live    string
-	earlier []Earlier
-	raw     []Raw
-}
-
-func eRounds(f, c string) []eRound {
-	return []eRound{{name: "F", live: f, raw: eStartup()}, {name: "C", live: c, raw: eStartup()}}
-}
-
-// Flyway's execution_time changes between F and C while every word it
-// matched stays as recorded: it was copied from none of them, so it is
-// learned as varying (noise), whichever start-up word each round's value
-// happens to equal.
-func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
-	for _, tc := range []struct{ f, c, matched string }{
-		{"1", "3", `"1" of SELECT 1, INSERT 0 1 (F)`},
-		{"3", "1", `"1" (C only)`},
-		{"16", "4", `"16" of PostgreSQL 16.4 (F), "4" of it (C)`},
-		{"0", "1", `"0" of INSERT 0 1 (F), "1" (C): both fixed words, the value moved`},
-		{"1", "82", "C binds the recorded value again"},
+		{"F's word, at a payload F served that was recorded after the call", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(10*time.Millisecond)).ServedAs(2)), noRec, "mock-1"},
+		{"F's word, at a leaf whose recorded text lacks it (an echo of what F served)", "82", "16", []Earlier{eLeaf(before, 6, "5150", "16")}, eStartup(), noRec, "mock-8"},
+		{"F's word, at a leaf recorded at the call's own instant", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt, 6, "7", "7")}, eStartup(), noRec, "mock-8"},
+		{"F's word, at a leaf recorded after the call", "took 82 ms", "took 7 ms", []Earlier{eLeaf(eRecAt.Add(time.Millisecond), 6, "7", "7")}, eStartup(), noRec, "mock-8"},
+		{"F's word, at a payload F did not serve", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond))), noF, "mock-1"},
+		{"the recorded word, at a leaf F served drifted", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "83")}, eStartup(), noF, "mock-8"},
+		{"a word both values hold", "82 1", "4 1 1", nil, eStartup(), both, "mock-1"},
+		{"a payload whose recorded time keploy cannot read", "82", "1", nil, with(eStartup(), 1, mock1(time.Time{}).ServedAs(2)), untimed, "mock-1"},
+		{"a leaf whose recorded time keploy cannot read", "took 82 ms", "took 7 ms", []Earlier{eLeaf(time.Time{}, 6, "7", "7")}, eStartup(), "keploy cannot read when the recording gave the application mock-8", "mock-8"},
 	} {
-		got := classifyRounds(t, "bind.$8", "82", eRecAt, eRounds(tc.f, tc.c))
-		if got.Kind != KindNoise {
-			t.Errorf("execution_time 82 at record, %s in F, %s in C (%s): %s (%s), want noise", tc.f, tc.c, tc.matched, got.Kind, got.Why)
+		got := classifyF(t, tc.recorded, tc.live, tc.earlier, tc.raw, nil)
+		switch {
+		case tc.want == "" && got.Kind != KindNoise:
+			t.Errorf("%s: %q recorded, %q in F: %s (%q), want noise", tc.name, tc.recorded, tc.live, got.Kind, got.Why)
+		case tc.want != "" && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) || !strings.Contains(got.Why, "in "+tc.at)):
+			t.Errorf("FALSE GREEN? %s: %q recorded, %q in F: %s (%q), want refused naming %s: %q", tc.name, tc.recorded, tc.live, got.Kind, got.Why, tc.at, tc.want)
 		}
 	}
-}
-
-// The control: a value equal to the same fixed word in every replay round
-// may be a copy of it. It stays refused, saying why.
-func TestEAValueEqualToTheWordInEveryRoundStaysRefused(t *testing.T) {
-	for _, tc := range []struct{ f, c string }{{"1", "1"}, {"16", "16"}, {"0", "0"}} {
-		got := classifyRounds(t, "bind.$8", "82", eRecAt, eRounds(tc.f, tc.c))
-		if got.Kind != KindUnaccounted || got.Why == "" {
-			t.Errorf("execution_time 82 at record, %s in F and in C, beside a fixed %q: %s (%q), want refused with a reason", tc.f, tc.f, got.Kind, got.Why)
+	// A word the recorded value held, at a payload: the recorded value is a
+	// copy of that payload's word as far as the recording shows, and is
+	// bound as a variable there (appearedIn) before the word rule reads it,
+	// whether F served the payload or not. The rule never makes it noise.
+	for _, raw := range [][]Raw{eStartup(), with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond)))} {
+		if got := classifyF(t, "1", "82", nil, raw, nil); got.Kind != KindVariable {
+			t.Errorf("1 recorded beside SELECT 1, 82 in F: %s (%q), want a variable of mock-1", got.Kind, got.Why)
 		}
-	}
-}
-
-// A real echo moves with its source: the earlier exchange F and C served
-// carries this run's value (a served leaf whose Live differs per round), and
-// the bound value equals it in each round. The value changes between rounds,
-// but so does its source: it is still refused. This row kills an (e) that
-// reads "the value changed between F and C" alone as no echo.
-func TestEARealEchoMovesWithItsSourceAndIsRefused(t *testing.T) {
-	served := func(live string) []Earlier {
-		return []Earlier{{Mock: "mock-5", At: eRecAt.Add(-100 * time.Millisecond), Payload: payloadOf("mock-5", eRecAt.Add(-100*time.Millisecond)), Seen: []Seen{
-			{Side: Response, Leaf: Leaf{Path: "rows[0][1]", Type: String, Value: "5150"}, Live: live},
-		}}}
-	}
-	rounds := []eRound{
-		{name: "F", live: "16", earlier: served("16"), raw: eStartup()},
-		{name: "C", live: "7", earlier: served("7"), raw: eStartup()},
-	}
-	got := classifyRounds(t, "bind.$8", "82", eRecAt, rounds)
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-5 at rows[0][1]") {
-		t.Errorf("a value that equals mock-5's served rows[0][1] in F (16) and in C (7): %s (%q), want refused naming mock-5's rows[0][1] (it follows its source)", got.Kind, got.Why)
-	}
-}
-
-// One replay observation is not enough: with only F seen, the drift is not
-// learned as noise (refused, or pending C; see FLOW above).
-func TestEOneReplayRoundIsNotEnough(t *testing.T) {
-	got := classifyRounds(t, "bind.$8", "82", eRecAt, []eRound{{name: "F", live: "1", raw: eStartup()}})
-	if got.Kind == KindNoise || got.Kind == KindVariable {
-		t.Errorf("execution_time 82 at record, 1 in F, C not run: %s, want refused or pending", got.Kind)
-	}
-}
-
-// classifyRounds reads the call in record's full round (the first round)
-// under the rule a copy follows its source, and has the confirming round
-// (the second, when there is one) decide a provisional reading.
-func classifyRounds(t *testing.T, path, recorded string, at time.Time, rounds []eRound) Learned {
-	t.Helper()
-	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
-	f := rounds[0]
-	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: f.live}}}
-	out := ClassifyFollowing(NewDriftCache(), []string{path}, live, rec, at, f.earlier, f.raw, nil, nil, nil)
-	if len(out) != 1 {
-		t.Fatalf("round %s: %+v", f.name, out)
-	}
-	if out[0].Kind != KindPending || len(rounds) == 1 {
-		return out[0]
-	}
-	if out[0].Pending == nil {
-		t.Fatalf("round %s: pending with nothing kept: %+v", f.name, out[0])
-	}
-	c := rounds[1]
-	return out[0].Pending.Decide(NewDriftCache(), Leaf{Path: path, Type: String, Value: c.live}, rec.Leaves[path], at, c.earlier, c.raw, nil, nil, nil)
-}
-
-// Record's full round alone answers the call provisionally: pending, never
-// noise, with a reason that says it is undecided and names the place the
-// word rule found the word at. ClassifyGiven, which no confirming round
-// decides after, still refuses it.
-func TestAProvisionalReadingIsPendingAndSaysWhy(t *testing.T) {
-	path := "bind.$8"
-	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
-	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "1"}}}
-	got := ClassifyFollowing(NewDriftCache(), []string{path}, live, rec, eRecAt, nil, eStartup(), nil, nil, nil)
-	if len(got) != 1 || got[0].Kind != KindPending || got[0].Pending == nil {
-		t.Fatalf("execution_time 82 at record, 1 in record's full round: %+v, want pending", got)
-	}
-	why := got[0].Why
-	for _, want := range []string{"pending, varying or a copy undecided: ", "appears in an earlier recording, in mock-1", "the confirming round decides", "counts as refused"} {
-		if !strings.Contains(why, want) {
-			t.Errorf("pending reason %q lacks %q", why, want)
-		}
-	}
-	if strings.Contains(why, `"1"`) {
-		t.Errorf("pending reason %q holds the value", why)
-	}
-	if p := got[0].Pending; p.Live != "1" || p.Recorded != "82" || len(p.Words) == 0 || len(p.Raw) != len(eStartup()) {
-		t.Errorf("pending kept %+v, want F's value, the recorded one, the words found and the 5 recordings read", p)
-	}
-	today := ClassifyGiven(NewDriftCache(), []string{path}, live, rec, eRecAt, nil, eStartup(), nil, nil, nil)
-	if today[0].Kind != KindUnaccounted {
-		t.Errorf("ClassifyGiven of the same call: %s, want refused (no confirming round decides it)", today[0].Kind)
-	}
-}
-
-// The confirming round decides only from places it gave the application
-// too: where it gave none of the startup recordings before the call, it
-// cannot show the value does not follow their words, and refuses, saying so.
-func TestAConfirmingRoundThatDidNotGiveThePlaceRefuses(t *testing.T) {
-	rounds := []eRound{{name: "F", live: "1", raw: eStartup()}, {name: "C", live: "3"}}
-	got := classifyRounds(t, "bind.$8", "82", eRecAt, rounds)
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the confirming round did not give the application that word there before the call") {
-		t.Errorf("1 in F beside SELECT 1, 3 in C with no start-up recording given: %s (%q), want refused naming the missing place", got.Kind, got.Why)
-	}
-}
-
-// A confirming round whose value still holds the word the place gave shows
-// nothing: refused, saying both rounds held it.
-func TestAConfirmingValueStillHoldingTheWordRefuses(t *testing.T) {
-	got := classifyRounds(t, "bind.$8", "82", eRecAt, eRounds("1", "1 7"))
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "both saw a value holding that word") && !strings.Contains(got.Why, "held that word too") {
-		t.Errorf("1 in F, \"1 7\" in C beside SELECT 1: %s (%q), want refused saying both rounds held the word", got.Kind, got.Why)
-	}
-}
-
-// A word only the recorded value held, found at an earlier exchange that
-// did not drift, is shown no copy by record's full round itself (it gave the
-// word, the value lost it); the value is still noise only where the two
-// rounds saw different values, and refused where they saw the same.
-func TestARecordedWordIsNoiseOnlyWhereTheRoundsSawDifferentValues(t *testing.T) {
-	served := []Earlier{{Mock: "mock-8", At: eRecAt.Add(-50 * time.Millisecond), Payload: payloadOf("mock-8", eRecAt.Add(-50*time.Millisecond)), Seen: []Seen{
-		{Side: Response, Leaf: Leaf{Path: "body.retries", Type: Number, Value: "82"}, Live: "82"},
-	}}}
-	rounds := func(f, c string) []eRound {
-		return []eRound{{name: "F", live: f, earlier: served, raw: eStartup()}, {name: "C", live: c, earlier: served, raw: eStartup()}}
-	}
-	if got := classifyRounds(t, "bind.$8", "took 82 ms", eRecAt, rounds("took 5 ms", "took 6 ms")); got.Kind != KindNoise {
-		t.Errorf("took 82 ms at record beside mock-8's 82, 5 ms in F, 6 ms in C: %s (%q), want noise", got.Kind, got.Why)
-	}
-	got := classifyRounds(t, "bind.$8", "took 82 ms", eRecAt, rounds("took 5 ms", "took 5 ms"))
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the confirming round saw the same value as record's full round") {
-		t.Errorf("took 82 ms at record beside mock-8's 82, 5 ms in F and in C: %s (%q), want refused: two rounds that saw one value", got.Kind, got.Why)
-	}
-}
-
-// The confirming round decides a pending reading of the recording it was
-// made of alone.
-func TestAPendingReadingOfAnotherRecordedValueIsRefused(t *testing.T) {
-	path := "bind.$8"
-	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
-	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "1"}}}
-	got := ClassifyFollowing(NewDriftCache(), []string{path}, live, rec, eRecAt, nil, eStartup(), nil, nil, nil)
-	if got[0].Kind != KindPending {
-		t.Fatalf("F: %s, want pending", got[0].Kind)
-	}
-	d := got[0].Pending.Decide(NewDriftCache(), Leaf{Path: path, Type: String, Value: "3"}, Leaf{Path: path, Type: String, Value: "83"}, eRecAt, nil, eStartup(), nil, nil, nil)
-	if d.Kind != KindUnaccounted || !strings.Contains(d.Why, "another recorded value") {
-		t.Errorf("decided against recorded 83: %s (%q), want refused", d.Kind, d.Why)
 	}
 }
 
 // An echo (the call's recorded answer holds the recorded value) beside a
-// word the word rule found earlier is refused in record's full round, as
-// ClassifyGiven refuses it: only a reading that would be noise is answered
-// provisionally.
-func TestAnEchoBesideAWordFoundEarlierIsRefusedNotPending(t *testing.T) {
-	path := "bind.$8"
-	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
-	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "1"}}}
+// word the word rule let go is refused, naming the word's place, as
+// ClassifyGiven refuses it.
+func TestAnEchoBesideAWordFoundEarlierIsRefused(t *testing.T) {
 	resp := []Leaf{{Path: "rows[0][0]", Type: String, Value: "82"}}
-	got := ClassifyFollowing(NewDriftCache(), []string{path}, live, rec, eRecAt, nil, eStartup(), resp, nil, nil)
-	if got[0].Kind != KindUnaccounted || !strings.Contains(got[0].Why, "appears in an earlier recording, in mock-1") {
-		t.Errorf("82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want refused naming mock-1", got[0].Kind, got[0].Why)
+	got := classifyF(t, "82", "1", nil, eStartup(), resp)
+	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "appears in an earlier recording, in mock-1") {
+		t.Errorf("82 echoed in the answer, 1 in F beside SELECT 1: %s (%q), want refused naming mock-1", got.Kind, got.Why)
 	}
 }
 
-// A word of the confirming round's value found at a place record's full
-// round never gave the application is one no round shows the value does not
-// follow: refused, whatever F's words show.
-func TestAConfirmingValueFoundAtAPlaceOnlyItGaveRefuses(t *testing.T) {
-	extra := RawOf(&models.Mock{Name: "mock-7", Kind: models.PostgresV3, Spec: models.MockSpec{
-		ReqTimestampMock: eRecAt.Add(-40 * time.Millisecond),
-		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
-			SQLNormalized: "SELECT count(*) FROM job", Response: &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: "7"}}}, CommandComplete: "SELECT 1"},
-		}},
-	}}, false)
-	rounds := []eRound{{name: "F", live: "1", raw: eStartup()}, {name: "C", live: "7", raw: append(eStartup(), extra)}}
-	got := classifyRounds(t, "bind.$8", "82", eRecAt, rounds)
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-7") {
-		t.Errorf("1 in F, 7 in C beside mock-7's 7 that only C gave: %s (%q), want refused naming mock-7", got.Kind, got.Why)
-	}
-}
-
-// A word both rounds' values held where the place gave it in both shows no
-// round the value does not follow it, even where record's full round did
-// not find it (it stood unchanged there) and the confirming round finds it
-// only as a word held once more: refused.
-func TestAWordBothRoundsHeldIsRefusedWhereOnlyTheConfirmingRoundFindsIt(t *testing.T) {
-	got := classifyRounds(t, "bind.$8", "82 1", eRecAt, eRounds("16 1", "4 1 1"))
-	if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "in mock-1") {
-		t.Errorf(`"82 1" at record, "16 1" in F, "4 1 1" in C beside SELECT 1: %s (%q), want refused naming mock-1`, got.Kind, got.Why)
-	}
-}
-
-// eAnswer is a start-up recording made before at that answers one row, the
-// word word: a place whose word the application may copy.
+// eAnswer is a start-up recording made before eRecAt that answers one row,
+// the word word: a place whose word the application may copy.
 func eAnswer(name string, before time.Duration, word string) Raw {
-	return RawOf(&models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
-		ReqTimestampMock: eRecAt.Add(-before),
-		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &models.PostgresV3QuerySpec{
-			SQLNormalized: "SELECT next_slot FROM " + name, Response: &models.PostgresV3Response{Rows: []models.PostgresV3Cells{{{Value: word}}}, CommandComplete: "SELECT 1"},
-		}},
-	}}, false)
+	return ePg(name, before, "SELECT next_slot FROM "+name, []models.PostgresV3Cells{{{Value: word}}}, "SELECT 1")
 }
 
-// An application that copies the last answer it got takes a different word
-// in each round where the rounds served the same answers in another order:
-// mock-a answers 7 and mock-b 9; record served a then b and recorded "slot
-// 9". F served b then a and saw "slot 7", C served a then b and saw "slot
-// 9": each round shows
-// the value no copy of the word the other took, yet it is a copy in both.
-// Noise only where both rounds served the same places in the same order;
-// otherwise refused, saying why. Each subcase was noise before.
-func TestAConfirmingRoundThatServedTheEarlierAnswersInAnotherOrderRefuses(t *testing.T) {
+// An application that copies the last answer it got takes another place's
+// word where F gave it the same answers in another order than the recording
+// did. mock-a answers 7 and mock-b 9; the recording gave a then b and
+// recorded "slot 82", F saw "slot 7": the recording shows the value no copy
+// of a's 7 only where F gave a at the place the recording did. Noise only
+// where the recording and F gave the same places in the same order;
+// otherwise refused, saying why. Each refused subcase is noise without the
+// order.
+func TestARoundThatGaveTheEarlierAnswersInAnotherOrderThanTheRecordingRefuses(t *testing.T) {
 	a := eAnswer("mock-a", 300*time.Millisecond, "7")
 	b := eAnswer("mock-b", 200*time.Millisecond, "9")
-	const diff = "the rounds served the earlier answers in a different order, so keploy cannot tell a copy from a varying value"
-	for _, tc := range []struct {
-		name       string
-		f, c       []Raw
-		fLive      string
-		cLive      string
-		want, also string
-	}{
-		{"F served b then a, C a then b", []Raw{a.ServedAs(2), b.ServedAs(1)}, []Raw{a.ServedAs(1), b.ServedAs(2)}, "7", "9", diff, "the 1st earlier answer was mock-b in record's full round and mock-a in the confirming round"},
-		{"F served a, b and a again; C a then b", []Raw{a.ServedIn(1, 3), b.ServedAs(2)}, []Raw{a.ServedAs(1), b.ServedAs(2)}, "7", "9", diff, "the confirming round gave 2 earlier answers, record's full round more"},
-		{"F served a and b in an order keploy does not number", []Raw{a.WithServed(true), b.ServedAs(1)}, []Raw{a.ServedAs(1), b.ServedAs(2)}, "7", "9", "keploy does not know where record's full round served mock-a among the other earlier answers it served, so keploy cannot tell a copy from a varying value", ""},
-		{"C served a and b in an order keploy does not number", []Raw{a.ServedAs(2), b.ServedAs(1)}, []Raw{a.ServedAs(1), b.WithServed(true)}, "7", "9", "keploy does not know where the confirming round served mock-b among the other earlier answers it served, so keploy cannot tell a copy from a varying value", ""},
-		{"F served a twice with a serve keploy cannot place between", []Raw{a.ServedIn(1, 3), b.ServedAs(4)}, []Raw{a.ServedIn(1, 3), b.ServedAs(4)}, "7", "9", "record's full round served mock-a more than once, with a serve between that is no earlier answer's, which keploy cannot place, so keploy cannot tell a copy from a varying value", ""},
-	} {
-		got := classifyRounds(t, "bind.$8", "slot 82", eRecAt, []eRound{{name: "F", live: "slot " + tc.fLive, raw: tc.f}, {name: "C", live: "slot " + tc.cLive, raw: tc.c}})
-		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) || !strings.Contains(got.Why, tc.also) || !strings.Contains(got.Why, "appears in an earlier recording, in mock-") {
-			t.Errorf("FALSE GREEN? %s, slot 82 at record, slot %s in F, slot %s in C: %s (%q), want refused: %q (%q)", tc.name, tc.fLive, tc.cLive, got.Kind, got.Why, tc.want, tc.also)
-		}
-	}
-	// The control: the same places served in the same order in both rounds
-	// (numbered apart: other serves of the set between them), and values
-	// that differ, are a varying value (a copy follows its source).
+	c := eAnswer("mock-c", 250*time.Millisecond, "x")
+	late := eAnswer("mock-d", -100*time.Millisecond, "y")
+	together := eAnswer("mock-b", 300*time.Millisecond, "9")
+	const tail = ", so keploy cannot tell a copy from a varying value"
 	for _, tc := range []struct {
 		name string
-		f, c []Raw
+		raw  []Raw
+		want string
 	}{
-		{"both served a then b", []Raw{a.ServedAs(1), b.ServedAs(2)}, []Raw{a.ServedAs(1), b.ServedAs(2)}},
-		{"both served a then b, numbered apart", []Raw{a.ServedAs(3), b.ServedAs(5)}, []Raw{a.ServedAs(10), b.ServedAs(12)}},
-		{"both served a, b and a again", []Raw{a.ServedIn(1, 3), b.ServedAs(2)}, []Raw{a.ServedIn(4, 6), b.ServedAs(5)}},
-		{"neither round served them (the recording's order)", []Raw{a, b}, []Raw{a, b}},
+		{"F served b then a", []Raw{a.ServedAs(2), b.ServedAs(1)}, "the recording and record's full round gave the application the earlier answers in a different order (the 1st earlier answer was mock-a in the recording and mock-b in record's full round)" + tail},
+		{"F served a, b and a again", []Raw{a.ServedIn(1, 3), b.ServedAs(2)}, "(the recording gave 2 earlier answers, record's full round more)" + tail},
+		{"F served a where keploy does not number it", []Raw{a.WithServed(true), b.ServedAs(1)}, "keploy does not know where record's full round served mock-a among the other earlier answers it served" + tail},
+		{"F served a twice with a serve keploy cannot place between", []Raw{a.ServedIn(1, 3), b.ServedAs(4)}, "record's full round served mock-a more than once, with a serve between that is no earlier answer's, which keploy cannot place" + tail},
+		{"the recording gave a and b at one instant", []Raw{a.ServedAs(1), together.ServedAs(2)}, "the recording gave the application mock-a and mock-b at one instant, so keploy cannot tell the order it gave them in" + tail},
+		{"the recording gave c between them, F did not serve it", []Raw{a.ServedAs(1), c, b.ServedAs(2)}, "(the 2nd earlier answer was mock-c in the recording and mock-b in record's full round)" + tail},
+		{"F served a recording made after the call", []Raw{a.ServedAs(1), b.ServedAs(2), late.ServedAs(3)}, "(the recording gave 2 earlier answers, record's full round more)" + tail},
 	} {
-		got := classifyRounds(t, "bind.$8", "slot 82", eRecAt, []eRound{{name: "F", live: "slot 7", raw: tc.f}, {name: "C", live: "slot 9", raw: tc.c}})
-		if got.Kind != KindNoise {
-			t.Errorf("%s, slot 82 at record, slot 7 in F, slot 9 in C: %s (%q), want noise", tc.name, got.Kind, got.Why)
+		got := classifyF(t, "slot 82", "slot 7", nil, tc.raw, nil)
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.want) || !strings.Contains(got.Why, "appears in an earlier recording, in mock-") {
+			t.Errorf("FALSE GREEN? %s, slot 82 at record, slot 7 in F: %s (%q), want refused: %q", tc.name, got.Kind, got.Why, tc.want)
+		}
+	}
+	// The control: F served the places in the order the recording gave
+	// them (numbered apart: other serves of the set between them; a mock
+	// served twice with the other's serve after both), and the value is a
+	// varying one (a copy follows its source).
+	for _, tc := range []struct {
+		name string
+		raw  []Raw
+	}{
+		{"F served a then b", []Raw{a.ServedAs(1), b.ServedAs(2)}},
+		{"F served a then b, numbered apart", []Raw{a.ServedAs(3), b.ServedAs(5)}},
+		{"F served a then b, and an exchange after both", nil},
+	} {
+		var earlier []Earlier
+		raw := tc.raw
+		if raw == nil {
+			raw = []Raw{a.ServedAs(1), b.ServedAs(2)}
+			earlier = []Earlier{eLeaf(eRecAt.Add(-50*time.Millisecond), 3, "0", "0")}
+		}
+		if got := classifyF(t, "slot 82", "slot 7", earlier, raw, nil); got.Kind != KindNoise {
+			t.Errorf("%s, slot 82 at record, slot 7 in F: %s (%q), want noise", tc.name, got.Kind, got.Why)
 		}
 	}
 }
