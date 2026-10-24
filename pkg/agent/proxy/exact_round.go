@@ -423,8 +423,10 @@ func (r *roundState) bindLocked(v *exactView) {
 }
 
 // phaseLocked is where the round is (integrations.RoundPhase), from v and
-// the tracker read l, holding the round lock.
-func (m *MockManager) phaseLocked(v *exactView, l integrations.LearnRead) (integrations.RoundPhase, string) {
+// the tracker read l, holding the round lock, with which side moved at a
+// boundary, and the test the store ended that the tracker still has open
+// (integrations.RoundSnapshot.Ended).
+func (m *MockManager) phaseLocked(v *exactView, l integrations.LearnRead) (phase integrations.RoundPhase, boundary, ended string) {
 	open := l.Open
 	if !l.Bound {
 		// No tracker read: the store's view alone.
@@ -434,24 +436,24 @@ func (m *MockManager) phaseLocked(v *exactView, l integrations.LearnRead) (integ
 		b := m.exact.round.bound
 		switch {
 		case !open:
-			return integrations.RoundBoundary, "the store shows " + v.test + "'s view and the learn tracker has no test open"
+			return integrations.RoundBoundary, "the store shows " + v.test + "'s view and the learn tracker has no test open", ""
 		case l.Bound && v.learnBound && v.learnNumber != l.Number:
-			return integrations.RoundBoundary, "the learn tracker began another test than " + v.test + ", whose view the store still shows"
+			return integrations.RoundBoundary, "the learn tracker began another test than " + v.test + ", whose view the store still shows", ""
 		case l.Bound && !v.learnBound && b != nil && b.learnNumber == l.Number:
-			return integrations.RoundBoundary, "the learn tracker's open test is " + b.test + "'s, and the store shows " + v.test + "'s view"
+			return integrations.RoundBoundary, "the learn tracker's open test is " + b.test + "'s, and the store shows " + v.test + "'s view", ""
 		}
-		return integrations.RoundInTest, ""
+		return integrations.RoundInTest, "", ""
 	}
 	if !open {
 		if !m.exact.fired.Load() {
-			return integrations.RoundStartUp, ""
+			return integrations.RoundStartUp, "", ""
 		}
-		return integrations.RoundBetween, ""
+		return integrations.RoundBetween, "", ""
 	}
 	if b := m.exact.round.bound; b != nil && b.learnNumber == l.Number {
-		return integrations.RoundBoundary, "the store ended " + b.test + ", which the learn tracker still has open"
+		return integrations.RoundBoundary, "the store ended " + b.test + ", which the learn tracker still has open", b.test
 	}
-	return integrations.RoundBoundary, "the learn tracker began a test the store has not opened"
+	return integrations.RoundBoundary, "the learn tracker began a test the store has not opened", ""
 }
 
 // RoundSnapshot implements integrations.RoundReader: every part read holding
@@ -494,7 +496,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		s.Learn.Set, s.Learn.Order = p.Set, p.Order
 		s.Learn.Answered = t.AnsweredMocks()
 	}
-	s.Phase, s.Boundary = m.phaseLocked(v, s.Learn)
+	s.Phase, s.Boundary, s.Ended = m.phaseLocked(v, s.Learn)
 	s.Open = s.Phase == integrations.RoundInTest
 	read("learn")
 
@@ -561,6 +563,14 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		Owners: owners, Claimants: claimants, Worker: v.worker, Pool: v.pool,
 		Windows: m.testWindows.Load(), PoolNames: m.exact.poolNames.Load(),
 		ViewGen: v.round,
+	}
+	if b := r.bound; s.Ended != "" && b != nil {
+		// A call read here may be the ended test's late one: its
+		// recordings are no other test's for it (CallRound).
+		parts.EndedOwn = make(map[string]struct{}, len(b.owned))
+		for _, mk := range b.owned {
+			parts.EndedOwn[mk.Name] = struct{}{}
+		}
 	}
 	if v.bg != nil {
 		parts.BackgroundPool = v.bg.pool

@@ -312,6 +312,14 @@ func (t *Tracker) OnAwait(f func()) {
 // the two. A tracker no test awaits a request of returns at once. It holds
 // no lock of the tracker's while it waits; its caller must hold none that
 // Give, End or a Begin takes.
+//
+// A known nondeterminism, accepted as fail-closed: a call woken by Give but
+// not scheduled until its test's window closed (End, the next Begin) reads a
+// round that moved, and its caller decides nothing of it (a miss naming the
+// move), where a call scheduled at once is decided in its test. Whether such
+// a call is kept or dropped then depends on the scheduler under load. Either
+// way nothing is learned from another round, so it costs yield, never a
+// false pass.
 func (t *Tracker) AwaitRequest(ctx context.Context) error {
 	if t == nil {
 		return nil

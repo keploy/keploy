@@ -4022,6 +4022,24 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 	}
 }
 
+// A pass after a wait is no retake: a first pass that read test-1's view on
+// the store with no test open on the learn tracker, followed by a pass, not
+// read again for a refused take, on which the tracker began the test the
+// view is bound to, is the round moving (the tracker began a test), not the
+// tracker catching up. The same two reads on a retake are the catch-up.
+// learnMatchIn never makes the first: it waits only for an open test's
+// request. movedFrom's rule says so all the same.
+func TestMovedFromAPassAfterAWaitIsNoCatchUp(t *testing.T) {
+	first := learnRound{read: true, snap: true, epoch: 1, viewGen: 4, view: "test-1", test: 1}
+	now := learnRound{read: true, snap: true, epoch: 1, viewGen: 4, view: "test-1", test: 2, open: true, agrees: true}
+	if moved, caught := first.movedFrom(now, false); moved != "began a test" || caught {
+		t.Fatalf("a pass after a wait read %q, caught up %v; want the move %q, no catch-up", moved, caught, "began a test")
+	}
+	if moved, caught := first.movedFrom(now, true); moved != "" || !caught {
+		t.Fatalf("a retake read %q, caught up %v; want the tracker's catch-up", moved, caught)
+	}
+}
+
 // A call that waited for its test case's request in test-2, read with the
 // store showing test-2's view and the tracker test-2 open, is held to that
 // view: a store that then shows another test's view while the tracker keeps

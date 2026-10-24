@@ -57,9 +57,13 @@ const (
 	// opened before the tracker began it, or after a test whose end never
 	// reached the tracker). No recording is a test's own then: the tracker
 	// cannot say which test a call is of. Where the store shows the pool
-	// view, a learn step reads the round as between tests; where it shows a
-	// test's view, the background answers exactly or not at all, as in a
-	// test (ExactBackground), so nothing is learned onto it.
+	// view after ending the test the tracker still has open
+	// (RoundSnapshot.Ended), the round is no one's: a learn step decides
+	// nothing of a call read there. Where the store shows the pool view and
+	// the tracker began a test the store has not opened, a learn step reads
+	// the round as between tests; where it shows a test's view, the
+	// background answers exactly or not at all, as in a test
+	// (ExactBackground), so nothing is learned onto it.
 	RoundBoundary
 )
 
@@ -200,6 +204,13 @@ type RoundSnapshot struct {
 	Phase RoundPhase
 	// Boundary says, for RoundBoundary, which side moved.
 	Boundary string
+	// Ended is, for RoundBoundary where the store shows its pool view after
+	// ending a test the learn tracker still has open, that test (its view's
+	// name); "" otherwise. A call read there is of no one round: the store
+	// has ended the test, and the tracker has not reached the round after
+	// it. It is the test's late call or the round's early one, and nothing
+	// tells which, so a learn step decides nothing of it.
+	Ended string
 	// Open is Phase == RoundInTest: the one answer a learn step reads to
 	// whether a test is open, and whose recordings are its own.
 	Open bool
@@ -241,6 +252,7 @@ type RoundSnapshot struct {
 	winStart  time.Time
 	winEnd    time.Time
 	viewGen   uint64
+	endedOwn  map[string]struct{}
 }
 
 // RoundParts is what a store fills a RoundSnapshot's unexported answers
@@ -260,6 +272,9 @@ type RoundParts struct {
 	// ViewGen is the generation the view in force was installed at (the
 	// Gen of the takes made in it).
 	ViewGen uint64
+	// EndedOwn are, by name, the recordings the view of the test the store
+	// ended (RoundSnapshot.Ended) held as its own; nil when Ended is "".
+	EndedOwn map[string]struct{}
 }
 
 // WithParts is s answering from p (a store's, read with s).
@@ -269,6 +284,7 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	s.windows, s.poolNames = p.Windows, p.PoolNames
 	s.winStart, s.winEnd = p.WindowStart, p.WindowEnd
 	s.viewGen = p.ViewGen
+	s.endedOwn = p.EndedOwn
 	return s
 }
 
@@ -284,9 +300,16 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // of it (CallRound): its staging, and every recording its view held as its
 // own (Owner is not OwnerNone), whether that view was a staging's, a
 // test's (Test), and one of a set served by proven routing (Background).
+// Read where the store ended a test the learn tracker still has open
+// (Ended), the call may be that test's late one: the recordings that test's
+// view held are held as the call's own too, so no lookup names one as made
+// elsewhere, nor pairs the call with one as another test's.
 func (s RoundSnapshot) CallRound() CallRound {
-	owners := s.owners
-	return NewCallRound(s.At.Epoch, func(name string) bool { return owners[name] != OwnerNone }).InStaging(s.Staging).InView(s.Test != "", s.Background)
+	owners, ended := s.owners, s.endedOwn
+	return NewCallRound(s.At.Epoch, func(name string) bool {
+		_, own := ended[name]
+		return own || owners[name] != OwnerNone
+	}).InStaging(s.Staging).InView(s.Test != "", s.Background)
 }
 
 // Claimant is the test that took the shared recording m (OwnerSharedTaken).
