@@ -9,6 +9,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
@@ -396,6 +397,25 @@ func (s *scopedMockDb) StagedOwnerBegun(name string) bool {
 }
 
 var _ integrations.BegunOwnerReader = (*scopedMockDb)(nil)
+
+// ServingFor implements integrations.ServeTeller: this view over the store's
+// ServingFor(f), so a parser on a connection whose view was made before exact
+// serving began (scopedFor keeps it for the connection's life) tells the
+// learn step whose request it serves, as on the bare manager, and its
+// consumes stay filtered by this worker's view. s itself from a store that
+// does not tell: its serves are the one request aloft's. The copy is for one
+// call's consumes (ServeTeller): a cursor peek resolved on it is not kept.
+func (s *scopedMockDb) ServingFor(f *learn.Flight) integrations.MockMemDb {
+	t, ok := s.MockMemDb.(integrations.ServeTeller)
+	if !ok {
+		return s
+	}
+	c := *s
+	c.MockMemDb = t.ServingFor(f)
+	return &c
+}
+
+var _ integrations.ServeTeller = (*scopedMockDb)(nil)
 
 // passThrough reports whether this view passes every read and consume
 // straight to the store it wraps: while the store serves each test exactly

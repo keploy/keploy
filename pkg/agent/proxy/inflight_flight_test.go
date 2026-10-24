@@ -155,8 +155,9 @@ func TestAKeptConnectionTellsTheLearnStepItsRequests(t *testing.T) {
 // A parser that says whose request it serves (integrations.ServingIn) has
 // the mock manager tell the learn step the serve is that connection's
 // request's: a heartbeat aloft on a parallel connection, which reads no
-// recording, leaves it in F's order, through each consume door, and through
-// a round scope too. A connection told to no tracker says nothing.
+// recording, leaves it in F's order, through each consume door, through a
+// worker's view made before exact serving began, and through a round scope
+// too. A connection told to no tracker says nothing.
 func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
 	doors := map[string]func(db integrations.MockMemDb, m models.Mock) bool{
 		"MarkMockAsUsed":       func(db integrations.MockMemDb, m models.Mock) bool { return db.MarkMockAsUsed(m) },
@@ -205,6 +206,41 @@ func TestAServeSaidInItsRequestIsOrderedPastAHeartbeat(t *testing.T) {
 				t.Fatalf("the test shows %d mocks; want a", len(pt))
 			}
 			door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), mm), *pt[0])
+			_, _ = heartbeat.Write([]byte("H"))
+			_, _ = c1.Write([]byte("A"))
+			if fa, la := tr.Placed().Order.Of(pt[0]); fa != 1 || la != 1 {
+				t.Fatalf("a at %d,%d; want 1,1: the heartbeat read no recording", fa, la)
+			}
+		})
+	}
+	for name, door := range doors {
+		// A connection whose worker view was made before exact serving began
+		// keeps that view for its life (scopedFor): the view tells the
+		// serve's request as the manager does, and stays the view.
+		t.Run("under exact serving, on a worker's view made before it began: "+name, func(t *testing.T) {
+			provenswitch.Pin(true)
+			t.Cleanup(provenswitch.Unpin)
+			tr := learn.NewTracker()
+			p := &Proxy{learnTracker: tr}
+			a := exactMock("a", 0, models.LifetimeSession)
+			mm := stagedManager(t, nil, []*models.Mock{a})
+			mm.ServeExactPool("-", nil)
+			mm.ServeExactTest("T", []*models.Mock{a})
+			p.setMockManager(mm)
+			view := &scopedMockDb{MockMemDb: mm, src: p}
+			c1, app1 := flyingPair(t, tr, nil)
+			heartbeat, app2 := flyingPair(t, tr, nil)
+			request(t, c1, app1)
+			request(t, heartbeat, app2)
+			pt, _ := view.GetPerTestMocksInWindow()
+			if len(pt) != 1 {
+				t.Fatalf("the test shows %d mocks; want a", len(pt))
+			}
+			got := integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), view)
+			if sv, ok := got.(*scopedMockDb); !ok || sv.src != p || sv == view {
+				t.Fatalf("the worker's view serving c1's request is %T; want a copy of the view over the manager's teller", got)
+			}
+			door(got, *pt[0])
 			_, _ = heartbeat.Write([]byte("H"))
 			_, _ = c1.Write([]byte("A"))
 			if fa, la := tr.Placed().Order.Of(pt[0]); fa != 1 || la != 1 {
