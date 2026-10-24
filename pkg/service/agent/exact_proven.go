@@ -309,11 +309,11 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		}
 		bg := a.settleBackground(ex)
 		if _, can := es.(coreAgent.ExactBackgroundServer); bg != nil && !can {
-			// A proxy that cannot serve the background rules serves the set by
-			// today's, and the agent says so (ServedBackground): the replay
-			// keeps today's checks.
+			// A proxy that cannot serve the background rules serves the set as
+			// one recorded without proven routing, and the agent says so
+			// (ServedBackground): the replay checks it as such a set.
 			a.logger.Info("this keploy agent's proxy cannot serve a test set by the proven routing it was recorded under: its background is served as in a set recorded without proven routing, its worker scope checked at the set's end",
-				zap.String("next_step", "nothing to do for this run: its checks are today's, and its verdicts hold. This agent's proxy (a mode or a build that predates proven routing) serves no set by proven routing; replay with one that does to have the set served by it"))
+				zap.String("next_step", "nothing to do for this run: it is checked as a set recorded without proven routing, and its verdicts hold. This agent's proxy (a mode or a build that predates proven routing) serves no set by proven routing; replay with one that does to have the set served by it"))
 			bg = nil
 		}
 		a.scopeMu.Lock()

@@ -10,6 +10,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // testQueue is a kind of this test's own, so no parser's registration is
@@ -267,11 +268,13 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 			if cannot {
 				proxy = &p.workerExactProxy
 			}
+			core, logs := observer.New(zap.InfoLevel)
 			a := diskAgent(t, proxy,
 				stageMock("boot-config", "/config", stageT0.Add(-20*time.Second)),
 				stageMock("test-a", "/q", stageT0.Add(time.Second)),
 				stageMock("w-delete", "/delete", stageT0.Add(30*time.Second)),
 				stageMock("w-poll", "/poll", stageT0.Add(time.Hour)))
+			a.logger = zap.New(core)
 			err := a.UpdateMockParams(context.Background(), models.MockFilterParams{
 				AfterTime:              models.BaseTime,
 				BeforeTime:             stageT0.Add(2 * time.Hour),
@@ -288,6 +291,18 @@ func TestTheS12StagingTellsTheProxyItsRulesAndReachesANoSiblingRecording(t *test
 			}
 			if !reflect.DeepEqual(p.rules, tc.wantRules) {
 				t.Fatalf("the proxy was told the rules %q; want %q", p.rules, tc.wantRules)
+			}
+			// The agent says so in the one user-facing name: the set is checked
+			// as one recorded without proven routing.
+			said := logs.FilterMessageSnippet("cannot serve a test set by the proven routing").All()
+			if cannot != (len(said) == 1) {
+				t.Fatalf("the agent said its proxy cannot serve proven routing %d times; want it said once only when it cannot", len(said))
+			}
+			for _, e := range said {
+				next := e.ContextMap()["next_step"].(string)
+				if !strings.Contains(next, "checked as a set recorded without proven routing") || strings.Contains(next, "today") {
+					t.Fatalf("the next step %q does not say the set is checked as one recorded without proven routing", next)
+				}
 			}
 			if !reflect.DeepEqual(p.views, tc.wantViews) {
 				t.Fatalf("the views the staging installed read the rules %q; want %q", p.views, tc.wantViews)
