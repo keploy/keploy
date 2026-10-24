@@ -1032,11 +1032,15 @@ func (m *MockManager) ServeExactWorker(names []string) {
 // of what it read that what it may read changed: every kind's revision moves,
 // and so does the window signal. v is complete as it is published: what the
 // door installing it gives it (its test and its mocks; on a test's view,
-// its stamp and the claims a shared recording is answered under; on a
-// concurrent door's view, which of its mocks are shared; on a pool view, its
-// pool names) and what this gives it
-// from the manager (the outside answers, the staging epoch and the worker
-// set) are all set before the swap that publishes it.
+// its stamp, the claims a shared recording is answered under, its mocks the
+// pool view before it answered in the gap (consumed, order, carried) and its
+// mocks that pool view served as its calls in flight, answered or not
+// (inFlight); on a concurrent door's view, which of its mocks are shared; on
+// a pool view, its pool names, and, when it replaces a pool view that
+// answered some of the calls in flight it names too, those kept answered
+// (consumed, order, served)) and what this gives it from the manager (the
+// outside answers, the staging epoch and the worker set) are all set before
+// the swap that publishes it.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if w := m.exact.worker.Load(); w != nil {
