@@ -318,6 +318,74 @@ func TestACallHeldWhileTheNextSetIsStagedIsNoExtraCallOfItsTest(t *testing.T) {
 	}
 }
 
+// A replay's call of one test set held after its first read of the round
+// while the replay stages the next set is never diagnosed against a
+// recording of the next set: not one the next set's open test already
+// answered and the call resembles (answeredDiag), nor one the call sends with
+// an array in another order (orderMiss, unstable_order). Both read the store
+// held to the call's first read, which shows nothing once the staging moved,
+// so the miss names no closest recording of the next set and no reason that
+// comes from one, and says the set was staged again under the call.
+func TestACallHeldWhileTheNextSetIsStagedIsDiagnosedAgainstNoRecordingOfIt(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		next *models.Mock
+		// answered: the next set's test answers its own call first.
+		answered bool
+		call     string
+	}{
+		{"a recording its test answered", r3Mock("s2-jobs", now.Add(time.Second), "GET", "/jobs/1?page=2", "", `{"job":1}`), true, jobsCall},
+		{"a recording in another array order", r3Mock("s2-batch", now.Add(time.Second), "POST", "/batch", `{"rid":"r-1","ids":[1,2,3]}`, `{"ok":true}`), false, post(`{"rid":"r-1","ids":[3,1,2]}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			users := r3Mock("s1-users", now, "GET", "/users/a", "", `{"name":"a"}`)
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			stage := func(own *models.Mock, test string) {
+				mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, now.Add(time.Hour))
+				mm.ServeExactTest(test, []*models.Mock{own})
+			}
+			stage(users, "T1")
+			answered := false
+			db := &heldFirstRead{MockManager: mm, moved: func() {
+				stage(tc.next, "T2")
+				if !tc.answered {
+					return
+				}
+				mocks, _ := mm.GetPerTestMocksInWindow()
+				for _, mk := range mocks {
+					if mk.Name == tc.next.Name && !answered {
+						c := *mk
+						answered = mm.DeleteFilteredMock(c) || mm.UpdateUnFilteredMock(mk, &c)
+					}
+				}
+			}}
+
+			r := sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), tc.call)
+			if !db.fired.Load() || answered != tc.answered {
+				t.Fatalf("precondition: the replay staged the next set under the call (%v), its test answered its own call (%v, want %v)", db.fired.Load(), answered, tc.answered)
+			}
+			if r == nil {
+				t.Fatalf("a call of the set before was answered with the next set's %s", tc.next.Name)
+			}
+			if r.ClosestMock == tc.next.Name || r.NotOwned || r.Reason == models.MissUnstableOrder {
+				t.Fatalf("a call of the set before was diagnosed against the next set's %s: %+v", tc.next.Name, r)
+			}
+			if !strings.Contains(r.NextSteps, "staged a test set again while it decided this request") {
+				t.Fatalf("the miss does not say the set was staged again under the call: %q", r.NextSteps)
+			}
+
+			// The next set's own call is diagnosed against it.
+			r = sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), tc.call)
+			if r == nil || r.ClosestMock != tc.next.Name {
+				t.Fatalf("the next set's own call is %+v; want it diagnosed against %s", r, tc.next.Name)
+			}
+		})
+	}
+}
+
 // A call whose first read of the round was in its test's view, held while
 // the replay ends that test, is never named as its own test's recording made
 // elsewhere, nor paired with it as another test's: the call is that test's,

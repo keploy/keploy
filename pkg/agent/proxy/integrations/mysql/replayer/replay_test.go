@@ -3,11 +3,15 @@ package replayer
 import (
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // A client that opens a MySQL connection waits to be greeted. With no MySQL
@@ -80,6 +84,56 @@ func (markingDb) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*m
 
 func (m markingDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
 	return m, func() bool { return false }
+}
+
+// restagingDb is markingDb whose hold finds the staging moved under every
+// command: the replay staged a test set again after the command's mark.
+type restagingDb struct{ markingDb }
+
+func (m restagingDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return m, func() bool { return true }
+}
+
+// A command the replay staged a test set again under misses saying so, and
+// is never logged as a command the set never recorded (REPLAY-ORPHAN): its
+// matcher, held to its first read, read nothing of the set because the set
+// moved, not because the recording lacks the command. A command of a set
+// that recorded no data mock for it still is.
+func TestACommandStagedAgainUnderIsNoOrphanOfTheRecording(t *testing.T) {
+	const orphan = "REPLAY-ORPHAN"
+	const note = "staged a test set again while it decided this command"
+	for _, tc := range []struct {
+		name     string
+		db       func(*fakeMockDb) integrations.MockMemDb
+		restaged bool
+	}{
+		{"staged again under the command", func(f *fakeMockDb) integrations.MockMemDb { return restagingDb{markingDb{f, false}} }, true},
+		{"a set that recorded no data mock for it", func(f *fakeMockDb) integrations.MockMemDb { return markingDb{f, false} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.ErrorLevel)
+			client, done := replayLogged(t, tc.db(&fakeMockDb{session: []*models.Mock{nativeHandshake()}}), zap.New(core))
+			client.greetAndAnswer("app", mysql.Native)
+			if ok := client.read(); len(ok) == 0 || ok[0] != mysql.OK {
+				t.Fatalf("the client read %x after its handshake; want the recorded OK", ok)
+			}
+			client.send(0, append([]byte{mysql.COM_QUERY}, "SELECT 1"...))
+			if got, err := io.ReadAll(client.c); len(got) != 0 || err != nil {
+				t.Fatalf("the client read %q, %v after its query; want its connection closed unanswered", got, err)
+			}
+			err := <-done
+			var r reportCarrier
+			if !errors.Is(err, models.ErrNoMockMatched) || !errors.As(err, &r) || r.MismatchReport() == nil {
+				t.Fatalf("Replay returned %v; want the query's miss with its report", err)
+			}
+			if said := strings.Contains(r.MismatchReport().NextSteps, note); said != tc.restaged {
+				t.Fatalf("the miss says the set was staged again under it: %v, want %v (%q)", said, tc.restaged, r.MismatchReport().NextSteps)
+			}
+			if logged := logs.FilterMessageSnippet(orphan).Len() > 0; logged == tc.restaged {
+				t.Fatalf("the command's %s line was logged: %v, want %v", orphan, logged, !tc.restaged)
+			}
+		})
+	}
 }
 
 // A command-phase miss carries where its command first read the round

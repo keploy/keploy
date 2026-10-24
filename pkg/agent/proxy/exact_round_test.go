@@ -1417,3 +1417,85 @@ func TestAKeyedWalkOfAHeldStoreStopsWhereTheStagingMoved(t *testing.T) {
 		t.Fatal("a keyed walk made after the staging moved, finding nothing, does not say the set was staged again")
 	}
 }
+
+// A store held to a call's round (HoldToRound) settles and shows nothing of
+// the set the replay stages after the call's mark: the background spend,
+// the pairing claim and the background read (the doors a parser of record's
+// full round asks under the background rules), and the connection-tier and
+// session-window reads (MySQL's prepared statements and its windowed session
+// pass), each find the staging moved and refuse, and the store says it was
+// staged again. What the next set staged is untouched by them: its
+// background recording is still spent and its recording still claimed, once,
+// by a call of its own.
+func TestAHeldStoreSpendsClaimsAndReadsNothingOfTheNextSet(t *testing.T) {
+	mm, ms := s12Set(t)
+	conn := func(name string, at time.Duration) *models.Mock {
+		m := exactMock(name, at, models.LifetimeConnection)
+		m.Kind = models.MySQL
+		m.Spec.Metadata = map[string]string{"type": "connection", "connID": "c1"}
+		return m
+	}
+	stage := func(own, other, pool, c *models.Mock, test string) {
+		mm.SetMocksWithWindow(nil, []*models.Mock{own, other, pool, c}, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{pool.Name}, nil)
+		mm.SetPairing(true)
+		mm.ServeExactTest(test, []*models.Mock{own})
+	}
+	stage(ms["own"], ms["other"], ms["pool"], conn("s1-prep", 5*time.Second), "T1")
+	call := mm.MarkCallRound()
+	db, restaged := mm.HoldToRound(call)
+	h := db.(interface {
+		Background(models.Kind) []*models.Mock
+		SpendByKind(*models.Mock) bool
+		ClaimPairing(*models.Mock) bool
+		GetConnectionMocks(string) ([]*models.Mock, error)
+		GetSessionMocksInWindow(time.Time, time.Time) ([]*models.Mock, error)
+	})
+	own2 := httpCall("s2-own", 10*time.Second, "/s2-own")
+	other2 := httpCall("s2-other", 11*time.Second, "/s2-other")
+	pool2 := httpCall("s2-pool", 12*time.Second, "/s2-pool")
+	prep2 := conn("s2-prep", 13*time.Second)
+	stage(own2, other2, pool2, prep2, "S2-T1")
+	from, to := exactT0, exactT0.Add(time.Hour)
+
+	// Preconditions: the store as it is now shows the next set at each door.
+	if !hasName(mm.Background(models.HTTP), pool2.Name) || !hasName(mm.PairingCandidates(models.HTTP), other2.Name) {
+		t.Fatalf("precondition: the next set's background %v and pairing candidates %v", exactNames(mm.Background(models.HTTP)), exactNames(mm.PairingCandidates(models.HTTP)))
+	}
+	if c, _ := mm.GetConnectionMocks("c1"); !hasName(c, prep2.Name) {
+		t.Fatalf("precondition: the next set's connection tier is %v", exactNames(c))
+	}
+	if s, _ := mm.GetSessionMocksInWindow(from, to); !hasName(s, pool2.Name) {
+		t.Fatalf("precondition: the next set's session window is %v", exactNames(s))
+	}
+
+	if b := h.Background(models.HTTP); len(b) != 0 {
+		t.Fatalf("the held store's background read shows the next set's %v", exactNames(b))
+	}
+	if c, err := h.GetConnectionMocks("c1"); len(c) != 0 || err != nil {
+		t.Fatalf("the held store's connection read shows the next set's %v (%v)", exactNames(c), err)
+	}
+	if s, err := h.GetSessionMocksInWindow(from, to); len(s) != 0 || err != nil {
+		t.Fatalf("the held store's session window shows the next set's %v (%v)", exactNames(s), err)
+	}
+	if h.SpendByKind(pool2) {
+		t.Fatalf("the held store spent the next set's %s", pool2.Name)
+	}
+	if h.ClaimPairing(other2) {
+		t.Fatalf("the held store claimed the next set's %s for a pairing", other2.Name)
+	}
+	if !restaged() {
+		t.Fatal("the held store does not say the staging moved under its call")
+	}
+	if s := mm.SpentBackground(models.HTTP); len(s) != 0 {
+		t.Fatalf("the next set's background is spent after the held store refused: %v", exactNames(s))
+	}
+
+	// A call of the next set's own spends and claims them, once.
+	if !mm.SpendByKind(pool2) || mm.SpendByKind(pool2) {
+		t.Fatalf("the next set's own call did not spend %s exactly once", pool2.Name)
+	}
+	if !mm.ClaimPairing(other2) || mm.ClaimPairing(other2) {
+		t.Fatalf("the next set's own call did not claim %s exactly once", other2.Name)
+	}
+}

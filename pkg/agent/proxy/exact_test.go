@@ -2062,6 +2062,61 @@ func TestAGenericRequestHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *test
 	}
 }
 
+// A Generic request held after its first read of the round while the
+// replay stages the next set, whose open test has already answered an
+// exchange, is never told as one exchange more than that test recorded
+// (extraCall), nor diagnosed against that exchange (answeredExchanges):
+// both read the store held to the request's first read, which shows nothing
+// of the next set's test once the staging moved. The next set's own request
+// is told and diagnosed against it.
+func TestAGenericRequestHeldWhileTheNextSetIsStagedIsNoExtraCallOfItsTest(t *testing.T) {
+	for _, tc := range []struct{ name, answered, req string }{
+		{"the exchange it is", "AUTH step4", "AUTH step4"},
+		{"an exchange it resembles", "AUTH step4 user=b", "AUTH step4 user=a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mine := genericExchange("ex-mine", 0, "PING")
+			next := genericExchange("s2-ex", 2*time.Second, tc.answered)
+			mm := stagedManager(t, nil, []*models.Mock{mine})
+			mm.ServeExactTest("T1", []*models.Mock{mine})
+			answered := false
+			mm.exact.onMarked = func() {
+				mm.exact.onMarked = nil
+				mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now())
+				mm.ServeExactTest("S2-T1", []*models.Mock{next})
+				// S2-T1's own request, answered with its exchange.
+				mocks, _ := mm.GetPerTestMocksInWindow()
+				session, _ := mm.GetSessionMocks()
+				for _, mk := range append(mocks, session...) {
+					if mk.Name == next.Name && !answered {
+						c := *mk
+						answered = mm.DeleteFilteredMock(c) || mm.UpdateUnFilteredMock(mk, &c)
+					}
+				}
+			}
+			r := genericServe(t, mm, tc.req)
+			if !answered {
+				t.Fatal("precondition: the replay staged the next set under the request and its test answered its own")
+			}
+			if r == nil {
+				t.Fatalf("a request of the set before was answered with the next set's %s", next.Name)
+			}
+			if r.MissKind == models.MissExtraCall {
+				t.Fatalf("a request of the set before was told as one exchange more than the next set's test recorded: %+v", r)
+			}
+			if r.NotOwned || r.ClosestMock == next.Name {
+				t.Fatalf("a request of the set before was diagnosed against the next set's %s: %+v", next.Name, r)
+			}
+
+			// The next set's own request: told, or diagnosed, against it.
+			r = genericServe(t, mm, tc.req)
+			if r == nil || r.ClosestMock != next.Name && r.MissKind != models.MissExtraCall {
+				t.Fatalf("the next set's own request is %+v; want it told against %s", r, next.Name)
+			}
+		})
+	}
+}
+
 // aloftHolder is a connection with one request aloft (learn.Flight): the
 // parser's ctx carries it as the proxy's kept connection does.
 type aloftHolder struct{ f *learn.Flight }

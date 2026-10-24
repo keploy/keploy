@@ -241,42 +241,63 @@ func (s *stagedUnderMark) MarkCallRound() integrations.CallRound {
 // recording, never spent, answers the next set's own command.
 func TestAMySQLCommandHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *testing.T) {
 	const query = "SELECT v FROM kv WHERE id = 1"
-	at := diffBase.Add(time.Millisecond)
-	mine := diffMock("s1-other", "c1", []mysql.Request{queryReq("SELECT 1")}, at, models.LifetimePerTest, "mocks")
-	next := diffMock("s2-kv", "c1", []mysql.Request{queryReq(query)}, at.Add(time.Second), models.LifetimePerTest, "mocks")
-	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	stage := func(own *models.Mock, test string) {
-		mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, time.Now().Add(time.Hour))
-		mm.ServeExactTest(test, []*models.Mock{own})
-	}
-	stage(mine, "T1")
-	staged := false
-	db := &stagedUnderMark{MockManager: mm, moved: func() { stage(next, "S2-T1"); staged = true }}
-	conn := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
-	dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: map[uint32]string{}}
+	// The next set's recording of the command: its open test's own, or a
+	// session recording every test of it is served (the session tier, read
+	// through the windowed session pass).
+	for _, tc := range []struct {
+		name string
+		lt   models.Lifetime
+	}{{"its test's own", models.LifetimePerTest}, {"a session recording", models.LifetimeSession}} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := diffBase.Add(time.Millisecond)
+			mine := diffMock("s1-other", "c1", []mysql.Request{queryReq("SELECT 1")}, at, models.LifetimePerTest, "mocks")
+			next := diffMock("s2-kv", "c1", []mysql.Request{queryReq(query)}, at.Add(time.Second), tc.lt, "mocks")
+			if tc.lt == models.LifetimeSession {
+				// Stated session by its recorder (a SET), as exact serving
+				// shares it with every test of its set.
+				next.Spec.Metadata[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
+				next.TestModeInfo = models.TestModeInfo{}
+				next.DeriveLifetime()
+			}
+			mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			stage := func(own *models.Mock, test string) {
+				mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, time.Now().Add(time.Hour))
+				var owned []*models.Mock
+				if own.TestModeInfo.Lifetime == models.LifetimePerTest {
+					owned = []*models.Mock{own}
+				}
+				mm.ServeExactTest(test, owned)
+			}
+			stage(mine, "T1")
+			staged := false
+			db := &stagedUnderMark{MockManager: mm, moved: func() { stage(next, "S2-T1"); staged = true }}
+			conn := context.WithValue(context.Background(), models.ClientConnectionIDKey, "c1")
+			dctx := &wire.DecodeContext{PreparedStatements: map[uint32]*mysql.StmtPrepareOkPacket{}, StmtIDToQuery: map[uint32]string{}}
 
-	resp, ok, miss, err := replayer.MatchForTest(conn, zap.NewNop(), queryReq(query), db, dctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !staged {
-		t.Fatal("precondition: the replay never staged the next set under the command")
-	}
-	if ok {
-		t.Fatalf("a command of the set before was answered with the next set's %s: %q", next.Name, resp.Payload)
-	}
-	if strings.Contains(miss, next.Name) {
-		t.Fatalf("a command of the set before was diagnosed against the next set's %s: %s", next.Name, miss)
-	}
-	if !strings.Contains(miss, "staged a test set again while it decided this command, so keploy answered it with no recording") {
-		t.Fatalf("the miss does not say the set was staged again under the command: %s", miss)
-	}
+			resp, ok, miss, err := replayer.MatchForTest(conn, zap.NewNop(), queryReq(query), db, dctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !staged {
+				t.Fatal("precondition: the replay never staged the next set under the command")
+			}
+			if ok {
+				t.Fatalf("a command of the set before was answered with the next set's %s: %q", next.Name, resp.Payload)
+			}
+			if strings.Contains(miss, next.Name) {
+				t.Fatalf("a command of the set before was diagnosed against the next set's %s: %s", next.Name, miss)
+			}
+			if !strings.Contains(miss, "staged a test set again while it decided this command, so keploy answered it with no recording") {
+				t.Fatalf("the miss does not say the set was staged again under the command: %s", miss)
+			}
 
-	// Never spent on the command before, it answers the next set's own.
-	resp, ok, miss, err = replayer.MatchForTest(conn, zap.NewNop(), queryReq(query), db, dctx)
-	if err != nil || !ok || resp.Payload != next.Name {
-		t.Fatalf("the next set's own command was not answered with %s: ok=%v err=%v miss=%s", next.Name, ok, err, miss)
+			// Never spent on the command before, it answers the next set's own.
+			resp, ok, miss, err = replayer.MatchForTest(conn, zap.NewNop(), queryReq(query), db, dctx)
+			if err != nil || !ok || resp.Payload != next.Name {
+				t.Fatalf("the next set's own command was not answered with %s: ok=%v err=%v miss=%s", next.Name, ok, err, miss)
+			}
+		})
 	}
 }
 

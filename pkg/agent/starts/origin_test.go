@@ -353,8 +353,9 @@ func TestAGoTestBinaryIsNamedByItsGoTest(t *testing.T) {
 // Under `go test -exec <prog>` the test binary the go tool built is the exec
 // program's child (sudo's, or the child sudo runs it under), not the go
 // tool's: it is named by the go test all the same, the same in two records.
-// No go command within goCommandDepth ancestors, or one above another
-// program the go tool built, names it: it is its own argv[0].
+// No go command within goCommandDepth ancestors, one above another program
+// the go tool built, or one above an ancestor keploy cannot read, names it:
+// it is its own argv[0].
 func TestAGoTestBinaryRunUnderAnExecProgramIsNamedByItsGoTest(t *testing.T) {
 	record := func(dir string, base uint32, between ...string) string {
 		c := newCommander()
@@ -363,8 +364,13 @@ func TestAGoTestBinaryRunUnderAnExecProgramIsNamedByItsGoTest(t *testing.T) {
 		parent := base
 		for i, prog := range between {
 			pid := base + uint32(i) + 1
+			// "!" marks an ancestor whose command line keploy cannot read.
+			hidden := strings.HasPrefix(prog, "!")
+			prog = strings.TrimPrefix(prog, "!")
 			c.spawn(pid, parent, at(1), prog)
-			c.comm[pid], c.argv[pid] = filepath.Base(prog), []string{prog, "-E", dir + "/b001/ebpf.test"}
+			if !hidden {
+				c.comm[pid], c.argv[pid] = filepath.Base(prog), []string{prog, "-E", dir + "/b001/ebpf.test"}
+			}
 			parent = pid
 		}
 		test := base + 50
@@ -398,6 +404,12 @@ func TestAGoTestBinaryRunUnderAnExecProgramIsNamedByItsGoTest(t *testing.T) {
 	}
 	if got := record("/tmp/go-build1", 300, deep[:goCommandDepth-1]...); got != want {
 		t.Errorf("a test binary %d ancestors below its go test is named %q; want %q", goCommandDepth, got, want)
+	}
+	// Below an ancestor keploy cannot read (sudo under hidepid=2): the walk
+	// stops there, and the test binary is its own argv[0], never named by a
+	// go command keploy did not see run it.
+	if got := record("/tmp/go-build1", 300, "!/usr/bin/sudo"); got != "`ebpf.test` (`/tmp/go-build1/b001/ebpf.test`)" {
+		t.Errorf("a test binary below an ancestor keploy cannot read is named %q; want its own argv[0]", got)
 	}
 	// Above another program the go tool built (an exec program go run
 	// built): that program's go command, not this one's.
