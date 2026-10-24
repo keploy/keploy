@@ -28,7 +28,14 @@
 #   1. no overflow: PASSED, every recorded mock still there, the dependency
 #      not called;
 #   2. overflow: FAILED as capture incomplete, exit non-zero, the prune
-#      skipped for that reason, no mock deleted, no mappings.yaml written.
+#      skipped for that reason, no mock deleted, no mappings.yaml written;
+#   3. overflow under KEPLOY_PROVEN=1 with --keep-app-alive and a second test
+#      set: one application serves both sets, so a process the full map
+#      refused in the first lives on into the second and taints its tests
+#      too. The second set is item1's test alone, the call the app makes
+#      itself from the place it took before the map filled, so its own calls
+#      lose nothing: it fails as capture incomplete for the first set's loss,
+#      and its reason says so, and why (the application kept alive).
 #
 # Nothing in 2 depends on WHICH process the full map refused. The holder's own
 # 10500 processes are more than the map's 10240 places, so the kernel refuses
@@ -307,7 +314,41 @@ ktest() {
     --remove-unused-mocks --generateGithubActions=false --disable-tele > "$log" 2>&1
   echo $?
 }
-latest_report() { sudo sh -c 'ls -1dt keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | head -n1'; }
+latest_report() { sudo sh -c "ls -1dt keploy/reports/test-run-*/${1:-test-set-0}-report.yaml 2>/dev/null | head -n1"; }
+
+# make_kept_set: test-set-1, item1's test alone with its mock, beside the
+# recording's test-set-0 (ktest copied it back).
+make_kept_set() {
+  local t
+  t=$(sudo grep -l 'url: http://.*/order/item1$' keploy/test-set-0/tests/*.yaml 2>/dev/null | head -n1)
+  [ -n "$t" ] || { echo "FAIL: found no recorded test of /order/item1"; return 1; }
+  sudo mkdir -p keploy/test-set-1/tests
+  sudo cp "$t" keploy/test-set-1/tests/
+  # mocks.yaml is one YAML document per mock: keep item1's.
+  sudo python3 - keploy/test-set-0/mocks.yaml keploy/test-set-1/mocks.yaml <<'PY'
+import sys
+docs = open(sys.argv[1]).read().split("\n---\n")
+keep = [d for d in docs if "/price/item1" in d]
+open(sys.argv[2], "w").write("\n---\n".join(keep) + "\n")
+PY
+  [ "$(mocks keploy/test-set-1/mocks.yaml)" = 1 ] || { echo "FAIL: test-set-1 holds $(mocks keploy/test-set-1/mocks.yaml) mocks, want item1's one"; return 1; }
+}
+
+# ktest_kept <log> [VAR=value...]: one replay, under KEPLOY_PROVEN=1, of
+# test-set-0 and test-set-1 (make_kept_set) with --keep-app-alive; prints
+# keploy's exit code. Under the switch the first test waits for the
+# application's readiness however long it takes (no --health-poll-timeout:
+# the switch refuses one), so `timeout` is the only bound, a hang guard.
+ktest_kept() {
+  local log=$1
+  shift
+  sudo rm -rf keploy hold.out && sudo cp -a keploy.rec keploy
+  make_kept_set || { echo 99; return; }
+  : > dep.log
+  sudo -E "${SCOPE[@]}" env PATH="$PATH" KEPLOY_PROVEN=1 "$@" timeout -k 30 900 "$REPLAY_BIN" test -c "bash app.sh" --keep-app-alive \
+    --health-url "http://127.0.0.1:$APP/healthz" --generateGithubActions=false --disable-tele > "$log" 2>&1
+  echo $?
+}
 
 echo "== keploy test --remove-unused-mocks, no overflow: must pass and keep every mock =="
 rc=$(ktest test.log)
@@ -354,8 +395,35 @@ fi
 echo "--- test (overflow): what keploy said"
 grep -E "PID map|could not track|skipping mock pruning|not writing mappings" test-overflow.log | cut -c1-400
 
+echo "== keploy test --keep-app-alive, KEPLOY_PROVEN=1, two test sets, the PID map overflowing in the first: the second must fail as capture incomplete too, saying why =="
+rc=$(ktest_kept test-kept.log OVERFLOW=1)
+rep0=$(latest_report test-set-0)
+rep1=$(latest_report test-set-1)
+echo "test (kept): keploy exited $rc; test-set-0 $(sudo grep -m1 '^status:' "$rep0" 2>/dev/null); test-set-1 $(sudo grep -m1 '^status:' "$rep1" 2>/dev/null); the dependency saw: $(tr '\n' ' ' < dep.log)"
+grep -qx "held $HOLD" hold.out 2>/dev/null ||
+  fail "test (kept): the app command did not hold $HOLD live processes: $(head -n 2 hold.out 2>/dev/null)"
+[ "$rc" != 0 ] || fail "test (kept): keploy exited 0 although the agent could not track $HOLD live processes"
+sudo grep -q '^status: FAILED' "$rep0" 2>/dev/null || fail "test (kept): test-set-0's report is not FAILED"
+if grep -qx "/price/item1" dep.log; then
+  fail "test (kept): the app's own call, /price/item1, went to the real dependency although the app had its place in the map"
+fi
+# test-set-1's own call was mocked; what fails it is the process the first
+# set lost, which runs on with the application.
+sudo grep -q '^status: FAILED' "$rep1" 2>/dev/null ||
+  fail "test (kept): test-set-1's report is not FAILED although the application it ran against lost a process in test-set-0: $(sudo grep -m1 '^status:' "$rep1" 2>/dev/null)"
+sudo grep -q 'kind: pid_map_refused$' "$rep1" 2>/dev/null ||
+  fail "test (kept): test-set-1's test was not charged pid_map_refused"
+for want in "capture incomplete" "before this test-set began" "kept alive across test-sets (--keep-app-alive)"; do
+  sudo grep -q "^failure_reason: .*$want" "$rep1" 2>/dev/null ||
+    fail "test (kept): test-set-1's failure_reason does not say \"$want\": $(sudo grep -m1 '^failure_reason' "$rep1" 2>/dev/null | cut -c1-400)"
+done
+grep -q "a process of the application's that keploy could not capture before this test-set began runs on in it" test-kept.log ||
+  fail "test (kept): keploy did not say, at ERROR, that a process lost before test-set-1 runs on in it"
+echo "--- test (kept): what keploy said of test-set-1"
+sudo grep -m1 '^failure_reason' "$rep1" 2>/dev/null | cut -c1-600
+
 if [ "$FAIL" -ne 0 ]; then
-  for l in record test test-overflow; do
+  for l in record test test-overflow test-kept; do
     echo "--- the last 40 lines of $l.log ---"
     tail -n 40 "$l.log"
   done

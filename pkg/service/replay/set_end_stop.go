@@ -76,5 +76,7 @@ func noAttemptFollows(attempt int, test config.Test) bool {
 // switch (AgentClient; P101-c).
 type composeAppStopper interface {
 	StopComposeApp(ctx context.Context) (string, error)
-	StartComposeApp(ctx context.Context) error
+	// StartComposeApp says whether it started a container that was not
+	// running (anew).
+	StartComposeApp(ctx context.Context) (anew bool, err error)
 }

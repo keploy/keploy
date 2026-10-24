@@ -57,23 +57,37 @@ type ExitMark struct {
 
 // MarkExit reads how far procs are on their way out, each named by its pid
 // and start time: one whose pid now names another process, or a zombie, has
-// exited.
+// exited. One whose main thread exited while another runs on reads as a
+// zombie in its stat, but runs (Exited): its open files, which its main
+// thread no longer shows, are read through a thread of it that runs.
 func MarkExit(procs []Reached) ExitMark {
 	var m ExitMark
 	for _, p := range procs {
 		st, ok := ReadProcStat(p.PID)
-		if !ok || st.StartTime != p.Start || st.State == 'Z' {
+		if !ok || st.StartTime != p.Start {
 			continue
+		}
+		dir := "/proc/" + strconv.Itoa(p.PID)
+		fdDir := dir + "/fd"
+		if st.State == 'Z' {
+			// A read of its threads that fails leaves it running, as in
+			// Exited: what keploy cannot tell has ended is not taken for so.
+			tid, runs, err := runningThread(p.PID)
+			if err == nil && !runs {
+				continue
+			}
+			if runs {
+				fdDir = dir + "/task/" + strconv.Itoa(tid) + "/fd"
+			}
 		}
 		m.Running++
 		if st.State == 'D' {
 			m.OnStorage = true
 		}
-		dir := "/proc/" + strconv.Itoa(p.PID)
 		if tasks, err := os.ReadDir(dir + "/task"); err == nil {
 			m.Threads += len(tasks)
 		}
-		if fds, err := os.ReadDir(dir + "/fd"); err == nil {
+		if fds, err := os.ReadDir(fdDir); err == nil {
 			m.Fds += len(fds)
 		}
 		m.IO += readStorageIO(dir + "/io")

@@ -1711,14 +1711,24 @@ func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefus
 // than the route (404) or one that cannot count (501) gives
 // models.ErrCaptureLossesUnsupported, which is "unknown", not "none".
 func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	losses, _, err := a.GetCaptureLossesAndAgent(ctx)
+	return losses, err
+}
+
+// GetCaptureLossesAndAgent is GetCaptureLosses, and the agent process that
+// answered (models.AgentInstanceHeader): its counts are that process's, from
+// its start, and an agent started again in its place counts afresh. "" where
+// the answer names none (an agent with the switch off, or older than the
+// header).
+func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
 	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
 	}
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
+		return nil, "", fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
 	}
 	defer func() {
 		if err := res.Body.Close(); err != nil {
@@ -1726,17 +1736,17 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 		}
 	}()
 	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
-		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+		return nil, "", fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
 	}
 	if res.StatusCode != http.StatusOK {
 		rawBody, _ := readAgentBody(res)
-		return nil, agentRespErr("get capture losses", res, rawBody)
+		return nil, "", agentRespErr("get capture losses", res, rawBody)
 	}
 	var losses models.CaptureLosses
 	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
-		return nil, fmt.Errorf("failed to decode the capture losses: %w", err)
+		return nil, "", fmt.Errorf("failed to decode the capture losses: %w", err)
 	}
-	return losses, nil
+	return losses, res.Header.Get(models.AgentInstanceHeader), nil
 }
 
 // GetUnchargedCaptureLosses asks the agent what it could not capture since
@@ -1797,9 +1807,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 	appErrCh := make(chan models.AppError, 1)
 	// stopKilled is why the stop at a test set's end, or at a recording's
-	// end, had to kill the app (models.AppError.StopKilled), known once the
-	// app's run has returned.
-	var stopKilled string
+	// end, had to kill the app (models.AppError.StopKilled), and leftRunning
+	// what of its daemons the stop left running (models.AppError.LeftRunning),
+	// known once the app's run has returned.
+	var stopKilled, leftRunning string
 	defer func() {
 		err := runAppErrGrp.Wait()
 		if err != nil {
@@ -1807,6 +1818,14 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		}
 		if ret.AppErrorType == models.ErrCtxCanceled && stopKilled != "" {
 			ret.StopKilled = stopKilled
+		}
+		// On a run that ended with a type (a stop's, an exit's): a clean
+		// return carries no error to read it from. Not a stop's alone: an
+		// application that exited on its own has its daemons stopped too,
+		// and its set's end says what of them was left (the set is not
+		// judged on its tests then, and no set follows it).
+		if ret.AppErrorType != "" {
+			ret.LeftRunning = leftRunning
 		}
 	}()
 
@@ -1821,7 +1840,9 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		// stopping, and is not asked again when it acts on the interrupt.
 		// When the stop at a set's end had to kill one that made no
 		// progress on its way out, the run says so, as for the app.
-		if why := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx)); why != "" && stopKilled == "" {
+		why, left := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx))
+		leftRunning = left
+		if why != "" && stopKilled == "" {
 			switch {
 			case errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd):
 				stopKilled = "keploy interrupted the application at the set's end, and " + why
@@ -1874,10 +1895,10 @@ func (a *AgentClient) StopComposeApp(ctx context.Context) (string, error) {
 
 // StartComposeApp starts the app's container of a docker compose stack again
 // after StopComposeApp (app.App.StartComposeApp, P101-c).
-func (a *AgentClient) StartComposeApp(ctx context.Context) error {
+func (a *AgentClient) StartComposeApp(ctx context.Context) (bool, error) {
 	app, err := a.getApp()
 	if err != nil {
-		return err
+		return false, err
 	}
 	return app.StartComposeApp(ctx)
 }
