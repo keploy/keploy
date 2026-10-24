@@ -89,14 +89,19 @@ func sameRequest(diffs []strictField) bool {
 // markRepeat makes report the miss of a call identical to a, a recording an
 // earlier test made that already answered at this replay: a is its closest
 // mock, with no field named as differing, and the note (models.RepeatNote)
-// says which recording and how long after its answer this call came. The
-// replay measures the gaps at record and the likely cause at the set's end
-// (markRepeatOf), from the set's recordings, which the agent does not hold.
+// says which recording and how long after its answer this call came. A call
+// that is also a recording made elsewhere (report.NotOwned, markNotOwned)
+// keeps that recording as its closest, the reason it missed, and its next
+// step names both (models.RepeatNote.ExplainMiss). The replay measures the
+// gaps at record and the likely cause at the set's end (markRepeatOf), from
+// the set's recordings, which the agent does not hold.
 func markRepeat(report *models.MockMismatchReport, a integrations.AnsweredCall) {
 	m := a.Mock
-	report.ClosestMock = m.Name
-	report.FieldDiffs, report.Differs, report.Diff = nil, nil, ""
-	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
+	if !report.NotOwned {
+		report.ClosestMock = m.Name
+		report.FieldDiffs, report.Differs, report.Diff = nil, nil, ""
+		report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
+	}
 	report.Repeat = models.NewRepeatNote(m.Name, a.AnsweredAt, m.Spec.ReqTimestampMock, report.At)
-	report.NextSteps = report.Repeat.Explain(mismatch.RecordCommand())
+	report.NextSteps = report.Repeat.ExplainMiss(report.NotOwned, report.ClosestMock, "", mismatch.RecordCommand())
 }

@@ -81,6 +81,37 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 }
 
+// A call that is also a recording made elsewhere (not owned, named with the
+// test it was recorded in by markRecordedIn) keeps that recording as its
+// closest when the replay names the repeat: its next step names both, the
+// recording made in test-5's window and the earlier answer of test-3, and
+// says judging does not move it to the worker scope. The end-of-run row says
+// the same words as the report.
+func TestMarkRepeatOfKeepsANotOwnedCallsReason(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	results := []models.TestResult{
+		{TestCaseID: "test-9", FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{ActualSummary: "GET /count", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: anchoredNote("mock-7", rec, rec, rec.Add(6*time.Second), rec.Add(2*time.Second))},
+		}}},
+	}
+	store := NewTestFailureStore()
+	store.AddUnmatchedCallForTest("set-0", "test-9", results[0].FailureInfo.UnmatchedCalls[0])
+	markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, nil, nil, nil)
+	c := results[0].FailureInfo.UnmatchedCalls[0]
+	if c.ClosestMock != "mock-w" || !c.NotOwned || c.Repeat.Mock != "mock-7" || c.Repeat.Test != "test-3" {
+		t.Fatalf("the not-owned call became closest %q (not owned %v), note %+v", c.ClosestMock, c.NotOwned, c.Repeat)
+	}
+	for _, want := range []string{"This request is mock-w, a recording keploy made in test test-5's window", "identical to mock-7, the recording that already answered test test-3's call", "does not move mock-w"} {
+		if !strings.Contains(c.NextSteps, want) {
+			t.Fatalf("the next step lacks %q: %s", want, c.NextSteps)
+		}
+	}
+	store.nameRepeats("set-0", results)
+	if row := store.GetFailures()[0].MismatchReport; row.NextSteps != c.NextSteps || row.Repeat.Test != "test-3" {
+		t.Fatalf("the end-of-run row says %q (note %+v), the report %q", row.NextSteps, row.Repeat, c.NextSteps)
+	}
+}
+
 // The gap at record is measured to the call's own test's recorded request
 // where the replay has it (the agent, which does not hold the set's
 // recordings, measures none), and the gap at replay to when the test began;

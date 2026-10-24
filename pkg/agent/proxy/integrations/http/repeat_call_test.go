@@ -269,15 +269,17 @@ func (d gateDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bo
 
 func (d gateDb) ConsumedTestMocks() []*models.Mock { return d.consumed }
 
-// Under exact serving the note joins only a miss nothing else explains. A
-// call that is another test's recording no read shows stays named as that
-// recording made elsewhere (not owned), which judging moves to the worker
-// scope: never also as a repeat, whose closest and next step would replace
-// it while NotOwned stayed. A call the test recorded fewer times than it made
-// stays one call more than recorded (extra_call), the test's own recording
-// its closest. Each has an earlier test's identical recording that answered,
-// which alone gives the note.
-func TestARepeatNoteLeavesANotOwnedAndAnExtraCallAsTheyAre(t *testing.T) {
+// Under exact serving a call that is another test's recording no read shows
+// stays named as that recording made elsewhere (not owned): it is the reason
+// the call missed, and its closest. When an earlier test's identical
+// recording already answered, the note joins it beside that reason, never
+// instead of it: the next step names both, and says judging reads it as the
+// repeat rather than moving the recording to the worker scope (at record a
+// test in between refilled the cache with the same call). With no earlier
+// answer the miss is the plain not-owned one. A call the test recorded fewer
+// times than it made stays one call more than recorded (extra_call), the
+// test's own recording its closest, with no note.
+func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 	const addr, host = "127.0.0.1:8099", "localhost:8099"
 	const path = "/sap/A_BusinessPartner/$count?$filter=x"
 	t.Setenv(provenswitch.Env, "1")
@@ -292,8 +294,30 @@ func TestARepeatNoteLeavesANotOwnedAndAnExtraCallAsTheyAre(t *testing.T) {
 	elsewhere := onHost("mock-w", path, host)
 	elsewhere.Spec.HTTPReq.Header["X-Request-Id"] = "live-9"
 	r := missReport(t, gateDb{earlierDb: earlier, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{})
-	if !r.NotOwned || r.ClosestMock != "mock-w" || r.Repeat != nil || strings.Contains(r.NextSteps, "identical to mock-7") {
-		t.Fatalf("a call made elsewhere is closest %q, not owned %v, note %+v, next step %q; want mock-w made elsewhere and no note", r.ClosestMock, r.NotOwned, r.Repeat, r.NextSteps)
+	if !r.NotOwned || r.ClosestMock != "mock-w" || len(r.FieldDiffs) != 0 || r.Repeat == nil || r.Repeat.Mock != "mock-7" {
+		t.Fatalf("a call made elsewhere that repeats an earlier answer is closest %q, not owned %v, diffs %v, note %+v; want mock-w made elsewhere with the note on mock-7 beside it", r.ClosestMock, r.NotOwned, r.FieldDiffs, r.Repeat)
+	}
+	for _, want := range []string{"This request is mock-w, a recording keploy made between tests or in another test's window", "identical to mock-7", "does not move mock-w to the test set's worker scope"} {
+		if !strings.Contains(r.NextSteps, want) {
+			t.Fatalf("the next step of a call made elsewhere that repeats an earlier answer lacks %q: %s", want, r.NextSteps)
+		}
+	}
+
+	// In record's full round a learn step may name a recording the request
+	// changed from; a call made elsewhere is named as that recording all the
+	// same, with the note beside it, which the learn reason no longer
+	// explains.
+	changed := onHost("mock-c", path+"&$top=1", host)
+	learning := earlierDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{changed}}, answered: earlier.answered}
+	r = missReport(t, gateDb{earlierDb: learning, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{Learn: true, LearnPool: true})
+	if !r.NotOwned || r.ClosestMock != "mock-w" || r.Repeat == nil || r.Repeat.Mock != "mock-7" || !strings.Contains(r.NextSteps, "This request is mock-w") {
+		t.Fatalf("in the learn round a call made elsewhere is closest %q, not owned %v, note %+v, next step %q; want mock-w with the note on mock-7", r.ClosestMock, r.NotOwned, r.Repeat, r.NextSteps)
+	}
+
+	alone := earlierDb{mockMemDb: &mockMemDb{}}
+	r = missReport(t, gateDb{earlierDb: alone, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{})
+	if !r.NotOwned || r.ClosestMock != "mock-w" || r.Repeat != nil || r.NextSteps != notOwnedNextSteps("mock-w") {
+		t.Fatalf("a call made elsewhere with no earlier answer is closest %q, not owned %v, note %+v, next step %q; want the plain not-owned miss", r.ClosestMock, r.NotOwned, r.Repeat, r.NextSteps)
 	}
 
 	own := onHost("mock-own", path, host)

@@ -210,3 +210,32 @@ func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time
 	n.Anchor(replayStart, recordStart, mock, rec)
 	return n
 }
+
+// A miss's next step is the note's Explain, unless the call is also a
+// recording made elsewhere (not owned, with a closest): then it names that
+// recording first, with the test it was recorded in when known, keeps
+// Explain's words whole, and says judging reads it as the repeat. A nil note
+// says nothing.
+func TestExplainMissNamesANotOwnedRecordingBesideTheRepeat(t *testing.T) {
+	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	n := NewRepeatNote("mock-7", rec, rec, rec.Add(6*time.Second))
+	n.Test = "test-3"
+	plain := n.Explain("keploy record")
+	if got := n.ExplainMiss(false, "mock-w", "test-5", "keploy record"); got != plain {
+		t.Fatalf("an owned call's next step is %q, want Explain's", got)
+	}
+	if got := n.ExplainMiss(true, "", "test-5", "keploy record"); got != plain {
+		t.Fatalf("a not-owned call with no closest got %q, want Explain's", got)
+	}
+	got := n.ExplainMiss(true, "mock-w", "test-5", "keploy record")
+	if !strings.HasPrefix(got, "This request is mock-w, a recording keploy made in test test-5's window,") || !strings.Contains(got, plain) || !strings.HasSuffix(got, "does not move mock-w to the test set's worker scope, and sets the test aside as a repeat of an earlier recorded call only when its confirming round sees the same again.") {
+		t.Fatalf("a not-owned repeat's next step is %q", got)
+	}
+	if got := n.ExplainMiss(true, "mock-w", "", "keploy record"); !strings.HasPrefix(got, "This request is mock-w, a recording keploy made between tests or in another test's window,") {
+		t.Fatalf("with no test named it says %q", got)
+	}
+	var none *RepeatNote
+	if got := none.ExplainMiss(true, "mock-w", "test-5", "keploy record"); got != "" {
+		t.Fatalf("a nil note says %q", got)
+	}
+}

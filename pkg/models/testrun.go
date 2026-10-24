@@ -513,9 +513,11 @@ type UnmatchedCall struct {
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
 	// Repeat mirrors MockMismatchReport.Repeat: the call is identical to a
-	// recording an earlier test of the set made (ClosestMock), which already
-	// answered that test's call at this replay; the replay names that test
-	// (RepeatNote.Test). nil otherwise.
+	// recording an earlier test of the set made (ClosestMock, or
+	// RepeatNote.Mock for a NotOwned call, whose ClosestMock stays the
+	// recording made elsewhere), which already answered that test's call at
+	// this replay; the replay names that test (RepeatNote.Test). nil
+	// otherwise.
 	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
 }
 

@@ -173,6 +173,31 @@ func (n *RepeatNote) Explain(recordCmd string) string {
 	return b.String()
 }
 
+// ExplainMiss is the next step of a miss the note is on: Explain, unless the
+// call is also closest, a recording keploy made where this replay did not
+// make it (notOwned: another test's, named by recordedIn when the replay
+// knows it, or one made between tests). Both explanations hold then, and the
+// sentence names both: the call is that recording, which exact serving does
+// not give this test, and it repeats the earlier answer, which says why the
+// application asked again here. Neither replaces the other: the recording
+// made elsewhere is the reason the call missed, the repeat the likely cause.
+// keploy record's judging reads such a call as a repeat, not as a call to
+// move to the worker scope: the recording is the same answer, made again at
+// record by a test whose cache had expired there.
+func (n *RepeatNote) ExplainMiss(notOwned bool, closest, recordedIn, recordCmd string) string {
+	if n == nil {
+		return ""
+	}
+	if !notOwned || closest == "" {
+		return n.Explain(recordCmd)
+	}
+	where := "a recording keploy made between tests or in another test's window"
+	if recordedIn != "" {
+		where = "a recording keploy made in test " + recordedIn + "'s window"
+	}
+	return fmt.Sprintf("This request is %s, %s, where this replay did not make it: exact serving answers a test only with its own recordings. %s keploy record's judging reads this miss as that repeat: it does not move %s to the test set's worker scope, and sets the test aside as a repeat of an earlier recorded call only when its confirming round sees the same again.", closest, where, n.Explain(recordCmd), closest)
+}
+
 // recordedLastPhrase names, in a sentence, the recording the record gap runs
 // from (RecordedLast): "it" when that is Mock.
 func (n *RepeatNote) recordedLastPhrase() string {

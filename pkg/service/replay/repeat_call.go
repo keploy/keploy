@@ -23,8 +23,11 @@ const repeatRecordCommand = "keploy record"
 // record from the newest identical per-test recording made before the test
 // began then (recordAnchor over lookup, testCases), which may be another
 // test's than the one that answered: that test's call was never made again
-// while the cache stayed fresh at this replay. It returns one line per call
-// it named, for the set's log.
+// while the cache stayed fresh at this replay. A call that is also a
+// recording made elsewhere (NotOwned; markRecordedIn names its test first)
+// keeps that recording as its closest, and its next step names both
+// (models.RepeatNote.ExplainMiss). It returns one line per call it named, for
+// the set's log.
 func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time) []string {
 	began := recordedStarts(testCases)
 	var recorded map[string][]recordedTwin
@@ -51,7 +54,7 @@ func markRepeatOf(results []models.TestResult, consumers map[string][]string, te
 			}
 			n.Anchor(replayStarts[r.TestCaseID], start, last.name, last.recordedAt)
 			c.Repeat = n
-			c.NextSteps = c.Repeat.Explain(repeatRecordCommand)
+			c.NextSteps = c.Repeat.ExplainMiss(c.NotOwned, c.ClosestMock, c.RecordedIn, repeatRecordCommand)
 			named = append(named, repeatLine(r.TestCaseID, c))
 		}
 	}
@@ -279,19 +282,20 @@ func repeatLine(test string, c *models.UnmatchedCall) string {
 
 // nameRepeats writes into the end-of-run mismatch rows of testSetID the
 // notes markRepeatOf completed on results (the earlier test named, the gap
-// at record measured), so the table the CLI prints says the same as the
-// report.
+// at record measured) and the next steps it wrote with them, so the table
+// the CLI prints says the same as the report.
 func (tfs *TestFailureStore) nameRepeats(testSetID string, results []models.TestResult) {
-	byTest := map[string]map[string]*models.RepeatNote{}
+	byTest := map[string]map[string]*models.UnmatchedCall{}
 	for i := range results {
-		for _, c := range results[i].FailureInfo.UnmatchedCalls {
+		for j := range results[i].FailureInfo.UnmatchedCalls {
+			c := &results[i].FailureInfo.UnmatchedCalls[j]
 			if c.Repeat == nil {
 				continue
 			}
 			if byTest[results[i].TestCaseID] == nil {
-				byTest[results[i].TestCaseID] = map[string]*models.RepeatNote{}
+				byTest[results[i].TestCaseID] = map[string]*models.UnmatchedCall{}
 			}
-			byTest[results[i].TestCaseID][c.Repeat.Mock] = c.Repeat
+			byTest[results[i].TestCaseID][c.Repeat.Mock] = c
 		}
 	}
 	if len(byTest) == 0 {
@@ -304,13 +308,13 @@ func (tfs *TestFailureStore) nameRepeats(testSetID string, results []models.Test
 		if f.TestSetID != testSetID || f.MismatchReport == nil || f.MismatchReport.Repeat == nil {
 			continue
 		}
-		n := byTest[f.TestID][f.MismatchReport.Repeat.Mock]
-		if n == nil {
+		c := byTest[f.TestID][f.MismatchReport.Repeat.Mock]
+		if c == nil {
 			continue
 		}
 		rep := *f.MismatchReport
-		rep.Repeat = n.Clone()
-		rep.NextSteps = rep.Repeat.Explain(repeatRecordCommand)
+		rep.Repeat = c.Repeat.Clone()
+		rep.NextSteps = c.NextSteps
 		f.MismatchReport = &rep
 	}
 }

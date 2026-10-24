@@ -297,7 +297,10 @@ type MockMismatchReport struct {
 	Concurrent *ConcurrentNote
 	// Repeat says the call is identical to a recording an earlier test of
 	// the set made, which already answered that test's call at this replay
-	// (RepeatNote); nil otherwise. ClosestMock is then that recording.
+	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but
+	// for a call that is also a recording made elsewhere (NotOwned): that
+	// recording stays ClosestMock, the reason the call missed, and the note
+	// names the earlier one (RepeatNote.Mock, RepeatNote.ExplainMiss).
 	Repeat *RepeatNote
 }
 
