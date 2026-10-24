@@ -224,7 +224,8 @@ func eHistory(at time.Time, n int, asRecorded bool) Raw {
 // follows its source, coordinator 21:20), and it is learned as varying,
 // naming the reading set aside. The reading stands (a variable of mock-5)
 // where F did not observe the source (not served, served changed), where
-// the source holds F's value too (200), where the recording did not give
+// the source holds F's value too (200, or a%2Fb in its decoded form, a/b),
+// where the recording did not give
 // the application the source before the call; and the noise is refused
 // where F served the places in another order than the recording gave them.
 func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
@@ -249,6 +250,15 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	} {
 		if got := classifyF(t, "50", tc.live, nil, tc.raw, nil); got.Kind != KindVariable || got.From.Mock != "mock-5" {
 			t.Errorf("FALSE GREEN? 50 beside VARCHAR(50), %s, %s in F: %s (%q), want a variable of mock-5", tc.name, tc.live, got.Kind, got.Why)
+		}
+	}
+	// A source F served as recorded holding F's value in the form a bind
+	// with an escape decodes to (F's a%2Fb, a/b among its words) holds F's
+	// value too: the value may have come from it, and the reading stands.
+	src := ePg("mock-s", 150*time.Millisecond, "SELECT a, b FROM t", []models.PostgresV3Cells{{{Value: "50"}, {Value: "x a/b y"}}}, "SELECT 1").ServedAs(6).ServedAsRecorded()
+	for _, live := range []string{"a/b", "a%2Fb"} {
+		if got := classifyF(t, "50", live, nil, startup(src), nil); got.Kind != KindVariable || got.From.Mock != "mock-s" {
+			t.Errorf("FALSE GREEN? 50 in mock-s, which holds F's value %s (a/b, decoded), %s in F: %s (%q), want a variable of mock-s", live, live, got.Kind, got.Why)
 		}
 	}
 	// The call's recorded answer echoes the value: an echo beside a source
