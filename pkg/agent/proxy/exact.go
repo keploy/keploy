@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -59,7 +60,8 @@ import (
 // of what it read reads again.
 
 // exactView is what exact serving shows. It is replaced, never changed,
-// except for which of its test mocks have answered (mu).
+// except for which of its test mocks have answered and what its open test
+// was served (mu).
 type exactView struct {
 	// test is the open test's ID; "" while no test is open.
 	test string
@@ -122,12 +124,75 @@ type exactView struct {
 	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
 	outside *outsideAnswers
 	epoch   *atomic.Uint64
+	// heard is every mock a parser was served while the view was installed,
+	// as the served observer was told of it (observeServed): of any lifetime
+	// (the test's own, a protocol-phase or reusable one, one spent through a
+	// delete door, a worker-scope one), through any door, a serve whose
+	// claim then failed included, once each by identity (learn.MockID,
+	// heardIDs), in the order they came. Kept only while there is an
+	// observer (the proven switch), and read only of a test view
+	// (ServedInOpenTest).
+	heard    []*models.Mock
+	heardIDs map[string]bool
+	// stamp is the learn tracker's open test (learn.Tracker.OpenEpoch) as
+	// the test's view was installed (exactState.stampTest), set before the
+	// view is published and never changed: 0 for a pool view, with no
+	// tracker (SetOpenTestEpoch), when the tracker had no test open, and in
+	// a tracker test another test's view was installed in too.
+	stamp uint64
+}
+
+// hear files mk in v's account of what its open test was served (heard),
+// once by identity (learn.MockID, the tracker's). A pool view files nothing:
+// its account would be read by no one (ServedInOpenTest reads a test view's
+// only), and the start-up's and the gaps' serves would each build an entry
+// kept until the view is replaced. A replaced view's account is read by no
+// one either; a serve read in it before it was replaced is filed there.
+func (v *exactView) hear(mk *models.Mock) {
+	if v == nil || v.test == "" {
+		return
+	}
+	id := learn.MockID(mk)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.heardIDs[id] {
+		return
+	}
+	if v.heardIDs == nil {
+		v.heardIDs = map[string]bool{}
+	}
+	v.heardIDs[id] = true
+	v.heard = append(v.heard, mk)
 }
 
 // exactState is a manager's exact serving: off until the agent turns it on
 // for a replay session (view nil), off again at the next one.
 type exactState struct {
 	view atomic.Pointer[exactView]
+	// beforePublish, set only by tests and before the install it is to see,
+	// is called with each view as installExact is about to publish it in
+	// view: it sees the view as a reader loading view first will.
+	beforePublish func(*exactView)
+	// afterPublish, set only by tests and before the install it is to see,
+	// is called with each view as installExact's last step before it
+	// returns: the view published, the view before it closed, every kind's
+	// revision and the window signal moved. It sees what a reader the signal
+	// woke reads.
+	// It runs with no view's lock held; on a test's view the install lock is
+	// held, and on the open doors the variables' lock too.
+	afterPublish func(*exactView)
+	// aheadLocked, set only by tests and before the install it is to see, is
+	// called with the pool view closeAhead closes and reads, at the end of
+	// the hold of that view's lock in which it does both. The lock is still
+	// held, so it must not take it, nor read or consume through the manager
+	// (each takes the view's lock). No install lock is held.
+	aheadLocked func(*exactView)
+	// aheadRead, set only by tests and before the install it is to see, is
+	// called with the pool view closeAhead closed and read, as closeAhead
+	// returns: the view's lock released, before the door builds its view
+	// from what it read. It runs with no view's lock and no install lock
+	// held.
+	aheadRead func(*exactView)
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
 	poolNames atomic.Pointer[map[string]struct{}]
@@ -158,6 +223,55 @@ type exactState struct {
 	// claims are the shared recordings the tests of the current staging
 	// answered with (exactClaims).
 	claims exactClaims
+	// installMu orders the installs of tests' views (serveExactTest): each
+	// reads the learn tracker's open test, stamps its view (stampTest) and
+	// makes it the view served under it, so the stamps' order is the order
+	// the views start serving in, and no other test's view is installed
+	// between an install's read of the tracker and its view's start.
+	installMu sync.Mutex
+	// stamped is, under installMu, the learn tracker's open test the latest
+	// test's view was installed in, and which tests' views were (stampTest).
+	stamped *stampedTest
+}
+
+// stampedTest is, of the learn tracker's open test epoch, the test whose
+// view was installed last in it, and whether another test's view was too.
+type stampedTest struct {
+	epoch uint64
+	test  string
+	mixed bool
+}
+
+// stampTest is the stamp of test's view as it is installed (exactView.stamp),
+// called under installMu: the learn tracker's open test (open,
+// learn.Tracker.OpenEpoch; nil when the manager has none), so a reader
+// compares the view's test with the tracker's by number. It is 0 when there
+// is no tracker, when no test is open in it (the view was installed before
+// the tracker's test began, or after it ended), and once two tests' views
+// were installed in one open tracker test, for every view installed in it
+// after that: the tracker began no test for the second, and files the serves
+// of both in the one test. A test's view installed again with no other
+// test's between keeps the stamp. The reads are made in installMu's order and
+// the tracker's numbers only grow, so a read is never older than the stamp
+// before it, unless it is of no open test (0).
+// What the stamp does not see is a tracker test that begins while a test's
+// view is served: the tracker files that view's serves in the test until the
+// next view is installed. The replay begins each test case only over the
+// pool (replay poolBeforeBegin).
+func (e *exactState) stampTest(open *func() uint64, test string) uint64 {
+	if open == nil {
+		return 0
+	}
+	n := (*open)()
+	next := &stampedTest{epoch: n, test: test}
+	if prev := e.stamped; prev != nil && prev.epoch == n {
+		next.mixed = prev.mixed || prev.test != test
+	}
+	e.stamped = next
+	if next.mixed {
+		return 0
+	}
+	return n
 }
 
 // exactClaims are, in one staging (stagingEpoch), the shared recordings
@@ -714,6 +828,13 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		v.carried[a.owned.Name] = true
 	}
 	install := func() {
+		// Stamped as it is installed: what the tracker's open test is when
+		// the view starts serving. The lock is taken here, on every door, so
+		// on the open doors (OpenExactTest, OpenExactTestConcurrent) it is
+		// held under the variables' lock.
+		m.exact.installMu.Lock()
+		defer m.exact.installMu.Unlock()
+		v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 		m.exact.begun.add(m.stagingEpoch.Load(), owned)
 		m.exact.fired.Store(true)
 		m.exact.last.Store(v)
@@ -750,22 +871,34 @@ type aheadAnswer struct{ owned, served *models.Mock }
 // closeAhead closes the view being served, if it is a pool view that answers
 // the next test's mocks in flight when it began (ServeExactPool's ahead), and
 // returns those that answered, in the order they did, and the names of all of
-// them. Closed first, so no consume lands between the read and the next view.
+// them. It closes the view whatever of its ahead the view answered, all, some
+// or none, in the same hold of its lock as the read, so no consume lands
+// between the read and the next view: one after it is refused (exactConsume).
 func (m *MockManager) closeAhead() (answered []aheadAnswer, ahead []string) {
 	prev := m.exact.view.Load()
 	if prev == nil || prev.test != "" || len(prev.owned) == 0 {
 		return nil, nil
 	}
-	prev.mu.Lock()
-	defer prev.mu.Unlock()
-	prev.closed = true
-	answered = make([]aheadAnswer, 0, len(prev.order))
-	for _, i := range prev.order {
-		answered = append(answered, aheadAnswer{owned: prev.owned[i], served: prev.served[i]})
-	}
-	ahead = make([]string, 0, len(prev.owned))
-	for _, mk := range prev.owned {
-		ahead = append(ahead, mk.Name)
+	// One hold, released by its defer even if a test's seam in it stops
+	// the goroutine.
+	func() {
+		prev.mu.Lock()
+		defer prev.mu.Unlock()
+		prev.closed = true
+		answered = make([]aheadAnswer, 0, len(prev.order))
+		for _, i := range prev.order {
+			answered = append(answered, aheadAnswer{owned: prev.owned[i], served: prev.served[i]})
+		}
+		ahead = make([]string, 0, len(prev.owned))
+		for _, mk := range prev.owned {
+			ahead = append(ahead, mk.Name)
+		}
+		if m.exact.aheadLocked != nil {
+			m.exact.aheadLocked(prev)
+		}
+	}()
+	if m.exact.aheadRead != nil {
+		m.exact.aheadRead(prev)
 	}
 	return answered, ahead
 }
@@ -922,11 +1055,24 @@ func (m *MockManager) ServeExactWorker(names []string) {
 
 // installExact makes v the view, then tells every parser that keeps an index
 // of what it read that what it may read changed: every kind's revision moves,
-// and so does the window signal.
+// and so does the window signal. v is complete as it is published: what the
+// door installing it gives it (its test and its mocks; on a test's view,
+// its stamp, the claims a shared recording is answered under, its mocks the
+// pool view before it answered in the gap (consumed, order, carried) and its
+// mocks that pool view served as its calls in flight, answered or not
+// (inFlight); on a concurrent door's view, which of its mocks are shared; on
+// a pool view, its pool names, and, when it replaces a pool view that
+// answered some of the calls in flight it names too, those kept answered
+// (consumed, order, served)) and what this gives it from the manager (the
+// outside answers, the staging epoch and the worker set) are all set before
+// the swap that publishes it.
 func (m *MockManager) installExact(v *exactView) {
 	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
 	if w := m.exact.worker.Load(); w != nil {
 		v.worker = *w
+	}
+	if m.exact.beforePublish != nil {
+		m.exact.beforePublish(v)
 	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
@@ -945,6 +1091,9 @@ func (m *MockManager) installExact(v *exactView) {
 	}
 	m.bumpRevisionAll()
 	m.signalWindowChange()
+	if m.exact.afterPublish != nil {
+		m.exact.afterPublish(v)
+	}
 	if m.logger != nil {
 		m.logger.Debug("exact serving", zap.String("test", v.test), zap.Int("test_mocks", len(v.owned)),
 			zap.String("pool_key", v.poolKey), zap.Int("pool_mocks", len(v.pool)))
@@ -1032,6 +1181,27 @@ func (m *MockManager) ConsumedTestMocks() []*models.Mock {
 }
 
 var _ integrations.ExactConsumedReader = (*MockManager)(nil)
+
+// ServedInOpenTest implements integrations.ExactServedReader: the open
+// test's view's stamp (exactView.stamp) and every mock a parser was served
+// while the view was installed, of any lifetime and through any door, once
+// each, in the order they came (see exactView.heard), both of the one view
+// loaded once; 0 and none while no test is open, and none with no served
+// observer. The observer is told of a serve before the serve is filed here,
+// and the view a serve is filed in is the one installed before the observer
+// was told: a mock this returns is one the observer has heard of, and one
+// served while this view was the open one.
+func (m *MockManager) ServedInOpenTest() (uint64, []*models.Mock) {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return 0, nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.stamp, append([]*models.Mock(nil), v.heard...)
+}
+
+var _ integrations.ExactServedReader = (*MockManager)(nil)
 
 // ClaimantOf implements integrations.ExactConcurrentReader: the test that
 // answered a call with the shared recording name in the current staging.

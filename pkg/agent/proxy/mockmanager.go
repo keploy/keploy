@@ -70,6 +70,10 @@ type MockManager struct {
 	// outside the manager's own locks: under the proven switch, the learn
 	// step's earlier places of the test's recording (learn.Tracker.ServedMock).
 	servedObserver atomic.Pointer[func(*models.Mock)]
+	// openTestEpoch, when set, says the learn tracker's open test
+	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
+	// stamp (exactView.stamp, ServedInOpenTest).
+	openTestEpoch atomic.Pointer[func() uint64]
 
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
@@ -4128,17 +4132,42 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	m.servedObserver.Store(&f)
 }
 
+// SetOpenTestEpoch makes f say the learn tracker's open test
+// (learn.Tracker.OpenEpoch) as each test's view is installed, from now on
+// (nil: none). The view carries what it said (exactView.stamp), and
+// ServedInOpenTest returns it with the view's account, so a reader compares
+// test numbers, not what the two accounts hold. Without it every view
+// carries 0.
+func (m *MockManager) SetOpenTestEpoch(f func() uint64) {
+	if f == nil {
+		m.openTestEpoch.Store(nil)
+		return
+	}
+	m.openTestEpoch.Store(&f)
+}
+
 // observeServed tells the served observer of mock before a parser's claim
 // takes it out of the pool, so a request reading the pool and then the
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
 // same mock: the observer is told of a mock that was served either way.
+//
+// With an observer, the serve is then filed in the open test's view
+// (exactView.hear, ServedInOpenTest), the view read before the observer is
+// told: the replay (keploy test's loops, the agent's scope begin) begins the
+// learn tracker's test before it installs the test's view, and serves the
+// pool before the next test begins, so a mock a test view holds is one the
+// tracker heard of in that test, and a reader that reads the view's account
+// before the tracker's never finds there a serve the tracker has not heard
+// of. The view's stamp (SetOpenTestEpoch) says which tracker test that is. Without one (the switch off) nothing is filed.
 func (m *MockManager) observeServed(mock *models.Mock) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
 	if f := m.servedObserver.Load(); f != nil {
+		v := m.exactView()
 		(*f)(mock)
+		v.hear(mock)
 	}
 }
 
@@ -4151,7 +4180,9 @@ func (m *MockManager) observeServedCopy(mock models.Mock) {
 	}
 	if f := m.servedObserver.Load(); f != nil {
 		c := mock
+		v := m.exactView()
 		(*f)(&c)
+		v.hear(&c)
 	}
 }
 

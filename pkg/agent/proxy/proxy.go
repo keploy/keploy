@@ -1823,8 +1823,10 @@ func hostPortFromAuthority(authority, scheme string) (string, int) {
 func (p *Proxy) setMockManager(m *MockManager) {
 	if provenswitch.On() && m != nil {
 		// Every mock served in a test is an earlier place of its recording
-		// for the learn step (package matcher/learn).
+		// for the learn step (package matcher/learn), and each test's view
+		// carries the tracker's open test as it is installed.
 		m.SetServedObserver(p.learnTracker.ServedMock)
+		m.SetOpenTestEpoch(p.learnTracker.OpenEpoch)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
@@ -4958,6 +4960,27 @@ func missSummaries(errs []error) []string {
 		out = append(out, err.Error())
 	}
 	return out
+}
+
+// WithdrawTestErrorCapture takes back the window the latest Begin or
+// ContinueTestErrorCapture opened, for a test that did not begin after all:
+// the agent's scope begin opens the window first, so the learn tracker's test
+// begins before the test's view is installed, and a begin that then fails
+// served the test nothing. The tracker's test ends, and the window is left as
+// one its test already read: what it holds, the misses made since the
+// previous test's window closed included, and what is missed until the next
+// window opens are carried into the next test's window (openTestErrorCapture),
+// as they would have been had this window never opened. Nothing is dropped
+// or charged to the test that did not begin.
+func (p *Proxy) WithdrawTestErrorCapture() {
+	if provenswitch.On() {
+		p.learnTracker.End()
+	}
+	p.captureMu.Lock()
+	if acc := p.activeTestErrors.Load(); acc != nil {
+		acc.read = true
+	}
+	p.captureMu.Unlock()
 }
 
 // EndTestErrorCapture stops collecting errors and returns all accumulated errors.
