@@ -39,6 +39,11 @@ type wireProxy struct {
 	missErr   error
 	served    map[string]uint64
 	continues int
+	// withdraws counts the windows taken back; order is what the capture
+	// window and exact serving were told, in order: "continue", "withdraw",
+	// "serve <test>".
+	withdraws int
+	order     []string
 	// exactTest and exactNames are what exact serving was last told to
 	// serve: an open test and its test mocks, or ("", the pool slice);
 	// atServe is served when the test opened. setErr fails serving.
@@ -79,7 +84,19 @@ func (p *wireProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, erro
 	return out, nil
 }
 
-func (p *wireProxy) ContinueTestErrorCapture() { p.mu.Lock(); p.continues++; p.mu.Unlock() }
+func (p *wireProxy) ContinueTestErrorCapture() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.continues++
+	p.order = append(p.order, "continue")
+}
+
+func (p *wireProxy) WithdrawTestErrorCapture() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.withdraws++
+	p.order = append(p.order, "withdraw")
+}
 
 // SetMocks takes a staging of the replay's mocks.
 func (p *wireProxy) SetMocks(_ context.Context, _, _ []*models.Mock) error {
@@ -96,6 +113,7 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 		return p.setErr
 	}
 	p.exactTest, p.exactNames = test, nil
+	p.order = append(p.order, "serve "+test)
 	for _, m := range owned {
 		p.exactNames = append(p.exactNames, m.Name)
 	}
@@ -840,6 +858,14 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Equal(t, "SELECT ?", pg.ActualSummary)
 	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})
 	require.Empty(t, redis.ActualSummary, "a protocol keploy has no shape for keeps no call text")
+
+	// A repeat note names recordings, a test and times, never a value the app
+	// sent: it is kept, on a copy, so judging can name the earlier test.
+	note := &models.RepeatNote{Mock: "mock-54", Test: "get-by-id-1", ReplayGapSeconds: 8, ReplayGapFromStart: true, RecordGapSeconds: 2.95, RecordGapKnown: true, RecordedLast: "mock-54"}
+	rep := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /bp/202", ClosestMock: "mock-54", Repeat: note})
+	require.NotNil(t, rep.Repeat, "the repeat note was dropped")
+	require.Equal(t, *note, *rep.Repeat)
+	require.NotSame(t, note, rep.Repeat, "the note is the miss's own: written on a copy")
 }
 
 // A miss, its reason text and a recorded mock's name keep an HTTP call's
@@ -1489,4 +1515,34 @@ func TestABeginGivesTheLearnStepItsRecordedBegin(t *testing.T) {
 	require.Nil(t, serr)
 	require.Equal(t, []string{"recorded begin", "open", "recorded begin", "open"}, p.order)
 	require.Equal(t, []time.Time{at, {}}, p.taken)
+}
+
+// A begin opens the test's capture window, where the proxy's learn tracker
+// begins the test, before it installs the test's view: a tracker that began
+// after it would file what the view served first as the previous test's. A
+// begin whose view the proxy refuses takes the window back, so what it held
+// is carried into the next test's, and is served nothing.
+func TestABeginOpensItsCaptureWindowBeforeItsView(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"), httpMock("mock-4", "GET", "http://h/pool"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}
+	ctx := context.Background()
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-4"}}))
+	claimSelf(t, a)
+	p.mu.Lock()
+	p.setErr = errors.New("the proxy refused the test's view")
+	p.order = nil
+	p.mu.Unlock()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.NotNil(t, serr, "a begin whose view the proxy refused")
+	p.mu.Lock()
+	require.Equal(t, []string{"continue", "withdraw"}, p.order, "the refused begin's window is taken back, and nothing is served")
+	p.setErr = nil
+	p.order = nil
+	p.mu.Unlock()
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	p.mu.Lock()
+	require.Equal(t, []string{"continue", "serve o::TestB"}, p.order, "the window opens before the view")
+	p.mu.Unlock()
 }

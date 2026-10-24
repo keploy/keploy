@@ -75,6 +75,10 @@ type MockManager struct {
 	// serves in a request its parser said (integrations.ServingIn,
 	// learn.Tracker.ServedMockIn).
 	servedInObserver atomic.Pointer[func(*models.Mock, *learn.Flight)]
+	// openTestEpoch, when set, says the learn tracker's open test
+	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
+	// stamp (exactView.stamp, ServedInOpenTest).
+	openTestEpoch atomic.Pointer[func() uint64]
 
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
@@ -148,6 +152,11 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
+	// answered keeps, of the per-test recordings that answered a call in this
+	// test set, the request side, by request key and bounded by bytes, for a
+	// miss's diagnosis (FindAnsweredEarlier).
+	// Reset with consumedPersistent.
+	answered answeredLog
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -516,6 +525,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		logger:              logger,
 	}
 	mm.setGen.Store(1)
+	mm.answered.fence(1)
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -697,6 +707,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// A reset that starts another test set says so (ArmSetFence), and its
 	// boundary staging drops them instead: they were consumed of the previous
 	// set's pool.
+	m.answered.reset()
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
@@ -3471,6 +3482,9 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}
+		// The log refuses a mock an earlier set pooled itself, as the flag
+		// does (answeredLog.note).
+		m.noteAnswered(mock)
 	}
 
 	// Bump per-kind only if that tree changed; global only if global changed
@@ -4018,6 +4032,11 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		}
 		return false
 	}
+	// A per-test recording this door keeps (HTTP's stateful one, kept for
+	// its test's repeats) answered a call too (FindAnsweredEarlier).
+	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
+		m.noteAnswered(mock)
+	}
 	return true
 }
 
@@ -4203,24 +4222,53 @@ func (m *MockManager) SetServedInObserver(f func(*models.Mock, *learn.Flight)) {
 	m.servedInObserver.Store(&f)
 }
 
+// SetOpenTestEpoch makes f say the learn tracker's open test
+// (learn.Tracker.OpenEpoch) as each test's view is installed, from now on
+// (nil: none). The view carries what it said (exactView.stamp), and
+// ServedInOpenTest returns it with the view's account, so a reader compares
+// test numbers, not what the two accounts hold. Without it every view
+// carries 0.
+func (m *MockManager) SetOpenTestEpoch(f func() uint64) {
+	if f == nil {
+		m.openTestEpoch.Store(nil)
+		return
+	}
+	m.openTestEpoch.Store(&f)
+}
+
 // observeServed tells the served observer of mock before a parser's claim
 // takes it out of the pool, so a request reading the pool and then the
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
 // same mock: the observer is told of a mock that was served either way. in
 // is the request it is served in, as its parser said (nil: not said).
+//
+// With an observer (the served-in observer for a said request, else the
+// served observer), the serve is then filed in the open test's view
+// (exactView.hear, ServedInOpenTest), the view read before the observer is
+// told: the replay (keploy test's loops, the agent's scope begin) begins the
+// learn tracker's test before it installs the test's view, and serves the
+// pool before the next test begins, so a mock a test view holds is one the
+// tracker heard of in that test, and a reader that reads the view's account
+// before the tracker's never finds there a serve the tracker has not heard
+// of. The view's stamp (SetOpenTestEpoch) says which tracker test that is.
+// Without one (the switch off) nothing is filed.
 func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
+			v := m.exactView()
 			(*f)(mock, in)
+			v.hear(mock)
 			return
 		}
 	}
 	if f := m.servedObserver.Load(); f != nil {
+		v := m.exactView()
 		(*f)(mock)
+		v.hear(mock)
 	}
 }
 
@@ -4234,13 +4282,17 @@ func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	if in != nil {
 		if f := m.servedInObserver.Load(); f != nil {
 			c := mock
+			v := m.exactView()
 			(*f)(&c, in)
+			v.hear(&c)
 			return
 		}
 	}
 	if f := m.servedObserver.Load(); f != nil {
 		c := mock
+		v := m.exactView()
 		(*f)(&c)
+		v.hear(&c)
 	}
 }
 
@@ -4595,7 +4647,9 @@ func (m *MockManager) ArmSetFence() {
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
 	m.consumedMu.Lock()
-	m.setGen.Add(1)
+	// The answered log follows the generation (answeredLog.fence); its
+	// lock is a leaf.
+	m.answered.fence(m.setGen.Add(1))
 	dropped := len(m.consumedList)
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)

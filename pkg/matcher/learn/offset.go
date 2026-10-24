@@ -789,7 +789,7 @@ func newSetPlaces() *setPlaces { return &setPlaces{of: map[string]GivenPlaces{}}
 // nothing is kept of it, nor of a recording that could not be read.
 func (o Order) GivenPlaces(m *models.Mock) (GivenPlaces, error) {
 	first, last := o.Of(m)
-	id := mockID(m)
+	id := MockID(m)
 	if c := o.places; c != nil {
 		c.mu.Lock()
 		g, ok := c.of[id]

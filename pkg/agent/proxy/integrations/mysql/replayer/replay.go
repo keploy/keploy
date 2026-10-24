@@ -19,6 +19,11 @@ import (
 
 // Mock Yaml to Binary
 
+// Replay serves the client's MySQL connection from the mocks, on a goroutine,
+// and returns only once that goroutine has returned, ctx's end included: then
+// its read or write of clientConn is ended (pUtil.InterruptOnDone), and it is
+// waited for (pUtil.JoinParser). It used to return ctx's error at once and
+// leave the goroutine reading, matching and logging after it had returned.
 func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
@@ -92,6 +97,10 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 			models.MatchPhaseNoMocks, 0), call, restaged, held)
 	}
 
+	// Before the goroutine starts: it puts the TLS connection it upgrades to
+	// in clientConn's place. A deadline set on the connection the client
+	// dialled ends the TLS connection's reads and writes too.
+	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer pUtil.RecoverInto(logger, clientConn, nil, errCh)
@@ -161,13 +170,5 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 	}(errCh, configMocks, mockDb, opts)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
+	return pUtil.JoinParser(ctx, errCh)
 }

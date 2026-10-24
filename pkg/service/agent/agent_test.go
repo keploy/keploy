@@ -175,6 +175,7 @@ func (p captureProxy) BeginTestErrorCapture() { *p.opened = append(*p.opened, "b
 type continuingProxy struct{ captureProxy }
 
 func (p continuingProxy) ContinueTestErrorCapture() { *p.opened = append(*p.opened, "continue") }
+func (p continuingProxy) WithdrawTestErrorCapture() { *p.opened = append(*p.opened, "withdraw") }
 
 // ContinueTestErrorCapture continues the proxy's capture, and opens the window
 // as Begin does on a proxy that predates continue.

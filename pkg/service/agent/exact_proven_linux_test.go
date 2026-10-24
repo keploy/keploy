@@ -77,6 +77,7 @@ func (p *servingProxy) ExactTestOutcome() (string, []string, []string, bool) {
 }
 func (p *servingProxy) ResetStatefulCursors()      { p.mm.ResetStatefulCursors() }
 func (p *servingProxy) ContinueTestErrorCapture()  {}
+func (p *servingProxy) WithdrawTestErrorCapture()  {}
 func (p *servingProxy) SetMappedUniverse([]string) {}
 func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
 	p.mu.Lock()

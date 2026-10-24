@@ -1851,6 +1851,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// proven switch (readiness_proven.go): the set runs no test and is not
 	// judged.
 	notReady := ""
+	// notBegun is why keploy did not begin a test case on its agent, under
+	// exact serving (poolBeforeBegin, openTestErrorCapture): the set stopped
+	// before that test case. The set's end marks the set not judged, and
+	// says so, only when the set's status is keploy's own failure
+	// (INTERNAL_ERR). A call that failed because the app's docker compose
+	// stack went down leaves the set the app's status (APP_HALTED).
+	var notBegun error
 
 	// exitLoopChan is never closed. The test loops below are its only readers,
 	// and they have finished by the time the deferred drain runs; its writers
@@ -2019,6 +2026,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// consumers are the tests that consumed each mock, by name: whose an
 	// unconsumed test mock went to, when a sibling's (markConsumedBy).
 	consumers := map[string][]string{}
+	// replayStarts is when each test began at this replay, its latest
+	// attempt's (markUnmadeRepeats).
+	replayStarts := map[string]time.Time{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
 	// perTestRegion names the per-test mocks this set hands the agent, the
 	// only ones an agent that says so reads consumed entries for (see
@@ -3116,10 +3126,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 	}
 	// drainBeforeFiling reads, under the proven switch, what a test that
-	// ends early (no answer, or one judged on its start) consumed, before its
-	// row is filed: its calls are its own, not the next test's, whose drain
-	// would read them otherwise. Without the switch an early row files as it
-	// always did.
+	// ends early (no answer, an answer of another type, or one judged on its
+	// start) consumed, before its row is filed: its calls are its own, not
+	// the next test's, whose drain would read them otherwise. Without the
+	// switch an early row files as it always did.
 	//
 	// answeredInGap and gapReadErr are what the gap before it answered of its
 	// calls in flight, read as it opened under exact serving
@@ -3315,7 +3325,36 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// its capture window opens: the agent's learn step awaits the
 			// request from then on.
 			opening := r.openingOf(tmplRun, testCase)
-			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
+			// Exact serving: a test case begins only over the pool, never
+			// over the last test case's own view (poolBeforeBegin). Its
+			// capture window opens next, where the agent's learn tracker
+			// begins it (openTestErrorCapture). When the agent takes no
+			// pool call, or opens no window, the set stops here, before the
+			// test case's view is asked for, never a pass, and keploy says
+			// so at once (logStoppedBeforeTest). The set's end gives the
+			// set its verdict (notBegun): not judged when the status is
+			// keploy's own failure, else the status of what failed the call.
+			beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, testCase.Name)
+			if beginErr == nil {
+				beginErr = r.openTestErrorCapture(runTestSetCtx, r.exact, &captureOpened, testCase.Name)
+			}
+			if beginErr != nil {
+				exitLoop = true
+				// A run stopped under the call (the user's stop, the app
+				// watcher's cancel) is not keploy's failure: the set's end
+				// gives it the status of whoever stopped it.
+				if runTestSetCtx.Err() != nil {
+					break
+				}
+				r.logStoppedBeforeTest(testSetID, beginErr)
+				notBegun = beginErr
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), beginErr); ok {
+					testSetStatus = resolvedStatus
+				} else {
+					testSetStatus = models.TestSetStatusInternalErr
+				}
+				break
+			}
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, opening)
 			} else {
@@ -3340,6 +3379,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// This ensures that replaceWith configuration takes precedence over global host/port overrides.
 
 			started := time.Now().UTC()
+			replayStarts[testCase.Name] = started
 
 			// What is sent: the request with this run's template values, on a
 			// copy. testCase stays as written.
@@ -4431,7 +4471,36 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// its capture window opens: the agent's learn step awaits the
 			// request from then on.
 			opening := r.openingOf(tmplRun, tc)
-			r.openTestErrorCapture(runTestSetCtx, &captureOpened)
+			// Exact serving: a test case begins only over the pool, never
+			// over the last test case's own view (poolBeforeBegin). Its
+			// capture window opens next, where the agent's learn tracker
+			// begins it (openTestErrorCapture). When the agent takes no
+			// pool call, or opens no window, the set stops here, before the
+			// test case's view is asked for, never a pass, and keploy says
+			// so at once (logStoppedBeforeTest). The set's end gives the
+			// set its verdict (notBegun): not judged when the status is
+			// keploy's own failure, else the status of what failed the call.
+			beginErr := r.poolBeforeBegin(runTestSetCtx, r.exact, tc.Name)
+			if beginErr == nil {
+				beginErr = r.openTestErrorCapture(runTestSetCtx, r.exact, &captureOpened, tc.Name)
+			}
+			if beginErr != nil {
+				exitLoop = true
+				// A run stopped under the call (the user's stop, the app
+				// watcher's cancel) is not keploy's failure: the set's end
+				// gives it the status of whoever stopped it.
+				if runTestSetCtx.Err() != nil {
+					break
+				}
+				r.logStoppedBeforeTest(testSetID, beginErr)
+				notBegun = beginErr
+				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), beginErr); ok {
+					testSetStatus = resolvedStatus
+				} else {
+					testSetStatus = models.TestSetStatusInternalErr
+				}
+				break
+			}
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, opening)
 			} else {
@@ -4442,6 +4511,23 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				loopErr = err
 				break
 			}
+			// endStream ends the streamed test case under exact serving: the
+			// agent serves the pool from then on, before the test case's
+			// last read of what it consumed and its misses (as the main
+			// loop serves it once its test case has its answer), so the
+			// next test case never begins over this one's view. Every exit
+			// calls it once and leaves the iteration (continue or break).
+			// On the two endedPartWay exits, which only a run with no agent
+			// reaches, it does nothing: that run has no exact plan (r.exact
+			// is nil, exactServing). A failed pool call is returned, and
+			// served again at the next one's loop head (poolBeforeBegin).
+			endStream := func() error {
+				rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
+				for _, s := range streamingTests[i+1:] {
+					rest = append(rest, s.testCase)
+				}
+				return r.serveExactPool(runTestSetCtx, r.exact, nextExactTest(rest, nil, nil, refusedTests))
+			}
 			// Exact serving: as the main loop reads what the gap answered.
 			answeredInGap, gapReadErr := r.drainAnsweredInGap(runTestSetCtx, r.exact, tc.Name)
 
@@ -4450,6 +4536,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// CompareHTTPStream below, so in-stream mock consumption can
 			// continue after this call returns.
 			started := time.Now().UTC()
+			replayStarts[tc.Name] = started
 			// Sent with this run's template values, on a copy; what it is
 			// expected to stream, likewise (a streamed response never
 			// captures).
@@ -4483,6 +4570,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 			if simErr != nil {
 				if status, ended := endedPartWay(); ended {
+					endStreamOnFailure(r.logger, tc.Name, endStream())
 					testSetStatus, exitLoop = status, true
 					break
 				}
@@ -4491,6 +4579,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if simErr != nil {
 				sayNoAnswer(r.logger, tc.Name, simErr, "failed to simulate streaming request")
 				noteNoAnswer(tc.Name, simErr)
+				endStreamOnFailure(r.logger, tc.Name, endStream())
 				drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 				failure++
 				testSetStatus = models.TestSetStatusFailed
@@ -4622,6 +4711,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						if testCaseResult, differs := r.startFailedRow(tmplRun, &sent, expectedStream, start, testSetID, started); differs {
 							sayStartJudged(r.logger, tc.Name, streamErr)
 							noteNoAnswer(tc.Name, streamErr)
+							endStreamOnFailure(r.logger, tc.Name, endStream())
 							drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 							failure++
 							testSetStatus = models.TestSetStatusFailed
@@ -4637,6 +4727,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 
 					if streamErr != nil {
 						if status, ended := endedPartWay(); ended {
+							endStreamOnFailure(r.logger, tc.Name, endStream())
 							testSetStatus, exitLoop = status, true
 							break
 						}
@@ -4660,6 +4751,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 							r.logger.Error("failed to read streaming response", zap.Error(streamErr))
 						}
 						noteNoAnswer(tc.Name, streamErr)
+						endStreamOnFailure(r.logger, tc.Name, endStream())
 						drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 						failure++
 						testSetStatus = models.TestSetStatusFailed
@@ -4714,6 +4806,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					failure++
 					testSetStatus = models.TestSetStatusFailed
 					testCaseResult := r.CreateFailedTestResult(expectedStream, testSetID, started, errors.New(errMsg))
+					endStreamOnFailure(r.logger, tc.Name, endStream())
+					drainBeforeFiling(runTestSetCtx, tc.Name, answeredInGap, gapReadErr)
 					r.attachMockErrors(runTestSetCtx, testSetID, tc.Name, testCaseResult)
 					loopErr = r.reportDB.InsertTestCaseResult(runTestSetCtx, testRunID, testSetID, testCaseResult)
 					if loopErr != nil {
@@ -4728,11 +4822,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			// Under exact serving the agent serves the pool from now, so the
 			// drain below reads all of the test case's consumption, and a
 			// call the application makes from here is the pool's.
-			rest := make([]*models.TestCase, 0, len(streamingTests)-i-1)
-			for _, s := range streamingTests[i+1:] {
-				rest = append(rest, s.testCase)
-			}
-			if err := r.serveExactPool(runTestSetCtx, r.exact, nextExactTest(rest, nil, nil, refusedTests)); err != nil && streamConsumedErr == nil {
+			if err := endStream(); err != nil && streamConsumedErr == nil {
 				streamConsumedErr = err
 			}
 
@@ -5181,6 +5271,33 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			zap.String("test-set", testSetID),
 			zap.Strings("calls", back[:min(len(back), 20)]),
 			zap.String("next_step", "record the test set again: a recording re-derives what each test owns, and its judging what moves"))
+	}
+	// A call no mock answered that repeats a recording an earlier test made,
+	// which already answered at this replay, is named with that test: the
+	// application asked again where its recording did not, perhaps as an
+	// answer it kept for a span of elapsed time ran out (models.RepeatNote).
+	// The line claims that cause only when every note's gaps support it.
+	if named, likely := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
+		r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)
+		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: "+repeatMissCause(likely, len(named))+"; each is named under unmatched_calls.repeat_of",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.Int("count", len(named)),
+			zap.Int("likely_elapsed_time", likely),
+			zap.String("next_step", "record with that cache disabled or its span longer than the replay, or make the call in every test that needs it"))
+	}
+	// Its mirror, for a replay faster than the recording: a recorded call
+	// this replay never made, identical to a recording an earlier test made
+	// that answered at this replay, is named with that recording; the
+	// application may still have held the earlier answer, which the line
+	// claims only when every note's gaps support it.
+	if named, likely := markUnmadeRepeats(testCaseResults, consumers, totalConsumedMocks, mockLookup, replayStarts, testCases); len(named) > 0 {
+		r.logger.Warn("tests did not make a recorded call identical to one an earlier test made, which keploy answered at this replay with that test's recording: "+repeatUnmadeCause(likely, len(named))+"; each is named under unconsumed_mocks.repeat_of",
+			zap.String("test-set", testSetID),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.Int("count", len(named)),
+			zap.Int("likely_elapsed_time", likely),
+			zap.String("next_step", "record with that cache disabled, or make the call in every test that needs it"))
 	}
 	// Under the proven switch a test whose call got no recorded answer fails,
 	// before the hook, so the hook sees the verdicts it is to act on. The loop
@@ -5689,6 +5806,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		testSetStatus = models.TestSetStatusInternalErr
 		r.markNotJudged(testSetID)
 		r.markNeverReady(testSetID)
+	}
+	// A test case keploy did not begin on its agent stopped the set before
+	// it. When that left the set keploy's own failure (INTERNAL_ERR), the
+	// set is not judged, saying why, and the run goes on to the next set
+	// (abortAfterTestSet). A set the app's halt failed keeps the app's
+	// status.
+	if notBegun != nil && testSetStatus == models.TestSetStatusInternalErr {
+		r.logNotBegun(testSetID, notBegun)
+		notJudged = alsoNotJudged(notJudged, "not judged: "+notBegun.Error())
+		r.markNotJudged(testSetID)
 	}
 
 	appFailure := getLastAppErr()
@@ -6744,9 +6871,12 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 			continue
 		}
 		lookup[mock.Name] = mockDisplayInfo{
-			summary:  models.MockSummaryFromSpec(mock),
-			protocol: string(mock.Kind),
-			target:   mockTargetFromSpec(mock),
+			summary:    models.MockSummaryFromSpec(mock),
+			protocol:   string(mock.Kind),
+			target:     mockTargetFromSpec(mock),
+			request:    mock.RequestFingerprint(),
+			recordedAt: mock.Spec.ReqTimestampMock,
+			lifetime:   mock.TestModeInfo.Lifetime,
 		}
 	}
 }
@@ -8545,41 +8675,53 @@ func (r *Replayer) waitForResetResendReady(ctx context.Context, testCase *models
 // since the previous test's window closed, with no test running, are carried
 // into this one, the test running when they can first be reported, rather
 // than dropped. An agent without the continue capability begins instead.
-// Best-effort: a failure only degrades to the old behaviour.
-func (r *Replayer) openTestErrorCapture(ctx context.Context, opened *bool) {
+//
+// Without exact serving it is best-effort: a failure only degrades to the old
+// behaviour, and nil is returned. Under exact serving (plan non-nil) opening
+// the window is where the agent's learn tracker begins test case name, and it
+// must begin before name's view is installed: a tracker left on the last test
+// case would file name's serves as that one's, and one that begins late would
+// move serves name's view already made out of name. A failure is returned,
+// and the set stops there, not judged, before name's view is asked for.
+func (r *Replayer) openTestErrorCapture(ctx context.Context, plan *exactPlan, opened *bool, name string) error {
 	// The window is the agent's. A base path has none, and no mock to miss.
 	if r.noAgent {
-		return
+		return nil
 	}
 	first := !*opened
 	*opened = true
-	if !first {
-		if c, ok := r.instrumentation.(interface {
-			ContinueTestErrorCapture(context.Context) error
-		}); ok {
-			if err := c.ContinueTestErrorCapture(ctx); err != nil {
-				r.logger.Debug("failed to continue test error capture", zap.Error(err))
-			}
-			return
-		}
+	var what string
+	var err error
+	if c, ok := r.instrumentation.(interface {
+		ContinueTestErrorCapture(context.Context) error
+	}); ok && !first {
+		what, err = "continue", c.ContinueTestErrorCapture(ctx)
+	} else {
+		what, err = "begin", r.beginTestErrorCapture(ctx)
 	}
-	r.beginTestErrorCapture(ctx)
+	if err == nil {
+		return nil
+	}
+	if plan == nil {
+		r.logger.Debug("failed to "+what+" test error capture", zap.Error(err))
+		return nil
+	}
+	return fmt.Errorf("keploy's agent did not begin test case %s (it did not open the test case's capture window), so keploy served none of %s's mocks and stopped the test set there: %w", name, name, err)
 }
 
 // beginTestErrorCapture opens a per-test mock-error capture window on the agent
 // (via an optional capability — older agents / non-agent instrumentations skip
 // it and fall back to the legacy global queue) so a mock miss during this test
 // attributes to THIS test instead of whichever test drains GetMockErrors next,
-// discarding what was missed with no window open.
-// Best-effort: a failure only degrades to the old behaviour.
-func (r *Replayer) beginTestErrorCapture(ctx context.Context) {
+// discarding what was missed with no window open. It returns the agent's
+// error; openTestErrorCapture decides what a failure means.
+func (r *Replayer) beginTestErrorCapture(ctx context.Context) error {
 	if b, ok := r.instrumentation.(interface {
 		BeginTestErrorCapture(context.Context) error
 	}); ok {
-		if err := b.BeginTestErrorCapture(ctx); err != nil {
-			r.logger.Debug("failed to begin test error capture", zap.Error(err))
-		}
+		return b.BeginTestErrorCapture(ctx)
 	}
+	return nil
 }
 
 // attachMockErrors drains the per-test mock-error capture window (closing it)

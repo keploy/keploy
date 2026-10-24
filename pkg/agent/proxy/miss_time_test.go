@@ -74,6 +74,8 @@ func fillEveryField(v reflect.Value) {
 			f.SetUint(uint64(i + 1))
 		case f.Kind() == reflect.Bool:
 			f.SetBool(true)
+		case f.Kind() == reflect.Float64:
+			f.SetFloat(float64(i) + 0.5)
 		case f.Kind() == reflect.Slice:
 			s := reflect.MakeSlice(f.Type(), 1, 1)
 			if s.Index(0).Kind() == reflect.Struct {

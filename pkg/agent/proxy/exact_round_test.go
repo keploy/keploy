@@ -1499,3 +1499,64 @@ func TestAHeldStoreSpendsClaimsAndReadsNothingOfTheNextSet(t *testing.T) {
 		t.Fatalf("the next set's own call did not claim %s exactly once", other2.Name)
 	}
 }
+
+// A store held to a call's staging (HoldToRound) names a recording that
+// answered earlier (FindAnsweredEarlier, the repeat note's lookup) only
+// while the staging is still the call's after the lookup: the answered log
+// is the staged set's, and recordings' names restart in each set, so once
+// the replay staged another set under the call, whose own recording then
+// answered, the call is named none, and its store says it was restaged. The
+// manager itself, read with no hold, names the other set's.
+func TestAHeldCallIsNamedNoAnsweredRecordingOnceTheStagingMoved(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	all := func(*models.Mock) bool { return true }
+	keys := []string{"url:/count"}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	defer mm.Close()
+	answer := func(set string, at time.Time) {
+		t.Helper()
+		// The set's staging starts a staging epoch (bumpStagingEpoch, as a
+		// staging does before it changes the trees); its first test answers.
+		mm.bumpStagingEpoch()
+		mm.SetMocksWithWindow([]*models.Mock{keyedRecording("mock-7", models.HTTP, 7, "/count", at)}, nil, at.Add(-time.Second), at.Add(time.Second))
+		staged, _ := mm.GetFilteredMocks()
+		if len(staged) != 1 || !mm.DeleteFilteredMock(*staged[0]) {
+			t.Fatalf("precondition: set %s's mock-7 did not answer: %v", set, staged)
+		}
+		// A later test of the set opens: mock-7 is no recording of its.
+		mm.SetCurrentTestWindow(at.Add(5*time.Second), at.Add(15*time.Second))
+	}
+	answer("A", t0)
+	held, restaged := mm.HoldToRound(integrations.NewCallRound(mm.stagingEpoch.Load(), nil))
+	f, ok := held.(integrations.AnsweredFinder)
+	if !ok {
+		t.Fatal("the held store offers no lookup of an earlier answer")
+	}
+	got, ok := f.FindAnsweredEarlier(models.HTTP, keys, all)
+	if !ok || got.Mock.Name != "mock-7" || !got.Mock.Spec.ReqTimestampMock.Equal(t0) || restaged() {
+		t.Fatalf("in its own staging the held call is named %v (%v, restaged %v); want set A's mock-7", got.Mock, ok, restaged())
+	}
+	// The staging moves while the lookup reads the answered log (as its
+	// match is asked): the held call is named none all the same, since the
+	// hold is checked after the lookup, not only before it.
+	during := func(*models.Mock) bool { mm.bumpStagingEpoch(); return true }
+	if got, ok := f.FindAnsweredEarlier(models.HTTP, keys, during); ok || !restaged() {
+		t.Fatalf("a staging that moved during the lookup left the held call named %v (%v, restaged %v); want none, restaged", got.Mock, ok, restaged())
+	}
+	// A call held in the staging as it now stands (a hold of its own: a
+	// hold's restaged stays said once said) is named set A's mock-7 until
+	// set B is staged under it, and none after, saying it was restaged.
+	held, restaged = mm.HoldToRound(integrations.NewCallRound(mm.stagingEpoch.Load(), nil))
+	f = held.(integrations.AnsweredFinder)
+	if got, ok := f.FindAnsweredEarlier(models.HTTP, keys, all); !ok || !got.Mock.Spec.ReqTimestampMock.Equal(t0) || restaged() {
+		t.Fatalf("a call held in the staging as it stands is named %v (%v, restaged %v); want set A's mock-7", got.Mock, ok, restaged())
+	}
+	answer("B", t0.Add(time.Hour))
+	if got, ok := f.FindAnsweredEarlier(models.HTTP, keys, all); ok || !restaged() {
+		t.Fatalf("once set B was staged under it the held call is named %v (restaged %v); want none, restaged", got.Mock, restaged())
+	}
+	if got, ok := mm.FindAnsweredEarlier(models.HTTP, keys, all); !ok || !got.Mock.Spec.ReqTimestampMock.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("precondition: with no hold the manager names %v (%v); want set B's mock-7", got.Mock, ok)
+	}
+}

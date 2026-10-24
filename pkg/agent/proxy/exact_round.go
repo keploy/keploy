@@ -895,6 +895,19 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 	return h.heldOf(h.MockManager.ConsumedTestMocks())
 }
 
+// FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
+// the staging is still h's call's after the lookup: the answered log is the
+// staged set's, and recordings' names restart in each set, so a call of one
+// set is never named a repeat of a recording another set staged under it
+// answered.
+func (h *heldScope) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	a, ok := h.MockManager.FindAnsweredEarlier(kind, keys, match)
+	if h.moved() {
+		return integrations.AnsweredCall{}, false
+	}
+	return a, ok
+}
+
 func (h *heldScope) ExactTakenCandidates(kind models.Kind) []*models.Mock {
 	return h.heldOf(h.MockManager.ExactTakenCandidates(kind))
 }

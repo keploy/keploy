@@ -2197,14 +2197,12 @@ func TestLearnedMatchLeavesASigV4CredentialToTheStrictMatcher(t *testing.T) {
 		head := fmt.Sprintf("POST /bucket/key HTTP/1.1\r\nHost: api.example\r\nAuthorization: %s\r\nX-Amz-Date: 20261015T101533Z\r\nX-Amz-Content-Sha256: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n",
 			tc.auth, hashOf(body), len(body))
 		app, proxy := tcpPair(t)
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = learn.WithTracker(ctx, learn.NewTracker())
 		h := &HTTP{Logger: zaptest.NewLogger(t)}
-		go func() {
-			_ = h.decodeHTTP(ctx, append([]byte(head), body...), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true, deleteFilteredReturn: true}, models.OutgoingOptions{})
-		}()
+		stop := startDecodeUntilStopped(t, func(ctx context.Context) error {
+			return h.decodeHTTP(learn.WithTracker(ctx, learn.NewTracker()), append([]byte(head), body...), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true, deleteFilteredReturn: true}, models.OutgoingOptions{})
+		})
 		got := readUntil(app, "\r\n\r\n", 20*time.Second)
-		cancel()
+		stop()
 		_ = app.Close()
 		if served := strings.HasPrefix(got, "HTTP/1.1 200"); served != tc.wantServed {
 			t.Errorf("%s: served %v (%q), want %v", tc.name, served, strings.SplitN(got, "\r\n", 2)[0], tc.wantServed)
@@ -2276,14 +2274,12 @@ func TestLearnedMatchLeavesAPresignedCredentialToTheStrictMatcher(t *testing.T) 
 		}
 		head := "POST " + q(tc.cred, "20261015T101533Z", sig(2)) + " HTTP/1.1\r\nHost: api.example\r\nContent-Length: 0\r\n\r\n"
 		app, proxy := tcpPair(t)
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = learn.WithTracker(ctx, learn.NewTracker())
 		h := &HTTP{Logger: zaptest.NewLogger(t)}
-		go func() {
-			_ = h.decodeHTTP(ctx, []byte(head), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true, deleteFilteredReturn: true}, models.OutgoingOptions{})
-		}()
+		stop := startDecodeUntilStopped(t, func(ctx context.Context) error {
+			return h.decodeHTTP(learn.WithTracker(ctx, learn.NewTracker()), []byte(head), proxy, nil, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true, deleteFilteredReturn: true}, models.OutgoingOptions{})
+		})
 		got := readUntil(app, "\r\n\r\n", 20*time.Second)
-		cancel()
+		stop()
 		_ = app.Close()
 		if served := strings.HasPrefix(got, "HTTP/1.1 200"); served != tc.served {
 			t.Errorf("%s: served %v (%q), want %v", tc.name, served, strings.SplitN(got, "\r\n", 2)[0], tc.served)
