@@ -203,6 +203,28 @@ func TreeOf(pid int) []Reached {
 // whose app it stops (nil: none). bound is how a kill names the stall bound,
 // as it was measured (ExitClock.Said).
 func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope) (end StopEnd, bound string) {
+	end, bound, _ = waitByEvents(logger, exited, procs, moved, true)
+	return end, bound
+}
+
+// WaitStopByEvents is WaitExitByEvents for a stop that is through only once
+// stopped fires: the word of what runs procs (a container's daemon), which
+// comes after the kernel's. Every one of procs gone does not end it. It
+// waits on in the same wait, with the same offer to end it at the user's
+// Ctrl+C, and nothing of procs is left to judge, so its stall is keploy's
+// runnable time alone: the bound on no news. As two waits, one to the
+// processes' exit and one after it, a press taken at the first's offer in
+// the look that found them gone was lost: the second wait's offer could not
+// be answered (the press had taken it), and the stop held to the stall
+// bound. gone says whether every one of procs had exited as the wait ended,
+// stalled or pressed (false for none): nothing of theirs is left to kill.
+func WaitStopByEvents(logger *zap.Logger, stopped <-chan struct{}, procs []Reached, moved *TeardownScope) (end StopEnd, bound string, gone bool) {
+	return waitByEvents(logger, stopped, procs, moved, false)
+}
+
+// waitByEvents is WaitExitByEvents where goneEnds is set, WaitStopByEvents
+// where it is not.
+func waitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reached, moved *TeardownScope, goneEnds bool) (end StopEnd, bound string, gone bool) {
 	clock, meter, stop := NewExitMeter(procs, StopStallBudget)
 	defer stop()
 	notice := NewStopNowNotice(StopOffer)
@@ -212,28 +234,34 @@ func WaitExitByEvents(logger *zap.Logger, exited <-chan struct{}, procs []Reache
 	for {
 		select {
 		case <-exited:
-			return StopExited, clock.Said(StopStallBudget)
+			return StopExited, clock.Said(StopStallBudget), false
 		case <-notice.Interrupt():
-			return StopPressed, clock.Said(StopStallBudget)
+			// A fresh look: they may have gone since the last.
+			return StopPressed, clock.Said(StopStallBudget), len(procs) > 0 && MarkExit(procs).Running == 0
 		case <-meter.Wait():
 		}
 		if looked := exitLooked.Load(); looked != nil {
 			(*looked)()
 		}
+		m := MarkExit(procs)
+		left := len(procs) > 0 && m.Running == 0
 		if !offering && notice.Next() {
 			offering = true
-			logger.Info("keploy waits for the application to stop, as long as it makes progress on its way out; press Ctrl+C again to kill it now")
+			if left && !goneEnds {
+				logger.Info("the application's processes have exited, and keploy waits for word that it has stopped; press Ctrl+C again to stop waiting")
+			} else {
+				logger.Info("keploy waits for the application to stop, as long as it makes progress on its way out; press Ctrl+C again to kill it now")
+			}
 		}
-		m := MarkExit(procs)
-		if len(procs) > 0 && m.Running == 0 {
-			return StopExited, clock.Said(StopStallBudget)
+		if left && goneEnds {
+			return StopExited, clock.Said(StopStallBudget), true
 		}
 		if meter.Advance(m) {
 			moved.Note()
 			continue
 		}
 		if meter.Expired() {
-			return StopStalled, clock.Said(StopStallBudget)
+			return StopStalled, clock.Said(StopStallBudget), left
 		}
 	}
 }

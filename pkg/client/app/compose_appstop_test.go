@@ -116,7 +116,15 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 	return nil
 }
 
-func (d *composeDocker) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+func (d *composeDocker) ContainerWait(ctx context.Context, _ string, c container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	if c != container.WaitConditionNotRunning {
+		// A wait for any other condition (the next exit) of a container
+		// that has stopped waits for an exit to come; this fake answers only
+		// the wait keploy's stop asks for.
+		errs := make(chan error, 1)
+		errs <- fmt.Errorf("the fake daemon answers a wait for %q only, not %q", container.WaitConditionNotRunning, c)
+		return make(chan container.WaitResponse), errs
+	}
 	d.mu.Lock()
 	exited := d.exitedCh
 	running := d.running

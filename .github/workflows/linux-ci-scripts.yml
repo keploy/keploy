@@ -7,17 +7,29 @@ name: Linux CI scripts
 # index is broken, which an ordinary run never shows. The tests make all three
 # happen on purpose, against a stub mirror. They run on every change to the
 # helper or its tests.
+#
+# Also here: compose-proven-setend-linux.tests.sh, the cases of the lane
+# "proven set-end stop (docker_compose)" against a fake keploy record, run on
+# every change to the lane script or its tests. A recording that lacks a test
+# case, as a request that failed or keploy dropping one leaves it, has to end
+# with its log printed, not hold the lane until its job is cancelled; and one
+# that has them all has to pass, its test cases written as the requests are
+# answered or as keploy record stops.
 
 on:
   push:
     branches:
       - main
     paths:
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.sh'
+      - '.github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
       - '.github/workflows/linux-ci-scripts.yml'
@@ -109,3 +121,13 @@ jobs:
             echo "::error::apt's list cleanup kept the sentinel, so the check above proves nothing"
             exit 1
           fi
+
+  compose-proven-setend:
+    # Four cases, a few seconds; each bounds the hang it tests for at 60 s.
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test compose-proven-setend-linux.sh (a recording's test cases counted once keploy record has stopped)
+        run: bash .github/workflows/test_workflow_scripts/compose-proven-setend-linux.tests.sh
