@@ -260,6 +260,9 @@ type prInstr struct {
 	// returns.
 	release chan struct{}
 	stopped chan struct{}
+	// leftRunning is what the app's stop leaves running
+	// (models.AppError.LeftRunning) when its run is stopped.
+	leftRunning string
 	// mockErrorsFor, when set, answers every GetMockErrors call: what the agent
 	// read of the calls no mock answered during the test that just ran. The
 	// replayer reads them once per test, in test order.
@@ -289,7 +292,7 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		if f.release != nil {
 			<-f.release
 		}
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1, LeftRunning: f.leftRunning}
 	case <-f.appStopped:
 		errType := models.ErrAppStopped
 		if f.stopErr != "" {

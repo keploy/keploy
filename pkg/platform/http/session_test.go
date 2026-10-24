@@ -324,9 +324,11 @@ type restartingAgent struct {
 	// the calls other than health checks that met it.
 	down      bool
 	downCalls int
-	// refuse answers a path's nth connection 503; hang keeps it open after
-	// its item, as an agent that vanished without closing it, until release
-	// is closed; slow answers it slowBy late.
+	// refuse answers a path's nth connection 503 (the agent's readiness,
+	// with the CA setup failure an agent latches until it is started
+	// again); hang keeps it open after its item, as an agent that vanished
+	// without closing it, until release is closed; slow answers it slowBy
+	// late.
 	refuse, hang, slow map[string]int
 	release            chan struct{}
 	slowBy             time.Duration
@@ -362,7 +364,14 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		}
 		r.mu.Unlock()
 		switch req.URL.Path {
-		case "/agent/agent/ready", "/agent/health":
+		case "/agent/agent/ready":
+			if r.refuse[req.URL.Path] == n {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "%s the agent could not set its CA up", agentCASetupFailed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/agent/health":
 			w.WriteHeader(http.StatusOK)
 		case "/agent/outgoing":
 			if r.refuse[req.URL.Path] == n {

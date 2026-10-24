@@ -24,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	agentsvc "go.keploy.io/server/v3/pkg/service/agent"
 	"go.uber.org/zap"
 )
@@ -122,6 +123,26 @@ type lossAgentSvc struct {
 
 func (s lossAgentSvc) CaptureLosses(context.Context) (models.CaptureLosses, error) {
 	return s.losses, s.err
+}
+
+// Under the proven switch a read of the counts names the agent process that
+// answered it, the counts being that process's from its start; with the
+// switch off the agent names none, and the read says so ("").
+func TestACaptureLossReadNamesTheAgentThatAnsweredIt(t *testing.T) {
+	want := models.CaptureLosses{{Kind: models.CaptureLossPIDMap, Count: 1, What: "pid 41"}}
+	t.Setenv(provenswitch.Env, "1")
+	got, agent, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLossesAndAgent(context.Background())
+	if err != nil || len(got) != 1 || got[0] != want[0] || agent == "" {
+		t.Fatalf("read %+v from agent %q, %v; want %+v from a named agent process", got, agent, err, want)
+	}
+	again, other, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLossesAndAgent(context.Background())
+	if err != nil || len(again) != 1 || other != agent {
+		t.Fatalf("a second router of the same process: %+v from %q, %v; want the same process, %q", again, other, err, agent)
+	}
+	t.Setenv(provenswitch.Env, "")
+	if _, agent, err := newClient(t, agentWith(t, lossAgentSvc{losses: want})).GetCaptureLossesAndAgent(context.Background()); err != nil || agent != "" {
+		t.Fatalf("the switch off: agent %q, %v; want none named", agent, err)
+	}
 }
 
 // The client reads what the agent counted, field for field; an agent older

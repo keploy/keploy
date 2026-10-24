@@ -1,9 +1,12 @@
 package models
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestCaptureLossesSinceIsWhatGrew(t *testing.T) {
@@ -36,18 +39,18 @@ func TestChargedTaintsWithTheRunsKindsAndKeepsATestsOwnToIt(t *testing.T) {
 	prev := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 3, What: "to a:443"}}
 	now := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 3, What: "to a:443"}}
 	want := CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}}
-	if got := now.Charged(run, run, prev); !reflect.DeepEqual(got, want) {
+	if got := now.Charged(SameBases(run), prev); !reflect.DeepEqual(got, want) {
 		t.Fatalf("no rejection since the previous test: Charged = %+v, want %+v (the PID map's taint only)", got, want)
 	}
 	now = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 2}, {Kind: CaptureLossTLSAbort, Count: 5, What: "to b:443"}}
 	want = CaptureLosses{{Kind: CaptureLossPIDMap, Count: 1}, {Kind: CaptureLossTLSAbort, Count: 2, What: "to b:443"}}
-	if got := now.Charged(run, run, prev); !reflect.DeepEqual(got, want) {
+	if got := now.Charged(SameBases(run), prev); !reflect.DeepEqual(got, want) {
 		t.Fatalf("two rejections since the previous test: Charged = %+v, want %+v", got, want)
 	}
 	// What keploy cannot capture at all (decision 20) is counted from the
 	// run's base, however far back it was made, as SinceWithin counts it.
 	unix := CaptureLosses{{Kind: CaptureLossUnixSocket, Count: 1}}
-	if got := unix.Charged(unix, nil, unix); !reflect.DeepEqual(got, unix) {
+	if got := unix.Charged(LossBases{Set: unix, App: unix}, unix); !reflect.DeepEqual(got, unix) {
 		t.Fatalf("a Unix-socket call before the base: Charged = %+v, want %+v", got, unix)
 	}
 	if !CaptureLossTLSAbort.PerTest() || CaptureLossPIDMap.PerTest() || CaptureLossAppBytesLost.PerTest() {
@@ -67,10 +70,10 @@ func TestAnAbandonedHandshakeIsATestsOwnAndLeavesItNotJudged(t *testing.T) {
 	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: k, Count: n, What: "to a:443"}} }
 	// Abandoned before the set's mark: not the set's, whatever the run's
 	// base (a Unix-socket call before it would be).
-	if got := at(2).SinceWithin(at(2), nil); len(got) != 0 {
+	if got := at(2).SinceWithin(LossBases{Set: at(2), App: at(2)}); len(got) != 0 {
 		t.Fatalf("SinceWithin = %+v: one before the mark is not this set's", got)
 	}
-	if got := at(3).Charged(at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+	if got := at(3).Charged(LossBases{Set: at(1), App: at(1)}, at(2)); !reflect.DeepEqual(got, at(1)) {
 		t.Fatalf("Charged = %+v, want the one since the previous test", got)
 	}
 	judged, notJudged := at(1).Split()
@@ -186,11 +189,11 @@ func TestNotJudgedLossesAreSplitAndCountedFromTheRun(t *testing.T) {
 	// The set's mark is after the connect; the run's base before it.
 	now := CaptureLosses{tls, unixAt(1)}
 	mark := CaptureLosses{tls, unixAt(1)}
-	got := now.SinceWithin(mark, nil)
+	got := now.SinceWithin(LossBases{Set: mark, App: mark})
 	if len(got) != 1 || got[0].Kind != CaptureLossUnixSocket {
 		t.Fatalf("SinceWithin = %+v, want the Unix socket only, from the run's base", got)
 	}
-	if got := now.SinceWithin(mark, CaptureLosses{unixAt(1)}); len(got) != 0 {
+	if got := now.SinceWithin(LossBases{Set: mark, App: mark, Run: CaptureLosses{unixAt(1)}, Capture: CaptureLosses{unixAt(1)}}); len(got) != 0 {
 		t.Fatalf("SinceWithin with the connect before the run's base = %+v, want nothing", got)
 	}
 }
@@ -207,7 +210,7 @@ func TestUnixSocketsKeployCannotSeeAreAStandingNotJudgedLoss(t *testing.T) {
 	if got := now.Since(now); len(got) != 1 || got[0] != unseen {
 		t.Fatalf("Since(itself) = %+v, want unix_unseen kept: a state, no mark takes it away", got)
 	}
-	if got := now.SinceWithin(now, now); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {
+	if got := now.SinceWithin(SameBases(now)); len(got) != 1 || got[0].Kind != CaptureLossUnixUnseen {
 		t.Fatalf("SinceWithin = %+v, want unix_unseen", got)
 	}
 	judged, notJudged := now.Split()
@@ -237,7 +240,7 @@ func TestAServerFirstConnectionLeavesItsTestNotJudged(t *testing.T) {
 	}
 	before := CaptureLosses{{Kind: k, Count: 2, What: "to 10.0.0.9:25"}}
 	now := CaptureLosses{{Kind: k, Count: 5, What: "to 10.0.0.9:25"}}
-	charged := now.Charged(nil, nil, before)
+	charged := now.Charged(SameBases(nil), before)
 	if len(charged) != 1 || charged[0].Count != 3 {
 		t.Fatalf("charged %+v; want what passed in this test only", charged)
 	}
@@ -282,7 +285,7 @@ func TestAContainerReadTheDaemonDidNotAnswerLeavesItsTestNotJudged(t *testing.T)
 	at := func(n uint64) CaptureLosses {
 		return CaptureLosses{{Kind: k, Count: n, What: "container pg (postgres:16)"}}
 	}
-	if got := at(3).Charged(at(1), nil, at(2)); !reflect.DeepEqual(got, at(1)) {
+	if got := at(3).Charged(LossBases{Set: at(1), App: at(1)}, at(2)); !reflect.DeepEqual(got, at(1)) {
 		t.Fatalf("Charged = %+v, want the one since the previous test", got)
 	}
 	judged, notJudged := at(1).Split()
@@ -328,13 +331,13 @@ func TestAKernelSkipIsEvidenceNotAVerdict(t *testing.T) {
 		t.Fatal("a skipped connection report covers every later test")
 	}
 	// Counted from the run's base: a test after the skip still carries it.
-	if got := at(k, 3).Charged(at(k, 3), at(k, 1), at(k, 3)); !reflect.DeepEqual(got, at(k, 2)) {
+	if got := at(k, 3).Charged(LossBases{Set: at(k, 3), App: at(k, 3), Run: at(k, 1), Capture: at(k, 1)}, at(k, 3)); !reflect.DeepEqual(got, at(k, 2)) {
 		t.Fatalf("Charged = %+v, want what grew since the run began", got)
 	}
 	if !call.PerTest() || call.runScoped() {
 		t.Fatal("a skipped call's run is its test's own")
 	}
-	if got := at(call, 3).Charged(at(call, 1), nil, at(call, 2)); !reflect.DeepEqual(got, at(call, 1)) {
+	if got := at(call, 3).Charged(LossBases{Set: at(call, 1), App: at(call, 1)}, at(call, 2)); !reflect.DeepEqual(got, at(call, 1)) {
 		t.Fatalf("Charged = %+v, want the one since the previous test", got)
 	}
 	for _, l := range []CaptureLosses{at(k, 1), at(call, 1)} {
@@ -369,23 +372,38 @@ func TestAProcessKeployCouldNotClassifyLeavesTheTestsFromItNotJudged(t *testing.
 	}
 }
 
-// What a downstream build's capture saw and could not read, or stopped
-// recording a connection over, fails the test it happened in (judged), and
-// that test only (PerTest); the text says which.
-func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
+// What a downstream build's capture lost fails the tests it taints (judged,
+// never evidence): a piece it saw and could not read, or a connection it
+// stopped recording, the test it happened in only (PerTest); an app process
+// it could not mark, which lives on, that test and every later one, from the
+// running application's start (agent-life, AppLife). The text says which,
+// and an untracked process's says what to do.
+func TestWhatADownstreamCaptureLostFailsTheTestsItTaints(t *testing.T) {
 	for _, tc := range []struct {
-		k    CaptureLossKind
-		text string
+		k       CaptureLossKind
+		text    string
+		perTest bool
+		appLife bool
 	}{
-		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried"},
-		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)"},
+		{CaptureLossUnread, "could not read 2 piece(s) of what the application's connections carried", true, false},
+		{CaptureLossUnrecorded, "stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and 2 piece(s)", true, false},
+		{CaptureLossAppSubtreeUntracked, "keploy could not mark 2 process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked while this test ran, or before it; report it to keploy with the agent's log, which names the process", false, true},
 	} {
-		if tc.k.NotJudged() || !tc.k.PerTest() || tc.k.runScoped() {
-			t.Fatalf("%s: a judged loss, the test's own", tc.k)
+		if tc.k.NotJudged() || tc.k.Evidence() || tc.k.PerTest() != tc.perTest || tc.k.AppLife() != tc.appLife || tc.k.runScoped() {
+			t.Fatalf("%s: NotJudged %v, Evidence %v, PerTest %v, AppLife %v; want a judged loss, PerTest %v, AppLife %v",
+				tc.k, tc.k.NotJudged(), tc.k.Evidence(), tc.k.PerTest(), tc.k.AppLife(), tc.perTest, tc.appLife)
 		}
 		at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: tc.k, Count: n}} }
-		if got := at(5).Charged(at(1), nil, at(3)); !reflect.DeepEqual(got, at(2)) {
-			t.Fatalf("%s: Charged = %+v, want the 2 since the previous test", tc.k, got)
+		// Now 5; the running application started at 1, the set at 2, and
+		// the previous test ended at 3: a test's own kind is charged the 2
+		// since that test, an application-life kind the 4 since its
+		// application started.
+		want := at(4)
+		if tc.perTest {
+			want = at(2)
+		}
+		if got := at(5).Charged(LossBases{Set: at(2), App: at(1)}, at(3)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: Charged = %+v, want %+v", tc.k, got, want)
 		}
 		if judged, notJudged := at(2).Split(); len(judged) != 1 || len(notJudged) != 0 {
 			t.Fatalf("%s: Split = %v, %v: judged", tc.k, judged, notJudged)
@@ -393,5 +411,115 @@ func TestAnUnreadOrUnrecordedPieceFailsItsTest(t *testing.T) {
 		if txt := at(2).Text(); !strings.Contains(txt, tc.text) {
 			t.Fatalf("%s: text %q lacks %q", tc.k, txt, tc.text)
 		}
+	}
+}
+
+// Each kind is charged from the base its loss lasts from: a test's own from
+// the previous test's end; a process of the application's keploy could not
+// place (AppLife) from the running application's start; one that outlives
+// the application (one keploy could not exclude: it predates the recording)
+// from the run's start; what keploy cannot capture at all, a process it
+// could not classify among it, from that base, however far back; every
+// other kind from the set's.
+func TestEachKindIsChargedFromTheBaseItsLossLastsFrom(t *testing.T) {
+	// Now 9; the hooks loaded at 0 (what keploy cannot capture is counted
+	// from there), the run began at 1, the running application started at 3,
+	// the set at 5, and the previous test ended at 7.
+	for _, tc := range []struct {
+		k    CaptureLossKind
+		want uint64
+	}{
+		{CaptureLossTLSAbort, 2},
+		{CaptureLossParserStall, 4},
+		{CaptureLossPIDMap, 6},
+		{CaptureLossAppSubtreeUntracked, 6},
+		{CaptureLossPIDMapExcluded, 8},
+		{CaptureLossUnclassified, 9},
+	} {
+		at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: tc.k, Count: n}} }
+		if got := at(9).Charged(LossBases{Set: at(5), App: at(3), Run: at(1), Capture: nil}, at(7)); !reflect.DeepEqual(got, at(tc.want)) {
+			t.Errorf("%s: Charged = %+v, want %d", tc.k, got, tc.want)
+		}
+	}
+	for _, k := range []CaptureLossKind{CaptureLossPIDMap, CaptureLossAppSubtreeUntracked} {
+		if !k.AppLife() || k.runLife() || k.runScoped() || k.PerTest() {
+			t.Errorf("%s: AppLife %v, runLife %v, runScoped %v, PerTest %v; want application-life only", k, k.AppLife(), k.runLife(), k.runScoped(), k.PerTest())
+		}
+	}
+	if k := CaptureLossPIDMapExcluded; !k.runLife() || k.AppLife() || k.runScoped() || k.NotJudged() {
+		t.Errorf("%s: want judged and run-life only", k)
+	}
+}
+
+// A kind this build does not know (a newer agent's) is kept whole when what
+// carries it is read and written again, in YAML and in JSON, and it is judged
+// and agent-life: an older reader fails every test from it on rather than
+// drop the loss or pass them.
+func TestAKindThisBuildDoesNotKnowIsKeptAndJudged(t *testing.T) {
+	newer := CaptureLossKind("a_kind_from_a_newer_build")
+	losses := CaptureLosses{{Kind: newer, Count: 2, What: "the latest: pid 7 (app)"}}
+	for _, codec := range []struct {
+		name      string
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}{
+		{"yaml", yaml.Marshal, yaml.Unmarshal},
+		{"json", json.Marshal, json.Unmarshal},
+	} {
+		b, err := codec.marshal(FailureInfo{CaptureIncomplete: losses})
+		if err != nil {
+			t.Fatalf("%s: write: %v", codec.name, err)
+		}
+		var back FailureInfo
+		if err := codec.unmarshal(b, &back); err != nil {
+			t.Fatalf("%s: read: %v", codec.name, err)
+		}
+		again, err := codec.marshal(back)
+		if err != nil {
+			t.Fatalf("%s: write again: %v", codec.name, err)
+		}
+		var twice FailureInfo
+		if err := codec.unmarshal(again, &twice); err != nil {
+			t.Fatalf("%s: read again: %v", codec.name, err)
+		}
+		if !reflect.DeepEqual(twice.CaptureIncomplete, losses) {
+			t.Fatalf("%s: read and written twice: %+v, want %+v", codec.name, twice.CaptureIncomplete, losses)
+		}
+	}
+	if newer.NotJudged() || newer.Evidence() {
+		t.Fatal("an unknown kind is not judged, or is evidence: an older reader would pass a test it taints")
+	}
+	if judged, _ := losses.Split(); len(judged) != 1 {
+		t.Fatalf("Split = %v: an unknown kind must be judged", judged)
+	}
+	// And it is agent-life: charged from the set's base, so it taints the
+	// test it happened in and every later one.
+	at := func(n uint64) CaptureLosses { return CaptureLosses{{Kind: newer, Count: n}} }
+	if newer.PerTest() {
+		t.Fatal("an unknown kind is a test's own: an older reader would charge it to one test only")
+	}
+	if got := at(5).Charged(LossBases{Set: at(1), App: at(1)}, at(3)); !reflect.DeepEqual(got, at(4)) {
+		t.Fatalf("Charged = %+v, want the 4 since the set's base", got)
+	}
+}
+
+// An agent started again while the application ran on (the replay's own
+// charge, never the agent's) leaves the tests it is charged to without a
+// verdict, and says why and what to do.
+func TestAnAgentStartedAgainLeavesTheTestsWithoutAVerdict(t *testing.T) {
+	k := CaptureLossAgentStartedAgain
+	if !k.NotJudged() || k.PerTest() || k.Evidence() || k.AppLife() {
+		t.Fatalf("%s: NotJudged %v, PerTest %v, Evidence %v, AppLife %v; want not judged only", k, k.NotJudged(), k.PerTest(), k.Evidence(), k.AppLife())
+	}
+	l := CaptureLosses{{Kind: k, Count: 1, What: "agent process a1, then b2"}}
+	judged, notJudged := l.Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %v, %v: not judged", judged, notJudged)
+	}
+	if text := l.NotJudgedText(); !strings.Contains(text, "keploy's agent was started again while the application ran on") || !strings.Contains(text, "(agent process a1, then b2)") {
+		t.Fatalf("NotJudgedText = %q", text)
+	}
+	if remedy := l.NotJudgedRemedy(); remedy != AgentStartedAgainRemedy {
+		t.Fatalf("NotJudgedRemedy = %q, want %q", remedy, AgentStartedAgainRemedy)
 	}
 }
