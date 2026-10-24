@@ -343,6 +343,9 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// Pending, of a provisional reading (KindPending), is what record's
+	// full round saw, for the confirming round to decide (Pending.Decide).
+	Pending *Pending
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -423,6 +426,13 @@ type GivenEarlier func() ([]GivenPlaces, error)
 // earlier in the set (given; nil: none), which the offset rule, the word rule
 // and the echo of what F gave there read beside raw's.
 func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier) []Learned {
+	return classifyGiven(dc, drift, live, rec, at, earlier, raw, resp, w, given, followNone, nil)
+}
+
+// classifyGiven is ClassifyGiven, its word rule read as mode says
+// (follows.go): pending is the reading the confirming round decides
+// (followC).
+func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, mode followMode, pending *Pending) []Learned {
 	if dc == nil {
 		dc = NewDriftCache()
 	}
@@ -469,6 +479,10 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 			continue
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
+		var fol *follows
+		if mode != followNone {
+			fol = &follows{dc: dc, at: at, served: served, raw: raw, live: l.Value, pending: pending}
+		}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw); ok {
 				ln.Kind, ln.From = KindVariable, from
@@ -496,7 +510,11 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 				// An instant of it built on a moved place by an offset, before
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
-			} else if why = unaccounted(dc, v, at, served, raw); why == "" {
+			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
+				if fol != nil && fol.refused != "" {
+					why += "; " + fol.refused
+				}
+			} else {
 				// Nor a word of it in what F gave the application in
 				// another test or in a recording made after the call, nor
 				// an instant of it copied from there, or picked from it,
@@ -522,6 +540,19 @@ func ClassifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 		if ln.Kind == KindNoise {
 			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
 				ln.Kind, ln.Why = KindUnaccounted, why
+			}
+		}
+		// Words the word rule let go in record's full round: noise only
+		// once the confirming round shows the value follows none of them
+		// (Pending.Decide); anything else they stood beside is refused as
+		// the word rule refuses them.
+		if mode == followF && len(fol.words) > 0 {
+			switch ln.Kind {
+			case KindNoise:
+				ln.Kind, ln.Pending = KindPending, pendingOf(r, l, at, served, raw, fol.words)
+				ln.Why = pendingWhy(fol.words[0])
+			case KindEcho:
+				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.words[0].Why, nil
 			}
 		}
 		out = append(out, ln)

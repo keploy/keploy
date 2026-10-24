@@ -780,7 +780,7 @@ func nonASCIIRuns(s string) []string {
 // place holds the moment it was recorded with (else it is a variable of that
 // place, appearedIn), is refused before any lead or window excuses its words:
 // what F saw came from what F served, whatever moved it.
-func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) string {
+func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) string {
 	if v.unparsed != "" {
 		return v.unparsed
 	}
@@ -819,7 +819,11 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
-					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
+					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
+					if fol.excused(i, t, recorded, e.Mock, s.Leaf.Path, why) {
+						continue
+					}
+					return why
 				}
 				if s.Undeclared && gluedIn(ed, t, recorded) {
 					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
@@ -837,7 +841,11 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
 					at = x.mock + " at " + f
 				}
-				return word(t, recorded) + " appears in an earlier recording, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				why := word(t, recorded) + " appears in an earlier recording, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				if fol.excused(i, t, recorded, x.mock, "", why) {
+					continue
+				}
+				return why
 			}
 		}
 		return ""
