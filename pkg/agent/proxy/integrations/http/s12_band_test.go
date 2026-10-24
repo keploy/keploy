@@ -181,9 +181,9 @@ type roundLearnDb struct {
 func (d *roundLearnDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
 	s := integrations.RoundSnapshot{Test: d.test, Background: d.background, PerTest: d.perTest, Session: d.mocks}
 	if t := q.Tracker; t != nil {
-		number, open, began := t.State()
-		s.Learn = integrations.LearnRead{Bound: true, Number: number, Open: open, Begun: began}
-		_, s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = t.Places()
+		p := t.Placed()
+		s.Learn = integrations.LearnRead{Bound: true, Number: p.Test, Open: p.Open, Begun: p.Begun}
+		s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = p.Earlier, p.Served, p.Before, p.Awaiting
 		s.Learn.Answered = t.AnsweredMocks()
 	}
 	switch {

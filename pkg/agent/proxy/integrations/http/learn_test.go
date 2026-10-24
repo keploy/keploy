@@ -3903,6 +3903,107 @@ func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
 	}
 }
 
+// A call that waited for its test case's request is decided in the round it
+// was made in, or in none: once the test's window closed without the request
+// (End, the next test begun, awaiting its own request or not, the next set
+// begun), the call misses, saying where its first pass read it and that the
+// replay ended that test, and is never learned from against the next test's
+// places, nor left to wait for, and be decided by, the next test's request.
+// One whose own request came is learned from as before. Each close is forced
+// through the tracker's OnAwait, through no clock, 200 times, from a store
+// read one read after another and from one read in one snapshot of the
+// round (integrations.RoundReader).
+func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
+	h, n, opts := learnOn(t)
+	request := func(test string) *models.TestRequest {
+		return &models.TestRequest{Test: test, Parts: []models.TestRequestPart{jsonType, {Name: "body", Recorded: `{"q":"books"}`, Sent: `{"q":"books"}`}}}
+	}
+	call := live("POST", "/v1/nonce", `{"nonce":"n-77c0d3"}`, nil)
+	type decided struct {
+		out  string
+		miss *learnMiss
+	}
+	outcome := func(served *models.Mock, miss *learnMiss, err error) decided {
+		switch {
+		case err != nil:
+			return decided{out: "error " + err.Error()}
+		case miss != nil:
+			return decided{out: "miss " + miss.res.Why, miss: miss}
+		}
+		return decided{out: "served " + served.Name}
+	}
+	const movedWhy = "keploy record's full round read this request in the test that was open, and the replay ended that test before keploy could answer it"
+	stores := []struct {
+		name string
+		of   func(*learnDb) integrations.MockMemDb
+	}{
+		{"read one after another", func(ld *learnDb) integrations.MockMemDb { return ld }},
+		{"read in one snapshot of the round", func(ld *learnDb) integrations.MockMemDb {
+			return &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}, test: "test-2"}
+		}},
+	}
+	closes := []struct {
+		name  string
+		close func(*learn.Tracker)
+		want  string
+	}{
+		{"its own request came", func(tr *learn.Tracker) { tr.Give(learn.GivenRequest(request("test-2"))) }, "served mock-0"},
+		{"its window ended unread", (*learn.Tracker).End, "miss " + movedWhy},
+		{"the next test began", (*learn.Tracker).Begin, "miss " + movedWhy},
+		{"the next test began awaiting its own request", (*learn.Tracker).BeginAwaiting, "miss " + movedWhy},
+		{"the next set began", (*learn.Tracker).NewSet, "miss " + movedWhy},
+	}
+	for _, store := range stores {
+		for _, c := range closes {
+			for i := 0; i < 200; i++ {
+				db := store.of(&learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}})
+				tr := learn.NewTracker()
+				waiting := make(chan struct{}, 2)
+				tr.OnAwait(func() {
+					select {
+					case waiting <- struct{}{}:
+					default:
+					}
+				})
+				tr.BeginAwaiting()
+				got := make(chan decided, 1)
+				go func() {
+					got <- outcome(h.learnMatch(learn.WithTracker(context.Background(), tr), call, db, n, opts))
+				}()
+				select {
+				case <-waiting:
+				case d := <-got:
+					t.Fatalf("%s, %s: decided before its request came or its window closed: %s", store.name, c.name, d.out)
+				}
+				c.close(tr)
+				var d decided
+				select {
+				case d = <-got:
+				case <-waiting:
+					// It waits again: for the next test's request, which
+					// ends the wait here, not at the test's timeout.
+					tr.Give(learn.GivenRequest(request("test-3")))
+					d = <-got
+					d.out = "waited for the next test's request, then " + d.out
+				}
+				if d.out != c.want {
+					t.Fatalf("%s, %s: %s; want %s", store.name, c.name, d.out, c.want)
+				}
+				if d.miss == nil {
+					continue
+				}
+				// The miss says where the call was read and what moved, and
+				// gives no reason: nothing of the request was compared.
+				r := &models.MockMismatchReport{}
+				d.miss.explain(r)
+				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy+": keploy learns nothing of a call in a round it was not made in") {
+					t.Fatalf("%s, %s: the miss reads reason %q, next steps %q; want no reason, and the round that moved", store.name, c.name, r.Reason, r.NextSteps)
+				}
+			}
+		}
+	}
+}
+
 // On the HTTP learn step, a test case's request whose body declares no media
 // type, read as text by its bytes, refuses a call's value that changed and
 // that it holds glued to the bytes around it (a protobuf's printable tag and

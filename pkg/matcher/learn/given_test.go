@@ -519,25 +519,45 @@ func TestACallInTheGapWaitsForTheRequest(t *testing.T) {
 			t.Fatalf("a call that woke to its request, its end come too: %v; want it to learn from the request", err)
 		}
 	}
-	// A call that waits sees the next test's window open, and waits for its
-	// request in turn.
-	tr = NewTracker()
-	waiting = make(chan struct{}, 2)
-	tr.OnAwait(func() { waiting <- struct{}{} })
-	tr.BeginAwaiting()
-	got := make(chan uint64, 1)
-	go func() {
-		_ = tr.AwaitRequest(context.Background())
+	// A call that waits stops waiting as its test's window closes, though
+	// the next test began awaiting its own request before the call woke: it
+	// was made in the test whose window closed, and never waits for, nor is
+	// decided by, the next test's request. Its caller reads the next test's
+	// number, a round that moved under the call. A wait begun again, for
+	// the next test's request, fails here (OnAwait), not at the test's
+	// timeout.
+	for i := 0; i < 200; i++ {
+		tr = NewTracker()
+		waiting = make(chan struct{}, 2)
+		tr.OnAwait(func() {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+		})
+		tr.BeginAwaiting()
+		got := make(chan uint64, 1)
+		go func() {
+			_ = tr.AwaitRequest(context.Background())
+			n, _, _, _ := tr.Test()
+			got <- n
+		}()
+		<-waiting
+		tr.BeginAwaiting()
 		n, _, _, _ := tr.Test()
-		got <- n
-	}()
-	<-waiting
-	tr.BeginAwaiting()
-	<-waiting
-	tr.Give(GivenRequest(request("books")))
-	n, _, _, _ := tr.Test()
-	if g := <-got; g != n {
-		t.Fatalf("the waiting call read test %d; want the next test, %d", g, n)
+		select {
+		case g := <-got:
+			if g != n {
+				t.Fatalf("the waiting call read test %d; want the next test, %d", g, n)
+			}
+		case <-waiting:
+			tr.Give(GivenRequest(request("books")))
+			<-got
+			t.Fatalf("a call made in a test whose window closed waited again, for the next test's request")
+		}
+		if _, _, _, _, still := tr.Places(); !still {
+			t.Fatalf("the next test no longer awaits its own request")
+		}
 	}
 }
 

@@ -485,9 +485,11 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	read("view")
 
 	if t := q.Tracker; t != nil {
-		number, open, began := t.State()
-		s.Learn = integrations.LearnRead{Bound: true, Number: number, Open: open, Begun: began}
+		// One read of the tracker: the test's number and openness of the
+		// same instant as its places and whether it awaits its request,
+		// which a call's learn step holds its later passes to.
 		p := t.Placed()
+		s.Learn = integrations.LearnRead{Bound: true, Number: p.Test, Open: p.Open, Begun: p.Begun}
 		s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = p.Earlier, p.Served, p.Before, p.Awaiting
 		s.Learn.Set, s.Learn.Order = p.Set, p.Order
 		s.Learn.Answered = t.AnsweredMocks()

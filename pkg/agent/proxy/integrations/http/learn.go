@@ -412,6 +412,64 @@ type learnMiss struct {
 	res     learn.Result
 	closest *models.Mock
 	pool    []*models.Mock
+	// moved: the replay moved the round under the call before the learn
+	// step could decide it (learnRound.movedFrom), and res.Why says where
+	// the call's first pass read it and what the replay did since. It has
+	// no reason: nothing of the request was compared.
+	moved bool
+}
+
+// learnRound is the round a pass of the learn step that waited for its test
+// case's request read (learn.Tracker.AwaitRequest): the learn tracker's test
+// (learn.Placed.Test, the number every Begin, BeginAwaiting and NewSet moves
+// on) and whether a test was open (learn.Placed.Open), read with the round.
+// read is false for a call that never waited. The pass after the wait
+// decides nothing in another round (movedFrom): the call was made in the
+// test whose request it waited for, and is of that test's round, as the
+// Mongo and Postgres learn steps' calls are.
+//
+// Only that pass is held to it. A take a learn boundary refused later (the
+// tracker began or ended a test between a pass's read and its take: the
+// tracker's boundary lags the store's view) is read again as the round now
+// stands, as for a call that never waited: whether a call fell in the gap
+// before its test case's request, or after it, decides nothing.
+type learnRound struct {
+	read, open bool
+	test       uint64
+}
+
+// movedFrom says, of the pass after a wait (now), what the replay moved
+// since the pass that waited (c): "" when the call is still in the round it
+// waited in, or never waited. Another test of the tracker, or the end of the test the first pass
+// found open, is the replay ending that test under the call (the tracker's
+// End moves no test number); another test begun after a first pass between
+// tests is the replay beginning a test. A call that waited for its test
+// case's request (learn.Tracker.AwaitRequest) whose test's window closed
+// without it (End, the next Begin or BeginAwaiting, NewSet) is such a call:
+// keploy never read that request, so every changed value of the call may
+// have come from it (learn.Tracker.OnUnreadClose), and judged in the next
+// test's round it would be checked against that test's places, and its
+// request, only.
+func (c learnRound) movedFrom(now learnRound) string {
+	switch {
+	case !c.read:
+		return ""
+	case now.test != c.test && c.open:
+		return "ended that test"
+	case now.test != c.test:
+		return "began a test"
+	case c.open && !now.open:
+		return "ended that test"
+	}
+	return ""
+}
+
+// where is the round c was read in, as a miss says it.
+func (c learnRound) where() string {
+	if c.open {
+		return "the test that was open"
+	}
+	return "the round between tests"
 }
 
 // scope is what a request's scope offers: the HTTP candidates learn.Pair
@@ -1028,6 +1086,11 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 	}
 	marked := false
+	// waited is the round the pass that waited for its test case's request
+	// read (learnRound), and waitedPool the HTTP mocks that pass offered:
+	// the pass after the wait is held to that round.
+	var waited learnRound
+	var waitedPool []*models.Mock
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
@@ -1040,6 +1103,19 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		if first {
 			*call, marked = read.call, true
 		}
+		now := learnRound{read: true, open: read.open, test: read.test}
+		if moved := waited.movedFrom(now); moved != "" {
+			// The replay ended the test the call waited in (End, the
+			// next Begin or BeginAwaiting, NewSet) before the call read
+			// the round again: what it would learn now is of a round it
+			// was not made in, against the next test's places and
+			// request, and the next test's own recordings are not its
+			// own. A wait for a request that never came ends so: the
+			// window closed unread.
+			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request in " + waited.where() + ", and the replay " + moved + " before keploy could answer it"}
+			return nil, &learnMiss{res: res, pool: waitedPool, moved: true}, nil
+		}
+		waited, waitedPool = learnRound{}, nil
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
 		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
 		if read.awaiting {
@@ -1048,7 +1124,11 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// learns from nothing until the request came
 			// (learn.Tracker.AwaitRequest), then reads the round again,
 			// learned from as a call made after it, whichever way the two
-			// fell.
+			// fell. The wait ends too as the test's window closes without
+			// the request (End, the next Begin, NewSet), though the next
+			// test awaits its own: the next pass reads a round that moved
+			// (learnRound.movedFrom), and decides nothing.
+			waited, waitedPool = now, sc.http
 			if err := tracker.AwaitRequest(ctx); err != nil {
 				return nil, nil, err
 			}
@@ -1233,6 +1313,8 @@ type learnRead struct {
 	// (learn.Placed): the places of the offset rule alone (givenEarlier).
 	set   []*models.Mock
 	order learn.Order
+	// open: a test was open (learn.Placed.Open), read with test.
+	open bool
 	// awaiting: the running test still awaits its test case's request
 	// (learn.Tracker.Places), and the pass learns nothing from its places.
 	awaiting bool
@@ -1268,6 +1350,7 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			set:      snap.Learn.Set,
 			order:    snap.Learn.Order,
 			awaiting: snap.Learn.Awaiting,
+			open:     snap.Learn.Open,
 			windows:  snap,
 			claimDb:  integrations.WithinRound(mockDb, snap.At),
 			at:       learnPass{rev: rev, round: snap.At},
@@ -1284,6 +1367,7 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 	r := learnRead{sc: sc, claimDb: mockDb, at: learnPass{rev: rev}}
 	p := tracker.Placed()
 	r.test, r.earlier, r.served, r.before, r.awaiting, r.set, r.order = p.Test, p.Earlier, p.Served, p.Before, p.Awaiting, p.Set, p.Order
+	r.open = p.Open
 	r.windows, _ = mockDb.(integrations.TestWindows)
 	return r, nil
 }
@@ -1881,6 +1965,15 @@ func (m *learnMiss) diag() *matchDiag {
 // a value.
 func (m *learnMiss) explain(r *models.MockMismatchReport) {
 	if r == nil {
+		return
+	}
+	if m.moved {
+		// The replay moved the round under the call: say where it was
+		// read and what moved, as the Mongo and Postgres learn steps'
+		// misses do. No reason: nothing of the request was compared.
+		why := m.res.Why + ": keploy learns nothing of a call in a round it was not made in, and pairs it with none of that round's recordings. " +
+			"If the application makes this call at a test's start or end, make the test, or the application's readiness, wait for it, then record again."
+		r.NextSteps = strings.TrimSpace(why + " " + r.NextSteps)
 		return
 	}
 	r.Reason = m.res.Reason

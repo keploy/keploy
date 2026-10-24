@@ -438,6 +438,65 @@ func TestALearnStepReadsAgainATakeALearnBoundaryRefused(t *testing.T) {
 	}
 }
 
+// A call that waited for its test case's request, whose take a learn
+// boundary then refused (the replay ended the test on the store, its pool
+// view, before the tracker), is read again as the round now stands, as a
+// call made after the request is: the hold to the round a call waited in is
+// the pass after the wait's alone, and where the call fell, in the gap
+// before its test case's request or after it, decides nothing.
+func TestALearnStepReadsAgainATakeALearnBoundaryRefusedAfterItsWait(t *testing.T) {
+	for _, waits := range []bool{false, true} {
+		t.Run(map[bool]string{false: "a call made after the request", true: "a call that waited for it"}[waits], func(t *testing.T) {
+			p, mm := s12Orders(t)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestCaseCapture()
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			req := &models.TestRequest{Test: "test-1"}
+			// The boundary lands as the call's take is about to take the
+			// round lock: after its read, before its check.
+			var moved atomic.Bool
+			mm.exact.round.onWait = func() {
+				if moved.CompareAndSwap(false, true) {
+					p.EndTestErrorCapture()
+				}
+			}
+			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+			var code int
+			var got string
+			if !waits {
+				p.TakeTestRequest(req)
+				code, got = r3Send(t, p, mm, opts, roundPost(`{"item":"apple"}`))
+			} else {
+				waiting := make(chan struct{}, 1)
+				p.learnTracker.OnAwait(func() {
+					select {
+					case waiting <- struct{}{}:
+					default:
+					}
+				})
+				sent := make(chan struct{})
+				go func() {
+					defer close(sent)
+					code, got = r3Send(t, p, mm, opts, roundPost(`{"item":"apple"}`))
+				}()
+				select {
+				case <-waiting:
+				case <-sent:
+					t.Fatalf("precondition: the call did not wait for its test case's request (got %d %s)", code, got)
+				}
+				p.TakeTestRequest(req)
+				<-sent
+			}
+			if !moved.Load() {
+				t.Fatal("precondition: no boundary landed under the call's take")
+			}
+			if code != http.StatusOK || got != `{"order":0}` {
+				t.Fatalf("a call whose take a learn boundary refused got %d %s; want the pool's mock-pool, read again", code, got)
+			}
+		})
+	}
+}
+
 // A voided ahead answer is spent for whichever test opens with it in its
 // view: one the test shares with the tests recorded beside it
 // (ServeExactTestConcurrent) as well as one of its own. A call that is it

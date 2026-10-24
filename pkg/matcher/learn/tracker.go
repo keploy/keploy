@@ -217,21 +217,33 @@ func (t *Tracker) closeUnread() func() {
 	return func() { f(n) }
 }
 
-// waitGiven waits while the running test awaits its test case's request
-// (awaiting), t.mu held on entry and on return, released while it waits:
-// until Give brings it, or the test's window closes without it, or done is
-// closed. false where done closed while the test still awaited it.
+// waitGiven waits while the test running as it is called awaits its test
+// case's request (awaiting), t.mu held on entry and on return, released
+// while it waits: until Give brings it, or that test's window closes without
+// it, or done is closed. false where done closed while that test still
+// awaited it.
+//
+// It waits for that one test's request alone: a call that wakes once the
+// window closed returns, though the next test began awaiting its own
+// request (BeginAwaiting) before the call ran again. Its caller reads the
+// round as it then stands, which moved under the call: a call made in one
+// test is never left to wait for, and be decided by, the next test's
+// request.
 //
 // What it answers is read from the tracker as the call wakes, never from
 // which of the two the scheduler showed it first: where the request came
 // (or the window closed) by then, true, as for a call that read the places
 // after it; where the test still awaits it and done is closed, false.
 func (t *Tracker) waitGiven(done <-chan struct{}) bool {
-	for t.awaiting != nil {
+	// awaiting is never replaced while open: a test's wait ends only by
+	// closing it (closeAwaiting), and a new one is made only once it is
+	// nil (await). Another channel than ch is the next test's wait.
+	ch := t.awaiting
+	for ch != nil && t.awaiting == ch {
 		if closed(done) {
 			return false
 		}
-		ch, hook := t.awaiting, t.onAwait
+		hook := t.onAwait
 		t.waiting++
 		t.mu.Unlock()
 		if hook != nil {
@@ -287,7 +299,11 @@ func (t *Tracker) OnAwait(f func()) {
 
 // AwaitRequest waits while the running test awaits its test case's request
 // (BeginAwaiting): until Give brings it, or the test's window closes without
-// it (End, the next Begin, NewSet), or ctx ends, whose error it returns. A
+// it (End, the next Begin, NewSet), or ctx ends, whose error it returns. It
+// waits for the request of the test running as it is called alone, never
+// for the next test's, though that test began awaiting its own before the
+// call woke (waitGiven): the call's caller then reads a round that moved
+// under it, and decides nothing of it there. A
 // call that read the test's places while it awaited (Places) reads them
 // again only then: the replay sends the request only after the filter that
 // brings it is answered, so a call made in between is the test's background
@@ -456,9 +472,10 @@ func (t *Tracker) beginAt(at time.Time) func() {
 // so (Places), and waits for it (AwaitRequest). A test that ends without it
 // (End) leaves its earliest place a request the learn step could not read
 // (Earlier.Unread): every value that changed in a call that read the test's
-// places after then is refused. At the next Begin a call still waiting reads
-// the next test's places instead, waiting again where that test awaits its
-// own request. BeginAwaitingAt
+// places after then is refused. At the next Begin a call still waiting
+// stops waiting (AwaitRequest), though the next test awaits a request of its
+// own: it was made in the test whose window closed, and reads a round that
+// moved under it. BeginAwaitingAt
 // marks a test as it begins, in one step; a test keploy test did not open
 // (keploy mock's) is never marked: it has no keploy test case.
 func (t *Tracker) Await() {
@@ -577,6 +594,11 @@ type Placed struct {
 	Earlier        []Earlier
 	Served, Before []*models.Mock
 	Awaiting       bool
+	// Open and Begun are State's, in the same read: whether a test is open
+	// (Begin, until End), and whether one has begun in this set. A call's
+	// learn step holds each later pass to the test and the openness its
+	// first pass read (the round it was made in).
+	Open, Begun bool
 	// Set is every mock F served in the running set before the read, each
 	// once, in the order F first served it (Tracker.set): a prefix of the
 	// tracker's own list, which only grows, so no later serve shows in it.
@@ -611,6 +633,7 @@ func (t *Tracker) Placed() Placed {
 	earlier = append(append(earlier, t.run...), t.served...)
 	return Placed{
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
+		Open: t.open, Begun: t.began,
 		Set:   t.set[:len(t.set):len(t.set)],
 		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places, flights: t.flights, landings: t.landings, flying: t.flying},
 	}
