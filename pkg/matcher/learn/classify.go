@@ -164,8 +164,11 @@ func (r Raw) Mock() string { return r.mock }
 // instant. A recording made at that instant (a fixture's whole second) may
 // have been made before the call, so it is read as one, the fail-closed
 // side: a value it holds is refused or bound, never learned as noise by
-// default. The caller hands neither the paired recording nor one F served
-// at that instant (what F gave alone: GivenEarlier) as a Raw.
+// default, whether F served it before the call or not. The caller hands the
+// paired recording as no Raw, and a recording made at the call's own instant
+// as one, served or not, as it hands one made a moment before the call: one
+// F served there is no place F gave the application alone (GivenEarlier),
+// whose word rule reads only what F served.
 func (r Raw) earlierThan(at time.Time) bool {
 	return r.served || !r.at.After(at)
 }
@@ -326,7 +329,21 @@ type Place struct {
 	// stands in the value, never by its text.
 	Field, Held string
 	Echo        bool
+	// AtCall, of a place found in a raw mock's payload: the mock was
+	// recorded at the call's own instant (a fixture's whole second), which
+	// keploy reads as one the recording may have given the application
+	// before the call, the fail-closed side (Raw.earlierThan). A reason
+	// naming the place says so (placeAt).
+	AtCall bool
 }
+
+// atCallNote is what a reason says of a recording it names that was made at
+// the call's own instant: keploy reads it as given to the application before
+// the call, the fail-closed side, as every rule reads the equal instant.
+const (
+	atCallWords = "recorded at the call's own instant, so keploy reads it as given to the application before the call"
+	atCallNote  = " (" + atCallWords + ")"
+)
 
 // Learned is what L learned about one drifted leaf of the paired mock.
 type Learned struct {
@@ -1585,23 +1602,25 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		if !x.earlierThan(at) {
 			continue
 		}
+		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
+			from.AtCall = atCall
 			return from, true
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w}, true
+				return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall}, true
 			}
 		}
 	}
@@ -1674,13 +1693,17 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 		if !x.earlierThan(at) {
 			continue
 		}
+		note := ""
+		if x.at.Equal(at) {
+			note = atCallNote
+		}
 		for _, f := range x.fields {
 			if !f.key && holds(x.text[f.start:f.end]) {
-				return "in " + x.mock + " at " + f.describe()
+				return "in " + x.mock + " at " + f.describe() + note
 			}
 		}
 		if holds(x.text) {
-			return "in " + x.mock + "'s payload"
+			return "in " + x.mock + "'s payload" + note
 		}
 	}
 	return ""
@@ -1710,15 +1733,20 @@ func evidence(v *valueDrift, from Place) string {
 }
 
 // placeAt names where from stands, as a reason names it: "<mock> at
-// <leaf or field>", or "<mock>'s payload".
+// <leaf or field>", or "<mock>'s payload", and that its mock was recorded at
+// the call's own instant where it was (Place.AtCall).
 func placeAt(from Place) string {
+	note := ""
+	if from.AtCall {
+		note = atCallNote
+	}
 	switch {
 	case from.Path != "":
-		return from.Mock + " at " + from.Path
+		return from.Mock + " at " + from.Path + note
 	case from.Field != "":
-		return from.Mock + " at " + from.Field
+		return from.Mock + " at " + from.Field + note
 	}
-	return from.Mock + "'s payload"
+	return from.Mock + "'s payload" + note
 }
 
 // echoFound is what the echo found, at at (evidence); echoProvenance why

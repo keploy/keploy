@@ -940,7 +940,7 @@ func offsetWhy(m offsetMatch) string {
 	unit := unitName(max(m.rec.res, m.live.res))
 	gave := " holds as the recording gave it"
 	if m.hr.atCall {
-		gave += " (recorded at the call's own instant, so keploy reads it as given to the application before the call)"
+		gave += atCallNote
 	}
 	why := "its moment, to the " + unit + ", stands " + rel + " the moment " + m.hr.where + gave + ", and record's full round saw it " + rel + " the moment " + m.hf.where + " holds, which record's full round gave the application in its place: a value built on what the application was given by an offset moves so, as a read of the clock does, so keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it is built on " + m.hf.mock + "'s instant, which keploy cannot follow with an offset yet"
 	if m.hr.mock != m.hf.mock && (m.hr.given && m.hr.first == 0 || m.hf.given && m.hf.first == 0) {

@@ -2972,7 +2972,7 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 		t.Fatal(err)
 	}
 	if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.pooled) != 0 ||
-		!strings.Contains(miss.res.Why, "a word of what record's full round saw in it (its characters 1 to 2) appears in mock-1, a recording record's full round gave the application before the call that was recorded at or after the call") {
+		!strings.Contains(miss.res.Why, "a word of what record's full round saw in it (its characters 1 to 2) appears in mock-1, a recording record's full round gave the application before the call that was recorded after the call") {
 		t.Fatalf("served %v miss %+v; want body.counter refused naming mock-1, never noise nor bound", got, miss)
 	}
 }
@@ -2984,7 +2984,7 @@ func TestLearnMatchAPoolCallReadsNoMockRecordedAfterItThatFServedBefore(t *testi
 // made the call before it. A
 // value of the test's own call that changed to a word of that mock's answer
 // (an id, a whole id, an instant, copied word for word) is bound to nothing
-// and refused, naming the mock and that it was recorded at or after the call,
+// and refused, naming the mock and that it was recorded after the call,
 // never calling it another test's (it is the call's own test's); never
 // learned as noise. So is a time copied from it that moved as the lead moves
 // a read of the clock (a read before the call, and the mock's answer that
@@ -3020,7 +3020,7 @@ func TestLearnMatchAnOwnCallRefusesAValueCopiedFromAMockRecordedAfterItThatFServ
 				if got != nil || miss == nil || miss.res.Reason != models.MissRequestChanged || len(db.consumed) != 0 ||
 					!strings.Contains(miss.res.Why, "body.ref changed") ||
 					!strings.Contains(miss.res.Why, tc.found) ||
-					!strings.Contains(miss.res.Why, tc.found+", a recording record's full round gave the application before the call that was recorded at or after the call") ||
+					!strings.Contains(miss.res.Why, tc.found+", a recording record's full round gave the application before the call that was recorded after the call") ||
 					strings.Contains(miss.res.Why, "another test's") {
 					t.Fatalf("served %v miss %+v consumed %d; want body.ref refused naming mock-2 as recorded after the call, never noise nor bound", got, miss, len(db.consumed))
 				}
@@ -3125,7 +3125,7 @@ func TestEarlierRawReadsTheOwnTestsPlacesAndLeavesTheSetToTheOffsetRule(t *testi
 	if !reflect.DeepEqual(given, []*models.Mock{own, pool, late, paired}) {
 		t.Fatalf("given %v", given)
 	}
-	raw, err := earlierRaw(learn.NewDriftCache(), paired, nil, p.Served, given, nil, p.Order, nil, nil, learn.NewPreviousCall(paired))
+	raw, err := earlierRaw(learn.NewDriftCache(), paired, p.Served, given, nil, p.Order, nil, nil, learn.NewPreviousCall(paired))
 	if err != nil || len(raw) != 2 {
 		t.Fatalf("raw %v err %v; want mock-0 and mock-1 alone", raw, err)
 	}
@@ -3956,63 +3956,14 @@ func TestAnExchangeServedLeafByLeafCarriesItsPayload(t *testing.T) {
 // jsonType is a test case's request's Content-Type part declaring JSON.
 var jsonType = models.TestRequestPart{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}
 
-// A recording made at the call's own instant (a fixture's whole second):
-// one F served before the call is what F gave the application alone, read
-// by the rule that reads what F gave (givenEarlier), so a word or an id
-// copied from it is refused naming it, wherever F served it; one F did not
-// serve (the scope shows it, or the store stages it) may have been made
-// before the call, so it is an earlier place, read as one recorded a moment
-// before the call is. Neither is read by no rule, which would learn a value
-// copied from it as noise.
+// A recording made at the call's own instant (a fixture's whole second)
+// that F did not serve (the scope shows it, or the store stages it) may have
+// been made before the call, so it is an earlier place, read as one recorded
+// a moment before the call is: the same verdict and reason, the reason
+// saying it was recorded at the call's own instant. Read by no rule, a value
+// copied from it would be learned as noise. One F served is read so too
+// (TestLearnMatchAServedRecordingAtTheCallsOwnInstantGetsTheVerdictOfOneAMomentBefore).
 func TestLearnMatchAMockRecordedAtTheCallsOwnInstantIsReadByOneRule(t *testing.T) {
-	for _, tc := range []struct {
-		name, rec, live, answer string
-		refused                 bool
-	}{
-		{"a word copied", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"42"}`, true},
-		{"an id copied", `{"ref":"ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323"}`, `{"ref":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, `{"id":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, true},
-		{"holding the recorded word, a fresh value", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"7"}`, false},
-	} {
-		for _, where := range []string{"at the start-up", "in the previous test", "earlier in the test", "earlier in the test, the scope showing it"} {
-			t.Run(tc.name+", served "+where, func(t *testing.T) {
-				h, n, opts := learnOn(t)
-				call := learnRecorded("mock-1", time.Millisecond, "POST", "/v1/messages", tc.rec, nil, `{}`)
-				same := learnRecorded("mock-2", time.Millisecond, "GET", "/stats", "", nil, tc.answer)
-				if !same.Spec.ReqTimestampMock.Equal(call.Spec.ReqTimestampMock) {
-					t.Fatal("precondition: not the call's own instant")
-				}
-				db := &learnDb{perTest: []*models.Mock{call}}
-				shown := strings.HasSuffix(where, "showing it")
-				if shown {
-					// Exact serving spends a mock without taking it out
-					// of its tree: the scope shows what F served.
-					db.perTest = append(db.perTest, same)
-					where = "earlier in the test"
-				}
-				tr := learn.NewTracker()
-				if where != "at the start-up" {
-					tr.Begin()
-				}
-				tr.ServedMock(same)
-				if where != "earlier in the test" {
-					tr.Begin()
-				}
-				got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", tc.live, nil), db, n, opts)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if tc.refused {
-					if got != nil || miss == nil || !strings.Contains(miss.res.Why, "mock-2") || !strings.Contains(miss.res.Why, "was recorded at or after the call") || len(db.consumed) != 0 {
-						t.Fatalf("FALSE GREEN: a value copied from mock-2, served before the call and recorded at its instant, was not refused naming it: served %v miss %+v", got != nil, miss)
-					}
-					return
-				}
-				if got == nil || miss != nil {
-					t.Fatalf("a fresh value refused: %+v", miss)
-				}
-			})
-		}
-	}
 	// Not served: shown by the scope, or staged by the store. Recorded at
 	// the call's own instant, it is read as one recorded a moment before it.
 	for _, tc := range []struct {
@@ -4047,8 +3998,101 @@ func TestLearnMatchAMockRecordedAtTheCallsOwnInstantIsReadByOneRule(t *testing.T
 			if before != "refused" || !strings.Contains(beforeWhy, "mock-2") {
 				t.Fatalf("%s (staged %v), recorded a moment before the call: %s (%s); want it refused naming mock-2", tc.name, staged, before, beforeWhy)
 			}
-			if equal != before || equalWhy != beforeWhy {
-				t.Errorf("FALSE GREEN? %s (staged %v), recorded at the call's own instant: %s (%s); want what one recorded a moment before gets: %s (%s)", tc.name, staged, equal, equalWhy, before, beforeWhy)
+			want := strings.Replace(beforeWhy, "mock-2 at spec.resp.body", "mock-2 at spec.resp.body (recorded at the call's own instant, so keploy reads it as given to the application before the call)", 1)
+			if equal != before || want == beforeWhy || equalWhy != want {
+				t.Errorf("FALSE GREEN? %s (staged %v), recorded at the call's own instant: %s (%s); want what one recorded a moment before gets: %s (%s)", tc.name, staged, equal, equalWhy, before, want)
+			}
+		}
+	}
+}
+
+// A recording F served before the call that was made at the call's own
+// instant (a fixture's whole second) is read as one made a moment before the
+// call is: keploy reads the equal instant as possibly before the call, the
+// fail-closed side, everywhere. So a value it holds whole, or a word or an id
+// copied from it, is refused naming it wherever F served it (in the test, at
+// the start-up, in the previous test, two tests back), whether the store
+// still stages it or not, and the reason says it was recorded at the call's
+// own instant. A value it does not hold stays noise in both.
+func TestLearnMatchAServedRecordingAtTheCallsOwnInstantGetsTheVerdictOfOneAMomentBefore(t *testing.T) {
+	for _, tc := range []struct {
+		name, rec, live, answer string
+		refused                 bool
+	}{
+		{"holding the recorded value whole", `{"msg_id":"k1b2e4d70"}`, `{"msg_id":"k5d0e8a33"}`, `{"Messages":[{"MessageId":"k1b2e4d70"}]}`, true},
+		{"holding the recorded word", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"7"}`, true},
+		{"a word copied", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"42"}`, true},
+		{"an id copied", `{"ref":"ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323"}`, `{"ref":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, `{"id":"0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"}`, true},
+		{"holding neither (control)", `{"ref":"7"}`, `{"ref":"42"}`, `{"count":"9"}`, false},
+	} {
+		for _, where := range []string{"in the test", "at the start-up", "in the previous test", "two tests back"} {
+			for _, staged := range []bool{false, true} {
+				name := fmt.Sprintf("%s, served %s, staged %v", tc.name, where, staged)
+				verdict := func(at time.Duration) (string, string) {
+					h, n, opts := learnOn(t)
+					call := learnRecorded("mock-1", time.Millisecond, "POST", "/v1/messages", tc.rec, nil, `{}`)
+					other := learnRecorded("mock-2", at, "POST", "/v1/receive", `{"max":10}`, nil, tc.answer)
+					db := &learnDb{perTest: []*models.Mock{call}}
+					if staged {
+						db.staged = []*models.Mock{other}
+					}
+					tr := learn.NewTracker()
+					switch where {
+					case "in the test":
+						tr.Begin()
+						tr.ServedMock(other)
+					case "at the start-up":
+						tr.ServedMock(other)
+						tr.Begin()
+					case "in the previous test":
+						tr.Begin()
+						tr.ServedMock(other)
+						tr.End()
+						tr.Begin()
+					case "two tests back":
+						tr.Begin()
+						tr.ServedMock(other)
+						tr.End()
+						tr.Begin()
+						tr.End()
+						tr.Begin()
+					}
+					got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), live("POST", "/v1/messages", tc.live, nil), db, n, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if miss == nil {
+						return fmt.Sprintf("served %v", got != nil), ""
+					}
+					return "refused", miss.res.Why
+				}
+				before, beforeWhy := verdict(0)
+				equal, equalWhy := verdict(time.Millisecond)
+				t.Logf("VERDICT %s: a moment before: %s; at the call's own instant: %s (%q)", name, before, equal, equalWhy)
+				if !tc.refused {
+					if before != "served true" || equal != "served true" {
+						t.Errorf("%s: a fresh value refused: a moment before %s (%s); at the call's own instant %s (%s)", name, before, beforeWhy, equal, equalWhy)
+					}
+					continue
+				}
+				if before != "refused" || !strings.Contains(beforeWhy, "mock-2") {
+					t.Errorf("%s, recorded a moment before the call: %s (%s); want it refused naming mock-2", name, before, beforeWhy)
+				}
+				if equal != "refused" || !strings.Contains(equalWhy, "mock-2") || !strings.Contains(equalWhy, "recorded at the call's own instant") {
+					t.Errorf("FALSE GREEN? %s, recorded at the call's own instant: %s (%s); want it refused naming mock-2 and the instant", name, equal, equalWhy)
+					continue
+				}
+				// The reason is the one a moment before gets, saying the
+				// recording was made at the call's own instant: read as
+				// the same place, by the same rule.
+				const note = " (recorded at the call's own instant, so keploy reads it as given to the application before the call)"
+				want := strings.Replace(beforeWhy, "mock-2 at spec.resp.body", "mock-2 at spec.resp.body"+note, 1)
+				if want == beforeWhy {
+					want = strings.Replace(beforeWhy, "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's", "was"+strings.TrimSuffix(strings.Replace(note, " (", " ", 1), ")")+", yet as no earlier place of the call's own test: keploy follows no value of it", 1)
+				}
+				if want == beforeWhy || equalWhy != want {
+					t.Errorf("%s, recorded at the call's own instant: %q; want what one recorded a moment before gets, saying the instant: %q", name, equalWhy, want)
+				}
 			}
 		}
 	}

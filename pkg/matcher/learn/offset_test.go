@@ -819,7 +819,7 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 		want      string // "" noise
 	}{
 		{"a word of the value in another test's answer's own clock stamp alone", stamped, "slot-03", "slot-17", ""},
-		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording record's full round gave the application before the call that was recorded at or after the call"},
+		{"the live id in another test's answer, recorded after the call", receiveOf("mock-12", liveID, after), recID, liveID, "a word of what record's full round saw in it (its characters 1 to 8) appears in mock-12, a recording record's full round gave the application before the call that was recorded after the call"},
 		{"the recorded id in another test's answer recorded before the call", receiveOf("mock-13", recID, before), recID, liveID, "a word of its recorded value (its characters 1 to 8) appears in mock-13, a recording record's full round gave the application before the call that is another test's"},
 		{"the recorded id in another test's answer recorded after the call", receiveOf("mock-14", recID, after), recID, liveID, ""},
 		{"the live id in another test's request alone", sentOnly, recID, liveID, ""},
@@ -1079,11 +1079,11 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 			m    *models.Mock
 			want string // "" noise
 		}{
-			{"copied, recorded after the call", sentAtReceive("mock-30", after, f.copied), "was recorded at or after the call"},
+			{"copied, recorded after the call", sentAtReceive("mock-30", after, f.copied), "was recorded after the call"},
 			{"copied, recorded before the call", sentAtReceive("mock-31", before, f.copied), "is another test's"},
 			{"the recorded moment alone, recorded after the call", sentAtReceive("mock-32", after, recT.Format(time.RFC3339Nano)), ""},
 			{"copied in the request the application sent alone", requestOnly("mock-35", after, f.copied), ""},
-			{"copied, inside a base64 body", base64Receive("mock-36", after, f.copied), "was recorded at or after the call"},
+			{"copied, inside a base64 body", base64Receive("mock-36", after, f.copied), "was recorded after the call"},
 		} {
 			for _, viaSet := range []bool{false, true} {
 				dc := NewDriftCache()
@@ -1123,7 +1123,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		want string
 	}{
 		{"recorded before the call", sentAtReceive("mock-33", before, both, neighbour), "is another test's"},
-		{"recorded after the call", sentAtReceive("mock-34", after, both, neighbour), "was recorded at or after the call"},
+		{"recorded after the call", sentAtReceive("mock-34", after, both, neighbour), "was recorded after the call"},
 	} {
 		for _, viaSet := range []bool{false, true} {
 			dc := NewDriftCache()
@@ -1149,16 +1149,18 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 	}
 }
 
-// A recording F gave the application before the call that was recorded at
-// or after the call (at the call's own instant too: a fixture's whole
-// second) was never given to the recorded application before the call, so
-// only what F served there counts: an instant of it that names the moment F
-// saw is a copy, refused naming it, even where the same instant names the
-// recorded moment too (11:14:40 rounds to F's minute and cuts down to the
-// recorded one); one that names the recorded moment alone shows no copy,
-// noise, unless the recording at the call's own instant, read as one the
-// recorded application may have been given, names it by the rule by which
-// the call's own place names F's. Beside the own place, the offset rule
+// A recording F gave the application before the call that was recorded
+// after the call was never given to the recorded application before the
+// call, so only what F served there counts: an instant of it that names the
+// moment F saw is a copy, refused naming it, even where the same instant
+// names the recorded moment too (11:14:40 rounds to F's minute and cuts down
+// to the recorded one); one that names the recorded moment alone shows no
+// copy, noise. One recorded at the call's own instant (a fixture's whole
+// second) is read both ways, the fail-closed side: what F served there, and
+// what the recording may have given the application before the call; the
+// verdicts are the same, the reasons saying it was recorded at the call's
+// own instant, and the recorded moment alone is noise unless the recording
+// names it by the rule by which the call's own place names F's. Beside the own place, the offset rule
 // reads such a recording as the recording gave it (the equal instant read
 // fail-closed) against the own place F gave, and refuses naming both and
 // that it was recorded at the call's own instant.
@@ -1187,7 +1189,13 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 			{"the recorded minute alone", base.Add(10 * time.Second), false, ""},
 			{"the recorded minute alone, beside the own place", base.Add(10 * time.Second), true, ""},
 		} {
-			want := tc.want
+			// Recorded at the call's own instant, the neighbour is one the
+			// recorded application may have been given before the call (the
+			// fail-closed side), and the reason says so.
+			want := strings.Replace(tc.want, "was recorded at or after the call", "was recorded after the call", 1)
+			if when.at.Equal(at) {
+				want = strings.Replace(tc.want, "was recorded at or after the call", "was "+atCallWords+", yet as no earlier place of the call's own test", 1)
+			}
 			if when.at.Equal(at) && tc.withOwn && tc.sent != base.Add(65*time.Second) {
 				// The neighbour, which the recorded application may have
 				// been given before the call, as the recording gave it, and
@@ -1261,11 +1269,76 @@ func TestAnUnservedRecordingAtTheCallsOwnInstantIsAnEarlierPlace(t *testing.T) {
 	if before.Kind == KindNoise || !strings.Contains(before.Why, "mock-50") {
 		t.Fatalf("recorded a moment before the call: %s (%s); want it refused naming mock-50", before.Kind, before.Why)
 	}
-	if same.Kind != before.Kind || same.Why != before.Why {
-		t.Errorf("FALSE GREEN? recorded at the call's own instant: %s (%s); want what one recorded a moment before gets: %s (%s)", same.Kind, same.Why, before.Kind, before.Why)
+	// The same verdict and reason, the reason saying the recording was made
+	// at the call's own instant.
+	if want := strings.Replace(before.Why, "mock-50 at spec.resp.body", "mock-50 at spec.resp.body"+atCallNote, 1); same.Kind != before.Kind || want == before.Why || same.Why != want {
+		t.Errorf("FALSE GREEN? recorded at the call's own instant: %s (%s); want what one recorded a moment before gets: %s (%s)", same.Kind, same.Why, before.Kind, want)
 	}
 	if after.Kind != KindNoise {
 		t.Errorf("recorded a moment after the call: %s (%s); want noise, no earlier place", after.Kind, after.Why)
+	}
+}
+
+// A recording record's full round served before the call, made at the
+// call's own instant, is read as one made a moment before the call is (the
+// fail-closed side keploy reads the equal instant by everywhere), wherever
+// the caller hands it: as an earlier place F served (a Raw), or as one F
+// gave the application that no earlier place of the call's own test is
+// (GivenEarlier). A value it holds whole is refused naming it either way,
+// the reason saying it was recorded at the call's own instant; one recorded
+// a moment after the call, which the caller hands only as what F gave, is
+// no source of it.
+func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing.T) {
+	const p = "body.msg_id"
+	const recID, liveID = "k1b2e4d70", "k5d0e8a33"
+	at := r1Insert
+	for _, viaSet := range []bool{false, true} {
+		verdict := func(when time.Time) Learned {
+			dc := NewDriftCache()
+			x := dc.RawOf(receiveOf("mock-50", recID, when), true).ServedAs(1)
+			if viaSet {
+				return ClassifyGiven(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+					return []GivenPlaces{PlacesOf(x)}, nil
+				})[0]
+			}
+			return ClassifyIn(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, []Raw{x}, nil, nil)[0]
+		}
+		before, same, after := verdict(at.Add(-time.Second)), verdict(at), verdict(at.Add(time.Second))
+		if before.Kind == KindNoise || !strings.Contains(before.Why, "mock-50") {
+			t.Fatalf("set %v, recorded a moment before the call: %s (%s); want it refused naming mock-50", viaSet, before.Kind, before.Why)
+		}
+		if same.Kind == KindNoise || !strings.Contains(same.Why, "mock-50") || !strings.Contains(same.Why, atCallWords) {
+			t.Errorf("FALSE GREEN? set %v, recorded at the call's own instant: %s (%s); want it refused naming mock-50 and the instant, as one recorded a moment before is: %s (%s)", viaSet, same.Kind, same.Why, before.Kind, before.Why)
+		}
+		if same.Kind != before.Kind {
+			t.Errorf("set %v: recorded at the call's own instant %s, a moment before %s; want the same verdict", viaSet, same.Kind, before.Kind)
+		}
+		// A Raw F served is an earlier place whenever it was recorded
+		// (Raw.earlierThan); the caller hands one recorded after the call
+		// only as what F gave (GivenEarlier).
+		if viaSet && after.Kind != KindNoise {
+			t.Errorf("set %v, recorded a moment after the call: %s (%s); want noise, no earlier place", viaSet, after.Kind, after.Why)
+		}
+	}
+	// The echo: a minute F saw that such a recording holds, while no earlier
+	// place holds the recorded one, is refused naming it, as where one made
+	// a moment before the call holds it.
+	const sp = "body.sent_at"
+	const minute = "2006-01-02T15:04Z07:00"
+	recT := at.Truncate(time.Second)
+	base := recT.Truncate(time.Minute)
+	rec, live := strLeaf(sp, recT.Format(minute)), strLeaf(sp, recT.Add(time.Minute).Format(minute))
+	echo := func(when time.Time) Learned {
+		dc := NewDriftCache()
+		x := dc.RawOf(sentAtReceive("mock-51", when, base.Add(65*time.Second).Format(time.RFC3339)), true).ServedAs(1)
+		return ClassifyIn(dc, []string{sp}, live, rec, at, nil, []Raw{x}, nil, nil)[0]
+	}
+	before, same := echo(at.Add(-time.Second)), echo(at)
+	if before.Kind != KindUnaccounted || !strings.Contains(before.Why, "in mock-51 at spec.resp.body") {
+		t.Fatalf("the echo, recorded a moment before the call: %s (%s); want it refused naming mock-51", before.Kind, before.Why)
+	}
+	if want := strings.Replace(before.Why, "in mock-51 at spec.resp.body", "in mock-51 at spec.resp.body"+atCallNote, 1); same.Kind != before.Kind || same.Why != want {
+		t.Errorf("FALSE GREEN? the echo, recorded at the call's own instant: %s (%s); want %s (%s)", same.Kind, same.Why, before.Kind, want)
 	}
 }
 
@@ -1435,7 +1508,7 @@ func TestARecordingOfAnotherCallAtTheCallsOwnInstantIsWhereTheRecordedMomentStan
 		} else {
 			ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{own, nb.OfAnotherTest()}, nil, nil)[0]
 		}
-		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "the moment record's full round saw in it stands in mock-42 at spec.resp.body, and the moment it was recorded with stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call") {
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "the moment record's full round saw in it stands in mock-42 at spec.resp.body, and the moment it was recorded with stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was "+atCallWords) {
 			t.Errorf("FALSE GREEN? the own place and another call's recording at the call's own instant (set %v): %s (%s); want it refused naming both", viaSet, ln.Kind, ln.Why)
 		}
 	}

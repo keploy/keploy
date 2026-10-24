@@ -837,10 +837,15 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
 			if dc.searchedTokens(x, keep)[i][t] {
+				note := ""
+				if x.at.Equal(at) {
+					note = atCallNote
+				}
 				at := x.mock + "'s payload"
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
 					at = x.mock + " at " + f
 				}
+				at += note
 				why := word(t, recorded) + " appears in an earlier recording, in " + at + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
 				if fol.excused(i, t, recorded, x.mock, "", why) {
 					continue
@@ -876,7 +881,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 			return op.unread
 		}
 		for _, g := range op.words {
-			if recorded && !g.at.Before(at) {
+			// A word the value was recorded with, in a recording made
+			// after the call, came from none: the recording could not have
+			// read it there. One made at the call's own instant may have
+			// been made before it, the fail-closed side.
+			if recorded && g.at.After(at) {
 				continue
 			}
 			if !kept {
@@ -892,12 +901,17 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 
 // givenWhose says whose a recording F gave the application before a call
 // recorded at at is, that no earlier place of the call's own test is
-// (givenWhy, echoedElsewhere), its request recorded at gat: another test's,
-// or, recorded at or after the call, no earlier place of any test's call
-// (one recorded at the call's own instant may have been made after it).
+// (givenWhy, echoedElsewhere), its request recorded at gat: another test's;
+// recorded after the call, no earlier place of any test's call; recorded at
+// the call's own instant, one keploy reads as given to the application
+// before the call (the fail-closed side: it may have been made before it,
+// or after it), yet no earlier place of the call's own test.
 func givenWhose(gat, at time.Time) string {
-	if !gat.Before(at) {
-		return "was recorded at or after the call, so it is no earlier place of the call's own test: keploy follows no value of a recording made at or after the call"
+	switch {
+	case gat.Equal(at):
+		return "was " + atCallWords + ", yet as no earlier place of the call's own test: keploy follows no value of it"
+	case gat.After(at):
+		return "was recorded after the call, so it is no earlier place of the call's own test: keploy follows no value of a recording made after the call"
 	}
 	return "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
 }
