@@ -395,6 +395,12 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 // read tracker test 8 could swap after another test's view was stamped in 9,
 // or start serving after a view whose stamp came later, and a view of
 // tracker test 9 then carried 9 though another test's view served in it.
+// The view being started also carries its stamp already, as its start is
+// logged (exactView.stamp is set before the view is published). A view that
+// started serving before its stamp was set would be read with no stamp by a
+// learn step reading ServedInOpenTest beside the install: a learn step that
+// refuses a 0 would drop its calls at random, and the stamp's write would
+// race that read in a switch-on replay.
 func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	for _, door := range []struct {
@@ -416,17 +422,43 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 				}
 				return true
 			}
-			starts := 0
+			// started is the test and the stamp of each view as its start
+			// is logged, read on the install's own goroutine. installExact
+			// logs "exact serving" after it swaps the view in, so the view
+			// loaded here is the one being started.
+			type start struct {
+				test  string
+				stamp uint64
+			}
+			var started []start
 			core, _ := observer.New(zapcore.DebugLevel)
 			mm = NewMockManager(nil, nil, zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
 				if e.Message == "exact serving" {
-					starts++
+					v := mm.exact.view.Load()
+					if v == nil {
+						t.Errorf("a view's start was logged with no view installed: the row reads the view being started only if \"exact serving\" is logged after the swap")
+						return nil
+					}
+					started = append(started, start{test: v.test, stamp: v.stamp})
 					if !held() {
-						t.Errorf("view %d started serving with no install lock held: another test's view could be stamped before it and start after it", starts)
+						t.Errorf("view %d started serving with no install lock held: another test's view could be stamped before it and start after it", len(started))
 					}
 				}
 				return nil
 			})))
+			// startedCarrying checks that the last view started is test's,
+			// and that it carried stamp, the stamp it carries once
+			// installed, as its start was logged.
+			startedCarrying := func(test string, stamp uint64) {
+				t.Helper()
+				n := len(started)
+				if n == 0 || started[n-1].test != test {
+					t.Fatalf("precondition: the views started serving as %+v; want %s's last", started, test)
+				}
+				if got := started[n-1].stamp; got != stamp {
+					t.Fatalf("%s's view started serving carrying %d and carries %d once installed: its stamp was set after it started serving", test, got, stamp)
+				}
+			}
 			t.Cleanup(mm.Close)
 			mm.SetMocksWithWindow([]*models.Mock{own}, nil, models.BaseTime, time.Now())
 			tr := learn.NewTracker()
@@ -443,12 +475,14 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 			if got := stampOf(mm); got != tr.Epoch() {
 				t.Fatalf("C's view, the first installed in the tracker's test %d, carries %d", tr.Epoch(), got)
 			}
+			startedCarrying("C", tr.Epoch())
 			door.install(mm, "E")
 			if got := stampOf(mm); got != 0 {
 				t.Fatalf("E's view, installed after C's in the tracker's test %d, carries %d; want 0", tr.Epoch(), got)
 			}
-			if reads != 2 || starts != 2 {
-				t.Fatalf("precondition: the installs read the tracker's open test %d times and started %d views; want 2 and 2", reads, starts)
+			startedCarrying("E", 0)
+			if reads != 2 || len(started) != 2 {
+				t.Fatalf("precondition: the installs read the tracker's open test %d times and started %d views; want 2 and 2", reads, len(started))
 			}
 		})
 	}
