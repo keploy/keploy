@@ -132,12 +132,7 @@ func TestDecideHandshakeDiscardsWhatItDialledForAnAbandonedHandshake(t *testing.
 // TestDecideHandshakeAnswersAsTheDestinationDid: a destination that refuses
 // makes the application's connect fail the same way, and nothing is kept.
 func TestDecideHandshakeAnswersAsTheDestinationDid(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	refused := l.Addr().String()
-	_ = l.Close() // nothing listens there now
+	refused := refusedAddr(t, "tcp")
 
 	p := &Proxy{logger: zap.NewNop()}
 	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
@@ -372,12 +367,7 @@ func TestDecideHandshakeRefusesALoopbackPortNothingOwnsInMockMode(t *testing.T) 
 	recorded.reset()
 	t.Cleanup(recorded.reset)
 	addr, _ := listenCounting(t)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	free := l.Addr().String()
-	_ = l.Close()
+	free := refusedAddr(t, "tcp")
 
 	mocked := &agent.Session{Mode: models.MODE_TEST}
 	mocked.Mocking = true

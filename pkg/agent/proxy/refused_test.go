@@ -8,13 +8,8 @@ import (
 )
 
 func TestRefusedLocallyOnlyForALocalPortWithNothingListening(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	l.Close()
-	_, err = net.Dial("tcp", addr)
+	addr := refusedAddr(t, "tcp")
+	_, err := net.Dial("tcp", addr)
 	if err == nil {
 		t.Fatal("expected the dial to be refused")
 	}

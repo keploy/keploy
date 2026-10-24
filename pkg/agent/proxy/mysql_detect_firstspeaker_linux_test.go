@@ -5,7 +5,6 @@ package proxy
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"syscall"
@@ -89,7 +88,7 @@ func TestFirstReadStoppedBeforeItBeganStillSeesWhatArrived(t *testing.T) {
 // report: the probe says client-read-error with no error, however the two
 // ends' outcomes interleave.
 func TestProbeAClientThatLeftIsNotADialFailure(t *testing.T) {
-	addr := refusedAddr(t)
+	addr := refusedAddr(t, "tcp")
 	p := testProxy(t)
 	app, srcConn := clientPair(t)
 	_ = app.Close()
@@ -106,7 +105,7 @@ func TestProbeAClientThatLeftIsNotADialFailure(t *testing.T) {
 // end spoke: the probe returns the dial's failure for the caller to report,
 // rather than letting generic dispatch dial the same address again.
 func TestProbeADialFailureEndsTheConnection(t *testing.T) {
-	addr := refusedAddr(t)
+	addr := refusedAddr(t, "tcp")
 	p := testProxy(t)
 	app, srcConn := clientPair(t)
 	if _, err := io.WriteString(app, "publish 1\n"); err != nil {
@@ -118,25 +117,6 @@ func TestProbeADialFailureEndsTheConnection(t *testing.T) {
 	if !errors.Is(err, syscall.ECONNREFUSED) || probe.Reason != "upstream-dial-failed" {
 		t.Fatalf("reason %q, err %v; want upstream-dial-failed with the refusal", probe.Reason, err)
 	}
-}
-
-// refusedAddr is a loopback address nothing listens on: a socket bound to it
-// and not listening keeps the port from anyone else and refuses connections.
-func refusedAddr(t *testing.T) string {
-	t.Helper()
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = syscall.Close(fd) })
-	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
-		t.Fatal(err)
-	}
-	sa, err := syscall.Getsockname(fd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return fmt.Sprintf("127.0.0.1:%d", sa.(*syscall.SockaddrInet4).Port)
 }
 
 // arrived waits, with no clock, until what the peer sent, or its close, is

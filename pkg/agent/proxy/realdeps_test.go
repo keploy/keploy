@@ -57,6 +57,12 @@ func realServer(t *testing.T) string {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+	return answerReal(ln)
+}
+
+// answerReal answers each connection ln accepts with "real:" and what the
+// connection sent until it half-closed, and returns ln's address.
+func answerReal(ln net.Listener) string {
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -183,10 +189,7 @@ func TestAConnectionKeployCannotNameIsCaptureIncomplete(t *testing.T) {
 // A REAL destination that refuses fails the connection as it would without
 // keploy, and the open test's row counts the failure.
 func TestARefusedRealDestinationFailsTheConnection(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	dst := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	dst := refusedAddr(t, "tcp")
 	p := realProxy(t, []string{dst}, nil)
 	p.realTracker.BeginTest()
 	app, accepted := realConnPair(t)
@@ -194,7 +197,7 @@ func TestARefusedRealDestinationFailsTheConnection(t *testing.T) {
 	require.True(t, s.handled)
 	require.NoError(t, s.err)
 	_ = accepted.Close()
-	_, err = app.Read(make([]byte, 1))
+	_, err := app.Read(make([]byte, 1))
 	require.Error(t, err)
 	uses, _ := p.realTracker.EndTest()
 	require.Equal(t, []models.RealUse{{Dest: dst, Failed: 1}}, uses)
@@ -278,11 +281,7 @@ func TestARealNamesDNSIsResolvedLiveAndBooked(t *testing.T) {
 // An upstream that cannot be asked answers a real name SERVFAIL, never
 // keploy's own address.
 func TestARealNameKeployCannotResolveIsServfail(t *testing.T) {
-	ln, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	_, port, _ := net.SplitHostPort(ln.LocalAddr().String())
-	require.NoError(t, ln.Close())
-	p := newProxyWithUpstream(t, "127.0.0.1:"+port, 200*time.Millisecond)
+	p := newProxyWithUpstream(t, refusedAddr(t, "udp"), 200*time.Millisecond)
 	t.Setenv(provenswitch.Env, "1")
 	list, err := realdeps.Parse([]string{"auth.test:443"})
 	require.NoError(t, err)
@@ -391,10 +390,7 @@ func TestASearchExpansionOfARealNameIsThatName(t *testing.T) {
 // the open test's REAL row counts, and kept for the relay when it accepts. A
 // connect to anything else is accepted at once, as before.
 func TestAReplaysRealConnectAnswersAsTheRealDestination(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := refusedAddr(t, "tcp")
 	up, _ := listenCounting(t)
 
 	p := realProxy(t, []string{refused, up}, nil)
@@ -504,8 +500,11 @@ func TestALocalhostEntryReachesItsOtherLoopbackFamily(t *testing.T) {
 	} else {
 		_ = l6.Close()
 	}
-	dst := realServer(t)
-	_, port, _ := net.SplitHostPort(dst)
+	// On Linux the port is held at every address for the test's life
+	// (sharedPort), beside the test's listener at 127.0.0.1, so the dial to
+	// [::1] is refused.
+	port := strconv.Itoa(sharedPort(t))
+	answerReal(listenShared(t, "tcp", net.JoinHostPort("127.0.0.1", port)))
 	v6 := net.JoinHostPort("::1", port)
 	p := realProxy(t, []string{"localhost:" + port}, nil)
 	p.realTracker.BeginTest()
@@ -531,9 +530,10 @@ func TestALocalhostEntryReachesItsOtherLoopbackFamily(t *testing.T) {
 // reached through 127.0.0.1:P, which mock.real does not list, and the dial
 // counts as failed, never as reached.
 func TestARealDialReachesOnlyTheListedAddress(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
+	// On Linux the port is held at every address for the test's life
+	// (sharedPort), beside the test's listener at 127.0.0.1, so the dial to
+	// [::1] is refused.
+	ln := listenShared(t, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(sharedPort(t))))
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -669,10 +669,7 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 // once it ends. One whose placing does not end is capture_incomplete: never a
 // silent miss.
 func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := refusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	for _, placed := range []bool{true, false} {
@@ -716,10 +713,7 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 // A failed connect while Docker cannot be read, or where nothing is being
 // placed, is a dependency's: it charges nothing, and it is answered at once.
 func TestARefusedDialWithNothingBeingPlacedChargesNothing(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := refusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	for name, index := range map[string]*containerkey.Keyer{
@@ -769,10 +763,7 @@ func (f placedOnPending) AwaitReadsOf(ctx context.Context, _ []string) {
 // is found placed, and the failure counts at once: the placings are read
 // before the destination is looked up, so the end of one is never missed.
 func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := refusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	p := realProxy(t, []string{"container:redis"}, nil)
