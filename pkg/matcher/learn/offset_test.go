@@ -1405,3 +1405,38 @@ func TestAnOffsetOnARecordingAtTheCallsOwnInstantIsRefused(t *testing.T) {
 		t.Errorf("FALSE GREEN? an offset on a recording made at the call's own instant: %s (%s); want what one a moment before gets, saying when it was recorded: %s (%s)", same.Kind, same.Why, before.Kind, want)
 	}
 }
+
+// A recording made at the call's own instant, of another call than the one
+// whose answer the call's own place is (the offset rule pairs no places of
+// two calls), holds the moment the value was recorded with by the rule by
+// which the own place names F's (11:14:10 rounds to the recorded minute,
+// 11:14:45 to F's): the recording may have given it to the application
+// before the call, so the echo reads it as one the recording gave, and the
+// value is refused naming both places, never only that no earlier place
+// holds the recorded moment.
+func TestARecordingOfAnotherCallAtTheCallsOwnInstantIsWhereTheRecordedMomentStands(t *testing.T) {
+	const p = "body.sent_at"
+	at := r1Insert
+	recT := at.Truncate(time.Second)
+	const minute = "2006-01-02T15:04Z07:00"
+	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
+	base := recT.Truncate(time.Minute)
+	for _, viaSet := range []bool{false, true} {
+		dc := NewDriftCache()
+		own := dc.RawOf(sentAtReceive("mock-42", at.Add(-time.Minute), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
+		other := sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339))
+		other.Spec.HTTPReq.Method = "GET"
+		nb := dc.RawOf(other, true).ServedAs(1)
+		var ln Learned
+		if viaSet {
+			ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil, func() ([]GivenPlaces, error) {
+				return []GivenPlaces{PlacesOf(nb)}, nil
+			})[0]
+		} else {
+			ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{own, nb.OfAnotherTest()}, nil, nil)[0]
+		}
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "the moment record's full round saw in it stands in mock-42 at spec.resp.body, and the moment it was recorded with stands in mock-44 at spec.resp.body, a recording record's full round gave the application before the call that was recorded at or after the call") {
+			t.Errorf("FALSE GREEN? the own place and another call's recording at the call's own instant (set %v): %s (%s); want it refused naming both", viaSet, ln.Kind, ln.Why)
+		}
+	}
+}
