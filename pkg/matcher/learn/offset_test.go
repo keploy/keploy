@@ -1345,6 +1345,28 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	if ln.Kind != KindNoise {
 		t.Errorf("the own place and a neighbour recorded after the call: %s (%s); want noise, the later recording no source of the recorded moment", ln.Kind, ln.Why)
 	}
+	// Both neighbours, the one recorded after the call read first: the
+	// echo holds (the own place names F's minute rounded, the earlier
+	// neighbour the recorded one), and the reason names the earlier
+	// neighbour as where the recorded moment stands, never the later one,
+	// which the recording made the call before.
+	for _, viaSet := range []bool{false, true} {
+		dc := NewDriftCache()
+		own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
+		late := dc.RawOf(sentAtReceive("mock-44", after, base.Add(-10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
+		nb := dc.RawOf(sentAtReceive("mock-43", before.Add(-time.Minute), base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(2)
+		var ln Learned
+		if viaSet {
+			ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil, func() ([]GivenPlaces, error) {
+				return []GivenPlaces{PlacesOf(late), PlacesOf(nb)}, nil
+			})[0]
+		} else {
+			ln = ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{own, late.OfAnotherTest(), nb.OfAnotherTest()}, nil, nil)[0]
+		}
+		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "and the moment it was recorded with stands in mock-43 at spec.resp.body, a recording record's full round gave the application before the call that is another test's") || strings.Contains(ln.Why, "mock-44") {
+			t.Errorf("the own place, a neighbour recorded after the call and one before it (set %v): %s (%s); want it refused naming mock-43, never mock-44", viaSet, ln.Kind, ln.Why)
+		}
+	}
 }
 
 // A place recorded at the call's own instant counts, for the offset rule, as
