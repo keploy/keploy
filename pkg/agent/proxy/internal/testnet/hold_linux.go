@@ -41,18 +41,46 @@ func RefusedAddr(t *testing.T, network string) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 }
 
-// HoldPort holds TCP port at every IPv4 address, 0.0.0.0, for the test's
-// life with a socket that never listens. It is false, and nothing is held,
-// when another socket has the port at an IPv4 address. It is built on Linux
-// only, where a hold can be made.
-func HoldPort(t *testing.T, port int) bool {
+// ListenIPv6Only opens a TCP listener at [::1]:P that no IPv4 address
+// reaches. The listener is closed when the test ends. P is held at every
+// IPv4 address, 0.0.0.0, for the test's life, by a socket that never
+// listens. So a dial to 127.0.0.1:P is refused. No other socket can take P
+// at an IPv4 address meanwhile. The hold is taken first, at port 0: the
+// kernel then picks a port no IPv4 socket is at, one in TIME_WAIT included.
+// The listener then opens at that port, IPv6-only. No IPv4 socket conflicts
+// with it. Taken the other way round, an IPv6 bind picks the port. An IPv4
+// TIME_WAIT can be at that port. The hold, a socket without SO_REUSEADDR,
+// then cannot bind beside it. The test is skipped where there is no IPv6
+// loopback. ListenIPv6Only is built on Linux only, where a hold can be made.
+func ListenIPv6Only(t *testing.T) net.Listener {
 	t.Helper()
-	_, err := bindHold(t, "tcp", "0.0.0.0", port, false)
-	if errors.Is(err, syscall.EADDRINUSE) {
-		return false
+	return listenIPv6Only(t, nil)
+}
+
+// listenIPv6Only is ListenIPv6Only that calls between, when it is not nil,
+// with the port once it is held and before the listener opens there.
+func listenIPv6Only(t *testing.T, between func(port int)) net.Listener {
+	t.Helper()
+	for range 10 {
+		port, err := bindHold(t, "tcp", "0.0.0.0", 0, false)
+		require.NoError(t, err)
+		if between != nil {
+			between(port)
+		}
+		ln, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+		if err == nil {
+			t.Cleanup(func() { _ = ln.Close() })
+			return ln
+		}
+		if addrAbsent(err) {
+			t.Skipf("no IPv6 loopback here: %v", err)
+		}
+		// Another IPv6-only socket has the port at [::1] or [::]. The
+		// hold stays to the test's end. The next round holds another port.
+		require.ErrorIs(t, err, syscall.EADDRINUSE)
 	}
-	require.NoError(t, err)
-	return true
+	t.Fatal("found no port free at [::1] among ten held at every IPv4 address")
+	return nil
 }
 
 // SharedPort holds a free TCP port for the test's life at every address,
@@ -178,14 +206,16 @@ func addrAbsent(err error) bool {
 	return errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT)
 }
 
-// BoundHere counts the TCP sockets of this process bound at port, at any
-// address: those /proc/net/tcp and tcp6 list at the port whose inode is one
-// of this process's descriptors. The tables give no inode, so it counts
-// none, for a socket in TIME_WAIT or one the kernel keeps with no owner (an
-// orphan still closing, a connection not yet accepted). It reads the
-// descriptors first and the tables then, so a socket closed between the two
-// reads is not counted, and one opened between them is not either. known is
-// true: on Linux it can tell.
+// BoundHere counts the TCP sockets of this process at port, at any address:
+// those /proc/net/tcp and tcp6 list at the port whose inode is one of this
+// process's descriptors. The tables list listening sockets and those with a
+// peer only, so it counts none for a socket that is bound but neither
+// listens nor connects, as this package's TCP holds are. The tables give no
+// inode, so it counts none for a socket in TIME_WAIT or one the kernel keeps
+// with no owner (an orphan still closing, a connection not yet accepted). It
+// reads the descriptors first and the tables then, so a socket closed
+// between the two reads is not counted, and one opened between them is not
+// either. known is true: on Linux it can tell.
 func BoundHere(t *testing.T, port int) (n int, known bool) {
 	t.Helper()
 	mine := map[string]bool{}

@@ -404,26 +404,10 @@ func TestUnderTheSwitchALiveHandlersCallNamesNoTestCaseByItsOwnBytes(t *testing.
 // listed address.
 func TestUnderTheSwitchAnIPEntryIsNotReachedThroughTheOtherLoopbackFamily(t *testing.T) {
 	p, _ := provenTreeProxy(t)
-	var l net.Listener
-	for range 10 {
-		l6, err := net.Listen("tcp6", "[::1]:0")
-		if err != nil {
-			t.Skipf("no IPv6 loopback here: %v", err)
-		}
-		port := l6.Addr().(*net.TCPAddr).Port
-		// Nothing may listen at the listed address, 127.0.0.1 at that
-		// port, for the test's life: the port is held at every IPv4
-		// address, beside the IPv6-only listener.
-		if testnet.HoldPort(t, port) {
-			l = l6
-			break
-		}
-		_ = l6.Close()
-	}
-	if l == nil {
-		t.Fatal("found no port free at every IPv4 address for a listener at [::1]")
-	}
-	t.Cleanup(func() { _ = l.Close() })
+	// Nothing may listen at the listed address, 127.0.0.1 at the
+	// listener's port, for the test's life: the port is held at every
+	// IPv4 address, beside the IPv6-only listener.
+	l := testnet.ListenIPv6Only(t)
 	go func() {
 		for {
 			c, err := l.Accept()

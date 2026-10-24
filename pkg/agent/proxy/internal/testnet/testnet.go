@@ -18,5 +18,75 @@
 // free; GiveAway hands a listener's socket to another process, for a test of
 // that. Both work on Linux only.
 //
+// HoldFinalizers keeps the runtime's finalizers from running for the rest
+// of a test, so a socket the code under test dropped stays open until the
+// test looks. It works on every platform.
+//
 // The package is for tests only: nothing outside a _test.go file imports it.
 package testnet
+
+import (
+	"runtime"
+	"sync/atomic"
+	"testing"
+)
+
+// finalizersHeld is true while a test holds the finalizers.
+var finalizersHeld atomic.Bool
+
+// finalizerParked is true while the hold's finalizer has the goroutine that
+// runs finalizers.
+var finalizerParked atomic.Bool
+
+// HoldFinalizers keeps the runtime's finalizers from running for the rest of
+// the test. net closes a listener or a connection in the socket's finalizer.
+// The finalizer runs once a collection finds that nothing references the
+// socket. So a socket the code under test left open could be closed before
+// the test looks. The test's check that the code closed it would then pass.
+// A collection can start at an allocation. The code under test can start one
+// itself (runtime.GC). Turning the collector off does not stop runtime.GC.
+// Nor does it stop a collection a memory limit (GOMEMLIMIT) starts.
+//
+// The runtime runs every finalizer on one goroutine, one after another. The
+// hold parks that goroutine in a finalizer of its own until the test ends. No
+// collection, whoever starts it, can close a dropped socket meanwhile.
+//
+// It holds finalizers only: a function passed to runtime.AddCleanup still
+// runs. If net closed sockets that way, the hold would not keep them open. The
+// finalizers are held for one test at a time: a second call, from this test
+// or another, fails the test.
+func HoldFinalizers(t *testing.T) {
+	t.Helper()
+	holdFinalizers(t, runtime.GC)
+}
+
+// holdFinalizers is HoldFinalizers that starts each collection it waits
+// through with collect.
+func holdFinalizers(t *testing.T, collect func()) {
+	t.Helper()
+	if !finalizersHeld.CompareAndSwap(false, true) {
+		t.Fatal("HoldFinalizers: the finalizers are held already, by this test or another")
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	// 64 bytes, so the tiny allocator does not put the object in a block
+	// with others that keep it reachable.
+	runtime.SetFinalizer(new([64]byte), func(*[64]byte) {
+		finalizerParked.Store(true)
+		close(started)
+		<-release
+		finalizerParked.Store(false)
+	})
+	t.Cleanup(func() {
+		close(release)
+		finalizersHeld.Store(false)
+	})
+	for {
+		collect()
+		select {
+		case <-started:
+			return
+		default:
+			runtime.Gosched()
+		}
+	}
+}
