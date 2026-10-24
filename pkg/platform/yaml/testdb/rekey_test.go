@@ -330,12 +330,12 @@ func TestASetRewriteReKeysEachRecordingOnceWhenItIsDone(t *testing.T) {
 	old1, old2 := hashOf(t, r, dir, p1), hashOf(t, r, dir, p2)
 
 	// The keploy directory as another spelling of it names the same set.
-	w := BeginSetRewrite(zap.NewNop(), dir+string(filepath.Separator)+".", "set-1")
-	if w == nil {
-		t.Fatal("no rewrite under the switch with a Rekeyer")
+	w, err := BeginSetRewrite(zap.NewNop(), dir+string(filepath.Separator)+".", "set-1")
+	if err != nil || w == nil {
+		t.Fatalf("BeginSetRewrite = %v, %v; want a rewrite under the switch with a Rekeyer", w, err)
 	}
-	if inner := BeginSetRewrite(zap.NewNop(), dir, "set-1"); inner != nil {
-		t.Fatal("a rewrite inside another of the same set is not the outer one's")
+	if inner, err := BeginSetRewrite(zap.NewNop(), dir, "set-1"); inner != nil || err != nil {
+		t.Fatalf("a rewrite inside another of the same set is not the outer one's: %v, %v", inner, err)
 	}
 	for _, url := range []string{"http://api.test/t1?x=1", "http://api.test/t1?x=2"} {
 		if err := ts.UpdateTestCase(t.Context(), namedTC("t1", url), "set-1", false); err != nil {
@@ -369,7 +369,7 @@ func TestASetRewriteReKeysEachRecordingOnceWhenItIsDone(t *testing.T) {
 	}
 
 	t.Setenv(provenswitch.Env, "")
-	if w := BeginSetRewrite(zap.NewNop(), dir, "set-1"); w != nil {
-		t.Fatal("a rewrite without the switch")
+	if w, err := BeginSetRewrite(zap.NewNop(), dir, "set-1"); w != nil || err != nil {
+		t.Fatalf("a rewrite without the switch: %v, %v", w, err)
 	}
 }

@@ -44,16 +44,20 @@ func (ts *OpenAPIYaml) GetTestCasesSchema(ctx context.Context, testSetID string,
 	if err != nil {
 		return nil, err
 	}
-	_, err = os.Stat(TestPath)
-	if err != nil {
+	// Only a set folder that does not exist means no tests. One that is
+	// there but cannot be opened (permission denied, an I/O error, a
+	// symlink loop, not a directory) is an error: reading it as empty would
+	// report a set's schemas as none.
+	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
+	if errors.Is(err, fs.ErrNotExist) {
 		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return nil, nil
 	}
-	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
 		return nil, err
 	}
+	defer func() { _ = dir.Close() }()
 	files, err := dir.ReadDir(0)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
@@ -91,7 +95,16 @@ func (ts *OpenAPIYaml) GetMocksSchemas(ctx context.Context, testSetID string, mo
 		return nil, err
 	}
 
-	if _, err := os.Stat(mockPath); err == nil {
+	// Only a schema file that does not exist means no mocks. One that is
+	// there but cannot be looked at (permission denied, an I/O error, a
+	// symlink loop) is an error: reading it as empty would report the mock
+	// set's schemas as none.
+	_, err = os.Stat(mockPath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		utils.LogError(ts.logger, err, "failed to look at the mocks schema file", zap.String("path", mockPath))
+		return nil, err
+	}
+	if err == nil {
 		var mockYamls []*models.OpenAPI
 		data, err := yaml.ReadFile(ctx, ts.logger, path, mockFileName)
 		if err != nil {

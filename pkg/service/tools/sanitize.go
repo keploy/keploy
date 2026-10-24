@@ -171,7 +171,10 @@ func isDir(p string) bool {
 func (t *Tools) SanitizeTestSetDir(ctx context.Context, testSetDir string) error {
 	// The set's recordings are rewritten where they lie, outside testdb:
 	// each is re-keyed once, after (testdb.SetRewrite).
-	rw := testdb.BeginSetRewrite(t.logger, filepath.Dir(testSetDir), filepath.Base(testSetDir))
+	rw, err := testdb.BeginSetRewrite(t.logger, filepath.Dir(testSetDir), filepath.Base(testSetDir))
+	if err != nil {
+		return err
+	}
 	defer rw.Done()
 	return t.sanitizeTestSetDir(ctx, testSetDir)
 }
@@ -1128,7 +1131,10 @@ func DesanitizeFileInPlace(path string, secrets map[string]string) error {
 func (t *Tools) DesanitizeTestSet(testSetID string, path string) (bool, error) {
 	// The set's recordings are rewritten where they lie, outside testdb:
 	// each is re-keyed once, after (testdb.SetRewrite).
-	rw := testdb.BeginSetRewrite(t.logger, path, testSetID)
+	rw, err := testdb.BeginSetRewrite(t.logger, path, testSetID)
+	if err != nil {
+		return false, err
+	}
 	defer rw.Done()
 	return t.desanitizeTestSet(testSetID, path)
 }

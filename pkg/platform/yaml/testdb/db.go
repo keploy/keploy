@@ -1051,7 +1051,11 @@ func (ts *TestYaml) ChangePath(path string) {
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	// The test case file is rewritten where it lies, outside upsert: it is
 	// re-keyed once, after (SetRewrite).
-	rw := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	rw, err := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to update the assertions of the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+		return err
+	}
 	defer rw.Done()
 	return ts.updateAssertions(ctx, testCaseID, testSetID, assertions)
 }
