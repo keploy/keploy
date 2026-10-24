@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"fmt"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,8 +119,8 @@ func TestFindAnsweredEarlierNamesAnEarlierTestsAnsweredRecording(t *testing.T) {
 }
 
 // Of several recordings that answered under a key, the one answered last is
-// found; a key keeps its newest answeredPerKey, and the log its newest
-// answeredMaxKeys keys.
+// found; a key keeps its newest answeredPerKey, and the log the newest that
+// fit in answeredMaxBytes.
 func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 	byURL(t)
 	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
@@ -130,15 +132,27 @@ func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 	if len(c) != answeredPerKey || c[0].mock.Name != fmt.Sprintf("m%d", answeredPerKey+3) || c[len(c)-1].mock.Name != "m4" {
 		t.Fatalf("kept %d, newest %s, oldest %s; want %d from m%d down to m4", len(c), c[0].mock.Name, c[len(c)-1].mock.Name, answeredPerKey, answeredPerKey+3)
 	}
-	for i := 0; i < answeredMaxKeys; i++ {
-		l.note(keyedRecording(fmt.Sprintf("k%d", i), models.HTTP, i, fmt.Sprintf("/k%d", i), t0), t0)
-	}
-	if c := l.candidates([]string{"url:/a"}); len(c) != 0 {
-		t.Fatalf("the oldest key outlived %d newer ones: %d kept", answeredMaxKeys, len(c))
+	// Newer keys, until the byte bound has pushed out every recording of /a,
+	// the oldest noted: no newer one went first, and the log never held more
+	// than its bound.
+	n := 0
+	for len(l.candidates([]string{"url:/a"})) > 0 {
+		if n > answeredMaxBytes/answeredEntryOverhead {
+			t.Fatalf("%d newer keys, %d bytes held, and /a is still kept: no byte bound", n, l.bytes)
+		}
+		l.note(keyedRecording(fmt.Sprintf("k%d", n), models.HTTP, n, fmt.Sprintf("/k%d", n), t0), t0)
+		n++
+		if l.bytes > answeredMaxBytes {
+			t.Fatalf("the log holds %d bytes, over its bound %d", l.bytes, answeredMaxBytes)
+		}
 	}
 	if c := l.candidates([]string{"url:/k0"}); len(c) != 1 {
-		t.Fatalf("a key among the newest %d was dropped", answeredMaxKeys)
+		t.Fatal("k0 was pushed out before the older recordings of /a")
 	}
+	if _, ok := l.byKey["url:/a"]; ok {
+		t.Fatal("the key of the recordings pushed out still has a list")
+	}
+	checkAnsweredCounts(t, &l)
 
 	// Across keys the newest wins: the manager compares answer times.
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -153,6 +167,150 @@ func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 	got, ok = mm.FindAnsweredEarlier(models.HTTP, []string{"url:/y", "url:/x"}, func(*models.Mock) bool { return true })
 	if !ok || got.Mock.Name != "new" {
 		t.Fatalf("with the newest's key first, found %v, want the one answered last", got.Mock)
+	}
+}
+
+// What the log keeps of a recording is what a match reads: its request, name,
+// kind, times and noise, never its response, nor the loader that would read
+// one back from disk.
+func TestAnsweredLogKeepsNoResponse(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	mk := keyedRecording("mock-1", models.HTTP, 1, "/rates", t0)
+	mk.Noise = []string{"secret"}
+	mk.Spec.Metadata = map[string]string{"type": "http-client"}
+	mk.Spec.ReqBodyNoise = map[string][]string{"body.ts": nil}
+	mk.Spec.HTTPReq.Body = `{"q":1}`
+	mk.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: strings.Repeat("r", 64<<10)}
+	mk.Spec.MongoResponses = []models.MongoResponse{{}}
+	mk.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		return &models.HTTPResp{Body: "from disk"}, nil, nil
+	})
+	var l answeredLog
+	l.note(mk, t0.Add(time.Second))
+	c := l.candidates([]string{"url:/rates"})
+	if len(c) != 1 {
+		t.Fatalf("kept %d, want the one", len(c))
+	}
+	p := c[0].mock
+	if p.Spec.HTTPResp != nil || p.Spec.MongoResponses != nil || p.HasSpilledResponse() {
+		t.Fatal("the log keeps a response, or the loader of one")
+	}
+	if p.Name != mk.Name || p.Kind != mk.Kind || p.Spec.HTTPReq == nil || p.Spec.HTTPReq.Body != mk.Spec.HTTPReq.Body ||
+		!p.Spec.ReqTimestampMock.Equal(t0) || len(p.Noise) != 1 || p.Spec.Metadata["type"] != "http-client" || len(p.Spec.ReqBodyNoise) != 1 {
+		t.Fatalf("the log lost what a match or the note reads: %+v", p)
+	}
+	if c[0].size >= 8<<10 {
+		t.Fatalf("an entry with a small request counts %d bytes", c[0].size)
+	}
+	if mk.Spec.HTTPResp == nil || !mk.HasSpilledResponse() {
+		t.Fatal("noting the recording changed it")
+	}
+}
+
+// A set of 20,000 answered recordings, each with a 4 KiB request and a 64 KiB
+// response, leaves the log holding no more than its byte bound: the newest
+// are kept, the oldest pushed out, and no response is held.
+func TestAnsweredLogStaysSmall(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	var l answeredLog
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	const n = 20000
+	for i := 0; i < n; i++ {
+		mk := keyedRecording(fmt.Sprintf("m%d", i), models.HTTP, i, fmt.Sprintf("/c/%d", i), t0)
+		body := make([]byte, 4<<10)
+		resp := make([]byte, 64<<10)
+		body[0], resp[0] = byte(i), byte(i)
+		mk.Spec.HTTPReq.Body = string(body)
+		mk.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: string(resp)}
+		l.note(mk, t0.Add(time.Duration(i)*time.Millisecond))
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if l.bytes > answeredMaxBytes {
+		t.Fatalf("the log counts %d bytes, over its bound %d", l.bytes, answeredMaxBytes)
+	}
+	if grew := int64(after.HeapAlloc) - int64(before.HeapAlloc); grew > 3*answeredMaxBytes {
+		t.Fatalf("%d answered recordings left %d MiB on the heap; the bound is %d MiB", n, grew>>20, answeredMaxBytes>>20)
+	}
+	if c := l.candidates([]string{fmt.Sprintf("url:/c/%d", n-1)}); len(c) != 1 {
+		t.Fatal("the newest recording was not kept")
+	}
+	if c := l.candidates([]string{"url:/c/0"}); len(c) != 0 {
+		t.Fatal("the oldest recording outlived the byte bound")
+	}
+	runtime.KeepAlive(&l)
+}
+
+// A recording whose request alone is over answeredMaxEntryBytes is not kept:
+// it would push out many smaller ones. One just under is.
+func TestAnsweredLogKeepsNoOversizedRequest(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	var l answeredLog
+	big := keyedRecording("big", models.HTTP, 1, "/big", t0)
+	big.Spec.HTTPReq.Body = strings.Repeat("b", answeredMaxEntryBytes)
+	l.note(big, t0)
+	if c := l.candidates([]string{"url:/big"}); len(c) != 0 {
+		t.Fatalf("kept a recording of %d bytes, over the %d an entry may hold", c[0].size, answeredMaxEntryBytes)
+	}
+	// Of any kind: a Generic recording's request is in its payloads.
+	gen := keyedRecording("gen", models.GENERIC, 3, "/gen", t0)
+	gen.Spec.GenericRequests = []models.Payload{{Message: []models.OutputBinary{{Data: strings.Repeat("g", answeredMaxEntryBytes)}}}}
+	l.note(gen, t0)
+	if c := l.candidates([]string{"url:/gen"}); len(c) != 0 {
+		t.Fatalf("kept a Generic recording of %d bytes, over the %d an entry may hold", c[0].size, answeredMaxEntryBytes)
+	}
+	fits := keyedRecording("fits", models.HTTP, 2, "/fits", t0)
+	fits.Spec.HTTPReq.Body = strings.Repeat("f", answeredMaxEntryBytes-4*answeredEntryOverhead)
+	l.note(fits, t0)
+	if c := l.candidates([]string{"url:/fits"}); len(c) != 1 {
+		t.Fatal("a recording under the entry bound was not kept")
+	}
+}
+
+// A key answered again and again holds its newest answeredPerKey, and the
+// log counts and queues only those: the ones the key's bound dropped give
+// their bytes back and leave the queue.
+func TestAnsweredLogShedsWhatAKeyDropped(t *testing.T) {
+	byURL(t)
+	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	var l answeredLog
+	size := 0
+	for i := 0; i < 10000; i++ {
+		l.note(keyedRecording(fmt.Sprintf("m%d", i), models.HTTP, i, "/same", t0), t0)
+		if i == 0 {
+			size = l.bytes
+		}
+	}
+	if l.live != answeredPerKey || l.bytes > answeredPerKey*(size+16) {
+		t.Fatalf("one key answered 10000 times: %d entries and %d bytes counted, want %d of about %d", l.live, l.bytes, answeredPerKey, size)
+	}
+	if len(l.queue) > 2*answeredPerKey+64+1 {
+		t.Fatalf("one key answered 10000 times queues %d entries", len(l.queue))
+	}
+	checkAnsweredCounts(t, &l)
+}
+
+// checkAnsweredCounts fails t unless l's counts are those of the entries its
+// key lists hold.
+func checkAnsweredCounts(t *testing.T, l *answeredLog) {
+	t.Helper()
+	seen := map[*answeredEntry]bool{}
+	bytes := 0
+	for _, list := range l.byKey {
+		for _, e := range list {
+			if !seen[e] {
+				seen[e] = true
+				bytes += e.size
+			}
+		}
+	}
+	if l.live != len(seen) || l.bytes != bytes {
+		t.Fatalf("the log counts %d entries and %d bytes; its lists hold %d and %d", l.live, l.bytes, len(seen), bytes)
 	}
 }
 
