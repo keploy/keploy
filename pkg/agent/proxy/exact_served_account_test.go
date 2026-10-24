@@ -9,6 +9,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // account is r's account of what its open test was served, without its
@@ -385,52 +387,69 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 	}
 }
 
-// Views installed at once in one open tracker test are of no one test, but
-// the first: an install whose swap loses to another's reads the stamp again
-// and finds the other test's view (0). And a view installed as the tracker's
-// test ends, which reads no open test, records nothing: a view installed
-// beside it that read the test before it ended still finds the test's
-// earlier view of another test (0). Recording the 0 forgot that view, and
-// the view installed beside it carried the test's number, as if it were the
-// only test's view installed in that tracker test.
-func TestViewsInstalledAtOnceInOneTrackerTestAreOfNoOneTest(t *testing.T) {
-	var e exactState
-	open := func() uint64 { return 7 }
-	raced := false
-	e.stampLoaded = func() {
-		if raced {
-			return
-		}
-		raced = true
-		if got := e.stampTest(&open, "B"); got != 7 {
-			t.Fatalf("B's view, the first installed in the tracker's test 7, carries %d; want 7", got)
-		}
-	}
-	if got := e.stampTest(&open, "A"); got != 0 {
-		t.Fatalf("A's view, whose install read no view in the tracker's test 7 before B's landed, carries %d; want 0", got)
-	}
-	if !raced {
-		t.Fatal("precondition: B's install did not land in A's")
-	}
-
-	var f exactState
-	n := uint64(8)
-	cur := func() uint64 { return n }
-	if got := f.stampTest(&cur, "X"); got != 8 {
-		t.Fatalf("X's view, the first installed in the tracker's test 8, carries %d; want 8", got)
-	}
-	ended := false
-	racing := func() uint64 {
-		if !ended {
-			ended = true
-			n = 0 // the tracker's test 8 ends, and D's view is installed
-			if got := f.stampTest(&cur, "D"); got != 0 {
-				t.Fatalf("D's view, installed with no tracker test open, carries %d; want 0", got)
+// A test's view is stamped and starts serving under one lock (installMu),
+// on both install doors: the install's read of the tracker's open test and
+// its view's start are made under it, so no other test's view is installed
+// between the two, and the stamps' order is the order the views serve in.
+// Stamped by a swap with no lock around the view's start, an install that
+// read tracker test 8 could swap after another test's view was stamped in 9,
+// or start serving after a view whose stamp came later, and a view of
+// tracker test 9 then carried 9 though another test's view served in it.
+func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
+	own := exactMock("own", 0, models.LifetimePerTest)
+	for _, door := range []struct {
+		name    string
+		install func(mm *MockManager, test string)
+	}{
+		{name: "ServeExactTest", install: func(mm *MockManager, test string) { mm.ServeExactTest(test, []*models.Mock{own}) }},
+		{name: "OpenExactTest", install: func(mm *MockManager, test string) { mm.OpenExactTest(test, []*models.Mock{own}, nil) }},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			// held says whether an install holds the lock, as its view's
+			// start is logged ("exact serving", installExact) and as it
+			// reads the tracker.
+			var mm *MockManager
+			held := func() bool {
+				if mm.exact.installMu.TryLock() {
+					mm.exact.installMu.Unlock()
+					return false
+				}
+				return true
 			}
-		}
-		return 8 // C's install read test 8 before it ended
-	}
-	if got := f.stampTest(&racing, "C"); got != 0 {
-		t.Fatalf("C's view, installed in the tracker's test 8 after X's, carries %d; want 0", got)
+			starts := 0
+			core, _ := observer.New(zapcore.DebugLevel)
+			mm = NewMockManager(nil, nil, zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+				if e.Message == "exact serving" {
+					starts++
+					if !held() {
+						t.Errorf("view %d started serving with no install lock held: another test's view could be stamped before it and start after it", starts)
+					}
+				}
+				return nil
+			})))
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow([]*models.Mock{own}, nil, models.BaseTime, time.Now())
+			tr := learn.NewTracker()
+			reads := 0
+			mm.SetOpenTestEpoch(func() uint64 {
+				reads++
+				if !held() {
+					t.Errorf("install %d read the tracker's open test with no install lock held: another test's view could be installed before its view starts serving", reads)
+				}
+				return tr.OpenEpoch()
+			})
+			tr.Begin()
+			door.install(mm, "C")
+			if got := stampOf(mm); got != tr.Epoch() {
+				t.Fatalf("C's view, the first installed in the tracker's test %d, carries %d", tr.Epoch(), got)
+			}
+			door.install(mm, "E")
+			if got := stampOf(mm); got != 0 {
+				t.Fatalf("E's view, installed after C's in the tracker's test %d, carries %d; want 0", tr.Epoch(), got)
+			}
+			if reads != 2 || starts != 2 {
+				t.Fatalf("precondition: the installs read the tracker's open test %d times and started %d views; want 2 and 2", reads, starts)
+			}
+		})
 	}
 }

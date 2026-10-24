@@ -199,14 +199,15 @@ type exactState struct {
 	// claims are the shared recordings the tests of the current staging
 	// answered with (exactClaims).
 	claims exactClaims
-	// stamped is which tests' views were installed in the learn tracker's
-	// latest open test a view was installed in (stampTest).
-	stamped atomic.Pointer[stampedTest]
-	// stampLoaded, set by tests alone and before the state is shared, runs
-	// in stampTest between its read of the latest stamp and its swap: an
-	// install that lands there makes the swap fail, and the stamp is read
-	// again.
-	stampLoaded func()
+	// installMu orders the installs of tests' views (serveExactTest): each
+	// reads the learn tracker's open test, stamps its view (stampTest) and
+	// makes it the view served under it, so the stamps' order is the order
+	// the views start serving in, and no other test's view is installed
+	// between an install's read of the tracker and its view's start.
+	installMu sync.Mutex
+	// stamped is, under installMu, the learn tracker's open test the latest
+	// test's view was installed in, and which tests' views were (stampTest).
+	stamped *stampedTest
 }
 
 // stampedTest is, of the learn tracker's open test epoch, the test whose
@@ -217,39 +218,36 @@ type stampedTest struct {
 	mixed bool
 }
 
-// stampTest is the stamp of test's view as it is installed (exactView.stamp):
-// the learn tracker's open test (open, learn.Tracker.OpenEpoch; nil when the
-// manager has none), so a reader compares the view's test with the tracker's
-// by number. It is 0 when there is no tracker, when no test is open in it
-// (the view was installed before the tracker's test began, or after it
-// ended), and once two tests' views were installed in one open tracker test,
-// for every view installed in it after that: the tracker began no test for
-// the second, and files the serves of both in the one test. A test's view
-// installed again with no other test's between keeps the stamp.
+// stampTest is the stamp of test's view as it is installed (exactView.stamp),
+// called under installMu: the learn tracker's open test (open,
+// learn.Tracker.OpenEpoch; nil when the manager has none), so a reader
+// compares the view's test with the tracker's by number. It is 0 when there
+// is no tracker, when no test is open in it (the view was installed before
+// the tracker's test began, or after it ended), and once two tests' views
+// were installed in one open tracker test, for every view installed in it
+// after that: the tracker began no test for the second, and files the serves
+// of both in the one test. A test's view installed again with no other
+// test's between keeps the stamp. The reads are made in installMu's order and
+// the tracker's numbers only grow, so a read is never older than the stamp
+// before it, unless it is of no open test (0).
+// What the stamp does not see is a tracker test that begins while a test's
+// view is served: the tracker files that view's serves in the test until the
+// next view is installed. The replay begins each test case only over the
+// pool (replay poolBeforeBegin).
 func (e *exactState) stampTest(open *func() uint64, test string) uint64 {
 	if open == nil {
 		return 0
 	}
 	n := (*open)()
-	if n == 0 {
+	next := &stampedTest{epoch: n, test: test}
+	if prev := e.stamped; prev != nil && prev.epoch == n {
+		next.mixed = prev.mixed || prev.test != test
+	}
+	e.stamped = next
+	if next.mixed {
 		return 0
 	}
-	for {
-		prev := e.stamped.Load()
-		if e.stampLoaded != nil {
-			e.stampLoaded()
-		}
-		next := &stampedTest{epoch: n, test: test}
-		if prev != nil && prev.epoch == n {
-			next.mixed = prev.mixed || prev.test != test
-		}
-		if e.stamped.CompareAndSwap(prev, next) {
-			if next.mixed {
-				return 0
-			}
-			return n
-		}
-	}
+	return n
 }
 
 // exactClaims are, in one staging (stagingEpoch), the shared recordings
@@ -807,7 +805,10 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 	}
 	install := func() {
 		// Stamped as it is installed: what the tracker's open test is when
-		// the view starts serving.
+		// the view starts serving. The lock is taken here, on both doors, so
+		// on OpenExactTest's it is held under the variables' lock.
+		m.exact.installMu.Lock()
+		defer m.exact.installMu.Unlock()
 		v.stamp = m.exact.stampTest(m.openTestEpoch.Load(), test)
 		m.exact.begun.add(m.stagingEpoch.Load(), owned)
 		m.exact.fired.Store(true)
