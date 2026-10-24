@@ -192,6 +192,11 @@ type exactState struct {
 	// (StagedOwnerBegun); named, those a miss's diagnosis named
 	// (FindStagedNotOwned), each once.
 	begun, named stagingNames
+	// onMarked runs right after a call's round is marked (MarkCallRound),
+	// onNaming right before a lookup checks the staging and spends a name,
+	// and onNamed right after it spent one (findNotOwned): seams a test
+	// changes the round at.
+	onMarked, onNaming, onNamed func()
 	// recorded is where a miss's diagnosis reads the set's recordings the
 	// trees do not hold (SetRecordingSource).
 	recorded recordingSource
@@ -317,6 +322,26 @@ func (s *stagingNames) add(epoch uint64, mocks []*models.Mock) {
 			set[mk.Name] = struct{}{}
 		}
 	}
+}
+
+// claimIn is claim for a staging the store may have left: holding the set's
+// lock, it claims name in the set of staging epoch only while now (the
+// store's staging) is still epoch, and otherwise claims nothing (moved). A
+// staging after epoch claims under the lock only once it began (now moved
+// first), so no claim of a staging left behind empties the set of the one
+// in force.
+func (s *stagingNames) claimIn(epoch uint64, now func() uint64, name string) (claimed, moved bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now() != epoch {
+		return false, true
+	}
+	set := s.in(epoch)
+	if _, ok := set[name]; ok {
+		return false, false
+	}
+	set[name] = struct{}{}
+	return true, false
 }
 
 // claim puts name in the set of staging epoch, reporting whether it was not
@@ -479,6 +504,35 @@ func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
 var _ integrations.ExactServingReader = (*MockManager)(nil)
 
+// MarkCallRound is, under exact serving, the call's round as it is now
+// (integrations.StagedFinder): the staging and the view in force, read
+// together under the round lock, in O(1). The view is kept, never copied: a
+// view is not changed once installed, and tells its own by name later, for
+// a miss's lookup. The zero CallRound without exact serving.
+func (m *MockManager) MarkCallRound() integrations.CallRound {
+	r := &m.exact.round
+	r.mu.Lock()
+	v := m.exact.view.Load()
+	epoch := m.stagingEpoch.Load()
+	r.mu.Unlock()
+	if f := m.exact.onMarked; f != nil {
+		f()
+	}
+	if v == nil {
+		return integrations.CallRound{}
+	}
+	return integrations.NewCallRound(epoch, v.holds)
+}
+
+// holds reports whether the view holds the recording name as its own (the
+// open test's, in flight into it, shared with it, a pool view's ahead): a
+// name its index has. Read only once the view is installed, when it is
+// never written again.
+func (v *exactView) holds(name string) bool {
+	_, own := v.index[name]
+	return own
+}
+
 // FindStagedNotOwned is, under exact serving, the name of the first mock of
 // kind staged in the manager's trees (per-test, session, startup, in that
 // order) that the open view does not show, that no call of the set has
@@ -492,8 +546,14 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // recording elsewhere holds, made where it was not recorded, which record's
 // judging reads to bake the recording into the worker scope (a2). For a
 // miss's diagnosis only: the mock is never handed out, nor served.
-func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
-	return m.findNotOwned(kind, nil, match)
+//
+// It is asked of call, the round the call was made in: a recording call's
+// view held as its own is never named, nor any once the replay staged
+// another set (restaged), checked right before a name is spent, which is
+// spent in call's staging, and again before it is returned. The zero
+// CallRound names nothing.
+func (m *MockManager) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	return m.findNotOwned(kind, call, nil, match)
 }
 
 // FindStagedNotOwnedByKeys is FindStagedNotOwned, looking also, when the
@@ -503,23 +563,30 @@ func (m *MockManager) FindStagedNotOwned(kind models.Kind, match func(*models.Mo
 // before its test would find none (integrations.StagedKeyFinder). Only those
 // keys' recordings are decoded, on each such miss, and none is kept. No keys
 // looks in the trees alone.
-func (m *MockManager) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
-	return m.findNotOwned(kind, keys, match)
+func (m *MockManager) FindStagedNotOwnedByKeys(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
+	return m.findNotOwned(kind, call, keys, match)
 }
 
 var _ integrations.StagedKeyFinder = (*MockManager)(nil)
 
 // findNotOwned is FindStagedNotOwned, and with keys FindStagedNotOwnedByKeys.
-func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+// The staging only moves on, and moves before the trees change (a staging
+// bumps it first, holding swapMu), so a recording read from the trees while
+// the staging is still call's is of call's set.
+func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
 	v := m.exactView()
-	if v == nil || match == nil {
-		return ""
+	if v == nil || match == nil || !call.Read() {
+		return "", false
 	}
-	epoch := m.stagingEpoch.Load()
+	epoch := call.Epoch()
+	moved := func() bool { return m.stagingEpoch.Load() != epoch }
+	if moved() {
+		return "", true
+	}
 	m.treesMu.RLock()
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
-	found := ""
+	found, restaged := "", false
 	seen := map[string]bool{}
 	try := func(mk *models.Mock) bool {
 		if mk == nil || mk.Kind != kind || seen[mk.Name] {
@@ -528,51 +595,69 @@ func (m *MockManager) findNotOwned(kind models.Kind, keys []string, match func(*
 		seen[mk.Name] = true
 		// The view's own: the open test's, or, in a pool view, the next
 		// test's calls in flight (ServeExactPool's ahead), answered in the
-		// gap as that test's and flagged consumed only once it opens.
-		if _, own := v.index[mk.Name]; own {
+		// gap as that test's and flagged consumed only once it opens. And
+		// the call's first read's own: the replay ended the call's test
+		// under it, whose recordings are no other test's for the call.
+		if _, own := v.index[mk.Name]; own || call.Held(mk.Name) {
 			return false
 		}
-		if v.shows(mk) || m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name) {
+		if v.shows(mk) || m.consumedInSet(mk.Name) || m.exact.named.has(epoch, mk.Name) || !match(mk) {
 			return false
 		}
-		if match(mk) && m.exact.named.claim(epoch, mk.Name) {
+		if f := m.exact.onNaming; f != nil {
+			f()
+		}
+		claimed, stop := m.exact.named.claimIn(epoch, m.stagingEpoch.Load, mk.Name)
+		if stop {
+			restaged = true
+			return true
+		}
+		if claimed {
 			found = mk.Name
+			if f := m.exact.onNamed; f != nil {
+				f()
+			}
 			return true
 		}
 		return false
 	}
+	// Each tree's values are read first, and tried with no tree's lock held:
+	// match is the parser's.
 	for _, t := range trees {
-		if t == nil || found != "" {
-			continue
+		for _, mk := range m.treeValues(t, kind) {
+			if found != "" || restaged {
+				break
+			}
+			try(mk)
 		}
-		t.rangeValues(func(val interface{}) bool {
-			mk, _ := val.(*models.Mock)
+	}
+	if found == "" && !restaged && len(keys) > 0 {
+		// The recordings kept on disk, in recorded order, each decoded only
+		// once the checks by name have passed it, and none after the first
+		// that is the call.
+		m.rangeRecorded(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+			if seen[name] || m.consumedInSet(name) || m.exact.named.has(epoch, name) || call.Held(name) {
+				return true
+			}
+			if _, own := v.index[name]; own {
+				return true
+			}
+			mk, err := load()
+			if err != nil {
+				if m.logger != nil {
+					m.logger.Debug("a miss's diagnosis could not read a recording kept on disk; it names none of them", zap.String("mock", name), zap.Error(err))
+				}
+				return false
+			}
 			return !try(mk)
 		})
 	}
-	if found != "" || len(keys) == 0 {
-		return found
+	if restaged || moved() {
+		// Named in call's staging, if at all, and the replay staged the
+		// next set before the miss is told: it is no longer call's round.
+		return "", true
 	}
-	// The recordings kept on disk, in recorded order, each decoded only once
-	// the checks by name have passed it, and none after the first that is
-	// the call.
-	m.rangeRecorded(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
-		if seen[name] || m.consumedInSet(name) || m.exact.named.has(epoch, name) {
-			return true
-		}
-		if _, own := v.index[name]; own {
-			return true
-		}
-		mk, err := load()
-		if err != nil {
-			if m.logger != nil {
-				m.logger.Debug("a miss's diagnosis could not read a recording kept on disk; it names none of them", zap.String("mock", name), zap.Error(err))
-			}
-			return false
-		}
-		return !try(mk)
-	})
-	return found
+	return found, false
 }
 
 // RecordingSource visits, of the test set staged, every recorded mock of kind

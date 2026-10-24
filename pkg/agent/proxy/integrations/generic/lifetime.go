@@ -47,15 +47,22 @@ func exchangeLifetime(n int) string {
 // is this request is named: keploy record's judging bakes what a miss names
 // into the set's worker scope, and an exchange merely like it (the per-test
 // similarity) is another call. "" when it is none, or exact serving is off.
-func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb) string {
+//
+// The store is asked of call, the round the request's first read found it
+// made in (integrations.CallRound, marked before the matcher read the
+// store): an exchange that read's view held as its own is never named (the
+// replay ended the call's test under it), nor is any once the replay staged
+// another set.
+func notOwnedExchange(reqBuffs [][]byte, mockDb integrations.MockMemDb, call integrations.CallRound) string {
 	sf, ok := mockDb.(integrations.StagedFinder)
 	if !ok {
 		return ""
 	}
-	return sf.FindStagedNotOwned(models.GENERIC, func(mk *models.Mock) bool {
+	name, _ := sf.FindStagedNotOwned(models.GENERIC, call, func(mk *models.Mock) bool {
 		return mk.Spec.Metadata[models.MetadataLifetimeKey] == models.MetadataLifetimePerTest &&
 			findExactMatch([]*models.Mock{mk}, reqBuffs) == 0
 	})
+	return name
 }
 
 // notOwnedExchangeNextSteps says what a miss on an exchange the test does not

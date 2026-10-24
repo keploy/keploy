@@ -21,12 +21,21 @@ import (
 )
 
 // heldFirstRead is the agent's store, with moved run once, right after the
-// first read of the round (RoundSnapshot) a call makes: the replay moving
-// while the call is held after its first read.
+// first read of the round a call makes (its mark, MarkCallRound, or a
+// RoundSnapshot): the replay moving while the call is held after its first
+// read.
 type heldFirstRead struct {
 	*MockManager
 	fired atomic.Bool
 	moved func()
+}
+
+func (h *heldFirstRead) MarkCallRound() integrations.CallRound {
+	call := h.MockManager.MarkCallRound()
+	if h.moved != nil && h.fired.CompareAndSwap(false, true) {
+		h.moved()
+	}
+	return call
 }
 
 func (h *heldFirstRead) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {

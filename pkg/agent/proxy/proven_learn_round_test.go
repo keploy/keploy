@@ -466,48 +466,64 @@ func TestALearnStepCountsAVoidedAheadAnswerATestSharesAsSpent(t *testing.T) {
 	}
 }
 
-// A pairing's claim lands only in the staging its candidates were read in.
-// The set is staged again between the read and the claim, under the same
-// names (names are unique within a set only), mock-x answering otherwise
-// now: the claim is refused, and the call is paired again in the staging
-// in force, answered with its mock-x. Claimed by name in the new staging,
-// the call was answered with the old staging's recording while the new
-// one's was marked claimed.
-func TestAPairingsClaimLandsOnlyInTheStagingItWasReadIn(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	p := startedDrainProxy(t, 100)
-	p.learnTracker = learn.NewTracker()
+// A call pairs with nothing once the replay staged again after its first
+// read. The store counts stagings and cannot tell the same set staged again
+// from the next one, and a recording of the next set must never answer a
+// call of the set before, nor be spent on it: the call misses, a false red
+// at worst, whichever set lands under it. Here the set staged again under
+// the call is the same (the same names, mock-x answering otherwise now) or
+// the next (other names, set2-y the same request): the call is answered by
+// neither, and no recording of the staging in force is claimed for it.
+func TestAPairingPairsNothingOnceTheReplayStagedAgainUnderTheCall(t *testing.T) {
 	now := time.Now()
-	set := func(answer string) []*models.Mock {
-		own := r3Mock("mock-own", now.Add(100*time.Millisecond), "GET", "/status", "", `{"up":true}`)
-		x := r3Mock("mock-x", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, answer)
-		return []*models.Mock{own, x}
-	}
-	mm := NewMockManager(nil, nil, zap.NewNop())
-	mm.SetMocksWithWindow(set(`{"order":1}`), nil, models.BaseTime, now.Add(time.Hour))
-	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
-	mm.SetPairing(true)
-	p.setMockManager(mm)
-	t.Cleanup(func() { p.setMockManager(nil) })
-	p.ContinueTestErrorCapture()
-	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own")})
-	// The call's first take is the pairing's claim: the set is staged again
-	// before it lands.
-	staged := false
-	mm.exact.round.onWait = func() {
-		if staged {
-			return
+	set := func(own, x, answer string) []*models.Mock {
+		return []*models.Mock{
+			r3Mock(own, now.Add(100*time.Millisecond), "GET", "/status", "", `{"up":true}`),
+			r3Mock(x, now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, answer),
 		}
-		staged = true
-		mm.SetMocksWithWindow(set(`{"order":2}`), nil, models.BaseTime, now.Add(time.Hour))
 	}
-	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, roundPost(`{"item":"apple"}`))
-	mm.exact.round.onWait = nil
-	if !staged {
-		t.Fatalf("precondition: the call took nothing (answered %d %s)", code, got)
-	}
-	if code != http.StatusOK || got != `{"order":2}` {
-		t.Fatalf("the call was answered %d %s; want the staging in force's mock-x, {\"order\":2}", code, got)
+	for _, tc := range []struct {
+		name  string
+		again []*models.Mock
+		x     string
+	}{
+		{"the same set", set("mock-own", "mock-x", `{"order":2}`), "mock-x"},
+		{"the next set", set("set2-own", "set2-y", `{"order":"from set 2"}`), "set2-y"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			mm.SetMocksWithWindow(set("mock-own", "mock-x", `{"order":1}`), nil, models.BaseTime, now.Add(time.Hour))
+			mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+			mm.SetPairing(true)
+			p.setMockManager(mm)
+			t.Cleanup(func() { p.setMockManager(nil) })
+			p.ContinueTestErrorCapture()
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own")})
+			// The call's first take is the pairing's claim: the set is
+			// staged again before it lands.
+			staged := false
+			mm.exact.round.onWait = func() {
+				if staged {
+					return
+				}
+				staged = true
+				mm.SetMocksWithWindow(tc.again, nil, models.BaseTime, now.Add(time.Hour))
+			}
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, roundPost(`{"item":"apple"}`))
+			mm.exact.round.onWait = nil
+			if !staged {
+				t.Fatalf("precondition: the call took nothing (answered %d %s)", code, got)
+			}
+			if code == http.StatusOK {
+				t.Fatalf("a call of the staging before was answered %d %s by a pairing in the staging in force", code, got)
+			}
+			if mm.exact.claimed.has(mm.StagingEpoch(), tc.x) {
+				t.Fatalf("the staging in force's %s was claimed for a call of the staging before", tc.x)
+			}
+		})
 	}
 }
 

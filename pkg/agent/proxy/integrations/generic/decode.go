@@ -85,6 +85,10 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				continue
 			}
 
+			// The request's first read of the round, before the matcher
+			// reads the store: a miss's lookup of an exchange made
+			// elsewhere is asked of it (notOwnedExchange).
+			call := integrations.MarkCallRound(mockDb)
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
 			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb)
@@ -111,7 +115,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				report := buildGenericMismatchReport(ctx, genericRequests, mockDb, answered)
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
-				} else if name := notOwnedExchange(genericRequests, mockDb); name != "" {
+				} else if name := notOwnedExchange(genericRequests, mockDb, call); name != "" {
 					report.ClosestMock, report.NotOwned = name, true
 					report.NextSteps = notOwnedExchangeNextSteps(name)
 				}

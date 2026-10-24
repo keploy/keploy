@@ -277,6 +277,14 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 	return s.owners[m.Name]
 }
 
+// CallRound is s, a store's snapshot of the round, as a call's first read
+// of it (CallRound): its staging, and every recording its view held as its
+// own (Owner is not OwnerNone).
+func (s RoundSnapshot) CallRound() CallRound {
+	owners := s.owners
+	return NewCallRound(s.At.Epoch, func(name string) bool { return owners[name] != OwnerNone })
+}
+
 // Claimant is the test that took the shared recording m (OwnerSharedTaken).
 func (s RoundSnapshot) Claimant(m *models.Mock) (string, bool) {
 	if m == nil {

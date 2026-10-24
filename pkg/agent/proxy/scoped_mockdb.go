@@ -357,27 +357,31 @@ func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take 
 
 var _ integrations.RoundReader = (*scopedMockDb)(nil)
 
+// MarkCallRound forwards the store's (integrations.StagedFinder): the zero
+// CallRound from a store that names no recording made elsewhere.
+func (s *scopedMockDb) MarkCallRound() integrations.CallRound {
+	return integrations.MarkCallRound(s.MockMemDb)
+}
+
 // FindStagedNotOwned forwards the store's lookup of a staged mock the open
 // test does not own (integrations.StagedFinder), "" from a store that has
 // none: under exact serving a Generic miss on a view made before it began is
 // diagnosed as one on the bare manager is.
-func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
 	if f, ok := s.MockMemDb.(integrations.StagedFinder); ok {
-		return f.FindStagedNotOwned(kind, match)
+		return f.FindStagedNotOwned(kind, call, match)
 	}
-	return ""
+	return "", false
 }
-
-var _ integrations.StagedFinder = (*scopedMockDb)(nil)
 
 // FindStagedNotOwnedByKeys forwards the store's
 // (integrations.StagedKeyFinder), or, from one that has none, its
 // FindStagedNotOwned.
-func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
 	if f, ok := s.MockMemDb.(integrations.StagedKeyFinder); ok {
-		return f.FindStagedNotOwnedByKeys(kind, keys, match)
+		return f.FindStagedNotOwnedByKeys(kind, call, keys, match)
 	}
-	return s.FindStagedNotOwned(kind, match)
+	return s.FindStagedNotOwned(kind, call, match)
 }
 
 var _ integrations.StagedKeyFinder = (*scopedMockDb)(nil)

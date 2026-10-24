@@ -248,9 +248,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				diag  *matchDiag
 				lmiss *learnMiss
 				// call is where the request's first read of the round
-				// found it made (callRound): a miss's lookup of a
-				// recording made elsewhere is asked of that round.
-				call callRound
+				// found it made (integrations.CallRound): a miss's lookup
+				// of a recording made elsewhere is asked of that round.
+				call integrations.CallRound
 			)
 			switch {
 			case provenswitch.On() && opts.Learn:
@@ -275,8 +275,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				proven := provenswitch.On()
 				if proven {
 					// The request's first read of the round, before any
-					// matcher reads the store.
-					call = readFirstRound(mockDb)
+					// matcher reads the store: its staging and view, kept
+					// in O(1) for a miss to be asked of.
+					call = integrations.MarkCallRound(mockDb)
 					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
@@ -331,13 +332,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// recording: it did not change, so no learn-step reason
 				// explains it.
 				// It is asked of the round the request's first read found it
-				// made in (notOwnedRecordingIn): never a recording that read
+				// made in (notOwnedRecording): never a recording that read
 				// held as its view's own, nor one of a set the replay staged
 				// under the request, which the miss then says.
 				var elsewhere *models.Mock
 				restaged := false
 				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere, restaged = notOwnedRecordingIn(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+					elsewhere, restaged = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)

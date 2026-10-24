@@ -338,8 +338,20 @@ type ExactConsumedReader interface {
 // none. A parser names it on a miss (MockMismatchReport.NotOwned): the call
 // is that recording, made where it was not recorded. For a miss's diagnosis
 // only: the mock is never handed out, nor served.
+//
+// The lookup is asked of the round the call was made in (CallRound), which
+// the parser marks (MarkCallRound) as the call's first read of the store,
+// before any matcher reads it: a recording that read's view held as its own
+// is never named (the replay ended the call's test under it, and the call
+// is that test's, not one record's judging moves to the worker scope), and
+// none is once the replay staged another set (restaged): a recording of the
+// next set named for the call would be moved there, and its one miss spent
+// on a call it never made. The staging is checked last, right before the
+// store spends a name, and again before it returns one. A lookup asked of
+// the zero CallRound names nothing.
 type StagedFinder interface {
-	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+	MarkCallRound() CallRound
+	FindStagedNotOwned(kind models.Kind, call CallRound, match func(*models.Mock) bool) (name string, restaged bool)
 }
 
 // StagedKeyFinder is StagedFinder that also looks, when what is staged holds
@@ -350,7 +362,45 @@ type StagedFinder interface {
 // recording its comparison would accept is indexed under at least one of.
 // For a miss's diagnosis only.
 type StagedKeyFinder interface {
-	FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string
+	StagedFinder
+	FindStagedNotOwnedByKeys(kind models.Kind, call CallRound, keys []string, match func(*models.Mock) bool) (name string, restaged bool)
+}
+
+// CallRound is where a call's first read of the store found it made: the
+// staging it was in (WindowPacer.StagingEpoch) and the recordings, by name,
+// that read's view held as its own (the open test's, in flight into it,
+// shared with it, a pool view's ahead). A store makes it in O(1), keeping
+// what it needs to tell them later (StagedFinder.MarkCallRound); a round
+// snapshot is one too (RoundSnapshot.CallRound). The zero CallRound is of no
+// read.
+type CallRound struct {
+	read  bool
+	epoch uint64
+	held  func(name string) bool
+}
+
+// NewCallRound is a store's CallRound of staging epoch, held telling, by
+// name, the recordings its view held as its own (nil: none).
+func NewCallRound(epoch uint64, held func(name string) bool) CallRound {
+	return CallRound{read: true, epoch: epoch, held: held}
+}
+
+// Read reports whether c is of a read (not the zero CallRound).
+func (c CallRound) Read() bool { return c.read }
+
+// Epoch is the staging c was read in.
+func (c CallRound) Epoch() uint64 { return c.epoch }
+
+// Held reports whether the read's view held the recording name as its own.
+func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the
+// zero CallRound from a store that names no recording made elsewhere.
+func MarkCallRound(mockDb MockMemDb) CallRound {
+	if f, ok := mockDb.(StagedFinder); ok {
+		return f.MarkCallRound()
+	}
+	return CallRound{}
 }
 
 // BegunOwnerReader is an optional MockMemDb extension under exact serving:

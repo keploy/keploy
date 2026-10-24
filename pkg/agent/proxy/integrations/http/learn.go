@@ -967,10 +967,10 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 }
 
 // learnMatchIn is learnMatch, telling call, when set, where the call's first
-// read of the round found it made (callRound): its first pass's, from a
-// store that reads the round in one snapshot. A miss's lookup of a
-// recording made elsewhere is asked of that round (notOwnedRecordingIn).
-func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, call *callRound) (*models.Mock, *learnMiss, error) {
+// read of the round found it made (integrations.CallRound): its first
+// pass's. A miss's lookup of a recording made elsewhere is asked of that
+// round (notOwnedRecording).
+func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, call *integrations.CallRound) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
@@ -999,17 +999,18 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy's mock store would not hand out "+m.Name+", which it still shows, so keploy cannot answer from it"
 		return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 	}
+	marked := false
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		first := call != nil && !call.read
+		first := call != nil && !marked
 		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool, first)
 		if err != nil {
 			return nil, nil, err
 		}
 		if first {
-			*call = read.call
+			*call, marked = read.call, true
 		}
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
 		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
@@ -1209,8 +1210,10 @@ type learnRead struct {
 	claimDb  integrations.MockMemDb
 	at       learnPass
 	// call is, of a call's first pass (readLearnPass's first), where the
-	// call was made (firstRound); zero from a store that reads no round.
-	call callRound
+	// call was made: the snapshot's round (RoundSnapshot.CallRound). A
+	// store that reads no round in one snapshot gives none (the zero
+	// CallRound), and its misses name no recording made elsewhere.
+	call integrations.CallRound
 }
 
 // readLearnPass reads a pass of the learn step. From a store that reads its
@@ -1240,7 +1243,7 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			at:       learnPass{rev: rev, round: snap.At},
 		}
 		if first {
-			r.call = firstRound(snap)
+			r.call = snap.CallRound()
 		}
 		return r, nil
 	}

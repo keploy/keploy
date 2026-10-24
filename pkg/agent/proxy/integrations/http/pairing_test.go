@@ -397,3 +397,46 @@ func TestAPairedHTTPCallIsAnsweredAndReported(t *testing.T) {
 		t.Fatalf("without Learn: %d, %d reports (%v), claims %v; want a miss and no pairing", status, len(reported), reported, db.claimed)
 	}
 }
+
+// pacedPairingDb is pairingDb saying its staging (integrations.WindowPacer).
+type pacedPairingDb struct {
+	*pairingDb
+	epoch uint64
+}
+
+func (d *pacedPairingDb) WindowChanged() <-chan struct{} { return make(chan struct{}) }
+func (d *pacedPairingDb) StagingEpoch() uint64           { return d.epoch }
+
+// From a store that reads no round in one snapshot, a call whose first read
+// marked its round pairs only while the store is still in that staging: once
+// the replay staged again, or with a store that cannot say its staging, it
+// pairs with nothing and claims nothing. A call of no read pairs as before.
+func TestAPairingFromAStoreOfNoSnapshotPairsOnlyInTheCallsStaging(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const host = "localhost:50001"
+	h := newHTTP()
+	n := h.newStrictNoise(nil, nil, nil)
+	ctx := context.Background()
+	call := getTo("/delete", host)
+	at := integrations.NewCallRound(1, nil)
+	db := func(epoch uint64) (*pacedPairingDb, *models.Mock) {
+		x := answered(onHost("mock-x", "/delete", host), time.Second, 200, `{"ok":true}`)
+		return &pacedPairingDb{pairingDb: &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{x}}, epoch: epoch}, x
+	}
+	d, x := db(1)
+	if _, rec := h.pairExactlyFrom(ctx, call, d, n, at); rec != x {
+		t.Fatalf("in the call's staging: paired %v, want %s", rec, x.Name)
+	}
+	d, _ = db(2)
+	if _, rec := h.pairExactlyFrom(ctx, call, d, n, at); rec != nil || len(d.claimed) != 0 {
+		t.Fatalf("staged again after the call's first read: paired %v (claimed %v), want none", rec, d.claimed)
+	}
+	d, _ = db(1)
+	if _, rec := h.pairExactlyFrom(ctx, call, d.pairingDb, n, at); rec != nil || len(d.claimed) != 0 {
+		t.Fatalf("a store that cannot say its staging: paired %v (claimed %v), want none", rec, d.claimed)
+	}
+	d, x = db(1)
+	if _, rec := h.pairExactlyFrom(ctx, call, d.pairingDb, n, integrations.CallRound{}); rec != x {
+		t.Fatalf("a call of no read: paired %v, want %s", rec, x.Name)
+	}
+}

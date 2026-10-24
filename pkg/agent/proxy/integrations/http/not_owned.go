@@ -20,89 +20,19 @@ import (
 // worker scope (design v14, a2). nil when there is none, or the store
 // keeps no staged mocks to look in. ctx carries the request's destination as
 // it came (liveDestination).
-func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) *models.Mock {
-	m, _ := notOwnedRecordingIn(ctx, input, mockDb, n, callRound{})
-	return m
-}
-
-// callRound is where a call's first read of the round found it made
-// (firstRound): the staging, and, by name, every recording that read's view
-// held as its own (the open test's, in flight into it, shared with it, a
-// pool view's ahead). read is false before any read, or from a store that
-// reads no round.
-type callRound struct {
-	read  bool
-	epoch uint64
-	own   map[string]bool
-}
-
-// firstRound is the callRound of snap, a call's first read of the round.
-func firstRound(snap integrations.RoundSnapshot) callRound {
-	c := callRound{read: true, epoch: snap.At.Epoch, own: map[string]bool{}}
-	for _, list := range [][]*models.Mock{snap.PerTest, snap.Startup, snap.Session, snap.SessionScoped} {
-		for _, m := range list {
-			if m != nil && snap.Owner(m) != integrations.OwnerNone {
-				c.own[m.Name] = true
-			}
-		}
-	}
-	return c
-}
-
-// readFirstRound is a call's first read of the round from a store that reads
-// it in one snapshot (integrations.RoundReader, under exact serving), for a
-// call that no other read of the round decides first: the zero callRound
-// from any other store.
-func readFirstRound(mockDb integrations.MockMemDb) callRound {
-	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{}); ok {
-		return firstRound(snap)
-	}
-	return callRound{}
-}
-
-// restagedNote is what a miss says when the replay staged the next test set
-// while the call was decided (notOwnedRecordingIn).
-const restagedNote = "keploy replay staged the next test set while it decided this request, so keploy names no recording made elsewhere for it: a request of one test set is never named as a recording of the next."
-
-// notOwnedRecordingIn is notOwnedRecording for a call whose first read of the
-// round is call (callRound; none read: notOwnedRecording). The store is
-// asked now, and names each recording for one miss at most, in the staging
-// it is in when it names it (FindStagedNotOwned). What it is asked must be
-// of the round the call was made in, though:
 //
-//   - a recording the call's first read held as its view's own (call.own) is
-//     no recording made elsewhere for the call, whatever view the store
-//     shows now: the replay ended the call's test under it, and the call is
-//     that test's, not one judging moves to the worker scope;
-//   - once the replay staged another set (the store's StagingEpoch is no
-//     longer the call's), no recording the store holds is of the call's set:
-//     a recording of the next set named for the call would be moved there
-//     by judging, and its one miss spent on a call it never made.
-//
-// Both are checked as the store offers each recording, the staging last,
-// right before the store names one, so that a name is spent, if at all, in
-// the call's staging; a staging that moves after the store named one drops
-// it too. restaged then says so (restagedNote), for the miss to tell. A
-// store that read a round (call.read) but cannot say its staging
-// (integrations.WindowPacer) is asked nothing.
-func notOwnedRecordingIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call callRound) (found *models.Mock, restaged bool) {
-	moved := func() bool { return false }
-	if call.read {
-		p, ok := mockDb.(integrations.WindowPacer)
-		if !ok {
-			return nil, false
-		}
-		moved = func() bool { return p.StagingEpoch() != call.epoch }
-	}
+// The store is asked of call, the round the request's first read found it
+// made in (integrations.CallRound, marked before any matcher read the
+// store): it names no recording that read's view held as its own, and none
+// once the replay staged another set, which restaged then says
+// (restagedNote), for the miss to tell. The zero CallRound names nothing.
+func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call integrations.CallRound) (found *models.Mock, restaged bool) {
 	live := liveDestination(ctx, input)
 	// accepted is what match last accepted: the store names it unless
 	// another miss spent its name first, and then offers the next.
 	var accepted *models.Mock
 	match := func(m *models.Mock) bool {
-		// The staging is checked last, right before the store names m: it
-		// only moves on, so a store at the call's staging here names m in
-		// it.
-		if m.Spec.HTTPReq == nil || call.own[m.Name] || len(strictDiff(input, live, m, n)) != 0 || moved() {
+		if m.Spec.HTTPReq == nil || len(strictDiff(input, live, m, n)) != 0 {
 			return false
 		}
 		accepted = m
@@ -116,20 +46,19 @@ func notOwnedRecordingIn(ctx context.Context, input *req, mockDb integrations.Mo
 			path = input.url.Path
 		}
 		target := strings.Join(input.header.Values(amzTargetHeader), ",")
-		name = f.FindStagedNotOwnedByKeys(models.HTTP, RequestKeysOf(input.method, path, target, n.loose()), match)
+		name, restaged = f.FindStagedNotOwnedByKeys(models.HTTP, call, RequestKeysOf(input.method, path, target, n.loose()), match)
 	case integrations.StagedFinder:
-		name = f.FindStagedNotOwned(models.HTTP, match)
+		name, restaged = f.FindStagedNotOwned(models.HTTP, call, match)
 	}
-	if moved() {
-		// Named in the call's staging, if at all, and the replay staged the
-		// next set before the miss is told: it is no longer the call's round.
-		return nil, true
-	}
-	if name == "" || accepted == nil || accepted.Name != name {
-		return nil, false
+	if restaged || name == "" || accepted == nil || accepted.Name != name {
+		return nil, restaged
 	}
 	return accepted, false
 }
+
+// restagedNote is what a miss says when the replay staged the next test set
+// while the call was decided (notOwnedRecording).
+const restagedNote = "keploy replay staged the next test set while it decided this request, so keploy names no recording made elsewhere for it: a request of one test set is never named as a recording of the next."
 
 // amzTargetHeader names an AWS JSON-protocol call's action.
 const amzTargetHeader = "X-Amz-Target"

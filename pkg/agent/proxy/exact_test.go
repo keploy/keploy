@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"sort"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -915,10 +918,10 @@ func TestAGenericTestMockIsReportedAsATestMock(t *testing.T) {
 	mm.ServeExactTest("T", []*models.Mock{own})
 	// A miss's diagnosis finds a staged mock the open test does not own, by
 	// name: another test's, which no read shows; never the test's own.
-	if got := mm.FindStagedNotOwned(models.GENERIC, func(m *models.Mock) bool { return m.Name == "other" }); got != "other" {
+	if got := stagedNotOwnedNow(mm, models.GENERIC, func(m *models.Mock) bool { return m.Name == "other" }); got != "other" {
 		t.Fatalf("found %q, want another test's staged exchange", got)
 	}
-	if got := mm.FindStagedNotOwned(models.GENERIC, func(m *models.Mock) bool { return m.Name == "own" }); got != "" {
+	if got := stagedNotOwnedNow(mm, models.GENERIC, func(m *models.Mock) bool { return m.Name == "own" }); got != "" {
 		t.Fatalf("found the test's own exchange %q", got)
 	}
 	var served *models.Mock
@@ -1384,6 +1387,19 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	}
 }
 
+// stagedNotOwnedNow is mm's lookup of a recording made elsewhere for a call
+// whose first read is now (MarkCallRound).
+func stagedNotOwnedNow(mm *MockManager, kind models.Kind, match func(*models.Mock) bool) string {
+	name, _ := mm.FindStagedNotOwned(kind, mm.MarkCallRound(), match)
+	return name
+}
+
+// stagedNotOwnedByKeysNow is stagedNotOwnedNow, by keys.
+func stagedNotOwnedByKeysNow(mm *MockManager, kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	name, _ := mm.FindStagedNotOwnedByKeys(kind, mm.MarkCallRound(), keys, match)
+	return name
+}
+
 // A miss's diagnosis (FindStagedNotOwned) names a staged recording the open
 // view does not show and no call of the set consumed: another test's, in a
 // test or between tests, and a worker-scope one whose place the run has not
@@ -1405,10 +1421,10 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	all := []*models.Mock{own, other, inT1, consumed, boot, later, pool, pollA, pollB}
 	mm := stagedManager(t, nil, all)
 	find := func(name string) string {
-		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+		return stagedNotOwnedNow(mm, models.HTTP, func(m *models.Mock) bool { return m.Name == name })
 	}
 	jobs := func() string {
-		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
+		return stagedNotOwnedNow(mm, models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
 	}
 
 	// The set's start, no test open: any test's recording is named, and the
@@ -1506,7 +1522,7 @@ func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
 		if key != "" {
 			keys = []string{key}
 		}
-		return mm.FindStagedNotOwnedByKeys(models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
+		return stagedNotOwnedByKeysNow(mm, models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
 	}
 	mm.ServeExactPool("k", []string{"pool"})
 	if got := find("", "t2-delete"); got != "" || len(asked) != 0 {
@@ -1547,7 +1563,7 @@ func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
 	mm := stagedManager(t, nil, []*models.Mock{ahead})
 	mm.ServeExactPool("k", nil, ahead)
 	named := func() string {
-		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
+		return stagedNotOwnedNow(mm, models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
 	}
 	if got := named(); got != "" {
 		t.Fatalf("before it answered, the next test's call in flight was named as made elsewhere: %q", got)
@@ -1658,5 +1674,211 @@ func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
 	mm.ResetForReplaySession()
 	if _, known := mm.InPool(a); known {
 		t.Fatal("a new replay session reads the last session's pool names")
+	}
+}
+
+// A lookup of a recording made elsewhere is asked of the round the call was
+// made in (integrations.CallRound, marked as its first read): asked of no
+// read it names nothing; a recording the call's first read's view held as
+// its own is never named once the replay ended that test under the call,
+// nor spent; and none is named once the replay staged another set, whether
+// it staged before the lookup or right before a name is spent, and the
+// next set's recording keeps its one miss for a call of its own.
+func TestALookupOfARecordingMadeElsewhereIsAskedOfTheCallsRound(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	other := httpCall("other", time.Second, "/delete")
+	mm := stagedManager(t, nil, []*models.Mock{own, other})
+	find := func(call integrations.CallRound, name string) (string, bool) {
+		return mm.FindStagedNotOwned(models.HTTP, call, func(m *models.Mock) bool { return m.Name == name })
+	}
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got, moved := find(integrations.CallRound{}, "other"); got != "" || moved {
+		t.Fatalf("asked of no read: named %q (restaged %v)", got, moved)
+	}
+
+	// A call T1's view read, decided after T1 ended under it.
+	call := mm.MarkCallRound()
+	mm.ServeExactTest("T2", []*models.Mock{other})
+	if got, moved := find(call, "own"); got != "" || moved {
+		t.Fatalf("a call made in T1 named T1's own once T1 ended under it: %q (restaged %v)", got, moved)
+	}
+	if got, _ := find(mm.MarkCallRound(), "own"); got != "own" {
+		t.Fatalf("a call made in T2 did not name T1's own (%q): the lookup that refused it spent it", got)
+	}
+
+	// The next set staged after the call's first read: none of its
+	// recordings is even offered to the parser's comparison.
+	call = mm.MarkCallRound()
+	next := func(name string) *models.Mock { return httpCall(name, 2*time.Second, "/next") }
+	mm.SetMocksWithWindow(nil, []*models.Mock{next("next")}, models.BaseTime, time.Now())
+	mm.ServeExactTest("S2-T1", nil)
+	offered := 0
+	got, moved := mm.FindStagedNotOwned(models.HTTP, call, func(*models.Mock) bool { offered++; return true })
+	if got != "" || !moved || offered != 0 {
+		t.Fatalf("a call of the set before named %q of the next set (restaged %v, %d offered), want none, restaged, none offered", got, moved, offered)
+	}
+	if got, _ := find(mm.MarkCallRound(), "next"); got != "next" {
+		t.Fatalf("the next set's recording lost its one miss to a call of the set before: %q", got)
+	}
+
+	// The next set staged right before the lookup spends a name, and a
+	// call of that set named its recording at once: the lookup of the set
+	// before spends nothing, in neither set, so the recording is named
+	// for that one call only.
+	mm.SetMocksWithWindow(nil, []*models.Mock{next("again")}, models.BaseTime, time.Now())
+	mm.ServeExactTest("S3-T1", nil)
+	call = mm.MarkCallRound()
+	staged, inForce := false, ""
+	mm.exact.onNaming = func() {
+		if !staged {
+			staged = true
+			mm.SetMocksWithWindow(nil, []*models.Mock{next("again")}, models.BaseTime, time.Now())
+			mm.ServeExactTest("S4-T1", nil)
+			inForce, _ = find(mm.MarkCallRound(), "again")
+		}
+	}
+	got, moved = find(call, "again")
+	mm.exact.onNaming = nil
+	if !staged || got != "" || !moved {
+		t.Fatalf("staged right before the name was spent (%v): named %q (restaged %v), want none, restaged", staged, got, moved)
+	}
+	if inForce != "again" {
+		t.Fatalf("the set staged in force's own call did not name its recording: %q", inForce)
+	}
+	if got, _ := find(mm.MarkCallRound(), "again"); got != "" {
+		t.Fatalf("the set in force's recording was named for a second call (%q): the lookup of the set before emptied what that set spent", got)
+	}
+
+	// The next set staged right after the lookup spent a name in the
+	// call's staging: the name is not told, and the lookup says the set
+	// moved.
+	mm.SetMocksWithWindow(nil, []*models.Mock{next("late")}, models.BaseTime, time.Now())
+	mm.ServeExactTest("S5-T1", nil)
+	call = mm.MarkCallRound()
+	mm.exact.onNamed = func() {
+		mm.exact.onNamed = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{next("late")}, models.BaseTime, time.Now())
+		mm.ServeExactTest("S6-T1", nil)
+	}
+	if got, moved := find(call, "late"); got != "" || !moved {
+		t.Fatalf("staged right after a name was spent: named %q (restaged %v), want none, restaged", got, moved)
+	}
+	if got, _ := find(mm.MarkCallRound(), "late"); got != "late" {
+		t.Fatalf("the set in force's recording lost its one miss to a call of the set before: %q", got)
+	}
+}
+
+// genericExchange is a Generic exchange the recorder stated per-test,
+// answering OK.
+func genericExchange(name string, at time.Duration, req string) *models.Mock {
+	m := exactMock(name, at, models.LifetimeSession)
+	m.Kind = models.GENERIC
+	m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	m.Spec.GenericRequests = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: req}}}}
+	m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "OK"}}}}
+	return m
+}
+
+// genericMiss is the miss report the Generic parser files for req, sent on
+// a connection served from mm. A request the parser answers fails the
+// test: the application reads the answer and closes the connection, which
+// ends the parser with no miss.
+func genericMiss(t *testing.T, mm *MockManager, req string) *models.MockMismatchReport {
+	t.Helper()
+	app, proxySide := net.Pipe()
+	t.Cleanup(func() { app.Close(); proxySide.Close() })
+	go func() {
+		if _, err := app.Write([]byte(req)); err != nil {
+			return
+		}
+		if n, _ := app.Read(make([]byte, 64)); n > 0 {
+			app.Close()
+		}
+	}()
+	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "1")
+	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
+	err := generic.New(zap.NewNop()).MockOutgoing(ctx, proxySide, nil, mm, models.OutgoingOptions{})
+	var r interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.As(err, &r) || r.MismatchReport() == nil {
+		t.Fatalf("%q: no miss with a report: %v", req, err)
+	}
+	return r.MismatchReport()
+}
+
+// The Generic parser asks its lookup of an exchange made elsewhere of the
+// round the request's first read found it made in (MarkCallRound, before
+// its matcher reads the store): another test's exchange is named; one the
+// call's test owned when the call was read is not once the replay ended
+// that test under the call; and none is once the replay staged the next set
+// under it.
+func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
+	mine := genericExchange("ex-mine", 0, "AUTH step2")
+	theirs := genericExchange("ex-theirs", time.Second, "AUTH step3")
+	mm := stagedManager(t, nil, []*models.Mock{mine, theirs})
+	mm.ServeExactTest("T1", []*models.Mock{mine})
+	if r := genericMiss(t, mm, "AUTH step3"); !r.NotOwned || r.ClosestMock != "ex-theirs" {
+		t.Fatalf("another test's exchange was not named: %+v", r)
+	}
+
+	// T1 ends between the request's first read and the matcher's.
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.ServeExactTest("T2", nil)
+	}
+	if r := genericMiss(t, mm, "AUTH step2"); r.NotOwned {
+		t.Fatalf("the exchange the call's test owned when its request was read was named as made elsewhere: %+v", r)
+	}
+
+	// The next set is staged between the request's first read and the
+	// matcher's.
+	mm.ServeExactTest("T3", nil)
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{genericExchange("s2-ex", 2*time.Second, "AUTH step4")}, models.BaseTime, time.Now())
+		mm.ServeExactTest("S2-T1", nil)
+	}
+	if r := genericMiss(t, mm, "AUTH step4"); r.NotOwned {
+		t.Fatalf("a request of the set before was named as the next set's exchange: %+v", r)
+	}
+	if r := genericMiss(t, mm, "AUTH step4"); !r.NotOwned || r.ClosestMock != "s2-ex" {
+		t.Fatalf("the next set's exchange lost its one miss to a request of the set before: %+v", r)
+	}
+}
+
+// BenchmarkACallsRoundIsMarked is what each request's first read of the
+// round costs replay under the switch (MarkCallRound), by the set's size:
+// the staging and the view in force, read in O(1), whatever the set holds.
+func BenchmarkACallsRoundIsMarked(b *testing.B) {
+	for _, n := range []int{100, 1000, 5000} {
+		for _, par := range []bool{false, true} {
+			b.Run(strconv.Itoa(n)+"/parallel="+strconv.FormatBool(par), func(b *testing.B) {
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				b.Cleanup(mm.Close)
+				ms := make([]*models.Mock, n)
+				for i := range ms {
+					ms[i] = httpCall(fmt.Sprintf("mock-%d", i), time.Duration(i)*time.Millisecond, "/x/"+strconv.Itoa(i))
+				}
+				mm.SetMocksWithWindow(nil, ms, models.BaseTime, time.Now())
+				mm.ServeExactTest("test-1", ms[:1])
+				if !integrations.MarkCallRound(mm).Read() {
+					b.Fatal("no round marked")
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				if par {
+					b.RunParallel(func(pb *testing.PB) {
+						for pb.Next() {
+							integrations.MarkCallRound(mm)
+						}
+					})
+					return
+				}
+				for i := 0; i < b.N; i++ {
+					integrations.MarkCallRound(mm)
+				}
+			})
+		}
 	}
 }
