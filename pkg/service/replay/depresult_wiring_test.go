@@ -741,7 +741,7 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 	if want := "addMockDisplayInfo: mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}"; found[0] != want {
 		t.Fatalf("the mock display lookup of a mock whose payload is on disk is now %s, want %s", found[0], want)
 	}
-	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), request: mock.RequestFingerprint(), recordedAt: mock.Spec.ReqTimestampMock, }"
+	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), request: mock.RequestFingerprint(), recordedAt: mock.Spec.ReqTimestampMock, lifetime: mock.TestModeInfo.Lifetime, }"
 	if found[1] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+

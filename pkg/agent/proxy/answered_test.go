@@ -39,8 +39,8 @@ func byURL(t *testing.T) {
 }
 
 // A per-test recording that answered a call in an earlier test is found by a
-// later test's lookup under its key, with when the later test began at
-// record time; the open test's own recording, one of another kind, and one
+// later test's lookup under its key, with when it answered; the open test's
+// own recording, one of another kind, and one
 // the match refuses are not. A new session or a new test set forgets them.
 func TestFindAnsweredEarlierNamesAnEarlierTestsAnsweredRecording(t *testing.T) {
 	byURL(t)
@@ -85,8 +85,8 @@ func TestFindAnsweredEarlierNamesAnEarlierTestsAnsweredRecording(t *testing.T) {
 	if !ok || got.Mock.Name != earlier.Name {
 		t.Fatalf("found %v (%v), want the earlier test's %s: not the open test's own, nor a Generic one", got.Mock, ok, earlier.Name)
 	}
-	if !got.TestRecordedStart.Equal(start) || got.AnsweredAt.IsZero() {
-		t.Fatalf("the open test began at %v at record, answered at %v; want %v and a time", got.TestRecordedStart, got.AnsweredAt, start)
+	if got.AnsweredAt.IsZero() {
+		t.Fatal("the recording found carries no time it answered")
 	}
 	if _, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/other"}, all); ok {
 		t.Fatal("found a recording under a key it is not under")
@@ -186,9 +186,6 @@ func TestFindAnsweredEarlierUnderExactServing(t *testing.T) {
 			got, ok := mm.FindAnsweredEarlier(models.HTTP, []string{"url:/count"}, all)
 			if !ok || got.Mock.Name != first.Name {
 				t.Fatalf("found %v (%v), want the first test's %s, not the open test's own", got.Mock, ok, first.Name)
-			}
-			if !got.TestRecordedStart.IsZero() {
-				t.Fatalf("exact serving knows no recorded start, got %v", got.TestRecordedStart)
 			}
 		})
 	}

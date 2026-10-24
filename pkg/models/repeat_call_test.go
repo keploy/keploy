@@ -7,26 +7,60 @@ import (
 )
 
 // The note's gaps come from the times it is given: at replay from the earlier
-// answer to this call, at record from the earlier recording to the start of
-// this call's test, to the hundredth of a second and never below zero; the
-// record gap is unknown without the test's recorded start.
+// answer to this call, or, once anchored, to this call's test's start; at
+// record from the recording it is anchored on to the start of this call's
+// test; to the hundredth of a second and never below zero. The record gap is
+// unknown until it is anchored, and a likely cause is judged only from gaps
+// that both run to the test's start.
 func TestRepeatNoteGapsFromAControlledTimeline(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
 	answered := rec.Add(time.Hour)
-	n := NewRepeatNote("mock-7", answered, rec, answered.Add(6213*time.Millisecond), rec.Add(3050*time.Millisecond))
+	n := anchoredNote("mock-7", answered, rec, answered.Add(6213*time.Millisecond), rec.Add(3050*time.Millisecond))
 	if n.Mock != "mock-7" || n.ReplayGapSeconds != 6.21 || n.RecordGapSeconds != 3.05 || !n.RecordGapKnown {
 		t.Fatalf("note %+v, want 6.21s at replay and 3.05s at record", n)
 	}
 	if likely, known := n.ElapsedTimeExpiryLikely(); !likely || !known {
 		t.Fatalf("a replay gap longer than the record gap is not an expiry: likely %v, known %v", likely, known)
 	}
-	if n := NewRepeatNote("m", answered, rec, answered.Add(-time.Millisecond), time.Time{}); n.ReplayGapSeconds != 0 || n.RecordGapKnown {
-		t.Fatalf("a call a millisecond before its twin's answer, with no recorded start, gave %+v", n)
+	if n := NewRepeatNote("m", answered, rec, answered.Add(-1500*time.Millisecond)); n.ReplayGapSeconds != 0 || n.RecordGapKnown || n.ReplayGapFromStart {
+		t.Fatalf("a call 1.5 s before its twin's answer, not anchored, gave %+v", n)
 	}
-	if _, known := NewRepeatNote("m", answered, rec, answered, time.Time{}).ElapsedTimeExpiryLikely(); known {
+	if n := anchoredNote("m", answered, rec, answered.Add(-1500*time.Millisecond), rec.Add(-2*time.Second)); n.ReplayGapSeconds != 0 || n.RecordGapSeconds != 0 || !n.RecordGapKnown || !n.ReplayGapFromStart {
+		t.Fatalf("a test that began before its twin's answer and before its recording, anchored, gave %+v", n)
+	}
+	// Anchored at record only: the replay gap still runs to the call.
+	half := NewRepeatNote("m", answered, rec, answered.Add(9*time.Second))
+	half.Anchor(time.Time{}, rec.Add(2*time.Second), "m", rec)
+	if _, known := half.ElapsedTimeExpiryLikely(); known || !half.RecordGapKnown || half.ReplayGapFromStart {
+		t.Fatalf("gaps that run to a call and to a test's start were judged: %+v", half)
+	}
+	if _, known := half.ElapsedTimeFreshLikely(); known {
+		t.Fatal("the mirror judged gaps that run to a call and to a test's start")
+	}
+	// Anchored on another recording, the record gap runs from that one.
+	other := NewRepeatNote("mock-7", answered, rec, time.Time{})
+	other.Anchor(answered.Add(6*time.Second), rec.Add(30*time.Second), "mock-9", rec.Add(28*time.Second))
+	if other.RecordGapSeconds != 2 || other.RecordedLast != "mock-9" || other.ReplayGapSeconds != 6 {
+		t.Fatalf("anchored on mock-9, recorded 2 s before the test began: %+v", other)
+	}
+	if likely, known := other.ElapsedTimeExpiryLikely(); !likely || !known {
+		t.Fatalf("6 s at replay against 2 s at record is not an expiry: %v %v", likely, known)
+	}
+	// An anchor with no name or no time measures nothing at record.
+	for _, a := range []struct {
+		name string
+		at   time.Time
+	}{{"", rec}, {"mock-9", time.Time{}}} {
+		n := NewRepeatNote("mock-7", answered, rec, time.Time{})
+		n.Anchor(answered.Add(time.Second), rec.Add(30*time.Second), a.name, a.at)
+		if n.RecordGapKnown || n.RecordedLast != "" {
+			t.Fatalf("an anchor %q at %v measured %+v", a.name, a.at, n)
+		}
+	}
+	if _, known := NewRepeatNote("m", answered, rec, answered).ElapsedTimeExpiryLikely(); known {
 		t.Fatal("an unknown record gap was judged")
 	}
-	if likely, known := NewRepeatNote("m", answered, rec, answered.Add(time.Second), rec.Add(2*time.Second)).ElapsedTimeExpiryLikely(); likely || !known {
+	if likely, known := anchoredNote("m", answered, rec, answered.Add(time.Second), rec.Add(2*time.Second)).ElapsedTimeExpiryLikely(); likely || !known {
 		t.Fatalf("a replay gap shorter than the record gap was judged likely %v (known %v)", likely, known)
 	}
 }
@@ -36,19 +70,30 @@ func TestRepeatNoteGapsFromAControlledTimeline(t *testing.T) {
 // claimed as certain.
 func TestRepeatNoteExplains(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
-	expired := NewRepeatNote("mock-7", rec, rec, rec.Add(6210*time.Millisecond), rec.Add(3050*time.Millisecond))
+	expired := anchoredNote("mock-7", rec, rec, rec.Add(6210*time.Millisecond), rec.Add(3050*time.Millisecond))
 	expired.Test = "get-count-3"
 	got := expired.Explain("keploy record")
-	for _, want := range []string{"identical to mock-7", "test get-count-3's call", "came 6.21s after", "began 3.05s after", "likely kept the earlier answer for a span of elapsed time", "'keploy record'", "could hide a bug"} {
+	for _, want := range []string{"identical to mock-7", "test get-count-3's call", "At replay this test began 6.21s after that call", "at record this test began 3.05s after it,", "likely kept the earlier answer for a span of elapsed time", "'keploy record'", "could hide a bug"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the note of an expiry lacks %q: %s", want, got)
 		}
 	}
-	unnamed := NewRepeatNote("mock-7", rec, rec, rec.Add(time.Second), time.Time{}).Explain("keploy record")
-	if !strings.Contains(unnamed, "an earlier test of this set") || strings.Contains(unnamed, "at record this test began") || !strings.Contains(unnamed, "If the application keeps that answer") {
+	unnamed := NewRepeatNote("mock-7", rec, rec, rec.Add(time.Second)).Explain("keploy record")
+	if !strings.Contains(unnamed, "an earlier test of this set") || !strings.Contains(unnamed, "At replay this call came 1.00s after that one") || strings.Contains(unnamed, "at record this test began") || !strings.Contains(unnamed, "If the application keeps that answer") {
 		t.Errorf("the note with no test and no record gap: %s", unnamed)
 	}
-	faster := NewRepeatNote("mock-7", rec, rec, rec.Add(time.Second), rec.Add(2*time.Second)).Explain("keploy record")
+	refilled := NewRepeatNote("mock-7", rec, rec, time.Time{})
+	refilled.Anchor(rec.Add(6*time.Second), rec.Add(30*time.Second), "mock-9", rec.Add(28*time.Second))
+	if s := refilled.Explain("keploy record"); !strings.Contains(s, "at record this test began 2.00s after mock-9, the newest identical recording made before it,") || !strings.Contains(s, "likely kept") {
+		t.Errorf("the note anchored on another recording: %s", s)
+	}
+	if s := refilled.ExplainUnmade("keploy record"); !strings.Contains(s, "at record it began 2.00s after mock-9, the newest identical recording made before it.") {
+		t.Errorf("the unmade note anchored on another recording: %s", s)
+	}
+	if b := refilled.Brief(false); b != "identical to mock mock-7, which answered an earlier test's call 6.00s earlier at replay and 2.00s earlier at record (from mock-9): likely an answer the application keeps for a span of elapsed time" {
+		t.Errorf("the brief anchored on another recording is %q", b)
+	}
+	faster := anchoredNote("mock-7", rec, rec, rec.Add(time.Second), rec.Add(2*time.Second)).Explain("keploy record")
 	if !strings.Contains(faster, "less likely cause") || strings.Contains(faster, "likely kept") {
 		t.Errorf("the note of a replay gap shorter than at record: %s", faster)
 	}
@@ -111,7 +156,7 @@ func TestRequestFingerprintNamesOneIdenticalRequest(t *testing.T) {
 // support: a replay gap shorter than at record is the likely sign.
 func TestRepeatNoteExplainsAnUnmadeCall(t *testing.T) {
 	rec := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
-	fresh := NewRepeatNote("mock-2", rec, rec, rec.Add(1500*time.Millisecond), rec.Add(70*time.Second))
+	fresh := anchoredNote("mock-2", rec, rec, rec.Add(1500*time.Millisecond), rec.Add(70*time.Second))
 	fresh.Test = "get-rates-1"
 	if likely, known := fresh.ElapsedTimeFreshLikely(); !likely || !known {
 		t.Fatalf("a replay gap shorter than at record is not fresh: %v %v", likely, known)
@@ -122,14 +167,14 @@ func TestRepeatNoteExplainsAnUnmadeCall(t *testing.T) {
 			t.Errorf("the unmade note lacks %q: %s", want, got)
 		}
 	}
-	slower := NewRepeatNote("mock-2", rec, rec, rec.Add(80*time.Second), rec.Add(70*time.Second))
+	slower := anchoredNote("mock-2", rec, rec, rec.Add(80*time.Second), rec.Add(70*time.Second))
 	if likely, _ := slower.ElapsedTimeFreshLikely(); likely {
 		t.Fatal("a replay gap longer than at record was judged fresh")
 	}
 	if s := slower.ExplainUnmade("keploy record"); !strings.Contains(s, "less likely cause") || strings.Contains(s, "likely still held") {
 		t.Errorf("the unmade note of a slower replay: %s", s)
 	}
-	if s := NewRepeatNote("mock-2", rec, rec, rec.Add(time.Second), time.Time{}).ExplainUnmade("keploy record"); !strings.Contains(s, "an earlier test of this set") || strings.Contains(s, "at record it began") || !strings.Contains(s, "If the application keeps that answer") {
+	if s := NewRepeatNote("mock-2", rec, rec, rec.Add(time.Second)).ExplainUnmade("keploy record"); !strings.Contains(s, "an earlier test of this set") || strings.Contains(s, "at record it began") || !strings.Contains(s, "If the application keeps that answer") {
 		t.Errorf("the unmade note with no test and no record gap: %s", s)
 	}
 	if _, known := (*RepeatNote)(nil).ElapsedTimeFreshLikely(); known || (*RepeatNote)(nil).ExplainUnmade("x") != "" || (*RepeatNote)(nil).Brief(true) != "" {
@@ -141,7 +186,17 @@ func TestRepeatNoteExplainsAnUnmadeCall(t *testing.T) {
 	if b := fresh.Brief(false); strings.Contains(b, "likely") {
 		t.Errorf("a miss whose replay gap is shorter claims a likely cause: %q", b)
 	}
-	if b := NewRepeatNote("mock-2", rec, rec, rec.Add(time.Second), time.Time{}).Brief(false); b != "identical to mock mock-2, which answered an earlier test's call 1.00s earlier at replay" {
+	if b := NewRepeatNote("mock-2", rec, rec, rec.Add(time.Second)).Brief(false); b != "identical to mock mock-2, which answered an earlier test's call 1.00s earlier at replay" {
 		t.Errorf("the brief with no test and no record gap is %q", b)
 	}
+}
+
+// anchoredNote is the note of a call identical to mock, which answered at
+// answered and was recorded at rec, in a test that began at replayStart at
+// this replay and at recordStart at record, measured from mock itself
+// (RepeatNote.Anchor).
+func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time) *RepeatNote {
+	n := NewRepeatNote(mock, answered, rec, time.Time{})
+	n.Anchor(replayStart, recordStart, mock, rec)
+	return n
 }

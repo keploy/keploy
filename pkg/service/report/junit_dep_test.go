@@ -427,9 +427,9 @@ func TestProvenEvidenceLeavesOutAConnectionThatSentNothing(t *testing.T) {
 // recording, the test it answered, and both gaps.
 func TestProvenEvidenceNamesARepeatedCall(t *testing.T) {
 	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
-	miss := models.NewRepeatNote("mock-2", at, at, at.Add(6*time.Second), at.Add(2*time.Second))
+	miss := anchoredNote("mock-2", at, at, at.Add(6*time.Second), at.Add(2*time.Second))
 	miss.Test = "test-2"
-	unmade := models.NewRepeatNote("mock-1", at, at, at.Add(time.Second), at.Add(70*time.Second))
+	unmade := anchoredNote("mock-1", at, at, at.Add(time.Second), at.Add(70*time.Second))
 	unmade.Test = "test-1"
 	lines := provenEvidenceLines(models.FailureInfo{
 		UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "HTTP", Repeat: miss}},
@@ -440,4 +440,14 @@ func TestProvenEvidenceNamesARepeatedCall(t *testing.T) {
 		!strings.HasSuffix(lines[1], "; identical to mock mock-1, which answered test test-1's call 1.00s earlier at replay and 70.00s earlier at record: likely an answer the application keeps for a span of elapsed time") {
 		t.Fatalf("evidence lines = %q", lines)
 	}
+}
+
+// anchoredNote is the note of a call identical to mock, which answered at
+// answered and was recorded at rec, in a test that began at replayStart at
+// this replay and at recordStart at record, measured from mock itself
+// (models.RepeatNote.Anchor).
+func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time) *models.RepeatNote {
+	n := models.NewRepeatNote(mock, answered, rec, time.Time{})
+	n.Anchor(replayStart, recordStart, mock, rec)
+	return n
 }
