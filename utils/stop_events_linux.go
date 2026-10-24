@@ -84,15 +84,33 @@ func MarkExit(procs []Reached) ExitMark {
 		if st.State == 'D' {
 			m.OnStorage = true
 		}
-		if tasks, err := os.ReadDir(dir + "/task"); err == nil {
-			m.Threads += len(tasks)
-		}
+		m.Threads += processThreads(p.PID)
 		if fds, err := os.ReadDir(fdDir); err == nil {
 			m.Fds += len(fds)
 		}
 		m.IO += readStorageIO(dir + "/io")
 	}
 	return m
+}
+
+// processThreads is how many threads process pid has not yet released, as
+// MarkExit counts them: its count (num_threads), not a listing of them,
+// which, taken while some exit, can leave out one that runs
+// (RunningThread). A count of 0 is a main thread released as its stat was
+// read: read again, the process is gone (0) or a thread of it ran an exec
+// and holds its pid (its count). A test makes it count otherwise.
+var processThreads = func(pid int) int {
+	buf := make([]byte, statBufSize)
+	for range 2 {
+		n, gone, err := threadCount("/proc", pid, buf)
+		if err != nil || gone {
+			return 0
+		}
+		if n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 // ExitRatchet is the furthest processes have come on their way out: the

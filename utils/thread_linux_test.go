@@ -307,6 +307,246 @@ func TestRunningThreadSaysWhatItCouldNotRead(t *testing.T) {
 	}
 }
 
+// fakeThreads is a /proc of process 7 alone, its threads as given (tid to
+// state), its stat counting count threads: what the tests of
+// runningThreadIn read.
+func fakeThreads(t *testing.T, count int, threads map[int]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for tid, state := range threads {
+		dir := filepath.Join(root, "7", "task", strconv.Itoa(tid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(fakeThreadLine(tid, state)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "7", "stat"), []byte(fakeCountLine(count)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func fakeThreadLine(tid int, state string) string {
+	return fmt.Sprintf("%d (worker) %s 4242 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 2 0 780 0 0\n", tid, state)
+}
+
+func fakeCountLine(threads int) string {
+	return fmt.Sprintf("7 (worker) Z 4242 7 7 0 -1 0 0 0 0 0 0 0 0 0 20 0 %d 0 780 0 0\n", threads)
+}
+
+// Where the process can be asked whether its whole thread group has exited
+// (its pidfd), that decides first; else a listing that the count says holds
+// every thread, none of them running, stands only where that group is empty
+// or an exited thread other than the main one stands in it: a thread that
+// ran an exec takes over the main thread's tid and start time, so the main
+// thread alone, read twice, may be two threads. With no one to ask, the count
+// alone decides. Threads that never settle are an error after a bounded
+// number of listings, not a wait.
+func TestRunningThreadAsksWhetherTheGroupExited(t *testing.T) {
+	notEmpty := func(int) (bool, bool) { return false, true }
+	exited := func(int) (bool, bool) { return true, true }
+	unknown := func(int) (bool, bool) { return false, false }
+	// The group has exited: none runs, whatever a listing would say.
+	root := fakeThreads(t, 2, map[int]string{7: "Z", 11: "S"})
+	if tid, runs, err := runningThreadIn(root, 7, exited); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, its group exited", tid, runs, err)
+	}
+	// The main thread alone, counted alone, while the group is not empty:
+	// a thread left out of the listing ran an exec, holds the main thread's
+	// tid now, started thread 11 and exited its own as the main thread was
+	// read again. The threads are listed again, and 11 found.
+	root = fakeThreads(t, 1, map[int]string{7: "Z"})
+	serveStat(t, filepath.Join(root, "7", "task", "7", "stat"), func(n int) string {
+		if n == 2 {
+			dir := filepath.Join(root, "7", "task", "11")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(fakeThreadLine(11, "S")), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+		return fakeThreadLine(7, "Z")
+	})
+	if tid, runs, err := runningThreadIn(root, 7, notEmpty); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, the main thread read twice not taken for one exited thread while the group is not empty", tid, runs, err)
+	}
+	// An exited thread other than the main one (a zombie a tracer holds)
+	// stands in the listing: no exec came between the main thread's reads,
+	// and none runs, though the group is not empty.
+	root = fakeThreads(t, 2, map[int]string{7: "Z", 8: "Z"})
+	if tid, runs, err := runningThreadIn(root, 7, notEmpty); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, 8 a zombie a tracer holds", tid, runs, err)
+	}
+	// The same, where the exec came as the main thread was read again: the
+	// exec's thread waited for every other thread to be released first (8
+	// here), so 8, read again after the main thread, is gone, stands for
+	// nothing, and the threads are listed again. Read before the main
+	// thread, 8 would have stood for an exited thread there throughout.
+	root = fakeThreads(t, 2, map[int]string{7: "Z", 8: "Z"})
+	serveStat(t, filepath.Join(root, "7", "task", "7", "stat"), func(n int) string {
+		if n == 2 {
+			if err := os.RemoveAll(filepath.Join(root, "7", "task", "8")); err != nil {
+				t.Error(err)
+			}
+			dir := filepath.Join(root, "7", "task", "11")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(fakeThreadLine(11, "S")), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+		return fakeThreadLine(7, "Z")
+	})
+	if tid, runs, err := runningThreadIn(root, 7, notEmpty); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, 8 not read again before the main thread", tid, runs, err)
+	}
+	// A vhost worker (flags PF_USER_WORKER) is no such thread: an exec does
+	// not wait for one to be released. Here nothing else stands, the group
+	// is not empty, and the threads never settle: an error.
+	root = fakeThreads(t, 2, map[int]string{7: "Z"})
+	worker := filepath.Join(root, "7", "task", "8")
+	if err := os.MkdirAll(worker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worker, "stat"), []byte("8 (vhost-7) Z 4242 7 7 0 -1 16384 0 0 0 0 0 0 0 0 20 0 2 0 780 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runningThreadIn(root, 7, notEmpty); err == nil || !strings.Contains(err.Error(), "kept changing") {
+		t.Fatalf("an exited vhost worker taken to rule out an exec: err %v; want the threads never settling said", err)
+	}
+	// A vhost worker seen in one listing keeps the rule off for the rest of
+	// the read, though released (8 here, gone by the count's read): the
+	// exec its release may have let through came all the same.
+	root = fakeThreads(t, 3, map[int]string{7: "Z", 9: "Z"})
+	vhost := filepath.Join(root, "7", "task", "8")
+	if err := os.MkdirAll(vhost, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vhost, "stat"), []byte("8 (vhost-7) Z 4242 7 7 0 -1 16384 0 0 0 0 0 0 0 0 20 0 3 0 780 0 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	serveStat(t, filepath.Join(root, "7", "stat"), func(n int) string {
+		if n == 1 {
+			if err := os.RemoveAll(vhost); err != nil {
+				t.Error(err)
+			}
+			return fakeCountLine(3)
+		}
+		return fakeCountLine(2)
+	})
+	if _, _, err := runningThreadIn(root, 7, notEmpty); err == nil || !strings.Contains(err.Error(), "kept changing") {
+		t.Fatalf("a vhost worker released after the first listing forgotten: err %v; want the threads never settling said", err)
+	}
+	// The main thread is read last in a listing: every other thread is read
+	// before it, so one that stands for an exited thread was there before
+	// the main thread's first read.
+	root = fakeThreads(t, 2, map[int]string{7: "Z", 8: "Z"})
+	var leaderReads atomic.Int32
+	serveStat(t, filepath.Join(root, "7", "task", "7", "stat"), func(int) string {
+		leaderReads.Add(1)
+		return fakeThreadLine(7, "Z")
+	})
+	serveStat(t, filepath.Join(root, "7", "task", "8", "stat"), func(n int) string {
+		if n == 1 && leaderReads.Load() != 0 {
+			t.Error("the main thread was read before thread 8 in the listing")
+		}
+		return fakeThreadLine(8, "Z")
+	})
+	if tid, runs, err := runningThreadIn(root, 7, notEmpty); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, 8 a zombie a tracer holds", tid, runs, err)
+	}
+	// No one to ask: the count alone decides.
+	root = fakeThreads(t, 1, map[int]string{7: "Z"})
+	if tid, runs, err := runningThreadIn(root, 7, unknown); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, its main thread all it counts", tid, runs, err)
+	}
+	// Threads being released, the count lower at each listing, for more
+	// listings than threadListings: no error, for each is progress; once
+	// the count comes down to what the listing holds, none runs.
+	root = fakeThreads(t, 2, map[int]string{7: "Z", 8: "Z"})
+	serveStat(t, filepath.Join(root, "7", "stat"), func(n int) string {
+		return fakeCountLine(max(2*threadListings+2-n, 2))
+	})
+	if tid, runs, err := runningThreadIn(root, 7, unknown); err != nil || runs {
+		t.Fatalf("RunningThread = %d, %v, %v; want none running, its threads released one by one", tid, runs, err)
+	}
+	// A count higher than any listing: an error after threadListings
+	// listings with no thread released, never a wait for ever.
+	root = fakeThreads(t, 3, map[int]string{7: "Z", 8: "Z"})
+	if _, _, err := runningThreadIn(root, 7, unknown); err == nil || !strings.Contains(err.Error(), "kept changing") {
+		t.Fatalf("a count no listing makes up: err %v; want it said", err)
+	}
+	// A thread released as each listing is taken (listed, its stat gone
+	// by its read: 20, then 21), while one that runs (11) is left out: the
+	// threads are listed again until 11 is found.
+	root = fakeThreads(t, 2, map[int]string{7: "Z"})
+	mkdir := func(tid int) {
+		if err := os.MkdirAll(filepath.Join(root, "7", "task", strconv.Itoa(tid)), 0o755); err != nil {
+			t.Error(err)
+		}
+	}
+	mkdir(20)
+	serveStat(t, filepath.Join(root, "7", "stat"), func(n int) string {
+		switch n {
+		case 1:
+			if err := os.RemoveAll(filepath.Join(root, "7", "task", "20")); err != nil {
+				t.Error(err)
+			}
+			mkdir(21)
+		case 2:
+			if err := os.RemoveAll(filepath.Join(root, "7", "task", "21")); err != nil {
+				t.Error(err)
+			}
+			mkdir(11)
+			if err := os.WriteFile(filepath.Join(root, "7", "task", "11", "stat"), []byte(fakeThreadLine(11, "S")), 0o644); err != nil {
+				t.Error(err)
+			}
+		}
+		return fakeCountLine(2)
+	})
+	if tid, runs, err := runningThreadIn(root, 7, unknown); err != nil || !runs || tid != 11 {
+		t.Fatalf("RunningThread = %d, %v, %v; want thread 11, the listings that left it out not taken for alike", tid, runs, err)
+	}
+	// The main thread alone, the group not empty, and nothing else ever
+	// listed: the same error, after threadListings listings.
+	root = fakeThreads(t, 1, map[int]string{7: "Z"})
+	if _, _, err := runningThreadIn(root, 7, notEmpty); err == nil || !strings.Contains(err.Error(), "kept changing") {
+		t.Fatalf("a group not empty whose threads never list: err %v; want it said", err)
+	}
+}
+
+// The pidfd of a process tells whether its whole thread group has exited:
+// not while a thread of it runs on after its main thread exited, and so once
+// every thread of it has. A /proc that cannot confirm what the pidfd names
+// (one with no self/fdinfo) leaves it untold.
+func TestGroupExitedAsksThePidfd(t *testing.T) {
+	if fd, err := unix.PidfdOpen(os.Getpid(), 0); err != nil {
+		// A kernel before 5.3, or a seccomp filter (a sandbox): untold,
+		// which RunningThread reads its threads for.
+		t.Skipf("pidfd_open refused here: %v", err)
+	} else {
+		_ = unix.Close(fd)
+	}
+	cmd := startMainThreadExited(t)
+	if exited, known := groupExitedIn("/proc")(cmd.Process.Pid); !known || exited {
+		t.Fatalf("a process whose main thread exited, another running: exited %v, known %v; want not exited, known", exited, known)
+	}
+	pid, _ := startZombie(t)
+	if exited, known := groupExitedIn("/proc")(pid); !known || !exited {
+		t.Fatalf("zombie %d: exited %v, known %v; want exited, known", pid, exited, known)
+	}
+	if exited, known := groupExitedIn(t.TempDir())(pid); known {
+		t.Fatalf("zombie %d read from a /proc with no self/fdinfo: exited %v, known; want untold", pid, exited)
+	}
+	if _, known := groupExitedIn("/proc")(os.Getpid() + 1<<22 + 1); known {
+		t.Fatal("a pid beyond pid_max: known; want untold")
+	}
+}
+
 // serveStat makes path, a stat in a test's /proc, a FIFO whose writer, on
 // each open of it in turn, calls line with the open's number (from 1) and
 // gives what it returns: what line does to the /proc first is done between
