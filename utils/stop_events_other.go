@@ -45,3 +45,10 @@ func WaitExitByEvents(_ *zap.Logger, exited <-chan struct{}, _ []Reached, _ *Tea
 		return StopStalled, StopStallSaid()
 	}
 }
+
+// WaitStopByEvents is WaitExitByEvents here: no process is read, so none is
+// said to be gone.
+func WaitStopByEvents(logger *zap.Logger, stopped <-chan struct{}, procs []Reached, moved *TeardownScope) (end StopEnd, bound string, gone bool) {
+	end, bound = WaitExitByEvents(logger, stopped, procs, moved)
+	return end, bound, false
+}

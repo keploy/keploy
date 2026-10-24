@@ -20,6 +20,8 @@ import (
 	"go.keploy.io/server/v3/internal/starvetest"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // shortStall sets StopStallBudget to d for the test.
@@ -973,6 +975,95 @@ func TestAStopEndsOnItsProcessesGoneAndAtAPress(t *testing.T) {
 		t.Fatalf("the stop said %q; want the press's kill", killed)
 	}
 	awaitReaped(t, "the app", reaped)
+}
+
+// pressAtOffer is a logger whose first offer to end a stop at the next
+// Ctrl+C ("press Ctrl+C again") is answered by a press, as the user's, in
+// the offer's own look: the press only a standing offer takes
+// (MarkInterruptedAgain). It sets the offer at the run's interrupt
+// (StopOffer 0, the run interrupted) for the test. said is the offer's text,
+// and taken whether the press was taken; read them once the stop is over.
+func pressAtOffer(t *testing.T) (logger *zap.Logger, said *atomic.Pointer[string], taken *atomic.Bool) {
+	t.Helper()
+	offer := StopOffer
+	StopOffer = 0
+	t.Cleanup(func() { StopOffer = offer; ClearInterrupted(); ResetInterruptedAgain() })
+	MarkInterrupted()
+	said, taken = &atomic.Pointer[string]{}, &atomic.Bool{}
+	core, _ := observer.New(zapcore.InfoLevel)
+	logger = zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if strings.Contains(e.Message, "press Ctrl+C again") && said.CompareAndSwap(nil, &e.Message) {
+			taken.Store(MarkInterruptedAgain())
+		}
+		return nil
+	}))
+	return logger, said, taken
+}
+
+// A stop through only on its own word (a container's daemon's, which comes
+// after the kernel's) waits on past its processes' exit, in the same wait:
+// one offer to end it at Ctrl+C, which says what a press does then, and a
+// press at it ends the wait, saying nothing of the processes is left to kill.
+// As two waits, one to the processes' exit and one after, a press taken at
+// the first's offer in the look that found them gone was lost, and the stop
+// held to its stall bound. The bound here is 10s, so a lost press fails the
+// test (the wait ends stalled), not holds it.
+func TestAStopThroughOnItsWordWaitsPastItsProcessesExit(t *testing.T) {
+	shortStall(t, 10*time.Second)
+	gone := func(t *testing.T) []Reached {
+		t.Helper()
+		cmd, reaped := startGroupLeader(t, "sleep", "600")
+		p, ok := ProcOf(cmd.Process.Pid)
+		if !ok {
+			t.Fatal("cannot read the process")
+		}
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
+		awaitReaped(t, "the process", reaped)
+		return []Reached{p}
+	}
+	t.Run("its processes gone do not end it", func(t *testing.T) {
+		procs := gone(t)
+		stopped := make(chan struct{})
+		var looks atomic.Int32
+		looked := func() {
+			if looks.Add(1) == 3 {
+				close(stopped)
+			}
+		}
+		exitLooked.Store(&looked)
+		defer exitLooked.Store(nil)
+		end, _, _ := WaitStopByEvents(zap.NewNop(), stopped, procs, nil)
+		if n := looks.Load(); end != StopExited || n < 3 {
+			t.Fatalf("the wait ended %v at look %d; want StopExited once its word came, at look 3", end, n)
+		}
+	})
+	t.Run("a press at its offer, its processes gone", func(t *testing.T) {
+		procs := gone(t)
+		logger, said, taken := pressAtOffer(t)
+		end, _, left := WaitStopByEvents(logger, make(chan struct{}), procs, nil)
+		if end != StopPressed || !left || !taken.Load() {
+			t.Fatalf("the wait ended %v, its processes gone %v, the press taken %v; want StopPressed, gone", end, left, taken.Load())
+		}
+		if s := said.Load(); s == nil || *s != "the application's processes have exited, and keploy waits for word that it has stopped; press Ctrl+C again to stop waiting" {
+			t.Fatalf("the offer said %v; want that a press stops the wait, with nothing to kill", s)
+		}
+	})
+	t.Run("a press at its offer, its process running", func(t *testing.T) {
+		cmd, reaped := startGroupLeader(t, "sleep", "600")
+		defer func() { _ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL); awaitReaped(t, "the process", reaped) }()
+		p, ok := ProcOf(cmd.Process.Pid)
+		if !ok {
+			t.Fatal("cannot read the process")
+		}
+		logger, said, taken := pressAtOffer(t)
+		end, _, left := WaitStopByEvents(logger, make(chan struct{}), []Reached{p}, nil)
+		if end != StopPressed || left || !taken.Load() {
+			t.Fatalf("the wait ended %v, its processes gone %v, the press taken %v; want StopPressed, not gone", end, left, taken.Load())
+		}
+		if s := said.Load(); s == nil || !strings.Contains(*s, "press Ctrl+C again to kill it now") {
+			t.Fatalf("the offer said %v; want that a press kills it", s)
+		}
+	})
 }
 
 // A process is named by its pid and start time: a pid that names another

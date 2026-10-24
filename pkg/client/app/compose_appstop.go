@@ -492,10 +492,13 @@ func (a *App) composeAppHalt() *composeHalt {
 // signal, SIGINT when it declares none) to the container compose made for
 // the app's service (composeAppContainer), then a wait for it to stop on the
 // stop's events, as a docker run
-// app's stop waits (stopDockerRunByEvents): the daemon's word, or its main
-// process exiting (its pidfd), which a starved daemon is slow to report. It
-// kills only when the container's processes made no progress on its way out
-// for utils.StopStallBudget of the time both they and keploy could run
+// app's stop waits (stopDockerRunByEvents). The stop is through on the
+// daemon's word only, which a starved daemon is slow to give: its main
+// process exiting (its pidfd) is no kill, and no stop either, where the
+// daemon still calls the container running (utils.WaitStopByEvents); it
+// stands for the stop only where the daemon's wait failed twice. It kills only when the
+// container's processes made no progress on its way out for
+// utils.StopStallBudget of the time both they and keploy could run
 // (utils.ExitClock), or at the user's Ctrl+C, which it offers; never on a
 // number of seconds. It says why it had to kill, "" when the app exited on
 // the interrupt, or had exited already.
@@ -561,20 +564,40 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 		}
 		return "", fmt.Errorf("keploy could not interrupt the application's container %q: %w", a.container, err)
 	}
+	// stopped closes once the daemon says the container is not running. Its
+	// main process's exit (mainGone) is the kernel's word, which comes
+	// first: the daemon is still taking the container's exit then (slower on
+	// a starved host), and calls it running. A start at that point is the
+	// daemon's no-op (304, which its client takes for a success), and the
+	// exit the daemon takes after it reads as a halt of the app keploy has
+	// just started: the next set ended APP_HALTED with no report. So the
+	// main process's exit stands for the stop only where the daemon cannot
+	// be asked: its wait failed, and failed again when asked once more (a
+	// wait asked again of a container that has stopped answers at once).
 	stopped := make(chan struct{})
 	go func() {
+		var mainGone <-chan struct{}
+		askedAgain := false
 		for {
 			select {
 			case <-daemonSaid:
 			case err := <-waitErr:
 				if !errdefs.IsNotFound(err) {
+					if !askedAgain {
+						// A stream that broke (a daemon restarted, an
+						// answer that did not decode) is asked again.
+						askedAgain = true
+						a.logger.Debug("the daemon's wait for the app's container failed; asking for it again", zap.Error(err))
+						daemonSaid, waitErr = a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)
+						continue
+					}
 					// No news of the container (removed, once seen, is
 					// stopped): its main process's exit stands.
-					a.logger.Debug("the daemon's wait for the app's container failed; waiting for its main process", zap.Error(err))
-					daemonSaid, waitErr = nil, nil
+					a.logger.Debug("the daemon's wait for the app's container failed again; waiting for its main process", zap.Error(err))
+					daemonSaid, waitErr, mainGone = nil, nil, w.mainGone
 					continue
 				}
-			case <-w.mainGone:
+			case <-mainGone:
 			case <-wctx.Done():
 				return
 			}
@@ -582,10 +605,19 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 			return
 		}
 	}()
-	end, bound := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load())
-	switch end {
-	case utils.StopExited:
+	// All of its processes gone is the kernel's word, which comes before the
+	// daemon's: the wait goes on for the daemon's, in the same wait, so a
+	// press of Ctrl+C at its offer is never lost (utils.WaitStopByEvents).
+	// lagged: it ended, stalled or at Ctrl+C, with every one of them gone,
+	// and there is nothing to kill.
+	end, bound, lagged := utils.WaitStopByEvents(a.logger, stopped, w.procs, a.teardown.Load())
+	switch {
+	case end == utils.StopExited:
 		return "", nil
+	case lagged:
+		return "", a.composeStopLagged(end)
+	}
+	switch end {
 	case utils.StopPressed:
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
 	default:
@@ -606,10 +638,23 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	// The kill ends it but in the kernel: wait for that at the same rule;
 	// a container still there after it is an error the next set's start
 	// would meet.
-	if end, _ := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
+	if end, _, lagged := utils.WaitStopByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
+		if lagged {
+			return killed, a.composeStopLagged(end)
+		}
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
 	return killed, nil
+}
+
+// composeStopLagged is the stop's error where the app's processes exited but
+// the daemon did not say its container had stopped (utils.WaitStopByEvents):
+// a start now could be the daemon's no-op on a container it calls running.
+func (a *App) composeStopLagged(end utils.StopEnd) error {
+	if end == utils.StopPressed {
+		return fmt.Errorf("the application's processes had exited, and keploy stopped waiting for the docker daemon to say its container %q had stopped at the press of Ctrl+C", a.container)
+	}
+	return fmt.Errorf("the application's processes had exited, but the docker daemon had not said its container %q had stopped %s later", a.container, utils.StopStallSaid())
 }
 
 // composeInterrupt is the signal keploy interrupts the app's container
