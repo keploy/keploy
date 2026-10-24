@@ -1849,18 +1849,32 @@ func genericExchange(name string, at time.Duration, req string) *models.Mock {
 }
 
 // genericMiss is the miss report the Generic parser files for req, sent on
-// a connection served from mm. A request the parser answers fails the
-// test: the application reads the answer and closes the connection, which
-// ends the parser with no miss.
+// a connection served from mm. A request the parser answers fails the test.
 func genericMiss(t *testing.T, mm *MockManager, req string) *models.MockMismatchReport {
 	t.Helper()
+	r := genericServe(t, mm, req)
+	if r == nil {
+		t.Fatalf("%q: no miss with a report: the parser answered it", req)
+	}
+	return r
+}
+
+// genericServe is the miss report the Generic parser files for req, sent on
+// a connection served from mm, or nil when the parser answered it: the
+// application reads the answer and closes the connection, which ends the
+// parser with no miss.
+func genericServe(t *testing.T, mm *MockManager, req string) *models.MockMismatchReport {
+	t.Helper()
+	answered := make(chan bool, 1)
 	app, proxySide := net.Pipe()
 	t.Cleanup(func() { app.Close(); proxySide.Close() })
 	go func() {
 		if _, err := app.Write([]byte(req)); err != nil {
 			return
 		}
-		if n, _ := app.Read(make([]byte, 64)); n > 0 {
+		n, _ := app.Read(make([]byte, 64))
+		answered <- n > 0
+		if n > 0 {
 			app.Close()
 		}
 	}()
@@ -1870,10 +1884,15 @@ func genericMiss(t *testing.T, mm *MockManager, req string) *models.MockMismatch
 	var r interface {
 		MismatchReport() *models.MockMismatchReport
 	}
-	if !errors.As(err, &r) || r.MismatchReport() == nil {
-		t.Fatalf("%q: no miss with a report: %v", req, err)
+	if errors.As(err, &r) && r.MismatchReport() != nil {
+		return r.MismatchReport()
 	}
-	return r.MismatchReport()
+	// No miss: the parser answered the request, or failed it with no report.
+	proxySide.Close()
+	if !<-answered {
+		t.Fatalf("%q: neither answered nor a miss with a report: %v", req, err)
+	}
+	return nil
 }
 
 // The Generic parser asks its lookup of an exchange made elsewhere of the
@@ -1913,6 +1932,46 @@ func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
 	}
 	if r := genericMiss(t, mm, "AUTH step4"); !r.NotOwned || r.ClosestMock != "s2-ex" {
 		t.Fatalf("the next set's exchange lost its one miss to a request of the set before: %+v", r)
+	}
+}
+
+// A Generic request held after its first read of the round while the
+// replay stages the next set, whose open test owns an exchange that is the
+// request byte for byte, is never answered with that exchange, nor
+// diagnosed against it: the matcher and the miss read the store held to the
+// request's first read (integrations.HoldToRound), which finds nothing once
+// the staging moved. The request misses, saying the set was staged again
+// under it, and the exchange, never spent, answers the next set's own
+// request.
+func TestAGenericRequestHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *testing.T) {
+	mine := genericExchange("ex-mine", 0, "AUTH step2")
+	next := genericExchange("s2-ex", 2*time.Second, "AUTH step4")
+	mm := stagedManager(t, nil, []*models.Mock{mine})
+	mm.ServeExactTest("T1", []*models.Mock{mine})
+	staged := false
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now())
+		mm.ServeExactTest("S2-T1", []*models.Mock{next})
+		staged = true
+	}
+	r := genericServe(t, mm, "AUTH step4")
+	if !staged {
+		t.Fatal("precondition: the replay never staged the next set under the request")
+	}
+	if r == nil {
+		t.Fatalf("a request of the set before was answered with the next set's %s", next.Name)
+	}
+	if r.NotOwned || r.ClosestMock == next.Name {
+		t.Fatalf("a request of the set before was diagnosed against the next set's %s: %+v", next.Name, r)
+	}
+	if !strings.Contains(r.NextSteps, "staged a test set again while it decided this request, so keploy answered it with no recorded exchange") {
+		t.Fatalf("the miss does not say the set was staged again under the request: %q", r.NextSteps)
+	}
+
+	// Never spent on the request before, it answers the next set's own.
+	if r := genericServe(t, mm, "AUTH step4"); r != nil {
+		t.Fatalf("the next set's own request missed after a request of the set before: %+v", r)
 	}
 }
 
