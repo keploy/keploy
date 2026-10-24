@@ -397,16 +397,18 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 // The row reads each test's view at its publication itself
 // (exactState.beforePublish, just before the swap) and checks that the
 // stamp it is published with is the stamp it carries once the install
-// returns. So a view published before its stamp is set fails it, and so
-// does a write to the stamp once the view is published that leaves the
-// stamp changed. A write once it is published that the install undoes
-// before it returns, or that writes the value the view already carries,
-// leaves the two reads equal and passes this row: it is the next row's to
+// returns, and that the first test's view still carries its stamp once the
+// next install, which closes it, returns. So a view published before its
+// stamp is set fails it, and so does a write to the stamp, once the view is
+// published, that is still there when its install or the next returns. A
+// write that is undone before then, one of the value the view already
+// carries, or one made later passes this row: it is the next row's to
 // catch, and that row may miss it. At the same seam the row checks the rest
-// of what installExact's doc says a view is published with: its test, its
-// mocks, and what installExact gives it from the manager (the outside
-// answers, the staging epoch and the worker set, seeded here). Any of those
-// set after the swap fails it.
+// of what installExact's doc says a view is published with: a test's view's
+// test and mocks, and what installExact gives every view from the manager
+// (the outside answers and the staging epoch, checked on a pool view too,
+// and the worker set, seeded here, on the tests' views). Any of those set
+// after the swap fails it.
 // A view published before its stamp was set would be read with no stamp by a
 // learn step reading ServedInOpenTest beside the install: a learn step that
 // refuses a 0 would drop its calls at random, and the stamp's write would
@@ -437,8 +439,10 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 			type publication struct {
 				test  string
 				stamp uint64
+				view  *exactView
 			}
 			var published []publication
+			pools := 0
 			mm.exact.beforePublish = func(v *exactView) {
 				// What installExact gives every view from the manager is
 				// there as it is published: with no outside answers a reader
@@ -447,6 +451,7 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 					t.Errorf("a view (test %q) was about to be published without the manager's outside answers and staging epoch: a reader loading it first would show again what calls outside every test consumed", v.test)
 				}
 				if v.test == "" {
+					pools++
 					return // a pool view: never stamped
 				}
 				if mm.exact.view.Load() == v {
@@ -459,9 +464,13 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 					t.Errorf("%s's view was about to be published with the worker set %v; want the manager's, [w-boot]: a reader loading it first would refuse its worker-scope mocks", v.test, v.worker)
 				}
 				if len(v.owned) != 1 || v.owned[0].Name != own.Name {
-					t.Errorf("%s's view was about to be published with %d test mocks; want its one, %s", v.test, len(v.owned), own.Name)
+					names := make([]string, 0, len(v.owned))
+					for _, mk := range v.owned {
+						names = append(names, mk.Name)
+					}
+					t.Errorf("%s's view was about to be published with the test mocks %v; want its one, %s", v.test, names, own.Name)
 				}
-				published = append(published, publication{test: v.test, stamp: v.stamp})
+				published = append(published, publication{test: v.test, stamp: v.stamp, view: v})
 				if !held() {
 					t.Errorf("view %d was published with no install lock held: another test's view could be stamped before it and published after it", len(published))
 				}
@@ -473,7 +482,7 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 				t.Helper()
 				n := len(published)
 				if n == 0 || published[n-1].test != test {
-					t.Fatalf("precondition: the views were published as %+v; want %s's last", published, test)
+					t.Fatalf("the test views were published as %+v, and %d views with no test; want %s's last: a test's view published before its test is set is taken for a pool view", published, pools, test)
 				}
 				if got := published[n-1].stamp; got != stamp {
 					t.Fatalf("%s's view was published carrying %d and carries %d once installed: its stamp was set after a reader could load the view", test, got, stamp)
@@ -502,8 +511,17 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 				t.Fatalf("E's view, installed after C's in the tracker's test %d, carries %d; want 0", tr.Epoch(), got)
 			}
 			publishedCarrying("E", 0)
-			if reads != 2 || len(published) != 2 {
-				t.Fatalf("the two installs read the tracker's open test %d times and published %d test views; want one read and one publication each, 2 and 2", reads, len(published))
+			if got := published[0].view.stamp; got != tr.Epoch() {
+				t.Fatalf("C's view carries %d once E's install, which closed it, returned; want %d, the stamp it was published with", got, tr.Epoch())
+			}
+			if reads != 2 || len(published) != 2 || pools != 0 {
+				t.Fatalf("the two installs read the tracker's open test %d times, and published %d test views and %d with no test; want one read and one test view each, 2, 2 and 0", reads, len(published), pools)
+			}
+			// A pool view is published with the manager's outside answers
+			// and staging epoch too (checked at the seam).
+			mm.ServeExactPool("k", nil)
+			if pools != 1 || len(published) != 2 {
+				t.Fatalf("the pool call published %d views with no test, and the test views are now %d; want 1 and 2", pools, len(published))
 			}
 		})
 	}
@@ -511,15 +529,19 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 
 // A learn step reads ServedInOpenTest while the replay installs tests' views,
 // on both doors: in a switch-on replay the two run at once. It never reads a
-// test's view without the stamp that view carries once installed. It is the
-// guard for the writes the row above cannot see: a write to the stamp once
-// the view is published that the install undoes before it returns, or that
-// writes the value the view already carries. It catches one only by the race
-// report or by chance. Under -race, a write under no lock this read also
-// takes races the read, and -race reports it. Otherwise it sees a write only
-// if one of its reads falls between the write and its undoing, and a write
-// of the value the view already carries not at all. A write once the view is
-// published that leaves the stamp changed, the row above fails every time.
+// test's view without the stamp that view carries once installed: first
+// beside installs of one test's view, each carrying the tracker's open test,
+// then beside installs of two tests' views in that tracker test, each
+// carrying 0. It is the guard for the writes the row above cannot see: a
+// write to the stamp once the view is published that is undone before the
+// install returns, one of the value the view already carries, or one made
+// later. The second half is the one that can see a write of the tracker's
+// open test onto a view that carries 0, which a learn step would take for
+// the test's own stamp: a false green, not a refusal. It catches such a
+// write only by the race report or by chance. Under -race, a write under no
+// lock this read also takes races the read, and -race reports it. Otherwise
+// it sees a write only if one of its reads falls between the write and its
+// undoing, and a write of the value the view already carries not at all.
 func TestAReaderBesideTheInstallsAlwaysReadsTheTestsViewStamped(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	mm := NewMockManager(nil, nil, zap.NewNop())
@@ -528,62 +550,86 @@ func TestAReaderBesideTheInstallsAlwaysReadsTheTestsViewStamped(t *testing.T) {
 	tr := learn.NewTracker()
 	mm.SetOpenTestEpoch(tr.OpenEpoch)
 	tr.Begin()
-	want := tr.Epoch()
-	// Every view installed is C's, in the one tracker test, so each carries
-	// want (a test's view installed again in its tracker test keeps it).
-	install := func(k int) {
+	epoch := tr.Epoch()
+	installOf := func(k int, test string) {
 		if k%2 == 0 {
-			mm.ServeExactTest("C", []*models.Mock{own})
+			mm.ServeExactTest(test, []*models.Mock{own})
 		} else {
-			mm.OpenExactTest("C", []*models.Mock{own}, nil)
+			mm.OpenExactTest(test, []*models.Mock{own}, nil)
 		}
 	}
-	install(0)
-	if got, _ := mm.ServedInOpenTest(); got != want {
-		t.Fatalf("precondition: C's view, the first installed in the tracker's test %d, carries %d", want, got)
-	}
-	type tally struct {
-		reads, bad int
-		last       uint64
-	}
-	stop, reading := make(chan struct{}), make(chan struct{})
-	done := make(chan tally, 1)
-	go func() {
-		var n tally
-		for {
-			select {
-			case <-stop:
-				done <- n
-				return
-			default:
+	// beside reads ServedInOpenTest on another goroutine while the installs
+	// run, each of which leaves the view carrying want, and fails if a read
+	// is of another stamp. The installs start once the reader reads, so the
+	// two overlap; the reader is stopped and joined before it returns.
+	beside := func(views string, want uint64, install func(k int)) {
+		t.Helper()
+		type tally struct {
+			reads, bad int
+			last       uint64
+		}
+		stop, reading := make(chan struct{}), make(chan struct{})
+		done := make(chan tally, 1)
+		go func() {
+			var n tally
+			for {
+				select {
+				case <-stop:
+					done <- n
+					return
+				default:
+				}
+				got, _ := mm.ServedInOpenTest()
+				if n.reads++; n.reads == 1 {
+					close(reading)
+				}
+				if got != want {
+					n.bad, n.last = n.bad+1, got
+				}
+				runtime.Gosched()
 			}
-			got, _ := mm.ServedInOpenTest()
-			if n.reads++; n.reads == 1 {
-				close(reading)
-			}
-			if got != want {
-				n.bad, n.last = n.bad+1, got
+		}()
+		<-reading
+		const installs = 2000
+		for k := 1; k <= installs; k++ {
+			install(k)
+			if got := stampOf(mm); got != want {
+				t.Errorf("install %d of %s left the view carrying %d; want %d", k, views, got, want)
+				break
 			}
 			runtime.Gosched()
 		}
-	}()
-	// The installs start once the reader reads, so the two overlap.
-	<-reading
-	const installs = 2000
-	for k := 1; k <= installs; k++ {
-		install(k)
-		if got := stampOf(mm); got != want {
-			t.Errorf("install %d left C's view carrying %d; want %d, the stamp of C's view in the tracker's test %d", k, got, want, want)
-			break
+		close(stop)
+		n := <-done
+		if t.Failed() {
+			return
 		}
-		runtime.Gosched()
+		if n.bad != 0 {
+			t.Fatalf("of %d reads beside %d installs of %s, each of which left the view carrying %d, %d read another stamp (the last %d): a stamp was written once its view could be read", n.reads, installs, views, want, n.bad, n.last)
+		}
 	}
-	close(stop)
-	n := <-done
+	// Every view installed first is C's, in the one tracker test, so each
+	// carries its open test (a test's view installed again in its tracker
+	// test keeps it).
+	installOf(0, "C")
+	if got, _ := mm.ServedInOpenTest(); got != epoch {
+		t.Fatalf("precondition: C's view, the first installed in the tracker's test %d, carries %d", epoch, got)
+	}
+	beside("C's view", epoch, func(k int) { installOf(k, "C") })
 	if t.Failed() {
 		return
 	}
-	if n.bad != 0 {
-		t.Fatalf("of %d reads beside %d installs of C's view, each of which left it carrying %d, %d read another stamp (the last %d): a stamp was written once its view could be read", n.reads, installs, want, n.bad, n.last)
+	// E's view installed in the same tracker test: every view installed in
+	// it from then on, C's or E's, carries 0.
+	installOf(0, "E")
+	if got, _ := mm.ServedInOpenTest(); got != 0 {
+		t.Fatalf("precondition: E's view, installed after C's in the tracker's test %d, carries %d; want 0", epoch, got)
 	}
+	beside("C's and E's views", 0, func(k int) {
+		test := "C"
+		if (k/2)%2 == 1 {
+			test = "E"
+		}
+		installOf(k, test)
+	})
 }
