@@ -753,3 +753,45 @@ func TestRelayRawPassthrough_CleanThenResetReturnsPromptly(t *testing.T) {
 			"that window is %v.", elapsed, testDrainIdle, RelayDrainIdle)
 	}
 }
+
+// TestRelayRawPassthrough_AClientResetEndsTheRelayAtOnce: a client that
+// resets an idle connection (a browser dropping a spare one it never used)
+// ends both halves of that connection, so nothing more can be delivered
+// either way. The relay returns at once and the caller's close reaches the
+// server, as the reset would over the wire; waiting out the idle window kept
+// a test's loopback server from closing for its whole length.
+func TestRelayRawPassthrough_AClientResetEndsTheRelayAtOnce(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	appSide, appPeer := tcpPair(t, ln)
+	destSide, destPeer := tcpPair(t, ln)
+	defer func() { _ = appSide.Close(); _ = destSide.Close(); _ = destPeer.Close() }()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		if tc, ok := appPeer.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0)
+		}
+		_ = appPeer.Close()
+	}()
+
+	const idle = 5 * time.Second
+	start := time.Now()
+	returned := make(chan struct{})
+	go func() {
+		relayRawPassthrough(NewSafeConn(appSide, zap.NewNop()), NewSafeConn(destSide, zap.NewNop()), idle)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("relayRawPassthrough never returned")
+	}
+	if elapsed := time.Since(start); elapsed > idle/2 {
+		t.Fatalf("returned after %v: a client reset left the server's side held for most of the %v idle window", elapsed, idle)
+	}
+}
