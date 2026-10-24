@@ -384,3 +384,53 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 		})
 	}
 }
+
+// Views installed at once in one open tracker test are of no one test, but
+// the first: an install whose swap loses to another's reads the stamp again
+// and finds the other test's view (0). And a view installed as the tracker's
+// test ends, which reads no open test, records nothing: a view installed
+// beside it that read the test before it ended still finds the test's
+// earlier view of another test (0). Recording the 0 forgot that view, and
+// the view installed beside it carried the test's number, as if it were the
+// only test's view installed in that tracker test.
+func TestViewsInstalledAtOnceInOneTrackerTestAreOfNoOneTest(t *testing.T) {
+	var e exactState
+	open := func() uint64 { return 7 }
+	raced := false
+	e.stampLoaded = func() {
+		if raced {
+			return
+		}
+		raced = true
+		if got := e.stampTest(&open, "B"); got != 7 {
+			t.Fatalf("B's view, the first installed in the tracker's test 7, carries %d; want 7", got)
+		}
+	}
+	if got := e.stampTest(&open, "A"); got != 0 {
+		t.Fatalf("A's view, whose install read no view in the tracker's test 7 before B's landed, carries %d; want 0", got)
+	}
+	if !raced {
+		t.Fatal("precondition: B's install did not land in A's")
+	}
+
+	var f exactState
+	n := uint64(8)
+	cur := func() uint64 { return n }
+	if got := f.stampTest(&cur, "X"); got != 8 {
+		t.Fatalf("X's view, the first installed in the tracker's test 8, carries %d; want 8", got)
+	}
+	ended := false
+	racing := func() uint64 {
+		if !ended {
+			ended = true
+			n = 0 // the tracker's test 8 ends, and D's view is installed
+			if got := f.stampTest(&cur, "D"); got != 0 {
+				t.Fatalf("D's view, installed with no tracker test open, carries %d; want 0", got)
+			}
+		}
+		return 8 // C's install read test 8 before it ended
+	}
+	if got := f.stampTest(&racing, "C"); got != 0 {
+		t.Fatalf("C's view, installed in the tracker's test 8 after X's, carries %d; want 0", got)
+	}
+}
