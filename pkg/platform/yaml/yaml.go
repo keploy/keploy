@@ -594,6 +594,25 @@ func fileDirF(ctx context.Context, Logger *zap.Logger, path string, fileName str
 	return filePath, true, nil
 }
 
+// openIndexDir opens the folder ReadSessionIndicesF / ReadSessionIndicesAny
+// list. A folder that does not exist yet is empty (empty is true, err nil):
+// the first recording, or a reports folder no run has written. Any other
+// failure to open it -- permission denied, an I/O error, a symlink loop, a
+// path that is not a directory -- is returned: the folder may well hold test
+// sets, and reading it as empty makes `keploy record` pick test-set-0 again
+// and record into the user's existing test-set-0.
+func openIndexDir(path string, logger *zap.Logger) (*os.File, bool, error) {
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err == nil {
+		return dir, false, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		logger.Debug("folder does not exist yet; nothing to list", zap.String("path", path))
+		return nil, true, nil
+	}
+	return nil, false, err
+}
+
 func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	return ReadSessionIndicesF(ctx, path, logger, mode, FormatYAML)
 }
@@ -601,14 +620,9 @@ func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mo
 func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, mode IndexMode, format Format) ([]string, error) {
 	var indices []string
 
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if errors.Is(err, safeyaml.ErrNotDir) {
-		// There, and not a directory: an error, as listing it always was.
+	dir, empty, err := openIndexDir(path, logger)
+	if empty || err != nil {
 		return indices, err
-	}
-	if err != nil {
-		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
 	}
 	defer func() { _ = dir.Close() }()
 
@@ -655,14 +669,9 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	var indices []string
 
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if errors.Is(err, safeyaml.ErrNotDir) {
-		// There, and not a directory: an error, as listing it always was.
+	dir, empty, err := openIndexDir(path, logger)
+	if empty || err != nil {
 		return indices, err
-	}
-	if err != nil {
-		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
 	}
 	defer func() { _ = dir.Close() }()
 
