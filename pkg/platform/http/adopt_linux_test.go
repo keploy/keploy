@@ -1164,7 +1164,7 @@ func TestTheScanOfProcSaysWhatItCouldNotRead(t *testing.T) {
 	stat(106, fmt.Sprintf("106 (worker) Z %d 106 106 0 -1 0 0 0 0 0 0 0 0 0 20 0 2 0 780 0 0\n", me))
 	task(106, 106, 'Z')
 	task(106, 107, 'S')
-	stat(108, fmt.Sprintf("108 (worker) Z %d 108 108 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 781 0 0\n", me))
+	stat(108, fmt.Sprintf("108 (worker) Z %d 108 108 0 -1 0 0 0 0 0 0 0 0 0 20 0 3 0 781 0 0\n", me))
 	task(108, 108, 'Z')
 	task(108, 109, 'X')
 	// A thread, and a process, being released: Z, its parent and group gone.
