@@ -2,6 +2,7 @@ package learn
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 )
@@ -35,13 +36,21 @@ import (
 //   - the recorded value and the value F saw do not both hold it (one holds
 //     it: that is why the rule found it; the other must lack it). The two
 //     values differ wherever the rule finds a changed word at all;
-//   - the recording and F gave the application the places before the call
-//     in the same order (recordedOrder, servedOrder), so an application that
-//     copies an answer by its position (the last one it got) took the same
-//     place's word in both, and a value that lacks it shows no copy of it.
-//     The recording shows the order of its answers only where each was
-//     recorded before the next request, or where requests in flight together
-//     were carried on one connection at known positions (Raw.SentOn).
+//   - the recording and F gave the application the value's candidate
+//     sources before the call in the same order (recordedOrder,
+//     servedOrder), so an application that copies an answer by its position
+//     (the last one it got) took the same place's word in both, and a value
+//     that lacks it shows no copy of it. The candidate sources are the
+//     places where the rule found a word of the value (follows.sources): the
+//     order exists only to tell which of them the application had last. A
+//     place that holds none of those words is no source of either value, so
+//     its order is not read, nor whether its request was in flight with a
+//     source's (a connection pool's handshake on its own thread beside a
+//     migration's statement). The recording shows the order of two sources
+//     only where one was recorded answered before the other's request, or
+//     where requests in flight together were carried on one connection at
+//     known positions (Raw.SentOn); two sources in flight together on two
+//     connections are refused.
 //
 // Otherwise the value is refused, the reason naming which of these failed.
 // Nothing is read from a value's shape. Everything else the classifier
@@ -74,6 +83,19 @@ type follows struct {
 	// value learned as noise says of it (followed).
 	at      time.Time
 	refuted string
+	// sources are the mocks of the places the word rule let a word of the
+	// value go at (excused), and of the place the search for its source went
+	// past (refute): the value's candidate sources, the only places whose
+	// order the rule reads (followed).
+	sources map[string]bool
+}
+
+// source notes mock as a candidate source of the value (follows.sources).
+func (f *follows) source(mock string) {
+	if f.sources == nil {
+		f.sources = map[string]bool{}
+	}
+	f.sources[mock] = true
 }
 
 // refute reports whether p, a place in x's payload (texts, as appearedIn
@@ -105,6 +127,10 @@ func (f *follows) refute(x Raw, texts [2]string, v *valueDrift, p Place) bool {
 		}
 		f.refuted = found + ", which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it"
 	}
+	// The word rule reads the same word at the same place on the same terms
+	// and notes it there too (excusedRaw); a source set aside is noted here
+	// as well, so it is ordered should the two searches ever part.
+	f.source(x.mock)
 	return true
 }
 
@@ -149,7 +175,11 @@ func (f *follows) excusedSeen(e Earlier, ed *valueDrift, i int, t string, at tim
 	if !e.Given {
 		before, untimed = recordedGave(e.recordedAt(), e.Payload.answered, at, e.Mock)
 	}
-	return f.excused(t, before && ed.recTok[i][t], ed.liveTok[i][t], untimed, why)
+	if !f.excused(t, before && ed.recTok[i][t], ed.liveTok[i][t], untimed, why) {
+		return false
+	}
+	f.source(e.Mock)
+	return true
 }
 
 // excusedRaw is excused of word t, found in reading i in x's payload: the
@@ -165,7 +195,11 @@ func (f *follows) excusedRaw(x Raw, i int, t string, at time.Time, why string) b
 	}
 	before, untimed := recordedGave(x.recordedAt(), x.answered, at, x.mock)
 	held := f.dc.searchedTokens(x, false)[i][t]
-	return f.excused(t, before && held, x.AsRecorded() && held, untimed, why)
+	if !f.excused(t, before && held, x.AsRecorded() && held, untimed, why) {
+		return false
+	}
+	f.source(x.mock)
+	return true
 }
 
 // recordedGave reports whether the recording gave the application a place
@@ -201,13 +235,15 @@ func (dc *DriftCache) holdsWord(value, t string) bool {
 // followed is the verdict on a drift record's full round would learn as
 // noise once the word rule let go the words fol found (fol.first non-empty),
 // or once the search for its source went past a place (fol.refuted):
-// noise where the recording and F gave the application the places before
-// the call in the same order; refused otherwise, saying why. earlier and raw
-// are every place the classifier was handed (the call's own and those F gave
-// elsewhere in the set).
+// noise where the recording and F gave the application the value's
+// candidate sources (fol.sources) before the call in the same order;
+// refused otherwise, saying why. earlier and raw are every place the
+// classifier was handed (the call's own and those F gave elsewhere in the
+// set); only the sources among them are ordered.
 func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []Raw) Learned {
-	rec, untoldRec := recordedOrder(at, earlier, raw)
-	f, untoldF := servedOrder(earlier, raw)
+	source := func(mock string) bool { return fol.sources[mock] }
+	rec, untoldRec := recordedOrder(at, earlier, raw, source)
+	f, untoldF := servedOrder(earlier, raw, source)
 	why := ""
 	switch {
 	case untoldRec != "":
@@ -250,8 +286,10 @@ func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.
 
 // recordedOrder is the places the recording gave the application before a
 // call recorded at at, in the order it gave them their answers: the test
-// case's request first; then every place whose answer was recorded strictly
-// before the call (recordedGave), served by F or not. The recording shows the
+// case's request first; then every candidate source (source: a place
+// holding a word the value could have copied, follows.sources) whose answer
+// was recorded strictly before the call (recordedGave), served by F or not.
+// Any other place is read for nothing: neither its times nor its order. The recording shows the
 // order of two places where one was answered strictly before the other's
 // request was recorded (keploy stamped its answer first), or, for two
 // requests in flight together, where both were carried on one connection at
@@ -265,9 +303,12 @@ func ClassifyFollowing(dc *DriftCache, drift []string, live, rec Shape, at time.
 // order of their answers is then the dependency's and the network's, which
 // the recording does not hold); a place whose recorded request or answer
 // time keploy cannot read.
-func recordedOrder(at time.Time, earlier []Earlier, raw []Raw) (order []string, untold string) {
+func recordedOrder(at time.Time, earlier []Earlier, raw []Raw, source func(mock string) bool) (order []string, untold string) {
 	var places []recPlace
 	add := func(p recPlace) string {
+		if !source(p.mock) {
+			return ""
+		}
 		before, untimed := recordedGave(p.at, p.answered, at, p.mock)
 		if untimed != "" {
 			return untimed
@@ -360,16 +401,18 @@ func answeredBefore(q, p recPlace) string {
 
 // servedOrder is the places record's full round gave the application before
 // the call, in the order it gave them: the test case's request first; then
-// what it served (every Earlier, and each Raw it served, whenever recorded),
-// in the one order it served the set's mocks in (Raw.ServedIn, the first and
-// the last of each mock's serves; an exchange's by its payload's,
-// InServeOrder). A recording it did not serve it did not give. untold, where
-// that order cannot be told, says why: a served place the order does not
-// number, beside another it served (two serves it gave in an order keploy
-// cannot establish are unordered, never ordered by when keploy noted them),
-// or a mock served more than once with a serve between its first and its
-// last that is no place's (it may have been that mock's own, unnumbered).
-func servedOrder(earlier []Earlier, raw []Raw) (order []string, untold string) {
+// the candidate sources (source) it served (every Earlier, and each Raw it
+// served, whenever recorded), in the one order it served the set's mocks in
+// (Raw.ServedIn, the first and the last of each mock's serves; an
+// exchange's by its payload's, InServeOrder). A recording it did not serve
+// it did not give. untold, where that order cannot be told, says why: a
+// served source the order does not number, beside another source it served
+// (two serves it gave in an order keploy cannot establish are unordered,
+// never ordered by when keploy noted them), or a source served more than
+// once with a serve between its first and its last that is no place's (it
+// may have been that mock's own, unnumbered). Any other place's serves only
+// number the set's.
+func servedOrder(earlier []Earlier, raw []Raw, source func(mock string) bool) (order []string, untold string) {
 	type serve struct {
 		n    int
 		mock string
@@ -380,9 +423,16 @@ func servedOrder(earlier []Earlier, raw []Raw) (order []string, untold string) {
 	}
 	var serves []serve
 	var spans []span
+	var others []int
 	unordered := ""
 	placed := 0
 	add := func(mock string, first, last int) {
+		if !source(mock) {
+			// In no order the rule reads, its serves still number the
+			// set's: a serve between a source's first and last is placed.
+			others = append(others, first, last)
+			return
+		}
 		placed++
 		if first == 0 {
 			unordered = mock
@@ -420,10 +470,15 @@ func servedOrder(earlier []Earlier, raw []Raw) (order []string, untold string) {
 	})
 	var nums []int
 	for _, v := range serves {
-		if len(nums) == 0 || nums[len(nums)-1] != v.n {
-			nums = append(nums, v.n)
+		nums = append(nums, v.n)
+	}
+	for _, n := range others {
+		if n != 0 {
+			nums = append(nums, n)
 		}
 	}
+	sort.Ints(nums)
+	nums = slices.Compact(nums)
 	for _, s := range spans {
 		// The serves strictly between s's first and last that some place's
 		// first or last numbers: fewer than the numbers between leaves a
