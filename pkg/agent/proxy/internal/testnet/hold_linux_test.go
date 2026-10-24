@@ -15,7 +15,9 @@ import (
 
 // ipv4Binds are the binds a listener of another test could make at port at
 // an IPv4 address: at loopback, at another loopback address and at every
-// address (which net.Listen makes dual-stack where there is IPv6).
+// address (which net.Listen makes dual-stack where there is IPv6), in that
+// order: the every-address bind is last, so a caller that wants only the
+// loopback binds takes the first two.
 func ipv4Binds(port string) []struct{ network, addr string } {
 	return []struct{ network, addr string }{
 		{"tcp", net.JoinHostPort("127.0.0.1", port)},
@@ -48,6 +50,22 @@ func requireForeignBindsRefused(t *testing.T, binds []struct{ network, addr stri
 			_ = ln.Close()
 		}
 		require.ErrorIs(t, err, syscall.EADDRINUSE, "%s, another listener took the port at %s", when, b.addr)
+	}
+}
+
+// requireSharedBindsRefused is requireForeignBindsRefused for a socket that
+// sets SO_REUSEPORT before it binds (OpenShared), as keploy's DNS server does
+// at the port it is given. Two sockets of one user that both set it may share
+// a port, so such a socket is refused a port only where a socket that does
+// not set it, or another user's, is at an address the bind overlaps.
+func requireSharedBindsRefused(t *testing.T, binds []struct{ network, addr string }, when string) {
+	t.Helper()
+	for _, b := range binds {
+		ln, err := OpenShared(b.network, b.addr)
+		if err == nil {
+			_ = ln.Close()
+		}
+		require.ErrorIs(t, err, syscall.EADDRINUSE, "%s, a listener that sets SO_REUSEPORT took the port at %s", when, b.addr)
 	}
 }
 
@@ -119,22 +137,27 @@ func TestASharedPortIsHeldForTheTestsLifeBesideItsOwnListeners(t *testing.T) {
 }
 
 // The port of a listener ListenIPv6Only opens is held at every IPv4 address
-// for the test's life. A listener of another test, made by net.Listen, is
-// refused the port at loopback, at another loopback address and at every
-// address. A dial to the port at 127.0.0.1 is refused. Both hold while the
-// test's listener is open and after it closed.
+// for the test's life. A listener of another test, made by net.Listen or one
+// that sets SO_REUSEPORT, is refused the port at loopback, at another
+// loopback address and at every address. A dial to the port at 127.0.0.1 is
+// refused. All of it holds while the test's listener is open and after it
+// closed. While it is open, a bind at every address overlaps it at [::1],
+// and it refuses that bind whatever the hold does, so only the two loopback
+// binds there ask the hold.
 func TestAnIPv6OnlyListenersPortIsHeldAtEveryIPv4AddressForTheTestsLife(t *testing.T) {
 	ln := ListenIPv6Only(t)
 	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	binds, _ := foreignBinds(port)
 	at4 := []string{net.JoinHostPort("127.0.0.1", port)}
 	requireForeignBindsRefused(t, binds, "while the test listens at [::1]")
+	requireSharedBindsRefused(t, ipv4Binds(port)[:2], "while the test listens at [::1]")
 	requireDialsRefused(t, at4, "while the test listens at [::1]")
 	c, err := net.Dial("tcp", ln.Addr().String())
 	require.NoError(t, err)
 	_ = c.Close()
 	require.NoError(t, ln.Close())
 	requireForeignBindsRefused(t, ipv4Binds(port), "after the test's listener closed")
+	requireSharedBindsRefused(t, ipv4Binds(port), "after the test's listener closed")
 	requireDialsRefused(t, at4, "after the test's listener closed")
 }
 
