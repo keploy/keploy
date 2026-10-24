@@ -824,11 +824,13 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			name = "record: dialled at the handshake"
 		}
 		t.Run(name, func(t *testing.T) {
-			var accepted atomic.Int32
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = ln.Close() })
 			acceptLoop := make(chan struct{})
+			// The client address of each connection the destination
+			// accepted, in the order it accepted them.
+			acceptedFrom := make(chan string, 8)
 			go func() {
 				defer close(acceptLoop)
 				for {
@@ -836,7 +838,7 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 					if err != nil {
 						return
 					}
-					accepted.Add(1)
+					acceptedFrom <- c.RemoteAddr().String()
 					go func() {
 						_, _ = c.Write([]byte("220 mail.test ESMTP\r\n"))
 						_, _ = io.Copy(io.Discard, c)
@@ -854,9 +856,11 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 				book.Answered(n, []netip.Addr{netip.MustParseAddr("127.0.0.1")})
 			}
 			var pre *util.Predialed
+			var dialled []string
 			if held {
 				up, err := util.DialUpstream(context.Background(), nil, "tcp", dst)
 				require.NoError(t, err)
+				dialled = append(dialled, up.LocalAddr().String())
 				pre = util.NewPredialed(dst, up)
 				t.Cleanup(pre.CloseIfUnused)
 			}
@@ -897,19 +901,30 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			got, err := io.ReadAll(app)
 			require.NoError(t, err)
 			require.Empty(t, got, "the application was sent bytes")
-			want := int32(0)
-			if held {
-				want = 1 // the handshake's own dial, never relayed
-			}
-			// Every accept is counted once the accept loop has ended. The
-			// handshake's connection goes first, as handleConnection's
+			// The destination saw only the handshake's own dial (none on
+			// replay), never relayed. It goes first, as handleConnection's
 			// deferred close lets it go at the run's end.
 			if pre != nil {
 				pre.CloseIfUnused()
 			}
+			// A listener hands its connections on in the order they reached
+			// it, and drops one still in its queue when it closes, uncounted.
+			// So take every accept up to a connection dialled after all the
+			// others before closing it.
+			last, err := net.Dial("tcp", dst)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = last.Close() })
+			var reached []string
+			for {
+				from := awaitEvent(t, acceptedFrom, "the destination accepting the connection dialled last")
+				if from == last.LocalAddr().String() {
+					break
+				}
+				reached = append(reached, from)
+			}
+			require.Equal(t, dialled, reached, "the connections the destination accepted")
 			_ = ln.Close()
 			awaitEvent(t, acceptLoop, "the destination's accept loop ending")
-			require.Equal(t, want, accepted.Load())
 			run := p.RealRun()
 			require.Empty(t, run.Incomplete, "its test was charged; the run is not charged again")
 			require.Empty(t, run.Reached)
