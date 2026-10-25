@@ -1073,3 +1073,117 @@ func TestNewWiresParserCanResyncIntoBothTees(t *testing.T) {
 			on.teeC2D.parserCanResync, on.teeD2C.parserCanResync)
 	}
 }
+
+// endedWithConnTee is a tee of the client direction, started, with an out
+// channel of buf chunks and a consumer that is gone once gone is closed. Its
+// endedWithConn notes each call, and whether out had already ended then
+// (closedFirst): a parser that reaches the end must find the mark there.
+type endedWithConnTee struct {
+	*tee
+	gone        chan struct{}
+	calls       atomic.Int32
+	closedFirst atomic.Bool
+}
+
+func newEndedWithConnTee(t *testing.T, capBytes int64, buf int) *endedWithConnTee {
+	t.Helper()
+	e := &endedWithConnTee{gone: make(chan struct{})}
+	e.tee = newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, nil, (&dropRecorder{}).record, nil)
+	e.endedWithConn = func() {
+		e.calls.Add(1)
+		// The test took every chunk off out before it closed the tee, so
+		// out is empty here: a receive that does not block means out ended.
+		select {
+		case _, ok := <-e.readCh():
+			if !ok {
+				e.closedFirst.Store(true)
+			}
+		default:
+		}
+	}
+	e.start(e.gone)
+	t.Cleanup(func() {
+		e.close()
+		e.waitDone()
+	})
+	return e
+}
+
+// take receives the next chunk off out, failing the test if out ended.
+func (e *endedWithConnTee) take(t *testing.T, want string) {
+	t.Helper()
+	c, ok := <-e.readCh()
+	if !ok || string(c.Bytes) != want {
+		t.Fatalf("out gave %q (open %v), want %q", c.Bytes, ok, want)
+	}
+}
+
+// A tee says its stream ended with its connection (Config.EndedWithConnection)
+// only when the forwarder read its source to its end (noteSourceEnded) and the
+// tee lost no chunk, so the stream carries every byte the connection carried.
+// It says so once, after the last chunk and before out ends, where a parser
+// that reaches the end looks. A stream the relay stopped, or one that lost a
+// chunk (refused, or abandoned with its queue when its parser stopped
+// reading), does not carry all of it, and the tee says nothing.
+//
+// Before, no tee said it at all: on the proxy path no stream ended with its
+// connection, and a Couchbase recorder reported every quiet request still
+// waiting at a normal close as left out.
+func TestTee_SaysItsStreamEndedWithItsConnectionOnlyWhenItCarriesAllOfIt(t *testing.T) {
+	t.Run("its source ended and it lost nothing", func(t *testing.T) {
+		e := newEndedWithConnTee(t, 1<<20, 4)
+		e.push(mkChunk("ab"))
+		e.push(mkChunk("cd"))
+		e.take(t, "ab")
+		e.take(t, "cd")
+		e.noteSourceEnded()
+		e.close()
+		if _, ok := <-e.readCh(); ok {
+			t.Fatal("out gave a chunk after the last one")
+		}
+		e.waitDone()
+		if got := e.calls.Load(); got != 1 {
+			t.Fatalf("endedWithConn called %d times, want once", got)
+		}
+		if e.closedFirst.Load() {
+			t.Fatal("out ended before the tee said the stream ended with its connection: a parser at the end does not see it")
+		}
+	})
+	t.Run("the relay stopped it while its source carried on", func(t *testing.T) {
+		e := newEndedWithConnTee(t, 1<<20, 4)
+		e.push(mkChunk("ab"))
+		e.take(t, "ab")
+		e.close()
+		e.waitDone()
+		if got := e.calls.Load(); got != 0 {
+			t.Fatalf("endedWithConn called %d times for a stream its source did not end", got)
+		}
+	})
+	t.Run("a chunk was refused", func(t *testing.T) {
+		e := newEndedWithConnTee(t, 4, 4)
+		e.push(mkChunk("ab"))
+		if e.push(mkChunk("0123456789")) {
+			t.Fatal("the cap took a chunk larger than itself")
+		}
+		e.take(t, "ab")
+		e.noteSourceEnded()
+		e.close()
+		e.waitDone()
+		if got := e.calls.Load(); got != 0 {
+			t.Fatalf("endedWithConn called %d times for a stream that lost a chunk", got)
+		}
+	})
+	t.Run("its parser stopped reading and its queue was abandoned", func(t *testing.T) {
+		e := newEndedWithConnTee(t, 1<<20, 1)
+		e.push(mkChunk("ab"))
+		e.push(mkChunk("cd"))
+		e.push(mkChunk("ef"))
+		close(e.gone)
+		e.noteSourceEnded()
+		e.close()
+		e.waitDone()
+		if got := e.calls.Load(); got != 0 {
+			t.Fatalf("endedWithConn called %d times for a stream whose queue was abandoned", got)
+		}
+	})
+}

@@ -505,6 +505,26 @@ type Config struct {
 	// had closed there. The forward path is untouched either way, and so is
 	// the relay when the parser returns: a parser's return never ends it.
 	EndAtHole func(dir fakeconn.Direction, reason string)
+
+	// EndedWithConnection, when set, says a direction's stream ended because
+	// its connection did, with every byte the connection carried in it: the
+	// forwarder read its source to io.EOF (the peer closed that direction),
+	// and its tee lost no chunk (no refused push, no pause, no abandoned
+	// queue). The tee calls it once that direction's queue is delivered and
+	// before it ends its FakeConn, so a parser that reaches the end sees it.
+	// The caller wires it to supervisor.Session.MarkEndedWithConnection.
+	//
+	// It is not called for a direction the relay stopped while its peer
+	// carried on: the recording stopped (ctx), the other direction ended the
+	// relay (its peer's FIN met a peer that neither answered nor closed
+	// within HalfCloseGrace, or it failed), or a read or write failed. Nor
+	// for one that lost a chunk, or ended at its hole (EndAtHole). The parser
+	// cannot know what such a stream is missing. With it, a parser can
+	// tell the end of what the peer sent from a stop: a request answered
+	// only when it fails (a Couchbase quiet op) is known answered once the
+	// server's stream ended with its connection with no error reply for it.
+	// Nil (the default) says nothing, and every end looks like a stop.
+	EndedWithConnection func(dir fakeconn.Direction)
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

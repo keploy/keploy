@@ -33,8 +33,10 @@ type holeEndProbe struct {
 	marked  [2]bool
 	holeWhy [2]string
 	atHole  [2]bool
-	endedC  [2]chan struct{}
-	fedC    chan struct{}
+	// withConn is what Session.EndedWithConnection said at each end.
+	withConn [2]bool
+	endedC   [2]chan struct{}
+	fedC     chan struct{}
 }
 
 func newHoleEndProbe() *holeEndProbe {
@@ -59,7 +61,9 @@ func (p *holeEndProbe) RecordOutgoing(ctx context.Context, s *integrations.Recor
 				c, err := fc.ReadChunk()
 				if err != nil {
 					why, atHole := sess.EndedAtHole(fakeconn.Direction(d))
+					withConn := sess.EndedWithConnection(fakeconn.Direction(d))
 					p.mu.Lock()
+					p.withConn[d] = withConn
 					p.endErr[d] = err
 					p.marked[d] = sess.IsMockIncomplete()
 					p.holeWhy[d], p.atHole[d] = why, atHole
@@ -106,7 +110,13 @@ type holeEndHarness struct {
 	writeApp  func(t *testing.T, b string)
 	writeDest func(t *testing.T, b string)
 	destSeen  func() string
-	appSeen   func() string
+	// destFed is signalled each time the destination receives bytes.
+	destFed <-chan struct{}
+	appSeen func() string
+	// closeDest closes the destination's end, as a server that closes the
+	// connection does; stop cancels the recording.
+	closeDest func()
+	stop      func()
 	// returned is closed once recordViaSupervisor has returned.
 	returned <-chan struct{}
 }
@@ -124,6 +134,7 @@ func newHoleEndHarness(t *testing.T, parser integrations.Integrations, perConnCa
 	// synchronous pipe and nothing reaches a tee.
 	var destMu sync.Mutex
 	var destBuf []byte
+	destFed := make(chan struct{}, 64)
 	drain := func(c net.Conn, keep func([]byte)) {
 		buf := make([]byte, 4096)
 		for {
@@ -140,6 +151,10 @@ func newHoleEndHarness(t *testing.T, parser integrations.Integrations, perConnCa
 		destMu.Lock()
 		destBuf = append(destBuf, b...)
 		destMu.Unlock()
+		select {
+		case destFed <- struct{}{}:
+		default:
+		}
 	})
 	var appMu sync.Mutex
 	var appBuf []byte
@@ -185,12 +200,15 @@ func newHoleEndHarness(t *testing.T, parser integrations.Integrations, perConnCa
 			defer destMu.Unlock()
 			return string(destBuf)
 		},
+		destFed: destFed,
 		appSeen: func() string {
 			appMu.Lock()
 			defer appMu.Unlock()
 			return string(appBuf)
 		},
-		returned: done,
+		closeDest: func() { _ = destSvc.Close() },
+		stop:      cancel,
+		returned:  done,
 	}
 }
 
