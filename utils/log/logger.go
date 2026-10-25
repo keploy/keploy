@@ -530,9 +530,10 @@ func QuietConsole() (*zap.Logger, error) {
 		logger := zap.New(newRedactingCore(core))
 		return reattachDebugFileSink(logger), nil
 	}
-	// File: every level in full zap format.
+	// File: every level in full zap format, with the Show field stripped
+	// so it does not appear in the log file.
 	fileSink := zapcore.AddSync(lf)
-	fc := consoleCore(LogCfg, fileSink, LogCfg.Level)
+	fc := cleanFileCore{consoleCore(LogCfg, fileSink, LogCfg.Level)}
 
 	// Console: only Show-marked lines and WARN/ERROR, as plain
 	// "keploy: <text>" lines.
@@ -554,15 +555,20 @@ func QuietConsole() (*zap.Logger, error) {
 // is checked.
 type quietConsoleCore struct {
 	out *os.File
+	// withFields are fields added via logger.With() — context fields like
+	// the mock-set name. A Show marker there would show every line the
+	// sub-logger writes, which is not the intent; With fields are checked
+	// anyway, so a logger.With(log.Show("x")).Info("y") still shows.
+	withFields []zapcore.Field
 }
 
 func (c *quietConsoleCore) Enabled(zapcore.Level) bool { return true }
 
 func (c *quietConsoleCore) With(fields []zapcore.Field) zapcore.Core {
-	// Fields added via logger.With() are not Show markers — they are
-	// context fields like the mock-set name. The quiet core carries no
-	// state from them: it checks each Write's fields for Show.
-	return c
+	cp := &quietConsoleCore{out: c.out, withFields: make([]zapcore.Field, 0, len(c.withFields)+len(fields))}
+	cp.withFields = append(cp.withFields, c.withFields...)
+	cp.withFields = append(cp.withFields, fields...)
+	return cp
 }
 
 func (c *quietConsoleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
@@ -572,15 +578,29 @@ func (c *quietConsoleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *z
 
 func (c *quietConsoleCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	// Show-marked line: print the Show text.
-	for i := range fields {
-		if fields[i].Key == showKey {
-			fmt.Fprintf(c.out, "keploy: %s\n", fields[i].String)
+	all := append(c.withFields, fields...)
+	for i := range all {
+		if all[i].Key == showKey {
+			fmt.Fprintf(c.out, "keploy: %s\n", all[i].String)
 			return nil
 		}
 	}
-	// WARN/ERROR without Show: print the message.
+	// WARN/ERROR without Show: print the message with any error details.
 	if ent.Level >= zapcore.WarnLevel {
-		fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), ent.Message)
+		msg := ent.Message
+		for i := range all {
+			if all[i].Type == zapcore.ErrorType && all[i].Interface != nil {
+				msg += ": " + all[i].Interface.(error).Error()
+			}
+			if all[i].Key == "next_step" {
+				// A next_step field carries the actionable fix; put it on
+				// its own line so the agent can read it.
+				fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), msg)
+				fmt.Fprintf(c.out, "keploy: NEXT  fix: %s\n", all[i].String)
+				return nil
+			}
+		}
+		fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), msg)
 		return nil
 	}
 	// INFO/DEBUG without Show: console stays silent.
@@ -588,6 +608,41 @@ func (c *quietConsoleCore) Write(ent zapcore.Entry, fields []zapcore.Field) erro
 }
 
 func (c *quietConsoleCore) Sync() error { return nil }
+
+// stripShowField returns fields without the Show marker, for cores that
+// should not carry the internal field in their output (the log file).
+func stripShowField(fields []zapcore.Field) []zapcore.Field {
+	for i := range fields {
+		if fields[i].Key == showKey {
+			out := make([]zapcore.Field, 0, len(fields)-1)
+			out = append(out, fields[:i]...)
+			out = append(out, fields[i+1:]...)
+			return out
+		}
+	}
+	return fields
+}
+
+// cleanFileCore wraps a zapcore.Core and strips the Show field from each
+// Write so it does not appear in the log file.
+type cleanFileCore struct {
+	zapcore.Core
+}
+
+func (c cleanFileCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
+	return c.Core.Write(ent, stripShowField(fields))
+}
+
+func (c cleanFileCore) With(fields []zapcore.Field) zapcore.Core {
+	return cleanFileCore{c.Core.With(stripShowField(fields))}
+}
+
+func (c cleanFileCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	if c.Core.Enabled(ent.Level) {
+		return ce.AddCore(ent, c)
+	}
+	return ce
+}
 
 func AddMode(mode string) (*zap.Logger, error) {
 	ensureLogCfg()
