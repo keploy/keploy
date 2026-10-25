@@ -1684,10 +1684,13 @@ func stagedNamed(t *testing.T, mm *proxyPkg.MockManager, name string) *models.Mo
 // for a test's own recordings whether the agent holds them resident or on
 // disk, and on a copy: the store's recording is not changed. It holds for
 // the recordings the proxy staged at the set's start too, the pool's: the
-// pool the retry cycles are served between tests carries it. The learning
-// comes only with the learn step ended: on a filter that does not end it,
-// it is refused, and nothing is served. A proxy that cannot put it on its
-// staged recordings is refused before anything is loaded.
+// pool the retry cycles are served between tests carries it, through every
+// later filter of the set, each of which says the learn step ended and
+// carries none: the retry cycle's test cases, or the deferred streaming
+// pass's, and the pool between them. The learning comes only with the learn
+// step ended: on a filter that does not end it, it is refused, and nothing
+// is served. A proxy that cannot put it on its staged recordings is refused
+// before anything is loaded.
 func TestARetryCycleIsServedTheRecordingsWithWhatTheFirstCycleLearned(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	ctx := context.Background()
@@ -1729,6 +1732,14 @@ func TestARetryCycleIsServedTheRecordingsWithWhatTheFirstCycleLearned(t *testing
 			require.NotContains(t, first.Spec.ReqBodyNoise, "body.beat", "the staged recording itself was changed")
 			open.LearnEnded = true
 			require.NoError(t, a.UpdateMockParams(ctx, open))
+			// Every filter after says the learn step ended, and carries no
+			// learning: the test case it opens (above) and the pool after it,
+			// a retry cycle's or the deferred streaming pass's, are served
+			// the kept learning all the same, until the next staging.
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}, LearnEnded: true}))
+			after := stagedNamed(t, p.mm, "mock-pool")
+			require.NotNil(t, after, "the pool is served between test cases")
+			require.Contains(t, after.Spec.ReqBodyNoise, "body.beat", "the pool after a test case opened with the learn step ended is served its recording without what the first cycle learned on it")
 			served := p.owned["test-1"]
 			require.Len(t, served, 2, "test-1 opened twice")
 			require.Len(t, served[0], 1)

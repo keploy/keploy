@@ -79,7 +79,11 @@ func (f *filedBases) base(epoch uint64, name string) *models.Mock {
 // out, does not: variables or binds a learn step learned on it
 // (MockSpec.Learned, LearnedBinds; a recording the store hands out carries
 // none), a noise path or a noise pattern base lacks (an empty pattern list
-// ignores the whole field), or a variable base lacks.
+// ignores the whole field), or a variable base lacks. No parser in the tree
+// reaches three of these today, and they have no row: a new pattern on a
+// noise path base holds, a whole-field noise over base's patterns (every
+// noise merge keeps the keys and patterns it holds), and learned binds with
+// no learned variable (LearnedBinds come only with Learned).
 func learnsBeyond(base, caller *models.Mock) bool {
 	if caller == nil {
 		return false

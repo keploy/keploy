@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 )
 
 // aheadInstr is the stand-in agent of a replay under exact serving whose app
@@ -605,6 +606,56 @@ func TestRunTestSet_AConsumeThatLearnedAfterTheLearnStepEndedLeavesItsTestWithNo
 			if other := final("test-3"); strings.Contains(other.FailureInfo.LearningNotKept, "learn step ended") || len(other.VerdictUnknown()) > 0 {
 				t.Fatalf("test-3, whose consumes learned nothing after the end, lost its verdict: %+v", other.FailureInfo)
 			}
+			// The set, whose other test cases fail here (aheadRun's test-1),
+			// keeps FAILED beside it, with the note
+			// (TestRunTestSet_ASetWhoseTestLearnedAfterTheEndIsNotJudgedPassed
+			// pins a set with no FAILED test).
+			h.report.mu.Lock()
+			setStatus, failed := h.report.report.Status, slices.ContainsFunc(h.report.report.Tests, func(r models.TestResult) bool { return r.Status == models.TestStatusFailed })
+			h.report.mu.Unlock()
+			if want := models.TestSetStatusFailed; !failed || setStatus != string(want) {
+				t.Fatalf("the set is %s beside a FAILED test (%v); want %s", setStatus, failed, want)
+			}
+		})
+	}
+}
+
+// A set has no verdict its tests do not give: beside a test that consumed a
+// mock a parser learned on after the set's learn step ended
+// (MockState.LearnedAfterEnd), whose run leaned on learning keploy does not
+// keep, a set with no FAILED test is not judged (INTERNAL_ERR), never PASSED,
+// and the run goes on to the next set; one with a FAILED test keeps FAILED.
+func TestRunTestSet_ASetWhoseTestLearnedAfterTheEndIsNotJudgedPassed(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("another reason fails it: %v", failing), func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 1, 0)
+			mappedTo(h, sessionTierHTTP("mock-1"))
+			hooks := prHooks{consumed: []models.MockState{{Name: "mock-1", Kind: models.HTTP, Type: "HTTP_CLIENT", Lifetime: models.LifetimeSession, LearnedAfterEnd: true}}}
+			if failing {
+				hooks.wrongBody = map[string]bool{"test-1": true}
+			}
+			h.replayer.hookImpl = hooks
+			status := h.run(t)
+			row := resultOf(t, h, "test-1")
+			if !strings.Contains(row.FailureInfo.LearningNotKept, "after the test set's learn step ended") {
+				t.Fatalf("test-1's row does not say a parser learned on mock-1 after the learn step ended: %q", row.FailureInfo.LearningNotKept)
+			}
+			if failing {
+				if status != models.TestSetStatusFailed || row.Status != models.TestStatusFailed {
+					t.Fatalf("set %s, test-1 %s; a set whose test FAILED keeps FAILED", status, row.Status)
+				}
+				return
+			}
+			if status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+				t.Fatalf("set %s (not judged: %v); want INTERNAL_ERR, not judged, beside a test with no verdict", status, h.replayer.notJudged("test-set-0"))
+			}
+			if reason := h.report.report.FailureReason; !strings.Contains(reason, "not judged") || !strings.Contains(reason, "test-1") {
+				t.Fatalf("failure reason %q does not say the set is not judged, and for which test", reason)
+			}
+			if abortAfterTestSet(status, utils.Native, true) {
+				t.Fatal("an unjudged set must let the run go on to the next set")
+			}
 		})
 	}
 }
@@ -802,20 +853,32 @@ func TestEveryTestCaseBeginsOverThePoolOnThePlainReplaysPaths(t *testing.T) {
 // the pool's with the learn step ended, after the gap after the first
 // cycle's last test case is read and before the retry cycle's first test
 // case opens, carries exactly the learning the round keeps
-// (models.MockFilterParams.Learned), and none other does. Without retry
-// cycles no filter carries any.
+// (models.MockFilterParams.Learned), and none other does. A set with no
+// retry cycle whose streaming test case was recorded before another (test-3,
+// before test-4) ends its learn step before its deferred streaming pass, and
+// is served it the same way, before that test case opens: with the learn
+// step ended the agent hands its staged recordings out as staged, so without
+// it the pass would be judged with nothing learned. Without either no filter
+// carries any.
 func TestRunTestSet_TheRetryCyclesAreServedWhatTheFirstCycleLearned(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, tc := range []struct {
-		retry  bool
-		unread string
-	}{{true, ""}, {false, ""}, {true, "test-2"}} {
+		retry       bool
+		unread      string
+		earlyStream bool
+	}{{true, "", false}, {false, "", false}, {true, "test-2", false}, {false, "", true}} {
 		retry := tc.retry
-		t.Run(fmt.Sprintf("retry=%v,unread=%q", retry, tc.unread), func(t *testing.T) {
+		t.Run(fmt.Sprintf("retry=%v,unread=%q,streamingRecordedBeforeAnother=%v", retry, tc.unread, tc.earlyStream), func(t *testing.T) {
 			var kept map[string]models.MockState
-			_, _, instr := aheadRun(t, aheadOpts{retry: retry, learn: true, learnedOnce: true, gapLearns: true, unreadAt: tc.unread, persisted: func(s map[string]models.MockState) {
+			o := aheadOpts{retry: retry, learn: true, learnedOnce: true, gapLearns: true, unreadAt: tc.unread, earlyStream: tc.earlyStream, persisted: func(s map[string]models.MockState) {
 				kept = s
-			}})
+			}}
+			if tc.earlyStream {
+				// The pass consumes a heartbeat again, learning nothing:
+				// what it is served is what was learned before.
+				o.reconsumed = "hb-1"
+			}
+			_, _, instr := aheadRun(t, o)
 			instr.mu.Lock()
 			sends := append([]models.MockFilterParams(nil), instr.allParams...)
 			instr.mu.Unlock()
@@ -838,21 +901,29 @@ func TestRunTestSet_TheRetryCyclesAreServedWhatTheFirstCycleLearned(t *testing.T
 					opened[p.Exact.Test] = true
 				}
 			}
-			if !retry {
+			if !retry && !tc.earlyStream {
 				if at >= 0 {
-					t.Fatalf("a set with no retry cycle was sent learning on filter %d: %+v", at, sends[at].Learned)
+					t.Fatalf("a set with no retry cycle, its streaming test cases recorded after the others, was sent learning on filter %d: %+v", at, sends[at].Learned)
 				}
 				return
 			}
 			if at < 0 {
-				t.Fatal("no filter served the retry cycles what the first cycle learned")
+				t.Fatal("no filter served the test cases run with the learn step ended what the set learned before")
 			}
 			p := sends[at]
 			if !p.LearnEnded || p.Exact == nil || p.Exact.Test != "" || p.Exact.Stage {
 				t.Fatalf("the learning came on filter %d, not the pool's with the learn step ended: %+v", at, p)
 			}
+			if !retry {
+				// The deferred streaming pass's test case opens for the
+				// first time, after the learning.
+				reopen = slices.IndexFunc(sends, func(p models.MockFilterParams) bool { return p.Exact != nil && p.Exact.Test == "test-3" })
+				if before := slices.IndexFunc(sends, func(p models.MockFilterParams) bool { return p.Exact != nil && p.Exact.Test == "test-4" }); before < 0 || reopen < before {
+					t.Fatalf("precondition: test-4 opens before test-3, the streaming one (%d, %d)", before, reopen)
+				}
+			}
 			if !(ended < at && at < reopen) {
-				t.Fatalf("the learning came on filter %d; after the learn step ended (%d) and before the retry cycle's first opening (%d)", at, ended, reopen)
+				t.Fatalf("the learning came on filter %d; after the learn step ended (%d) and before the first opening it ends it for (%d)", at, ended, reopen)
 			}
 			var want, got []string
 			for n, st := range kept {

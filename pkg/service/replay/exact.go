@@ -715,8 +715,9 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 // whose pass needs drift learned fails there). A set with no retry cycle ends
 // it before that pass when a streaming test case was recorded before a test
 // case that ran ahead of it: the pass then runs out of recorded order too.
-// The retry cycles are judged with what the round keeps of the first cycle's
-// learning (serveFirstCycleLearned). A test whose consume a parser learned
+// The retry cycles, and a streaming pass so run out of recorded order, are
+// judged with what the round keeps of the first cycle's learning
+// (serveFirstCycleLearned). A test whose consume a parser learned
 // on all the same once it ended (MockState.LearnedAfterEnd: a parser that
 // does not read the end) has no verdict, and its row says why
 // (markLearnedAfterEnd): nothing keeps that learning. A no-op on a nil plan
@@ -747,8 +748,10 @@ func (r *Replayer) endFirstCycleLearning(ctx context.Context, plan *exactPlan, n
 }
 
 // serveFirstCycleLearned has the agent serve the set's retry cycles what the
-// replay keeps of its first cycle's learning (kept, by mock name): the pool
-// served again ahead of next, the cycle's first test case, its filter
+// replay keeps of its first cycle's learning (kept, by mock name), or the
+// deferred streaming pass of a set with none, run out of recorded order,
+// what the set's other test cases learned: the pool served again ahead of
+// next, the cycle's (or the pass's) first test case, its filter
 // carrying, with the learn step ended, every state of kept that carries
 // learning, in name order (models.MockFilterParams.Learned). A test that
 // passed in the first cycle only through drift its learn step learned is so

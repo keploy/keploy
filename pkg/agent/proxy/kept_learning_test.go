@@ -166,6 +166,56 @@ func TestARetryCycleIsNotServedWhatTheFirstCycleFiledOnATreesRecording(t *testin
 	}
 }
 
+// What a matcher filed in one staging is that staging's: the base a filed
+// copy is handed out on once the learn step has ended (filedBases) is never
+// another staging's. Mock names restart in every set, so the next set's
+// recording of the same name, which its first cycle filed nothing over, is
+// served in its retry cycles as that set staged it, never as the previous
+// set's recording, with the noise and variables that set recorded on it: a
+// call only those answer would be answered through them (a false green).
+func TestARetryCycleIsNotServedWhatAnEarlierStagingFiled(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const answered = `200 {"ok":true}`
+	// The set before's recording of beat ignores "at" (recorded noise).
+	before := beatMock("beat")
+	before.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+	mm := stagedManager(t, nil, []*models.Mock{before})
+	mm.ServeExactPool("-", []string{"beat"})
+	var tree *models.Mock
+	un, _ := mm.GetUnFilteredMocks()
+	for _, mk := range un {
+		if mk.Name == "beat" {
+			tree = mk
+		}
+	}
+	if tree == nil {
+		t.Fatal("precondition: the pool holds no beat")
+	}
+	filed := *tree
+	filed.TestModeInfo.IsFiltered = false
+	if !mm.UpdateUnFilteredMock(tree, &filed) {
+		t.Fatal("precondition: the set before's matcher's copy is not filed")
+	}
+	if got := beatAt(t, mm, "t-2"); got != answered {
+		t.Fatalf("precondition: the set before answers a drifted at through its recorded noise: %s", got)
+	}
+
+	// The next set, staged afresh with the learn step taken up again: its
+	// first cycle files nothing over its own beat, which records no noise.
+	mm.SetLearnEnded(false)
+	mm.SetMocksWithWindow(nil, []*models.Mock{beatMock("beat")}, models.BaseTime, time.Now())
+	mm.ServeExactPool("-", []string{"beat"})
+	// Its retry cycle (a call its first cycle answers would file a copy).
+	mm.SetLearnEnded(true)
+	mm.ServeExactPool("-", []string{"beat"})
+	if got := beatAt(t, mm, "t-3"); got == answered {
+		t.Fatalf("a retry cycle answered a drifted call through the noise the set before recorded on its recording of the same name (a false green): %s", got)
+	}
+	if got := beatAt(t, mm, "t-1"); got != answered {
+		t.Fatalf("the retry cycle misses the recorded call: %s", got)
+	}
+}
+
 // A staged recording read twice in a retry cycle is the same learned copy,
 // pooled so matchers copy it rather than edit it, through every read exact
 // serving hands staged recordings out by: the tiers, a key's stateless

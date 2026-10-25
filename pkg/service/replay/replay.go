@@ -4460,9 +4460,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// after what the application consumed since the set's last other
 		// test case is read, and what the set keeps is what was learned
 		// before it (firstCycleLearned). Its streaming test cases are
-		// judged with that learning on the recordings and learn nothing;
-		// one that needs drift learned fails. A set that ran retry cycles
-		// ended its learn step before them.
+		// judged with as much of that learning on the recordings as the
+		// replay keeps (serveFirstCycleLearned), and learn nothing; one
+		// that needs drift learned fails. A set that ran retry cycles
+		// ended its learn step, and was served that learning, before them.
 		if r.learning() && firstCycleLearned == nil && streamingOutOfOrder {
 			gap, err := r.endFirstCycleLearning(runTestSetCtx, r.exact, streamingTests[0].testCase.Name)
 			if err != nil {
@@ -4483,6 +4484,16 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			r.logger.Info("keploy runs the test set's streaming test cases after its others, out of the order they were recorded in, without the learn step: they are judged with what the others learned on the recordings, and learn nothing; a streaming test case that needs a varying field learned fails",
 				zap.String("testSetID", testSetID),
 				zap.String("next_step", "record each streaming test case after the set's other test cases, or in a test set of its own, to have its varying fields learned"))
+			// The pass is served the recordings with what the others
+			// learned on them, as much as the replay keeps (keptLearning),
+			// as a set's retry cycles are: with the learn step ended the
+			// agent hands its staged recordings out as staged, so without
+			// it a streaming test case would be judged with nothing learned.
+			if err := r.serveFirstCycleLearned(runTestSetCtx, r.exact, streamingTests[0].testCase.Name, r.keptLearning(firstCycleLearned, consumers)); err != nil {
+				r.logger.Warn("keploy could not serve the test set's streaming test cases what its other test cases learned (the error names what the keploy agent cannot do): they are judged without that learning, so one that would pass only through drift the others learned may fail, and keeps that failure",
+					zap.String("testSetID", testSetID), zap.Error(err),
+					zap.String("next_step", "run keploy record again, or record each streaming test case after the set's other test cases"))
+			}
 		}
 
 		for i, deferred := range streamingTests {
