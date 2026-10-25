@@ -33,6 +33,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
 #                           answer (OBSOLETE, not judged, its set INTERNAL_ERR)
 #                           -> FAILED (its set FAILED). Both runs exit
 #                           non-zero: a demoted wrong answer is never a pass.
+#                           --strict-failure keeps them FAILED too, and each
+#                           prints its diff (step 11d).
 #
 # Neither phase is sufficient alone — a writer stuck at "checked" passes phase 3
 # and a writer stuck at "not checked" passes phase 1-2. Read the long comment
@@ -905,6 +907,67 @@ if ! jq -es 'length > 0 and all(.dependencies_checked == true and ((.effects // 
 fi
 echo "✓ the knob changed the status, not the dependency data"
 
+# 11d. --STRICT-FAILURE, THE OTHER VETO, AND WHAT THE CONSOLE SAYS OF IT
+#      (keploy#4743). Step 9's run again, with --strict-failure in place of
+#      --assert-dependencies: a wrong answer whose mock set diverged stays
+#      FAILED (resolveTestOutcome), its set FAILED, and the run red. Its
+#      response diff is the only explanation of that verdict, so each test's
+#      "Testrun failed" line and its status diff (the 299 step 9 wrote into
+#      the recording) must reach the console. They were suppressed there as
+#      the re-record noise of a demoted test: the suppression knew
+#      --assert-dependencies and not --strict-failure, so the run failed on
+#      tests the console said nothing about, and the mock-mismatch line was
+#      all it printed.
+rm -rf ./knob-run/keploy/reports
+KEPLOY_STRICT_MOCK_WINDOW=1 "$REPLAY_BIN" test -c "./http-pokeapi" --path ./knob-run --delay 7 --strict-failure --generateGithubActions=false 2>&1 | tee strict_failure_logs.txt
+strict_failure_rc=${PIPESTATUS[0]}
+if grep "WARNING: DATA RACE" strict_failure_logs.txt; then
+    echo "::error::Race condition detected in the --strict-failure run"
+    exit 1
+fi
+shopt -s nullglob
+strict_failure_reports=( ./knob-run/keploy/reports/test-run-*/test-set-*-report.yaml )
+shopt -u nullglob
+if [ ${#strict_failure_reports[@]} -eq 0 ]; then
+    echo "::error::the per-test-tier --strict-failure run wrote no report"
+    exit 1
+fi
+"$REPLAY_BIN" report --path ./knob-run --format json > ndjson_strict_failure.txt 2> ndjson_strict_failure_err.txt
+if [ ! -s ndjson_strict_failure.txt ]; then
+    echo "::error::keploy report --format json produced no NDJSON after the per-test-tier --strict-failure run"
+    cat ndjson_strict_failure_err.txt
+    exit 1
+fi
+if ! jq -es 'length > 0 and all(.status == "FAILED")' ndjson_strict_failure.txt > /dev/null; then
+    echo "::error::--strict-failure did not keep the wrong answers FAILED. The baseline (step 9) demoted these same tests to OBSOLETE; --strict-failure vetoes that demotion."
+    jq -s 'map({test_case_id, status, verdict_unknown, failure_categories})' ndjson_strict_failure.txt
+    exit 1
+fi
+strict_failure_set_statuses=$(yq -N '.status' "${strict_failure_reports[@]}" | sort -u | tr '\n' ' ')
+if [ "$strict_failure_set_statuses" != "FAILED " ] || [ "$strict_failure_rc" -eq 0 ]; then
+    echo "::error::--strict-failure must leave the sets FAILED and the run red: its sets are '$strict_failure_set_statuses' and it exited $strict_failure_rc (must be non-zero)."
+    tail -40 strict_failure_logs.txt
+    exit 1
+fi
+# The console, read without its colour codes: each FAILED test's line, and a
+# status diff for every one of them.
+strict_failure_console=$(sed -E 's/\x1b\[[0-9;]*m//g' strict_failure_logs.txt)
+for tcid in $(jq -r '.test_case_id' ndjson_strict_failure.txt); do
+    if ! grep -qF "Testrun failed for testcase with id: \"$tcid\"" <<<"$strict_failure_console"; then
+        echo "::error::--strict-failure failed $tcid, and the console printed no 'Testrun failed' line or diff for it: a red test with nothing to say why (keploy#4743)."
+        grep -n "mock mapping mismatch\|Testrun" <<<"$strict_failure_console" | head -20
+        exit 1
+    fi
+done
+strict_failure_tests=$(jq -s 'length' ndjson_strict_failure.txt)
+strict_failure_status_diffs=$(grep -ciF 'expect status' <<<"$strict_failure_console" || true)
+if [ "$strict_failure_status_diffs" -lt "$strict_failure_tests" ] || ! grep -qw '299' <<<"$strict_failure_console"; then
+    echo "::error::--strict-failure failed $strict_failure_tests test(s) whose status differs, and the console printed $strict_failure_status_diffs status diff(s), or none showing the recorded 299: each must print its own."
+    grep -n -A8 'Testrun failed' <<<"$strict_failure_console" | head -40
+    exit 1
+fi
+echo "✓ --strict-failure kept the demoted wrong answers FAILED (set FAILED, exit $strict_failure_rc) and printed each one's diff"
+
 # ---------------------------------------------------------------------------
 # PHASE 4 — THE PROVEN SWITCH (KEPLOY_PROVEN=1, the proven model's staging
 # gate). A test fails when one of its calls got no recorded answer or when it
@@ -1182,7 +1245,7 @@ echo "    vanished dependency as MISSING, the inert warning stayed silent, and"
 echo "    the demoted wrong answers were not judged (OBSOLETE, verdict_unknown, set"
 echo "    INTERNAL_ERR for the stale mapping, run red), and --assert-dependencies"
 echo "    moved them to FAILED (set FAILED), which no knob-independent label can"
-echo "    fake;"
+echo "    fake; --strict-failure kept them FAILED too and printed each one's diff;"
 echo "  - under KEPLOY_PROVEN=1 a test owns every data-plane mock its mapping"
 echo "    lists: the unmutated recording replays green, and a test fails when it"
 echo "    does not make a call it recorded or a call got no recorded answer."
