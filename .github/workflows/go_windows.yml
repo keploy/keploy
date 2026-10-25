@@ -90,3 +90,14 @@ jobs:
       - name: Test the Windows stop (amd64)
         run: go test -count=1 -run "TestTheWindowsStopSaysItKilled" ./utils/
         shell: cmd
+
+      # The temp-dir CA sweep's Windows open (legacy_cleanup_windows.go): a
+      # ca.crt* symlink or directory is skipped and kept, a real leaked copy
+      # is read and removed, and a file over the read cap is kept. Only these
+      # rows of ./pkg/agent/proxy/tls/ run here: the package as a whole has
+      # not been shown to pass on Windows. They were cross-compiled, not run,
+      # before being listed (no Windows host or Wine was at hand): this job's
+      # run on the PR that added them is their first.
+      - name: Test the temp-dir CA sweep (amd64)
+        run: go test -count=1 -run "TestLegacyTempSweepWindowsSkipsALinkAndADir|TestLegacyTempSweepCapsTheRead|TestFileIsExactlyCert" ./pkg/agent/proxy/tls/
+        shell: cmd

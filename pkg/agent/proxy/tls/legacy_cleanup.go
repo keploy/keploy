@@ -6,6 +6,9 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,6 +122,11 @@ func fileIsExactlyCert(path string, fp [32]byte) bool {
 	if err != nil {
 		return false
 	}
+	return pemIsExactlyCert(data, fp)
+}
+
+// pemIsExactlyCert is fileIsExactlyCert on bytes already read.
+func pemIsExactlyCert(data []byte, fp [32]byte) bool {
 	var certDER []byte
 	rest := data
 	count := 0
@@ -231,7 +239,18 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 		case strings.HasPrefix(name, "ca.crt"):
 			// Fingerprint-gated: only the old client's temp copy of the retired
 			// CA, never an unrelated file that happens to start with "ca.crt".
-			if fileIsExactlyCert(p, fp) {
+			// Any local user can create an entry of that name in the shared
+			// temp dir, and this runs as root inside every setup, so it reads
+			// only a regular file, bounded: a FIFO there would block the open
+			// forever, a link would be followed out of the temp dir, and a huge
+			// file would be read whole into memory.
+			data, err := readRegularTempFile(p, maxLegacyTempCertBytes)
+			if err != nil {
+				logger.Debug("skipped a temp-dir entry named like the old client's CA copy",
+					zap.String("path", p), zap.Error(err))
+				continue
+			}
+			if pemIsExactlyCert(data, fp) {
 				if err := os.Remove(p); err == nil {
 					logger.Debug("removed a leaked legacy CA temp file", zap.String("path", p))
 				}
@@ -244,6 +263,82 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 				logger.Debug("removed a leaked keploy Java truststore", zap.String("path", p))
 			}
 		}
+	}
+}
+
+// maxLegacyTempCertBytes caps the read of a temp-dir ca.crt* entry. The old
+// client's copy was one PEM certificate, about 1 KB, so a file over the cap is
+// not that copy.
+const maxLegacyTempCertBytes = 64 << 10
+
+// errTempEntryNotRegular marks a temp-dir entry skipped for its type.
+var errTempEntryNotRegular = errors.New("not a regular file")
+
+// readRegularTempFile reads path, an entry of the shared temp dir, only if it
+// is a regular file, and at most limit bytes of it: a longer file is an error.
+// The Lstat looks at the entry itself, so a FIFO, socket, device, symlink or
+// directory is skipped without being opened. readOpenedRegular then holds the
+// same rule for an entry swapped in after the Lstat.
+//
+// A stated limit: a FUSE mount on a ca.crt* entry. Root reaches another
+// user's FUSE mount only if root enabled user_allow_other in /etc/fuse.conf
+// (off by default; without it the kernel refuses root with EACCES before the
+// daemon is asked). With it on, a daemon that never answers stalls this Lstat
+// or the open, as it would any root path walk into that mount.
+func readRegularTempFile(path string, limit int64) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is a %s: %w", path, fileKind(fi.Mode()), errTempEntryNotRegular)
+	}
+	return readOpenedRegular(path, limit)
+}
+
+// readOpenedRegular opens path without following a symlink and without
+// blocking (openNoFollowNonBlocking), and reads it only if the opened file is
+// regular, at most limit bytes.
+func readOpenedRegular(path string, limit int64) ([]byte, error) {
+	f, err := openNoFollowNonBlocking(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is a %s: %w", path, fileKind(fi.Mode()), errTempEntryNotRegular)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
+	}
+	return data, nil
+}
+
+// fileKind names the type of a non-regular file for a log line.
+func fileKind(m os.FileMode) string {
+	switch {
+	case m&os.ModeSymlink != 0:
+		return "symbolic link"
+	case m&os.ModeNamedPipe != 0:
+		return "named pipe (FIFO)"
+	case m&os.ModeSocket != 0:
+		return "socket"
+	case m&os.ModeCharDevice != 0:
+		return "character device"
+	case m&os.ModeDevice != 0:
+		return "device"
+	case m.IsDir():
+		return "directory"
+	default:
+		return "non-regular file (" + m.Type().String() + ")"
 	}
 }
 
