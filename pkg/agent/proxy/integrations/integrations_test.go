@@ -1,6 +1,9 @@
 package integrations
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // A call's mark is moved, at a later read of the round, by another staging
 // or another boundary count of the round, and by nothing else: not by more
@@ -53,6 +56,39 @@ func TestACallsMarkIsMovedByAnotherStagingOrBoundaryOfTheRound(t *testing.T) {
 		c := s.CallRound()
 		if got, known := c.Round(); !known || got != want || c.MovedSince(at) {
 			t.Errorf("%s: a round snapshot's call round reads %+v (known %v), moved by its own read %v; want %+v", name, got, known, c.MovedSince(at), want)
+		}
+	}
+}
+
+// A view's sequence of a reusable request walks, in a test with a recorded
+// window, the recordings the window holds; with none in it, the one in force
+// when the test began (the last before it), else the first; between tests,
+// and in a test with no window, every one.
+func TestASequenceWalksTheOpenTestsRecordedWindow(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	at := func(secs ...int) func(int) time.Time {
+		return func(i int) time.Time { return t0.Add(time.Duration(secs[i]) * time.Second) }
+	}
+	in := func(from, to int) SequenceView {
+		return SequenceView{Test: "T", Start: t0.Add(time.Duration(from) * time.Second), End: t0.Add(time.Duration(to) * time.Second)}
+	}
+	for _, c := range []struct {
+		name   string
+		v      SequenceView
+		secs   []int
+		lo, hi int
+	}{
+		{"between tests", SequenceView{}, []int{1, 2, 3}, 0, 3},
+		{"a test with no window", SequenceView{Test: "T"}, []int{1, 2, 3}, 0, 3},
+		{"the window's own", in(2, 3), []int{1, 2, 3, 4}, 1, 3},
+		{"bounds included", in(1, 4), []int{1, 2, 3, 4}, 0, 4},
+		{"none in it: the last before", in(5, 6), []int{1, 2, 7}, 1, 2},
+		{"none before or in it: the first", in(0, 0), []int{1, 2}, 0, 1},
+		{"none recorded", in(1, 2), nil, 0, 0},
+	} {
+		lo, hi := c.v.Span(len(c.secs), at(c.secs...))
+		if lo != c.lo || hi != c.hi {
+			t.Errorf("%s: span [%d, %d); want [%d, %d)", c.name, lo, hi, c.lo, c.hi)
 		}
 	}
 }

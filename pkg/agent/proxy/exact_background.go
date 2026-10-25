@@ -361,7 +361,7 @@ func (v *exactView) spentBackground(name string) bool {
 
 // BackgroundCursor is, under the background rules, the stateful cursor of
 // the set's background (integrations.BackgroundCursor): the one the calls
-// between tests advance, under the pool views' key (exactCursorKey), which a
+// between tests advance, under the pool views' key (cursorSlotIn), which a
 // call inside a test that a background recording answers reads and advances
 // too. The background's recorded sequence is then one whether its calls land
 // inside a test or between tests (its cursor is shared with
@@ -379,15 +379,15 @@ func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {
 type backgroundCursor struct{ m *MockManager }
 
 func (c backgroundCursor) MockCursorIndex(key string, n int) int {
-	return c.m.cursorIndexAt(c.m.backgroundCursorKey(key), true, n)
+	return c.m.cursorIndexAt(cursorSlot{key: c.m.backgroundCursorKey(key)}, n)
 }
 
 func (c backgroundCursor) AdvanceMockCursor(key string, servedIdx, n int) {
-	c.m.advanceCursorAt(c.m.backgroundCursorKey(key), true, servedIdx, n)
+	c.m.advanceCursorAt(cursorSlot{key: c.m.backgroundCursorKey(key)}, servedIdx, n)
 }
 
 // backgroundCursorKey is the cursor key a call between tests gives key
-// (exactCursorKey): under the key of the pool view installed last.
+// (cursorSlotIn): under the key of the pool view installed last.
 func (m *MockManager) backgroundCursorKey(key string) string {
 	pool := models.PoolKeyNone
 	if p := m.exact.poolCursor.Load(); p != nil {

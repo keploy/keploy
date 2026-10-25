@@ -629,16 +629,17 @@ func TestS12SharesTheBackgroundsCursorBetweenATestAndTheGaps(t *testing.T) {
 	if got := bg.MockCursorIndex("served\x00pool", 2); got != 1 {
 		t.Fatalf("between tests the background's cursor reads %d after the store's advanced; want 1", got)
 	}
-	// In a test: the store's keeps none; the background's is the gaps'.
+	// In a test: the store's is the test's own, empty as it opens; the
+	// background's is the gaps'.
 	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
 	if got := mm.MockCursorIndex("served\x00pool", 2); got != 0 {
-		t.Fatalf("in a test the store's cursor reads %d; want 0 (none kept)", got)
+		t.Fatalf("in a test the store's cursor reads %d; want 0 (the test's own, empty)", got)
 	}
 	if got := bg.MockCursorIndex("served\x00pool", 2); got != 1 {
 		t.Fatalf("in a test the background's cursor reads %d; want the gap's 1", got)
 	}
 	bg.AdvanceMockCursor("served\x00other", 0, 2)
-	mm.AdvanceMockCursor("served\x00own", 0, 2) // none kept in a test
+	mm.AdvanceMockCursor("served\x00own", 0, 2) // the test's own, dropped as it ends
 	mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
 	if got := mm.MockCursorIndex("served\x00other", 2); got != 1 {
 		t.Fatalf("between tests the store's cursor reads %d for a mark made in a test through the background's; want 1", got)

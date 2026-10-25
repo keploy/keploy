@@ -98,7 +98,11 @@ type exactView struct {
 	// installed: shown whether a test is open or not.
 	worker map[string]struct{}
 	// poolKey is the key of that slice: its stateful cursors are its own.
-	poolKey string
+	// winStart and winEnd are, on a test view, the test's recorded window
+	// (the staging's recorded windows, by its name), where its sequences
+	// start (SequenceView); zero for a test the replay sent none of.
+	poolKey          string
+	winStart, winEnd time.Time
 	// cand marks, by position in owned, the recordings the open test shares
 	// with the tests whose requests were open beside its own at record time
 	// (ServeExactTestConcurrent): filed after every one of its own, each
@@ -260,7 +264,7 @@ type exactState struct {
 	// A view installed meanwhile is a staging view (exactView.staging).
 	staging atomic.Bool
 	// poolCursor is the key of the pool view installed last: the cursors
-	// the calls between tests advance are under it (exactCursorKey), and so
+	// the calls between tests advance are under it (cursorSlotIn), and so
 	// are the background's (BackgroundCursor).
 	poolCursor atomic.Pointer[string]
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
@@ -582,7 +586,7 @@ func (m *MockManager) prepareOutside() {
 // process that claims key again in the session (a retried package,
 // --rerun-fails) is a new scope, as a test begun again is. The recordings of
 // names, key's pool slice, that calls outside every test consumed in the
-// staging answer again, and key's stateful cursors (exactCursorKey) start
+// staging answer again, and key's stateful cursors (cursorSlotIn) start
 // over. No other key's are touched: pool slices name disjoint recordings.
 func (m *MockManager) RestartExactKey(key string, names []string) {
 	// One step of the round (exact_round.go): a snapshot reads each name
@@ -701,7 +705,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
 		// elsewhere.
-		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil)
+		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil).WithSequence(m.sequenceViewOf(v))
 	}
 	held := v.holds
 	switch {
@@ -714,7 +718,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	case ended != nil:
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil)
+	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil).WithSequence(m.sequenceViewOf(v))
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -1093,6 +1097,9 @@ func (m *MockManager) serveExactTest(test string, owned, cands []*models.Mock, b
 		m.exact.beforeInstall()
 	}
 	v := &exactView{test: test, gen: m.exact.gen.Add(1), index: make(map[string]int, len(owned)+len(cands))}
+	if w, ok := m.testWindows.Load().Of(test); ok {
+		v.winStart, v.winEnd = w.Start, w.End
+	}
 	v.addOwned(owned)
 	if n := len(v.owned); len(cands) > 0 {
 		v.addShared(cands)
@@ -1433,6 +1440,14 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if m.exact.beforePublish != nil {
 		m.exact.beforePublish(v)
 	}
+	// The test's cursors exist before its view is published, so a call
+	// that reads the new view never has its commit refused for want of
+	// them (a lost served mark would answer its recording again). No row
+	// pins this order: it needs a hook between the two steps, and a call
+	// reading the view between them is concurrency only.
+	if v.test != "" {
+		m.openTestCursors(v.gen)
+	}
 	prev := m.exact.view.Swap(v)
 	if prev != nil {
 		prev.mu.Lock()
@@ -1458,6 +1473,9 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	// and spends that found prev closed go on, against v.
 	if prev != nil {
 		prev.markReplaced()
+		if prev.test != "" {
+			m.closeTestCursors(prev.gen)
+		}
 	}
 	if m.exact.afterPublish != nil {
 		m.exact.afterPublish(v)
@@ -2183,23 +2201,90 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 	m.bumpRevisionAll()
 }
 
-// exactCursorKey is the stateful cursor a key names under exact serving: the
-// served pool slice's own, so two keys' calls never share a sequence. In a
-// test no cursor is used (ok false): the test's mocks answer once each, in
-// recorded order, and under today's rules the pool serves no data-plane mock
-// there. Under the background rules a background recording that answers a
-// call in a test is picked with the background's cursor (BackgroundCursor),
-// the one this gives the calls between tests.
-func (m *MockManager) exactCursorKey(key string) (string, bool) {
+// cursorSlot is where a stateful cursor key is kept (cursorSlotIn): in the
+// store-wide map under key, or, for gen > 0, in the cursors of the test view
+// numbered gen (openTestCursors), which hold only while that view is in force.
+type cursorSlot struct {
+	key string
+	gen uint64
+}
+
+// cursorSlotIn is the stateful cursor key names under the view v: with exact
+// serving off (v nil) key itself, one sequence for the set; between tests the
+// served pool slice's own, so two keys' calls never share a sequence; in a
+// test the test view's own, so a reusable request recorded more than once
+// answers in record order in the test, and a test opened again (a retry, or
+// the next test) starts its sequences over. Where in its recordings a test's
+// sequence starts is the test's recorded window (SequenceView.Span). Under the
+// background rules a background recording that answers a call in a test is
+// picked with the background's cursor (BackgroundCursor), the one this gives
+// the calls between tests.
+func cursorSlotIn(v *exactView, key string) cursorSlot {
+	switch {
+	case v == nil:
+		return cursorSlot{key: key}
+	case v.test != "":
+		return cursorSlot{key: key, gen: v.gen}
+	default:
+		return cursorSlot{key: v.poolKey + "\x00" + key}
+	}
+}
+
+// openTestCursors gives the test view numbered gen its cursors, empty, before
+// the view is published (installExactWith): a call that reads the view finds
+// them there.
+func (m *MockManager) openTestCursors(gen uint64) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	if m.testCursors == nil {
+		m.testCursors = make(map[uint64]map[string]int, 2)
+	}
+	m.testCursors[gen] = make(map[string]int)
+}
+
+// closeTestCursors drops the cursors of the test view numbered gen once
+// another view replaced it: a commit that lands after is refused
+// (advanceCursorAt), so no ended test's cursor is kept.
+func (m *MockManager) closeTestCursors(gen uint64) {
+	m.cursorMu.Lock()
+	defer m.cursorMu.Unlock()
+	delete(m.testCursors, gen)
+}
+
+// SequenceView is, under exact serving, the stateful cursor of the view in
+// force now, resolved once, with the open test's recorded window
+// (integrations.SequenceViewer): a peek and the commit after it through it
+// move that view's sequence whichever view is in force when the commit lands.
+// False with exact serving off.
+func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 	v := m.exactView()
 	if v == nil {
-		return key, true
+		return integrations.SequenceView{}, false
 	}
-	if v.test != "" {
-		return "", false
-	}
-	return v.poolKey + "\x00" + key, true
+	return m.sequenceViewOf(v), true
 }
+
+// sequenceViewOf is the sequence view of v (SequenceView), the view in force
+// now or the one a call was read in (MarkCallRound).
+func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
+	return integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
+}
+
+// viewCursor is one view's stateful cursor (SequenceView).
+type viewCursor struct {
+	m *MockManager
+	v *exactView
+}
+
+func (c viewCursor) MockCursorIndex(key string, n int) int {
+	return c.m.cursorIndexAt(cursorSlotIn(c.v, key), n)
+}
+
+func (c viewCursor) AdvanceMockCursor(key string, servedIdx, n int) {
+	c.m.advanceCursorAt(cursorSlotIn(c.v, key), servedIdx, n)
+}
+
+var _ integrations.SequenceViewer = (*MockManager)(nil)
 
 // startupTree and unfilteredTree are the staged reusable trees now.
 func (m *MockManager) startupTree() *TreeDb {

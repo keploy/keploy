@@ -727,14 +727,20 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 // two callers whose calls fit two sets of recordings (two tokens) each take
 // theirs in order. A recording whose variables do not hold (its variable not
 // yet bound, or another test's) is passed over and keeps its turn. Record
-// order is recordedBefore's, as splitVariableMocks orders a tier. commit
-// marks the answer served once the call is answered (nil when no mark
-// applies).
-func (h *HTTP) pickHit(hits []*varHit, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
+// order is recordedBefore's, as splitVariableMocks orders a tier. Under exact
+// serving the walk is servedWalk's, over the recordings the store stages
+// that member says are this call too (spent ones: stagedGroup); answered,
+// non-nil, is then the call's miss. commit marks the answer served once the
+// call is answered (nil when no mark applies).
+func (h *HTTP) pickHit(hits []*varHit, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool, member func(*models.Mock) bool) (*varHit, func(), *answeredSequence) {
 	first := hits[0]
+	if !statefulMocks || first.mock.TestModeInfo.Consume != models.ConsumeCursorSaturate {
+		return first, nil, nil
+	}
+	_, exact := integrations.SequenceViewOf(mockDb)
 	cs, ok := mockDb.(integrations.MockCursor)
-	if !statefulMocks || !ok || first.mock.TestModeInfo.Consume != models.ConsumeCursorSaturate {
-		return first, nil
+	if !ok && !exact {
+		return first, nil, nil
 	}
 	byMock := make(map[*models.Mock]*varHit, len(hits))
 	stateful := make([]*models.Mock, 0, len(hits))
@@ -746,10 +752,33 @@ func (h *HTTP) pickHit(hits []*varHit, own func(*models.Mock) bool, mockDb integ
 	}
 	// Under the background rules the open test's own and the set's
 	// background are two bands (statefulBand).
-	mocks, cs := statefulBand(first.mock, stateful, own, mockDb, cs)
+	mocks, cs, bg, ofBand := statefulBand(first.mock, stateful, own, mockDb, cs)
 	sort.SliceStable(mocks, func(i, j int) bool { return recordedBefore(mocks[i], mocks[j]) })
-	i, commit := servedPick(mocks, cs)
-	return byMock[mocks[i]], commit
+	i, commit, answered := bandPick(mocks, cs, bg, mockDb, statefulMember(member, ofBand))
+	if answered != nil {
+		return nil, nil, answered
+	}
+	return byMock[mocks[i]], commit, nil
+}
+
+// variableMember is, for the variable pass's stateful walk (pickHit), a
+// recording the store stages that the call fits, whether or not its
+// variables hold (fitVariables gives a hit or a problem): a spent recording
+// of the call is one, whatever it bound.
+func (h *HTTP) variableMember(ctx context.Context, input *req, scope varScope, headerNoise, userBodyNoise map[string][]string, urlNoise []string) func(*models.Mock) bool {
+	var live *reqView
+	return func(m *models.Mock) bool {
+		if !hasVariables(m) {
+			return false
+		}
+		if live == nil {
+			v := liveView(input)
+			live = &v
+		}
+		table, _ := scope.of(m)
+		hit, problem := h.fitVariables(ctx, input, *live, m, table, headerNoise, userBodyNoise, urlNoise)
+		return hit != nil || problem != nil
+	}
 }
 
 // serveVariables answers the call with a hit: loads its response, renders its

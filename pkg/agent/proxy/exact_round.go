@@ -899,7 +899,8 @@ const restagedWhy = "the staging moved: the test set was staged again"
 // staging call was marked in (heldScope). restaged reports whether a read or
 // a consume door of it found the staging moved since.
 func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
-	h := &heldScope{roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
+	h := &heldScope{roundScope: roundScope{MockManager: m, g: roundGuard{at: integrations.RoundAt{Epoch: call.Epoch()}, staging: true}}}
+	h.seq, h.seqOK = call.Sequence()
 	return h, h.restaged
 }
 
@@ -915,7 +916,26 @@ var (
 // read is made: a staging moves its epoch before it changes the trees or
 // installs a view, so a read the staging is still the call's after was of
 // the call's set. One call's: not for sharing between goroutines.
-type heldScope struct{ roundScope }
+type heldScope struct {
+	roundScope
+	// seq is the sequence view of the view the call was read in
+	// (integrations.CallRound.Sequence), seqOK whether its mark kept one.
+	seq   integrations.SequenceView
+	seqOK bool
+}
+
+// SequenceView implements integrations.SequenceViewer: the sequence view of
+// the view h's call was read in, so a call read in one view and walked after
+// the next one is installed (a test opening or ending between the read and
+// the walk) walks the view it was read in, its cursor and its window, never
+// the next view's; with no view kept by the mark (exact serving began after
+// it), the view in force now.
+func (h *heldScope) SequenceView() (integrations.SequenceView, bool) {
+	if h.seqOK {
+		return h.seq, true
+	}
+	return h.MockManager.SequenceView()
+}
 
 // restaged reports whether a read or a consume door of h found the staging
 // moved since its call's mark.

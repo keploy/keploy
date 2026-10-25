@@ -421,6 +421,9 @@ type learnMiss struct {
 	// report's default, which speaks of a request that changed since it was
 	// recorded.
 	steps string
+	// answered, where set, is a stateful walk's miss (answeredSequence):
+	// the report says so.
+	answered *answeredSequence
 }
 
 // learnRound is the round a call's first pass of the learn step read: the
@@ -1375,7 +1378,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			picked, commit := m, func() {}
 			if !own {
 				var c func()
-				picked, c = h.cursorPick(m, exactGroup(liveShape, sc, true), sc.owner(), mockDb, !opts.DisableStatefulMocks)
+				var answered *answeredSequence
+				picked, c, answered = h.cursorPick(m, exactGroup(liveShape, sc, true), sc.owner(), mockDb, !opts.DisableStatefulMocks)
+				if answered != nil {
+					res.Outcome, res.Reason, res.Why = learn.Miss, "", answered.why()
+					return nil, &learnMiss{res: res, closest: m, pool: sc.http, answered: answered}, nil
+				}
 				if c != nil {
 					commit = c
 				}
@@ -2383,7 +2391,12 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 		if len(hit.Spec.ReqBodyNoise) == 0 {
 			return nil, nil
 		}
-		picked, commit := h.cursorPick(hit, group, sc.owner(), mockDb, !opts.DisableStatefulMocks)
+		picked, commit, answered := h.cursorPick(hit, group, sc.owner(), mockDb, !opts.DisableStatefulMocks)
+		if answered != nil {
+			// Each recording the walk holds has answered: the strict pass
+			// decides the call, and misses it the same way.
+			return nil, nil
+		}
 		if !sigV4PartsHold(recordedParts(picked), live) {
 			// Noise learned on a SigV4 Authorization is its signature's:
 			// the strict matcher compares the rest by its parts (founder
@@ -2440,6 +2453,7 @@ func (m *learnMiss) diag() *matchDiag {
 	if m.closest != nil {
 		d.schemaMatched = []*models.Mock{m.closest}
 	}
+	d.answered = m.answered
 	return d
 }
 
@@ -2447,8 +2461,8 @@ func (m *learnMiss) diag() *matchDiag {
 // for judging, and what differed, for the person who reads it. Neither holds
 // a value.
 func (m *learnMiss) explain(r *models.MockMismatchReport) {
-	if r == nil {
-		return
+	if r == nil || m.answered != nil {
+		return // a stateful walk's miss: the report says so (answeredSequence)
 	}
 	if m.moved {
 		// The replay moved the round under the call: say where it was
