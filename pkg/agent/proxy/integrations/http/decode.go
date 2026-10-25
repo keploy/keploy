@@ -45,7 +45,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
-		defer pUtil.RecoverInto(h.Logger, clientConn, nil, errCh)
+		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
