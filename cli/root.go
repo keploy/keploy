@@ -9,6 +9,7 @@ import (
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
@@ -42,6 +43,9 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		Example: provider.RootExamples,
 		Version: utils.Version,
 		PreRun: func(cmd *cobra.Command, _ []string) {
+			if provenswitch.On() {
+				return // quiet console: no logo, no banner
+			}
 			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)
 		},

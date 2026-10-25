@@ -47,6 +47,9 @@ var (
 	// QuietConsole can split the console and file into separate cores with
 	// different levels. nil when no file was opened (refused or errored).
 	activeLogFile *os.File
+	// quietMode is set by QuietConsole. Code that starts subprocesses
+	// (the agent) checks it to redirect their output to the log file.
+	quietMode bool
 )
 
 // setPrimarySink records the console destination for subsequent logger
@@ -464,6 +467,24 @@ func RedirectToStderr() (*zap.Logger, error) {
 	return reattachDebugFileSink(logger), nil
 }
 
+// IsQuiet reports whether QuietConsole has silenced the console. Code that
+// starts subprocesses (the keploy agent) checks this to redirect their
+// output to the log file instead of the console.
+func IsQuiet() bool {
+	primarySinkMu.Lock()
+	defer primarySinkMu.Unlock()
+	return quietMode
+}
+
+// GetActiveLogFile returns the log file New() opened for this run, or nil
+// when no file was opened. Used by the agent startup code to redirect the
+// agent subprocess's output to the log file in quiet mode.
+func GetActiveLogFile() *os.File {
+	primarySinkMu.Lock()
+	defer primarySinkMu.Unlock()
+	return activeLogFile
+}
+
 // QuietConsole rebuilds the logger so the console shows only warnings and
 // errors while the log file keeps every level. Structured keploy: lines
 // printed via fmt.Fprintf to stderr are unaffected — they bypass zap.
@@ -500,6 +521,11 @@ func QuietConsole() (*zap.Logger, error) {
 	fc := consoleCore(LogCfg, fileSink, LogCfg.Level)
 
 	core := zapcore.NewTee(cc, fc)
+
+	primarySinkMu.Lock()
+	quietMode = true
+	primarySinkMu.Unlock()
+
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
 }
