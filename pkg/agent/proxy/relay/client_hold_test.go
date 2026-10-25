@@ -983,7 +983,7 @@ func TestClientWriteHold_ReleaseDeliversTheDestStash(t *testing.T) {
 
 	// A server response caught at the pause boundary.
 	stranded := []byte("server-bytes-read-at-the-boundary\n")
-	h.r.stashInflightFromPause(fakeconn.FromDest, stranded, time.Now())
+	h.r.stashInflightFromPause(readFromDest(h.r, stranded))
 
 	h.r.Directives() <- directive.ReleaseClient("plaintext auth")
 	if ack := awaitTCPAck(t, h); !ack.OK {

@@ -17,6 +17,10 @@ type readTimeProvider interface {
 type stashedPayload struct {
 	bytes  []byte
 	readAt time.Time
+	// connSeq is the number the forwarder gave the chunk as its Read
+	// returned (fakeconn.Chunk.ConnSeq), kept so a stashed chunk the relay
+	// tees later, on a resume or a release, is numbered where it was read.
+	connSeq uint32
 }
 
 func (s stashedPayload) len() int {

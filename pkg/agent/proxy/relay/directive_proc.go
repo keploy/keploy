@@ -933,15 +933,13 @@ func (r *Relay) handleReleaseClient(ctx context.Context, stopping <-chan struct{
 	// data the client is waiting for, and dropping them is silent
 	// user-traffic loss on a directive whose whole contract is "our
 	// brake comes off, nothing else changes".
-	if held := r.takeStashed(fakeconn.FromDest); held.len() > 0 {
-		if srcPtr := r.src.Load(); srcPtr != nil {
-			if _, werr := (*srcPtr).Write(held.bytes); werr != nil && log != nil {
-				log.Debug("relay: delivering the D2C pause stash on release failed",
-					zap.Error(werr),
-					zap.Int("bytes", held.len()),
-				)
-			}
-		}
+	// They are teed on the way (deliverStashedToClient): the parser sees
+	// every server byte the client reads.
+	if derr := r.deliverStashedToClient(r.takeStashedParts(fakeconn.FromDest), "release_d2c_delivery"); derr != nil && log != nil {
+		log.Debug("relay: delivering the D2C pause stash on release failed",
+			zap.Error(derr),
+			zap.String("directive_reason", d.Reason),
+		)
 	}
 
 	r.endPause()
@@ -1045,34 +1043,14 @@ func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan str
 			}
 		}
 	}
+	// The destination's stashed bytes go to the client teed, as every
+	// server byte the client reads is (deliverStashedToClient).
 	if drainErr == nil && len(d2cStash) > 0 {
-		src := *r.src.Load()
-		for _, p := range d2cStash {
-			if src == nil {
-				break
+		if derr := r.deliverStashedToClient(d2cStash, "pre_dispatch_drain_d2c"); derr != nil {
+			if log != nil {
+				log.Debug("relay: ResumePreDispatch D2C drain write error", zap.Error(derr))
 			}
-			wn, werr := src.Write(p.bytes)
-			if werr != nil {
-				if log != nil {
-					log.Debug("relay: ResumePreDispatch D2C drain write error",
-						zap.Error(werr),
-						zap.Int("payload_bytes", len(p.bytes)),
-						zap.Int("written_bytes", wn),
-					)
-				}
-				if r.cfg.OnMarkMockIncomplete != nil {
-					r.cfg.OnMarkMockIncomplete("pre_dispatch_drain_d2c_write_error")
-				}
-				drainErr = fmt.Errorf("resume-pre-dispatch D2C drain: %w", werr)
-				break
-			}
-			if wn != len(p.bytes) {
-				if r.cfg.OnMarkMockIncomplete != nil {
-					r.cfg.OnMarkMockIncomplete("pre_dispatch_drain_d2c_short_write")
-				}
-				drainErr = errors.New("resume-pre-dispatch D2C drain: short write on source socket")
-				break
-			}
+			drainErr = fmt.Errorf("resume-pre-dispatch D2C drain: %w", derr)
 		}
 	}
 
@@ -1090,6 +1068,60 @@ func (r *Relay) handleResumePreDispatch(ctx context.Context, stopping <-chan str
 		return directive.Ack{Kind: d.Kind, OK: false, Err: drainErr}
 	}
 	return directive.Ack{Kind: d.Kind, OK: true}
+}
+
+// deliverStashedToClient writes the destination's bytes a pause stashed to
+// the client, in read order, and tees each chunk to the parser BEFORE its
+// bytes reach the client.
+//
+// The forwarder that read them stashed them untee'd: across a pause the
+// destination's bytes are the directive handler's, and a TLS upgrade takes
+// them as its preamble, which the parser must not see. A plain resume or
+// release changes nothing about the connection, so here they are ordinary
+// server bytes the client reads, and this is the one place the parser can be
+// given them. Written on untee'd, the app would read bytes no parser sees and
+// no report names.
+//
+// The tee comes first so that the chunk is on the parser's queue, where the
+// capture watermark counts it, before the app can have read its bytes: a test
+// case that used them cannot be judged complete without them. A chunk the
+// tee refuses is reported by the tee as it refuses it. A write that fails or
+// falls short means the client did not get what the parser was given, so the
+// mock is marked incomplete (reason+"_write_error" or reason+"_short_write")
+// and nothing more is written.
+//
+// It runs with the D2C forwarder parked on the pause, so it numbers the
+// chunks (SeqNo) and tells the owner of them (Config.OnCarried) in the
+// forwarder's place. Each keeps the ReadAt and ConnSeq it was read with.
+func (r *Relay) deliverStashedToClient(parts []stashedPayload, reason string) error {
+	var src net.Conn
+	if srcPtr := r.src.Load(); srcPtr != nil {
+		src = *srcPtr
+	}
+	for _, p := range parts {
+		if len(p.bytes) == 0 {
+			continue
+		}
+		if src == nil {
+			r.cfg.OnMarkMockIncomplete(reason + "_write_error")
+			return errors.New("no client conn")
+		}
+		c := fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: p.connSeq, Bytes: p.bytes, ReadAt: p.readAt}
+		c.SeqNo = r.seqD2C.Add(1)
+		teed := r.teeD2C.push(c)
+		r.noteCarried(r.teeD2C, c, teed)
+
+		wn, werr := src.Write(p.bytes)
+		if werr != nil {
+			r.cfg.OnMarkMockIncomplete(reason + "_write_error")
+			return fmt.Errorf("%d of %d bytes written: %w", wn, len(p.bytes), werr)
+		}
+		if wn != len(p.bytes) {
+			r.cfg.OnMarkMockIncomplete(reason + "_short_write")
+			return fmt.Errorf("short write on the client socket: %d of %d bytes", wn, len(p.bytes))
+		}
+	}
+	return nil
 }
 
 // teeFor returns the tee for the given direction, or nil if the

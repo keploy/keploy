@@ -273,11 +273,14 @@ type Config struct {
 	// did, once the parser has stopped reading; the order in which the relay
 	// and the parser get to a chunk does not (the parser can read a chunk
 	// before the relay is done with it). A chunk the forwarder only stashes
-	// across a pause, with no push, is not told of, nor is a destination
-	// chunk the client refused (ClientStopped). It runs under the client
-	// hold's lock on that path, and under the relay's own lock as it settles
-	// chunks that waited, so it must not block or call back into the relay.
-	// Nil is safe.
+	// across a pause, with no push, is told of when a plain resume or release
+	// tees it on its way to the client, and not at all when the pause's
+	// handler takes it (a TLS upgrade's preamble). A destination chunk the
+	// client refused (ClientStopped) is not told of. It runs on the
+	// forwarder, under the client hold's lock on that path; under the
+	// relay's own lock as it settles chunks that waited; and, for a stashed
+	// chunk, on the directive handler while the forwarder is parked. So it
+	// must not block or call back into the relay. Nil is safe.
 	OnCarried func(dir fakeconn.Direction, at time.Time, teed bool, through int64)
 
 	// OnMarkMockIncomplete is invoked whenever the relay drops a

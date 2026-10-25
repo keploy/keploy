@@ -85,10 +85,12 @@ type Relay struct {
 	// (rather than writing them to the live socket and corrupting
 	// the upstream wire across the upgrade boundary) when it
 	// observes the pause set on its post-Read recheck. The directive
-	// handler can claim them via takeStashed; on resume, anything
-	// still stashed is silently discarded — the forwarder no longer
-	// owns those bytes and the upgraded socket has no way to consume
-	// them sensibly.
+	// handler can claim them via takeStashed. A plain resume or release
+	// delivers both stashes, the destination's teed to the parser on its
+	// way to the client (deliverStashedToClient); after a TLS upgrade,
+	// anything still stashed is discarded by endPause — the forwarder no
+	// longer owns those bytes and the upgraded socket has no way to
+	// consume them sensibly.
 	stashMu    sync.Mutex
 	stashedC2D []stashedPayload
 	stashedD2C []stashedPayload
@@ -813,7 +815,7 @@ func (r *Relay) forward(
 		// (see the upstream-corruption analysis above).
 		if pc := r.currentPauseCh(); pc != nil {
 			if n > 0 {
-				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
+				r.stashInflightFromPause(chunk)
 				if log != nil {
 					log.Debug("relay: stashing in-flight bytes across pause boundary",
 						zap.String("dir", dir.String()),
@@ -925,7 +927,7 @@ func (r *Relay) forward(
 				// stash between these two statements, the bytes go upstream
 				// and are teed immediately after, so the parser still sees
 				// every byte the connection carried.
-				r.stashInflightFromPause(dir, chunk.Bytes, chunk.ReadAt)
+				r.stashInflightFromPause(chunk)
 				chunk.SeqNo = seq.Add(1)
 				teed := t.push(chunk)
 				r.noteCarried(t, chunk, teed)
@@ -1436,23 +1438,24 @@ func clearDeadline(c *net.Conn) {
 // real source socket but never written to the real destination, so
 // they belong to the directive handler now (it may need them as a
 // protocol preamble it's about to consume — Postgres SSLResponse
-// being the canonical case). The dir argument identifies which
-// direction's stash to populate.
+// being the canonical case). The chunk's Dir names the stash; its bytes
+// are copied, and its ReadAt and ConnSeq are kept with them.
 //
 // Bytes are appended to any existing stash so two consecutive Read+
 // pause-recheck iterations don't lose data; in practice the forwarder
 // only ever reaches this path once per pause window.
-func (r *Relay) stashInflightFromPause(dir fakeconn.Direction, payload []byte, readAt time.Time) {
-	if len(payload) == 0 {
+func (r *Relay) stashInflightFromPause(c fakeconn.Chunk) {
+	if len(c.Bytes) == 0 {
 		return
 	}
 	stashed := stashedPayload{
-		bytes:  append([]byte(nil), payload...),
-		readAt: readAt,
+		bytes:   append([]byte(nil), c.Bytes...),
+		readAt:  c.ReadAt,
+		connSeq: c.ConnSeq,
 	}
 	r.stashMu.Lock()
 	defer r.stashMu.Unlock()
-	switch dir {
+	switch c.Dir {
 	case fakeconn.FromClient:
 		r.stashedC2D = append(r.stashedC2D, stashed)
 	case fakeconn.FromDest:
@@ -1684,6 +1687,12 @@ func (r *Relay) flushHeldRemainder() error {
 // Returns a zero payload if there is no stash; takeStashed is safe to
 // call before any forwarder Read has fired.
 func (r *Relay) takeStashed(dir fakeconn.Direction) stashedPayload {
+	return joinStashed(r.takeStashedParts(dir))
+}
+
+// takeStashedParts claims the given direction's stash as the chunks the
+// forwarder stashed, in read order, each with its own ReadAt and ConnSeq.
+func (r *Relay) takeStashedParts(dir fakeconn.Direction) []stashedPayload {
 	r.stashMu.Lock()
 	defer r.stashMu.Unlock()
 	var parts []stashedPayload
@@ -1695,7 +1704,7 @@ func (r *Relay) takeStashed(dir fakeconn.Direction) stashedPayload {
 		parts = r.stashedD2C
 		r.stashedD2C = nil
 	}
-	return joinStashed(parts)
+	return parts
 }
 
 // takeStashedPrefix returns up to n bytes from the given direction's
@@ -1748,8 +1757,9 @@ func splitStashedPrefix(parts []stashedPayload, n int) (stashedPayload, []stashe
 			continue
 		}
 		remainder := stashedPayload{
-			bytes:  append([]byte(nil), part.bytes[take:]...),
-			readAt: part.readAt,
+			bytes:   append([]byte(nil), part.bytes[take:]...),
+			readAt:  part.readAt,
+			connSeq: part.connSeq,
 		}
 		newRest := make([]stashedPayload, 0, len(rest))
 		newRest = append(newRest, remainder)

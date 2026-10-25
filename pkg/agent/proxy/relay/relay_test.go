@@ -589,8 +589,8 @@ func TestDirectiveUpgradeTLS_PrependsStashedClientBytesThroughPreamble(t *testin
 
 	h := newHarness(t, Config{TLSUpgradeFn: upgraderFn})
 	stashAt := time.Unix(1_700_000_001, 123)
-	h.r.stashInflightFromPause(fakeconn.FromDest, []byte("S"), stashAt)
-	h.r.stashInflightFromPause(fakeconn.FromClient, []byte("CLIENTHELLO"), stashAt)
+	h.r.stashInflightFromPause(fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("S"), ReadAt: stashAt})
+	h.r.stashInflightFromPause(fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte("CLIENTHELLO"), ReadAt: stashAt})
 
 	d := directive.UpgradeTLS(nil, &tls.Config{}, "postgres sslrequest")
 	d.TLS.PreambleReadFromDest = 1
