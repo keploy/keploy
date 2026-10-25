@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // ipv4Binds are the binds a listener of another test could make at port at
@@ -82,15 +83,30 @@ func requireDialsRefused(t *testing.T, dials []string, when string) {
 	}
 }
 
+// setReuseAddr is a net.ListenConfig Control that sets SO_REUSEADDR on the
+// socket before it binds, as Go's ListenMulticastUDP and many servers do on
+// a UDP socket. Two UDP sockets that both set it may share a port.
+func setReuseAddr(_, _ string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+	}); err != nil {
+		return err
+	}
+	return serr
+}
+
 // A refused address refuses every dial for as long as the test that took it
 // runs, and no other socket can take its port meanwhile. A TCP listener
 // opened on it, as one of a package tested beside this one can be, by
-// net.Listen or one that sets SO_REUSEPORT, is refused the port at loopback,
-// at another address, at every address and at [::1]; a UDP socket, made by
-// net.ListenPacket or one that sets SO_REUSEPORT, is refused it at
-// 127.0.0.1, where it is held. A socket that sets SO_REUSEPORT is tried
-// because one of this user that does may share a port with a hold that sets
-// it too, as keploy's DNS server does at the port it is given.
+// net.Listen (which sets SO_REUSEADDR) or one that sets SO_REUSEPORT, is
+// refused the port at loopback, at another address, at every address and at
+// [::1]; a UDP socket, made by net.ListenPacket (which sets neither), one
+// that sets SO_REUSEPORT or one that sets SO_REUSEADDR, is refused it at
+// 127.0.0.1, where it is held. Each option is tried because a socket that
+// sets it may share a port with a hold that sets it too: SO_REUSEPORT for a
+// socket of this user, as keploy's DNS server does at the port it is given,
+// and SO_REUSEADDR for a UDP socket of any user.
 func TestARefusedAddressRefusesEveryDialForTheTestsLife(t *testing.T) {
 	t.Run("tcp", func(t *testing.T) {
 		_, port, err := net.SplitHostPort(RefusedAddr(t, "tcp"))
@@ -102,17 +118,21 @@ func TestARefusedAddressRefusesEveryDialForTheTestsLife(t *testing.T) {
 	})
 	t.Run("udp", func(t *testing.T) {
 		addr := RefusedAddr(t, "udp")
-		pc, err := net.ListenPacket("udp", addr)
-		if err == nil {
-			_ = pc.Close()
+		for _, b := range []struct {
+			by      string
+			control func(network, address string, c syscall.RawConn) error
+		}{
+			{"net.ListenPacket", nil},
+			{"a socket that sets SO_REUSEPORT", setReusePort},
+			{"a socket that sets SO_REUSEADDR", setReuseAddr},
+		} {
+			lc := net.ListenConfig{Control: b.control}
+			pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+			if err == nil {
+				_ = pc.Close()
+			}
+			require.ErrorIs(t, err, syscall.EADDRINUSE, "%s took the refused port", b.by)
 		}
-		require.ErrorIs(t, err, syscall.EADDRINUSE, "another socket took the refused port")
-		lc := net.ListenConfig{Control: setReusePort}
-		pc, err = lc.ListenPacket(context.Background(), "udp", addr)
-		if err == nil {
-			_ = pc.Close()
-		}
-		require.ErrorIs(t, err, syscall.EADDRINUSE, "a socket that sets SO_REUSEPORT took the refused port")
 		c, err := net.Dial("udp", addr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
