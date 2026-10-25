@@ -43,6 +43,10 @@ var Emoji = "\U0001F430" + " Keploy:"
 var (
 	primarySinkMu sync.Mutex
 	primarySink   *os.File
+	// activeLogFile is the log file New() opened for this run, kept so
+	// QuietConsole can split the console and file into separate cores with
+	// different levels. nil when no file was opened (refused or errored).
+	activeLogFile *os.File
 )
 
 // setPrimarySink records the console destination for subsequent logger
@@ -380,6 +384,11 @@ func New() (*zap.Logger, *os.File, error) {
 
 	LogCfg = defaultLogCfg()
 
+	// Keep the file reference so QuietConsole can split the sinks.
+	primarySinkMu.Lock()
+	activeLogFile = logFile
+	primarySinkMu.Unlock()
+
 	// Build the core with our custom encoder
 	sink := primarySyncer()
 	if logFile != nil {
@@ -451,6 +460,46 @@ func RedirectToStderr() (*zap.Logger, error) {
 	setPrimarySink(os.Stderr)
 	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
+	logger := zap.New(newRedactingCore(core))
+	return reattachDebugFileSink(logger), nil
+}
+
+// QuietConsole rebuilds the logger so the console shows only warnings and
+// errors while the log file keeps every level. Structured keploy: lines
+// printed via fmt.Fprintf to stderr are unaffected — they bypass zap.
+//
+// Call it once, after New(), when the run wants a clean console (the proven
+// mock flow). It is a no-op when --debug is on (the console level is already
+// at debug) or when no log file was opened (suppressing INFO on the console
+// when there is no file would lose it).
+func QuietConsole() (*zap.Logger, error) {
+	ensureLogCfg()
+	if LogCfg.Level.Level() <= zap.DebugLevel {
+		// --debug: the user asked for the full console.
+		core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
+		logger := zap.New(newRedactingCore(core))
+		return reattachDebugFileSink(logger), nil
+	}
+	primarySinkMu.Lock()
+	lf := activeLogFile
+	primarySinkMu.Unlock()
+
+	if lf == nil {
+		// No file: keep the console as it is so nothing is lost.
+		core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
+		logger := zap.New(newRedactingCore(core))
+		return reattachDebugFileSink(logger), nil
+	}
+	// Console: warnings and errors only.
+	consoleSink := primarySyncer()
+	consoleLevel := zap.NewAtomicLevelAt(zap.WarnLevel)
+	cc := consoleCore(LogCfg, consoleSink, consoleLevel)
+
+	// File: every level the config asks for (INFO by default).
+	fileSink := zapcore.AddSync(lf)
+	fc := consoleCore(LogCfg, fileSink, LogCfg.Level)
+
+	core := zapcore.NewTee(cc, fc)
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
 }
