@@ -60,9 +60,10 @@ type roundState struct {
 	// tracker), and the tracker's next begin binds it.
 	learn learnBinding
 	bound *exactView
-	// stagedSet is the learn tracker's set (learnBinding.set) as the last
-	// staging found it (bumpStagingEpoch): one the tracker began after it is
-	// a set the store has not staged (integrations.LearnRead.SetAhead).
+	// stagedSet is the learn tracker's set as the last staging found it
+	// (bumpStagingEpoch): the tracker's own (MockManager.SetTrackerSetAt),
+	// else learnBinding.set. One the tracker began after it is a set the
+	// store has not staged (integrations.LearnRead.SetAhead).
 	stagedSet uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
@@ -370,8 +371,14 @@ func (m *MockManager) stagedRecording(mk *models.Mock) *models.Mock {
 func (m *MockManager) bumpStagingEpoch() {
 	m.lockRound()
 	m.stagingEpoch.Add(1)
-	// The set the tracker began last is staged now, whichever it is.
-	m.exact.round.stagedSet = m.exact.round.learn.set
+	// The set the tracker began last is staged now, whichever it is: the
+	// tracker's own (SetTrackerSetAt), as its set may have begun before any
+	// of its boundaries reached this manager.
+	if f := m.trackerSetAt.Load(); f != nil {
+		m.exact.round.stagedSet = (*f)()
+	} else {
+		m.exact.round.stagedSet = m.exact.round.learn.set
+	}
 	m.exact.round.wakeLocked()
 	m.exact.round.mu.Unlock()
 }

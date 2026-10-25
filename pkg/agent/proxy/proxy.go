@@ -1850,6 +1850,9 @@ func (p *Proxy) setMockManager(m *MockManager) {
 		m.SetServedObserver(p.learnTracker.ServedMock)
 		m.SetServedInObserver(p.learnTracker.ServedMockIn)
 		m.SetOpenTestEpoch(p.learnTracker.OpenEpoch)
+		// Each staging stages the tracker's running set, though the set
+		// may have begun before m was made (Mock).
+		m.SetTrackerSetAt(p.learnTracker.SetAt)
 	}
 	p.sessionMu.Lock()
 	prev := p.mockManager
@@ -4156,6 +4159,9 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		p.missCutPending.Store(true)
 		// A new test set: what the previous set served is no earlier place
 		// of this one's, whose mocks reuse its names (package matcher/learn).
+		// A fresh agent holds no manager yet, so its first set begins on the
+		// tracker alone; the set's staging reads the tracker's set itself
+		// (MockManager.SetTrackerSetAt).
 		p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
 	}
 	if mm := p.getMockManager(); mm == nil {

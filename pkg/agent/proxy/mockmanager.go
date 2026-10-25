@@ -79,6 +79,10 @@ type MockManager struct {
 	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
 	// stamp (exactView.stamp, ServedInOpenTest).
 	openTestEpoch atomic.Pointer[func() uint64]
+	// trackerSetAt, when set, says the learn tracker's running set
+	// (learn.Tracker.SetAt) as a staging is made: the set it stages
+	// (roundState.stagedSet).
+	trackerSetAt atomic.Pointer[func() uint64]
 
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
@@ -4242,6 +4246,26 @@ func (m *MockManager) SetOpenTestEpoch(f func() uint64) {
 		return
 	}
 	m.openTestEpoch.Store(&f)
+}
+
+// SetTrackerSetAt makes f say the learn tracker's running set
+// (learn.Tracker.SetAt) as each staging is made, from now on (nil: none):
+// the set the staging stages is the tracker's own, whether or not the
+// boundary that began it reached this manager. keploy test's Mock begins
+// a fresh agent's first set on the tracker before the proxy holds a
+// manager (Proxy.learnBoundary then runs on the tracker alone), so this
+// manager's account of the tracker's boundaries (LearnBoundary) does not
+// hold it. Without f a staging stages the set that account last held. f
+// runs holding swapMu (written) and the round lock (bumpStagingEpoch):
+// it must not call back into the manager (a staging, an install, a consume
+// door, a snapshot, a claim or a spend, LearnBoundary), or it waits on a
+// lock it runs under. learn.Tracker.SetAt takes only the tracker's own lock.
+func (m *MockManager) SetTrackerSetAt(f func() uint64) {
+	if f == nil {
+		m.trackerSetAt.Store(nil)
+		return
+	}
+	m.trackerSetAt.Store(&f)
 }
 
 // observeServed tells the served observer of mock before a parser's claim

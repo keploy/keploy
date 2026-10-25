@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -1901,6 +1902,61 @@ func TestACallAfterTheTrackersNewSetIsStagedIsTheNewSets(t *testing.T) {
 	}
 	if code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"apple"}`)); code != http.StatusOK || !strings.Contains(got, `"order":0`) {
 		t.Fatalf("the new set's call got %d %s; want its pool's answer", code, got)
+	}
+}
+
+// A fresh agent's first test set is the set its staging stages, though
+// keploy test's Mock begins that set on the learn tracker (NewSet) before the
+// proxy holds a mock manager, so the set's start reaches the tracker alone
+// (learnBoundary) and no manager's binding: the staging reads the tracker's
+// own set (SetTrackerSetAt). The set's first test then reads in that test,
+// never as a set the store has not staged, and a call there is learned from
+// that test's own recording. A replacement agent the replay re-registers its
+// set's mocks with (ensureAgentHoldsStoredMocks: a Mock without
+// StartsTestSet) starts the same way. Before, the staging stored the
+// manager's binding of the tracker's set (none: no boundary had reached it),
+// the first routed begin bound the tracker's set, and from the set's first
+// test on every snapshot and mark read the set unstaged: each learn call of
+// record's full round missed as of no round, and each miss of a plain proven
+// replay was filed outside every test with the staging note.
+func TestAFreshAgentsFirstTestSetIsTheSetItsStagingStaged(t *testing.T) {
+	for name, starts := range map[string]bool{"a test set's start": true, "a replacement agent's repair": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := New(zap.NewNop(), nil, &config.Config{})
+			p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			p.StartErrorDrain(ctx)
+			if p.getMockManager() != nil {
+				t.Fatal("precondition: a fresh proxy holds a mock manager")
+			}
+			if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: starts, Learn: true}); err != nil {
+				t.Fatal(err)
+			}
+			mm := p.getMockManager()
+			t.Cleanup(func() { p.setMockManager(nil) })
+			now := time.Now()
+			pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+			own := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+			if err := p.SetMocksWithWindow(ctx, []*models.Mock{pool, own}, nil, models.BaseTime, now.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			p.ContinueTestErrorCapture()
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+			if !ok || snap.Phase != integrations.RoundInTest || !snap.Open || snap.SetUnstaged() || snap.Learn.SetAhead || snap.NoOneRound() != "" {
+				t.Errorf("test-1 of a fresh agent's first set reads %v (open %v, unstaged %v: %q); want in test-1", snap.Phase, snap.Open, snap.SetUnstaged(), snap.NoOneRound())
+			}
+			if c := mm.MarkCallRound(); !c.Read() || c.Staging() || !c.InTest() || c.Held("mock-pool") {
+				t.Errorf("a call marked in test-1 of a fresh agent's first set reads staging %v, in a test %v, holding mock-pool %v; want test-1's", c.Staging(), c.InTest(), c.Held("mock-pool"))
+			}
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, roundPost(`{"item":"fig"}`))
+			if code != http.StatusOK || got != `{"order":1}` || len(r3States(mm)["mock-own1"].ReqBodyNoise) == 0 {
+				t.Fatalf("test-1's drifted call of a fresh agent's first set got %d %s, mock-own1 learned %v; want it learned from mock-own1", code, got, r3States(mm)["mock-own1"].ReqBodyNoise)
+			}
+		})
 	}
 }
 
