@@ -422,6 +422,35 @@ func (m *MockManager) exactView() *exactView { return m.exact.view.Load() }
 // it at each dispatch: exact serving can begin after a connection opened.
 func (m *MockManager) ExactServing() bool { return m.exactView() != nil }
 
+// ExactPoolParts is a diagnostic (KPMATCH): of mocks a parser read, how many
+// the view shows as the open test's own, the pool slice's, the worker
+// scope's reached, or none of those; and the open test and the pool's key.
+// ok is false without exact serving.
+func (m *MockManager) ExactPoolParts(mocks []*models.Mock) (test, key string, own, pool, worker, other int, ok bool) {
+	v := m.exactView()
+	if v == nil {
+		return "", "", 0, 0, 0, 0, false
+	}
+	for _, mk := range mocks {
+		if mk == nil {
+			continue
+		}
+		_, isOwn := v.index[mk.Name]
+		_, isPool := v.pool[mk.Name]
+		switch {
+		case isOwn:
+			own++
+		case isPool:
+			pool++
+		case v.isWorker(mk.Name):
+			worker++
+		default:
+			other++
+		}
+	}
+	return v.test, v.poolKey, own, pool, worker, other, true
+}
+
 var _ integrations.ExactServingReader = (*MockManager)(nil)
 
 // FindStagedNotOwned is, under exact serving, the name of the first mock of
