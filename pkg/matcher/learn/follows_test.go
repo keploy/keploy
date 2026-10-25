@@ -600,3 +600,56 @@ func TestOnlyTheValuesCandidateSourcesAreOrdered(t *testing.T) {
 		t.Errorf("FALSE GREEN? two candidate sources on one connection, positions against their order: %s (%q), want refused", got.Kind, got.Why)
 	}
 }
+
+// eSession is a connection's recorded Postgres start-up, requested the
+// duration before before eRecAt and answered a millisecond later, its backend pid pid.
+func eSession(name string, before time.Duration, pid int32) *models.Mock {
+	return &models.Mock{Name: name, Kind: models.PostgresV3, Spec: models.MockSpec{
+		ReqTimestampMock: eRecAt.Add(-before),
+		ResTimestampMock: eRecAt.Add(-before + time.Millisecond),
+		Metadata:         map[string]string{"type": "config"},
+		PostgresV3: &models.PostgresV3Spec{Type: models.PostgresV3TypeSession, Session: &models.PostgresV3SessionSpec{
+			ServerVersion: "15.2", BackendProcessID: pid, BackendSecretKey: 7000 + pid,
+		}},
+	}}
+}
+
+// Two connections opened at once may get each other's start-ups in record's
+// full round (F): the application copied its connection's backend pid (81 at
+// record) and F's 82 is the other connection's. Both start-ups' requests were
+// aloft together, so F's order of them cannot be told and the pid is refused,
+// whichever F claimed first, never learned as varying. Opened one after the
+// other, each start-up keeps its place in F's order (ServedHandshakeIn).
+func TestAPidCopiedFromTwoStartUpsOpenedAtOnceIsRefused(t *testing.T) {
+	a, b := eSession("mock-hs-81", 900*time.Millisecond, 81), eSession("mock-hs-82", 850*time.Millisecond, 82)
+	open := func(c string, m *models.Mock) []flightStep {
+		return []flightStep{{c, "lift", nil}, {c, "handshake", m}, {c, "land", nil}}
+	}
+	ran := map[bool]int{}
+	for i, steps := range interleavings(open("A", a), open("B", b)) {
+		tr := NewTracker()
+		runFlights(tr, steps)
+		o := tr.Placed().Order
+		raw := make([]Raw, 0, 2)
+		for _, m := range []*models.Mock{a, b} {
+			first, last := o.Of(m)
+			raw = append(raw, RawOf(m, false).ServedIn(first, last).ServedAsRecorded())
+		}
+		at := overlapped(steps, "A", "B")
+		ran[at]++
+		if !at {
+			fa, _ := o.Of(a)
+			fb, _ := o.Of(b)
+			if fa == 0 || fb == 0 {
+				t.Fatalf("interleaving %d %v: opened one after the other, the start-ups at %d and %d; want each placed in F's order", i, steps, fa, fb)
+			}
+			continue
+		}
+		if got := classifyF(t, "81", "82", nil, raw, nil); got.Kind == KindNoise {
+			t.Fatalf("interleaving %d %v: the pid copied from one of two start-ups opened at once was learned as varying (%q); want refused", i, steps, got.Why)
+		}
+	}
+	if ran[true] == 0 || ran[false] == 0 {
+		t.Fatalf("interleavings: %d opened at once, %d one after the other; want both", ran[true], ran[false])
+	}
+}

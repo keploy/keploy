@@ -40,6 +40,22 @@ package learn
 // after that request's serves, as F claimed them, as one request's are,
 // although the application may read it on another connection before the
 // cause's own answer.
+//
+// A handshake, a protocol phase, has a place in F's order only where its
+// parser says which request it answers, and chose the connection's recorded
+// handshake in that same request (Tracker.ServedHandshakeIn: a Postgres
+// start-up answers the StartupMessage its client opened the connection with,
+// and is picked as that request arrives): told once that request landed, as
+// a serve made in it is, and in an order keploy cannot tell where its request
+// was aloft beside one that was a serve or got a handshake, as the
+// application may hold either answer first, and two connections opened at
+// once may get each other's start-ups. One chosen in an earlier request (an
+// SSLRequest's, before the StartupMessage it answers) has no place: two
+// connections whose SSLRequests were aloft together may have swapped
+// start-ups although their StartupMessages came one after the other. A
+// handshake makes no other request's serve untold: a pool's handshake on its
+// own connection beside a statement leaves the statement its place, and the
+// handshake none.
 type Flight struct {
 	t *Tracker
 	// overlaps are the requests aloft at an instant this one was: those
@@ -53,6 +69,17 @@ type Flight struct {
 	// while it is none): the first data-plane serve made in it, or one made
 	// while it was aloft that no parser said whose request it was.
 	serving int
+	// answering is the number of the first handshake served in this
+	// request (0 with none; Tracker.ServedHandshakeIn), placed or not: the
+	// answer a server gives the request a client opens its connection with.
+	// It makes no other request's serve one keploy cannot tell, but another
+	// handshake aloft beside it is (two connections opened at once).
+	// servingSet and answeringSet are the set epochs (Tracker.setEpoch)
+	// serving and answering were numbered in: a request aloft across a
+	// NewSet is numbered in the set it was served in, and a read compares
+	// only its own set's numbers (Order.byRead).
+	answering                int
+	servingSet, answeringSet uint64
 	// landed is the tracker's count of landings once this one landed (0
 	// while aloft): a read of the order (Placed) reads it only if it landed
 	// before the read, so later requests change no read's verdict.
@@ -224,15 +251,31 @@ func (f *Flight) EndUntold() {
 // request's, and makes none a serve), for a serve its parser said was made
 // in no request (NoRequest), which makes none a serve either, for a serve in
 // no request, in one already landed, or with several aloft and none said,
-// when every one aloft becomes a serve. t.mu is held. A serve made in one
+// when every one aloft becomes a serve. A handshake (k.handshake: its parser
+// said it answers in, ServedHandshakeIn) makes in, a request of t's, one
+// that got a handshake (Flight.answering), never a serve, and is in's while
+// in is aloft and the handshake was chosen in it (k.placed); nil otherwise,
+// and no request aloft becomes anything. t.mu is held. A serve made in one
 // that ended untold is untold whatever this returns (Order.told).
-func (t *Tracker) flightOfLocked(protocol bool, in *Flight) *Flight {
+func (t *Tracker) flightOfLocked(protocol bool, in *Flight, k serveKind) *Flight {
+	if k.handshake {
+		if in == nil || in.t != t {
+			return nil
+		}
+		if in.answering == 0 {
+			in.answering, in.answeringSet = t.seq, t.setEpoch
+		}
+		if !k.placed || in.landed != 0 {
+			return nil
+		}
+		return in
+	}
 	if protocol || in == noRequest {
 		return nil
 	}
 	serves := func(f *Flight) {
 		if f.serving == 0 {
-			f.serving = t.seq
+			f.serving, f.servingSet = t.seq, t.setEpoch
 		}
 	}
 	if in != nil && in.t == t {
@@ -258,8 +301,9 @@ func (t *Tracker) flightOfLocked(protocol bool, in *Flight) *Flight {
 // for the read o: always without flights (no connection was ever lifted:
 // F's claims are the only order there is); with them, only a serve made in
 // one request that landed before the read and had not ended untold by then
-// (EndUntold), and overlapped no request that was a serve by then. o.t.mu
-// is held.
+// (EndUntold), and overlapped no request that was a serve by then; a
+// handshake (Flight.answering), no request either that got one by then.
+// o.t.mu is held.
 func (o Order) told(s int) bool {
 	if !o.flying {
 		// A serve made in no request (NoRequest) is told here too. The
@@ -274,10 +318,26 @@ func (o Order) told(s int) bool {
 	if f.untold != 0 && f.untold <= o.landings {
 		return false
 	}
+	handshake := o.handshakes[s]
 	for _, g := range f.overlaps {
-		if g.serving != 0 && g.serving <= o.upTo {
+		if o.byRead(g.serving, g.servingSet) {
+			return false
+		}
+		if handshake && o.byRead(g.answering, g.answeringSet) {
 			return false
 		}
 	}
 	return true
 }
+
+// byRead reports whether the serve numbered n in the set set was made by the
+// read o: in an earlier set, or in o's at or before its last serve. A number
+// of a later set, or 0 (none), was not. o.t.mu is held.
+func (o Order) byRead(n int, set uint64) bool {
+	return n != 0 && (set < o.set || set == o.set && n <= o.upTo)
+}
+
+// serveKind is how a serve's parser told it (Tracker.servedIn): handshake,
+// a handshake that answers the request it was told in (ServedHandshakeIn);
+// placed, chosen in that same request, so it can have that request's place.
+type serveKind struct{ handshake, placed bool }

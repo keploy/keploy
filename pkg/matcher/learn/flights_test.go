@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -149,10 +150,12 @@ func interleavings[T any](a, b []T) [][]T {
 
 // flightStep is one event of a request: its lift, a serve in it (said:
 // the parser says whose request it is, ServedMockIn; none: the parser says it
-// is no request's, NoRequest), or its landing.
+// is no request's, NoRequest; handshake: the parser says the handshake
+// answers it and was chosen in it, ServedHandshakeIn; ssl: chosen in the
+// request c+"1"), or its landing.
 type flightStep struct {
 	c    string
-	what string // "lift", "said", "unsaid", "none", "land"
+	what string // "lift", "said", "unsaid", "none", "handshake", "ssl", "land"
 	m    *models.Mock
 }
 
@@ -168,6 +171,12 @@ func runFlights(tr *Tracker, steps []flightStep) {
 			tr.ServedMock(s.m)
 		case "none":
 			tr.ServedMockIn(s.m, NoRequest())
+		case "handshake":
+			tr.ServedHandshakeIn(s.m, fs[s.c], fs[s.c])
+		case "ssl":
+			// Chosen in the connection's SSLRequest (its c+"1"), answering
+			// its StartupMessage (c).
+			tr.ServedHandshakeIn(s.m, fs[s.c+"1"], fs[s.c])
 		case "land":
 			fs[s.c].Land()
 		}
@@ -494,5 +503,176 @@ func TestARequestEndedUntoldLeavesItsServesUnordered(t *testing.T) {
 	tr.ServedMockIn(a, NoRequest())
 	if got := of(tr.Placed().Order, a); got != [2]int{} {
 		t.Fatalf("a serve in no request at %v after NoRequest's EndUntold; want 0,0 as before", got)
+	}
+}
+
+// overlapped reports whether requests a and b were aloft at one instant in
+// steps: neither landed before the other lifted.
+func overlapped(steps []flightStep, a, b string) bool {
+	at := func(c, what string) int {
+		for i, s := range steps {
+			if s.c == c && s.what == what {
+				return i
+			}
+		}
+		return -1
+	}
+	return !(at(a, "land") < at(b, "lift") || at(b, "land") < at(a, "lift"))
+}
+
+// handshakeMock is a connection's recorded start-up: a protocol phase.
+func handshakeMock(name string) *models.Mock {
+	return &models.Mock{Name: name, Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}}}
+}
+
+// A handshake its parser says answers a request (a Postgres start-up answers
+// its connection's StartupMessage) has that request's place in F's order:
+// told once it landed, in the order F served it. Two connections opened at
+// once (their start-ups aloft at one instant) may get each other's start-ups,
+// so both are in an order keploy cannot tell, whichever F claimed first. A
+// pool's handshake beside a statement on another connection leaves the
+// statement its place (the handshake is no serve of the application's
+// request), and has none itself; a driver's heartbeat beside a handshake
+// leaves the handshake its place.
+func TestAHandshakeIsToldInTheRequestItAnswers(t *testing.T) {
+	hsA, hsB := handshakeMock("mock-hs-a"), handshakeMock("mock-hs-b")
+	q := &models.Mock{Name: "mock-q"}
+	hello := &models.Mock{Name: "mock-hello", Spec: models.MockSpec{Metadata: map[string]string{"type": "config"}}}
+	open := func(c string, m *models.Mock) []flightStep {
+		return []flightStep{{c, "lift", nil}, {c, "handshake", m}, {c, "land", nil}}
+	}
+	t.Run("two opens", func(t *testing.T) {
+		for i, steps := range interleavings(open("A", hsA), open("B", hsB)) {
+			tr := NewTracker()
+			runFlights(tr, steps)
+			o := tr.Placed().Order
+			fa, la := o.Of(hsA)
+			fb, lb := o.Of(hsB)
+			if overlapped(steps, "A", "B") {
+				if fa != 0 || fb != 0 {
+					t.Fatalf("interleaving %d %v: A's start-up at %d,%d and B's at %d,%d; want both untold (0, 0): the opens were aloft together", i, steps, fa, la, fb, lb)
+				}
+				continue
+			}
+			if fa == 0 || fa != la || fb == 0 || fb != lb || fa == fb {
+				t.Fatalf("interleaving %d %v: A's start-up at %d,%d and B's at %d,%d; want each its own serve's number", i, steps, fa, la, fb, lb)
+			}
+		}
+	})
+	t.Run("a pool's handshake beside a statement", func(t *testing.T) {
+		stmt := []flightStep{{"S", "lift", nil}, {"S", "said", q}, {"S", "land", nil}}
+		for i, steps := range interleavings(stmt, open("H", hsA)) {
+			tr := NewTracker()
+			runFlights(tr, steps)
+			o := tr.Placed().Order
+			if f, l := o.Of(q); f == 0 || f != l {
+				t.Fatalf("interleaving %d %v: the statement at %d,%d; want its serve's number (a handshake beside it is no serve)", i, steps, f, l)
+			}
+			f, _ := o.Of(hsA)
+			if want := !overlapped(steps, "S", "H"); (f != 0) != want {
+				t.Fatalf("interleaving %d %v: the handshake at %d; told %v, want %v", i, steps, f, f != 0, want)
+			}
+		}
+	})
+	t.Run("a heartbeat beside a handshake", func(t *testing.T) {
+		beat := []flightStep{{"P", "lift", nil}, {"P", "said", hello}, {"P", "land", nil}}
+		for i, steps := range interleavings(beat, open("A", hsA)) {
+			tr := NewTracker()
+			runFlights(tr, steps)
+			if f, l := tr.Placed().Order.Of(hsA); f == 0 || f != l {
+				t.Fatalf("interleaving %d %v: the start-up at %d,%d; want its serve's number", i, steps, f, l)
+			}
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		steps []flightStep
+		want  bool
+	}{
+		{"told before its request landed", open("A", hsA), true},
+		{"told after its request landed", []flightStep{{"A", "lift", nil}, {"A", "land", nil}, {"A", "handshake", hsA}}, false},
+		{"told in no request a connection lifted", []flightStep{{"A", "lift", nil}, {"Z", "handshake", hsA}, {"A", "land", nil}}, false},
+		{"told as a protocol phase", []flightStep{{"A", "lift", nil}, {"A", "said", hsA}, {"A", "land", nil}}, false},
+		{"told with no connection ever lifted", []flightStep{{"Z", "handshake", hsA}}, true},
+		{"told in NoRequest", []flightStep{{"A", "lift", nil}, {"N", "none", hsA}, {"A", "land", nil}}, false},
+		{"chosen in an earlier request", []flightStep{{"A1", "lift", nil}, {"A1", "land", nil}, {"A", "lift", nil}, {"A", "ssl", hsA}, {"A", "land", nil}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker()
+			runFlights(tr, tc.steps)
+			if f, l := tr.Placed().Order.Of(hsA); (f != 0 && f == l) != tc.want {
+				t.Fatalf("%v: the start-up at %d,%d; told %v, want %v", tc.steps, f, l, f != 0, tc.want)
+			}
+		})
+	}
+}
+
+// A handshake chosen in one request and answering another (an SSLRequest's
+// connection, whose start-up is picked as the SSLRequest arrives and answers
+// the StartupMessage after it) has no place, whatever its requests
+// overlapped: two such connections whose SSLRequests were aloft together may
+// have swapped start-ups although their StartupMessages came one after the
+// other. It still makes its request one that got a handshake, so a
+// handshake chosen and answered in one request beside it has no place
+// either.
+func TestAHandshakeChosenInAnEarlierRequestHasNoPlace(t *testing.T) {
+	hsA, hsB := handshakeMock("mock-hs-a"), handshakeMock("mock-hs-b")
+	steps := []flightStep{
+		{"A1", "lift", nil}, {"B1", "lift", nil}, {"A1", "land", nil}, {"B1", "land", nil},
+		{"B", "lift", nil}, {"B", "ssl", hsB}, {"B", "land", nil},
+		{"A", "lift", nil}, {"A", "ssl", hsA}, {"A", "land", nil},
+	}
+	tr := NewTracker()
+	runFlights(tr, steps)
+	o := tr.Placed().Order
+	for _, m := range []*models.Mock{hsA, hsB} {
+		if f, l := o.Of(m); f != 0 || l != 0 {
+			t.Fatalf("%s at %d,%d; want no place (chosen in its SSLRequest)", m.Name, f, l)
+		}
+	}
+	tr = NewTracker()
+	runFlights(tr, []flightStep{{"A", "lift", nil}, {"B", "lift", nil}, {"A", "ssl", hsA}, {"B", "handshake", hsB}, {"A", "land", nil}, {"B", "land", nil}})
+	if f, l := tr.Placed().Order.Of(hsB); f != 0 || l != 0 {
+		t.Fatalf("B's start-up at %d,%d beside one with no place; want none", f, l)
+	}
+}
+
+// A request that told two handshakes beside another that told one leaves
+// every one unordered: each is a handshake serve, not only the first.
+func TestEveryHandshakeOfARequestIsCheckedForACrossing(t *testing.T) {
+	x, a, y := handshakeMock("mock-x"), handshakeMock("mock-a"), handshakeMock("mock-y")
+	tr := NewTracker()
+	runFlights(tr, []flightStep{{"A", "lift", nil}, {"B", "lift", nil}, {"A", "handshake", x}, {"B", "handshake", y}, {"A", "handshake", a}, {"A", "land", nil}, {"B", "land", nil}})
+	for _, m := range []*models.Mock{x, a, y} {
+		if f, l := tr.Placed().Order.Of(m); f != 0 || l != 0 {
+			t.Fatalf("%s at %d,%d; want untold (A and B aloft together)", m.Name, f, l)
+		}
+	}
+}
+
+// A read compares its own set's serve numbers only: a request aloft across
+// NewSet that becomes a serve, or gets a handshake, in the next set does
+// not change a read of the set before, whatever that set's numbers are.
+func TestAReadOfASetIgnoresTheNextSetsNumbers(t *testing.T) {
+	hsA, hsB := handshakeMock("mock-hs-a"), handshakeMock("mock-hs-b")
+	for _, pad := range []int{0, 3, 6} {
+		tr := NewTracker()
+		a := tr.Lift()
+		b := tr.Lift()
+		for i := 0; i < pad; i++ {
+			tr.ServedMock(handshakeMock(fmt.Sprintf("mock-pad-%d", i)))
+		}
+		tr.ServedHandshakeIn(hsA, a, a)
+		a.Land()
+		read := tr.Placed().Order
+		if f, _ := read.Of(hsA); f == 0 {
+			t.Fatalf("pad %d: A's start-up has no place before B got one", pad)
+		}
+		tr.NewSet()
+		tr.ServedHandshakeIn(hsB, b, b)
+		b.Land()
+		if f, l := read.Of(hsA); f == 0 || f != l {
+			t.Fatalf("pad %d: the read of the earlier set changed after the next set's handshake: A at %d,%d", pad, f, l)
+		}
 	}
 }
