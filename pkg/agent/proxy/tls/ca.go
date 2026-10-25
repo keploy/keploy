@@ -292,15 +292,18 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 	if len(certPEM) == 0 {
 		return fmt.Errorf("SetupCaCertEnv: no CA certificate provided (fetch it from the agent first)")
 	}
-	tempPath, err := extractCertToTemp(certPEM)
+	// The trust files of runs killed before they could remove their own.
+	sweepDeadRunFiles(logger)
+	caFile, err := extractCertToTemp(logger, certPEM)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
 	}
+	tempPath := caFile.path
 	// Recorded before the env points at it: from here on, however this run
 	// ends, RemoveCaCertEnvFiles removes the file and puts back each variable
 	// that still names it.
-	recordCaTrustFile(tempPath)
+	recordCaTrustFile(caFile)
 	for _, k := range caTrustEnvVars {
 		recordCaTrustEnv(k, tempPath)
 	}
@@ -325,10 +328,10 @@ var caTrustEnvVars = []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_
 // caTrustFilesMu guards the record of what SetupCaCertEnv did to this process.
 var (
 	caTrustFilesMu sync.Mutex
-	// caTrustFiles are the trust files SetupCaCertEnv wrote in this process:
-	// the CA files the trust variables name and the Java truststores
-	// JAVA_TOOL_OPTIONS names.
-	caTrustFiles []string
+	// caTrustFiles are the trust files SetupCaCertEnv wrote in this process,
+	// each under the run's lock: the CA files the trust variables name and
+	// the Java truststores JAVA_TOOL_OPTIONS names.
+	caTrustFiles []*runFile
 	// caTrustEnvBefore holds each variable SetupCaCertEnv sets as it was
 	// before the first SetupCaCertEnv since the last RemoveCaCertEnvFiles:
 	// its value, or nil for a variable that was unset.
@@ -360,11 +363,11 @@ func snapshotCaTrustEnvLocked() {
 
 // recordCaTrustFile records a trust file SetupCaCertEnv wrote, for
 // RemoveCaCertEnvFiles to remove.
-func recordCaTrustFile(path string) {
+func recordCaTrustFile(rf *runFile) {
 	caTrustFilesMu.Lock()
 	defer caTrustFilesMu.Unlock()
 	snapshotCaTrustEnvLocked()
-	caTrustFiles = append(caTrustFiles, path)
+	caTrustFiles = append(caTrustFiles, rf)
 }
 
 // recordCaTrustEnv records that keploy sets k to v, before it does: while k
@@ -408,16 +411,18 @@ func caTrustEnvBase(k string) string {
 // Every keploy binary whose commands are built by cli.Root gets this for free:
 // Root registers it to run when the command returns, however it returns. A
 // program that sets up native runs through pkg/platform/http without cli.Root
-// must call it itself on its way out. Only an end that skips the command's
-// return leaves the file: SIGKILL, an os.Exit, a crash in another goroutine.
+// must call it itself on its way out. An end that skips the command's return
+// (SIGKILL, an os.Exit, a crash in another goroutine) leaves the files, and a
+// later SetupCaCertEnv with the same temp dir that may remove them (root's, or
+// the same user's) does (sweepDeadRunFiles).
 // It is safe to call more than once, and when SetupCaCertEnv never ran.
 func RemoveCaCertEnvFiles() error {
 	caTrustFilesMu.Lock()
 	defer caTrustFilesMu.Unlock()
 
 	var errs []error
-	for _, p := range caTrustFiles {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+	for _, rf := range caTrustFiles {
+		if err := rf.remove(); err != nil {
 			errs = append(errs, fmt.Errorf("removing the app's CA trust file: %w", err))
 		}
 	}
@@ -503,14 +508,14 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	systemBundle, srcPath := loadSystemCABundleFn(logger)
 	merged := mergeCABundle(systemBundle, certPEM)
 
-	mergedPEM, err := os.CreateTemp("", "keploy-java-cas-*.pem")
+	mergedPEM, mergedFile, err := createRunFile(logger, runMergedPEMPattern)
 	if err != nil {
 		return fmt.Errorf("failed to create the merged CA pem: %w", err)
 	}
-	mergedPath := mergedPEM.Name()
+	mergedPath := mergedFile.path
 	// The merged PEM is only the input to generateTrustStore; the JKS is what
 	// the JVM reads, so the PEM can go once the store is built.
-	defer func() { _ = os.Remove(mergedPath) }()
+	defer func() { _ = mergedFile.remove() }()
 	if _, err := mergedPEM.Write(merged); err != nil {
 		_ = mergedPEM.Close()
 		return fmt.Errorf("failed to write the merged CA pem: %w", err)
@@ -525,25 +530,25 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	// test` jobs) overwrote each other's, and since a JVM reads its truststore
 	// when it first makes a TLS call, the app of the run that wrote first
 	// then refused its own agent's certificates. It was also left behind,
-	// root's under sudo. CreateTemp makes a new file under a new name, so no
-	// other run's store, and no leftover another user owns, is ever in the
-	// way; a single shared name once let one `sudo keploy` leave a root-owned
-	// store every later run failed to rewrite ("open
+	// root's under sudo. A new file under a new name each run means no other
+	// run's store, and no leftover another user owns, is ever in the way; a
+	// single shared name once let one `sudo keploy` leave a root-owned store
+	// every later run failed to rewrite ("open
 	// /tmp/keploy-java-truststore.jks: permission denied").
-	jks, err := os.CreateTemp("", "keploy-java-truststore-*.jks")
+	jks, jksFile, err := createRunFile(logger, runTrustStorePattern)
 	if err != nil {
 		return fmt.Errorf("failed to create the Java truststore: %w", err)
 	}
-	jksPath := jks.Name()
+	jksPath := jksFile.path
 	// Recorded before Java is pointed at it: from here on, however this run
 	// ends, RemoveCaCertEnvFiles removes it.
-	recordCaTrustFile(jksPath)
+	recordCaTrustFile(jksFile)
 	if err := jks.Close(); err != nil {
-		_ = os.Remove(jksPath)
+		_ = jksFile.remove()
 		return fmt.Errorf("failed to create the Java truststore: %w", err)
 	}
 	if err := generateTrustStore(mergedPath, jksPath, decodeFirstCertDER(certPEM)); err != nil {
-		_ = os.Remove(jksPath)
+		_ = jksFile.remove()
 		return fmt.Errorf("failed to build the Java truststore: %w", err)
 	}
 	// Readable by the app, which may run as the same user; the store contains
@@ -560,7 +565,7 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	// machine without keytool).
 	safePath, ok := envSafePath(jksPath)
 	if !ok {
-		_ = os.Remove(jksPath)
+		_ = jksFile.remove()
 		logger.Warn("the Java truststore path contains a space and cannot be made space-free; skipping JAVA_TOOL_OPTIONS so the JVM still starts",
 			zap.String("truststore", jksPath))
 		return nil
@@ -1042,13 +1047,14 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
 		// Extract certificate to a temporary file
-		tempCertPath, err := extractCertToTemp(ca.certPEM)
+		certFile, err := extractCertToTemp(logger, ca.certPEM)
 		if err != nil {
 			utils.LogError(logger, err, "Failed to extract certificate to temp folder")
 			return err
 		}
+		tempCertPath := certFile.path
 		defer func() {
-			if err := os.Remove(tempCertPath); err != nil {
+			if err := certFile.remove(); err != nil {
 				logger.Debug("Failed to remove temporary certificate file", zap.String("path", tempCertPath), zap.Error(err))
 			}
 		}()
@@ -1278,31 +1284,32 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
 // could replace the cert an app was about to trust. The certificate is public,
 // so world-readable is fine; world-writable was the bug.
 //
-// A file it cannot finish is removed: the caller gets no path to remove.
-func extractCertToTemp(certPEM []byte) (path string, err error) {
-	tempFile, err := os.CreateTemp("", "keploy-ca-*.crt")
+// The file is a run file (createRunFile), under the run's lock until the
+// caller removes it. A file it cannot finish is removed: the caller gets
+// nothing to remove.
+func extractCertToTemp(logger *zap.Logger, certPEM []byte) (_ *runFile, err error) {
+	tempFile, made, err := createRunFile(logger, runCAFilePattern)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer func() {
 		if cerr := tempFile.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
 		if err != nil {
-			_ = os.Remove(tempFile.Name())
-			path = ""
+			_ = made.remove()
 		}
 	}()
 
-	if err = os.Chmod(tempFile.Name(), 0644); err != nil {
-		return "", err
+	if err = os.Chmod(made.path, 0644); err != nil {
+		return nil, err
 	}
 
 	if _, err = tempFile.Write(certPEM); err != nil {
-		return "", err
+		return nil, err
 	}
 
-	return tempFile.Name(), nil
+	return made, nil
 }
 
 // generateTrustStore creates a JKS file from every CERTIFICATE PEM block

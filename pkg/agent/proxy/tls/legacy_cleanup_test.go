@@ -71,8 +71,9 @@ func TestLegacyCAFingerprint(t *testing.T) {
 
 // TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked: `keploy
 // ca clean` removes every Java truststore keploy left in the temp dir, the
-// shared name the oldest versions used included, and nothing else; the boot
-// sweep, which may run beside a live run, removes none of them.
+// shared name the oldest versions used included, and the run files of ended
+// runs, and nothing else: not a live run's store; the boot sweep, which may
+// run beside a live run of an older keploy, removes none of them.
 func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("os.TempDir does not honour TMPDIR on Windows")
@@ -90,6 +91,19 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 		_, err := os.Stat(filepath.Join(dir, name))
 		return err == nil
 	}
+	// A live run's store, under its lock, and run files of ended runs.
+	jks, live, err := createRunFile(zap.NewNop(), runTrustStorePattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = jks.Close()
+	t.Cleanup(func() { _ = live.remove() })
+	deadRuns := []string{"keploy-java-truststore-run-5.jks", "keploy-ca-run-6.crt"}
+	for _, name := range deadRuns {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, false)
 	for _, name := range stores {
@@ -106,5 +120,13 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 	}
 	if !exists(other) {
 		t.Errorf("keploy ca clean removed %s, which is not keploy's", other)
+	}
+	for _, name := range deadRuns {
+		if exists(name) {
+			t.Errorf("keploy ca clean left %s, which no run holds", name)
+		}
+	}
+	if !exists(filepath.Base(live.path)) {
+		t.Errorf("keploy ca clean removed %s, the store of a live run", live.path)
 	}
 }

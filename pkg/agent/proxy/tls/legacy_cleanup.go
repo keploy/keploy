@@ -53,12 +53,13 @@ func SweepLegacyCA(ctx context.Context, logger *zap.Logger, fresh bool) {
 }
 
 // SweepLegacyCAAggressive is the explicit `keploy ca clean` path. It does
-// everything SweepLegacyCA does and also removes every keploy Java truststore
-// in the temp dir: the shared and per-uid ones older keploy versions kept
-// after every run, and one a run killed before its cleanup left (a run now
-// removes its own when it ends). That removal is not fingerprint-gated, and
-// it also takes a store a run going on at the same time still uses, so it is
-// kept out of the automatic per-run boot sweep.
+// everything SweepLegacyCA does and also removes the keploy Java truststores
+// in the temp dir: every shared and per-uid one older keploy versions kept
+// after every run, and the trust files of runs killed before their cleanup
+// (sweepDeadRunFiles, which a setup does too). The older stores hold no lock,
+// so that removal may take one an older keploy running at the same time still
+// uses, and it is kept out of the automatic per-run boot sweep; a run file is
+// taken only when no run holds it.
 func SweepLegacyCAAggressive(ctx context.Context, logger *zap.Logger, fresh bool) {
 	sweepLegacyCA(ctx, logger, fresh, true)
 }
@@ -219,9 +220,12 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 
 // removeLegacyTempFiles deletes the world-writable temp files the old client
 // wrote and never cleaned: the per-process CA copies ($TMPDIR/ca.crt*) that
-// contain the retired cert, and, with includeTruststores, every keploy Java
-// truststore.
+// contain the retired cert, and, with includeTruststores, every Java
+// truststore of an older keploy and the run files no run holds.
 func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores bool) {
+	if includeTruststores {
+		sweepDeadRunFiles(logger)
+	}
 	tmp := os.TempDir()
 	entries, err := os.ReadDir(tmp)
 	if err != nil {
@@ -239,7 +243,7 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, includeTruststores b
 					logger.Debug("removed a leaked legacy CA temp file", zap.String("path", p))
 				}
 			}
-		case includeTruststores && (strings.HasPrefix(name, "keploy-java-truststore-") || name == "keploy-java-truststore.jks"):
+		case includeTruststores && !isRunFileName(name) && (strings.HasPrefix(name, "keploy-java-truststore-") || name == "keploy-java-truststore.jks"):
 			// Not fingerprint-gated (it is a JKS, not a PEM), so only done on the
 			// explicit `keploy ca clean` — never on the automatic boot sweep,
 			// where it could race a concurrent run's live truststore.

@@ -90,3 +90,13 @@ jobs:
       - name: Test the Windows stop (amd64)
         run: go test -count=1 -run "TestTheWindowsStopSaysItKilled" ./utils/
         shell: cmd
+
+      # A native run's trust files under their LockFileEx lock
+      # (pkg/agent/proxy/tls/runfiles_windows.go): a setup leaves a live run's,
+      # takes those of a run killed with TerminateProcess, and takes nothing
+      # else. Only these tests of the package run here: the package as a whole
+      # has not been shown to pass on Windows. This job is where they first
+      # ran on Windows; they were cross-compiled and vetted for it before.
+      - name: Test the run files' lock (amd64)
+        run: go test -count=1 -run "^TestRunFiles" ./pkg/agent/proxy/tls/
+        shell: cmd
