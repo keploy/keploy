@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -624,13 +625,28 @@ func stripShowField(fields []zapcore.Field) []zapcore.Field {
 }
 
 // cleanFileCore wraps a zapcore.Core and strips the Show field from each
-// Write so it does not appear in the log file.
+// Write so it does not appear in the log file. Write errors from a closed
+// file are silenced: the log file can be closed during shutdown while a
+// late zap flush is still in flight, and its error must not leak onto
+// stderr (the CI lane asserts on the last line of stderr).
 type cleanFileCore struct {
 	zapcore.Core
 }
 
 func (c cleanFileCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
-	return c.Core.Write(ent, stripShowField(fields))
+	err := c.Core.Write(ent, stripShowField(fields))
+	if err != nil && strings.Contains(err.Error(), "file already closed") {
+		return nil // silently ignore: the file was closed during shutdown
+	}
+	return err
+}
+
+func (c cleanFileCore) Sync() error {
+	err := c.Core.Sync()
+	if err != nil && strings.Contains(err.Error(), "file already closed") {
+		return nil
+	}
+	return err
 }
 
 func (c cleanFileCore) With(fields []zapcore.Field) zapcore.Core {
