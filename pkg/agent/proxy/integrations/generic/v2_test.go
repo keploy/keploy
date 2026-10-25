@@ -3,7 +3,12 @@ package generic
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -590,5 +595,127 @@ func TestV2_ATurnThatTakesNoChunkMarksNothing(t *testing.T) {
 	}
 	if c, p := sess.DestStream.Consumed(), sess.DestStream.Processed(); c != 4 || p != 4 {
 		t.Errorf("dest Consumed, Processed = %d, %d, want 4, 4", c, p)
+	}
+}
+
+// loopPanic is what the row's post-record hook panics with.
+const loopPanic = "generic test: the parser's loop panics"
+
+// A loop that panics stops its readers. They read ahead of it (ReadAhead) and
+// used to wait for good to hand it what they had taken once its queue was
+// full: each reader's goroutine, the chunk in its hand and the queue's chunks
+// were held for the life of the agent, so a parser that panicked on every
+// connection grew the agent's memory with each one. Now they stop with the
+// loop, and what they took and it never processed stays unprocessed (the
+// loop's MarkProcessed alone marks it), so the release counts it as
+// unrecorded: the request whose mock the loop was recording when it panicked
+// is processed, its answer (in the loop's hand) and nothing after it is not.
+func TestV2_ALoopThatPanicsStopsItsReaders(t *testing.T) {
+	t.Setenv(provenswitch.Env, "0") // emitted at once, not held
+	synctest.Test(t, func(t *testing.T) {
+		at := time.Unix(2_000_000_000, 0)
+		seq := uint32(0)
+		chunk := func(dir fakeconn.Direction, b []byte) fakeconn.Chunk {
+			seq++
+			return fakeconn.Chunk{Dir: dir, ConnSeq: seq, Bytes: b, ReadAt: at, WrittenAt: at}
+		}
+		// Unbuffered: a send returns once a reader has the chunk, and a send
+		// that does not wait (offer) is taken only by a reader waiting for one.
+		clientCh, destCh := make(chan fakeconn.Chunk), make(chan fakeconn.Chunk)
+		offer := func(c fakeconn.Chunk) bool {
+			synctest.Wait()
+			select {
+			case clientCh <- c:
+				return true
+			default:
+				return false
+			}
+		}
+		sess, _ := newV2Session(t, clientCh, destCh)
+		// The loop panics as it records its first mock, held there until the
+		// test releases it: meanwhile the test feeds the readers what the loop
+		// never gets to.
+		held, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		sess.AddPostRecordHook(func(*models.Mock) {
+			once.Do(func() {
+				close(held)
+				<-release
+				panic(loopPanic)
+			})
+		})
+		done := make(chan any, 1)
+		go func() {
+			defer func() { done <- recover() }() // as the supervisor recovers it
+			_ = encodeGenericV2(sess, zap.NewNop())
+		}()
+
+		req, res := []byte("REQ1"), []byte("RES1")
+		clientCh <- chunk(fakeconn.FromClient, req)
+		synctest.Wait()
+		destCh <- chunk(fakeconn.FromDest, res) // completes the exchange: the loop records it
+		<-held
+
+		// The client's reader takes what comes until its queue to the loop is
+		// full and it holds one more.
+		const maxMore = 1024
+		more := 0
+		for ; more < maxMore && offer(chunk(fakeconn.FromClient, []byte(fmt.Sprintf("REQ-%d", more)))); more++ {
+		}
+		if more == 0 || more == maxMore {
+			t.Fatalf("the client's reader took %d chunks from a held loop; want it to fill its queue and hold one", more)
+		}
+		close(release)
+		if p := <-done; p != loopPanic {
+			t.Fatalf("the parser returned with %v; want its loop's panic", p)
+		}
+		if offer(chunk(fakeconn.FromClient, []byte("after the stop"))) {
+			t.Error("the client's reader took a chunk once the loop had stopped")
+		}
+		// The connection ends.
+		close(clientCh)
+		close(destCh)
+		synctest.Wait()
+		if p := parkedIn("generic.encodeGenericV2"); len(p) != 0 {
+			t.Errorf("the parser's goroutines outlive its loop's panic, holding what its readers took: %q", p)
+		}
+		if got, want := [2]int64{sess.ClientStream.Processed(), sess.DestStream.Processed()}, [2]int64{int64(len(req)), 0}; got != want {
+			t.Errorf("processed (client, server) %v bytes; want %v: none of the %d chunks the readers took once the loop was held", got, want, more)
+		}
+	})
+}
+
+// parkedIn is the goroutines of the caller's synctest bubble, other than the
+// caller, that are alive and whose stack names fn (as a stack prints it: in a
+// frame, or as the function that started the goroutine), each as its stack's
+// first two lines. Called after synctest.Wait, when every other goroutine of the
+// bubble has returned or is durably blocked, what it returns does not depend on
+// how they were scheduled.
+func parkedIn(fn string) []string {
+	header, _, _ := strings.Cut(goroutineStacks(false), "\n")
+	self, _, _ := strings.Cut(header, " [")
+	_, bubble, ok := strings.Cut(header, ", synctest bubble ")
+	if !ok {
+		panic("parkedIn: called outside a synctest bubble")
+	}
+	bubble = ", synctest bubble " + bubble
+	var parked []string
+	for _, g := range strings.Split(goroutineStacks(true), "\n\n") {
+		first, _, _ := strings.Cut(g, "\n")
+		if strings.HasPrefix(first, self+" [") || !strings.HasSuffix(first, bubble) || !strings.Contains(g, fn) {
+			continue
+		}
+		lines := strings.SplitN(g, "\n", 3)
+		parked = append(parked, strings.Join(lines[:min(2, len(lines))], " "))
+	}
+	return parked
+}
+
+// goroutineStacks is runtime.Stack's text, the caller's goroutine's alone or all.
+func goroutineStacks(all bool) string {
+	for buf := make([]byte, 1<<16); ; buf = make([]byte, 2*len(buf)) {
+		if n := runtime.Stack(buf, all); n < len(buf) {
+			return string(buf[:n])
+		}
 	}
 }
