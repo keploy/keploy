@@ -1964,6 +1964,113 @@ func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
 	}
 }
 
+// A call marked where keploy's store no longer shows the view of the test
+// its learn tracker still has open (the store's pool view after that test's
+// end, or the next test's view after it), may be that test's late call: its
+// mark (MarkCallRound, which the Generic, MySQL and Postgres parsers read)
+// holds that test's recordings as its own, as a round snapshot's call round
+// does, so no lookup names one as made elsewhere, and record's judging
+// never bakes a test's own recording into the worker scope. The Generic
+// parser's miss there names none. Once the tracker ends the test, a call
+// marked then names it.
+func TestACallMarkedWhereTheStoreEndedATestTheTrackerHasOpenNamesNoneOfItsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name  string
+		after func(mm *MockManager, next *models.Mock)
+	}{
+		{"the store's pool view", func(mm *MockManager, next *models.Mock) { mm.ServeExactPool(models.PoolKeyNone, nil) }},
+		{"the next test's view", func(mm *MockManager, next *models.Mock) {
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			mm.ServeExactTest("T2", []*models.Mock{next})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			own := genericExchange("ex-own", 0, "AUTH step2")
+			next := genericExchange("ex-next", time.Second, "PING")
+			mm := stagedManager(t, nil, []*models.Mock{own, next})
+			tr := learn.NewTracker()
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+			mm.ServeExactTest("T1", []*models.Mock{own})
+			tc.after(mm, next)
+			find := func(call integrations.CallRound) string {
+				name, _ := mm.FindStagedNotOwned(models.GENERIC, call, func(m *models.Mock) bool { return m.Name == own.Name })
+				return name
+			}
+			if got := find(mm.MarkCallRound()); got != "" {
+				t.Fatalf("a call marked with T1 ended on the store alone named T1's own %q as made elsewhere", got)
+			}
+			if snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr}); !ok || snap.Ended != "T1" {
+				t.Fatalf("precondition: the round reads %v (%s), ended %q; want T1 ended on the store alone", snap.Phase, snap.Boundary, snap.Ended)
+			} else if got := find(snap.CallRound()); got != "" {
+				t.Fatalf("a snapshot's call round with T1 ended on the store alone named T1's own %q as made elsewhere", got)
+			}
+			if r := genericMiss(t, mm, "AUTH step2"); r.NotOwned || r.ClosestMock == own.Name {
+				t.Fatalf("a Generic request with T1 ended on the store alone was diagnosed as T1's own recording made elsewhere: %+v", r)
+			}
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+			if got := find(mm.MarkCallRound()); got != own.Name {
+				t.Fatalf("a call marked once the tracker ended T1 too named %q; want T1's own %s, made elsewhere", got, own.Name)
+			}
+		})
+	}
+}
+
+// A call marked where keploy's learn tracker began a test whose view the
+// store has not installed (integrations.RoundSnapshot.TrackerAhead) is the
+// pool's on the store's pool view after the test before
+// (integrations.RoundSnapshot.PoolsCall) and the tracker's test's on that
+// test's view still in force, and in neither does anything tell which
+// recordings are the tracker's test's own: its mark (MarkCallRound, which
+// the Generic, MySQL and Postgres parsers
+// read) holds every recording, as a round snapshot's call round does, so no
+// lookup names the test's own recording as made elsewhere, and the Generic
+// parser's miss there names none. Once the store opens the test, a call
+// marked then names the test before's recording.
+func TestACallMarkedWhereTheTrackerIsAheadOfTheStoreNamesNoRecordingMadeElsewhere(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name  string
+		after func(mm *MockManager)
+	}{
+		{"the store's pool view after T1", func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }},
+		{"the store still showing T1's view", func(mm *MockManager) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := genericExchange("ex-before", 0, "AUTH step2")
+			own := genericExchange("ex-own", time.Second, "PING")
+			mm := stagedManager(t, nil, []*models.Mock{before, own})
+			tr := learn.NewTracker()
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+			mm.ServeExactTest("T1", []*models.Mock{before})
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+			tc.after(mm)
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+			find := func(call integrations.CallRound, name string) string {
+				got, _ := mm.FindStagedNotOwned(models.GENERIC, call, func(m *models.Mock) bool { return m.Name == name })
+				return got
+			}
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+			if !ok || !snap.TrackerAhead() {
+				t.Fatalf("precondition: the round reads %v (%s), ended %q; want the tracker ahead of the store", snap.Phase, snap.Boundary, snap.Ended)
+			}
+			if got := find(mm.MarkCallRound(), own.Name); got != "" {
+				t.Fatalf("a call marked with the tracker ahead of the store named %q as made elsewhere; want none", got)
+			}
+			if got := find(snap.CallRound(), own.Name); got != "" {
+				t.Fatalf("a snapshot's call round with the tracker ahead of the store named %q as made elsewhere; want none", got)
+			}
+			if r := genericMiss(t, mm, "PING"); r.NotOwned || r.ClosestMock == own.Name {
+				t.Fatalf("a Generic request with the tracker ahead of the store was diagnosed as a recording made elsewhere: %+v", r)
+			}
+			mm.ServeExactTest("T2", []*models.Mock{own})
+			if got := find(mm.MarkCallRound(), before.Name); got != before.Name {
+				t.Fatalf("a call marked once the store opened T2 named %q; want T1's %s, made elsewhere", got, before.Name)
+			}
+		})
+	}
+}
+
 // A lookup of a recording made elsewhere is asked of the round the call was
 // made in (integrations.CallRound, marked as its first read): asked of no
 // read it names nothing; a recording the call's first read's view held as

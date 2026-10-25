@@ -610,6 +610,9 @@ type Placed struct {
 	// learn step holds each later pass to the test and the openness its
 	// first pass read (the round it was made in).
 	Open, Begun bool
+	// SetAt is SetAt's, in the same read: the test number the running set
+	// began at.
+	SetAt uint64
 	// Set is every mock F served in the running set before the read, each
 	// once, in the order F first served it (Tracker.set): a prefix of the
 	// tracker's own list, which only grows, so no later serve shows in it.
@@ -644,7 +647,7 @@ func (t *Tracker) Placed() Placed {
 	earlier = append(append(earlier, t.run...), t.served...)
 	return Placed{
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
-		Open: t.open, Begun: t.began,
+		Open: t.open, Begun: t.began, SetAt: t.setEpoch,
 		Set:   t.set[:len(t.set):len(t.set)],
 		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places, flights: t.flights, landings: t.landings, flying: t.flying},
 	}
@@ -1183,6 +1186,19 @@ func WithTracker(ctx context.Context, t *Tracker) context.Context {
 func TrackerFrom(ctx context.Context) *Tracker {
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
 	return t
+}
+
+// SetAt is the test number the running set began at (NewSet): it moves at
+// every new set, and only there, so a store that keeps the number its
+// staging was made under tells whether the tracker began a set the store has
+// not staged yet.
+func (t *Tracker) SetAt() uint64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.setEpoch
 }
 
 // State is the running test's number, whether a test is open (Begin, until

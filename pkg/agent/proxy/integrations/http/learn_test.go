@@ -3908,8 +3908,11 @@ func TestLearnMatchACallInTheGapIsLearnedAsOneAfterTheRequest(t *testing.T) {
 // One whose own request came is learned from as before. Each close is forced
 // through the tracker's OnAwait, through no clock, 200 times, from a store
 // read one read after another and from one read in one snapshot of the
-// round (integrations.RoundReader), showing the test's view or, the test
-// ended on it first, its pool view.
+// round (integrations.RoundReader), showing the test's view or its pool
+// view, the tracker's test not installed: there the call is the pool's
+// (integrations.RoundSnapshot.PoolsCall), and still waits for its request,
+// then is decided in the round between tests, where mock-0, a test's own
+// recording, is no recording it may learn onto.
 func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 	h, n, opts := learnOn(t)
 	request := func(test string) *models.TestRequest {
@@ -3932,26 +3935,32 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 	// The miss names the test the call was read in: by its view's name
 	// where the store reads its round in one snapshot, as the test then
 	// running where it does not.
-	movedWhy := func(where string) string {
-		return "keploy record's full round read this request " + where + ", and the replay ended that test before keploy could answer it"
+	movedWhy := func(where, moved string) string {
+		if moved == "" {
+			moved = "ended that test"
+		}
+		return "keploy record's full round read this request " + where + ", and the replay " + moved + " before keploy could answer it"
 	}
 	// came is what a call whose own request came gets.
 	const served = "served mock-0"
 	stores := []struct {
-		name, where, came string
-		of                func(*learnDb) integrations.MockMemDb
+		name, where, came, moved string
+		of                       func(*learnDb) integrations.MockMemDb
 	}{
-		{"read one after another", "in the test then running", served, func(ld *learnDb) integrations.MockMemDb { return ld }},
-		{"read in one snapshot of the round", "in test-2", served, func(ld *learnDb) integrations.MockMemDb {
+		{"read one after another", "in the test then running", served, "", func(ld *learnDb) integrations.MockMemDb { return ld }},
+		{"read in one snapshot of the round", "in test-2", served, "", func(ld *learnDb) integrations.MockMemDb {
 			return &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}, test: "test-2"}
 		}},
 		// The store shows its pool view while the tracker awaits the
-		// test's request (the test ended on the store first): a window
-		// the tracker then closes unread is a round that moved, though the
-		// two agree again, between tests. One whose request came is read
-		// as between tests, where mock-0 is learned nothing onto.
-		{"read in one snapshot of the round, the store's test ended", "in the test then running",
+		// test's request: the pool's call
+		// (integrations.RoundSnapshot.PoolsCall), which never waits for
+		// the store (this one tells no move: no integrations.RoundWaiter),
+		// only for its request, then is decided in the round between
+		// tests, where mock-0 is no recording it may learn onto. Any close
+		// of the window is the round between tests moving on.
+		{"read in one snapshot of the round, the store on its pool view", "in the round between tests, as keploy's learn tracker began the next test",
 			"miss its closest recorded call is not one the learn step may learn onto (another test's, or the pool's outside a full record): body.nonce changed",
+			"moved on to another test or test set",
 			func(ld *learnDb) integrations.MockMemDb {
 				return &roundLearnDb{s12LearnDb: &s12LearnDb{learnDb: ld}}
 			}},
@@ -3971,7 +3980,7 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 		for _, c := range closes {
 			want := store.came
 			if c.moved {
-				want = "miss " + movedWhy(store.where)
+				want = "miss " + movedWhy(store.where, store.moved)
 			}
 			for i := 0; i < 200; i++ {
 				db := store.of(&learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/nonce", `{"nonce":"n-5f2a91"}`, nil, `{"ok":true}`)}})
@@ -4014,7 +4023,7 @@ func TestLearnMatchACallThatWaitedIsDecidedInItsOwnTestsRound(t *testing.T) {
 				// gives no reason: nothing of the request was compared.
 				r := &models.MockMismatchReport{}
 				d.miss.explain(r)
-				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy(store.where)+": keploy learns nothing of a call in a round it was not made in") {
+				if r.Reason != "" || !strings.HasPrefix(r.NextSteps, movedWhy(store.where, store.moved)+": keploy learns nothing of a call in a round it was not made in") {
 					t.Fatalf("%s, %s: the miss reads reason %q, next steps %q; want no reason, and the round that moved", store.name, c.name, r.Reason, r.NextSteps)
 				}
 			}
@@ -4037,6 +4046,85 @@ func TestMovedFromAPassAfterAWaitIsNoCatchUp(t *testing.T) {
 	}
 	if moved, caught := first.movedFrom(now, true); moved != "" || !caught {
 		t.Fatalf("a retake read %q, caught up %v; want the tracker's catch-up", moved, caught)
+	}
+}
+
+// A catch-up lands only on the test the first pass read
+// (learnRound.movedFrom). The tracker catches up with the store's view only
+// where it had no test open at the first pass: one that had another test's
+// view open moved. The store catches up only with the tracker's same test,
+// and only where the first pass found the tracker ahead of the view of the
+// test before (learnRound.waits): its install of the view of the tracker's
+// next test, as the tracker moved on to it, is a move. A first pass that
+// found the tracker ahead of the store's pool view read the pool's call
+// (learnRound.pools), of the round between tests: the store opening the
+// tracker's test, another pool view, or the tracker moving on, is a move of
+// that round, never a catch-up. movedFrom's rule does not rest on its
+// caller.
+func TestMovedFromCatchesUpOnlyWithTheFirstPassesTest(t *testing.T) {
+	pool := learnRound{read: true, snap: true, epoch: 1, viewGen: 5, test: 2, open: true, ahead: true}
+	behind := learnRound{read: true, snap: true, epoch: 1, viewGen: 4, view: "test-1", test: 2, open: true, ahead: true}
+	for _, tc := range []struct {
+		name       string
+		first, now learnRound
+		retake     bool
+		moved      string
+		caught     bool
+	}{
+		{"a retake, the tracker that had test-1 open beginning test-2, whose view the store showed",
+			learnRound{read: true, snap: true, epoch: 1, viewGen: 4, view: "test-2", test: 1, open: true},
+			learnRound{read: true, snap: true, epoch: 1, viewGen: 4, view: "test-2", test: 2, open: true, agrees: true},
+			true, "ended that test", false},
+		// The pool's call (integrations.RoundSnapshot.PoolsCall).
+		{"the pool's call, a retake, the tracker ending test-2, which it began before the store opened it",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, test: 2, agrees: true},
+			true, "moved on to another test or test set", false},
+		{"the pool's call, after a wait, the store opening test-3 as the tracker moved on to it from test-2",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 6, view: "test-3", test: 3, open: true, agrees: true},
+			false, "began a test", false},
+		{"the pool's call, after a wait, the store opening test-2, which the tracker has open",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 6, view: "test-2", test: 2, open: true, agrees: true},
+			false, "began a test", false},
+		{"the pool's call, a retake, the store opening test-2, which the tracker has open",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 6, view: "test-2", test: 2, open: true, agrees: true},
+			true, "began a test", false},
+		{"the pool's call, the store installing a pool view after its pool view, the tracker keeping test-2",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 6, test: 2, open: true, ahead: true},
+			false, "served another view of its recordings between tests", false},
+		{"the pool's call, the tracker beginning test-3 before the store opened test-2",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, test: 3, open: true, ahead: true},
+			false, "moved on to another test or test set", false},
+		{"the pool's call, the store's next pool view as the tracker ended test-2",
+			pool, learnRound{read: true, snap: true, epoch: 1, viewGen: 6, test: 2, agrees: true},
+			false, "served another view of its recordings between tests", false},
+		{"the pool's call, its round unmoved",
+			pool, pool, false, "", false},
+		// The tracker ahead of the view of the test before
+		// (learnRound.waits): the call waits for the store to open the
+		// tracker's test, through any view not that test's.
+		{"behind, the store installing its pool view after test-1's, the tracker keeping test-2",
+			behind, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, test: 2, open: true, ahead: true},
+			false, "", false},
+		{"behind, the store opening test-2, which the tracker has open",
+			behind, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, view: "test-2", test: 2, open: true, agrees: true},
+			false, "", true},
+		{"behind, the store opening test-3 as the tracker moved on to it from test-2",
+			behind, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, view: "test-3", test: 3, open: true, agrees: true},
+			false, "ended that test", false},
+		// Ahead at both passes, but the tracker moved on: the call's test
+		// ended before the store opened it.
+		{"behind, the tracker beginning test-3 before the store opened test-2",
+			behind, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, test: 3, open: true, ahead: true},
+			false, "ended that test", false},
+		{"behind, the tracker ending test-2 on the store's pool view",
+			behind, learnRound{read: true, snap: true, epoch: 1, viewGen: 5, test: 2, agrees: true},
+			false, "ended that test", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if moved, caught := tc.first.movedFrom(tc.now, tc.retake); moved != tc.moved || caught != tc.caught {
+				t.Fatalf("movedFrom read %q, caught up %v; want %q, caught up %v", moved, caught, tc.moved, tc.caught)
+			}
+		})
 	}
 }
 

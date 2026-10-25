@@ -252,6 +252,14 @@ type Proxy struct {
 	// models.BaseTime), which cuts what was missed until then
 	// (cutMissesAtSetStart).
 	missCutPending atomic.Bool
+	// setStaged is the staging (MockManager.StagingEpoch) of the running
+	// test set's first, which cut what was missed until then
+	// (cutMissesAtSetStart), under the proven switch; 0 before any. A miss
+	// whose call was marked in an earlier staging
+	// (models.MockMismatchReport.MarkEpoch) is not the set's, and the drain
+	// cuts it as the set's start did, however late it arrives
+	// (markedBeforeSet).
+	setStaged atomic.Uint64
 	// pendingMockErrors retains mock-not-found errors that arrive while no test
 	// capture window is active (activeTestErrors is nil) — e.g. between tests,
 	// or when the replayer/agent predates the BeginTestErrorCapture wiring.
@@ -4813,10 +4821,19 @@ var (
 // charged with is. An application keploy starts for the set starts after the
 // staging, so none of its startup is cut. The drain is flushed first, so a miss
 // it holds is cut with the rest; a flush that cannot complete (the drain
-// stopped, the staging given up) cuts what is filed. A call matched before the
-// staging whose miss reaches the drain only after the flush is not cut: it is
-// read as the set's, red, never green.
+// stopped, the staging given up) cuts what is filed. A call whose parser
+// marked its round before the staging (models.MockMismatchReport.MarkEpoch)
+// is cut whenever its miss reaches the drain (markedBeforeSet): before the
+// flush, here, after it, in the drain, so whether it is counted never rests
+// on the scheduler. An unmarked call matched before the staging whose miss
+// reaches the drain only after the flush is not cut: nothing tells it from
+// the set's, so it is read as the set's, red, never green.
 func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
+	if m := p.getMockManager(); m != nil {
+		// Before the flush: a marked miss the drain files after this is cut
+		// there (markedBeforeSet), one it filed before, here.
+		p.setStaged.Store(m.StagingEpoch())
+	}
 	if p.errDrainActive.Load() && p.errChannel != nil {
 		_, _ = p.flushOnEvents(ctx, &flushMarker{done: make(chan struct{})})
 	}
@@ -4832,11 +4849,34 @@ func (p *Proxy) cutMissesAtSetStart(ctx context.Context) {
 	// this set is short of it.
 	p.missLoss.Store(nil)
 	p.captureMu.Unlock()
-	p.logDroppedMisses("mock mismatches made after the previous test set's last read, or before this set's mocks were staged, are not attributed to a test or a test set", tail)
+	p.logDroppedMisses(missesCutAtSetStart, tail)
 	if lost {
 		p.logger.Warn("more mock mismatches were made after the previous test set's last read, or before this set's mocks were staged, than keploy keeps; the rest were dropped, and they are not attributed to a test or a test set either",
 			zap.Int("kept", maxPendingMockErrors))
 	}
+}
+
+// missesCutAtSetStart is what the set start's cut says of the misses it drops
+// (cutMissesAtSetStart, markedBeforeSet).
+const missesCutAtSetStart = "mock mismatches made after the previous test set's last read, or before this set's mocks were staged, are not attributed to a test or a test set"
+
+// markedBeforeSet reports whether err is a miss whose call's parser marked
+// its round (models.MockMismatchReport.Mark) in a staging before the running
+// test set's first (Proxy.setStaged): a call made before the set's mocks
+// were staged, which is not the set's however late its report reaches the
+// drain, as the set start's cut says (cutMissesAtSetStart). False before a
+// set's first cut, and for a parser that marks no round.
+func (p *Proxy) markedBeforeSet(err error) bool {
+	at := p.setStaged.Load()
+	if at == 0 {
+		return false
+	}
+	var pe models.ParserError
+	if !errors.As(err, &pe) || pe.MismatchReport == nil {
+		return false
+	}
+	r := pe.MismatchReport
+	return r.Mark != models.RoundUnmarked && r.MarkEpoch < at
 }
 
 // stagingMissNote is what a miss made while the replay was staging a test
@@ -5015,6 +5055,13 @@ func (p *Proxy) StartErrorDrain(ctx context.Context) {
 					// (all prior errors are already routed) and move on.
 					if m, isMarker := err.(*flushMarker); isMarker {
 						close(m.done)
+						continue
+					}
+					if p.markedBeforeSet(err) {
+						// Made before the running set's mocks were
+						// staged: cut as the set's start cut what it
+						// held, whichever way the two fell.
+						p.logDroppedMisses(missesCutAtSetStart, []error{err})
 						continue
 					}
 					// Route under captureMu so the window can't be swapped

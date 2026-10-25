@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -59,6 +60,10 @@ type roundState struct {
 	// tracker), and the tracker's next begin binds it.
 	learn learnBinding
 	bound *exactView
+	// stagedSet is the learn tracker's set (learnBinding.set) as the last
+	// staging found it (bumpStagingEpoch): one the tracker began after it is
+	// a set the store has not staged (integrations.LearnRead.SetAhead).
+	stagedSet uint64
 	// onWait and onRead are test seams, nil outside tests: onWait runs as a
 	// change is about to take the lock (lockRound), onRead inside a
 	// snapshot after each of its reads, with that read's name. A test
@@ -69,6 +74,17 @@ type roundState struct {
 	// let the round lock go, before what it tells the replay
 	// (flagMockAsUsed).
 	onSettled func()
+	// moveCh is closed, and dropped, as the round moves (bump, a staging,
+	// the manager's Close): a call waiting for the store to open the test
+	// the learn tracker began (AwaitRoundMove) wakes on it. Made by the
+	// first waiter; nil while none waits. closed: the manager was closed,
+	// so no move is told any more.
+	moveCh chan struct{}
+	closed bool
+	// onAwaitMove is a test seam, nil outside tests: it runs as a call
+	// starts to wait in AwaitRoundMove, the round lock not held, so a test
+	// moves the round after the call waits through no clock.
+	onAwaitMove func()
 }
 
 // learnBinding is the learn tracker as its last boundary left it.
@@ -77,6 +93,9 @@ type learnBinding struct {
 	routed bool
 	number uint64
 	open   bool
+	// set is the test number the tracker's running set began at
+	// (learn.Tracker.SetAt).
+	set uint64
 }
 
 // roundLog is one staging's take log (integrations.Take): appended to,
@@ -105,10 +124,85 @@ func (m *MockManager) lockRound() {
 	m.exact.round.mu.Lock()
 }
 
-// bump moves the round's generation, holding its lock.
+// bump moves the round's generation, holding its lock, and wakes every call
+// waiting for it to move (AwaitRoundMove).
 func (r *roundState) bump(why string) {
 	r.gen++
 	r.moved = why
+	r.wakeLocked()
+}
+
+// wakeLocked wakes every call waiting for the round to move
+// (AwaitRoundMove), holding the round lock.
+func (r *roundState) wakeLocked() {
+	if r.moveCh != nil {
+		close(r.moveCh)
+		r.moveCh = nil
+	}
+}
+
+// AwaitRoundMove implements integrations.RoundWaiter: it waits until the
+// round moves from at, its generation (a view's install, a boundary of the
+// learn tracker: a test's begin or end on it, a new set) or its staging, or
+// ctx ends, whose error it returns. moved is true once it moved, at once
+// where it moved already; false, at once, where this manager cannot tell
+// the move a call waits for: no exact serving, a learn tracker whose
+// boundaries never reached it (its begins and ends then move no
+// generation), or a manager closed (Close wakes its waiters so). It holds no
+// lock while it waits, so a boundary, an install or a staging takes the
+// round lock as ever. No clock: a waiter wakes on the move alone. A waiter
+// scheduled only after the store ended the test it waited for reads the
+// round moved on, and its call gets the moved miss: accepted as
+// fail-closed, the same class as learn.Tracker.AwaitRequest's.
+func (m *MockManager) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (moved bool, err error) {
+	r := &m.exact.round
+	r.mu.Lock()
+	switch {
+	case r.closed || !r.learn.routed || m.exactView() == nil:
+		r.mu.Unlock()
+		return false, nil
+	case r.gen != at.Gen || m.stagingEpoch.Load() != at.Epoch:
+		r.mu.Unlock()
+		return true, nil
+	}
+	if r.moveCh == nil {
+		r.moveCh = make(chan struct{})
+	}
+	ch, hook := r.moveCh, r.onAwaitMove
+	r.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	r.mu.Lock()
+	closed := r.closed
+	r.mu.Unlock()
+	return !closed, nil
+}
+
+// OnAwaitRoundMove makes the manager call f as a call starts to wait in
+// AwaitRoundMove, the round lock not held: the agent's tests order the
+// round's moves, and keploy test's settle, after a waiting call through no
+// clock. nil calls nothing.
+func (m *MockManager) OnAwaitRoundMove(f func()) {
+	r := &m.exact.round
+	r.mu.Lock()
+	r.onAwaitMove = f
+	r.mu.Unlock()
+}
+
+// closeRound wakes every call waiting for the round to move, for good: the
+// manager is closed (Close), and its round moves no more.
+func (m *MockManager) closeRound() {
+	r := &m.exact.round
+	r.mu.Lock()
+	r.closed = true
+	r.wakeLocked()
+	r.mu.Unlock()
 }
 
 // logLocked is the current staging's take log, holding the round lock: a
@@ -276,6 +370,9 @@ func (m *MockManager) stagedRecording(mk *models.Mock) *models.Mock {
 func (m *MockManager) bumpStagingEpoch() {
 	m.lockRound()
 	m.stagingEpoch.Add(1)
+	// The set the tracker began last is staged now, whichever it is.
+	m.exact.round.stagedSet = m.exact.round.learn.set
+	m.exact.round.wakeLocked()
 	m.exact.round.mu.Unlock()
 }
 
@@ -394,7 +491,7 @@ func (m *MockManager) LearnBoundary(t *learn.Tracker, step func(*learn.Tracker))
 		// A new test number: no view is its yet.
 		r.bound = nil
 	}
-	r.learn = learnBinding{routed: true, number: n, open: open}
+	r.learn = learnBinding{routed: true, number: n, open: open, set: t.SetAt()}
 	if !open {
 		r.bump("the learn tracker ended its test")
 		return
@@ -422,6 +519,22 @@ func (r *roundState) bindLocked(v *exactView) {
 	r.bound = v
 }
 
+// endedLocked is, holding the round lock, the view bound to the test the
+// learn tracker has open (number, open) where v, the view in force, is not
+// it: the store installed its pool view, or a test's view bound to none,
+// after that test's, while the tracker kept the test open
+// (integrations.RoundSnapshot.Ended). nil otherwise. It is the view last
+// bound to that number (roundState.bound): an older test's view where a view
+// was opened and ended without its test's begin reaching the tracker, and
+// one that survives a staging of the set again until the tracker's next
+// number. Held as a call's own, it fails closed either way.
+func (r *roundState) endedLocked(v *exactView, number uint64, open bool) *exactView {
+	if b := r.bound; open && b != nil && !v.learnBound && b.learnNumber == number {
+		return b
+	}
+	return nil
+}
+
 // phaseLocked is where the round is (integrations.RoundPhase), from v and
 // the tracker read l, holding the round lock, with which side moved at a
 // boundary, and the test the store ended that the tracker still has open
@@ -432,15 +545,22 @@ func (m *MockManager) phaseLocked(v *exactView, l integrations.LearnRead) (phase
 		// No tracker read: the store's view alone.
 		open = v.test != ""
 	}
+	if l.Bound && l.SetAhead {
+		// The tracker began a set the store has not staged: whatever view
+		// the store shows, its pool's or a test's, is the set before's.
+		return integrations.RoundBoundary, "the learn tracker began a test set the store has not staged", ""
+	}
 	if v.test != "" {
-		b := m.exact.round.bound
 		switch {
 		case !open:
 			return integrations.RoundBoundary, "the store shows " + v.test + "'s view and the learn tracker has no test open", ""
 		case l.Bound && v.learnBound && v.learnNumber != l.Number:
 			return integrations.RoundBoundary, "the learn tracker began another test than " + v.test + ", whose view the store still shows", ""
-		case l.Bound && !v.learnBound && b != nil && b.learnNumber == l.Number:
-			return integrations.RoundBoundary, "the learn tracker's open test is " + b.test + "'s, and the store shows " + v.test + "'s view", ""
+		}
+		if l.Bound {
+			if b := m.exact.round.endedLocked(v, l.Number, true); b != nil {
+				return integrations.RoundBoundary, "the learn tracker's open test is " + b.test + "'s, and the store shows " + v.test + "'s view", b.test
+			}
 		}
 		return integrations.RoundInTest, "", ""
 	}
@@ -450,7 +570,7 @@ func (m *MockManager) phaseLocked(v *exactView, l integrations.LearnRead) (phase
 		}
 		return integrations.RoundBetween, "", ""
 	}
-	if b := m.exact.round.bound; b != nil && b.learnNumber == l.Number {
+	if b := m.exact.round.endedLocked(v, l.Number, open); b != nil {
 		return integrations.RoundBoundary, "the store ended " + b.test + ", which the learn tracker still has open", b.test
 	}
 	return integrations.RoundBoundary, "the learn tracker began a test the store has not opened", ""
@@ -492,6 +612,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 		// which a call's learn step holds its later passes to.
 		p := t.Placed()
 		s.Learn = integrations.LearnRead{Bound: true, Number: p.Test, Open: p.Open, Begun: p.Begun}
+		s.Learn.SetAhead = r.learn.routed && p.SetAt != r.stagedSet
 		s.Learn.Earlier, s.Learn.Served, s.Learn.Before, s.Learn.Awaiting = p.Earlier, p.Served, p.Before, p.Awaiting
 		s.Learn.Set, s.Learn.Order = p.Set, p.Order
 		s.Learn.Answered = t.AnsweredMocks()
@@ -695,7 +816,10 @@ func (m *MockManager) WithinRound(at integrations.RoundAt) integrations.RoundSco
 	return &roundScope{MockManager: m, g: roundGuard{at: at}}
 }
 
-var _ integrations.RoundReader = (*MockManager)(nil)
+var (
+	_ integrations.RoundReader = (*MockManager)(nil)
+	_ integrations.RoundWaiter = (*MockManager)(nil)
+)
 
 // roundScope is the manager whose consume doors settle only while it is at
 // one snapshot's round (WithinRound); every other method is the manager's.

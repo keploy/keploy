@@ -444,11 +444,29 @@ type learnRound struct {
 	epoch      uint64
 	viewGen    uint64
 	view       string
-	// ended is the test the store had ended, its pool view in force, while
-	// the tracker still had it open (integrations.RoundSnapshot.Ended): a
-	// round of no one test. A call is never decided in one (learnMatchIn).
-	ended string
+	// noOne says why the round read is no one test's, "" where it is one's
+	// (integrations.RoundSnapshot.NoOneRound): the store ended the test
+	// the tracker still has open. A call is never decided in one, on any
+	// pass (learnMatchIn).
+	noOne string
+	// ahead: the tracker had begun a test whose view the store had not
+	// installed (integrations.RoundSnapshot.TrackerAhead). On the store's
+	// pool view (pools) the call is the pool's, decided at once in the
+	// round between tests. On the view of the test before (waits) it
+	// decides nothing until the store opens the tracker's test (then in
+	// that test's round: movedFrom's catch-up) or the test's window closes
+	// (the moved miss), and waits for either (learnMatchIn).
+	ahead bool
 }
+
+// pools reports whether c read the pool's call: the tracker ahead of the
+// store's pool view (integrations.RoundSnapshot.PoolsCall), keploy test's
+// begin of a test before its view's install, which waits for the call.
+func (c learnRound) pools() bool { return c.ahead && c.view == "" }
+
+// waits reports whether c read a call that waits for the store: the tracker
+// ahead of a store still showing the view of the test before.
+func (c learnRound) waits() bool { return c.ahead && c.view != "" }
 
 // movedFrom says, of a later pass (now), what the replay moved since the
 // call's first pass (c): "" when the call is still in the round it was made
@@ -465,42 +483,53 @@ type learnRound struct {
 // the tracker apart (a test's begin that reached one of them first), the one
 // that lagged catching up with the other, which did not move, so that the
 // two agree on the one test the first pass read. The call was made after the
-// side that led moved, in that test:
+// side that led moved, in that test. A first pass that found the store's
+// end of the tracker's open test read a round of no one test
+// (learnRound.noOne): the call is decided in none, on that pass, so no
+// catch-up follows it, and its verdict never rests on whether a boundary
+// lands under a take. A first pass that found the tracker ahead of the
+// store's pool view (it began a test whose view the store had not installed:
+// learnRound.pools) read the pool's call, decided in the round between
+// tests: any move of that round is a move, the store opening the tracker's
+// test among them (keploy test's flow installs it only once the call is
+// answered). One that found the tracker ahead of the view of the test before
+// (learnRound.waits) waits for the store, and every pass still so on the
+// tracker's same test is no move. The two catch-ups:
 //   - the tracker catching up with the store's same test view, on a retake
 //     (a pass read again because a take of the pass before was refused): it
 //     began the test whose view the store shows, where it had no test open
 //     at the first pass. The recordings the view offers, and whose own each
 //     is, are the ones the call was made among
-//     (TestALearnStepReadsAgainATakeALearnBoundaryRefused). A tracker that
-//     still had another test open then (that test's end had not reached it)
-//     read a call of either test, and nothing tells which: it is a move,
-//     as is the tracker ending a test with no view of it on the store's pool
-//     view, which lands between tests, not in the test the call was read in
-//     (TestALearnStepDecidesNothingOfACallOnceTheTrackerMovedToAnotherTest).
+//     (TestALearnStepReadsAgainATakeALearnBoundaryRefused). A first pass
+//     with a test of the tracker's open is checked all the same: one of the
+//     store's pool view is a move (it lands between tests, not in the test
+//     the call was read in), as is any other (TestMovedFromCatchesUpOnlyWithTheFirstPassesTest).
 //     A pass after a wait is no retake: a window that closed unread is a
-//     round that moved, whatever the store shows. That the first pass found
+//     round that moved, whatever the store shows
+//     (TestMovedFromAPassAfterAWaitIsNoCatchUp). That the first pass found
 //     the two apart is implied: on one view, a store that binds each test's
 //     view to the tracker's test it opened under agrees with one test of
 //     the tracker only;
 //   - the store installing the view of the test the tracker has open, its
-//     number and openness unchanged since the first pass, which found the two
-//     apart: the call was made in that test, as the tracker began it, while
-//     the store still served the view before
+//     number and openness unchanged since the first pass, which found the
+//     tracker ahead of the view of the test before (learnRound.waits), and
+//     that waited for it. The call was made in that test, as the tracker
+//     began it, while the store still served the view before
 //     (TestALearnStepReadsTheRoundOnceMoreAfterAnInstall). The tracker's
 //     number is its set's too (a new set moves it), so the test is of the
 //     same set; a view of any other test is a move
-//     (TestALearnStepDecidesNothingOfACallOnceTheTrackerMovedToAnotherTest). A store that
-//     installed its pool view while the tracker had no test open moved on:
+//     (TestMovedFromCatchesUpOnlyWithTheFirstPassesTest), as is a test view
+//     the tracker does not have open: a store that opened a test before the
+//     tracker began it, then the next over it, moved on
+//     (TestALearnStepDecidesNothingOfACallOnceTheStoreMovedItsViewAlone).
+//     A store that installed its pool view while the tracker had no test
+//     open moved on:
 //     the tracker may never have begun the test the store showed
 //     (TestALearnStepDecidesNothingOfACallOnceTheStoreEndedATestTheTrackerNeverBegan).
 //     Read from a store that binds views, the two never agreed on the view
 //     before (a test's view installed under the test the tracker has open is
 //     bound to none); the first pass's disagreement is checked all the same,
 //     for a store that does not bind them.
-//
-// A test's end that reached the store first is no catch-up of the tracker's:
-// a call read between the two is of no one round (learnRound.ended), and is
-// decided in none, whatever the tracker does next.
 //
 // An accepted catch-up is the call's round from then on (the caller holds
 // the later passes to now). Any other move, of either side, is the replay
@@ -518,6 +547,12 @@ func (c learnRound) movedFrom(now learnRound, retake bool) (moved string, caught
 	switch {
 	case sameView && sameTest:
 		return "", false
+	case c.waits() && now.ahead && sameTest:
+		// The store is still behind the tracker's test, the call's own:
+		// whatever view it installed meanwhile (its pool view after the
+		// test before, another), the call still waits for that test's
+		// (learnMatchIn), held to the first pass.
+		return "", false
 	case retake && sameView && now.agrees && now.view != "" && !c.open:
 		// learnMatchIn waits only for an open test's request, so a
 		// first pass with no test open is never followed by a pass
@@ -525,8 +560,17 @@ func (c learnRound) movedFrom(now learnRound, retake bool) (moved string, caught
 		// checked all the same: movedFrom's rule does not rest on its
 		// caller (TestMovedFromAPassAfterAWaitIsNoCatchUp).
 		return "", true
-	case !c.agrees && now.agrees && sameTest && now.view != "":
+	case c.waits() && now.agrees && sameTest && now.view != "":
 		return "", true
+	case c.pools() && now.view != "":
+		// The pool's call (integrations.RoundSnapshot.PoolsCall): the
+		// store opening the tracker's test is no catch-up of it, but the
+		// round between tests moving on.
+		return "began a test", false
+	case c.pools() && !sameView:
+		return "served another view of its recordings between tests", false
+	case c.pools():
+		return "moved on to another test or test set", false
 	case c.open || c.view != "" && !sameView:
 		return "ended that test", false
 	case now.open || now.view != "":
@@ -550,6 +594,8 @@ func (c learnRound) where() string {
 	switch {
 	case c.open && c.agrees && c.view != "":
 		return "in " + c.view
+	case c.pools():
+		return "in the round between tests, as keploy's learn tracker began the next test"
 	case c.open:
 		return "in the test then running"
 	case c.view != "":
@@ -1185,7 +1231,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			return nil, nil, ctx.Err()
 		}
 		first := call != nil && !marked
-		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool, first)
+		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1193,6 +1239,14 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			*call, marked = read.call, true
 		}
 		moved, caughtUp := made.movedFrom(read.round, retake)
+		if caughtUp && call != nil {
+			// The call's round is the one caught up with from now on, and
+			// so is its mark: the recordings that round's view holds as its
+			// own are the call's (a test the store opened after the call's
+			// first pass found the tracker ahead holds its own), so a miss
+			// names none of them made elsewhere.
+			*call = read.call
+		}
 		if moved != "" {
 			// The replay moved the round the call was made in before the
 			// learn step decided it (another view installed, a staging,
@@ -1206,22 +1260,59 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + made.where() + ", and the replay " + moved + " before keploy could answer it"}
 			return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
 		}
+		if why := read.round.noOne; why != "" {
+			// The store and the tracker are apart on which test is open
+			// (integrations.RoundSnapshot.NoOneRound): the call is one
+			// test's late call or the other's early one, and nothing tells
+			// which. Read as either, a call that is exactly one test's own
+			// recording was paired with another round's, and what it
+			// differs in learned onto it as noise: a false green. It is of
+			// no one round, and decided in none, on its first pass or any
+			// later one (a pass after its wait for its test case's
+			// request, the store still not showing that test), whatever
+			// the replay does next: the verdict never rests on whether a
+			// boundary lands before a take.
+			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + why}
+			return nil, &learnMiss{res: res, pool: read.sc.http, moved: true}, nil
+		}
 		if !made.read || caughtUp {
-			if read.round.ended != "" {
-				// The store has ended the test and the tracker has not:
-				// the call is the test's late one or the next round's
-				// early one, and nothing tells which. Read as between
-				// tests, a call that is exactly the test's own recording
-				// was paired with the pool's, and what it differs in
-				// learned onto it as noise: a false green. It is of no
-				// one round, and decided in none.
-				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request after keploy's store ended " + read.round.ended +
-					" and before its learn tracker did, so the call is of neither " + read.round.ended + " nor the round between tests"}
-				return nil, &learnMiss{res: res, pool: read.sc.http, moved: true}, nil
-			}
 			// The first pass, or the round the side that lagged caught up
 			// with (learnRound.movedFrom): every later pass is held to it.
 			made, madePool = read.round, read.sc.http
+		}
+		if made.waits() && read.round.ahead {
+			// The tracker began a test whose view the store has not
+			// installed while the store still shows the view of the test
+			// before (integrations.RoundSnapshot.TrackerAhead), which
+			// keploy test's flow never leaves in force. The call is of the
+			// tracker's test, and decides nothing until the store opens
+			// it, waiting for the round to move through no clock: the
+			// store opening the test is the catch-up
+			// (learnRound.movedFrom), and the call is decided in that
+			// test's round, its mark read again there (its own recordings
+			// held); the window closing (End, the next Begin, NewSet) or a
+			// staging is the moved miss. The call and the install give
+			// one verdict whichever way the scheduler orders them, but for
+			// a waiter the install woke that runs only once the store has
+			// ended that test too: it reads the round moved on and gets
+			// the moved miss, accepted as fail-closed
+			// (MockManager.AwaitRoundMove's doc). A store that
+			// cannot tell the move fails closed: the call is decided in no
+			// round. The tracker ahead of the store's pool view is no
+			// wait: that call is the pool's
+			// (integrations.RoundSnapshot.PoolsCall), decided in the round
+			// between tests, since keploy test installs the test's view
+			// only once every call made before it is answered, this one
+			// among them: a wait for the install would wait for itself.
+			moved, err := integrations.AwaitRoundMove(ctx, mockDb, read.at.round)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !moved {
+				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request after keploy's learn tracker began a test its store had not opened, and the store cannot tell when it opens it, so the call is of no round keploy can decide it in"}
+				return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+			}
+			continue
 		}
 		retake = false
 		sc, windows, claimDb := read.sc, read.windows, read.claimDb
@@ -1235,7 +1326,11 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// fell. The wait ends too as the test's window closes without
 			// the request (End, the next Begin, NewSet), though the next
 			// test awaits its own: the next pass reads a round that moved
-			// (learnRound.movedFrom), and decides nothing.
+			// (learnRound.movedFrom), and decides nothing. The pool's call
+			// read as a test opens (integrations.RoundSnapshot.PoolsCall)
+			// waits so too: the agent gives the request before it settles
+			// the calls made before (OpenTestCase), so the wait never holds
+			// the test's install, and the call reads the request either way.
 			if err := tracker.AwaitRequest(ctx); err != nil {
 				return nil, nil, err
 			}
@@ -1386,6 +1481,18 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
+				// Read again as an exact claim is: movedFrom's retake
+				// catch-up then follows a first pass where the store showed
+				// a test's view the tracker had not begun, which keploy
+				// test's order never makes (its tracker begins a test before
+				// the store opens it, and the store ends it first). A paired
+				// claim can be refused there only on a set without the
+				// background rules: a test's own recordings are offered only
+				// in a round the two agreed on, and under the background
+				// rules a test's view shows the pool only to answer exactly,
+				// but without them the view's in-flight gap recordings and
+				// its reached worker scope are the pool's in that round, and
+				// pairable (integrations.RoundBoundary).
 				unclaimed[m] = read.at
 				retake = true
 				continue
@@ -1440,8 +1547,9 @@ type learnRead struct {
 	windows  integrations.TestWindows
 	claimDb  integrations.MockMemDb
 	at       learnPass
-	// call is, of a call's first pass (readLearnPass's first), where the
-	// call was made: the snapshot's round (RoundSnapshot.CallRound). A
+	// call is where the call was made, as this pass read it: the
+	// snapshot's round (RoundSnapshot.CallRound), the call's mark from its
+	// first pass on, and from a pass it caught up with (learnMatchIn). A
 	// store that reads no round in one snapshot gives none (the zero
 	// CallRound), and its misses name no recording made elsewhere.
 	call integrations.CallRound
@@ -1455,9 +1563,10 @@ type learnRead struct {
 // other store, the reads one after another: the scope first, then the
 // tracker, so a mock a concurrent call consumed before the scope was read is
 // gone from the scope, and in the tracker's account (the store tells it
-// first: MockManager.observeServed). first, for a call's first pass, reads
-// where the call was made too (learnRead.call).
-func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool, first bool) (learnRead, error) {
+// first: MockManager.observeServed). From a snapshot it reads the pass's
+// mark too (learnRead.call): the call's, of its first pass and of a pass
+// whose round the call caught up with (learnMatchIn).
+func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
 	rev := storeRevision(mockDb)
 	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
 		r := learnRead{
@@ -1479,11 +1588,10 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			epoch:   snap.At.Epoch,
 			viewGen: snap.ViewGen(),
 			view:    snap.Test,
-			ended:   snap.Ended,
+			noOne:   snap.NoOneRound(),
+			ahead:   snap.TrackerAhead(),
 		}
-		if first {
-			r.call = snap.CallRound()
-		}
+		r.call = snap.CallRound()
 		return r, nil
 	}
 	sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, pool)

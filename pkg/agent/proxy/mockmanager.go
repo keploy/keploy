@@ -556,6 +556,9 @@ func (m *MockManager) Close() {
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
 		close(m.sweeperStop)
+		// A learn step waiting for this manager's round to move
+		// (AwaitRoundMove) is told it never will.
+		m.closeRound()
 		// Wake anything waiting on a window change so it can see IsClosed and
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
@@ -4227,7 +4230,12 @@ func (m *MockManager) SetServedInObserver(f func(*models.Mock, *learn.Flight)) {
 // (nil: none). The view carries what it said (exactView.stamp), and
 // ServedInOpenTest returns it with the view's account, so a reader compares
 // test numbers, not what the two accounts hold. Without it every view
-// carries 0.
+// carries 0. f runs as the view is installed, holding the install lock and
+// the round lock (exact_round.go), so no snapshot reads the tracker between
+// the stamp and the view's start: f must not call back into the manager (an
+// install, a consume door, a snapshot, a claim or a spend, LearnBoundary), or
+// it waits on a lock it runs under. learn.Tracker.OpenEpoch takes only the
+// tracker's own lock.
 func (m *MockManager) SetOpenTestEpoch(f func() uint64) {
 	if f == nil {
 		m.openTestEpoch.Store(nil)

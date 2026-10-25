@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // roundPost is a POST /orders the app sends deps.example.
@@ -102,8 +104,11 @@ func TestALearnStepCountsAnAheadAnswerCarriedIntoItsTestAsSpent(t *testing.T) {
 			if len(misses) != 1 || misses[0].ClosestMock != "mock-a" || !strings.Contains(misses[0].NextSteps, "one call more") {
 				t.Fatalf("the miss does not name mock-a as the call answered already: %+v", misses)
 			}
-			// test-2's own call of mock-b is still answered from it.
-			p.ContinueTestErrorCapture()
+			// test-2's own call of mock-b is still answered from it, in
+			// test-2 on both the store and the tracker. (A tracker begin
+			// here, the store still on test-2's view, is the tracker ahead
+			// of the store: the call waits for test-3's view,
+			// TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan.)
 			if code, got := r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`)); code != http.StatusOK || got != `{"order":2}` {
 				t.Fatalf("test-2's own call got %d %s", code, got)
 			}
@@ -178,7 +183,11 @@ func TestALearnStepCountsAVoidedAheadAnswerAsSpent(t *testing.T) {
 	if len(misses) != 1 || misses[0].ClosestMock != "mock-a" || !strings.Contains(misses[0].NextSteps, "one call more") {
 		t.Fatalf("the miss does not name mock-a as the call answered already: %+v", misses)
 	}
-	p.ContinueTestErrorCapture()
+	// test-2's own call of mock-b is still answered from it, in test-2 on
+	// both the store and the tracker. (A tracker begin here, the store
+	// still on test-2's view, is the tracker ahead of the store: the call
+	// waits for test-3's view,
+	// TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan.)
 	if code, got := r3Send(t, p, mm, opts, roundPost(`{"item":"pear"}`)); code != http.StatusOK || got != `{"order":2}` {
 		t.Fatalf("test-2's own call got %d %s", code, got)
 	}
@@ -324,61 +333,126 @@ func TestALearnStepLearnsNothingOntoThePoolWhileTheStoreShowsATest(t *testing.T)
 	}
 }
 
-// A learn step whose take finds the view it read closing (an install under
-// way) waits for the install and reads the round once more, in the view that
-// follows: it never reads the closing view again and again until the
-// install lands. The call in flight, made as test-2 opens, is answered from
-// test-2's own mock-a.
+// A call made at test-2's begin, awaiting its test case's request, read
+// where the learn tracker began test-2 before keploy's store opened it (the
+// tracker ahead of the store: integrations.RoundSnapshot.TrackerAhead), is
+// decided with one verdict whichever way its request and the store's install
+// fall, ordered through the round's and the tracker's wait hooks, through no
+// clock. Where the store still shows test-1's view (a state keploy test's
+// flow never leaves in force), the call is of test-2: it waits for the store
+// to open test-2 and for its request, whichever comes first, and is decided
+// in test-2's round, test-2's own mock-own2 answering a call that is exactly
+// it. (Before, a request that came before the install left the call of no
+// one round, a miss: two verdicts by where the install fell.) Where the
+// store shows its pool view (integrations.RoundSnapshot.PoolsCall: keploy
+// test's begin of every test, whose view the agent installs only once every
+// call made before is answered), the call is the pool's: it waits for its
+// request, as any call read before the request was given does, never for the
+// store, and is decided in the round between tests, mock-pool answering a
+// call that is exactly it whether the request came before the call or as it
+// waited. A store that opens test-2 as the pool's call waits for its request
+// (a flow without keploy test's settle) moved the round between tests under
+// it: the moved miss, naming no recording made elsewhere. Under today's
+// rules and proven routing.
 func TestALearnStepReadsTheRoundOnceMoreAfterAnInstall(t *testing.T) {
-	p, mm := roundOrders(t, 100*time.Millisecond, 200*time.Millisecond, "mock-a")
-	opts := models.OutgoingOptions{Learn: true}
-	p.ContinueTestErrorCapture()
-	var reads atomic.Int64
-	// A third read while the install is held is a read of the closing view
-	// again: the row lets the install go on, and fails.
-	spun := make(chan struct{})
-	var held atomic.Bool
-	mm.exact.round.onRead = func(step string) {
-		if step == "view" && reads.Add(1) == 3 && held.Load() {
-			close(spun)
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	request := func(p *Proxy) { p.TakeTestRequest(&models.TestRequest{Test: "test-2"}) }
+	install := func(mm *MockManager) {
+		mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+	}
+	ahead := func(t *testing.T, p *Proxy, mm *MockManager, pools bool) {
+		t.Helper()
+		snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+		if !ok || !snap.TrackerAhead() || snap.PoolsCall() != pools {
+			t.Fatalf("precondition: the round's snapshot does not read the tracker ahead of the store (the pool's call %v): %+v", pools, snap.Boundary)
 		}
 	}
-	waits := make(chan struct{}, 1)
-	mm.exact.onClosedWait = func() {
-		select {
-		case waits <- struct{}{}:
-		default:
+	for _, routed := range []bool{false, true} {
+		rules := map[bool]string{false: "today's rules", true: "proven routing"}[routed]
+		for _, installFirst := range []bool{true, false} {
+			t.Run(rules+"/the store still shows test-1's view/"+map[bool]string{true: "the store opens test-2, then the request comes", false: "the request comes before the store opens test-2"}[installFirst], func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				p.EndTestErrorCapture()
+				p.ContinueTestCaseCapture()
+				ahead(t, p, mm, false)
+				var storeWait, requestWait atomic.Bool
+				mm.exact.round.onAwaitMove = func() {
+					if storeWait.CompareAndSwap(false, true) {
+						if !installFirst {
+							request(p)
+						}
+						install(mm)
+					}
+				}
+				p.learnTracker.OnAwait(func() {
+					if installFirst && requestWait.CompareAndSwap(false, true) {
+						request(p)
+					}
+				})
+				code, got := r3Send(t, p, mm, opts, roundPost(`{"item":"plum"}`))
+				mm.exact.round.onAwaitMove = nil
+				p.learnTracker.OnAwait(nil)
+				if !storeWait.Load() || installFirst && !requestWait.Load() {
+					t.Fatalf("the call was decided (%d %s) without waiting for the store (%v) or for its request (%v)", code, got, storeWait.Load(), requestWait.Load())
+				}
+				if code != http.StatusOK || got != `{"order":2}` {
+					t.Fatalf("the call that waited for test-2 got %d %s; want test-2's mock-own2", code, got)
+				}
+			})
 		}
-	}
-	sent := make(chan struct{})
-	var code int
-	var got string
-	waited := false
-	mm.exact.beforeInstall = func() {
-		mm.exact.beforeInstall = nil
-		held.Store(true)
-		go func() {
-			defer close(sent)
-			code, got = r3Send(t, p, mm, opts, roundPost(`{"item":"apple"}`))
-		}()
-		// The install goes on once the call waits for it, returns, or reads
-		// the closing view again.
-		select {
-		case <-waits:
-			waited = true
-		case <-sent:
-		case <-spun:
+		for _, order := range []string{"the request comes before the call", "the request comes as the call waits for it", "the store opens test-2 as the call waits for its request"} {
+			t.Run(rules+"/the store shows its pool view/"+order, func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				p.EndTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				p.ContinueTestCaseCapture()
+				ahead(t, p, mm, true)
+				requestFirst := order == "the request comes before the call"
+				if requestFirst {
+					request(p)
+				}
+				var storeWait, requestWait atomic.Bool
+				mm.exact.round.onAwaitMove = func() {
+					// Ends the wait, so the row fails rather than hangs.
+					if storeWait.CompareAndSwap(false, true) {
+						install(mm)
+					}
+				}
+				p.learnTracker.OnAwait(func() {
+					if requestWait.CompareAndSwap(false, true) {
+						if order == "the store opens test-2 as the call waits for its request" {
+							install(mm)
+						}
+						request(p)
+					}
+				})
+				code, got := r3Send(t, p, mm, opts, roundPost(`{"item":"apple"}`))
+				mm.exact.round.onAwaitMove = nil
+				p.learnTracker.OnAwait(nil)
+				if storeWait.Load() {
+					t.Fatalf("the pool's call read as test-2 opens waited for the store to open test-2 (%d %s)", code, got)
+				}
+				if requestWait.Load() == requestFirst {
+					t.Fatalf("the pool's call awaited its request %v; its request came before it %v", requestWait.Load(), requestFirst)
+				}
+				if order == "the store opens test-2 as the call waits for its request" {
+					misses := heldMiss(t, p, mm, code, got, "in the round between tests, as keploy's learn tracker began the next test", "began a test")
+					for _, m := range misses {
+						if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+							t.Fatalf("the moved miss of the pool's call names a recording made elsewhere: %s", m.NextSteps)
+						}
+					}
+					return
+				}
+				if code != http.StatusOK || got != `{"order":0}` {
+					t.Fatalf("the pool's call read as test-2 opens got %d %s; want mock-pool's answer", code, got)
+				}
+			})
 		}
-		held.Store(false)
-	}
-	mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-a"), roundMock(mm, "mock-b")})
-	<-sent
-	mm.exact.round.onRead, mm.exact.onClosedWait = nil, nil
-	if !waited || reads.Load() != 2 {
-		t.Fatalf("the call waited for the install %v, and read the round %d times; want it to wait, and read the round once before the install and once after", waited, reads.Load())
-	}
-	if code != http.StatusOK || got != `{"order":1}` {
-		t.Fatalf("the call in flight got %d %s; want test-2's mock-a", code, got)
 	}
 }
 
@@ -484,8 +558,15 @@ func TestALearnStepDecidesNothingOfACallReadAfterTheStoreEndedATestTheTrackerHas
 // agent's does, so the learn tracker's boundaries reach it.
 func heldOrders(t *testing.T, routed bool) (*Proxy, *MockManager) {
 	t.Helper()
+	return heldOrdersLogging(t, routed, zap.NewNop())
+}
+
+// heldOrdersLogging is heldOrders with the logger the row reads, set before
+// the drain starts (startedDrainProxyLogging).
+func heldOrdersLogging(t *testing.T, routed bool, logger *zap.Logger) (*Proxy, *MockManager) {
+	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
-	p := startedDrainProxy(t, 100)
+	p := startedDrainProxyLogging(t, 100, logger)
 	p.learnTracker = learn.NewTracker()
 	now := time.Now()
 	pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
@@ -509,15 +590,16 @@ func heldOrders(t *testing.T, routed bool) (*Proxy, *MockManager) {
 // heldMiss fails t unless the call was answered by nothing, learned nothing
 // onto any recording, and missed once, with no reason, saying where keploy
 // read it (where) and what the replay moved (moved).
-func heldMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, where, moved string) {
+func heldMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, where, moved string) []models.UnmatchedCall {
 	t.Helper()
-	roundMiss(t, p, mm, code, got, "keploy record's full round read this request "+where+", and the replay "+moved+" before keploy could answer it")
+	return roundMiss(t, p, mm, code, got, "keploy record's full round read this request "+where+", and the replay "+moved+" before keploy could answer it")
 }
 
 // roundMiss fails t unless the call was answered by nothing, learned nothing
 // onto any recording, and missed once, with no reason, its next steps
-// saying why.
-func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why string) {
+// saying why. It returns the misses it read: the read takes them, so a
+// later read finds none.
+func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why string) []models.UnmatchedCall {
 	t.Helper()
 	for name, st := range r3States(mm) {
 		if len(st.ReqBodyNoise) > 0 {
@@ -534,6 +616,7 @@ func roundMiss(t *testing.T, p *Proxy, mm *MockManager, code int, got, why strin
 	if len(misses) != 1 || misses[0].Reason != "" || !strings.Contains(misses[0].NextSteps, why) {
 		t.Fatalf("the miss reads %+v; want one, with no reason, saying %q", misses, why)
 	}
+	return misses
 }
 
 // A call of a test whose take the replay refused by moving the store's view
@@ -705,23 +788,13 @@ func TestALearnStepWaitsInTheRoundTheTrackerCaughtUpWith(t *testing.T) {
 	}
 }
 
-// A take refused as the learn tracker moved to another test is no catch-up,
-// though the two may agree after it: the call misses. A catch-up lands only
-// on the test the call's first pass read. Where the store showed test-2's
-// view while the tracker still had test-1 open, the tracker ending test-1
-// and beginning test-2 agrees with the view, but the tracker had another
-// test open when the call was read: it is test-1's late call or test-2's
-// early one, and nothing tells which (caught up, the call that is exactly
-// test-2's own mock-own2 was answered from it). Where the tracker began
-// test-2 before the store opened it, the tracker ending test-2 and beginning
-// test-3 with the store opening test-3's view agrees too, in another test
-// than the one the call was read in (caught up, the call was paired with
-// test-3's own mock-own2 and its item learned onto it), and the tracker
-// ending test-2 with no view of it agrees with the store's pool view, in the
-// round between tests, not the test the call was read in (caught up, the
-// call was paired with mock-pool and its item learned onto it). Where the store shows test-1's view
-// the tracker ended first, the tracker's begin of the next test, before the
-// store opened it, agrees with no view.
+// A take refused as the learn tracker moved to another test or set is no
+// catch-up: the call misses, saying what moved. Where the store shows test-1's
+// view the tracker ended first, the tracker's begin of the next test, before
+// the store opened it, agrees with no view. Between tests, the tracker's new
+// set under the take moves its number with the store's view unchanged: read
+// again, the call (no recording is exactly it) was paired with mock-pool in a
+// round of the next set's, and its item learned onto it.
 func TestALearnStepDecidesNothingOfACallOnceTheTrackerMovedToAnotherTest(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, where, moved string
@@ -730,41 +803,15 @@ func TestALearnStepDecidesNothingOfACallOnceTheTrackerMovedToAnotherTest(t *test
 	}{
 		// A call no recording is exactly (none is named as made
 		// elsewhere), which the round between tests pairs with mock-pool.
-		{"the store opened test-2 while the tracker had test-1 open, then the tracker began test-2", `{"item":"plum"}`,
-			"in the test then running", "ended that test",
+		{"between tests, the tracker begins a new set", `{"item":"fig"}`,
+			"in the round between tests", "moved on to another test or test set",
 			func(p *Proxy, mm *MockManager) {
 				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
 				p.ContinueTestErrorCapture()
-				mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
-			},
-			func(p *Proxy, mm *MockManager) {
-				p.EndTestErrorCapture()
-				p.ContinueTestErrorCapture()
-			}},
-		{"the tracker began test-2 before the store opened it, then ended it", `{"item":"fig"}`,
-			"in the test then running", "ended that test",
-			func(p *Proxy, mm *MockManager) {
-				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
-				p.ContinueTestErrorCapture()
-				p.EndTestErrorCapture()
 				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
-				p.ContinueTestErrorCapture()
-			},
-			func(p *Proxy, mm *MockManager) { p.EndTestErrorCapture() }},
-		{"the tracker began test-2 before the store opened it, then moved to test-3 as the store opened test-3", `{"item":"fig"}`,
-			"in the test then running", "ended that test",
-			func(p *Proxy, mm *MockManager) {
-				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
-				p.ContinueTestErrorCapture()
 				p.EndTestErrorCapture()
-				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
-				p.ContinueTestErrorCapture()
 			},
-			func(p *Proxy, mm *MockManager) {
-				p.EndTestErrorCapture()
-				p.ContinueTestErrorCapture()
-				mm.ServeExactTest("test-3", []*models.Mock{roundMock(mm, "mock-own2")})
-			}},
+			func(p *Proxy, mm *MockManager) { p.learnBoundary(func(t *learn.Tracker) { t.NewSet() }) }},
 		{"the tracker ended test-1, then began the next test before the store opened it", `{"item":"pear"}`,
 			"while keploy's store showed test-1's view, with no test open on its learn tracker", "began a test",
 			func(p *Proxy, mm *MockManager) {
@@ -795,12 +842,582 @@ func TestALearnStepDecidesNothingOfACallOnceTheTrackerMovedToAnotherTest(t *test
 	}
 }
 
+// A call read where keploy's store and its learn tracker are apart on which
+// test is open is of no one round (integrations.RoundSnapshot.NoOneRound):
+// one test's late call or the other's early one, and nothing tells which. It
+// misses on its first pass, with no reason, saying so, and nothing is
+// learned or answered from that pass, whether the replay's next boundary
+// lands under the call (under its take, where it took a recording) or after
+// it returned, under today's rules and proven routing. The states: the store
+// ended test-1 and opened test-2 while the tracker still had test-1 open;
+// and the store's end of test-1 with test-2's call in flight, the tracker
+// still in test-1. Decided on the first pass, a call that is exactly
+// test-2's own mock-own2 was answered from it or missed, and one no
+// recording is exactly learned onto mock-pool between tests or missed, as
+// the boundary fell. The tracker ahead of the store is no such state: its
+// call waits for the store
+// (TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan).
+func TestALearnStepDecidesNothingOfACallReadWhereTheStoreAndTheTrackerAreApartOnItsTest(t *testing.T) {
+	const (
+		apart = "keploy record's full round read this request after keploy's store ended test-1 for test-2's view and before its learn tracker ended test-1, so the call is of neither test-1 nor test-2"
+		ended = "keploy record's full round read this request after keploy's store ended test-1 and before its learn tracker did, so the call is of neither test-1 nor the round between tests"
+	)
+	for _, tc := range []struct {
+		name, why string
+		bodies    []string
+		at        func(p *Proxy, mm *MockManager)
+		boundary  func(p *Proxy, mm *MockManager)
+	}{
+		{"the store ended test-1 and opened test-2 while the tracker had test-1 open; the tracker ends test-1 and begins test-2", apart,
+			[]string{`{"item":"plum"}`, `{"item":"pear"}`},
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+			},
+			func(p *Proxy, mm *MockManager) {
+				p.EndTestErrorCapture()
+				p.ContinueTestErrorCapture()
+			}},
+		{"the store ended test-1 with test-2's call in flight while the tracker had test-1 open; the tracker ends test-1", ended,
+			[]string{`{"item":"plum"}`},
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"}, roundMock(mm, "mock-own2"))
+			},
+			func(p *Proxy, mm *MockManager) { p.EndTestErrorCapture() }},
+	} {
+		for _, routed := range []bool{false, true} {
+			for _, body := range tc.bodies {
+				for _, under := range []bool{true, false} {
+					name := tc.name + "/" + map[bool]string{false: "today's rules", true: "proven routing"}[routed] + "/" + body + "/" +
+						map[bool]string{true: "the boundary lands under the call", false: "the boundary lands after the call"}[under]
+					t.Run(name, func(t *testing.T) {
+						p, mm := heldOrders(t, routed)
+						tc.at(p, mm)
+						// The boundary lands under the call's take, where it
+						// takes one: armed only while the call is decided, not
+						// under the report's own reads of the round.
+						var moved, armed atomic.Bool
+						if under {
+							armed.Store(true)
+							mm.exact.round.onWait = func() {
+								if armed.Load() && moved.CompareAndSwap(false, true) {
+									tc.boundary(p, mm)
+								}
+							}
+							t.Cleanup(func() { mm.exact.round.onWait = nil })
+						}
+						code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(body))
+						armed.Store(false)
+						roundMiss(t, p, mm, code, got, tc.why)
+						if moved.CompareAndSwap(false, true) {
+							tc.boundary(p, mm)
+						}
+						for name, st := range r3States(mm) {
+							if len(st.ReqBodyNoise) > 0 {
+								t.Errorf("%s learned %v as noise once the boundary landed after a call of no one round", name, st.ReqBodyNoise)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// A call read where the learn tracker is ahead of keploy's store, the store
+// still showing test-1's view after the tracker began test-2 (a state keploy
+// test's flow never leaves in force: a test's end installs the pool view
+// first), waits for the store, through no clock
+// (integrations.RoundSnapshot.TrackerAhead). Where the store opens test-2,
+// the call is decided in test-2's round (its own mock-own2 answers a call
+// that is exactly it), with one verdict whether the store opened test-2 as
+// the call waited or before the call came; decided on its first pass, it was
+// answered from test-1's view, missed, or named test-2's own mock-own2 made
+// elsewhere (record's judging then bakes it into the worker scope), as the
+// scheduler fell. Where test-2's window closes as the call waits (the
+// tracker's End, its next Begin), the call gets the moved miss: nothing
+// learned or answered, and no recording named made elsewhere. So too where
+// the store opens test-2 and then ends it alone, for test-3's view, before
+// the call reads the round again: the store caught up with the tracker's
+// test and moved on past it, a round of no one test
+// (integrations.RoundSnapshot.NoOneRound) the call was never made in, so it
+// is no catch-up of the call's round but the replay ending that test under
+// it, and the miss says so. Under today's rules and proven routing. The
+// tracker ahead of the store's pool view is no wait:
+// TestALearnStepDecidesThePoolsCallReadAsATestOpensBetweenTests.
+func TestALearnStepWaitsForTheStoreToOpenTheTestTheTrackerBegan(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	states := []struct {
+		name string
+		at   func(p *Proxy, mm *MockManager)
+	}{
+		{"the store still shows test-1's view", func(p *Proxy, mm *MockManager) {
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			p.EndTestErrorCapture()
+			p.ContinueTestErrorCapture()
+		}},
+	}
+	ahead := func(t *testing.T, p *Proxy, mm *MockManager) {
+		t.Helper()
+		snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+		if !ok || !snap.TrackerAhead() || snap.PoolsCall() {
+			t.Fatalf("the round's snapshot does not read the tracker ahead of test-1's view: %+v", snap.Boundary)
+		}
+	}
+	// waitThen runs resolve once the call waits for the store, and fails t
+	// where the call returned without waiting.
+	waitThen := func(t *testing.T, mm *MockManager, resolve func()) func() {
+		var waited atomic.Bool
+		mm.exact.round.onAwaitMove = func() {
+			if waited.CompareAndSwap(false, true) {
+				resolve()
+			}
+		}
+		return func() {
+			t.Helper()
+			mm.exact.round.onAwaitMove = nil
+			if !waited.Load() {
+				t.Fatal("the call was decided without waiting for the store to open the test the tracker began")
+			}
+		}
+	}
+	outcome := roundOutcome
+	for _, routed := range []bool{false, true} {
+		for _, st := range states {
+			for _, body := range []string{`{"item":"plum"}`, `{"item":"fig"}`, `{"item":"pear"}`} {
+				name := map[bool]string{false: "today's rules", true: "proven routing"}[routed] + "/" + st.name + "/" + body
+				t.Run(name+"/the store opens test-2", func(t *testing.T) {
+					open := func(mm *MockManager) {
+						mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+					}
+					// The store opens test-2 before the call.
+					p, mm := heldOrders(t, routed)
+					st.at(p, mm)
+					open(mm)
+					code, got := r3Send(t, p, mm, opts, roundPost(body))
+					before := outcome(t, p, mm, code, got)
+					// The call first: it waits, and the store opens test-2.
+					p, mm = heldOrders(t, routed)
+					st.at(p, mm)
+					ahead(t, p, mm)
+					done := waitThen(t, mm, func() { open(mm) })
+					code, got = r3Send(t, p, mm, opts, roundPost(body))
+					done()
+					if waited := outcome(t, p, mm, code, got); waited != before {
+						t.Fatalf("opened as the call waited: %s; opened before the call: %s: two verdicts by where the scheduler put the call", waited, before)
+					}
+					if body == `{"item":"plum"}` && before != `200 {"order":2}, learned onto , misses []` {
+						t.Fatalf("a call exactly test-2's own mock-own2, decided in test-2's round, reads %s; want it answered from mock-own2", before)
+					}
+				})
+				for _, end := range []struct {
+					name  string
+					close func(t *testing.T, p *Proxy, mm *MockManager)
+					why   string
+				}{
+					{"the tracker ends test-2", func(_ *testing.T, p *Proxy, _ *MockManager) { p.EndTestErrorCapture() }, "before keploy could answer it"},
+					{"the tracker begins test-3", func(_ *testing.T, p *Proxy, _ *MockManager) { p.ContinueTestErrorCapture() }, "before keploy could answer it"},
+					// The store's end of test-2 for test-3's view, the
+					// tracker still on test-2, reads a round of no one test:
+					// read as the store catching up, the call would take
+					// that round's noOne miss ("after keploy's store ended
+					// test-2 ..."), not its own round's move.
+					{"the store opens test-2, then ends it alone for test-3's view", func(t *testing.T, p *Proxy, mm *MockManager) {
+						mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+						mm.ServeExactTest("test-3", []*models.Mock{roundMock(mm, "mock-own3")})
+						if snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker}); !ok || snap.NoOneRound() == "" || snap.TrackerAhead() {
+							// Errorf: the call's goroutine runs the hook.
+							t.Errorf("the round's snapshot does not read the store's end of test-2 alone: %+v", snap.Boundary)
+						}
+					}, "in the test then running, and the replay ended that test before keploy could answer it"},
+				} {
+					t.Run(name+"/"+end.name, func(t *testing.T) {
+						p, mm := heldOrders(t, routed)
+						st.at(p, mm)
+						ahead(t, p, mm)
+						done := waitThen(t, mm, func() { end.close(t, p, mm) })
+						code, got := r3Send(t, p, mm, opts, roundPost(body))
+						done()
+						misses := roundMiss(t, p, mm, code, got, end.why)
+						for _, m := range misses {
+							if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+								t.Fatalf("the moved miss of a call the tracker's test made names a recording made elsewhere: %s", m.NextSteps)
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// A call waiting for the round to move (the learn tracker ahead of a store
+// still showing test-1's view: MockManager.AwaitRoundMove) is woken by every
+// move of the round, through no clock: the store opening test-2, the
+// tracker's end of test-2, its begin of test-3, a withdrawn begin, a new
+// test set, a staging, each reading the round moved, and the manager's
+// close, which moves it no more and reads it unmoved. A round that moved
+// between the call's snapshot and its wait is read moved at once, the wait
+// never begun (it would wait for a move that came before it). The learn
+// step's call woken so is decided in test-2's round where the store opened
+// test-2, and otherwise misses with nothing learned or answered, naming no
+// recording made elsewhere. A move that wakes no waiter fails the row
+// through no clock: the waiter's channel still open right after the move
+// (stillAwaitsMove) cancels its context, the one way left to end it.
+func TestARoundWaiterIsWokenByEveryMoveOfTheRound(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	ahead := func(t *testing.T) (*Proxy, *MockManager, integrations.RoundAt) {
+		t.Helper()
+		p, mm := heldOrders(t, true)
+		mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+		p.ContinueTestErrorCapture()
+		p.EndTestErrorCapture()
+		p.ContinueTestErrorCapture()
+		snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+		if !ok || !snap.TrackerAhead() || snap.PoolsCall() {
+			t.Fatalf("precondition: the round's snapshot does not read the tracker ahead of test-1's view: %+v", snap.Boundary)
+		}
+		return p, mm, snap.At
+	}
+	for _, mv := range []struct {
+		name  string
+		move  func(p *Proxy, mm *MockManager)
+		moved bool
+		why   string
+	}{
+		{"the store opens test-2", func(p *Proxy, mm *MockManager) {
+			mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+		}, true, ""},
+		{"the tracker ends test-2", func(p *Proxy, mm *MockManager) { p.EndTestErrorCapture() }, true, "before keploy could answer it"},
+		{"the tracker begins test-3", func(p *Proxy, mm *MockManager) { p.ContinueTestErrorCapture() }, true, "before keploy could answer it"},
+		{"the replay withdraws test-2's begin", func(p *Proxy, mm *MockManager) { p.WithdrawTestErrorCapture() }, true, "before keploy could answer it"},
+		{"the tracker begins a new test set", func(p *Proxy, mm *MockManager) {
+			p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+		}, true, "before keploy could answer it"},
+		{"the replay stages the set again", func(p *Proxy, mm *MockManager) {
+			mm.SetMocksWithWindow(nil, nil, models.BaseTime, time.Now().Add(time.Hour))
+		}, true, "before keploy could answer it"},
+		{"the manager closes", func(p *Proxy, mm *MockManager) { mm.Close() }, false, "of no round keploy can decide it in"},
+	} {
+		t.Run(mv.name+"/as the call waits", func(t *testing.T) {
+			p, mm, at := ahead(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var waited atomic.Bool
+			mm.exact.round.onAwaitMove = func() {
+				if waited.CompareAndSwap(false, true) {
+					mv.move(p, mm)
+					if stillAwaitsMove(mm) {
+						t.Errorf("%s did not wake the call waiting for the round to move", mv.name)
+						cancel()
+					}
+				}
+			}
+			moved, err := mm.AwaitRoundMove(ctx, at)
+			mm.exact.round.onAwaitMove = nil
+			if err != nil || !waited.Load() || moved != mv.moved {
+				t.Fatalf("a waiter the round moved under (%s) read moved %v (err %v, waited %v); want moved %v", mv.name, moved, err, waited.Load(), mv.moved)
+			}
+		})
+		t.Run(mv.name+"/before the call waits", func(t *testing.T) {
+			p, mm, at := ahead(t)
+			mv.move(p, mm)
+			var waited atomic.Bool
+			mm.exact.round.onAwaitMove = func() {
+				// Ends the wait, so the row fails rather than hangs.
+				if waited.CompareAndSwap(false, true) {
+					mm.Close()
+				}
+			}
+			moved, err := mm.AwaitRoundMove(context.Background(), at)
+			mm.exact.round.onAwaitMove = nil
+			if err != nil || waited.Load() || moved != mv.moved {
+				t.Fatalf("a waiter whose round moved (%s) before it waited read moved %v (err %v, waited %v); want moved %v at once", mv.name, moved, err, waited.Load(), mv.moved)
+			}
+		})
+		t.Run(mv.name+"/the learn step's call", func(t *testing.T) {
+			p, mm, _ := ahead(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var waited atomic.Bool
+			mm.exact.round.onAwaitMove = func() {
+				if waited.CompareAndSwap(false, true) {
+					mv.move(p, mm)
+					if stillAwaitsMove(mm) {
+						t.Errorf("%s did not wake the learn step's call waiting for the round to move", mv.name)
+						cancel()
+					}
+				}
+			}
+			code, got := r3SendIn(t, ctx, p, mm, opts, roundPost(`{"item":"plum"}`))
+			mm.exact.round.onAwaitMove = nil
+			if !waited.Load() {
+				t.Fatalf("the call was decided (%d %s) without waiting for the round to move", code, got)
+			}
+			if mv.why == "" {
+				if code != http.StatusOK || got != `{"order":2}` {
+					t.Fatalf("the call woken by the store opening test-2 got %d %s; want test-2's own mock-own2", code, got)
+				}
+				return
+			}
+			for _, m := range roundMiss(t, p, mm, code, got, mv.why) {
+				if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+					t.Fatalf("the miss of a call woken by %s names a recording made elsewhere: %s", mv.name, m.NextSteps)
+				}
+			}
+		})
+	}
+}
+
+// stillAwaitsMove reports whether a call still waits for the round to move:
+// the channel its wait began on (AwaitRoundMove) not closed, which a move
+// does as it wakes its waiters. Read right after a move, with one waiter, so
+// no clock decides it.
+func stillAwaitsMove(mm *MockManager) bool {
+	r := &mm.exact.round
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.moveCh != nil
+}
+
+// roundOutcome is a call's answer, what was learned, and each miss's closest
+// recording and whether it names one made elsewhere: the mark the call is
+// decided with (its round's own recordings) is part of the verdict.
+func roundOutcome(t *testing.T, p *Proxy, mm *MockManager, code int, got string) string {
+	t.Helper()
+	learned := []string{}
+	for name, st := range r3States(mm) {
+		if len(st.ReqBodyNoise) > 0 {
+			learned = append(learned, name)
+		}
+	}
+	sort.Strings(learned)
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	told := []string{}
+	for _, m := range misses {
+		told = append(told, m.ClosestMock+" made elsewhere "+strconv.FormatBool(strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it")))
+	}
+	return strconv.Itoa(code) + " " + got + ", learned onto " + strings.Join(learned, ",") + ", misses [" + strings.Join(told, "; ") + "]"
+}
+
+// A call read where the learn tracker began test-2 while keploy's store still
+// shows its pool view after test-1 is the pool's
+// (integrations.RoundSnapshot.PoolsCall): under exact serving that is keploy
+// test's begin of every test, whose view the agent installs only once every
+// call made before is answered, this one among them, and only then gives the
+// application test-2's request. The call is decided at once, in the round
+// between tests, and never waits for the store to open test-2 (a wait would
+// hold the install it waits for: TestKeployTestOpensATestCaseWithAPoolCallReadInItsGap
+// in the agent's package). Its verdict is the one of the same call read in
+// the round between tests, before the tracker began test-2, but that its
+// misses name no recording made elsewhere (its mark holds every recording:
+// nothing tells which are test-2's own): mock-pool answers a call that is
+// exactly it, and a call that is exactly test-2's own mock-own2, which the
+// pool view does not offer, is not answered from mock-own2 (a miss naming
+// none made elsewhere:
+// TestALearnStepCaughtUpWithTheStoreMarksTheCallInTheTestItOpened). Under
+// today's rules and proven routing.
+func TestALearnStepDecidesThePoolsCallReadAsATestOpensBetweenTests(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	between := func(p *Proxy, mm *MockManager) {
+		mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+		p.ContinueTestErrorCapture()
+		p.EndTestErrorCapture()
+		mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	}
+	for _, routed := range []bool{false, true} {
+		for _, body := range []string{`{"item":"apple"}`, `{"item":"plum"}`, `{"item":"pear"}`, `{"item":"fig"}`} {
+			t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed]+"/"+body, func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				between(p, mm)
+				code, got := r3Send(t, p, mm, opts, roundPost(body))
+				want := strings.ReplaceAll(roundOutcome(t, p, mm, code, got), "made elsewhere true", "made elsewhere false")
+
+				p, mm = heldOrders(t, routed)
+				between(p, mm)
+				p.ContinueTestErrorCapture()
+				snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+				if !ok || !snap.PoolsCall() {
+					t.Fatalf("the round's snapshot does not read the tracker ahead of the store's pool view: %+v", snap.Boundary)
+				}
+				var waited atomic.Bool
+				mm.exact.round.onAwaitMove = func() {
+					// Ends the wait, so the row fails rather than hangs.
+					if waited.CompareAndSwap(false, true) {
+						mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+					}
+				}
+				code, got = r3Send(t, p, mm, opts, roundPost(body))
+				mm.exact.round.onAwaitMove = nil
+				if waited.Load() {
+					t.Fatal("the pool's call read as test-2 opens waited for the store to open test-2")
+				}
+				if gap := roundOutcome(t, p, mm, code, got); gap != want {
+					t.Fatalf("the pool's call read as test-2 opens: %s; read between tests: %s", gap, want)
+				}
+				if body == `{"item":"apple"}` && want != `200 {"order":0}, learned onto , misses []` {
+					t.Fatalf("a call exactly mock-pool, read in the round between tests: %s; want it answered from mock-pool", want)
+				}
+				if body == `{"item":"plum"}` && strings.Contains(want, `{"order":2}`) {
+					t.Fatalf("the pool's call exactly test-2's own mock-own2 was answered from it: %s", want)
+				}
+
+			})
+		}
+	}
+}
+
+// A call read while the learn tracker is ahead of a store still showing
+// test-1's view holds every recording as its own (integrations.HoldsEvery)
+// until the store opens the tracker's test; caught up there, it is decided
+// in that test's round with that round's mark, read again: a call that is
+// exactly test-1's own recording (GET /status, which test-2 never made)
+// misses in test-2's round naming it as made elsewhere, the same as a call
+// read once the store opened test-2. Kept to the first pass's mark, it named
+// nothing: two verdicts by where the scheduler put the call. The tracker
+// ahead of the store's pool view reads the pool's call
+// (integrations.RoundSnapshot.PoolsCall): it waits for no install, and is
+// decided in the round between tests with its mark holding every recording,
+// so its miss of test-1's own GET /status, which names it made elsewhere
+// read between tests, names none.
+func TestALearnStepCaughtUpWithTheStoreMarksTheCallInTheTestItOpened(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	status := "GET /status HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	staged := func(t *testing.T, routed bool) (*Proxy, *MockManager) {
+		t.Helper()
+		t.Setenv(provenswitch.Env, "1")
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		now := time.Now()
+		pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+		own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "GET", "/status", "", `{"up":1}`)
+		own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		mm.SeedRecordedWindows([]models.TestWindow{
+			{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
+			{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+		})
+		mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2}, nil, models.BaseTime, now.Add(time.Hour))
+		if routed {
+			mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
+		}
+		p.setMockManager(mm)
+		t.Cleanup(func() { p.setMockManager(nil) })
+		mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+		return p, mm
+	}
+	outcome := func(t *testing.T, p *Proxy, code int, got string) string {
+		t.Helper()
+		misses, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		told := []string{}
+		for _, m := range misses {
+			told = append(told, m.ClosestMock+" made elsewhere "+strconv.FormatBool(strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it")))
+		}
+		return strconv.Itoa(code) + " " + got + ", misses [" + strings.Join(told, "; ") + "]"
+	}
+	for _, routed := range []bool{false, true} {
+		for _, st := range []struct {
+			name string
+			at   func(p *Proxy, mm *MockManager)
+		}{
+			{"the store still shows test-1's view", func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				p.EndTestErrorCapture()
+				p.ContinueTestErrorCapture()
+			}},
+		} {
+			t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed]+"/"+st.name, func(t *testing.T) {
+				open := func(mm *MockManager) { mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")}) }
+				p, mm := staged(t, routed)
+				st.at(p, mm)
+				open(mm)
+				code, got := r3Send(t, p, mm, opts, status)
+				before := outcome(t, p, code, got)
+				if !strings.Contains(before, "mock-own1 made elsewhere true") {
+					t.Fatalf("precondition: test-1's own GET /status, read in test-2's round, reads %s; want it named as made elsewhere", before)
+				}
+				p, mm = staged(t, routed)
+				st.at(p, mm)
+				if snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker}); !ok || !snap.TrackerAhead() || snap.PoolsCall() {
+					t.Fatalf("precondition: the round's snapshot does not read the tracker ahead of test-1's view: %+v", snap.Boundary)
+				}
+				var waited atomic.Bool
+				mm.exact.round.onAwaitMove = func() {
+					if waited.CompareAndSwap(false, true) {
+						open(mm)
+					}
+				}
+				code, got = r3Send(t, p, mm, opts, status)
+				mm.exact.round.onAwaitMove = nil
+				if !waited.Load() {
+					t.Fatalf("the call was decided (%d %s) without waiting for the store to open test-2", code, got)
+				}
+				if after := outcome(t, p, code, got); after != before {
+					t.Fatalf("caught up as the call waited: %s; read once the store opened test-2: %s: two verdicts by where the scheduler put the call", after, before)
+				}
+			})
+		}
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed]+"/the store shows its pool view after test-1", func(t *testing.T) {
+			between := func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+				p.ContinueTestErrorCapture()
+				p.EndTestErrorCapture()
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+			}
+			p, mm := staged(t, routed)
+			between(p, mm)
+			code, got := r3Send(t, p, mm, opts, status)
+			read := outcome(t, p, code, got)
+			if !strings.Contains(read, "mock-own1 made elsewhere true") {
+				t.Fatalf("precondition: test-1's own GET /status, read between tests, reads %s; want it named as made elsewhere", read)
+			}
+			p, mm = staged(t, routed)
+			between(p, mm)
+			p.ContinueTestErrorCapture()
+			if snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker}); !ok || !snap.PoolsCall() {
+				t.Fatalf("precondition: the round's snapshot does not read the tracker ahead of the store's pool view: %+v", snap.Boundary)
+			}
+			var waited atomic.Bool
+			mm.exact.round.onAwaitMove = func() {
+				// Ends the wait, so the row fails rather than hangs.
+				if waited.CompareAndSwap(false, true) {
+					mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+				}
+			}
+			code, got = r3Send(t, p, mm, opts, status)
+			mm.exact.round.onAwaitMove = nil
+			if waited.Load() {
+				t.Fatalf("the pool's call waited for the store to open test-2 (%d %s)", code, got)
+			}
+			if gap := outcome(t, p, code, got); code == http.StatusOK || strings.Count(gap, " made elsewhere ") != 1 || strings.Contains(gap, "made elsewhere true") {
+				t.Fatalf("the pool's call read as test-2 opens: %s; want one miss naming no recording made elsewhere (between tests: %s)", gap, read)
+			}
+		})
+	}
+}
+
 // A take refused as the store installed another view under it is no
 // catch-up where the tracker did not lead: between tests the store serving
-// another pool view (its recordings may be others), and a staging of the set
-// again. The call misses, saying
-// what moved, and is learned onto nothing; read again, it was paired with
-// mock-pool between tests and its item learned there as noise.
+// another pool view (its recordings may be others), a staging of the set
+// again, and a store that opened test-1 before the tracker began it opening
+// test-2 over it, the tracker still between tests (the store led, and moved
+// on from the view the call was read in to one the tracker never agreed
+// on). The call misses, saying what moved, and is learned onto nothing;
+// read again, it was paired with mock-pool between tests and its item
+// learned there as noise, or, exactly test-1's own mock-own1, decided in
+// test-2's view, a round it was not made in.
 func TestALearnStepDecidesNothingOfACallOnceTheStoreMovedItsViewAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, where, moved string
@@ -816,6 +1433,14 @@ func TestALearnStepDecidesNothingOfACallOnceTheStoreMovedItsViewAlone(t *testing
 				p.EndTestErrorCapture()
 			},
 			func(p *Proxy, mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"}) }},
+		{"the store opened test-1 before the tracker began it, then test-2", `{"item":"pear"}`,
+			"while keploy's store showed test-1's view, with no test open on its learn tracker", "ended that test",
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			},
+			func(p *Proxy, mm *MockManager) {
+				mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+			}},
 		{"the replay stages the set again in test-1", `{"item":"pear"}`,
 			"in test-1", "staged a test set again",
 			func(p *Proxy, mm *MockManager) {
@@ -957,16 +1582,25 @@ func gapRound(t *testing.T) (*Proxy, *MockManager) {
 
 // A call that reaches the learn step through the agent's MockManager (one
 // read of the round, RoundSnapshot) after keploy test opened test-2's
-// capture window and before the filter that opens the test brought its test
-// case's request waits for the request, and is learned from as a call made
-// after it: its item that drifted is noise either way, learned onto the
-// pool recording it is answered from, and one the request holds the
-// recorded word of is refused either way. The round's snapshot says the
-// test awaits its request until the request came. A snapshot that dropped
-// it decided the call at once, against a request it could not read: by
-// where the scheduler put the call, two outcomes. The call is ordered
-// before the request through the tracker's OnAwait, through no clock, 200
-// times each.
+// capture window and before the store installed test-2's view (the replay's
+// begin of every test: the tracker begins the test, its test case's request
+// is read, the agent answers every call made before, then the store opens
+// it) is the pool's (RoundSnapshot.PoolsCall): no call there is test-2's,
+// since the application gets test-2's request only after the install. Made
+// before its request, it waits for the request, never for the store (whose
+// install, in keploy test's flow, waits for the call), and is decided in the
+// round between tests, with one verdict whether the request came before the
+// call or as it waited: the background rules learn a drifted item onto the
+// pool between tests (q books), and refuse it where the test case's request
+// holds the recorded word (q apple). Before, such a call was learned onto the pool as
+// one between tests, or missed, by whether the store's install landed
+// before its pass. A call read once the store opened test-2 is test-2's: the
+// pool answers exactly or not at all in a test
+// (TestALearnStepsClaimLandsOnlyInTheRoundItWasReadIn), so it misses and
+// nothing is learned. A store that opens test-2 as the pool's call waits for
+// its request (a flow without keploy test's settle) moved the round between
+// tests under it: the moved miss. Ordered through the round's and the
+// tracker's wait hooks, through no clock, 200 times each.
 func TestACallInATestCasesGapIsLearnedThroughTheRoundAsOneAfterItsRequest(t *testing.T) {
 	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
 	call := roundPost(`{"item":"apricot"}`)
@@ -983,9 +1617,11 @@ func TestACallInATestCasesGapIsLearnedThroughTheRoundAsOneAfterItsRequest(t *tes
 		snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
 		return ok && snap.Learn.Awaiting
 	}
+	install := func(mm *MockManager) { mm.ServeExactTest("test-2", nil) }
+	want := map[string]string{"books": "200 {\"order\":0}, learned true", "apple": "502 keploy: no matching mock found for this HTTP request\n, learned false"}
 	for _, q := range []string{"books", "apple"} {
 		for i := 0; i < 200; i++ {
-			// The request first.
+			// The request first, then the call, in the gap.
 			p, mm := gapRound(t)
 			if !awaiting(mm, p) {
 				t.Fatal("the round's snapshot does not say test-2 awaits its request after its capture window opened")
@@ -994,40 +1630,238 @@ func TestACallInATestCasesGapIsLearnedThroughTheRoundAsOneAfterItsRequest(t *tes
 			if awaiting(mm, p) {
 				t.Fatal("the round's snapshot says test-2 awaits its request after the request came")
 			}
-			code, got := r3Send(t, p, mm, opts, call)
-			after := outcome(mm, code, got)
-			if q == "books" && after != `200 {"order":0}, learned true` || q != "books" && strings.HasPrefix(after, "200 ") {
-				t.Fatalf("q %s, after the request: %s", q, after)
+			if snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker}); !ok || !snap.PoolsCall() {
+				t.Fatalf("precondition: the round's snapshot does not read the pool's call in test-2's gap: %+v", snap.Boundary)
 			}
-			// The call first, in the gap: the request comes once the call
-			// waits for it, never before.
+			// No install comes: a call that waits for the store would wait
+			// for good, so its wait ends the call, and the row fails.
+			ctx, cancel := context.WithCancel(context.Background())
+			mm.exact.round.onAwaitMove = func() {
+				t.Errorf("q %s, the pool's call made after its request in test-2's gap waited for the store", q)
+				cancel()
+			}
+			code, got := r3SendIn(t, ctx, p, mm, opts, call)
+			mm.exact.round.onAwaitMove = nil
+			cancel()
+			first := outcome(mm, code, got)
+			if first != want[q] {
+				t.Fatalf("q %s, the request before the call in the gap: %s; want %s, decided in the round between tests", q, first, want[q])
+			}
+			for _, order := range []string{"the request as the call waits for it", "the install as the call waits for its request"} {
+				p, mm = gapRound(t)
+				var storeWait, requestWait atomic.Bool
+				mm.exact.round.onAwaitMove = func() {
+					// Ends the wait, so the row fails rather than hangs.
+					if storeWait.CompareAndSwap(false, true) {
+						install(mm)
+					}
+				}
+				p.learnTracker.OnAwait(func() {
+					if requestWait.CompareAndSwap(false, true) {
+						if order == "the install as the call waits for its request" {
+							install(mm)
+						}
+						p.TakeTestRequest(request(q))
+					}
+				})
+				code, got = r3Send(t, p, mm, opts, call)
+				mm.exact.round.onAwaitMove = nil
+				p.learnTracker.OnAwait(nil)
+				if storeWait.Load() || !requestWait.Load() {
+					t.Fatalf("q %s, %s: the pool's call in the gap waited for the store (%v), or not for its request (%v): %d %s", q, order, storeWait.Load(), requestWait.Load(), code, got)
+				}
+				if order == "the install as the call waits for its request" {
+					heldMiss(t, p, mm, code, got, "in the round between tests, as keploy's learn tracker began the next test", "began a test")
+					continue
+				}
+				if waited := outcome(mm, code, got); waited != first {
+					t.Fatalf("q %s: %s: %s; the request before the call: %s: two outcomes by where the call fell", q, order, waited, first)
+				}
+			}
+			// The request and the install first: a call of test-2's.
 			p, mm = gapRound(t)
-			waiting := make(chan struct{}, 1)
-			p.learnTracker.OnAwait(func() {
-				select {
-				case waiting <- struct{}{}:
-				default:
-				}
-			})
-			answered := make(chan struct{})
-			gave := make(chan bool, 1)
-			go func() {
-				select {
-				case <-waiting:
-					p.TakeTestRequest(request(q))
-					gave <- true
-				case <-answered:
-					gave <- false
-				}
-			}()
+			p.TakeTestRequest(request(q))
+			install(mm)
 			code, got = r3Send(t, p, mm, opts, call)
-			close(answered)
-			if !<-gave {
-				t.Fatalf("q %s: the call in the gap was answered (%d %s) without waiting for its test case's request", q, code, got)
-			}
-			if before := outcome(mm, code, got); before != after {
-				t.Fatalf("q %s: in the gap %s, after the request %s: two outcomes by where the call fell", q, before, after)
+			if after := outcome(mm, code, got); strings.HasPrefix(after, "200 ") || !strings.HasSuffix(after, ", learned false") {
+				t.Fatalf("q %s, read once the store opened test-2: %s; want a miss in test-2's round, nothing learned", q, after)
 			}
 		}
+	}
+}
+
+// unstagedSet leaves p and mm, after test-1 of a set ended (the store on its
+// pool view, keploy test's flow, or still on test-1's view), with the learn
+// tracker in the next test set (keploy test's Mock of it: NewSet) and that
+// set not staged, its round's snapshot reading so (SetUnstaged), neither the
+// tracker ahead (TrackerAhead) nor the pool's call (PoolsCall).
+func unstagedSet(t *testing.T, view string) (*Proxy, *MockManager) {
+	t.Helper()
+	return unstagedSetLogging(t, view, zap.NewNop())
+}
+
+// unstagedSetLogging is unstagedSet with the logger the row reads.
+func unstagedSetLogging(t *testing.T, view string, logger *zap.Logger) (*Proxy, *MockManager) {
+	t.Helper()
+	p, mm := heldOrdersLogging(t, true, logger)
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+	p.ContinueTestErrorCapture()
+	p.EndTestErrorCapture()
+	if view == "pool" {
+		mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	}
+	p.learnBoundary(func(t *learn.Tracker) { t.NewSet() })
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+	if !ok || !snap.SetUnstaged() || snap.TrackerAhead() || snap.PoolsCall() || snap.NoOneRound() == "" || snap.Boundary != "the learn tracker began a test set the store has not staged" {
+		t.Fatalf("precondition: the round's snapshot does not read a test set the store has not staged: %q unstaged %v ahead %v pools %v", snap.Boundary, snap.SetUnstaged(), snap.TrackerAhead(), snap.PoolsCall())
+	}
+	return p, mm
+}
+
+// A call read after keploy test's Mock of the next test set began a set on
+// the learn tracker (NewSet) and before that set's staging is of no set the
+// store holds: the store still shows the set before's staging, its pool view
+// (keploy test's flow: the set's last test ended) or a test's view. The
+// round's snapshot reads a set the store has not staged (SetUnstaged): the
+// call is decided at once, waiting for nothing (a wait would end at the
+// staging, racing its cut of the misses made before it), as the staging note
+// says of a call the application makes between test sets, outside every
+// test, nothing learned onto the set before's recordings and none named
+// made elsewhere. Before, on the pool view, the call was read as one between
+// tests of the set before, its drifted item learned onto that set's
+// mock-pool as noise.
+func TestACallReadAsTheTrackerBeginsATestSetTheStoreHasNotStagedLearnsNothing(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	for _, view := range []string{"pool", "test-1"} {
+		t.Run(view, func(t *testing.T) {
+			p, mm := unstagedSet(t, view)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var waited atomic.Bool
+			mm.exact.round.onAwaitMove = func() {
+				// A wait no move ends: the call is cancelled, and fails.
+				waited.Store(true)
+				cancel()
+			}
+			code, got := r3SendIn(t, ctx, p, mm, opts, roundPost(`{"item":"apricot"}`))
+			mm.exact.round.onAwaitMove = nil
+			if waited.Load() {
+				t.Fatalf("the call read in a test set the store has not staged waited (%d %s); want it decided at once", code, got)
+			}
+			for _, m := range roundMiss(t, p, mm, code, got, "keploy record's full round read this request as keploy's learn tracker began a test set its store had not staged") {
+				if !strings.HasPrefix(m.NextSteps, stagingMissNote) || m.Kind != models.MissOutsideTest {
+					t.Errorf("the miss reads %s %q; want it %s, led by the staging note", m.Kind, m.NextSteps, models.MissOutsideTest)
+				}
+				if strings.Contains(m.NextSteps, "which keploy recorded where this replay did not make it") {
+					t.Fatalf("the miss names a recording made elsewhere: %s", m.NextSteps)
+				}
+			}
+		})
+	}
+}
+
+// A test set the store has not staged is never the tracker ahead, even with
+// a test of it begun before its staging (no keploy test flow does so): no
+// call read there waits for the store or is the pool's, every one is of no
+// round (NoOneRound), and its mark is a staging's, outside every test.
+func TestATestSetTheStoreHasNotStagedIsNeverTheTrackerAhead(t *testing.T) {
+	for _, open := range []bool{false, true} {
+		for _, test := range []string{"", "test-1"} {
+			s := integrations.RoundSnapshot{Phase: integrations.RoundBoundary, Test: test, Learn: integrations.LearnRead{Bound: true, Number: 2, Open: open, SetAhead: true}}
+			c := s.CallRound()
+			if !s.SetUnstaged() || s.TrackerAhead() || s.PoolsCall() || s.NoOneRound() == "" || !c.Staging() || c.InTest() || !c.Held("any") {
+				t.Errorf("open %v, view %q: unstaged %v ahead %v pools %v no one %q, mark staging %v in a test %v", open, test, s.SetUnstaged(), s.TrackerAhead(), s.PoolsCall(), s.NoOneRound(), c.Staging(), c.InTest())
+			}
+		}
+	}
+}
+
+// The staging of the set the learn tracker began stages it (SetUnstaged no
+// longer reads): a call the new set's application makes then is the new
+// set's, read in its start-up, answered from its recordings, not refused as
+// one made between test sets.
+func TestACallAfterTheTrackersNewSetIsStagedIsTheNewSets(t *testing.T) {
+	p, mm := unstagedSet(t, "pool")
+	now := time.Now()
+	pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+	mm.SetMocksWithWindow([]*models.Mock{pool}, nil, models.BaseTime, now.Add(time.Hour))
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+	if !ok || snap.SetUnstaged() || snap.Learn.SetAhead || snap.NoOneRound() != "" {
+		t.Fatalf("the staging left the tracker's set unstaged: %q unstaged %v", snap.Boundary, snap.SetUnstaged())
+	}
+	if call := mm.MarkCallRound(); call.Staging() {
+		t.Fatalf("a call marked after the new set's staging is marked as made in a staging")
+	}
+	if code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(`{"item":"apple"}`)); code != http.StatusOK || !strings.Contains(got, `"order":0`) {
+		t.Fatalf("the new set's call got %d %s; want its pool's answer", code, got)
+	}
+}
+
+// The manager's mark of a call (MarkCallRound: the generic, MySQL and
+// Postgres parsers' order) in a test set the store has not staged is the
+// snapshot's (RoundSnapshot.CallRound): a staging's, outside every test,
+// holding every recording, so the miss says it was refused as the set's
+// mocks were staged, filed outside every test, and names no recording made
+// elsewhere, on the pool view and on test-1's alike.
+func TestTheManagersMarkInATestSetTheStoreHasNotStagedIsAStagings(t *testing.T) {
+	for _, view := range []string{"pool", "test-1"} {
+		t.Run(view, func(t *testing.T) {
+			p, mm := unstagedSet(t, view)
+			snap, _ := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+			for name, call := range map[string]integrations.CallRound{"the manager's mark": mm.MarkCallRound(), "the snapshot's": snap.CallRound()} {
+				if !call.Read() || !call.Staging() || call.InTest() || !call.Held("mock-own2") || !call.Held("mock-pool") {
+					t.Errorf("%s reads staging %v, in a test %v, holding mock-own2 %v; want a staging's, outside every test, holding every recording", name, call.Staging(), call.InTest(), call.Held("mock-own2"))
+				}
+			}
+		})
+	}
+}
+
+// A miss whose call was marked in a test set the store had not staged is
+// counted the same whichever way its report and the set's staging fall: its
+// report reaching the drain before the staging (the set start's cut drops
+// it) or after it (the drain drops it, its mark's staging before the set's),
+// said either way, and the set's first test reads none of it. A miss marked
+// after the staging is the set's either way (made before its first test).
+// Before, a report the drain filed after the staging's cut was read as the
+// set's, failing it: whether the call counted rested on the scheduler.
+func TestAMissMarkedBeforeASetsStagingIsCountedTheSameEitherWay(t *testing.T) {
+	for _, after := range []bool{false, true} {
+		t.Run(map[bool]string{false: "the report before the staging", true: "the report after the staging"}[after], func(t *testing.T) {
+			core, logs := observer.New(zap.DebugLevel)
+			p, mm := unstagedSetLogging(t, "pool", zap.New(core))
+			p.dnsCache = newDNSCache()
+			p.missCutPending.Store(true) // the set's Mock
+			miss := func(summary string, call integrations.CallRound) models.ParserError {
+				e := mockMiss(summary)
+				integrations.StampMark(e.MismatchReport, call)
+				return e
+			}
+			early := miss("POST /between-sets", mm.MarkCallRound())
+			if !after {
+				p.SendError(early)
+				flushDrain(p)
+			}
+			if err := p.SetMocksWithWindow(context.Background(), nil, nil, models.BaseTime, time.Now().Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			if after {
+				p.SendError(early)
+			}
+			p.SendError(miss("insert on events", mm.MarkCallRound()))
+			flushDrain(p)
+			p.BeginTestErrorCapture()
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].ActualSummary != "insert on events" || !got[0].BeforeSet {
+				t.Fatalf("the set's first test read %+v; want only the miss marked after its staging, as the set's", got)
+			}
+			if n := logs.FilterMessage(missesCutAtSetStart).FilterField(zap.Strings("calls", []string{"POST /between-sets"})).Len(); n != 1 {
+				t.Fatalf("the cut of the miss marked before the staging was said %d times; want once: %+v", n, logs.All())
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"context"
 	"sort"
 	"time"
 
@@ -56,14 +57,20 @@ const (
 	// view and the tracker none, or another test than the view's (a test
 	// opened before the tracker began it, or after a test whose end never
 	// reached the tracker). No recording is a test's own then: the tracker
-	// cannot say which test a call is of. Where the store shows the pool
-	// view after ending the test the tracker still has open
-	// (RoundSnapshot.Ended), the round is no one's: a learn step decides
-	// nothing of a call read there. Where the store shows the pool view and
-	// the tracker began a test the store has not opened, a learn step reads
-	// the round as between tests; where it shows a test's view, the
-	// background answers exactly or not at all, as in a test
-	// (ExactBackground), so nothing is learned onto it.
+	// cannot say which test a call is of. Where the store ended the test the
+	// tracker still has open (RoundSnapshot.Ended), for its pool view or
+	// another test's view, the round is no one's (RoundSnapshot.NoOneRound):
+	// a learn step decides nothing of a call read there. Where the tracker
+	// began a test the store has not opened (RoundSnapshot.TrackerAhead), a
+	// call read on the store's pool view is the pool's
+	// (RoundSnapshot.PoolsCall), and one read on the view of the test before
+	// waits for the store to open the tracker's test. Where the store shows a
+	// test's view and the tracker has no test open, or another test than the
+	// one it ended, the background answers exactly or not at all, as in a
+	// test (ExactBackground), so nothing is learned onto it under the
+	// background rules; on a set without them, the view's in-flight gap
+	// recordings and its reached worker scope are the pool's there, and may
+	// be paired with.
 	RoundBoundary
 )
 
@@ -157,6 +164,10 @@ type LearnRead struct {
 	Number uint64
 	Open   bool
 	Begun  bool
+	// SetAhead: the tracker began a test set (learn.Tracker.NewSet) the
+	// store has not staged yet, so the store still holds the set before's
+	// staging, its pool view or a test's (RoundSnapshot.SetUnstaged).
+	SetAhead bool
 	// Earlier, Served and Before are learn.Tracker.Test's.
 	Earlier        []learn.Earlier
 	Served, Before []*models.Mock
@@ -204,12 +215,17 @@ type RoundSnapshot struct {
 	Phase RoundPhase
 	// Boundary says, for RoundBoundary, which side moved.
 	Boundary string
-	// Ended is, for RoundBoundary where the store shows its pool view after
-	// ending a test the learn tracker still has open, that test (its view's
-	// name); "" otherwise. A call read there is of no one round: the store
-	// has ended the test, and the tracker has not reached the round after
-	// it. It is the test's late call or the round's early one, and nothing
-	// tells which, so a learn step decides nothing of it.
+	// Ended is, for RoundBoundary where the store no longer shows the view
+	// bound to the test the learn tracker still has open, that view's test
+	// (its name): the store showed its pool view, or another test's view,
+	// after it, and the tracker has not ended it. "" otherwise. A call read
+	// there is of no one round (NoOneRound): the test's late call or the
+	// next round's early one, and nothing tells which. It is the view last
+	// bound to the tracker's test: where a view was opened and ended
+	// without its test's begin reaching the tracker, an older test's view,
+	// and one that survives a staging of the set again until the tracker's
+	// next test. Read as the call's own (CallRound), its recordings are
+	// held so either way, which only names fewer recordings made elsewhere.
 	Ended string
 	// Open is Phase == RoundInTest: the one answer a learn step reads to
 	// whether a test is open, and whose recordings are its own.
@@ -288,6 +304,100 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 	return s
 }
 
+// NoOneRound says why a call read in s is of no one round, "" where it is of
+// one: the store ended the test the learn tracker still has open (Ended),
+// for its pool view or for another test's view (a test's end that never
+// reached the tracker, and a begin that reached the store first). A call
+// read there is the test's late call or the next round's early one, and
+// nothing tells which. Read as either, a call that is exactly one test's own
+// recording was paired with another round's, and what it differs in learned
+// onto it as noise. A learn step decides nothing of a call read where
+// NoOneRound is not "": the call misses, with no reason, saying why, and
+// nothing is learned or answered from that read, whatever the replay does
+// next. The tracker ahead of the store is no such round (TrackerAhead): on
+// the store's pool view the call is the pool's (PoolsCall), and on the view
+// of the test before it is of the tracker's test, whose view the store has
+// not installed yet, and waits for it. Where the store shows a test's view
+// and the tracker has no test open (a begin the store led, an end the
+// tracker led), "" is returned: the background answers exactly or not at all
+// there (RoundBoundary). A call read in a test set the store has not staged
+// (SetUnstaged) is of no round of either set: decided at once in none.
+func (s RoundSnapshot) NoOneRound() string {
+	if s.SetUnstaged() {
+		return "as keploy's learn tracker began a test set its store had not staged, so the call is of no round of either test set"
+	}
+	if s.Phase != RoundBoundary || !s.Learn.Bound || !s.Learn.Open || s.Ended == "" {
+		return ""
+	}
+	if s.Test == "" {
+		return "after keploy's store ended " + s.Ended + " and before its learn tracker did, so the call is of neither " + s.Ended + " nor the round between tests"
+	}
+	return "after keploy's store ended " + s.Ended + " for " + s.Test + "'s view and before its learn tracker ended " + s.Ended + ", so the call is of neither " + s.Ended + " nor " + s.Test
+}
+
+// TrackerAhead reports whether s found the learn tracker ahead of the
+// store: the tracker began a test (it is open, at its number) whose view the
+// store has not installed, and the store shows its pool view or the view of
+// the test before, bound to the tracker's test before. Its mark (CallRound)
+// holds every recording as its own: the store cannot tell which the
+// tracker's test owns, so a miss of it names none made elsewhere. What the
+// call is then depends on the view in force:
+//   - the store's pool view (PoolsCall): keploy test's begin of every test
+//     under exact serving, from the tracker's begin to the install of the
+//     test's view. The call is the pool's, decided at once in the round
+//     between tests, and never waits for the store;
+//   - the view of the test before, which keploy test's flow never leaves in
+//     force once the tracker began the next test (a test's end installs the
+//     pool view first): the call is of the tracker's test, made before the
+//     store caught up, and a learn step decides nothing of it until the
+//     store opens that test (then in that test's round, its mark read again
+//     there) or the test's window closes (the tracker's End, its next
+//     Begin, a new set: the moved miss), waiting for it through no clock
+//     (RoundWaiter).
+//
+// The tracker's begin of a test set the store has not staged is no such
+// state (SetUnstaged): no call read there waits.
+func (s RoundSnapshot) TrackerAhead() bool {
+	return s.Phase == RoundBoundary && s.Learn.Bound && s.Learn.Open && s.Ended == "" && !s.Learn.SetAhead
+}
+
+// SetUnstaged reports whether s found the learn tracker in a test set the
+// store has not staged (LearnRead.SetAhead): keploy test's Mock of the next
+// set began it (learn.Tracker.NewSet) and the store still holds the set
+// before's staging, its pool view (the set's last test ended) or a test's
+// view. No recording of either set answers a call read there: the set
+// before's are not the next set's, and the next set's are not staged. It is
+// the call the staging note describes (a call the application makes between
+// test sets), decided at once, never waiting for the staging: its mark is a
+// staging's, outside every test, holding every recording as its own
+// (CallRound), so its miss says it was refused as the set's mocks were
+// staged and names no recording made elsewhere, and a learn step decides
+// nothing of it (NoOneRound). A wait would end at the staging, whose cut of
+// the misses made before it (the proxy's set start) the moved miss would
+// race; a miss decided at once is counted the same whichever way its report
+// and the cut fall (its mark's staging precedes the set's).
+func (s RoundSnapshot) SetUnstaged() bool {
+	return s.Phase == RoundBoundary && s.Learn.Bound && s.Learn.SetAhead
+}
+
+// PoolsCall reports whether s found the learn tracker ahead of the store
+// (TrackerAhead) while the store shows its pool view: under exact serving,
+// keploy test's begin of every test, from the tracker's begin (the test's
+// capture window opens before its mock filter) to the install of the test's
+// view, which the agent makes only once every call made before is answered
+// (its settle), and only then gives the application the test's request. No
+// call read there is the tracker's test's: it is the pool's, decided at once
+// in the round between tests. It never waits for the store to open the
+// test: the install it would wait for waits for it, as the settle waits for
+// every call in the proxy's hands (a deadlock: the settle's watchdog fails
+// the test's open). It waits only for its test case's request, as any call
+// read before the request was given does (learn.Tracker.AwaitRequest), which
+// the agent gives before it settles: the call reads the round with the
+// request either way.
+func (s RoundSnapshot) PoolsCall() bool {
+	return s.TrackerAhead() && s.Test == ""
+}
+
 // Owner is whose m is, as the view held it at the snapshot (by name).
 func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 	if m == nil {
@@ -304,13 +414,35 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // (Ended), the call may be that test's late one: the recordings that test's
 // view held are held as the call's own too, so no lookup names one as made
 // elsewhere, nor pairs the call with one as another test's.
+//
+// Read in a test set the store has not staged (SetUnstaged), the mark is a
+// staging's, outside every test, and holds every recording: the call the
+// staging note describes, whose miss names no recording made elsewhere.
+//
+// Read where the learn tracker is ahead of the store (TrackerAhead), every
+// recording is held as the call's own: the tracker's test's view is not
+// installed, so nothing tells which recordings are that test's own, the
+// pool's call (PoolsCall) among them, and a lookup that named one made elsewhere would let
+// record's judging bake a test's own recording into the worker scope. It
+// names none, and pairs none, which only fails closed.
 func (s RoundSnapshot) CallRound() CallRound {
+	if s.SetUnstaged() {
+		return NewCallRound(s.At.Epoch, HoldsEvery).InStaging(true).InView(false, s.Background)
+	}
+	if s.TrackerAhead() {
+		return NewCallRound(s.At.Epoch, HoldsEvery).InStaging(s.Staging).InView(s.Test != "", s.Background)
+	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
 	}).InStaging(s.Staging).InView(s.Test != "", s.Background)
 }
+
+// HoldsEvery holds every recording as a call's own (NewCallRound): the mark
+// of a call whose round's own recordings the store cannot tell
+// (RoundSnapshot.TrackerAhead). Its miss names no recording made elsewhere.
+func HoldsEvery(string) bool { return true }
 
 // Claimant is the test that took the shared recording m (OwnerSharedTaken).
 func (s RoundSnapshot) Claimant(m *models.Mock) (string, bool) {
@@ -556,6 +688,37 @@ type RoundReader interface {
 	// TakenLog is entries [from, to) of staging epoch's take log, nil for a
 	// staging the store left.
 	TakenLog(epoch uint64, from, to int) []Take
+}
+
+// RoundWaiter is an optional RoundReader capability: a wait, through no
+// clock, for the round to move. A learn step whose call it read where the
+// learn tracker is ahead of a store still showing the view of the test
+// before (RoundSnapshot.TrackerAhead, not PoolsCall) waits on it for the
+// store to open the tracker's test, or for that test's window to close. A
+// call of the pool's (PoolsCall) never waits on it: in keploy test's flow
+// the install it would wait for waits for the call. Whether a waiter is
+// scheduled before the store ends the test it waited for is the scheduler's:
+// one woken only after that end reads the round moved on and gets the moved
+// miss, never a verdict of another round (accepted as fail-closed, as
+// learn.Tracker.AwaitRequest's). The agent's MockManager implements it, and every MockMemDb wrapper
+// that forwards RoundReader must forward it.
+type RoundWaiter interface {
+	// AwaitRoundMove waits until the round moves from at: its generation
+	// (RoundAt.Gen: a view's install, a boundary of the learn tracker) or
+	// its staging. moved is true once it moved, at once where it moved
+	// already; false, at once, where the store cannot tell the move (no
+	// exact serving, a tracker whose boundaries never reach it, a store
+	// closed); err is ctx's where it ended first.
+	AwaitRoundMove(ctx context.Context, at RoundAt) (moved bool, err error)
+}
+
+// AwaitRoundMove is db's AwaitRoundMove; false, at once, when db does not
+// implement RoundWaiter.
+func AwaitRoundMove(ctx context.Context, db MockMemDb, at RoundAt) (moved bool, err error) {
+	if w, ok := db.(RoundWaiter); ok {
+		return w.AwaitRoundMove(ctx, at)
+	}
+	return false, nil
 }
 
 // SnapshotRound is db's RoundSnapshot; false when db does not implement

@@ -204,8 +204,15 @@ func r3Mock(name string, at time.Time, method, target, body, resp string) *model
 // tracker and miss reporter.
 func r3Send(t *testing.T, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
+	return r3SendIn(t, context.Background(), p, mm, opts, request)
+}
+
+// r3SendIn is r3Send with the call's context, which a row cancels to end a
+// call that would otherwise wait for good: the row then fails, never hangs.
+func r3SendIn(t *testing.T, parent context.Context, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+	t.Helper()
 	app, agentEnd := net.Pipe()
-	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+	ctx := models.WithMockMismatchReporter(parent, p.sendMockNotFoundError)
 	ctx = learn.WithTracker(ctx, p.learnTracker)
 	defer app.Close()
 	go func() {

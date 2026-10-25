@@ -636,11 +636,34 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // the miss to say so (integrations.StampMark), a test's (exactView.test),
 // for the miss to be filed in it, and one of a set served by proven routing
 // (exactView.bg). The zero CallRound without exact serving.
+//
+// Marked where the store no longer shows the view of the test the learn
+// tracker still has open (roundState.endedLocked: its pool view, or another
+// test's, installed before the tracker ended the test), the call may be that
+// test's late one: the recordings that test's view held are held as the
+// call's own too, as a round snapshot's CallRound holds them, so no lookup
+// names one as made elsewhere (record's judging would bake a test's own
+// recording into the worker scope), nor pairs the call with one as another
+// test's. Marked where the tracker began a test whose view the store has not
+// installed (integrations.RoundSnapshot.TrackerAhead), every recording is
+// held: nothing tells which are that test's own. Marked where the tracker
+// began a test set the store has not staged
+// (integrations.RoundSnapshot.SetUnstaged), the mark is a staging's, outside
+// every test, holding every recording.
 func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r := &m.exact.round
 	r.mu.Lock()
 	v := m.exact.view.Load()
 	epoch := m.stagingEpoch.Load()
+	var ended *exactView
+	ahead, unstaged := false, false
+	if v != nil && r.learn.routed {
+		ended = r.endedLocked(v, r.learn.number, r.learn.open)
+		l := integrations.LearnRead{Bound: true, Number: r.learn.number, Open: r.learn.open, SetAhead: r.learn.set != r.stagedSet}
+		phase, _, _ := m.phaseLocked(v, l)
+		s := integrations.RoundSnapshot{Phase: phase, Learn: l, Ended: endedName(ended)}
+		ahead, unstaged = s.TrackerAhead(), s.SetUnstaged()
+	}
 	r.mu.Unlock()
 	if f := m.exact.onMarked; f != nil {
 		f()
@@ -648,7 +671,34 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	if v == nil {
 		return integrations.CallRound{}
 	}
-	return integrations.NewCallRound(epoch, v.holds).InStaging(v.staging).InView(v.test != "", v.bg != nil)
+	if unstaged {
+		// The tracker began a test set the store has not staged
+		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
+		// note describes, outside every test, its miss naming none made
+		// elsewhere.
+		return integrations.NewCallRound(epoch, integrations.HoldsEvery).InStaging(true).InView(false, v.bg != nil)
+	}
+	held := v.holds
+	switch {
+	case ahead:
+		// The tracker began a test whose view the store has not
+		// installed (integrations.RoundSnapshot.TrackerAhead): nothing
+		// tells which recordings are that test's own, so every one is
+		// held, and the call's miss names none made elsewhere.
+		held = integrations.HoldsEvery
+	case ended != nil:
+		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
+	}
+	return integrations.NewCallRound(epoch, held).InStaging(v.staging).InView(v.test != "", v.bg != nil)
+}
+
+// endedName is the test of v, the view the store ended while the learn
+// tracker kept its test open (roundState.endedLocked), "" for none.
+func endedName(v *exactView) string {
+	if v == nil {
+		return ""
+	}
+	return v.test
 }
 
 // holds reports whether the view holds the recording name as its own (the

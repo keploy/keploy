@@ -511,8 +511,11 @@ func S12BackgroundIn(call CallRound, db MockMemDb) bool {
 // (models.MockMismatchReport.MarkedInTest). A miss is decided where its call
 // was marked, and the view serving when the report reaches the proxy can be
 // the next staging's, the staged set's after the call's staging, or the pool
-// view after the call's test ended. Nothing for the zero CallRound (a
-// store that marks no round): the proxy reads the view serving then.
+// view after the call's test ended. The staging it was marked in too
+// (models.MockMismatchReport.MarkEpoch): a miss marked before a test set's
+// staging is not that set's, whenever its report arrives. Nothing for the
+// zero CallRound (a store that marks no round): the proxy reads the view
+// serving then.
 func StampMark(r *models.MockMismatchReport, call CallRound) {
 	if r == nil || !call.Read() {
 		return
@@ -522,6 +525,7 @@ func StampMark(r *models.MockMismatchReport, call CallRound) {
 		r.Mark = models.RoundMarkedStaging
 	}
 	r.MarkedInTest = call.InTest()
+	r.MarkEpoch = call.Epoch()
 }
 
 // MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the

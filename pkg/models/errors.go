@@ -336,6 +336,12 @@ type MockMismatchReport struct {
 	// which can be the pool view after the call's test ended, or the next
 	// test's. Never written to a report.
 	MarkedInTest bool `json:"-" yaml:"-"`
+	// MarkEpoch is, with Mark set, the staging the call's first read was
+	// made in (integrations.CallRound.Epoch): a miss whose call was marked
+	// before a test set's staging is not that set's, however late its
+	// report reaches the proxy (the proxy's set-start cut). Never written
+	// to a report.
+	MarkEpoch uint64 `json:"-" yaml:"-"`
 	// Repeat says the call is identical to a recording an earlier test of
 	// the set made, which already answered that test's call at this replay
 	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but

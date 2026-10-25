@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -337,6 +338,12 @@ func (s *scopedMockDb) RoundSnapshot(q integrations.RoundQuery) (integrations.Ro
 	return integrations.SnapshotRound(s.MockMemDb, q)
 }
 
+// AwaitRoundMove forwards the store's wait for its round to move
+// (integrations.RoundWaiter); false, at once, from a store that has none.
+func (s *scopedMockDb) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (bool, error) {
+	return integrations.AwaitRoundMove(ctx, s.MockMemDb, at)
+}
+
 func (s *scopedMockDb) WithinRound(at integrations.RoundAt) integrations.RoundScope {
 	return integrations.WithinRound(s.MockMemDb, at)
 }
@@ -356,7 +363,10 @@ func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take 
 	return nil
 }
 
-var _ integrations.RoundReader = (*scopedMockDb)(nil)
+var (
+	_ integrations.RoundReader = (*scopedMockDb)(nil)
+	_ integrations.RoundWaiter = (*scopedMockDb)(nil)
+)
 
 // MarkCallRound forwards the store's (integrations.StagedFinder): the zero
 // CallRound from a store that names no recording made elsewhere.
