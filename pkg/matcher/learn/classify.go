@@ -2154,10 +2154,11 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 }
 
 // echoServed is the place of an exchange F served leaf by leaf (or the test
-// case's request) that holds, as recorded, in every form, the moment a
-// drifted value (recorded) was recorded with, by the rule the echo found it
-// a copy by (echoedIn, holdsRecorded): the first by placeRank. ok is false
-// when none does.
+// case's request) that holds, as recorded, in every form (a typed time of
+// day as the echo reads it, seenHoldsRecorded), the moment a drifted value
+// (recorded) was recorded with, by the rule the echo found it a copy by
+// (echoedIn, holdsRecorded): the first by placeRank. ok is false when none
+// does.
 func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
@@ -2166,7 +2167,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) {
+			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
 			whole := s.Leaf.Value == recorded
@@ -2199,8 +2200,9 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 
 // heldAt names the earliest place that holds the moment F saw of one of
 // echoed (holdsLive: an exchange F served leaf by leaf, as recorded or as F
-// served it, then a raw mock served earlier or recorded before at): "in
-// <mock> at <field>", "" when none does.
+// served it, a typed time of day there as the echo reads it, seenHoldsLive,
+// then a raw mock served earlier or recorded before at): "in <mock> at
+// <field>", "" when none does.
 func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) string {
 	holds := func(text string) bool {
 		return dc.holdsLive(text, echoed) || dc.holdsLive(dc.rawExtra(text), echoed)
@@ -2210,7 +2212,7 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 			// As echoedIn reads it: what F served, or gave the application
 			// as its test case's request, not what the application itself
 			// sent where it drifted.
-			if holds(s.Leaf.Value) || (s.Side == Response || e.Given || s.Live == s.Leaf.Value) && holds(s.Live) {
+			if holds(s.Leaf.Value) || seenHoldsLive(s.Leaf, s.Leaf.Value, echoed) || (s.Side == Response || e.Given || s.Live == s.Leaf.Value) && (holds(s.Live) || seenHoldsLive(s.Leaf, s.Live, echoed)) {
 				return "in " + e.Mock + " at " + s.Leaf.Path
 			}
 		}

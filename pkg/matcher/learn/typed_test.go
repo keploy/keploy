@@ -1022,3 +1022,71 @@ func TestATypedTimeOfDayAnEarlierExchangeHoldsIsReadThere(t *testing.T) {
 		}
 	}
 }
+
+// A typed time of day an earlier exchange holds is read there by each of the
+// learn step's readers, and each gives its own outcome, naming the leaf: a
+// drifted value that names the moment the leaf drifted with exactly is a
+// variable of it (instantServedFrom); one cut coarser than that moment (a
+// second, or a millisecond of a microsecond the millisecond does not hold
+// whole), typed or a text, is the echo's variable there, with its evidence
+// (instantEchoFrom, echoServed); one that names exactly what the leaf held as
+// recorded and F served so is a variable of it, with its evidence
+// (instantLeafFrom); and a move to what the leaf held as recorded, where F
+// served it another (on either side), or to what F served there, where it
+// was recorded as another, typed or a text, is refused as a pick naming it
+// (heldAt), never noise.
+func TestATypedTimeOfDayAnEarlierExchangeHoldsIsBoundOrRefusedNamingItsLeaf(t *testing.T) {
+	call := time.Date(2026, 10, 22, 11, 14, 20, 155e6, time.UTC)
+	read := time.Date(2026, 10, 22, 11, 14, 17, 115e6, time.UTC)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	const sp, p = "rows.0.start_at", "args.0"
+	tod := func(path string, at time.Time, res time.Duration) Leaf {
+		return TimeOfDayLeaf(path, path, time.Duration(clockOfDay(at)), res)
+	}
+	text := func(at time.Time, layout string) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: at.Format(layout)}
+	}
+	seen := func(side Side, rec, f time.Time) Earlier {
+		return Earlier{Mock: "pg-1", At: call.Add(-time.Second), Own: true, Payload: payloadOf("pg-1", call.Add(-time.Second)), Seen: []Seen{{Side: side, Leaf: tod(sp, rec, time.Microsecond), Live: tod(sp, f, time.Microsecond).Value}}}
+	}
+	typed := func(res time.Duration) [2]Leaf { return [2]Leaf{tod(p, read, res), tod(p, live, res)} }
+	texted := func(layout string) [2]Leaf { return [2]Leaf{text(read, layout), text(live, layout)} }
+	fine := 123 * time.Microsecond
+	for _, c := range []struct {
+		name  string
+		e     Earlier
+		v     [2]Leaf
+		want  string
+		whole bool
+	}{
+		{"drifted with it, to the microsecond", seen(Response, read, live), typed(time.Microsecond), "served", true},
+		{"drifted with it, to the millisecond", seen(Response, read, live), typed(time.Millisecond), "served", false},
+		{"drifted with it, to the second", seen(Response, read, live), typed(time.Second), "echo", false},
+		{"drifted with a microsecond the millisecond does not hold whole", seen(Response, read.Add(fine), live.Add(fine)), typed(time.Millisecond), "echo", false},
+		{"a text drifted with it, to the second", seen(Response, read, live), texted("15:04:05"), "echo", false},
+		{"a text drifted with it, to the millisecond", seen(Response, read, live), texted("15:04:05.000"), "echo", false},
+		{"held as recorded and served so, to the microsecond", seen(Response, read, read), typed(time.Microsecond), "held", true},
+		{"held as recorded and served so, to the millisecond", seen(Response, read, read), typed(time.Millisecond), "held", false},
+		{"F saw what an answer held as recorded", seen(Response, live, live.Add(time.Hour)), typed(time.Millisecond), "pick", false},
+		{"F saw what a request held as recorded", seen(Request, live, live.Add(time.Hour)), typed(time.Millisecond), "pick", false},
+		{"F saw what an answer served it, recorded as another", seen(Response, read.Add(-time.Hour), live), typed(time.Millisecond), "pick", false},
+		{"a text F saw where an answer held it as recorded", seen(Response, live, live.Add(time.Hour)), texted("15:04:05.000"), "pick", false},
+	} {
+		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.v[1]}}, Shape{Leaves: map[string]Leaf{p: c.v[0]}}, call, []Earlier{c.e}, nil, nil, nil)[0]
+		at := ln.Kind == KindVariable && ln.From.Mock == "pg-1" && ln.From.Path == sp && ln.From.Whole == c.whole
+		var ok bool
+		switch c.want {
+		case "served":
+			ok = at && !ln.From.Echo && ln.Why == ""
+		case "echo":
+			ok = at && ln.From.Echo && strings.Contains(ln.Why, "the moment it was recorded with stands in pg-1 at "+sp) && (c.v[0].Type != Instant || ln.Why == instantEvidence(ln.From))
+		case "held":
+			ok = at && !ln.From.Echo && ln.Why == instantEvidence(ln.From)
+		case "pick":
+			ok = ln.Kind == KindUnaccounted && ln.Why == pickUnaccounted("in pg-1 at "+sp)
+		}
+		if !ok {
+			t.Errorf("%s: %s (from %+v, %q); want the %s outcome at pg-1 %s, whole %v", c.name, ln.Kind, ln.From, ln.Why, c.want, sp, c.whole)
+		}
+	}
+}

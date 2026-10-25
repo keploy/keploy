@@ -625,6 +625,36 @@ func heldSeen(held *heldMoments, l Leaf, value string) {
 	}
 }
 
+// seenNamesApart reports whether value, l's as a side holds it, is an
+// instant its protocol types (seenMoment) that names m by a rule of rules
+// (any, nil) by which it does not name other, as namesApart reads a text's:
+// the places the echo names read a typed time of day as the echo reads it
+// (heldSeen), so a copy it found there is bound or refused naming that leaf.
+func seenNamesApart(l Leaf, value string, m, other moment, rules map[cutRule]bool) bool {
+	sm, ok := seenMoment(l, value)
+	return ok && namesMomentApart(sm, m, other, rules)
+}
+
+// seenHoldsRecorded is holdsRecorded of a typed leaf's value (seenNamesApart).
+func seenHoldsRecorded(l Leaf, value string, ms []echoMatch) bool {
+	for _, m := range ms {
+		if seenNamesApart(l, value, m.rec, m.live, m.rules) {
+			return true
+		}
+	}
+	return false
+}
+
+// seenHoldsLive is holdsLive of a typed leaf's value (seenNamesApart).
+func seenHoldsLive(l Leaf, value string, ms []echoMatch) bool {
+	for _, m := range ms {
+		if seenNamesApart(l, value, m.live, m.rec, m.rules) {
+			return true
+		}
+	}
+	return false
+}
+
 // instantSource reports whether v, a drifted value read word by word, came
 // from s, a leaf F saw drift whose protocol types it as one instant (Instant):
 // v held the moment s was recorded with as recorded and the moment F saw
@@ -667,15 +697,15 @@ func (dc *DriftCache) instantCoDrifted(rec, live string, rm, lm moment) bool {
 // instantEchoFrom is the earlier place holding the moment the drifted
 // instant r was recorded with, as an instant or its time of day, by the rule
 // the echo found it a copy by (echoed, holdsRecorded, as appearedIn's echo
-// reads the places): a leaf of an exchange F served earlier, ranked by
-// placeRank, then a payload served or recorded before at, its field where
-// one holds it.
+// reads the places): a leaf of an exchange F served earlier, a typed time of
+// day there as the echo reads it (seenHoldsRecorded), ranked by placeRank,
+// then a payload served or recorded before at, its field where one holds it.
 func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) (Place, bool) {
 	var best Place
 	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) {
+			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
 			whole := s.Leaf.Value == r.Value
