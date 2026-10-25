@@ -399,8 +399,10 @@ func MockID(m *models.Mock) string {
 // its call's window (Window.holdsRead): a value any other zone would read so
 // is no read keploy can tell from a value the test harness gave it (the
 // clock's reading plus two hours). An application whose zone is neither has
-// such a value refused, a false red that fails closed. The agent sets it
-// once, before any test.
+// such a value refused, a false red that fails closed. A wall clock of no
+// zone its protocol types (WallClockLeaf) is read in those two zones too
+// where the learn step looks for a read of the clock (instantClock), as a
+// text's is. The agent sets it once, before any test.
 func (t *Tracker) SetAppZone(loc *time.Location) {
 	if t == nil {
 		return

@@ -1524,7 +1524,8 @@ type DriftCache struct {
 	clientTests bool
 	// zone is the zone the application writes a wall clock of no zone in,
 	// beside UTC (Tracker.SetAppZone), nil for UTC alone: a client test's
-	// window reads such a wall clock in those two only (Window.holdsRead).
+	// window reads such a wall clock in those two only (Window.holdsRead),
+	// and so does the clock rule of one its protocol types (instantClock).
 	zone   *time.Location
 	mu     sync.Mutex
 	m      map[driftKey]*valueDrift
@@ -1562,8 +1563,9 @@ type DriftCache struct {
 // request the learn step reads (Earlier.Given).
 func (dc *DriftCache) ClientTests() bool { return dc != nil && dc.clientTests }
 
-// Zone is the zone, beside UTC, in which a client test's window reads a
-// wall clock of no zone (Tracker.SetAppZone): nil for UTC alone.
+// Zone is the zone, beside UTC, in which a client test's window, and the
+// clock rule of a wall clock its protocol types, read a wall clock of no
+// zone (Tracker.SetAppZone): nil for UTC alone.
 func (dc *DriftCache) Zone() *time.Location {
 	if dc == nil {
 		return nil
@@ -1586,9 +1588,10 @@ func (dc *DriftCache) ClockReads(recorded, live string) []models.ClockRead {
 
 // InstantClockRead is InstantClockRead of the cache's test: in one of keploy
 // mock's client tests (ClientTests) the lead shows no read of the
-// application's clock, so only w can.
+// application's clock, so only w can; a wall clock of no zone is read in the
+// cache's zone too (Zone).
 func (dc *DriftCache) InstantClockRead(rec, live Leaf, w *Window) bool {
-	return instantClockRead(rec, live, w, !dc.ClientTests())
+	return instantClockRead(rec, live, w, !dc.ClientTests(), dc.Zone())
 }
 
 // NewDriftCache makes an empty cache.
@@ -2363,6 +2366,7 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 	for _, e := range served {
 		for _, s := range e.Seen {
 			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
+			heldSeen(&held, s.Leaf, s.Leaf.Value)
 			// What F served (an answer's value, or a request's that did not
 			// drift), and the test case's request as keploy test sent it
 			// (Earlier.Given). What the application itself sent in F, where
@@ -2370,6 +2374,7 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 			// reads: two reads of the clock in one moment drift alike.
 			if s.Side == Response || e.Given || s.Live == s.Leaf.Value {
 				dc.heldIn(&held, s.Live, dc.rawExtra(s.Live))
+				heldSeen(&held, s.Leaf, s.Live)
 			}
 		}
 	}
@@ -2390,6 +2395,7 @@ func (dc *DriftCache) recordedMoments(at time.Time, served []Earlier, raw []Raw)
 	for _, e := range served {
 		for _, s := range e.Seen {
 			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
+			heldSeen(&held, s.Leaf, s.Leaf.Value)
 		}
 	}
 	return &held
@@ -2417,8 +2423,8 @@ func Echoes(dc *DriftCache, r Leaf, resp []Leaf) []Leaf {
 			// An answer's instant its protocol types echoes the value
 			// where the value holds that moment, in any layout and form:
 			// it has no words to hold.
-			if t, res, ok := InstantOf(a); ok {
-				m := instantMoment(t, res)
+			if ti, ok := readTyped(a); ok {
+				m := ti.moment(ti.res)
 				if dc.holdsExact(r.Value, m) || dc.holdsExact(dc.rawExtra(r.Value), m) {
 					out = append(out, a)
 				}
