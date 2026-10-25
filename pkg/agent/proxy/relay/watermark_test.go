@@ -430,6 +430,70 @@ func TestWatermark_AChunkJustBeforeItsQueueHoldsItsWindowWhileTheParserWaits(t *
 	}
 }
 
+// forwarderParked reports whether dir's forwarder has signalled that it parks
+// on the relay's pause barrier in the current pause window
+// (markForwarderParked): it is then past its stash and its release.
+func forwarderParked(r *Relay, dir fakeconn.Direction) bool {
+	r.pauseMu.Lock()
+	parked := r.parkedC2D
+	if dir == fakeconn.FromDest {
+		parked = r.parkedD2C
+	}
+	r.pauseMu.Unlock()
+	if parked == nil {
+		return false
+	}
+	select {
+	case <-parked:
+		return true
+	default:
+		return false
+	}
+}
+
+// A forwarder that reads a chunk while the relay is paused stashes it (and
+// queues a client chunk for the parser too, in a pre-dispatch pause or under a
+// client write hold), lets go of it, and only then parks until the pause ends.
+// The chunk is then in neither forwarder's hand: the parser has taken what it
+// was given and waits for more. A window over the chunk's stamp is settled while
+// the forwarder stays parked. Were the hand let go of only at the top of the
+// next loop, after the pause, the parked forwarder would keep the chunk's
+// stamp in its hand. It would hold every window the stamp falls in for as long
+// as the pause lasts: a late settle, or a stop that waits out its bound.
+func TestWatermark_AForwarderParkedInAPauseHoldsNoWindowWithTheChunkItStashed(t *testing.T) {
+	for _, dir := range []fakeconn.Direction{fakeconn.FromClient, fakeconn.FromDest} {
+		t.Run(dir.String(), func(t *testing.T) {
+			h := newHarness(t, Config{PreDispatchPause: true})
+			w := NewWatermark()
+			defer w.Track(h.r, "conn-1")()
+
+			start := time.Now()
+			if dir == fakeconn.FromClient {
+				h.writeClient([]byte("first"))
+				// Queued for the parser as well as stashed: it takes it.
+				if c := readChunk(t, h.r.ClientStream()); string(c.Bytes) != "first" {
+					t.Fatalf("the parser got %q, want first", c.Bytes)
+				}
+				blockInRead(t, h.r.ClientStream())
+			} else {
+				h.writeDest([]byte("greet"))
+				// Stashed only: the parser is given nothing and waits, nor will
+				// it be given it: ResumePreDispatch writes it to the client and
+				// UpgradeTLS takes it for the handshake, and neither tees it.
+				blockInRead(t, h.r.DestStream())
+			}
+			awaitState(t, "the forwarder to park on the pause", func() bool { return forwarderParked(h.r, dir) })
+			end := time.Now()
+			if by := w.HeldBy("", "", start, end, 0); by != nil {
+				t.Errorf("a window over the chunk the parked forwarder stashed is held by %v, want settled", by)
+			}
+			if w.PendingBefore(end) {
+				t.Error("PendingBefore: true while the only chunk is stashed and the forwarder that read it is parked")
+			}
+		})
+	}
+}
+
 // A forwarder marks a chunk it read as in its hand, being stamped
 // (heldUnstamped), before it reads the clock for the chunk's stamp, so a look
 // that found its hand empty is older than the stamp. Were the clock read
