@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -396,6 +398,105 @@ func TestAnAcceptedConnectionTellsTheLearnStepItsRequestsUnderTheSwitch(t *testi
 		}
 		if gotKept != 1 || gotTold != want {
 			t.Fatalf("switch %v: %d of %d kept connections tell the learn step their requests, want %d of 1", on, gotTold, gotKept, want)
+		}
+	}
+}
+
+// unansweringParser serves a connection's request through handleConnection:
+// it reads the request through what the proxy hands it (the TLS layer it
+// serves over) and has the learn step number a serve of m in it. Without
+// answer it returns at once, as a parser that matched a recording it cannot
+// deliver does; with it, it writes m's answer and reads on until the
+// application closes or resets the connection.
+type unansweringParser struct {
+	tr     *learn.Tracker
+	m      *models.Mock
+	answer bool
+}
+
+func (unansweringParser) MatchType(context.Context, []byte) bool { return true }
+func (unansweringParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
+	return nil
+}
+func (u unansweringParser) MockOutgoing(_ context.Context, src net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	if _, err := src.Read(make([]byte, 64)); err != nil {
+		return err
+	}
+	u.tr.ServedMock(u.m)
+	if !u.answer {
+		return nil
+	}
+	if _, err := src.Write([]byte("A")); err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, src)
+	return nil
+}
+
+// The proxy's close of the TLS layer it serves a kept connection over sends
+// the layer's close_notify, a write that is no answer: a request its parser
+// returned without answering is ended untold before it (learn.Flight.
+// EndUntold), so its serve is in an order keploy cannot tell (0,0), never
+// one the application read. One the parser answered keeps F's order (1,1),
+// whether the application then closes or resets the connection, so that
+// the close_notify's write fails. The request is the flight the client's
+// Finished lifted: a Go TLS 1.3 server that asks for no client certificate
+// writes nothing after it, so it is aloft when the request is read.
+func TestTheProxysCloseOfItsTLSLayerEndsARequestItGaveNoAnswerUntold(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	saved := containerkey.Default
+	containerkey.Default = containerkey.NewKeyer(containerAt{addr: "none"})
+	t.Cleanup(func() { containerkey.Default = saved })
+	for _, tc := range []struct {
+		name   string
+		answer bool
+		// reset: the application resets the connection once it read the
+		// answer (SO_LINGER 0), rather than closing it.
+		reset bool
+		told  bool
+	}{
+		{"unanswered", false, false, false},
+		{"answered, then closed", true, false, true},
+		{"answered, then reset", true, true, true},
+	} {
+		tr := learn.NewTracker()
+		a := &models.Mock{Name: "mock-a"}
+		cfg := config.New()
+		cfg.Agent.Mode = models.MODE_TEST
+		p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, "127.0.0.1:8443")}, cfg)
+		p.Integrations = map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: unansweringParser{tr: tr, m: a, answer: tc.answer}}
+		p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
+		_ = p.Mock(context.Background(), models.OutgoingOptions{DisableMysqlAutoDetect: true, Mocking: true})
+		app, src := acceptedConn(t)
+		tcn := p.inflight.trackTold(src, tr)
+		done := make(chan error, 1)
+		go func() { done <- p.handleConnection(context.Background(), tcn) }()
+		cli := tls.Client(app, &tls.Config{InsecureSkipVerify: true, ServerName: "dep.example", MinVersion: tls.VersionTLS13}) //nolint:gosec // the client of a handshake the test only makes
+		if err := cli.Handshake(); err != nil {
+			t.Fatalf("%s: the client's handshake: %v", tc.name, err)
+		}
+		if _, err := cli.Write([]byte("GET / HTTP/1.1\r\nHost: dep.example\r\n\r\n")); err != nil {
+			t.Fatal(err)
+		}
+		if tc.answer {
+			if _, err := io.ReadFull(cli, make([]byte, 1)); err != nil {
+				t.Fatalf("%s: reading the answer: %v", tc.name, err)
+			}
+			if tc.reset {
+				_ = app.SetLinger(0)
+			}
+			_ = app.Close()
+		} else {
+			_, _ = io.Copy(io.Discard, cli) // the proxy's close
+		}
+		awaitEvent(t, done, "handleConnection returning")
+		_ = app.Close()
+		fa, la := tr.Placed().Order.Of(a)
+		if tc.told && (fa != 1 || la != 1) {
+			t.Fatalf("%s: A at %d,%d; want 1,1: the application read its answer", tc.name, fa, la)
+		}
+		if !tc.told && (fa != 0 || la != 0) {
+			t.Fatalf("%s: A at %d,%d; want 0,0: the close_notify landed a request the application was given no answer to", tc.name, fa, la)
 		}
 	}
 }

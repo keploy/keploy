@@ -2,8 +2,9 @@ package learn
 
 // Flight is one request of the application's on one of its connections to
 // keploy: aloft from the first bytes of it keploy read until keploy starts
-// to write the answer back, or the connection closes (Land), or until keploy
-// knows the application is not given the answer (EndUntold). A request
+// to write the answer back (Land), or until keploy knows the application is
+// not given the answer: the connection closed or half-closed before the
+// answer started, or a write of it failed (EndUntold). A request
 // counts as a serve once F served a recording in it (ServedMockIn: the
 // parser says whose request it serves; ServedMockAt: the one request
 // aloft). A request that reads no recording (a driver's monitor heartbeat,
@@ -158,9 +159,9 @@ func (f *Flight) LiftCaused() *Flight {
 	return p
 }
 
-// Land is the end of f: keploy starts to write its answer back, or its
-// connection closed. Landed once; a nil or landed flight is nothing. One
-// that ended untold (EndUntold) stays untold.
+// Land is the end of f: keploy starts to write its answer back. Landed
+// once; a nil or landed flight is nothing. One that ended untold
+// (EndUntold) stays untold.
 func (f *Flight) Land() {
 	if f == nil || f.t == nil {
 		return
@@ -176,23 +177,31 @@ func (f *Flight) Land() {
 	f.landed = t.landings
 }
 
-// EndUntold is the end of f whose answer the application is not given: its
-// caller will write no answer in f (a server push it took and will not
-// deliver as that consume's), or the write that started as f landed failed.
-// It is a contract for such a caller: no proxy door calls it yet, and a
-// connection's close and its writes land its flight (Land). Every serve made
-// in f is then in an order keploy cannot tell (Order.Of: 0, 0) in each read
-// made from now on, so it is never one the application read before a
-// request of its: the application was not given it. Aloft, f is no longer in
-// flight: a request lifted after it (Lift) overlaps it no more, while those
-// that overlapped it keep the overlap (with f a serve, their serves stay
-// untold, which fails closed), and a request a serve caused (LiftCaused)
-// still crosses it as one of the set's lifts, which fails closed too.
-// Landed, f stays out of flight, and a read made before this keeps the
-// verdict it gave (Placed reads every flight as the read saw it), as a read
-// made before a Land does. Once: a nil flight, NoRequest, or one that ended
-// untold already is nothing, and a Land after it changes no read: its
-// serves stay untold.
+// EndUntold is the end of f whose answer the application is not given: no
+// answer is written in f, or the write that started it failed. The proxy's
+// kept connection ends f untold when it closes or half-closes with f aloft,
+// and when the write that landed f fails; a later write that fails ends
+// nothing, as the connection cannot tell the rest of an answer from a write
+// after it, so a request whose answer is cut after its first write stays
+// landed. A layer over the connection that writes as it closes (TLS's
+// close_notify) lands f first, as an answer's first bytes would: the proxy
+// ends its request aloft untold before it closes the layer it serves over. A
+// parser that closes such a layer itself (the TLS it was handed, or a
+// STARTTLS upgrade of its own) lands its request aloft so, unless it ends it
+// untold first: one that will not answer it must. So must one that takes a
+// server push it will not deliver as that consume's, or that lands a flight
+// itself (LiftCaused) and then fails to write its push. Every serve made in f
+// is then in an order keploy cannot tell (Order.Of: 0, 0) in each read made
+// from now on, so it is never one the application read before a request of
+// its: the application was not given it. Aloft, f is no longer in flight: a
+// request lifted after it (Lift) overlaps it no more, while those that
+// overlapped it keep the overlap (with f a serve, their serves stay untold,
+// which fails closed), and a request a serve caused (LiftCaused) still
+// crosses it as one of the set's lifts, which fails closed too. Landed, f
+// stays out of flight, and a read made before this keeps the verdict it gave
+// (Placed reads every flight as the read saw it), as a read made before a
+// Land does. Once: a nil flight, NoRequest, or one that ended untold already
+// is nothing, and a Land after it changes no read: its serves stay untold.
 func (f *Flight) EndUntold() {
 	if f == nil || f.t == nil {
 		return
