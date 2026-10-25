@@ -467,6 +467,24 @@ func RedirectToStderr() (*zap.Logger, error) {
 	return reattachDebugFileSink(logger), nil
 }
 
+// showKey is the zap field key that marks a log line for the console in
+// quiet mode. Its value is the text printed as "keploy: <value>".
+const showKey = "_keploy_show"
+
+// Show marks a log line to appear on the console in quiet mode. The text
+// is what the console prints as "keploy: <text>". Without quiet mode the
+// field is a regular zap string carried in the log file.
+//
+// Usage:
+//
+//	logger.Info("recorded mocks", log.Show("recorded 16 mocks in 5 tests"), zap.Int("mocks", 16))
+//
+// Console (quiet): keploy: recorded 16 mocks in 5 tests
+// File:            🐰 Keploy: ... INFO recorded mocks {"mocks": 16, ...}
+func Show(text string) zap.Field {
+	return zap.String(showKey, text)
+}
+
 // IsQuiet reports whether QuietConsole has silenced the console. Code that
 // starts subprocesses (the keploy agent) checks this to redirect their
 // output to the log file instead of the console.
@@ -485,9 +503,10 @@ func GetActiveLogFile() *os.File {
 	return activeLogFile
 }
 
-// QuietConsole rebuilds the logger so the console shows only warnings and
-// errors while the log file keeps every level. Structured keploy: lines
-// printed via fmt.Fprintf to stderr are unaffected — they bypass zap.
+// QuietConsole rebuilds the logger so the console shows only lines marked
+// with Show and warnings or errors, each as a plain "keploy: <text>" line.
+// Every level still goes to the log file in full zap format. Structured
+// keploy: lines printed via fmt.Fprintf to stderr are unaffected.
 //
 // Call it once, after New(), when the run wants a clean console (the proven
 // mock flow). It is a no-op when --debug is on (the console level is already
@@ -511,16 +530,15 @@ func QuietConsole() (*zap.Logger, error) {
 		logger := zap.New(newRedactingCore(core))
 		return reattachDebugFileSink(logger), nil
 	}
-	// Console: warnings and errors only.
-	consoleSink := primarySyncer()
-	consoleLevel := zap.NewAtomicLevelAt(zap.WarnLevel)
-	cc := consoleCore(LogCfg, consoleSink, consoleLevel)
-
-	// File: every level the config asks for (INFO by default).
+	// File: every level in full zap format.
 	fileSink := zapcore.AddSync(lf)
 	fc := consoleCore(LogCfg, fileSink, LogCfg.Level)
 
-	core := zapcore.NewTee(cc, fc)
+	// Console: only Show-marked lines and WARN/ERROR, as plain
+	// "keploy: <text>" lines.
+	qc := &quietConsoleCore{out: PrimarySink()}
+
+	core := zapcore.NewTee(fc, qc)
 
 	primarySinkMu.Lock()
 	quietMode = true
@@ -529,6 +547,47 @@ func QuietConsole() (*zap.Logger, error) {
 	logger := zap.New(newRedactingCore(core))
 	return reattachDebugFileSink(logger), nil
 }
+
+// quietConsoleCore is a zapcore.Core that prints only Show-marked lines and
+// WARN/ERROR to the console as plain "keploy: <text>" lines. It enables all
+// levels so that Show-marked INFO lines reach Write, where the Show field
+// is checked.
+type quietConsoleCore struct {
+	out *os.File
+}
+
+func (c *quietConsoleCore) Enabled(zapcore.Level) bool { return true }
+
+func (c *quietConsoleCore) With(fields []zapcore.Field) zapcore.Core {
+	// Fields added via logger.With() are not Show markers — they are
+	// context fields like the mock-set name. The quiet core carries no
+	// state from them: it checks each Write's fields for Show.
+	return c
+}
+
+func (c *quietConsoleCore) Check(ent zapcore.Entry, ce *zapcore.CheckedEntry) *zapcore.CheckedEntry {
+	// Always accept: Show-marked INFO lines must reach Write.
+	return ce.AddCore(ent, c)
+}
+
+func (c *quietConsoleCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
+	// Show-marked line: print the Show text.
+	for i := range fields {
+		if fields[i].Key == showKey {
+			fmt.Fprintf(c.out, "keploy: %s\n", fields[i].String)
+			return nil
+		}
+	}
+	// WARN/ERROR without Show: print the message.
+	if ent.Level >= zapcore.WarnLevel {
+		fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), ent.Message)
+		return nil
+	}
+	// INFO/DEBUG without Show: console stays silent.
+	return nil
+}
+
+func (c *quietConsoleCore) Sync() error { return nil }
 
 func AddMode(mode string) (*zap.Logger, error) {
 	ensureLogCfg()

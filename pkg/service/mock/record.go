@@ -21,6 +21,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	rec "go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -94,6 +95,7 @@ func (m *mockService) Record(ctx context.Context) error {
 		return err
 	}
 	m.logger.Info("Recording mocks for your test command",
+		log.Show("recording: "+m.userCommand),
 		zap.String("mock-set", name),
 		zap.String("command", m.userCommand))
 
@@ -619,7 +621,9 @@ func (m *mockService) Record(ctx context.Context) error {
 			if derr := m.mockDB.DiscardStagedSet(persistCtx, staging); derr != nil {
 				m.logger.Debug("failed to discard an empty staging set after interrupt", zap.String("staging", staging), zap.Error(derr))
 			}
-			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged", zap.String("mock-set", name))
+			m.logger.Info("recording stopped; nothing was captured, the existing mock set was left unchanged",
+				log.Show("recording stopped: nothing was captured"),
+				zap.String("mock-set", name))
 			return nil
 		}
 		keep = true
@@ -627,7 +631,9 @@ func (m *mockService) Record(ctx context.Context) error {
 			utils.LogError(m.logger, err, "recording stopped, but saving the captured mocks failed", zap.Int("mocks", mockCount), zap.String("mock-set", name))
 			return nil
 		}
-		m.logger.Info("recording stopped; captured mocks saved", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+		m.logger.Info("recording stopped; captured mocks saved",
+			log.Show(fmt.Sprintf("recording stopped: %d mocks saved", mockCount)),
+			zap.Int("mocks", mockCount), zap.String("mock-set", name))
 		sayUnconfirmed()
 		return nil
 	}
@@ -827,9 +833,13 @@ func (m *mockService) Record(ctx context.Context) error {
 		m.logger.Warn("failed to publish mock set to the store", zap.String("mock-set", name), zap.Error(err))
 	}
 
-	m.logger.Info("recorded mocks", zap.Int("mocks", mockCount), zap.String("mock-set", name))
+	m.logger.Info("recorded mocks",
+		log.Show(fmt.Sprintf("recorded %d outgoing calls", mockCount)),
+		zap.Int("mocks", mockCount), zap.String("mock-set", name))
 	if capture != nil {
-		m.logger.Info("recorded test cases", zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
+		m.logger.Info("recorded test cases",
+			log.Show(fmt.Sprintf("recorded %d test cases", len(capture.list()))),
+			zap.Int("cases", len(capture.list())), zap.String("mock-set", name))
 	}
 	if mockCount == 0 {
 		m.logger.Warn("no outgoing calls were captured; the runner made no mockable dependency calls, or its traffic was not intercepted",
