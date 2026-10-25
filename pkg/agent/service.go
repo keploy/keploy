@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -609,6 +610,24 @@ type RecordingSourceSetter interface {
 // time, decoding one at a time; nil for none). Nothing it reads is served.
 type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
+}
+
+// LearnEndSetter is implemented by a proxy whose learn step a keploy test
+// filter can end for the rest of a test set (models.MockFilterParams.
+// LearnEnded): SetLearnEnded says whether it has ended. The agent sets it from
+// every keploy test filter, before the filter's view goes live.
+type LearnEndSetter interface {
+	SetLearnEnded(ended bool) error
+}
+
+// KeptLearningSetter is implemented by a proxy that serves a test set's
+// retry cycles the staged recordings (the pool's, the worker scope's) with
+// what keploy record keeps of the set's first-cycle learning on them
+// (models.MockFilterParams.Learned): SetKeptLearning puts it there, nil
+// takes it off. The agent's own store carries it on the recordings it hands
+// the proxy (a test's own); the staged ones are the proxy's.
+type KeptLearningSetter interface {
+	SetKeptLearning(l *learn.KeptLearning) error
 }
 
 type ExactServer interface {

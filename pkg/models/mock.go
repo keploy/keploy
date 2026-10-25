@@ -1095,6 +1095,16 @@ type MockState struct {
 	// (ExactServing.Concurrent), not as one of its own: whose call it was is
 	// settled at the set's end. An agent that predates it reports none.
 	Concurrent bool `json:"concurrent,omitempty"`
+	// LearnedAfterEnd says the parser that consumed the mock reported, after
+	// the test set's learn step ended (MockFilterParams.LearnEnded: a retry
+	// cycle, an out-of-order streaming pass), learning the copy exact serving
+	// handed it out by did not carry: variables or binds its learn step
+	// learned, or noise paths or variables beyond the recording's and the
+	// round's kept learning. Its answer was served through that learning, so
+	// the replay gives the tests that consumed it no verdict, with that
+	// reason. An agent that predates it reports none; the agent and the CLI
+	// are one keploy.
+	LearnedAfterEnd bool `json:"learnedAfterEnd,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec

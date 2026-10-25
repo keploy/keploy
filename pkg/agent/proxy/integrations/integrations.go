@@ -523,7 +523,11 @@ func (c CallRound) Round() (at RoundAt, known bool) {
 //     of the two depends on where the install lands. HTTP's learn step,
 //     whose first read is its mark, reads the pool's call so too: a take
 //     the install lands under is refused, and its next pass is the moved
-//     miss.
+//     miss. keploy mock's scope flow settles once, before the tracker
+//     begins the test, and installs its view after with no second settle,
+//     so any call marked between the begin and the install meets it there;
+//     keploy test only a call that arrives after its settle returns and
+//     before the install.
 //   - A call marked where the tracker had begun a test whose view the store
 //     had not installed, over the view of the test before
 //     (RoundSnapshot.TrackerAhead), is moved by the store's install of that
@@ -763,6 +767,25 @@ type RecordedBeforeReader interface {
 // all; the learn step then learns nothing from the call, as it cannot tell.
 type StagedRecordingReader interface {
 	RangeStagedRecordings(kind models.Kind, keys []string, visit func(m *models.Mock) bool) error
+}
+
+// LearnEnder is an optional MockMemDb capability: whether the test set's
+// learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's
+// mock-consistency retry cycles run the passing test cases again, test-1
+// after test-N, so recorded order is not replay order in them: a late call of
+// one test read in another's window would be paired with that test's own
+// recording. Those cycles are judged, and learn nothing.
+type LearnEnder interface {
+	LearnEnded() bool
+}
+
+// LearnEnded reports whether db says the test set's learn step has ended
+// (LearnEnder): a parser's learn step then decides no request, and the
+// request is served as a replay serves it. false for a store that does not
+// tell, which keeps learning as before.
+func LearnEnded(db MockMemDb) bool {
+	e, ok := db.(LearnEnder)
+	return ok && e.LearnEnded()
 }
 
 // RecordedTests is an optional TestWindows capability: where a recording's

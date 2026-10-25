@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -667,4 +668,33 @@ func TestTrackerOpenEpochIsTheEpochOnlyWhileATestIsOpen(t *testing.T) {
 	closed("NewSet")
 	tr.Begin()
 	open("the new set's first Begin")
+}
+
+// Once the test set's learn step has ended (keploy replay's retry cycles of
+// record's full round, SetLearnEnded) a parser finds no tracker on its
+// connection's context, so a learn step that reads it per request decides
+// none; a parser that kept it reads LearnEnded. The set's staging takes it
+// back up. A nil tracker answers false and ignores the call.
+func TestTrackerFromGivesNoTrackerOnceTheLearnStepEnded(t *testing.T) {
+	tr := NewTracker()
+	ctx := WithTracker(context.Background(), tr)
+	if TrackerFrom(ctx) != tr || tr.LearnEnded() {
+		t.Fatal("precondition: a parser finds the tracker while the set's learn step runs")
+	}
+	tr.SetLearnEnded(true)
+	if got := TrackerFrom(ctx); got != nil {
+		t.Fatal("a parser still finds the tracker once the set's learn step ended")
+	}
+	if !tr.LearnEnded() {
+		t.Fatal("a parser that kept the tracker is not told the set's learn step ended")
+	}
+	tr.SetLearnEnded(false)
+	if TrackerFrom(ctx) != tr || tr.LearnEnded() {
+		t.Fatal("the set's staging did not take the learn step back up")
+	}
+	var none *Tracker
+	none.SetLearnEnded(true)
+	if none.LearnEnded() || TrackerFrom(context.Background()) != nil {
+		t.Fatal("a nil tracker says the learn step ended")
+	}
 }

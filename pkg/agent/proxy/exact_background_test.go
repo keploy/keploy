@@ -164,6 +164,29 @@ func TestPairingIsOffWithoutLearn(t *testing.T) {
 	}
 }
 
+// Once the set's learn step has ended (SetLearnEnded: a retry cycle of
+// record's full round, which runs the tests out of their recorded order), a
+// session that pairs, under the background rules, has no pairing candidate
+// and claims no pairing, for any parser that asks: a call of one test read in
+// another's window is never paired with a recording another test owns.
+// Taking the learn step back up pairs again.
+func TestPairingIsOffOnceTheSetsLearnStepEnded(t *testing.T) {
+	mm, ms := s12Set(t)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"pool"}, []string{"w-boot", "w-later"})
+	mm.ServeExactTest("T1", []*models.Mock{ms["own"]})
+	mm.SetPairing(true)
+	equalNames(t, "precondition: the candidates with Learn", mm.PairingCandidates(models.HTTP), "other")
+	mm.SetLearnEnded(true)
+	if c := mm.PairingCandidates(models.HTTP); c != nil {
+		t.Fatalf("a session whose learn step ended has pairing candidates: %v", exactNames(c))
+	}
+	if mm.ClaimPairing(ms["other"]) {
+		t.Fatal("a session whose learn step ended claims a pairing")
+	}
+	mm.SetLearnEnded(false)
+	equalNames(t, "the candidates once the learn step is taken back up", mm.PairingCandidates(models.HTTP), "other")
+}
+
 // A set's staging opens under the rules it was recorded under
 // (StageExactBackground) before any view of it is installed, so the view it
 // serves while its mocks are staged, before its background is named, reads

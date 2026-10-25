@@ -202,6 +202,115 @@ func TestRunTestSet_ARequestUnreadInOneSetIsNotTheNextSets(t *testing.T) {
 	}
 }
 
+// byTestInstr is the harness's agent, which says its learn step read the
+// request of every test case it opens but those unread names, and keeps the
+// test case it opened last (opened).
+type byTestInstr struct {
+	*prInstr
+	unread map[string]bool
+	opened string
+}
+
+func (a *byTestInstr) SendTestCaseFilter(ctx context.Context, p models.MockFilterParams) (bool, error) {
+	if err := a.UpdateMockParams(ctx, p); err != nil {
+		return false, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if p.TestRequest == nil {
+		return true, nil
+	}
+	a.opened = p.TestRequest.Test
+	return !a.unread[p.TestRequest.Test], nil
+}
+
+func (a *byTestInstr) last() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.opened
+}
+
+// The first cycle serves what one test learned on a reusable recording to
+// the later tests that consume it: a matcher files its copy, carrying that
+// learning, over the pool's recording, and the next test is served the
+// copy. Where the round drops that learning (here: the agent did not say it
+// read test-1's request, which learned it), test-2, whose own request was
+// read, may have passed on it alone: it has no verdict either, and its row
+// names the recording, what was not kept, and test-1, whose request was not
+// read. With every request read, both keep their verdicts and the learning.
+func TestRunTestSet_ALaterTestServedLearningTheRoundDropsHasNoVerdict(t *testing.T) {
+	own := utils.Version
+	utils.Version = "v3.7.0"
+	t.Cleanup(func() { utils.Version = own })
+	// What each test's drain says it consumed of the pool's recording:
+	// test-1 learned body.at on it, and test-2 was served the copy the
+	// matcher filed, which carries it.
+	filed := models.MockState{Name: "pool-1", Kind: models.HTTP, ReqBodyNoise: map[string][]string{"body.at": {}}}
+	for _, tc := range []struct {
+		name   string
+		unread map[string]bool
+	}{
+		{"test-1's request not read", map[string]bool{"test-1": true}},
+		{"every request read", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provenOn(t, true)
+			h := newPartialRunHarness(t, 2, 0)
+			h.replayer.config.Test.Learn = true
+			store := &learnedStore{prMockDB: h.mocks}
+			h.replayer.mockDB = store
+			instr := &byTestInstr{prInstr: h.instr, unread: tc.unread}
+			h.replayer.instrumentation = instr
+			h.replayer.hookImpl = prHooks{consumedFor: func() []models.MockState {
+				if instr.last() == "" {
+					return nil
+				}
+				return []models.MockState{filed}
+			}}
+			status := h.run(t)
+			if h.report.report == nil || len(h.report.report.Tests) != 2 {
+				t.Fatalf("report %+v; want the set's report with its 2 tests", h.report.report)
+			}
+			if tc.unread == nil {
+				if status != models.TestSetStatusPassed {
+					t.Fatalf("status %s, want PASSED", status)
+				}
+				if got := store.persisted["pool-1"]; !reflect.DeepEqual(got.ReqBodyNoise, filed.ReqBodyNoise) {
+					t.Fatalf("kept %+v; want what test-1 learned", got)
+				}
+				for _, res := range h.report.report.Tests {
+					if res.FailureInfo.LearningNotKept != "" || len(res.VerdictUnknown()) > 0 {
+						t.Fatalf("%s: %q; want its verdict", res.TestCaseID, res.FailureInfo.LearningNotKept)
+					}
+				}
+				return
+			}
+			if status != models.TestSetStatusInternalErr {
+				t.Fatalf("status %s; want the set not judged (INTERNAL_ERR)", status)
+			}
+			if got := store.persisted["pool-1"]; got.ReqBodyNoise != nil {
+				t.Fatalf("kept %+v; want nothing learned", got)
+			}
+			for _, res := range h.report.report.Tests {
+				if res.Status != models.TestStatusPassed || len(res.VerdictUnknown()) == 0 {
+					t.Fatalf("%s: %s, verdict unknown %v; want a passed row with no verdict", res.TestCaseID, res.Status, res.VerdictUnknown())
+				}
+				why := res.FailureInfo.LearningNotKept
+				want := "keploy did not keep what its agent learned on the mocks this test consumed (pool-1 body.at (noise)): the agent did not say it read the test case's request, nor its version"
+				if res.TestCaseID == "test-2" {
+					want = "keploy did not keep what its agent learned on the mocks this test consumed (pool-1 body.at (noise)), which 1 other test case(s) consumed too (test-1): the agent did not say it read their requests, nor its version, as an agent older than this keploy (v3.7.0) does not, so a value the application took from one of them may have been learned as noise"
+				}
+				if !strings.Contains(why, want) {
+					t.Fatalf("%s: learning not kept %q; want it to say %q", res.TestCaseID, why, want)
+				}
+			}
+			if got, want := fmt.Sprint(sortedNoVerdicts(h.replayer)), "map[test-set-0:[test-1 test-2]]"; got != want {
+				t.Fatalf("the run's tests with no verdict %s; want %s", got, want)
+			}
+		})
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // sortedNoVerdicts is the run's tests with no verdict (Replayer.noVerdicts),
@@ -226,7 +335,7 @@ func TestWithoutUnreadLearning(t *testing.T) {
 	}
 	consumers := map[string][]string{"mock-1": {"test-1", "test-2"}, "mock-2": {"test-2"}}
 	for i := 0; i < 50; i++ {
-		kept, dropped, byTest := withoutUnreadLearning(consumed, consumers, map[string]bool{"test-1": true})
+		kept, dropped, byTest, from := withoutUnreadLearning(consumed, consumers, map[string]bool{"test-1": true})
 		want := "mock-1 body.a (noise),mock-1 body.b (noise),mock-1 e (echo),mock-1 v (bound at mock-0),mock-1 v (variable)"
 		if strings.Join(dropped, ",") != want {
 			t.Fatalf("dropped %v; want %s", dropped, want)
@@ -236,6 +345,11 @@ func TestWithoutUnreadLearning(t *testing.T) {
 		if len(byTest) != 2 || strings.Join(byTest["test-1"], ",") != want || strings.Join(byTest["test-2"], ",") != want {
 			t.Fatalf("by test %v; want test-1 and test-2, each %s", byTest, want)
 		}
+		// test-2's reason names the test whose request was not read: its
+		// own was.
+		if !reflect.DeepEqual(from, map[string][]string{"test-2": {"test-1"}}) {
+			t.Fatalf("from %v; want test-2's naming test-1", from)
+		}
 		if kept["mock-1"].ReqBodyNoise != nil || kept["mock-1"].Variables != nil || kept["mock-1"].Binds != nil || len(kept["mock-2"].ReqBodyNoise) != 1 || len(kept["boot"].ReqBodyNoise) != 1 {
 			t.Fatalf("kept %+v", kept)
 		}
@@ -243,11 +357,45 @@ func TestWithoutUnreadLearning(t *testing.T) {
 	if len(consumed["mock-1"].ReqBodyNoise) != 2 {
 		t.Fatal("the consumed states were changed")
 	}
-	if kept, dropped, byTest := withoutUnreadLearning(consumed, consumers, nil); dropped != nil || byTest != nil || !reflect.DeepEqual(kept, consumed) {
+	if kept, dropped, byTest, from := withoutUnreadLearning(consumed, consumers, nil); dropped != nil || byTest != nil || from != nil || !reflect.DeepEqual(kept, consumed) {
 		t.Fatalf("with every request read: kept %v, dropped %v, by test %v", kept, dropped, byTest)
 	}
 	// A mock the unread test consumed that learned nothing marks no test.
-	if _, dropped, byTest := withoutUnreadLearning(map[string]models.MockState{"mock-3": {Name: "mock-3"}}, map[string][]string{"mock-3": {"test-1"}}, map[string]bool{"test-1": true}); dropped != nil || byTest != nil {
+	if _, dropped, byTest, from := withoutUnreadLearning(map[string]models.MockState{"mock-3": {Name: "mock-3"}}, map[string][]string{"mock-3": {"test-1"}}, map[string]bool{"test-1": true}); dropped != nil || byTest != nil || from != nil {
 		t.Fatalf("nothing learned: dropped %v, by test %v", dropped, byTest)
+	}
+}
+
+// What the retry cycles are served of the first cycle's learning
+// (keptLearning) is what the round keeps of it: nothing learned on a shared
+// recording the settlement did not pin (stripUnresolved), nor what the agent
+// learned for a test whose request it did not say it read
+// (withoutUnreadLearning); the rest as it is, and consumed unchanged.
+func TestKeptLearningIsWhatTheRoundKeeps(t *testing.T) {
+	noise := func(name string) models.MockState {
+		return models.MockState{Name: name, Kind: models.HTTP, ReqBodyNoise: map[string][]string{"body.at": {}}}
+	}
+	consumed := map[string]models.MockState{"shared-1": noise("shared-1"), "pinned-1": noise("pinned-1"), "own-2": noise("own-2"), "own-3": noise("own-3")}
+	r := &Replayer{exact: &exactPlan{share: &sharePlan{
+		sharing: true,
+		candOf:  map[string][]string{"shared-1": {"test-1", "test-3"}, "pinned-1": {"test-1", "test-3"}},
+		settled: models.SetShares{Pins: map[string]string{"pinned-1": "test-3"}},
+	}}}
+	r.requestsUnread.note("test-2", "")
+	kept := r.keptLearning(consumed, map[string][]string{"own-2": {"test-2"}, "own-3": {"test-3"}, "pinned-1": {"test-3"}})
+	var learned []string
+	for name, st := range kept {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 {
+			learned = append(learned, name)
+		}
+	}
+	sort.Strings(learned)
+	if want := []string{"own-3", "pinned-1"}; !reflect.DeepEqual(learned, want) {
+		t.Fatalf("the retry cycles are served the learning of %v; the round keeps %v (not the unpinned share's, nor what test-2 learned with its request unread)", learned, want)
+	}
+	for name, st := range consumed {
+		if len(st.ReqBodyNoise) == 0 {
+			t.Fatalf("keptLearning changed what was consumed: %s lost its learning", name)
+		}
 	}
 }

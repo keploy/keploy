@@ -145,6 +145,10 @@ type exactView struct {
 	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
 	outside *outsideAnswers
 	epoch   *atomic.Uint64
+	// kept is the manager's kept learning (SetKeptLearning): each staged
+	// recording the view hands out carries it (learned). nil on a view no
+	// manager installed.
+	kept *keptOverlay
 
 	// round is the round's generation this view was installed at
 	// (roundState.gen), set holding the round lock before the view is
@@ -260,7 +264,15 @@ type exactState struct {
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
 	// pairing claimed in the current staging; ofKind, where the pairing
 	// reads recordings of a kind the trees do not hold.
-	pairs   atomic.Bool
+	pairs atomic.Bool
+	// learnEnded says the set's learn step ended (SetLearnEnded): a retry
+	// cycle of record's full round, served and judged, learns nothing and
+	// pairs nothing.
+	learnEnded atomic.Bool
+	// kept is what keploy record keeps of the set's first-cycle learning,
+	// put on the staged recordings its retry cycles are served
+	// (SetKeptLearning).
+	kept    keptOverlay
 	claimed stagingNames
 	ofKind  recordedOfKindSource
 	// begun is the mocks the tests begun in the current staging own
@@ -521,6 +533,9 @@ type outsideState struct {
 	staged map[string]*models.Mock
 	// spent holds the names consumed: the first consume of one wins.
 	spent sync.Map
+	// unstaged holds the names of the recordings a door named that staged
+	// does not hold, once each is said (MockManager.servedAsNamed).
+	unstaged sync.Map
 }
 
 // hidden reports whether name was consumed outside every test in the staging
@@ -1381,7 +1396,7 @@ func (m *MockManager) installExact(v *exactView) { m.installExactWith(v, nil) }
 // round lock in the step that moves the round's generation and swaps v in:
 // what it changes is seen by a snapshot with v, never before it.
 func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) {
-	v.outside, v.epoch = &m.exact.outside, &m.stagingEpoch
+	v.outside, v.epoch, v.kept = &m.exact.outside, &m.stagingEpoch, &m.exact.kept
 	if v.test == "" {
 		key := v.poolKey
 		m.exact.poolCursor.Store(&key)
@@ -1702,7 +1717,6 @@ func (v *exactView) spentOutside(name string) bool {
 	return v.outside != nil && v.outside.hidden(name, v.epoch.Load())
 }
 
-// keep narrows staged mocks to those the view shows, in their order.
 // unspent is in less the mocks a parser consumed through a delete door in
 // this view, or outside every test in the staging; in itself when there are
 // none.
@@ -1728,6 +1742,8 @@ func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
 	return out
 }
 
+// keep narrows staged mocks to those the view shows, in their order, each
+// as the view hands it out (learned).
 func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 	out := make([]*models.Mock, 0, len(in))
 	if v.bg != nil {
@@ -1735,7 +1751,7 @@ func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 	}
 	for _, mk := range in {
 		if v.shows(mk) {
-			out = append(out, mk)
+			out = append(out, v.learned(mk))
 		}
 	}
 	return out
@@ -1745,20 +1761,22 @@ func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 // background order: what is not background first (the
 // protocol-phase mocks), in their order; then the worker scope, the earlier
 // place first, delivering before idle, then recorded order (workerOrder);
-// then the pool, in recorded order, whichever trees in came from.
+// then the pool, in recorded order, whichever trees in came from. Each is
+// as the view hands it out (learned).
 func (v *exactView) backgroundOrder(out, in []*models.Mock) []*models.Mock {
 	var worker, pool []*models.Mock
 	for _, mk := range in {
 		if !v.shows(mk) {
 			continue
 		}
+		l := v.learned(mk)
 		switch {
 		case mk.IsProtocolPhase():
-			out = append(out, mk)
+			out = append(out, l)
 		case v.isWorker(mk.Name):
-			worker = append(worker, mk)
+			worker = append(worker, l)
 		default:
-			pool = append(pool, mk)
+			pool = append(pool, l)
 		}
 	}
 	sort.SliceStable(worker, func(i, j int) bool {
@@ -2112,6 +2130,7 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
 		Variables:        variablesOf(mk.Spec),
 		Binds:            bindsOf(mk.Spec),
+		LearnedAfterEnd:  m.learnedAfterEndNamed(mk),
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
@@ -2142,6 +2161,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		Variables:        variablesOf(served.Spec),
 		Binds:            bindsOf(served.Spec),
 		Concurrent:       owned.TestModeInfo.Concurrent,
+		LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(owned), served),
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}

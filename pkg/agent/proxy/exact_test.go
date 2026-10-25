@@ -62,7 +62,13 @@ func equalNames(t *testing.T, what string, got []*models.Mock, want ...string) {
 // switch: every mock of the set, once, at BaseTime.
 func stagedManager(t *testing.T, perTest, session []*models.Mock) *MockManager {
 	t.Helper()
-	mm := NewMockManager(nil, nil, zap.NewNop())
+	return stagedManagerLogged(t, zap.NewNop(), perTest, session)
+}
+
+// stagedManagerLogged is stagedManager, logging to lg.
+func stagedManagerLogged(t *testing.T, lg *zap.Logger, perTest, session []*models.Mock) *MockManager {
+	t.Helper()
+	mm := NewMockManager(nil, nil, lg)
 	t.Cleanup(mm.Close)
 	mm.SetMocksWithWindow(perTest, session, models.BaseTime, time.Now())
 	return mm

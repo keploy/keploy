@@ -128,6 +128,37 @@ func (m *MockManager) SetPairing(on bool) {
 	m.exact.pairs.Store(on && provenswitch.On())
 }
 
+// SetLearnEnded says whether the test set's learn step has ended
+// (models.MockFilterParams.LearnEnded): the agent sets it from every keploy
+// test filter, before the filter's view goes live. While it is set the
+// session pairs nothing (pairing), and no parser's learn step decides a
+// request (LearnEnded): keploy replay's retry cycles run the passing tests
+// again in another order than the one they were recorded in, where a late
+// call of one test read in another's window would be paired with that test's
+// own recording, and what was learned of it kept.
+//
+// A learn step that takes up again holds no kept learning (SetKeptLearning):
+// keploy sends it only with the learn step ended.
+func (m *MockManager) SetLearnEnded(ended bool) {
+	if !ended {
+		m.exact.kept.set(nil, false)
+	}
+	m.exact.learnEnded.Store(ended)
+	if ended {
+		// What the staging's matchers filed is not served from here on,
+		// whether or not the round keeps any learning (keptOverlay.onto).
+		m.exact.kept.ended()
+	}
+}
+
+// LearnEnded implements integrations.LearnEnder: the set's learn step has
+// ended (SetLearnEnded).
+func (m *MockManager) LearnEnded() bool {
+	return m.exact.learnEnded.Load()
+}
+
+var _ integrations.LearnEnder = (*MockManager)(nil)
+
 // SetRecordedOfKind sets where the pairing reads the staged set's recordings
 // of a kind the trees do not hold (the agent's on-disk store of per-test
 // mocks: DiskMocks.RangeKind, which decodes one only as visit loads it); nil
@@ -369,9 +400,10 @@ var _ integrations.BackgroundCursor = (*MockManager)(nil)
 
 // pairing is the view to pair in, and the staging's epoch: a view of a set
 // served by the background rules, its background named (not settling), while
-// the session pairs; nil when none is.
+// the session pairs and the set's learn step has not ended (SetLearnEnded);
+// nil when none is.
 func (m *MockManager) pairing() (*exactView, uint64) {
-	if !m.exact.pairs.Load() {
+	if !m.exact.pairs.Load() || m.exact.learnEnded.Load() {
 		return nil, 0
 	}
 	v := m.exactView()

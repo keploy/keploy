@@ -1,0 +1,273 @@
+package learn
+
+// The merge of what the learn step learned onto a recording: keploy record
+// writes it onto the recordings it persists (mockdb), and the agent puts it
+// on the recordings it serves a test set's retry cycles (KeptLearning), so
+// those cycles are served the recordings as the next keploy test reads them.
+
+import (
+	"sort"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+)
+
+// MergeReqBodyNoise returns a fresh map combining the existing on-disk
+// request-body noise with newly-detected noise carried on the MockState.
+// Existing entries win on key collision (noise is monotonic), and every slice
+// is copied so the result shares no backing storage with its inputs.
+func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(existing)+len(detected))
+	for k, v := range existing {
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	for k, v := range detected {
+		if _, ok := out[k]; ok {
+			continue
+		}
+		vc := make([]string, len(v))
+		copy(vc, v)
+		out[k] = vc
+	}
+	return out
+}
+
+// MergeLearned writes what a consumed mock's state carries of what the
+// learn step learned onto the mock read from disk: its learned noise, its
+// variables, and binds, the variables other mocks of its test use that are
+// bound at it. It returns what it added, sorted, each as "<path> (noise)",
+// "<place> (variable <name>: bind|use)" or "<place> (echo <name>)". Noise and
+// variables are monotonic (what is on disk stays), with one exception: a
+// place that is a variable's is never noise, so learned noise there is
+// dropped (the learn step may have learned a value as noise at the call
+// that first sent it, before a later call showed it flowed on).
+func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
+	var added []string
+	if !provenswitch.On() {
+		// Without the switch nothing learns variables, and noise merges as
+		// it always has.
+		for k := range st.ReqBodyNoise {
+			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
+				added = append(added, k+" (noise)")
+			}
+		}
+		if len(st.ReqBodyNoise) > 0 {
+			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
+		}
+		sort.Strings(added)
+		return added
+	}
+	if len(st.Variables) > 0 || len(binds) > 0 {
+		vars := mock.Spec.Variables.Clone()
+		if vars == nil {
+			vars = models.MockVariables{}
+		}
+		names := make([]string, 0, len(st.Variables)+len(binds))
+		for n := range st.Variables {
+			names = append(names, n)
+		}
+		for n := range binds {
+			if _, ok := st.Variables[n]; !ok {
+				names = append(names, n)
+			}
+		}
+		for _, n := range names {
+			v, ok := st.Variables[n]
+			if b, isBind := binds[n]; isBind {
+				if ok {
+					v = MergeVariable(v, b)
+				} else {
+					v = b
+				}
+			}
+			cur, had := vars[n]
+			if had && cur.Recorded != v.Recorded {
+				// Another variable of the same name: not this one.
+				continue
+			}
+			next := v
+			if had {
+				next = MergeVariable(cur, v)
+			}
+			added = append(added, variableAdded(n, cur, next)...)
+			vars[n] = next
+		}
+		mock.Spec.Variables = vars
+	}
+	varPlaces := map[string]bool{}
+	for _, v := range mock.Spec.Variables {
+		for _, place := range append([]string{v.Bind}, v.Use...) {
+			if p, ok := LeafPath(place); ok {
+				varPlaces[p] = true
+			}
+		}
+	}
+	if len(st.ReqBodyNoise) > 0 {
+		noise := make(map[string][]string, len(st.ReqBodyNoise))
+		for k, v := range st.ReqBodyNoise {
+			if !varPlaces[k] {
+				noise[k] = v
+			}
+		}
+		for k := range noise {
+			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
+				added = append(added, k+" (noise)")
+			}
+		}
+		if len(noise) > 0 {
+			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
+		}
+	}
+	for k := range mock.Spec.ReqBodyNoise {
+		if varPlaces[k] {
+			delete(mock.Spec.ReqBodyNoise, k)
+		}
+	}
+	sort.Strings(added)
+	return added
+}
+
+// MergeVariable is two declarations of one variable in one call as one: a
+// bind place from either, every use and answer place of both, and an echo
+// only when both say so (a call another uses the value of is not its echo).
+// A clock read goes with its bind, and holds for one both bind only when
+// both say so (models.MergeVariables).
+func MergeVariable(a, b models.MockVariable) models.MockVariable {
+	if a.Recorded == "" {
+		a.Recorded, a.Echo = b.Recorded, b.Echo
+	} else {
+		a.Echo = a.Echo && b.Echo
+	}
+	if a.Bind == "" {
+		a.Bind, a.Clock = b.Bind, append([]models.ClockRead(nil), b.Clock...)
+	} else if b.Bind != "" && len(b.Clock) == 0 {
+		a.Clock = nil
+	}
+	a.Use = unionSorted(a.Use, b.Use)
+	a.Answer = unionSorted(a.Answer, b.Answer)
+	return a
+}
+
+func unionSorted(a, b []string) []string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, v := range append(append([]string(nil), a...), b...) {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// variableAdded says what next declares of variable name that was not
+// declared before (was).
+func variableAdded(name string, was, next models.MockVariable) []string {
+	var out []string
+	if next.Bind != "" && next.Bind != was.Bind {
+		if next.Echo {
+			out = append(out, next.Bind+" (echo "+name+")")
+		} else {
+			out = append(out, next.Bind+" (variable "+name+": bind)")
+		}
+	}
+	have := map[string]bool{}
+	for _, u := range was.Use {
+		have[u] = true
+	}
+	for _, u := range next.Use {
+		if !have[u] {
+			out = append(out, u+" (variable "+name+": use)")
+		}
+	}
+	return out
+}
+
+// FoldLearned is, of states (by mock name), the states that carry learning
+// (noise or variables) and, by target mock, the variables other mocks' states
+// bind at it (MockState.Binds), folded (MergeVariable). A target no state of
+// its own carries learning for is in the first with a bare state, so the
+// merge reaches it (MergeLearned).
+func FoldLearned(states map[string]models.MockState) (map[string]models.MockState, map[string]models.MockVariables) {
+	withLearning := make(map[string]models.MockState)
+	binds := map[string]models.MockVariables{}
+	for name, st := range states {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 {
+			withLearning[name] = st
+		}
+		for target, vs := range st.Binds {
+			if binds[target] == nil {
+				binds[target] = models.MockVariables{}
+			}
+			for vn, v := range vs {
+				binds[target][vn] = MergeVariable(binds[target][vn], v)
+			}
+		}
+	}
+	for target := range binds {
+		if _, ok := withLearning[target]; !ok {
+			withLearning[target] = models.MockState{Name: target}
+		}
+	}
+	return withLearning, binds
+}
+
+// KeptLearning is what keploy record keeps of a test set's learning, by mock
+// name, as the recordings carry it once it is persisted: a test set's retry
+// cycles run after its learn step ended, and are served the recordings so
+// (models.MockFilterParams.Learned). A nil KeptLearning holds nothing.
+type KeptLearning struct {
+	states map[string]models.MockState
+	binds  map[string]models.MockVariables
+}
+
+// NewKeptLearning is the learning states carry (FoldLearned); nil when none
+// carries any.
+func NewKeptLearning(states []models.MockState) *KeptLearning {
+	byName := make(map[string]models.MockState, len(states))
+	for _, st := range states {
+		if st.Name != "" {
+			byName[st.Name] = st
+		}
+	}
+	withLearning, binds := FoldLearned(byName)
+	if len(withLearning) == 0 {
+		return nil
+	}
+	return &KeptLearning{states: withLearning, binds: binds}
+}
+
+// Has says whether l holds learning for the mock named name.
+func (l *KeptLearning) Has(name string) bool {
+	if l == nil {
+		return false
+	}
+	_, ok := l.states[name]
+	return ok
+}
+
+// Onto is m with what l holds of it merged (MergeLearned), on a deep copy: m
+// itself, untouched, when l holds nothing of it.
+func (l *KeptLearning) Onto(m *models.Mock) *models.Mock {
+	if m == nil || !l.Has(m.Name) {
+		return m
+	}
+	c := m.DeepCopy()
+	l.Into(c)
+	return c
+}
+
+// Into merges what l holds of m onto m itself (MergeLearned), for a mock no
+// one else holds: one just decoded.
+func (l *KeptLearning) Into(m *models.Mock) {
+	if m == nil || !l.Has(m.Name) {
+		return
+	}
+	MergeLearned(m, l.states[m.Name], l.binds[m.Name])
+}

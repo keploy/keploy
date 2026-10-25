@@ -1651,10 +1651,13 @@ func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live 
 // that is exactly a later test's recording is as likely a value that drifted
 // onto it (an off-by-one counter) as an early call, and keeps its pairing
 // with the test's own. Where the window is not known (no recorded windows, a
-// store that does not tell), every one: it fails closed. A limit, to be
-// fixed: keploy replay's mock-consistency retry cycles (RetryPassing) run
-// test-1 again after test-N, so there recorded order is not replay order, and
-// a late call of test-N read in test-1 keeps its pairing with test-1's own.
+// store that does not tell), every one: it fails closed. This holds in
+// recorded order only: keploy replay's mock-consistency retry cycles
+// (RetryPassing) run test-1 again after test-N, where a late call of test-N
+// read in test-1 would keep its pairing with test-1's own, so the learn step
+// ends for those cycles (integrations.LearnEnded) and decides none of their
+// requests. So it does for the deferred streaming pass of a set whose
+// streaming test case was recorded before a test case that ran ahead of it.
 func elsewhereCounts(own bool, windows integrations.TestWindows) func(*models.Mock) bool {
 	every := func(*models.Mock) bool { return true }
 	o, ok := windows.(integrations.RecordedTests)

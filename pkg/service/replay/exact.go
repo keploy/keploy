@@ -48,8 +48,11 @@ import (
 // exactPlan is the set's exact serving: what each test case owns, and the
 // set's pool.
 type exactPlan struct {
-	owned map[string][]string
-	pool  []string
+	// learnEnded: the set's learn step has ended (endLearning), and every
+	// filter the plan sends says so (models.MockFilterParams.LearnEnded).
+	learnEnded bool
+	owned      map[string][]string
+	pool       []string
 	// worker is the set's worker scope (models.Mapping.Worker): the mocks of
 	// it the agent holds, in recorded order, each with its place. The
 	// staging call hands it to the agent, which serves each from its place
@@ -702,6 +705,80 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 	return p
 }
 
+// endLearning ends the set's learn step on the agent from the plan's next
+// filter on (models.MockFilterParams.LearnEnded): a retry cycle of record's
+// full round runs the passing test cases again out of their recorded order,
+// so it is judged and learns nothing. It stays ended for the rest of the set,
+// the deferred streaming pass included, which goes back to an earlier window
+// too: a set's learning is its first cycle's, and a streaming test case of a
+// set that ran retry cycles, whose one run is that pass, learns nothing (one
+// whose pass needs drift learned fails there). A set with no retry cycle ends
+// it before that pass when a streaming test case was recorded before a test
+// case that ran ahead of it: the pass then runs out of recorded order too.
+// The retry cycles are judged with what the round keeps of the first cycle's
+// learning (serveFirstCycleLearned). A test whose consume a parser learned
+// on all the same once it ended (MockState.LearnedAfterEnd: a parser that
+// does not read the end) has no verdict, and its row says why
+// (markLearnedAfterEnd): nothing keeps that learning. A no-op on a nil plan
+// (no exact serving: no agent learns).
+func (p *exactPlan) endLearning() {
+	if p != nil {
+		p.learnEnded = true
+	}
+}
+
+// endFirstCycleLearning ends the set's learn step on the agent before its
+// first retry cycle (endLearning), with the pool served again ahead of next,
+// the cycle's first test case: its filter ends the learn step before the
+// agent settles the calls made since the first cycle's last test, so what the
+// learn step learned of them is decided by then. It returns what they
+// consumed, read now: the first cycle's, kept with what it learned. Without
+// exact serving or instrumentation it ends the plan's learn step only, and
+// reads nothing.
+func (r *Replayer) endFirstCycleLearning(ctx context.Context, plan *exactPlan, next string) ([]models.MockState, error) {
+	plan.endLearning()
+	if plan == nil || !r.instrument {
+		return nil, nil
+	}
+	if err := r.serveExactPool(ctx, plan, next); err != nil {
+		return nil, err
+	}
+	return r.hookImpl.GetConsumedMocks(ctx)
+}
+
+// serveFirstCycleLearned has the agent serve the set's retry cycles what the
+// replay keeps of its first cycle's learning (kept, by mock name): the pool
+// served again ahead of next, the cycle's first test case, its filter
+// carrying, with the learn step ended, every state of kept that carries
+// learning, in name order (models.MockFilterParams.Learned). A test that
+// passed in the first cycle only through drift its learn step learned is so
+// judged with it in the retry cycles, as the next keploy test is once it is
+// persisted. A no-op without exact serving or instrumentation, or when kept
+// carries no learning.
+func (r *Replayer) serveFirstCycleLearned(ctx context.Context, plan *exactPlan, next string, kept map[string]models.MockState) error {
+	if plan == nil || !r.instrument {
+		return nil
+	}
+	learned := carriesLearning(kept)
+	if len(learned) == 0 {
+		return nil
+	}
+	return r.serveExactPoolWith(ctx, plan, next, learned)
+}
+
+// carriesLearning is, in name order, every state of states that carries
+// learned noise, variables or binds.
+func carriesLearning(states map[string]models.MockState) []models.MockState {
+	var out []models.MockState
+	for _, st := range states {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 {
+			out = append(out, st)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // serveExactTest opens test case name on the agent, served exactly its own
 // mocks, with what its opening carries (testOpening).
 func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name string, open testOpening) error {
@@ -715,6 +792,7 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 		Variables:   open.vars,
 		TestRequest: open.request,
 		Exact:       ex,
+		LearnEnded:  plan.learnEnded,
 	}
 	err := r.sendFilter(ctx, params)
 	if err != nil {
@@ -780,13 +858,19 @@ func (r *Replayer) drainAnsweredInGap(ctx context.Context, plan *exactPlan, name
 // (exactPlan.ahead), which answers as next's. next is the test case the
 // replay opens next, "" for none.
 func (r *Replayer) serveExactPool(ctx context.Context, plan *exactPlan, next string) error {
+	return r.serveExactPoolWith(ctx, plan, next, nil)
+}
+
+// serveExactPoolWith is serveExactPool, its filter carrying learned
+// (models.MockFilterParams.Learned) when it is not empty.
+func (r *Replayer) serveExactPoolWith(ctx context.Context, plan *exactPlan, next string, learned []models.MockState) error {
 	if plan == nil {
 		return nil
 	}
 	// Named only once the agent has them: a test case whose naming failed
 	// is named again at its loop head (serveExactAhead).
 	plan.aheadNamed = ""
-	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...)}})
+	err := r.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Ahead: append([]string(nil), plan.ahead[next]...)}, LearnEnded: plan.learnEnded, Learned: learned})
 	if err != nil {
 		utils.LogError(r.logger, err, "failed to serve the test set's pool between test cases")
 		return err

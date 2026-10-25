@@ -9,6 +9,7 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -216,6 +217,37 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		return err
 	}
 	ex := params.Exact
+	// The set's learn step ends (a retry cycle of record's full round,
+	// models.MockFilterParams.LearnEnded) before anything is settled or
+	// served: a request a parser's learn step takes up after this is no
+	// longer paired, nor learned (one it took up before keeps its decision).
+	// Once ended it stays ended for the set: only the next set's staging
+	// takes it back up (as a new session does, Proxy.Mock), so a later
+	// filter that does not say it, from an older or another client, never
+	// turns learning back on mid-set. A proxy that cannot end it refuses
+	// the filter that asks to: its learn step would pair and learn in an
+	// order that is not the recorded one.
+	if le, ok := a.Proxy.(coreAgent.LearnEndSetter); ok {
+		if params.LearnEnded || ex.Stage {
+			if err := le.SetLearnEnded(params.LearnEnded); err != nil {
+				return err
+			}
+		}
+	} else if params.LearnEnded {
+		return errors.New("this keploy agent cannot stop its learn step for the test set's retry cycle")
+	}
+	// What the set's first cycle learned is on every recording the agent
+	// serves the set from here on, its retry cycles (models.MockFilterParams.
+	// Learned): only with the learn step ended, which would otherwise read
+	// a learned recording as the one recorded.
+	if len(params.Learned) > 0 {
+		if !params.LearnEnded {
+			return errors.New("the test set's learning came on a filter that does not end its learn step: keploy sends it only with its retry cycles' learn step ended; run the keploy agent of this keploy version")
+		}
+		if err := a.loadKeptLearning(params.Learned); err != nil {
+			return fmt.Errorf("serve the test set's retry cycles what its first cycle learned: %w", err)
+		}
+	}
 	// A test case opens, or ends, once the calls made before are settled
 	// (settle_proven.go): they are the pool's, or the test case's own. A
 	// connection whose held requests cannot be told does not stop either:
@@ -381,6 +413,50 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		}
 		return unknown
 	}
+}
+
+// loadKeptLearning puts what the replay keeps of the set's first-cycle
+// learning (states, models.MockFilterParams.Learned) on every recording the
+// agent's store hands out from now on: each resident one it holds learning
+// for is replaced by a merged copy (learn.KeptLearning.Onto), and each read
+// from the on-disk store is merged as it is decoded (DiskMocks.SetOnLoad).
+// A test's own recordings, read by name as it opens (mocksByName), are so
+// served as the next keploy test reads them once the learning is persisted.
+// The recordings the proxy staged at the set's start (the pool's, the worker
+// scope's) carry it as the proxy hands them out (KeptLearningSetter). A
+// proxy that cannot is refused before anything is loaded: the retry cycles
+// would be served the staged recordings without what was learned on them.
+// The next set's store (StoreMocks) comes without it, and so does the
+// proxy's next staging (SetLearnEnded(false)).
+func (a *Agent) loadKeptLearning(states []models.MockState) error {
+	kept := learn.NewKeptLearning(states)
+	if kept == nil {
+		return nil
+	}
+	ks, ok := a.Proxy.(coreAgent.KeptLearningSetter)
+	if !ok {
+		return errors.New("this keploy agent's proxy cannot serve the staged recordings (the pool's, the worker scope's) what the first cycle learned: it has no kept-learning capability; run the keploy agent of this keploy version")
+	}
+	v, ok := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	if !ok || s == nil {
+		return errors.New("no mocks are loaded")
+	}
+	if err := ks.SetKeptLearning(kept); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for _, tier := range [][]*models.Mock{s.filtered, s.unfiltered} {
+		for i, m := range tier {
+			tier[i] = kept.Onto(m)
+		}
+	}
+	disk := s.diskMocks
+	s.mu.Unlock()
+	if disk != nil {
+		disk.SetOnLoad(kept.Into)
+	}
+	return nil
 }
 
 // serveTestConcurrently opens ex.Test with owned and the recordings it shares

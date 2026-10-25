@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -253,31 +252,18 @@ func resolveMockFileMode(targetPath string) (os.FileMode, error) {
 	return 0, err
 }
 
+// The merge of what the learn step learned onto a recording is the learn
+// package's, which the agent shares for a test set's retry cycles
+// (learn.KeptLearning).
+var (
+	mergeLearned      = learn.MergeLearned
+	mergeVariable     = learn.MergeVariable
+	mergeReqBodyNoise = learn.MergeReqBodyNoise
+)
+
 // replaceFile puts a rewritten mock file in place (yaml.ReplaceFile); tests
 // swap it to make the replace fail.
 var replaceFile = yaml.ReplaceFile
-
-// mergeReqBodyNoise returns a fresh map combining the existing on-disk
-// request-body noise with newly-detected noise carried on the MockState.
-// Existing entries win on key collision (noise is monotonic), and every slice
-// is copied so the result shares no backing storage with its inputs.
-func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(existing)+len(detected))
-	for k, v := range existing {
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	for k, v := range detected {
-		if _, ok := out[k]; ok {
-			continue
-		}
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	return out
-}
 
 // UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
@@ -599,26 +585,7 @@ func (ys *MockYaml) PersistLearned(ctx context.Context, testSetID string, mockSt
 func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
 	// Only mocks that carry learned noise or variables matter, and the
 	// earlier mocks other mocks' variables are bound at (Binds).
-	withNoise := make(map[string]models.MockState)
-	binds := map[string]models.MockVariables{}
-	for name, st := range mockStates {
-		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 {
-			withNoise[name] = st
-		}
-		for target, vs := range st.Binds {
-			if binds[target] == nil {
-				binds[target] = models.MockVariables{}
-			}
-			for vn, v := range vs {
-				binds[target][vn] = mergeVariable(binds[target][vn], v)
-			}
-		}
-	}
-	for target := range binds {
-		if _, ok := withNoise[target]; !ok {
-			withNoise[target] = models.MockState{Name: target}
-		}
-	}
+	withNoise, binds := learn.FoldLearned(mockStates)
 	if len(withNoise) == 0 {
 		return nil, nil
 	}
@@ -794,161 +761,6 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 	}
 	logPersisted(total)
 	return added, nil
-}
-
-// mergeLearned writes what a consumed mock's state carries of what the
-// learn step learned onto the mock read from disk: its learned noise, its
-// variables, and binds, the variables other mocks of its test use that are
-// bound at it. It returns what it added, sorted, each as "<path> (noise)",
-// "<place> (variable <name>: bind|use)" or "<place> (echo <name>)". Noise and
-// variables are monotonic (what is on disk stays), with one exception: a
-// place that is a variable's is never noise, so learned noise there is
-// dropped (the learn step may have learned a value as noise at the call
-// that first sent it, before a later call showed it flowed on).
-func mergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
-	var added []string
-	if !provenswitch.On() {
-		// Without the switch nothing learns variables, and noise merges as
-		// it always has.
-		for k := range st.ReqBodyNoise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
-			}
-		}
-		if len(st.ReqBodyNoise) > 0 {
-			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
-		}
-		sort.Strings(added)
-		return added
-	}
-	if len(st.Variables) > 0 || len(binds) > 0 {
-		vars := mock.Spec.Variables.Clone()
-		if vars == nil {
-			vars = models.MockVariables{}
-		}
-		names := make([]string, 0, len(st.Variables)+len(binds))
-		for n := range st.Variables {
-			names = append(names, n)
-		}
-		for n := range binds {
-			if _, ok := st.Variables[n]; !ok {
-				names = append(names, n)
-			}
-		}
-		for _, n := range names {
-			v, ok := st.Variables[n]
-			if b, isBind := binds[n]; isBind {
-				if ok {
-					v = mergeVariable(v, b)
-				} else {
-					v = b
-				}
-			}
-			cur, had := vars[n]
-			if had && cur.Recorded != v.Recorded {
-				// Another variable of the same name: not this one.
-				continue
-			}
-			next := v
-			if had {
-				next = mergeVariable(cur, v)
-			}
-			added = append(added, variableAdded(n, cur, next)...)
-			vars[n] = next
-		}
-		mock.Spec.Variables = vars
-	}
-	varPlaces := map[string]bool{}
-	for _, v := range mock.Spec.Variables {
-		for _, place := range append([]string{v.Bind}, v.Use...) {
-			if p, ok := learn.LeafPath(place); ok {
-				varPlaces[p] = true
-			}
-		}
-	}
-	if len(st.ReqBodyNoise) > 0 {
-		noise := make(map[string][]string, len(st.ReqBodyNoise))
-		for k, v := range st.ReqBodyNoise {
-			if !varPlaces[k] {
-				noise[k] = v
-			}
-		}
-		for k := range noise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
-			}
-		}
-		if len(noise) > 0 {
-			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
-		}
-	}
-	for k := range mock.Spec.ReqBodyNoise {
-		if varPlaces[k] {
-			delete(mock.Spec.ReqBodyNoise, k)
-		}
-	}
-	sort.Strings(added)
-	return added
-}
-
-// mergeVariable is two declarations of one variable in one call as one: a
-// bind place from either, every use and answer place of both, and an echo
-// only when both say so (a call another uses the value of is not its echo).
-// A clock read goes with its bind, and holds for one both bind only when
-// both say so (models.MergeVariables).
-func mergeVariable(a, b models.MockVariable) models.MockVariable {
-	if a.Recorded == "" {
-		a.Recorded, a.Echo = b.Recorded, b.Echo
-	} else {
-		a.Echo = a.Echo && b.Echo
-	}
-	if a.Bind == "" {
-		a.Bind, a.Clock = b.Bind, append([]models.ClockRead(nil), b.Clock...)
-	} else if b.Bind != "" && len(b.Clock) == 0 {
-		a.Clock = nil
-	}
-	a.Use = unionSorted(a.Use, b.Use)
-	a.Answer = unionSorted(a.Answer, b.Answer)
-	return a
-}
-
-func unionSorted(a, b []string) []string {
-	if len(a) == 0 && len(b) == 0 {
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, v := range append(append([]string(nil), a...), b...) {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// variableAdded says what next declares of variable name that was not
-// declared before (was).
-func variableAdded(name string, was, next models.MockVariable) []string {
-	var out []string
-	if next.Bind != "" && next.Bind != was.Bind {
-		if next.Echo {
-			out = append(out, next.Bind+" (echo "+name+")")
-		} else {
-			out = append(out, next.Bind+" (variable "+name+": bind)")
-		}
-	}
-	have := map[string]bool{}
-	for _, u := range was.Use {
-		have[u] = true
-	}
-	for _, u := range next.Use {
-		if !have[u] {
-			out = append(out, u+" (variable "+name+": use)")
-		}
-	}
-	return out
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {

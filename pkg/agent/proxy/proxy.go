@@ -4200,6 +4200,10 @@ func (p *Proxy) Mock(ctx context.Context, opts models.OutgoingOptions) error {
 		// Record's full round pairs a call nothing answered with a recording
 		// another test owns: only its session sets Learn.
 		p.getMockManager().SetPairing(opts.Learn)
+		// A session's learn step begins anew: what ends it is a filter of
+		// a set's later cycle (SetLearnEnded).
+		p.getMockManager().SetLearnEnded(false)
+		p.learnTracker.SetLearnEnded(false)
 	}
 
 	// Drop any per-worker scopes from a prior session so a crashed worker that
@@ -4680,6 +4684,48 @@ func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock)
 }
 
 var _ agent.RecordedBeforeSetter = (*Proxy)(nil)
+
+// SetLearnEnded implements agent.LearnEndSetter: the mock store says it
+// (MockManager.SetLearnEnded, integrations.LearnEnded), and so does the learn
+// tracker the parsers find on their connection's context
+// (learn.Tracker.SetLearnEnded), which then gives none (learn.TrackerFrom).
+// With no mock manager there is no learn step to take back up; one to end is
+// refused (errNoMockManager).
+func (p *Proxy) SetLearnEnded(ended bool) error {
+	m := p.getMockManager()
+	if m == nil {
+		if ended {
+			return errNoMockManager
+		}
+		p.learnTracker.SetLearnEnded(false)
+		return nil
+	}
+	m.SetLearnEnded(ended)
+	p.learnTracker.SetLearnEnded(ended)
+	return nil
+}
+
+var _ agent.LearnEndSetter = (*Proxy)(nil)
+
+// SetKeptLearning implements agent.KeptLearningSetter: the mock store puts
+// what keploy record keeps of the set's first-cycle learning on the staged
+// recordings it hands out (MockManager.SetKeptLearning). With no mock
+// manager there is nothing to put it on, and learning to put is refused
+// (errNoMockManager): the retry cycles would be served the staged
+// recordings without it.
+func (p *Proxy) SetKeptLearning(l *learn.KeptLearning) error {
+	m := p.getMockManager()
+	if m == nil {
+		if l != nil {
+			return errNoMockManager
+		}
+		return nil
+	}
+	m.SetKeptLearning(l)
+	return nil
+}
+
+var _ agent.KeptLearningSetter = (*Proxy)(nil)
 
 // SetRecordingSource implements agent.RecordingSourceSetter (exact.go).
 func (p *Proxy) SetRecordingSource(src func(kind models.Kind, keys []string, visit func(name string, load func() (*models.Mock, error)) bool) error) error {

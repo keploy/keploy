@@ -444,6 +444,38 @@ type MockFilterParams struct {
 	// agent) as a request it could not read, and refuses every value that
 	// changed in the test.
 	TestRequest *TestRequest `json:"testRequest,omitempty"`
+
+	// LearnEnded is set, in record's full round (the learn step's round,
+	// under the proven switch), on every filter of a test set's cycle after
+	// its first: keploy replay's mock-consistency retry cycles
+	// (config.RetryPassing) run the passing test cases again, test-1 after
+	// test-N, so recorded order is no longer replay order there. The agent's
+	// learn step then decides no request and pairs none until the next
+	// set's staging: such a cycle is served as keploy test serves (exact
+	// serving), with what the first cycle learned on the recordings
+	// (Learned), judged, and learns nothing. What the set's first cycle
+	// learned is what the replay keeps.
+	// false on a set's staging and on each filter of its first cycle. The
+	// agent keeps it ended for the rest of the set, whatever a later filter
+	// says: only the next set's staging takes the learn step back up. The
+	// agent's answer does not say it took it: an agent that ignored it would
+	// learn on, but no released keploy agent has the learn step, so every
+	// agent that learns is one that reads it.
+	LearnEnded bool `json:"learnEnded,omitempty"`
+
+	// Learned is, in record's full round, what the replay keeps of what its
+	// test set's first cycle learned (the states of the mocks it consumed
+	// that carry learned noise, variables or binds), sent once, with
+	// LearnEnded, on the pool filter before the set's first retry cycle. The
+	// agent serves every recording of the set from then on with it merged
+	// (learn.KeptLearning), as the recording carries it once persisted: a
+	// test that passed in the first cycle only through drift its learn step
+	// learned is judged the same way in the retry cycles, never failed for
+	// learning they do not take. It holds for the rest of the set: the next
+	// set's mocks come without it. The agent refuses it on a filter without
+	// LearnEnded (the learn step would read learned recordings as recorded).
+	// nil on every other filter.
+	Learned []MockState `json:"learned,omitempty"`
 }
 
 // TestRequest is a keploy test case's own request, as the filter that opens

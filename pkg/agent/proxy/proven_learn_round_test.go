@@ -2478,3 +2478,87 @@ func TestAScopedViewRangesTheStoresStagedRecordings(t *testing.T) {
 		t.Fatalf("a recording the store cannot read back gave %v; want an error naming mock-own2", err)
 	}
 }
+
+// A retry cycle of record's full round (keploy replay's retryPassing) runs
+// test-1 again after test-N, so recorded order is not replay order there. A
+// late call of test-N read in test-1's window is exactly test-N's recording,
+// made after test-1's window, which the learn step reads as a drift of
+// test-1's own (elsewhereCounts): paired with it, its item would be learned
+// as noise on test-1's recording, a false green. Once the set's learn step
+// has ended (MockManager.SetLearnEnded, from the cycle's filters) the call is
+// served as keploy test serves: it keeps no pairing with test-1's own,
+// nothing is learned, and the session pairs nothing. In the set's first cycle
+// the same call is paired and learned (the control the fix leaves as it was).
+func TestARetryCyclesLateCallKeepsNoPairingWithTheTestsOwnRecordingAndLearnsNothing(t *testing.T) {
+	for _, ended := range []bool{false, true} {
+		t.Run("learn step ended "+strconv.FormatBool(ended), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := New(zap.NewNop(), nil, &config.Config{})
+			p.nsswitchData = []byte("preseeded-by-test") // Mock leaves the host's DNS alone
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			p.StartErrorDrain(ctx)
+			if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: true, Learn: true}); err != nil {
+				t.Fatal(err)
+			}
+			mm := p.getMockManager()
+			t.Cleanup(func() { p.setMockManager(nil) })
+			now := time.Now()
+			own := r3Mock("mock-own", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":1}`)
+			late := r3Mock("mock-late", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":2}`)
+			if err := p.SetMocksWithWindow(ctx, []*models.Mock{own, late}, nil, models.BaseTime, now.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+			// The staging's recorded windows: test-1's holds mock-own,
+			// test-2's (recorded after it) mock-late.
+			mm.SeedRecordedWindows([]models.TestWindow{
+				{TestCase: "test-1", Start: now.Add(50 * time.Millisecond), End: now.Add(150 * time.Millisecond)},
+				{TestCase: "test-2", Start: now.Add(650 * time.Millisecond), End: now.Add(750 * time.Millisecond)},
+			})
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			// The cycle's first filter says whether the set's learn step
+			// ended, then test-1 opens, owning mock-own.
+			if err := p.SetLearnEnded(ended); err != nil {
+				t.Fatal(err)
+			}
+			p.ContinueTestErrorCapture()
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own")})
+			code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, roundPost(`{"item":"pear"}`))
+			st := r3States(mm)
+			paired := code == http.StatusOK && got == `{"order":1}`
+			learned := len(st["mock-own"].ReqBodyNoise) > 0 || len(st["mock-own"].Variables) > 0
+			if !ended {
+				if !paired || !learned {
+					t.Fatalf("precondition: in the set's first cycle the call is paired with test-1's own and learned: answered %d %s, learned %v", code, got, st["mock-own"].ReqBodyNoise)
+				}
+				return
+			}
+			if paired || learned || len(p.learnTracker.AnsweredMocks()) > 0 {
+				t.Fatalf("a retry cycle's late call was paired with test-1's own recording: answered %d %s, mock-own learned %v %v, test-1 answered %v",
+					code, got, st["mock-own"].ReqBodyNoise, st["mock-own"].Variables, exactNames(p.learnTracker.AnsweredMocks()))
+			}
+			if v, _ := mm.pairing(); v != nil {
+				t.Fatal("the session still pairs once the set's learn step ended")
+			}
+			// A parser's connection finds no learn tracker (learn.TrackerFrom):
+			// Mongo's learn step, which reads it per request, decides none.
+			if learn.TrackerFrom(learn.WithTracker(ctx, p.learnTracker)) != nil {
+				t.Fatal("a parser's connection still finds the learn tracker once the set's learn step ended: a learn step that reads it per request (Mongo's) would pair and learn out of recorded order")
+			}
+			// test-1's own call is still served exactly from its recording.
+			if code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true}, roundPost(`{"item":"apple"}`)); code != http.StatusOK || got != `{"order":1}` {
+				t.Fatalf("test-1's own call got %d %s", code, got)
+			}
+			// A new session takes the learn step back up.
+			if err := p.Mock(ctx, models.OutgoingOptions{StartsTestSet: true, Learn: true}); err != nil {
+				t.Fatal(err)
+			}
+			if p.getMockManager().LearnEnded() {
+				t.Fatal("a new session's learn step stays ended")
+			}
+			if learn.TrackerFrom(learn.WithTracker(ctx, p.learnTracker)) == nil {
+				t.Fatal("a new session's parsers find no learn tracker")
+			}
+		})
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -55,6 +56,11 @@ type DiskMocks struct {
 	// records (its kind and models.StatementKey), the entry of the first one
 	// recorded (LoadStatements). One entry per statement, resident.
 	statements map[string]diskEntry
+
+	// onLoad, when set, is applied to every mock read from the store, as it
+	// is decoded (readAt): what a test set's first cycle learned, put on the
+	// recordings its retry cycles are served (SetOnLoad). nil until then.
+	onLoad atomic.Pointer[func(*models.Mock)]
 
 	// byKey names, by kind and request key (models.RequestKeys), every mock
 	// on disk under each key its parser declares, in the order Add took them
@@ -288,6 +294,9 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 	if err := gob.NewDecoder(bytes.NewReader(buf)).Decode(&m); err != nil {
 		return nil, fmt.Errorf("disk mocks: decode at %d: %w", e.off, err)
 	}
+	if f := d.onLoad.Load(); f != nil {
+		(*f)(&m)
+	}
 	if e.respOff >= 0 {
 		respOff, respLen := e.respOff, e.respLen
 		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
@@ -295,6 +304,18 @@ func (d *DiskMocks) readAt(e diskEntry) (*models.Mock, error) {
 		})
 	}
 	return &m, nil
+}
+
+// SetOnLoad has f applied to every mock the store reads from now on, as it is
+// decoded, before any caller holds it: the agent puts on them what a test
+// set's first cycle learned, for its retry cycles (learn.KeptLearning.Into).
+// A mock read before keeps what it was read with.
+func (d *DiskMocks) SetOnLoad(f func(*models.Mock)) {
+	if f == nil {
+		d.onLoad.Store(nil)
+		return
+	}
+	d.onLoad.Store(&f)
 }
 
 // loadResponse reads and decodes an elided response blob on demand at serve.

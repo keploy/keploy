@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -152,6 +153,9 @@ type Tracker struct {
 	// in, beside UTC (SetAppZone); nil: UTC alone. Every DriftCache the
 	// tracker makes reads it (DriftCache.zone).
 	appZone *time.Location
+	// learnEnded says the running test set's learn step has ended
+	// (SetLearnEnded): TrackerFrom then gives no tracker.
+	learnEnded atomic.Bool
 }
 
 // NewTracker makes a tracker with no test open.
@@ -1182,10 +1186,38 @@ func WithTracker(ctx context.Context, t *Tracker) context.Context {
 	return context.WithValue(ctx, trackerKey{}, t)
 }
 
-// TrackerFrom is the tracker on ctx, nil when there is none.
+// TrackerFrom is the tracker on ctx, nil when there is none, and nil once the
+// test set's learn step has ended (SetLearnEnded): a parser's learn step runs
+// only with a tracker, so one that reads it per request decides no request of
+// a cycle the learn step does not learn in, and the request is served as
+// keploy test serves it.
 func TrackerFrom(ctx context.Context) *Tracker {
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
+	if t.LearnEnded() {
+		return nil
+	}
 	return t
+}
+
+// SetLearnEnded says whether the running test set's learn step has ended
+// (models.MockFilterParams.LearnEnded): keploy replay's retry cycles of
+// record's full round run the passing test cases again out of the order they
+// were recorded in, and are judged without learning. While it has ended,
+// TrackerFrom gives no tracker. A parser that holds the tracker from an
+// earlier read (one kept for a connection's life) reads LearnEnded on every
+// request itself, and learns nothing while it is true. The agent sets it with
+// the mock store's (integrations.LearnEnded), and only a set's staging or a
+// new session takes it back up. A no-op on a nil tracker.
+func (t *Tracker) SetLearnEnded(ended bool) {
+	if t != nil {
+		t.learnEnded.Store(ended)
+	}
+}
+
+// LearnEnded reports whether the running test set's learn step has ended
+// (SetLearnEnded); false on a nil tracker.
+func (t *Tracker) LearnEnded() bool {
+	return t != nil && t.learnEnded.Load()
 }
 
 // SetAt is the test number the running set began at (NewSet): it moves at

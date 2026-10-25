@@ -2026,6 +2026,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// consumers are the tests that consumed each mock, by name: whose an
 	// unconsumed test mock went to, when a sibling's (markConsumedBy).
 	consumers := map[string][]string{}
+	// learnedLate are, by test, the mocks it consumed that a parser learned
+	// on after the set's learn step ended (noteLearnedAfterEnd).
+	learnedLate := map[string][]string{}
 	// replayStarts is when each test began at this replay, its latest
 	// attempt's (markUnmadeRepeats).
 	replayStarts := map[string]time.Time{}
@@ -3065,6 +3068,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// afterwards so long-lived connections do not block the normal flow.
 	var activeTestCases []*models.TestCase
 	var streamingTests []streamingTest
+	// streamingOutOfOrder: a streaming test case was recorded before a test
+	// case that runs ahead of it (testCases are in recorded order), so the
+	// deferred streaming pass does not run in the recorded order.
+	streamingOutOfOrder := false
 	for _, testCase := range testCases {
 		if _, ok := selectedTests[testCase.Name]; !ok && len(selectedTests) != 0 {
 			continue
@@ -3097,6 +3104,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			continue
 		}
 
+		if len(streamingTests) > 0 {
+			streamingOutOfOrder = true
+		}
 		activeTestCases = append(activeTestCases, testCase)
 	}
 
@@ -3155,9 +3165,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			totalConsumedMocks[m.Name] = m
 		}
 		noteConsumers(consumers, name, early)
+		noteLearnedAfterEnd(learnedLate, name, early)
 		r.exact.noteShares(name, early, nil)
 	}
 	finalTestCaseResults := make(map[string]*models.TestResult)
+	// firstCycleLearned is, once a retry cycle of record's full round
+	// begins, every mock state the set's first cycle consumed: what the learn
+	// step learned there, the one cycle it learns in. nil while no retry
+	// cycle ran.
+	var firstCycleLearned map[string]models.MockState
 	itr := 1
 	if r.config.RetryPassing {
 		itr = 5
@@ -3178,7 +3194,54 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// cycle are folded into allConsumedAcrossCycles first so the post-loop
 		// readers (Mocks-Consumed telemetry and PersistMockNoise) stay complete.
 		if replay > 0 {
+			// The first cycle's learning ends before it is read: after its
+			// last test the pool is served with the learn step still on, so
+			// a call the application makes there (a heartbeat) is learned,
+			// and would be read only with the retry cycle's first test,
+			// after firstCycleLearned. The learn step ends on the agent
+			// first, and what the gap consumed is read now, the first
+			// cycle's (endFirstCycleLearning).
+			if r.learning() && firstCycleLearned == nil {
+				gap, err := r.endFirstCycleLearning(runTestSetCtx, r.exact, nextExactTest(testsToRun, selectedTests, ignoredTests, refusedTests))
+				if err != nil {
+					r.logger.Warn("keploy could not read what the application consumed after the test set's last test case, before its retry cycles: what the learn step learned there is not kept, and the next keploy test may not find it on the recordings",
+						zap.String("testSetID", testSetID), zap.Error(err),
+						zap.String("next_step", "run keploy record again"))
+				}
+				for _, m := range gap {
+					totalConsumedMocks[m.Name] = m
+				}
+			}
 			totalConsumedMocks = r.rewindConsumedForRetryCycle(totalConsumedMocks, baselineConsumedMocks, allConsumedAcrossCycles)
+			// Record's full round learns in the set's first cycle only. A
+			// retry cycle runs the passing tests again, test-1 after
+			// test-N, so recorded order is no longer replay order: a late
+			// call of test-N read in test-1's window would be paired with
+			// test-1's own recording and its value learned as noise. The
+			// agent's learn step ends from the cycle's first filter on
+			// (endLearning); the cycle is served as keploy test serves and
+			// judged, and what the replay keeps is what the first cycle
+			// learned (firstCycleLearned), never a later cycle's state of
+			// the same mock, which carries none of it.
+			if r.learning() && firstCycleLearned == nil {
+				firstCycleLearned = make(map[string]models.MockState, len(allConsumedAcrossCycles))
+				for k, v := range allConsumedAcrossCycles {
+					firstCycleLearned[k] = v
+				}
+				r.logger.Info("keploy runs the test set's passing test cases again (retryPassing) without the learn step: those runs are judged with what the first run learned on the recordings, and learn nothing, as they do not run in the order the tests were recorded in; what is kept is what the first run learned",
+					zap.String("testSetID", testSetID),
+					zap.String("next_step", "nothing to do: a test that passed with the first run's learning is judged with it again"))
+				// The retry cycles are served the recordings with what the
+				// first cycle learned on them, as much as the replay keeps
+				// (keptLearning): a test that passed in the first cycle only
+				// through learned drift is judged with it again, never failed
+				// for learning the retry cycles do not take.
+				if err := r.serveFirstCycleLearned(runTestSetCtx, r.exact, nextExactTest(testsToRun, selectedTests, ignoredTests, refusedTests), r.keptLearning(firstCycleLearned, consumers)); err != nil {
+					r.logger.Warn("keploy could not serve the test set's retry cycles what its first run learned (the error names what the keploy agent cannot do): this retry is judged without the first cycle's learning, so a test that passed there only through drift it learned may fail in it, and keeps that failure",
+						zap.String("testSetID", testSetID), zap.Error(err),
+						zap.String("next_step", "run keploy record again, or without retryPassing (--retry-passing-test)"))
+				}
+			}
 		}
 		// Every pass over the set starts each template key at its recorded
 		// value, so a cycle's producers capture again from their own answers;
@@ -3542,6 +3605,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					totalConsumedMocks[m.Name] = m
 				}
 				noteConsumers(consumers, testCase.Name, consumedMocks)
+				noteLearnedAfterEnd(learnedLate, testCase.Name, consumedMocks)
 				r.exact.noteShares(testCase.Name, consumedMocks, instrumentConsumedFetchErr)
 			}
 
@@ -4382,6 +4446,40 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// no per-test consumed set, so it has no fetch outcome to report.
 		r.warnDependencyAssertionInert(testSetID, useMappingBased, isMappingEnabled, false, true, false, &depAssertionInertWarned)
 
+		// Record's full round learns in recorded order only. A streaming
+		// test case recorded before a test case that ran ahead of it runs
+		// out of that order here: a late call of the later-recorded test
+		// read in its window would be paired with its own recording, which
+		// that call was recorded after, and its drift learned. The pass so
+		// ends the learn step as a retry cycle does (endFirstCycleLearning),
+		// after what the application consumed since the set's last other
+		// test case is read, and what the set keeps is what was learned
+		// before it (firstCycleLearned). Its streaming test cases are
+		// judged with that learning on the recordings and learn nothing;
+		// one that needs drift learned fails. A set that ran retry cycles
+		// ended its learn step before them.
+		if r.learning() && firstCycleLearned == nil && streamingOutOfOrder {
+			gap, err := r.endFirstCycleLearning(runTestSetCtx, r.exact, streamingTests[0].testCase.Name)
+			if err != nil {
+				r.logger.Warn("keploy could not read what the application consumed after the test set's last test case, before its streaming test cases: what the learn step learned there is not kept, and the next keploy test may not find it on the recordings",
+					zap.String("testSetID", testSetID), zap.Error(err),
+					zap.String("next_step", "run keploy record again"))
+			}
+			for _, m := range gap {
+				totalConsumedMocks[m.Name] = m
+			}
+			firstCycleLearned = make(map[string]models.MockState, len(allConsumedAcrossCycles)+len(totalConsumedMocks))
+			for k, v := range allConsumedAcrossCycles {
+				firstCycleLearned[k] = v
+			}
+			for k, v := range totalConsumedMocks {
+				firstCycleLearned[k] = v
+			}
+			r.logger.Info("keploy runs the test set's streaming test cases after its others, out of the order they were recorded in, without the learn step: they are judged with what the others learned on the recordings, and learn nothing; a streaming test case that needs a varying field learned fails",
+				zap.String("testSetID", testSetID),
+				zap.String("next_step", "record each streaming test case after the set's other test cases, or in a test set of its own, to have its varying fields learned"))
+		}
+
 		for i, deferred := range streamingTests {
 			tc := deferred.testCase
 
@@ -4624,6 +4722,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						mockNames = append(mockNames, m.Name)
 					}
 					noteConsumers(consumers, tc.Name, consumedMocks)
+					noteLearnedAfterEnd(learnedLate, tc.Name, consumedMocks)
 					r.exact.noteShares(tc.Name, consumedMocks, nil)
 				}
 			}
@@ -4845,6 +4944,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					mockNames = append(mockNames, m.Name)
 				}
 				noteConsumers(consumers, tc.Name, additionalMocks)
+				noteLearnedAfterEnd(learnedLate, tc.Name, additionalMocks)
 				r.exact.noteShares(tc.Name, additionalMocks, drainErr)
 				consumedMocks = append(consumedMocks, additionalMocks...)
 			}
@@ -5980,12 +6080,24 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// already, or keeps a status that says more.
 	learnKeeps := r.learning() && r.instrument && unchecked == ""
 	var learnedKept map[string]models.MockState
-	var learningNotKeptBy map[string][]string
+	var learningNotKeptBy, learningNotKeptFrom map[string][]string
 	var learningNotKeptTests []string
 	if learnKeeps {
-		learnedKept, learningNotKeptBy = r.readLearning(testSetID, r.exact.stripUnresolved(allConsumedAcrossCycles), consumers)
-		learningNotKeptTests = markLearningNotKept(testCaseResults, learningNotKeptBy, r.requestsUnread.agentVersion())
+		// A set that ran retry cycles keeps what its first cycle learned
+		// (firstCycleLearned): a later cycle's state of a mock carries
+		// nothing learned, and would take the first cycle's place.
+		learnFrom := allConsumedAcrossCycles
+		if firstCycleLearned != nil {
+			learnFrom = firstCycleLearned
+		}
+		learnedKept, learningNotKeptBy, learningNotKeptFrom = r.readLearning(testSetID, r.exact.stripUnresolved(learnFrom), consumers)
+		learningNotKeptTests = markLearningNotKept(testCaseResults, learningNotKeptBy, learningNotKeptFrom, r.requestsUnread.agentVersion())
 	}
+	// A test that consumed a mock a parser learned on after the set's learn
+	// step ended (a retry cycle, the streaming pass after the first run) has
+	// no verdict either: nothing keeps that learning, and its run leaned on
+	// it (MockState.LearnedAfterEnd).
+	learnedLateTests := markLearnedAfterEnd(testCaseResults, learnedLate)
 	// What of the set has no verdict, whatever the set's status: Start's
 	// exit code reads it for a set its user's stop took to USER_ABORT, where
 	// none of the rules here and below leaves it not judged (OBS-ctrlc).
@@ -6034,6 +6146,26 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				zap.String("status", string(testSetStatus)),
 				zap.Strings("tests", learningNotKeptTests),
 				zap.String("next_step", learningNotKeptRemedy()))
+		}
+	}
+	// So for a test that consumed what a parser learned after the learn
+	// step ended (above).
+	if len(learnedLateTests) > 0 {
+		if testSetStatus == models.TestSetStatusPassed || notJudged != "" {
+			notJudged = alsoNotJudged(notJudged, "not judged: "+learnedAfterEndNote(learnedLateTests))
+			r.logger.Error("test-set is not judged: a parser learned on mocks some of its tests consumed after the set's learn step ended, which keploy does not keep, and they may have passed on it alone; the run goes on to the next test-set",
+				zap.String("test-set", testSetID),
+				zap.Strings("tests", learnedLateTests),
+				zap.String("next_step", learnedAfterEndRemedy))
+			testSetStatus = models.TestSetStatusInternalErr
+			r.markNotJudged(testSetID)
+		} else {
+			staleWhy = joinNotes(staleWhy, learnedAfterEndNote(learnedLateTests))
+			r.logger.Error("some tests of the test-set are not judged: a parser learned on mocks they consumed after the set's learn step ended, which keploy does not keep, and they may have passed on it alone; the set keeps its own status",
+				zap.String("test-set", testSetID),
+				zap.String("status", string(testSetStatus)),
+				zap.Strings("tests", learnedLateTests),
+				zap.String("next_step", learnedAfterEndRemedy))
 		}
 	}
 	// Under the proven switch the set is judged only if one agent process

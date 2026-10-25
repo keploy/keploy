@@ -271,10 +271,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				db = mockDb
 			)
 			switch {
-			case provenswitch.On() && opts.Learn:
+			case provenswitch.On() && opts.Learn && !integrations.LearnEnded(mockDb):
 				// Record's full round: the learn step decides every request
 				// (design v14 §7.2), and its first pass is the request's
-				// first read of the round.
+				// first read of the round. Once the set's learn step ended
+				// (a retry cycle, integrations.LearnEnder) a request is
+				// served as a replay serves it, below: nothing is paired,
+				// nor learned.
 				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, &call)
 				ok = stub != nil
 				if !ok && err == nil {

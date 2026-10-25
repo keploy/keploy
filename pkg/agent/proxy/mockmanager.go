@@ -796,7 +796,7 @@ func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered,
 	// other read: until the next begin or end, or for a data-plane recording
 	// consumed outside every test, until the next staging.
 	if v := m.exactView(); v != nil {
-		filtered, unfiltered = v.unspent(filtered), v.unspent(unfiltered)
+		filtered, unfiltered = v.withLearned(v.unspent(filtered)), v.withLearned(v.unspent(unfiltered))
 	}
 	return filtered, unfiltered
 }
@@ -2711,7 +2711,7 @@ func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) 
 	// Under exact serving a connection mock a parser evicted is gone, as from
 	// every other read (unspent).
 	if v := m.exactView(); v != nil && err == nil {
-		mocks = v.unspent(mocks)
+		mocks = v.withLearned(v.unspent(mocks))
 	}
 	return mocks, err
 }
@@ -3316,6 +3316,12 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 	// Update legacy/global tree first (it keeps its window index right; see
 	// TreeDb.update)
 	updatedGlobal, replaced := globalTree.updateReplacing(old.TestModeInfo, new.TestModeInfo, new, *old)
+	if updatedGlobal && replaced != nil && provenswitch.On() && m.exactView() != nil {
+		// What the staging put in the trees, before this staging's first
+		// filing of a copy of it: the base its retry cycles are served
+		// (keptOverlay.onto).
+		m.exact.kept.filed.note(m.stagingEpoch.Load(), replaced)
+	}
 	if shared {
 		if updatedGlobal && replaced != nil {
 			// The copy the tree held, which is not always the caller's old: a
@@ -3397,6 +3403,7 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
+			LearnedAfterEnd:  m.learnedAfterEnd(old, new),
 		}, old.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				// The previous set's pool: not this set's consume.
@@ -3447,7 +3454,7 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 	m.treesMu.RUnlock()
 	// Identity-checked: the key is tier-local, so a mock taken from another
 	// tier addresses a DIFFERENT mock here. See TreeDb.sameMock.
-	deletedGlobal := globalTree.deleteMock(mock.TestModeInfo, mock)
+	deletedGlobal, removed := globalTree.deleteMockReturning(mock.TestModeInfo, mock)
 
 	// per-kind
 	k := mock.Kind
@@ -3482,6 +3489,7 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				consumed = false
@@ -3555,6 +3563,7 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 				Variables:        variablesOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
+				LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 				CarryOver:        true,
 			}, mk.TestModeInfo.StagedSet); err != nil {
 				if errors.Is(err, errPreviousSet) {
@@ -3628,6 +3637,7 @@ func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				// The previous set's pool: not this set's consume. The
@@ -3793,6 +3803,7 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -4030,6 +4041,9 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// the other doors carry it (nil with the switch off).
 		Variables: variablesOf(mock.Spec),
 		Binds:     bindsOf(mock.Spec),
+		// Learning the consume carries beyond what exact serving handed
+		// the parser out, once the set's learn step ended.
+		LearnedAfterEnd: m.learnedAfterEndNamed(&mock),
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -4434,6 +4448,11 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	}
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
+		// A consume in this drain that learned after the learn step ended
+		// is not hidden by a later one that did not: the drain's consumers
+		// were served through it. Only the drain's: another drain's
+		// consumers were not.
+		mock.LearnedAfterEnd = mock.LearnedAfterEnd || m.consumedList[idx].LearnedAfterEnd
 		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
@@ -4682,6 +4701,8 @@ func (m *MockManager) dropPreviousSetConsumes() {
 	// The answered log follows the generation (answeredLog.fence); its
 	// lock is a leaf.
 	m.answered.fence(m.setGen.Add(1))
+	// What was kept of the previous set's learning is not this set's.
+	m.exact.kept.set(nil, false)
 	dropped := len(m.consumedList)
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)
