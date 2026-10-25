@@ -350,6 +350,22 @@ type StoreMocksReq struct {
 
 const StoreMocksStreamContentType = "application/x-gob-stream"
 
+// MockStreamMinAgentVersion is the first keploy release whose agent takes the
+// /storemocks stream (keploy #4327). Keploy Enterprise's first agent image built
+// on it is v3.5.76.
+const MockStreamMinAgentVersion = "v3.5.85"
+
+// ErrAgentPredatesMockStream is the /storemocks failure of an agent older than
+// MockStreamMinAgentVersion. Such an agent reads the body as one StoreMocksReq,
+// fails on the MockStreamHeader that opens the stream, and answers 400 with an
+// AgentResp whose error it cannot encode, so the reply holds a type and no
+// value. Nothing this side sends makes it take the mocks, and the legacy
+// single-shot framing it reads is gone (it held the whole corpus in memory), so
+// the agent has to be upgraded. A caller that knows which agent it is talking
+// to (k8s-proxy knows the image of the replay pods it made) names it.
+var ErrAgentPredatesMockStream = errors.New("the agent is older than keploy " + MockStreamMinAgentVersion +
+	" and cannot take the streamed mocks; upgrade the agent image to the version of the keploy that runs the replay")
+
 // MockStreamEncodingZstd is the Content-Encoding of a zstd-compressed /storemocks
 // stream. An agent that can decode it says so with "Accept-Encoding: zstd" on its
 // /health response (RFC 7694), and the client compresses only for such an agent:

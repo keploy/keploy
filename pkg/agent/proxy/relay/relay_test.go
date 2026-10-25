@@ -44,6 +44,14 @@ type relayHarness struct {
 
 func newHarness(t *testing.T, cfg Config) *relayHarness {
 	t.Helper()
+	return newHarnessOver(t, cfg, nil)
+}
+
+// newHarnessOver is newHarness with the relay reading the client's socket
+// through src(srcProxy), for a row that needs that socket to do more than a
+// pipe does (nil: srcProxy itself).
+func newHarnessOver(t *testing.T, cfg Config, src func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
 	clientApp, srcProxy := net.Pipe()
 	dstProxy, destSvc := net.Pipe()
 
@@ -52,7 +60,11 @@ func newHarness(t *testing.T, cfg Config) *relayHarness {
 		cfg.Logger = zap.NewNop()
 	}
 
-	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
+	relaySrc := srcProxy
+	if src != nil {
+		relaySrc = src(srcProxy)
+	}
+	r := New(cfg, relaySrc, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &relayHarness{
@@ -1353,9 +1365,9 @@ func TestObservedReadTrustsOnlyTheRelaysOwnStamp(t *testing.T) {
 	now := time.Unix(100, 0)
 	foreignAt := time.Unix(50, 0)
 	foreign := fixedReadAtConn{Conn: a, readAt: foreignAt}
-	tracked := newReadTrackingConn(a)
+	tracked := newReadTrackingConn(a, nil)
 	tracked.lastReadNano.Store(time.Unix(90, 0).UnixNano())
-	trackedForeign := newReadTrackingConn(foreign)
+	trackedForeign := newReadTrackingConn(foreign, nil)
 	trackedForeign.lastReadNano.Store(foreignAt.UnixNano())
 	for _, tc := range []struct {
 		name  string
@@ -1376,5 +1388,85 @@ func TestObservedReadTrustsOnlyTheRelaysOwnStamp(t *testing.T) {
 		if !at.Equal(tc.at) || clock != tc.clock {
 			t.Errorf("%s: observedRead = %v, %v; want %v, %v", tc.name, at, clock, tc.at, tc.clock)
 		}
+	}
+}
+
+// A parser that reads a connection's capture only once the relay has ended
+// (a parser behind its capture) reads each stream to its end and then io.EOF,
+// as one keeping up does. A parser tells a stream that ran out (io.EOF) from
+// its reader being closed while the capture could still send
+// (fakeconn.ErrClosed), so the relay's teardown must not close a FakeConn
+// before its stream has ended: as the relay closes each FakeConn, the tee
+// that feeds it has closed its channel and its drain has returned. The row
+// checks that at the moment of each Close (fakeconn.SetCloseHookForTest).
+func TestAParserBehindTheRelayReadsTheEndOfAStreamAsEOF(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	followed := map[*fakeconn.FakeConn]struct {
+		name string
+		t    *tee
+	}{
+		h.r.ClientStream(): {"client", h.r.teeC2D},
+		h.r.DestStream():   {"destination", h.r.teeD2C},
+	}
+	var mu sync.Mutex
+	closes := map[string]bool{}
+	var early []string
+	restore := fakeconn.SetCloseHookForTest(func(fc *fakeconn.FakeConn) {
+		s, ok := followed[fc]
+		if !ok {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if closes[s.name] {
+			return
+		}
+		closes[s.name] = true
+		select {
+		case <-s.t.done:
+		default:
+			early = append(early, "the relay closed the "+s.name+"'s FakeConn before the tee feeding it had ended its stream")
+		}
+	})
+	defer restore()
+	read := make(chan error, 1)
+	go func() {
+		b := make([]byte, len("response"))
+		_, err := io.ReadFull(h.clientApp, b)
+		read <- err
+	}()
+	if _, err := h.destSvc.Write([]byte("response")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-read; err != nil {
+		t.Fatalf("the client did not get the response: %v", err)
+	}
+	_ = h.destSvc.Close()
+	_ = h.clientApp.Close()
+	select {
+	case <-h.runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relay did not end once both peers had closed")
+	}
+	c, err := h.r.DestStream().ReadChunk()
+	if err != nil || string(c.Bytes) != "response" {
+		t.Fatalf("the destination's stream read %q, %v once the relay had ended, want the response", c.Bytes, err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := h.r.DestStream().ReadChunk(); err != io.EOF {
+			t.Fatalf("after the response, the destination's stream read %v, want io.EOF", err)
+		}
+	}
+	if _, err := h.r.ClientStream().ReadChunk(); err != io.EOF {
+		t.Fatalf("the client's stream, which carried nothing, read %v, want io.EOF", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(closes) != 2 {
+		t.Errorf("the relay closed %d of its two FakeConns", len(closes))
+	}
+	for _, e := range early {
+		t.Error(e)
 	}
 }

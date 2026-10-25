@@ -134,7 +134,9 @@ jobs:
       # objects against this kernel's BTF, as the agent does, and
       # TestTracefsMountedAgreesWithCiliumInEveryLayout holds tracefsMounted to
       # cilium/ebpf's own tracefs lookup in five mount layouts, each built in a
-      # mount namespace of its own. Built as the runner user, run as root, and
+      # mount namespace of its own, and TestTheClientsRegistrationKeepsItsPIDNamespace
+      # holds RegisterClient, which needs a kernel map, to keeping the pid
+      # namespace the CLI said. Built as the runner user, run as root, and
       # each PASS line grepped, so a test or layout that skips or vanishes
       # fails the step.
       - name: Hooks tests as root
@@ -142,8 +144,8 @@ jobs:
         run: |
           go test -c -o /tmp/hooks-linux.test ./pkg/agent/hooks/linux/
           cd pkg/agent/hooks/linux
-          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout)$' | tee /tmp/hooks-linux.out
-          for t in TestTheHooksLoadOnThisKernel TestTracefsMountedAgreesWithCiliumInEveryLayout \
+          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout|TestTheClientsRegistrationKeepsItsPIDNamespace)$' | tee /tmp/hooks-linux.out
+          for t in TestTheHooksLoadOnThisKernel TestTracefsMountedAgreesWithCiliumInEveryLayout TestTheClientsRegistrationKeepsItsPIDNamespace \
             TestTracefsMountedAgreesWithCiliumInEveryLayout/{none,canonical,elsewhere,subdir,debugfs}; do
             grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
           done

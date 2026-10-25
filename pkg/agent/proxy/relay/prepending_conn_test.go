@@ -153,3 +153,24 @@ func TestPrependingConn_PassThroughMethods(t *testing.T) {
 		t.Fatal("Close did not propagate to wrapped conn")
 	}
 }
+
+// Past the prefix the bytes are the socket's, read just now: the conn says
+// nothing of when, so the read-tracking conn above stamps them only after it
+// has marked them in hand for the capture watermark (readTrackingConn).
+func TestPrependingConn_PastThePrefixLeavesTheStampToTheConnAbove(t *testing.T) {
+	raw := &fakeReadConn{chunks: [][]byte{[]byte("LIVE")}}
+	c := newPrependingConnWithReadAt(raw, []byte("STASH"), time.Unix(1_700_000_000, 42))
+	buf := make([]byte, 100)
+	for _, want := range []string{"STASH", "LIVE"} {
+		n, err := c.Read(buf)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if got := string(buf[:n]); got != want {
+			t.Fatalf("Read = %q; want %q", got, want)
+		}
+	}
+	if got := c.(interface{ LastReadTime() time.Time }).LastReadTime(); !got.IsZero() {
+		t.Fatalf("LastReadTime = %v past the prefix, want none", got)
+	}
+}

@@ -95,20 +95,70 @@ func proxyStamped(conn net.Conn) bool {
 	return !tells
 }
 
+// readTrackingConn is the conn a TLS layer reads the socket through: it
+// stamps each read, and the record the layer hands on next takes the stamp of
+// the read that completed it (LastReadTime, through readTimeReportingConn).
+//
+// The layer holds those bytes from that read until it hands the record on,
+// and can hold several records from one read, so the read is also where the
+// capture watermark must start to see them (progress.go). layer is the mark
+// for that, the teeProgress.layer of the direction the layer feeds (nil: none
+// to keep):
+//
+//   - Before a read, the mark is cleared. A layer reads only once it has
+//     handed on every whole record it held, and a record it hands on over the
+//     read takes this read's stamp.
+//   - After a read that brought bytes, the mark is set to heldUnstamped before
+//     the stamp is taken from the clock, then to the stamp. A look that found
+//     the mark clear is then older than the stamp.
+//   - After a read that brought none, the stamp is cleared, so a record the
+//     layer hands on over it is stamped by the forwarder, after the look that
+//     saw both marks clear (heldUnstamped).
+//
+// An inner conn that reports when it read the bytes (prependingConn, for the
+// stash a handshake reads first) gives its own stamp instead. The stash holds
+// only what the peer sent before the handshake's answer, so a record the layer
+// hands on after the handshake never takes that stamp: the handshake reads
+// the socket after the stash, and that read stamps what follows.
 type readTrackingConn struct {
 	net.Conn
 	lastReadNano atomic.Int64
+	layer        *atomic.Int64
+	// now is the clock Read takes a read's stamp from (nil: time.Now); Read
+	// keeps that time unless the inner conn reports its own. It is per conn,
+	// so a test can see the layer's mark at the moment the clock is read
+	// without touching other conns.
+	now func() time.Time
 }
 
-func newReadTrackingConn(conn net.Conn) *readTrackingConn {
-	return &readTrackingConn{Conn: conn}
+func newReadTrackingConn(conn net.Conn, layer *atomic.Int64) *readTrackingConn {
+	return &readTrackingConn{Conn: conn, layer: layer}
+}
+
+func (c *readTrackingConn) markLayer(v int64) {
+	if c.layer != nil {
+		c.layer.Store(v)
+	}
+}
+
+func (c *readTrackingConn) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *readTrackingConn) Read(p []byte) (int, error) {
+	c.markLayer(0)
 	n, err := c.Conn.Read(p)
-	if n > 0 {
-		c.lastReadNano.Store(observedReadAt(c.Conn, time.Now()).UnixNano())
+	if n <= 0 {
+		c.lastReadNano.Store(0)
+		return n, err
 	}
+	c.markLayer(heldUnstamped)
+	at := observedReadAt(c.Conn, c.clock()).UnixNano()
+	c.lastReadNano.Store(at)
+	c.markLayer(at)
 	return n, err
 }
 

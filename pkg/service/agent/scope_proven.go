@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -181,12 +182,18 @@ func abandoned(err error) *models.ScopeError {
 		"the request ended before keploy's agent could take it: "+err.Error(), "send it again")
 }
 
-// clientRoot is the process keploy's CLI registered as its client.
-func (a *Agent) clientRoot() int {
+// clientRoot is the process keploy's CLI registered as its client, in this
+// agent's pid namespace (utils.ClientPIDHere), or 0 with why it is not taken:
+// a CLI in another pid namespace (a docker agent's own, which the app's
+// containers join, beside a CLI in a CI step container) said a pid that names
+// another process here, so a claimer that descends from that process is not
+// the run's.
+func (a *Agent) clientRoot() (int, string) {
 	if a.config == nil {
-		return 0
+		return 0, ""
 	}
-	return int(a.config.Agent.ClientNSPID)
+	here := utils.ClientPIDHere(a.config.Agent.ClientNSPID, a.config.Agent.ClientPIDNS)
+	return int(here.PID), here.Why
 }
 
 // agentPID is this agent's process: a claim read as its own is refused.
@@ -255,10 +262,14 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	if a.wireClosed() {
 		return models.InstanceResp{}, errClosed()
 	}
-	root := a.clientRoot()
+	root, why := a.clientRoot()
 	if root <= 0 {
+		msg := "this keploy run cannot take a test process's claim: keploy did not start its command natively (docker compose)"
+		if why != "" {
+			msg = "this keploy run cannot take a test process's claim: keploy's agent cannot tell its CLI's process (" + why + ")"
+		}
 		return models.InstanceResp{}, scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
-			"this keploy run cannot take a test process's claim: keploy did not start its command natively (docker compose)",
+			msg,
 			"run the test command natively: keploy mock record -c \"<command>\" or keploy mock replay -c \"<command>\"")
 	}
 	if caller == agentPID {
