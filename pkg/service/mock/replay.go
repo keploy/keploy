@@ -795,11 +795,11 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     wrote a coverage report said anything about isolation at all.
 	if isolated {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
-			log.Show(fmt.Sprintf("outgoing calls: %d recorded, all answered from the recording", counts.consumed)),
+			log.Show(fmt.Sprintf("every dependency answered from the recording: %d outgoing calls served", counts.consumed)),
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
 	} else {
 		m.logger.Info("this replay did not prove the tests run with the dependencies off",
-			log.Show("replay did not prove isolation: "+isolationNote),
+			log.Show("this replay did not prove the tests run with the dependencies off: "+isolationNote),
 			zap.String("mock-set", name), zap.String("reason", isolationNote))
 	}
 
