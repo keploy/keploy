@@ -78,7 +78,7 @@ type readsUnderTest struct {
 func newReadsUnderTest() *readsUnderTest {
 	c := &connRecorder{}
 	s := &readsStreams{}
-	p := newParserReads(c, c.leftOut, func() bool { return c.stopping }, readsIdleGrace, nil)
+	p := newParserReads(c, c.leftOut, nil, func() bool { return c.stopping }, readsIdleGrace, nil)
 	p.follow(s, s.teedOf)
 	return &readsUnderTest{parserReads: p, conn: c, streams: s}
 }
@@ -156,7 +156,7 @@ func TestParserReads_ARequestReadAheadAndNeverProcessedIsLeftOut(t *testing.T) {
 	s := &readsStreams{}
 	ch := make(chan fakeconn.Chunk, 2)
 	client := fakeconn.New(ch, nil, nil)
-	p := newParserReads(c, c.leftOut, func() bool { return c.stopping }, readsIdleGrace, nil)
+	p := newParserReads(c, c.leftOut, nil, func() bool { return c.stopping }, readsIdleGrace, nil)
 	p.follow(client, s.teedOf)
 	for i, req := range []string{"first", "next"} {
 		at := msAfter(10 * i)

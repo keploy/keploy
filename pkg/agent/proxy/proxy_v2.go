@@ -219,7 +219,9 @@ func (p *Proxy) recordViaSupervisor(
 	// recorded, whenever the relay gets to tell of it, and one it never read
 	// is not, whenever it was told of. Every stop goes through it,
 	// so the return knows whether one came first, and when.
-	reads := newParserReads(unrecorded, svSess.RecordOrphanWindow, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
+	reads := newParserReads(unrecorded, svSess.RecordOrphanWindow, func(start, end time.Time, reason string) {
+		svSess.ReportLeftOut(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: start, ResTimestampMock: end}}, reason)
+	}, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
 	svSess.OnStop = reads.stop
 	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
 	defer stopRecordingStamp()
@@ -546,6 +548,12 @@ func (p *Proxy) recordViaSupervisor(
 	// answer reads it, and they open no span then. Called before the tees are
 	// paused below: a chunk a paused tee refuses is told of as after the
 	// return.
+	// A parser that panicked died with what its readers took ahead of its loop
+	// not parsed: the return reports what it leaves out of that as left out,
+	// with a reason naming the panic (parserReads.parserPanicked).
+	if result.Status == supervisor.StatusPanicked {
+		reads.parserPanicked(string(parserType))
+	}
 	reads.parserReturned()
 	// Only now does the watermark stop following the connection: a test case
 	// held for what its parser never read is let go once that is left out

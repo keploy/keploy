@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -74,9 +75,18 @@ import (
 // carries from the recording's stop on is no loss; the requests captured
 // before it, while the recording ran, still are.
 type parserReads struct {
-	mu        sync.Mutex
-	conn      unrecordedConn
-	leftOut   func(start, end time.Time)
+	mu      sync.Mutex
+	conn    unrecordedConn
+	leftOut func(start, end time.Time)
+	// reportLeftOut reports a closed span of traffic the parser did not record
+	// as left out, for reason (Session.ReportLeftOut: counted, spanned, and
+	// logged at WARN by its cause). It is used in leftOut's place once the
+	// parser panicked (parserPanicked), so what it took and never parsed is
+	// set aside with a reason naming the panic, not left out at Debug.
+	reportLeftOut func(start, end time.Time, reason string)
+	// panicked names the parser whose Run ended in a panic (parserPanicked),
+	// "" until then.
+	panicked  string
 	stopping  func() bool
 	idleGrace time.Duration
 	logger    *zap.Logger
@@ -143,8 +153,39 @@ func wall(t time.Time) time.Time { return t.Round(0) }
 // the recording is stopping (Session.RecordingStopping); idleGrace is how
 // long a run of unread chunks goes on past its last one
 // (syncMock.UnrecordedIdleGrace, as conn's followed spans).
-func newParserReads(conn unrecordedConn, leftOut func(start, end time.Time), stopping func() bool, idleGrace time.Duration, logger *zap.Logger) *parserReads {
-	return &parserReads{conn: conn, leftOut: leftOut, stopping: stopping, idleGrace: idleGrace, logger: logger}
+func newParserReads(conn unrecordedConn, leftOut func(start, end time.Time), reportLeftOut func(start, end time.Time, reason string), stopping func() bool, idleGrace time.Duration, logger *zap.Logger) *parserReads {
+	return &parserReads{conn: conn, leftOut: leftOut, reportLeftOut: reportLeftOut, stopping: stopping, idleGrace: idleGrace, logger: logger}
+}
+
+// parserPanicked says the parser's Run ended in a panic: the parser named
+// parser died with what its readers had taken ahead of its loop (the chunks
+// queued for the loop, and each reader's chunk in hand) never parsed. Those
+// bytes are not processed (fakeconn.FakeConn.MarkProcessed), so the return
+// leaves out the client chunks in them, as it does any the parser never read;
+// a panic makes that a capture loss to report, not a parser's ordinary end. So
+// from here each span left out is reported (reportLeftOut), with a reason
+// naming the panic, so the test cases over it are set aside with that reason,
+// counted in the recording's summary. Call it before parserReturned.
+func (p *parserReads) parserPanicked(parser string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.panicked = parser
+}
+
+// panickedLeftOutCause is the cause (the text before the first colon) of the
+// reason a span the return leaves out after a panic is reported with
+// (parserReads.parserPanicked).
+const panickedLeftOutCause = "parser panicked"
+
+// panickedReason is the reason a run of n client chunks the parser named
+// parser never parsed (taken ahead of its loop, or still queued for it) is
+// reported with once it panicked. It names no
+// panic value: the supervisor's "parser panicked" ERROR carries it with the
+// stack, and a line at WARN must not carry the "panic:" token the lanes grep
+// for a crashed keploy (see recordViaSupervisor).
+func panickedReason(parser string, n int) string {
+	return fmt.Sprintf("%s: the %s parser died with %d client chunks of this connection not parsed (taken ahead of its loop, or still queued for it), so the requests in them are not recorded (the supervisor's %q error has the stack)",
+		panickedLeftOutCause, parser, n, "parser panicked")
 }
 
 // follow sets the parser's client stream and the relay's count of what it has
@@ -288,7 +329,7 @@ func (p *parserReads) parserReturned() {
 func (p *parserReads) leaveOut(at []time.Time) {
 	spans := 0
 	for k := 0; k < len(at); {
-		start, last := wall(at[k]), wall(at[k])
+		start, last, first := wall(at[k]), wall(at[k]), k
 		for k++; k < len(at) && !wall(at[k]).After(last.Add(p.idleGrace)); k++ {
 			// The relay's stamps follow the wall clock, which can step back:
 			// a run's span covers every chunk in it whichever way they lie.
@@ -298,10 +339,14 @@ func (p *parserReads) leaveOut(at []time.Time) {
 				start = t
 			}
 		}
-		p.leftOut(start, last.Add(p.idleGrace))
+		if p.panicked != "" && p.reportLeftOut != nil {
+			p.reportLeftOut(start, last.Add(p.idleGrace), panickedReason(p.panicked, k-first))
+		} else {
+			p.leftOut(start, last.Add(p.idleGrace))
+		}
 		spans++
 	}
-	if spans > 0 && p.logger != nil {
+	if spans > 0 && p.logger != nil && p.panicked == "" {
 		p.logger.Debug("left out the requests a connection's parser returned without recording",
 			zap.Int("chunks", len(at)), zap.Int("spans", spans), zap.Time("from", at[0]))
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -599,5 +600,79 @@ func TestRecordViaSupervisor_TrafficAfterAnIdleCloseOpensNoSpanAsTheRecordingSto
 	after, _, _ := h.mgr.OrphanRangeCount()
 	if over, _ := h.mgr.WasMockOrphanedInWindow(stopped, time.Now()); after != before || over {
 		t.Errorf("%d spans, %d before the recording stopped; a span after the stop: %v. It leaves out the test cases in flight as the recording stops", after, before, over)
+	}
+}
+
+// aheadThenPanicParser reads its client stream ahead of its loop (ReadAhead),
+// as most V2 parsers' readers do: it takes n chunks, telling took of each,
+// marks only the first processed, and panics once die is closed, with the rest
+// taken and never parsed.
+type aheadThenPanicParser struct {
+	stubParser
+	n    int
+	took chan struct{}
+	die  chan struct{}
+}
+
+func (aheadThenPanicParser) IsV2() bool { return true }
+
+func (p aheadThenPanicParser) RecordOutgoing(_ context.Context, s *integrations.RecordSession) error {
+	for i := 0; i < p.n; i++ {
+		c, err := s.V2.ClientStream.ReadAhead()
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			s.V2.MarkProcessed(fakeconn.FromClient, c)
+		}
+		p.took <- struct{}{}
+	}
+	<-p.die
+	panic("a main-loop bug, with chunks taken and not parsed")
+}
+
+// A parser whose loop panics dies with what its readers took ahead of it not
+// parsed. Those requests came before the panic, so the stop's span, which
+// starts at the panic, does not cover them, and the return left them out at
+// Debug alone: the test cases over them were set aside with no reason, and
+// the recording's summary counted nothing. Each span the return leaves out
+// after a panic is now reported left out (Session.ReportLeftOut), with a
+// reason naming the panic and the parser, and the request the parser did
+// parse is in none.
+func TestRecordViaSupervisor_APanicReportsWhatItsParserTookAndNeverParsed(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	p := aheadThenPanicParser{n: 3, took: make(chan struct{}, 3), die: make(chan struct{})}
+	h := newStopHarness(t, p, zap.New(core))
+	var once sync.Once
+	die := func() { once.Do(func() { close(p.die) }) }
+	defer die()
+
+	one := h.send(t, "GET /one HTTP/1.1\r\n\r\n")
+	waitFor(t, p.took, "the parser never took the first request")
+	two := h.send(t, "GET /two HTTP/1.1\r\n\r\n")
+	waitFor(t, p.took, "the parser never took the second request")
+	three := h.send(t, "GET /three HTTP/1.1\r\n\r\n")
+	waitFor(t, p.took, "the parser never took the third request")
+	die()
+	h.end(t)
+
+	h.requireInASpan(t, two, "taken and not parsed before its parser panicked")
+	h.requireInASpan(t, three, "taken and not parsed before its parser panicked")
+	if over, _ := h.mgr.WasMockOrphanedInWindow(one.sent, one.arrived); over {
+		t.Errorf("the request the parser parsed before it panicked is in a span")
+	}
+	var reasons []string
+	for _, e := range logs.All() {
+		if e.Message != supervisor.LeftOutWarnMsg && e.Message != supervisor.LeftOutDebugMsg {
+			continue
+		}
+		reason, _ := e.ContextMap()["reason"].(string)
+		reasons = append(reasons, reason)
+		if !strings.HasPrefix(reason, "parser panicked: the http parser died with ") || strings.Contains(reason, "panic:") {
+			t.Errorf("left out for %q, want the panic named, with its parser, and no \"panic:\" token", reason)
+		}
+	}
+	if n := h.mgr.MocksLeftOut(); n == 0 || n != int64(len(reasons)) {
+		t.Errorf("the manager counts %d mocks left out, and %d were logged (%q): want each span the panic left out reported", n, len(reasons), reasons)
 	}
 }
