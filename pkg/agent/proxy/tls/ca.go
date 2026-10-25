@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -296,6 +297,9 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
 	}
+	// Recorded before the env points at it: from here on, however this run
+	// ends, RemoveCaCertEnvFiles removes the file.
+	recordCaTrustFile(tempPath)
 	if err := SetEnvForPath(logger, tempPath); err != nil {
 		return err
 	}
@@ -308,6 +312,89 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 			zap.Error(err))
 	}
 	return nil
+}
+
+// caTrustEnvVars are the language-runtime variables SetEnvForPath points at one
+// CA file.
+var caTrustEnvVars = []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CARGO_HTTP_CAINFO"}
+
+// caTrustFilesMu guards the record of what SetupCaCertEnv did to this process.
+var (
+	caTrustFilesMu sync.Mutex
+	// caTrustFiles are the trust files SetupCaCertEnv wrote in this process.
+	caTrustFiles []string
+	// caTrustEnvBefore holds each of caTrustEnvVars as it was before the first
+	// SetupCaCertEnv since the last RemoveCaCertEnvFiles: its value, or nil
+	// for a variable that was unset.
+	caTrustEnvBefore map[string]*string
+)
+
+func recordCaTrustFile(path string) {
+	caTrustFilesMu.Lock()
+	defer caTrustFilesMu.Unlock()
+	if caTrustEnvBefore == nil {
+		caTrustEnvBefore = make(map[string]*string, len(caTrustEnvVars))
+		for _, k := range caTrustEnvVars {
+			if v, ok := os.LookupEnv(k); ok {
+				caTrustEnvBefore[k] = &v
+			} else {
+				caTrustEnvBefore[k] = nil
+			}
+		}
+	}
+	caTrustFiles = append(caTrustFiles, path)
+}
+
+// RemoveCaCertEnvFiles removes the trust files SetupCaCertEnv wrote in this
+// process, and puts back each trust variable that still names one of them as
+// it was before keploy set it.
+//
+// The app reads its file for as long as it runs, and in a replay keploy starts
+// the app again for every test set, with the same environment: so a file must
+// stay for as long as the command runs, and nothing reads it after. It used to
+// be left behind on every native run, one more in the temp dir each time, and
+// root's under sudo. A second SetupCaCertEnv in the same process (an agent set
+// up again) writes a file of its own and leaves the earlier one alone, since
+// an app started before may still read it; this removes them all.
+//
+// Every keploy binary whose commands are built by cli.Root gets this for free:
+// Root registers it to run when the command returns, however it returns. A
+// program that sets up native runs through pkg/platform/http without cli.Root
+// must call it itself on its way out. Only an end that skips the command's
+// return leaves the file: SIGKILL, an os.Exit, a crash in another goroutine.
+// It is safe to call more than once, and when SetupCaCertEnv never ran.
+func RemoveCaCertEnvFiles() error {
+	caTrustFilesMu.Lock()
+	defer caTrustFilesMu.Unlock()
+
+	removed := make(map[string]bool, len(caTrustFiles))
+	var errs []error
+	for _, p := range caTrustFiles {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("removing the app's CA trust file: %w", err))
+		}
+		removed[p] = true
+	}
+	// A variable naming a file that is gone breaks a process this one starts
+	// afterwards: Python's requests refuses to make an HTTPS call at all when
+	// REQUESTS_CA_BUNDLE names a missing file, and cargo when CARGO_HTTP_CAINFO
+	// does. One set to something else since is not keploy's.
+	for k, before := range caTrustEnvBefore {
+		if !removed[os.Getenv(k)] {
+			continue
+		}
+		var err error
+		if before == nil {
+			err = os.Unsetenv(k)
+		} else {
+			err = os.Setenv(k, *before)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("restoring %s: %w", k, err))
+		}
+	}
+	caTrustFiles, caTrustEnvBefore = nil, nil
+	return errors.Join(errs...)
 }
 
 // EnvJavaToolOptions is the environment variable a JVM reads extra launch flags
@@ -365,9 +452,11 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	}
 
 	// Deterministic per-user path, overwritten each run, so runs do not
-	// accumulate a new JKS in the temp dir every time (there is no teardown hook
-	// to remove a random-named one). The contents are the same public bundle
-	// each run, so a concurrent overwrite is harmless.
+	// accumulate a new JKS in the temp dir every time. Its contents are not the
+	// same each run, though: the keploy CA is generated per run, so two runs as
+	// one user at the same time overwrite each other's store, and the JVM of the
+	// run that wrote first then distrusts its own agent. Making the store per
+	// run, removed by RemoveCaCertEnvFiles as the CA file is, ends both.
 	//
 	// The uid in the NAME is what makes "per-user" true. It used to be a single
 	// shared filename, which is not per-user at all: os.TempDir() is shared and
@@ -434,11 +523,9 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 // bundle; that split is the whole reason the shared-volume path exists
 // and cannot be replicated by any sequence of SetEnvForPath calls.
 func SetEnvForPath(logger *zap.Logger, path string) error {
-	envs := map[string]string{
-		"NODE_EXTRA_CA_CERTS": path,
-		"REQUESTS_CA_BUNDLE":  path,
-		"SSL_CERT_FILE":       path,
-		"CARGO_HTTP_CAINFO":   path,
+	envs := make(map[string]string, len(caTrustEnvVars))
+	for _, k := range caTrustEnvVars {
+		envs[k] = path
 	}
 	return setEnvVars(logger, envs)
 }
@@ -1122,12 +1209,22 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
 // keploy's process-wide umask 0 left the file world-WRITABLE so any local user
 // could replace the cert an app was about to trust. The certificate is public,
 // so world-readable is fine; world-writable was the bug.
-func extractCertToTemp(certPEM []byte) (string, error) {
+//
+// A file it cannot finish is removed: the caller gets no path to remove.
+func extractCertToTemp(certPEM []byte) (path string, err error) {
 	tempFile, err := os.CreateTemp("", "keploy-ca-*.crt")
 	if err != nil {
 		return "", err
 	}
-	defer tempFile.Close()
+	defer func() {
+		if cerr := tempFile.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+		if err != nil {
+			_ = os.Remove(tempFile.Name())
+			path = ""
+		}
+	}()
 
 	if err = os.Chmod(tempFile.Name(), 0644); err != nil {
 		return "", err
