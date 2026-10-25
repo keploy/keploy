@@ -42,6 +42,11 @@
 # keploy wrote the line and exited before await looked
 #   await has to find the line (0): what keploy wrote before it exited is
 #   read before its exit is taken for one before the line.
+# keploy writes the line and exits between await's read and its look
+#   await's read of the log comes back with nothing; keploy then writes the
+#   line and exits, before await looks at keploy. await has to read the log
+#   again and find the line (0). An await that looks at keploy after its read,
+#   not before, takes the exit for one before the line (1).
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -217,6 +222,47 @@ wait "$keploy"
 (cd "$root/await-after-exit" && FUNCS="$funcs" timeout 60 bash -c '. "$FUNCS"; await later.log "$1" "APP LISTENING" 1' _ "$keploy") >"$root/await-after-exit.out" 2>&1
 rc=$?
 [ "$rc" = 0 ] || fail_case "keploy wrote the line and exited before await looked: await exited $rc, want 0"
+
+# The moment between await's read and its look is made in await's own python,
+# through a sitecustomize on PYTHONPATH: once a read of the log comes back
+# with nothing, it writes the line to the log, kills keploy (a stand-in), and
+# lets the read return only once keploy has exited (its pidfd says so). It
+# says so on stderr, so a case whose hook never ran cannot pass.
+ws="$root/await-between"
+mkdir -p "$ws/hook"
+: >"$ws/later.log"
+cat >"$ws/hook/sitecustomize.py" <<'PY'
+import builtins, os, select, signal, sys
+_log, _pid, _open = os.environ["AWAIT_HOOK_LOG"], int(os.environ["AWAIT_HOOK_PID"]), builtins.open
+class _Between:
+    def __init__(self, f):
+        self.f, self.done = f, False
+    def read(self, n=-1):
+        b = self.f.read(n)
+        if not b and not self.done:
+            self.done = True
+            with _open(_log, "ab") as w:
+                w.write(b"APP LISTENING\n")
+            fd = os.pidfd_open(_pid)
+            os.kill(_pid, signal.SIGKILL)
+            select.select([fd], [], [])
+            os.close(fd)
+            print("await-hook: keploy wrote the line and exited after an empty read", file=sys.stderr, flush=True)
+        return b
+def _hooked(file, mode="r", *a, **k):
+    f = _open(file, mode, *a, **k)
+    return _Between(f) if file == _log and "r" in mode else f
+builtins.open = _hooked
+PY
+sleep 600 &
+keploy=$!
+keploys="$keploys $keploy"
+(cd "$ws" && PYTHONPATH="$ws/hook" AWAIT_HOOK_LOG=later.log AWAIT_HOOK_PID="$keploy" FUNCS="$funcs" timeout 60 bash -c '. "$FUNCS"; await later.log "$1" "APP LISTENING" 1' _ "$keploy") >"$root/await-between.out" 2>&1
+rc=$?
+grep -q "^await-hook: keploy wrote the line and exited after an empty read$" "$root/await-between.out" ||
+    fail_case "keploy writes the line and exits between await's read and its look: the hook never ran, so the case proves nothing"
+[ "$rc" = 0 ] ||
+    fail_case "keploy writes the line and exits between await's read and its look: await exited $rc, want 0: it looked at keploy after its read and took the exit for one before the line"
 
 if [ "$failures" -ne 0 ]; then
     for f in "$root"/*.out "$root"/*.log; do
