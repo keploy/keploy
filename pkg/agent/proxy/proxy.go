@@ -5217,10 +5217,12 @@ func missSummaries(errs []error) []string {
 // previous test's window closed included, and what is missed until the next
 // window opens are carried into the next test's window (openTestErrorCapture),
 // as they would have been had this window never opened. Nothing is dropped
-// or charged to the test that did not begin.
+// or charged to the test that did not begin. The tracker's test ends
+// through the mock manager, as every boundary of its tracker does
+// (learnBoundary), so the manager's round reads the tracker as it is.
 func (p *Proxy) WithdrawTestErrorCapture() {
 	if provenswitch.On() {
-		p.learnTracker.End()
+		p.learnBoundary(func(t *learn.Tracker) { t.End() })
 	}
 	p.captureMu.Lock()
 	if acc := p.activeTestErrors.Load(); acc != nil {
