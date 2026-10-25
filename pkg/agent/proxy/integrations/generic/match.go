@@ -19,7 +19,12 @@ import (
 // If a match is found, it returns the corresponding response mock and a boolean value indicating success.
 // If no match is found, it returns false and a nil response.
 // If an error occurs during the matching process, it returns an error.
+//
+// What it consumes is told to the learn step as served in this connection's
+// request (integrations.ServingIn), so a request aloft on another connection
+// that reads no recording leaves this one's serve in its order.
 func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockDb integrations.MockMemDb) (bool, []models.Payload, error) {
+	serving := integrations.ServingIn(ctx, mockDb)
 	for {
 		select {
 		case <-ctx.Done():
@@ -69,7 +74,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				updatedMock := *filteredMocks[index]
 				updatedMock.TestModeInfo.IsFiltered = false
 				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(filteredMocks[index], &updatedMock)
+				isUpdated := serving.UpdateUnFilteredMock(filteredMocks[index], &updatedMock)
 				if !isUpdated {
 					continue
 				}
@@ -88,7 +93,7 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 				updatedMock := *unfilteredMocks[index]
 				updatedMock.TestModeInfo.IsFiltered = false
 				updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
-				isUpdated := mockDb.UpdateUnFilteredMock(unfilteredMocks[index], &updatedMock)
+				isUpdated := serving.UpdateUnFilteredMock(unfilteredMocks[index], &updatedMock)
 				if !isUpdated {
 					continue
 				}

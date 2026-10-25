@@ -388,11 +388,233 @@ func respLeaves(r *models.HTTPResp) []learn.Leaf {
 	return out
 }
 
+// classifiedAnswer is m's recorded answer as the classifier reads it for
+// the drift of m's own call (learn.ClassifyIn's resp): its leaves
+// (respLeaves), without its Date header where that is the answer's own clock
+// stamp (learn.AnswerStamp: within the span the exchange was recorded in).
+// The server read its clock as it answered the call, so no word of the
+// call's request came back there: a word of a drifted value that the Date
+// holds by coincidence is no echo.
+func classifiedAnswer(m *models.Mock) []learn.Leaf {
+	leaves := respLeaves(m.Spec.HTTPResp)
+	out := leaves[:0:0]
+	for _, l := range leaves {
+		if l.Path == "header.date" && learn.AnswerStamp(l.Value, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 // learnMiss is a request the learn step left unanswered.
 type learnMiss struct {
 	res     learn.Result
 	closest *models.Mock
 	pool    []*models.Mock
+	// moved: the replay moved the round under the call before the learn
+	// step could decide it (learnRound.movedFrom), and res.Why says where
+	// the call's first pass read it and what the replay did since. It has
+	// no reason: nothing of the request was compared.
+	moved bool
+	// steps, where set, is the miss's next step, in place of the mismatch
+	// report's default, which speaks of a request that changed since it was
+	// recorded.
+	steps string
+}
+
+// learnRound is the round a call's first pass of the learn step read: the
+// learn tracker's test (learn.Placed.Test, the number every Begin,
+// BeginAwaiting and NewSet moves on) and whether a test was open
+// (learn.Placed.Open), and, from a store that reads its round in one
+// snapshot (snap: integrations.RoundReader), the store's view read with it:
+// the staging (epoch), the view in force (the generation it was installed
+// at, viewGen, and its test, view: "" for a pool view), and whether the
+// store and the tracker agreed on where the round was (agrees: in the
+// view's test, or between tests). read is false before the first pass.
+//
+// Every later pass is held to it (movedFrom): the call was made in that
+// round, and is decided in it or in none, as the Mongo and Postgres learn
+// steps' calls are. A pass read again once the replay moved the round under
+// the call (the store installed another view, staged again, or the tracker
+// moved to another test) would pair the call with another round's
+// recordings, and learn what differs onto them as noise: a call of a test
+// answered from the pool, or from the next test's own, as the scheduler fell.
+type learnRound struct {
+	read, open bool
+	test       uint64
+	snap       bool
+	agrees     bool
+	epoch      uint64
+	viewGen    uint64
+	view       string
+	// noOne says why the round read is no one test's, "" where it is one's
+	// (integrations.RoundSnapshot.NoOneRound): the store ended the test
+	// the tracker still has open. A call is never decided in one, on any
+	// pass (learnMatchIn).
+	noOne string
+	// ahead: the tracker had begun a test whose view the store had not
+	// installed (integrations.RoundSnapshot.TrackerAhead). On the store's
+	// pool view (pools) the call is the pool's, decided at once in the
+	// round between tests. On the view of the test before (waits) it
+	// decides nothing until the store opens the tracker's test (then in
+	// that test's round: movedFrom's catch-up) or the test's window closes
+	// (the moved miss), and waits for either (learnMatchIn).
+	ahead bool
+	// alone says why the round read is no one round to learn in, "" where
+	// it is one (integrations.RoundSnapshot.ViewAlone): the store shows a
+	// test's view and the tracker has no test open. The call is answered
+	// only by a recording it matches exactly, and learns nothing, on any
+	// pass (learnMatchIn).
+	alone string
+}
+
+// pools reports whether c read the pool's call: the tracker ahead of the
+// store's pool view (integrations.RoundSnapshot.PoolsCall), keploy test's
+// begin of a test before its view's install, which waits for the call.
+func (c learnRound) pools() bool { return c.ahead && c.view == "" }
+
+// waits reports whether c read a call that waits for the store: the tracker
+// ahead of a store still showing the view of the test before.
+func (c learnRound) waits() bool { return c.ahead && c.view != "" }
+
+// movedFrom says, of a later pass (now), what the replay moved since the
+// call's first pass (c): "" when the call is still in the round it was made
+// in. The store moves the round by staging again or by installing another
+// view (a test's end installs the pool's, a test's begin its own, a pool
+// view the next); the tracker by another test (Begin, BeginAwaiting, NewSet)
+// or by ending the one the first pass found open (End moves no test
+// number). A call that waited for its test case's request
+// (learn.Tracker.AwaitRequest) whose test's window closed without it is
+// such a call: keploy never read that request, so every changed value of the
+// call may have come from it (learn.Tracker.OnUnreadClose).
+//
+// Two moves are not the round's: where the first pass found the store and
+// the tracker apart (a test's begin that reached one of them first), the one
+// that lagged catching up with the other, which did not move, so that the
+// two agree on the one test the first pass read. The call was made after the
+// side that led moved, in that test. A first pass that found the store's
+// end of the tracker's open test read a round of no one test
+// (learnRound.noOne): the call is decided in none, on that pass, so no
+// catch-up follows it, and its verdict never rests on whether a boundary
+// lands under a take. A first pass that found the tracker ahead of the
+// store's pool view (it began a test whose view the store had not installed:
+// learnRound.pools) read the pool's call, decided in the round between
+// tests: any move of that round is a move, the store opening the tracker's
+// test among them (keploy test's flow installs it only once the call is
+// answered). One that found the tracker ahead of the view of the test before
+// (learnRound.waits) waits for the store, and every pass still so on the
+// tracker's same test is no move. The two catch-ups:
+//   - the tracker catching up with the store's same test view, on a retake
+//     (a pass read again because a take of the pass before was refused): it
+//     began the test whose view the store shows, where it had no test open
+//     at the first pass. The recordings the view offers, and whose own each
+//     is, are the ones the call was made among
+//     (TestALearnStepReadsAgainATakeALearnBoundaryRefused), and it is
+//     answered only by one it matches exactly, learning nothing, as on the
+//     first pass (learnRound.alone): only an exact take's refusal makes
+//     the retake there. A first pass
+//     with a test of the tracker's open is checked all the same: one of the
+//     store's pool view is a move (it lands between tests, not in the test
+//     the call was read in), as is any other (TestMovedFromCatchesUpOnlyWithTheFirstPassesTest).
+//     A pass after a wait is no retake: a window that closed unread is a
+//     round that moved, whatever the store shows
+//     (TestMovedFromAPassAfterAWaitIsNoCatchUp). That the first pass found
+//     the two apart is implied: on one view, a store that binds each test's
+//     view to the tracker's test it opened under agrees with one test of
+//     the tracker only;
+//   - the store installing the view of the test the tracker has open, its
+//     number and openness unchanged since the first pass, which found the
+//     tracker ahead of the view of the test before (learnRound.waits), and
+//     that waited for it. The call was made in that test, as the tracker
+//     began it, while the store still served the view before
+//     (TestALearnStepReadsTheRoundOnceMoreAfterAnInstall). The tracker's
+//     number is its set's too (a new set moves it), so the test is of the
+//     same set; a view of any other test is a move
+//     (TestMovedFromCatchesUpOnlyWithTheFirstPassesTest), as is a test view
+//     the tracker does not have open: a store that opened a test before the
+//     tracker began it, then the next over it, moved on
+//     (TestALearnStepDecidesNothingOfACallOnceTheStoreMovedItsViewAlone).
+//     A store that installed its pool view while the tracker had no test
+//     open moved on:
+//     the tracker may never have begun the test the store showed
+//     (TestALearnStepDecidesNothingOfACallOnceTheStoreEndedATestTheTrackerNeverBegan).
+//     Read from a store that binds views, the two never agreed on the view
+//     before (a test's view installed under the test the tracker has open is
+//     bound to none); the first pass's disagreement is checked all the same,
+//     for a store that does not bind them.
+//
+// An accepted catch-up is the call's round from then on (the caller holds
+// the later passes to now). Any other move, of either side, is the replay
+// moving the round under the call: a call of an agreed round (a test both
+// had open, between tests on both) is decided in it or in none.
+func (c learnRound) movedFrom(now learnRound, retake bool) (moved string, caughtUp bool) {
+	if !c.read {
+		return "", false
+	}
+	if now.snap != c.snap || c.snap && now.epoch != c.epoch {
+		return movedRestaged, false
+	}
+	sameView := now.viewGen == c.viewGen && now.view == c.view
+	sameTest := now.test == c.test && now.open == c.open
+	switch {
+	case sameView && sameTest:
+		return "", false
+	case c.waits() && now.ahead && sameTest:
+		// The store is still behind the tracker's test, the call's own:
+		// whatever view it installed meanwhile (its pool view after the
+		// test before, another), the call still waits for that test's
+		// (learnMatchIn), held to the first pass.
+		return "", false
+	case retake && sameView && now.agrees && now.view != "" && !c.open:
+		// learnMatchIn waits only for an open test's request, so a
+		// first pass with no test open is never followed by a pass
+		// after a wait, and !c.open implies the retake there. It is
+		// checked all the same: movedFrom's rule does not rest on its
+		// caller (TestMovedFromAPassAfterAWaitIsNoCatchUp).
+		return "", true
+	case c.waits() && now.agrees && sameTest && now.view != "":
+		return "", true
+	case c.pools() && now.view != "":
+		// The pool's call (integrations.RoundSnapshot.PoolsCall): the
+		// store opening the tracker's test is no catch-up of it, but the
+		// round between tests moving on.
+		return "began a test", false
+	case c.pools() && !sameView:
+		return "served another view of its recordings between tests", false
+	case c.pools():
+		return "moved on to another test or test set", false
+	case c.open || c.view != "" && !sameView:
+		return "ended that test", false
+	case now.open || now.view != "":
+		return "began a test", false
+	case !sameView:
+		return "served another view of its recordings between tests", false
+	}
+	return "moved on to another test or test set", false
+}
+
+// movedRestaged is what movedFrom says of a pass read after the replay
+// staged a test set again.
+const movedRestaged = "staged a test set again"
+
+// where is the round c was read in, as a miss says it: in the test open (by
+// its view's name where the store and the tracker agreed on it, or as the
+// test then running), while the store showed a test's view the tracker had
+// no test open beside (before the tracker began it, or after it ended it),
+// or in the round between tests (the start-up among them).
+func (c learnRound) where() string {
+	switch {
+	case c.open && c.agrees && c.view != "":
+		return "in " + c.view
+	case c.pools():
+		return "in the round between tests, as keploy's learn tracker began the next test"
+	case c.open:
+		return "in the test then running"
+	case c.view != "":
+		return "while keploy's store showed " + c.view + "'s view, with no test open on its learn tracker"
+	}
+	return "in the round between tests"
 }
 
 // scope is what a request's scope offers: the HTTP candidates learn.Pair
@@ -425,34 +647,110 @@ func (sc scope) owner() func(*models.Mock) bool {
 // the pool, and in a view that scopes the pool to a test
 // (integrations.TestOwnership), only the mocks it says are the test's.
 func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (scope, error) {
-	var sc scope
 	perTest, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get per-test mocks")
-		return sc, errors.New("error while matching the request with the mocks")
+		return scope{}, errors.New("error while matching the request with the mocks")
 	}
 	session, err := mockDb.GetSessionMocks()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get session mocks")
-		return sc, errors.New("error while matching the request with the mocks")
+		return scope{}, errors.New("error while matching the request with the mocks")
 	}
-	sc.visible = append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)
-	httpPerTest, httpSession := inRecordedOrder(FilterHTTPMocks(perTest)), inRecordedOrder(FilterHTTPMocks(session))
-	sc.http = append(append(make([]*models.Mock, 0, len(httpPerTest)+len(httpSession)), httpPerTest...), httpSession...)
-
-	open := tracker.Open()
-	inScope := map[string]bool{}
-	owner, _ := mockDb.(integrations.TestOwnership)
+	r := scopeReads{perTest: perTest, session: session, open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
+	r.owner, _ = mockDb.(integrations.TestOwnership)
 	if integrations.ExactServing(mockDb) {
 		// Under exact serving the store alone says what the open test owns:
 		// what its per-test tier shows, as on the bare manager. A worker's
 		// view made before exact serving began passes straight through, and
 		// its allowlist is the scope it was made for, not the open test's.
-		owner = nil
+		r.owner = nil
 	}
-	windows, _ := mockDb.(integrations.TestWindows)
-	inFlight, _ := mockDb.(integrations.InFlightOwner)
-	pools, _ := mockDb.(integrations.PoolMembership)
+	r.windows, _ = mockDb.(integrations.TestWindows)
+	r.inFlight, _ = mockDb.(integrations.InFlightOwner)
+	r.pools, _ = mockDb.(integrations.PoolMembership)
+	// Under the background rules a test learns from its own recordings
+	// only (own exact, own learn, then background exact): with
+	// a test open the background (the worker scope and the pool the view
+	// shows in it) answers a call exactly or not at all, and no drift of the
+	// test's is learned onto a background recording. The pool is learned
+	// from between tests only.
+	r.exactBackground = r.open && integrations.S12Background(mockDb)
+	return r.scope(live, liveShape, n, pool), nil
+}
+
+// learnScopeIn is learnScope read from one snapshot of the store's round
+// (integrations.RoundSnapshot): the view, whose each recording is, whether a
+// test is open, and what the test's own answered, all of one instant. A test
+// is open only where the store shows its view and the learn tracker has it
+// open (RoundInTest): at a boundary between the two no recording is a test's
+// own, and where the store shows a test's view the background answers
+// exactly or not at all (RoundSnapshot.ExactBackground). What the open
+// test's own answered is every account of it: what the tracker took for a
+// call (Answer), what the view says answered (a pool view's ahead answers
+// carried into the test among them), and the recordings the view holds (its
+// test's own, in flight, or shared) that the round answered as a call in
+// flight of a test that did not open next (voided): each answered a call of
+// the round, and answers none again.
+func (h *HTTP) learnScopeIn(snap integrations.RoundSnapshot, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) scope {
+	answered := map[string]*models.Mock{}
+	var order []*models.Mock
+	add := func(m *models.Mock) {
+		if m != nil && answered[m.Name] == nil {
+			answered[m.Name] = m
+			order = append(order, m)
+		}
+	}
+	for _, m := range snap.Learn.Answered {
+		add(m)
+	}
+	for _, m := range snap.TakenInView() {
+		add(m)
+	}
+	for _, m := range snap.Voided() {
+		// Whoever's the view holds it as: the test's own, in flight, or
+		// shared with the tests recorded beside it.
+		if snap.Open && snap.Owner(m) != integrations.OwnerNone {
+			add(m)
+		}
+	}
+	r := scopeReads{
+		perTest: snap.PerTest, session: snap.Session, open: snap.Open,
+		windows: snap, inFlight: snap, pools: snap,
+		exactBackground: snap.ExactBackground(),
+		answered:        func(name string) bool { return answered[name] != nil },
+		answeredMocks:   func() []*models.Mock { return order },
+	}
+	return r.scope(live, liveShape, n, pool)
+}
+
+// scopeReads is what a request's scope is built from (scopeReads.scope):
+// the store's per-test and session reads, whether a test is open, how the
+// store tells whose a recording is, and which of the test's own answered.
+type scopeReads struct {
+	perTest, session []*models.Mock
+	open             bool
+	owner            integrations.TestOwnership
+	windows          integrations.TestWindows
+	inFlight         integrations.InFlightOwner
+	pools            integrations.PoolMembership
+	exactBackground  bool
+	// answered reports whether one of the test's own answered a request of
+	// it; answeredMocks are those, as recorded, read after the scope's
+	// mocks.
+	answered      func(name string) bool
+	answeredMocks func() []*models.Mock
+}
+
+// scope is the scope r reads.
+func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, pool bool) scope {
+	var sc scope
+	perTest, session, open := r.perTest, r.session, r.open
+	sc.visible = append(append(make([]*models.Mock, 0, len(perTest)+len(session)), perTest...), session...)
+	httpPerTest, httpSession := inRecordedOrder(FilterHTTPMocks(perTest)), inRecordedOrder(FilterHTTPMocks(session))
+	sc.http = append(append(make([]*models.Mock, 0, len(httpPerTest)+len(httpSession)), httpPerTest...), httpSession...)
+
+	inScope := map[string]bool{}
 	var poolCands []learn.Candidate
 	var poolMocks []*models.Mock
 	for i, m := range sc.http {
@@ -468,7 +766,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), owner, windows, inFlight, pools)
+		own, poolsOwn := ownership(m, i < len(httpPerTest), r.owner, r.windows, r.inFlight, r.pools)
 		// A protocol-phase mock (a handshake, a token fetch) is never a
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
@@ -476,10 +774,10 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 		c := learn.Candidate{
 			Shape:    n.shape(rp, d),
 			Known:    n.known(m),
-			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn),
+			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
 		}
 		inScope[m.Name] = true
-		if own && tracker.Answered(m.Name) {
+		if own && r.answered(m.Name) {
 			// Each of the test's own mocks answers one request of it
 			// (design §5.2), whatever lifetime the store gives it: one
 			// that answered is spent. It still competes, as the recording
@@ -499,7 +797,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	// mock is deleted when consumed) is still spent, and still competes.
 	if open {
 		var gone []*models.Mock
-		for _, m := range tracker.AnsweredMocks() {
+		for _, m := range r.answeredMocks() {
 			if !inScope[m.Name] && m.Spec.HTTPReq != nil {
 				gone = append(gone, m)
 			}
@@ -518,7 +816,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	for range poolCands {
 		sc.own = append(sc.own, false)
 	}
-	return sc, nil
+	return sc
 }
 
 // ownership says whether a recorded mock is the open test's own and whether
@@ -693,17 +991,46 @@ func stagedOf(mockDb integrations.MockMemDb) []*models.Mock {
 
 // earlierRaw are the mocks of the test's recording that came before a
 // request recorded at at, as Classify reads them when no leaf names their
-// values: every mock any parser served earlier in the test, and every mock
-// recorded before it that the scope shows, that was served before the test
-// began, or that the store stages, served or not (visible: a start-up call
-// a kept-alive app never makes again in F is one). Each is read once. The
-// paired mock is not one, and neither is an exchange the learn step served
-// (earlier): its leaves and fixed parts, with what F saw at each, are read
-// instead (earlierOf). dc keeps each mock's text for the test, read with its
-// answer (DriftCache.ReadRaw). err names one whose answer the agent parked on
-// disk and that cannot be read back, and why; no mock is then returned, since
-// what it held cannot be told.
-func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*models.Mock, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
+// values: every mock any parser served earlier in the test that was
+// recorded before it (served), every one F served before the test began
+// that is an earlier place of the call's own test and was recorded before
+// it (given: in the previous test, at the start-up, between tests;
+// ofPairedTest), and every mock recorded before it
+// that the scope shows or that the store stages, served or not (visible: a
+// start-up call a kept-alive app never makes again in F is one). Recorded
+// before it here counts one recorded at the call's own instant too, whether
+// F served it or not (recordedByCall): read as one recorded a moment before
+// the call, the fail-closed side. Each is read once. The paired mock is not one, and neither is an exchange the
+// learn step served (earlier): its leaves and fixed parts, with what F saw
+// at each, are read instead (earlierOf); where F served the paired mock
+// before the call, givenEarlier reads it for the offset rule alone. A mock
+// F served, in the test or before it, is read as F served it
+// (learn.Raw.ServedIn): at the first and the last of its serves in the one
+// order F served the set's mocks in,
+// across its start-up, its tests and the gaps between them (order, as the
+// read of the places saw it; 0, an order keploy cannot tell, which the
+// offset rule fails closed on). Every other mock F served in the set
+// (another test's, or one recorded after the call, served in the test or
+// before it) is read by the offset rule and, for the words and the
+// instants of its answer, by the word rule and the echo (givenEarlier): a
+// value built on it, or copied word for word from what it answered, is
+// refused naming it, never learned as noise. The paired mock has a
+// recorded time here: the learn step learns nothing from one with none, as
+// without it every mock F served would read as recorded after the call. dc keeps each mock's text for the test, read with its
+// answer (DriftCache.ReadRaw). err names one whose answer the agent parked
+// on disk and that cannot be read back, and why; no mock is then returned,
+// since what it held cannot be told.
+func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visible []*models.Mock, order learn.Order, recorded func(visit func(*models.Mock) bool) error, earlier []learn.Earlier, prev *learn.PreviousCall) (out []learn.Raw, err error) {
+	at := paired.Spec.ReqTimestampMock
+	// A mock recorded at the call's own instant (a fixture's whole second:
+	// record may have made it before the call) is an earlier place, as one
+	// recorded a moment before the call is, whether F served it before the
+	// call or not: the fail-closed side, which every learn rule reads the
+	// equal instant by (learn.Raw). Read as what F gave alone
+	// (givenEarlier), a value it holds whole would pass as noise.
+	recordedByCall := func(m *models.Mock) bool {
+		return !m.Spec.ReqTimestampMock.After(at)
+	}
 	leafed := make(map[string]bool, len(earlier)+1)
 	leafed[paired.Name] = true
 	for _, e := range earlier {
@@ -711,32 +1038,51 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 	}
 	read := map[string]bool{}
 	once := func(m *models.Mock) bool {
-		id := m.Name + "\x00" + string(m.Kind) + "\x00" + m.Spec.ReqTimestampMock.String()
+		id := rawID(m)
 		if read[id] {
 			return false
 		}
 		read[id] = true
 		return true
 	}
-	add := func(m *models.Mock, served bool) error {
-		r, err := dc.ReadRaw(m, served)
+	add := func(m *models.Mock, servedByF bool, span [2]int) error {
+		r, err := dc.ReadRaw(m, servedByF)
 		if err != nil {
 			return fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+		}
+		if servedByF {
+			r = r.ServedIn(span[0], span[1])
 		}
 		out = append(out, r)
 		return nil
 	}
 	for _, m := range served {
 		prev.See(m)
-		if m != nil && !leafed[m.Name] && once(m) {
-			if err := add(m, true); err != nil {
+	}
+	for _, list := range [][]*models.Mock{served, given} {
+		spans := order.Spans(list)
+		for k, m := range list {
+			// What F served, in the test or before it, is an earlier
+			// place where it was recorded before the call or at its own
+			// instant (recordedByCall). One recorded after it gave the
+			// recorded application nothing before the call, wherever F
+			// served it this run (at the start-up, in an earlier test, or
+			// in this test before the call): the offset rule, the word
+			// rule and the echo read it as what F gave this run alone
+			// (givenEarlier), so a value copied from what F gave is
+			// refused naming it, and a word the value was recorded with
+			// that only it holds decides nothing.
+			if m == nil || leafed[m.Name] || !recordedByCall(m) || !once(m) {
+				continue
+			}
+			if err := add(m, true, spans[k]); err != nil {
 				return nil, err
 			}
 		}
 	}
 	for _, m := range visible {
-		if m != nil && !leafed[m.Name] && m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) && once(m) {
-			if err := add(m, false); err != nil {
+		if m != nil && !leafed[m.Name] && recordedByCall(m) && once(m) {
+			if err := add(m, false, [2]int{}); err != nil {
 				return nil, err
 			}
 		}
@@ -749,7 +1095,7 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 	var readErr error
 	if err := recorded(func(m *models.Mock) bool {
 		prev.See(m)
-		if m == nil || leafed[m.Name] || !m.Spec.ReqTimestampMock.Before(paired.Spec.ReqTimestampMock) || !once(m) {
+		if m == nil || leafed[m.Name] || !recordedByCall(m) || !once(m) {
 			return true
 		}
 		r, err := learn.ReadRaw(m, false)
@@ -766,6 +1112,58 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, visible []*mo
 		return nil, readErr
 	}
 	return out, nil
+}
+
+// rawID is a recording's identity as earlierRaw reads each once.
+func rawID(m *models.Mock) string {
+	return m.Name + "\x00" + string(m.Kind) + "\x00" + m.Spec.ReqTimestampMock.String()
+}
+
+// givenEarlier is the learn step's learn.GivenEarlier for the call paired
+// with paired: every mock of set (those F served in the running set before
+// the call, as the read of the places saw it) that earlierRaw reads no place
+// of (read: those it read as F served them, the test's served and its given
+// recorded before the call or at its own instant), each as F served it, by
+// order: a mock F served
+// in the test before the call but recorded after it is read here, as one F
+// served before the test is, never as an earlier place. The paired mock
+// is one where F served it before the call (in the set: a pool's reusable
+// recording F gave the application at the start-up, or earlier in the
+// test), which earlierRaw never reads: recorded at the call's own instant,
+// it is a place F gave the application alone, never one the recording did.
+// Each is read once for the set, its places alone kept, its text not held
+// (learn.Order.GivenPlaces), a parked answer read back from disk only the
+// first time. The exchanges the learn step served leaf by leaf (earlier:
+// their payloads are read there) are not read again. An answer it cannot
+// read back is an error naming it.
+func givenEarlier(paired *models.Mock, set, served, given []*models.Mock, earlier []learn.Earlier, order learn.Order) learn.GivenEarlier {
+	return func() ([]learn.GivenPlaces, error) {
+		skip := make(map[string]bool, len(earlier))
+		for _, e := range earlier {
+			skip[e.Mock] = true
+		}
+		read := map[string]bool{}
+		for _, list := range [][]*models.Mock{served, given} {
+			for _, m := range list {
+				if m != nil && m.Name != paired.Name && !m.Spec.ReqTimestampMock.After(paired.Spec.ReqTimestampMock) {
+					read[rawID(m)] = true
+				}
+			}
+		}
+		out := make([]learn.GivenPlaces, 0, len(set))
+		for _, m := range set {
+			if m == nil || skip[m.Name] || read[rawID(m)] {
+				continue
+			}
+			read[rawID(m)] = true
+			g, err := order.GivenPlaces(m)
+			if err != nil {
+				return nil, fmt.Errorf("read back the recorded answer of %q: %w", m.Name, err)
+			}
+			out = append(out, g)
+		}
+		return out, nil
+	}
 }
 
 // orderMiss is the order rule's reading, under the proven switch outside
@@ -796,6 +1194,14 @@ func (h *HTTP) orderMiss(ctx context.Context, input *req, mockDb integrations.Mo
 // otherwise it is a miss with its reason. It returns the mock to serve, or
 // the miss.
 func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, *learnMiss, error) {
+	return h.learnMatchIn(ctx, input, mockDb, n, opts, nil)
+}
+
+// learnMatchIn is learnMatch, telling call, when set, where the call's first
+// read of the round found it made (integrations.CallRound): its first
+// pass's. A miss's lookup of a recording made elsewhere is asked of that
+// round (notOwnedRecording).
+func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions, call *integrations.CallRound) (*models.Mock, *learnMiss, error) {
 	tracker := learn.TrackerFrom(ctx)
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
@@ -808,11 +1214,16 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 	// that pass read its scope, would fail the same way, and looking again
 	// would find it, and fail, forever (a session-lifetime mock in the
 	// per-test tier, whose claim updates the session tier): the call
-	// misses instead.
-	unclaimed := map[*models.Mock]uint64{}
-	stuck := func(m *models.Mock) bool {
+	// misses instead. Read from one snapshot of the round, the pass is also
+	// the round's staging, generation and take log's length: a claim the
+	// round moved under (another view, the tracker's next test), refused
+	// only once the round moved, is never stuck: the call reads the round
+	// again, and misses unless it is still the round the first pass read,
+	// or the one the side that lagged caught up with (learnRound.movedFrom).
+	unclaimed := map[*models.Mock]learnPass{}
+	stuck := func(m *models.Mock, now learnPass) bool {
 		at, ok := unclaimed[m]
-		return ok && storeRevision(mockDb) == at
+		return ok && at == now
 	}
 	refused := func(m *models.Mock, res learn.Result, sc scope) (*models.Mock, *learnMiss, error) {
 		h.Logger.Warn("keploy's mock store would not hand out the recording the learn step chose for this call; learning nothing from it",
@@ -820,21 +1231,135 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy's mock store would not hand out "+m.Name+", which it still shows, so keploy cannot answer from it"
 		return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 	}
+	marked := false
+	// made is the round the call's first pass read (learnRound), and
+	// madePool the HTTP mocks that pass offered: every later pass is held
+	// to that round. retake: the pass reads again because the take of the
+	// pass before was refused.
+	var made learnRound
+	var madePool []*models.Mock
+	// alone is why the call learns nothing on any pass, "" where it may
+	// learn: its first pass read the store's test view with the tracker
+	// not open (integrations.RoundSnapshot.ViewAlone). It holds past a
+	// catch-up of the tracker to the store's test on a retake, which only
+	// an exact take's refusal makes there: the call is answered as it would
+	// have been had the tracker's begin not landed under its take, by a
+	// recording it matches exactly, or not at all.
+	alone := ""
+	retake := false
 	for {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		rev := storeRevision(mockDb)
-		sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, opts.LearnPool)
+		first := call != nil && !marked
+		read, err := h.readLearnPass(mockDb, tracker, live, liveShape, n, opts.LearnPool)
 		if err != nil {
 			return nil, nil, err
 		}
-		// What the test served so far is read after the scope: a mock a
-		// concurrent call consumed before the scope was read is gone from
-		// the scope, and the mock manager told the tracker of it before it
-		// left (MockManager.observeServed), so it is in one of the two.
-		test, earlier, served, before := tracker.Test()
-		windows, _ := mockDb.(integrations.TestWindows)
+		if first {
+			*call, marked = read.call, true
+		}
+		moved, caughtUp := made.movedFrom(read.round, retake)
+		if caughtUp && call != nil {
+			// The call's round is the one caught up with from now on, and
+			// so is its mark: the recordings that round's view holds as its
+			// own are the call's (a test the store opened after the call's
+			// first pass found the tracker ahead holds its own), so a miss
+			// names none of them made elsewhere.
+			*call = read.call
+		}
+		if moved != "" {
+			// The replay moved the round the call was made in before the
+			// learn step decided it (another view installed, a staging,
+			// the tracker's next test or its end of the call's test,
+			// while the call waited for its test case's request or while
+			// a take of it was refused): what it would learn now is of a
+			// round it was not made in, against another round's places
+			// and recordings, and the next test's own, or the pool's, are
+			// not its own. A wait for a request that never came ends so:
+			// the window closed unread.
+			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + made.where() + ", and the replay " + moved + " before keploy could answer it"}
+			return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+		}
+		if why := read.round.noOne; why != "" {
+			// The store and the tracker are apart on which test is open
+			// (integrations.RoundSnapshot.NoOneRound): the call is one
+			// test's late call or the other's early one, and nothing tells
+			// which. Read as either, a call that is exactly one test's own
+			// recording was paired with another round's, and what it
+			// differs in learned onto it as noise: a false green. It is of
+			// no one round, and decided in none, on its first pass or any
+			// later one (a pass after its wait for its test case's
+			// request, the store still not showing that test), whatever
+			// the replay does next: the verdict never rests on whether a
+			// boundary lands before a take.
+			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + why}
+			return nil, &learnMiss{res: res, pool: read.sc.http, moved: true}, nil
+		}
+		if !made.read {
+			alone = read.round.alone
+		}
+		if !made.read || caughtUp {
+			// The first pass, or the round the side that lagged caught up
+			// with (learnRound.movedFrom): every later pass is held to it.
+			made, madePool = read.round, read.sc.http
+		}
+		if made.waits() && read.round.ahead {
+			// The tracker began a test whose view the store has not
+			// installed while the store still shows the view of the test
+			// before (integrations.RoundSnapshot.TrackerAhead), which
+			// keploy test's flow never leaves in force. The call is of the
+			// tracker's test, and decides nothing until the store opens
+			// it, waiting for the round to move through no clock: the
+			// store opening the test is the catch-up
+			// (learnRound.movedFrom), and the call is decided in that
+			// test's round, its mark read again there (its own recordings
+			// held); the window closing (End, the next Begin, NewSet) or a
+			// staging is the moved miss. The call and the install give
+			// one verdict whichever way the scheduler orders them, but for
+			// a waiter the install woke that runs only once the store has
+			// ended that test too: it reads the round moved on and gets
+			// the moved miss, accepted as fail-closed
+			// (MockManager.AwaitRoundMove's doc). A store that
+			// cannot tell the move fails closed: the call is decided in no
+			// round. The tracker ahead of the store's pool view is no
+			// wait: that call is the pool's
+			// (integrations.RoundSnapshot.PoolsCall), decided in the round
+			// between tests, since keploy test installs the test's view
+			// only once every call made before it is answered, this one
+			// among them: a wait for the install would wait for itself.
+			moved, err := integrations.AwaitRoundMove(ctx, mockDb, read.at.round)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !moved {
+				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request after keploy's learn tracker began a test its store had not opened, and the store cannot tell when it opens it, so the call is of no round keploy can decide it in"}
+				return nil, &learnMiss{res: res, pool: madePool, moved: true}, nil
+			}
+			continue
+		}
+		retake = false
+		sc, windows, claimDb := read.sc, read.windows, read.claimDb
+		test, earlier, served, before, set, order := read.test, read.earlier, read.served, read.before, read.set, read.order
+		if read.awaiting {
+			// The call came after the test's window opened and before the
+			// filter that opens it brought its test case's request: it
+			// learns from nothing until the request came
+			// (learn.Tracker.AwaitRequest), then reads the round again,
+			// learned from as a call made after it, whichever way the two
+			// fell. The wait ends too as the test's window closes without
+			// the request (End, the next Begin, NewSet), though the next
+			// test awaits its own: the next pass reads a round that moved
+			// (learnRound.movedFrom), and decides nothing. The pool's call
+			// read as a test opens (integrations.RoundSnapshot.PoolsCall)
+			// waits so too: the agent gives the request before it settles
+			// the calls made before (OpenTestCase), so the wait never holds
+			// the test's install, and the call reads the request either way.
+			if err := tracker.AwaitRequest(ctx); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
 
 		res := learn.Pair(liveShape, sc.cands)
 		switch res.Outcome {
@@ -859,17 +1384,23 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				rp := recordedParts(picked)
 				rec = n.shape(rp, destOf(live, rp))
 			}
-			if stuck(picked) {
+			if stuck(picked, read.at) {
 				return refused(picked, res, sc)
 			}
 			if own && !tracker.Answer(test, picked) {
+				// Read again, held to the call's round: a test's own is
+				// offered only where the store and the tracker agreed on
+				// the test, and from an agreed round no move is a
+				// catch-up (learnRound.movedFrom), so the next pass is
+				// this round again or the moved miss.
+				retake = true
 				continue
 			}
 			// The claim reads the scope's owners (ownedKey), as the
 			// matcher's does: a stated recording no open test owns is a
 			// reusable one, kept and served in turn (cursorPick), never
 			// used up.
-			out, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+			out, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, claimDb, nil, nil)
 			if err != nil || !claimed {
 				if own {
 					tracker.Unanswer(test, picked.Name)
@@ -877,7 +1408,8 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				if err != nil {
 					return nil, nil, err
 				}
-				unclaimed[picked] = rev
+				unclaimed[picked] = read.at
+				retake = true
 				continue
 			}
 			commit()
@@ -888,13 +1420,52 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
-			if stuck(m) {
+			if alone != "" {
+				// The store showed a test's view the tracker had no test
+				// open beside (integrations.RoundSnapshot.ViewAlone): the
+				// call is the view's test's or the round between tests',
+				// and nothing tells which. Paired with the pool's, a call
+				// that is exactly one of the view's own recordings would
+				// learn what it differs in onto them as noise. Decided at
+				// once, never waiting for the tracker: what keploy test or
+				// keploy mock would wait on may itself wait for the call.
+				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + alone}
+				return nil, &learnMiss{res: res, pool: sc.http, moved: true}, nil
+			}
+			// A call that is exactly a recording the scope does not offer
+			// (the test before's own, read between tests after that test
+			// ended; another test's) is that recording's call, made where
+			// it was not recorded, never a drift of m: paired with m, what
+			// it differs from m in was learned onto m as noise, a false
+			// green. It learns nothing, and its miss goes on to the steps
+			// that answer or name a recording made elsewhere (the
+			// pairing, the miss's lookup), or names it here.
+			var place *unreadPlace
+			if x, err := exactlyElsewhere(input, mockDb, sc, live, liveShape, n, elsewhereCounts(own, read.windows)); errors.As(err, &place) {
+				if _, warned := h.placeWarned.LoadOrStore(placeWarning{epoch: read.round.epoch, mock: place.mock}, true); !warned {
+					h.Logger.Warn("a recording of the test set declares a variable at a place keploy cannot read, so the learn step cannot tell whether a call of its operation is exactly that recording: it learns nothing from such a call, which misses. Correct or remove the variable in the test set's mocks.yaml, or record again, then run again",
+						zap.String("recording", place.mock), zap.String("variable", place.variable), zap.String("place", place.place))
+				}
+				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy cannot read where the recording " + place.mock + " declares its variable " + place.variable + " (" + strconv.Quote(place.place) + "), so it cannot tell whether this request is exactly " + place.mock + " rather than a changed call of " + m.Name + ", and learns nothing from it"}
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http, steps: placeSteps}, nil
+			} else if err != nil {
+				h.Logger.Warn("keploy cannot read every recording of the test set, so its learn step cannot tell whether this call is exactly one of them: it learns nothing from the call, which misses. Fix what the error names, then run again",
+					zap.String("mock", m.Name), zap.Error(err))
+				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy cannot read every recording of the test set (" + err.Error() + "), so it cannot tell whether this request is exactly one of them rather than a changed call of " + m.Name + ", and learns nothing from it"}
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http, steps: unreadSteps}, nil
+			} else if x != nil {
+				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: elsewhereWhy(x, m, read.round.where(), read.windows)}
+				return nil, &learnMiss{res: res, closest: x, pool: sc.http, steps: elsewhereSteps}, nil
+			}
+			if stuck(m, read.at) {
 				return refused(m, res, sc)
 			}
-			if !own && m.Spec.ReqTimestampMock.IsZero() {
-				// A pool mock's earlier places are every recording made
-				// before it: of one with no recorded time, none can be
-				// told, so where its value came from cannot be either.
+			if m.Spec.ReqTimestampMock.IsZero() {
+				// A mock's earlier places are the recordings made before
+				// it (a pool mock's, every one; the test's own, those of
+				// its test, and what F served in it recorded before it):
+				// of one with no recorded time, none can be told, so
+				// where its value came from cannot be either.
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, "keploy cannot tell which recordings of the test set came before "+m.Name+", which has no recorded time, so it cannot tell whether what changed came from one"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
@@ -918,7 +1489,8 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			for _, s := range staged {
 				prev.See(s)
 			}
-			raw, err := earlierRaw(tracker.Drifts(), m, served, append(append(ofPairedTest(before, m, windows, own), ofPairedTest(sc.visible, m, windows, own)...), ofPairedTest(staged, m, windows, own)...), recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
+			given := ofPairedTest(before, m, windows, own)
+			raw, err := earlierRaw(tracker.Drifts(), m, served, given, append(ofPairedTest(sc.visible, m, windows, own), ofPairedTest(staged, m, windows, own)...), order, recordedBeforeOf(mockDb, m, windows, own), earlier, prev)
 			var unread recordedUnread
 			if errors.As(err, &unread) {
 				h.Logger.Warn("the learn step cannot read the recordings made before a pool call; learning nothing from this call",
@@ -929,30 +1501,36 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 			if err != nil {
 				h.Logger.Warn("the learn step cannot read back an earlier recorded answer the agent parked on disk; learning nothing from this call",
 					zap.String("mock", m.Name), zap.Error(err))
-				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of an earlier call of the test, so it cannot tell whether what changed came from there"
+				res.Outcome, res.Reason, res.Why = learn.Miss, "", "keploy cannot read back the recorded answer of a recording made or served before this call, so it cannot tell whether what changed came from there"
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
+			// The exchanges served leaf by leaf, each as the n-th mock F
+			// served, as the payloads among raw are.
+			earlier = learn.InServeOrder(earlier, append(append([]*models.Mock(nil), served...), before...), order)
 			// A pool mock's call need not run on the clock F set for a
 			// test (at the start-up and between tests none is set, and a
 			// call made in a test was recorded in none): its clock reads
 			// are read in its own window (learn.Tracker.CallWindowFrom),
 			// as well as by the lead. Its previous recorded call is found
 			// among every recording of the set, those on disk too, as the
-			// earlier places streamed them.
+			// earlier places streamed them. In keploy mock's client tests
+			// every call's are, a test's own too: there the lead shows no
+			// read of the application's clock (learn.DriftCache.ClientTests).
 			var w *learn.Window
-			if !own {
+			if !own || tracker.ClientTests() {
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
-			learned := learn.ClassifyIn(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, respLeaves(answered.Spec.HTTPResp), w)
+			learned := learn.ClassifyGiven(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
 			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if own && !tracker.Answer(test, m) {
+				retake = true
 				continue
 			}
-			out, claimed, why, err := h.claimLearned(ctx, m, mockDb, plan, sc.owner())
+			out, claimed, why, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner())
 			if own && (err != nil || why != "" || !claimed) {
 				tracker.Unanswer(test, m.Name)
 			}
@@ -964,7 +1542,14 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
-				unclaimed[m] = rev
+				// Read again as an exact claim is. movedFrom's retake
+				// catch-up follows only a first pass where the store
+				// showed a test's view the tracker had no test open
+				// beside, where nothing is paired (alone): a paired
+				// claim's retake reads its own round again, or the moved
+				// miss.
+				unclaimed[m] = read.at
+				retake = true
 				continue
 			}
 			for _, l := range learned {
@@ -982,6 +1567,292 @@ func (h *HTTP) learnMatch(ctx context.Context, input *req, mockDb integrations.M
 		}
 		return nil, miss, nil
 	}
+}
+
+// exactlyElsewhere is a recording of the staged test set that live is
+// exactly, modulo what is known (as Pair's Exact), that the scope sc does not
+// offer, and that counts reads: the test before's own, read between tests
+// once that test ended, or another test's, which the view in force does not
+// show. Such a call is read as that recording's, made outside where it was
+// recorded, and is never paired with another recording. A recording that
+// declares variables is compared with its variables' request places excused
+// (variablePlaces): a call of it differs there on every run.
+//
+// The store visits its recordings of the call's request keys
+// (integrations.StagedRecordingReader), those it keeps on disk too; a store
+// with no such reader, its staged mocks (integrations.StagedReader). err is
+// why the store could not read them all, or an *unreadPlace: a variable place
+// keploy cannot read, of a recording of the call's operation. A limit: an agent that could not create its disk store keeps its
+// mocks resident (agent.go), and a test's own recordings are then staged
+// only as that test opens, so a call exactly a later test's is not seen.
+func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live httpParts, liveShape learn.Shape, n learnNoise, counts func(*models.Mock) bool) (*models.Mock, error) {
+	offered := make(map[string]bool, len(sc.http)+len(sc.mocks))
+	for _, list := range [][]*models.Mock{sc.http, sc.mocks} {
+		for _, m := range list {
+			if m != nil {
+				offered[m.Name] = true
+			}
+		}
+	}
+	var found *models.Mock
+	var placeErr error
+	try := func(m *models.Mock) bool {
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || offered[m.Name] || !counts(m) {
+			return true
+		}
+		rp := recordedParts(m)
+		d := destOf(live, rp)
+		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
+			return true
+		}
+		known := n.known(m)
+		if hasVariables(m) {
+			at, err := variablePlaces(m)
+			if err != nil {
+				placeErr = err
+				return false
+			}
+			known = excusedAt{Known: known, at: at}
+		}
+		if diff := learn.Compare(liveShape, n.shape(rp, d), known); diff.Structural == "" && len(diff.Drift) == 0 && len(diff.Reordered) == 0 {
+			found = m
+			return false
+		}
+		return true
+	}
+	var err error
+	if r, ok := mockDb.(integrations.StagedRecordingReader); ok {
+		path := ""
+		if input.url != nil {
+			path = input.url.Path
+		}
+		target := strings.Join(input.header.Values(amzTargetHeader), ",")
+		loose := len(n.url) > 0 || n.headers[strings.ToLower(amzTargetHeader)]
+		err = r.RangeStagedRecordings(models.HTTP, RequestKeysOf(input.method, path, target, loose), try)
+	} else {
+		for _, m := range stagedOf(mockDb) {
+			if !try(m) {
+				break
+			}
+		}
+	}
+	if placeErr != nil {
+		return nil, placeErr
+	}
+	return found, err
+}
+
+// elsewhereCounts is which recordings exactlyElsewhere reads for a call the
+// learn step would pair with a recording, the open test's own or not. Paired
+// with the pool's (between tests, or in a test), every one. Paired with the
+// open test's own, those recorded before the test's recorded window began
+// (an earlier test's, the test before's late call): keploy test sends a
+// test's request only once the test before's view ended, so a call in a test
+// that is exactly a later test's recording is as likely a value that drifted
+// onto it (an off-by-one counter) as an early call, and keeps its pairing
+// with the test's own. Where the window is not known (no recorded windows, a
+// store that does not tell), every one: it fails closed. This holds in
+// recorded order only: keploy replay's mock-consistency retry cycles
+// (RetryPassing) run test-1 again after test-N, where a late call of test-N
+// read in test-1 would keep its pairing with test-1's own, so the learn step
+// ends for those cycles (integrations.LearnEnded) and decides none of their
+// requests. So it does for the deferred streaming pass of a set whose
+// streaming test case was recorded before a test case that ran ahead of it.
+func elsewhereCounts(own bool, windows integrations.TestWindows) func(*models.Mock) bool {
+	every := func(*models.Mock) bool { return true }
+	o, ok := windows.(integrations.RecordedTests)
+	if !own || !ok {
+		return every
+	}
+	return func(x *models.Mock) bool {
+		before, known := o.BeforeTestWindow(x.Spec.ReqTimestampMock)
+		return before || !known
+	}
+}
+
+// variablePlaces is the leaf paths (learn.LeafPath) of m's variables'
+// request places, each bind and use (models.MockVariable): where a call of m
+// holds a value the application makes anew each run. err names a place keploy
+// cannot read.
+func variablePlaces(m *models.Mock) (map[string]bool, error) {
+	names := make([]string, 0, len(m.Spec.Variables))
+	for name := range m.Spec.Variables {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	at := map[string]bool{}
+	for _, name := range names {
+		v := m.Spec.Variables[name]
+		places := append(make([]string, 0, 1+len(v.Use)), v.Use...)
+		if v.Bind != "" {
+			places = append(places, v.Bind)
+		}
+		for _, p := range places {
+			path, ok := learn.LeafPath(p)
+			if !ok {
+				return nil, &unreadPlace{mock: m.Name, variable: name, place: p}
+			}
+			at[path] = true
+		}
+	}
+	return at, nil
+}
+
+// unreadPlace is a variable's request place keploy cannot read
+// (variablePlaces): the recording, the variable, the place as written.
+type unreadPlace struct{ mock, variable, place string }
+
+func (e *unreadPlace) Error() string {
+	return fmt.Sprintf("the recording %s declares its variable %s at %q, a place keploy cannot read", e.mock, e.variable, e.place)
+}
+
+// placeWarning is a recording, of the staging epoch, whose unreadable
+// variable place (unreadPlace) the learn step warned of: once per recording
+// and staging, however many calls of its operation miss on it. Mock names
+// repeat across test sets, hence the staging.
+type placeWarning struct {
+	epoch uint64
+	mock  string
+}
+
+// excusedAt excuses what Known does and, at the leaf paths at, any value,
+// type or presence.
+type excusedAt struct {
+	learn.Known
+	at map[string]bool
+}
+
+func (k excusedAt) Excused(l learn.Leaf) (bool, bool) {
+	if k.at[l.Path] {
+		return true, false
+	}
+	return k.Known.Excused(l)
+}
+
+// elsewhereWhy is what the learn step says of a call that is exactly x, a
+// recording its scope did not offer (exactlyElsewhere), where it would have
+// paired the call with m: read where (learnRound.where), and the recorded
+// test whose window x lies in, where the store tells it
+// (integrations.RecordedTests).
+func elsewhereWhy(x, m *models.Mock, where string, windows integrations.TestWindows) string {
+	made := "a recording of the test set that is not offered where this call was made"
+	if w, ok := windows.(integrations.RecordedTests); ok {
+		if test := w.RecordedTestAt(x.Spec.ReqTimestampMock); test != "" {
+			made = "which keploy recorded in " + test + "'s window"
+		}
+	}
+	exactly := x.Name
+	if hasVariables(x) {
+		exactly += " (but for its variables: values the application makes anew each run)"
+	}
+	return "keploy record's full round read this request " + where + ", and it is exactly " + exactly + ", " + made +
+		": keploy reads it as that recording's call made outside where it was recorded (a test's late or early call), not as a changed call of " + m.Name +
+		", so it learns nothing onto " + m.Name + " from it"
+}
+
+// elsewhereSteps, unreadSteps and placeSteps are the next steps of a call
+// exactly a recording made elsewhere, of one keploy could not tell for a
+// recording it cannot read back, and for one whose variable place it cannot
+// read (in place of the mismatch report's default, which speaks of a request
+// that changed).
+const (
+	elsewhereSteps = "If the application makes this call after its test's response or before the next test's request, make the test, or the application's readiness, wait for it, then record again; if a value only happens to equal that recording's, record again so keploy sees it change."
+	unreadSteps    = "This is keploy failing to read its own recordings, not a change of the request: fix what the agent's log names, then run again."
+	placeSteps     = "This is a recording keploy cannot read, not a change of the request: correct or remove the variable named above in the test set's mocks.yaml, or record again, then run again."
+)
+
+// learnPass is the instant a pass of the learn step read the store at: the
+// store's revision, and, read from one snapshot of the round, the round's
+// staging, generation and take log's length.
+type learnPass struct {
+	rev   uint64
+	round integrations.RoundAt
+}
+
+// learnRead is what a pass of the learn step reads (readLearnPass): the
+// request's scope, the learn tracker's test (its number, its earlier places,
+// what was served in it and before it), where the store places a recording
+// among the recorded tests (windows), and the store a claim of this pass
+// takes from (claimDb): one checked against the snapshot the pass read.
+type learnRead struct {
+	sc             scope
+	test           uint64
+	earlier        []learn.Earlier
+	served, before []*models.Mock
+	// set and order are F's serving of the running set as the read saw it
+	// (learn.Placed): the places of the offset rule alone (givenEarlier).
+	set   []*models.Mock
+	order learn.Order
+	// open: a test was open (learn.Placed.Open), read with test.
+	open bool
+	// round is the round the pass read (learnRound): what a call's later
+	// passes are held to.
+	round learnRound
+	// awaiting: the running test still awaits its test case's request
+	// (learn.Tracker.Places), and the pass learns nothing from its places.
+	awaiting bool
+	windows  integrations.TestWindows
+	claimDb  integrations.MockMemDb
+	at       learnPass
+	// call is where the call was made, as this pass read it: the
+	// snapshot's round (RoundSnapshot.CallRound), the call's mark from its
+	// first pass on, and from a pass it caught up with (learnMatchIn). A
+	// store that reads no round in one snapshot gives none (the zero
+	// CallRound), and its misses name no recording made elsewhere.
+	call integrations.CallRound
+}
+
+// readLearnPass reads a pass of the learn step. From a store that reads its
+// round in one snapshot (integrations.RoundReader, under exact serving), it
+// is that one read: the scope, whose each recording is, the tracker's test
+// and what the test's own answered, of one instant, and a claim is taken
+// only while the round is still at it (integrations.WithinRound). From any
+// other store, the reads one after another: the scope first, then the
+// tracker, so a mock a concurrent call consumed before the scope was read is
+// gone from the scope, and in the tracker's account (the store tells it
+// first: MockManager.observeServed). From a snapshot it reads the pass's
+// mark too (learnRead.call): the call's, of its first pass and of a pass
+// whose round the call caught up with (learnMatchIn).
+func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (learnRead, error) {
+	rev := storeRevision(mockDb)
+	if snap, ok := integrations.SnapshotRound(mockDb, integrations.RoundQuery{Tracker: tracker}); ok {
+		r := learnRead{
+			sc:       h.learnScopeIn(snap, live, liveShape, n, pool),
+			test:     snap.Learn.Number,
+			earlier:  snap.Learn.Earlier,
+			served:   snap.Learn.Served,
+			before:   snap.Learn.Before,
+			set:      snap.Learn.Set,
+			order:    snap.Learn.Order,
+			awaiting: snap.Learn.Awaiting,
+			open:     snap.Learn.Open,
+			windows:  snap,
+			claimDb:  integrations.WithinRound(mockDb, snap.At),
+			at:       learnPass{rev: rev, round: snap.At},
+		}
+		r.round = learnRound{read: true, open: r.open, test: r.test, snap: true,
+			agrees:  snap.Phase == integrations.RoundInTest || snap.Phase == integrations.RoundBetween,
+			epoch:   snap.At.Epoch,
+			viewGen: snap.ViewGen(),
+			view:    snap.Test,
+			noOne:   snap.NoOneRound(),
+			ahead:   snap.TrackerAhead(),
+			alone:   snap.ViewAlone(),
+		}
+		r.call = snap.CallRound()
+		return r, nil
+	}
+	sc, err := h.learnScope(mockDb, tracker, live, liveShape, n, pool)
+	if err != nil {
+		return learnRead{}, err
+	}
+	r := learnRead{sc: sc, claimDb: mockDb, at: learnPass{rev: rev}}
+	p := tracker.Placed()
+	r.test, r.earlier, r.served, r.before, r.awaiting, r.set, r.order = p.Test, p.Earlier, p.Served, p.Before, p.Awaiting, p.Set, p.Order
+	r.open = p.Open
+	r.round = learnRound{read: true, open: r.open, test: r.test}
+	r.windows, _ = mockDb.(integrations.TestWindows)
+	return r, nil
 }
 
 // storeRevision is the mock store's revision (MockManager.Revision: it moves
@@ -1068,12 +1939,32 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		case learn.KindVariable:
 			from := l.From
 			switch {
+			case from.Given:
+				// The test case's own request (learn.Earlier.Given): what
+				// the application was given, which no variable binds at.
+				why := r.Path + " carries a value the test case's own request holds (" + from.Mock + " at " + from.Path + "), which keploy cannot follow into a call yet"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case from.Side == "":
-				return p, r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
+				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case from.Side != learn.Request:
-				return p, r.Path + " carries a value " + from.Mock + " answered earlier in the test, which keploy cannot follow from an answer"
+				why := r.Path + " carries a value " + from.Mock + " answered earlier in the test at " + from.Path + ", which keploy cannot follow from an answer"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case !from.Whole || from.Var == "":
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				return p, why
 			case !own || !from.Own:
 				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
 			}
@@ -1102,8 +1993,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// F's clock evidence, read where the variable is bound: a clock
 			// read that moved by the lead there may share its live value with
 			// another one read in the same second in a replay
-			// (models.MockVariable.Clock).
-			bv.Clock = learn.ClockReads(r.Value, from.Live)
+			// (models.MockVariable.Clock). None in keploy mock's client
+			// tests, where the lead shows no read of the app's clock
+			// (learn.DriftCache.ClockReads).
+			bv.Clock = tracker.Drifts().ClockReads(r.Value, from.Live)
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
@@ -1322,9 +2215,11 @@ func (n learnNoise) servedExchange(m, recorded *models.Mock, rec learn.Shape, rp
 // earlierOf is the exchange F just served from m (own: one of the test's own
 // mocks), as a later request of the test reads it: each recorded leaf of its
 // request with the live value, and each recorded leaf of its answer with the
-// value served, each with its variable place.
+// value served, each with its variable place; and m's payload
+// (learn.Earlier.Payload), whose answer's places the learn step's offset rule
+// reads against another recording's of the call.
 func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own bool) learn.Earlier {
-	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own}
+	e := learn.Earlier{Mock: m.Name, At: m.Spec.ReqTimestampMock, Own: own, Payload: learn.RawOf(m, true)}
 	jsonReq := rec.Fixed["body"] == "json"
 	for p, r := range rec.Leaves {
 		place, _ := learn.VarPlace(r, jsonReq)
@@ -1358,7 +2253,11 @@ func earlierOf(m *models.Mock, rec, live learn.Shape, served *models.Mock, own b
 	for _, r := range respLeaves(m.Spec.HTTPResp) {
 		// respLeaves names body scalars only of a JSON answer.
 		place, _ := learn.VarPlace(r, true)
-		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path], Place: place})
+		// Its Date header, within the span the exchange was recorded in and
+		// served as recorded, is its server's clock read as it answered: no
+		// value came from it (learn.AnswerStamp).
+		stamp := r.Path == "header.date" && sent[r.Path] == r.Value && learn.AnswerStamp(r.Value, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		e.Seen = append(e.Seen, learn.Seen{Side: learn.Response, Leaf: r, Live: sent[r.Path], Place: place, Stamp: stamp})
 	}
 	sort.Slice(e.Seen, func(i, j int) bool {
 		if e.Seen[i].Side != e.Seen[j].Side {
@@ -1551,6 +2450,15 @@ func (m *learnMiss) explain(r *models.MockMismatchReport) {
 	if r == nil {
 		return
 	}
+	if m.moved {
+		// The replay moved the round under the call: say where it was
+		// read and what moved, as the Mongo and Postgres learn steps'
+		// misses do. No reason: nothing of the request was compared.
+		why := m.res.Why + ": keploy learns nothing of a call in a round it was not made in, and pairs it with none of that round's recordings. " +
+			"If the application makes this call at a test's start or end, make the test, or the application's readiness, wait for it, then record again."
+		r.NextSteps = strings.TrimSpace(why + " " + r.NextSteps)
+		return
+	}
 	r.Reason = m.res.Reason
 	why := "keploy's learn step: " + m.res.Why + "."
 	switch m.res.Reason {
@@ -1558,6 +2466,10 @@ func (m *learnMiss) explain(r *models.MockMismatchReport) {
 		why += " The app sent the array in another order than it was recorded in (unstable_order)."
 	case models.MissRequestChanged:
 		why += " The request changed since it was recorded in a way keploy does not learn (request_changed)."
+	}
+	if m.steps != "" {
+		r.NextSteps = why + " " + m.steps
+		return
 	}
 	if r.NextSteps == "" {
 		r.NextSteps = why

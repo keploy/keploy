@@ -546,6 +546,16 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)
 	if capture != nil {
+		// The learn step bounds the test's calls by when the test began in
+		// its recording, the instant its begin moved the app's clock to
+		// (coreAgent.RecordedBeginTaker): given before the window opens, so
+		// the test begins with it.
+		if r, ok := a.Proxy.(coreAgent.RecordedBeginTaker); ok {
+			a.scopeMu.Lock()
+			began := a.testBegins[id]
+			a.scopeMu.Unlock()
+			r.TakeRecordedBegin(began)
+		}
 		// Misses made from here, and those made since the previous test
 		// ended (or before the first test), are this test's: a miss outside
 		// every test is charged to the next test that begins (design v14
@@ -1249,7 +1259,9 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
 // the matcher's next step, when it happened, why it missed (the learn step's
-// reason, in record's full round), and the call's shape
+// reason, in record's full round), how an answered call was answered and the
+// process that made the call (models.UnmatchedCall.Answer, Source: names,
+// no value), and the call's shape
 // (models.MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?". No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
@@ -1262,6 +1274,9 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		// An answered call stays one (models.UnmatchedCall.Answer): how it was
+		// answered and by which process, no value.
+		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn,
 		Repeat: m.Repeat.Clone()}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (models.MissShape) still writes them {}. Any other place

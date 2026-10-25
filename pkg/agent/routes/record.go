@@ -1086,6 +1086,9 @@ func (a *Agent) HandleOutgoing(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 
 	enc := gob.NewEncoder(w)
+	// The record log names, once each, the processes its calls came from
+	// (starts.Registry.StampOrigin).
+	starts.Default.SetLogger(a.logger)
 
 	// put streams m. It reports false once the stream is no longer viable.
 	put := func(m *models.Mock) bool {

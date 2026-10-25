@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -13,12 +14,16 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // learnCall sends one request through the HTTP integration in record's full
@@ -200,12 +205,26 @@ func r3Mock(name string, at time.Time, method, target, body, resp string) *model
 // tracker and miss reporter.
 func r3Send(t *testing.T, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
+	return r3SendIn(t, context.Background(), p, mm, opts, request)
+}
+
+// r3SendIn is r3Send with the call's context, which a row cancels to end a
+// call that would otherwise wait for good: the row then fails, never hangs.
+func r3SendIn(t *testing.T, parent context.Context, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+	t.Helper()
+	return r3SendVia(t, parent, httpint.New(zap.NewNop()), p, mm, opts, request)
+}
+
+// r3SendVia is r3SendIn through the HTTP integration h: one the row keeps
+// across calls, as the agent's proxy keeps its parser.
+func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+	t.Helper()
 	app, agentEnd := net.Pipe()
-	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+	ctx := models.WithMockMismatchReporter(parent, p.sendMockNotFoundError)
 	ctx = learn.WithTracker(ctx, p.learnTracker)
 	defer app.Close()
 	go func() {
-		_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
 		_ = agentEnd.Close()
 	}()
 	if _, err := app.Write([]byte(request)); err != nil {
@@ -295,6 +314,81 @@ func TestALearnStepLateCallKeepsItsEarlierPlaces(t *testing.T) {
 	code, got := r3Send(t, p, mm, opts, "GET /orders/o-9 HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n")
 	if _, noise := r3States(mm)["mock-b"].ReqBodyNoise["url.path.1"]; noise {
 		t.Fatalf("the id that flowed from test 1's create became noise (answered %d %s)", code, got)
+	}
+}
+
+// Through the agent's MockManager, whose served observer tells the learn
+// step's tracker what F served: an application that receives two messages of
+// a queue before the test (at the start-up, in the previous test, or the
+// first before and the second in it) and builds the insert's visible_after
+// on the message it holds (SentTimestamp and a minute). F serving B first,
+// the recording's value is built on A and F's on B: the insert is refused,
+// naming both receives, wherever before the call F served them, never
+// learned as noise. The tracker numbers what the store served across the
+// set (learn.Order), so F's order is told wherever it served them.
+func TestALearnStepReadsWhatTheStoreServedBeforeTheTestAsGiven(t *testing.T) {
+	for _, where := range []string{"at the start-up", "in the previous test", "the first before the test, the second in it"} {
+		t.Run(where, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, "1")
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			now := time.Now()
+			// Early in their minutes, whenever the test runs: a sent time
+			// late in its minute rounds to the minute the value is cut to,
+			// and the echo then names the two receives before the offset
+			// rule does.
+			sentA := now.Truncate(time.Minute).Add(-10*time.Minute + 4*time.Second + 473*time.Millisecond)
+			sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
+			receive := func(name, path string, at, sent time.Time) *models.Mock {
+				return r3Mock(name, at, "GET", path, "", `{"Messages":[{"MessageId":"`+name+`","Attributes":{"SentTimestamp":"`+strconv.FormatInt(sent.UnixMilli(), 10)+`"}}]}`)
+			}
+			minute := func(t time.Time) string { return t.Format("2006-01-02T15:04Z07:00") }
+			a := receive("mock-a", "/queue/a", now.Add(-3*time.Second), sentA)
+			b := receive("mock-b", "/queue/b", now.Add(-2*time.Second), sentB)
+			insert := r3Mock("mock-insert", now.Add(-time.Second), "POST", "/v1/messages", `{"visible_after":"`+minute(sentA.Add(time.Minute))+`"}`, `{}`)
+			for _, m := range []*models.Mock{a, b, insert} {
+				m.TestModeInfo.Lifetime, m.TestModeInfo.LifetimeDerived = models.LifetimePerTest, true
+			}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			t.Cleanup(mm.Close)
+			mm.SetMocksWithWindow([]*models.Mock{a, b, insert}, nil, now.Add(-time.Hour), now.Add(time.Hour))
+			mm.SetServedObserver(p.learnTracker.ServedMock) // as setMockManager installs it
+			opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+			get := func(path string) {
+				if code, got := r3Send(t, p, mm, opts, "GET "+path+" HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"); code != http.StatusOK {
+					t.Fatalf("GET %s got %d %s", path, code, got)
+				}
+			}
+			switch where {
+			case "at the start-up":
+				get("/queue/b")
+				get("/queue/a")
+				p.ContinueTestErrorCapture()
+			case "in the previous test":
+				p.ContinueTestErrorCapture()
+				get("/queue/b")
+				get("/queue/a")
+				if _, err := p.GetMockErrors(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				p.ContinueTestErrorCapture()
+			case "the first before the test, the second in it":
+				get("/queue/b")
+				p.ContinueTestErrorCapture()
+				get("/queue/a")
+			}
+			body := `{"visible_after":"` + minute(sentB.Add(time.Minute)) + `"}`
+			code, got := r3Send(t, p, mm, opts, "POST /v1/messages HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			said := fmt.Sprintf("%+v", misses)
+			if _, noise := r3States(mm)["mock-insert"].ReqBodyNoise["body.visible_after"]; noise || code == http.StatusOK ||
+				!strings.Contains(said, "mock-a at spec.resp.body holds as the recording gave it") || !strings.Contains(said, "mock-b at spec.resp.body holds, which record's full round gave the application in its place") {
+				t.Fatalf("answered %d %s, misses %s; want the insert refused, built on mock-a and mock-b by an offset", code, got, said)
+			}
+		})
 	}
 }
 
@@ -837,7 +931,7 @@ func TestANewSessionPlacesNoRecordingByTheLastSessionsWindows(t *testing.T) {
 	}
 }
 
-// Under exact serving (S12: keploy test's agent under the switch), what the
+// Under exact serving (keploy test's agent under the switch), what the
 // learn step learned as a variable rides the consumed mock's state, as on
 // every other door: persistLearned writes it onto the recording.
 func TestALearnStepVariableRidesExactServing(t *testing.T) {
@@ -998,5 +1092,154 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 	}
 	if noise := r3States(mm)["mock-1"].ReqBodyNoise; noise["body.processed_at"] == nil {
 		t.Fatalf("learned %v; want body.processed_at", noise)
+	}
+}
+
+// A slot the app picks by its clock from its test case's own request, which
+// the agent was handed as the test case opened (TakeTestRequest), is refused,
+// naming the request's slot: the learn step's echo reads the request. Handed
+// none (a keploy older than its agent), the call is refused for the request
+// it could not read, never learned as noise.
+func TestALearnStepRefusesAPickFromTheTestCasesRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	book := func() *models.Mock {
+		m := batchMock()
+		m.Spec.HTTPReq.URL, m.Spec.HTTPReq.Body = "/book", `{"slot":"11:14"}`
+		m.Spec.HTTPResp.Header["Content-Length"], m.Spec.HTTPResp.Body = "11", `{"ok":true}`
+		return m
+	}
+	body := `{"slots":["11:13","11:14","11:15"]}`
+	slots := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "header.Content-Type", Recorded: "application/json", Sent: "application/json"}, {Name: "body", Recorded: body, Sent: body}}}
+	for _, tc := range []struct {
+		name string
+		req  *models.TestRequest
+		want string
+	}{
+		{"handed its request", slots, "carries a value the test case's own request holds (test case test-1 at body.slots[1])"},
+		{"handed none", nil, "keploy could not read the test case's own request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := startedDrainProxy(t, 100)
+			p.learnTracker = learn.NewTracker()
+			p.ContinueTestErrorCapture()
+			p.TakeTestRequest(tc.req)
+			req := `{"slot":"11:15"}`
+			resp, _, _ := learnCall(t, p, book(), "POST /book HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(req))+"\r\n\r\n"+req)
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("the app got %d, want 502", resp.StatusCode)
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(misses) != 1 || misses[0].Reason != models.MissRequestChanged || !strings.Contains(misses[0].NextSteps, tc.want) {
+				t.Fatalf("misses %+v; want a request_changed naming %q", misses, tc.want)
+			}
+		})
+	}
+	// With the switch off, nothing is handed.
+	t.Setenv(provenswitch.Env, "0")
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	p.learnTracker.Begin()
+	p.TakeTestRequest(slots)
+	if _, earlier, _, _ := p.learnTracker.Test(); len(earlier) != 0 {
+		t.Fatalf("switch off, the tracker holds %+v", earlier)
+	}
+}
+
+// An agent that serves keploy mock (its --mock-mode) learns its tests as a
+// test harness's client tests (learn.Tracker.SetClientTests); one that serves
+// keploy test does not.
+func TestAMockModeAgentsLearnStepReadsClientTests(t *testing.T) {
+	for _, mock := range []bool{false, true} {
+		cfg := config.New()
+		cfg.Agent.MockMode = mock
+		p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+		if got := p.learnTracker.ClientTests(); got != mock || p.learnTracker.Drifts().ClientTests() != mock || p.ClientTests() != mock {
+			t.Fatalf("mock mode %v: client tests %v", mock, got)
+		}
+	}
+}
+
+// keploy mock's agent reads a wall clock of no zone in its own zone, the
+// application's beside it (learn.Tracker.SetAppZone), and, under the proven
+// switch, bounds a test's calls by the test's recorded begin it is given
+// (TakeRecordedBegin; learn.Tracker.RecordedBegin): the test's first call
+// has a window from it. With the switch off it is given nothing.
+func TestAMockModeAgentsLearnStepReadsTheAppsZoneAndATestsRecordedBegin(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(map[bool]string{true: "switch on", false: "switch off"}[on], func(t *testing.T) {
+			t.Setenv(provenswitch.Env, map[bool]string{true: "1", false: ""}[on])
+			cfg := config.New()
+			cfg.Agent.MockMode = true
+			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			if got := p.learnTracker.Drifts().Zone(); got != time.Local {
+				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, time.Local)
+			}
+			rec := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
+			paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec.Add(time.Second)}}
+			p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+			p.TakeRecordedBegin(rec)
+			began := time.Now()
+			p.learnTracker.BeginAt(began)
+			w := p.learnTracker.CallWindowFrom(time.Time{}, paired, began.Add(time.Millisecond))
+			if on && (w == nil || !w.Rec.From.Equal(rec)) {
+				t.Fatalf("window %+v; want one from the test's recorded begin", w)
+			}
+			if !on && w != nil {
+				t.Fatalf("switch off: window %+v; want none", w)
+			}
+		})
+	}
+}
+
+// A capture window keploy test opens for a test case begins the learn step's
+// test awaiting its request, in the window's own step, until the filter that
+// opens the test brings it (TakeTestRequest); a window opened otherwise
+// (keploy mock's, or with the switch off) awaits none.
+func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for name, open := range map[string]func(*Proxy){
+		"begin":    (*Proxy).BeginTestCaseCapture,
+		"continue": (*Proxy).ContinueTestCaseCapture,
+	} {
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		open(p)
+		if _, _, _, _, awaiting := p.learnTracker.Places(); !awaiting {
+			t.Fatalf("%s: the test does not await its request", name)
+		}
+		p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+		if _, earlier, _, _, awaiting := p.learnTracker.Places(); awaiting || len(earlier) != 1 || earlier[0].Mock != "test case test-1" {
+			t.Fatalf("%s: after the request: %+v, awaiting %v", name, earlier, awaiting)
+		}
+	}
+	// A window that closes before the filter brought the request is said at
+	// the default level; one whose request came says nothing.
+	for name, give := range map[string]bool{"closed unread": false, "its request given": true} {
+		core, logs := observer.New(zapcore.InfoLevel)
+		p := startedDrainProxyLogging(t, 100, zap.New(core))
+		p.learnTracker = learn.NewTracker()
+		p.sayLearnWaits()
+		p.BeginTestCaseCapture()
+		if give {
+			p.TakeTestRequest(&models.TestRequest{Test: "test-1"})
+		}
+		p.EndTestErrorCapture()
+		warned := logs.FilterLevelExact(zapcore.WarnLevel).FilterMessageSnippet("closed before the filter that opens the test brought its request").Len()
+		if want := map[bool]int{false: 1, true: 0}[give]; warned != want {
+			t.Fatalf("%s: %d warnings that the window closed without its request; want %d", name, warned, want)
+		}
+	}
+	for name, open := range map[string]func(*Proxy){
+		"keploy mock's begin":    (*Proxy).BeginTestErrorCapture,
+		"keploy mock's continue": (*Proxy).ContinueTestErrorCapture,
+	} {
+		p := startedDrainProxy(t, 100)
+		p.learnTracker = learn.NewTracker()
+		open(p)
+		if _, _, _, _, awaiting := p.learnTracker.Places(); awaiting {
+			t.Fatalf("%s: the test awaits a request", name)
+		}
 	}
 }

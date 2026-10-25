@@ -12,6 +12,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
@@ -115,11 +116,27 @@ type trackedConn struct {
 	// dependency held idle (MarkIdle): while one stands, a handler that is
 	// not reading is no work of keploy's.
 	idle atomic.Int32
+	// flights, under the proven switch, is the learn step's tracker its
+	// requests are told to (learn.Flight): a read that returns bytes while
+	// none is aloft lifts one (flight), the first write after it, its
+	// half-close or its close lands it. Set when it is kept (trackTold),
+	// before anything reads it; nil, nothing is told. fmu orders the lift against the
+	// landing: a handler may read and write from two goroutines. grounded:
+	// its close began, and no read lifts one again (the close's own reads,
+	// pairClosing, are no request).
+	flights  *learn.Tracker
+	fmu      sync.Mutex
+	flight   *learn.Flight
+	grounded bool
 }
 
 // track keeps conn, and returns it wrapped so its reads are seen.
-func (t *inflight) track(conn net.Conn) *trackedConn {
-	tc := &trackedConn{Conn: conn, t: t, id: t.ids.Add(1)}
+func (t *inflight) track(conn net.Conn) *trackedConn { return t.trackTold(conn, nil) }
+
+// trackTold is track of a connection whose requests are told to flights
+// (trackedConn.flights; nil, to none).
+func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn {
+	tc := &trackedConn{Conn: conn, t: t, id: t.ids.Add(1), flights: flights}
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			tc.raw = raw
@@ -333,6 +350,15 @@ func (c *trackedConn) servedBy(t integrations.IntegrationType, parser any) {
 	c.t.changed()
 }
 
+// flights is the learn step's tracker an accepted connection tells its
+// requests to (learn.Flight), under the proven switch; nil without it.
+func (p *Proxy) flights() *learn.Tracker {
+	if !provenswitch.On() {
+		return nil
+	}
+	return p.learnTracker
+}
+
 // Progress is the count of changes so far.
 func (t *inflight) Progress() uint64 { return t.progress.Load() }
 
@@ -340,6 +366,9 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 	c.count(&c.reading, 1)
 	c.t.wake()
 	n, err := c.Conn.Read(b)
+	if n > 0 {
+		c.lift()
+	}
 	c.returned(n, errors.Is(err, io.EOF))
 	if n == 0 && (err == nil || isTimeout(err) || errors.Is(err, io.EOF)) {
 		// Nothing came: a deadline waited out by a parser polling an idle
@@ -349,6 +378,57 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 		c.moved()
 	}
 	return n, err
+}
+
+// Write lands the request in flight (learn.Flight) before the answer's
+// first bytes go out: the application cannot send the next request on
+// what it read before the landing, on this connection or another, so a
+// request that waited for the answer is never read as one aloft with it.
+func (c *trackedConn) Write(b []byte) (int, error) {
+	if len(b) > 0 {
+		c.land(false)
+	}
+	return c.Conn.Write(b)
+}
+
+// lift is a read of c that returned bytes: the start of a request in
+// flight, unless one is aloft (learn.Tracker.Lift).
+func (c *trackedConn) lift() {
+	if c.flights == nil {
+		return
+	}
+	c.fmu.Lock()
+	if c.flight == nil && !c.grounded {
+		c.flight = c.flights.Lift()
+	}
+	c.fmu.Unlock()
+}
+
+// InFlight implements integrations.FlightCarrier: c's request aloft now, nil
+// with none, or told to no tracker.
+func (c *trackedConn) InFlight() *learn.Flight {
+	if c.flights == nil {
+		return nil
+	}
+	c.fmu.Lock()
+	defer c.fmu.Unlock()
+	return c.flight
+}
+
+var _ integrations.FlightCarrier = (*trackedConn)(nil)
+
+// land ends c's request in flight, if one is aloft (learn.Flight.Land);
+// ground too stops any later read lifting one.
+func (c *trackedConn) land(ground bool) {
+	if c.flights == nil {
+		return
+	}
+	c.fmu.Lock()
+	f := c.flight
+	c.flight = nil
+	c.grounded = c.grounded || ground
+	c.fmu.Unlock()
+	f.Land()
 }
 
 // count changes one of c's counts under c.mu (view).
@@ -464,6 +544,7 @@ func (c *trackedConn) SyscallConn() (syscall.RawConn, error) {
 // (SQS's) has not filed the miss yet: until the proxy files it, the
 // connection holds the test's work, as a handler not blocked reading does.
 func (c *trackedConn) Close() error {
+	c.land(true)
 	c.closing.Store(true)
 	if c.beforeClose != nil {
 		c.closeOnce.Do(c.beforeClose)
@@ -479,6 +560,7 @@ func (c *trackedConn) HoldTLSLayer(l *tls.Conn) { c.tlsLayer.Store(l) }
 
 // CloseWrite forwards a half-close to the conn underneath.
 func (c *trackedConn) CloseWrite() error {
+	c.land(false)
 	type closeWriter interface{ CloseWrite() error }
 	if cw, ok := c.Conn.(closeWriter); ok {
 		return cw.CloseWrite()

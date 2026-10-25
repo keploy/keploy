@@ -266,23 +266,124 @@ func missReportOf(t *testing.T, db integrations.MockMemDb, addr, raw string, opt
 // gateDb is earlierDb under exact serving: staged are other tests'
 // recordings no read shows (integrations.StagedFinder), and consumed the open
 // test's recordings that already answered a call of it
-// (integrations.ExactConsumedReader).
+// (integrations.ExactConsumedReader). It marks every call in one staging
+// that it never leaves, so it holds each call to its round as it is
+// (integrations.RoundHolder); a store that marks a call's round but cannot
+// hold it reads nothing for it, and names nothing made elsewhere.
 type gateDb struct {
 	earlierDb
 	staged   []*models.Mock
 	consumed []*models.Mock
 }
 
-func (d gateDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+func (d gateDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+
+func (d gateDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
+func (d gateDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	if !call.Read() {
+		return "", false
+	}
 	for _, m := range d.staged {
 		if m.Kind == kind && match(m) {
-			return m.Name
+			return m.Name, false
 		}
 	}
-	return ""
+	return "", false
 }
 
 func (d gateDb) ConsumedTestMocks() []*models.Mock { return d.consumed }
+
+// roundGateDb is gateDb read in one snapshot of the round
+// (integrations.RoundReader), as the agent's MockManager is under exact
+// serving: the store shows the pool view between tests, whose session tier
+// is the recordings earlierDb holds, none of them the view's own, so a
+// call's first pass is where the call was made (RoundSnapshot.CallRound).
+type roundGateDb struct{ gateDb }
+
+func (d roundGateDb) RoundSnapshot(integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	s := integrations.RoundSnapshot{At: integrations.RoundAt{Epoch: 1, Gen: 1}, Phase: integrations.RoundBetween, Session: d.mocks}
+	return s.WithParts(integrations.RoundParts{}), true
+}
+
+func (d roundGateDb) WithinRound(integrations.RoundAt) integrations.RoundScope {
+	return roundGateScope{d}
+}
+
+func (d roundGateDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
+func (roundGateDb) ClaimPairingIn(*models.Mock, integrations.RoundAt) (claimed, moved bool, why string) {
+	return false, false, "no pairing in this store"
+}
+
+func (roundGateDb) SpendByKindIn(*models.Mock, integrations.RoundAt) (spent, moved bool, why string) {
+	return false, false, "no background spend in this store"
+}
+
+func (roundGateDb) TakenLog(uint64, int, int) []integrations.Take { return nil }
+
+// roundGateScope is roundGateDb as a RoundScope whose round never moves.
+type roundGateScope struct{ roundGateDb }
+
+func (roundGateScope) Moved() string { return "" }
+
+var _ integrations.RoundReader = roundGateDb{}
+
+// restagedDb is earlierDb with a call the replay staged another set under
+// while the call was decided. The store itself names the answered recording
+// it holds (the other set's: recordings' names restart in each set). The
+// store held to the call's round names none and says the call was
+// restaged, as the agent's held store does once the staging moved
+// (heldScope.FindAnsweredEarlier and FindStagedNotOwned).
+type restagedDb struct{ earlierDb }
+
+func (restagedDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+
+func (restagedDb) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*models.Mock) bool) (string, bool) {
+	return "", false
+}
+
+func (d restagedDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return restagedHeld{earlierDb{mockMemDb: d.mockMemDb}}, func() bool { return true }
+}
+
+// restagedHeld is restagedDb held to the call's round once the replay
+// staged another set under the call.
+type restagedHeld struct{ earlierDb }
+
+func (restagedHeld) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+
+func (restagedHeld) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*models.Mock) bool) (string, bool) {
+	return "", true
+}
+
+// A miss's repeat note is asked of the store held to the call's round
+// (integrations.HoldToRound), as every other diagnosis of the miss is: once
+// the replay staged another set under the call, and that set's own mock-7
+// answered, the call is named no repeat of mock-7, and its miss says it was
+// restaged.
+func TestARepeatNoteIsAskedOfTheStoreHeldToTheCallsRound(t *testing.T) {
+	const addr, host = "127.0.0.1:8099", "localhost:8099"
+	t.Setenv(provenswitch.Env, "1")
+	other := sapCount("mock-7", host, time.Date(2026, 10, 24, 10, 0, 0, 0, time.UTC))
+	db := restagedDb{earlierDb{mockMemDb: &mockMemDb{}, answered: []integrations.AnsweredCall{{
+		Mock: other, AnsweredAt: time.Now().Add(-time.Minute),
+	}}}}
+	if a, ok := db.FindAnsweredEarlier(models.HTTP, nil, func(*models.Mock) bool { return true }); !ok || a.Mock.Name != "mock-7" {
+		t.Fatalf("precondition: the store itself names %v (%v); want the other set's mock-7", a.Mock, ok)
+	}
+	r := missReport(t, db, addr, host, "/sap/A_BusinessPartner/$count?$filter=x", models.OutgoingOptions{})
+	if r.Repeat != nil || r.ClosestMock == "mock-7" || strings.Contains(r.NextSteps, "identical to") {
+		t.Fatalf("a call the replay restaged under is named a repeat: %+v (closest %q, next step %q); want no note", r.Repeat, r.ClosestMock, r.NextSteps)
+	}
+	if !strings.Contains(r.NextSteps, restagedNote) {
+		t.Fatalf("the restaged call's next step is %q; want it to say the replay staged a set again", r.NextSteps)
+	}
+}
 
 // Under exact serving a call that is another test's recording no read shows
 // stays named as that recording made elsewhere (not owned): it is the reason
@@ -324,12 +425,22 @@ func TestARepeatNoteJoinsANotOwnedMissAndLeavesAnExtraCall(t *testing.T) {
 	// In record's full round a learn step may name a recording the request
 	// changed from; a call made elsewhere is named as that recording all the
 	// same, with the note beside it, which the learn reason no longer
-	// explains.
+	// explains. The learn step's first pass is the call's first read of the
+	// round, and only a store that reads its round in one snapshot (the
+	// agent's) says from it where the call was made.
 	changed := onHost("mock-c", path+"&$top=1", host)
 	learning := earlierDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{changed}}, answered: earlier.answered}
-	r = missReport(t, gateDb{earlierDb: learning, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{Learn: true, LearnPool: true})
+	r = missReport(t, roundGateDb{gateDb{earlierDb: learning, staged: []*models.Mock{elsewhere}}}, addr, host, path, models.OutgoingOptions{Learn: true, LearnPool: true})
 	if !r.NotOwned || r.ClosestMock != "mock-w" || r.Repeat == nil || r.Repeat.Mock != "mock-7" || !strings.Contains(r.NextSteps, "This request is mock-w") {
 		t.Fatalf("in the learn round a call made elsewhere is closest %q, not owned %v, note %+v, next step %q; want mock-w with the note on mock-7", r.ClosestMock, r.NotOwned, r.Repeat, r.NextSteps)
+	}
+	// A store that reads no round in one snapshot gives the learn step's
+	// first pass no round to ask a recording made elsewhere of: the miss
+	// names none, keeps the learn step's reason and closest, and gets no
+	// note.
+	r = missReport(t, gateDb{earlierDb: learning, staged: []*models.Mock{elsewhere}}, addr, host, path, models.OutgoingOptions{Learn: true, LearnPool: true})
+	if r.NotOwned || r.ClosestMock != "mock-c" || r.Reason != models.MissRequestChanged || r.Repeat != nil || strings.Contains(r.NextSteps, "mock-w") {
+		t.Fatalf("in the learn round with no snapshot of it a call is closest %q, not owned %v, reason %q, note %+v, next step %q; want mock-c's learn miss, nothing made elsewhere and no note", r.ClosestMock, r.NotOwned, r.Reason, r.Repeat, r.NextSteps)
 	}
 
 	alone := earlierDb{mockMemDb: &mockMemDb{}}

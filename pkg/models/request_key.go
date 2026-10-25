@@ -2,7 +2,7 @@ package models
 
 import "sync"
 
-// REQUEST KEYS (design v14 S12, a2).
+// REQUEST KEYS (design v14, a2).
 //
 // A miss under exact serving that is a recording made elsewhere names that
 // recording, which keploy record's judging bakes into the set's worker scope.

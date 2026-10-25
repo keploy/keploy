@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -398,5 +399,44 @@ func TestAWithdrawnCaptureWindowIsCarriedIntoTheNextTestsWhole(t *testing.T) {
 	}
 	if n := logs.FilterMessageSnippet("dropped").Len(); n != 0 {
 		t.Fatalf("misses were said to be dropped (%d)", n)
+	}
+}
+
+// A window taken back (WithdrawTestErrorCapture) ends the learn tracker's
+// test through the mock manager, as every boundary of the proxy's tracker
+// does (learnBoundary): holding the round lock, so the manager's round reads
+// the tracker as it is. Ended on the tracker alone, the round still read the
+// withdrawn test as open: a test's view the store then installed, before the
+// tracker began the next test (the store opening it first), was bound to the
+// withdrawn test, and once the tracker began that next test every read of
+// the round found the two apart ("the learn tracker began another test"),
+// though the store showed the very test the tracker had begun. Bound to
+// none, the view is the test the tracker begins next, and the round is in it.
+// No caller installs a view between a failed begin and the next window (the
+// agent opens the window before the view); the row drives that order
+// directly, as the store-led order LearnBoundary binds.
+func TestAWithdrawnWindowEndsTheTrackersTestInTheManagersRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own := exactMock("own", 0, models.LifetimePerTest)
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4), learnTracker: learn.NewTracker()}
+	mm := stagedManager(t, []*models.Mock{own}, nil)
+	p.setMockManager(mm)
+	p.BeginTestErrorCapture()
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	p.EndTestErrorCapture()
+	mm.ServeExactPool("-", nil)
+	p.ContinueTestErrorCapture() // the begin that fails opens its window first
+	p.WithdrawTestErrorCapture()
+	if mm.exact.round.learn.open {
+		t.Fatal("the manager's round still reads the withdrawn test as open")
+	}
+	mm.ServeExactTest("T2", []*models.Mock{own})
+	p.ContinueTestErrorCapture()
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP, Tracker: p.learnTracker})
+	if !ok {
+		t.Fatal("no round snapshot")
+	}
+	if snap.Phase != integrations.RoundInTest || snap.Test != "T2" {
+		t.Fatalf("the round reads phase %v, test %q (%s); want T2's test, the one the tracker began over the view", snap.Phase, snap.Test, snap.Boundary)
 	}
 }

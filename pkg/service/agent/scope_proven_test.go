@@ -1517,6 +1517,46 @@ func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 	require.Equal(t, at.Add(21*time.Second), got)
 }
 
+// recBeginProxy is a wireProxy that takes a test's recorded begin
+// (coreAgent.RecordedBeginTaker), and says in which order it was given it and
+// opened the test's capture window.
+type recBeginProxy struct {
+	*wireProxy
+	order []string
+	taken []time.Time
+}
+
+func (p *recBeginProxy) TakeRecordedBegin(at time.Time) {
+	p.order, p.taken = append(p.order, "recorded begin"), append(p.taken, at)
+}
+
+func (p *recBeginProxy) ContinueTestErrorCapture() {
+	p.order = append(p.order, "open")
+	p.wireProxy.ContinueTestErrorCapture()
+}
+
+// A replayed test's begin gives the proxy's learn step the instant the test
+// began at in its recording, before the test's capture window opens (the
+// tracker begins the test with it): a test the recording lists no begin of
+// gives none.
+func TestABeginGivesTheLearnStepItsRecordedBegin(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &recBeginProxy{wireProxy: wp}
+	a.Proxy = p
+	ctx := context.Background()
+	claimSelf(t, a)
+	at := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": at}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	require.Equal(t, []string{"recorded begin", "open", "recorded begin", "open"}, p.order)
+	require.Equal(t, []time.Time{at, {}}, p.taken)
+}
+
 // A begin opens the test's capture window, where the proxy's learn tracker
 // begins the test, before it installs the test's view: a tracker that began
 // after it would file what the view served first as the previous test's. A

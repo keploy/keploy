@@ -730,25 +730,26 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 // order is recordedBefore's, as splitVariableMocks orders a tier. commit
 // marks the answer served once the call is answered (nil when no mark
 // applies).
-func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
+func (h *HTTP) pickHit(hits []*varHit, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
 	first := hits[0]
 	cs, ok := mockDb.(integrations.MockCursor)
 	if !statefulMocks || !ok || first.mock.TestModeInfo.Consume != models.ConsumeCursorSaturate {
 		return first, nil
 	}
-	group := make([]*varHit, 0, len(hits))
+	byMock := make(map[*models.Mock]*varHit, len(hits))
+	stateful := make([]*models.Mock, 0, len(hits))
 	for _, hit := range hits {
 		if hit.mock.TestModeInfo.Consume == models.ConsumeCursorSaturate {
-			group = append(group, hit)
+			byMock[hit.mock] = hit
+			stateful = append(stateful, hit.mock)
 		}
 	}
-	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i].mock, group[j].mock) })
-	mocks := make([]*models.Mock, len(group))
-	for i, hit := range group {
-		mocks[i] = hit.mock
-	}
+	// Under the background rules the open test's own and the set's
+	// background are two bands (statefulBand).
+	mocks, cs := statefulBand(first.mock, stateful, own, mockDb, cs)
+	sort.SliceStable(mocks, func(i, j int) bool { return recordedBefore(mocks[i], mocks[j]) })
 	i, commit := servedPick(mocks, cs)
-	return group[i], commit
+	return byMock[mocks[i]], commit
 }
 
 // serveVariables answers the call with a hit: loads its response, renders its

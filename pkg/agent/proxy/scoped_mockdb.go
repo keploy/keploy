@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -9,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/starts"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
@@ -289,27 +291,108 @@ func (s *scopedMockDb) MarkMockAsUsed(mock models.Mock) bool {
 // on it must see that MarkMockAsUsed's false for a named mock is a refusal.
 func (s *scopedMockDb) ExactServing() bool { return integrations.ExactServing(s.MockMemDb) }
 
+// Background, SpentBackground, PairingCandidates and ClaimPairing forward the
+// store's background serving (integrations.ExactBackground, Pairing): a
+// view made before exact serving began reads the bare manager's, nil and
+// false from a store that has none.
+func (s *scopedMockDb) Background(kind models.Kind) []*models.Mock {
+	return integrations.Background(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) SpentBackground(kind models.Kind) []*models.Mock {
+	return integrations.SpentBackground(s.MockMemDb, kind)
+}
+
+// KindBackground and SpendByKind forward the store's by-kind background
+// (integrations.ByKindBackground).
+func (s *scopedMockDb) KindBackground(kind models.Kind) (unused, spent []*models.Mock) {
+	return integrations.KindBackground(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) SpendByKind(m *models.Mock) bool {
+	return integrations.SpendByKind(s.MockMemDb, m)
+}
+
+var _ integrations.ByKindBackground = (*scopedMockDb)(nil)
+
+func (s *scopedMockDb) PairingCandidates(kind models.Kind) []*models.Mock {
+	return integrations.PairingCandidates(s.MockMemDb, kind)
+}
+
+func (s *scopedMockDb) ClaimPairing(m *models.Mock) bool {
+	return integrations.ClaimPairing(s.MockMemDb, m)
+}
+
+var (
+	_ integrations.ExactBackground = (*scopedMockDb)(nil)
+	_ integrations.Pairing         = (*scopedMockDb)(nil)
+)
+
+// RoundSnapshot, WithinRound, ClaimPairingIn, SpendByKindIn and TakenLog
+// forward the store's one read of exact serving's round
+// (integrations.RoundReader). A view passes everything through to its
+// store under exact serving (passThrough), the only time a round is read:
+// a parser on a view made before exact serving began reads and takes as it
+// does on the bare manager. A store that reads no round answers none.
+func (s *scopedMockDb) RoundSnapshot(q integrations.RoundQuery) (integrations.RoundSnapshot, bool) {
+	return integrations.SnapshotRound(s.MockMemDb, q)
+}
+
+// AwaitRoundMove forwards the store's wait for its round to move
+// (integrations.RoundWaiter); false, at once, from a store that has none.
+func (s *scopedMockDb) AwaitRoundMove(ctx context.Context, at integrations.RoundAt) (bool, error) {
+	return integrations.AwaitRoundMove(ctx, s.MockMemDb, at)
+}
+
+func (s *scopedMockDb) WithinRound(at integrations.RoundAt) integrations.RoundScope {
+	return integrations.WithinRound(s.MockMemDb, at)
+}
+
+func (s *scopedMockDb) ClaimPairingIn(m *models.Mock, at integrations.RoundAt) (bool, bool, string) {
+	return integrations.ClaimPairingIn(s.MockMemDb, m, at)
+}
+
+func (s *scopedMockDb) SpendByKindIn(m *models.Mock, at integrations.RoundAt) (bool, bool, string) {
+	return integrations.SpendByKindIn(s.MockMemDb, m, at)
+}
+
+func (s *scopedMockDb) TakenLog(epoch uint64, from, to int) []integrations.Take {
+	if r, ok := s.MockMemDb.(integrations.RoundReader); ok {
+		return r.TakenLog(epoch, from, to)
+	}
+	return nil
+}
+
+var (
+	_ integrations.RoundReader = (*scopedMockDb)(nil)
+	_ integrations.RoundWaiter = (*scopedMockDb)(nil)
+)
+
+// MarkCallRound forwards the store's (integrations.StagedFinder): the zero
+// CallRound from a store that names no recording made elsewhere.
+func (s *scopedMockDb) MarkCallRound() integrations.CallRound {
+	return integrations.MarkCallRound(s.MockMemDb)
+}
+
 // FindStagedNotOwned forwards the store's lookup of a staged mock the open
 // test does not own (integrations.StagedFinder), "" from a store that has
 // none: under exact serving a Generic miss on a view made before it began is
 // diagnosed as one on the bare manager is.
-func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+func (s *scopedMockDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
 	if f, ok := s.MockMemDb.(integrations.StagedFinder); ok {
-		return f.FindStagedNotOwned(kind, match)
+		return f.FindStagedNotOwned(kind, call, match)
 	}
-	return ""
+	return "", false
 }
-
-var _ integrations.StagedFinder = (*scopedMockDb)(nil)
 
 // FindStagedNotOwnedByKeys forwards the store's
 // (integrations.StagedKeyFinder), or, from one that has none, its
 // FindStagedNotOwned.
-func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+func (s *scopedMockDb) FindStagedNotOwnedByKeys(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
 	if f, ok := s.MockMemDb.(integrations.StagedKeyFinder); ok {
-		return f.FindStagedNotOwnedByKeys(kind, keys, match)
+		return f.FindStagedNotOwnedByKeys(kind, call, keys, match)
 	}
-	return s.FindStagedNotOwned(kind, match)
+	return s.FindStagedNotOwned(kind, call, match)
 }
 
 var _ integrations.StagedKeyFinder = (*scopedMockDb)(nil)
@@ -324,6 +407,52 @@ func (s *scopedMockDb) StagedOwnerBegun(name string) bool {
 }
 
 var _ integrations.BegunOwnerReader = (*scopedMockDb)(nil)
+
+// ServingFor implements integrations.ServeTeller: this view over the store's
+// ServingFor(f), so a parser on a connection whose view was made before exact
+// serving began (scopedFor keeps it for the connection's life) tells the
+// learn step whose request it serves, as on the bare manager, and its
+// consumes stay filtered by this worker's view. s itself from a store that
+// does not tell: its serves are the one request aloft's. The copy is for one
+// call's consumes (ServeTeller): a cursor peek resolved on it is not kept.
+func (s *scopedMockDb) ServingFor(f *learn.Flight) integrations.MockMemDb {
+	t, ok := s.MockMemDb.(integrations.ServeTeller)
+	if !ok {
+		return s
+	}
+	c := *s
+	c.MockMemDb = t.ServingFor(f)
+	return &c
+}
+
+var _ integrations.ServeTeller = (*scopedMockDb)(nil)
+
+// HoldToRound implements integrations.RoundHolder: this view over the store
+// held to call, so a parser on a connection whose view was made before exact
+// serving began reads and consumes only while the staging is still its
+// call's, as on the bare manager, filtered by this worker's view. s itself,
+// never restaged, for a call of no round; over a store that marked the call
+// but cannot hold it, this view over the fail-closed store, which reads
+// nothing and tells why (Unheld). The copy is one call's (RoundHolder), as
+// ServingFor's is.
+func (s *scopedMockDb) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	inner, restaged := integrations.HoldToRound(s.MockMemDb, call)
+	if inner == s.MockMemDb {
+		return s, restaged
+	}
+	c := *s
+	c.MockMemDb = inner
+	return &c, restaged
+}
+
+// Unheld implements integrations.UnheldTeller: the store's, so a view over
+// the fail-closed store HoldToRound made says why its call read nothing.
+func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMemDb) }
+
+var (
+	_ integrations.RoundHolder  = (*scopedMockDb)(nil)
+	_ integrations.UnheldTeller = (*scopedMockDb)(nil)
+)
 
 // passThrough reports whether this view passes every read and consume
 // straight to the store it wraps: while the store serves each test exactly
@@ -410,8 +539,27 @@ func (s *scopedMockDb) StagedMocks() []*models.Mock {
 
 var _ integrations.StagedReader = (*scopedMockDb)(nil)
 
-// RangeRecordedBefore forwards the store's recordings before t
-// (integrations.RecordedBeforeReader), whatever this view's allowlist shows:
+// RangeStagedRecordings forwards the store's staged recordings
+// (integrations.StagedRecordingReader), whatever this view's allowlist
+// shows: a call that is exactly one the view does not offer is that
+// recording's. Over a store that keeps no such reader it visits the store's
+// staged mocks (StagedMocks) of kind, the trees' alone.
+func (s *scopedMockDb) RangeStagedRecordings(kind models.Kind, keys []string, visit func(*models.Mock) bool) error {
+	if r, ok := s.MockMemDb.(integrations.StagedRecordingReader); ok {
+		return r.RangeStagedRecordings(kind, keys, visit)
+	}
+	for _, mk := range s.StagedMocks() {
+		if mk != nil && mk.Kind == kind && !visit(mk) {
+			return nil
+		}
+	}
+	return nil
+}
+
+var _ integrations.StagedRecordingReader = (*scopedMockDb)(nil)
+
+// RangeRecordedBefore forwards the store's recordings before t, or at its
+// own instant (integrations.RecordedBeforeReader), whatever this view's allowlist shows:
 // the learn step's earlier places are the recording's. Over a store that
 // keeps no such reader it is an error, not what the view holds: the view
 // cannot visit every recording made before t, and a caller that took what it
@@ -582,14 +730,7 @@ func (s *scopedMockDb) MockCursorIndex(key string, n int) int {
 	if !ok {
 		return -1
 	}
-	switch {
-	case s.passThrough():
-		s.lastScope = ""
-	case s.live:
-		s.lastScope = starts.Default.Scope(s.pid)
-	default:
-		s.lastScope = s.current().scope
-	}
+	s.resolveCursorScope()
 	return c.MockCursorIndex(s.cursorKey(key), n)
 }
 
@@ -598,6 +739,48 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 		c.AdvanceMockCursor(s.cursorKey(key), servedIdx, n)
 	}
 }
+
+// resolveCursorScope resolves, for a peek, the scope its cursor key is in
+// (cursorKey), which the commit after it reuses.
+func (s *scopedMockDb) resolveCursorScope() {
+	switch {
+	case s.passThrough():
+		s.lastScope = ""
+	case s.live:
+		s.lastScope = starts.Default.Scope(s.pid)
+	default:
+		s.lastScope = s.current().scope
+	}
+}
+
+// BackgroundCursor forwards the store's background cursor under the background rules
+// (integrations.BackgroundCursor), its keys in this view's scope as every
+// other cursor key of it is (cursorKey): false from a store that has none.
+func (s *scopedMockDb) BackgroundCursor() (integrations.MockCursor, bool) {
+	inner, ok := integrations.BackgroundCursorOf(s.MockMemDb)
+	if !ok {
+		return nil, false
+	}
+	return scopedBackgroundCursor{s: s, inner: inner}, true
+}
+
+// scopedBackgroundCursor is the store's background cursor through a scoped
+// view (scopedMockDb.BackgroundCursor).
+type scopedBackgroundCursor struct {
+	s     *scopedMockDb
+	inner integrations.MockCursor
+}
+
+func (c scopedBackgroundCursor) MockCursorIndex(key string, n int) int {
+	c.s.resolveCursorScope()
+	return c.inner.MockCursorIndex(c.s.cursorKey(key), n)
+}
+
+func (c scopedBackgroundCursor) AdvanceMockCursor(key string, servedIdx, n int) {
+	c.inner.AdvanceMockCursor(c.s.cursorKey(key), servedIdx, n)
+}
+
+var _ integrations.BackgroundCursor = (*scopedMockDb)(nil)
 
 // InTestWindow forwards integrations.TestWindows.
 func (s *scopedMockDb) InTestWindow(t time.Time) bool {

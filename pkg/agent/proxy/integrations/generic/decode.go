@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -91,9 +92,18 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				continue
 			}
 
+			// The request's first read of the round, before the matcher
+			// reads the store: a miss's lookup of an exchange made
+			// elsewhere is asked of it (notOwnedExchange).
+			call := integrations.MarkCallRound(mockDb)
+			// The matcher and the miss read the store held to that read's
+			// staging (integrations.HoldToRound): once the replay stages
+			// another set, the request finds nothing of it to be answered
+			// with, nor compared with, and misses saying so.
+			db, _ := integrations.HoldToRound(mockDb, call)
 			// bestMatchedIndx := 0
 			// fuzzy match gives the index for the best matched generic mock
-			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, mockDb)
+			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, db)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
 			}
@@ -109,17 +119,29 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 				// Under exact serving: one exchange more than the test
 				// recorded? Any other miss is compared with the test's
 				// answered exchanges too: they are in no read now.
-				n := extraCall(genericRequests, mockDb)
+				n := extraCall(genericRequests, db)
 				var answered []*models.Mock
 				if n == 0 {
-					answered = answeredExchanges(mockDb)
+					answered = answeredExchanges(db)
 				}
-				report := buildGenericMismatchReport(ctx, genericRequests, mockDb, answered)
+				report := buildGenericMismatchReport(ctx, genericRequests, db, answered)
+				// The miss was decided where the request first read the
+				// round: whether that read found a staging is told from it.
+				integrations.StampMark(report, call)
 				if n > 0 {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
-				} else if name := notOwnedExchange(genericRequests, mockDb); name != "" {
+				} else if name, restaged := notOwnedExchange(genericRequests, db, call); name != "" {
 					report.ClosestMock, report.NotOwned = name, true
 					report.NextSteps = notOwnedExchangeNextSteps(name)
+				} else if restaged {
+					// The lookup checks the staging last: a matcher held to
+					// the request's first read that found it moved found
+					// nothing (integrations.HoldToRound).
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedExchangeNote)
+				} else if why := integrations.UnheldWhy(db); why != "" {
+					// The store marked the request's round but could not
+					// hold it: its matcher read nothing (HoldToRound).
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
 				}
 				// Per-call generic detail at Debug; the canonical mock-mismatch
 				// WARN is emitted once in proxy.sendMockNotFoundError (covers

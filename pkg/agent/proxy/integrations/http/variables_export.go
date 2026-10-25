@@ -119,7 +119,7 @@ func (h *HTTP) VariableMatch(ctx context.Context, scope VariableScope, call Vari
 		}
 		return VariableResult{Outcome: VariableNone, Rest: rest}, nil
 	}
-	hit, commitCursor := h.pickHit(hits, mockDb, false)
+	hit, commitCursor := h.pickHit(hits, nil, mockDb, false)
 	served, problem, retry, err := h.serveVariablesBy(hit, consume)
 	switch {
 	case err != nil:

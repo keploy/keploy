@@ -17,19 +17,28 @@ import (
 // test's, any test's with no test open, or a worker-scope one whose place the
 // run has not reached (integrations.StagedFinder). The call was made where it
 // was not recorded: record's judging reads it to bake the recording into the
-// worker scope (design v14 S12, a2). nil when there is none, or the store
+// worker scope (design v14, a2). nil when there is none, or the store
 // keeps no staged mocks to look in. ctx carries the request's destination as
 // it came (liveDestination).
-func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise) *models.Mock {
+//
+// The store is asked of call, the round the request's first read found it
+// made in (integrations.CallRound, marked before any matcher read the
+// store): it names no recording that read's view held as its own, and none
+// once the replay staged another set, which restaged then says
+// (restagedNote), for the miss to tell. The zero CallRound names nothing.
+func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.MockMemDb, n strictNoise, call integrations.CallRound) (found *models.Mock, restaged bool) {
 	live := liveDestination(ctx, input)
-	var found *models.Mock
+	// accepted is what match last accepted: the store names it unless
+	// another miss spent its name first, and then offers the next.
+	var accepted *models.Mock
 	match := func(m *models.Mock) bool {
 		if m.Spec.HTTPReq == nil || len(strictDiff(input, live, m, n)) != 0 {
 			return false
 		}
-		found = m
+		accepted = m
 		return true
 	}
+	name := ""
 	switch f := mockDb.(type) {
 	case integrations.StagedKeyFinder:
 		path := ""
@@ -37,12 +46,23 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 			path = input.url.Path
 		}
 		target := strings.Join(input.header.Values(amzTargetHeader), ",")
-		f.FindStagedNotOwnedByKeys(models.HTTP, RequestKeysOf(input.method, path, target, n.loose()), match)
+		name, restaged = f.FindStagedNotOwnedByKeys(models.HTTP, call, RequestKeysOf(input.method, path, target, n.loose()), match)
 	case integrations.StagedFinder:
-		f.FindStagedNotOwned(models.HTTP, match)
+		name, restaged = f.FindStagedNotOwned(models.HTTP, call, match)
 	}
-	return found
+	if restaged || name == "" || accepted == nil || accepted.Name != name {
+		return nil, restaged
+	}
+	return accepted, false
 }
+
+// restagedNote is what a miss says when the replay staged a test set again
+// while the call was decided: its matcher, held to the call's first read
+// (integrations.HoldToRound), found nothing to answer it with, or its lookup
+// of a recording made elsewhere (notOwnedRecording) named none. The next
+// set, or the same set for a replaced agent, which the store does not tell
+// apart.
+const restagedNote = "keploy replay staged a test set again while it decided this request, so keploy answered it with no recording and names none made elsewhere for it: a request is never answered with, nor named as, a recording of a staging made after it began."
 
 // amzTargetHeader names an AWS JSON-protocol call's action.
 const amzTargetHeader = "X-Amz-Target"
@@ -129,11 +149,37 @@ func recordedRequestKeys(m *models.Mock) []string {
 		}
 		learned = k.learnedAt("url.path."+strconv.Itoa(i), "")
 	}
+	if !learned && hasVariables(m) {
+		learned = variableKeyed(m, len(segs))
+	}
 	keys := []string{requestKeyShape(method, len(segs))}
 	if learned {
 		return append(keys, requestKeyLearned(method, len(segs)))
 	}
 	return append(keys, requestKeyExact(method, segs, target))
+}
+
+// variableKeyed reports whether a variable of m (variablePlaces) sits where
+// the exact request key reads (one of its segs path segments, or its
+// X-Amz-Target), or at a place keploy cannot read. A call of m holds a value
+// made anew each run there, so m is filed under the learned key, as for
+// learned noise there: filed under its recorded value, no call that carries
+// another would ask for it, and the learn step's check that a call is exactly
+// a recording made elsewhere (exactlyElsewhere) would pass it over.
+func variableKeyed(m *models.Mock, segs int) bool {
+	at, err := variablePlaces(m)
+	if err != nil {
+		return true
+	}
+	if at["header."+strings.ToLower(amzTargetHeader)] {
+		return true
+	}
+	for i := 0; i < segs; i++ {
+		if at["url.path."+strconv.Itoa(i)] {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

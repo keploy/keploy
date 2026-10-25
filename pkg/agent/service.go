@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -183,7 +184,7 @@ type AcceptCounter interface {
 	ListenDrops() (uint64, error)
 }
 
-// ProxyConnCounter is what the agent offers a test's begin and end (S12): the
+// ProxyConnCounter is what the agent offers a test's begin and end: the
 // connections to the proxy, numbered on both sides, and a wait for every call
 // the application had started by a read to be in the proxy's hands. begin and
 // end read ProxyConns, then WaitProxySettled(ctx, counts), then go on to the
@@ -475,6 +476,48 @@ type VariableResetter interface {
 	ResetVariables()
 }
 
+// TestRequestTaker is the optional extension implemented by proxies whose
+// learn step reads a keploy test case's own request (models.TestRequest): the
+// agent hands it the request the filter that opens the test case carries,
+// before the test case's mocks go live (nil: the filter carried none, as a
+// keploy older than its agent sends it). Under the proven switch the learn
+// step reads it as the test's earliest place. A proxy that lacks it
+// reads none.
+//
+// BeginTestCaseCapture and ContinueTestCaseCapture open the capture window of
+// a test keploy test opens, as BeginTestErrorCapture and
+// ContinueTestErrorCapture do, and in the same step begin the learn step's
+// test awaiting its request, which its opening filter brings: until
+// TakeTestRequest gives it, a call that reads the test's places waits for it,
+// so the learn step's verdict on a call does not hang on whether the call
+// came before the filter or after it. The agent calls one as keploy test
+// opens the test's capture window.
+type TestRequestTaker interface {
+	BeginTestCaseCapture()
+	ContinueTestCaseCapture()
+	TakeTestRequest(req *models.TestRequest)
+}
+
+// ClientTestsReader is the optional extension implemented by proxies whose
+// learn step reads keploy mock's tests as a test harness's client tests
+// (learn.Tracker.SetClientTests): ClientTests reports whether it does, which
+// the agent of a keploy mock session answers the session's MockOutgoing
+// with (models.ClientTestsReadHeader). A proxy that lacks it reads none so.
+type ClientTestsReader interface {
+	ClientTests() bool
+}
+
+// RecordedBeginTaker is the optional extension implemented by proxies whose
+// learn step bounds a client test's calls by the test's begin: the agent
+// gives it, as a keploy mock test begins and before the proxy opens the
+// test, the instant the test began at in its recording (the one the test's
+// begin moves the app's clock to), so the test's first call has a window
+// on the app's clock in the recording too (learn.Tracker.RecordedBegin). A
+// proxy that lacks it bounds no call so.
+type RecordedBeginTaker interface {
+	TakeRecordedBegin(at time.Time)
+}
+
 // VariableBinder is the optional extension implemented by proxies that keep
 // the test variables a replay binds: it begins a test's variables with the
 // values its own request gave (false when it holds no table), and reads back
@@ -523,6 +566,30 @@ type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
 }
 
+// ExactBackgroundServer is implemented by a proxy that serves a test set's
+// background (its worker scope and its pool) by the background rules under
+// exact serving (models.RecordedWithS12Routing, replay.RegisterS12Serving):
+// StageExactBackground opens each set's staging under the rules the set is
+// served by, before the staging installs a view, so every view of the
+// staging reads the set's rules; ServeExactBackground then names the set's
+// pool and its whole worker scope, once its mocks are staged; any rules but
+// the background rules are today's. A proxy that does not implement it serves every set by
+// today's rules, and the agent says so to the replay
+// (models.BackgroundRulesHeader), which then keeps today's checks.
+type ExactBackgroundServer interface {
+	StageExactBackground(rules string) error
+	ServeExactBackground(rules string, pool, worker []string) error
+}
+
+// RecordedOfKindSetter is implemented by a proxy whose pairing (record's full
+// round) reads, beside what is staged, the set's recordings of
+// a kind the agent keeps on disk: a test's own are staged only as it opens.
+// SetRecordedOfKind sets where (src visits the on-disk mocks of a kind, in
+// recorded order, decoding one only as visit loads it; nil for none).
+type RecordedOfKindSetter interface {
+	SetRecordedOfKind(src func(kind models.Kind, visit func(name string, load func() (*models.Mock, error)) bool) error) error
+}
+
 // RecordingSourceSetter is implemented by a proxy whose miss diagnosis under
 // exact serving (a call that is a recording made elsewhere) can read, beside
 // what is staged, the set's recordings the agent keeps on disk: a test's own
@@ -543,6 +610,24 @@ type RecordingSourceSetter interface {
 // time, decoding one at a time; nil for none). Nothing it reads is served.
 type RecordedBeforeSetter interface {
 	SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error
+}
+
+// LearnEndSetter is implemented by a proxy whose learn step a keploy test
+// filter can end for the rest of a test set (models.MockFilterParams.
+// LearnEnded): SetLearnEnded says whether it has ended. The agent sets it from
+// every keploy test filter, before the filter's view goes live.
+type LearnEndSetter interface {
+	SetLearnEnded(ended bool) error
+}
+
+// KeptLearningSetter is implemented by a proxy that serves a test set's
+// retry cycles the staged recordings (the pool's, the worker scope's) with
+// what keploy record keeps of the set's first-cycle learning on them
+// (models.MockFilterParams.Learned): SetKeptLearning puts it there, nil
+// takes it off. The agent's own store carries it on the recordings it hands
+// the proxy (a test's own); the staged ones are the proxy's.
+type KeptLearningSetter interface {
+	SetKeptLearning(l *learn.KeptLearning) error
 }
 
 type ExactServer interface {
