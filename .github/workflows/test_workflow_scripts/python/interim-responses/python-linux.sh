@@ -21,6 +21,17 @@
 # server does when its handler does not read the body, with no 100: curl
 # sends the body once it stops waiting for the 100, and the test case must
 # hold it too.
+#
+# It also guards that a run leaves none of keploy's CA trust files behind.
+# Every native run, whatever the app's language, wrote the app's CA file
+# (keploy-ca-*.crt, one more per run) and a Java truststore
+# (keploy-java-truststore-*, built in Go, one per user, rewritten each run)
+# to the temp dir, and never removed them: root's, here. keploy record and
+# keploy test run with TMPDIR at a dir of this job's own, so what is left
+# there is theirs and no other job's. While each record runs, its CA file
+# must be there (so the check below looks where keploy writes); once each
+# has ended (record stopped by SIGINT, test finishing on its own) no
+# keploy-ca-*.crt or keploy-java-* may be left.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -37,8 +48,33 @@ cleanup() {
     echo "cleanup..."
     sudo pkill -9 keploy 2>/dev/null || true
     sleep 1
+    [ -n "${KEPLOY_TMPDIR:-}" ] && sudo rm -rf -- "$KEPLOY_TMPDIR"
 }
 trap cleanup EXIT
+
+# keploy's temp dir: os.TempDir() follows TMPDIR. No sudo passes TMPDIR (glibc
+# drops it for every setuid program, so neither -E nor env_keep keeps it), so
+# each keploy command gets it after sudo, from env.
+KEPLOY_TMPDIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/interim-responses-tmp.XXXXXX") || exit 1
+
+# no_temp_left WHAT: once WHAT has ended, none of keploy's CA trust files may
+# be left in its temp dir. Whatever else is there is only listed.
+no_temp_left() {
+    local what=$1 left other
+    left=$(find "$KEPLOY_TMPDIR" -mindepth 1 -maxdepth 1 \( -name 'keploy-ca-*.crt' \
+        -o -name 'keploy-java-*' \) -printf '%f ') || {
+        echo "::error::cannot list keploy's temp dir ${KEPLOY_TMPDIR} after ${what}, so nothing was checked"
+        return 1
+    }
+    if [ -n "$left" ]; then
+        echo "::error::${what} left its temp files behind (each run must remove its own when it ends): ${left}"
+        ls -la "$KEPLOY_TMPDIR"
+        return 1
+    fi
+    other=$(find "$KEPLOY_TMPDIR" -mindepth 1 -maxdepth 1 -printf '%f ')
+    [ -z "$other" ] || echo "note: ${what} left in its temp dir (not checked here): ${other}"
+    return 0
+}
 
 cd "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/python/interim-responses" || exit 1
 
@@ -57,6 +93,15 @@ drive_requests() {
     done
     if [ "$up" -ne 1 ]; then
         echo "::error::app /health did not become ready within 60s"
+        sudo pkill -INT keploy 2>/dev/null || true
+        return 1
+    fi
+    # keploy writes the app's CA file before it starts the app, so it is in
+    # keploy's temp dir by now: else keploy is not writing there (TMPDIR lost
+    # on the way, a renamed file) and the leak check would pass unseen.
+    if ! compgen -G "${KEPLOY_TMPDIR}/keploy-ca-*.crt" >/dev/null; then
+        echo "::error::keploy record's CA file (keploy-ca-*.crt) is not in its temp dir ${KEPLOY_TMPDIR} while it runs, so the temp-file check would see nothing"
+        ls -la "$KEPLOY_TMPDIR"
         sudo pkill -INT keploy 2>/dev/null || true
         return 1
     fi
@@ -124,7 +169,7 @@ KEPLOY_CFG
 
     drive_requests > "driver_logs_${mode}.txt" 2>&1 &
     local driver_pid=$!
-    sudo -E env PATH="$PATH" "$RECORD_BIN" record "${mode_flag[@]}" \
+    sudo -E env PATH="$PATH" TMPDIR="$KEPLOY_TMPDIR" "$RECORD_BIN" record "${mode_flag[@]}" \
         -c "python3 app.py ${APP_PORT}" \
         --generateGithubActions=false > "record_logs_${mode}.txt" 2>&1
     echo "record exit status: $?"
@@ -136,6 +181,7 @@ KEPLOY_CFG
         tail -100 "record_logs_${mode}.txt"
         return 1
     fi
+    no_temp_left "keploy record (${mode})" || return 1
     if grep -q 'WARNING: DATA RACE' "record_logs_${mode}.txt"; then
         echo "::error::data race detected during record (${mode})"
         tail -200 "record_logs_${mode}.txt"
@@ -176,7 +222,7 @@ KEPLOY_CFG
     done
 
     echo "=================== replay ${mode} ==================="
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test \
+    sudo -E env PATH="$PATH" TMPDIR="$KEPLOY_TMPDIR" "$REPLAY_BIN" test \
         -c "python3 app.py ${APP_PORT}" --delay 5 \
         --generateGithubActions=false > "test_logs_${mode}.txt" 2>&1
     echo "test exit status: $?"
@@ -204,10 +250,11 @@ KEPLOY_CFG
         tail -60 "test_logs_${mode}.txt"
         return 1
     fi
+    no_temp_left "keploy test (${mode})" || return 1
     return 0
 }
 
 run_mode default || exit 1
 run_mode sync || exit 1
-echo "PASS: interim responses are forwarded and the final ones recorded"
+echo "PASS: interim responses are forwarded and the final ones recorded, and no run left its CA trust files behind"
 exit 0
