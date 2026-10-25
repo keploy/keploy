@@ -78,6 +78,7 @@ func TestClientPIDHereTakesTheCLIsPidOnlyInItsNamespace(t *testing.T) {
 		14: {nspid: "", ino: 300},      // status unreadable, its ns another
 		15: {nspid: "15", ino: 0},      // the CLI, its ns/pid unreadable (no ptrace access)
 		16: {nspid: "16 16", ino: 200}, // a child namespace's at the same pid there
+		17: {nspid: " ", ino: 100},     // an NSpid line with no pids (no kernel since 4.1 writes one)
 	}
 	proc := fakePIDNSProc(t, 100, fixtureBoot, procs)
 	for _, c := range []struct {
@@ -103,6 +104,7 @@ func TestClientPIDHereTakesTheCLIsPidOnlyInItsNamespace(t *testing.T) {
 		{"same namespace, no process at the pid", 12, same, 0, ClientPIDGone, "no process has the pid 12"},
 		{"same namespace, status unreadable: the number, said", 10, same, 10, ClientPIDByNumber, "status of pid 10 cannot be read"},
 		{"same namespace, status unreadable, its ns another", 14, same, 0, ClientPIDAnother, "another pid namespace (300)"},
+		{"same namespace, an NSpid line with no pids: the number, said", 17, same, 17, ClientPIDByNumber, "NSpid is empty"},
 		{"no namespace said (an older CLI): the number", 7, "", 7, ClientPIDByNumber, "did not say its pid namespace"},
 		{"no namespace said, the pid cannot be the CLI's", 11, "", 0, ClientPIDNotTheCLI, "has pid 3 in its own pid namespace"},
 		{"no namespace said, no process", 12, "", 0, ClientPIDGone, "no process has the pid 12"},
