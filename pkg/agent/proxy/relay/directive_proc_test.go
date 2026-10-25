@@ -484,3 +484,44 @@ func TestAFailedDeliveryOfTheDestinationsStashMarksTheMockIncomplete(t *testing.
 		})
 	}
 }
+
+// With no client conn to write it to, a stashed destination chunk reaches
+// neither the client nor the parser: the mock is marked incomplete
+// (reason+"_write_error"), nothing is teed and nothing is written. The relay
+// sets its client conn in New, before any forwarder runs, so a delivery meets
+// no conn only if that order changes; this row holds the guard to it.
+func TestAStashWithNoClientConnToDeliverItToMarksTheMockIncomplete(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var teed atomic.Int32
+		marks := make(chan string, 2)
+		dstProxy, destSvc := net.Pipe()
+		t.Cleanup(func() { _ = dstProxy.Close(); _ = destSvc.Close() })
+		r := New(Config{Logger: zap.NewNop(), OnCarried: func(_ fakeconn.Direction, _ time.Time, wasTeed bool, _ int64) {
+			if wasTeed {
+				teed.Add(1)
+			}
+		}, OnMarkMockIncomplete: func(reason string) { marks <- reason },
+		}, nil, connseq.NewUpstream(dstProxy))
+		t.Cleanup(func() { r.teeC2D.close(); r.teeD2C.close() }) // their drains; the relay is not run
+
+		r.stashInflightFromPause(readFromDest(r, []byte("greet")))
+		if err := r.deliverStashedToClient(t.Context(), r.takeStashedParts(fakeconn.FromDest), "release_d2c_delivery"); err == nil {
+			t.Fatal("a stash with no client conn to write it to was delivered without an error")
+		}
+		synctest.Wait()
+		select {
+		case m := <-marks:
+			if m != "release_d2c_delivery_write_error" {
+				t.Fatalf("the mock was marked incomplete for %q, want release_d2c_delivery_write_error", m)
+			}
+		default:
+			t.Fatal("a stash with no client conn to write it to was dropped, and the mock was not marked incomplete")
+		}
+		if n := teed.Load(); n != 0 {
+			t.Fatalf("a stashed chunk no client could get was teed %d times", n)
+		}
+		if n := r.teeD2C.awaitingLen(); n != 0 {
+			t.Fatalf("a stashed chunk no client could get was set aside (%d)", n)
+		}
+	})
+}
