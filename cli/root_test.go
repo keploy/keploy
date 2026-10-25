@@ -64,14 +64,20 @@ func testCACertPEM(t testing.TB) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-// caTrustFilesIn lists the trust files SetupCaCertEnv leaves in dir.
+// caTrustFilesIn lists the trust files SetupCaCertEnv leaves in dir: the CA
+// file the trust variables name, and the Java truststore JAVA_TOOL_OPTIONS
+// names (and the PEM it is built from, should that outlive it).
 func caTrustFilesIn(t *testing.T, dir string) []string {
 	t.Helper()
-	m, err := filepath.Glob(filepath.Join(dir, "keploy-ca-*.crt"))
-	if err != nil {
-		t.Fatal(err)
+	var files []string
+	for _, pattern := range []string{"keploy-ca-*.crt", "keploy-java-*"} {
+		m, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, m...)
 	}
-	return m
+	return files
 }
 
 // TestRoot_RemovesTheCATrustFileWhenTheCommandFinishes: a native run points
@@ -104,6 +110,9 @@ func TestRoot_RemovesTheCATrustFileWhenTheCommandFinishes(t *testing.T) {
 					trustFile = os.Getenv("SSL_CERT_FILE")
 					if _, err := os.Stat(trustFile); err != nil {
 						t.Errorf("the app's trust file is not there while the command runs: %v", err)
+					}
+					if live := caTrustFilesIn(t, dir); len(live) != 2 {
+						t.Errorf("want the app's CA file and Java truststore while the command runs, have %v", live)
 					}
 					return end.end()
 				},

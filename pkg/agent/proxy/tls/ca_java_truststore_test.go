@@ -1,17 +1,17 @@
 package tls
 
 import (
+	"bytes"
 	"encoding/pem"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/pavlo-v-chernykh/keystore-go/v4"
 	"go.uber.org/zap"
 )
 
@@ -20,6 +20,9 @@ import (
 // keploy root and the system roots, and it never clobbers an existing value.
 func TestSetupJavaTrustStoreEnv_SetsMergedStore(t *testing.T) {
 	t.Setenv(EnvJavaToolOptions, "-Xmx256m") // a pre-existing value must survive
+	// The store is recorded for RemoveCaCertEnvFiles, as in a run: remove it,
+	// and forget it, so no later test inherits this one's record.
+	t.Cleanup(func() { _ = RemoveCaCertEnvFiles() })
 	if err := setupJavaTrustStoreEnv(zap.NewNop(), testCACertPEM()); err != nil {
 		t.Fatalf("setupJavaTrustStoreEnv: %v", err)
 	}
@@ -38,7 +41,6 @@ func TestSetupJavaTrustStoreEnv_SetsMergedStore(t *testing.T) {
 			jks = strings.TrimPrefix(f, "-Djavax.net.ssl.trustStore=")
 		}
 	}
-	t.Cleanup(func() { _ = os.Remove(jks) })
 	if _, err := os.Stat(jks); err != nil {
 		t.Fatalf("truststore not created: %v", err)
 	}
@@ -164,63 +166,120 @@ func TestGenerateTrustStore_SkipsNonCertSequence(t *testing.T) {
 	}
 }
 
-// TestJavaTrustStorePathIsPerUser pins the property that makes this survivable
-// on a shared machine.
-//
-// The path used to be a single shared filename in os.TempDir(). That directory
-// is world-writable with the sticky bit, so the first run to create the file
-// owns it permanently: one `sudo keploy`, or any rootful-docker run, left a
-// root-owned JKS and every later run as the normal user died with
-//
-//	failed to build the Java truststore: ... permission denied
-//
-// with Java interception silently broken until someone removed it by hand. This
-// test fails on a machine that still has such a leftover ONLY if the code has
-// regressed to the shared name — which is the point: it must pass regardless of
-// what is already sitting in /tmp.
-func TestJavaTrustStorePathIsPerUser(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("TMPDIR", dir)
-	// setupJavaTrustStoreEnv ends in os.Setenv, which outlives this test and
-	// leaks a JAVA_TOOL_OPTIONS pointing at a truststore inside t.TempDir() —
-	// a path that no longer exists once the test finishes. Every later test in
-	// the binary, and every subprocess they spawn, would inherit it. t.Setenv
-	// registers the restore.
-	t.Setenv(EnvJavaToolOptions, "")
-
-	// os.TempDir honours TMPDIR only on unix; on Windows it reads TMP/TEMP, so
-	// the redirect above would not take effect and this test would assert
-	// against the real temp dir.
-	if runtime.GOOS == "windows" {
-		t.Skip("os.TempDir does not honour TMPDIR on Windows; the per-user property is " +
-			"already provided there by a per-user temp dir")
+// trustStoreIn returns the one truststore opts points the JVM at.
+func trustStoreIn(t *testing.T, opts string) string {
+	t.Helper()
+	var stores []string
+	for _, f := range strings.Fields(opts) {
+		if v, ok := strings.CutPrefix(f, "-Djavax.net.ssl.trustStore="); ok {
+			stores = append(stores, v)
+		}
 	}
-
-	logger := zap.NewNop()
-	if err := setupJavaTrustStoreEnv(logger, testCACertPEM()); err != nil {
-		t.Fatalf("setupJavaTrustStoreEnv: %v", err)
+	if len(stores) != 1 {
+		t.Fatalf("want one truststore in JAVA_TOOL_OPTIONS, have %v in %q", stores, opts)
 	}
+	return stores[0]
+}
 
-	entries, err := os.ReadDir(dir)
+// keployRootIn returns the certificate the JKS at path trusts as keploy's.
+func keployRootIn(t *testing.T, path string) []byte {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var jks []string
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".jks") {
-			jks = append(jks, e.Name())
+	defer f.Close()
+	ks := keystore.New()
+	if err := ks.Load(f, []byte("changeit")); err != nil {
+		t.Fatalf("loading %s: %v", path, err)
+	}
+	e, err := ks.GetTrustedCertificateEntry("keploy-root")
+	if err != nil {
+		t.Fatalf("%s has no keploy-root: %v", path, err)
+	}
+	return e.Certificate.Content
+}
+
+// TestJavaTrustStore_IsPerRunAndGoesWithTheRun: the store a native run points
+// Java at holds that run's CA, and the CA is generated per run, so the store
+// is that run's alone. It used to be one fixed file per user, rewritten by
+// every run: two runs as one user at once (parallel `sudo keploy test` jobs)
+// overwrote each other's, and since a JVM reads its truststore when it first
+// makes a TLS call, the app of the run that wrote first then refused its own
+// agent's certificates. It was also left in the temp dir after every run,
+// root's under sudo. Now each setup writes a store of its own, Java is
+// pointed at the newest, an app started before keeps the one it was given,
+// and every one goes when the run is done, with JAVA_TOOL_OPTIONS put back.
+func TestJavaTrustStore_IsPerRunAndGoesWithTheRun(t *testing.T) {
+	dir := caTrustTempDir(t)
+	orig := loadSystemCABundleFn
+	t.Cleanup(func() { loadSystemCABundleFn = orig })
+	system := mustGenerateTestCA()
+	loadSystemCABundleFn = func(*zap.Logger) ([]byte, string) { return system.certPEM, "test" }
+	t.Setenv(EnvJavaToolOptions, "-Xmx256m") // the user's own, kept throughout
+
+	first, second := mustGenerateTestCA(), mustGenerateTestCA()
+	if err := SetupCaCertEnv(zap.NewNop(), first.certPEM); err != nil {
+		t.Fatalf("SetupCaCertEnv: %v", err)
+	}
+	firstStore := trustStoreIn(t, os.Getenv(EnvJavaToolOptions))
+	// Another setup in the same process, as when the agent is set up again,
+	// stands in for another run: the old fixed path was the same for both.
+	if err := SetupCaCertEnv(zap.NewNop(), second.certPEM); err != nil {
+		t.Fatalf("second SetupCaCertEnv: %v", err)
+	}
+	opts := os.Getenv(EnvJavaToolOptions)
+	secondStore := trustStoreIn(t, opts)
+	if !strings.HasPrefix(opts, "-Xmx256m ") {
+		t.Errorf("JAVA_TOOL_OPTIONS = %q, want the user's own flags kept in front", opts)
+	}
+	if firstStore == secondStore {
+		t.Fatalf("both setups wrote the one truststore %s: a run overwrites another's, "+
+			"and the first run's Java app then distrusts its own agent", firstStore)
+	}
+	for _, s := range []string{firstStore, secondStore} {
+		if filepath.Dir(s) != dir {
+			t.Fatalf("truststore %s is not in the run's temp dir %s", s, dir)
 		}
 	}
-	if len(jks) == 0 {
-		t.Fatal("no truststore was written")
+	if !bytes.Equal(keployRootIn(t, firstStore), first.der) {
+		t.Errorf("the first setup's store %s no longer trusts the first CA", firstStore)
 	}
-	want := fmt.Sprintf("-%d.jks", os.Geteuid())
-	for _, name := range jks {
-		if !strings.HasSuffix(name, want) {
-			t.Errorf("truststore %q is not keyed by uid (want a name ending %q).\n\n"+
-				"A shared name in a world-writable sticky temp dir is owned forever by "+
-				"whoever creates it first, so a single run under sudo permanently breaks "+
-				"Java interception for that machine's normal user.", name, want)
-		}
+	if !bytes.Equal(keployRootIn(t, secondStore), second.der) {
+		t.Errorf("JAVA_TOOL_OPTIONS points at %s, which does not trust the newest CA", secondStore)
+	}
+
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Fatalf("RemoveCaCertEnvFiles: %v", err)
+	}
+	if left := globIn(t, dir, "keploy-java-*"); len(left) != 0 {
+		t.Errorf("the Java truststores outlived the run: %v", left)
+	}
+	if got := os.Getenv(EnvJavaToolOptions); got != "-Xmx256m" {
+		t.Errorf("JAVA_TOOL_OPTIONS = %q after the run, want the user's own %q back", got, "-Xmx256m")
+	}
+}
+
+// TestJavaTrustStore_LeavesTheUsersOwnStoreAlone: a JAVA_TOOL_OPTIONS that
+// already names a truststore is the user's choice, and keploy neither adds a
+// second one nor writes a store nobody reads.
+func TestJavaTrustStore_LeavesTheUsersOwnStoreAlone(t *testing.T) {
+	dir := caTrustTempDir(t)
+	const users = "-Djavax.net.ssl.trustStore=/etc/the-users.jks -Xmx1g"
+	t.Setenv(EnvJavaToolOptions, users)
+	if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+		t.Fatalf("SetupCaCertEnv: %v", err)
+	}
+	if got := os.Getenv(EnvJavaToolOptions); got != users {
+		t.Errorf("JAVA_TOOL_OPTIONS = %q, want the user's own %q", got, users)
+	}
+	if left := globIn(t, dir, "keploy-java-*"); len(left) != 0 {
+		t.Errorf("a truststore Java is never pointed at was written: %v", left)
+	}
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Fatalf("RemoveCaCertEnvFiles: %v", err)
+	}
+	if got := os.Getenv(EnvJavaToolOptions); got != users {
+		t.Errorf("JAVA_TOOL_OPTIONS = %q after the run, want the user's own %q", got, users)
 	}
 }

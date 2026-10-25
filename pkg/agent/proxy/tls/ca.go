@@ -298,8 +298,12 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 		return err
 	}
 	// Recorded before the env points at it: from here on, however this run
-	// ends, RemoveCaCertEnvFiles removes the file.
+	// ends, RemoveCaCertEnvFiles removes the file and puts back each variable
+	// that still names it.
 	recordCaTrustFile(tempPath)
+	for _, k := range caTrustEnvVars {
+		recordCaTrustEnv(k, tempPath)
+	}
 	if err := SetEnvForPath(logger, tempPath); err != nil {
 		return err
 	}
@@ -321,41 +325,85 @@ var caTrustEnvVars = []string{"NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_
 // caTrustFilesMu guards the record of what SetupCaCertEnv did to this process.
 var (
 	caTrustFilesMu sync.Mutex
-	// caTrustFiles are the trust files SetupCaCertEnv wrote in this process.
+	// caTrustFiles are the trust files SetupCaCertEnv wrote in this process:
+	// the CA files the trust variables name and the Java truststores
+	// JAVA_TOOL_OPTIONS names.
 	caTrustFiles []string
-	// caTrustEnvBefore holds each of caTrustEnvVars as it was before the first
-	// SetupCaCertEnv since the last RemoveCaCertEnvFiles: its value, or nil
-	// for a variable that was unset.
+	// caTrustEnvBefore holds each variable SetupCaCertEnv sets as it was
+	// before the first SetupCaCertEnv since the last RemoveCaCertEnvFiles:
+	// its value, or nil for a variable that was unset.
 	caTrustEnvBefore map[string]*string
+	// caTrustEnvSet holds, for each of those variables, every value
+	// SetupCaCertEnv set it to since then.
+	caTrustEnvSet map[string]map[string]bool
 )
 
+// snapshotCaTrustEnvLocked records the variables SetupCaCertEnv sets as they
+// are, unless they are recorded already. Called with caTrustFilesMu held,
+// before keploy changes any of them.
+func snapshotCaTrustEnvLocked() {
+	if caTrustEnvBefore != nil {
+		return
+	}
+	vars := append([]string{EnvJavaToolOptions}, caTrustEnvVars...)
+	caTrustEnvBefore = make(map[string]*string, len(vars))
+	caTrustEnvSet = make(map[string]map[string]bool, len(vars))
+	for _, k := range vars {
+		if v, ok := os.LookupEnv(k); ok {
+			caTrustEnvBefore[k] = &v
+		} else {
+			caTrustEnvBefore[k] = nil
+		}
+		caTrustEnvSet[k] = map[string]bool{}
+	}
+}
+
+// recordCaTrustFile records a trust file SetupCaCertEnv wrote, for
+// RemoveCaCertEnvFiles to remove.
 func recordCaTrustFile(path string) {
 	caTrustFilesMu.Lock()
 	defer caTrustFilesMu.Unlock()
-	if caTrustEnvBefore == nil {
-		caTrustEnvBefore = make(map[string]*string, len(caTrustEnvVars))
-		for _, k := range caTrustEnvVars {
-			if v, ok := os.LookupEnv(k); ok {
-				caTrustEnvBefore[k] = &v
-			} else {
-				caTrustEnvBefore[k] = nil
-			}
-		}
-	}
+	snapshotCaTrustEnvLocked()
 	caTrustFiles = append(caTrustFiles, path)
 }
 
+// recordCaTrustEnv records that keploy sets k to v, before it does: while k
+// still holds v, the value is keploy's, and RemoveCaCertEnvFiles puts k back.
+func recordCaTrustEnv(k, v string) {
+	caTrustFilesMu.Lock()
+	defer caTrustFilesMu.Unlock()
+	snapshotCaTrustEnvLocked()
+	caTrustEnvSet[k][v] = true
+}
+
+// caTrustEnvBase returns the value of k that keploy builds its own on: what
+// k was before keploy set it, while k still holds a value keploy set, and its
+// value now otherwise.
+func caTrustEnvBase(k string) string {
+	caTrustFilesMu.Lock()
+	defer caTrustFilesMu.Unlock()
+	cur, ok := os.LookupEnv(k)
+	if !ok || !caTrustEnvSet[k][cur] {
+		return cur
+	}
+	if before := caTrustEnvBefore[k]; before != nil {
+		return *before
+	}
+	return ""
+}
+
 // RemoveCaCertEnvFiles removes the trust files SetupCaCertEnv wrote in this
-// process, and puts back each trust variable that still names one of them as
-// it was before keploy set it.
+// process, and puts back each variable that still holds a value keploy set
+// as it was before keploy set it.
 //
 // The app reads its file for as long as it runs, and in a replay keploy starts
 // the app again for every test set, with the same environment: so a file must
 // stay for as long as the command runs, and nothing reads it after. It used to
 // be left behind on every native run, one more in the temp dir each time, and
-// root's under sudo. A second SetupCaCertEnv in the same process (an agent set
-// up again) writes a file of its own and leaves the earlier one alone, since
-// an app started before may still read it; this removes them all.
+// root's under sudo. The same goes for the Java truststore JAVA_TOOL_OPTIONS
+// names. A second SetupCaCertEnv in the same process (an agent set up again)
+// writes files of its own and leaves the earlier ones alone, since an app
+// started before may still read them; this removes them all.
 //
 // Every keploy binary whose commands are built by cli.Root gets this for free:
 // Root registers it to run when the command returns, however it returns. A
@@ -367,20 +415,20 @@ func RemoveCaCertEnvFiles() error {
 	caTrustFilesMu.Lock()
 	defer caTrustFilesMu.Unlock()
 
-	removed := make(map[string]bool, len(caTrustFiles))
 	var errs []error
 	for _, p := range caTrustFiles {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("removing the app's CA trust file: %w", err))
 		}
-		removed[p] = true
 	}
-	// A variable naming a file that is gone breaks a process this one starts
-	// afterwards: Python's requests refuses to make an HTTPS call at all when
-	// REQUESTS_CA_BUNDLE names a missing file, and cargo when CARGO_HTTP_CAINFO
-	// does. One set to something else since is not keploy's.
+	// Every value keploy set names one of those files, and a variable naming
+	// a file that is gone breaks a process this one starts afterwards:
+	// Python's requests refuses to make an HTTPS call at all when
+	// REQUESTS_CA_BUNDLE names a missing file, and cargo when
+	// CARGO_HTTP_CAINFO does; a JVM would be pointed at a store that is
+	// gone. One set to something else since is not keploy's.
 	for k, before := range caTrustEnvBefore {
-		if !removed[os.Getenv(k)] {
+		if cur, ok := os.LookupEnv(k); !ok || !caTrustEnvSet[k][cur] {
 			continue
 		}
 		var err error
@@ -393,7 +441,7 @@ func RemoveCaCertEnvFiles() error {
 			errs = append(errs, fmt.Errorf("restoring %s: %w", k, err))
 		}
 	}
-	caTrustFiles, caTrustEnvBefore = nil, nil
+	caTrustFiles, caTrustEnvBefore, caTrustEnvSet = nil, nil, nil
 	return errors.Join(errs...)
 }
 
@@ -423,15 +471,35 @@ func mergeCABundle(systemBundle, keployCertPEM []byte) []byte {
 // cacerts wholesale, so the store must carry the system roots too or a Java app
 // could no longer validate any non-keploy-proxied HTTPS.
 //
-// Nothing in the JDK is modified: the store lives in a temp file and is thrown
-// away with it. keploy's flags are appended to any JAVA_TOOL_OPTIONS the user
-// already set rather than replacing it.
+// Nothing in the JDK is modified: the store is a temp file of this run's,
+// removed with the CA file when the command finishes (RemoveCaCertEnvFiles).
+// keploy's flags are appended to any JAVA_TOOL_OPTIONS the user already set
+// rather than replacing it, and one that already names a truststore is the
+// user's choice and left alone.
 //
 // Note: every JVM the app spawns prints "Picked up JAVA_TOOL_OPTIONS: ..." to
 // its stderr — harmless, but a build tool that parses child-JVM stderr may see
 // it. That is inherent to JAVA_TOOL_OPTIONS and is the accepted cost of not
 // mutating the JDK.
 func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
+	// What keploy's flags go after: the user's own JAVA_TOOL_OPTIONS. After an
+	// earlier setup in this process the variable holds what that one set, and
+	// building on it would keep Java on the earlier store and its CA.
+	base := caTrustEnvBase(EnvJavaToolOptions)
+	if strings.Contains(base, "-Djavax.net.ssl.trustStore=") {
+		// Only the store's path: the rest of the value may hold its password.
+		var users string
+		for _, f := range strings.Fields(base) {
+			if v, ok := strings.CutPrefix(f, "-Djavax.net.ssl.trustStore="); ok {
+				users = v
+			}
+		}
+		logger.Warn("JAVA_TOOL_OPTIONS already names a truststore, so keploy leaves Java on it, and a Java app's HTTPS calls through keploy fail certificate checks",
+			zap.String("truststore", users),
+			zap.String("next_step", "for the keploy run, drop -Djavax.net.ssl.trustStore (and its password) from JAVA_TOOL_OPTIONS, so keploy points Java at a store that holds its CA and the system roots"))
+		return nil
+	}
+
 	systemBundle, srcPath := loadSystemCABundleFn(logger)
 	merged := mergeCABundle(systemBundle, certPEM)
 
@@ -451,28 +519,31 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 		return fmt.Errorf("failed to write the merged CA pem: %w", err)
 	}
 
-	// Deterministic per-user path, overwritten each run, so runs do not
-	// accumulate a new JKS in the temp dir every time. Its contents are not the
-	// same each run, though: the keploy CA is generated per run, so two runs as
-	// one user at the same time overwrite each other's store, and the JVM of the
-	// run that wrote first then distrusts its own agent. Making the store per
-	// run, removed by RemoveCaCertEnvFiles as the CA file is, ends both.
-	//
-	// The uid in the NAME is what makes "per-user" true. It used to be a single
-	// shared filename, which is not per-user at all: os.TempDir() is shared and
-	// world-writable with the sticky bit, so the first run to create it owns it
-	// forever. One `sudo keploy` — or any rootful-docker run — left a root-owned
-	// file that every later run as the normal user failed to rewrite:
-	//
-	//	failed to build the Java truststore: failed to create jks file:
-	//	open /tmp/keploy-java-truststore.jks: permission denied
-	//
-	// and Java interception stayed broken on that machine until someone removed
-	// it by hand. Keying the name by uid means two users, or the same user with
-	// and without sudo, never contend for one inode. The store holds only public
-	// certificates, so a per-uid copy costs nothing.
-	jksPath := filepath.Join(os.TempDir(), fmt.Sprintf("keploy-java-truststore-%d.jks", os.Geteuid()))
+	// A store of this run's own: the keploy CA is generated per run, so the
+	// store is too. It used to be one fixed file per user, rewritten by every
+	// run, so two runs as one user at the same time (parallel `sudo keploy
+	// test` jobs) overwrote each other's, and since a JVM reads its truststore
+	// when it first makes a TLS call, the app of the run that wrote first
+	// then refused its own agent's certificates. It was also left behind,
+	// root's under sudo. CreateTemp makes a new file under a new name, so no
+	// other run's store, and no leftover another user owns, is ever in the
+	// way; a single shared name once let one `sudo keploy` leave a root-owned
+	// store every later run failed to rewrite ("open
+	// /tmp/keploy-java-truststore.jks: permission denied").
+	jks, err := os.CreateTemp("", "keploy-java-truststore-*.jks")
+	if err != nil {
+		return fmt.Errorf("failed to create the Java truststore: %w", err)
+	}
+	jksPath := jks.Name()
+	// Recorded before Java is pointed at it: from here on, however this run
+	// ends, RemoveCaCertEnvFiles removes it.
+	recordCaTrustFile(jksPath)
+	if err := jks.Close(); err != nil {
+		_ = os.Remove(jksPath)
+		return fmt.Errorf("failed to create the Java truststore: %w", err)
+	}
 	if err := generateTrustStore(mergedPath, jksPath, decodeFirstCertDER(certPEM)); err != nil {
+		_ = os.Remove(jksPath)
 		return fmt.Errorf("failed to build the Java truststore: %w", err)
 	}
 	// Readable by the app, which may run as the same user; the store contains
@@ -489,21 +560,18 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	// machine without keytool).
 	safePath, ok := envSafePath(jksPath)
 	if !ok {
+		_ = os.Remove(jksPath)
 		logger.Warn("the Java truststore path contains a space and cannot be made space-free; skipping JAVA_TOOL_OPTIONS so the JVM still starts",
 			zap.String("truststore", jksPath))
 		return nil
 	}
 	opts := fmt.Sprintf("-Djavax.net.ssl.trustStore=%s -Djavax.net.ssl.trustStorePassword=changeit", safePath)
-	if existing := os.Getenv(EnvJavaToolOptions); existing != "" {
-		if strings.Contains(existing, "-Djavax.net.ssl.trustStore=") {
-			// Already set (a second SetupCaCertEnv in the same process): leave it
-			// rather than appending a duplicate flag and leaking work.
-			return nil
-		}
-		opts = existing + " " + opts
+	if base != "" {
+		opts = base + " " + opts
 	}
 	logger.Info("pointing Java at a merged keploy truststore via JAVA_TOOL_OPTIONS (the JDK's cacerts is left untouched)",
 		zap.String("truststore", safePath), zap.String("system_source", srcPath))
+	recordCaTrustEnv(EnvJavaToolOptions, opts)
 	return os.Setenv(EnvJavaToolOptions, opts)
 }
 

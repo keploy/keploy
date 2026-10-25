@@ -36,6 +36,11 @@ func TestRoot_RemovesTheCATrustFileOnASignal(t *testing.T) {
 			}
 			keploy := exec.Command(os.Args[0], "-test.run=^TestRoot_CATrustFileSignalHelper$")
 			keploy.Env = append(os.Environ(), caSignalHelperEnv+"="+dir, "TMPDIR="+tmp)
+			// None of the machine's own trust settings: a JAVA_TOOL_OPTIONS
+			// that names a truststore of its own would have keploy write none.
+			for _, k := range caTrustEnv {
+				keploy.Env = append(keploy.Env, k+"=")
+			}
 			out := &bytes.Buffer{}
 			keploy.Stdout, keploy.Stderr = out, out
 			if err := keploy.Start(); err != nil {
@@ -54,8 +59,8 @@ func TestRoot_RemovesTheCATrustFileOnASignal(t *testing.T) {
 			})
 
 			waitForMark(t, dir, "ready", exited, out)
-			if left := caTrustFilesIn(t, tmp); len(left) != 1 {
-				t.Fatalf("want the app's one trust file while the run is live, have %v\n%s", left, out.String())
+			if left := caTrustFilesIn(t, tmp); len(left) != 2 {
+				t.Fatalf("want the app's CA file and Java truststore while the run is live, have %v\n%s", left, out.String())
 			}
 			if err := keploy.Process.Signal(sig); err != nil {
 				t.Fatal(err)

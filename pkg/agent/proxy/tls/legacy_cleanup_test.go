@@ -4,7 +4,10 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 // TestFileIsExactlyCert is the core safety property of legacy cleanup: it matches
@@ -63,5 +66,45 @@ func TestLegacyCAFingerprint(t *testing.T) {
 	var zero [32]byte
 	if fp == zero {
 		t.Fatal("legacy CA fingerprint parsed to all zeros")
+	}
+}
+
+// TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked: `keploy
+// ca clean` removes every Java truststore keploy left in the temp dir, the
+// shared name the oldest versions used included, and nothing else; the boot
+// sweep, which may run beside a live run, removes none of them.
+func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.TempDir does not honour TMPDIR on Windows")
+	}
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	stores := []string{"keploy-java-truststore.jks", "keploy-java-truststore-1000.jks", "keploy-java-truststore-123456.jks"}
+	const other = "the-users-own.jks"
+	for _, name := range append([]string{other}, stores...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("jks"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+		return err == nil
+	}
+
+	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, false)
+	for _, name := range stores {
+		if !exists(name) {
+			t.Errorf("the boot sweep removed %s, which a live run may use", name)
+		}
+	}
+
+	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, true)
+	for _, name := range stores {
+		if exists(name) {
+			t.Errorf("keploy ca clean left the keploy truststore %s", name)
+		}
+	}
+	if !exists(other) {
+		t.Errorf("keploy ca clean removed %s, which is not keploy's", other)
 	}
 }
