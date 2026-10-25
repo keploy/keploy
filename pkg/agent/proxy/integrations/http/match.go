@@ -43,6 +43,18 @@ type req struct {
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// doc is body read as one JSON document, read once for every recording
+	// the call is compared with (jsonBody); a view of the call with the same
+	// body shares it (reqView.asReq). A req is one call's, read by its
+	// connection's goroutine alone.
+	doc *bodyDoc
+}
+
+// bodyDoc is a body read as one JSON document (decodeJSONDoc), once.
+type bodyDoc struct {
+	once sync.Once
+	v    interface{}
+	ok   bool
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload
@@ -52,6 +64,18 @@ func (r *req) sentBody() []byte {
 		return r.encoded
 	}
 	return r.body
+}
+
+// jsonBody is the body read as one JSON document, as decodeJSONDoc reads it:
+// read the first time a comparison asks, and the same value for every later
+// one. A comparison only reads it (strictKnown.jsonDiffs), so a call compared
+// with a whole pool reads its body once, not once per recording.
+func (r *req) jsonBody() (interface{}, bool) {
+	if r.doc == nil {
+		r.doc = &bodyDoc{}
+	}
+	r.doc.once.Do(func() { r.doc.v, r.doc.ok = decodeJSONDoc(r.body) })
+	return r.doc.v, r.doc.ok
 }
 
 // matchDiag captures where the match cascade stopped when no mock matched, so

@@ -432,7 +432,7 @@ func (k strictKnown) bodyDiffs(r *models.HTTPReq, input *req) []strictField {
 		return k.multipartDiffs(recCT, r.Body, input.header.Get("Content-Type"), live)
 	}
 	rv, rok := decodeJSONDoc(rec)
-	lv, lok := decodeJSONDoc(live)
+	lv, lok := input.jsonBody()
 	if rok && lok {
 		var out []strictField
 		k.jsonDiffs(rv, lv, "body", "", "body", false, &out)

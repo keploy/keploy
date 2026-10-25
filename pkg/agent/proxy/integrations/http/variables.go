@@ -220,10 +220,13 @@ type reqView struct {
 	query    url.Values
 	header   http.Header
 	body     string
+	// liveBody: body is still the live call's own, nothing put back inside
+	// it, so the call's JSON reading of it holds for the view (asReq).
+	liveBody bool
 }
 
 func liveView(input *req) reqView {
-	v := reqView{method: input.method, header: input.header, body: string(input.body)}
+	v := reqView{method: input.method, header: input.header, body: string(input.body), liveBody: true}
 	if input.url != nil {
 		v.segments = pathSegments(input.url.EscapedPath())
 		v.query = input.url.Query()
@@ -339,7 +342,7 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 		if !ok {
 			return v, false
 		}
-		v.body = body
+		v.body, v.liveBody = body, false
 	case variables.PartPath:
 		if p.Index >= len(v.segments) {
 			return v, false
@@ -363,7 +366,7 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 		if !ok {
 			return v, false
 		}
-		v.body = body
+		v.body, v.liveBody = body, false
 	}
 	return v, true
 }
@@ -434,7 +437,17 @@ func spliceFormPart(ct, body, name, value string) (string, bool) {
 }
 
 func (v reqView) asReq(input *req) *req {
-	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw, encoded: input.sentBody()}
+	out := &req{method: v.method, header: v.header, raw: input.raw, encoded: input.sentBody()}
+	if v.liveBody {
+		// Nothing was put back inside the body: the view's body is the
+		// call's, and so is what it reads as JSON (jsonBody).
+		if input.doc == nil {
+			input.doc = &bodyDoc{}
+		}
+		out.body, out.doc = input.body, input.doc
+	} else {
+		out.body = []byte(v.body)
+	}
 	u := url.URL{}
 	if input.url != nil {
 		u = *input.url
