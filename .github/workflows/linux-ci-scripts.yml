@@ -7,6 +7,13 @@ name: Linux CI scripts
 # index is broken, which an ordinary run never shows. The tests make all three
 # happen on purpose, against a stub mirror. They run on every change to the
 # helper or its tests.
+#
+# Also here: golang/client_mock_memory/golang-linux.tests.sh, the cases of the
+# lane "keploy test holds no test set in memory" against a fake keploy, run on
+# every change to the lane script, the helpers it sources, or its tests. The
+# lane runs under `bash -e`, and each case is a failure it has to explain
+# rather than end on: keploy test exiting 2, keploy test ending while its peak
+# RSS is read, a report with no status line.
 
 on:
   push:
@@ -15,17 +22,34 @@ on:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/client_mock_memory/**'
+      - '.github/workflows/test_workflow_scripts/go-retry.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
       - '.github/workflows/linux-ci-scripts.yml'
   pull_request:
     paths:
       - '.github/workflows/test_workflow_scripts/apt-install.sh'
       - '.github/workflows/test_workflow_scripts/apt-install.tests.sh'
+      - '.github/workflows/test_workflow_scripts/golang/client_mock_memory/**'
+      - '.github/workflows/test_workflow_scripts/go-retry.sh'
+      - '.github/workflows/test_workflow_scripts/test-iid.sh'
       - '.github/workflows/linux-ci-scripts.yml'
 
 permissions:
   contents: read
 
 jobs:
+  client-mock-memory-lane:
+    # Three cases of about 16 s each: the lane's record half waits that long
+    # for the app it starts, fake or not.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the client mock memory lane against a fake keploy
+        run: bash .github/workflows/test_workflow_scripts/golang/client_mock_memory/golang-linux.tests.sh
+
   apt-install:
     # Seven ubuntu containers that fetch the package lists once each (through
     # the stub, which asks the real mirror for each list only the first time),
