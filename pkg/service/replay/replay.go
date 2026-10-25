@@ -130,6 +130,14 @@ func mapAppErrorToTestSetStatus(appErr models.AppError) (models.TestSetStatus, b
 	}
 }
 
+func appNotReadyStatus(appErr models.AppError) (models.TestSetStatus, error) {
+	status, ok := mapAppErrorToTestSetStatus(appErr)
+	if !ok || appErr == (models.AppError{}) {
+		return models.TestSetStatusUserAbort, context.Canceled
+	}
+	return status, appErr
+}
+
 func resolveTestSetStatus(cmdType utils.CmdType, current, derived models.TestSetStatus, err error) (models.TestSetStatus, bool) {
 	switch current {
 	case models.TestSetStatusAppHalted, models.TestSetStatusFaultUserApp, models.TestSetStatusInternalErr, models.TestSetStatusUserAbort:
@@ -2711,7 +2719,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if !waitsForApp(serveTest, r.isFirstTestSet) {
 				r.logger.Debug("--keep-app-alive: skipping waitForAppReady on post-first test-set; app already warm")
 			} else if ready, why := r.appReady(runTestSetCtx, testCases, testSetID, true, serveTest && !r.isFirstTestSet); !ready && why == "" {
-				return models.TestSetStatusUserAbort, context.Canceled
+				return appNotReadyStatus(getLastAppErr())
 			} else if !ready {
 				notReady = why
 			}

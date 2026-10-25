@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -820,26 +819,8 @@ func firstDialTarget(ctx context.Context, testCfg config.Test, testCases []*mode
 			// configure it): test.host for the authority's host, its app
 			// port, test.grpcPort, replaceWith, and the one host port its
 			// app port is published on.
-			authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
-			if authority == "" {
-				continue
-			}
-			h := testCfg.Host
-			if h == "" {
-				h = "localhost"
-			}
-			port := testCfg.GRPCPort
-			if ps, ok := testCfg.Protocol["grpc"]; ok && ps.Port > 0 {
-				port = ps.Port
-			}
-			urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
-			target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, h, tc.AppPort, port, false, logger)
-			if err != nil {
-				continue
-			}
-			target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: port, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, authority, target, tc.AppPort, false)
-			if th, tp, err := net.SplitHostPort(target); err == nil && tp != "" {
-				return "", th, tp, true
+			if h, p, ok := resolveGRPCDialTarget(ctx, testCfg, tc, testSetID, logger, published); ok {
+				return "", h, p, true
 			}
 		}
 	}
@@ -1110,7 +1091,7 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		if !started {
 			return true, ""
 		}
-		return waitForAppReady(ctx, r.logger, r.config, resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), publishedPortsOf(r.logger, r.instrumentation).of(testSetID))), ""
+		return waitForAppReady(ctx, r.logger, r.config, r.readinessProbeTarget(ctx, testCases, testSetID)), ""
 	}
 	p := provenReadiness{logger: r.logger, cfg: r.config, docker: utils.IsDockerCmd(utils.CmdType(r.config.CommandType))}
 	scheme, host, port, ok := firstDialTarget(ctx, r.config.Test, testCases, testSetID, r.logger, publishedPortsOf(r.logger, r.instrumentation).of(testSetID))
@@ -1186,6 +1167,15 @@ func (r *Replayer) appReady(ctx context.Context, testCases []*models.TestCase, t
 		r.readyStalledAt = nil
 	}
 	return ready, why
+}
+
+func (r *Replayer) readinessProbeTarget(ctx context.Context, testCases []*models.TestCase, testSetID string) httpProbeTarget {
+	published := publishedPortsOf(r.logger, r.instrumentation).of(testSetID)
+	probe := resolveTestSetProbeTarget(ctx, r.config.Test, testCases, testSetID, r.logger, appPortReachabilityOf(r.instrumentation), published)
+	if probe.ok || utils.IsDockerCmd(utils.CmdType(r.config.CommandType)) {
+		return probe
+	}
+	return resolveTestSetGRPCTarget(ctx, r.config.Test, testCases, testSetID, r.logger, published)
 }
 
 // markReadiness reads, under the proven switch, the agent's count of the
