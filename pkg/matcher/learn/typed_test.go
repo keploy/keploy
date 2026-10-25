@@ -1025,10 +1025,11 @@ func TestATypedTimeOfDayAnEarlierExchangeHoldsIsReadThere(t *testing.T) {
 
 // A typed time of day an earlier exchange holds is read there by each of the
 // learn step's readers, and each gives its own outcome, naming the leaf: a
-// drifted value that names the moment the leaf drifted with exactly is a
-// variable of it (instantServedFrom); one cut coarser than that moment (a
-// second, or a millisecond of a microsecond the millisecond does not hold
-// whole), typed or a text, is the echo's variable there, with its evidence
+// drifted value that names the moment the leaf drifted with exactly, typed or
+// a text, is a variable of it (instantServedFrom; a text's, instantSource);
+// one cut coarser than that moment (a second, or a millisecond of a
+// microsecond the millisecond does not hold whole), typed or a text, is the
+// echo's variable there, with its evidence
 // (instantEchoFrom, echoServed); one that names exactly what the leaf held as
 // recorded and F served so is a variable of it, with its evidence
 // (instantLeafFrom); and a move to what the leaf held as recorded, where F
@@ -1064,7 +1065,7 @@ func TestATypedTimeOfDayAnEarlierExchangeHoldsIsBoundOrRefusedNamingItsLeaf(t *t
 		{"drifted with it, to the second", seen(Response, read, live), typed(time.Second), "echo", false},
 		{"drifted with a microsecond the millisecond does not hold whole", seen(Response, read.Add(fine), live.Add(fine)), typed(time.Millisecond), "echo", false},
 		{"a text drifted with it, to the second", seen(Response, read, live), texted("15:04:05"), "echo", false},
-		{"a text drifted with it, to the millisecond", seen(Response, read, live), texted("15:04:05.000"), "echo", false},
+		{"a text drifted with it, to the millisecond", seen(Response, read, live), texted("15:04:05.000"), "served", false},
 		{"held as recorded and served so, to the microsecond", seen(Response, read, read), typed(time.Microsecond), "held", true},
 		{"held as recorded and served so, to the millisecond", seen(Response, read, read), typed(time.Millisecond), "held", false},
 		{"F saw what an answer held as recorded", seen(Response, live, live.Add(time.Hour)), typed(time.Millisecond), "pick", false},
@@ -1087,6 +1088,94 @@ func TestATypedTimeOfDayAnEarlierExchangeHoldsIsBoundOrRefusedNamingItsLeaf(t *t
 		}
 		if !ok {
 			t.Errorf("%s: %s (from %+v, %q); want the %s outcome at pg-1 %s, whole %v", c.name, ln.Kind, ln.From, ln.Why, c.want, sp, c.whole)
+		}
+	}
+}
+
+// A time of day written as a text and one its protocol types are one moment
+// where they name it exactly, as two texts or two typed leaves are, so the
+// typed rule reads a typed time of day where a text holds it (holdsExact,
+// isInstant): a value that drifted, to the microsecond, with an earlier leaf
+// of the other form, on either side of the exchange, is a variable of that
+// leaf, never noise (two texts or two typed leaves of the same shape are
+// bound there); so is a typed one whose recorded moment such a text leaf
+// held as recorded, whatever F saw there, or a payload holds; and the call's
+// own answer holding it, in either form, is its echo, and one holding
+// another moment is none. A time of day and an instant keploy reads are two
+// moments whatever their forms: one never names the other exactly (only the
+// echo reads a time of day an answer's instant holds, as a pick by its
+// clock).
+func TestATimeOfDayInTheOtherFormIsTheSameMoment(t *testing.T) {
+	call := time.Date(2026, 10, 22, 11, 14, 20, 155e6, time.UTC)
+	read := time.Date(2026, 10, 22, 11, 14, 17, 115123e3, time.UTC)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	const sp, p, ap = "rows.0.start_at", "args.0", "rows.0.0"
+	forms := map[string]func(path string, at time.Time) Leaf{
+		"typed": func(path string, at time.Time) Leaf {
+			return TimeOfDayLeaf(path, path, time.Duration(clockOfDay(at)), time.Microsecond)
+		},
+		"a text": func(path string, at time.Time) Leaf {
+			return Leaf{Path: path, Noise: path, Type: String, Value: at.Format("15:04:05.000000")}
+		},
+		"an instant": func(path string, at time.Time) Leaf {
+			return InstantLeaf(path, path, at, time.Microsecond)
+		},
+	}
+	classify := func(v string, e []Earlier, raw []Raw, resp []Leaf) Learned {
+		rec, lv := forms[v](p, read), forms[v](p, live)
+		return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: lv}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, e, raw, resp, nil)[0]
+	}
+	seen := func(side Side, form string, f time.Time) []Earlier {
+		return []Earlier{{Mock: "pg-1", At: call.Add(-time.Second), Own: true, Payload: payloadOf("pg-1", call.Add(-time.Second)), Seen: []Seen{{Side: side, Leaf: forms[form](sp, read), Live: forms[form](sp, f).Value}}}}
+	}
+	ofLeaf := func(ln Learned) bool {
+		return ln.Kind == KindVariable && ln.From.Mock == "pg-1" && ln.From.Path == sp
+	}
+	for _, side := range []Side{Response, Request} {
+		for _, ef := range []string{"typed", "a text"} {
+			for _, vf := range []string{"typed", "a text"} {
+				if ln := classify(vf, seen(side, ef, live), nil, nil); !ofLeaf(ln) {
+					t.Errorf("%s drifted with %s earlier on the %s side: %s (from %+v, %q); want a variable of pg-1 at %s", vf, ef, side, ln.Kind, ln.From, ln.Why, sp)
+				}
+			}
+		}
+		// Recorded as the moment, F saw another there: an equal moment is
+		// followed whatever its provenance, as one drifted with it
+		// (instantServedFrom), as a typed leaf's is (seenIs).
+		for _, ef := range []string{"typed", "a text"} {
+			if ln := classify("typed", seen(side, ef, live.Add(time.Hour)), nil, nil); !ofLeaf(ln) || ln.From.Echo || ln.Why != "" {
+				t.Errorf("typed, %s earlier on the %s side recorded as its moment, F seeing another: %s (from %+v, %q); want a variable of pg-1 at %s, as one drifted with it", ef, side, ln.Kind, ln.From, ln.Why, sp)
+			}
+		}
+		// Held as recorded and served so (instantLeafFrom).
+		if ln := classify("typed", seen(side, "a text", read), nil, nil); !ofLeaf(ln) || ln.Why != instantEvidence(ln.From) {
+			t.Errorf("typed, a text earlier on the %s side held as recorded and served so: %s (from %+v, %q); want a variable of pg-1 at %s, with its evidence", side, ln.Kind, ln.From, ln.Why, sp)
+		}
+		// An instant at the same time of day is another moment.
+		for _, pair := range [][2]string{{"typed", "an instant"}, {"an instant", "typed"}, {"a text", "an instant"}, {"an instant", "a text"}} {
+			if ln := classify(pair[1], seen(side, pair[0], live), nil, nil); ofLeaf(ln) && !ln.From.Echo {
+				t.Errorf("%s drifted with %s earlier on the %s side: a variable of it, as the same moment; want them two moments", pair[1], pair[0], side)
+			}
+		}
+	}
+	// A payload holding the recorded moment as a text (instantRawFrom).
+	raw := []Raw{{read: true, mock: "mock-db", at: call.Add(-time.Second), served: true, text: `{"rows":[["42","` + read.Format("15:04:05.000000") + `"]]}`}}
+	if ln := classify("typed", nil, raw, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-db" || ln.Why != instantEvidence(ln.From) {
+		t.Errorf("typed, its recorded moment a text in a payload: %s (from %+v, %q); want a variable of mock-db, with its evidence", ln.Kind, ln.From, ln.Why)
+	}
+	// The call's own answer holding it (instantEchoes, Echoes), and holding
+	// another moment: an instant at its time of day, a time of day a second
+	// on.
+	for _, vf := range []string{"typed", "a text"} {
+		for _, af := range []string{"typed", "a text"} {
+			if ln := classify(vf, nil, nil, []Leaf{forms[af](ap, read)}); ln.Kind != KindEcho || len(ln.Echo) != 1 || ln.Echo[0].Path != ap {
+				t.Errorf("%s, the call's answer holding it as %s: %s (echo %v, %q); want its echo at %s", vf, af, ln.Kind, ln.Echo, ln.Why, ap)
+			}
+		}
+		for _, a := range []Leaf{forms["an instant"](ap, read), forms["typed"](ap, read.Add(time.Second)), forms["a text"](ap, read.Add(time.Second))} {
+			if ln := classify(vf, nil, nil, []Leaf{a}); ln.Kind == KindEcho {
+				t.Errorf("%s, the call's answer holding another moment, %s: an echo of it; want none", vf, a.Value)
+			}
 		}
 	}
 }

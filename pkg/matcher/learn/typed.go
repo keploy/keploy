@@ -672,12 +672,13 @@ func (dc *DriftCache) instantSource(s Seen, v *valueDrift) bool {
 }
 
 // isInstant reports whether text, in one of its declared forms (textForms),
-// is one instant and nothing else, of moment m to the nanosecond.
+// is one instant and nothing else, of moment m to the nanosecond: of a time
+// of day too, where m is one (a typed time of day), as holdsExact reads it.
 func (dc *DriftCache) isInstant(text string, m moment) bool {
 	for _, f := range textForms(text) {
 		f = strings.TrimSpace(f)
 		sp := dc.spansOf(f)
-		if len(sp) == 1 && sp[0].keyed && !sp[0].key.day && sp[0].start == 0 && sp[0].end == len(f) && sp[0].key == m.key {
+		if len(sp) == 1 && sp[0].keyed && sp[0].start == 0 && sp[0].end == len(f) && sp[0].key == m.key {
 			return true
 		}
 	}
@@ -797,26 +798,32 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw
 
 // instantEchoes are the leaves of the call's recorded answer (resp) that
 // hold rec, the moment the drifted instant was recorded with, as an instant
-// of their own, exactly, in any form: places keploy answers with the moment
+// of their own, exactly, in any form, a typed time of day's among them
+// (seenIs), which no text form writes: places keploy answers with the moment
 // F saw.
 func (dc *DriftCache) instantEchoes(rec moment, resp []Leaf) []Leaf {
 	var out []Leaf
 	for _, a := range resp {
-		if a.Value != "" && (dc.holdsExact(a.Value, rec) || dc.holdsExact(dc.rawExtra(a.Value), rec)) {
+		if a.Value != "" && (dc.holdsExact(a.Value, rec) || dc.holdsExact(dc.rawExtra(a.Value), rec) || seenIs(a, a.Value, rec)) {
 			out = append(out, a)
 		}
 	}
 	return out
 }
 
-// holdsExact reports whether text holds m as an instant of its own, in any
-// layout (instantSpans), to the nanosecond: not its time of day.
+// holdsExact reports whether text holds m as a moment of its own, in any
+// layout (instantSpans), to the nanosecond: an instant, or, where m is a time
+// of day (a typed time of day, typedInstant.moment), a time of day, never an
+// instant's time of day, whose key is another (instantKey.day). A text holds
+// a typed time of day so as it holds a typed instant: a time of day written
+// as a text and one its protocol types drifting together are a value and its
+// copy, as two texts or two typed leaves are, never noise.
 func (dc *DriftCache) holdsExact(text string, m moment) bool {
 	if text == "" {
 		return false
 	}
 	for _, sp := range dc.spansOf(text) {
-		if sp.keyed && !sp.key.day && sp.key == m.key {
+		if sp.keyed && sp.key == m.key {
 			return true
 		}
 	}
