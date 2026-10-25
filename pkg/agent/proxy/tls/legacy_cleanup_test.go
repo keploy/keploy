@@ -80,7 +80,7 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 	}
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
-	stores := []string{"keploy-java-truststore.jks", "keploy-java-truststore-1000.jks", "keploy-java-truststore-123456.jks"}
+	stores := []string{"keploy-java-truststore.jks", "keploy-java-truststore-1000.jks", "keploy-java-truststore-123456.jks", "keploy-java-truststore--1.jks"}
 	const other = "the-users-own.jks"
 	for _, name := range append([]string{other}, stores...) {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("jks"), 0o600); err != nil {
@@ -128,5 +128,81 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 	}
 	if !exists(filepath.Base(live.path)) {
 		t.Errorf("keploy ca clean removed %s, the store of a live run", live.path)
+	}
+}
+
+// TestRemoveLegacyTempFiles_TakesOlderNameCAFilesOnlyWhenAsked: `keploy ca
+// clean` removes the CA files and merged PEMs keploy versions before the lock
+// left under keploy-ca-<N>.crt and keploy-java-cas-<N>.pem, and only the
+// exact older names: not a file whose name merely looks like one, not a
+// directory or a symlink at such a name (nor the symlink's target), not a
+// live run's file. The boot sweep removes none of them, since an older keploy
+// running at the same time may still use one.
+func TestRemoveLegacyTempFiles_TakesOlderNameCAFilesOnlyWhenAsked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.TempDir does not honour TMPDIR on Windows")
+	}
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	older := []string{"keploy-ca-123.crt", "keploy-ca-0.crt", "keploy-java-cas-4567.pem"}
+	others := []string{"keploy-ca.crt", "keploy-ca-.crt", "keploy-ca-12a.crt", "keploy-ca-12.crt.bak",
+		"my-keploy-ca-1.crt", "keploy-ca-7.pem", "keploy-java-cas-8.crt",
+		"keploy-java-truststore-1000.jks.bak", "keploy-java-truststore-x.jks", "keploy-java-truststore--2.jks"}
+	for _, name := range append(append([]string{}, older...), others...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("pem"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const aDir = "keploy-ca-9.crt"
+	if err := os.Mkdir(filepath.Join(dir, aDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	others = append(others, aDir)
+	// A symlink at an older name, to a file elsewhere: a root clean in a
+	// sticky /tmp must take neither.
+	target := filepath.Join(t.TempDir(), "elsewhere.crt")
+	if err := os.WriteFile(target, []byte("pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const aLink = "keploy-ca-10.crt"
+	if err := os.Symlink(target, filepath.Join(dir, aLink)); err != nil {
+		t.Fatal(err)
+	}
+	others = append(others, aLink)
+	exists := func(name string) bool {
+		_, err := os.Lstat(filepath.Join(dir, name))
+		return err == nil
+	}
+	// A live run's CA file, under its lock.
+	ca, live, err := createRunFile(zap.NewNop(), runCAFilePattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ca.Close()
+	t.Cleanup(func() { _ = live.remove() })
+
+	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, false)
+	for _, name := range older {
+		if !exists(name) {
+			t.Errorf("the boot sweep removed %s, which a live older keploy may use", name)
+		}
+	}
+
+	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, true)
+	for _, name := range older {
+		if exists(name) {
+			t.Errorf("keploy ca clean left %s, an older keploy's CA trust file", name)
+		}
+	}
+	for _, name := range others {
+		if !exists(name) {
+			t.Errorf("keploy ca clean removed %s, which is not an older keploy's CA trust file", name)
+		}
+	}
+	if !exists(filepath.Base(live.path)) {
+		t.Errorf("keploy ca clean removed %s, the CA file of a live run", live.path)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("keploy ca clean removed %s, the target of a symlink at an older name: %v", target, err)
 	}
 }

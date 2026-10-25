@@ -126,7 +126,7 @@ func createUnlockedRunFile(logger *zap.Logger, pattern string, why error) (*os.F
 	warnUnlockedOnce.Do(func() {
 		logger.Warn("keploy cannot lock its trust files in the temp dir, so a run killed before its cleanup leaves them there and no later run removes them",
 			zap.String("temp_dir", os.TempDir()), zap.Error(why),
-			zap.String("next_step", "point TMPDIR at a local filesystem; keploy-ca-*.crt and keploy-java-* files in the temp dir while no keploy runs can be removed by hand"))
+			zap.String("next_step", "point TMPDIR at a local filesystem; while no keploy runs, `keploy ca clean` with TMPDIR set to temp_dir (sudo resets TMPDIR: sudo env TMPDIR=<temp_dir> keploy ca clean) removes the keploy-ca-*.crt and keploy-java-* files a killed run leaves there"))
 	})
 	f, err := os.CreateTemp("", unlockedPattern(pattern))
 	if err != nil {
@@ -198,10 +198,34 @@ func removeAndUnlock(path string, lock *os.File) error {
 	return err
 }
 
+// olderTrustFilePatterns are the names of the trust files that keploy
+// versions before the lock wrote, and that a run which cannot lock still
+// writes: keploy-ca-<N>.crt, keploy-java-truststore-<N>.jks (an older
+// keploy's per-uid store, N its uid) and keploy-java-cas-<N>.pem. No sweep
+// takes them; only the explicit `keploy ca clean` does (removeLegacyTempFiles).
+var olderTrustFilePatterns = []string{unlockedPattern(runCAFilePattern), unlockedPattern(runTrustStorePattern), unlockedPattern(runMergedPEMPattern)}
+
 // isRunFileName reports whether name is one os.CreateTemp gives a run-file
 // pattern: its prefix, a decimal number, its suffix, and nothing else.
 func isRunFileName(name string) bool {
-	for _, pattern := range runFilePatterns {
+	return isCreateTempName(name, runFilePatterns)
+}
+
+// isOlderTrustFileName reports whether name is a trust file under an older
+// keploy name: one of olderTrustFilePatterns, the one shared truststore of the
+// oldest versions, or an older per-uid one where os.Geteuid is -1 (Windows).
+func isOlderTrustFileName(name string) bool {
+	switch name {
+	case "keploy-java-truststore.jks", "keploy-java-truststore--1.jks":
+		return true
+	}
+	return isCreateTempName(name, olderTrustFilePatterns)
+}
+
+// isCreateTempName reports whether name is one os.CreateTemp gives one of
+// patterns: its prefix, a decimal number, its suffix, and nothing else.
+func isCreateTempName(name string, patterns []string) bool {
+	for _, pattern := range patterns {
 		prefix, suffix, _ := strings.Cut(pattern, "*")
 		mid, ok := strings.CutPrefix(name, prefix)
 		if !ok {
