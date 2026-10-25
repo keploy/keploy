@@ -1222,3 +1222,75 @@ func TestWatermark_AParserWaitingWithTheOtherDirectionUnreadIsNotDone(t *testing
 		t.Fatal("PendingBefore(mid) = false while the parser waits on the client with the response to the request it took before mid unread")
 	}
 }
+
+// A chunk a parser read ahead and has not processed holds the windows its
+// stamp is in, whichever place it waited in before the tee's queue: a
+// destination chunk set aside for the client's answer after the client's FIN
+// (tee.awaiting), or bytes a TLS layer read and had not handed on (layer). The
+// chunk leaves that place before the parser has it, and the parser's reader
+// taking it (Consumed) is not the parser being done with it (Processed): were
+// the tee to forget a delivered chunk once it is handed on, the look would
+// find it in no place and pass its window while the parser's loop has yet to
+// emit what it completes.
+func TestWatermark_AChunkReadAheadHoldsItsStampWhereverItWaitedBefore(t *testing.T) {
+	stamp := time.Unix(100, 0)
+	for _, place := range []struct {
+		name string
+		// enter puts the chunk in the place; leave moves it on, onto the
+		// tee's queue, as the relay does.
+		enter, leave func(tt *tee, c fakeconn.Chunk)
+	}{
+		{
+			name:  "set aside for the client's answer",
+			enter: func(tt *tee, c fakeconn.Chunk) { tt.await(c) },
+			// settle pushes a chunk set aside before it lets go of it.
+			leave: func(tt *tee, c fakeconn.Chunk) { tt.push(c); tt.doneAwaiting() },
+		},
+		{
+			name:  "in a TLS layer's hand",
+			enter: func(tt *tee, c fakeconn.Chunk) { tt.progress.layer.Store(c.ReadAt.UnixNano()) },
+			// The forwarder takes the record (held), queues it and lets go
+			// of it, and the layer reads again (its mark clears).
+			leave: func(tt *tee, c fakeconn.Chunk) {
+				tt.noteCarried(c.ReadAt)
+				tt.push(c)
+				tt.noteReleased()
+				tt.noteLayerGone()
+			},
+		},
+	} {
+		t.Run(place.name, func(t *testing.T) {
+			tt := newTee(fakeconn.FromDest, 1<<20, 16, time.Second, nil, nil, nil)
+			fc := fakeconn.New(tt.readCh(), nil, nil)
+			tt.consumed, tt.processedThrough = fc.Consumed, fc.ProcessedThrough
+			tt.start(fc.Done())
+			t.Cleanup(func() {
+				_ = fc.Close()
+				tt.close()
+			})
+			held := func(when string) {
+				t.Helper()
+				at, unstamped, ok := tt.oldestUnprocessed(unstampedInAnyWindow)
+				if unstamped || !ok || at != stamp.UnixNano() {
+					t.Fatalf("%s: oldest unprocessed (%d, unstamped %v, %v), want the chunk's stamp %d", when, at, unstamped, ok, stamp.UnixNano())
+				}
+			}
+			c := fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("one"), ReadAt: stamp}
+			place.enter(tt, c)
+			held("while it waits there")
+			place.leave(tt, c)
+			got, err := fc.ReadAhead()
+			if err != nil || string(got.Bytes) != "one" {
+				t.Fatalf("ReadAhead = %q, %v; want the chunk", got.Bytes, err)
+			}
+			if fc.Consumed() != 3 || fc.Processed() != 0 {
+				t.Fatalf("test setup: consumed %d, processed %d, want 3, 0", fc.Consumed(), fc.Processed())
+			}
+			held("once its parser read it ahead and has not processed it")
+			fc.MarkProcessed(got)
+			if at, _, ok := tt.oldestUnprocessed(unstampedInAnyWindow); ok {
+				t.Fatalf("oldest unprocessed %d once the parser processed the chunk, want none", at)
+			}
+		})
+	}
+}
