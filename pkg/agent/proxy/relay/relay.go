@@ -1439,7 +1439,8 @@ func clearDeadline(c *net.Conn) {
 // they belong to the directive handler now (it may need them as a
 // protocol preamble it's about to consume — Postgres SSLResponse
 // being the canonical case). The chunk's Dir names the stash; its bytes
-// are copied, and its ReadAt and ConnSeq are kept with them.
+// are copied, and its ReadAt, ConnSeq and AfterClientClose are kept with
+// them.
 //
 // Bytes are appended to any existing stash so two consecutive Read+
 // pause-recheck iterations don't lose data; in practice the forwarder
@@ -1449,9 +1450,10 @@ func (r *Relay) stashInflightFromPause(c fakeconn.Chunk) {
 		return
 	}
 	stashed := stashedPayload{
-		bytes:   append([]byte(nil), c.Bytes...),
-		readAt:  c.ReadAt,
-		connSeq: c.ConnSeq,
+		bytes:            append([]byte(nil), c.Bytes...),
+		readAt:           c.ReadAt,
+		connSeq:          c.ConnSeq,
+		afterClientClose: c.AfterClientClose,
 	}
 	r.stashMu.Lock()
 	defer r.stashMu.Unlock()

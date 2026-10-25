@@ -477,9 +477,15 @@ func TestWatermark_AForwarderParkedInAPauseHoldsNoWindowWithTheChunkItStashed(t 
 				blockInRead(t, h.r.ClientStream())
 			} else {
 				h.writeDest([]byte("greet"))
-				// Stashed only: the parser is given nothing and waits, nor will
-				// it be given it: ResumePreDispatch writes it to the client and
-				// UpgradeTLS takes it for the handshake, and neither tees it.
+				// Stashed only: the parser is given nothing yet and waits. A
+				// TLS upgrade takes it for the handshake and the parser never
+				// gets it. A plain resume or release tees it, and only then
+				// writes it to the client (deliverStashedToClient). So while it
+				// is stashed the client has not read it: no test case that has
+				// ended used it, and a window settled meanwhile lost nothing.
+				// The window an app's use of it falls in ends after that write,
+				// and the chunk, on the parser's queue by then, holds it
+				// (TestAResumeTeesTheDestinationsStashBeforeTheClientReadsIt).
 				blockInRead(t, h.r.DestStream())
 			}
 			awaitState(t, "the forwarder to park on the pause", func() bool { return forwarderParked(h.r, dir) })

@@ -9,11 +9,14 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // A client-side TLS upgrade whose handshake failed is handed, with the
@@ -79,8 +82,11 @@ func TestAClientHandshakeErrorReadsAsBefore(t *testing.T) {
 	}
 }
 
-// stashBound only ends a run that is broken (a relay that never tees what it
-// delivers, or writes before it tees, blocks in its Write below); no verdict
+// stashBound ends a run that is broken (a relay that never tees what it
+// delivers, or writes before it tees, blocks in its Write below). The rows that
+// use it run in a synctest bubble, where it is the bubble's clock: that moves
+// only once every goroutine in the bubble is durably blocked, so a stuck relay
+// fails at once, and a correct one, however slow, never reaches it. No verdict
 // depends on how long anything takes.
 const stashBound = 30 * time.Second
 
@@ -217,52 +223,215 @@ func (h *stashDeliveryHarness) parserChunk(t *testing.T) fakeconn.Chunk {
 // A plain ResumePreDispatch writes the destination's bytes the pause stashed
 // to the client. They are ordinary server bytes the client reads, so the
 // parser is given them too, teed before the client can read them, numbered and
-// stamped as they were read. Written on untee'd, the app read bytes no parser
-// saw and no report named.
+// stamped as they were read, and with the time they were handed on as their
+// WrittenAt (a recorder takes a response's WrittenAt as its mock's time).
+// Written on untee'd, the app read bytes no parser saw and no report named.
+//
+// The capture watermark: stashed, the chunk held no window, as the client had
+// not read it (TestWatermark_AForwarderParkedInAPauseHoldsNoWindowWithTheChunkItStashed).
+// Once the client has read it, a window over its stamp is held until the
+// parser has taken it: it reached the parser's queue before the client.
 func TestAResumeTeesTheDestinationsStashBeforeTheClientReadsIt(t *testing.T) {
 	t.Parallel()
-	h := newStashDeliveryHarness(t, Config{PreDispatchPause: true}, len("greet"))
+	synctest.Test(t, func(t *testing.T) {
+		h := newStashDeliveryHarness(t, Config{PreDispatchPause: true}, len("greet"))
+		w := NewWatermark()
+		defer w.Track(h.r, "conn-1")()
 
-	// The destination speaks first: its forwarder reads the greeting, stashes
-	// it and parks, so neither the client nor the parser has it.
-	before := time.Now()
-	h.writeDest([]byte("greet"))
-	awaitParkedOnPause(t, h.r, fakeconn.FromDest)
+		// The destination speaks first: its forwarder reads the greeting,
+		// stashes it and parks, so neither the client nor the parser has it.
+		before := time.Now()
+		h.writeDest([]byte("greet"))
+		awaitParkedOnPause(t, h.r, fakeconn.FromDest)
 
-	h.r.Directives() <- directive.ResumePreDispatch("parser-decided-no-tls")
-	if a := h.ack(t, directive.KindResumePreDispatch); !a.OK {
-		t.Fatalf("resume failed: %+v", a)
-	}
-	c := h.parserChunk(t)
-	if string(c.Bytes) != "greet" || c.Dir != fakeconn.FromDest {
-		t.Fatalf("the parser got %v %q, want the destination's stashed greet", c.Dir, c.Bytes)
-	}
-	if c.ConnSeq == 0 || c.SeqNo == 0 || c.ReadAt.Before(before) {
-		t.Fatalf("the stashed chunk reached the parser as ConnSeq %d SeqNo %d ReadAt %v: want it "+
-			"numbered and stamped as it was read (after %v)", c.ConnSeq, c.SeqNo, c.ReadAt, before)
-	}
-	if got := <-h.clientGot; string(got) != "greet" {
-		t.Fatalf("the client got %q, want greet", got)
-	}
+		h.r.Directives() <- directive.ResumePreDispatch("parser-decided-no-tls")
+		if a := h.ack(t, directive.KindResumePreDispatch); !a.OK {
+			t.Fatalf("resume failed: %+v", a)
+		}
+		if got := <-h.clientGot; string(got) != "greet" {
+			t.Fatalf("the client got %q, want greet", got)
+		}
+		if by := w.HeldBy("", "", before, time.Now(), 0); by == nil {
+			t.Error("a window over the delivered greet is settled though the client has read it and the parser has not taken it")
+		}
+		c := h.parserChunk(t)
+		if string(c.Bytes) != "greet" || c.Dir != fakeconn.FromDest {
+			t.Fatalf("the parser got %v %q, want the destination's stashed greet", c.Dir, c.Bytes)
+		}
+		if c.ConnSeq == 0 || c.SeqNo == 0 || c.ReadAt.Before(before) {
+			t.Fatalf("the stashed chunk reached the parser as ConnSeq %d SeqNo %d ReadAt %v: want it "+
+				"numbered and stamped as it was read (after %v)", c.ConnSeq, c.SeqNo, c.ReadAt, before)
+		}
+		if c.WrittenAt.IsZero() || c.WrittenAt.Before(c.ReadAt) {
+			t.Fatalf("the stashed chunk reached the parser with WrittenAt %v (ReadAt %v): want the time it was handed on",
+				c.WrittenAt, c.ReadAt)
+		}
+	})
 }
 
 // A plain ReleaseClient delivers the destination's bytes stashed at the
-// pause boundary to the client the same way: teed first.
+// pause boundary to the client the same way: teed first, with its WrittenAt.
 func TestAReleaseTeesTheDestinationsStashBeforeTheClientReadsIt(t *testing.T) {
 	t.Parallel()
-	h := newStashDeliveryHarness(t, Config{HoldClientWrites: true}, len("late reply"))
-	h.r.stashInflightFromPause(readFromDest(h.r, []byte("late reply")))
+	synctest.Test(t, func(t *testing.T) {
+		h := newStashDeliveryHarness(t, Config{HoldClientWrites: true}, len("late reply"))
+		h.r.stashInflightFromPause(readFromDest(h.r, []byte("late reply")))
 
-	h.r.Directives() <- directive.ReleaseClient("plaintext auth")
-	if a := h.ack(t, directive.KindReleaseClient); !a.OK {
-		t.Fatalf("release failed: %+v", a)
-	}
-	if c := h.parserChunk(t); string(c.Bytes) != "late reply" || c.ConnSeq == 0 || c.SeqNo == 0 {
-		t.Fatalf("the parser got %q (ConnSeq %d, SeqNo %d), want the stashed late reply, numbered",
-			c.Bytes, c.ConnSeq, c.SeqNo)
-	}
-	if got := <-h.clientGot; string(got) != "late reply" {
-		t.Fatalf("the client got %q, want late reply", got)
+		h.r.Directives() <- directive.ReleaseClient("plaintext auth")
+		if a := h.ack(t, directive.KindReleaseClient); !a.OK {
+			t.Fatalf("release failed: %+v", a)
+		}
+		c := h.parserChunk(t)
+		if string(c.Bytes) != "late reply" || c.ConnSeq == 0 || c.SeqNo == 0 {
+			t.Fatalf("the parser got %q (ConnSeq %d, SeqNo %d), want the stashed late reply, numbered",
+				c.Bytes, c.ConnSeq, c.SeqNo)
+		}
+		if c.WrittenAt.IsZero() || c.WrittenAt.Before(c.ReadAt) {
+			t.Fatalf("the stashed chunk reached the parser with WrittenAt %v (ReadAt %v): want the time it was handed on",
+				c.WrittenAt, c.ReadAt)
+		}
+		if got := <-h.clientGot; string(got) != "late reply" {
+			t.Fatalf("the client got %q, want late reply", got)
+		}
+	})
+}
+
+// A destination chunk read after the client's FIN reaches the parser saying
+// so (fakeconn.Chunk.AfterClientClose), stashed or not: a parser judges by it
+// whether the client can have read the bytes. The stash keeps the flag the
+// chunk was numbered with, and the delivery hands it on.
+func TestAStashedDestinationChunkReadAfterTheClientsFINReachesTheParserSayingSo(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		h := newStashDeliveryHarness(t, Config{HoldClientWrites: true}, len("bye reply"))
+		h.r.order.ClientClosed() // the client's FIN, numbered as its forwarder numbers it
+		read := readFromDest(h.r, []byte("bye reply"))
+		if !read.AfterClientClose {
+			t.Fatal("a destination chunk numbered after the client's FIN does not say so")
+		}
+		h.r.stashInflightFromPause(read)
+
+		h.r.Directives() <- directive.ReleaseClient("plaintext auth")
+		if a := h.ack(t, directive.KindReleaseClient); !a.OK {
+			t.Fatalf("release failed: %+v", a)
+		}
+		if c := h.parserChunk(t); string(c.Bytes) != "bye reply" || !c.AfterClientClose {
+			t.Fatalf("the parser got %q with AfterClientClose %v, want the stashed bye reply saying it came after the client's FIN",
+				c.Bytes, c.AfterClientClose)
+		}
+		<-h.clientGot
+	})
+}
+
+// A stashed destination chunk is handed on as forward() hands on one it
+// writes: the client's side decides whether the parser gets it
+// (client_took.go). Once the client has stopped taking the stream
+// (Config.ClientStopped), the chunk is refused: neither teed nor told of, and
+// counted as not taken; it is still written. After the client's FIN, it is set
+// aside, before it is written, until the client answers, and teed once the
+// client says it took it. Teed at once, the parser would be given bytes past
+// where its stream ended, or bytes a closed client may never read. A write
+// that fails marks the mock incomplete as forward() marks it: not for a
+// refused chunk, which is no part of the parser's stream, and for one set
+// aside only once it is teed.
+func TestAStashedDestinationChunkIsHandedOnAsTheClientsSideDecides(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		stopped, fail bool
+	}{
+		{"client stopped", true, false}, {"after the client's FIN", false, false},
+		{"client stopped/write fails", true, true}, {"after the client's FIN/write fails", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				var carried atomic.Int32
+				var last atomic.Pointer[time.Time]
+				marks := make(chan string, 4)
+				failWrites := new(atomic.Int32)
+				if tc.fail {
+					failWrites.Store(writeFails)
+				}
+				clientApp, srcProxy := net.Pipe()
+				dstProxy, destSvc := net.Pipe()
+				t.Cleanup(func() {
+					for _, c := range []net.Conn{clientApp, srcProxy, dstProxy, destSvc} {
+						_ = c.Close()
+					}
+				})
+				r := New(Config{Logger: zap.NewNop(), OnCarried: func(dir fakeconn.Direction, at time.Time, teed bool, _ int64) {
+					if dir == fakeconn.FromDest && teed {
+						carried.Add(1)
+						last.Store(&at)
+					}
+				}, OnMarkMockIncomplete: func(reason string) { marks <- reason },
+				}, clientWriteFailer{Conn: srcProxy, fail: failWrites}, connseq.NewUpstream(dstProxy))
+				t.Cleanup(func() { r.teeC2D.close(); r.teeD2C.close() }) // their drains; the relay is not run
+				// The client's FIN reached the proxy, and nothing written to it
+				// since has been taken; then it takes it all.
+				sock := &scriptedSocket{script: []clientLook{finned(0), finned(64)}}
+				r.client = sock
+				r.clientFIN.Store(true)
+				if tc.stopped {
+					r.clientStopped.Store(true)
+				}
+				got := make(chan []byte, 1)
+				go func() {
+					buf := make([]byte, len("late reply"))
+					if _, err := io.ReadFull(clientApp, buf); err == nil {
+						got <- buf
+					}
+				}()
+
+				read := fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("late reply"), ReadAt: time.Now()}
+				read.ConnSeq, read.AfterClientClose = r.order.FromDest()
+				r.stashInflightFromPause(read)
+				err := r.deliverStashedToClient(t.Context(), r.takeStashedParts(fakeconn.FromDest), "release_d2c_delivery")
+				if tc.fail != (err != nil) {
+					t.Fatalf("delivery returned %v, want an error only for a failed write", err)
+				}
+				if !tc.fail {
+					if b := <-got; string(b) != "late reply" {
+						t.Fatalf("the client got %q, want late reply", b)
+					}
+				}
+				synctest.Wait()
+				if len(marks) != 0 {
+					t.Fatalf("the mock was marked incomplete (%q) for a stashed chunk the parser has not been given", <-marks)
+				}
+				if tc.stopped {
+					if n := carried.Load(); n != 0 {
+						t.Fatalf("a stashed chunk the client refused was teed %d times: the parser's stream ended where the client stopped", n)
+					}
+					if n := r.notTakenChunks.Load(); n != 1 {
+						t.Fatalf("%d chunks counted as not taken, want the refused one", n)
+					}
+					return
+				}
+				if n, aside := carried.Load(), r.teeD2C.awaitingLen(); n != 0 || aside != 1 {
+					t.Fatalf("after the client's FIN, with no answer from it yet, the stashed chunk was teed %d times and %d set aside: "+
+						"want it set aside until the client answers", n, aside)
+				}
+				time.Sleep(lastLookAgain) // the resolver's next look, on the bubble's clock
+				synctest.Wait()
+				if n, aside := carried.Load(), r.teeD2C.awaitingLen(); n != 1 || aside != 0 {
+					t.Fatalf("once the client took it, the stashed chunk was teed %d times and %d still set aside: want it teed once", n, aside)
+				}
+				if at := last.Load(); at == nil || !at.Equal(read.ReadAt) {
+					t.Fatalf("the stashed chunk was told of at %v, want its ReadAt %v", at, read.ReadAt)
+				}
+				if tc.fail {
+					select {
+					case m := <-marks:
+						if m != "release_d2c_delivery_write_error" {
+							t.Fatalf("the mock was marked incomplete for %q, want release_d2c_delivery_write_error", m)
+						}
+					default:
+						t.Fatal("a stashed chunk whose write failed was teed once the client answered, and the mock was not marked incomplete")
+					}
+				}
+			})
+		})
 	}
 }
 
@@ -285,31 +454,33 @@ func TestAFailedDeliveryOfTheDestinationsStashMarksTheMockIncomplete(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newStashDeliveryHarness(t, tc.cfg, 0)
-			if tc.cfg.PreDispatchPause {
-				h.writeDest([]byte("greet"))
-				awaitParkedOnPause(t, h.r, fakeconn.FromDest)
-			} else {
-				h.r.stashInflightFromPause(readFromDest(h.r, []byte("greet")))
-			}
-			h.failWrites.Store(tc.fail)
-
-			h.r.Directives() <- tc.send
-			a := h.ack(t, tc.send.Kind)
-			if tc.cfg.PreDispatchPause && a.OK {
-				t.Fatalf("resume acked OK though its write to the client failed: %+v", a)
-			}
-			select {
-			case got := <-h.marked:
-				if got != tc.reason {
-					t.Fatalf("the mock was marked incomplete for %q, want %q", got, tc.reason)
+			synctest.Test(t, func(t *testing.T) {
+				h := newStashDeliveryHarness(t, tc.cfg, 0)
+				if tc.cfg.PreDispatchPause {
+					h.writeDest([]byte("greet"))
+					awaitParkedOnPause(t, h.r, fakeconn.FromDest)
+				} else {
+					h.r.stashInflightFromPause(readFromDest(h.r, []byte("greet")))
 				}
-			default:
-				t.Fatalf("the write to the client failed or fell short after the parser was given its bytes, and the mock was not marked incomplete")
-			}
-			if c := h.parserChunk(t); string(c.Bytes) != "greet" {
-				t.Fatalf("the parser got %q, want greet", c.Bytes)
-			}
+				h.failWrites.Store(tc.fail)
+
+				h.r.Directives() <- tc.send
+				a := h.ack(t, tc.send.Kind)
+				if tc.cfg.PreDispatchPause && a.OK {
+					t.Fatalf("resume acked OK though its write to the client failed: %+v", a)
+				}
+				select {
+				case got := <-h.marked:
+					if got != tc.reason {
+						t.Fatalf("the mock was marked incomplete for %q, want %q", got, tc.reason)
+					}
+				default:
+					t.Fatalf("the write to the client failed or fell short after the parser was given its bytes, and the mock was not marked incomplete")
+				}
+				if c := h.parserChunk(t); string(c.Bytes) != "greet" {
+					t.Fatalf("the parser got %q, want greet", c.Bytes)
+				}
+			})
 		})
 	}
 }

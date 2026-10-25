@@ -21,6 +21,10 @@ type stashedPayload struct {
 	// returned (fakeconn.Chunk.ConnSeq), kept so a stashed chunk the relay
 	// tees later, on a resume or a release, is numbered where it was read.
 	connSeq uint32
+	// afterClientClose is the chunk's fakeconn.Chunk.AfterClientClose,
+	// decided as it was numbered: a destination chunk read after the
+	// client's FIN reaches the parser saying so, stashed or not.
+	afterClientClose bool
 }
 
 func (s stashedPayload) len() int {
