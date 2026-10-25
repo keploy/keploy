@@ -38,18 +38,22 @@ func TestClientPIDNSSuffixSaysThisCLIsPidNamespace(t *testing.T) {
 	}
 }
 
-// The linux arm's alias says the namespace right beside the pid.
+// The linux arm's alias says the namespace right beside the pid, in record and
+// in test mode alike.
 func TestGetAlias_LinuxSaysTheCLIsPidNamespace(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("getAlias switches on runtime.GOOS; the linux arm only executes here")
 	}
-	opts := models.SetupOptions{KeployContainer: "keploy-test", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, ClientNSPID: 4242, Mode: models.MODE_RECORD}
-	alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
-	if err != nil {
-		t.Fatalf("getAlias: %v", err)
-	}
-	if want := " --client-pid 4242 --client-pid-ns " + ownPIDNamespace(t) + " "; !strings.Contains(alias, want) {
-		t.Fatalf("the agent alias does not say %q, so the agent takes the CLI's pid by its number alone:\n%s", want, alias)
+	want := " --client-pid 4242 --client-pid-ns " + ownPIDNamespace(t) + " "
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		opts := models.SetupOptions{KeployContainer: "keploy-test", AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, ClientNSPID: 4242, Mode: mode}
+		alias, err := getAlias(context.Background(), zap.NewNop(), opts, false)
+		if err != nil {
+			t.Fatalf("%s: getAlias: %v", mode, err)
+		}
+		if !strings.Contains(alias, want) {
+			t.Fatalf("%s: the agent alias does not say %q, so the agent takes the CLI's pid by its number alone:\n%s", mode, want, alias)
+		}
 	}
 }
 
@@ -69,21 +73,24 @@ func TestGetAlias_EveryPlatformBranchSaysTheCLIsPidNamespace(t *testing.T) {
 }
 
 // compose's keploy-agent service, which the app's services join (pid:
-// service:keploy-agent), says the namespace its --client-pid is this CLI's in.
+// service:keploy-agent), says the namespace its --client-pid is this CLI's in,
+// in record and in test mode alike.
 func TestGenerateKeployAgentService_SaysTheCLIsPidNamespace(t *testing.T) {
-	svc, err := (&Impl{logger: zap.NewNop(), conf: &config.Config{}}).GenerateKeployAgentService(models.SetupOptions{
-		AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, Mode: models.MODE_RECORD,
-	})
-	if err != nil {
-		t.Fatalf("GenerateKeployAgentService: %v", err)
-	}
-	command := composeCommand(t, svc)
 	own := ownPIDNamespace(t)
-	pid, ns := slices.Index(command, "--client-pid"), slices.Index(command, "--client-pid-ns")
-	if pid < 0 || pid+1 >= len(command) || command[pid+1] != strconv.Itoa(os.Getpid()) {
-		t.Fatalf("the compose agent command does not say this CLI's pid: %v", command)
-	}
-	if ns < 0 || ns+1 >= len(command) || command[ns+1] != own {
-		t.Fatalf("the compose agent command does not say the CLI's pid namespace %q beside its pid, so the agent takes the pid by its number alone: %v", own, command)
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		svc, err := (&Impl{logger: zap.NewNop(), conf: &config.Config{}}).GenerateKeployAgentService(models.SetupOptions{
+			AgentPort: 16789, ProxyPort: 16790, DnsPort: 16791, Mode: mode,
+		})
+		if err != nil {
+			t.Fatalf("%s: GenerateKeployAgentService: %v", mode, err)
+		}
+		command := composeCommand(t, svc)
+		pid, ns := slices.Index(command, "--client-pid"), slices.Index(command, "--client-pid-ns")
+		if pid < 0 || pid+1 >= len(command) || command[pid+1] != strconv.Itoa(os.Getpid()) {
+			t.Fatalf("%s: the compose agent command does not say this CLI's pid: %v", mode, command)
+		}
+		if ns < 0 || ns+1 >= len(command) || command[ns+1] != own {
+			t.Fatalf("%s: the compose agent command does not say the CLI's pid namespace %q beside its pid, so the agent takes the pid by its number alone: %v", mode, own, command)
+		}
 	}
 }
