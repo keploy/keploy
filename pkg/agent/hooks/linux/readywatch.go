@@ -285,7 +285,7 @@ func (w *readyWatch) fail(err error) {
 
 // snapshot is what the watch knows now (models.AppReadiness), of the listens
 // from since on.
-func (w *readyWatch) snapshot(clientPID uint32, since uint64) (models.AppReadiness, error) {
+func (w *readyWatch) snapshot(clientPID uint32, clientPIDNS string, since uint64) (models.AppReadiness, error) {
 	told, listens, err := w.listensFrom(since)
 	if err != nil {
 		return models.AppReadiness{}, err
@@ -295,7 +295,7 @@ func (w *readyWatch) snapshot(clientPID uint32, since uint64) (models.AppReadine
 	// in the count read after it, so its process's CPU time is never weighed
 	// under the count before it (keploy test weighs CPU time until the start
 	// restarts).
-	if members, ok := memberCPU("/proc", os.Getpid(), w.docker, clientPID); ok {
+	if members, ok := memberCPU("/proc", os.Getpid(), w.docker, clientPID, clientPIDNS); ok {
 		out.CPU, out.CPUKnown = w.cpu.add(members), true
 	}
 	if err := w.maps.ReadyListenEventsLost.Lookup(uint32(0), &out.ListensLost); err != nil {
@@ -444,7 +444,7 @@ type procStat struct {
 // shim for its parent too, but started later, and is no member, as the
 // kernel's ready_mains has it (its first exec there). ok is false when it
 // cannot be read.
-func memberCPU(root string, self int, docker bool, client uint32) (map[int]procStat, bool) {
+func memberCPU(root string, self int, docker bool, client uint32, clientNS string) (map[int]procStat, bool) {
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		return nil, false
@@ -481,6 +481,12 @@ func memberCPU(root string, self int, docker bool, client uint32) (map[int]procS
 	notMembers := map[int]bool{}
 	for p := self; p > 0 && !notMembers[p]; p = stats[p].ppid {
 		notMembers[p] = true
+	}
+	// The client's pid as this agent's /proc names it: a pid the client said
+	// in another pid namespace names another process here, or none, whose
+	// descendants are not the application (utils.ClientPIDHere).
+	if !docker {
+		client = utils.ClientPIDIn(root, client, clientNS).PID
 	}
 	if !docker && client == 0 {
 		return nil, false
@@ -745,7 +751,10 @@ func (h *Hooks) AppReadiness(since uint64) (models.AppReadiness, error) {
 		}
 		client = info.ClientNSPID
 	}
-	return w.snapshot(client, since)
+	h.clientMu.Lock()
+	clientNS := h.clientPIDNS
+	h.clientMu.Unlock()
+	return w.snapshot(client, clientNS, since)
 }
 
 // selfRegistered is registerSelf, once: its error stays.
