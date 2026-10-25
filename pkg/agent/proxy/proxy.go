@@ -420,7 +420,11 @@ type Proxy struct {
 	// arbitrary JDK first on PATH. On non-Java, Windows, or shared-volume
 	// paths these are ignored. See pkg/agent/proxy/tls/java_detect.go for
 	// the resolution order and rationale.
-	appPID     uint32
+	appPID uint32
+	// appPIDNS is the pid namespace the CLI said appPID is its pid in
+	// (config.Agent.ClientPIDNS): the JAVA_HOME auto-detect reads
+	// /proc/<appPID> only where that names the CLI (javaHomePID).
+	appPIDNS   string
 	mockMode   bool
 	live       LiveHandler
 	treeMu     sync.Mutex
@@ -995,6 +999,24 @@ func resolveUpstreamTLSConfig(opts *config.Config) (verify bool, caCert string) 
 	return verify, caCert
 }
 
+// javaHomePID is the process the JAVA_HOME auto-detect reads
+// (/proc/<pid>/environ and exe): the CLI's, where its pid names it in this
+// agent's pid namespace (utils.ClientPIDHere); else 0, which leaves the
+// detection to keytool on PATH, never another process's JDK.
+func (p *Proxy) javaHomePID() uint32 {
+	return utils.ClientPIDHere(p.appPID, p.appPIDNS).PID
+}
+
+// setupCAForApp is pTls.SetupCAForApp; a test swaps it to see the pid the
+// JAVA_HOME auto-detect is given.
+var setupCAForApp = pTls.SetupCAForApp
+
+// setupCA installs keploy's CA for the app, the JAVA_HOME auto-detect reading
+// the CLI's process only (javaHomePID).
+func (p *Proxy) setupCA(ctx context.Context) error {
+	return setupCAForApp(ctx, p.logger, p.IsDocker, int(p.javaHomePID()), p.caJavaHome)
+}
+
 func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	warnIfRemovedRelayKnobSet(logger)
 	proxy := &Proxy{
@@ -1020,6 +1042,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		IsDocker:                  opts.Agent.IsDocker,
 		EnableIPv6Redirect:        opts.Agent.EnableIPv6Redirect,
 		appPID:                    opts.Agent.ClientNSPID,
+		appPIDNS:                  opts.Agent.ClientPIDNS,
 		mockMode:                  opts.Agent.MockMode,
 		agentMode:                 opts.Agent.Mode,
 		caJavaHome:                opts.Agent.CAJavaHome,
@@ -1925,7 +1948,7 @@ func (p *Proxy) StartProxy(ctx context.Context, opts agent.ProxyOptions) error {
 	// mode / appPID==0 these extra args are harmless — SetupCAForApp
 	// falls back to the legacy PATH-keytool behaviour. See
 	// pkg/agent/proxy/tls/java_detect.go for the resolution order.
-	err = pTls.SetupCAForApp(ctx, p.logger, p.IsDocker, int(p.appPID), p.caJavaHome)
+	err = p.setupCA(ctx)
 	utils.BootStep("the CA's install is over")
 	if err != nil {
 		// Terminal: the CA cannot be installed in this process and

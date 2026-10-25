@@ -2055,6 +2055,11 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
 		"--mode", string(opts.Mode),
 	}
+	// The pid namespace the pid is this process's in, so the agent takes it
+	// only where it names this process (utils.ClientPIDHere).
+	if ns := utils.OwnPIDNamespace(); ns != "" {
+		args = append(args, "--client-pid-ns", ns)
+	}
 
 	extraArgs := opts.ExtraArgs
 	if len(extraArgs) > 0 {

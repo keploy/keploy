@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -726,6 +728,44 @@ func TestAClaimInARunWithoutAClientSaysWhy(t *testing.T) {
 	require.NotNil(t, serr)
 	require.Equal(t, models.ScopeErrNotInRun, serr.Code)
 	require.Contains(t, serr.Message, "docker compose")
+}
+
+// A CLI in another pid namespace than the agent's (a CI step container's,
+// beside a docker agent's own, which the app's containers join) said a pid
+// that names another process here: a claimer that descends from that process
+// is not the run's, and the claim says why. The CLI said in the agent's own
+// namespace, or by an older CLI that says none, keeps its claim.
+func TestAClaimUnderACLIOfAnotherPIDNamespaceIsRefused(t *testing.T) {
+	own := utils.OwnPIDNamespace()
+	ino, boot, ok := strings.Cut(own, "@")
+	if !ok {
+		t.Skipf("this process cannot say its pid namespace with a boot id (%q)", own)
+	}
+	n, err := strconv.ParseUint(ino, 10, 64)
+	require.NoError(t, err)
+	other := strconv.FormatUint(n+1, 10) + "@" + boot
+	for _, c := range []struct {
+		name, ns string
+		taken    bool
+	}{
+		{"another namespace on this kernel", other, false},
+		{"the agent's namespace on another kernel", ino + "@another-boot", false},
+		{"a CLI in no Linux namespace", utils.ClientPIDNSNone, false},
+		{"the agent's own namespace", own, true},
+		{"an older CLI that says none", "", true},
+	} {
+		a, _ := wireAgent(t, models.MODE_TEST)
+		a.config.Agent.ClientPIDNS = c.ns
+		_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a"}, os.Getpid())
+		if c.taken {
+			require.Nil(t, serr, c.name)
+			continue
+		}
+		require.NotNil(t, serr, "%s: the claim of a descendant of the process at the CLI's pid", c.name)
+		require.Equal(t, models.ScopeErrNotInRun, serr.Code, c.name)
+		require.Contains(t, serr.Message, "cannot tell its CLI's process", c.name)
+		require.NotContains(t, serr.Message, "docker compose", c.name)
+	}
 }
 
 func TestABeginRefusesAnIDSeparatorInItsFile(t *testing.T) {

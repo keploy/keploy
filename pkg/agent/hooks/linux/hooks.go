@@ -77,6 +77,12 @@ type Hooks struct {
 	// readyMu; nil with the switch off.
 	readyMu sync.Mutex
 	ready   *readyWatch
+	// clientPIDNS is the pid namespace the registered client said it runs
+	// in (config.Agent.ClientPIDNS), beside its pid in the kernel's
+	// registration, under clientMu: the readiness watch reads that pid
+	// through it (utils.ClientPIDIn).
+	clientMu    sync.Mutex
+	clientPIDNS string
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -895,6 +901,9 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
+	h.clientMu.Lock()
+	h.clientPIDNS = opts.ClientPIDNS
+	h.clientMu.Unlock()
 
 	return h.SendClientInfo(clientInfo)
 }
