@@ -33,6 +33,25 @@
 // caller — but "only reads and writes them" is no longer the whole
 // story.
 //
+// What the destination sends after the client's FIN is still forwarded,
+// as soon as it comes, but on Linux the parser is given it only if the
+// client took it (client_took.go). A client that half-closed and waits
+// for its reply takes it: its TCP stack acknowledges the bytes. A client
+// that closed its socket (a driver closing a pooled connection, an HTTP
+// client giving up at its timeout) reads nothing more, and its stack
+// answers the bytes with a reset and acknowledges none. A chunk written
+// once a look found the client's FIN at the proxy's socket waits for
+// that answer, off the forwarding path; answered with a reset and no
+// acknowledgement, it is not teed, whatever its protocol, and nor is any
+// later one. The one such chunk an application did read is one a
+// half-closed client read and then reset before its stack acknowledged
+// it (an abortive close). The relay also numbers the FIN in the capture
+// sequence as it reads it, before it forwards it, and every destination
+// chunk numbered after it carries [fakeconn.Chunk.AfterClientClose]:
+// where the client's socket cannot be asked (off Linux), that mark is
+// what a parser whose clients never read after their FIN (a MongoDB
+// driver) judges by.
+//
 // This package is wired into the record path via the V2 dispatcher
 // (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
 // (those implementing integrations.IntegrationsV2 with IsV2()==true)

@@ -556,6 +556,9 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 		heldConsumedByHandshake bool
 	)
 
+	// The directions whose TLS layer this upgrade started: a failed upgrade
+	// drops them, and what their handshakes read with them (progress.go).
+	var layersStarted []*tee
 	upgradeDest := func() *directive.Ack {
 		if params.DestTLSConfig == nil {
 			return nil
@@ -578,7 +581,8 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			}
 			dst = newPrependingConnWithReadAt(dst, stashed.bytes, stashed.readAt)
 		}
-		trackedDst := newReadTrackingConn(dst)
+		trackedDst := newReadTrackingConn(dst, &r.teeD2C.progress.layer)
+		layersStarted = append(layersStarted, r.teeD2C)
 		var err error
 		upgradedDst, err = r.cfg.TLSUpgradeFn(ctx, trackedDst, true, params.DestTLSConfig)
 		if err != nil {
@@ -668,7 +672,8 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 			src = newPrependingConnWithReadAt(src, stashed.bytes, stashed.readAt)
 			heldConsumedByHandshake = true
 		}
-		trackedSrc := newReadTrackingConn(src)
+		trackedSrc := newReadTrackingConn(src, &r.teeC2D.progress.layer)
+		layersStarted = append(layersStarted, r.teeC2D)
 		var err error
 		upgradedSrc, err = r.cfg.TLSUpgradeFn(ctx, trackedSrc, false, params.ClientTLSConfig)
 		if err != nil {
@@ -707,6 +712,9 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 	}
 	for _, step := range steps {
 		if ack := step(); ack != nil {
+			for _, t := range layersStarted {
+				t.noteLayerGone()
+			}
 			return *ack
 		}
 	}

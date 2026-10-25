@@ -41,6 +41,49 @@ func (d Direction) String() string {
 // ConnSeq's to say (CapturedBefore), never theirs.
 type Chunk struct {
 	Dir Direction
+	// AfterClientClose, on a chunk from the destination, says its bytes
+	// reached the producer after the client had closed its side of the
+	// connection: the relay had read the client's FIN (its Read on the client
+	// returned io.EOF), and numbered it as it numbers a client chunk, before it
+	// forwarded it, and this chunk is numbered after it (ConnSeq). The
+	// destination's answer to the FIN itself always is: it can send one only
+	// once the FIN is forwarded. Bytes that were already waiting in the
+	// relay's socket when the FIN was read are not, however late they are
+	// read, where the socket's count can say so (a TCP socket on Linux;
+	// elsewhere bytes the relay had not read yet are numbered after the FIN:
+	// connseq.Upstream).
+	//
+	// The relay forwards these bytes. On Linux it does not tee one the
+	// client refused (relay/client_took.go): written once a look found the
+	// client's FIN at the proxy's socket, after which the connection closed
+	// with nothing acknowledged since that look, as it does for a client
+	// that closed its socket. A client that only half-closed
+	// (shutdown(SHUT_WR)) and waits for its reply, as an EOF-delimited
+	// request does, acknowledges them, and they are teed. So on Linux a
+	// chunk teed with the mark is one a half-closed client's stack took,
+	// except one the client had answered neither way for by the relay's end
+	// or the recording's stop (at once with a negative HalfCloseGrace, where
+	// the relay stops at the client's FIN), one written to a socket that
+	// could not say (keploy closed it), one written after a reset that came
+	// in before any look found the client's FIN (its Write fails, and the
+	// mock is marked incomplete), and one written after a TLS client's
+	// close_notify, which the relay reads as the client's end, while no TCP
+	// FIN is at the socket: until it comes, or for good from a client that
+	// closes only its TLS side. A chunk refused is one the client's
+	// stack did not acknowledge, which is not always one its application
+	// did not read: a half-closed client that resets before its
+	// acknowledgement went out (it closed with part of the chunk unread, or
+	// abortively, with SO_LINGER 0) read some or all of it. Where the relay
+	// cannot ask the client's socket (off Linux, or a client conn with no
+	// TCP socket under it) it tees them all, marked: a parser whose clients
+	// send their FIN as they close the connection, and stop reading then, as
+	// a MongoDB driver does, does not record them.
+	//
+	// False on every chunk from the client, and on every chunk of a producer
+	// that does not number the client's FIN: such a chunk reads as one
+	// captured before it, as every chunk did before the relay numbered it.
+	// In the padding after Dir, so a queued chunk costs no more memory.
+	AfterClientClose bool
 	// ConnSeq is the connection-wide capture sequence: the producer numbers
 	// the chunks of BOTH directions of a connection from one counter, once,
 	// where the bytes enter the capture, with ConnSeqOf, by one rule: a
