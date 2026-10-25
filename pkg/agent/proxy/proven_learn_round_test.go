@@ -268,10 +268,12 @@ func s12Orders(t *testing.T) (*Proxy, *MockManager) {
 // While the store shows a test's view, the background answers a call
 // exactly or not at all, and no drift is learned onto it, whether the learn
 // tracker has that test open or not: the pool is learned onto between tests
-// only. Two schedules the replay makes put the tracker out of step with the
-// store's test view: keploy mock's scope flow opens a test's view before the
-// tracker begins it, and a test whose misses' read did not complete never
-// ended on the tracker. Read as between tests there, a drifted call of the
+// only. Two schedules put the tracker out of step with the store's test
+// view: a store that opens a test's view before the tracker begins it (no
+// agent flow does so today: keploy test's loops and keploy mock's scope flow
+// both begin the tracker's test first), and a test whose misses' read did
+// not complete never ended on the tracker. Read as between tests there, a
+// drifted call of the
 // test was answered from the pool, its item learned onto mock-pool as
 // noise: a false green. Between tests the same call is learned onto the
 // pool, as the background rules have it.
@@ -283,7 +285,7 @@ func TestALearnStepLearnsNothingOntoThePoolWhileTheStoreShowsATest(t *testing.T)
 		learned bool
 	}{
 		{"test-2's view, after a test whose end never reached the tracker, begun", func(p *Proxy, mm *MockManager) {
-			// test-1, the scope flow: the view, then the tracker's begin.
+			// test-1, the store first: the view, then the tracker's begin.
 			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
 			p.ContinueTestErrorCapture()
 			// test-1 ends on the store; its misses' read never completes.
@@ -461,9 +463,10 @@ func TestALearnStepReadsTheRoundOnceMoreAfterAnInstall(t *testing.T) {
 // generation, not the store's revision, and the next pass, on the store's
 // same view, with the tracker caught up with it, serves the call. Told by the store's revision alone, the
 // refusal read as a recording the store would not hand out, and a call its
-// recording answers exactly missed: a false red. Two schedules the replay
-// makes: keploy mock's scope flow opens a test's view before the tracker
-// begins it. (The other, the replay ending a test on the store before the
+// recording answers exactly missed: a false red. Two schedules: a store that
+// opens a test's view before the tracker begins it (no agent flow does so
+// today: both begin the tracker's test first). (The other, the replay ending
+// a test on the store before the
 // tracker, is a round of no one test: TestALearnStepDecidesNothingOfACallReadAfterTheStoreEndedATestTheTrackerHasOpen.)
 func TestALearnStepReadsAgainATakeALearnBoundaryRefused(t *testing.T) {
 	for _, tc := range []struct {
@@ -551,6 +554,97 @@ func TestALearnStepDecidesNothingOfACallReadAfterTheStoreEndedATestTheTrackerHas
 	}
 }
 
+// A call read where keploy's store shows test-1's view and the learn tracker
+// has no test open is of no one round to learn in
+// (integrations.RoundSnapshot.ViewAlone): test-1's call (the tracker ended
+// test-1 while the store still shows its view, as where a test's end did not
+// install the pool view) or the round between tests', and
+// nothing tells which. It is answered from the store's view only by a
+// recording it matches exactly (test-1's own mock-own1, the in-flight gap
+// recording mock-gap the view shows), and learns nothing: a call that differs
+// misses, decided at once and never waiting (for a test case's request, or
+// for the round to move), under today's rules and proven routing. On a set
+// without the background rules, the view's in-flight gap recording is the
+// pool's in that round, and the call was paired with it and the item it
+// differs in learned onto it as noise: a false green; the miss now says why,
+// with no reason. Under the background rules the view shows the pool only to
+// answer exactly, so the call misses as one the learn step may not learn
+// onto. Once the tracker began test-1, the store's view agreed on, a call is
+// test-1's and learns as any other.
+func TestACallReadWhereTheStoreShowsATestViewTheTrackerHasNoTestOpenBesideLearnsNothing(t *testing.T) {
+	opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+	const alone = "keploy record's full round read this request while keploy's store showed test-1's view and its learn tracker had no test open, so the call is of neither test-1 nor the round between tests to learn in"
+	// mock-gap is recorded between test-1's window and test-2's: a call in
+	// flight into test-1, which test-1's view shows.
+	gap := func(now time.Time) []*models.Mock {
+		return []*models.Mock{r3Mock("mock-gap", now.Add(900*time.Millisecond), "POST", "/orders", `{"item":"kiwi"}`, `{"order":9}`)}
+	}
+	view := func(mm *MockManager) {
+		mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1"), roundMock(mm, "mock-gap")})
+	}
+	states := []struct {
+		name string
+		at   func(p *Proxy, mm *MockManager)
+	}{
+		{"the store opened test-1 before the tracker began it", func(p *Proxy, mm *MockManager) { view(mm) }},
+		{"the tracker ended test-1 before the store did", func(p *Proxy, mm *MockManager) {
+			p.ContinueTestErrorCapture()
+			view(mm)
+			p.EndTestErrorCapture()
+		}},
+	}
+	exact := map[string]string{
+		`{"item":"pear"}`: `200 {"order":1}, learned onto , misses []`,
+		`{"item":"kiwi"}`: `200 {"order":9}, learned onto , misses []`,
+	}
+	for _, routed := range []bool{false, true} {
+		rules := map[bool]string{false: "today's rules", true: "proven routing"}[routed]
+		for _, st := range states {
+			for _, body := range []string{`{"item":"fig"}`, `{"item":"pear"}`, `{"item":"kiwi"}`} {
+				t.Run(rules+"/"+st.name+"/"+body, func(t *testing.T) {
+					p, mm := heldOrdersWith(t, routed, zap.NewNop(), gap)
+					st.at(p, mm)
+					snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker})
+					if !ok || snap.ViewAlone() == "" || snap.NoOneRound() != "" || snap.TrackerAhead() {
+						t.Fatalf("precondition: the round reads %v (%s); want test-1's view with no test open on the tracker", snap.Phase, snap.Boundary)
+					}
+					p.learnTracker.OnAwait(func() { t.Error("the call waited for a test case's request with no test open on the tracker") })
+					mm.OnAwaitRoundMove(func() { t.Error("the call waited for the round to move") })
+					code, got := r3Send(t, p, mm, opts, roundPost(body))
+					if w, ok := exact[body]; ok {
+						if o := roundOutcome(t, p, mm, code, got); o != w {
+							t.Fatalf("a call exactly a recording the view shows reads %s; want %s", o, w)
+						}
+						return
+					}
+					if !routed {
+						roundMiss(t, p, mm, code, got, alone)
+						return
+					}
+					if o := roundOutcome(t, p, mm, code, got); code == http.StatusOK || strings.Contains(o, "learned onto m") {
+						t.Fatalf("a call that differs from every recording reads %s; want a miss, nothing learned", o)
+					}
+				})
+			}
+			if st.name != "the store opened test-1 before the tracker began it" {
+				continue
+			}
+			t.Run(rules+"/"+st.name+"/then the tracker begins it", func(t *testing.T) {
+				p, mm := heldOrdersWith(t, routed, zap.NewNop(), gap)
+				st.at(p, mm)
+				p.ContinueTestErrorCapture()
+				if snap, _ := mm.RoundSnapshot(integrations.RoundQuery{Tracker: p.learnTracker}); snap.Phase != integrations.RoundInTest || snap.ViewAlone() != "" {
+					t.Fatalf("precondition: the round reads %v (%s); want test-1 open on both", snap.Phase, snap.Boundary)
+				}
+				code, got := r3Send(t, p, mm, opts, roundPost(`{"item":"fig"}`))
+				if o := roundOutcome(t, p, mm, code, got); code != http.StatusOK || !strings.Contains(o, "learned onto m") {
+					t.Fatalf("a call of test-1, once the tracker began it, reads %s; want it answered, the item learned", o)
+				}
+			})
+		}
+	}
+}
+
 // heldOrders stages, under exact serving, the pool's mock-pool (POST /orders
 // {"item":"apple"}), test-1's own mock-own1 ({"item":"pear"}) and test-2's
 // own mock-own2 ({"item":"plum"}), served by proven routing or by today's
@@ -565,6 +659,14 @@ func heldOrders(t *testing.T, routed bool) (*Proxy, *MockManager) {
 // the drain starts (startedDrainProxyLogging).
 func heldOrdersLogging(t *testing.T, routed bool, logger *zap.Logger) (*Proxy, *MockManager) {
 	t.Helper()
+	return heldOrdersWith(t, routed, logger, nil)
+}
+
+// heldOrdersWith is heldOrdersLogging with more recordings staged beside
+// mock-pool, mock-own1 and mock-own2, made from the time those are recorded
+// after (more may be nil).
+func heldOrdersWith(t *testing.T, routed bool, logger *zap.Logger, more func(now time.Time) []*models.Mock) (*Proxy, *MockManager) {
+	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxyLogging(t, 100, logger)
 	p.learnTracker = learn.NewTracker()
@@ -577,7 +679,11 @@ func heldOrdersLogging(t *testing.T, routed bool, logger *zap.Logger) (*Proxy, *
 		{Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
 		{Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
 	})
-	mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2}, nil, models.BaseTime, now.Add(time.Hour))
+	staged := []*models.Mock{pool, own1, own2}
+	if more != nil {
+		staged = append(staged, more(now)...)
+	}
+	mm.SetMocksWithWindow(staged, nil, models.BaseTime, now.Add(time.Hour))
 	if routed {
 		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
 	}
@@ -714,7 +820,7 @@ func TestALearnStepDecidesNothingOfACallInARoundTheStoreMovedOnFrom(t *testing.T
 }
 
 // A call made while the store showed test-1's view that the learn tracker
-// had not begun yet (keploy mock's scope flow opens the view first) is of
+// had not begun yet (a store-led begin, which no agent flow makes today) is of
 // test-1 by the store's view: once the replay ended test-1 on the store under
 // its take, the tracker never having begun it, the two agree again, between
 // tests, but the store moved on and the tracker caught up with nothing. The
@@ -743,7 +849,7 @@ func TestALearnStepDecidesNothingOfACallOnceTheStoreEndedATestTheTrackerNeverBeg
 }
 
 // A call whose take the tracker's begin of the test the store shows refused
-// (keploy mock's scope flow opens the view first), that test awaiting its
+// (a store-led begin, which no agent flow makes today), that test awaiting its
 // test case's request, is read again in that test's round, waits there for
 // the request, and is answered once it came: the round the tracker caught
 // up with is the call's from then on (learnRound.movedFrom), so the pass

@@ -66,11 +66,14 @@ const (
 	// (RoundSnapshot.PoolsCall), and one read on the view of the test before
 	// waits for the store to open the tracker's test. Where the store shows a
 	// test's view and the tracker has no test open, or another test than the
-	// one it ended, the background answers exactly or not at all, as in a
-	// test (ExactBackground), so nothing is learned onto it under the
-	// background rules; on a set without them, the view's in-flight gap
-	// recordings and its reached worker scope are the pool's there, and may
-	// be paired with.
+	// one it ended, the call is of no one round to learn in (ViewAlone):
+	// the view's test's, or the round between tests', and nothing tells
+	// which. It is answered only by a recording it matches exactly, and a
+	// learn step learns nothing from it, under either rule set: on a set
+	// without the background rules the view's in-flight gap recordings and
+	// its reached worker scope are the pool's there, and a call that is
+	// exactly one of the view's own recordings, paired with them, would
+	// learn what it differs in onto them as noise.
 	RoundBoundary
 )
 
@@ -318,10 +321,12 @@ func (s RoundSnapshot) WithParts(p RoundParts) RoundSnapshot {
 // the store's pool view the call is the pool's (PoolsCall), and on the view
 // of the test before it is of the tracker's test, whose view the store has
 // not installed yet, and waits for it. Where the store shows a test's view
-// and the tracker has no test open (a begin the store led, an end the
-// tracker led), "" is returned: the background answers exactly or not at all
-// there (RoundBoundary). A call read in a test set the store has not staged
-// (SetUnstaged) is of no round of either set: decided at once in none.
+// and the tracker has no test open (the tracker ended a test whose end did
+// not install the pool view), "" is returned: the call is answered from the
+// store's view by a recording it matches exactly, and learns nothing
+// (ViewAlone). A call
+// read in a test set the store has not staged (SetUnstaged) is of no round
+// of either set: decided at once in none.
 func (s RoundSnapshot) NoOneRound() string {
 	if s.SetUnstaged() {
 		return "as keploy's learn tracker began a test set its store had not staged, so the call is of no round of either test set"
@@ -333,6 +338,37 @@ func (s RoundSnapshot) NoOneRound() string {
 		return "after keploy's store ended " + s.Ended + " and before its learn tracker did, so the call is of neither " + s.Ended + " nor the round between tests"
 	}
 	return "after keploy's store ended " + s.Ended + " for " + s.Test + "'s view and before its learn tracker ended " + s.Ended + ", so the call is of neither " + s.Ended + " nor " + s.Test
+}
+
+// ViewAlone says why a call read in s is of no one round to learn in, "" where
+// it is of one: the store shows a test's view and the learn tracker has no
+// test open. The agent's flows begin the tracker's test before they install
+// its view (keploy test's loops, and keploy mock's scope flow too:
+// ProvenBegin opens the test's window before BeginScopeAt), so the store
+// never opens a test first; the state arises where a test's end did not
+// install the pool view and the tracker then ended the test (the scope
+// flow's end, warned as it could not stop serving the test, or keploy test's
+// end, failing with serveExactPool's error). The call is the view's test's
+// (made before the tracker's end) or the round between tests', and nothing
+// tells which. It is still served from the
+// store's view where it matches one of its recordings exactly, but a learn
+// step learns nothing from it, on its first pass or any later one (a pass
+// read again once a take of it was refused, the tracker caught up with the
+// store's test): it misses, with no reason, saying why, and never waits for
+// the tracker, whose begin the agent's settle may itself wait for. Read as
+// the pool's, a call that is exactly one of the view's own recordings was
+// paired with the pool's (on a set without the background rules, the view's
+// in-flight gap recordings and its reached worker scope), and what it
+// differs in learned onto them as noise: a false green. A call read once the
+// tracker began the view's test is of that test, and learns as any other.
+// The store ahead of the tracker mirrors NoOneRound, the store behind it
+// (it ended the test the tracker still has open); a test set the store has
+// not staged is NoOneRound's, not this.
+func (s RoundSnapshot) ViewAlone() string {
+	if s.Phase != RoundBoundary || !s.Learn.Bound || s.Learn.Open || s.Learn.SetAhead || s.Test == "" {
+		return ""
+	}
+	return "while keploy's store showed " + s.Test + "'s view and its learn tracker had no test open, so the call is of neither " + s.Test + " nor the round between tests to learn in"
 }
 
 // TrackerAhead reports whether s found the learn tracker ahead of the

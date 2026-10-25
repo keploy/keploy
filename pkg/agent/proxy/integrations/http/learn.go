@@ -457,6 +457,12 @@ type learnRound struct {
 	// that test's round: movedFrom's catch-up) or the test's window closes
 	// (the moved miss), and waits for either (learnMatchIn).
 	ahead bool
+	// alone says why the round read is no one round to learn in, "" where
+	// it is one (integrations.RoundSnapshot.ViewAlone): the store shows a
+	// test's view and the tracker has no test open. The call is answered
+	// only by a recording it matches exactly, and learns nothing, on any
+	// pass (learnMatchIn).
+	alone string
 }
 
 // pools reports whether c read the pool's call: the tracker ahead of the
@@ -500,7 +506,10 @@ func (c learnRound) waits() bool { return c.ahead && c.view != "" }
 //     began the test whose view the store shows, where it had no test open
 //     at the first pass. The recordings the view offers, and whose own each
 //     is, are the ones the call was made among
-//     (TestALearnStepReadsAgainATakeALearnBoundaryRefused). A first pass
+//     (TestALearnStepReadsAgainATakeALearnBoundaryRefused), and it is
+//     answered only by one it matches exactly, learning nothing, as on the
+//     first pass (learnRound.alone): only an exact take's refusal makes
+//     the retake there. A first pass
 //     with a test of the tracker's open is checked all the same: one of the
 //     store's pool view is a move (it lands between tests, not in the test
 //     the call was read in), as is any other (TestMovedFromCatchesUpOnlyWithTheFirstPassesTest).
@@ -1225,6 +1234,14 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 	// pass before was refused.
 	var made learnRound
 	var madePool []*models.Mock
+	// alone is why the call learns nothing on any pass, "" where it may
+	// learn: its first pass read the store's test view with the tracker
+	// not open (integrations.RoundSnapshot.ViewAlone). It holds past a
+	// catch-up of the tracker to the store's test on a retake, which only
+	// an exact take's refusal makes there: the call is answered as it would
+	// have been had the tracker's begin not landed under its take, by a
+	// recording it matches exactly, or not at all.
+	alone := ""
 	retake := false
 	for {
 		if ctx.Err() != nil {
@@ -1274,6 +1291,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			// boundary lands before a take.
 			res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + why}
 			return nil, &learnMiss{res: res, pool: read.sc.http, moved: true}, nil
+		}
+		if !made.read {
+			alone = read.round.alone
 		}
 		if !made.read || caughtUp {
 			// The first pass, or the round the side that lagged caught up
@@ -1396,6 +1416,18 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 
 		case learn.Paired:
 			m, c, own := sc.mocks[res.Index], sc.cands[res.Index], sc.own[res.Index]
+			if alone != "" {
+				// The store showed a test's view the tracker had no test
+				// open beside (integrations.RoundSnapshot.ViewAlone): the
+				// call is the view's test's or the round between tests',
+				// and nothing tells which. Paired with the pool's, a call
+				// that is exactly one of the view's own recordings would
+				// learn what it differs in onto them as noise. Decided at
+				// once, never waiting for the tracker: what keploy test or
+				// keploy mock would wait on may itself wait for the call.
+				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + alone}
+				return nil, &learnMiss{res: res, pool: sc.http, moved: true}, nil
+			}
 			if stuck(m, read.at) {
 				return refused(m, res, sc)
 			}
@@ -1481,18 +1513,12 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
-				// Read again as an exact claim is: movedFrom's retake
-				// catch-up then follows a first pass where the store showed
-				// a test's view the tracker had not begun, which keploy
-				// test's order never makes (its tracker begins a test before
-				// the store opens it, and the store ends it first). A paired
-				// claim can be refused there only on a set without the
-				// background rules: a test's own recordings are offered only
-				// in a round the two agreed on, and under the background
-				// rules a test's view shows the pool only to answer exactly,
-				// but without them the view's in-flight gap recordings and
-				// its reached worker scope are the pool's in that round, and
-				// pairable (integrations.RoundBoundary).
+				// Read again as an exact claim is. movedFrom's retake
+				// catch-up follows only a first pass where the store
+				// showed a test's view the tracker had no test open
+				// beside, where nothing is paired (alone): a paired
+				// claim's retake reads its own round again, or the moved
+				// miss.
 				unclaimed[m] = read.at
 				retake = true
 				continue
@@ -1590,6 +1616,7 @@ func (h *HTTP) readLearnPass(mockDb integrations.MockMemDb, tracker *learn.Track
 			view:    snap.Test,
 			noOne:   snap.NoOneRound(),
 			ahead:   snap.TrackerAhead(),
+			alone:   snap.ViewAlone(),
 		}
 		r.call = snap.CallRound()
 		return r, nil
