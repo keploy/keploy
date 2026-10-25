@@ -119,16 +119,20 @@ func ListenShared(t *testing.T, network, addr string) net.Listener {
 // test, for a goroutine the test starts or a test that skips on it; the
 // caller closes the listener.
 func OpenShared(network, addr string) (net.Listener, error) {
-	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
-		var serr error
-		if err := c.Control(func(fd uintptr) {
-			serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
-		}); err != nil {
-			return err
-		}
-		return serr
-	}}
+	lc := net.ListenConfig{Control: setReusePort}
 	return lc.Listen(context.Background(), network, addr)
+}
+
+// setReusePort is a net.ListenConfig Control that sets SO_REUSEPORT on the
+// socket before it binds.
+func setReusePort(_, _ string, c syscall.RawConn) error {
+	var serr error
+	if err := c.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+	}); err != nil {
+		return err
+	}
+	return serr
 }
 
 // bindHold binds a socket that never listens at host:port for the test's

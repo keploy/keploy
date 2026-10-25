@@ -3,6 +3,7 @@
 package testnet
 
 import (
+	"context"
 	"io"
 	"net"
 	"strconv"
@@ -83,15 +84,20 @@ func requireDialsRefused(t *testing.T, dials []string, when string) {
 
 // A refused address refuses every dial for as long as the test that took it
 // runs, and no other socket can take its port meanwhile. A TCP listener
-// opened on it, as one of a package tested beside this one can be, is
-// refused the port at loopback, at another address, at every address and at
-// [::1]; a UDP socket is refused it at 127.0.0.1, where it is held.
+// opened on it, as one of a package tested beside this one can be, by
+// net.Listen or one that sets SO_REUSEPORT, is refused the port at loopback,
+// at another address, at every address and at [::1]; a UDP socket, made by
+// net.ListenPacket or one that sets SO_REUSEPORT, is refused it at
+// 127.0.0.1, where it is held. A socket that sets SO_REUSEPORT is tried
+// because one of this user that does may share a port with a hold that sets
+// it too, as keploy's DNS server does at the port it is given.
 func TestARefusedAddressRefusesEveryDialForTheTestsLife(t *testing.T) {
 	t.Run("tcp", func(t *testing.T) {
 		_, port, err := net.SplitHostPort(RefusedAddr(t, "tcp"))
 		require.NoError(t, err)
 		binds, dials := foreignBinds(port)
 		requireForeignBindsRefused(t, binds, "while held")
+		requireSharedBindsRefused(t, binds, "while held")
 		requireDialsRefused(t, dials, "while held")
 	})
 	t.Run("udp", func(t *testing.T) {
@@ -101,6 +107,12 @@ func TestARefusedAddressRefusesEveryDialForTheTestsLife(t *testing.T) {
 			_ = pc.Close()
 		}
 		require.ErrorIs(t, err, syscall.EADDRINUSE, "another socket took the refused port")
+		lc := net.ListenConfig{Control: setReusePort}
+		pc, err = lc.ListenPacket(context.Background(), "udp", addr)
+		if err == nil {
+			_ = pc.Close()
+		}
+		require.ErrorIs(t, err, syscall.EADDRINUSE, "a socket that sets SO_REUSEPORT took the refused port")
 		c, err := net.Dial("udp", addr)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = c.Close() })
