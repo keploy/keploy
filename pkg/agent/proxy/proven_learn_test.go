@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -211,12 +212,19 @@ func r3Send(t *testing.T, p *Proxy, mm *MockManager, opts models.OutgoingOptions
 // call that would otherwise wait for good: the row then fails, never hangs.
 func r3SendIn(t *testing.T, parent context.Context, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
 	t.Helper()
+	return r3SendVia(t, parent, httpint.New(zap.NewNop()), p, mm, opts, request)
+}
+
+// r3SendVia is r3SendIn through the HTTP integration h: one the row keeps
+// across calls, as the agent's proxy keeps its parser.
+func r3SendVia(t *testing.T, parent context.Context, h integrations.Integrations, p *Proxy, mm *MockManager, opts models.OutgoingOptions, request string) (int, string) {
+	t.Helper()
 	app, agentEnd := net.Pipe()
 	ctx := models.WithMockMismatchReporter(parent, p.sendMockNotFoundError)
 	ctx = learn.WithTracker(ctx, p.learnTracker)
 	defer app.Close()
 	go func() {
-		_ = httpint.New(zap.NewNop()).MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, opts)
 		_ = agentEnd.Close()
 	}()
 	if _, err := app.Write([]byte(request)); err != nil {

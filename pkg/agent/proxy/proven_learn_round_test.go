@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -2025,5 +2028,453 @@ func TestAMissMarkedBeforeASetsStagingIsCountedTheSameEitherWay(t *testing.T) {
 				t.Fatalf("the cut of the miss marked before the staging was said %d times; want once: %+v", n, logs.All())
 			}
 		})
+	}
+}
+
+// A call read between tests (the store's pool view, the learn tracker's
+// test ended) that is exactly a recording the round does not offer, the
+// test before's own (test-1's mock-own1, its late call, whether or not
+// mock-own1 answered test-1 first) or the next test's (test-2's mock-own2,
+// an early call), is that recording's call, made where it was not recorded:
+// keploy learns nothing from it. Before, it was paired with the pool's
+// mock-pool, the only recording of POST /orders the pool view offers, and
+// answered from it, its item learned onto mock-pool as noise: a false green
+// (any item then passed for mock-pool). Now it is answered from its own
+// recording only by the pairing (a call that is exactly another test's
+// recording, which this set's pairing offers none of), or misses naming
+// that recording: as made elsewhere (the miss's lookup, for record's
+// judging), or, once the recording answered already, by the learn step,
+// which says the recording's test window. A call that drifted from mock-pool and is no recording is still
+// learned onto the pool between tests. Under today's rules and proven
+// routing.
+func TestABetweenTestsCallThatIsExactlyARecordingElsewhereLearnsNothingOntoThePool(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, body, rec, answer string
+			// answered: mock-own1 answered test-1's call in test-1 first.
+			answered bool
+		}{
+			{"the test before's own", `{"item":"pear"}`, "mock-own1", `{"order":1}`, false},
+			{"the test before's own, which answered its test", `{"item":"pear"}`, "mock-own1", `{"order":1}`, true},
+			{"the next test's own", `{"item":"plum"}`, "mock-own2", `{"order":2}`, false},
+			{"no recording: the pool's drift", `{"item":"fig"}`, "", "", false},
+		} {
+			name := map[bool]string{false: "today's rules", true: "proven routing"}[routed] + "/" + tc.name
+			t.Run(name, func(t *testing.T) {
+				p, mm := heldOrders(t, routed)
+				own1 := roundMock(mm, "mock-own1")
+				own2 := roundMock(mm, "mock-own2")
+				mm.SeedRecordedWindows([]models.TestWindow{
+					{TestCase: "test-1", Start: own1.Spec.ReqTimestampMock.Add(-200 * time.Millisecond), End: own1.Spec.ReqTimestampMock.Add(100 * time.Millisecond)},
+					{TestCase: "test-2", Start: own2.Spec.ReqTimestampMock.Add(-500 * time.Millisecond), End: own2.Spec.ReqTimestampMock.Add(500 * time.Millisecond)},
+				})
+				opts := models.OutgoingOptions{Learn: true, LearnPool: true}
+				mm.ServeExactTest("test-1", []*models.Mock{own1})
+				p.ContinueTestErrorCapture()
+				if tc.answered {
+					if code, got := r3Send(t, p, mm, opts, roundPost(tc.body)); code != http.StatusOK || got != tc.answer {
+						t.Fatalf("precondition: test-1's call got %d %s; want %s from mock-own1", code, got, tc.answer)
+					}
+				}
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+				if _, err := p.GetMockErrors(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				code, got := r3Send(t, p, mm, opts, roundPost(tc.body))
+				learned := map[string][]string{}
+				for n, st := range r3States(mm) {
+					if len(st.ReqBodyNoise) > 0 {
+						learned[n] = st.ReqBodyNoise["body"]
+					}
+				}
+				misses, err := p.GetMockErrors(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.rec == "" {
+					if _, ok := learned["mock-pool"]; code != http.StatusOK || got != `{"order":0}` || !ok {
+						t.Fatalf("between tests the pool's drift was not learned onto mock-pool: answered %d %s, learned %v, misses %+v", code, got, learned, misses)
+					}
+					return
+				}
+				if len(learned) > 0 || got == `{"order":0}` {
+					t.Fatalf("a call that is exactly %s was paired with mock-pool between tests: answered %d %s, learned %v", tc.rec, code, got, learned)
+				}
+				if code == http.StatusOK {
+					if tc.answered || got != tc.answer || len(misses) != 0 {
+						t.Fatalf("a call that is exactly %s was answered %d %s (misses %+v); want it answered so only by the pairing, from %s, which answered nothing yet", tc.rec, code, got, misses, tc.rec)
+					}
+					return
+				}
+				if len(misses) != 1 || misses[0].ClosestMock != tc.rec || !strings.Contains(misses[0].NextSteps, tc.rec) {
+					t.Fatalf("the miss reads %+v; want one naming %s", misses, tc.rec)
+				}
+				if tc.answered {
+					why := "it is exactly mock-own1, which keploy recorded in test-1's window: keploy reads it as that recording's call made outside where it was recorded (a test's late or early call), not as a changed call of mock-pool"
+					if misses[0].Reason != "" || !strings.Contains(misses[0].NextSteps, why) || strings.Contains(misses[0].NextSteps, "Request structure changed") {
+						t.Fatalf("the miss of a call that is exactly mock-own1 once it answered test-1 reads %+v; want no reason, saying %q", misses[0], why)
+					}
+				} else if !strings.Contains(misses[0].NextSteps, "which keploy recorded where this replay did not make it") {
+					t.Fatalf("the miss of a call that is exactly %s reads %+v; want it named as made elsewhere", tc.rec, misses[0])
+				}
+			})
+		}
+	}
+}
+
+// elsewhereOrders stages heldOrders' three recordings of POST /orders
+// (mock-pool, the pool's; mock-own1 in test-1's window; mock-own2 in
+// test-2's), of which trees picks what the store's trees hold, with more
+// beside them, and src, if set, is the agent's disk source (the recordings it
+// keeps on disk).
+func elsewhereOrders(t *testing.T, routed bool, trees func(pool, own1, own2 *models.Mock) []*models.Mock, src func(own2 *models.Mock) RecordingSource) (*Proxy, *MockManager) {
+	t.Helper()
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxyLogging(t, 100, zap.NewNop())
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+	own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+	own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "test-1", Start: now.Add(500 * time.Millisecond), End: now.Add(800 * time.Millisecond)},
+		{TestCase: "test-2", Start: now.Add(time.Second), End: now.Add(2 * time.Second)},
+	})
+	mm.SetMocksWithWindow(trees(pool, own1, own2), nil, models.BaseTime, now.Add(time.Hour))
+	if src != nil {
+		mm.SetRecordingSource(src(own2))
+	}
+	if routed {
+		mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"mock-pool"}, nil)
+	}
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	return p, mm
+}
+
+// elsewhereSent is what a call was answered and what keploy learned onto
+// which recording (its request-body noise), and the misses it left.
+func elsewhereSent(t *testing.T, p *Proxy, mm *MockManager, body string) (int, string, map[string][]string, []models.UnmatchedCall) {
+	t.Helper()
+	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, roundPost(body))
+	learned := map[string][]string{}
+	for n, st := range r3States(mm) {
+		if len(st.ReqBodyNoise) > 0 {
+			learned[n] = st.ReqBodyNoise["body"]
+		}
+	}
+	misses, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return code, got, learned, misses
+}
+
+// elsewhereBetween opens test-1 (its own: own), ends it, and leaves the store
+// on its pool view, between tests.
+func elsewhereBetween(t *testing.T, p *Proxy, mm *MockManager, own ...string) {
+	t.Helper()
+	var view []*models.Mock
+	for _, name := range own {
+		view = append(view, roundMock(mm, name))
+	}
+	mm.ServeExactTest("test-1", view)
+	p.ContinueTestErrorCapture()
+	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-pool"})
+	if _, err := p.GetMockErrors(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A call between tests that is exactly test-1's own recording mock-v1, which
+// declares a variable at its item (the layout keploy writes once a learn
+// round baked one), whether it carries the recorded item or another (the
+// variable's place differs on every run): it is mock-v1's call, made where it
+// was not recorded, and learns nothing. Before, a recording that declares
+// variables was never compared, the call was paired with mock-pool and its
+// item learned onto mock-pool: a false green.
+func TestABetweenTestsCallThatIsExactlyAVariablesRecordingLearnsNothingOntoThePool(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		for _, body := range []string{`{"item":"kiwi"}`, `{"item":"lime"}`} {
+			t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed]+"/"+body, func(t *testing.T) {
+				p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock {
+					v1 := r3Mock("mock-v1", own1.Spec.ReqTimestampMock.Add(-50*time.Millisecond), "POST", "/orders", `{"item":"kiwi"}`, `{"order":9}`)
+					v1.Spec.Variables = models.MockVariables{"item": models.MockVariable{Recorded: "kiwi", Bind: "body.item"}}
+					return []*models.Mock{pool, own1, own2, v1}
+				}, nil)
+				elsewhereBetween(t, p, mm, "mock-v1", "mock-own1")
+				code, got, learned, misses := elsewhereSent(t, p, mm, body)
+				t.Logf("answered %d %s, learned %v, misses %+v", code, got, learned, misses)
+				if len(learned) > 0 || got == `{"order":0}` {
+					t.Fatalf("a call that is exactly mock-v1 (modulo its variable) was paired with mock-pool between tests: answered %d %s, learned %v", code, got, learned)
+				}
+				if code == http.StatusOK {
+					t.Fatalf("a call that is exactly mock-v1 between tests was answered %d %s; want a miss", code, got)
+				}
+				if len(misses) != 1 || misses[0].ClosestMock != "mock-v1" || strings.Contains(misses[0].NextSteps, "Request structure changed") {
+					t.Fatalf("the miss reads %+v; want one naming mock-v1, with no word of a changed request", misses)
+				}
+			})
+		}
+	}
+}
+
+// A call between tests that is exactly test-2's own recording mock-own2,
+// which the agent keeps on disk only (a test's own are staged only as that
+// test opens): the store reads it back by the call's request keys, and the
+// call learns nothing. Read from the trees alone, it was paired with mock-pool
+// and its item learned onto it: a false green.
+func TestABetweenTestsCallThatIsExactlyARecordingKeptOnDiskLearnsNothingOntoThePool(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1} },
+				func(own2 *models.Mock) RecordingSource { return elsewhereDisk(t, own2).RangeKeys })
+			elsewhereBetween(t, p, mm, "mock-own1")
+			code, got, learned, misses := elsewhereSent(t, p, mm, `{"item":"plum"}`)
+			if len(learned) > 0 || got == `{"order":0}` {
+				t.Fatalf("a call that is exactly mock-own2, kept on disk, was paired with mock-pool between tests: answered %d %s, learned %v", code, got, learned)
+			}
+			if len(misses) != 1 || misses[0].ClosestMock != "mock-own2" || strings.Contains(misses[0].NextSteps, "Request structure changed") {
+				t.Fatalf("answered %d %s; the miss reads %+v; want one naming mock-own2, with no word of a changed request", code, got, misses)
+			}
+		})
+	}
+}
+
+// elsewhereDisk is the agent's disk store holding ms, as it indexes them
+// (models.RequestKeys).
+func elsewhereDisk(t *testing.T, ms ...*models.Mock) *DiskMocks {
+	t.Helper()
+	d := newDiskWith(t, ms...)
+	t.Cleanup(func() { _ = d.Close() })
+	return d
+}
+
+// keyedSource is a disk store holding ms that, as DiskMocks.RangeKeys does,
+// visits one only when a key asked is one of its models.RequestKeys, and
+// reads it back with load.
+func keyedSource(load func(*models.Mock) (*models.Mock, error), ms ...*models.Mock) RecordingSource {
+	return func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		for _, m := range ms {
+			if m.Kind != kind || !slices.ContainsFunc(models.RequestKeys(m), func(k string) bool { return slices.Contains(keys, k) }) {
+				continue
+			}
+			if !visit(m.Name, func() (*models.Mock, error) { return load(m) }) {
+				return nil
+			}
+		}
+		return nil
+	}
+}
+
+// A call between tests that is exactly test-2's own recording mock-v2, kept
+// on disk only (as per-test recordings are), which declares a variable where
+// the exact request key reads: a URL path segment (POST mints an id, the next
+// call carries it in its path) or its X-Amz-Target. The call carries a value
+// of its own there, so the store files mock-v2 under the learned key, the
+// call reads it back, and it learns nothing. Before, mock-v2 was filed under
+// its recorded value, no call that carried another asked for it, and the call
+// was paired with mock-pool and its item learned onto it: a false green.
+func TestABetweenTestsCallThatIsExactlyAVariablesRecordingKeptOnDiskLearnsNothingOntoThePool(t *testing.T) {
+	type layout struct {
+		path, amz, bind, recorded, sent, sentAmz string
+	}
+	for name, l := range map[string]layout{
+		"path segment": {path: "/orders/abc", bind: "url.path[1]", recorded: "abc", sent: "/orders/qqq"},
+		"X-Amz-Target": {path: "/", amz: "Orders.Put", bind: "header.X-Amz-Target", recorded: "Orders.Put", sent: "/", sentAmz: "Orders.Take"},
+	} {
+		for _, routed := range []bool{false, true} {
+			t.Run(name+"/"+map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+				withAmz := func(m *models.Mock, amz string) *models.Mock {
+					if amz != "" {
+						m.Spec.HTTPReq.Header["X-Amz-Target"] = amz
+					}
+					return m
+				}
+				p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock {
+					return []*models.Mock{withAmz(r3Mock("mock-pool", pool.Spec.ReqTimestampMock, "POST", l.sent, `{"item":"pear"}`, `{"order":0}`), l.sentAmz), own1}
+				}, func(own2 *models.Mock) RecordingSource {
+					v2 := withAmz(r3Mock("mock-v2", own2.Spec.ReqTimestampMock, "POST", l.path, `{"item":"kiwi"}`, `{"order":9}`), l.amz)
+					v2.Spec.Variables = models.MockVariables{"v": models.MockVariable{Recorded: l.recorded, Bind: l.bind}}
+					return elsewhereDisk(t, v2).RangeKeys
+				})
+				elsewhereBetween(t, p, mm, "mock-own1")
+				request := "POST " + l.sent + " HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n"
+				if l.sentAmz != "" {
+					request += "X-Amz-Target: " + l.sentAmz + "\r\n"
+				}
+				request += "Content-Length: 15\r\n\r\n" + `{"item":"kiwi"}`
+				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true}, request)
+				for n, st := range r3States(mm) {
+					if len(st.ReqBodyNoise) > 0 {
+						t.Fatalf("a call that is exactly mock-v2 (modulo its variable), kept on disk, was paired between tests: answered %d %s, learned %v onto %s", code, got, st.ReqBodyNoise, n)
+					}
+				}
+				misses, err := p.GetMockErrors(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if code == http.StatusOK || len(misses) != 1 || misses[0].ClosestMock != "mock-v2" || !strings.Contains(misses[0].NextSteps, "test-2's window") {
+					t.Fatalf("answered %d %s; the miss reads %+v; want one naming mock-v2, recorded in test-2's window", code, got, misses)
+				}
+			})
+		}
+	}
+}
+
+// A recording of test-2, kept on disk, whose variable is at a place keploy
+// cannot read (a hand edit, a newer keploy's place): the learn step cannot
+// tell whether a call of its operation is exactly it, whatever the call
+// carries where the place may be, so two such calls between tests learn
+// nothing, each misses naming the recording and its place (not every
+// recording of the set), and the agent warns of it once.
+func TestACallOfARecordingWhoseVariablePlaceKeployCannotReadLearnsNothing(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock {
+				return []*models.Mock{r3Mock("mock-pool", pool.Spec.ReqTimestampMock, "POST", "/orders/xyz", `{"item":"pear"}`, `{"order":0}`), own1}
+			}, func(own2 *models.Mock) RecordingSource {
+				v2 := r3Mock("mock-v2", own2.Spec.ReqTimestampMock, "POST", "/orders/abc", `{"item":"kiwi"}`, `{"order":9}`)
+				v2.Spec.Variables = models.MockVariables{"v": models.MockVariable{Recorded: "kiwi", Bind: "bogus.item"}}
+				return elsewhereDisk(t, v2).RangeKeys
+			})
+			elsewhereBetween(t, p, mm, "mock-own1")
+			h := httpint.New(zap.New(core))
+			for _, sent := range []string{"/orders/qqq", "/orders/rrr"} {
+				body := `{"item":"fig"}`
+				code, got := r3SendVia(t, context.Background(), h, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+					"POST "+sent+" HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+				if code == http.StatusOK {
+					t.Fatalf("POST %s, which keploy cannot tell from mock-v2, was answered %d %s", sent, code, got)
+				}
+			}
+			for n, st := range r3States(mm) {
+				if len(st.ReqBodyNoise) > 0 {
+					t.Fatalf("a call keploy cannot tell from mock-v2 learned %v onto %s", st.ReqBodyNoise, n)
+				}
+			}
+			misses, err := p.GetMockErrors(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			const why = `keploy cannot read where the recording mock-v2 declares its variable v ("bogus.item"), so it cannot tell whether this request is exactly mock-v2 rather than a changed call of mock-pool`
+			if len(misses) != 2 {
+				t.Fatalf("misses %+v; want two", misses)
+			}
+			for _, m := range misses {
+				if !strings.Contains(m.NextSteps, why) || !strings.Contains(m.NextSteps, "This is a recording keploy cannot read") || strings.Contains(m.NextSteps, "every recording") {
+					t.Fatalf("the miss reads %+v; want one saying %q, naming the recording keploy cannot read", m, why)
+				}
+			}
+			if n := logs.FilterMessageSnippet("declares a variable at a place keploy cannot read").FilterField(zap.String("recording", "mock-v2")).Len(); n != 1 {
+				t.Fatalf("the agent warned %d times of mock-v2's place; want once (%v)", n, logs.All())
+			}
+		})
+	}
+}
+
+// A recording the store cannot read back from disk: the learn step cannot
+// tell whether a call between tests that drifted from mock-pool is exactly
+// it, so it learns nothing, and the miss says keploy could not read its own
+// recordings (not that the request changed).
+func TestALearnStepThatCannotReadARecordingBackLearnsNothing(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "today's rules", true: "proven routing"}[routed], func(t *testing.T) {
+			p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1} },
+				func(own2 *models.Mock) RecordingSource {
+					return keyedSource(func(*models.Mock) (*models.Mock, error) { return nil, errors.New("disk mocks: short read") }, own2)
+				})
+			elsewhereBetween(t, p, mm, "mock-own1")
+			code, got, learned, misses := elsewhereSent(t, p, mm, `{"item":"fig"}`)
+			if len(learned) > 0 || code == http.StatusOK {
+				t.Fatalf("a call keploy could not tell from a recording it cannot read back was answered %d %s, learned %v", code, got, learned)
+			}
+			const why = "keploy cannot read every recording of the test set (read the recording mock-own2 kept on disk: disk mocks: short read)"
+			if len(misses) != 1 || !strings.Contains(misses[0].NextSteps, why) || !strings.Contains(misses[0].NextSteps, "keploy failing to read its own recordings") ||
+				strings.Contains(misses[0].NextSteps, "Request structure changed") {
+				t.Fatalf("the miss reads %+v; want one saying %q and that keploy failed to read its own recordings, with no word of a changed request", misses, why)
+			}
+		})
+	}
+}
+
+// In a test, a call the learn step would pair with the test's own recording
+// is checked against the recordings of EARLIER tests alone: in test-2, a late
+// call of test-1 exactly test-1's mock-own1 learns nothing onto mock-own2 and
+// misses naming mock-own1; in test-1, a call exactly test-2's mock-own2 (a
+// value that drifted onto the next test's, an off-by-one counter, as often
+// as an early call: keploy test sends test-2's request only once test-1's
+// view ended) keeps its pairing with mock-own1, as before.
+func TestAnInTestCallIsCheckedAgainstEarlierTestsRecordingsAlone(t *testing.T) {
+	for _, routed := range []bool{false, true} {
+		name := map[bool]string{false: "today's rules", true: "proven routing"}[routed]
+		t.Run(name+"/in test-2, exactly test-1's own", func(t *testing.T) {
+			p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1, own2} }, nil)
+			elsewhereBetween(t, p, mm, "mock-own1")
+			mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-own2")})
+			p.ContinueTestErrorCapture()
+			code, got, learned, misses := elsewhereSent(t, p, mm, `{"item":"pear"}`)
+			if len(learned) > 0 || got == `{"order":2}` {
+				t.Fatalf("in test-2 a call that is exactly test-1's mock-own1 was paired with mock-own2: answered %d %s, learned %v", code, got, learned)
+			}
+			if code == http.StatusOK || len(misses) != 1 || misses[0].ClosestMock != "mock-own1" {
+				t.Fatalf("answered %d %s, misses %+v; want one miss naming mock-own1", code, got, misses)
+			}
+		})
+		t.Run(name+"/in test-1, exactly test-2's own", func(t *testing.T) {
+			p, mm := elsewhereOrders(t, routed, func(pool, own1, own2 *models.Mock) []*models.Mock { return []*models.Mock{pool, own1, own2} }, nil)
+			mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-own1")})
+			p.ContinueTestErrorCapture()
+			code, got, learned, misses := elsewhereSent(t, p, mm, `{"item":"plum"}`)
+			if _, ok := learned["mock-own1"]; code != http.StatusOK || got != `{"order":1}` || !ok || len(misses) != 0 {
+				t.Fatalf("in test-1 a call that is exactly test-2's mock-own2 was answered %d %s, learned %v, misses %+v; want it paired with mock-own1 as before", code, got, learned, misses)
+			}
+		})
+	}
+}
+
+// The scoped view forwards the store's staged recordings whatever its
+// allowlist shows, those on disk too, and a read-back error; over a store
+// that keeps no such reader, it visits the store's trees.
+func TestAScopedViewRangesTheStoresStagedRecordings(t *testing.T) {
+	now := time.Now()
+	pool := r3Mock("mock-pool", now, "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
+	own1 := r3Mock("mock-own1", now.Add(time.Second), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
+	own2 := r3Mock("mock-own2", now.Add(2*time.Second), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SetMocksWithWindow([]*models.Mock{pool, own1}, nil, models.BaseTime, now.Add(time.Hour))
+	var fail error
+	mm.SetRecordingSource(func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		if kind == models.HTTP && len(keys) > 0 {
+			visit(own2.Name, func() (*models.Mock, error) { return own2, fail })
+		}
+		return nil
+	})
+	visit := func(db integrations.MockMemDb) (string, error) {
+		r, ok := db.(integrations.StagedRecordingReader)
+		if !ok {
+			t.Fatalf("%T reads no staged recordings", db)
+		}
+		var names []string
+		err := r.RangeStagedRecordings(models.HTTP, []string{"POST /orders"}, func(m *models.Mock) bool { names = append(names, m.Name); return true })
+		sort.Strings(names)
+		return strings.Join(names, ","), err
+	}
+	if names, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "mock-own1,mock-own2,mock-pool" {
+		t.Fatalf("through the scoped view: %s %v; want mock-own1, mock-own2 (from disk), mock-pool", names, err)
+	}
+	type treesOnly struct {
+		integrations.MockMemDb
+		integrations.StagedReader
+	}
+	if names, err := visit(&scopedMockDb{MockMemDb: treesOnly{mm, mm}}); err != nil || names != "mock-own1,mock-pool" {
+		t.Fatalf("over a store with no reader: %s %v; want its trees, mock-own1 and mock-pool", names, err)
+	}
+	fail = errors.New("short read")
+	if _, err := visit(&scopedMockDb{MockMemDb: mm}); err == nil || !strings.Contains(err.Error(), "mock-own2") {
+		t.Fatalf("a recording the store cannot read back gave %v; want an error naming mock-own2", err)
 	}
 }

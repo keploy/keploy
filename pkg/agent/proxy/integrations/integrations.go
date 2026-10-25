@@ -673,6 +673,37 @@ type RecordedBeforeReader interface {
 	RangeRecordedBefore(t time.Time, visit func(m *models.Mock) bool) error
 }
 
+// StagedRecordingReader is an optional MockMemDb capability: it visits every
+// recording of kind of the staged test set, those the store holds in its
+// trees and those of kind it keeps on disk indexed under any of keys
+// (models.RequestKeys; a test's own are staged only as that test opens),
+// served or not and whatever the open view shows, each once, until visit
+// returns false. A recording kept on disk is decoded for visit alone: visit
+// keeps at most the one it stops at. For the learn step alone: a call that
+// is exactly a recording its scope does not offer (another test's, the
+// previous test's own after that test ended) is that recording's call, never
+// a drift of the recording the learn step would pair it with. Nothing it
+// visits is handed out, nor served. err is why the store cannot read them
+// all; the learn step then learns nothing from the call, as it cannot tell.
+type StagedRecordingReader interface {
+	RangeStagedRecordings(kind models.Kind, keys []string, visit func(m *models.Mock) bool) error
+}
+
+// RecordedTests is an optional TestWindows capability: where a recording's
+// time lies among the staging's recorded test windows. For the learn step's
+// reasons and its check that a call is exactly a recording its scope does not
+// offer (StagedRecordingReader).
+type RecordedTests interface {
+	// RecordedTestAt is the test case whose recorded window t is inside, ""
+	// where t is inside none, the replay sent none, or the window carries no
+	// name.
+	RecordedTestAt(t time.Time) string
+	// BeforeTestWindow reports whether t is before the start of the
+	// recorded window of the test the view in force serves; known is false
+	// where no such window is known or t is zero.
+	BeforeTestWindow(t time.Time) (before, known bool)
+}
+
 // TestWindows is an optional MockMemDb capability: where the request time of
 // a recorded mock falls among the replay's test windows. The learn step tells
 // the open test's own mocks, the pool's and other tests' apart by it where

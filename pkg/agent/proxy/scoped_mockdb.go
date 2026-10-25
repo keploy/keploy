@@ -539,6 +539,25 @@ func (s *scopedMockDb) StagedMocks() []*models.Mock {
 
 var _ integrations.StagedReader = (*scopedMockDb)(nil)
 
+// RangeStagedRecordings forwards the store's staged recordings
+// (integrations.StagedRecordingReader), whatever this view's allowlist
+// shows: a call that is exactly one the view does not offer is that
+// recording's. Over a store that keeps no such reader it visits the store's
+// staged mocks (StagedMocks) of kind, the trees' alone.
+func (s *scopedMockDb) RangeStagedRecordings(kind models.Kind, keys []string, visit func(*models.Mock) bool) error {
+	if r, ok := s.MockMemDb.(integrations.StagedRecordingReader); ok {
+		return r.RangeStagedRecordings(kind, keys, visit)
+	}
+	for _, mk := range s.StagedMocks() {
+		if mk != nil && mk.Kind == kind && !visit(mk) {
+			return nil
+		}
+	}
+	return nil
+}
+
+var _ integrations.StagedRecordingReader = (*scopedMockDb)(nil)
+
 // RangeRecordedBefore forwards the store's recordings before t, or at its
 // own instant (integrations.RecordedBeforeReader), whatever this view's allowlist shows:
 // the learn step's earlier places are the recording's. Over a store that

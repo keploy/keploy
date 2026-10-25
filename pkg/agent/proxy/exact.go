@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -957,6 +958,59 @@ func (m *MockManager) StagedMocks() []*models.Mock {
 }
 
 var _ integrations.StagedReader = (*MockManager)(nil)
+
+// RangeStagedRecordings implements integrations.StagedRecordingReader: the
+// recordings of kind the trees hold (StagedMocks, of kind), then those of
+// kind the agent keeps on disk under any of keys (SetRecordingSource), each
+// decoded only once the trees showed no recording of its name. No keys
+// visits the trees alone. Nothing visited is handed out, and no name is
+// claimed (FindStagedNotOwned's naming is the miss's): a call that is
+// exactly a recording is told so however many calls are.
+func (m *MockManager) RangeStagedRecordings(kind models.Kind, keys []string, visit func(*models.Mock) bool) error {
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	seen := map[string]bool{}
+	for _, t := range trees {
+		for _, mk := range m.treeValues(t, kind) {
+			if mk == nil || mk.Kind != kind || seen[mk.Name] {
+				continue
+			}
+			seen[mk.Name] = true
+			if !visit(mk) {
+				return nil
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	m.exact.recorded.mu.Lock()
+	src := m.exact.recorded.src
+	m.exact.recorded.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	var loadErr error
+	err := src(kind, keys, func(name string, load func() (*models.Mock, error)) bool {
+		if seen[name] {
+			return true
+		}
+		seen[name] = true
+		mk, err := load()
+		if err != nil {
+			loadErr = fmt.Errorf("read the recording %s kept on disk: %w", name, err)
+			return false
+		}
+		return mk == nil || visit(mk)
+	})
+	if err != nil {
+		return err
+	}
+	return loadErr
+}
+
+var _ integrations.StagedRecordingReader = (*MockManager)(nil)
 
 // ServeExactTest opens test under exact serving: from now its test mocks,
 // owned (the data-plane mocks of its mapping, in recorded order), each answer

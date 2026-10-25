@@ -417,6 +417,10 @@ type learnMiss struct {
 	// the call's first pass read it and what the replay did since. It has
 	// no reason: nothing of the request was compared.
 	moved bool
+	// steps, where set, is the miss's next step, in place of the mismatch
+	// report's default, which speaks of a request that changed since it was
+	// recorded.
+	steps string
 }
 
 // learnRound is the round a call's first pass of the learn step read: the
@@ -1428,6 +1432,31 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				res := learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy record's full round read this request " + alone}
 				return nil, &learnMiss{res: res, pool: sc.http, moved: true}, nil
 			}
+			// A call that is exactly a recording the scope does not offer
+			// (the test before's own, read between tests after that test
+			// ended; another test's) is that recording's call, made where
+			// it was not recorded, never a drift of m: paired with m, what
+			// it differs from m in was learned onto m as noise, a false
+			// green. It learns nothing, and its miss goes on to the steps
+			// that answer or name a recording made elsewhere (the
+			// pairing, the miss's lookup), or names it here.
+			var place *unreadPlace
+			if x, err := exactlyElsewhere(input, mockDb, sc, live, liveShape, n, elsewhereCounts(own, read.windows)); errors.As(err, &place) {
+				if _, warned := h.placeWarned.LoadOrStore(placeWarning{epoch: read.round.epoch, mock: place.mock}, true); !warned {
+					h.Logger.Warn("a recording of the test set declares a variable at a place keploy cannot read, so the learn step cannot tell whether a call of its operation is exactly that recording: it learns nothing from such a call, which misses. Correct or remove the variable in the test set's mocks.yaml, or record again, then run again",
+						zap.String("recording", place.mock), zap.String("variable", place.variable), zap.String("place", place.place))
+				}
+				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy cannot read where the recording " + place.mock + " declares its variable " + place.variable + " (" + strconv.Quote(place.place) + "), so it cannot tell whether this request is exactly " + place.mock + " rather than a changed call of " + m.Name + ", and learns nothing from it"}
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http, steps: placeSteps}, nil
+			} else if err != nil {
+				h.Logger.Warn("keploy cannot read every recording of the test set, so its learn step cannot tell whether this call is exactly one of them: it learns nothing from the call, which misses. Fix what the error names, then run again",
+					zap.String("mock", m.Name), zap.Error(err))
+				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: "keploy cannot read every recording of the test set (" + err.Error() + "), so it cannot tell whether this request is exactly one of them rather than a changed call of " + m.Name + ", and learns nothing from it"}
+				return nil, &learnMiss{res: res, closest: m, pool: sc.http, steps: unreadSteps}, nil
+			} else if x != nil {
+				res = learn.Result{Outcome: learn.Miss, Index: -1, Why: elsewhereWhy(x, m, read.round.where(), read.windows)}
+				return nil, &learnMiss{res: res, closest: x, pool: sc.http, steps: elsewhereSteps}, nil
+			}
 			if stuck(m, read.at) {
 				return refused(m, res, sc)
 			}
@@ -1539,6 +1568,195 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 		return nil, miss, nil
 	}
 }
+
+// exactlyElsewhere is a recording of the staged test set that live is
+// exactly, modulo what is known (as Pair's Exact), that the scope sc does not
+// offer, and that counts reads: the test before's own, read between tests
+// once that test ended, or another test's, which the view in force does not
+// show. Such a call is read as that recording's, made outside where it was
+// recorded, and is never paired with another recording. A recording that
+// declares variables is compared with its variables' request places excused
+// (variablePlaces): a call of it differs there on every run.
+//
+// The store visits its recordings of the call's request keys
+// (integrations.StagedRecordingReader), those it keeps on disk too; a store
+// with no such reader, its staged mocks (integrations.StagedReader). err is
+// why the store could not read them all, or an *unreadPlace: a variable place
+// keploy cannot read, of a recording of the call's operation. A limit: an agent that could not create its disk store keeps its
+// mocks resident (agent.go), and a test's own recordings are then staged
+// only as that test opens, so a call exactly a later test's is not seen.
+func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live httpParts, liveShape learn.Shape, n learnNoise, counts func(*models.Mock) bool) (*models.Mock, error) {
+	offered := make(map[string]bool, len(sc.http)+len(sc.mocks))
+	for _, list := range [][]*models.Mock{sc.http, sc.mocks} {
+		for _, m := range list {
+			if m != nil {
+				offered[m.Name] = true
+			}
+		}
+	}
+	var found *models.Mock
+	var placeErr error
+	try := func(m *models.Mock) bool {
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || offered[m.Name] || !counts(m) {
+			return true
+		}
+		rp := recordedParts(m)
+		d := destOf(live, rp)
+		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
+			return true
+		}
+		known := n.known(m)
+		if hasVariables(m) {
+			at, err := variablePlaces(m)
+			if err != nil {
+				placeErr = err
+				return false
+			}
+			known = excusedAt{Known: known, at: at}
+		}
+		if diff := learn.Compare(liveShape, n.shape(rp, d), known); diff.Structural == "" && len(diff.Drift) == 0 && len(diff.Reordered) == 0 {
+			found = m
+			return false
+		}
+		return true
+	}
+	var err error
+	if r, ok := mockDb.(integrations.StagedRecordingReader); ok {
+		path := ""
+		if input.url != nil {
+			path = input.url.Path
+		}
+		target := strings.Join(input.header.Values(amzTargetHeader), ",")
+		loose := len(n.url) > 0 || n.headers[strings.ToLower(amzTargetHeader)]
+		err = r.RangeStagedRecordings(models.HTTP, RequestKeysOf(input.method, path, target, loose), try)
+	} else {
+		for _, m := range stagedOf(mockDb) {
+			if !try(m) {
+				break
+			}
+		}
+	}
+	if placeErr != nil {
+		return nil, placeErr
+	}
+	return found, err
+}
+
+// elsewhereCounts is which recordings exactlyElsewhere reads for a call the
+// learn step would pair with a recording, the open test's own or not. Paired
+// with the pool's (between tests, or in a test), every one. Paired with the
+// open test's own, those recorded before the test's recorded window began
+// (an earlier test's, the test before's late call): keploy test sends a
+// test's request only once the test before's view ended, so a call in a test
+// that is exactly a later test's recording is as likely a value that drifted
+// onto it (an off-by-one counter) as an early call, and keeps its pairing
+// with the test's own. Where the window is not known (no recorded windows, a
+// store that does not tell), every one: it fails closed. A limit, to be
+// fixed: keploy replay's mock-consistency retry cycles (RetryPassing) run
+// test-1 again after test-N, so there recorded order is not replay order, and
+// a late call of test-N read in test-1 keeps its pairing with test-1's own.
+func elsewhereCounts(own bool, windows integrations.TestWindows) func(*models.Mock) bool {
+	every := func(*models.Mock) bool { return true }
+	o, ok := windows.(integrations.RecordedTests)
+	if !own || !ok {
+		return every
+	}
+	return func(x *models.Mock) bool {
+		before, known := o.BeforeTestWindow(x.Spec.ReqTimestampMock)
+		return before || !known
+	}
+}
+
+// variablePlaces is the leaf paths (learn.LeafPath) of m's variables'
+// request places, each bind and use (models.MockVariable): where a call of m
+// holds a value the application makes anew each run. err names a place keploy
+// cannot read.
+func variablePlaces(m *models.Mock) (map[string]bool, error) {
+	names := make([]string, 0, len(m.Spec.Variables))
+	for name := range m.Spec.Variables {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	at := map[string]bool{}
+	for _, name := range names {
+		v := m.Spec.Variables[name]
+		places := append(make([]string, 0, 1+len(v.Use)), v.Use...)
+		if v.Bind != "" {
+			places = append(places, v.Bind)
+		}
+		for _, p := range places {
+			path, ok := learn.LeafPath(p)
+			if !ok {
+				return nil, &unreadPlace{mock: m.Name, variable: name, place: p}
+			}
+			at[path] = true
+		}
+	}
+	return at, nil
+}
+
+// unreadPlace is a variable's request place keploy cannot read
+// (variablePlaces): the recording, the variable, the place as written.
+type unreadPlace struct{ mock, variable, place string }
+
+func (e *unreadPlace) Error() string {
+	return fmt.Sprintf("the recording %s declares its variable %s at %q, a place keploy cannot read", e.mock, e.variable, e.place)
+}
+
+// placeWarning is a recording, of the staging epoch, whose unreadable
+// variable place (unreadPlace) the learn step warned of: once per recording
+// and staging, however many calls of its operation miss on it. Mock names
+// repeat across test sets, hence the staging.
+type placeWarning struct {
+	epoch uint64
+	mock  string
+}
+
+// excusedAt excuses what Known does and, at the leaf paths at, any value,
+// type or presence.
+type excusedAt struct {
+	learn.Known
+	at map[string]bool
+}
+
+func (k excusedAt) Excused(l learn.Leaf) (bool, bool) {
+	if k.at[l.Path] {
+		return true, false
+	}
+	return k.Known.Excused(l)
+}
+
+// elsewhereWhy is what the learn step says of a call that is exactly x, a
+// recording its scope did not offer (exactlyElsewhere), where it would have
+// paired the call with m: read where (learnRound.where), and the recorded
+// test whose window x lies in, where the store tells it
+// (integrations.RecordedTests).
+func elsewhereWhy(x, m *models.Mock, where string, windows integrations.TestWindows) string {
+	made := "a recording of the test set that is not offered where this call was made"
+	if w, ok := windows.(integrations.RecordedTests); ok {
+		if test := w.RecordedTestAt(x.Spec.ReqTimestampMock); test != "" {
+			made = "which keploy recorded in " + test + "'s window"
+		}
+	}
+	exactly := x.Name
+	if hasVariables(x) {
+		exactly += " (but for its variables: values the application makes anew each run)"
+	}
+	return "keploy record's full round read this request " + where + ", and it is exactly " + exactly + ", " + made +
+		": keploy reads it as that recording's call made outside where it was recorded (a test's late or early call), not as a changed call of " + m.Name +
+		", so it learns nothing onto " + m.Name + " from it"
+}
+
+// elsewhereSteps, unreadSteps and placeSteps are the next steps of a call
+// exactly a recording made elsewhere, of one keploy could not tell for a
+// recording it cannot read back, and for one whose variable place it cannot
+// read (in place of the mismatch report's default, which speaks of a request
+// that changed).
+const (
+	elsewhereSteps = "If the application makes this call after its test's response or before the next test's request, make the test, or the application's readiness, wait for it, then record again; if a value only happens to equal that recording's, record again so keploy sees it change."
+	unreadSteps    = "This is keploy failing to read its own recordings, not a change of the request: fix what the agent's log names, then run again."
+	placeSteps     = "This is a recording keploy cannot read, not a change of the request: correct or remove the variable named above in the test set's mocks.yaml, or record again, then run again."
+)
 
 // learnPass is the instant a pass of the learn step read the store at: the
 // store's revision, and, read from one snapshot of the round, the round's
@@ -2245,6 +2463,10 @@ func (m *learnMiss) explain(r *models.MockMismatchReport) {
 		why += " The app sent the array in another order than it was recorded in (unstable_order)."
 	case models.MissRequestChanged:
 		why += " The request changed since it was recorded in a way keploy does not learn (request_changed)."
+	}
+	if m.steps != "" {
+		r.NextSteps = why + " " + m.steps
+		return
 	}
 	if r.NextSteps == "" {
 		r.NextSteps = why

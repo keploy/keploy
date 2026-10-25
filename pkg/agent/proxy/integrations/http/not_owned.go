@@ -149,11 +149,37 @@ func recordedRequestKeys(m *models.Mock) []string {
 		}
 		learned = k.learnedAt("url.path."+strconv.Itoa(i), "")
 	}
+	if !learned && hasVariables(m) {
+		learned = variableKeyed(m, len(segs))
+	}
 	keys := []string{requestKeyShape(method, len(segs))}
 	if learned {
 		return append(keys, requestKeyLearned(method, len(segs)))
 	}
 	return append(keys, requestKeyExact(method, segs, target))
+}
+
+// variableKeyed reports whether a variable of m (variablePlaces) sits where
+// the exact request key reads (one of its segs path segments, or its
+// X-Amz-Target), or at a place keploy cannot read. A call of m holds a value
+// made anew each run there, so m is filed under the learned key, as for
+// learned noise there: filed under its recorded value, no call that carries
+// another would ask for it, and the learn step's check that a call is exactly
+// a recording made elsewhere (exactlyElsewhere) would pass it over.
+func variableKeyed(m *models.Mock, segs int) bool {
+	at, err := variablePlaces(m)
+	if err != nil {
+		return true
+	}
+	if at["header."+strings.ToLower(amzTargetHeader)] {
+		return true
+	}
+	for i := 0; i < segs; i++ {
+		if at["url.path."+strconv.Itoa(i)] {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

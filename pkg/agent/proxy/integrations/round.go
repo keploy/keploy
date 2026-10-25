@@ -512,6 +512,41 @@ func (s RoundSnapshot) InTestWindow(t time.Time) bool {
 	return !t.Before(s.winStart) && !t.After(s.winEnd)
 }
 
+// RecordedTestAt is the test case whose recorded window t is inside, of the
+// staging's recorded test windows (the earliest-starting one), "" where t is
+// inside none, the replay sent none, or the window carries no name.
+func (s RoundSnapshot) RecordedTestAt(t time.Time) string {
+	if s.windows.Len() == 0 || t.IsZero() {
+		return ""
+	}
+	if i := s.windows.IndexOf(t); i >= 0 {
+		return s.windows.Window(i).TestCase
+	}
+	return ""
+}
+
+// BeforeTestWindow implements RecordedTests: t is before the start of the
+// recorded window of the view's test (the staging's recorded windows, by test
+// case), else of the test window the snapshot read.
+func (s RoundSnapshot) BeforeTestWindow(t time.Time) (before, known bool) {
+	if t.IsZero() {
+		return false, false
+	}
+	if s.Test != "" {
+		for i := 0; i < s.windows.Len(); i++ {
+			if w := s.windows.Window(i); w.TestCase == s.Test && !w.Start.IsZero() {
+				return t.Before(w.Start), true
+			}
+		}
+	}
+	if s.winStart.IsZero() {
+		return false, false
+	}
+	return t.Before(s.winStart), true
+}
+
+var _ RecordedTests = RoundSnapshot{}
+
 func (s RoundSnapshot) InRecordedTestWindow(t time.Time) (inside, known bool) {
 	if s.windows.Len() == 0 || t.IsZero() {
 		return false, false
