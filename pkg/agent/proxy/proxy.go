@@ -36,6 +36,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -540,6 +541,12 @@ type Proxy struct {
 	// negative disables half-close, so it is NOT clamped to zero the way
 	// recordBufferStallGrace is.
 	recordBufferHalfCloseGrace time.Duration
+
+	// recordSupervisor builds the supervisor of a recorded connection's V2
+	// parser (recordViaSupervisor); nil is supervisor.New. Tests set it, to
+	// drive a hang on a clock they move or to put a connection over its
+	// memory cap.
+	recordSupervisor func(supervisor.Config) *supervisor.Supervisor
 
 	// capture follows the relays of the connections whose parser is
 	// recording, for the recording's capture watermark

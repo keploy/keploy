@@ -20,6 +20,7 @@ import (
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -233,6 +234,14 @@ type stopHarness struct {
 
 func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.Logger) *stopHarness {
 	t.Helper()
+	return newStopHarnessWith(t, parser, logger, nil)
+}
+
+// newStopHarnessWith is newStopHarness with the connection's parser
+// supervised by what newSupervisor builds (Proxy.recordSupervisor; nil is
+// supervisor.New).
+func newStopHarnessWith(t *testing.T, parser integrations.Integrations, logger *zap.Logger, newSupervisor func(supervisor.Config) *supervisor.Supervisor) *stopHarness {
+	t.Helper()
 	supervisor.ResetLeftOutWarningsForTest()
 	h := &stopHarness{mgr: syncMock.New(nil), done: make(chan error, 1)}
 	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), h.mgr), 30*time.Second)
@@ -267,6 +276,7 @@ func newStopHarness(t *testing.T, parser integrations.Integrations, logger *zap.
 		recordBufferQueueSize:      64,
 		recordBufferStallGrace:     2 * time.Second,
 		recordBufferHalfCloseGrace: 200 * time.Millisecond,
+		recordSupervisor:           newSupervisor,
 	}
 	go func() {
 		h.done <- p.recordViaSupervisor(ctx, srcConn, connseq.NewUpstream(dstConn), parser, integrations.HTTP,
@@ -674,5 +684,179 @@ func TestRecordViaSupervisor_APanicReportsWhatItsParserTookAndNeverParsed(t *tes
 	}
 	if n := h.mgr.MocksLeftOut(); n == 0 || n != int64(len(reasons)) {
 		t.Errorf("the manager counts %d mocks left out, and %d were logged (%q): want each span the panic left out reported", n, len(reasons), reasons)
+	}
+}
+
+// aheadThenStopParser reads its client stream ahead of its loop, as
+// aheadThenPanicParser does: it takes n chunks, telling took of each, and
+// marks only the first processed. Then its Run ends in a stop with the rest
+// taken and never parsed: it returns fail, or, when fail is nil, waits on its
+// context until the supervisor retires it (a hang, or its memory cap).
+type aheadThenStopParser struct {
+	stubParser
+	n    int
+	took chan struct{}
+	fail error
+}
+
+func (aheadThenStopParser) IsV2() bool { return true }
+
+func (p aheadThenStopParser) RecordOutgoing(ctx context.Context, s *integrations.RecordSession) error {
+	for i := 0; i < p.n; i++ {
+		c, err := s.V2.ClientStream.ReadAhead()
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			s.V2.MarkProcessed(fakeconn.FromClient, c)
+		}
+		p.took <- struct{}{}
+	}
+	if p.fail != nil {
+		return p.fail
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// armedClock is a stall.ManualClock that says, on armed, each time the
+// supervisor's watchdog arms its next look, so a test moves the clock past
+// the hang budget only once the watchdog waits on it.
+type armedClock struct {
+	*stall.ManualClock
+	armed chan struct{}
+}
+
+func (c armedClock) After(d time.Duration) (<-chan time.Time, func() bool) {
+	ch, stop := c.ManualClock.After(d)
+	select {
+	case c.armed <- struct{}{}:
+	default:
+	}
+	return ch, stop
+}
+
+// sendTaken writes req from the app and returns once the parser took it
+// (took): the relay read it, and teed it, in between.
+func (h *stopHarness) sendTaken(t *testing.T, req string, took <-chan struct{}) sentRequest {
+	t.Helper()
+	sent := time.Now()
+	if _, err := h.clientApp.Write([]byte(req)); err != nil {
+		t.Fatalf("write %q: %v", req, err)
+	}
+	waitFor(t, took, "the parser never took "+req)
+	return sentRequest{sent: sent, arrived: time.Now()}
+}
+
+// parserStopCase is a stop a row ends a parser's Run in: fail is the error it
+// returns (nil: it waits on its context); retire, when set, retires it once
+// it took every request; supervise builds its connection's supervisor (nil:
+// supervisor.New); want is how the reason of a span it leaves out begins.
+type parserStopCase struct {
+	name, want string
+	fail       error
+	retire     func(t *testing.T)
+	supervise  func(supervisor.Config) *supervisor.Supervisor
+}
+
+// hungStop retires the parser as hung: its watchdog reads a clock the row
+// moves past the hang budget each time the watchdog waits on it, once the
+// parser took every request. A look can find activity after the last move:
+// the relay's own, as it finishes forwarding the last request after the
+// parser took it (BumpActivity follows the write to the destination). That
+// look arms the next, which finds the hang, as nothing moves after it.
+func hungStop() parserStopCase {
+	const budget = time.Minute
+	clk := armedClock{ManualClock: &stall.ManualClock{}, armed: make(chan struct{}, 1)}
+	return parserStopCase{
+		name: "hung",
+		want: "parser hung: the http parser was retired as hung (no progress for its hang budget) with ",
+		supervise: func(cfg supervisor.Config) *supervisor.Supervisor {
+			cfg.HangBudget, cfg.Clock = budget, clk
+			return supervisor.New(cfg)
+		},
+		retire: func(t *testing.T) {
+			stop := make(chan struct{})
+			t.Cleanup(func() { close(stop) })
+			go func() {
+				for {
+					select {
+					case <-clk.armed:
+						clk.Advance(budget + time.Millisecond)
+					case <-stop:
+						return
+					}
+				}
+			}()
+		},
+	}
+}
+
+// memCapStop retires the parser over its connection's memory cap.
+func memCapStop() parserStopCase {
+	built := make(chan *supervisor.Supervisor, 1)
+	return parserStopCase{
+		name: "memory cap",
+		want: "parser over its memory cap: the http parser was retired over its connection's memory cap with ",
+		supervise: func(cfg supervisor.Config) *supervisor.Supervisor {
+			sv := supervisor.New(cfg)
+			built <- sv
+			return sv
+		},
+		retire: func(*testing.T) { (<-built).MarkMemCapExceeded() },
+	}
+}
+
+// Every stop a parser's Run ends in leaves what its readers took ahead of its
+// loop, and what was still queued for it, not parsed, as a panic does: a
+// parser that returned an error, one the watchdog found hung, and one over its
+// connection's memory cap. Those requests came before the stop, so the stop's
+// span, which starts at it, does not cover them, and the return left them out
+// at Debug alone: the test cases over them were set aside with no reason, and
+// the recording's summary counted nothing. Only the per-connection "parser
+// retired" WARN spoke for them, and it does not say which test cases it cost.
+// Each span the return leaves out after any stop is now reported left out
+// (Session.ReportLeftOut), with a reason naming the stop and the parser, and
+// the request the parser did parse is in none.
+func TestRecordViaSupervisor_EveryStopReportsWhatItsParserTookAndNeverParsed(t *testing.T) {
+	for _, tc := range []parserStopCase{
+		{name: "error", fail: errors.New("a frame that does not decode"),
+			want: "parser stopped on an error: the http parser returned an error with "},
+		hungStop(),
+		memCapStop(),
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			p := aheadThenStopParser{n: 3, took: make(chan struct{}, 3), fail: tc.fail}
+			h := newStopHarnessWith(t, p, zap.New(core), tc.supervise)
+
+			one := h.sendTaken(t, "GET /one HTTP/1.1\r\n\r\n", p.took)
+			two := h.sendTaken(t, "GET /two HTTP/1.1\r\n\r\n", p.took)
+			three := h.sendTaken(t, "GET /three HTTP/1.1\r\n\r\n", p.took)
+			if tc.retire != nil {
+				tc.retire(t)
+			}
+			h.end(t)
+
+			h.requireInASpan(t, two, "taken and not parsed before its parser's stop")
+			h.requireInASpan(t, three, "taken and not parsed before its parser's stop")
+			if over, _ := h.mgr.WasMockOrphanedInWindow(one.sent, one.arrived); over {
+				t.Errorf("the request the parser parsed before its stop is in a span")
+			}
+			var reasons []string
+			for _, e := range logs.All() {
+				if e.Message != supervisor.LeftOutWarnMsg && e.Message != supervisor.LeftOutDebugMsg {
+					continue
+				}
+				reason, _ := e.ContextMap()["reason"].(string)
+				reasons = append(reasons, reason)
+				if !strings.HasPrefix(reason, tc.want) {
+					t.Errorf("left out for %q, want the stop named, with its parser: %q...", reason, tc.want)
+				}
+			}
+			if n := h.mgr.MocksLeftOut(); n == 0 || n != int64(len(reasons)) {
+				t.Errorf("the manager counts %d mocks left out, and %d were logged (%q): want each span the stop left out reported", n, len(reasons), reasons)
+			}
+		})
 	}
 }

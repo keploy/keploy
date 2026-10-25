@@ -59,7 +59,11 @@ func (p *Proxy) recordViaSupervisor(
 	clientConnID, destConnID int64,
 	opts models.OutgoingOptions,
 ) error {
-	sv := supervisor.New(supervisor.Config{
+	newSupervisor := supervisor.New
+	if p.recordSupervisor != nil {
+		newSupervisor = p.recordSupervisor
+	}
+	sv := newSupervisor(supervisor.Config{
 		Logger: logger,
 		// Leave HangBudget / MemCap / PanicReporter defaulted by the
 		// supervisor package. Tune via config once we have production
@@ -548,12 +552,11 @@ func (p *Proxy) recordViaSupervisor(
 	// answer reads it, and they open no span then. Called before the tees are
 	// paused below: a chunk a paused tee refuses is told of as after the
 	// return.
-	// A parser that panicked died with what its readers took ahead of its loop
-	// not parsed: the return reports what it leaves out of that as left out,
-	// with a reason naming the panic (parserReads.parserPanicked).
-	if result.Status == supervisor.StatusPanicked {
-		reads.parserPanicked(string(parserType))
-	}
+	// A parser retired on a stop (an error, a panic, a hang or its memory cap)
+	// left what its readers took ahead of its loop, and what was still queued
+	// for it, not parsed: the return reports what it leaves out of that as
+	// left out, with a reason naming the stop (parserReads.parserStopped).
+	reads.parserStopped(string(parserType), result.Status)
 	reads.parserReturned()
 	// Only now does the watermark stop following the connection: a test case
 	// held for what its parser never read is let go once that is left out

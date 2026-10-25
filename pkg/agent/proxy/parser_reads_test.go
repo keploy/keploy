@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 )
 
 // readsIdleGrace is the idle grace the tests give parserReads.
@@ -430,5 +432,64 @@ func TestParserReads_ARunCoversItsChunksWhicheverWayTheirStampsLie(t *testing.T)
 	r.parserReturned()
 	if want := []string{span(msAfter(500), msAfter(1000).Add(readsIdleGrace))}; fmt.Sprint(r.conn.spans) != fmt.Sprint(want) {
 		t.Errorf("left out %v, want %v", r.conn.spans, want)
+	}
+}
+
+// Once a parser's Run ended in a stop, each span the return leaves out is
+// reported (reportLeftOut) under a cause naming the stop, with the count of
+// that span's own chunks, not every chunk left out; a parser that returned nil
+// or was cancelled as the recording stops reports none, and leaves them out
+// as before. Two runs of unread chunks, a gap longer than the grace between
+// them, are two spans: of two chunks and of one.
+func TestParserReads_AStopReportsEachSpanItLeavesOutWithItsOwnChunks(t *testing.T) {
+	gap := int(5 * readsIdleGrace / time.Millisecond)
+	wantSpans := []string{
+		span(msAfter(10), msAfter(20).Add(readsIdleGrace)),
+		span(msAfter(20+gap), msAfter(20+gap).Add(readsIdleGrace)),
+	}
+	for _, tc := range []struct {
+		status supervisor.Status
+		cause  string // "" when nothing is reported
+	}{
+		{supervisor.StatusError, "parser stopped on an error: the mysql parser returned an error"},
+		{supervisor.StatusPanicked, "parser panicked: the mysql parser died"},
+		{supervisor.StatusHung, "parser hung: the mysql parser was retired as hung (no progress for its hang budget)"},
+		{supervisor.StatusMemCap, "parser over its memory cap: the mysql parser was retired over its connection's memory cap"},
+		{supervisor.StatusOK, ""},
+		{supervisor.StatusCanceled, ""},
+	} {
+		c := &connRecorder{}
+		s := &readsStreams{}
+		var reported, reasons []string
+		p := newParserReads(c, c.leftOut, func(start, end time.Time, reason string) {
+			reported = append(reported, span(start, end))
+			reasons = append(reasons, reason)
+		}, func() bool { return c.stopping }, readsIdleGrace, nil)
+		p.follow(s, s.teedOf)
+		r := &readsUnderTest{parserReads: p, conn: c, streams: s}
+		r.carry(fakeconn.FromClient, 0, 5)
+		s.read.Store(5)
+		r.carry(fakeconn.FromClient, 10, 4)
+		r.carry(fakeconn.FromClient, 20, 4)
+		r.carry(fakeconn.FromClient, 20+gap, 4)
+		p.parserStopped("mysql", tc.status)
+		p.parserReturned()
+
+		if tc.cause == "" {
+			if len(reported) != 0 || fmt.Sprint(c.spans) != fmt.Sprint(wantSpans) {
+				t.Errorf("%v: reported %v (%q) and left out %v, want nothing reported and %v left out", tc.status, reported, reasons, c.spans, wantSpans)
+			}
+			continue
+		}
+		if len(c.spans) != 0 || fmt.Sprint(reported) != fmt.Sprint(wantSpans) {
+			t.Errorf("%v: reported %v and left out %v unreported, want %v reported", tc.status, reported, c.spans, wantSpans)
+			continue
+		}
+		for i, n := range []int{2, 1} {
+			want := fmt.Sprintf("%s with %d client chunks of this connection not parsed ", tc.cause, n)
+			if !strings.HasPrefix(reasons[i], want) || strings.Contains(reasons[i], "panic:") {
+				t.Errorf("%v: span %d reported for %q, want it to begin %q, with no \"panic:\" token", tc.status, i, reasons[i], want)
+			}
+		}
 	}
 }

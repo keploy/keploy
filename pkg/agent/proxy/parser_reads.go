@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	"go.uber.org/zap"
 )
 
@@ -81,12 +82,13 @@ type parserReads struct {
 	// reportLeftOut reports a closed span of traffic the parser did not record
 	// as left out, for reason (Session.ReportLeftOut: counted, spanned, and
 	// logged at WARN by its cause). It is used in leftOut's place once the
-	// parser panicked (parserPanicked), so what it took and never parsed is
-	// set aside with a reason naming the panic, not left out at Debug.
+	// parser's Run ended in a stop (parserStopped), so what it took and never
+	// parsed is set aside with a reason naming the stop, not left out at Debug.
 	reportLeftOut func(start, end time.Time, reason string)
-	// panicked names the parser whose Run ended in a panic (parserPanicked),
-	// "" until then.
-	panicked  string
+	// stopped is how the parser's Run ended, once that was a stop
+	// (parserStopped), and parser names it; StatusOK until then.
+	stopped   supervisor.Status
+	parser    string
 	stopping  func() bool
 	idleGrace time.Duration
 	logger    *zap.Logger
@@ -157,35 +159,56 @@ func newParserReads(conn unrecordedConn, leftOut func(start, end time.Time), rep
 	return &parserReads{conn: conn, leftOut: leftOut, reportLeftOut: reportLeftOut, stopping: stopping, idleGrace: idleGrace, logger: logger}
 }
 
-// parserPanicked says the parser's Run ended in a panic: the parser named
-// parser died with what its readers had taken ahead of its loop (the chunks
-// queued for the loop, and each reader's chunk in hand) never parsed. Those
-// bytes are not processed (fakeconn.FakeConn.MarkProcessed), so the return
-// leaves out the client chunks in them, as it does any the parser never read;
-// a panic makes that a capture loss to report, not a parser's ordinary end. So
-// from here each span left out is reported (reportLeftOut), with a reason
-// naming the panic, so the test cases over it are set aside with that reason,
-// counted in the recording's summary. Call it before parserReturned.
-func (p *parserReads) parserPanicked(parser string) {
+// parserStopped says how the parser named parser ended its Run (status).
+// Once that is a stop (stoppedLeftOut: it returned an error, panicked, was
+// found hung, or went over its memory cap), it was retired with what its
+// readers had taken ahead of its loop (the chunks queued for the loop, and
+// each reader's chunk in hand) never parsed, and with the chunks still queued
+// for it. Those bytes are not processed (fakeconn.FakeConn.MarkProcessed), so
+// the return leaves out the client chunks in them, as it does any the parser
+// never read; a stop makes that a capture loss to report, not a parser's
+// ordinary end. So from here each span left out is reported (reportLeftOut),
+// with a reason naming the stop, so the test cases over it are set aside with
+// that reason, counted in the recording's summary. A parser that returned nil
+// (StatusOK) recorded what it read, and one cancelled as the recording stops
+// (StatusCanceled) leaves out only what the recording's stop cuts off: both
+// stay at Debug. Call it before parserReturned.
+func (p *parserReads) parserStopped(parser string, status supervisor.Status) {
+	if _, ok := stoppedLeftOut[status]; !ok {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.panicked = parser
+	p.stopped, p.parser = status, parser
 }
 
-// panickedLeftOutCause is the cause (the text before the first colon) of the
-// reason a span the return leaves out after a panic is reported with
-// (parserReads.parserPanicked).
+// stoppedCause is, for a stop a parser's Run ended in, the cause (the text
+// before the first colon) a span the return leaves out is reported under,
+// what befell the parser, and where to read more of it.
+type stoppedCause struct{ cause, befell, more string }
+
+// stoppedLeftOut holds the stops a parser's Run can end in (parserStopped).
+// The reasons name no panic value: the supervisor's "parser panicked" ERROR
+// carries it with the stack, and a line at WARN must not carry the "panic:"
+// token the lanes grep for a crashed keploy (see recordViaSupervisor).
+var stoppedLeftOut = map[supervisor.Status]stoppedCause{
+	supervisor.StatusError:    {"parser stopped on an error", "returned an error", "run with --debug for the error"},
+	supervisor.StatusPanicked: {panickedLeftOutCause, "died", fmt.Sprintf("the supervisor's %q error has the stack", "parser panicked")},
+	supervisor.StatusHung:     {"parser hung", "was retired as hung (no progress for its hang budget)", "a slow but live parser wants a longer hang budget"},
+	supervisor.StatusMemCap:   {"parser over its memory cap", "was retired over its connection's memory cap", "its connection's parser-owned buffers went over the cap"},
+}
+
+// panickedLeftOutCause is the cause of the reason a span the return leaves
+// out after a panic is reported with (stoppedLeftOut).
 const panickedLeftOutCause = "parser panicked"
 
-// panickedReason is the reason a run of n client chunks the parser named
+// stoppedReason is the reason a run of n client chunks the parser named
 // parser never parsed (taken ahead of its loop, or still queued for it) is
-// reported with once it panicked. It names no
-// panic value: the supervisor's "parser panicked" ERROR carries it with the
-// stack, and a line at WARN must not carry the "panic:" token the lanes grep
-// for a crashed keploy (see recordViaSupervisor).
-func panickedReason(parser string, n int) string {
-	return fmt.Sprintf("%s: the %s parser died with %d client chunks of this connection not parsed (taken ahead of its loop, or still queued for it), so the requests in them are not recorded (the supervisor's %q error has the stack)",
-		panickedLeftOutCause, parser, n, "parser panicked")
+// reported with once its Run ended in the stop status (stoppedLeftOut).
+func stoppedReason(status supervisor.Status, parser string, n int) string {
+	c := stoppedLeftOut[status]
+	return fmt.Sprintf("%s: the %s parser %s with %d client chunks of this connection not parsed (taken ahead of its loop, or still queued for it), so the requests in them are not recorded (%s)",
+		c.cause, parser, c.befell, n, c.more)
 }
 
 // follow sets the parser's client stream and the relay's count of what it has
@@ -339,14 +362,14 @@ func (p *parserReads) leaveOut(at []time.Time) {
 				start = t
 			}
 		}
-		if p.panicked != "" && p.reportLeftOut != nil {
-			p.reportLeftOut(start, last.Add(p.idleGrace), panickedReason(p.panicked, k-first))
+		if p.stopped != supervisor.StatusOK && p.reportLeftOut != nil {
+			p.reportLeftOut(start, last.Add(p.idleGrace), stoppedReason(p.stopped, p.parser, k-first))
 		} else {
 			p.leftOut(start, last.Add(p.idleGrace))
 		}
 		spans++
 	}
-	if spans > 0 && p.logger != nil && p.panicked == "" {
+	if spans > 0 && p.logger != nil && (p.stopped == supervisor.StatusOK || p.reportLeftOut == nil) {
 		p.logger.Debug("left out the requests a connection's parser returned without recording",
 			zap.Int("chunks", len(at)), zap.Int("spans", spans), zap.Time("from", at[0]))
 	}
