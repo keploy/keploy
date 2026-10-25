@@ -2162,6 +2162,162 @@ func TestALookupOfARecordingMadeElsewhereIsAskedOfTheCallsRound(t *testing.T) {
 	}
 }
 
+// A call a parser marks (MarkCallRound) before its learn step's first read
+// of the round carries the round's boundary count, so that first read tells
+// whether the round moved between the two (integrations.CallRound
+// .MovedSince): a test's end (the store's pool view, the learn tracker's
+// end), or that end and the next test's begin, landing between them moved
+// it, and so does a staging; the tracker's end alone moves it where the
+// tracker's boundaries reach the store. Where nothing moved, or only a
+// consume of the test's own, or a test process claimed its key again (the
+// generation moves, no boundary does), the first read is of the mark's
+// round. The staging epoch, all a mark carried before, tells none of a
+// test's boundaries: the learn step decided such a call in the round its
+// first read showed, the pool's or the next test's, its mark holding the
+// ended test's recordings as its own, and learned what the call differs in
+// onto the pool view's in-flight recording of the next test as noise. A
+// mark read through a connection's view, and a round snapshot's call round,
+// carry the count too. A boundary that lands as the mark lets the round
+// lock go is after the mark, which then reads the view and the count of
+// before it; and a mark in a test set the store has not staged carries the
+// count as every other does.
+func TestACallMarkedBeforeItsTestMovesIsMovedAtItsFirstReadOfTheRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	type land func(t *testing.T, mm *MockManager, step func(func(*learn.Tracker)), own, ahead, next *models.Mock)
+	end := func(t *testing.T, mm *MockManager, step func(func(*learn.Tracker)), _, ahead, _ *models.Mock) {
+		mm.ServeExactPool(models.PoolKeyNone, nil, ahead)
+		step(func(t *learn.Tracker) { t.End() })
+	}
+	for _, routed := range []bool{false, true} {
+		for _, tc := range []struct {
+			name  string
+			moved bool
+			land  land
+			// asMarked lands the move in the mark itself, as it lets the
+			// round lock go (MockManager.exact.onMarked).
+			asMarked bool
+		}{
+			{name: "nothing (control)", land: func(*testing.T, *MockManager, func(func(*learn.Tracker)), *models.Mock, *models.Mock, *models.Mock) {}},
+			{name: "a consume of the test's own", land: func(t *testing.T, mm *MockManager, _ func(func(*learn.Tracker)), own, _, _ *models.Mock) {
+				if !mm.DeleteFilteredMock(*own) {
+					t.Fatal("precondition: T1's own recording was not consumed")
+				}
+			}},
+			{name: "a test process's claim of its key again", land: func(t *testing.T, mm *MockManager, _ func(func(*learn.Tracker)), _, ahead, _ *models.Mock) {
+				mm.RestartExactKey(models.PoolKeyNone, []string{ahead.Name})
+			}},
+			{name: "the tracker's end alone", moved: routed, land: func(t *testing.T, _ *MockManager, step func(func(*learn.Tracker)), _, _, _ *models.Mock) {
+				step(func(t *learn.Tracker) { t.End() })
+			}},
+			{name: "the test's end", moved: true, land: end},
+			{name: "the test's end, as the mark lets the round lock go", moved: true, land: end, asMarked: true},
+			{name: "the test's end and the next test's begin", moved: true, land: func(t *testing.T, mm *MockManager, step func(func(*learn.Tracker)), own, ahead, next *models.Mock) {
+				end(t, mm, step, own, ahead, next)
+				step(func(t *learn.Tracker) { t.Begin() })
+				mm.ServeExactTest("T2", []*models.Mock{ahead, next})
+			}},
+			{name: "a staging of the set again", moved: true, land: func(t *testing.T, mm *MockManager, _ func(func(*learn.Tracker)), own, ahead, next *models.Mock) {
+				mm.SetMocksWithWindow(nil, []*models.Mock{own, ahead, next}, models.BaseTime, time.Now())
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s, routed=%v", tc.name, routed), func(t *testing.T) {
+				own := genericExchange("ex-own", 0, "AUTH step2")
+				ahead := genericExchange("ex-ahead", time.Second, "PING")
+				next := genericExchange("ex-next", 2*time.Second, "PING")
+				mm := stagedManager(t, nil, []*models.Mock{own, ahead, next})
+				tr := learn.NewTracker()
+				step := func(f func(*learn.Tracker)) { f(tr) }
+				if routed {
+					step = func(f func(*learn.Tracker)) { mm.LearnBoundary(tr, f) }
+				}
+				step(func(t *learn.Tracker) { t.Begin() })
+				mm.ServeExactTest("T1", []*models.Mock{own})
+				at, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+				if !ok || at.Test != "T1" || at.Phase != integrations.RoundInTest && routed {
+					t.Fatalf("precondition: the round reads %q's view (%v, %v); want T1's", at.Test, at.Phase, ok)
+				}
+				if tc.asMarked {
+					mm.exact.onMarked = func() {
+						mm.exact.onMarked = nil
+						tc.land(t, mm, step, own, ahead, next)
+					}
+				}
+				marks := map[string]integrations.CallRound{"the store's mark": mm.MarkCallRound()}
+				if !tc.asMarked {
+					marks["a scoped view's mark"] = integrations.MarkCallRound(&scopedMockDb{MockMemDb: mm})
+					marks["a round snapshot's own"] = at.CallRound()
+					for name, mark := range marks {
+						if got, known := mark.Round(); !known || got.Gen != at.At.Gen || got.Bounds != at.At.Bounds || got.Epoch != at.At.Epoch {
+							t.Fatalf("%s reads the round at %+v (known %v); want the round's %+v", name, got, known, at.At)
+						}
+					}
+					tc.land(t, mm, step, own, ahead, next)
+				}
+				first, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+				if !ok {
+					t.Fatal("no first read of the round")
+				}
+				for name, mark := range marks {
+					if got := mark.MovedSince(first.At); got != tc.moved {
+						r, _ := mark.Round()
+						t.Errorf("%s of T1 read again after %s: moved %v, want %v (mark at %+v, first read at %+v)", name, tc.name, got, tc.moved, r, first.At)
+					}
+				}
+				if first.CallRound().MovedSince(first.At) {
+					t.Error("a round snapshot's call round is moved by its own read")
+				}
+			})
+		}
+	}
+	t.Run("a mark between tests, the tracker's next begin", func(t *testing.T) {
+		own := genericExchange("ex-own", 0, "AUTH step2")
+		mm := stagedManager(t, nil, []*models.Mock{own})
+		tr := learn.NewTracker()
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+		mm.ServeExactTest("T1", []*models.Mock{own})
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		at, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !ok || at.Phase != integrations.RoundBetween {
+			t.Fatalf("precondition: the round reads %v (%s); want between tests", at.Phase, at.Boundary)
+		}
+		mark := mm.MarkCallRound()
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+		first, _ := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !first.PoolsCall() || !mark.MovedSince(first.At) {
+			r, _ := mark.Round()
+			t.Fatalf("a call marked between tests, read once the tracker began the next test (pool's call %v), is not moved (mark at %+v, read at %+v)", first.PoolsCall(), r, first.At)
+		}
+	})
+	t.Run("a mark in a test set the store has not staged", func(t *testing.T) {
+		own := genericExchange("ex-own", 0, "AUTH step2")
+		mm := stagedManager(t, nil, []*models.Mock{own})
+		tr := learn.NewTracker()
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+		mm.ServeExactTest("T1", []*models.Mock{own})
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.NewSet() })
+		at, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !ok || !at.SetUnstaged() {
+			t.Fatalf("precondition: the round reads %v (%s); want a test set the store has not staged", at.Phase, at.Boundary)
+		}
+		mark := mm.MarkCallRound()
+		if !mark.Staging() || mark.InTest() {
+			t.Fatalf("precondition: the mark is not a staging's outside every test: staging %v, in a test %v", mark.Staging(), mark.InTest())
+		}
+		if mark.MovedSince(at.At) {
+			r, _ := mark.Round()
+			t.Fatalf("a call marked in a test set the store has not staged is moved where nothing moved (mark at %+v, read at %+v)", r, at.At)
+		}
+		mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, time.Now())
+		staged, _ := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !mark.MovedSince(staged.At) {
+			t.Fatal("a call marked in a test set the store had not staged is not moved by its staging")
+		}
+	})
+}
+
 // genericExchange is a Generic exchange the recorder stated per-test,
 // answering OK.
 func genericExchange(name string, at time.Duration, req string) *models.Mock {

@@ -651,11 +651,18 @@ var _ integrations.ExactServingReader = (*MockManager)(nil)
 // began a test set the store has not staged
 // (integrations.RoundSnapshot.SetUnstaged), the mark is a staging's, outside
 // every test, holding every recording.
+//
+// The mark carries the round's generation and boundary count, read under the
+// round lock with the staging and the view (integrations.CallRound.Round): a
+// learn step whose first read of the round comes after the mark tells from
+// it whether the round moved between the two
+// (integrations.CallRound.MovedSince), a test's end or the next one's
+// begin, which no epoch tells.
 func (m *MockManager) MarkCallRound() integrations.CallRound {
 	r := &m.exact.round
 	r.mu.Lock()
 	v := m.exact.view.Load()
-	epoch := m.stagingEpoch.Load()
+	at := integrations.RoundAt{Epoch: m.stagingEpoch.Load(), Gen: r.gen, Bounds: r.bounds}
 	var ended *exactView
 	ahead, unstaged := false, false
 	if v != nil && r.learn.routed {
@@ -677,7 +684,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 		// (integrations.RoundSnapshot.SetUnstaged): the call the staging
 		// note describes, outside every test, its miss naming none made
 		// elsewhere.
-		return integrations.NewCallRound(epoch, integrations.HoldsEvery).InStaging(true).InView(false, v.bg != nil)
+		return integrations.NewCallRound(at.Epoch, integrations.HoldsEvery).ReadAt(at).InStaging(true).InView(false, v.bg != nil)
 	}
 	held := v.holds
 	switch {
@@ -690,7 +697,7 @@ func (m *MockManager) MarkCallRound() integrations.CallRound {
 	case ended != nil:
 		held = func(name string) bool { return v.holds(name) || ended.holds(name) }
 	}
-	return integrations.NewCallRound(epoch, held).InStaging(v.staging).InView(v.test != "", v.bg != nil)
+	return integrations.NewCallRound(at.Epoch, held).ReadAt(at).InStaging(v.staging).InView(v.test != "", v.bg != nil)
 }
 
 // endedName is the test of v, the view the store ended while the learn
@@ -1398,7 +1405,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	// every snapshot reads under.
 	m.lockRound()
 	r := &m.exact.round
-	r.bump("a view was installed")
+	r.boundary("a view was installed")
 	v.round = r.gen
 	if v.test != "" {
 		r.bindLocked(v)

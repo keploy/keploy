@@ -47,9 +47,12 @@ import (
 type roundState struct {
 	mu sync.Mutex
 	// gen is the round's generation (integrations.RoundAt.Gen), and moved
-	// what moved it last.
-	gen   uint64
-	moved string
+	// what moved it last; bounds its boundary count
+	// (integrations.RoundAt.Bounds), which moves with gen at a view's
+	// install and a boundary of the learn tracker alone (boundary).
+	gen    uint64
+	bounds uint64
+	moved  string
 	// log is the current staging's take log.
 	log roundLog
 	// learn is what the learn tracker's boundaries (LearnBoundary) last
@@ -123,6 +126,14 @@ func (m *MockManager) lockRound() {
 		f()
 	}
 	m.exact.round.mu.Lock()
+}
+
+// boundary moves the round's boundary count and its generation, holding its
+// lock: a view's install, a boundary of the learn tracker. A call marked
+// before it is moved (integrations.CallRound.MovedSince).
+func (r *roundState) boundary(why string) {
+	r.bounds++
+	r.bump(why)
 }
 
 // bump moves the round's generation, holding its lock, and wakes every call
@@ -500,10 +511,10 @@ func (m *MockManager) LearnBoundary(t *learn.Tracker, step func(*learn.Tracker))
 	}
 	r.learn = learnBinding{routed: true, number: n, open: open, set: t.SetAt()}
 	if !open {
-		r.bump("the learn tracker ended its test")
+		r.boundary("the learn tracker ended its test")
 		return
 	}
-	r.bump("the learn tracker began a test")
+	r.boundary("the learn tracker began a test")
 	// A test's view the store installed before the tracker began this test
 	// (it opened the test first), and bound to none, is the test the
 	// tracker begins now.
@@ -603,7 +614,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	l := m.logLocked()
 	n := len(l.takes)
 	s := integrations.RoundSnapshot{
-		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Taken: n},
+		At:         integrations.RoundAt{Epoch: l.epoch, Gen: r.gen, Bounds: r.bounds, Taken: n},
 		Test:       v.test,
 		Ahead:      v.test == "" && len(v.owned) > 0,
 		Fired:      m.exact.fired.Load(),

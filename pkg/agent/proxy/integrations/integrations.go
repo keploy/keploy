@@ -435,15 +435,24 @@ type StagedKeyFinder interface {
 // its set was served by proven routing (Background), for a parser to say of
 // the call's miss what that view's set learned. Each is the view the read
 // found, never the one serving when the miss is reported: the replay can end
-// the call's test, or stage the next set, before then. The zero CallRound is
-// of no read.
+// the call's test, or stage the next set, before then. A store that reads
+// its round in one snapshot (RoundReader) also keeps the round's generation
+// and boundary count the read was made at (Round, read under the same lock
+// as the epoch and the view), for a parser that marks a call before its
+// learn step's first read of the round to tell whether the round moved
+// between the two (MovedSince). The zero CallRound is of no read.
 type CallRound struct {
 	read       bool
 	staging    bool
 	inTest     bool
 	background bool
 	epoch      uint64
-	held       func(name string) bool
+	// gen and bounds are the round's generation and boundary count the
+	// read was made at (RoundAt.Gen, RoundAt.Bounds), atRead whether the
+	// store that made the read keeps them.
+	gen, bounds uint64
+	atRead      bool
+	held        func(name string) bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -460,6 +469,73 @@ func (c CallRound) Epoch() uint64 { return c.epoch }
 
 // Held reports whether the read's view held the recording name as its own.
 func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// ReadAt is c, of a read made at at: its staging (at.Epoch), generation and
+// boundary count (at.Gen, at.Bounds). A store that reads its round in one
+// snapshot (RoundReader) sets it as it marks the call, all read under the
+// round lock with the view the mark describes, so they are of one instant.
+func (c CallRound) ReadAt(at RoundAt) CallRound {
+	c.epoch, c.gen, c.bounds, c.atRead = at.Epoch, at.Gen, at.Bounds, true
+	return c
+}
+
+// Round is the instant of the round c's read was made at (its Epoch, Gen and
+// Bounds; Taken is not kept); known is false for a read of a store that
+// keeps no generation (a CallRound made by NewCallRound alone).
+func (c CallRound) Round() (at RoundAt, known bool) {
+	return RoundAt{Epoch: c.epoch, Gen: c.gen, Bounds: c.bounds}, c.atRead
+}
+
+// MovedSince reports whether the round moved between the read c is of and
+// at, a later read of the round (RoundSnapshot.At): the replay staged a set
+// (another epoch), or a boundary of the round landed (another boundary
+// count, RoundAt.Bounds: a view's install, a boundary of the learn tracker:
+// a test's begin or end on it, a new set). No consume, spend or claim moves
+// it, nor a test process's claim of its key again
+// (MockManager.RestartExactKey), which gives back what its key spent and
+// moves the generation alone: the call is still in the round it was marked
+// in, and its first read decides it from what that round shows then.
+//
+// A parser that marks a call before any matcher reads the store, and
+// decides it with a learn step whose first read of the round comes after,
+// asks this of that first read: a call marked in a test whose end (a pool
+// view's install, the tracker's end of it), or end and the next test's
+// begin, landed between the mark and the first read was made in a round no
+// read shows any more. Decided in the round the first read shows, its mark
+// holds the ended test's recordings as its own while the read's view offers
+// the pool's, or the next test's in-flight recordings: the call is paired
+// with one of them and what it differs in learned onto it as noise, a false
+// green. Moved, it is the moved miss, learning nothing. A mark whose store
+// keeps no generation (Round's known false) is moved for every at: nothing
+// tells the round did not move under it (fail closed). The zero CallRound,
+// of no read, is never moved: the later read is the call's first. The agent's
+// MockManager gives it only where exact serving is off, where no round is
+// read; a call marked so, before exact serving began, is decided by its
+// first read alone (the agent's settle answers every call made before a test
+// opens).
+//
+// Stated limits, each failing closed (the moved miss learns nothing), the
+// same class as a take a boundary refuses under a learn step:
+//   - A call marked where the learn tracker had begun a test and the store
+//     still showed its pool view (RoundSnapshot.PoolsCall) is the pool's,
+//     decided at once by a first read made before the store installs that
+//     test's view, and the moved miss for a first read made after it: which
+//     of the two depends on where the install lands. HTTP's learn step,
+//     whose first read is its mark, reads the pool's call so too: a take
+//     the install lands under is refused, and its next pass is the moved
+//     miss.
+//   - A call marked where the tracker had begun a test whose view the store
+//     had not installed, over the view of the test before
+//     (RoundSnapshot.TrackerAhead), is moved by the store's install of that
+//     test too, where a wait for that install from the mark could have
+//     decided the call in that test's round. keploy test's flow never
+//     produces the state (it begins no test over the last test's view).
+func (c CallRound) MovedSince(at RoundAt) bool {
+	if !c.read {
+		return false
+	}
+	return c.epoch != at.Epoch || !c.atRead || c.bounds != at.Bounds
+}
 
 // InStaging is c, of a read whose view the replay served while it staged a
 // set's mocks (a staging view: no recording answers a call there) when

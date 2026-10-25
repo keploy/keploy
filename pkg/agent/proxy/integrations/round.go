@@ -33,6 +33,12 @@ type RoundAt struct {
 	// end on it, a new set), before what moved is visible to any reader. It
 	// never moves at a consume, a spend or a claim.
 	Gen uint64
+	// Bounds is the round's boundary count. It moves with Gen at every
+	// view install and every boundary of the learn tracker, and at nothing
+	// else: a test process's claim of its key again
+	// (MockManager.RestartExactKey), which gives back what its key spent,
+	// moves Gen alone. A call's mark is moved by it (CallRound.MovedSince).
+	Bounds uint64
 	// Taken is the length of the staging's take log (RoundSnapshot.Taken).
 	Taken int
 }
@@ -463,16 +469,16 @@ func (s RoundSnapshot) Owner(m *models.Mock) RoundOwner {
 // names none, and pairs none, which only fails closed.
 func (s RoundSnapshot) CallRound() CallRound {
 	if s.SetUnstaged() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).InStaging(true).InView(false, s.Background)
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(true).InView(false, s.Background)
 	}
 	if s.TrackerAhead() {
-		return NewCallRound(s.At.Epoch, HoldsEvery).InStaging(s.Staging).InView(s.Test != "", s.Background)
+		return NewCallRound(s.At.Epoch, HoldsEvery).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background)
 	}
 	owners, ended := s.owners, s.endedOwn
 	return NewCallRound(s.At.Epoch, func(name string) bool {
 		_, own := ended[name]
 		return own || owners[name] != OwnerNone
-	}).InStaging(s.Staging).InView(s.Test != "", s.Background)
+	}).ReadAt(s.At).InStaging(s.Staging).InView(s.Test != "", s.Background)
 }
 
 // HoldsEvery holds every recording as a call's own (NewCallRound): the mark
