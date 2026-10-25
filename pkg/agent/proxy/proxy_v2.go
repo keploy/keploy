@@ -311,6 +311,10 @@ func (p *Proxy) recordViaSupervisor(
 	// saying so. See relay.Config.EndAtHole.
 	applyEndAtHole(&relayCfg, svSess, parser)
 
+	// A direction whose peer closed it, with every byte teed, ends with the
+	// session saying so. See relay.Config.EndedWithConnection.
+	applyEndedWithConnection(&relayCfg, svSess)
+
 	r := relay.New(relayCfg, srcConn, dstConn)
 
 	svSess.ClientStream = r.ClientStream()
@@ -888,6 +892,24 @@ func applyEndAtHole(cfg *relay.Config, sess *supervisor.Session, parser integrat
 		return
 	}
 	cfg.EndAtHole = sess.MarkEndedAtHole
+}
+
+// applyEndedWithConnection has the relay say, on the session
+// (Session.MarkEndedWithConnection), that a direction's stream ended because
+// its connection did, with every byte the connection carried in it. Every
+// parser gets it: it only answers Session.EndedWithConnection, which a parser
+// asks once it has reached a stream's end, and an unmarked end is a stop, the
+// cautious answer.
+//
+// Without it, on the proxy path no stream ever ended with its connection, so a
+// parser that records only what such an end proves (a quiet request answered
+// only when it fails) reported every one still waiting at a normal close as
+// left out.
+func applyEndedWithConnection(cfg *relay.Config, sess *supervisor.Session) {
+	if cfg == nil || sess == nil {
+		return
+	}
+	cfg.EndedWithConnection = sess.MarkEndedWithConnection
 }
 
 // parserCanEndAtHole reports whether parser asks for a direction that lost a

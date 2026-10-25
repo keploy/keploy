@@ -405,6 +405,10 @@ func (r *Relay) settle(t *tee, seq *atomic.Uint64, l clientLook, last bool) (dec
 				t.doneAwaiting()
 			}
 			r.awaitingFrom, r.awaitingMark, r.resolverDone = nil, "", nil
+			// The destination's stream ends here for the parser: it no
+			// longer carries every byte the connection carried, so it does
+			// not end with the connection (Config.EndedWithConnection).
+			t.noteNotTeedFrom()
 			if !r.clientStopped.Swap(true) && r.cfg.ClientStopped != nil {
 				r.cfg.ClientStopped()
 			}

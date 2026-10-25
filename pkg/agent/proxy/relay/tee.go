@@ -171,6 +171,28 @@ type tee struct {
 	// the stream open, fed nothing, until close. Read-only after
 	// construction, like parserCanResync.
 	endAtHole func(reason string)
+	// endedWithConn, set by [New] from [Config.EndedWithConnection] for this
+	// direction, says the stream ended because its connection did: drain
+	// calls it, before it ends out, when the forwarder read its source to
+	// its end (sourceEnded) and the tee lost nothing on the way (drops is
+	// 0), so the stream carries every byte the connection carried in this
+	// direction. Nil says nothing. Read-only after construction, like
+	// endAtHole.
+	endedWithConn func()
+	// sourceEnded is set by the forwarder when its source's Read returned
+	// io.EOF (noteSourceEnded): the peer closed this direction, so the
+	// connection carries nothing more in it. Not set when the forwarder
+	// returned for any other reason: the recording stopped, the other
+	// direction ended the relay, or a read or write failed.
+	sourceEnded atomic.Bool
+	// notTeedFrom is set (noteNotTeedFrom) once the relay forwards this
+	// direction's chunks without teeing them: the client stopped taking the
+	// destination's (Config.ClientStopped), and every chunk from the first
+	// it refused is forwarded and not teed (client_took.go). The stream then
+	// ends where the client stopped, not with its connection, whatever its
+	// source does after. Those chunks are never pushed, so drops does not
+	// count them.
+	notTeedFrom atomic.Bool
 	// holeReason is why the chunk that desynced this tee was lost: the
 	// reason of its first desyncing drop. Storing it is what makes that drop
 	// the first, so onDesync and the WARN fire once, not once per chunk. It
@@ -584,6 +606,12 @@ func (t *tee) drain() {
 			}
 			if t.closed {
 				t.mu.Unlock()
+				// Every chunk queued is delivered, and nothing more will
+				// be. Said before out is ended (the deferred close), so a
+				// parser that reaches the end sees it.
+				if t.endsWithConnection() {
+					t.endedWithConn()
+				}
 				return
 			}
 			t.mu.Unlock()
@@ -825,3 +853,25 @@ func (t *tee) waitDone() { <-t.done }
 // [Config.EndAtHole]): its parser asked for it and cannot re-align, so it is
 // fed nothing after the hole.
 func (t *tee) endsAtHole() bool { return t.endAtHole != nil && !t.parserCanResync }
+
+// noteSourceEnded says the forwarder's source returned io.EOF: the peer closed
+// this direction (see sourceEnded). The forwarder calls it before it returns,
+// so the relay's close of the tee, which waits for the forwarders, comes after.
+func (t *tee) noteSourceEnded() { t.sourceEnded.Store(true) }
+
+// endsWithConnection reports whether the stream ends because its connection
+// did, with every byte the connection carried in this direction: the forwarder
+// read its source to its end, and the tee lost no chunk (a refused push, a
+// pause, an abandoned queue: each is counted in drops), nor stopped teeing
+// what it forwards (notTeedFrom). drain asks it once the tee is closed and its
+// queue delivered. A stream that lost a chunk, or that the relay stopped
+// teeing, does not carry all its connection carried, whatever ended it.
+func (t *tee) endsWithConnection() bool {
+	return t.endedWithConn != nil && t.sourceEnded.Load() && t.drops.Load() == 0 && !t.notTeedFrom.Load()
+}
+
+// noteNotTeedFrom says the relay forwards this direction's chunks from now on
+// without teeing them (see notTeedFrom). It is said before the tee is closed:
+// the relay settles every chunk set aside for the client's answer first
+// (awaitClientVerdict).
+func (t *tee) noteNotTeedFrom() { t.notTeedFrom.Store(true) }

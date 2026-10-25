@@ -635,3 +635,42 @@ func TestTheForwardersLooksForTheFINTakeItsLock(t *testing.T) {
 		t.Fatalf("%d of the forwarders' looks ran without finMu", n)
 	}
 }
+
+// A destination stream the client stopped taking does not end with its
+// connection, whatever its source does after: from the first chunk the client
+// refused, the relay forwards the destination's chunks without teeing them
+// (Config.ClientStopped), so the stream no longer carries every byte the
+// connection carried, which is what Config.EndedWithConnection says. The
+// client's stop wins: the parser is told the stream ended where the client
+// stopped, never that it ended with the connection. A chunk the client took
+// leaves the stream whole, and the destination's close then says it ended with
+// the connection.
+func TestAStreamTheClientStoppedTakingDoesNotEndWithItsConnection(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		// script is the client's socket's answers after the FIN.
+		script []clientLook
+		ended  bool
+	}{
+		{"the client took the chunk", []clientLook{finned(100), finned(100), finned(101)}, true},
+		{"the client refused the chunk", []clientLook{finned(100), finned(100), finned(100), closed(100)}, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			h := newTookHarness(row.script...)
+			h.t.endedWithConn = func() {}
+			if f := h.write(context.Background(), "first", ""); f != fateAwaiting {
+				t.Fatalf("the first chunk after the FIN: fate %d, want set aside", f)
+			}
+			h.settled(t)
+			if stopped := h.stops.Load() == 1; stopped == row.ended {
+				t.Fatalf("test setup: client stopped %v, want %v", stopped, !row.ended)
+			}
+			// The destination then closes its side: its forwarder reads
+			// io.EOF.
+			h.t.noteSourceEnded()
+			if got := h.t.endsWithConnection(); got != row.ended {
+				t.Fatalf("the destination's stream ends with its connection: %v, want %v", got, row.ended)
+			}
+		})
+	}
+}
