@@ -2,7 +2,8 @@ package learn
 
 // Flight is one request of the application's on one of its connections to
 // keploy: aloft from the first bytes of it keploy read until keploy starts
-// to write the answer back, or the connection closes (Land). A request
+// to write the answer back, or the connection closes (Land), or until keploy
+// knows the application is not given the answer (EndUntold). A request
 // counts as a serve once F served a recording in it (ServedMockIn: the
 // parser says whose request it serves; ServedMockAt: the one request
 // aloft). A request that reads no recording (a driver's monitor heartbeat,
@@ -55,6 +56,10 @@ type Flight struct {
 	// while aloft): a read of the order (Placed) reads it only if it landed
 	// before the read, so later requests change no read's verdict.
 	landed uint64
+	// untold is the tracker's count of landings once this one ended untold
+	// (EndUntold; 0 while it has not): a read made since reads none of its
+	// serves, and a read made before keeps the verdict it gave.
+	untold uint64
 }
 
 // Lift is a request that started to arrive on a connection: its flight,
@@ -154,7 +159,8 @@ func (f *Flight) LiftCaused() *Flight {
 }
 
 // Land is the end of f: keploy starts to write its answer back, or its
-// connection closed. Landed once; a nil or landed flight is nothing.
+// connection closed. Landed once; a nil or landed flight is nothing. One
+// that ended untold (EndUntold) stays untold.
 func (f *Flight) Land() {
 	if f == nil || f.t == nil {
 		return
@@ -170,6 +176,38 @@ func (f *Flight) Land() {
 	f.landed = t.landings
 }
 
+// EndUntold is the end of f whose answer the application is not given: its
+// caller will write no answer in f (a server push it took and will not
+// deliver as that consume's), or the write that started as f landed failed.
+// It is a contract for such a caller: no proxy door calls it yet, and a
+// connection's close and its writes land its flight (Land). Every serve made
+// in f is then in an order keploy cannot tell (Order.Of: 0, 0) in each read
+// made from now on, so it is never one the application read before a
+// request of its: the application was not given it. Aloft, f is no longer in
+// flight: a request lifted after it (Lift) overlaps it no more, while those
+// that overlapped it keep the overlap (with f a serve, their serves stay
+// untold, which fails closed), and a request a serve caused (LiftCaused)
+// still crosses it as one of the set's lifts, which fails closed too.
+// Landed, f stays out of flight, and a read made before this keeps the
+// verdict it gave (Placed reads every flight as the read saw it), as a read
+// made before a Land does. Once: a nil flight, NoRequest, or one that ended
+// untold already is nothing, and a Land after it changes no read: its
+// serves stay untold.
+func (f *Flight) EndUntold() {
+	if f == nil || f.t == nil {
+		return
+	}
+	t := f.t
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if f.untold != 0 {
+		return
+	}
+	delete(t.aloft, f)
+	t.landings++
+	f.untold = t.landings
+}
+
 // flightOfLocked is the request the serve numbered now (t.seq) is made in,
 // which it makes a serve (Flight.serving): in, the request its parser said
 // it serves, while that one is aloft; with none said, the one request
@@ -177,7 +215,8 @@ func (f *Flight) Land() {
 // request's, and makes none a serve), for a serve its parser said was made
 // in no request (NoRequest), which makes none a serve either, for a serve in
 // no request, in one already landed, or with several aloft and none said,
-// when every one aloft becomes a serve. t.mu is held.
+// when every one aloft becomes a serve. t.mu is held. A serve made in one
+// that ended untold is untold whatever this returns (Order.told).
 func (t *Tracker) flightOfLocked(protocol bool, in *Flight) *Flight {
 	if protocol || in == noRequest {
 		return nil
@@ -209,8 +248,9 @@ func (t *Tracker) flightOfLocked(protocol bool, in *Flight) *Flight {
 // told reports whether the serve numbered s is in an order keploy can tell
 // for the read o: always without flights (no connection was ever lifted:
 // F's claims are the only order there is); with them, only a serve made in
-// one request that landed before the read, and overlapped no request that
-// was a serve by then. o.t.mu is held.
+// one request that landed before the read and had not ended untold by then
+// (EndUntold), and overlapped no request that was a serve by then. o.t.mu
+// is held.
 func (o Order) told(s int) bool {
 	if !o.flying {
 		// A serve made in no request (NoRequest) is told here too. The
@@ -220,6 +260,9 @@ func (o Order) told(s int) bool {
 	}
 	f := o.flights[s]
 	if f == nil || f.landed == 0 || f.landed > o.landings {
+		return false
+	}
+	if f.untold != 0 && f.untold <= o.landings {
 		return false
 	}
 	for _, g := range f.overlaps {

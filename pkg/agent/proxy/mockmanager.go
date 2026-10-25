@@ -4286,8 +4286,14 @@ func (m *MockManager) SetTrackerSetAt(f func() uint64) {
 // takes it out of the pool, so a request reading the pool and then the
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
-// same mock: the observer is told of a mock that was served either way. in
-// is the request it is served in, as its parser said (nil: not said).
+// same mock: the observer is told of a mock that was served either way.
+// Under exact serving it is told once the view settled the consume as a
+// serve, in the step that takes it and holding the round lock
+// (exactConsumeAt), and never of a consume the view refused: nothing served
+// that one. There the take comes first, so only a reader that reads both
+// under that lock (RoundSnapshot) never finds the mock in neither; no reader
+// reads them without it, and none may. in is the request it is served in, as
+// its parser said (nil: not said).
 //
 // With an observer (the served-in observer for a said request, else the
 // served observer), the serve is then filed in the open test's view

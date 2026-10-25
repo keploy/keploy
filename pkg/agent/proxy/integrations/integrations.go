@@ -344,9 +344,13 @@ type ExactConsumedReader interface {
 //   - The account is every mock a parser was served while the view was
 //     installed, of any lifetime and through any door (the test's own, a
 //     protocol-phase or reusable one, one spent through a delete door, a
-//     worker-scope one), a serve whose claim was refused included (the
-//     tracker hears those too), once each by learn.MockID, in the order they
-//     came; none while no test is open, and none with no observer. The
+//     worker-scope one), one the store passed to its pool whose claim there
+//     then failed included (another connection's serve of it: the tracker
+//     hears those too), once each by learn.MockID, in the order they came;
+//     none while no test is open, and none with no observer. A consume the
+//     store's view refused (a mock it does not show, one that answered
+//     already) is no serve: neither this account nor the tracker holds it,
+//     and it makes its request no serve in the tracker's order. The
 //     test's own mocks the pool view answered before the test's view was
 //     installed (in flight when it began: InFlightIntoOpenTest) are in
 //     ConsumedTestMocks and not here: they were served before the test

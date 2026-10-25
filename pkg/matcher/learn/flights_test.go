@@ -403,3 +403,96 @@ func TestAServeARequestCausedIsToldInItWheneverItLanded(t *testing.T) {
 		t.Fatalf("B, read after the push its span crossed, at %d,%d; want 0,0", f, l)
 	}
 }
+
+// A request whose answer the application is not given ends untold
+// (Flight.EndUntold): every serve made in it is in an order keploy cannot
+// tell in each read made from then on, whether it ended aloft (no write of
+// it will be made) or after it landed (the write that started failed); a read
+// made before keeps its verdict. Ended aloft, it is in flight no more, so a
+// request lifted after it is ordered once it lands, while one that
+// overlapped it stays unordered (fail closed). It ends once, and a Land after
+// it is nothing.
+func TestARequestEndedUntoldLeavesItsServesUnordered(t *testing.T) {
+	a, b := &models.Mock{Name: "mock-a"}, &models.Mock{Name: "mock-b"}
+	of := func(o Order, m *models.Mock) [2]int {
+		f, l := o.Of(m)
+		return [2]int{f, l}
+	}
+
+	t.Run("ended aloft, never written", func(t *testing.T) {
+		tr := NewTracker()
+		f1 := tr.Lift()
+		tr.ServedMockIn(a, f1)
+		f1.EndUntold()
+		f1.Land() // changes no read: it ended untold
+		f1.EndUntold()
+		f2 := tr.Lift()
+		tr.ServedMockIn(b, f2)
+		f2.Land()
+		o := tr.Placed().Order
+		if got := of(o, a); got != [2]int{} {
+			t.Fatalf("A, served in a request whose answer was never written, at %v; want 0,0", got)
+		}
+		if got := of(o, b); got != [2]int{2, 2} {
+			t.Fatalf("B, served in a request lifted after A's ended untold, at %v; want 2,2: the ended request is in flight no more", got)
+		}
+	})
+
+	t.Run("landed, then its write failed", func(t *testing.T) {
+		tr := NewTracker()
+		f1 := tr.Lift()
+		tr.ServedMockIn(a, f1)
+		f1.Land()
+		before := tr.Placed().Order
+		f1.EndUntold()
+		after := tr.Placed().Order
+		if got := of(before, a); got != [2]int{1, 1} {
+			t.Fatalf("a read made before the write failed now says A at %v; want 1,1 still", got)
+		}
+		if got := of(after, a); got != [2]int{} {
+			t.Fatalf("A, whose write failed, at %v in a read made after; want 0,0", got)
+		}
+		f2 := tr.Lift()
+		tr.ServedMockIn(b, f2)
+		f2.Land()
+		if got := of(tr.Placed().Order, b); got != [2]int{2, 2} {
+			t.Fatalf("B, served in a request lifted after A's write failed, at %v; want 2,2", got)
+		}
+	})
+
+	t.Run("a request that overlapped it stays unordered", func(t *testing.T) {
+		tr := NewTracker()
+		f1, f2 := tr.Lift(), tr.Lift()
+		tr.ServedMockIn(a, f1)
+		tr.ServedMockIn(b, f2)
+		f1.EndUntold()
+		f2.Land()
+		o := tr.Placed().Order
+		if got := of(o, a); got != [2]int{} {
+			t.Fatalf("A at %v; want 0,0", got)
+		}
+		if got := of(o, b); got != [2]int{} {
+			t.Fatalf("B, served while A's request was aloft, at %v; want 0,0", got)
+		}
+	})
+
+	t.Run("a serve told in it after it ended", func(t *testing.T) {
+		tr := NewTracker()
+		f1 := tr.Lift()
+		f1.EndUntold()
+		tr.ServedMockIn(a, f1)
+		if got := of(tr.Placed().Order, a); got != [2]int{} {
+			t.Fatalf("A, told in a request that had ended untold, at %v; want 0,0", got)
+		}
+	})
+
+	var none *Flight
+	none.EndUntold()
+	NoRequest().EndUntold()
+	tr := NewTracker()
+	tr.Lift().Land()
+	tr.ServedMockIn(a, NoRequest())
+	if got := of(tr.Placed().Order, a); got != [2]int{} {
+		t.Fatalf("a serve in no request at %v after NoRequest's EndUntold; want 0,0 as before", got)
+	}
+}

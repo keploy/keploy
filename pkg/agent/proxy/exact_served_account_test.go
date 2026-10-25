@@ -36,8 +36,9 @@ func heldBy(list []*models.Mock, m *models.Mock) bool {
 // installed (ServedInOpenTest), of any lifetime and through any door: the
 // test's own (a delete door), a protocol-phase one that stays reusable (the
 // update door, served twice, filed once), a protocol-phase one spent through
-// a delete door, a worker-scope one, and a serve whose claim is refused
-// (another test's recording, which the view does not show). The
+// a delete door, and a worker-scope one. A consume the view refuses
+// (another test's recording, which the view does not show) is no serve: the
+// account does not hold it, nor does the tracker. The
 // test's own answered list (ConsumedTestMocks) holds the test's own alone. A
 // pool view files nothing, and the next test's view starts empty. Every mock
 // the store's account holds is one the learn tracker heard of in its running
@@ -84,13 +85,16 @@ func TestTheOpenTestsAccountHoldsEveryServeOfAnyLifetime(t *testing.T) {
 	if mm.MarkMockAsUsed(*other) {
 		t.Fatal("another test's recording answered in the open test")
 	}
-	equalNames(t, "the open test's account", account(mm), "own", "handshake", "set-config", "w-boot", "other")
+	equalNames(t, "the open test's account", account(mm), "own", "handshake", "set-config", "w-boot")
 	equalNames(t, "the open test's own answered", mm.ConsumedTestMocks(), "own")
 	_, _, served, _ := tr.Test()
 	for _, m := range account(mm) {
 		if !heldBy(served, m) {
 			t.Fatalf("the store's account holds %s, which the tracker did not hear of in its running test", m.Name)
 		}
+	}
+	if heldBy(served, other) {
+		t.Fatal("the tracker heard of another test's recording, which the view refused, as served in its running test")
 	}
 
 	// The next test begun over T1's view: the store's account is T1's, and
@@ -99,7 +103,7 @@ func TestTheOpenTestsAccountHoldsEveryServeOfAnyLifetime(t *testing.T) {
 	tr.Begin()
 	_, _, served, before := tr.Test()
 	acct := account(mm)
-	equalNames(t, "begun over the last test's view", acct, "own", "handshake", "set-config", "w-boot", "other")
+	equalNames(t, "begun over the last test's view", acct, "own", "handshake", "set-config", "w-boot")
 	for _, m := range acct {
 		if heldBy(served, m) || !heldBy(before, m) {
 			t.Fatalf("over the last test's view, the tracker files %s as served in its test (%v) or not before it (%v)", m.Name, heldBy(served, m), heldBy(before, m))

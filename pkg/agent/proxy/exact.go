@@ -165,9 +165,11 @@ type exactView struct {
 	// heard is every mock a parser was served while the view was installed,
 	// as the served observer was told of it (observeServed): of any lifetime
 	// (the test's own, a protocol-phase or reusable one, one spent through a
-	// delete door, a worker-scope one), through any door, a serve whose
-	// claim then failed included, once each by identity (learn.MockID,
-	// heardIDs), in the order they came. Kept only while there is an
+	// delete door, a worker-scope one), through any door, one the view
+	// passed whose tier claim then failed included (another connection's
+	// serve of it), once each by identity (learn.MockID, heardIDs), in the
+	// order they came. A consume the view refused is not one
+	// (exactConsumeAt): nothing served it. Kept only while there is an
 	// observer (the proven switch), and read only of a test view
 	// (ServedInOpenTest).
 	heard    []*models.Mock
@@ -1864,13 +1866,18 @@ func (m *MockManager) exactConsume(mk *models.Mock, evicts bool) exactVerdict {
 }
 
 // exactConsumeAt is exactConsume that tells the served observer (observe,
-// when not nil, once) in the step that settles the consume, and, with g,
-// settles it only while the store is still at g's round (roundGuard): a
-// consume decided on a snapshot never lands in another staging, view or
-// learn test, and one refused for that tells the observer nothing. Each
-// settle holds the round lock (exact_round.go), as every snapshot does, so a
-// snapshot sees a consume, its take and the observer's account of it all,
-// or none of them.
+// when not nil, once) in the step that settles the consume, once it settled
+// as a serve (exactServed, or exactPass: the tier it passes to claims it
+// next), and, with g, settles it only while the store is still at g's round
+// (roundGuard): a consume decided on a snapshot never lands in another
+// staging, view or learn test. A consume the view refuses (exactRefused: a
+// mock it does not show now, one that answered already, another test's
+// claim) tells the observer nothing, as one refused for g's round does:
+// nothing served the mock, so the learn tracker neither numbers it nor
+// counts its request as a serve (learn.Flight), and the open test's account
+// (ServedInOpenTest) does not hold it. Each settle holds the round lock
+// (exact_round.go), as every snapshot does, so a snapshot sees a consume,
+// its take and the observer's account of it all, or none of them.
 func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard, observe func()) exactVerdict {
 	return settleInForce(m, exactRefused, func(v *exactView) (exactVerdict, <-chan struct{}) {
 		if v != nil && mk != nil && (evicts || v.isWorker(mk.Name)) {
@@ -1884,16 +1891,20 @@ func (m *MockManager) exactConsumeAt(mk *models.Mock, evicts bool, g *roundGuard
 		m.lockRound()
 		// A take the round moved under is refused, or waits for the install
 		// its closing view announces and is settled again in the view that
-		// follows (where the round moved): either way before the served
-		// observer is told, of a mock nothing served.
+		// follows (where the round moved): either way the served observer
+		// is told nothing, of a mock nothing served.
 		if ok, wait := m.guardLocked(g, v); !ok {
 			return exactRefused, wait
 		}
-		if observe != nil {
+		verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
+		// Told once the view decided, in this step, that it is a serve,
+		// still holding the round lock: never of a consume it refused. One
+		// that found this view closed (wait) is told once, as it settles as
+		// a serve in the view that replaces it.
+		if wait == nil && verdict != exactRefused && observe != nil {
 			observe()
 			observe = nil
 		}
-		verdict, wait, after := m.exactConsumeIn(v, mk, evicts)
 		m.exact.round.mu.Unlock()
 		if f := m.exact.round.onSettled; f != nil && verdict == exactServed {
 			f()

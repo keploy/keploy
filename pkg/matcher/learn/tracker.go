@@ -50,7 +50,8 @@ type Tracker struct {
 	// flights are the request each serve of the set was made in, by its
 	// number (nil: none, or one keploy cannot tell; flightOfLocked). NewSet
 	// replaces it, as serves. aloft are the requests in flight now,
-	// landings the count of those that landed, and flying whether any
+	// landings the count of those that landed or ended untold
+	// (Flight.EndUntold), and flying whether any
 	// connection was ever lifted (Lift): F's order is then read by
 	// flights (Order.told). lifts are the requests lifted in the set, in
 	// the order they lifted (Flight.lift), for a serve one of them caused

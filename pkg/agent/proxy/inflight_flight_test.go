@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
@@ -334,6 +335,54 @@ func TestAServeToldInNoRequestOrInItsCauseThroughTheStore(t *testing.T) {
 			}
 			if f, l := o.Of(push); f != 2 || l != 2 {
 				t.Fatalf("the push at %d,%d; want 2,2: told in its cause", f, l)
+			}
+		})
+	}
+}
+
+// A consume the view refuses, in a request a parser says it serves
+// (integrations.ServingIn), makes that request no serve: a serve made in a
+// request aloft beside it keeps its place in F's order once it lands,
+// through each consume door. Before, the refused consume was told to the
+// tracker, which numbered it in its request and left the other serve in no
+// order keploy can tell.
+func TestAConsumeTheViewRefusedMakesItsRequestNoServe(t *testing.T) {
+	doors := map[string]func(db integrations.MockMemDb, m models.Mock) bool{
+		"MarkMockAsUsed":       func(db integrations.MockMemDb, m models.Mock) bool { return db.MarkMockAsUsed(m) },
+		"UpdateUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { c := m; return db.UpdateUnFilteredMock(&m, &c) },
+		"DeleteFilteredMock":   func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteFilteredMock(m) },
+		"DeleteUnFilteredMock": func(db integrations.MockMemDb, m models.Mock) bool { return db.DeleteUnFilteredMock(m) },
+	}
+	for name, door := range doors {
+		t.Run(name, func(t *testing.T) {
+			provenswitch.Pin(true)
+			t.Cleanup(provenswitch.Unpin)
+			tr := learn.NewTracker()
+			p := &Proxy{learnTracker: tr}
+			a := exactMock("a", 0, models.LifetimePerTest)
+			other := exactMock("other", time.Second, models.LifetimePerTest)
+			mm := stagedManager(t, []*models.Mock{a, other}, nil)
+			mm.ServeExactPool("-", nil)
+			mm.ServeExactTest("T", []*models.Mock{a})
+			p.setMockManager(mm)
+			c1, app1 := flyingPair(t, tr, nil)
+			c2, app2 := flyingPair(t, tr, nil)
+			request(t, c1, app1)
+			request(t, c2, app2)
+			if door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c1), mm), *other) {
+				t.Fatal("precondition: another test's recording answered in the open test")
+			}
+			if !door(integrations.ServingIn(integrations.WithRequestHolder(context.Background(), c2), mm), *a) {
+				t.Fatal("the open test's own mock was refused")
+			}
+			_, _ = c1.Write([]byte("R"))
+			_, _ = c2.Write([]byte("A"))
+			o := tr.Placed().Order
+			if fa, la := o.Of(a); fa != 1 || la != 1 {
+				t.Fatalf("a at %d,%d; want 1,1: the request beside it was served nothing", fa, la)
+			}
+			if fo, lo := o.Of(other); fo != 0 || lo != 0 {
+				t.Fatalf("the refused recording at %d,%d; want no serve of it", fo, lo)
 			}
 		})
 	}
