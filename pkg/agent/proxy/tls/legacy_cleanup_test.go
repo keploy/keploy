@@ -91,18 +91,28 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 		_, err := os.Stat(filepath.Join(dir, name))
 		return err == nil
 	}
-	// A live run's store, under its lock, and run files of ended runs.
-	jks, live, err := createRunFile(zap.NewNop(), runTrustStorePattern)
+	// A live run's store, under its lock, and run files of ended runs, in
+	// this user's private dir; and an unlocked run's store there, under an
+	// older name.
+	priv := privateDirIn(t, dir)
+	jks, live, err := createRunFile(zap.NewNop(), priv, runTrustStorePattern)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = jks.Close()
 	t.Cleanup(func() { _ = live.remove() })
 	deadRuns := []string{"keploy-java-truststore-run-5.jks", "keploy-ca-run-6.crt"}
-	for _, name := range deadRuns {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+	const unlocked = "keploy-java-truststore-77.jks"
+	for _, name := range append([]string{unlocked}, deadRuns...) {
+		if err := os.WriteFile(filepath.Join(priv, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A run-file name in the temp dir itself, where no run makes one and
+	// another user could have: no sweep takes it.
+	const notInPriv = "keploy-ca-run-8.crt"
+	if err := os.WriteFile(filepath.Join(dir, notInPriv), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, false)
@@ -110,6 +120,9 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 		if !exists(name) {
 			t.Errorf("the boot sweep removed %s, which a live run may use", name)
 		}
+	}
+	if !exists(filepath.Join(filepath.Base(priv), unlocked)) {
+		t.Errorf("the boot sweep removed %s in the private dir, which a live run that could not lock may use", unlocked)
 	}
 
 	removeLegacyTempFiles(zap.NewNop(), [32]byte{}, true)
@@ -121,12 +134,15 @@ func TestRemoveLegacyTempFiles_TakesEveryKeployTruststoreOnlyWhenAsked(t *testin
 	if !exists(other) {
 		t.Errorf("keploy ca clean removed %s, which is not keploy's", other)
 	}
-	for _, name := range deadRuns {
-		if exists(name) {
-			t.Errorf("keploy ca clean left %s, which no run holds", name)
+	for _, name := range append([]string{unlocked}, deadRuns...) {
+		if exists(filepath.Join(filepath.Base(priv), name)) {
+			t.Errorf("keploy ca clean left %s in the private dir, which no run holds", name)
 		}
 	}
-	if !exists(filepath.Base(live.path)) {
+	if !exists(notInPriv) {
+		t.Errorf("keploy ca clean swept %s in the temp dir itself; the sweep runs only in the private dir", notInPriv)
+	}
+	if !exists(filepath.Join(filepath.Base(priv), filepath.Base(live.path))) {
 		t.Errorf("keploy ca clean removed %s, the store of a live run", live.path)
 	}
 }
@@ -174,7 +190,7 @@ func TestRemoveLegacyTempFiles_TakesOlderNameCAFilesOnlyWhenAsked(t *testing.T) 
 		return err == nil
 	}
 	// A live run's CA file, under its lock.
-	ca, live, err := createRunFile(zap.NewNop(), runCAFilePattern)
+	ca, live, err := createRunFile(zap.NewNop(), privateDirIn(t, dir), runCAFilePattern)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,8 +215,8 @@ func TestRemoveLegacyTempFiles_TakesOlderNameCAFilesOnlyWhenAsked(t *testing.T) 
 			t.Errorf("keploy ca clean removed %s, which is not an older keploy's CA trust file", name)
 		}
 	}
-	if !exists(filepath.Base(live.path)) {
-		t.Errorf("keploy ca clean removed %s, the CA file of a live run", live.path)
+	if _, err := os.Lstat(live.path); err != nil {
+		t.Errorf("keploy ca clean removed %s, the CA file of a live run: %v", live.path, err)
 	}
 	if _, err := os.Stat(target); err != nil {
 		t.Errorf("keploy ca clean removed %s, the target of a symlink at an older name: %v", target, err)

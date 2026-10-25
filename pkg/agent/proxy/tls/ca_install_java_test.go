@@ -293,6 +293,10 @@ func putFakeJavaOnPath(t *testing.T, javaHome string) {
 // creates in the temp dir, so a leak is detectable.
 func tempCertFiles(t *testing.T) []string {
 	t.Helper()
-	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), "keploy-ca-*.crt"))
+	name, err := privateDirName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(os.TempDir(), name, "keploy-ca-*.crt"))
 	return matches
 }

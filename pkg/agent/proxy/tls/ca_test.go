@@ -951,7 +951,8 @@ func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 }
 
 // caTrustTempDir points os.TempDir, and so SetupCaCertEnv's files, at a
-// directory of the test's own, and has every variable SetupCaCertEnv sets
+// directory of the test's own (it returns this user's private dir in it, where
+// they go), and has every variable SetupCaCertEnv sets
 // restored when the test ends (t.Setenv), so no later test or child is left
 // pointed at a file in a temp dir that is gone.
 func caTrustTempDir(t *testing.T) string {
@@ -965,7 +966,7 @@ func caTrustTempDir(t *testing.T) string {
 		t.Setenv(k, "")
 	}
 	t.Cleanup(func() { _ = RemoveCaCertEnvFiles() })
-	return dir
+	return privateDirIn(t, dir)
 }
 
 func globIn(t *testing.T, dir, pattern string) []string {

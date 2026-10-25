@@ -5,12 +5,12 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 	ptls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
@@ -43,9 +43,16 @@ func TestRoot_RemovesTheCATrustFileOnASignal(t *testing.T) {
 			}
 			out := &bytes.Buffer{}
 			keploy.Stdout, keploy.Stderr = out, out
+			// Its stdin ends when this test does, however it ends: the
+			// helper's bound, which no wall clock sets.
+			stdin, err := keploy.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
 			if err := keploy.Start(); err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(func() { _ = stdin.Close() })
 			exited := make(chan error, 1)
 			go func() { exited <- keploy.Wait() }()
 			t.Cleanup(func() {
@@ -94,12 +101,18 @@ func TestRoot_CATrustFileSignalHelper(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600); err != nil {
 				return err
 			}
-			// Bounded, should the test that runs it die before it signals.
+			// Until the signal, or until the test that runs it ends
+			// without one: then its stdin ends.
+			stdinEnded := make(chan struct{})
+			go func() {
+				_, _ = io.Copy(io.Discard, os.Stdin)
+				close(stdinEnded)
+			}()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(time.Minute):
-				return errors.New("no signal came")
+			case <-stdinEnded:
+				return errors.New("the test that runs this one ended without signalling it")
 			}
 		},
 	})

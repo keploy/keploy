@@ -19,9 +19,9 @@ import (
 // pile up one set per killed run.
 //
 // So each run holds an advisory lock on every run file it creates, from just
-// after it creates the file until it removes it, and a later setup that uses
-// the same temp dir removes the run files whose lock it can take (and that it
-// may remove: root's, or its own user's). The system drops a process's locks
+// after it creates the file until it removes it, and a later setup of the
+// same user with the same temp dir removes the run files whose lock it can
+// take. The system drops a process's locks
 // when it ends, however it ends, so a run file nobody holds is one whose
 // keploy is gone, and a live keploy's files are never touched. An app that
 // outlived its killed keploy may still read one, but that app's keploy, its
@@ -32,6 +32,17 @@ import (
 // the lock wrote ("keploy-ca-123.crt", "keploy-java-truststore-1000.jks"):
 // those hold no lock, so an unlocked one may be a live run's of an older
 // keploy on the same machine, and is never swept.
+//
+// The run files live in a dir of this user's own in the temp dir
+// (runFilesDir: keploy-<euid> on Unix), never in the temp dir itself. The temp
+// dir (/tmp) is writable by every local user and the names a run makes, locks
+// and sweeps are predictable, so there any user could race a root run for one:
+// plant a file at a name a sweep has just freed, or a link, or a device, and
+// have root lock, read or hand its app what they put there. Nobody else can
+// create anything in a dir only this user can write, so nobody can plant, link
+// or race, and the sweep runs only there. The dir and the CA files in it stay
+// readable by everyone (0755 and 0644: a CA certificate is public), so an app
+// run as another user still reads them.
 //
 // The lock is only as good as the temp dir's filesystem: a TMPDIR on NFS
 // shared by several hosts with host-local locks (nolock, local_lock) would let
@@ -66,6 +77,117 @@ var (
 	errNotRegular = errors.New("not a regular file")
 )
 
+// runFilesDir is the dir a run makes its files in.
+type runFilesDir struct {
+	path string
+	// own: a new dir of this run's alone, made because the dir at the
+	// private dir's name was not this user's private dir; the run removes it
+	// with its files.
+	own bool
+}
+
+// openRunFilesDir returns the dir this run's files go in: the private dir
+// keploy-<id> in the temp dir (privateDirName), made if missing, and used
+// only if it is a directory (not a link), owned by this user and writable by
+// nobody else (checkPrivateDir). A dir at that name that is not is never
+// used: the run says why, and makes a new dir of its own in the temp dir,
+// removed when the run ends (a killed run leaves that one, and no sweep takes
+// it, since its name is not the private dir's).
+//
+// The check holds while nobody else can rename the dir away, which the
+// sticky bit of /tmp guarantees; a TMPDIR every user may write without the
+// sticky bit is open to that, as it is for anything put there.
+func openRunFilesDir(logger *zap.Logger) (*runFilesDir, error) {
+	tmp := os.TempDir()
+	name, err := privateDirName()
+	if err != nil {
+		return nil, fmt.Errorf("naming this user's dir for keploy's trust files: %w", err)
+	}
+	path := filepath.Join(tmp, name)
+	why := makePrivateDir(path)
+	if why == nil {
+		return &runFilesDir{path: path}, nil
+	}
+	own, err := os.MkdirTemp(tmp, name+"-")
+	if err != nil {
+		return nil, fmt.Errorf("%s is not usable (%v), and making a dir of this run's own failed: %w", path, why, err)
+	}
+	if err := setPrivateDirMode(own); err != nil {
+		_ = os.Remove(own)
+		return nil, err
+	}
+	if err := checkPrivateDir(own); err != nil {
+		_ = os.Remove(own)
+		return nil, fmt.Errorf("the dir %s this run made for its trust files: %w", own, err)
+	}
+	logger.Warn("keploy does not put its trust files in the dir at its own name in the temp dir, because that is not a dir only this user can write; this run uses a new dir of its own, and a run killed before its cleanup leaves that one behind",
+		zap.String("dir", path), zap.String("why", why.Error()), zap.String("run_dir", own),
+		zap.String("next_step", "remove that path (another user, or an older tool, made it), so the next run makes it again as this user's; if this run is killed before its cleanup, remove run_dir too"))
+	return &runFilesDir{path: own, own: true}, nil
+}
+
+// removeIfOwn removes the dir if the run made it for itself alone (own),
+// once its files are gone. Safe on a nil dir and on one removed already.
+func (d *runFilesDir) removeIfOwn() error {
+	if d == nil || !d.own {
+		return nil
+	}
+	if err := os.Remove(d.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// makePrivateDir makes this user's private dir at path, if nothing is there,
+// and returns why what is at path is not a usable private dir, or nil.
+func makePrivateDir(path string) error {
+	err := os.Mkdir(path, 0o755)
+	switch {
+	case err == nil:
+		// The umask may have taken the bits an app of another user needs.
+		if err := setPrivateDirMode(path); err != nil {
+			return fmt.Errorf("setting its mode: %w", err)
+		}
+	case !errors.Is(err, os.ErrExist):
+		return err
+	}
+	return checkPrivateDir(path)
+}
+
+// checkPrivateDir returns why the entry at path is not a dir only this user
+// can write, or nil: a symlink or other reparse point, not a dir, or one of
+// another user's, one that another user can write, or (Unix) a mount point,
+// whose owner and mode are whatever its filesystem says
+// (checkPrivateDirOwner).
+func checkPrivateDir(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return fmt.Errorf("it is a link (%s), not a dir", fi.Mode().Type())
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("it is not a dir (%s)", fi.Mode().Type())
+	}
+	return checkPrivateDirOwner(path, fi)
+}
+
+// privateRunFilesDir returns this user's private dir in the temp dir, if it
+// is there and is one (checkPrivateDir), without making it: what `keploy ca
+// clean` sweeps.
+func privateRunFilesDir() (string, error) {
+	name, err := privateDirName()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(os.TempDir(), name)
+	if err := checkPrivateDir(path); err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	return path, nil
+}
+
 // runFile is a temp file of this run's, under the run's lock while it exists.
 type runFile struct {
 	path string
@@ -74,33 +196,43 @@ type runFile struct {
 	lock *os.File
 }
 
-// Seams for the tests of a new run file's window before its lock and of a
-// temp dir that refuses locks.
+// Seams for the tests of a new run file's window before its lock, of the
+// instant a run file's lock is dropped, and of a temp dir that refuses locks.
 var (
-	beforeRunFileOpen = func(string) {}
-	beforeRunFileLock = func(string) {}
-	tryLockRunFileFn  = tryLockRunFile
+	beforeRunFileOpen  = func(string) {}
+	beforeRunFileLock  = func(string) {}
+	afterRunFileUnlock = func(string) {}
+	tryLockRunFileFn   = tryLockRunFile
 )
 
 // warnUnlockedOnce says once per process that a run's files go unlocked.
 var warnUnlockedOnce sync.Once
 
-// createRunFile creates a new file in the temp dir, named after pattern as
-// os.CreateTemp names it, and takes the run's lock on it. It returns the file
-// open for writing, which the caller closes, and the run file, which the
-// caller removes with remove. Where it cannot lock, it creates the file under
-// unlockedPattern instead: the run still works, only a kill leaves the file.
-func createRunFile(logger *zap.Logger, pattern string) (*os.File, *runFile, error) {
+// createRunFile creates a new file in dir (the run's openRunFilesDir), named
+// after pattern as os.CreateTemp names it, and takes the run's lock on it. It
+// returns the file open for writing, which the caller closes, and the run
+// file, which the caller removes with remove. Where it cannot lock, it creates
+// the file under unlockedPattern instead: the run still works, only a kill
+// leaves the file.
+func createRunFile(logger *zap.Logger, dir, pattern string) (*os.File, *runFile, error) {
 	if !runFileLocking {
-		return createUnlockedRunFile(logger, pattern, errors.ErrUnsupported)
+		return createUnlockedRunFile(logger, dir, pattern, errors.ErrUnsupported)
 	}
 	for attempt := 0; attempt < maxRunFileAttempts; attempt++ {
-		f, err := os.CreateTemp("", pattern)
+		f, err := os.CreateTemp(dir, pattern)
 		if err != nil {
 			return nil, nil, err
 		}
 		rf := &runFile{path: f.Name()}
 		lock, err := lockNewRunFile(rf.path)
+		if err == nil && !sameFile(f, lock) {
+			// The name was freed by a sweep and taken by another file before
+			// the lock's open: the lock holds that file, not the one f
+			// writes, and the run would hand its app what someone else put
+			// there.
+			_ = lock.Close()
+			err = errRunFileTaken
+		}
 		if err == nil {
 			rf.lock = lock
 			return f, rf, nil
@@ -114,7 +246,7 @@ func createRunFile(logger *zap.Logger, pattern string) (*os.File, *runFile, erro
 			_ = os.Remove(rf.path)
 		}
 		if !errors.Is(err, errRunFileTaken) {
-			return createUnlockedRunFile(logger, pattern, err)
+			return createUnlockedRunFile(logger, dir, pattern, err)
 		}
 	}
 	return nil, nil, fmt.Errorf("creating a %s run file: %w, %d times", pattern, errRunFileTaken, maxRunFileAttempts)
@@ -122,13 +254,13 @@ func createRunFile(logger *zap.Logger, pattern string) (*os.File, *runFile, erro
 
 // createUnlockedRunFile creates a run file the run could not lock (why), under
 // the name no sweep takes.
-func createUnlockedRunFile(logger *zap.Logger, pattern string, why error) (*os.File, *runFile, error) {
+func createUnlockedRunFile(logger *zap.Logger, dir, pattern string, why error) (*os.File, *runFile, error) {
 	warnUnlockedOnce.Do(func() {
 		logger.Warn("keploy cannot lock its trust files in the temp dir, so a run killed before its cleanup leaves them there and no later run removes them",
-			zap.String("temp_dir", os.TempDir()), zap.Error(why),
-			zap.String("next_step", "point TMPDIR at a local filesystem; while no keploy runs, `keploy ca clean` with TMPDIR set to temp_dir (sudo resets TMPDIR: sudo env TMPDIR=<temp_dir> keploy ca clean) removes the keploy-ca-*.crt and keploy-java-* files a killed run leaves there"))
+			zap.String("temp_dir", os.TempDir()), zap.String("dir", dir), zap.Error(why),
+			zap.String("next_step", "point TMPDIR at a local filesystem; while no keploy runs, remove the keploy-ca-*.crt and keploy-java-* files a killed run leaves in dir: `keploy ca clean` does for this user's own dir in temp_dir, with TMPDIR set to temp_dir (sudo resets TMPDIR: sudo env TMPDIR=<temp_dir> keploy ca clean), but not for a dir of a run's own (keploy-<id>-<N>), which is removed by hand"))
 	})
-	f, err := os.CreateTemp("", unlockedPattern(pattern))
+	f, err := os.CreateTemp(dir, unlockedPattern(pattern))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -160,6 +292,16 @@ func lockNewRunFile(path string) (*os.File, error) {
 		return nil, errRunFileTaken
 	}
 	return lock, nil
+}
+
+// sameFile reports whether a and b have the same file open.
+func sameFile(a, b *os.File) bool {
+	ai, err := a.Stat()
+	if err != nil {
+		return false
+	}
+	bi, err := b.Stat()
+	return err == nil && os.SameFile(ai, bi)
 }
 
 // stillAt reports whether path names the file f has open.
@@ -194,6 +336,7 @@ func removeAndUnlock(path string, lock *os.File) error {
 	err := os.Remove(path)
 	if lock != nil {
 		_ = lock.Close()
+		afterRunFileUnlock(path)
 	}
 	return err
 }
@@ -241,20 +384,20 @@ func isCreateTempName(name string, patterns []string) bool {
 	return false
 }
 
-// sweepDeadRunFiles removes from the temp dir the run files of runs that have
-// ended without removing them: those whose lock it can take. It leaves
-// everything else alone: a live run's run files, the files of older keploy
-// versions, any other file, and run files it may not remove (another user's,
-// for a run that is not root). Best-effort: a setup never fails over it.
+// sweepDeadRunFiles removes from dir, this user's private dir
+// (openRunFilesDir), the run files of runs that have ended without removing
+// them: those whose lock it can take. It leaves everything else alone: a live
+// run's run files, the files of older keploy versions, and any other file.
+// It never sweeps the temp dir itself, where another user could put things.
+// Best-effort: a setup never fails over it.
 //
 // Where keploy has no file lock (runFileLocking false) it sweeps nothing,
 // since it could not tell a live run's file from a dead one's; createRunFile
 // says so.
-func sweepDeadRunFiles(logger *zap.Logger) {
+func sweepDeadRunFiles(logger *zap.Logger, dir string) {
 	if !runFileLocking {
 		return
 	}
-	dir := os.TempDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		logger.Debug("could not list the temp dir for the trust files of ended runs", zap.String("dir", dir), zap.Error(err))

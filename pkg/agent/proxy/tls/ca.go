@@ -292,9 +292,18 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 	if len(certPEM) == 0 {
 		return fmt.Errorf("SetupCaCertEnv: no CA certificate provided (fetch it from the agent first)")
 	}
-	// The trust files of runs killed before they could remove their own.
-	sweepDeadRunFiles(logger)
-	caFile, err := extractCertToTemp(logger, certPEM)
+	// This user's private dir in the temp dir, which no other user can put
+	// anything in: the run's files go there, and only there are the trust
+	// files of runs killed before they could remove their own swept.
+	dir, err := openRunFilesDir(logger)
+	if err != nil {
+		utils.LogError(logger, err, "Failed to make the dir for the app's CA trust files",
+			zap.String("next_step", "point TMPDIR at a dir on a local filesystem that keeps owners and modes: keploy keeps the app's CA files in a dir there that only this user can write"))
+		return err
+	}
+	recordCaTrustDir(dir)
+	sweepDeadRunFiles(logger, dir.path)
+	caFile, err := extractCertToTemp(logger, dir.path, certPEM)
 	if err != nil {
 		utils.LogError(logger, err, "Failed to extract certificate to tmp folder")
 		return err
@@ -314,7 +323,7 @@ func SetupCaCertEnv(logger *zap.Logger, certPEM []byte) error {
 	// importing the keploy CA into the JDK's own cacerts. Best-effort and additive
 	// — a machine with no JDK, or a failure to build the store, must not fail CA
 	// setup for a Node/Python/Go app, and any existing JAVA_TOOL_OPTIONS is kept.
-	if err := setupJavaTrustStoreEnv(logger, certPEM); err != nil {
+	if err := setupJavaTrustStoreEnv(logger, dir.path, certPEM); err != nil {
 		logger.Warn("could not set up the Java truststore via JAVA_TOOL_OPTIONS; Java HTTPS interception may not work, but other runtimes are unaffected",
 			zap.Error(err))
 	}
@@ -332,6 +341,9 @@ var (
 	// each under the run's lock: the CA files the trust variables name and
 	// the Java truststores JAVA_TOOL_OPTIONS names.
 	caTrustFiles []*runFile
+	// caTrustDirs are the dirs of this run's own SetupCaCertEnv made for
+	// those files, when this user's private dir was not usable.
+	caTrustDirs []*runFilesDir
 	// caTrustEnvBefore holds each variable SetupCaCertEnv sets as it was
 	// before the first SetupCaCertEnv since the last RemoveCaCertEnvFiles:
 	// its value, or nil for a variable that was unset.
@@ -368,6 +380,17 @@ func recordCaTrustFile(rf *runFile) {
 	defer caTrustFilesMu.Unlock()
 	snapshotCaTrustEnvLocked()
 	caTrustFiles = append(caTrustFiles, rf)
+}
+
+// recordCaTrustDir records the dir SetupCaCertEnv put this run's files in,
+// for RemoveCaCertEnvFiles to remove if it is one of this run's own.
+func recordCaTrustDir(d *runFilesDir) {
+	if !d.own {
+		return
+	}
+	caTrustFilesMu.Lock()
+	defer caTrustFilesMu.Unlock()
+	caTrustDirs = append(caTrustDirs, d)
 }
 
 // recordCaTrustEnv records that keploy sets k to v, before it does: while k
@@ -413,8 +436,9 @@ func caTrustEnvBase(k string) string {
 // program that sets up native runs through pkg/platform/http without cli.Root
 // must call it itself on its way out. An end that skips the command's return
 // (SIGKILL, an os.Exit, a crash in another goroutine) leaves the files, and a
-// later SetupCaCertEnv with the same temp dir that may remove them (root's, or
-// the same user's) does (sweepDeadRunFiles).
+// later SetupCaCertEnv of the same user with the same temp dir removes them
+// from that user's private dir (sweepDeadRunFiles); one in a dir of the
+// run's own (openRunFilesDir) stays.
 // It is safe to call more than once, and when SetupCaCertEnv never ran.
 func RemoveCaCertEnvFiles() error {
 	caTrustFilesMu.Lock()
@@ -424,6 +448,11 @@ func RemoveCaCertEnvFiles() error {
 	for _, rf := range caTrustFiles {
 		if err := rf.remove(); err != nil {
 			errs = append(errs, fmt.Errorf("removing the app's CA trust file: %w", err))
+		}
+	}
+	for _, d := range caTrustDirs {
+		if err := d.removeIfOwn(); err != nil {
+			errs = append(errs, fmt.Errorf("removing the dir of the app's CA trust files: %w", err))
 		}
 	}
 	// Every value keploy set names one of those files, and a variable naming
@@ -446,7 +475,7 @@ func RemoveCaCertEnvFiles() error {
 			errs = append(errs, fmt.Errorf("restoring %s: %w", k, err))
 		}
 	}
-	caTrustFiles, caTrustEnvBefore, caTrustEnvSet = nil, nil, nil
+	caTrustFiles, caTrustDirs, caTrustEnvBefore, caTrustEnvSet = nil, nil, nil, nil
 	return errors.Join(errs...)
 }
 
@@ -486,7 +515,7 @@ func mergeCABundle(systemBundle, keployCertPEM []byte) []byte {
 // its stderr — harmless, but a build tool that parses child-JVM stderr may see
 // it. That is inherent to JAVA_TOOL_OPTIONS and is the accepted cost of not
 // mutating the JDK.
-func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
+func setupJavaTrustStoreEnv(logger *zap.Logger, dir string, certPEM []byte) error {
 	// What keploy's flags go after: the user's own JAVA_TOOL_OPTIONS. After an
 	// earlier setup in this process the variable holds what that one set, and
 	// building on it would keep Java on the earlier store and its CA.
@@ -508,7 +537,7 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	systemBundle, srcPath := loadSystemCABundleFn(logger)
 	merged := mergeCABundle(systemBundle, certPEM)
 
-	mergedPEM, mergedFile, err := createRunFile(logger, runMergedPEMPattern)
+	mergedPEM, mergedFile, err := createRunFile(logger, dir, runMergedPEMPattern)
 	if err != nil {
 		return fmt.Errorf("failed to create the merged CA pem: %w", err)
 	}
@@ -535,7 +564,7 @@ func setupJavaTrustStoreEnv(logger *zap.Logger, certPEM []byte) error {
 	// single shared name once let one `sudo keploy` leave a root-owned store
 	// every later run failed to rewrite ("open
 	// /tmp/keploy-java-truststore.jks: permission denied").
-	jks, jksFile, err := createRunFile(logger, runTrustStorePattern)
+	jks, jksFile, err := createRunFile(logger, dir, runTrustStorePattern)
 	if err != nil {
 		return fmt.Errorf("failed to create the Java truststore: %w", err)
 	}
@@ -1047,7 +1076,17 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	// Windows Specific Logic
 	if runtime.GOOS == "windows" {
 		// Extract certificate to a temporary file
-		certFile, err := extractCertToTemp(logger, ca.certPEM)
+		dir, err := openRunFilesDir(logger)
+		if err != nil {
+			utils.LogError(logger, err, "Failed to make the dir for the temporary certificate file")
+			return err
+		}
+		defer func() {
+			if err := dir.removeIfOwn(); err != nil {
+				logger.Debug("Failed to remove the dir of the temporary certificate file", zap.String("path", dir.path), zap.Error(err))
+			}
+		}()
+		certFile, err := extractCertToTemp(logger, dir.path, ca.certPEM)
 		if err != nil {
 			utils.LogError(logger, err, "Failed to extract certificate to temp folder")
 			return err
@@ -1287,8 +1326,8 @@ func removeJavaAlias(ctx context.Context, logger *zap.Logger, alias string) {
 // The file is a run file (createRunFile), under the run's lock until the
 // caller removes it. A file it cannot finish is removed: the caller gets
 // nothing to remove.
-func extractCertToTemp(logger *zap.Logger, certPEM []byte) (_ *runFile, err error) {
-	tempFile, made, err := createRunFile(logger, runCAFilePattern)
+func extractCertToTemp(logger *zap.Logger, dir string, certPEM []byte) (_ *runFile, err error) {
+	tempFile, made, err := createRunFile(logger, dir, runCAFilePattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1301,7 +1340,8 @@ func extractCertToTemp(logger *zap.Logger, certPEM []byte) (_ *runFile, err erro
 		}
 	}()
 
-	if err = os.Chmod(made.path, 0644); err != nil {
+	// Through the handle that writes it: the file the env will name.
+	if err = tempFile.Chmod(0644); err != nil {
 		return nil, err
 	}
 

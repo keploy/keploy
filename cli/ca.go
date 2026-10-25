@@ -61,12 +61,17 @@ files. Each is removed only if its fingerprint is the retired CA's, never on a
 name alone.
 
 It also removes, by their exact names, the trust files keploy runs leave in
-the temp dir ($TMPDIR, else /tmp; sudo resets TMPDIR, so for another dir run
-sudo env TMPDIR=<dir> keploy ca clean):
-  - those of runs that ended without removing them (killed, crashed). Each
-    running keploy holds a lock on its own files, and those are never taken;
-  - those older keploy versions wrote under names without a lock:
-    keploy-ca-<N>.crt, keploy-java-cas-<N>.pem, keploy-java-truststore-<N>.jks
-    and keploy-java-truststore.jks. An older keploy, or one that could not lock
-    its files, that is running at the same time loses its files, so run this
-    while no other keploy runs.`
+the temp dir of the user it runs as ($TMPDIR, else /tmp; sudo resets TMPDIR,
+so for another dir run sudo env TMPDIR=<dir> keploy ca clean):
+  - those of runs that ended without removing them (killed, crashed), in that
+    user's own dir keploy-<uid> in the temp dir (keploy-<SID> on Windows).
+    Each running keploy holds a lock on its own files, and those are never
+    taken. A run that found that dir unusable used a dir of its own,
+    keploy-<uid>-<N>, and warned: remove one a killed run left by hand;
+  - those older keploy versions wrote under names without a lock, in the temp
+    dir itself: keploy-ca-<N>.crt, keploy-java-cas-<N>.pem,
+    keploy-java-truststore-<N>.jks and keploy-java-truststore.jks; and the
+    same names in keploy-<uid>, which a run that could not lock its files
+    writes. An older keploy, or one that could not lock its files, that is
+    running at the same time loses its files, so run this only while no
+    other keploy is running.`

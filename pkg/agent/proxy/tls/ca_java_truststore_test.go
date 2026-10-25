@@ -23,7 +23,7 @@ func TestSetupJavaTrustStoreEnv_SetsMergedStore(t *testing.T) {
 	// The store is recorded for RemoveCaCertEnvFiles, as in a run: remove it,
 	// and forget it, so no later test inherits this one's record.
 	t.Cleanup(func() { _ = RemoveCaCertEnvFiles() })
-	if err := setupJavaTrustStoreEnv(zap.NewNop(), testCACertPEM()); err != nil {
+	if err := setupJavaTrustStoreEnv(zap.NewNop(), t.TempDir(), testCACertPEM()); err != nil {
 		t.Fatalf("setupJavaTrustStoreEnv: %v", err)
 	}
 	got := os.Getenv(EnvJavaToolOptions)

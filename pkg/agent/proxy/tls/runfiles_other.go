@@ -13,6 +13,14 @@ import (
 // (createRunFile), and still removes them when its command returns.
 const runFileLocking = false
 
+// privateDirName: no user id to name the private dir by here.
+func privateDirName() (string, error) { return "keploy-run", nil }
+
+// checkPrivateDirOwner: no owner to check here.
+func checkPrivateDirOwner(string, os.FileInfo) error { return nil }
+
+func setPrivateDirMode(string) error { return nil }
+
 func openRunFileLock(string) (*os.File, error) { return nil, errors.ErrUnsupported }
 
 func tryLockRunFile(*os.File) (bool, error) { return false, errors.ErrUnsupported }

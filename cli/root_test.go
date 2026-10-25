@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -70,12 +71,24 @@ func testCACertPEM(t testing.TB) []byte {
 func caTrustFilesIn(t *testing.T, dir string) []string {
 	t.Helper()
 	var files []string
-	for _, pattern := range []string{"keploy-ca-*.crt", "keploy-java-*"} {
-		m, err := filepath.Glob(filepath.Join(dir, pattern))
+	// Anywhere under dir: a run's files go in a dir of its user's in it.
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
-		files = append(files, m...)
+		if d.IsDir() {
+			return nil
+		}
+		for _, pattern := range []string{"keploy-ca-*.crt", "keploy-java-*"} {
+			if ok, _ := filepath.Match(pattern, d.Name()); ok {
+				files = append(files, p)
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	return files
 }

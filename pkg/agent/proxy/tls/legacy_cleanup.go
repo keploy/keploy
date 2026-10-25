@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -224,21 +225,32 @@ func resolveKeytoolAndCacerts() (keytool, cacerts string, ok bool) {
 // removeLegacyTempFiles deletes the world-writable temp files the old client
 // wrote and never cleaned: the per-process CA copies ($TMPDIR/ca.crt*) that
 // contain the retired cert, and, with explicitClean (`keploy ca clean`), every
-// trust file under an older keploy name and the run files no run holds.
+// trust file under an older keploy name (in the temp dir, where keploy versions
+// before the private dir wrote them, and in this user's private dir, where a
+// run that could not lock writes them) and the run files no run holds.
 func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, explicitClean bool) {
 	if explicitClean {
-		sweepDeadRunFiles(logger)
+		// Only this user's private dir, and only if it is one: a dir at its
+		// name that is not (another user's, a link) is left alone.
+		if dir, err := privateRunFilesDir(); err == nil {
+			sweepDeadRunFiles(logger, dir)
+			removeOlderTrustFiles(logger, dir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			logger.Debug("not cleaning this user's dir of keploy trust files in the temp dir", zap.Error(err))
+		}
 	}
 	tmp := os.TempDir()
 	entries, err := os.ReadDir(tmp)
 	if err != nil {
 		return
 	}
+	if explicitClean {
+		removeOlderTrustFiles(logger, tmp)
+	}
 	for _, e := range entries {
 		name := e.Name()
 		p := filepath.Join(tmp, name)
-		switch {
-		case strings.HasPrefix(name, "ca.crt"):
+		if strings.HasPrefix(name, "ca.crt") {
 			// Fingerprint-gated: only the old client's temp copy of the retired
 			// CA, never an unrelated file that happens to start with "ca.crt".
 			if fileIsExactlyCert(p, fp) {
@@ -246,17 +258,31 @@ func removeLegacyTempFiles(logger *zap.Logger, fp [32]byte, explicitClean bool) 
 					logger.Debug("removed a leaked legacy CA temp file", zap.String("path", p))
 				}
 			}
-		case explicitClean && e.Type().IsRegular() && isOlderTrustFileName(name):
-			// A trust file under an older keploy name: a keploy before the
-			// lock wrote it (a run's CA file, merged PEM or Java truststore),
-			// or a current run that could not lock. None holds a lock, and
-			// none is fingerprint-gated (a run's CA is its own; a JKS is no
-			// PEM), so its exact name is the gate, and it is only done on the
-			// explicit `keploy ca clean`: never on the automatic boot sweep,
-			// where it could race a live run's file.
-			if err := os.Remove(p); err == nil {
-				logger.Debug("removed a leaked keploy trust file", zap.String("path", p))
-			}
+		}
+	}
+}
+
+// removeOlderTrustFiles removes from dir every regular file under an older
+// keploy trust-file name: a keploy before the lock wrote it (a run's CA file,
+// merged PEM or Java truststore), or a current run that could not lock. None
+// holds a lock, and none is fingerprint-gated (a run's CA is its own; a JKS
+// is no PEM), so its exact name is the gate, and it is only done on the
+// explicit `keploy ca clean`: never on the automatic boot sweep, where it
+// could race a live run's file. Only a regular file (the listing's own type,
+// an lstat), and only removed: an unlink neither follows a link nor opens
+// what it names.
+func removeOlderTrustFiles(logger *zap.Logger, dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !isOlderTrustFileName(e.Name()) {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if err := os.Remove(p); err == nil {
+			logger.Debug("removed a leaked keploy trust file", zap.String("path", p))
 		}
 	}
 }

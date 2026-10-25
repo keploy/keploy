@@ -28,10 +28,11 @@
 # (keploy-java-truststore-*, built in Go, one per user, rewritten each run)
 # to the temp dir, and never removed them: root's, here. keploy record and
 # keploy test run with TMPDIR at a dir of this job's own, so what is left
-# there is theirs and no other job's. While each record runs, its CA file
-# must be there (so the check below looks where keploy writes); once each
-# has ended (record stopped by SIGINT, test finishing on its own) no
-# keploy-ca-*.crt or keploy-java-* may be left.
+# there is theirs and no other job's. A run's files go in its user's dir in
+# the temp dir (keploy-0 for root), so the checks look at every depth. While
+# each record runs, its CA file must be there (so the check below looks where
+# keploy writes); once each has ended (record stopped by SIGINT, test
+# finishing on its own) no keploy-ca-*.crt or keploy-java-* may be left.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -61,17 +62,17 @@ KEPLOY_TMPDIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/interim-responses-tmp.XXXXXX") |
 # be left in its temp dir. Whatever else is there is only listed.
 no_temp_left() {
     local what=$1 left other
-    left=$(find "$KEPLOY_TMPDIR" -mindepth 1 -maxdepth 1 \( -name 'keploy-ca-*.crt' \
-        -o -name 'keploy-java-*' \) -printf '%f ') || {
+    left=$(sudo find "$KEPLOY_TMPDIR" -mindepth 1 \( -name 'keploy-ca-*.crt' \
+        -o -name 'keploy-java-*' \) -printf '%P ') || {
         echo "::error::cannot list keploy's temp dir ${KEPLOY_TMPDIR} after ${what}, so nothing was checked"
         return 1
     }
     if [ -n "$left" ]; then
         echo "::error::${what} left its temp files behind (each run must remove its own when it ends): ${left}"
-        ls -la "$KEPLOY_TMPDIR"
+        sudo ls -laR "$KEPLOY_TMPDIR"
         return 1
     fi
-    other=$(find "$KEPLOY_TMPDIR" -mindepth 1 -maxdepth 1 -printf '%f ')
+    other=$(sudo find "$KEPLOY_TMPDIR" -mindepth 1 -printf '%P ')
     [ -z "$other" ] || echo "note: ${what} left in its temp dir (not checked here): ${other}"
     return 0
 }
@@ -99,9 +100,9 @@ drive_requests() {
     # keploy writes the app's CA file before it starts the app, so it is in
     # keploy's temp dir by now: else keploy is not writing there (TMPDIR lost
     # on the way, a renamed file) and the leak check would pass unseen.
-    if ! compgen -G "${KEPLOY_TMPDIR}/keploy-ca-*.crt" >/dev/null; then
+    if [ -z "$(sudo find "$KEPLOY_TMPDIR" -mindepth 1 -name 'keploy-ca-*.crt' -print -quit)" ]; then
         echo "::error::keploy record's CA file (keploy-ca-*.crt) is not in its temp dir ${KEPLOY_TMPDIR} while it runs, so the temp-file check would see nothing"
-        ls -la "$KEPLOY_TMPDIR"
+        sudo ls -laR "$KEPLOY_TMPDIR"
         sudo pkill -INT keploy 2>/dev/null || true
         return 1
     fi

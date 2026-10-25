@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,8 +20,16 @@ import (
 
 // runFilesTempDir points os.TempDir at a directory of the test's own, with
 // none of the machine's trust settings, and removes what SetupCaCertEnv wrote
-// when the test ends.
+// when the test ends. It returns this user's private dir in it, where the run
+// files go.
 func runFilesTempDir(t *testing.T) string {
+	t.Helper()
+	return privateDirIn(t, runFilesTempRoot(t))
+}
+
+// runFilesTempRoot is runFilesTempDir without the private dir: it returns
+// the temp dir itself, with nothing in it.
+func runFilesTempRoot(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	// TMPDIR is os.TempDir's on Unix, TMP and TEMP on Windows.
@@ -43,6 +52,21 @@ func runFilesTempDir(t *testing.T) string {
 		_ = RemoveCaCertEnvFiles()
 		loadSystemCABundleFn = orig
 	})
+	return dir
+}
+
+// privateDirIn makes this user's private dir for run files in tmp, as a setup
+// does, and returns it.
+func privateDirIn(t *testing.T, tmp string) string {
+	t.Helper()
+	name, err := privateDirName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(tmp, name)
+	if err := makePrivateDir(dir); err != nil {
+		t.Fatalf("making the private dir for run files %s: %v", dir, err)
+	}
 	return dir
 }
 
@@ -150,7 +174,7 @@ func TestRunFiles_ASetupTakesOnlyTheFilesOfRunsThatAreGone(t *testing.T) {
 	// sweeps; it takes them once Windows has.
 	for runtime.GOOS == "windows" && slices.ContainsFunc(theirs, func(p string) bool { return exists(t, p) }) {
 		time.Sleep(10 * time.Millisecond)
-		sweepDeadRunFiles(zap.NewNop())
+		sweepDeadRunFiles(zap.NewNop(), tmp)
 	}
 	for _, p := range theirs {
 		if exists(t, p) {
@@ -218,7 +242,7 @@ func TestRunFiles_ASweepLeavesEveryOtherFile(t *testing.T) {
 		foreign = append(foreign, "keploy-ca-run-3.crt")
 	}
 
-	sweepDeadRunFiles(zap.NewNop())
+	sweepDeadRunFiles(zap.NewNop(), tmp)
 
 	for _, n := range dead {
 		if exists(t, filepath.Join(tmp, n)) {
@@ -286,7 +310,7 @@ func TestRunFiles_ASweepInTheWindowBeforeTheLockCostsOnlyAnotherFile(t *testing.
 				}
 			}
 
-			f, rf, err := createRunFile(zap.NewNop(), runCAFilePattern)
+			f, rf, err := createRunFile(zap.NewNop(), tmp, runCAFilePattern)
 			release()
 			if err != nil {
 				t.Fatalf("createRunFile: %v", err)
@@ -311,7 +335,7 @@ func TestRunFiles_ASweepInTheWindowBeforeTheLockCostsOnlyAnotherFile(t *testing.
 			if rf.lock == nil || !exists(t, rf.path) {
 				t.Fatalf("the run's file %s is not there under its lock", rf.path)
 			}
-			sweepDeadRunFiles(zap.NewNop())
+			sweepDeadRunFiles(zap.NewNop(), tmp)
 			if !exists(t, rf.path) {
 				t.Errorf("a sweep took %s, which its run holds", rf.path)
 			}
@@ -355,7 +379,7 @@ func TestRunFiles_ATempDirThatRefusesLocksStillRuns(t *testing.T) {
 		t.Errorf("want one warning that the files go unlocked, have %d: %v", n, logs.All())
 	}
 	tryLockRunFileFn = orig
-	sweepDeadRunFiles(zap.NewNop())
+	sweepDeadRunFiles(zap.NewNop(), tmp)
 	for _, p := range unlocked {
 		if !exists(t, p) {
 			t.Errorf("a sweep took %s, which holds no lock and may be a live run's", p)
@@ -368,5 +392,231 @@ func TestRunFiles_ATempDirThatRefusesLocksStillRuns(t *testing.T) {
 		if exists(t, p) {
 			t.Errorf("%s outlived its run's cleanup", p)
 		}
+	}
+}
+
+// TestRunFiles_GoInADirOfTheUsersOwn: a run's trust files are never made in
+// the temp dir itself, which every local user may write (/tmp), but in this
+// user's dir in it, which nobody else can put anything in: every one of them,
+// the merged PEM the Java truststore is built from too. Nor does a setup sweep
+// the temp dir itself, where anyone may have put a file of a run file's name.
+// The dir stays for the next run; the files go with the run.
+func TestRunFiles_GoInADirOfTheUsersOwn(t *testing.T) {
+	tmp := runFilesTempRoot(t)
+	notOurs := filepath.Join(tmp, "keploy-ca-run-9.crt")
+	if err := os.WriteFile(notOurs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := beforeRunFileOpen
+	t.Cleanup(func() { beforeRunFileOpen = orig })
+	var made []string
+	beforeRunFileOpen = func(p string) { made = append(made, p) }
+	if err := SetupCaCertEnv(zap.NewNop(), testCACertPEM()); err != nil {
+		t.Fatal(err)
+	}
+	name, err := privateDirName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := filepath.Join(tmp, name)
+	if len(made) != 3 {
+		t.Errorf("want the setup to make a CA file, a merged PEM and a truststore, it made %v", made)
+	}
+	for _, p := range made {
+		if filepath.Dir(p) != priv {
+			t.Errorf("the setup made %s outside the private dir %s", p, priv)
+		}
+	}
+	if !exists(t, notOurs) {
+		t.Errorf("the setup swept %s in the temp dir itself", notOurs)
+	}
+	if why := checkPrivateDir(priv); why != nil {
+		t.Fatalf("the setup left no usable private dir at %s: %v", priv, why)
+	}
+	files := runFilesIn(t, priv)
+	if len(files) != 2 {
+		t.Fatalf("want the CA file and the Java truststore in %s, have %v", priv, files)
+	}
+	if ca := os.Getenv("SSL_CERT_FILE"); filepath.Dir(ca) != priv {
+		t.Errorf("the app is pointed at %s, not at a file in the private dir %s", ca, priv)
+	}
+	for _, pattern := range append(slices.Clone(runFilePatterns), olderTrustFilePatterns...) {
+		m, _ := filepath.Glob(filepath.Join(tmp, pattern))
+		if m = slices.DeleteFunc(m, func(p string) bool { return p == notOurs }); len(m) != 0 {
+			t.Errorf("the setup made %v in the temp dir itself", m)
+		}
+	}
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if left := runFilesIn(t, priv); len(left) != 0 {
+		t.Errorf("the run's files outlived it: %v", left)
+	}
+	if !exists(t, priv) {
+		t.Errorf("the run removed the private dir %s, which the next run (or a live one) uses", priv)
+	}
+}
+
+// setupPastAPlantedPrivateName puts what plant makes at this user's private
+// dir's name in a fresh temp dir, runs a setup and its end, and checks that
+// the run never used it: its files went in a new dir of its own, a warning
+// said why, and that dir went with the run.
+func setupPastAPlantedPrivateName(t *testing.T, plant func(path string)) {
+	t.Helper()
+	tmp := runFilesTempRoot(t)
+	name, err := privateDirName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := filepath.Join(tmp, name)
+	plant(priv)
+	before, err := os.Lstat(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger, logs := newObservedLogger(t)
+	if err := SetupCaCertEnv(logger, testCACertPEM()); err != nil {
+		t.Fatal(err)
+	}
+	ca := os.Getenv("SSL_CERT_FILE")
+	own := filepath.Dir(ca)
+	if own == priv || filepath.Dir(own) != tmp || !strings.HasPrefix(filepath.Base(own), name+"-") {
+		t.Fatalf("the app is pointed at %s, not at a new dir of the run's own in %s", ca, tmp)
+	}
+	warned := false
+	for _, e := range logs.FilterMessageSnippet("does not put its trust files in the dir at its own name").All() {
+		if e.ContextMap()["dir"] == priv && e.ContextMap()["why"] != "" {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("no warning named %s and why it was not used: %v", priv, logs.All())
+	}
+	if runtime.GOOS != "windows" {
+		// MkdirTemp makes it 0700, which an app of another user cannot
+		// read the CA file in.
+		if fi, err := os.Lstat(own); err != nil || fi.Mode().Perm() != 0o755 {
+			t.Errorf("the run's own dir %s is %v (%v), want mode 0755", own, fi, err)
+		}
+	}
+	after, err := os.Lstat(priv)
+	if err != nil || !os.SameFile(before, after) || after.Mode() != before.Mode() {
+		t.Errorf("the setup changed what was at %s: before %v, after %v (%v)", priv, before.Mode(), after, err)
+	}
+	if err := RemoveCaCertEnvFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, own) {
+		t.Errorf("the run's own dir %s outlived the run", own)
+	}
+}
+
+// TestRunFiles_AFileAtThePrivateDirsNameIsNeverUsed: something that is not
+// a dir at the private dir's name.
+func TestRunFiles_AFileAtThePrivateDirsNameIsNeverUsed(t *testing.T) {
+	setupPastAPlantedPrivateName(t, func(path string) {
+		if err := os.WriteFile(path, []byte("not a dir"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// TestRunFiles_ALockOnAFileSomeoneElsePutAtTheNameIsNotTaken: another run's
+// sweep takes the new CA file in the window before its lock, and a file that
+// is not the one the run writes is at the freed name before the run opens it
+// for its lock. The run must not lock and hand out that file: it writes the CA
+// through the CreateTemp handle, and the env names the path. It makes a file
+// under another name instead. On Windows the window cannot be taken: the
+// run's own write handle refuses delete until the file is locked.
+func TestRunFiles_ALockOnAFileSomeoneElsePutAtTheNameIsNotTaken(t *testing.T) {
+	dir := runFilesTempDir(t)
+	orig := beforeRunFileOpen
+	t.Cleanup(func() { beforeRunFileOpen = orig })
+	windows := runtime.GOOS == "windows"
+	var planted, refused string
+	beforeRunFileOpen = func(p string) {
+		if planted != "" || refused != "" {
+			return
+		}
+		if err := os.Remove(p); windows {
+			if !isInUse(err) {
+				t.Errorf("removing the new %s in its window gave %v, want the run's handle to refuse it", p, err)
+			}
+			refused = p
+			return
+		} else if err != nil {
+			t.Fatalf("the sweep's remove: %v", err)
+		}
+		planted = p
+		if err := os.WriteFile(p, []byte("SOMEONE ELSE'S CA\n"), 0o644); err != nil {
+			t.Fatalf("the plant: %v", err)
+		}
+	}
+	certPEM := testCACertPEM()
+	rf, err := extractCertToTemp(zap.NewNop(), dir, certPEM)
+	if err != nil {
+		t.Fatalf("extractCertToTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = rf.remove() })
+	if refused != "" {
+		if rf.path != refused {
+			t.Errorf("the run lost %s, which nothing could take, for %s", refused, rf.path)
+		}
+		return
+	}
+	if planted == "" {
+		t.Fatal("the window before the lock never came")
+	}
+	if rf.path == planted {
+		t.Errorf("the run locked and kept %s, the file put at the name its sweep freed", planted)
+	}
+	got, err := os.ReadFile(rf.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, certPEM) {
+		t.Errorf("the CA file the env would name (%s) holds %q, not the CA the run wrote", rf.path, got)
+	}
+	if got, err := os.ReadFile(planted); err != nil || string(got) != "SOMEONE ELSE'S CA\n" {
+		t.Errorf("the run changed or removed the file it did not make at %s: %q, %v", planted, got, err)
+	}
+}
+
+// TestRunFiles_AFileIsGoneBeforeItsLockIs: a run file's lock is dropped only
+// once the file is removed, both when its run ends and when a sweep takes a
+// dead run's. The other way round, a run that made a file of that name in
+// the instant between would take the free lock, find its path still its
+// file, and then lose that file to the remove.
+func TestRunFiles_AFileIsGoneBeforeItsLockIs(t *testing.T) {
+	dir := runFilesTempDir(t)
+	orig := afterRunFileUnlock
+	t.Cleanup(func() { afterRunFileUnlock = orig })
+	var unlocked []string
+	afterRunFileUnlock = func(p string) {
+		unlocked = append(unlocked, p)
+		if exists(t, p) {
+			t.Errorf("%s was still there when its lock was dropped", p)
+		}
+	}
+	// A live run's file, removed when its run ends.
+	f, rf, err := createRunFile(zap.NewNop(), dir, runCAFilePattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if rf.lock == nil {
+		t.Fatal("the run could not lock its file")
+	}
+	if err := rf.remove(); err != nil {
+		t.Fatal(err)
+	}
+	// A dead run's file, which a sweep takes.
+	dead := filepath.Join(dir, "keploy-ca-run-41.crt")
+	if err := os.WriteFile(dead, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sweepDeadRunFiles(zap.NewNop(), dir)
+	if !slices.Equal(unlocked, []string{rf.path, dead}) {
+		t.Errorf("want the locks of %s and %s dropped, dropped %v", rf.path, dead, unlocked)
 	}
 }
