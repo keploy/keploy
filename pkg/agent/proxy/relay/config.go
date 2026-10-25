@@ -173,6 +173,10 @@ type Config struct {
 	// on and before it tees it. Tests set it to hold one direction's tee
 	// back, so the other direction's later capture is teed first.
 	beforeTee func(fakeconn.Direction)
+	// afterForwarderExit, when set, runs on a forwarder's goroutine once
+	// run has acted on that forwarder's exit. Tests set it to hold the
+	// other direction's read until then, the order a loaded host can give.
+	afterForwarderExit func(fakeconn.Direction)
 
 	// ReaderLag, when positive, delivers each captured chunk to its parser
 	// no earlier than this long after the relay read it: the parser then runs

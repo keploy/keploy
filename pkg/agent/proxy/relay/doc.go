@@ -33,6 +33,11 @@
 // caller — but "only reads and writes them" is no longer the whole
 // story.
 //
+// A second one: when a peer resets, the relay sets SO_LINGER 0 on the
+// other peer's socket (proxyutil.ResetOnClose), so the caller's close
+// passes the reset on instead of the FIN that would call a cut stream
+// complete. The relay still never closes the socket itself.
+//
 // This package is wired into the record path via the V2 dispatcher
 // (see ../proxy_v2.go::recordViaSupervisor). V2-capable parsers
 // (those implementing integrations.IntegrationsV2 with IsV2()==true)

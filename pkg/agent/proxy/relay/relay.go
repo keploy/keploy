@@ -14,6 +14,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	proxyutil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -73,10 +75,22 @@ type Relay struct {
 	// live socket, and then deadlock because the byte was already
 	// consumed by the very Read that woke the forwarder out of its
 	// pre-pause block.
+	//
+	// exitedC2D and exitedD2C record that the forwarder of that
+	// direction has returned. A forwarder that has returned is off the
+	// live sockets for good, which is all a park promises the handler,
+	// so its park signal is closed when it exits and closed at once in
+	// every later pause window. Without that, a pause that came after
+	// one forwarder had exited waited for a park that could never
+	// happen: after a write reset the relay leaves the other forwarder
+	// running with no clock (see onForwarderExit in run), so nothing
+	// else would end that wait.
 	pauseMu   sync.Mutex
 	pauseCh   chan struct{}
 	parkedC2D chan struct{}
 	parkedD2C chan struct{}
+	exitedC2D bool
+	exitedD2C bool
 
 	// stashedC2D and stashedD2C hold bytes a forwarder Read returned
 	// AFTER the pause barrier was raised but BEFORE the forwarder
@@ -356,8 +370,15 @@ func (r *Relay) PauseTees() {
 //   - an error in the opposite-direction forwarder that propagates
 //     by closing the shared stopping signal.
 //
+// A write that fails because its peer reset (or reset after its FIN)
+// does not stop the other forwarder: that one reads the gone peer's
+// socket to its end, so what the peer sent before its reset is delivered.
+//
 // Run returns the first non-EOF error observed, or nil on clean close.
-// Run does NOT close the real sockets; the caller is responsible.
+// Run does NOT close the real sockets; the caller is responsible. When a
+// peer reset, Run sets SO_LINGER 0 on the other peer's socket
+// (proxyutil.ResetOnClose), so the caller's close passes the reset on
+// rather than a FIN.
 //
 // Run is single-shot; calling twice returns [ErrRelayAlreadyRun].
 func (r *Relay) Run(ctx context.Context) error {
@@ -511,13 +532,79 @@ func (r *Relay) run(ctx context.Context) error {
 	// added to prevent in the first place. Bounding the wait keeps that
 	// protection while giving a well-behaved peer time to reply.
 	//
-	// Anything that is NOT a clean EOF (a read error, a write error, a
-	// dead peer) keeps the original immediate teardown: there is no
-	// half-open state to preserve when the connection is already broken.
-	onForwarderExit := func(err error, writeSide, nudgeSide *atomic.Pointer[net.Conn]) {
-		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(writeSide.Load()) {
+	// A peer that resets is gone in both directions, and the other peer
+	// learns of it the way it would with no proxy in between: its socket
+	// is set to reset when the caller closes it (proxyutil.ResetOnClose),
+	// rather than sent the FIN that would call a cut stream complete.
+	// On Linux the kernel reports a reset once, to whichever call on the
+	// socket meets it first, so the relay can learn of it two ways:
+	//   - a READ of the forwarder's source fails with it: nothing more can
+	//     come from that peer, so the reset is passed on to the conn this
+	//     forwarder wrote to, and the relay tears down at once;
+	//   - a WRITE to the conn the forwarder wrote to fails with it: that
+	//     conn's peer is gone, but its socket may still hold what the peer
+	//     sent before its reset (a server's 413 before it resets an upload
+	//     it will not read), and the other forwarder reads that socket. So
+	//     the reset is passed on to this forwarder's source, and the other
+	//     forwarder is left to copy what is queued into the source's send
+	//     buffer and end on the socket's own end, which the reset makes
+	//     certain: after the write took the reset, that read returns the
+	//     queued bytes and then EOF, and that EOF from a gone peer is a
+	//     reset, not a half-close. (The caller's close then resets the
+	//     source: SO_LINGER 0 drops what the proxy's socket has not sent
+	//     yet, while what already reached the peer's receive queue stays
+	//     readable.) No clock bounds that forwarder's read, and none is
+	//     needed: its end is already queued. A pause directive cannot wait
+	//     on the exited forwarder either (markForwarderExited).
+	// If that EOF is read after the write took the reset but before the
+	// failed write is recorded here, it is taken for a half-close: the
+	// other peer reads a FIN after the queued bytes, and its socket is
+	// reset when the caller closes it. Its reads never show that reset (a
+	// FIN is read before a pending error, so every later read is EOF), so
+	// unless a later write of its own fails it takes the stream for
+	// complete, where with no proxy its read after the reply would have
+	// returned ECONNRESET. That window is still open.
+	// On Windows a reset drops what is queued and every call on the socket
+	// fails with it, so the other forwarder's read takes the read path.
+	//
+	// A write that fails with EPIPE met a reset that came after the
+	// peer's FIN: the peer wrote its reply, closed, and reset the bytes
+	// that reached it afterwards (Linux reports that reset as EPIPE, not
+	// ECONNRESET, on a socket that had read the FIN). Its reply and its
+	// FIN are queued in its socket, so the other forwarder is left to
+	// deliver them too; the FIN is a real one, so it is passed on as a
+	// FIN, and the source is set to reset at close. A forwarder never
+	// writes to a conn after the relay's own CloseWrite of it (only that
+	// conn's own forwarder half-closes it, as it exits), so EPIPE on a
+	// forwarder's write is never the relay's own shutdown, and neither is
+	// Windows' WSAESHUTDOWN, the local shutdown neterr.IsBrokenPipe also
+	// names. EPIPE also follows a reset whose error another call on the
+	// socket took first (a directive handler's I/O, or PauseTees' flush of
+	// the client hold); the gone peer is then not marked, and its EOF goes
+	// on as a FIN. That case is narrow.
+	//
+	// Anything else that is NOT a clean EOF (another read or write error)
+	// keeps the original immediate teardown: there is no half-open state
+	// to preserve when the connection is already broken.
+	var srcGone, dstGone atomic.Bool
+	onForwarderExit := func(err error, wrote bool, from, to *atomic.Pointer[net.Conn], fromGone, toGone *atomic.Bool) {
+		switch {
+		case wrote && neterr.IsConnReset(err):
+			toGone.Store(true)
+			proxyutil.ResetOnClose(*from.Load())
+			return
+		case wrote && neterr.IsBrokenPipe(err):
+			proxyutil.ResetOnClose(*from.Load())
+			return
+		case !wrote && (neterr.IsConnReset(err) || (errors.Is(err, io.EOF) && fromGone.Load())):
+			proxyutil.ResetOnClose(*to.Load())
 			closeStopping()
-			r.nudgeDeadline(nudgeSide.Load())
+			r.nudgeDeadline(to.Load())
+			return
+		}
+		if r.cfg.HalfCloseGrace < 0 || !errors.Is(err, io.EOF) || !halfCloseWrite(to.Load()) {
+			closeStopping()
+			r.nudgeDeadline(to.Load())
 			return
 		}
 		if log := r.cfg.Logger; log != nil {
@@ -530,7 +617,7 @@ func (r *Relay) run(ctx context.Context) error {
 			defer graceWG.Done()
 			r.awaitHalfCloseIdle(ctx, stopping, bothDone)
 			closeStopping()
-			r.nudgeDeadline(nudgeSide.Load())
+			r.nudgeDeadline(to.Load())
 		}()
 	}
 
@@ -538,18 +625,28 @@ func (r *Relay) run(ctx context.Context) error {
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		err := r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D)
+		wrote, err := asWriteFailure(r.forward(ctx, stopping, fakeconn.FromClient, &r.src, &r.dst, r.teeC2D, &r.seqC2D))
 		recordErr(err)
-		onForwarderExit(err, &r.dst, &r.dst)
+		onForwarderExit(err, wrote, &r.src, &r.dst, &srcGone, &dstGone)
+		// After onForwarderExit, so that a waiting handler goes on only
+		// once this forwarder has stopped touching the sockets.
+		r.markForwarderExited(fakeconn.FromClient)
+		if r.cfg.afterForwarderExit != nil {
+			r.cfg.afterForwarderExit(fakeconn.FromClient)
+		}
 	}()
 
 	// Forwarder dst → src (Dir=FromDest).
 	wgForward.Add(1)
 	go func() {
 		defer wgForward.Done()
-		err := r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C)
+		wrote, err := asWriteFailure(r.forward(ctx, stopping, fakeconn.FromDest, &r.dst, &r.src, r.teeD2C, &r.seqD2C))
 		recordErr(err)
-		onForwarderExit(err, &r.src, &r.src)
+		onForwarderExit(err, wrote, &r.dst, &r.src, &dstGone, &srcGone)
+		r.markForwarderExited(fakeconn.FromDest)
+		if r.cfg.afterForwarderExit != nil {
+			r.cfg.afterForwarderExit(fakeconn.FromDest)
+		}
 	}()
 
 	// Block until both forwarders exit.
@@ -596,6 +693,23 @@ func (r *Relay) run(ctx context.Context) error {
 	return firstErr
 }
 
+// writeFailure is how forward returns an error of its WRITE to the
+// opposite conn, so that run can tell it from an error of its source's
+// read (see onForwarderExit). run unwraps it at once (asWriteFailure):
+// nothing outside the forwarder's exit sees it.
+type writeFailure struct{ err error }
+
+func (w writeFailure) Error() string { return w.err.Error() }
+
+// asWriteFailure unwraps a forwarder's error, and reports whether it was
+// its write's.
+func asWriteFailure(err error) (bool, error) {
+	if w, ok := err.(writeFailure); ok {
+		return true, w.err
+	}
+	return false, err
+}
+
 // noteCarried tells the owner of a chunk the connection carried, as the
 // forwarder hands it to the tee t, and whether t took it (Config.OnCarried).
 // It runs on t's forwarder, the one goroutine that pushes into t, so t's
@@ -621,8 +735,9 @@ func (r *Relay) noteCarried(t *tee, c fakeconn.Chunk, teed bool) {
 //     the owner it was carried (Config.OnCarried).
 //  5. Bump activity.
 //
-// Returns the first read or write error encountered. io.EOF is
-// returned verbatim; callers filter it out in their error accounting.
+// Returns the first read or write error encountered, a write's as a
+// writeFailure. io.EOF is returned verbatim; callers filter it out in
+// their error accounting.
 func (r *Relay) forward(
 	ctx context.Context,
 	stopping <-chan struct{},
@@ -879,7 +994,7 @@ func (r *Relay) forward(
 								zap.Error(werr),
 							)
 						}
-						return werr
+						return writeFailure{werr}
 					}
 				}
 				// Suppress the forward below; the bytes are accounted for.
@@ -929,7 +1044,7 @@ func (r *Relay) forward(
 				if r.cfg.OnMarkMockIncomplete != nil {
 					r.cfg.OnMarkMockIncomplete("write_error")
 				}
-				return werr
+				return writeFailure{werr}
 			}
 			if wn != n {
 				// Short write on a blocking Write is a net.Conn
@@ -938,7 +1053,7 @@ func (r *Relay) forward(
 				if r.cfg.OnMarkMockIncomplete != nil {
 					r.cfg.OnMarkMockIncomplete("short_write")
 				}
-				return short
+				return writeFailure{short}
 			}
 
 			r.cfg.BumpActivity()
@@ -1039,9 +1154,15 @@ func (r *Relay) installPauseChLocked() chan struct{} {
 	}
 	if r.parkedC2D == nil {
 		r.parkedC2D = make(chan struct{})
+		if r.exitedC2D {
+			close(r.parkedC2D)
+		}
 	}
 	if r.parkedD2C == nil {
 		r.parkedD2C = make(chan struct{})
+		if r.exitedD2C {
+			close(r.parkedD2C)
+		}
 	}
 	return r.pauseCh
 }
@@ -1117,6 +1238,23 @@ func (r *Relay) markForwarderParked(dir fakeconn.Direction) {
 			}
 		}
 	}
+}
+
+// markForwarderExited records that the forwarder of dir has returned, and
+// closes its park signal: a returned forwarder is off the live sockets for
+// good, so the directive handler's waitForwardersParked must not wait for
+// it (see exitedC2D). installPauseChLocked closes the signal of every later
+// pause window too.
+func (r *Relay) markForwarderExited(dir fakeconn.Direction) {
+	r.pauseMu.Lock()
+	switch dir {
+	case fakeconn.FromClient:
+		r.exitedC2D = true
+	case fakeconn.FromDest:
+		r.exitedD2C = true
+	}
+	r.pauseMu.Unlock()
+	r.markForwarderParked(dir)
 }
 
 // endPause releases the pause barrier. No-op if no pause is active.
