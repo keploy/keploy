@@ -47,6 +47,31 @@ func IsConnReset(err error) bool {
 	return errors.Is(err, syscall.ECONNRESET) || isAny(err, connResetErrnos)
 }
 
+// IsPeerVanished reports whether the kernel gave up on an established
+// connection whose peer went away without a reset: its retransmissions or
+// keepalive probes went unanswered (ETIMEDOUT), or an ICMP error said the
+// peer's host or network cannot be reached (EHOSTUNREACH, ENETUNREACH,
+// EHOSTDOWN; an established socket holds such an error back and reports it
+// when it gives up). Either way the connection is dead in both directions,
+// as after a reset.
+//
+// It is not a deadline: a read or write past a deadline set on the conn
+// fails with os.ErrDeadlineExceeded, which is a timeout (net.Error's
+// Timeout) but none of these errnos, and says nothing about the peer.
+func IsPeerVanished(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isAny(err, peerVanishedPortable) || isAny(err, peerVanishedErrnos)
+}
+
+// peerVanishedPortable are the errnos IsPeerVanished matches on every
+// platform: the real values everywhere but Windows, and on Windows the
+// values a test or a non-Winsock source builds from these constants.
+var peerVanishedPortable = []syscall.Errno{
+	syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EHOSTDOWN,
+}
+
 // IsConnAborted reports whether the connection was aborted locally — the
 // host's own stack tore it down, typically mid-handshake or on timeout.
 //

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -840,6 +841,101 @@ func TestRelayRawPassthrough_PassesAResetOnAndEndsOnIt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRelayRawPassthrough_PassesAVanishedPeerOnAsAReset: a peer that
+// vanished without a reset (its host went down, or the network between
+// dropped it) ends its copy with the error the kernel gives up with,
+// ETIMEDOUT or EHOSTUNREACH, and is gone in both directions, as after a
+// reset. So the relay ends on that event, with no survivor drain, and the
+// other peer is reset: it reads ECONNRESET (with no proxy its own socket
+// would fail with the vanished peer's errno; a reset is the closest end the
+// proxy can give it). Before, the relay drained the survivor, a whole idle
+// window on a silent peer, and then sent it a FIN.
+//
+// No clock decides it: the vanished peer's read fails when the test says
+// so, the drain is an event the test sees (it is handed to relayRaw), and
+// the other peer's read returns when the test closes the relay's sockets
+// as its caller does.
+func TestRelayRawPassthrough_PassesAVanishedPeerOnAsAReset(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.EHOSTUNREACH} {
+		for _, destVanishes := range []bool{false, true} {
+			name := "the client vanished: " + errno.Error()
+			if destVanishes {
+				name = "the destination vanished: " + errno.Error()
+			}
+			t.Run(name, func(t *testing.T) {
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen: %v", err)
+				}
+				t.Cleanup(func() { _ = ln.Close() })
+				appSide, appPeer := tcpPair(t, ln)
+				destSide, destPeer := tcpPair(t, ln)
+				t.Cleanup(func() {
+					_ = appSide.Close()
+					_ = appPeer.Close()
+					_ = destSide.Close()
+					_ = destPeer.Close()
+				})
+
+				gone := make(chan struct{})
+				var app, dest net.Conn = appSide, destSide
+				waiting := destPeer
+				if destVanishes {
+					dest = &vanishedConn{Conn: destSide, gone: gone, errno: errno}
+					waiting = appPeer
+				} else {
+					app = &vanishedConn{Conn: appSide, gone: gone, errno: errno}
+				}
+				drained := make(chan struct{})
+				returned := make(chan struct{})
+				go func() {
+					relayRaw(NewSafeConn(app, zap.NewNop()), NewSafeConn(dest, zap.NewNop()),
+						func(finished <-chan copyOutcome, _ func() int64) {
+							close(drained)
+							<-finished // the test's close of the sockets ends it
+						})
+					close(returned)
+				}()
+				close(gone)
+
+				select {
+				case <-returned:
+				case <-drained:
+					t.Fatal("the relay waited on a survivor after a peer vanished. The survivor " +
+						"writes to the peer that is gone, so it can deliver nothing, and the other " +
+						"peer, never told, waits on: the relay holds the connection for a whole " +
+						"idle window, " + RelayDrainIdle.String() + " in production")
+				}
+				// The caller closes the real sockets once the relay returns.
+				_ = appSide.Close()
+				_ = destSide.Close()
+				if _, err := waiting.Read(make([]byte, 1)); !neterr.IsConnReset(err) {
+					t.Fatalf("the other peer read %v; want a reset. Its peer vanished, which ends "+
+						"the connection both ways; a FIN tells it the cut stream was complete", err)
+				}
+			})
+		}
+	}
+}
+
+// vanishedConn is a socket whose peer vanished without a reset, as the
+// kernel reports it once gone is closed: one read fails with the errno it
+// gave up with, and every read after that returns EOF.
+type vanishedConn struct {
+	net.Conn
+	gone     chan struct{}
+	errno    syscall.Errno
+	reported atomic.Bool
+}
+
+func (c *vanishedConn) Read([]byte) (int, error) {
+	<-c.gone
+	if c.reported.Swap(true) {
+		return 0, io.EOF
+	}
+	return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", c.errno)}
 }
 
 // TestRelayRawPassthrough_AResetWriteStillDrainsTheSurvivor: a write that

@@ -3,15 +3,18 @@ package relay
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 )
 
@@ -120,6 +123,93 @@ func testAPauseAfterAWriteReset(t *testing.T, pauseFirst bool) {
 	case <-time.After(time.Until(guard)):
 		t.Fatal("the relay never returned after both peers closed")
 	}
+}
+
+// TestRelay_AVanishedPeerIsPassedOnAsAReset: a peer that vanished without a
+// reset (its host went down, or the network between dropped it) ends the
+// relay's read of it with the error the kernel gives up with, ETIMEDOUT or
+// EHOSTUNREACH. That peer is gone in both directions, as after a reset, so
+// the other peer is reset too: it reads ECONNRESET (with no proxy its own
+// socket would fail with the vanished peer's errno; a reset is the closest
+// end the proxy can give it). A FIN instead would tell it the cut stream
+// was complete.
+//
+// No clock decides it: the vanished peer's read fails when the test says
+// so, and the other peer's read returns on the FIN or the reset the relay
+// gives it (the reset when the caller closes the relay's sockets).
+func TestRelay_AVanishedPeerIsPassedOnAsAReset(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.EHOSTUNREACH} {
+		for _, destVanishes := range []bool{true, false} {
+			name := "the client vanished: " + errno.Error()
+			if destVanishes {
+				name = "the destination vanished: " + errno.Error()
+			}
+			t.Run(name, func(t *testing.T) {
+				clientApp, srcProxy := relayTCPPair(t)
+				dstProxy, destSvc := relayTCPPair(t)
+				gone := make(chan struct{})
+				var src, dst net.Conn = srcProxy, dstProxy
+				waiting := clientApp
+				if destVanishes {
+					dst = &vanishedConn{Conn: dstProxy, gone: gone, errno: errno}
+				} else {
+					src = &vanishedConn{Conn: srcProxy, gone: gone, errno: errno}
+					waiting = destSvc
+				}
+				// A hang guard only, never the verdict's clock: the read
+				// below returns on the other peer's FIN or reset.
+				guard := hangGuard(t)
+				_ = waiting.SetReadDeadline(guard)
+
+				r := New(Config{Logger: zap.NewNop()}, src, connseq.NewUpstream(dst))
+				returned := make(chan struct{})
+				var runErr error
+				go func() {
+					defer close(returned)
+					runErr = r.Run(context.Background())
+					// The caller's close, once the relay has returned.
+					_ = srcProxy.Close()
+					_ = dstProxy.Close()
+				}()
+				close(gone)
+				_, err := waiting.Read(make([]byte, 1))
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatal("the relay never returned after a peer vanished, so the other peer was never told")
+				}
+				if !neterr.IsConnReset(err) {
+					t.Fatalf("the other peer read %v, want a reset: its peer vanished, which ends the "+
+						"connection both ways; a FIN tells it the cut stream was complete", err)
+				}
+				select {
+				case <-returned:
+				case <-time.After(time.Until(guard)):
+					t.Fatal("the relay never returned after a peer vanished")
+				}
+				if !neterr.IsPeerVanished(runErr) {
+					t.Errorf("the relay returned %v, want the vanished peer's error: it is a genuine "+
+						"error, as a reset is, not the benign timeout of the relay's own deadline nudge", runErr)
+				}
+			})
+		}
+	}
+}
+
+// vanishedConn is a socket whose peer vanished without a reset, as the
+// kernel reports it once gone is closed: one read fails with the errno it
+// gave up with, and every read after that returns EOF.
+type vanishedConn struct {
+	net.Conn
+	gone     chan struct{}
+	errno    syscall.Errno
+	reported atomic.Bool
+}
+
+func (c *vanishedConn) Read([]byte) (int, error) {
+	<-c.gone
+	if c.reported.Swap(true) {
+		return 0, io.EOF
+	}
+	return 0, &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", c.errno)}
 }
 
 // rowConn is a relay row's socket: a *net.TCPConn with the relay's

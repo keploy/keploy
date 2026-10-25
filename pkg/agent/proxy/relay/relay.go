@@ -583,20 +583,27 @@ func (r *Relay) run(ctx context.Context) error {
 	// the client hold); the gone peer is then not marked, and its EOF goes
 	// on as a FIN. That case is narrow.
 	//
+	// A peer that vanished without a reset (the kernel gave up on it:
+	// ETIMEDOUT, EHOSTUNREACH) is gone the same way, and is handled the
+	// same way, read or write: the kernel reports its end once too. The
+	// other peer then reads ECONNRESET, where with no proxy its own socket
+	// would fail with the vanished peer's errno; a reset is the closest end
+	// the proxy can give it (proxyutil.PeerGone).
+	//
 	// Anything else that is NOT a clean EOF (another read or write error)
 	// keeps the original immediate teardown: there is no half-open state
 	// to preserve when the connection is already broken.
 	var srcGone, dstGone atomic.Bool
 	onForwarderExit := func(err error, wrote bool, from, to *atomic.Pointer[net.Conn], fromGone, toGone *atomic.Bool) {
 		switch {
-		case wrote && neterr.IsConnReset(err):
+		case wrote && proxyutil.PeerGone(err):
 			toGone.Store(true)
 			proxyutil.ResetOnClose(*from.Load())
 			return
 		case wrote && neterr.IsBrokenPipe(err):
 			proxyutil.ResetOnClose(*from.Load())
 			return
-		case !wrote && (neterr.IsConnReset(err) || (errors.Is(err, io.EOF) && fromGone.Load())):
+		case !wrote && (proxyutil.PeerGone(err) || (errors.Is(err, io.EOF) && fromGone.Load())):
 			proxyutil.ResetOnClose(*to.Load())
 			closeStopping()
 			r.nudgeDeadline(to.Load())
@@ -1082,7 +1089,14 @@ func (r *Relay) forward(
 			// timeout-flagged error and the caller is expected to
 			// re-arm. Continuing the loop is the right thing in
 			// either case.
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			//
+			// A vanished peer is not one: its read fails with ETIMEDOUT
+			// (or EHOSTUNREACH) when the kernel gives up on it, and
+			// syscall.ETIMEDOUT is a Timeout() too. The kernel reports
+			// that once, so looping read the socket's EOF next and took
+			// the gone peer for a clean half-close: the other peer got a
+			// FIN, not the reset that onForwarderExit passes on for it.
+			if ne, ok := err.(net.Error); ok && ne.Timeout() && !neterr.IsPeerVanished(err) {
 				continue
 			}
 			return err
@@ -1772,9 +1786,10 @@ func isBenignNetErr(err error) bool {
 	}
 	// Timeout() == true means ctx was cancelled and we nudged the
 	// read deadline; the caller is doing teardown, not reporting a
-	// genuine protocol error.
+	// genuine protocol error. A vanished peer's ETIMEDOUT is a Timeout()
+	// too, and is the genuine error a reset is.
 	var nerr net.Error
-	if errors.As(err, &nerr) && nerr.Timeout() {
+	if errors.As(err, &nerr) && nerr.Timeout() && !neterr.IsPeerVanished(err) {
 		return true
 	}
 	// String fallback for errors that predate net.ErrClosed (and for

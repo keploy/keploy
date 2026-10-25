@@ -68,15 +68,33 @@ func (r *ReadRecorder) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// PassOnReset passes a reset by a copy's source peer on to dst, the
-// connection the copy wrote to, and reports whether it did. readErr is the
-// error the copy's source returned last (ReadRecorder.Err).
+// PeerGone reports whether err says a connection's peer is gone in both
+// directions: it reset (neterr.IsConnReset), or it vanished without a reset
+// and the kernel gave up on it (neterr.IsPeerVanished: ETIMEDOUT,
+// EHOSTUNREACH and their kin).
 //
-// A peer that resets is gone in both directions, so this is how a relay
+// A relay passes both on to the other peer as a reset. For a vanished peer
+// that is not the error the other peer would see with no proxy in between:
+// its own socket would fail with the vanished peer's ETIMEDOUT or
+// EHOSTUNREACH, while through the proxy it reads ECONNRESET. Its socket is
+// the proxy's, which is alive, and a reset is the one end the proxy can give
+// it that says the stream was cut. The alternatives are worse: a FIN calls a
+// cut stream complete, and saying nothing leaves the other peer waiting on a
+// connection that is dead (until its own timeout, if it has one), with the
+// relay waiting on it too.
+func PeerGone(err error) bool { return neterr.IsConnReset(err) || neterr.IsPeerVanished(err) }
+
+// PassOnReset passes the end of a copy's source peer, when it reset or
+// vanished (PeerGone), on to dst, the connection the copy wrote to, as a
+// reset, and reports whether it did. readErr is the error the copy's source
+// returned last (ReadRecorder.Err).
+//
+// A peer that is gone is gone in both directions, so this is how a relay
 // ends on the event rather than on a clock:
 //   - the other direction writes to that peer, so nothing it reads can be
 //     delivered any more, and the relay may stop waiting for it at once;
-//   - dst learns of the reset the way it would with no proxy in between:
+//   - dst learns of the end the way it would with no proxy in between, as
+//     a reset (or, for a vanished peer, the closest to it: see PeerGone):
 //     its close sends a reset, not the FIN that would call a truncated
 //     stream complete. Without that a destination that waits for the
 //     client's next request (an SMTP server after its reply, a database
@@ -94,7 +112,7 @@ func (r *ReadRecorder) Read(p []byte) (int, error) {
 // So passing the reset on loses nothing a reset would not; only the socket
 // that held the bytes differs.
 func PassOnReset(dst net.Conn, readErr error) bool {
-	if !neterr.IsConnReset(readErr) {
+	if !PeerGone(readErr) {
 		return false
 	}
 	ResetOnClose(dst)

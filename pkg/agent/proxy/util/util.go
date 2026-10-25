@@ -1088,26 +1088,24 @@ func recovered(logger *zap.Logger, r any, client, dest net.Conn) {
 // passed with nothing moved, and a survivor that is still moving bytes
 // keeps going for as long as it keeps moving them.
 //
-// It is kept for the breaks no event ends, where the survivor's source is
-// alive and silent:
-//   - one half of a tls.Conn has failed (its read half on a bad record or
-//     an alert, say) and both peers are alive. tls.Conn keeps its two
-//     halves' errors apart, so the failed half says nothing about the
-//     survivor, and no FIN or reset arrives because neither peer has ended:
-//     the client may wait for the reply to a request that died on the
-//     broken half while its destination waits for the next request;
-//   - a peer vanished without a reset (its host went down, or the network
-//     or a NAT entry between dropped it), so its copy ended on a timeout or
-//     an unreachable host (ETIMEDOUT, EHOSTUNREACH), not a reset, and the
-//     other peer is alive and silent.
+// It is kept for the one break no event ends, where the survivor's source
+// is alive and silent: one half of a tls.Conn has failed (its read half on
+// a bad record or an alert, say) and both peers are alive. tls.Conn keeps
+// its two halves' errors apart, so the failed half says nothing about the
+// survivor, and no FIN or reset arrives because neither peer has ended:
+// the client may wait for the reply to a request that died on the broken
+// half while its destination waits for the next request.
 //
 // Keploy cannot wake the survivor's blocked read either, since SafeConn's
 // Close and all three of its deadline setters are no-ops (the session owns
 // the socket). So the absence of progress is the only signal left. The
-// other breaks end on an event and never wait out this window: a reset
-// read ends the relay at once (PassOnReset), a clean EOF forwards its FIN,
-// and a write that failed because its peer is gone leaves the survivor
-// reading that same peer, whose FIN or reset then ends it.
+// other breaks end on an event and never wait out this window: a read that
+// says its peer is gone ends the relay at once (PassOnReset), whether the
+// peer reset or vanished without a reset (its host went down, or the
+// network or a NAT entry between dropped it, so the copy ended on ETIMEDOUT
+// or EHOSTUNREACH); a clean EOF forwards its FIN; and a write that failed
+// because its peer is gone leaves the survivor reading that same peer,
+// whose FIN or reset then ends it.
 //
 // Bounding progress, not time, is the whole point. A fixed wall clock is a
 // slower version of abandoning the survivor — measured at 33% of a
@@ -1178,9 +1176,9 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 type copyOutcome struct {
 	idx int
 	err error
-	// peerReset is set when the copy's SOURCE peer reset the connection
-	// (PassOnReset): that peer is gone both ways, so the other direction,
-	// which writes to it, has nothing left to deliver.
+	// peerReset is set when the copy's SOURCE peer reset the connection or
+	// vanished (PassOnReset): that peer is gone both ways, so the other
+	// direction, which writes to it, has nothing left to deliver.
 	peerReset bool
 }
 
@@ -1227,7 +1225,11 @@ func WaitForSurvivor[T any](finished <-chan T, delivered func() int64, idle time
 //
 // PASS A RESET ON AS A RESET, AND END ON IT. A peer that resets is gone in
 // both directions, so the other peer is reset too (PassOnReset) and the
-// relay returns at once: there is no survivor to wait for.
+// relay returns at once: there is no survivor to wait for. A peer that
+// vanished without a reset (ETIMEDOUT, EHOSTUNREACH) is gone the same way
+// and is passed on as a reset too, the closest end the proxy can give (the
+// other peer reads ECONNRESET, not the vanished peer's errno; see
+// PeerGone).
 //
 // WHEN ONE DIRECTION BREAKS OTHERWISE, LET THE OTHER KEEP GOING WHILE IT IS
 // STILL MAKING PROGRESS, and abandon it only once it stalls.

@@ -143,6 +143,7 @@ func TestNilAndUnrelatedErrors(t *testing.T) {
 		{"IsConnAborted", IsConnAborted},
 		{"IsBrokenPipe", IsBrokenPipe},
 		{"IsConnRefused", IsConnRefused},
+		{"IsPeerVanished", IsPeerVanished},
 	} {
 		if fn.f(nil) {
 			t.Errorf("%s(nil) = true, want false", fn.name)
@@ -169,5 +170,44 @@ func TestPortableConstantsStillMatch(t *testing.T) {
 	}
 	if !strings.Contains(wrapped.Error(), "read") {
 		t.Fatalf("unexpected error rendering: %v", wrapped)
+	}
+}
+
+// TestIsPeerVanished: the errnos of a connection the kernel gave up on are a
+// vanished peer, wrapped the way net delivers them; a reset is not (it has
+// its own predicate), and neither is a deadline, which is a timeout too
+// (net.Error's Timeout) but says nothing about the peer. The deadline comes
+// from a real socket, so the row holds for what net really returns.
+func TestIsPeerVanished(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EHOSTDOWN} {
+		err := &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", errno)}
+		if !IsPeerVanished(err) {
+			t.Errorf("IsPeerVanished(%v) = false, want true", err)
+		}
+	}
+	if err := (&net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}); IsPeerVanished(err) {
+		t.Errorf("IsPeerVanished(%v) = true, want false: a reset is IsConnReset's", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.SetReadDeadline(time.Unix(1, 0)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	_, err = c.Read(make([]byte, 1))
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Fatalf("a read past its deadline returned %v, want a timeout", err)
+	}
+	if IsPeerVanished(err) {
+		t.Errorf("IsPeerVanished(%v) = true, want false: a deadline the conn's owner set is not the peer's end", err)
 	}
 }

@@ -20,21 +20,26 @@ func TestWindowsErrnoTable(t *testing.T) {
 		name                                   string
 		errno                                  syscall.Errno
 		reset, aborted, brokenPipe, connRefuse bool
+		vanished                               bool
 	}{
-		{"WSAECONNRESET", windows.WSAECONNRESET, true, false, false, false},
-		{"WSAENETRESET", windows.WSAENETRESET, true, false, false, false},
-		{"WSAESHUTDOWN", windows.WSAESHUTDOWN, false, false, true, false},
-		{"WSAECONNREFUSED", windows.WSAECONNREFUSED, false, false, false, true},
+		{"WSAECONNRESET", windows.WSAECONNRESET, true, false, false, false, false},
+		{"WSAENETRESET", windows.WSAENETRESET, true, false, false, false, false},
+		{"WSAESHUTDOWN", windows.WSAESHUTDOWN, false, false, true, false, false},
+		{"WSAECONNREFUSED", windows.WSAECONNREFUSED, false, false, false, true, false},
 
 		// Ambiguous on Windows (genuine abort OR data-transmission timeout),
-		// so it maps to nothing. See the comment in neterr_windows.go: every
-		// caller excludes timeouts deliberately, and this is the only code
-		// that would smuggle one back in.
-		{"WSAECONNABORTED", windows.WSAECONNABORTED, false, false, false, false},
+		// so it maps to none of the first four. See the comment in
+		// neterr_windows.go: their callers exclude timeouts deliberately,
+		// and this is the only code that would smuggle one back in. Either
+		// meaning leaves the connection dead, so it is a vanished peer.
+		{"WSAECONNABORTED", windows.WSAECONNABORTED, false, false, false, false, true},
 
-		// Timeouts and unrelated Winsock failures must classify as nothing.
-		{"WSAETIMEDOUT", windows.WSAETIMEDOUT, false, false, false, false},
-		{"WSAEHOSTUNREACH", windows.WSAEHOSTUNREACH, false, false, false, false},
+		// A connection Winsock gave up on is a vanished peer, and nothing
+		// else: not a reset, an abort, a broken pipe or a refusal.
+		{"WSAETIMEDOUT", windows.WSAETIMEDOUT, false, false, false, false, true},
+		{"WSAEHOSTUNREACH", windows.WSAEHOSTUNREACH, false, false, false, false, true},
+		{"WSAENETUNREACH", windows.WSAENETUNREACH, false, false, false, false, true},
+		{"WSAEHOSTDOWN", windows.WSAEHOSTDOWN, false, false, false, false, true},
 	}
 
 	for _, c := range cases {
@@ -52,6 +57,9 @@ func TestWindowsErrnoTable(t *testing.T) {
 		}
 		if got := IsConnRefused(err); got != c.connRefuse {
 			t.Errorf("IsConnRefused(%s/%d) = %v, want %v", c.name, uintptr(c.errno), got, c.connRefuse)
+		}
+		if got := IsPeerVanished(err); got != c.vanished {
+			t.Errorf("IsPeerVanished(%s/%d) = %v, want %v", c.name, uintptr(c.errno), got, c.vanished)
 		}
 	}
 }

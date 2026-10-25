@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -39,12 +40,28 @@ import (
 // Both directions: the destination resets (the client's upload meets it),
 // and the client resets (the destination's answer meets it, and the request
 // the client sent before its reset still reaches the destination).
+//
+// A peer that vanished without a reset (the kernel gave up on it, and the
+// write took ETIMEDOUT or EHOSTUNREACH) is gone the same way and gets the
+// same handling: its reply, then a reset. A loopback socket cannot be made
+// to give those errnos, so those cases SIMULATE the write's failure (the
+// socket is not touched), and the gone peer closes with a FIN, the end its
+// socket reports once the kernel has given up on it.
 func TestRelay_AResetWriteStillDeliversTheGonePeersReply(t *testing.T) {
-	t.Run("the destination reset", func(t *testing.T) { testAGoneWriteStillDeliversTheReply(t, true) })
-	t.Run("the client reset", func(t *testing.T) { testAGoneWriteStillDeliversTheReply(t, false) })
+	t.Run("the destination reset", func(t *testing.T) { testAGoneWriteStillDeliversTheReply(t, true, 0) })
+	t.Run("the client reset", func(t *testing.T) { testAGoneWriteStillDeliversTheReply(t, false, 0) })
+	t.Run("the destination vanished, ETIMEDOUT", func(t *testing.T) {
+		testAGoneWriteStillDeliversTheReply(t, true, syscall.ETIMEDOUT)
+	})
+	t.Run("the destination vanished, EHOSTUNREACH", func(t *testing.T) {
+		testAGoneWriteStillDeliversTheReply(t, true, syscall.EHOSTUNREACH)
+	})
 }
 
-func testAGoneWriteStillDeliversTheReply(t *testing.T, destGone bool) {
+// testAGoneWriteStillDeliversTheReply runs the row with the destination or
+// the client gone; vanished, when set, is the errno the write to it fails
+// with (simulated), and otherwise the gone peer really resets.
+func testAGoneWriteStillDeliversTheReply(t *testing.T, destGone bool, vanished syscall.Errno) {
 	clientApp, srcProxy := relayTCPPair(t)
 	dstProxy, destSvc := relayTCPPair(t)
 	guard := hangGuard(t)
@@ -63,9 +80,9 @@ func testAGoneWriteStillDeliversTheReply(t *testing.T, destGone bool) {
 	src := &rowConn{Conn: srcProxy, ended: ended}
 	dst := &rowConn{Conn: dstProxy, ended: ended}
 	if destGone {
-		dst.hold = acted
+		dst.hold, dst.failWith = acted, vanished
 	} else {
-		src.hold = acted
+		src.hold, src.failWith = acted, vanished
 	}
 	cfg := Config{Logger: zap.NewNop(), afterForwarderExit: func(d fakeconn.Direction) {
 		if d == writer {
@@ -86,7 +103,11 @@ func testAGoneWriteStillDeliversTheReply(t *testing.T, destGone bool) {
 	if _, err := gone.Write(reply); err != nil {
 		t.Fatalf("the gone peer writes its reply: %v", err)
 	}
-	resetAndWait(t, gone, goneProxy, guard)
+	if vanished == 0 {
+		resetAndWait(t, gone, goneProxy, guard)
+	} else {
+		_ = gone.Close()
+	}
 	if _, err := other.Write([]byte("upload")); err != nil {
 		t.Fatalf("the other peer writes: %v", err)
 	}

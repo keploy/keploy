@@ -38,4 +38,17 @@ var (
 	connRefusedErrnos = []syscall.Errno{
 		windows.WSAECONNREFUSED, // 10061 - "connectex: ... actively refused it"
 	}
+
+	// A connection Winsock gave up on. WSAECONNABORTED is here although it
+	// is kept out of connAbortedErrnos above: it is a data-transmission
+	// timeout (the peer vanished) or a local abort, and both leave the
+	// connection dead in both directions, which is all IsPeerVanished's
+	// callers ask. They pass the end on as a reset; none re-sends.
+	peerVanishedErrnos = []syscall.Errno{
+		windows.WSAETIMEDOUT,    // 10060 - the peer did not answer
+		windows.WSAEHOSTUNREACH, // 10065
+		windows.WSAENETUNREACH,  // 10051
+		windows.WSAEHOSTDOWN,    // 10064
+		windows.WSAECONNABORTED, // 10053 - a data-transmission timeout, or a local abort
+	}
 )
