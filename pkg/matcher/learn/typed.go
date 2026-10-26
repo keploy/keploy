@@ -529,7 +529,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, why
 		return ln
 	}
-	noWindow := false
+	// noWindow, of an instant neither the lead nor a window shows a read
+	// that is learned as a plain read all the same (noWindowRead), is why
+	// keploy refused it before it learned it so: a caller whose replay
+	// checks no read of the clock refuses it with that reason still
+	// (KindClockRead). "" for any other.
+	noWindow := ""
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
 		// A read of the clock plus a constant offset (a time to live, a
 		// due date), in its call's window in both runs: compared, never
@@ -540,29 +545,30 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if off, ok := clockOffsetOf(rt, lt, w); ok && !dc.clientTests {
 			return dc.clockOffset(ln, off, max(rt.res, lt.res), lt.at.Sub(rt.at), w, unread, rec, resp)
 		}
+		why := instantNotClock
+		switch {
+		case rt.names != lt.names:
+			why = instantFormChangedWhy(rt.names, lt.names)
+		case dc.clientTests && rt.names == namesTimeOfDay:
+			why = timeOfDayClientTestWhy
+		case dc.clientTests:
+			why = clientTestWhy("", w != nil)
+		case inClockRange(rt.at) && inClockRange(lt.at) && leadMoved(rt.at, lt.at, rt.res, lt.res, false):
+			// Moved by the lead, as a read made after its call would
+			// (readNoLaterThan): the reason says so, never that it did
+			// not move by it.
+			why = instantPastCall
+			if rt.afterCall(at, dc.zone) {
+				why = instantAfterCall
+			}
+		}
 		// With no window, one that names its moment is a plain read of
 		// the clock all the same, checked at every replay (noWindowRead).
 		if !dc.noWindowRead(rt, lt, w, at) {
-			ln.Kind, ln.Why = KindUnaccounted, instantNotClock
-			switch {
-			case rt.names != lt.names:
-				ln.Why = instantFormChangedWhy(rt.names, lt.names)
-			case dc.clientTests && rt.names == namesTimeOfDay:
-				ln.Why = timeOfDayClientTestWhy
-			case dc.clientTests:
-				ln.Why = clientTestWhy("", w != nil)
-			case inClockRange(rt.at) && inClockRange(lt.at) && leadMoved(rt.at, lt.at, rt.res, lt.res, false):
-				// Moved by the lead, as a read made after its call would
-				// (readNoLaterThan): the reason says so, never that it did
-				// not move by it.
-				ln.Why = instantPastCall
-				if rt.afterCall(at, dc.zone) {
-					ln.Why = instantAfterCall
-				}
-			}
+			ln.Kind, ln.Why = KindUnaccounted, why
 			return ln
 		}
-		noWindow = true
+		noWindow = why
 	}
 	// Noise, or an echo, only where the echo could read the test case's own
 	// request, where the moment F saw may stand.
@@ -573,16 +579,20 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
 		// An echo answers with this run's value and checks none, so one
 		// that neither the lead nor a window shows a read is refused.
-		if noWindow {
-			ln.Kind, ln.Why = KindUnaccounted, instantNotClock
+		if noWindow != "" {
+			ln.Kind, ln.Why = KindUnaccounted, noWindow
 			return ln
 		}
 		ln.Kind, ln.Echo = KindEcho, echo
 	}
-	// A read of the clock, checked at every replay: one that names its
-	// moment as it names it, a wall clock of no zone in the zone the learn
-	// step read it in (wallZone).
+	// A read of the clock, checked at every replay (KindClockRead, never
+	// noise): one that names its moment as it names it, a wall clock of no
+	// zone in the zone the learn step read it in (wallZone).
 	if ln.Kind == KindNoise && rt.names == lt.names && rt.names != namesTimeOfDay {
+		ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
+		if noWindow != "" {
+			ln.Why = noWindow
+		}
 		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
 		if rt.names == namesWall {
 			ln.Read.Zone = dc.wallZone(rt.at, at)

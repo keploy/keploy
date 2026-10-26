@@ -37,7 +37,7 @@ func TestALearnedClockReadIsCheckedAtReplayInItsCallsSpan(t *testing.T) {
 	}
 	ln := classify(text(rec), text(live))
 	o, ok := ln.Clock()
-	if ln.Kind != KindNoise || !ok || !o.Plain() || o.Res != time.Nanosecond {
+	if ln.Kind != KindClockRead || !ok || !o.Plain() || o.Res != time.Nanosecond {
 		t.Fatalf("the nanosecond read: %s Read=%+v Clock=%+v,%v (%s); want noise that is a plain read at 1ns", ln.Kind, ln.Read, o, ok, ln.Why)
 	}
 
@@ -66,7 +66,7 @@ func TestALearnedClockReadIsCheckedAtReplayInItsCallsSpan(t *testing.T) {
 		return InstantLeaf("body.createdAt.$date.$numberLong", "body.createdAt", at.Truncate(time.Millisecond), time.Millisecond)
 	}
 	ln = classify(typed(rec), typed(live))
-	if o, ok := ln.Clock(); ln.Kind != KindNoise || !ok || !o.Plain() || o.Res < time.Millisecond {
+	if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() || o.Res < time.Millisecond {
 		t.Fatalf("the typed read: %s %+v,%v (%s); want noise that is a plain read", ln.Kind, o, ok, ln.Why)
 	} else if !ClockReadHolds(o, typed(now), s) || ClockReadHolds(o, typed(now.Add(-30*24*time.Hour)), s) || ClockReadHolds(o, typed(s.To.Add(time.Millisecond)), s) {
 		t.Errorf("the typed read: want the replay's now held, thirty days before and a millisecond past the span not")
@@ -125,7 +125,7 @@ func TestACutClockReadIsRefusedAtReplayNamingTheCut(t *testing.T) {
 	sec := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
 	ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: typed(sec.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{p: typed(sec)}}, sec.Add(time.Millisecond), nil, nil, nil, nil)[0]
 	o, ok := ln.Clock()
-	if ln.Kind != KindNoise || !ok || o.Res < time.Second {
+	if ln.Kind != KindClockRead || !ok || o.Res < time.Second {
 		t.Fatalf("the typed cut read: %s %+v,%v (%s); want noise that is a read at the second's cut", ln.Kind, o, ok, ln.Why)
 	}
 	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
@@ -244,7 +244,16 @@ func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
 // span, never noise that lets any value pass.
 func plainRead(ln Learned) bool {
 	o, ok := ln.Clock()
-	return ln.Kind == KindNoise && ok && o.Plain()
+	return ln.Kind == KindClockRead && ok && o.Plain()
+}
+
+// noiseOrRead reports whether ln is learned as noise or as a plain read of
+// the clock, and a read only as its own kind: noise never carries a read
+// (KindNoise with Read nil), and a read always does (KindClockRead), so a
+// caller that writes its noise leaves to the noise a replay skips never
+// stops comparing a read of the clock.
+func noiseOrRead(ln Learned) bool {
+	return ln.Kind == KindNoise && ln.Read == nil || plainRead(ln)
 }
 
 // zonedRead reports whether ln is a plain read of the clock (plainRead) that
@@ -301,7 +310,7 @@ func TestAWholeInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 			}
 			continue
 		}
-		if o, ok := ln.Clock(); ln.Kind != KindNoise || !ok || !o.Plain() {
+		if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() {
 			t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock, compared at replay", row.what, ln.Kind, ln.Read, ln.Why)
 		}
 	}
@@ -363,7 +372,7 @@ func TestAWholeInstantOutsideItsCallsWindowIsRefused(t *testing.T) {
 				t.Errorf("%s: %s (%s); want refused as a clock read before its call's window", row.what, ln.Kind, ln.Why)
 			}
 		case textClockRead(row.r, row.l) != nil:
-			if o, ok := ln.Clock(); ln.Kind != KindNoise || !ok || !o.Plain() {
+			if o, ok := ln.Clock(); ln.Kind != KindClockRead || !ok || !o.Plain() {
 				t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock", row.what, ln.Kind, ln.Read, ln.Why)
 			}
 		default:
@@ -525,5 +534,68 @@ func TestATimeOfDayTheLeadMovedIsNoClockReadAReplayChecks(t *testing.T) {
 	ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil)
 	if _, ok := ln.Clock(); ln.Kind != KindNoise || ok {
 		t.Errorf("a time of day the lead moved: %s Read=%+v (%s); want noise with no read of the clock", ln.Kind, ln.Read, ln.Why)
+	}
+}
+
+// A caller whose replay checks no read of the clock, and switches on the
+// kind alone (a parser that writes every KindNoise to the noise its replay
+// skips, and refuses any kind it does not know with its Why), never receives
+// a read of the clock as noise: every read is its own kind (KindClockRead),
+// so such a caller refuses it, never learns it as noise that lets any value
+// pass at every replay. One keploy refused before it learned it as a read
+// (an instant its protocol types with no call window that the lead did not
+// move) keeps that reason; one it learned as noise before (the lead moved
+// it, a window held it) says it is a read this replay does not check. A
+// caller that checks reads takes each as a plain read (Clock).
+func TestACallerThatChecksNoClockReadNeverReceivesOneAsNoise(t *testing.T) {
+	rec := time.Date(2026, 10, 27, 9, 0, 0, 123e6, time.UTC)
+	call := rec.Add(time.Millisecond)
+	const p = "body.at"
+	shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{p: l}} }
+	text := func(at time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: at.Format("2006-01-02T15:04:05.000Z07:00")}
+	}
+	typed := func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) }
+	wall := func(at time.Time) Leaf { return WallClockLeaf(p, p, at, time.Millisecond) }
+	lead, late := rec.Add(FullRoundLead), rec.Add(FullRoundLead+3400*time.Millisecond)
+	w := &Window{Rec: Span{From: rec.Add(-time.Second), To: call}, F: Span{From: late.Add(-time.Second), To: late.Add(time.Millisecond)}}
+	// unaware is such a caller: noise for a KindNoise, a binding for a
+	// variable or an echo, its refusal with the learn step's Why otherwise.
+	unaware := func(ln Learned) (bool, string) {
+		switch ln.Kind {
+		case KindNoise:
+			return true, ""
+		case KindEcho, KindVariable:
+			return false, ""
+		}
+		return false, p + " changed, and " + ln.Why
+	}
+	for _, row := range []struct {
+		what   string
+		r, l   Leaf
+		w      *Window
+		before string // why keploy refused it before it learned a read ("": noise)
+	}{
+		{"a text instant whole the lead moved", text(rec), text(lead), nil, ""},
+		{"a text instant whole with no window, read late", text(rec), text(late), nil, ""},
+		{"a text instant whole its window holds", text(rec), text(late), w, ""},
+		{"a typed instant the lead moved", typed(rec), typed(lead), nil, ""},
+		{"a typed instant its window holds", typed(rec), typed(late), w, ""},
+		{"a typed instant with no window, read late", typed(rec), typed(late), nil, instantNotClock},
+		{"a wall clock of no zone the lead moved", wall(rec), wall(lead), nil, ""},
+		{"a wall clock of no zone with no window, read late", wall(rec), wall(late), nil, instantNotClock},
+	} {
+		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(row.l), shape(row.r), call, nil, nil, nil, row.w)[0]
+		if o, ok := ln.Clock(); ln.Kind != KindClockRead || ln.Read == nil || !ok || !o.Plain() {
+			t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock, of its own kind", row.what, ln.Kind, ln.Read, ln.Why)
+			continue
+		}
+		want := clockReadUncheckedWhy
+		if row.before != "" {
+			want = row.before
+		}
+		if noise, why := unaware(ln); noise || why != p+" changed, and "+want {
+			t.Errorf("FALSE GREEN? %s, to a caller that checks no read: noise %v (%s); want refused: %s", row.what, noise, why, want)
+		}
 	}
 }
