@@ -923,11 +923,11 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Empty(t, m.ReceivedReq)
 
 	// The matcher's next step names the fields that differed; a map's keys
-	// can be values, so a path keeps its shape.
+	// can be values, so a path keeps its shape, and the advice stays.
 	drift := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x",
 		NextSteps:  "Only values drifted (body.users.alice@example.com.score, body.items[3].sku_7c01d2e9). Re-record.",
 		FieldDiffs: []models.MockFieldDiff{{Path: "body.users.alice@example.com.score"}, {Path: "body.items[3].sku_7c01d2e9"}}})
-	require.Equal(t, "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", drift.NextSteps)
+	require.Equal(t, "Only values drifted (body.users.{}.com.score, body.items[3].{}). Re-record.", drift.NextSteps)
 	fixed := sanitizedMiss(models.UnmatchedCall{Protocol: "MySQL", NextSteps: "Re-record mocks if the SQL query has changed."})
 	require.Equal(t, "Re-record mocks if the SQL query has changed.", fixed.NextSteps, "fixed advice is kept")
 	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "PostgresV2", ActualSummary: "SELECT 1"})
@@ -942,6 +942,89 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.NotNil(t, rep.Repeat, "the repeat note was dropped")
 	require.Equal(t, *note, *rep.Repeat)
 	require.NotSame(t, note, rep.Repeat, "the note is the miss's own: written on a copy")
+}
+
+// A miss of record's full round keeps the learn step's reason: its code and
+// its words, with every field path they name in its shape, so a test's
+// reason, the round's log and its evidence say why the call missed. (The
+// words were once replaced whole by a count of the differing fields
+// whenever they named one, which every learn step's reason does.)
+func TestAMissKeepsTheLearnStepsReason(t *testing.T) {
+	why := "The record round's replay of the same build saw this request differ from its recording in a way keploy does not learn as noise: " +
+		"body.docs.msgs.0.appId carries a value a recording of the test set holds earlier (in mock-1006), which keploy cannot follow into a Mongo request yet; " +
+		"body.docs.msgs.0.prefs.bob@example.org.on was recorded with it too. If the field is a time the application reads from its own clock, declare it noise in keploy.yml."
+	m := sanitizedMiss(models.UnmatchedCall{Protocol: "Mongo", Destination: "mongo:27017", MatchPhase: "body_mismatch", Reason: models.MissRequestChanged,
+		NextSteps: why, FieldDiffs: []models.MockFieldDiff{{Path: "body.docs.msgs.0.appId", Expected: "x-48d1", Actual: "x-6c7d"}}})
+	require.Equal(t, models.MissRequestChanged, m.Reason)
+	require.Equal(t, "The record round's replay of the same build saw this request differ from its recording in a way keploy does not learn as noise: "+
+		"body.docs.msgs.{}.appId carries a value a recording of the test set holds earlier (in mock-1006), which keploy cannot follow into a Mongo request yet; "+
+		"body.docs.msgs.{}.prefs.{}.org.on was recorded with it too. If the field is a time the application reads from its own clock, declare it noise in keploy.yml.", m.NextSteps,
+		"the reason stays, each body path in its shape, a path the diff does not list included")
+	require.NotContains(t, m.NextSteps, "bob", "a key that may be a value is {}")
+
+	// A path named without its "body." (as a learn step may name one) is
+	// shaped as the diff's path is; a header keeps its name.
+	short := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "keploy's learn step: users.alice@example.com.score moved; header.X-Trace changed.",
+		FieldDiffs: []models.MockFieldDiff{{Path: "body.users.alice@example.com.score"}, {Path: "header.X-Trace"}}})
+	require.Equal(t, "keploy's learn step: users.{}.com.score moved; header.X-Trace changed.", short.NextSteps)
+	require.Equal(t, short.NextSteps, nextStepOf(short), "a shaped next step is its own shape")
+}
+
+// A test failed in record's full round says, in its reason (what keploy's
+// test harness integrations print as the test's error), why each of its
+// calls missed in the learn step's words; a test whose misses have no
+// reason reads as before, and a miss made before the test began is not
+// explained as one of its calls.
+func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
+	learned := sanitizedMiss(models.UnmatchedCall{Protocol: "Mongo", Destination: "mongo:27017", Reason: models.MissRequestChanged, Differs: []string{"body.docs.msgs.0.appId"},
+		NextSteps: "The record round's replay saw body.docs.msgs.0.appId differ: it carries a value keploy cannot follow yet.", FieldDiffs: []models.MockFieldDiff{{Path: "body.docs.msgs.0.appId"}}})
+	r := evidenceReason("api::TestSlowStep", &models.ScopeEvidence{Misses: []models.UnmatchedCall{learned, learned}}, nil, time.Time{})
+	require.Equal(t, "keploy: a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs); a Mongo call to mongo:27017 had no recorded answer (body.docs.msgs.{}.appId differs).\n"+
+		"a Mongo call to mongo:27017 missed (request_changed): The record round's replay saw body.docs.msgs.{}.appId differ: it carries a value keploy cannot follow yet.\n"+
+		"If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting api::TestSlowStep>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine api::TestSlowStep --reason \"<why>\".", r, "one line per reason, said once")
+
+	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", NextSteps: "Re-record."}}}, nil, time.Time{})
+	require.Equal(t, "keploy: GET /x had no recorded answer. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting t>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine t --reason \"<why>\".", plain, "a miss without the learn step's reason reads as it did")
+
+	began := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	early := learned
+	early.At = began.Add(-time.Second)
+	r = evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{early}}, nil, began)
+	require.NotContains(t, r, "missed (request_changed)", "a call made before the test began is not explained as the test's")
+
+	var many []models.UnmatchedCall
+	for i := 0; i < 7; i++ {
+		c := learned
+		c.Destination = fmt.Sprintf("mongo-%d:27017", i)
+		many = append(many, c)
+	}
+	r = evidenceReason("t", &models.ScopeEvidence{Misses: many}, nil, time.Time{})
+	require.Equal(t, 5, strings.Count(r, "missed (request_changed)"))
+	require.Contains(t, r, "and 2 more call(s) missed for a reason the learn step gave")
+}
+
+// End to end on the agent: the test's end answers fail with the learn
+// step's reason, and the run's miss list (the CLI's round log) keeps it.
+func TestATestsEndAndTheRunsMissesCarryTheLearnStepsReason(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "Mongo", Destination: "mongo:27017", Kind: models.MissInTest, Reason: models.MissRequestChanged,
+		NextSteps: "body.cmd.filter.appId changed, and keploy cannot follow it yet.", FieldDiffs: []models.MockFieldDiff{{Path: "body.cmd.filter.appId", Expected: "a", Actual: "b"}}}}
+	e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "a Mongo call to mongo:27017 missed (request_changed): body.cmd.filter.appId changed, and keploy cannot follow it yet.")
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, models.MissRequestChanged, all[0].Reason)
+	require.Equal(t, "body.cmd.filter.appId changed, and keploy cannot follow it yet.", all[0].NextSteps)
+	require.Empty(t, all[0].FieldDiffs, "no value: evidence keeps no field diff")
 }
 
 // A miss, its reason text and a recorded mock's name keep an HTTP call's
@@ -1538,15 +1621,16 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	require.Contains(t, plain, "GET /x had no recorded answer (body.q differs).")
 
 	// The run's summary shows a miss's next step as evidence keeps it
-	// (nextStepOf): a next step that names a field the call differs in is
-	// replaced by fixed advice, and the why still reaches the summary, with
-	// no value; the matcher's own advice keeps it too, once.
-	advice := "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
+	// (nextStepOf): a next step that names a field the call differs in keeps
+	// its words with each path in its shape, and the why still reaches the
+	// summary, with no value; the matcher's own advice keeps it too, once.
+	advice := "fields differ: body.since, body.users.{}.since"
 	mongo := sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", Destination: "127.0.0.1:27017", MatchPhase: "body_mismatch", ClosestMock: "mock-12",
 		NextSteps:    "fields differ: body.since, body.users.kqzx9w.since",
 		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since"}, {Path: "body.users.kqzx9w.since"}},
 		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}}})
 	require.Equal(t, advice+" ("+since+")", mongo.NextSteps)
+	require.NotContains(t, mongo.NextSteps, "kqzx9w")
 	own := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test",
 		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.expires", Why: ttl}}})
 	require.Equal(t, "re-record the test ("+since+"; "+ttl+")", own.NextSteps)

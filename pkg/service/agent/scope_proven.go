@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -1358,7 +1359,8 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // like a value (models.PathShape says which do) or that a test variable's
 // place on the call names (VariablePlaces: one the miss names, one the
 // closest mock or a mock on the call's route declares, or one that holds a
-// value the test bound). The next step is the matcher's own fixed advice
+// value the test bound). The next step is the matcher's advice, or the
+// learn step's reason, with each field path it names in its shape
 // (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
@@ -1394,25 +1396,23 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	return out
 }
 
-// nextStepOf is a miss's next step as evidence keeps it. Every matcher
-// writes fixed advice, but one lists the fields that differed, and a map's
-// keys can be values (an email, a user ID): a next step that names any of
-// the miss's field paths is replaced by fixed advice that counts them. Why
-// a replay refused a field for a reason of its own (a learned read of the
-// application's clock the call does not carry: models.UnmatchedCall.FieldReasons)
-// is added to it, as the miss's reason says it (missDiffersText), so the
-// run's summary, which shows the next step, says it too.
+// nextStepOf is a miss's next step as evidence keeps it: the matcher's
+// advice, or the learn step's reason in record's full round, with every
+// field path it names written in its shape (models.FieldShape). A next step
+// names the fields that differed, and others (where a value was recorded),
+// and a map's keys can be values (an email, a user ID): each of the miss's
+// field paths, whole or without its "body." (as a learn step's reason may
+// name it), and every body path the text names (bodyPlace) keeps its shape,
+// so a key that may be a value is {}. The rest of the text stays: it is the
+// matcher's or the learn step's own words, and holds no value of the call.
+// (It was once replaced whole by a count of the fields, which hid the learn
+// step's reason from every in-test miss of the round.) Why a replay refused
+// a field for a reason of its own (a learned read of the application's
+// clock the call does not carry: models.UnmatchedCall.FieldReasons) is
+// added to it, as the miss's reason says it (missDiffersText), so the run's
+// summary, which shows the next step, says it too.
 func nextStepOf(m models.UnmatchedCall) string {
-	next := m.NextSteps
-	for _, d := range m.FieldDiffs {
-		if d.Path == "" {
-			continue
-		}
-		if strings.Contains(m.NextSteps, d.Path) || strings.Contains(m.NextSteps, strings.TrimPrefix(d.Path, "body.")) {
-			next = fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
-			break
-		}
-	}
+	next := shapedNextStep(m)
 	var whys []string
 	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
 		if !strings.Contains(next, r.Why) {
@@ -1427,6 +1427,44 @@ func nextStepOf(m models.UnmatchedCall) string {
 	}
 	return next + " (" + strings.Join(whys, "; ") + ")"
 }
+
+// shapedNextStep is the miss's own next step with every field path it names
+// in its shape (nextStepOf).
+func shapedNextStep(m models.UnmatchedCall) string {
+	text := m.NextSteps
+	if text == "" {
+		return ""
+	}
+	var paths []string
+	for _, d := range m.FieldDiffs {
+		for _, p := range []string{d.Path, strings.TrimPrefix(d.Path, "body.")} {
+			if p != "" && models.FieldShape(p) != p && !slices.Contains(paths, p) {
+				paths = append(paths, p)
+			}
+		}
+	}
+	if len(paths) > 0 {
+		// Longest first: a path is shaped whole, never inside a longer one
+		// it begins; the replacer reads the text once, so no shape is
+		// shaped again.
+		sort.SliceStable(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+		args := make([]string, 0, 2*len(paths))
+		for _, p := range paths {
+			args = append(args, p, models.FieldShape(p))
+		}
+		text = strings.NewReplacer(args...).Replace(text)
+	}
+	return bodyPlace.ReplaceAllStringFunc(text, func(p string) string {
+		// A sentence's full stop or a list's separator is not the path's.
+		trimmed := strings.TrimRight(p, ".,;:")
+		return models.FieldShape(trimmed) + p[len(trimmed):]
+	})
+}
+
+// bodyPlace is a body field path as a matcher's or a learn step's text names
+// one (body.cmd.filter.appId, body.docs.msgs.0.q.entity_id, body[0].id): the
+// root every protocol's compared places share.
+var bodyPlace = regexp.MustCompile(`\bbody[.\[][^\s,;()'"]*`)
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
 // as evidence keeps them (no value the app sent): they are counted, and
@@ -1540,8 +1578,50 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		// change, and nothing the test did needs re-recording or quarantine.
 		return "keploy: " + strings.Join(what, "; ") + "."
 	}
-	return fmt.Sprintf("keploy: %s. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", strings.Join(what, "; "), id, shellQuote(id))
+	head := "keploy: " + strings.Join(what, "; ") + "."
+	if whys := missWhys(ev.Misses, before, most); len(whys) > 0 {
+		// The learn step's reasons, one line each, before what to do: they
+		// are what tells an intended change from a flaky one.
+		head += "\n" + strings.Join(whys, "\n") + "\n"
+	} else {
+		head += " "
+	}
+	return fmt.Sprintf("%sIf this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
+		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", head, id, shellQuote(id))
+}
+
+// missWhys are, for a failed test's reason, why its calls missed, in the
+// learn step's words (record's full round, where a miss has a Reason): one
+// line per call, "<call> missed (<reason>): <next step>", each said once,
+// at most most of them and a count of the rest. A miss made before the test
+// began is no call of the test's (before), and is not explained here. The
+// next step is evidence's (nextStepOf): no value of the call.
+func missWhys(misses []models.UnmatchedCall, before func(models.UnmatchedCall) bool, most int) []string {
+	var out []string
+	seen := map[string]bool{}
+	more := 0
+	for _, m := range misses {
+		if m.Reason == "" || before(m) {
+			continue
+		}
+		line := missText(m) + " missed (" + m.Reason + ")"
+		if next := strings.TrimSpace(m.NextSteps); next != "" {
+			line += ": " + next
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		if len(out) == most {
+			more++
+			continue
+		}
+		out = append(out, line)
+	}
+	if more > 0 {
+		out = append(out, fmt.Sprintf("and %d more call(s) missed for a reason the learn step gave", more))
+	}
+	return out
 }
 
 // shellQuote quotes s for a POSIX shell unless it is made of characters a
