@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -47,10 +48,46 @@ func TestDestinationKey_NamesWhatTheSeededRulesRead(t *testing.T) {
 		t.Fatalf("two HTTP/2 authorities behind one address have keys %q and %q; want one each", a, b)
 	}
 	for name, m := range map[string]*models.Mock{
-		"an HTTP mock":                 {Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:80"}}},
-		"a MySQL mock, no address":     destMock(models.MySQL, map[string]string{}),
-		"an HTTP/2 mock, no authority": {Kind: models.HTTP2, Spec: models.MockSpec{HTTP2Req: &models.HTTP2Req{Scheme: "https"}}},
-		"no mock":                      nil,
+		"an HTTP mock off the default MySQL ports": {Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:80"}}},
+		"an HTTP/2 mock, no authority":             {Kind: models.HTTP2, Spec: models.MockSpec{HTTP2Req: &models.HTTP2Req{Scheme: "https"}}},
+		"no mock":                                  nil,
+	} {
+		if k := destinationKey(m); k != "" {
+			t.Errorf("%s: key %q, want none", name, k)
+		}
+	}
+}
+
+// What a replay reads of a built-in default MySQL port (3306, 4000) is a
+// destination too: a MySQL mock that names no address, which may be any default
+// port's (one key for all of them), and any other dependency reached at a
+// default port, wherever its mock names it (one key per port, whatever its
+// kind or host).
+func TestDestinationKey_NamesWhatADefaultPortHeld(t *testing.T) {
+	if a, b := destinationKey(destMock(models.MySQL, map[string]string{})), destinationKey(destMock(models.MySQL, map[string]string{"type": "config"})); a == "" || a != b {
+		t.Fatalf("MySQL mocks that name no address have keys %q and %q; want one, shared", a, b)
+	}
+	at4000 := map[string]*models.Mock{
+		"HTTP, its Host":        httpMockTo("127.0.0.1:4000"),
+		"HTTP, another host":    httpMockTo("api.internal:4000"),
+		"HTTP, its URL":         {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "http://10.0.0.2:4000/x", Header: map[string]string{"Host": "api.internal"}}}},
+		"gRPC, its :authority":  grpcMockTo("orders:4000"),
+		"HTTP/2, no authority":  {Kind: models.HTTP2, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:4000"}, HTTP2Req: &models.HTTP2Req{Scheme: "http"}}},
+		"generic, its destAddr": destMock(models.GENERIC, map[string]string{"destAddr": "10.0.0.2:4000"}),
+	}
+	want := destinationKey(httpMockTo("127.0.0.1:4000"))
+	for name, m := range at4000 {
+		if k := destinationKey(m); k == "" || k != want {
+			t.Errorf("%s at 4000: key %q, want the port's %q", name, k, want)
+		}
+	}
+	if k := destinationKey(httpMockTo("api:3306")); k == "" || k == want {
+		t.Errorf("HTTP at 3306: key %q, want its own", k)
+	}
+	for name, m := range map[string]*models.Mock{
+		"HTTP at 8080":                 {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Header: map[string]string{"Host": "api:8080"}}}},
+		"a DNS answer naming 4000":     destMock(models.DNS, map[string]string{"destAddr": "10.0.0.2:4000"}),
+		"a connection failure at 4000": destMock(models.ConnectionFailure, map[string]string{"destAddr": "10.0.0.2:4000"}),
 	} {
 		if k := destinationKey(m); k != "" {
 			t.Errorf("%s: key %q, want none", name, k)
@@ -269,4 +306,79 @@ func TestUnderExactServingTheOpenTestsHTTP2MocksOfferH2(t *testing.T) {
 			t.Fatal("test-2's view hides the pool's HTTP/2 mock, and its destination is offered h2 from the staged trees")
 		}
 	})
+}
+
+// Under the proven switch a set's staging reads only what was recorded before
+// its first test, and a test's own mocks reach the proxy as the test opens,
+// which derives nothing (ServeExactTest). What a built-in default MySQL port
+// held is then known only from the on-disk store's seed: an HTTP or gRPC
+// service the app called on 4000 only inside its tests replays on its client's
+// bytes, not greeted as MySQL, from the app's start on, whichever of the seed
+// and the session comes first. MySQL recorded there (TiDB), or a MySQL mock
+// that names no address, keeps the port MySQL, and each set's seed replaces
+// the previous one's.
+func TestASeededDefaultPortDestinationDecidesItsReplay(t *testing.T) {
+	inTest := func(name string, m *models.Mock) *models.Mock {
+		m.Name = name
+		m.Spec.ReqTimestampMock = time.Unix(100, 0).UTC()
+		m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
+		m.TestModeInfo.Lifetime = models.LifetimePerTest
+		return m
+	}
+	ctx := context.Background()
+	const request = "GET /session HTTP/1.1\r\nHost: 127.0.0.1:4000\r\n\r\n"
+	for name, seededFirst := range map[string]bool{"seeded, then the session starts": true, "the session starts, then seeded": false} {
+		t.Run(name, func(t *testing.T) {
+			p := testProxy(t)
+			for i, set := range []struct {
+				recorded []*models.Mock
+				isMySQL  bool
+				reason   string
+			}{
+				{[]*models.Mock{inTest("login", httpMockTo("127.0.0.1:4000"))}, false, "recorded-not-mysql"},
+				{[]*models.Mock{inTest("tidb", mysqlMockAt("tidb:4000"))}, true, "known-port"},
+				{[]*models.Mock{inTest("orders", grpcMockTo("orders:4000"))}, false, "recorded-not-mysql"},
+				{[]*models.Mock{inTest("login", httpMockTo("127.0.0.1:4000")), inTest("old-mysql", mysqlMockAt(""))}, true, "default-port"},
+				{nil, true, "default-port"},
+			} {
+				s, err := NewDiskMocks(zap.NewNop())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = s.Close() })
+				for _, m := range set.recorded {
+					if err := s.Add(m); err != nil {
+						t.Fatal(err)
+					}
+				}
+				seed, err := s.LoadDestinations()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if seededFirst {
+					p.SeedRecordedDestinations(seed)
+				}
+				if err := p.Mock(ctx, models.OutgoingOptions{}); err != nil {
+					t.Fatalf("Mock: %v", err)
+				}
+				if !seededFirst {
+					p.SeedRecordedDestinations(seed)
+				}
+				// The set's staging: nothing recorded before its first test.
+				if err := p.SetMocksWithWindow(ctx, nil, nil, models.BaseTime, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				app, srcConn := clientPair(t)
+				if !set.isMySQL {
+					if _, err := io.WriteString(app, request); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := awaitEvent(t, probeAsync(p, srcConn, "127.0.0.1:4000", 4000, models.MODE_TEST, models.OutgoingOptions{}), "the probe's verdict")
+				if r.err != nil || r.probe.IsMySQL != set.isMySQL || r.probe.Reason != set.reason {
+					t.Fatalf("set %d: IsMySQL=%v reason=%q err=%v, want %v/%s", i+1, r.probe.IsMySQL, r.probe.Reason, r.err, set.isMySQL, set.reason)
+				}
+			}
+		})
+	}
 }

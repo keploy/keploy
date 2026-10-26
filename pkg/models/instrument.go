@@ -239,7 +239,12 @@ type OutgoingOptions struct {
 	//
 	// Since automatic detection landed this list is an optimisation and
 	// an escape hatch rather than a requirement: a port listed here
-	// skips the detection probe entirely. See DisableMysqlAutoDetect.
+	// skips the detection probe entirely, pinned to MySQL, so an HTTP
+	// service on a listed port gets no answer. The built-in defaults are
+	// only a hint: at record whichever end speaks first decides (a client
+	// that speaks first is not MySQL), and at replay the recording does.
+	// With DisableMysqlAutoDetect the defaults are pinned as listed ports
+	// are.
 	MysqlPorts []uint32
 	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
 	// keploy should not record normally (see PassThroughRule). Ports gate on the

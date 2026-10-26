@@ -82,6 +82,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -166,8 +167,9 @@ type mysqlPortRegistry struct {
 	fromMocks map[uint32]struct{}
 	// What the recording says of a built-in default port (3306, 4000) that
 	// none of its MySQL mocks names, which decides how a replay serves it
-	// (defaultPortVerdict): otherPorts holds the ports of the recording's
-	// other dependencies (an HTTP mock's Host, a mock's destAddr), and
+	// (recordedNotMysql): otherPorts holds the ports of the recording's
+	// other dependencies (otherDependencyPort: a mock's destAddr, else the
+	// destination its HTTP, HTTP/2 or gRPC request names), and
 	// portless says a MySQL mock names no port at all (a recording made
 	// before MySQL mocks carried destAddr), so any default port may be its.
 	// Swapped with fromMocks at a session's derive.
@@ -487,19 +489,47 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 	return added
 }
 
-// otherDependencyPort reads the destination port of a recorded mock of a
-// dependency other than MySQL: its destAddr, else an HTTP mock's Host
-// (Mock.RecordedDestination). A DNS answer and a connection failure reached no
-// dependency at that port, so they say nothing of it.
+// otherDependencyAddr reads where a recorded mock of a dependency other than
+// MySQL reached, as an address that names its port: its destAddr, else the
+// destination its request names, an HTTP mock's Host (Mock.RecordedDestination,
+// or its URL's host when the Host names no port), an HTTP/2 mock's authority,
+// a gRPC mock's :authority. "" when none names a port. A DNS answer and a
+// connection failure reached no dependency at that port, so they say nothing
+// of it.
+func otherDependencyAddr(m *models.Mock) string {
+	if m == nil || m.Kind == models.MySQL || m.Kind == models.DNS || m.Kind == models.ConnectionFailure {
+		return ""
+	}
+	cands := []string{m.Spec.Metadata["destAddr"]}
+	switch m.Kind {
+	case models.HTTP:
+		host, _ := m.RecordedDestination()
+		cands = append(cands, host)
+		if m.Spec.HTTPReq != nil {
+			if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil {
+				cands = append(cands, u.Host)
+			}
+		}
+	case models.HTTP2:
+		if m.Spec.HTTP2Req != nil {
+			cands = append(cands, m.Spec.HTTP2Req.Authority)
+		}
+	case models.GRPC_EXPORT:
+		if m.Spec.GRPCReq != nil {
+			cands = append(cands, m.Spec.GRPCReq.Headers.PseudoHeaders[":authority"])
+		}
+	}
+	for _, addr := range cands {
+		if _, ok := portFromAddr(addr); ok {
+			return addr
+		}
+	}
+	return ""
+}
+
+// otherDependencyPort is the port of otherDependencyAddr.
 func otherDependencyPort(m *models.Mock) (uint32, bool) {
-	if m.Kind == models.DNS || m.Kind == models.ConnectionFailure {
-		return 0, false
-	}
-	addr := m.Spec.Metadata["destAddr"]
-	if addr == "" {
-		addr, _ = m.RecordedDestination()
-	}
-	return portFromAddr(addr)
+	return portFromAddr(otherDependencyAddr(m))
 }
 
 // recordedNotMysql reports whether the recording reached a dependency other

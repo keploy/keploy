@@ -315,6 +315,16 @@ func httpMockTo(host string) *models.Mock {
 	}}
 }
 
+func grpcMockTo(authority string) *models.Mock {
+	return &models.Mock{Kind: models.GRPC_EXPORT, Spec: models.MockSpec{GRPCReq: &models.GrpcReq{
+		Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{":authority": authority, ":path": "/orders.V1/Get", ":method": "POST", ":scheme": "http"}},
+	}}}
+}
+
+func http2MockTo(authority string) *models.Mock {
+	return &models.Mock{Kind: models.HTTP2, Spec: models.MockSpec{HTTP2Req: &models.HTTP2Req{Method: "GET", URL: "/x", Authority: authority, Scheme: "http"}}}
+}
+
 func mysqlMockAt(destAddr string) *models.Mock {
 	m := &models.Mock{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{}}}
 	if destAddr != "" {
@@ -344,6 +354,11 @@ func TestReplayDecidesADefaultPortByTheRecording(t *testing.T) {
 		{"nothing recorded on 3306", []*models.Mock{httpMockTo("localhost:4000")}, 3306, true, "default-port"},
 		{"no mocks at all", nil, 3306, true, "default-port"},
 		{"MySQL recorded without an address", []*models.Mock{httpMockTo("localhost:4000"), mysqlMockAt("")}, 4000, true, "default-port"},
+		{"gRPC recorded on 4000", []*models.Mock{grpcMockTo("orders:4000")}, 4000, false, "recorded-not-mysql"},
+		{"HTTP/2 recorded on 4000", []*models.Mock{http2MockTo("orders:4000")}, 4000, false, "recorded-not-mysql"},
+		{"HTTP recorded on 4000, its Host naming no port", []*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+			Method: "GET", URL: "http://127.0.0.1:4000/x", Header: map[string]string{"Host": "api.internal"}}}}}, 4000, false, "recorded-not-mysql"},
+		{"gRPC recorded on 8080", []*models.Mock{grpcMockTo("orders:8080")}, 4000, true, "default-port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := testProxy(t)
@@ -404,7 +419,7 @@ func TestReplayADefaultPortWaitsForTheRecording(t *testing.T) {
 }
 
 // What one recording said of a default port does not outlive it: the next
-// session's recording decides.
+// session's recording decides, also when it holds nothing at that port.
 func TestReplayADefaultPortsVerdictFollowsTheSession(t *testing.T) {
 	p := testProxy(t)
 	p.deriveMysqlPorts([]*models.Mock{httpMockTo("localhost:4000")})
@@ -417,6 +432,11 @@ func TestReplayADefaultPortsVerdictFollowsTheSession(t *testing.T) {
 	p.deriveMysqlPorts([]*models.Mock{httpMockTo("localhost:4000")})
 	if !p.mysqlPorts.recordedNotMysql(4000) {
 		t.Fatal("the previous recording's address-less MySQL outlived its session")
+	}
+	p.mysqlPorts.MarkSessionStale()
+	p.deriveMysqlPorts([]*models.Mock{httpMockTo("localhost:8080")})
+	if p.mysqlPorts.recordedNotMysql(4000) {
+		t.Fatal("the previous recording's HTTP on 4000 outlived its session, in one that holds nothing at 4000")
 	}
 }
 

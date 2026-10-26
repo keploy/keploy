@@ -1611,8 +1611,9 @@ func (a *Agent) seedStatementCatalog(storage *ClientMockStorage) {
 // before its first test, so a destination whose per-test mocks all lie inside
 // tests would be unknown to the proxy's destination rules while the app
 // starts: a non-default MySQL port would not be routed to the MySQL parser,
-// and a TLS client would not be offered h2 for a destination recorded
-// speaking HTTP/2. They are seeded once per store, when it is published, and
+// a default one (3306, 4000) the recording reached an HTTP or gRPC service at
+// would be greeted as MySQL, and a TLS client would not be offered h2 for a
+// destination recorded speaking HTTP/2. They are seeded once per store, when it is published, and
 // replace the previous store's; the proxy keeps them, and every staging
 // derives from them beside what it stages. A store with no on-disk store
 // seeds none: its per-test mocks are all resident, so its staging reaches
