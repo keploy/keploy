@@ -475,3 +475,15 @@ func TestTwoLearningsOfAClockReadMeetAsWhatBothHold(t *testing.T) {
 		t.Fatalf("MergeClocks wrote its input: in %+v, out %+v", in, out)
 	}
 }
+
+// A plain clock read holds nothing in a window that ends before it starts.
+func TestAPlainClockReadHoldsNothingInAWindowThatEndsBeforeItStarts(t *testing.T) {
+	from := time.Date(2026, 10, 27, 12, 0, 0, 500*int(time.Millisecond), time.UTC)
+	o := ClockOffset{Res: time.Second}
+	if !o.Holds(from.Add(10*time.Millisecond), time.Second, from, from.Add(40*time.Millisecond)) {
+		t.Fatal("the window's own read refused")
+	}
+	if o.Holds(from.Add(-300*time.Millisecond), time.Second, from, from.Add(-200*time.Millisecond)) {
+		t.Fatal("a window that ends before it starts held a read")
+	}
+}
