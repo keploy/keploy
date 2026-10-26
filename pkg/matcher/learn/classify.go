@@ -186,6 +186,13 @@ type Raw struct {
 	// and gave the application there is r's recorded text: what the rule a
 	// copy follows its source reads of what F gave at r (follows.go).
 	asRecorded bool
+	// live is, of a recording F served changed, what F's application sent
+	// there and F answered it, read as RawOf reads a mock (ServedLive): the
+	// value F gave the application at each field of the payload, by the
+	// field's path. nil where F gave no such view (not served, served
+	// unchanged, or an adapter that does not say), and keploy then reads that
+	// F gave nothing there (fail closed).
+	live *Raw
 	// unread, of a Raw that was not read, says why where the place it stands
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
@@ -301,7 +308,7 @@ func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answe
 func (r Raw) WithServed(served bool) Raw {
 	r.served = served
 	if !served {
-		r.first, r.last, r.asRecorded = 0, 0, false
+		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
 	}
 	return r
 }
@@ -323,6 +330,35 @@ func (r Raw) ServedAsRecorded() Raw {
 
 // AsRecorded reports whether F served r unchanged (ServedAsRecorded).
 func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
+
+// ServedLive is r, which F served (ServedIn, WithServed) changed, with F's
+// view of it: live is RawOf of the mock as F's application sent its request
+// and F answered it. Its fields stand for r's by their paths (rawField.path):
+// what F gave the application at a field of r's payload is live's text at
+// the field of the same path. Under the rule a copy follows its source
+// (ClassifyFollowing) a word of the value at a field F gave another value
+// at, which the value took none of the words of, is no word the value copied
+// there (follows.excusedRaw, appearedIn's refute: movedAway); where they
+// drifted together, or the view lacks the field, it stays where the value
+// came from. A word the value holds now that stands in the view and not in
+// the recorded text is refused, under ClassifyGiven too (unaccounted): the
+// recording did not give it there. A live that was not read from its mock,
+// or of another mock or call than r's, or a Raw F did not serve, gives no
+// view: keploy then reads that F gave nothing there (fail closed).
+// ServedAsRecorded, where an adapter also says it, reads first.
+func (r Raw) ServedLive(live Raw) Raw {
+	if !r.served || !live.read || live.mock != r.mock || live.call != r.call {
+		r.live = nil
+		return r
+	}
+	live.live = nil
+	r.live = &live
+	return r
+}
+
+// Live reports whether r carries F's view of what F served there
+// (ServedLive; WithServed(false) drops it).
+func (r Raw) Live() bool { return r.live != nil }
 
 // ServedAs is r as served once, the n-th serve of F's in the running set
 // (ServedIn(n, n)).
@@ -1084,8 +1120,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			switch ln.Kind {
 			case KindNoise:
 				ln = fol.followed(ln, at, served, all)
-				if ln.Kind == KindNoise && fol.refuted != "" {
+				switch {
+				case ln.Kind != KindNoise:
+				case fol.refuted != "":
 					ln.Why = fol.refuted + ", and keploy learns it as varying"
+				case fol.moved != "":
+					ln.Why = fol.moved + ", and keploy learns it as varying"
 				}
 			case KindEcho:
 				why := fol.first
@@ -2174,8 +2214,18 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				// (isStartUp, swapHolds). The value is refused there
 				// (startUpWhy). A word every start-up carries alike reads
 				// as any recording's.
-				if !p.startUp && fol.refute(x, texts, v, p) {
-					break
+				//
+				// A payload F served as recorded is set aside whole: F gave
+				// every word of it. One F gave its view of (ServedLive) is
+				// set aside a word at a time, its fields read one by one
+				// (liveAt), so the search goes on to the value's next word
+				// there: a field F gave another value at that the value
+				// drifted with stays a place.
+				if !p.startUp && fol.refute(x, texts, keep, v, p) {
+					if x.AsRecorded() {
+						break
+					}
+					continue
 				}
 				return p, true
 			}
