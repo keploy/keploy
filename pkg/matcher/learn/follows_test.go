@@ -751,23 +751,106 @@ func eLaneSession(name string, before time.Duration, pid int32) *models.Mock {
 	return m
 }
 
-// The rule's cost, a stated limit: a changed value recorded equal to a word
-// every start-up carries alike is refused too, though no swap of start-ups
-// could have changed it. On the lane's server that is 0 and 3 of the
-// protocol version, 16 and 4 of the server's, 4096, on, UTC: a migration's
-// execution_time of 0, 3, 4 or 16 ms at record is so refused.
-func TestAValueRecordedAsAWordEveryStartUpCarriesIsRefused(t *testing.T) {
+// A changed value recorded equal to a word every start-up carries alike (on
+// the lane's Postgres 16 server: 0 and 3 of the protocol version, 16 and 4
+// of the server's, 4096, on, UTC) is read as any recording's word: no swap
+// of start-ups could have changed it, since whichever start-up F gave the
+// connection carried the same word there. So a migration's execution_time
+// of 0, 3, 4 or 16 ms at record is learned again (F served both start-ups
+// as recorded and the value moved while they did not: noise under the rule
+// a copy follows its source; a variable at the start-up without it, as any
+// recording's word, which the adapters refuse in a raw payload).
+func TestAValueRecordedAsAWordEveryStartUpCarriesAlikeIsReadAsAnyRecordings(t *testing.T) {
 	raw := []Raw{
 		RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false).ServedAs(1).ServedAsRecorded(),
 		RawOf(eLaneSession("mock-hs-82", 850*time.Millisecond, 82), false).ServedAs(2).ServedAsRecorded(),
 	}
+	const path = "bind.$8"
 	for _, tc := range []struct{ recorded, live, field string }{
 		{"0", "12", "protocolVersion"}, {"3", "12", "protocolVersion"}, {"4", "12", "serverVersion"}, {"16", "12", "serverVersion"},
 		{"4096", "12", "parameterStatus.scram_iterations"}, {"on", "off", "parameterStatus.integer_datetimes"}, {"UTC", "IST", "parameterStatus.TimeZone"},
 	} {
-		got := classifyF(t, tc.recorded, tc.live, nil, raw, nil)
-		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-hs-81 at spec.postgresV3.session.") || !strings.Contains(got.Why, ", a connection's recorded start-up") {
-			t.Errorf("%s at record, a word every start-up carries (%s), %s in F: %s (%q); want refused, naming the first start-up", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
+		if got := classifyF(t, tc.recorded, tc.live, nil, raw, nil); got.Kind != KindNoise {
+			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, the rule a copy follows its source: %s (%q); want noise", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
 		}
+		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-hs-81" || got[0].From.startUp {
+			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, without the rule: %+v; want a variable at mock-hs-81 like any recording's word, not a start-up refusal", tc.recorded, tc.field, tc.live, got)
+		}
+	}
+}
+
+// A server parameter the start-ups recorded otherwise (an application_name
+// set per pool) or one of them lacks can be changed by a swap of start-ups
+// as a backend pid can: a value copied from it is refused, naming the
+// start-up, under the rule a copy follows its source and without it. A
+// backend pid recorded equal to a word every start-up carries alike (4096)
+// is refused all the same: the pid's own field holds it, and so is the pid
+// of the one start-up a set recorded, which no other start-up differs from:
+// a backend pid and a secret key are each connection's own.
+func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.T) {
+	const path = "bind.$8"
+	given := func(recorded, live string, raw []Raw) Learned {
+		t.Helper()
+		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		if len(got) != 1 {
+			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
+		}
+		return got[0]
+	}
+	named := func(name string, before time.Duration, pid int32, app string) *models.Mock {
+		m := eLaneSession(name, before, pid)
+		if app == "" {
+			delete(m.Spec.PostgresV3.Session.ParameterStatus, "application_name")
+		} else {
+			m.Spec.PostgresV3.Session.ParameterStatus["application_name"] = app
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name, recorded, live, found string
+		a, b                        *models.Mock
+	}{
+		{"application_name set per pool", "flyway", "hikari", "mock-hs-81 at spec.postgresV3.session.parameterStatus.application_name",
+			named("mock-hs-81", 900*time.Millisecond, 81, "flyway"), named("mock-hs-82", 850*time.Millisecond, 82, "hikari")},
+		{"application_name one start-up lacks", "flyway", "12", "mock-hs-81 at spec.postgresV3.session.parameterStatus.application_name",
+			named("mock-hs-81", 900*time.Millisecond, 81, "flyway"), named("mock-hs-82", 850*time.Millisecond, 82, "")},
+		{"a pid equal to a shared word", "4096", "82", "mock-hs-81 at spec.postgresV3.session.backendProcessID",
+			eLaneSession("mock-hs-81", 900*time.Millisecond, 4096), eLaneSession("mock-hs-82", 850*time.Millisecond, 82)},
+		{"the pid of the one start-up recorded", "81", "82", "mock-hs-81 at spec.postgresV3.session.backendProcessID",
+			eLaneSession("mock-hs-81", 900*time.Millisecond, 81), nil},
+	} {
+		raw := []Raw{RawOf(tc.a, false).ServedAs(1).ServedAsRecorded()}
+		if tc.b != nil {
+			raw = append(raw, RawOf(tc.b, false).ServedAs(2).ServedAsRecorded())
+		}
+		for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, tc.recorded, tc.live, nil, raw, nil), "without it": given(tc.recorded, tc.live, raw)} {
+			if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.found+", a connection's recorded start-up") || !strings.Contains(got.Why, "never varies") {
+				t.Errorf("FALSE GREEN? %s, %s at record, %s in F, %s: %s (%q); want refused, naming %s", tc.name, tc.recorded, tc.live, rule, got.Kind, got.Why, tc.found)
+			}
+		}
+	}
+}
+
+// A start-up's match that stands in no one of its fields (an echo read
+// across them) cannot be told apart from a word a swap of start-ups can
+// change, so it is read as one and refused (swapHolds). A match in a field
+// every start-up carries alike is no swap, and no other recording's match
+// is a start-up's.
+func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
+	a, b := RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false), RawOf(eLaneSession("mock-hs-82", 850*time.Millisecond, 82), false)
+	raw := []Raw{a, b}
+	if !a.swapHolds(a.text, raw, func(string) bool { return false }) {
+		t.Error("a start-up's match in no one field is not read as a swap's word; want refused")
+	}
+	if a.swapHolds(a.text, raw, func(own string) bool { return own == "UTF8" }) {
+		t.Error("a start-up's match in a field every start-up carries alike is read as a swap's word")
+	}
+	if !a.swapHolds(a.text, raw, func(own string) bool { return own == "81" }) {
+		t.Error("a start-up's backend pid is not read as a swap's word")
+	}
+	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
+	if other.swapHolds(other.text, raw, func(string) bool { return false }) {
+		t.Error("a recording that is no start-up is read as one")
 	}
 }

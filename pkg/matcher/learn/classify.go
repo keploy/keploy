@@ -176,9 +176,11 @@ type Raw struct {
 	// read: the text was read from the mock (RawOf).
 	read bool
 	// startUp: the mock is a connection's recorded start-up (isStartUp).
-	// Every word it carries never varies: a drifted value one of whose
-	// recorded words stands in it is refused, never learned as varying
-	// or bound there (appearedIn, startUpWhy).
+	// A word it carries in a field a swap of start-ups can change
+	// (swapHolds: its backend pid, its secret key, a field another
+	// start-up recorded otherwise) never varies: a drifted value one of
+	// whose recorded words stands there is refused, never learned as
+	// varying or bound there (appearedIn, startUpWhy).
 	startUp bool
 	// asRecorded: F served r unchanged (ServedAsRecorded), so what F sent
 	// and gave the application there is r's recorded text: what the rule a
@@ -275,6 +277,10 @@ type rawField struct {
 	start, end int
 	path       string
 	key        bool
+	// conn: of a connection's recorded start-up, a field that is the
+	// connection's own, whatever the server: its backend pid or secret key
+	// (BackendKeyData; RawOf, connFields).
+	conn bool
 }
 
 // Text is r's recorded request and answer, the payload only, as one text.
@@ -455,8 +461,10 @@ type Place struct {
 	// call's own instant (Raw.noTime): a reason says so (placeAt).
 	noTime bool
 	// startUp, of a place found in a raw mock's payload: the mock is a
-	// connection's recorded start-up (Raw.startUp), whose words never vary,
-	// so a drifted value found there is refused (startUpWhy).
+	// connection's recorded start-up (Raw.startUp) and the value's word
+	// stands there in a field a swap of start-ups can change (swapHolds),
+	// whose words never vary, so a drifted value found there is refused
+	// (startUpWhy).
 	startUp bool
 }
 
@@ -2138,29 +2146,35 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
-			from.AtCall, from.noTime, from.startUp = atCall, x.noTime, x.startUp
+			from.AtCall, from.noTime = atCall, x.noTime
+			from.startUp = x.swapHolds(x.text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
 			return from, true
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, startUp: x.startUp}, true
+					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, startUp: swap}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, startUp: x.startUp}, true
+					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, startUp: swap}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime, startUp: x.startUp}
-				// A connection's start-up is never set aside as a source
-				// the value moved away from: F may have given the
-				// application's connection another connection's start-up,
-				// whose word the value then copied (isStartUp). The value
-				// is refused there (startUpWhy).
-				if !x.startUp && fol.refute(x, texts, v, p) {
+				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}
+				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
+				// A word of a connection's start-up a swap can change is
+				// never set aside as a source the value moved away from: F
+				// may have given the application's connection another
+				// connection's start-up, whose word the value then copied
+				// (isStartUp, swapHolds). The value is refused there
+				// (startUpWhy). A word every start-up carries alike reads
+				// as any recording's.
+				if !p.startUp && fol.refute(x, texts, v, p) {
 					break
 				}
 				return p, true
@@ -2275,9 +2289,10 @@ func evidence(v *valueDrift, from Place) string {
 }
 
 // startUpWhy is why a drifted value v whose recorded value, or a part of
-// it, stands in a connection's recorded start-up (from: isStartUp) is
-// refused: a word a start-up carries never varies, and the value that
-// changed may be a copy of another connection's start-up.
+// it, stands in a connection's recorded start-up where a swap of start-ups
+// can change it (from: isStartUp, swapHolds) is refused: a word a start-up
+// carries never varies, and the value that changed may be a copy of
+// another connection's start-up.
 func startUpWhy(v *valueDrift, from Place) string {
 	at := placeAt(from)
 	var found string
@@ -2289,7 +2304,7 @@ func startUpWhy(v *valueDrift, from Place) string {
 	default:
 		found = "a part of its recorded value (" + partOf(v.rec, from.Held) + ") stands in " + at
 	}
-	return found + ", a connection's recorded start-up. A word a start-up carries (a backend pid, a secret key, a server parameter) never varies, and keploy gives each connection the application opens a recorded start-up by the order the connections open in, not by what each sent: a connection may get another connection's start-up, and a value that changed may be a copy of its word, so keploy cannot tell a copy from a varying value. If the field changes every run on its own, declare it noise in keploy.yml, and keploy stops comparing it"
+	return found + ", a connection's recorded start-up. A word a start-up carries where connections differ (a backend pid, a secret key, a server parameter set per connection) never varies, and keploy gives each connection the application opens a recorded start-up by the order the connections open in, not by what each sent: a connection may get another connection's start-up, and a value that changed may be a copy of its word, so keploy cannot tell a copy from a varying value. If the field changes every run on its own, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // placeAt names where from stands, as a reason names it: "<mock> at
@@ -2523,6 +2538,11 @@ func RawOf(m *models.Mock, served bool) Raw {
 	// value after an escape would be no token there.
 	payload := dropKeys(v, 0)
 	r.text, r.fields = textFields(payload)
+	if r.startUp {
+		for i, f := range r.fields {
+			r.fields[i].conn = !f.key && connFields[f.path]
+		}
+	}
 	if m.IsProtocolPhase() {
 		r.answerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	}
@@ -2538,14 +2558,24 @@ func RawOf(m *models.Mock, served bool) Raw {
 // by the order the connections open in, not by what each connection sent,
 // so two connections whose roles in the application differ between the
 // recording and F (a pool's threads that open in either order) each get the
-// other's. A word a start-up carries is therefore never a source that can
-// vary: the recorded value copied it from its connection's start-up, and a
-// value that changed may be a copy of another connection's (startUpWhy).
-// Only a PostgresV3 session mock is read so; the older Postgres kinds,
-// which carry their start-up in packets, and other protocols' start-ups are
-// read as any recording.
+// other's. A word a start-up carries where the start-ups differ (its
+// backend pid and secret key, swapHolds) is therefore never a source that
+// can vary: the recorded value copied it from its connection's start-up,
+// and a value that changed may be a copy of another connection's
+// (startUpWhy). Only a PostgresV3 session mock is read so; the older
+// Postgres kinds, which carry their start-up in packets, and other
+// protocols' start-ups are read as any recording.
 func isStartUp(m *models.Mock) bool {
 	return m.Kind == models.PostgresV3 && m.Spec.PostgresV3 != nil && m.Spec.PostgresV3.Type == models.PostgresV3TypeSession
+}
+
+// connFields are the fields of a connection's recorded start-up (isStartUp)
+// that are the connection's own, whatever the server and the other
+// start-ups recorded: its backend pid and secret key (BackendKeyData), as
+// textFields names them.
+var connFields = map[string]bool{
+	"postgresV3.session.backendProcessID": true,
+	"postgresV3.session.backendSecretKey": true,
 }
 
 // callOf is the call m answers, as one recording of a call is given in place
@@ -2684,6 +2714,71 @@ func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) string {
 		}
 	}
 	return ""
+}
+
+// holdsToken reports whether a field's text own holds word w as a token, in
+// its own text or in a declared form of it (fieldOf).
+func holdsToken(own, w string) bool {
+	if ContainsToken(own, w) {
+		return true
+	}
+	for _, form := range textForms(own)[1:] {
+		if ContainsToken(form, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// swapHolds reports whether x, a connection's recorded start-up, holds what
+// in finds (a word, a whole clock, an echoed moment) in a field a swap of
+// start-ups can change: the connection's own backend pid or secret key
+// (rawField.conn), or a field another start-up of raw recorded otherwise
+// or lacks (a server parameter set per connection), or in no one field.
+// text is x's text as searched. A field every start-up recorded alike (the
+// protocol and server versions, the server's parameters: 0, 3, 16, 4096,
+// on, UTC, UTF8 on Postgres 16) is no such field: whichever start-up F gave
+// a connection, it carried the same word there, so a value that changed
+// while it did not is read as any recording's word. False for any other
+// mock.
+func (x Raw) swapHolds(text string, raw []Raw, in func(own string) bool) bool {
+	if !x.startUp {
+		return false
+	}
+	held := false
+	for _, f := range x.fields {
+		if f.end > len(text) || !in(text[f.start:f.end]) {
+			continue
+		}
+		held = true
+		if f.conn || x.differs(f, raw) {
+			return true
+		}
+	}
+	return !held
+}
+
+// differs reports whether a start-up of raw lacks x's field f, or recorded
+// it otherwise: a swap of start-ups can change the word there. x itself,
+// in raw too, never differs.
+func (x Raw) differs(f rawField, raw []Raw) bool {
+	own := x.text[f.start:f.end]
+	for _, y := range raw {
+		if !y.startUp {
+			continue
+		}
+		same := false
+		for _, g := range y.fields {
+			if g.path == f.path && g.key == f.key {
+				same = y.text[g.start:g.end] == own
+				break
+			}
+		}
+		if !same {
+			return true
+		}
+	}
+	return false
 }
 
 // specNames are the names a mock file gives the spec's fields whose JSON

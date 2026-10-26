@@ -59,17 +59,20 @@ import (
 // answer) stays refused: the rule reads the word rule's plain matches of the
 // call's own earlier places alone.
 //
-// A connection's recorded start-up (isStartUp: a backend pid, a secret key,
-// a server parameter) is no place the rule reads. F gives each connection
-// the application opens a recorded start-up by the order the connections
-// open in, not by what each sent, so it may give the application's
-// connection another connection's start-up: both runs then gave the
-// application the same start-ups in the same order, yet not at the same
-// place. A recorded value one of whose words stands in a start-up is
-// refused there (startUpWhy), never learned as varying, whatever the
-// order: a word a start-up carries is never a source that can vary. A
-// value F saw that holds a start-up's word the recorded value lacks reads
-// as any other word both runs gave.
+// A connection's recorded start-up (isStartUp) is no place the rule reads
+// where the start-ups differ (swapHolds: its backend pid and secret key, a
+// server parameter set per connection). F gives each connection the
+// application opens a recorded start-up by the order the connections open
+// in, not by what each sent, so it may give the application's connection
+// another connection's start-up: both runs then gave the application the
+// same start-ups in the same order, yet not at the same place. A recorded
+// value one of whose words stands there is refused (startUpWhy), never
+// learned as varying, whatever the order: such a word is never a source
+// that can vary. A word every start-up carries alike (the server's version
+// and parameters) is read as any recording's: whichever start-up a
+// connection got, it carried that word. A value F saw that holds a
+// start-up's word the recorded value lacks reads as any other word both
+// runs gave.
 //
 // No later round decides anything: the confirming round (C), a child keploy
 // test, runs no learn step, and nothing carries F's reading to it. So F never
@@ -119,8 +122,9 @@ func (f *follows) source(mock string) {
 // first such place is named (refuted). Everywhere else (fol nil, a place F
 // did not serve or served changed, one the recording did not give before
 // the call or whose times keploy cannot read, one holding F's value too)
-// the place stays where the value came from. A connection's start-up is
-// never handed here (appearedIn refuses a value found there: isStartUp).
+// the place stays where the value came from. A start-up's word a swap can
+// change is never handed here (appearedIn refuses a value found there:
+// swapHolds).
 func (f *follows) refute(x Raw, texts [2]string, v *valueDrift, p Place) bool {
 	if f == nil || !x.AsRecorded() {
 		return false
