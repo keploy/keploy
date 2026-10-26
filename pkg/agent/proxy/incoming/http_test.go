@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1140,5 +1141,186 @@ func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
 				t.Fatal("handleHttp1Connection did not return")
 			}
 		})
+	}
+}
+
+// pausedExchange sends one GET for path on client (closing the connection
+// after it when last) and reads its response whole.
+func pausedExchange(t *testing.T, client net.Conn, br *bufio.Reader, path string, last bool) {
+	t.Helper()
+	hdr := ""
+	if last {
+		hdr = "Connection: close\r\n"
+	}
+	if _, err := client.Write([]byte("GET " + path + " HTTP/1.1\r\nHost: app.local\r\n" + hdr + "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+}
+
+// A pause of the memory guard costs the exchanges that come while it lasts and
+// no more: the keep-alive connection's next exchange after it is captured, and
+// the one that came during it is counted, on its connection, as not recorded.
+// Latched for the connection's life (captureEnabled cleared at the loop's top
+// and never set again), one half-second pause stopped the capture of every
+// keep-alive connection open through it, a load generator's included, for the
+// rest of the recording, and the recording did not say so.
+func TestHandleHttp1ZeroCopy_AKeepAliveConnectionIsCapturedAgainAfterAPause(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	mgr := syncMock.New(zap.NewNop())
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	captured := make(chan string, 4)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+		captured <- req.URL.Path
+	})
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+	defer cancel()
+	app := strings.TrimPrefix(upstream.URL, "http://")
+	client, done := ingressPipe(t, ctx, pm, app)
+	br := bufio.NewReader(client)
+	next := func(what string) string {
+		t.Helper()
+		select {
+		case p := <-captured:
+			return p
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s was not captured", what)
+			return ""
+		}
+	}
+
+	pausedExchange(t, client, br, "/before", false)
+	if p := next("the exchange before the pause"); p != "/before" {
+		t.Fatalf("captured %s, want /before", p)
+	}
+	paused.Store(true)
+	pausedExchange(t, client, br, "/during", false)
+	paused.Store(false)
+	pausedExchange(t, client, br, "/after", true)
+	if p := next("the exchange after the pause, on the same keep-alive connection"); p != "/after" {
+		t.Fatalf("captured %s, want /after", p)
+	}
+	<-done
+	pm.captures.Wait()
+	if len(captured) != 0 {
+		t.Fatalf("captured %s too: the exchange that came during the pause is not recorded", <-captured)
+	}
+
+	got := mgr.NotRecordedUnderPressure()
+	if got.Total != 1 || len(got.ByConn) != 1 {
+		t.Fatalf("not recorded under pressure: %+v, want the one exchange that came during the pause, on its connection", got)
+	}
+	for conn := range got.ByConn {
+		if !strings.HasSuffix(conn, " -> "+app) || !strings.HasPrefix(conn, "127.0.0.1:") {
+			t.Fatalf("the connection is named %q, want <client address> -> %s", conn, app)
+		}
+	}
+}
+
+// In the synchronous loop an exchange whose capture a pause decided against is
+// counted as not recorded, once, whichever of the loop's checks saw the pause;
+// one that came while recording ran is captured and counts nothing.
+func TestHandleHttp1Connection_SyncCountsAnExchangeAPauseCost(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	mgr := syncMock.New(zap.NewNop())
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	captured := make(chan string, 4)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+		captured <- req.URL.Path
+	})
+	app := strings.TrimPrefix(upstream.URL, "http://")
+	for _, during := range []bool{true, false} {
+		paused.Store(during)
+		pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true}
+		ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+		client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
+		pausedExchange(t, client, bufio.NewReader(client), "/x", true)
+		<-done
+		pm.captures.Wait()
+		cancel()
+	}
+	if len(captured) != 1 {
+		t.Fatalf("captured %d exchanges, want the one that came while recording ran", len(captured))
+	}
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 || got.Connections() != 1 {
+		t.Fatalf("not recorded under pressure: %+v, want the one exchange that came during the pause", got)
+	}
+}
+
+// firstReadConn is a connection that says when it was first read.
+type firstReadConn struct {
+	net.Conn
+	read *atomic.Bool
+}
+
+func (c firstReadConn) Read(p []byte) (int, error) {
+	c.read.Store(true)
+	return c.Conn.Read(p)
+}
+
+// A sampled connection (one the handler closes after its exchange) is decided
+// as its request comes, not as it opens: a pause that was on when it opened and
+// is over before its request is read costs it nothing. Read at the open, the
+// pause demoted the connection out of the sample, and its request was neither
+// recorded nor counted.
+func TestHandleHttp1ZeroCopy_ASampledConnectionReadsThePauseAsItsRequestComes(t *testing.T) {
+	var read atomic.Bool
+	stubIngressPaused(t, func() bool { return !read.Load() }) // paused until the client's side is first read
+	mgr := syncMock.New(zap.NewNop())
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	captured := make(chan string, 2)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+		captured <- req.URL.Path
+	})
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 2)}
+	t.Cleanup(pm.captures.Wait)
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+	defer cancel()
+	upConn, err := net.Dial("tcp4", strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pm.handleHttp1ZeroCopy(ctx, firstReadConn{Conn: server, read: &read}, upConn, pm.logger, pm.tcChan, 8080, true, func() {})
+	}()
+	pausedExchange(t, client, bufio.NewReader(client), "/sampled", true)
+	<-done
+	pm.captures.Wait()
+	select {
+	case p := <-captured:
+		if p != "/sampled" {
+			t.Fatalf("captured %s, want /sampled", p)
+		}
+	default:
+		t.Fatal("the sampled exchange was not captured: the pause over before its request came cost it")
+	}
+	if n := mgr.NotRecordedUnderPressure().Total; n != 0 {
+		t.Fatalf("counted %d requests not recorded under pressure, want none", n)
 	}
 }

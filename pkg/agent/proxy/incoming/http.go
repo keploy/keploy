@@ -553,6 +553,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
 	// uses the zero-copy path for both tracked and bypass connections.
 	forceCloseMode := pm.synchronous
+	// connName names the connection in the count of the requests a pause of
+	// the memory guard costs (syncMock NoteNotRecordedUnderPressure), here and
+	// in the capture hook (hooksUtils.SkipUnderPressure).
+	connName := ingressConnName(clientConn, finalAppAddr)
 
 	if !forceCloseMode {
 		// Sampling bypass: no capture, but route through the same
@@ -668,6 +672,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// the sampling lock is released early, and the loop exits after one exchange.
 		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
 		captureEnabled := !isIngressRecordingPaused()
+		// lostToPause: a pause of the memory guard decided this exchange is
+		// not recorded, at any of the checks below; counted once, as it ends.
+		lostToPause := !captureEnabled
 		// The exchange may be captured: open its window before the request
 		// reaches the app, so no egress call it makes is ever older than it.
 		// One that cannot be captured opens none: nothing would decide it.
@@ -710,6 +717,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		// Re-check memory pressure right before attaching capture buffers.
 		if captureEligible && isIngressRecordingPaused() {
+			lostToPause = true
 			pressureCloseMode = true
 			captureEligible = false
 			captureEnabled = false
@@ -749,6 +757,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		// Re-check memory pressure after forwarding the request.
 		if !pressureCloseMode && isIngressRecordingPaused() {
+			lostToPause = true
 			pressureCloseMode = true
 			captureEnabled = false
 			releaseLock()
@@ -837,6 +846,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Also re-check memory pressure in case it started mid-exchange.
 		captureEligible = captureEnabled && (!pm.sampling || acquiredLock)
 		if captureEligible && isIngressRecordingPaused() {
+			lostToPause = true
 			pressureCloseMode = true
 			captureEligible = false
 			captureEnabled = false
@@ -921,6 +931,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 		// Final memory pressure check before capture evaluation.
 		if !pressureCloseMode && isIngressRecordingPaused() {
+			lostToPause = true
 			pressureCloseMode = true
 			captureEnabled = false
 			releaseLock()
@@ -942,6 +953,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		// Skip capture if memory pressure kicked in during the exchange
 		if shouldCapture && isIngressRecordingPaused() {
+			lostToPause = true
 			shouldCapture = false
 		}
 
@@ -974,6 +986,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if !shouldCapture {
+			if lostToPause {
+				syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
+			}
 			win.Close()
 			win = nil
 			if forceCloseMode || pressureCloseMode {
@@ -1084,7 +1099,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(ctx, capturedWin)), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+			hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
@@ -1251,31 +1266,44 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	upstreamReader := bufio.NewReader(upWire)
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
-	captureEnabled := t != nil && !isIngressRecordingPaused()
+	// connCapture is the connection's capture; whether one exchange of it is
+	// captured is decided per exchange (captureEnabled, in the loop). A pause
+	// of the memory guard is the exchange's, never the connection's: latched
+	// for the connection's life, one pause stopped the capture of every
+	// keep-alive connection open through it (a load generator's, a pooled
+	// client's) for the rest of the recording, and nothing said so.
+	connCapture := t != nil
+	// connName names the connection in the count of the requests a pause
+	// costs (syncMock NoteNotRecordedUnderPressure), here and in the capture
+	// hook (hooksUtils.SkipUnderPressure).
+	var connName string
+	if connCapture {
+		connName = ingressConnName(clientConn, upstreamAddr)
+	}
+	notRecordedUnderPressure := func() {
+		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
+	}
 
 	// forceCloseActive mirrors the caller's forceClose intent but can be
 	// flipped to false mid-connection by demoteToBypass when the exchange
 	// turns out to be ineligible for the sampling budget (chunked /
-	// unknown-length body, or mid-stream memory pressure). Once demoted,
-	// the connection becomes pure passthrough: no Connection: close
+	// unknown-length body, or memory pressure as its request came). Once
+	// demoted, the connection becomes pure passthrough: no Connection: close
 	// injection on subsequent iterations, the sampling slot is released,
 	// and capture is disabled — matching the "untracked + unchanged" rule
-	// for non-capturable exchanges. The flag never re-enables itself.
+	// for non-capturable exchanges. The flag never re-enables itself: a
+	// sampled connection serves one exchange, and one demoted is out of the
+	// sample, not lost to it.
 	forceCloseActive := forceClose
 	demoteToBypass := func() {
 		if !forceCloseActive {
 			return
 		}
 		forceCloseActive = false
-		captureEnabled = false
+		connCapture = false
 		if releaseSlot != nil {
 			releaseSlot()
 		}
-	}
-	// Memory pressure at function entry: demote immediately so the slot
-	// is freed for non-pressure use and we don't inject any headers.
-	if forceCloseActive && isIngressRecordingPaused() {
-		demoteToBypass()
 	}
 
 	// Close the most recent upstream conn on function return. The caller
@@ -1336,10 +1364,6 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	defer func() { win.Close() }()
 
 	for {
-		if isIngressRecordingPaused() {
-			captureEnabled = false
-		}
-
 		iterStart := clockNow()
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
@@ -1374,9 +1398,18 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if forceCloseActive && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
 			demoteToBypass()
 		}
-		if forceCloseActive && isIngressRecordingPaused() {
+		// The pause is read as the request has come: what it costs is this
+		// exchange, which is counted, and the connection's next one is
+		// captured if the pause is over by then. An Upgrade is a tunnel no
+		// pause costs anything.
+		paused := isIngressRecordingPaused()
+		if paused && connCapture && !isHTTPUpgrade(req) {
+			notRecordedUnderPressure()
+		}
+		if forceCloseActive && paused {
 			demoteToBypass()
 		}
+		captureEnabled := connCapture && !paused
 
 		// HTTP Upgrade / CONNECT — bail out to raw byte pump after
 		// forwarding the parsed handshake. Subsequent frames are not
@@ -1865,7 +1898,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				defer parsedReq.Body.Close()
 				defer parsedResp.Body.Close()
-				hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(ctx, capturedWin)), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+				hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 			}()
 		}
 		// Not captured: nothing will decide it.
@@ -1884,6 +1917,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			return
 		}
 	}
+}
+
+// ingressConnName names an ingress connection, its client's address and the
+// app's, for the count of the requests a pause of the memory guard costs
+// (syncMock NoteNotRecordedUnderPressure).
+func ingressConnName(clientConn net.Conn, app string) string {
+	client := "unknown client"
+	if a := clientConn.RemoteAddr(); a != nil {
+		client = a.String()
+	}
+	return client + " -> " + app
 }
 
 // forwardRawTCP does bidirectional TCP forwarding between two connections

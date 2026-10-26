@@ -74,15 +74,29 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
+// SkipUnderPressure reports whether the memory guard has paused recording, as
+// a capture hook decides whether to record an exchange. When it has, it closes
+// the exchange's bodies, so the proxied connection's readers do not leak, and
+// counts the request as not recorded under pressure on the ingress connection
+// ctx names (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the
+// recording says what the pause cost. A capture hook asks it first and returns
+// when it says true.
+func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Response) bool {
+	if !memoryguard.IsRecordingPaused() {
+		return false
+	}
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+	return true
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
-	if memoryguard.IsRecordingPaused() {
-		// Close bodies even when skipping capture to avoid resource leaks.
-		if req.Body != nil {
-			req.Body.Close()
-		}
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
+	if SkipUnderPressure(ctx, req, resp) {
 		return
 	}
 

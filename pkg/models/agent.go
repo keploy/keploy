@@ -926,6 +926,17 @@ type StreamEndSummary struct {
 	// MassSuppressed: a large share of the session's test cases was
 	// suppressed (the agent's summary says so at WARN).
 	MassSuppressed bool `json:"mass_suppressed"`
+	// NotRecordedUnderPressure: requests not recorded because the memory
+	// guard had paused recording when they came.
+	NotRecordedUnderPressure PressureSkipSummary `json:"not_recorded_under_pressure,omitzero"`
+}
+
+// PressureSkipSummary is how many requests a recording did not record
+// because the memory guard had paused recording when they came, and on how
+// many connections (StreamEndSummary).
+type PressureSkipSummary struct {
+	Requests    uint64 `json:"requests"`
+	Connections int    `json:"connections"`
 }
 
 // FrameStream names one of an agent's frame streams to a recording's client.

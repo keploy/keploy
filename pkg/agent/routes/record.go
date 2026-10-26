@@ -60,6 +60,10 @@ const massSuppressionPercent = 25
 // massSuppressed reports whether a session that sent sent test cases and
 // suppressed suppressed of them suppressed a large share
 // (massSuppressionPercent): its summary says so at WARN.
+// maxNamedPressureConns is how many connections the summary's warning of the
+// requests a pause of the memory guard cost names, those with the most first.
+const maxNamedPressureConns = 8
+
 func massSuppressed(sent, suppressed int) bool {
 	total := sent + suppressed
 	return total > 0 && suppressed*100/total >= massSuppressionPercent
@@ -532,6 +536,9 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// life. None is ever taken back, so this session's are what that count
 	// grows by from here.
 	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
+	// The requests the ingress did not record because the memory guard had
+	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
+	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
@@ -787,6 +794,17 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Uint64("test_cases", leftOutInFlight),
 				zap.Int64("hold_bound_bytes", syncmgr.MaxHeldBytes))
 		}
+		// Read once: the warning and the summary say the same.
+		notRecorded := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
+		if notRecorded.Total > 0 {
+			// Each came while the memory guard had paused recording, so it
+			// was forwarded and not recorded. The pause cost these and no
+			// more: each connection's requests after it are recorded.
+			a.logger.Warn("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded",
+				zap.Uint64("requests", notRecorded.Total),
+				zap.Int("connections", notRecorded.Connections()),
+				zap.Strings("connections_most", notRecorded.Most(maxNamedPressureConns)))
+		}
 		if tcsUnsettled > 0 {
 			// The capture's parsers ran more than the hold's bound
 			// behind: these were checked against what was known then.
@@ -811,6 +829,10 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
 			zap.Int64("mocks_dropped_by_pressure", finalDropped),
+			// Requests the ingress did not record because the memory guard
+			// had paused recording when they came (the WARN above names
+			// their connections).
+			zap.Uint64("tcs_not_recorded_under_pressure", notRecorded.Total),
 			// Every mock a parser left out, the exchange it stopped
 			// on included, each reported with Session.ReportLeftOut
 			// (Session.ReportStoppedOn for the one it stopped on):
@@ -911,8 +933,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				TestCasesSent:       tcsSentSoFar,
 				TestCasesSuppressed: tcsSuppressedSoFar,
 				LeftOutInFlight:     leftOut.LeftOut(),
-				Unsettled:           tcsUnsettled,
-				MassSuppressed:      massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				NotRecordedUnderPressure: func() models.PressureSkipSummary {
+					n := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
+					return models.PressureSkipSummary{Requests: n.Total, Connections: n.Connections()}
+				}(),
+				Unsettled:      tcsUnsettled,
+				MassSuppressed: massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return

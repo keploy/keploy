@@ -490,6 +490,9 @@ type SyncMockManager struct {
 	// pressure. Both are atomic so they can be read without holding m.mu.
 	pressureDropped atomic.Int64
 	totalAdded      atomic.Int64
+	// notRecorded counts the requests an ingress did not record because the
+	// memory guard had paused recording (NoteNotRecordedUnderPressure).
+	notRecorded notRecordedUnderPressure
 
 	// leftOut counts the mocks a session routed here left out
 	// because a parser could not record them (NoteMockLeftOut): their capture
