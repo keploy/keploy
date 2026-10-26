@@ -590,3 +590,58 @@ func TestEveryConsumeDoorSaysWhenItLearnedAfterTheLearnStepEnded(t *testing.T) {
 		}
 	})
 }
+
+// Two stagings that both file a matcher's learned copy of a tree recording
+// of the same name: the second staging's retry cycle is served its
+// recording as staged (the round keeps no learning here), never the copy
+// its first cycle filed, which carries first-cycle learning the round does
+// not write (a false green). A staging's filings replace an earlier
+// staging's bases (filedBases.note's per-staging reset), so the base the
+// retry cycle restores is the second staging's own.
+func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const answered = `200 {"ok":true}`
+	file := func(mm *MockManager, noise bool) {
+		t.Helper()
+		var tree *models.Mock
+		un, _ := mm.GetUnFilteredMocks()
+		for _, mk := range un {
+			if mk.Name == "beat" {
+				tree = mk
+			}
+		}
+		if tree == nil {
+			t.Fatal("precondition: the pool holds no beat")
+		}
+		filed := *tree
+		filed.TestModeInfo.IsFiltered = false
+		if noise {
+			filed.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+		}
+		if !mm.UpdateUnFilteredMock(tree, &filed) {
+			t.Fatal("precondition: the matcher's copy is not filed")
+		}
+	}
+	// Staging 1: its first cycle files a copy (learned noise on it).
+	mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+	mm.ServeExactPool("-", []string{"beat"})
+	file(mm, true)
+	// Staging 2: the learn step taken up again, the set staged afresh; its
+	// first cycle files a learned copy too.
+	mm.SetLearnEnded(false)
+	mm.SetMocksWithWindow(nil, []*models.Mock{beatMock("beat")}, models.BaseTime, time.Now())
+	mm.ServeExactPool("-", []string{"beat"})
+	file(mm, true)
+	if got := beatAt(t, mm, "t-2"); got != answered {
+		t.Fatalf("precondition: staging 2's first cycle answers through what its matcher filed: %s", got)
+	}
+	// Staging 2's retry cycle, the round keeping no learning.
+	mm.SetLearnEnded(true)
+	mm.ServeExactPool("-", []string{"beat"})
+	if got := beatAt(t, mm, "t-3"); got == answered {
+		t.Fatalf("staging 2's retry cycle answered a drifted call through the copy its first cycle filed, learning the round does not keep (a false green): %s", got)
+	}
+	if got := beatAt(t, mm, "t-1"); got != answered {
+		t.Fatalf("the retry cycle misses the recorded call: %s", got)
+	}
+}

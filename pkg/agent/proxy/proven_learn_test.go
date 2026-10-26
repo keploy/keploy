@@ -1062,36 +1062,59 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 
 // Through the HTTP integration, the call's window ends when decodeHTTP had
 // the request whole: a start-up pool call's clock read in it is learned as
-// noise, where the lead alone (its minute and second words of the
-// receive's Date header) refuses it.
+// noise, whatever the receive's Date header holds. Read by the lead alone
+// (the minute and second words of the receive's Date header, in GMT as HTTP
+// writes it), it is learned where that header is its server's stamp, and
+// refused where the server's clock ran a second ahead (its Date header
+// after its answer is no stamp): only the window learns that one. The
+// instants are fixed in UTC, so the row reads the same in every zone.
 func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	p := startedDrainProxy(t, 100)
-	p.learnTracker = learn.NewTracker()
 	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
-	rec := time.Now().Add(-time.Hour).Truncate(time.Second)
-	receive := r3Mock("mock-0", rec, "POST", "/queue/receive", `{"n":10}`, `{"Messages":[{"Body":"m-1"}]}`)
-	receive.Spec.HTTPResp.Header["Date"] = rec.Format(http.TimeFormat)
-	event := r3Mock("mock-1", rec.Add(4*time.Millisecond), "POST", "/v1/events", `{"processed_at":"`+iso(rec.Add(3*time.Millisecond))+`"}`, `{"ok":true}`)
-	event.DeriveLifetime()
-	receive.DeriveLifetime()
-	mm := NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: rec.Add(time.Minute), End: rec.Add(2 * time.Minute)}})
-	mm.SetMocksWithWindow(nil, []*models.Mock{receive, event}, models.BaseTime, time.Now())
-	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-1"})
-	served := time.Now()
-	offset := rec.Add(learn.FullRoundLead + 2*time.Second).Sub(served)
-	p.learnTracker.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
-	p.learnTracker.ServedMockAt(receive, served)
-	body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
-	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
-		"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
-	if code != http.StatusOK || got != `{"ok":true}` {
-		t.Fatalf("answered %d %s; want the pool recording, its clock read learned", code, got)
-	}
-	if noise := r3States(mm)["mock-1"].ReqBodyNoise; noise["body.processed_at"] == nil {
-		t.Fatalf("learned %v; want body.processed_at", noise)
+	rec := time.Date(2026, 10, 20, 15, 49, 55, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		date  time.Time
+		stamp bool
+	}{
+		{"its server's stamp", rec, true},
+		{"its server's clock a second ahead", rec.Add(time.Second), false},
+	} {
+		for _, window := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, window=%v", tc.name, window), func(t *testing.T) {
+				p := startedDrainProxy(t, 100)
+				p.learnTracker = learn.NewTracker()
+				receive := r3Mock("mock-0", rec, "POST", "/queue/receive", `{"n":10}`, `{"Messages":[{"Body":"m-1"}]}`)
+				receive.Spec.HTTPResp.Header["Date"] = tc.date.Format(http.TimeFormat)
+				event := r3Mock("mock-1", rec.Add(4*time.Millisecond), "POST", "/v1/events", `{"processed_at":"`+iso(rec.Add(3*time.Millisecond))+`"}`, `{"ok":true}`)
+				event.DeriveLifetime()
+				receive.DeriveLifetime()
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: rec.Add(time.Minute), End: rec.Add(2 * time.Minute)}})
+				mm.SetMocksWithWindow(nil, []*models.Mock{receive, event}, models.BaseTime, time.Now())
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-1"})
+				served := time.Now()
+				offset := rec.Add(learn.FullRoundLead + 2*time.Second).Sub(served)
+				if window {
+					p.learnTracker.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+				}
+				p.learnTracker.ServedMockAt(receive, served)
+				body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
+				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+					"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+				noise := r3States(mm)["mock-1"].ReqBodyNoise
+				if window || tc.stamp {
+					if code != http.StatusOK || got != `{"ok":true}` || noise["body.processed_at"] == nil {
+						t.Fatalf("answered %d %s, learned %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise)
+					}
+					return
+				}
+				if code == http.StatusOK || noise["body.processed_at"] != nil {
+					t.Fatalf("by the lead alone, the server's clock a second ahead: answered %d %s, learned %v; want refused", code, got, noise)
+				}
+			})
+		}
 	}
 }
 
