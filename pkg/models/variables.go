@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // MockVariables names, by variable, the places of a recorded dependency call
 // that hold the value of a test variable: a value the application makes anew
@@ -117,6 +121,207 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 		d, first = -d, o.Res
 	}
 	return d-first < time.Second
+}
+
+// ClockOffset is how far a value stands from a read of the application's
+// clock: a value the application builds on its clock by a constant offset
+// (an expiry it sets thirty minutes after now), which the learn step found,
+// in its call's window both in the recording and in record's full round, at
+// a read of that run's clock plus one offset from Min up to, not including,
+// Max (learn.KindClockOffset). A replay keeps comparing it: the value it
+// sees must be a read made in its own call's window plus such an offset
+// (Holds), so a time to live changed by its Unit or more still fails. Min
+// and Max are what the two runs' windows bound the offset to, never a
+// tolerance, and the learn step learns one only where they, with Res, are
+// narrower than the unit the offset reads in (Unit, Within): thirty minutes
+// bounded to a few milliseconds, never to a few minutes. Min is above zero
+// and Unit coarser than a second for any offset the learn step finds.
+//
+// Res is the resolution the learn step read the value at: the coarser of
+// the one its encoding writes and the granularity both runs' values share
+// (the greatest duration both are whole multiples of, from the Unix epoch).
+// An application that cuts its value coarser than its encoding
+// (Truncate(time.Second) stored as a millisecond $date) shows that cut in
+// both values, and the sums that decide whether a replay can compare the
+// offset (Within, at the learn step and in Holds) count it, never the
+// encoding's finer one: a value cut to the minute, its time to live thirty
+// minutes, read late in its minute stands only thirty minutes and a
+// fraction of a second from its read even with a time to live of
+// thirty-one, and a resolution of a millisecond would hold it. Res is read
+// only in those sums and in the refusal of a cut (CutCoarserThan), so only
+// to refuse more: two values that happen to
+// share a coarser granularity make it coarser, never finer, the learn step
+// bounds Min and Max at the encoding's resolution, not at Res, and Holds
+// reads the replay's value at the replay's own resolution, not at Res. A
+// Res that is a cut the application made (CutCoarserThan: a whole number of
+// the unit above the encoding's, a value cut to the second stored at the
+// millisecond) is never learned: read at its encoding's resolution, a
+// replay's value cut so would hold only where its read falls early in its
+// cut, by when the replay ran, and keploy does not read the application's
+// cut from two values to hold it anywhere. Nor are two values a whole
+// number of that unit apart (learn's apartByUnits): a cut to it plus a time
+// to live that is no whole number of cuts, which Res does not show.
+type ClockOffset struct {
+	Min time.Duration `json:"min" yaml:"min" bson:"min"`
+	Max time.Duration `json:"max" yaml:"max" bson:"max"`
+	Res time.Duration `json:"res" yaml:"res" bson:"res"`
+}
+
+// offsetUnits are the units an offset reads in, coarsest first.
+var offsetUnits = []time.Duration{24 * time.Hour, time.Hour, time.Minute, time.Second, time.Millisecond, time.Microsecond, time.Nanosecond}
+
+// Unit is the coarsest unit (a day, an hour, a minute, a second, a
+// millisecond, a microsecond, a nanosecond) one of whose multiples lies from
+// Min up to, not including, Max: the unit String reads the offset in ("clock
+// + 30m": a minute). 0 for an empty o.
+func (o ClockOffset) Unit() time.Duration {
+	for _, u := range offsetUnits {
+		if ceilTo(o.Min, u) < o.Max {
+			return u
+		}
+	}
+	return 0
+}
+
+// CutCoarserThan reports whether o's Res is a cut the application made
+// coarser than an encoding that writes enc: above enc and a whole number of
+// the next unit of offsetUnits above enc (a second above a millisecond, a
+// millisecond above a microsecond, a minute above a second, an hour above a
+// minute), or above an enc no unit is above. Both runs' values cut to the
+// second and stored at the millisecond share a whole number of seconds;
+// two values the application does not cut share one by chance, one time in
+// about a million at a millisecond's or a microsecond's encoding and one in
+// 3,600 at a second's, and are refused the same. A Res above enc that is no
+// whole number of the next unit (half a second two millisecond values share
+// by chance, or 2 s two second values do) is none: the sums count it, and
+// the replay's value is read at its own resolution. A Res of enc itself
+// (an hour's time to live at a minute's encoding) is none either.
+func (o ClockOffset) CutCoarserThan(enc time.Duration) bool {
+	if o.Res <= enc {
+		return false
+	}
+	u := UnitAbove(enc)
+	return u == 0 || o.Res%u == 0
+}
+
+// UnitAbove is the finest of the units an offset reads in (a day, an hour,
+// a minute, a second, a millisecond, a microsecond, a nanosecond) coarser
+// than enc, an encoding's resolution: a second above a millisecond, a minute
+// above a second. 0 above a day.
+func UnitAbove(enc time.Duration) time.Duration {
+	for i := len(offsetUnits) - 1; i >= 0; i-- {
+		if u := offsetUnits[i]; u > enc {
+			return u
+		}
+	}
+	return 0
+}
+
+// ceilTo is the least multiple of u not below d.
+func ceilTo(d, u time.Duration) time.Duration {
+	q := d / u
+	if q*u < d {
+		q++
+	}
+	return q * u
+}
+
+// Within reports whether spans, each at least zero, add up to less than o's
+// Unit. The learn step learns o only where its width and its resolution are
+// (o.Within(o.Max-o.Min, o.Res)), so it holds one multiple of its unit, the
+// one String names; Holds asks the same of the replay's window with them,
+// so a time to live changed by a unit or more never holds, however the
+// replay's read falls in its window, as long as the application cuts its
+// value no coarser at the replay than in the two runs the learn step read,
+// and no coarser than Res there: a value cut to a whole number of the unit
+// above its encoding the learn step refuses (CutCoarserThan, and learn's
+// apartByUnits), but one cut finer than that unit (10 ms at a
+// millisecond's encoding) plus a time to live that is no whole number of
+// cuts stands up to a whole cut from its read, which Res does not count. A
+// time to live changed by less than that sum may hold, by where the read
+// falls.
+func (o ClockOffset) Within(spans ...time.Duration) bool {
+	left := o.Unit()
+	for _, s := range spans {
+		if s >= left {
+			return false
+		}
+		left -= s
+	}
+	return true
+}
+
+// Holds reports whether at, a value cut to resolution res (truncated: it
+// stands for [at, at+res)), is a read of the clock made from from to to (a
+// call's window on the application's clock) plus an offset of o: some read
+// t in [from, to] and offset d in [o.Min, o.Max) put t+d in [at, at+res),
+// so [from+o.Min, to+o.Max) and [at, at+res) meet. It reads at at res, the
+// replay's own resolution, never at o.Res, so a granularity the learn step
+// read in both runs' values accepts nothing more. It holds nothing where
+// the window, o's width and the coarser of res and o.Res add up to o's Unit
+// or more (Within): there a value whose time to live changed by a unit
+// could hold, by where the read fell, and the replay fails closed. Nor for
+// an o whose Unit is a second or finer: an application that cuts its value
+// to that unit makes a time to live changed by one look the same. Nor for
+// an o whose Res is a cut coarser than res's encoding (CutCoarserThan),
+// which the learn step never learns, or one it learned at an encoding
+// coarser than the replay's (a millisecond's Res at a nanosecond's
+// replay): the replay's value, read at res, would hold by where its read
+// fell in the cut. A window with no start (a zero to
+// is before any from), one that ends before it starts, a res of none or an
+// empty o (it has no Unit) holds nothing, and so does an o the learn step
+// never finds (a Min of zero or below, a Max not above Min, or a Res of
+// none or below: one built without the resolution it was learned at could
+// have its sums read finer than the application cuts its value), whose
+// width could overflow or whose Unit could swallow the sign of the offset.
+func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
+	if o.Min <= 0 || o.Max <= o.Min || o.Res <= 0 || o.Unit() <= time.Second || from.IsZero() || to.Before(from) || res <= 0 || o.CutCoarserThan(res) {
+		return false
+	}
+	if !o.Within(to.Sub(from), o.Max-o.Min, max(res, o.Res)) {
+		return false
+	}
+	return from.Add(o.Min).Before(at.Add(res)) && at.Before(to.Add(o.Max))
+}
+
+// String is o as a person reads it: "clock + 30m", the one multiple from Min
+// up to Max of its Unit, and the two bounds after it where they are more
+// than a nanosecond apart: "clock + 30m (from 29m59.998s to 30m0.001s)".
+// Where they hold more than one multiple, it names no offset: "clock plus an
+// offset from 29m59.96s to 32m59.956s". It never decides anything.
+func (o ClockOffset) String() string {
+	u := o.Unit()
+	if u == 0 || ceilTo(o.Min, u)+u < o.Max {
+		return o.Range()
+	}
+	s := "clock + " + ShortDuration(ceilTo(o.Min, u))
+	if o.Max-o.Min > 1 {
+		s += " (from " + ShortDuration(o.Min) + " to " + ShortDuration(o.Max) + ")"
+	}
+	return s
+}
+
+// Range is o's bounds as a person reads them, naming no offset: "clock plus
+// an offset from 29m42.845s to 30m41.368s". The learn step's refusal of an
+// o too wide for a replay to compare (Within) names it so.
+func (o ClockOffset) Range() string {
+	return "clock plus an offset from " + ShortDuration(o.Min) + " to " + ShortDuration(o.Max)
+}
+
+// ShortDuration is d as time.Duration writes it, without its trailing zero
+// units ("30m", "1h", "1h30m"), and a whole number of days as days ("30d").
+func ShortDuration(d time.Duration) string {
+	if d != 0 && d%(24*time.Hour) == 0 {
+		return strconv.FormatInt(int64(d/(24*time.Hour)), 10) + "d"
+	}
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+		if strings.HasSuffix(s, "h0m") {
+			s = strings.TrimSuffix(s, "0m")
+		}
+	}
+	return s
 }
 
 // Clone returns a copy of v that shares no map or slice with it; nil for an

@@ -102,7 +102,27 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // recorded moment, or refuses it, before any window or lead excuses it
 // (instants.go, echoedIn). A read made before the previous call falls in
 // neither. It is no tolerance: the spans are what each run's calls show.
-type Window struct{ Rec, F Span }
+type Window struct {
+	Rec, F Span
+	// offsets: the caller's replay compares a read of the clock plus a
+	// constant offset (ComparesOffsets).
+	offsets bool
+}
+
+// ComparesOffsets is w for a caller whose replay compares a value the learn
+// step reads as a read of the clock plus a constant offset
+// (KindClockOffset), as models.ClockOffset.Holds does, against the value's
+// own call's window: the learn step then learns such an instant, which it
+// otherwise refuses naming its offset. nil for a nil w (no window: no
+// offset is shown).
+func (w *Window) ComparesOffsets() *Window {
+	if w == nil {
+		return nil
+	}
+	c := *w
+	c.offsets = true
+	return &c
+}
 
 // Span is one run's part of a Window: From, when its previous data-plane
 // call reached keploy, and To, when the call itself did, on its app clock.
