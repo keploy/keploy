@@ -121,7 +121,8 @@ type carriedChunk struct {
 // answer says were acknowledged: the client had taken all it was sent.
 func newTookHarness(script ...clientLook) *tookHarness {
 	h := &tookHarness{sock: &scriptedSocket{script: script, wrote: script[0].acked}}
-	h.t = newTee(fakeconn.FromDest, 1<<20, 16, time.Second, func() bool {
+	h.t = newTee(fakeconn.FromDest, 1<<20, 16, time.Second, nil, nil)
+	h.t.pushStart = func() {
 		at, _, ok := h.t.oldestUnconsumed(unstampedInAnyWindow)
 		if !ok {
 			at = 0
@@ -129,8 +130,7 @@ func newTookHarness(script ...clientLook) *tookHarness {
 		h.mu.Lock()
 		h.pushing = append(h.pushing, at)
 		h.mu.Unlock()
-		return false
-	}, nil, nil)
+	}
 	h.r = &Relay{client: h.sock, lastLook: make(chan struct{}), cfg: Config{
 		ClientStopped: func() { h.stops.Add(1) },
 		OnMarkMockIncomplete: func(reason string) {

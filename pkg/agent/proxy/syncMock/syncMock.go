@@ -1749,19 +1749,10 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		starts.Default.StampDest(mock)
 	}
 	m.mu.Lock()
-	if m.memoryPause {
-		// Pressure is on at decode time, but this mock may have been decoded
-		// late for a request that happened during calm — its TC was captured
-		// at the ingress, so dropping the mock would orphan it. Decide by the
-		// request time, not now: drop only if the request ITSELF happened
-		// during pressure (the ingress never captured it, so there is no TC).
-		if m.pressureActiveAtLocked(mock.Spec.ReqTimestampMock) {
-			m.mu.Unlock()
-			m.pressureDropped.Add(1)
-			return
-		}
-		// Request was during calm → its TC was captured → keep this mock;
-		// fall through to the normal buffer/forward path.
+	if m.lostToPressureLocked(mock) {
+		m.mu.Unlock()
+		m.pressureDropped.Add(1)
+		return
 	}
 	// Mock is being kept — count it as successfully added.
 	m.totalAdded.Add(1)
@@ -3633,6 +3624,30 @@ func (m *SyncMockManager) pressureActiveAtLocked(t time.Time) bool {
 	return ok
 }
 
+// lostToPressureLocked reports whether AddMock drops mock for memory pressure:
+// a per-test mock whose request happened while the memory guard paused
+// recording. Decided by the request's time, not by whether the pause is on
+// now, both ways round:
+//   - a mock decoded during a pause for a request made before it belongs to a
+//     test case the ingress captured, and dropping it would orphan that test;
+//   - a mock decoded after a pause for a request made during it belongs to no
+//     test case (the ingress did not capture one there, and the recording
+//     suppresses any that overlap the pause), so keeping it would leave a mock
+//     no test owns. The relay hands parsers the whole stream through a pause
+//     so that the connection's capture survives it, which is what lets a
+//     parser decode such a mock after the pause has ended.
+//
+// A mock of a connection's or the session's lifetime (a handshake, a prepared
+// statement) is kept whenever its request was made: the tests the connection
+// serves after the pause are recorded, and they need it. Nil and an unknown
+// request time keep the mock. Caller holds m.mu.
+func (m *SyncMockManager) lostToPressureLocked(mock *models.Mock) bool {
+	if mock == nil || mock.TestModeInfo.Lifetime != models.LifetimePerTest {
+		return false
+	}
+	return m.pressureActiveAtLocked(mock.Spec.ReqTimestampMock)
+}
+
 // OrphanRangeCount returns how many orphan intervals have been recorded, and
 // how many spans hold them now, split into closed and still-open. Exposed for
 // the session-summary log in routes/record.go so a run with a high
@@ -3701,7 +3716,7 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 			// for span tracking — they would otherwise spam the spans.
 			m.closePressure = m.pressure.Open(now)
 		}
-		// Don't wipe the whole buffer. Two classes of mock must survive:
+		// Don't wipe the whole buffer. Three classes of mock must survive:
 		//   1. Startup-window mocks (IsStartup) — boot traffic and everything
 		//      captured within the first StartupMockTestCaseWindow test cases
 		//      (#4282). They own no resolved window and reach disk only via
@@ -3712,6 +3727,8 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 		//      (#4220 Bug-0). Only mocks whose request was during pressure are
 		//      dropped: the ingress never captured those, so there is no TC to
 		//      orphan.
+		//   3. Mocks of a connection's or the session's lifetime, whenever
+		//      their request was made (lostToPressureLocked).
 		// Unknown timestamp → keep (safe default). In-place filter, nil the tail.
 		before := len(m.buffer)
 		keep := m.buffer[:0]
@@ -3723,7 +3740,7 @@ func (m *SyncMockManager) SetMemoryPressure(enabled bool) {
 				keep = append(keep, mk)
 				continue
 			}
-			if !m.pressureActiveAtLocked(mk.Spec.ReqTimestampMock) {
+			if !m.lostToPressureLocked(mk) {
 				keep = append(keep, mk)
 			}
 		}

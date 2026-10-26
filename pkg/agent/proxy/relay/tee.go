@@ -39,8 +39,18 @@ import (
 // branch on them in tests and assertions without importing internal
 // types. Also forwarded verbatim into OnMarkMockIncomplete.
 const (
-	// DropMemoryPressure — [Config.MemoryGuardCheck] returned true
-	// at tee time.
+	// DropMemoryPressure is no longer emitted. The tee used to refuse every
+	// chunk while the memory guard paused recording, which cut the parser's
+	// byte stream mid-frame: a framed parser (MySQL, Postgres, Mongo) that
+	// cannot re-anchor after a hole then desynced for good, and a pause of
+	// half a second ended capture on every pooled connection for the rest of
+	// the recording. A pause is temporary, so the stream is now always
+	// delivered whole; the mock manager drops, and counts, the mocks whose
+	// request fell inside a pause (syncMock.SyncMockManager.AddMock), and the
+	// recording suppresses the test cases that overlap one. Retained so
+	// existing callers and dashboards that reference the string still compile.
+	//
+	// Deprecated: no longer produced.
 	DropMemoryPressure = "memory_pressure"
 
 	// DropPerConnCap — the per-connection byte cap would be exceeded
@@ -75,7 +85,7 @@ const (
 	// its framer after a hole, so there is nothing left worth delivering.
 	//
 	// This is a CONSEQUENCE reason, not a cause: the loss that mattered was
-	// reported once as [DropPerConnCap] or [DropMemoryPressure], and
+	// reported once as [DropPerConnCap], and
 	// [tee.onDesync] already fired for it. Everything after that would be
 	// framed from the wrong offset — a length header read out of the middle
 	// of a body — which yields no mocks and, in the postgres case that
@@ -123,11 +133,10 @@ const (
 // Lifetime: created by [newTee], started by [tee.start], stopped by
 // [tee.close]. close is idempotent; callers typically defer it in Run.
 type tee struct {
-	dir      fakeconn.Direction
-	logger   *zap.Logger
-	cap      int64
-	memCheck func() bool
-	onDrop   func(reason string)
+	dir    fakeconn.Direction
+	logger *zap.Logger
+	cap    int64
+	onDrop func(reason string)
 
 	// onDesync fires exactly once per tee, on the first dropped chunk.
 	// Set by [New] from [Config.OnCaptureDesync]; nil is safe.
@@ -288,19 +297,23 @@ type tee struct {
 	// until this long after it was read ([Config.ReaderLag]). Read-only
 	// after construction.
 	readerLag time.Duration
+
+	// pushStart, when set, runs as push begins to admit a chunk: a test's
+	// view of the tee at that instant. Nil outside tests. Read-only after
+	// construction.
+	pushStart func()
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
 // is called with the consumer's close signal — the FakeConn that consumes
 // readCh cannot be constructed until this tee exists, so binding the two
 // is necessarily a second step.
-func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, memCheck func() bool, onDrop func(reason string), logger *zap.Logger) *tee {
+func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, onDrop func(reason string), logger *zap.Logger) *tee {
 	return &tee{
 		dir:        dir,
 		logger:     logger,
 		cap:        capBytes,
 		stallGrace: stallGrace,
-		memCheck:   memCheck,
 		onDrop:     onDrop,
 		out:        make(chan fakeconn.Chunk, chanBuf),
 		wake:       make(chan struct{}, 1),
@@ -374,9 +387,9 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	// Ordered AFTER the pause check so a paused tee keeps reporting
 	// DropPaused exactly as before — a pause is requested, and the
 	// SessionOnAbort path depends on that cheap reason — and BEFORE the
-	// memory and cap checks so the remainder of a dead connection is
-	// attributed to the desync that killed it instead of re-reporting
-	// per_conn_cap / memory_pressure for every later chunk.
+	// cap check so the remainder of a dead connection is attributed to the
+	// desync that killed it instead of re-reporting per_conn_cap for every
+	// later chunk.
 	//
 	// The check is per DIRECTION, because a tee is: a hole in C2D corrupts
 	// only the request framer, and the response direction of the same
@@ -386,10 +399,14 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		t.drop(DropDesynced)
 		return false
 	}
-	if t.memCheck != nil && t.memCheck() {
-		t.drop(DropMemoryPressure)
-		return false
+	if t.pushStart != nil {
+		t.pushStart()
 	}
+	// No memory-pressure check here, on purpose: a pause is temporary, and
+	// a chunk refused during one would be a hole in a framed stream that
+	// most parsers cannot step over, ending the connection's capture for
+	// the rest of the recording (see [DropMemoryPressure]). The cap below
+	// bounds what one connection can queue whatever the pressure.
 	n := int64(len(c.Bytes))
 
 	t.mu.Lock()
@@ -435,13 +452,12 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 // downstream parser stranded mid-frame.
 //
 // The test is "did the capture pipeline lose bytes the parser was going to
-// need", not "was a mock affected". [DropPerConnCap] and
-// [DropMemoryPressure] are both unilateral: the parser is mid-stream and
-// simply never receives those bytes. [DropPaused] is not — see the caller.
+// need", not "was a mock affected". [DropPerConnCap] is unilateral: the
+// parser is mid-stream and simply never receives those bytes. [DropPaused] is not — see the caller.
 // Nor is [DropDesynced]: that one is emitted BECAUSE the tee is already
 // desynced, so counting it here would make the predicate self-feeding.
 func isDesyncingDrop(reason string) bool {
-	return reason == DropPerConnCap || reason == DropMemoryPressure
+	return reason == DropPerConnCap
 }
 
 // firstHole reports whether a drop for reason is this tee's hole: its first
