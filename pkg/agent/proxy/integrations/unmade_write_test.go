@@ -152,6 +152,9 @@ func TestReportAnswered_NamesTheWriteAndTheRecordingThatAnswered(t *testing.T) {
 
 	got = nil
 	for _, b := range []BeforeUnmadeWrite{{}, {Write: write}, {Answer: answer}} {
+		if s := b.Answered(); s != "" {
+			t.Errorf("BeforeUnmadeWrite(%+v).Answered() = %q, want \"\": nothing answers from before a write", b, s)
+		}
 		if ReportAnswered(ctx, b, &models.MockMismatchReport{Protocol: "MongoDB"}) {
 			t.Errorf("ReportAnswered(%+v) = true, want false: it answers nothing from before a write", b)
 		}
