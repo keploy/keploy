@@ -114,10 +114,18 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		svc := streamsSvc{tc: make(chan *models.TestCase, 4), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
 		a := &Agent{logger: zap.NewNop(), svc: svc}
 		tok := rand.Text() // its own each run: a token ended stays ended
+		// A request a pause cost before this session: not its own.
+		syncmgr.Get().NoteNotRecordedUnderPressure("10.0.0.9:5009 -> 127.0.0.1:8080")
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
 		defer done()
 		for _, n := range []string{"test-1", "test-2"} {
 			svc.tc <- &models.TestCase{Name: n}
+		}
+		// Requests a pause of the memory guard cost this session, three on
+		// two connections, noted once its stream is open: what the session
+		// counts from.
+		for _, c := range []string{"10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.2:5001 -> 127.0.0.1:8080"} {
+			syncmgr.Get().NoteNotRecordedUnderPressure(c)
 		}
 		endRecordingStreams(tok)
 		_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
@@ -153,6 +161,9 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if sum.TestCasesSent != 2 || sum.TestCasesSuppressed != 0 || sum.MassSuppressed {
 			t.Fatalf("the marker's summary says %+v, want the two test cases sent and none suppressed", sum)
+		}
+		if want := (models.PressureSkipSummary{Requests: 3, Connections: 2}); sum.NotRecordedUnderPressure != want {
+			t.Fatalf("the marker says a pause cost %+v, want %+v", sum.NotRecordedUnderPressure, want)
 		}
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)

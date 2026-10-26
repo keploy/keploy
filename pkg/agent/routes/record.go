@@ -57,13 +57,13 @@ var agentReadyFilePath = kdocker.AgentReadyFile
 // point where the recording has quietly become unrepresentative.
 const massSuppressionPercent = 25
 
-// massSuppressed reports whether a session that sent sent test cases and
-// suppressed suppressed of them suppressed a large share
-// (massSuppressionPercent): its summary says so at WARN.
 // maxNamedPressureConns is how many connections the summary's warning of the
 // requests a pause of the memory guard cost names, those with the most first.
 const maxNamedPressureConns = 8
 
+// massSuppressed reports whether a session that sent sent test cases and
+// suppressed suppressed of them suppressed a large share
+// (massSuppressionPercent): its summary says so at WARN.
 func massSuppressed(sent, suppressed int) bool {
 	total := sent + suppressed
 	return total > 0 && suppressed*100/total >= massSuppressionPercent
