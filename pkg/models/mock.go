@@ -435,6 +435,19 @@ type MockSpec struct {
 	// none. Additive / omitempty: an older keploy ignores it.
 	Variables MockVariables `json:"Variables,omitempty" yaml:"variables,omitempty" bson:"variables,omitempty"`
 
+	// Clocks names the request places of this call the learn step learned
+	// as a read of the application's clock: a plain read (a zero offset,
+	// ClockOffset.Plain) or a read plus a constant offset (an expiry thirty
+	// minutes after now), by the field paths ReqBodyNoise uses. They are
+	// compared, never noise: a replay checks the value its call carries
+	// there is a read made in its own call's window on the application's
+	// clock plus that offset (ClockOffset.Holds), and refuses it otherwise,
+	// or where it cannot tell the application's clock. Kind-agnostic,
+	// carried on the doc envelope as a top-level `clocks:` block like
+	// variables; nil for a call that holds none. Additive / omitempty: a
+	// recording without it loads as before, and an older keploy ignores it.
+	Clocks map[string]ClockOffset `json:"Clocks,omitempty" yaml:"clocks,omitempty" bson:"clocks,omitempty"`
+
 	// learned and learnedBinds are, on a mock the learn step of record's
 	// full round just paired (agent side, in memory), the variables it
 	// learned on the mock and those it learned that are bound at an earlier

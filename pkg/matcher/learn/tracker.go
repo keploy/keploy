@@ -1183,46 +1183,96 @@ func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival
 	if t == nil || paired == nil || paired.Spec.ReqTimestampMock.IsZero() {
 		return nil
 	}
-	t.mu.Lock()
-	clock := t.appClock
-	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
-	var prev time.Time
-	if i > 0 {
-		prev = t.servedAt[i-1]
-	}
-	client, began, recBegan := t.clientTests, t.beganAt, t.recBegan
-	t.mu.Unlock()
+	lc, recBegan := t.liveClockAt(arrival)
 	recFrom := prevRec
-	if client && recBegan.After(recFrom) {
+	if lc.client && recBegan.After(recFrom) {
 		recFrom = recBegan
 	}
-	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || clock == nil {
+	if recFrom.IsZero() || !recFrom.Before(paired.Spec.ReqTimestampMock) || lc.clock == nil {
 		return nil
 	}
-	// span is F's span from the real instant from to the arrival, ok where
-	// the app's clock ran as one between them.
-	span := func(from time.Time) (Span, bool) {
-		if from.IsZero() || from.After(arrival) {
-			return Span{}, false
-		}
-		fFrom, ok := clock(from)
-		if !ok {
-			return Span{}, false
-		}
-		fTo, ok := clock(arrival)
-		if !ok || fTo.Sub(fFrom) != arrival.Sub(from) {
-			return Span{}, false
-		}
-		return Span{From: fFrom, To: fTo}, true
-	}
-	f, ok := span(prev)
-	if !ok && client && began.After(prev) {
-		f, ok = span(began)
-	}
+	f, ok := lc.span(arrival)
 	if !ok {
 		return nil
 	}
 	return &Window{Rec: Span{From: recFrom, To: paired.Spec.ReqTimestampMock}, F: f}
+}
+
+// LiveSpan is the span on the app's clock in which the call that reached
+// keploy at the real instant arrival made its clock reads in this run, as
+// CallWindowFrom reads this run's half of a window: after the previous
+// data-plane call the store served (ServedMockAt) and no later than
+// arrival, and in a client test from the running test's begin where the
+// app's clock did not run as one from that serve, or the store served none
+// before it. It reads no recording, so a replay reads it for any call, in
+// any cycle (ClockSpanFrom). ok is false on a nil tracker, where no app
+// clock is set (SetAppClock: keploy cannot tell which clock the application
+// reads), where it cannot tell the app's clock at either bound, where no
+// bound is known, or where the app's clock did not run as one between the
+// bound and arrival: a replay then cannot check a read of the clock, and
+// refuses it (CheckClockRead).
+func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
+	if t == nil {
+		return Span{}, false
+	}
+	lc, _ := t.liveClockAt(arrival)
+	return lc.span(arrival)
+}
+
+// liveClock is what the tracker knows, at one moment, of this run's clock
+// before a call that reached keploy at a real instant: how to read the
+// app's clock, the previous data-plane serve before the call, and in a
+// client test the running test's begin.
+type liveClock struct {
+	clock       func(time.Time) (time.Time, bool)
+	prev, began time.Time
+	client      bool
+}
+
+// liveClockAt is the tracker's liveClock before arrival, and the running
+// test's recorded begin (RecordedBegin), read under one lock.
+func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	lc := liveClock{clock: t.appClock, client: t.clientTests, began: t.beganAt}
+	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
+	if i > 0 {
+		lc.prev = t.servedAt[i-1]
+	}
+	return lc, t.recBegan
+}
+
+// span is this run's span to arrival (LiveSpan): from the previous serve,
+// or, in a client test, from the test's begin where that came after it and
+// the span from it is none.
+func (lc liveClock) span(arrival time.Time) (Span, bool) {
+	if lc.clock == nil {
+		return Span{}, false
+	}
+	f, ok := lc.from(lc.prev, arrival)
+	if !ok && lc.client && lc.began.After(lc.prev) {
+		f, ok = lc.from(lc.began, arrival)
+	}
+	return f, ok
+}
+
+// from is the app's clock's span from the real instant from to arrival, ok
+// where the app's clock ran as one between them: the span its clock reads
+// must be the real time between them, exactly, or what it bounds is no run
+// of one clock.
+func (lc liveClock) from(from, arrival time.Time) (Span, bool) {
+	if from.IsZero() || from.After(arrival) {
+		return Span{}, false
+	}
+	fFrom, ok := lc.clock(from)
+	if !ok {
+		return Span{}, false
+	}
+	fTo, ok := lc.clock(arrival)
+	if !ok || fTo.Sub(fFrom) != arrival.Sub(from) {
+		return Span{}, false
+	}
+	return Span{From: fFrom, To: fTo}, true
 }
 
 type trackerKey struct{}
