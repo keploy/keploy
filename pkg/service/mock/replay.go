@@ -1150,16 +1150,19 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	if len(unknown) > 0 {
 		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
 	}
+	// Every test's recorded window, of every recording its mapping lists,
+	// the ones the agent never holds included: they were made in it.
+	windows := recordedTestWindows(mp, table, decoded)
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
 		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, windows); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("recorded test windows", len(windows)), zap.String("mock-set", name))
 	return nil
 }
 

@@ -283,6 +283,14 @@ type ScopeTableReq struct {
 	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
 	// between tests"; only a nil one is left out (with the switch off).
 	Pool map[string][]string `json:"pool,omitzero"`
+	// Windows is, under the proven switch, the recorded window of every test
+	// of the set, the gated ones included: what keploy test's staging sends
+	// as MockFilterParams.RecordedWindows. keploy mock replay derives each
+	// from the set's mappings (the test's recorded begin and its own
+	// recordings), so the learn step tells a test's own recordings from
+	// another test's (integrations.TestWindows). Absent from an older CLI
+	// and from a set with no test: the agent then knows none.
+	Windows []TestWindow `json:"windows,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

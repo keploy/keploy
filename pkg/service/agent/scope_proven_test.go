@@ -68,6 +68,10 @@ type wireProxy struct {
 	failPools int
 	// staged counts the stagings (SetMocks).
 	staged int
+	// seeded are the recorded test windows last seeded
+	// (SeedRecordedWindows), and seededAt the stagings made before.
+	seeded   []models.TestWindow
+	seededAt int
 	// appClock is the app clock the agent last handed the proxy
 	// (SetAppClock), nil until it did.
 	appClock func(time.Time) (time.Time, bool)
@@ -102,6 +106,13 @@ func (p *wireProxy) WithdrawTestErrorCapture() {
 	defer p.mu.Unlock()
 	p.withdraws++
 	p.order = append(p.order, "withdraw")
+}
+
+// SeedRecordedWindows takes the set's recorded test windows.
+func (p *wireProxy) SeedRecordedWindows(ws []models.TestWindow) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seeded, p.seededAt = ws, p.staged
 }
 
 // SetMocks takes a staging of the replay's mocks.
@@ -693,6 +704,26 @@ func TestABeginServesItsTestExactlyItsTestMocks(t *testing.T) {
 	p.mu.Lock()
 	require.Equal(t, 1, p.staged, "an end stages nothing again")
 	p.mu.Unlock()
+}
+
+// keploy mock replay's recorded test windows (the scope table's) reach the
+// proxy before the pool's serving stages the set, so the staging installs
+// them with it (MockManager.SeedRecordedWindows parks them at a set
+// boundary): the learn step knows each test's window from the first call.
+func TestTheRecordedWindowsAreSeededBeforeThePoolStagesTheSet(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-4", "GET", "http://h/pool"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+	ctx := context.Background()
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	ws := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
+	require.NoError(t, a.SetRecordedWindows(ctx, ws))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-4"}}))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Equal(t, ws, p.seeded)
+	require.Equal(t, 0, p.seededAt, "seeded before the set was staged")
+	require.Equal(t, 1, p.staged, "the pool's serving staged the set")
 }
 
 // A test that skipped itself is not failed for the recorded calls it then
