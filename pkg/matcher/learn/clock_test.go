@@ -133,7 +133,7 @@ func TestClassifyInTheStartUpInsertsInstantIsNoiseInItsWindow(t *testing.T) {
 			for wname, win := range map[string]*Window{"in the call's window": w, "by the lead alone": nil} {
 				ln := classify(form, tc.rec, tc.live, win)
 				if tc.noiseIn && win != nil {
-					if ln.Kind != KindNoise {
+					if !noiseOrRead(ln) {
 						t.Errorf("%s, %s, %s: %s (%s, from %q); want noise", fname, tc.name, wname, ln.Kind, ln.Why, ln.From.Mock)
 					}
 				} else if ln.Kind != KindVariable || ln.From.Mock != "mock-0" {
@@ -192,13 +192,19 @@ func TestClassifyInAClockWordInTheAnswerIsNoEcho(t *testing.T) {
 	resp := []Leaf{{Path: "body.note", Noise: "body.note", Type: String, Value: "seq " + recRead.Format("05") + " of o-41"}}
 	for _, form := range []struct {
 		of func(time.Time) string
-	}{{iso}, {func(t time.Time) string { return "at " + iso(t) }}} {
+		// whole: the value is one instant whole, a plain read of the
+		// clock (KindClockRead), not a word of a longer value (noise).
+		whole bool
+	}{{iso, true}, {func(t time.Time) string { return "at " + iso(t) }, false}} {
 		rec := body(t, "k", `{"at":"`+form.of(recRead)+`"}`)
 		got := body(t, "k", `{"at":"`+form.of(live)+`"}`)
 		for wname, win := range map[string]*Window{"in the call's window": w, "by the lead alone": nil} {
 			want := KindNoise
-			if win == nil {
+			switch {
+			case win == nil:
 				want = KindUnaccounted
+			case form.whole:
+				want = KindClockRead
 			}
 			if ln := ClassifyIn(nil, []string{"body.at"}, got, rec, recInsert, nil, nil, resp, win)[0]; ln.Kind != want {
 				t.Errorf("%q, %s: %s (%s); want %s", form.of(recRead), wname, ln.Kind, ln.Why, want)

@@ -333,7 +333,7 @@ func TestAPendingCallIsNoPreviousCall(t *testing.T) {
 		t.Fatalf("the insert's window %+v does not hold its read (recorded %s, live %s)", w, rec.Format(time.RFC3339Nano), live.Format(time.RFC3339Nano))
 	}
 	for _, typed := range []bool{false, true} {
-		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); ln.Kind != KindNoise {
+		if ln := classifyProcessedAt(rec, live, typed, insert.Spec.ReqTimestampMock, w, receive, hello5, count, hello7, pending); !noiseOrRead(ln) {
 			t.Errorf("typed %v: %s (from %q, %s); want noise, a read in its call's window", typed, ln.Kind, ln.From.Mock, ln.Why)
 		}
 	}
