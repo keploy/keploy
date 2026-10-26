@@ -1744,6 +1744,9 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 			// And the process its call came from.
 			starts.Default.StampOrigin(mock)
 		}
+		// The address its connection reached, in every mode, stamped while
+		// its connection is open (starts.Registry.StampDest).
+		starts.Default.StampDest(mock)
 	}
 	m.mu.Lock()
 	if m.memoryPause {

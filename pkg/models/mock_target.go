@@ -15,8 +15,11 @@ import (
 //  1. HTTP: method + host + path. A bare host collapses every call to one
 //     service into indistinguishable rows; `GET api.internal:8080/orders` is
 //     the string a human acts on and an agent keys off.
-//  2. Metadata["destAddr"] ("host:port", written by the MySQL and Postgres
-//     recorders) PLUS the mock's operation token when it has one, so the two
+//  2. Metadata["destAddr"] ("host:port", the address the call's connection
+//     reached, which keploy stamps on every mock it records and the MySQL
+//     and Postgres recorders write themselves; a recording made before
+//     keploy stamped every mock has it on those two only) PLUS the mock's
+//     operation token when it has one, so the two
 //     protocols that route every call through a single address still produce
 //     distinct rows ("mysql:3306 COM_QUERY").
 //  3. The protocol-generic summary (MockSummaryFromSpec), which is what
