@@ -96,27 +96,26 @@ func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Respon
 }
 
 // SkipGRPCUnderPressure reports whether a pause of the memory guard costs a
-// gRPC call whose request came at reqAt, as CaptureGRPC decides whether to
-// record it: the guard has paused recording now, or had as the request came
-// (a pressure span of ctx's mock manager holds reqAt). When it does, it counts
+// gRPC call, as CaptureGRPC decides whether to record it: the guard has
+// paused recording now, or had as the forwarder read the call's request
+// (pausedAtRequest, pkg.HTTP2Stream.RequestPaused). When it does, it counts
 // the call as not recorded under pressure on the ingress connection ctx names
 // (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the recording
 // says what the pause cost.
 //
 // The gRPC ingress tees a connection's whole stream through a pause, so its
-// calls come here whenever they complete: the request's time is what puts a
-// call in a pause, as an HTTP ingress reads the pause as a request comes. A
-// call whose request came before a pause that has ended by its response is
-// captured, and the recording suppresses it for the overlap
-// (WasPressureActiveInWindow), as it does an HTTP exchange's.
-func SkipGRPCUnderPressure(ctx context.Context, reqAt time.Time) bool {
-	mgr := syncMock.FromContextOrGlobal(ctx)
-	paused := memoryguard.IsRecordingPaused()
-	if !paused && !reqAt.IsZero() {
-		paused, _ = mgr.WasPressureActiveInWindow(reqAt, reqAt)
-	}
+// calls come here whenever they complete: whether the pause was on as the
+// request was read is what puts a call in it, as an HTTP ingress reads the
+// pause as a request comes. The request's time cannot: a pause's span ends at
+// the instant the pause does, and on a clock as coarse as Windows' the next
+// call's request is stamped in that same tick, so the first call after every
+// pause was judged to be in it. A call whose request came before a pause that
+// has ended by its response is captured, and the recording suppresses it for
+// the overlap (WasPressureActiveInWindow), as it does an HTTP exchange's.
+func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
+	paused := pausedAtRequest || memoryguard.IsRecordingPaused()
 	if paused {
-		mgr.NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
 	}
 	return paused
 }
@@ -618,7 +617,7 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		return
 	}
 
-	if SkipGRPCUnderPressure(ctx, http2Stream.GRPCReq.Timestamp) {
+	if SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
 		return
 	}
 

@@ -593,41 +593,40 @@ func TestSkipUnderPressureClosesAndCountsOnTheIngressConnection(t *testing.T) {
 }
 
 // A gRPC call is left out for a pause of the memory guard when the guard has
-// paused recording now, or had as the call's request came (a pressure span of
-// the manager holds its time), and each one left out is counted on the
-// ingress connection its context names. A call whose request came before or
-// after every pause is not: the gRPC ingress tees a connection's whole stream
-// through a pause, and only the calls the pause took part in are its cost.
-func TestSkipGRPCUnderPressureDecidesByTheRequestsTime(t *testing.T) {
+// paused recording now, or had as the forwarder read the call's request, and
+// each one left out is counted on the ingress connection its context names. A
+// call whose request was read while recording was not paused is not, however
+// close to a pause its request's time is: the gRPC ingress tees a
+// connection's whole stream through a pause, and only the calls the pause took
+// part in are its cost. A request read just after a pause, in the tick its
+// span ended in, is not in it: on a clock as coarse as Windows' the request's
+// time cannot tell, and the first call after every pause was left out.
+func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T) {
 	mgr := syncMock.New(zap.NewNop())
 	ctx := syncMock.WithIngressConn(syncMock.NewContext(context.Background(), mgr), "10.0.0.1:5000 -> 127.0.0.1:50051")
-
-	before := time.Now()
+	// A span that holds every instant: the request's time must not decide.
 	mgr.SetMemoryPressure(true)
-	during := time.Now()
-	mgr.SetMemoryPressure(false)
-	after := time.Now().Add(time.Millisecond)
+	defer mgr.SetMemoryPressure(false)
 
 	for _, c := range []struct {
-		what  string
-		reqAt time.Time
-		now   bool // the guard has paused recording now
-		want  bool
+		what            string
+		pausedAtRequest bool
+		now             bool // the guard has paused recording now
+		want            bool
 	}{
-		{what: "a request before the pause", reqAt: before},
-		{what: "a request after the pause", reqAt: after},
-		{what: "a request of unknown time", reqAt: time.Time{}},
-		{what: "a request during the pause, decided after it", reqAt: during, want: true},
-		{what: "a request after the pause, decided during the next", reqAt: after, now: true, want: true},
+		{what: "a request read while recording was not paused, its time in a span"},
+		{what: "a request read during the pause, decided after it", pausedAtRequest: true, want: true},
+		{what: "a request read after the pause, decided during the next", now: true, want: true},
+		{what: "a request read during a pause, decided during it", pausedAtRequest: true, now: true, want: true},
 	} {
 		restore := memoryguard.SetRecordingPausedForTest(c.now)
-		got := SkipGRPCUnderPressure(ctx, c.reqAt)
+		got := SkipGRPCUnderPressure(ctx, c.pausedAtRequest)
 		restore()
 		if got != c.want {
 			t.Errorf("%s: left out %v, want %v", c.what, got, c.want)
 		}
 	}
-	if got := mgr.NotRecordedUnderPressure(); got.Total != 2 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:50051"] != 2 {
-		t.Fatalf("not recorded under pressure: %+v, want the two calls left out, on their connection", got)
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 3 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:50051"] != 3 {
+		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
 	}
 }

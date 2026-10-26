@@ -756,79 +756,89 @@ func TestRecordIncoming_ACallCompletedUnderPressureIsDecidedBeforeItsChunksGo(t 
 // more: the connection's calls after the pause are captured, whether the
 // pause came mid-connection or the connection opened during it. A call whose
 // request came during the pause and whose response came after it is left out
-// too, and counted: its request's time puts it in the pause. The tee stopped
+// too, and counted: the pause was on as its request was read. The tee stopped
 // for good at a pause, and one opened during a pause never started, so a
 // pooled gRPC client's connection was recorded no more for the rest of the
-// recording, and nothing said so.
+// recording, and nothing said so. On a clock as coarse as Windows' too: the
+// next call's request is stamped in the tick the pause's span ended in, and
+// judged by that time, the first call after every pause was left out.
 func TestRecordIncoming_AConnectionIsCapturedAgainAfterAPause(t *testing.T) {
-	type call struct{ pausedAtRequest, pausedAtResponse, captured bool }
-	for name, tc := range map[string]struct {
-		pausedAtOpen bool
-		calls        []call
-	}{
-		"a pause mid-connection": {calls: []call{
-			{captured: true},
-			{pausedAtRequest: true, pausedAtResponse: true},
-			{captured: true},
-			{pausedAtRequest: true},
-			{captured: true},
-		}},
-		"a connection that opens during a pause": {pausedAtOpen: true, calls: []call{
-			{pausedAtRequest: true, pausedAtResponse: true},
-			{captured: true},
-		}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			restore := memoryguard.SetRecordingPausedForTest(tc.pausedAtOpen)
-			defer restore()
-			g := startGRPCIngress(t)
-			// A pause as the memory guard makes one: what IsRecordingPaused
-			// reports, and a pressure span of the manager.
-			pause := func(on bool) {
-				memoryguard.SetRecordingPausedForTest(on)
-				g.m.SetMemoryPressure(on)
+	for _, tick := range []time.Duration{0, 500 * time.Microsecond, time.Millisecond, windowsTick} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			if tick > 0 {
+				stubQuantizedClock(t, tick)
 			}
-			pause(tc.pausedAtOpen)
-			defer g.m.SetMemoryPressure(false)
+			awaitTickStart(tick)
+			type call struct{ pausedAtRequest, pausedAtResponse, captured bool }
+			for name, tc := range map[string]struct {
+				pausedAtOpen bool
+				calls        []call
+			}{
+				"a pause mid-connection": {calls: []call{
+					{captured: true},
+					{pausedAtRequest: true, pausedAtResponse: true},
+					{captured: true},
+					{pausedAtRequest: true},
+					{captured: true},
+				}},
+				"a connection that opens during a pause": {pausedAtOpen: true, calls: []call{
+					{pausedAtRequest: true, pausedAtResponse: true},
+					{captured: true},
+				}},
+			} {
+				t.Run(name, func(t *testing.T) {
+					restore := memoryguard.SetRecordingPausedForTest(tc.pausedAtOpen)
+					defer restore()
+					g := startGRPCIngress(t)
+					// A pause as the memory guard makes one: what IsRecordingPaused
+					// reports, and a pressure span of the manager.
+					pause := func(on bool) {
+						memoryguard.SetRecordingPausedForTest(on)
+						g.m.SetMemoryPressure(on)
+					}
+					pause(tc.pausedAtOpen)
+					defer g.m.SetMemoryPressure(false)
 
-			skipped := uint64(0)
-			for i, c := range tc.calls {
-				req, resp := pingCallOn(t, uint32(2*i+1), i == 0)
-				pause(c.pausedAtRequest)
-				go func() { _, _ = g.cliApp.Write(req) }()
-				_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
-				require.NoError(t, err)
-				g.waitFor(t, fmt.Sprintf("call %d's request chunk let go", i), func(st syncMock.BacklogState) bool { return st.Progress >= uint64(2*i+1) })
-				pause(c.pausedAtResponse)
-				go func() { _, _ = g.appApp.Write(resp) }()
-				_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)))
-				require.NoError(t, err)
+					skipped := uint64(0)
+					for i, c := range tc.calls {
+						req, resp := pingCallOn(t, uint32(2*i+1), i == 0)
+						pause(c.pausedAtRequest)
+						go func() { _, _ = g.cliApp.Write(req) }()
+						_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+						require.NoError(t, err)
+						g.waitFor(t, fmt.Sprintf("call %d's request chunk let go", i), func(st syncMock.BacklogState) bool { return st.Progress >= uint64(2*i+1) })
+						pause(c.pausedAtResponse)
+						go func() { _, _ = g.appApp.Write(resp) }()
+						_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)))
+						require.NoError(t, err)
 
-				if c.captured {
-					select {
-					case <-g.tcCh:
-					case <-time.After(30 * time.Second): // bounds only a call never captured
-						t.Fatalf("call %d, after the pause, was not captured", i)
+						if c.captured {
+							select {
+							case <-g.tcCh:
+							case <-time.After(30 * time.Second): // bounds only a call never captured
+								t.Fatalf("call %d, after the pause, was not captured", i)
+							}
+							continue
+						}
+						skipped++
+						// Decided once its response chunk is let go: a capture would
+						// hold it on the test-case channel nothing reads.
+						deadline := time.Now().Add(30 * time.Second)
+						for g.backlog().Progress < uint64(2*i+2) {
+							select {
+							case <-g.tcCh:
+								t.Fatalf("call %d, its request during the pause, was captured", i)
+							default:
+							}
+							if time.Now().After(deadline) {
+								t.Fatalf("call %d was never decided: %+v", i, g.backlog())
+							}
+							time.Sleep(time.Millisecond)
+						}
 					}
-					continue
-				}
-				skipped++
-				// Decided once its response chunk is let go: a capture would
-				// hold it on the test-case channel nothing reads.
-				deadline := time.Now().Add(30 * time.Second)
-				for g.backlog().Progress < uint64(2*i+2) {
-					select {
-					case <-g.tcCh:
-						t.Fatalf("call %d, its request during the pause, was captured", i)
-					default:
-					}
-					if time.Now().After(deadline) {
-						t.Fatalf("call %d was never decided: %+v", i, g.backlog())
-					}
-					time.Sleep(time.Millisecond)
-				}
+					assert.Equal(t, skipped, g.m.NotRecordedUnderPressure().Total, "calls counted as not recorded under pressure")
+				})
 			}
-			assert.Equal(t, skipped, g.m.NotRecordedUnderPressure().Total, "calls counted as not recorded under pressure")
 		})
 	}
 }

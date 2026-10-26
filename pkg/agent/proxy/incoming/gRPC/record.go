@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	Utils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
@@ -159,6 +160,10 @@ func RecordIncoming(ctx context.Context, logger *zap.Logger, clientConn, destCon
 type frameChunk struct {
 	data      []byte
 	timestamp time.Time
+	// paused: the memory guard had paused recording as the forwarder read
+	// the chunk. A call whose request's first frame it completes is a call
+	// the pause costs (pkg.HTTP2Stream.RequestPaused).
+	paused bool
 	// built, when set, says the chunk is through the pipeline: its frames
 	// are handled, and the emitter has captured the calls they completed (or
 	// it was let go). See building in RecordIncoming.
@@ -185,7 +190,12 @@ func release(built func()) {
 // table the parser never saw), so a tee that stopped for a pause stopped the
 // capture of every later call on the connection, and gRPC clients pool their
 // connections for as long as they run. A connection that opens during a
-// pause is teed from its first byte for the same reason.
+// pause is teed from its first byte for the same reason. Each chunk carries
+// whether recording was paused as it was read (frameChunk.paused): that order
+// of events, not the chunk's stamp, puts a call in a pause. A pause's span
+// ends at the instant the pause does, and on a clock as coarse as Windows'
+// the next call's request is stamped in that same tick; judged by its stamp,
+// the first call after every pause was in it.
 //
 // Its building, when set, notes each chunk it tees as being built
 // into a test case (syncMock BuildingTestCase) before the chunk is stamped,
@@ -252,15 +262,17 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 		}
 		return true
 	}
-	// tee hands b, forwarded or about to be, to the parser stamped at.
-	tee := func(b []byte, at time.Time, built func()) {
+	// tee hands b, forwarded or about to be, to the parser stamped at, and
+	// read while recording was paused or not.
+	tee := func(b []byte, at time.Time, built func(), paused bool) {
 		data := make([]byte, len(b))
 		copy(data, b)
-		ch <- frameChunk{data: data, timestamp: at, built: built} // blocking send — preserves stream integrity
+		ch <- frameChunk{data: data, timestamp: at, built: built, paused: paused} // blocking send — preserves stream integrity
 	}
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
+			paused := memoryguard.IsRecordingPaused()
 			b := buf[:n]
 			first := -1 // just past the first frame in b that ends a stream
 			if toClient {
@@ -274,19 +286,19 @@ func forwardAndTee(src, dst net.Conn, ch chan<- frameChunk, logger *zap.Logger, 
 				if !write(b, built) {
 					return
 				}
-				tee(b, at, built)
+				tee(b, at, built, paused)
 			case first < 0:
 				if !write(b, nil) {
 					return
 				}
 				built, at := noteAndStamp(false)
-				tee(b, at, built)
+				tee(b, at, built, paused)
 			default:
 				if !write(b[:first-1], nil) {
 					return
 				}
 				built, at := noteAndStamp(true)
-				tee(b, at, built)
+				tee(b, at, built, paused)
 				waitPast(at)
 				if !write(b[first-1:], nil) {
 					return
@@ -469,7 +481,7 @@ func parseFramesFromChan(ctx context.Context, logger *zap.Logger, ch <-chan fram
 				buffer = nil
 			}
 
-			if err := sm.HandleFrame(frame, isOutgoing, chunk.timestamp); err != nil {
+			if err := sm.HandleFrameRead(frame, isOutgoing, chunk.timestamp, chunk.paused); err != nil {
 				logger.Debug("stream manager error", zap.Error(err))
 			}
 			handled = true
