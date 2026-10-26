@@ -232,12 +232,18 @@ recording_counter() {
 # summary counts: suppressed, not recorded under memory pressure, left out in
 # flight, dropped at capacity, or held at the end. Requests k6 saw fail may
 # have reached no one, so they are allowed for, with 1% of the requests (at
-# least 10) on top. When the forced pause (FORCE_PAUSE) is the run's only
-# pause, it must also be temporary: it may cost the requests that came during
-# it and those in flight at its two edges (each k6 VU has one request in
-# flight), and every connection's capture resumes after it. One 0.5 s pause
-# used to stop capture on every pooled MySQL connection for the rest of the
-# run: 1,985 tests of 7,287 requests, 1,466 suppressed, 3,836 not counted.
+# least 10) on top. Every pause must also be temporary, the forced one
+# (FORCE_PAUSE) and each one real memory pressure made: a pause costs at most
+# the requests that come during it, which the agent counts as not recorded
+# under pressure, and those in flight at its two edges (each k6 VU has one
+# request in flight), and every connection's capture resumes after it. So
+# whatever the number of pauses N, the recording holds at least
+# reqs - failed - not recorded - N * 2 * VUs - slack tests; a suppressed test
+# does not count towards that. One 0.5 s pause used to stop capture on every
+# pooled MySQL connection for the rest of the run: 1,985 tests of 7,287
+# requests, 1,466 suppressed, 3,836 not counted; and when it did, and the
+# suppressed tests were counted, a run that real memory pressure paused as
+# well passed: 1,497 tests of 6,963 requests, 5,358 suppressed, 3 pauses.
 #
 # Only a recorder built from this tree is checked: a released agent predates
 # the count of requests not recorded under pressure, and does not know the
@@ -287,32 +293,29 @@ check_capture_accounted() {
         rc=1
     fi
 
-    [ -n "$FORCE_PAUSE" ] || return "$rc"
-    local from="${FORCE_PAUSE%%:*}" to="${FORCE_PAUSE##*:}"
-    if ! grep -q 'Pausing keploy-agent recording, forced by KEPLOY_DEBUG_FORCE_PAUSE' record.txt; then
-        echo "FAIL: the agent did not force the pause FORCE_PAUSE=${FORCE_PAUSE} asks for."
-        return 1
-    fi
-    if ! grep -q 'Cleared keploy-agent memory pressure, forced by KEPLOY_DEBUG_FORCE_PAUSE' record.txt; then
-        echo "FAIL: the forced pause did not end: it ends at ingress request ${to}, and k6 sent ${reqs}."
-        return 1
-    fi
-    if [ "${n[pressure_ranges_total]}" -ne 1 ]; then
-        echo "Real memory pressure paused the guard too (${n[pressure_ranges_total]} pauses): what each one cost is not known, so the forced pause's cost is not bounded."
-        return "$rc"
+    if [ -n "$FORCE_PAUSE" ]; then
+        local to="${FORCE_PAUSE##*:}"
+        if ! grep -q 'Pausing keploy-agent recording, forced by KEPLOY_DEBUG_FORCE_PAUSE' record.txt; then
+            echo "FAIL: the agent did not force the pause FORCE_PAUSE=${FORCE_PAUSE} asks for."
+            rc=1
+        elif ! grep -q 'Cleared keploy-agent memory pressure, forced by KEPLOY_DEBUG_FORCE_PAUSE' record.txt; then
+            echo "FAIL: the forced pause did not end: it ends at ingress request ${to}, and k6 sent ${reqs}."
+            rc=1
+        fi
     fi
     local max_vus=0 vus
     for vus in "$MIXED_API_START_VUS" ${MIXED_API_VU_STAGE_TARGETS//,/ }; do
         [ "$vus" -gt "$max_vus" ] && max_vus="$vus"
     done
     max_vus=$((max_vus + LARGE_PAYLOAD_MAX_VUS))
-    local pause_cost=$((to - from + 2 * max_vus))
-    echo "The forced pause covers ${from}..$((to - 1)); with ${max_vus} VUs in flight at each edge it may cost ${pause_cost} tests."
-    if [ "$tests" -lt $((reqs - failed - pause_cost)) ]; then
-        echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pause cost more than the requests during it and at its edges, so capture did not resume after it."
+    local pauses="${n[pressure_ranges_total]}"
+    local floor=$((reqs - failed - n[tcs_not_recorded_under_pressure] - pauses * 2 * max_vus - slack))
+    echo "Memory-guard pauses: ${pauses}, with ${n[tcs_not_recorded_under_pressure]} requests during them and ${max_vus} VUs in flight at each of their edges: the recording must hold at least ${floor} tests."
+    if [ "$tests" -lt "$floor" ]; then
+        echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pauses cost more than the requests during them and at their edges, so capture did not resume after a pause."
         rc=1
     fi
-    [ "$rc" -ne 0 ] || echo "The recording accounts for every request, and capture resumed after the pause."
+    [ "$rc" -ne 0 ] || echo "The recording accounts for every request, and capture resumed after every pause."
     return "$rc"
 }
 
