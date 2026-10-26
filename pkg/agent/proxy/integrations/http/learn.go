@@ -1451,13 +1451,16 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			// A recorded answer of the test's own that holds a value the
 			// test made earlier is answered with this run's value, and what
-			// that is learned (mintedAnswers).
+			// that is learned (mintedAnswers). A value the test case gave
+			// that the call carries unchanged is followed all the same
+			// (givenUses): the next run gives another.
 			var minted pairing
+			bindings := givenBindings(mockDb)
 			switch {
 			case own:
-				minted = h.mintedAnswers(tracker, test, picked, pairing{}, reservedNames(givenBindings(mockDb)), append(tracker.Minted(test), outsideMinted...))
+				minted = h.mintedAnswers(tracker, test, picked, givenUses(picked, rec, bindings, false), reservedNames(bindings), append(tracker.Minted(test), outsideMinted...))
 			case outsideCall:
-				minted = h.mintedAnswers(tracker, test, picked, pairing{}, nil, outsideMinted)
+				minted = h.mintedAnswers(tracker, test, picked, givenUses(picked, rec, bindings, true), nil, outsideMinted)
 			}
 			var (
 				out     *models.Mock
@@ -1467,7 +1470,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			if len(minted.vars) > 0 {
 				out, claimed, why, err = h.claimLearned(ctx, picked, claimDb, minted, sc.owner())
 			}
-			if len(minted.vars) == 0 || why != "" {
+			learned := len(minted.vars) > 0 && why == ""
+			if !learned {
 				// The claim reads the scope's owners (ownedKey), as the
 				// matcher's does: a stated recording no open test owns is a
 				// reusable one, kept and served in turn (cursorPick), never
@@ -1475,6 +1479,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				out, claimed, err = h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, claimDb, nil, nil)
 			} else if claimed {
 				h.logMintedAnswers(picked, minted.vars)
+				h.logGivenUses(picked, minted.vars)
 			}
 			if err != nil || !claimed {
 				if own {
@@ -1488,6 +1493,17 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				continue
 			}
 			commit()
+			if learned {
+				// What the call carried of the values the test case gave, a
+				// later call's answer may hold (mintedAnswers).
+				for _, v := range minted.minted {
+					if outsideCall {
+						tracker.MintOutside(v)
+						continue
+					}
+					tracker.Mint(test, v)
+				}
+			}
 			if e, ok := n.servedExchange(picked, nil, rec, recordedParts(picked), liveShape, live, out, own); ok {
 				tracker.Served(test, e)
 				if outsideCall {
@@ -2667,6 +2683,18 @@ func (h *HTTP) logMintedAnswers(m *models.Mock, vars models.MockVariables) {
 	}
 }
 
+// logGivenUses says, for a served mock its call matched exactly, each request
+// place that uses a value the test case gave, unchanged in this run
+// (givenUses).
+func (h *HTTP) logGivenUses(m *models.Mock, vars models.MockVariables) {
+	for name, v := range vars {
+		for _, u := range v.Use {
+			h.Logger.Info("followed a value the test case gave, which the call carried unchanged; the next run's is answered too",
+				zap.String("mock", m.Name), zap.String("field", u), zap.String("variable", name))
+		}
+	}
+}
+
 // givenBindings are the values the running test case's request gave
 // (variables.Binding.Given), as keploy test bound them for the test: none
 // for a store that keeps no variables.
@@ -2733,6 +2761,72 @@ func givenFor(r, live learn.Leaf, given []variables.Binding) (variables.Binding,
 		return latestGiven(within), true
 	}
 	return variables.Binding{}, false
+}
+
+// givenUses is what a call that is exactly its recording m (rec: its shape)
+// learns of the values the test case gave that it carries unchanged: F sent
+// the value it recorded (a session the test signs for each call, signed in the
+// second it was recorded in), so nothing drifted for the learn step to learn,
+// yet the next run signs another, and its call would be refused. Each request
+// place that holds a given value whole, or as a token of a longer text (the
+// Cookie header), uses that value's name (givenFor), as a value F saw change
+// does in learnPlan, and an answer place of m that echoes it whole answers it;
+// the application then holds it (Minted.Given: mintedAnswers). Only a value at
+// least minWithin long: a short one ("1", "main") the test gave may stand in
+// a call by chance. outside: the call is the claim key's, made outside every
+// test, which carries only the key's values (Binding.Outside).
+func givenUses(m *models.Mock, rec learn.Shape, given []variables.Binding, outside bool) pairing {
+	var held []variables.Binding
+	for _, g := range given {
+		if g.Recorded == g.Value && len(g.Recorded) >= minWithin && (!outside || g.Outside) {
+			held = append(held, g)
+		}
+	}
+	p := pairing{vars: models.MockVariables{}, values: map[string]variables.Binding{}}
+	if len(held) == 0 {
+		return p
+	}
+	jsonReq := rec.Fixed["body"] == "json"
+	var answers []learn.Leaf
+	if answered, err := withResponse(m); err == nil {
+		answers = respLeavesOf(answered)
+	}
+	paths := make([]string, 0, len(rec.Leaves))
+	for path := range rec.Leaves {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		r := rec.Leaves[path]
+		if r.Unnamed {
+			continue
+		}
+		g, ok := givenFor(r, r, held)
+		if !ok {
+			continue
+		}
+		place, placeable := learn.VarPlace(r, jsonReq)
+		if !placeable {
+			continue
+		}
+		v := p.vars[g.Name]
+		v.Recorded, v.Use, v.Outside = g.Recorded, appendNew(v.Use, place), g.Outside
+		for _, a := range answers {
+			if learn.WholeEcho(r, a) {
+				if at, ok := learn.VarPlace(a, true); ok {
+					v.Answer = appendNew(v.Answer, at)
+				}
+			}
+		}
+		p.vars[g.Name] = v
+		p.values[g.Name] = g
+		typ := r.Type
+		if !variables.SameValue(g.Recorded, r.Value, r.Type == learn.Number) {
+			typ = learn.String // a token of a longer text (givenFor)
+		}
+		p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: place, Recorded: g.Recorded, Live: g.Value, Type: typ, Outside: g.Outside, Given: g.Name})
+	}
+	return p
 }
 
 // latestGiven is, of the given values a call carries, the one it carries: of
