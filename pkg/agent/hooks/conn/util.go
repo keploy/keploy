@@ -95,6 +95,32 @@ func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Respon
 	return true
 }
 
+// SkipGRPCUnderPressure reports whether a pause of the memory guard costs a
+// gRPC call whose request came at reqAt, as CaptureGRPC decides whether to
+// record it: the guard has paused recording now, or had as the request came
+// (a pressure span of ctx's mock manager holds reqAt). When it does, it counts
+// the call as not recorded under pressure on the ingress connection ctx names
+// (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the recording
+// says what the pause cost.
+//
+// The gRPC ingress tees a connection's whole stream through a pause, so its
+// calls come here whenever they complete: the request's time is what puts a
+// call in a pause, as an HTTP ingress reads the pause as a request comes. A
+// call whose request came before a pause that has ended by its response is
+// captured, and the recording suppresses it for the overlap
+// (WasPressureActiveInWindow), as it does an HTTP exchange's.
+func SkipGRPCUnderPressure(ctx context.Context, reqAt time.Time) bool {
+	mgr := syncMock.FromContextOrGlobal(ctx)
+	paused := memoryguard.IsRecordingPaused()
+	if !paused && !reqAt.IsZero() {
+		paused, _ = mgr.WasPressureActiveInWindow(reqAt, reqAt)
+	}
+	if paused {
+		mgr.NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+	}
+	return paused
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
 	if SkipUnderPressure(ctx, req, resp) {
 		return
@@ -578,11 +604,10 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 //   - Counter is always incremented so concurrent duplicate streams each get a
 //     unique window name; keep=false discards their mocks without saving the TC.
 //   - Duplicate streams return after ResolveRange, before the test case is sent.
+//
+// A call a pause of the memory guard costs (SkipGRPCUnderPressure) is left out
+// and counted before any of that.
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
-	if memoryguard.IsRecordingPaused() {
-		return
-	}
-
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -590,6 +615,10 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	if http2Stream.GRPCReq == nil || http2Stream.GRPCResp == nil {
 		logger.Error("gRPC request or response is nil")
+		return
+	}
+
+	if SkipGRPCUnderPressure(ctx, http2Stream.GRPCReq.Timestamp) {
 		return
 	}
 

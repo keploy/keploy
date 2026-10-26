@@ -564,19 +564,23 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// Whether t is streamed, left out or lost to a broken stream, this
 		// is the last that sees it.
 		defer discardUpload(a.logger, t)
-		if _, left := leftovers[t.HTTPReq.Timestamp.UnixNano()]; left && !t.HTTPReq.Timestamp.IsZero() {
+		// The test case's window, by its kind: a gRPC test case's times are
+		// its GrpcReq's and GrpcResp's. Read as an HTTP one's, they were zero,
+		// on which the span checks below make no claim, so a gRPC test case a
+		// pause or a hole overlapped was streamed without the mocks it lost.
+		tcReqTime, tcRespTime := testCaseWindow(t)
+		if _, left := leftovers[tcReqTime.UnixNano()]; left && !tcReqTime.IsZero() {
 			a.logger.Debug("Test case left out: its request was in flight across the stop of a recording that has ended",
-				zap.Time("request_time", t.HTTPReq.Timestamp))
+				zap.Time("request_time", tcReqTime))
 			return true
 		}
-		// Skip this test case if memory pressure overlapped its HTTP window
+		// Skip this test case if memory pressure overlapped its window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
 		// TC window against recorded pressure ranges (not individual mock
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
-		tcRespTime := t.HTTPResp.Timestamp
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(tcReqTime, tcRespTime)
 		// An exchange a connection carried but did not record as a mock
 		// strands its TC mock-less, whether or not a pressure range covers
 		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
@@ -589,7 +593,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// only the TCs checked after it: without a watermark (the hold
 		// below), a TC streamed before it is saved without the mock, as the
 		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(tcReqTime, tcRespTime)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
 		// above cannot catch it. Suppress by EXACT owning test name so a
@@ -602,7 +606,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			tcsSuppressedSoFar++
 			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
-				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
 				zap.Int("orphan_overlaps", orphanOverlaps),
