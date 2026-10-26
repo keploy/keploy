@@ -2295,6 +2295,7 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 		AnswerPlaced:     models.IsAnswerPlaced(mk),
 		ReqBodyNoise:     reqBodyNoiseOf(mk.Spec),
 		Variables:        variablesOf(mk.Spec),
+		Clocks:           clocksOf(mk.Spec),
 		Binds:            bindsOf(mk.Spec),
 		LearnedAfterEnd:  m.learnedAfterEndNamed(mk),
 	}, 0); err != nil && m.logger != nil {
@@ -2325,6 +2326,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 		AnswerPlaced:     models.IsAnswerPlaced(owned),
 		ReqBodyNoise:     reqBodyNoiseOf(served.Spec),
 		Variables:        variablesOf(served.Spec),
+		Clocks:           clocksOf(served.Spec),
 		Binds:            bindsOf(served.Spec),
 		Concurrent:       owned.TestModeInfo.Concurrent,
 		LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(owned), served),
