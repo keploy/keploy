@@ -374,3 +374,50 @@ func TestAClockOffsetReadsAsTheClockPlusItsOffset(t *testing.T) {
 		t.Errorf("Range: %q, want %q", got, want)
 	}
 }
+
+// A zero offset (Plain) is a plain read of the application's clock: it
+// holds a value its call's window holds at the value's own resolution, at
+// either end, and nothing a resolution past it, thirty days before it or at
+// the epoch (the false green of a clock read learned as noise, which no
+// replay compared again). A second's value holds where its second meets the
+// window. It holds nothing with no Res, no res, a window with no start or
+// that ends before it starts, or a Res that is a cut coarser than the
+// replay's encoding (a value cut to the second, stored at the millisecond,
+// would hold by where its read fell in its second). Its String is "clock".
+func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
+	ms := time.Millisecond
+	from := time.Date(2026, 10, 26, 10, 0, 0, 500*int(ms), time.UTC)
+	to := from.Add(20 * ms)
+	o := ClockOffset{Res: ms}
+	if !o.Plain() || (ClockOffset{Min: ms, Res: ms}).Plain() || o.String() != "clock" {
+		t.Fatalf("Plain/String: %v %v %q", o.Plain(), (ClockOffset{Min: ms, Res: ms}).Plain(), o.String())
+	}
+	for _, row := range []struct {
+		what     string
+		at       time.Time
+		res      time.Duration
+		o        ClockOffset
+		from, to time.Time
+		want     bool
+	}{
+		{"a read inside the window", from.Add(5 * ms), ms, o, from, to, true},
+		{"a read at the window's start", from, ms, o, from, to, true},
+		{"a read at the window's end", to, ms, o, from, to, true},
+		{"a read a resolution past the end", to.Add(ms), ms, o, from, to, false},
+		{"a read a resolution before the start", from.Add(-ms), ms, o, from, to, false},
+		{"m10: thirty days before", from.Add(-30 * 24 * time.Hour), ms, o, from, to, false},
+		{"m10b: the epoch", time.Unix(0, 0), ms, o, from, to, false},
+		{"a second's value whose second meets the window", from.Truncate(time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, true},
+		{"a second's value a second later", from.Truncate(time.Second).Add(time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, false},
+		{"no Res", from.Add(5 * ms), ms, ClockOffset{}, from, to, false},
+		{"no res", from.Add(5 * ms), 0, o, from, to, false},
+		{"a window with no start", from.Add(5 * ms), ms, o, time.Time{}, to, false},
+		{"a window that ends before it starts", from.Add(5 * ms), ms, o, to, from, false},
+		{"a cut to the second at a millisecond's encoding", from.Truncate(time.Second), ms, ClockOffset{Res: time.Second}, from.Add(-600 * ms), to, false},
+		{"a millisecond's Res at a nanosecond's replay", from.Add(5 * ms), time.Nanosecond, o, from, to, false},
+	} {
+		if got := row.o.Holds(row.at, row.res, row.from, row.to); got != row.want {
+			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
+		}
+	}
+}

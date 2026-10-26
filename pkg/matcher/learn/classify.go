@@ -539,6 +539,21 @@ type Learned struct {
 	// the value at from the application's clock in both runs; nil for any
 	// other kind.
 	Offset *models.ClockOffset
+	// Read is, of a noise leaf (KindNoise) that is a read of the
+	// application's clock whole, that read as a replay checks it: a zero
+	// offset (models.ClockOffset.Plain) at the resolution the learn step
+	// read it at, the coarsest of the two values' encodings and the
+	// granularity they share. The leaf is an instant its protocol types that
+	// names its moment, or a text or a number that is one such instant whole
+	// (readClockText), every word of it that changed a read of the clock. A
+	// caller whose replay checks it writes it to models.MockSpec.Clocks
+	// (Clock), not to the request-body noise, so the value is still
+	// compared: it must be a read of the clock made in its own call's window
+	// (ClockReadHolds). nil for any other leaf: a wall clock that names no
+	// zone or a time of day (no window holds either without a zone or a
+	// day), and a clock read that is only a part of a longer value, stay
+	// noise.
+	Read *models.ClockOffset
 	// Why, of an unaccounted drift, is why it cannot be noise; of noise
 	// record's full round learned past a source it served unchanged that
 	// the value moved away from (ClassifyFollowing), that source and why it
@@ -1168,6 +1183,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
+		}
+		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
+			ln.Read = textClockRead(r.Value, l.Value)
 		}
 		out = append(out, ln)
 	}

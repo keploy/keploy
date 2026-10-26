@@ -253,7 +253,9 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 
 // Holds reports whether at, a value cut to resolution res (truncated: it
 // stands for [at, at+res)), is a read of the clock made from from to to (a
-// call's window on the application's clock) plus an offset of o: some read
+// call's window on the application's clock) plus an offset of o; of a Plain
+// o (a zero offset, a plain read of the clock), a read made there itself
+// (holdsRead). Of any other o: some read
 // t in [from, to] and offset d in [o.Min, o.Max) put t+d in [at, at+res),
 // so [from+o.Min, to+o.Max) and [at, at+res) meet. It reads at at res, the
 // replay's own resolution, never at o.Res, so a granularity the learn step
@@ -275,6 +277,9 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // have its sums read finer than the application cuts its value), whose
 // width could overflow or whose Unit could swallow the sign of the offset.
 func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
+	if o.Plain() {
+		return o.holdsRead(at, res, from, to)
+	}
 	if o.Min <= 0 || o.Max <= o.Min || o.Res <= 0 || o.Unit() <= time.Second || from.IsZero() || to.Before(from) || res <= 0 || o.CutCoarserThan(res) {
 		return false
 	}
@@ -284,12 +289,43 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	return from.Add(o.Min).Before(at.Add(res)) && at.Before(to.Add(o.Max))
 }
 
-// String is o as a person reads it: "clock + 30m", the one multiple from Min
+// Plain reports whether o is a zero offset: a plain read of the
+// application's clock (learn.Learned.Read), its Min and Max both zero, which
+// Holds reads as this call's own now. An o the learn step learned with an
+// offset (learn.KindClockOffset) has a Min above zero.
+func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
+
+// holdsRead is Holds of a Plain o: at, cut to resolution res (it stands for
+// [at, at+res)), is a read of the clock made from from to to, the call's
+// window on the application's clock, itself: some read t in [from, to] lies
+// in [at, at+res). A read the application made for the call lies in its
+// window whenever the replay ran, so a value the replay's own clock wrote
+// always holds and one moved by a resolution past the window never does:
+// the verdict does not turn on timing. It holds nothing for a res of none,
+// a window with no start or that ends before it starts, an o with no Res
+// (one built without the resolution it was learned at), or an o whose Res
+// is a cut coarser than res's encoding (CutCoarserThan: a value the
+// application cut to the second, stored at the millisecond, would hold only
+// where its read fell early enough in its second, by when the replay ran),
+// nor one learned at an encoding coarser than the replay's. There is no
+// unit to tell apart, so the window's width bounds nothing more.
+func (o ClockOffset) holdsRead(at time.Time, res time.Duration, from, to time.Time) bool {
+	if o.Res <= 0 || res <= 0 || from.IsZero() || to.Before(from) || o.CutCoarserThan(res) {
+		return false
+	}
+	return from.Before(at.Add(res)) && !at.After(to)
+}
+
+// String is o as a person reads it: "clock" for a Plain o; "clock + 30m",
+// the one multiple from Min
 // up to Max of its Unit, and the two bounds after it where they are more
 // than a nanosecond apart: "clock + 30m (from 29m59.998s to 30m0.001s)".
 // Where they hold more than one multiple, it names no offset: "clock plus an
 // offset from 29m59.96s to 32m59.956s". It never decides anything.
 func (o ClockOffset) String() string {
+	if o.Plain() {
+		return "clock"
+	}
 	u := o.Unit()
 	if u == 0 || ceilTo(o.Min, u)+u < o.Max {
 		return o.Range()
