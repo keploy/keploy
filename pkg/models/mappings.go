@@ -372,6 +372,22 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 // errRecordedGiven is a test entry whose given: is not a list of named values.
 const errRecordedGiven = "the values a test's harness gave (given) are not a list of names and values: %w"
 
+// MarshalYAML writes a given value with its name and value double-quoted. A
+// value a test gave may be any text it typed or sent (a pasted schema, a
+// command): yaml.v3 writes a text of several lines as a block, and one whose
+// first line is indented, or tab-indented, it cannot read back ("did not find
+// expected key"), so the record could not update its own mappings.yaml. A
+// double-quoted scalar reads back as written, whatever it holds.
+func (g GivenValue) MarshalYAML() (interface{}, error) {
+	str := func(v string, style yaml.Style) *yaml.Node {
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v, Style: style}
+	}
+	return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		str("name", 0), str(g.Name, yaml.DoubleQuotedStyle),
+		str("value", 0), str(g.Value, yaml.DoubleQuotedStyle),
+	}}, nil
+}
+
 // recordedGivenYAML is a test entry's given: under the proven switch. One that
 // is not a list of named values is an error, never a reason to read the entry
 // without it: its replay could not bind what the test makes. With the switch
