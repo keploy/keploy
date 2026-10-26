@@ -643,11 +643,11 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	filtered, unfiltered, startup := m.filtered, m.unfiltered, m.startup
 	m.treesMu.RUnlock()
 	filteredVals, unfilteredVals, startupVals := m.treeValues(filtered, ""), m.treeValues(unfiltered, ""), m.treeValues(startup, "")
-	var afterTests []*models.Mock
+	var teardown []*models.Mock
 	if v.afterTests(s.Fired) {
-		afterTests = startupVals
+		teardown = m.teardown(startupVals)
 	}
-	s.PerTest = v.perTest("", filteredVals, afterTests)
+	s.PerTest = v.perTest("", filteredVals, teardown)
 	read("per-test")
 	s.Startup = v.reusable("", startupVals, unfilteredVals)
 	s.SessionScoped = v.reusable("", unfilteredVals, startupVals)

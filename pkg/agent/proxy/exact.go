@@ -1811,51 +1811,112 @@ func (v *exactView) backgroundOrder(out, in []*models.Mock) []*models.Mock {
 
 // perTest is a per-test read under exact serving: the open test's unanswered
 // mocks of kind (between tests, the next test's ahead), then what the view
-// shows of the per-test tree's values (staged) and of the per-test
-// recordings among startup.
+// shows of the per-test tree's values (staged) and of teardown.
 //
-// startup is the startup tree's values, which the callers (exactPerTest, the
-// round snapshot) pass only while no test is open after the first test fired.
-// The staging files every per-test recording in the startup tree alone, so a
-// per-test recording the view shows between tests (the pool slice's, such as
-// a Go mongo-driver's endSessions at client.Disconnect after the last test,
-// or the reached worker scope's) is in no per-test tree. Mongo's index reads
-// the startup tier only until the first test fires, and from then on reads
-// such a call's recording only through a per-test read: without startup the
-// call missed though the view shows its recording. Before the first test the
-// startup read is the parsers' own, so nothing is added there; in a test
-// nothing is added either. The two trees never hold one mock (a staging
-// files a mock in one of them). What the view does not show is never added: a
-// per-test recording outside the pool slice and the worker scope, or another
-// test's. A pool recording consumed through a delete door (Mongo's per-test
-// consume) is spent outside every test and shown no more, so the same call
-// made once more misses, as a call with no recording does.
-func (v *exactView) perTest(kind models.Kind, staged, startup []*models.Mock) []*models.Mock {
+// teardown is the set's teardown recordings (MockManager.teardown), which the
+// callers (exactPerTest, the round snapshot) pass only while no test is open
+// after the first test fired (afterTests). The staging files every per-test
+// recording in the startup tree alone, so a call recorded after the set's
+// last test (a Go mongo-driver's endSessions at client.Disconnect) is in no
+// per-test tree, and Mongo's index reads the startup tier only until the
+// first test fires: from then on it reads such a call's recording only
+// through a per-test read, and without teardown the call missed though the
+// view shows its recording. What the view does not show is never added (a
+// recording outside the pool slice and the reached worker scope), and a pool
+// recording consumed through a delete door (Mongo's per-test consume) is spent
+// outside every test and shown no more, so the same call made once more
+// misses, as a call with no recording does.
+func (v *exactView) perTest(kind models.Kind, staged, teardown []*models.Mock) []*models.Mock {
 	all := staged
-	for _, mk := range startup {
-		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest {
-			if len(all) == len(staged) {
-				all = append(make([]*models.Mock, 0, len(staged)+len(startup)), staged...)
-			}
-			all = append(all, mk)
-		}
+	if len(teardown) > 0 {
+		all = append(append(make([]*models.Mock, 0, len(staged)+len(teardown)), staged...), teardown...)
 	}
 	return append(v.unanswered(kind), v.keep(all)...)
 }
 
-// afterTests reports whether a per-test read in v reads the startup tree's
-// per-test recordings too (perTest): while no test is open, once the first
-// test fired.
+// afterTests reports whether a per-test read in v reads the set's teardown
+// recordings too (perTest): while no test is open, once the first test fired.
 func (v *exactView) afterTests(fired bool) bool { return v.test == "" && fired }
 
-// exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
-// with the startup tree's values of kind when the read takes them.
-func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
-	var startup []*models.Mock
-	if v.afterTests(m.exact.fired.Load()) {
-		startup = m.treeValues(m.startupTree(), kind)
+// teardown is, of startup (the startup tree's values), the per-test
+// recordings sent after every test of the set's recording: the set's
+// teardown (teardownAfter). Those alone, never a pool recording made before
+// the first test or in a gap between two tests: a late call paired with such
+// a recording, made before another test's own, would learn as noise a value
+// that test's answer gave the application, which the learn step's earlier
+// places (every recording made before the paired one) do not hold. Every
+// test's recording is an earlier place of a teardown recording. A set whose
+// tests' place nothing tells gets none, and such a call misses.
+func (m *MockManager) teardown(startup []*models.Mock) []*models.Mock {
+	after := m.teardownAfter()
+	if after == nil {
+		return nil
 	}
-	return v.perTest(kind, staged, startup)
+	var out []*models.Mock
+	for _, mk := range startup {
+		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest && after(mk.Spec.ReqTimestampMock) {
+			out = append(out, mk)
+		}
+	}
+	return out
+}
+
+// teardownAfter is what tells a request sent after every test of the set's
+// recording, nil when nothing does. keploy test's staging sends the recorded
+// windows of every test of the set, the unselected ones included: after
+// every window's end (models.WindowSchedule.After). keploy mock replay sends
+// none, but stages the whole recording at once and names the pool's
+// recordings (SetPoolNames): after every staged data-plane recording outside
+// the pool, request and answer. That counts every recording a test owns, and
+// any other one outside the pool too (one no test owns): a later bound,
+// never an earlier one. That bound is the whole recording's, not a test
+// process's: of a suite whose test processes ran one after another, only the
+// last one's teardown is after every test's recording, so an earlier
+// process's call after its last test misses, as before, and the last
+// process's teardown recordings are shown from the first test fired on,
+// while an earlier process runs and in the last one's start-up.
+//
+// Once the first test fired, the teardown is shown in every gap, not only
+// after the last test: a call made in a gap may be answered by a teardown
+// recording, and the teardown's own call then misses, failing closed.
+func (m *MockManager) teardownAfter() func(time.Time) bool {
+	if s := m.testWindows.Load(); s.Len() > 0 {
+		return s.After
+	}
+	pool := m.exact.poolNames.Load()
+	if pool == nil {
+		return nil
+	}
+	m.treesMu.RLock()
+	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
+	m.treesMu.RUnlock()
+	var last time.Time
+	for _, tree := range trees {
+		for _, mk := range m.treeValues(tree, "") {
+			if _, inPool := (*pool)[mk.Name]; inPool || mk.IsProtocolPhase() {
+				continue
+			}
+			for _, at := range []time.Time{mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock} {
+				if at.After(last) {
+					last = at
+				}
+			}
+		}
+	}
+	if last.IsZero() {
+		return nil
+	}
+	return last.Before
+}
+
+// exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
+// with the set's teardown recordings of kind when the read takes them.
+func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
+	var teardown []*models.Mock
+	if v.afterTests(m.exact.fired.Load()) {
+		teardown = m.teardown(m.treeValues(m.startupTree(), kind))
+	}
+	return v.perTest(kind, staged, teardown)
 }
 
 // reusable is a session-tier read under exact serving: the open test's
