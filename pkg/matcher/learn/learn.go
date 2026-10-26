@@ -289,6 +289,11 @@ type Result struct {
 	Reason string
 	// Why, for a miss, is what differed, by path; it never holds a value.
 	Why string
+	// SpentExact, for a miss: the request is exactly a spent candidate (the
+	// test's own recording that answered a request of it already), modulo
+	// what is known and the values the test gave: one call more than the
+	// test recorded, the candidate at Index.
+	SpentExact bool
 }
 
 // Pair decides one request against its candidates (design §7.2 steps 1-5),
@@ -318,7 +323,28 @@ type Result struct {
 //     closest candidate is one the order rule refused and nothing else
 //     drifted, it is unstable_order, and nothing is learned from that
 //     array.
-func Pair(live Shape, cands []Candidate) Result {
+func Pair(live Shape, cands []Candidate) Result { return PairGiven(live, cands, nil) }
+
+// PairGiven is Pair where given says which drifted leaves carry a value the
+// test gave (its harness gave keploy that value under one name, recorded and
+// live: a session the test signed, a name it typed). Such a leaf tells the
+// recordings of one call apart by what the request carries, as nothing else
+// in step 5 does: a page that reads the same call under two sessions the
+// test switched between made recordings that differ only in the session.
+// Step 1 then reads it so:
+//
+//   - a candidate that is not spent, and whose every drifted leaf carries a
+//     given value, is paired in step 1, before any farther one, and the
+//     learn step binds each given value onto it as for any pairing (it is
+//     not served as an exact match: its leaves did change);
+//   - a spent one whose every drifted leaf carries a given value is matched
+//     exactly by the request: one call more than recorded, as in step 1.
+//
+// A leaf that carries another given's value (another session's) is no given
+// value of the request's, so such a candidate is never paired in step 1, and
+// is compared in step 5 as before. Only a pairable candidate is paired in step
+// 1. A nil given carries nothing (Pair).
+func PairGiven(live Shape, cands []Candidate, given func(rec, live Leaf) bool) Result {
 	type scored struct {
 		i        int
 		d        Diff
@@ -343,6 +369,17 @@ func Pair(live Shape, cands []Candidate) Result {
 			}
 			continue
 		}
+		if d.Structural == "" && len(d.Reordered) == 0 && givenAll(d.Drift, c.Shape, live, given) {
+			switch {
+			case c.Spent:
+				if spentExact < 0 {
+					spentExact = i
+				}
+				continue
+			case c.Pairable:
+				return Result{Outcome: Paired, Index: i, Diff: d}
+			}
+		}
 		if d.Structural != "" {
 			if c.Pairable && closest.Index < 0 {
 				closest.Index, closest.Diff = i, d
@@ -352,7 +389,7 @@ func Pair(live Shape, cands []Candidate) Result {
 		pairable = append(pairable, scored{i: i, d: d, drift: d.outside(), pairable: c.Pairable && !c.Spent})
 	}
 	if spentExact >= 0 {
-		return Result{Outcome: Miss, Index: spentExact, Why: "it is the call a recorded call of the test answered already: one call more than the test recorded"}
+		return Result{Outcome: Miss, Index: spentExact, Why: "it is the call a recorded call of the test answered already: one call more than the test recorded", SpentExact: true}
 	}
 	if !keyed {
 		return Result{Outcome: Miss, Index: -1, Reason: models.MissUnmockedCall, Why: "no recorded call has its method, destination and shape"}
@@ -407,6 +444,20 @@ func Pair(live Shape, cands []Candidate) Result {
 			Why: "its closest recorded call is not one the learn step may learn onto (another test's, or the pool's outside a full record): " + strings.Join(best.drift, ", ") + " changed"}
 	}
 	return Result{Outcome: Paired, Index: best.i, Diff: best.d}
+}
+
+// givenAll reports whether every one of paths, drifted leaves of rec and live,
+// carries a given value (given); false for none, or for a nil given.
+func givenAll(paths []string, rec, live Shape, given func(rec, live Leaf) bool) bool {
+	if given == nil || len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !given(rec.Leaves[p], live.Leaves[p]) {
+			return false
+		}
+	}
+	return true
 }
 
 func sameStrings(a, b []string) bool {

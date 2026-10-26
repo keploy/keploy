@@ -370,6 +370,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
 				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				if n == 0 && lmiss != nil && lmiss.extra {
+					// The learn step found it exactly a recording of the test
+					// that answered already, the values the test gave
+					// included (a session the test signed, which the
+					// matcher's dry run above reads only as recorded).
+					n = 1
+				}
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)

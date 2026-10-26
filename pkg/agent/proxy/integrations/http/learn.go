@@ -440,6 +440,10 @@ type learnMiss struct {
 	// answered, where set, is a stateful walk's miss (answeredSequence):
 	// the report says so.
 	answered *answeredSequence
+	// extra: the learn step found the request exactly one of the test's own
+	// recordings that answered already (learn.Result.SpentExact), the values
+	// the test gave included: one call more than the test recorded.
+	extra bool
 }
 
 // learnRound is the round a call's first pass of the learn step read: the
@@ -1399,7 +1403,13 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 		}
 
-		res := learn.Pair(liveShape, sc.cands)
+		// The values the test or its harness gave (givenBindings) tell the
+		// recordings of one call apart by what the request carries: a page
+		// that read the same call under two sessions the test switched
+		// between is paired with the recording of its own session, and its
+		// read one more than recorded under a session is one call more than
+		// recorded (learn.PairGiven), never paired with another session's.
+		res := learn.PairGiven(liveShape, sc.cands, givenLeaf(givenBindings(mockDb)))
 		switch res.Outcome {
 		case learn.Exact:
 			m := sc.mocks[res.Index]
@@ -1653,7 +1663,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 			}
 			return out, nil, nil
 		}
-		miss := &learnMiss{res: res, pool: sc.http}
+		miss := &learnMiss{res: res, pool: sc.http, extra: res.SpentExact}
 		if res.Index >= 0 {
 			miss.closest = sc.mocks[res.Index]
 		}
@@ -2652,6 +2662,19 @@ func givenBindings(mockDb integrations.MockMemDb) []variables.Binding {
 		}
 	}
 	return out
+}
+
+// givenLeaf is learn.PairGiven's reading of given: whether a drifted leaf
+// carries one of its values, as the learn step binds it (givenFor). nil when
+// nothing was given.
+func givenLeaf(given []variables.Binding) func(rec, live learn.Leaf) bool {
+	if len(given) == 0 {
+		return nil
+	}
+	return func(rec, live learn.Leaf) bool {
+		_, ok := givenFor(rec, live, given)
+		return ok
+	}
 }
 
 // givenFor is the given value the drifted leaf carries: the key's value
