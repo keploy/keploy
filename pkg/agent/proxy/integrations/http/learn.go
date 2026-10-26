@@ -2058,17 +2058,24 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// the call, under a key no variable is named, so a later leaf
 			// that held the same recorded value and holds another now is
 			// still caught as the app's change.
-			noted := func(place string) {
-				if _, ok := echoed[r.Value]; !ok {
-					key := "\x00" + r.Value
-					echoed[r.Value] = key
-					p.values[key] = variables.Binding{Value: l.Live.Value, Recorded: r.Value, Place: place}
+			noted := func(place string) string {
+				if name, ok := echoed[r.Value]; ok {
+					if !variables.SameValue(p.values[name].Value, l.Live.Value, r.Type == learn.Number) {
+						return r.Path + " and " + p.values[name].Place + " held one value when recorded and two now, so they are not one value the answer echoes"
+					}
+					return ""
 				}
+				key := "\x00" + r.Value
+				echoed[r.Value] = key
+				p.values[key] = variables.Binding{Value: l.Live.Value, Recorded: r.Value, Place: place}
+				return ""
 			}
 			place, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
 				limit(r.Path + " is echoed in the answer, at a place keploy cannot bind it (a form or multipart field)")
-				noted(r.Path)
+				if why := noted(r.Path); why != "" {
+					return p, why, ""
+				}
 				continue
 			}
 			at := answers(l, l.Echo)
@@ -2077,11 +2084,15 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				// one keploy can answer with this run's value.
 				if e := l.Echo[0]; e.Type != learn.Keys && (learn.WholeEcho(r, e) || e.Unnamed && e.Value == r.Value) {
 					limit(r.Path + " is echoed in the answer whole only at " + l.Echo[0].Path + ", a place keploy cannot answer with this run's value")
-					noted(place)
+					if why := noted(place); why != "" {
+						return p, why, ""
+					}
 					continue
 				}
 				limit(r.Path + " is echoed in the answer only inside a longer value, in another form or at a key (" + l.Echo[0].Path + "), which keploy cannot answer with this run's value")
-				noted(place)
+				if why := noted(place); why != "" {
+					return p, why, ""
+				}
 				continue
 			}
 			if name, ok := echoed[r.Value]; ok {
@@ -2097,7 +2108,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			if limited != "" {
 				// As for a variable: refused already, it takes no name.
-				noted(place)
+				if why := noted(place); why != "" {
+					return p, why, ""
+				}
 				continue
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)

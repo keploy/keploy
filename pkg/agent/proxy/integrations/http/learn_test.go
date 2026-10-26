@@ -4599,4 +4599,12 @@ func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
 	if cause != "" || !strings.Contains(why, "held one value when recorded and two now") {
 		t.Fatalf("cause %q, why %q; want one value now two, the app's, with no cause", cause, why)
 	}
+	// Nor when the second is an echo keploy cannot answer: it is still
+	// compared with the first.
+	inside := echo("body.b", "7")
+	inside.Echo = []learn.Leaf{{Path: "body.note", Value: "id 5 here", Type: learn.String}}
+	_, why, cause = learnPlan(nil, 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, []learn.Learned{echo("body.a", "6"), inside}, nil, nil)
+	if cause != "" || !strings.Contains(why, "held one value when recorded and two now") {
+		t.Fatalf("cause %q, why %q; want one value now two, the app's, with no cause", cause, why)
+	}
 }

@@ -951,6 +951,9 @@ func stricterOf(asPlace, asLate Learned) Learned {
 		if b := boundAt(asPlace); b != "" {
 			asLate.Why += "; read as a recording made before the call, the value would be " + b + ", yet keploy refuses a value either reading refuses"
 		}
+		// The two readings disagree: keploy's doubt, never its limit (the
+		// first reading's place may show the app's change).
+		asLate.NotFollowed = false
 		return asLate
 	}
 	if asPlace.Kind == KindUnaccounted && asLate.Kind == KindUnaccounted && !asLate.NotFollowed {
