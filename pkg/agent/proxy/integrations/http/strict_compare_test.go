@@ -12,6 +12,8 @@ import (
 
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // recorded is a recorded POST to api.example, with headers and a body, as the
@@ -849,6 +851,18 @@ func TestStrictChecksALearnedClockReadInItsCallsWindow(t *testing.T) {
 			if !strings.Contains(why, "learned") {
 				t.Fatalf("the refusal of %s gives no reason: %q", c.differs, why)
 			}
+			// The reason says what failed: a replay that cannot tell the
+			// application's clock says so, rather than that the value moved.
+			says := map[string]string{
+				"keploy cannot tell the app's clock": "keploy cannot tell the application's clock at this call",
+				"a time to live of 31m":              "is not a read of the application's clock plus that offset made in this call's window",
+				"no instant":                         "no instant keploy reads",
+				"two learnings left no one offset":   "no one read of the application's clock explains them all",
+				"moved thirty days":                  "is not a read of the application's clock made in this call's window",
+			}[c.name]
+			if !strings.Contains(why, says) {
+				t.Fatalf("the refusal of %s says %q; want it to say %q", c.differs, why, says)
+			}
 		})
 	}
 	// A read of the clock needs no noise beside it: the walk lets its value
@@ -907,6 +921,66 @@ func TestARefusedClockReadNamesItsFieldAndWhyInTheMissReport(t *testing.T) {
 			if strings.Contains(why, v) {
 				t.Fatalf("the reason of %s names %q: %q", f, v, why)
 			}
+		}
+	}
+}
+
+// A refused read of the clock is said in the agent's log too, for each
+// field: the closest mock, the field by its shape and why, with no value.
+func TestARefusedClockReadIsLoggedWithItsFieldAndWhy(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	moved := stamp(base.AddDate(0, 0, -30))
+	rec := recorded("usage", "/v1/usage", map[string]string{"Content-Type": "application/json"},
+		`{"since":"`+stamp(recAt)+`","users":{"kqzx9w":{"since":"`+stamp(recAt)+`"}}}`)
+	plain := models.ClockOffset{Res: time.Second}
+	rec.Spec.Clocks = map[string]models.ClockOffset{"body.since": plain, "body.users.kqzx9w.since": plain}
+	in := sent("/v1/usage", map[string]string{"Content-Type": "application/json"}, `{"since":"`+moved+`","users":{"kqzx9w":{"since":"`+moved+`"}}}`)
+	in.arrived = base.Add(2 * time.Second)
+	core, logs := observer.New(zap.WarnLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	ok, _, _, err := h.match(clockConn(true, base), in, &mockMemDb{mocks: []*models.Mock{rec}, updateUnFilteredReturn: true}, models.ProvenFlakyHeaderNoise(), nil, nil, true, false, false, true, true)
+	if err != nil || ok {
+		t.Fatalf("match ok=%v err=%v; want the moved reads of the clock refused", ok, err)
+	}
+	said := map[string]string{}
+	for _, e := range logs.FilterMessage("a learned read of the application's clock does not hold").All() {
+		c := e.ContextMap()
+		f, _ := c["field"].(string)
+		why, _ := c["reason"].(string)
+		if c["mock"] != "usage" || !strings.HasPrefix(why, f+" was learned as ") {
+			t.Fatalf("the log says %v; want the mock, the field and why naming it", c)
+		}
+		for _, v := range []string{"kqzx9w", moved, stamp(recAt)} {
+			if strings.Contains(f+why, v) {
+				t.Fatalf("the log names %q: %v", v, c)
+			}
+		}
+		said[f] = why
+	}
+	if len(said) != 2 || said["body.since"] == "" || said["body.users.{}.since"] == "" {
+		t.Fatalf("the log said %v; want body.since and body.users.{}.since", said)
+	}
+}
+
+// A refused read of the clock is named as the walk names its field, by its
+// shape: a query parameter's or a body key's name that may be a value the
+// app sent (a user's id) is {}, an array index is [], a path segment is the
+// path. Its reason quotes that name, so no value reaches the report.
+func TestARefusedClockReadsFieldIsNamedByItsShape(t *testing.T) {
+	for place, want := range map[string]string{
+		"url.query.since":         "query.since",
+		"url.query.kqzx9w":        "query.{}",
+		"url.path.2":              "path",
+		"body.since":              "body.since",
+		"body.users.kqzx9w.since": "body.users.{}.since",
+		"body.items[3].at":        "body.items[].at",
+		"header.x-sent-at":        "header.x-sent-at",
+	} {
+		if got := clockField(place).shape; got != want {
+			t.Errorf("the clock read at %s is named %q; want %q", place, got, want)
 		}
 	}
 }
