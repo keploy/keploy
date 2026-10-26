@@ -235,3 +235,123 @@ func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
 		t.Fatalf("span = %+v,%v; want %+v: a serve at the call's own arrival is no serve before it", s, ok, want)
 	}
 }
+
+// A value that is one instant whole in both runs, in a call with no window
+// (a test's own call, read by the lead alone), is a plain read of the clock,
+// compared at every replay in its call's own span, whether or not the lead
+// moved it: how late record's full round read its clock (a loaded box) must
+// not decide what is learned, and noise there would let any value pass at
+// every replay. In a window that holds it in both runs it is one too. A value
+// that is no instant whole (a random id, an instant inside a longer value) is
+// noise as before. A value learned so that is no read of the clock fails the
+// next replay's check, record's confirming round's first, which names the
+// field: it is filtered there with that reason, never kept to go red later.
+func TestAWholeInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) {
+	rec := time.Date(2026, 10, 27, 9, 0, 0, 123e6, time.UTC)
+	call := rec.Add(time.Millisecond)
+	const p = "body.processed_at"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	iso := func(at time.Time) string { return at.Format("2006-01-02T15:04:05.000Z07:00") }
+	classify := func(r, l string, w *Window) Learned {
+		return ClassifyIn(NewDriftCache(), []string{p}, shape(l), shape(r), call, nil, nil, nil, w)[0]
+	}
+	// F read its clock 3.4 s later than the lead puts it (a loaded box), or
+	// 0.4 s earlier.
+	late := rec.Add(FullRoundLead + 3400*time.Millisecond)
+	early := rec.Add(FullRoundLead - 400*time.Millisecond)
+	window := &Window{Rec: Span{From: rec.Add(-5 * time.Millisecond), To: call}, F: Span{From: late.Add(-5 * time.Millisecond), To: late.Add(time.Millisecond)}}
+	for _, row := range []struct {
+		what string
+		r, l string
+		w    *Window
+		read bool
+	}{
+		{"one instant whole, no window, read late", iso(rec), iso(late), nil, true},
+		{"one instant whole, no window, read early", iso(rec), iso(early), nil, true},
+		{"an epoch millisecond, no window, read late", strconv.FormatInt(rec.UnixMilli(), 10), strconv.FormatInt(late.UnixMilli(), 10), nil, true},
+		{"one instant whole, no window, moved by the lead", iso(rec), iso(rec.Add(FullRoundLead)), nil, true},
+		{"one instant whole, its window holds it in both runs", iso(rec), iso(late), window, true},
+		{"a random id, no window", "a7f3c2e9", "9c21e04b", nil, false},
+		{"an instant inside a longer value, no window", "ord-" + iso(rec), "ord-" + iso(late), nil, false},
+	} {
+		ln := classify(row.r, row.l, row.w)
+		if !row.read {
+			if ln.Kind != KindNoise || ln.Read != nil {
+				t.Errorf("%s: %s Read=%+v (%s); want noise", row.what, ln.Kind, ln.Read, ln.Why)
+			}
+			continue
+		}
+		if o, ok := ln.Clock(); ln.Kind != KindNoise || !ok || !o.Plain() {
+			t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock, compared at replay", row.what, ln.Kind, ln.Read, ln.Why)
+		}
+	}
+	// The confirming round replays the test: its call carries a read of its
+	// own clock (in its span), or a value that is no read of the clock, such
+	// as the recorded one again (an instant the application built on what
+	// the test gave it), which the check refuses, naming the field.
+	o, ok := classify(iso(rec), iso(late), nil).Clock()
+	if !ok {
+		t.Fatal("a whole instant with no window learned no read of the clock")
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+	if ok, why := CheckClockRead(p, o, Leaf{Path: p, Type: String, Value: iso(now.Add(5 * time.Millisecond))}, span, true); !ok {
+		t.Errorf("a read of the confirming round's clock in its call's span: refused (%s); want it kept", why)
+	}
+	for _, v := range []string{iso(rec), iso(late), iso(now.AddDate(0, 0, -30))} {
+		ok, why := CheckClockRead(p, o, Leaf{Path: p, Type: String, Value: v}, span, true)
+		if ok || !strings.HasPrefix(why, p+" was learned as ") || !strings.Contains(why, "it changed") {
+			t.Errorf("%s in the confirming round: ok %v (%s); want refused, naming %s and saying it changed", v, ok, why, p)
+		}
+	}
+}
+
+// A value that is one instant whole in both runs, in a call whose window on
+// the application's clock does not hold it in both runs, that the lead does
+// not move, is refused as a clock read before its call's window (or no plain
+// read of the clock): learned as noise, nothing would compare it again, and
+// any value would pass. Moved by the lead it is still a plain read of the
+// clock; a value that is no instant whole stays noise.
+func TestAWholeInstantOutsideItsCallsWindowIsRefused(t *testing.T) {
+	rec := time.Date(2026, 10, 27, 9, 0, 0, 123e6, time.UTC)
+	call := rec.Add(time.Millisecond)
+	const p = "body.audited_at"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	iso := func(at time.Time) string { return at.Format("2006-01-02T15:04:05.000Z07:00") }
+	live := rec.Add(FullRoundLead + 8*time.Second)
+	// The call's window opens 5 ms before it in both runs; the value was
+	// read 2 s before the window in record and 6 s before it in F.
+	window := &Window{Rec: Span{From: call.Add(-5 * time.Millisecond), To: call}, F: Span{From: live.Add(-5 * time.Millisecond), To: live.Add(time.Millisecond)}}
+	before, fBefore := rec.Add(-2*time.Second), live.Add(-6*time.Second)
+	for _, row := range []struct {
+		what   string
+		r, l   string
+		refuse bool
+	}{
+		{"read before its call's window in both runs", iso(before), iso(fBefore), true},
+		{"an epoch millisecond read before its window", strconv.FormatInt(before.UnixMilli(), 10), strconv.FormatInt(fBefore.UnixMilli(), 10), true},
+		{"later than its call in both runs, no offset keploy reads", iso(call.Add(time.Hour)), iso(live.Add(2 * time.Hour)), true},
+		{"outside its window, moved by the lead", iso(before), iso(before.Add(FullRoundLead)), false},
+		{"a random id", "a7f3c2e9", "9c21e04b", false},
+	} {
+		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(row.l), shape(row.r), call, nil, nil, nil, window)[0]
+		switch {
+		case row.refuse:
+			if ln.Kind != KindUnaccounted || ln.Why != outsideWindowWhy || !strings.Contains(ln.Why, "a clock read before its call's window") {
+				t.Errorf("%s: %s (%s); want refused as a clock read before its call's window", row.what, ln.Kind, ln.Why)
+			}
+		case textClockRead(row.r, row.l) != nil:
+			if o, ok := ln.Clock(); ln.Kind != KindNoise || !ok || !o.Plain() {
+				t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock", row.what, ln.Kind, ln.Read, ln.Why)
+			}
+		default:
+			if ln.Kind != KindNoise || ln.Read != nil {
+				t.Errorf("%s: %s Read=%+v (%s); want noise", row.what, ln.Kind, ln.Read, ln.Why)
+			}
+		}
+	}
+}
