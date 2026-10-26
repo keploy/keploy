@@ -146,7 +146,13 @@ func createAndReadBack(recorded string) []*models.Mock {
 
 func matchVar(t *testing.T, h *HTTP, db *varDb, r *req) (bool, *models.Mock, *matchDiag) {
 	t.Helper()
-	ok, stub, diag, err := h.match(context.Background(), r, db, nil, nil, nil, true, false, false, true, true)
+	return matchVarIn(t, context.Background(), h, db, r)
+}
+
+// matchVarIn is matchVar on a connection whose context is ctx.
+func matchVarIn(t *testing.T, ctx context.Context, h *HTTP, db *varDb, r *req) (bool, *models.Mock, *matchDiag) {
+	t.Helper()
+	ok, stub, diag, err := h.match(ctx, r, db, nil, nil, nil, true, false, false, true, true)
 	if err != nil {
 		t.Fatalf("match: %v", err)
 	}

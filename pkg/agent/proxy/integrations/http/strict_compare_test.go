@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -48,13 +49,19 @@ func sent(path string, header map[string]string, body string) *req {
 // the switched static list plus keploy.yml's header and body noise.
 func strictMatch(t *testing.T, input *req, headerNoise, bodyNoise map[string][]string, urlNoise []string, mocks ...*models.Mock) (*models.Mock, *matchDiag) {
 	t.Helper()
+	return strictMatchIn(t, context.Background(), input, headerNoise, bodyNoise, urlNoise, mocks...)
+}
+
+// strictMatchIn is strictMatch on a connection whose context is ctx.
+func strictMatchIn(t *testing.T, ctx context.Context, input *req, headerNoise, bodyNoise map[string][]string, urlNoise []string, mocks ...*models.Mock) (*models.Mock, *matchDiag) {
+	t.Helper()
 	t.Setenv("KEPLOY_PROVEN", "1")
 	hn := models.ProvenFlakyHeaderNoise()
 	for k, v := range headerNoise {
 		hn[k] = v
 	}
 	db := &mockMemDb{mocks: mocks, updateUnFilteredReturn: true}
-	ok, stub, diag, err := newHTTP().match(context.Background(), input, db, hn, bodyNoise, urlNoise, true, false, false, true, true)
+	ok, stub, diag, err := newHTTP().match(ctx, input, db, hn, bodyNoise, urlNoise, true, false, false, true, true)
 	if err != nil {
 		t.Fatalf("match: %v", err)
 	}
@@ -745,5 +752,125 @@ func TestStrictARecordingReplayedAsItIsTakesNoTurn(t *testing.T) {
 		if commit != nil || m.Name != "once" {
 			t.Fatalf("pick %d = %s (commit %v), want once with no turn", i+1, m.Name, commit != nil)
 		}
+	}
+}
+
+// clockConn is a connection's context whose learn tracker reads the
+// application's clock as the real one (none: keploy cannot tell it), with a
+// data-plane call served at served: a call that reaches keploy after it made
+// its clock reads after it.
+func clockConn(appClock bool, served time.Time) context.Context {
+	tr := learn.NewTracker()
+	if appClock {
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	}
+	tr.ServedMockAt(httpMock("earlier", "GET", "/v1/account"), served)
+	tr.SetLearnEnded(true)
+	return learn.WithTracker(context.Background(), tr)
+}
+
+// A place the learn step learned as a read of the application's clock
+// (MockSpec.Clocks) is still compared at a replay: the call must carry a read
+// of the clock made in its own window (since the previous serve), plus the
+// learned offset, at every kind of place (a body field, a query value, a
+// header). A value moved thirty days, the epoch, the recorded value itself,
+// a time to live changed by a minute, a value keploy cannot read, a missing
+// field, a place two learnings left Empty, and every value where keploy
+// cannot tell the application's clock are refused, the field named; learned
+// noise on the same place (a switch-off rewrite can put both on a file)
+// excuses none of them. keploy.yml's noise does: the user declared the field
+// not compared.
+func TestStrictChecksALearnedClockReadInItsCallsWindow(t *testing.T) {
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	now := base.Add(time.Second)
+	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Second, Res: time.Second}
+	plain := models.ClockOffset{Res: time.Second}
+	mock := func(clocks map[string]models.ClockOffset) *models.Mock {
+		m := recorded("usage", "/v1/usage?since="+stamp(recAt), map[string]string{"Content-Type": "application/json", "X-Sent-At": stamp(recAt)},
+			`{"since":"`+stamp(recAt)+`","expires":"`+stamp(recAt.Add(30*time.Minute))+`","q":"x"}`)
+		m.Spec.Clocks = clocks
+		m.Spec.ReqBodyNoise = map[string][]string{}
+		for p := range clocks {
+			m.Spec.ReqBodyNoise[p] = []string{}
+		}
+		return m
+	}
+	call := func(since, expires, query, header string) *req {
+		body := `{"q":"x","since":"` + since + `","expires":"` + expires + `"}`
+		if since == "" {
+			body = `{"q":"x","expires":"` + expires + `"}`
+		}
+		r := sent("/v1/usage?since="+query, map[string]string{"Content-Type": "application/json", "X-Sent-At": header}, body)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	all := map[string]models.ClockOffset{"body.since": plain, "body.expires": ttl, "url.query.since": plain, "header.x-sent-at": plain}
+	own := call(stamp(now), stamp(now.Add(30*time.Minute)), stamp(now), stamp(now))
+	for _, c := range []struct {
+		name      string
+		clocks    map[string]models.ClockOffset
+		appClock  bool
+		in        *req
+		bodyNoise map[string][]string
+		differs   string
+	}{
+		{"its own call's now and now + 30m", all, true, own, nil, ""},
+		{"moved thirty days", all, true, call(stamp(now.AddDate(0, 0, -30)), stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"the epoch", all, true, call("1970-01-01T00:00:00Z", stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"the recorded value", all, true, call(stamp(recAt), stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"a time to live of 31m", all, true, call(stamp(now), stamp(now.Add(31*time.Minute)), stamp(now), stamp(now)), nil, "body.expires"},
+		{"no instant", all, true, call("soon", stamp(now.Add(30*time.Minute)), stamp(now), stamp(now)), nil, "body.since"},
+		{"the field gone", map[string]models.ClockOffset{"body.since": plain}, true, call("", stamp(recAt.Add(30*time.Minute)), stamp(recAt), stamp(recAt)), nil, "body.since"},
+		{"a query value moved", all, true, call(stamp(now), stamp(now.Add(30*time.Minute)), stamp(now.AddDate(0, 0, -30)), stamp(now)), nil, "query.since"},
+		{"a header moved", all, true, call(stamp(now), stamp(now.Add(30*time.Minute)), stamp(now), stamp(recAt)), nil, "header.x-sent-at"},
+		{"two learnings left no one offset", map[string]models.ClockOffset{"body.since": {Min: time.Hour, Max: time.Hour}}, true, own, nil, "body.since"},
+		{"keploy cannot tell the app's clock", all, false, own, nil, "body.since"},
+		{"keploy.yml's noise reaches it", map[string]models.ClockOffset{"body.since": plain}, false, call(stamp(now), stamp(recAt.Add(30*time.Minute)), stamp(recAt), stamp(recAt)), map[string][]string{"since": {}}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, clockConn(c.appClock, base), c.in, nil, c.bodyNoise, nil, mock(c.clocks))
+			if c.differs == "" {
+				if got == nil {
+					t.Fatalf("refused (%v); want it answered", differs(diag))
+				}
+				return
+			}
+			if got != nil || !hasField(differs(diag), c.differs) {
+				t.Fatalf("answered %v, differs %v; want refused naming %s", got != nil, differs(diag), c.differs)
+			}
+			why := ""
+			for _, f := range diag.differs {
+				if f.shape == c.differs {
+					why = f.why
+				}
+			}
+			if !strings.Contains(why, "learned") {
+				t.Fatalf("the refusal of %s gives no reason: %q", c.differs, why)
+			}
+		})
+	}
+	// A read of the clock needs no noise beside it: the walk lets its value
+	// change, and the check decides it.
+	bare := mock(all)
+	bare.Spec.ReqBodyNoise = nil
+	if got, diag := strictMatchIn(t, clockConn(true, base), own, nil, nil, nil, bare); got == nil {
+		t.Fatalf("refused (%v) with no noise beside the reads of the clock; want it answered", differs(diag))
+	}
+}
+
+// Without the proven switch keploy reads no learned read of the clock, and
+// compares as before it.
+func TestNoClockIsReadWithTheSwitchOff(t *testing.T) {
+	m := httpMock("m", "GET", "/v1")
+	m.Spec.Clocks = map[string]models.ClockOffset{"body.since": {Res: time.Second}}
+	t.Setenv("KEPLOY_PROVEN", "")
+	if clocksOf(m) != nil {
+		t.Fatal("a clock read with the switch off")
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	if clocksOf(m) == nil {
+		t.Fatal("no clock read with the switch on")
 	}
 }
