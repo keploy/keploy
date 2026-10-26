@@ -285,7 +285,7 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 		if lead == "" {
 			lead = fol.refuted
 		}
-		ln.Kind, ln.Why, ln.Echo, ln.NotFollowed = KindUnaccounted, lead+"; "+why+", so keploy cannot tell a copy from a varying value", nil, true
+		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, lead+"; "+why+", so keploy cannot tell a copy from a varying value", nil
 	}
 	return ln
 }

@@ -499,11 +499,13 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
-	// NotFollowed, of an unaccounted drift, says keploy cannot follow or
-	// answer the value yet (a word of it echoed inside a longer answer
-	// value, an echo beside a source it set aside, a value a connection's
-	// start-up holds, a recording or the test case's request keploy could
-	// not read): keploy's limit, not a change nothing explains.
+	// NotFollowed, of an unaccounted drift, says keploy found where the
+	// value is and cannot follow or answer it there yet (a word of it
+	// echoed inside a longer answer value, an echo beside a source it set
+	// aside): keploy's limit, never the app's change. A drift keploy cannot
+	// tell about (a recording or request it could not read, a copy it
+	// cannot tell from a varying value) is not: it may be the app's change,
+	// and keploy's limit must never stand for one.
 	NotFollowed bool
 }
 
@@ -1004,7 +1006,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		if unreadRaw != "" {
-			out = append(out, Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw, NotFollowed: true})
+			out = append(out, Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw})
 			continue
 		}
 		if r.Type == Instant || l.Type == Instant {
@@ -1023,7 +1025,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
 				}
 				if from.startUp {
-					ln.Kind, ln.From, ln.Why, ln.NotFollowed = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from), true
+					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -1067,9 +1069,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
-				// What keploy could not read (the test case's request, or a
-				// recording a place search needed) is keploy's limit.
-				ln.NotFollowed = unreadReq != "" || op != nil && op.unread != "" && why == op.unread
 			}
 		}
 		// Noise only where no word of what changed comes back in the

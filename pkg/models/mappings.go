@@ -718,7 +718,7 @@ func nodeHasEntries(node *yaml.Node, field string) bool {
 				v = v.Alias
 			}
 			switch v.Kind {
-			case yaml.SequenceNode:
+			case yaml.SequenceNode, yaml.MappingNode:
 				return len(v.Content) > 0
 			case yaml.ScalarNode:
 				return v.Tag != "!!null" && strings.Trim(v.Value, " ,") != ""
@@ -766,6 +766,10 @@ func jsonHasEntries(data []byte, field string) bool {
 	var names string
 	if json.Unmarshal(raw[field], &names) == nil {
 		return strings.Trim(names, " ,") != ""
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw[field], &object) == nil {
+		return len(object) > 0
 	}
 	return len(raw[field]) > 0 && string(raw[field]) != "null"
 }

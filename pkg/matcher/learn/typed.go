@@ -478,10 +478,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	rt, okR := readTyped(r)
 	lt, okL := readTyped(l)
 	if !okR || !okL {
-		// keploy's limit only where it cannot decode its own recording of
-		// an instant both sides type as one; a live value it cannot decode,
-		// or one typed so on one side alone, is the app's.
-		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, instantUnread(r, l), r.Type == Instant && l.Type == Instant && !okR
+		ln.Kind, ln.Why = KindUnaccounted, instantUnread(r, l)
 		return ln
 	}
 	rec, live := rt.moment(rt.res), lt.moment(lt.res)
@@ -520,15 +517,14 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Built on a moved place by an offset (offset.go), before any provenance
 	// excuses it.
 	if m, ok := places().offsetFrom([]driftedInstant{{rec: rec, live: live}}); ok {
-		// A place keploy could not read is keploy's limit.
-		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, offsetWhy(m), m.unread != ""
+		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
 		return ln
 	}
 	// A copy of what F gave the application in another test or in a
 	// recording made after the call, or a pick from it (the echo of those
 	// places), before any provenance excuses it.
 	if why := dc.echoedElsewhere([]driftedInstant{{rec: rec, live: live}}, at, served, raw, places); why != "" {
-		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, places().unread != "" && why == places().unread
+		ln.Kind, ln.Why = KindUnaccounted, why
 		return ln
 	}
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
@@ -552,12 +548,9 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		return ln
 	}
 	// Noise, or an echo, only where the echo could read the test case's own
-	// request, where the moment F saw may stand: an instant the clock
-	// accounts for, which the unread request may hold too, is keploy's
-	// limit. One the clock does not account for was refused above as the
-	// app's: an ambiguous case never gets keploy's cause.
+	// request, where the moment F saw may stand.
 	if unread != "" {
-		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, unreadRequestWhy(unread), true
+		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {

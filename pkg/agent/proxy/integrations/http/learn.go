@@ -1541,7 +1541,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				retake = true
 				continue
 			}
-			out, claimed, why, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner())
+			out, claimed, why, limit, err := h.claimLearned(ctx, m, claimDb, plan, sc.owner())
 			if own && (err != nil || why != "" || !claimed) {
 				tracker.Unanswer(test, m.Name)
 			}
@@ -1549,9 +1549,13 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				return nil, nil, err
 			}
 			if why != "" {
-				// The variables learned cannot be declared, or the answer
-				// cannot carry their values: keploy's limit, not the app's.
-				res.Outcome, res.Reason, res.Why, res.Cause = learn.Miss, models.MissRequestChanged, why, learn.CauseNotFollowed
+				// Variables keploy learned and cannot declare are its limit;
+				// a value the recorded answer cannot hold may be the app's,
+				// so it gets no cause.
+				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				if limit {
+					res.Cause = learn.CauseNotFollowed
+				}
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {
@@ -2047,9 +2051,21 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			return p, r.Path + " changed, and " + l.Why, ""
 
 		case learn.KindEcho:
+			// noted keeps an echo refused for keploy's limit as a value of
+			// the call, under a key no variable is named, so a later leaf
+			// that held the same recorded value and holds another now is
+			// still caught as the app's change.
+			noted := func(place string) {
+				if _, ok := echoed[r.Value]; !ok {
+					key := "\x00" + r.Value
+					echoed[r.Value] = key
+					p.values[key] = variables.Binding{Value: l.Live.Value, Recorded: r.Value, Place: place}
+				}
+			}
 			place, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
 				limit(r.Path + " is echoed in the answer, at a place keploy cannot bind it (a form or multipart field)")
+				noted(r.Path)
 				continue
 			}
 			at := answers(l, l.Echo)
@@ -2058,9 +2074,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				// one keploy can answer with this run's value.
 				if e := l.Echo[0]; e.Type != learn.Keys && (learn.WholeEcho(r, e) || e.Unnamed && e.Value == r.Value) {
 					limit(r.Path + " is echoed in the answer whole only at " + l.Echo[0].Path + ", a place keploy cannot answer with this run's value")
+					noted(place)
 					continue
 				}
 				limit(r.Path + " is echoed in the answer only inside a longer value, in another form or at a key (" + l.Echo[0].Path + "), which keploy cannot answer with this run's value")
+				noted(place)
 				continue
 			}
 			if name, ok := echoed[r.Value]; ok {
@@ -2076,6 +2094,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			if limited != "" {
 				// As for a variable: refused already, it takes no name.
+				noted(place)
 				continue
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
@@ -2174,25 +2193,27 @@ func appendNew(list []string, vs ...string) []string {
 // mock is consumed with what was learned on its state (the noise, its
 // variables, and the variables it uses that are bound at earlier mocks), as
 // detected noise rides. why says why the answer cannot hold a variable's
-// value (nothing is consumed then); claimed is false when another connection
-// took m first. owner says which of the scope's mocks are the open test's
+// value (nothing is consumed then), and limit whether that is keploy's own
+// limit (the variables it learned cannot be declared) rather than a value
+// the recorded answer cannot hold, which may be the app's; claimed is false
+// when another connection took m first. owner says which of the scope's mocks are the open test's
 // own: one no open test owns (a stated stateful recording of the pool) is
 // kept reusable, as the matcher keeps it (ownedKey).
-func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, p pairing, owner func(*models.Mock) bool) (served *models.Mock, claimed bool, why string, err error) {
+func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrations.MockMemDb, p pairing, owner func(*models.Mock) bool) (served *models.Mock, claimed bool, why string, limit bool, err error) {
 	served, err = withResponse(m)
 	if err != nil {
-		return nil, false, "", err
+		return nil, false, "", false, err
 	}
 	if len(p.vars) > 0 {
 		decls, problem := readDecls(&models.Mock{Name: m.Name, Spec: models.MockSpec{Variables: p.vars}})
 		if problem != "" {
-			return nil, false, problem, nil
+			return nil, false, problem, true, nil
 		}
 		// local holds every variable this call answers; the empty table
 		// guards renderAnswers' table lookup all the same.
 		rendered, vp := h.renderAnswers(served, &varHit{mock: m, decls: decls, local: p.values}, &variables.Table{})
 		if vp != nil {
-			return nil, false, vp.why, nil
+			return nil, false, vp.why, false, nil
 		}
 		served = rendered
 	}
@@ -2209,7 +2230,7 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 			spec.SetLearned(mergeVariables(spec.Learned(), p.vars), mergeBinds(spec.LearnedBinds(), p.binds))
 		}
 	})
-	return served, claimed, "", nil
+	return served, claimed, "", false, nil
 }
 
 // inRecordedOrder is mocks in the order they were recorded.

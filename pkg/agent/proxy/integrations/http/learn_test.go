@@ -4589,4 +4589,14 @@ func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
 	if cause != "" || !strings.HasPrefix(why, "body.total changed") {
 		t.Fatalf("cause %q, why %q; want the unexplained change as the reason, with no cause", cause, why)
 	}
+	// Nor does it hide one recorded value the call now sends as two: the
+	// echoes after keploy's limit are still read for it.
+	echo := func(path, live string) learn.Learned {
+		r := learn.Leaf{Path: path, Value: "5", Type: learn.String}
+		return learn.Learned{Kind: learn.KindEcho, Recorded: r, Live: learn.Leaf{Path: path, Value: live, Type: learn.String}, Echo: []learn.Leaf{{Path: "body.echo", Value: "5", Type: learn.String}}}
+	}
+	_, why, cause = learnPlan(learn.NewTracker(), 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, []learn.Learned{limit, echo("body.a", "6"), echo("body.b", "7")}, nil, nil)
+	if cause != "" || !strings.Contains(why, "held one value when recorded and two now") {
+		t.Fatalf("cause %q, why %q; want one value now two, the app's, with no cause", cause, why)
+	}
 }
