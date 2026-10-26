@@ -21,12 +21,15 @@ var resultSetEncodes atomic.Uint64
 
 // ResultSetEncodes returns how many result sets EncodeToBinary has encoded
 // since the process started, rather than served from their cache. Tests read
-// it to prove each recorded answer is encoded once however often it is served.
+// it to prove a recorded answer is encoded once however often it is served,
+// while its payload stays cached.
 func ResultSetEncodes() uint64 { return resultSetEncodes.Load() }
 
 // EncodeToBinary returns the wire bytes of packet. A text or binary result set
-// is encoded on its first serve only: its payload is cached on the result set
+// is encoded on its first serve: its payload is cached on the result set
 // (mysql.EncodedPayload) and every later serve copies it after a fresh header.
+// The cache keeps at most 64 MiB of payloads in the process; a serve of an
+// answer it evicted encodes it again, to the same bytes.
 func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle, clientConn net.Conn, decodeCtx *DecodeContext) ([]byte, error) {
 
 	if packet == nil {
