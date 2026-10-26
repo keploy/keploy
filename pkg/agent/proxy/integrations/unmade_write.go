@@ -23,13 +23,15 @@ import (
 // acts on it (refuses the client the test has not blocked yet), and the
 // test fails, or passes on a state it never reached.
 //
-// The rule: a read the matcher would answer with one of the open test's own
-// recordings, that the test recorded after one of its own writes of the
-// same kind the replay has not made yet, is answered with the newest
-// recording of the same request made before that write: from earlier in
-// the test, else from earlier in the recording (an earlier test, the
-// start-up window). Never with a recording made after a write the replay
-// has not made. With none, it is a miss that says so (BeforeUnmadeWrite.Note).
+// The rule: a read an answer step would answer with a recording made after
+// one of the open test's own writes of the same kind the replay has not
+// made yet is answered with the newest recording of the same request made
+// before that write: from earlier in the test, else from earlier in the
+// recording (an earlier test, the start-up window, the background). Never
+// with a recording made after a write the replay has not made, whoever
+// recorded it: the open test (after the write, in recorded order), another
+// test, or the background (a request time after the write's). With none,
+// it is a miss that says so (BeforeUnmadeWrite.Note).
 // Serving the earlier recording consumes nothing: the read the test recorded
 // after the write still answers the call made after it.
 //
@@ -46,12 +48,14 @@ import (
 // forward it: one that drops it answers a read before a write with the
 // recording made after it.
 type UnmadeWriteReader interface {
-	// UnmadeWriteBefore is, when mk is one of the open test's own
-	// recordings that has not answered, the first of the test's own
-	// recordings of mk's kind recorded before it that has not answered
-	// either and that isWrite says is a write; false when there is none, mk
-	// is not one of the open test's own unanswered recordings, or no test is
-	// open. isWrite is called without the store's locks held.
+	// UnmadeWriteBefore is the first of the open test's own recordings of
+	// mk's kind recorded before mk that has not answered and that isWrite
+	// says is a write: before in recorded order when mk is one of the test's
+	// own recordings that has not answered, at an earlier request time when
+	// mk is any other recording (another test's, the background's, the
+	// start-up window's). False when there is none, mk is one of the test's
+	// own that answered already, or no test is open. isWrite is called
+	// without the store's locks held.
 	UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mock) bool) (*models.Mock, bool)
 }
 
@@ -116,7 +120,7 @@ func ReportAnswered(ctx context.Context, b BeforeUnmadeWrite, r *models.MockMism
 var errNoEarlierRecordings = errors.New("the mock store cannot read the recordings made before a write")
 
 // ReadBeforeUnmadeWrite decides, under exact serving, whether chosen, the
-// recording the matcher would answer a read with, was recorded after a write
+// recording an answer step would answer a read with, was recorded after a write
 // of the open test the replay has not made (UnmadeWriteReader), and if so
 // which recording answers the read instead: the newest one made before
 // that write that same accepts, of chosen's kind, of the test's own that
