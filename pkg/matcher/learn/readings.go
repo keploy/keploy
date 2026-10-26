@@ -824,7 +824,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
 					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
-					if fol.excusedSeen(e, ed, i, t, at, why) {
+					if fol.excusedSeen(e, ed, v, i, t, at, why, s.Leaf.Path) {
 						continue
 					}
 					return why
@@ -848,10 +848,21 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				place += note
 				why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
-				if fol.excusedRaw(x, i, t, at, why) {
+				if fol.excusedRaw(x, v, i, t, at, why, place) {
 					continue
 				}
 				return why
+			}
+			// A word the value holds now that stands in what F gave the
+			// application in a payload it served changed (ServedLive), and
+			// not in what the recording gave there: F gave it, the
+			// recording did not, as at a leaf whose recorded text lacks it.
+			if !recorded && x.Live() && dc.searchedTokens(*x.live, keep)[i][t] {
+				place := x.mock + "'s payload, as record's full round gave it"
+				if f := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
+					place = x.mock + " at " + f + ", as record's full round gave it"
+				}
+				return word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
 			}
 		}
 		return ""
