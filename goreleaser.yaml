@@ -28,16 +28,21 @@ builds:
       - -s -w -X main.version={{.Version}}
       - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
       - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
-    # Session P: pg_query_go / libpg_query requires CGo. The host
-    # (release.yml runs on macos-latest) can cross-compile windows
-    # via the mingw-w64 override in the keploy-windows leg below,
-    # but linux cross-compile from macOS needs an external
-    # osxcross/zig-cc toolchain. TODO (follow-up): split the
-    # release build so each platform leg runs on a native runner
-    # (linux goreleaser build on ubuntu-latest, darwin/windows on
-    # macos-latest) so CGO_ENABLED=1 is honoured without
-    # cross-toolchain surgery. Until that split lands, tagging a
-    # release with this config will fail to produce linux binaries.
+    # pg_query_go / libpg_query requires cgo. The release itself does not
+    # run goreleaser: .github/workflows/release.yml builds each platform on
+    # its own native runner, the linux binaries with
+    # .github/scripts/linux/build-linux-release.sh. This file mirrors it for
+    # local snapshot builds and as the ldflags source of truth.
+    #
+    # linux: FULLY STATIC against musl, linked by zig cc (the overrides
+    # below; KEPLOY_ZIG names the zig, .github/scripts/linux/zig-toolchain.sh
+    # stages the pinned one). Linked against the build host's glibc,
+    # v3.6.164 needed GLIBC_2.34 and exited at once on Debian 11, Ubuntu
+    # 20.04, RHEL 8 and Amazon Linux 2. netgo and osusergo keep DNS and user
+    # lookups pure Go (a static binary cannot load the host's NSS modules);
+    # -z stack-size gives threads glibc's 8 MiB default stack (musl's is
+    # 128 KiB, and the Postgres parser's C code recurses on the calling
+    # thread's stack); --strip-all because zig cc does not act on -s.
     env:
       - CGO_ENABLED=1
     goos:
@@ -58,6 +63,37 @@ builds:
         goarch: amd64
     tags:
       - viper_bind_struct
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC={{ envOrDefault "KEPLOY_ZIG" "zig" }} cc -target x86_64-linux-musl
+        ldflags:
+          - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
+          - -s -w -X main.version={{.Version}}
+          - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
+          - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+          - -linkmode=external -extldflags '-static -Wl,-z,stack-size=8388608 -Wl,--strip-all'
+        tags:
+          - viper_bind_struct
+          - netgo
+          - osusergo
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC={{ envOrDefault "KEPLOY_ZIG" "zig" }} cc -target aarch64-linux-musl
+        ldflags:
+          - -s -w -X main.dsn={{.Env.SENTRY_DSN_BINARY}}
+          - -s -w -X main.version={{.Version}}
+          - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
+          - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+          - -linkmode=external -extldflags '-static -Wl,-z,stack-size=8388608 -Wl,--strip-all'
+        tags:
+          - viper_bind_struct
+          - netgo
+          - osusergo
 
   # Docker image binaries. Separate from the public linux binaries
   # above because the docker image reports crashes to a distinct
@@ -66,10 +102,8 @@ builds:
   # archive — the binaries live in dist/ for the docker-release job
   # to consume via `Dockerfile.runtime`.
   #
-  # Session P: CGO_ENABLED=1 so pg_query_go links libpg_query. The
-  # same release.yml-on-macOS split caveat from the keploy leg
-  # applies — the linux runtime binaries need a native linux
-  # goreleaser leg before a tag release can publish them again.
+  # cgo for pg_query_go, linked static against musl as the keploy build's
+  # linux targets are (see there).
   - binary: keploy
     id: keploy-docker
     main: ./main.go
@@ -87,6 +121,37 @@ builds:
       - arm64
     tags:
       - viper_bind_struct
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC={{ envOrDefault "KEPLOY_ZIG" "zig" }} cc -target x86_64-linux-musl
+        ldflags:
+          - -s -w -X main.dsn={{.Env.SENTRY_DSN_DOCKER}}
+          - -s -w -X main.version={{.Version}}
+          - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
+          - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+          - -linkmode=external -extldflags '-static -Wl,-z,stack-size=8388608 -Wl,--strip-all'
+        tags:
+          - viper_bind_struct
+          - netgo
+          - osusergo
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC={{ envOrDefault "KEPLOY_ZIG" "zig" }} cc -target aarch64-linux-musl
+        ldflags:
+          - -s -w -X main.dsn={{.Env.SENTRY_DSN_DOCKER}}
+          - -s -w -X main.version={{.Version}}
+          - -s -w -X main.apiServerURI={{.Env.SERVER_URL}}
+          - -s -w -X main.gitHubClientID={{.Env.GITHUB_APP_CLIENT_ID}}
+          - -linkmode=external -extldflags '-static -Wl,-z,stack-size=8388608 -Wl,--strip-all'
+        tags:
+          - viper_bind_struct
+          - netgo
+          - osusergo
 
   - binary: keploy
     id: keploy-windows
