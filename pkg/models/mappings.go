@@ -82,6 +82,9 @@ type MockEntry struct {
 	// Owner running beside it, as judging kept it. Read and kept by each
 	// rewrite, whatever the switch.
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// extra is the fields the entry had that this keploy does not know,
+	// written back as they read (yamlExtra).
+	extra *yamlExtra
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
@@ -243,6 +246,9 @@ type Mapping struct {
 	// names none; omitted when empty, so a file without it is written as
 	// before. Only its use is under the switch.
 	RecordedWith []string `json:"recordedWith,omitempty" yaml:"recordedWith,omitempty" bson:"recorded_with,omitempty"`
+	// extra is the fields the file had that this keploy does not know,
+	// written back as they read (yamlExtra).
+	extra *yamlExtra
 }
 
 // Group is the concurrency group id names, nil when there is none.
@@ -344,6 +350,9 @@ type MappedTestCase struct {
 	// the verdict fails when CI never reaches one. Written and read only
 	// under the proven switch; empty in recordings made without it.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
+	// extra is the fields the entry had that this keploy does not know,
+	// written back as they read (yamlExtra).
+	extra *yamlExtra
 }
 
 type persistedTestFormat struct {
@@ -378,7 +387,7 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, nil
+	return withExtra(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, tc.extra)
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
@@ -484,6 +493,8 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	tc.At, tc.Real = at, rl
+	_, tk, _ := known()
+	tc.extra = extraFields(node, tk)
 	return nil
 }
 
