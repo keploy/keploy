@@ -216,3 +216,20 @@ func TestInsertKeepsASectionEntrysFields(t *testing.T) {
 		t.Fatalf("the start-up entry's note was lost:\n%s", raw)
 	}
 }
+
+// UpsertWorker, which replaces the worker scope with the one a record
+// captured, keeps what a hand edit added to an entry of the same mock.
+func TestUpsertWorkerKeepsAnEntrysFields(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(dir, "s"), 0o755))
+	file := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\ntests:\n    - id: o::TestA\n      mock_entries:\n        - name: mock-0\nworker:\n    - name: mock-9\n      note: flaky poll\n"
+	must(t, os.WriteFile(filepath.Join(dir, "s", "mappings.yaml"), []byte(file), 0o644))
+	db := NewWithFormat(zap.NewNop(), dir, "mappings", yaml.FormatYAML)
+	must(t, db.UpsertWorker(context.Background(), "s", []models.MockEntry{{Name: "mock-9"}, {Name: "mock-10"}}))
+	raw, err := os.ReadFile(filepath.Join(dir, "s", "mappings.yaml"))
+	must(t, err)
+	if !strings.Contains(string(raw), "note: flaky poll") || !strings.Contains(string(raw), "mock-10") {
+		t.Fatalf("the worker entry's note was lost, or the new entry not written:\n%s", raw)
+	}
+}

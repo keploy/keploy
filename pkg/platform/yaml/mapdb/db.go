@@ -351,7 +351,9 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 			return err
 		}
 	}
-	mapping.Worker = worker
+	// The new worker scope keeps what a hand edit added to each of its
+	// entries the file had (models.KeepEntriesExtra).
+	mapping.Worker = models.KeepEntriesExtra(worker, mapping.Worker)
 	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
 	if err != nil {
 		return err
@@ -612,7 +614,7 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		mapping.Suites = suites
 	}
 	if len(startup) > 0 {
-		mapping.Startup = startup
+		mapping.Startup = models.KeepEntriesExtra(startup, mapping.Startup)
 	}
 	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
 	if err != nil {

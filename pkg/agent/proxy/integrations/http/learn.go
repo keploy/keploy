@@ -2005,6 +2005,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded", ""
 			}
+			if limited != "" {
+				// The call is refused for keploy's limit: its app-change
+				// check is done, and it takes no variable name.
+				continue
+			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
 			if !ok {
 				if limited == "" {
@@ -2067,6 +2072,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				v := p.vars[name]
 				v.Use = appendNew(v.Use, place)
 				p.vars[name] = v
+				continue
+			}
+			if limited != "" {
+				// As for a variable: refused already, it takes no name.
 				continue
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
