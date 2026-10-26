@@ -2427,7 +2427,24 @@ func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
 		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
 		sv.Between = backgroundCursor{m: m}
 	}
+	if v.test == "" {
+		sv.Gap = func(mk *models.Mock) bool { return mk != nil && v.servesBetween(mk.Name) }
+	}
 	return sv
+}
+
+// servesBetween reports whether name is a recording the pool view v can
+// serve between tests (SequenceView.Gap): its pool slice's, a worker-scope
+// one it has reached, or one of the next test's calls in flight (its ahead,
+// ServeExactPool). Read without v.mu: they are fixed once v is installed.
+func (v *exactView) servesBetween(name string) bool {
+	if _, ok := v.pool[name]; ok {
+		return true
+	}
+	if _, ok := v.index[name]; ok {
+		return true
+	}
+	return v.isWorker(name)
 }
 
 // viewCursor is one view's stateful cursor (SequenceView).

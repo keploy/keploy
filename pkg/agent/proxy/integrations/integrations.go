@@ -349,6 +349,14 @@ type SequenceView struct {
 	// advance (the last pool view's), which a worker-scope call in a test
 	// reads and advances too.
 	Between MockCursor
+	// Gap reports, between tests, whether a data-plane recording is one the
+	// view can serve there: its pool slice's (the claim key's: a beforeAll's
+	// calls), a worker-scope one it has reached, or one of the next test's
+	// calls in flight. A call between tests walks those alone: a test's own
+	// recording never answers between tests, so it is never the last a
+	// call past the gap's own answers again (a beforeAll's page that reads
+	// once more than recorded). nil in a test.
+	Gap func(*models.Mock) bool
 }
 
 // Span returns the recordings, of n of one reusable request in record order
