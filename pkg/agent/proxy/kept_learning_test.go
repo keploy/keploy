@@ -749,3 +749,86 @@ func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
 		t.Fatalf("staging 2's retry cycle answered the recorded call %s; want staging 2's own recording %s", got, two)
 	}
 }
+
+// asStaged gives a matcher's copy the staged recording's clock reads, never
+// the ones the learn step learned on the copy, as it does noise and
+// variables.
+func TestAStagedCopyHoldsTheRecordingsClockReadsNotTheCopys(t *testing.T) {
+	base := beatMock("beat")
+	base.Spec.Clocks = map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+	mk := base.DeepCopy()
+	mk.Spec.Clocks = map[string]models.ClockOffset{"body.key": {Res: time.Second}}
+	if got := asStaged(mk, base).Spec.Clocks; !reflect.DeepEqual(got, base.Spec.Clocks) {
+		t.Fatalf("the staged copy holds clock reads %+v, want the recording's %+v", got, base.Spec.Clocks)
+	}
+}
+
+// Every delete door carries the consumed copy's clock reads (MockSpec.Clocks)
+// on its consume, as it carries noise and variables: the per-test tree's,
+// the pool's and the start-up tier's, without exact serving.
+func TestEveryDeleteDoorCarriesTheCopysClockReads(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	clocks := map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+	consumed := func(t *testing.T, mm *MockManager) map[string]models.ClockOffset {
+		t.Helper()
+		for _, st := range mm.GetConsumedMocks() {
+			if st.Name == "beat" {
+				return st.Clocks
+			}
+		}
+		t.Fatal("beat's consume is not reported")
+		return nil
+	}
+	learned := func(t *testing.T, got []*models.Mock) models.Mock {
+		t.Helper()
+		if len(got) != 1 {
+			t.Fatalf("precondition: the tier holds %d mocks, want beat alone", len(got))
+		}
+		c := *got[0].DeepCopy()
+		c.Spec.Clocks = clocks
+		return c
+	}
+	t.Run("per-test", func(t *testing.T) {
+		pt := beatMock("beat")
+		pt.TestModeInfo = models.TestModeInfo{ID: 1, SortOrder: 1, IsFiltered: true, Lifetime: models.LifetimePerTest}
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow([]*models.Mock{pt}, nil, exactT0.Add(-time.Second), exactT0.Add(time.Second))
+		got, _ := mm.GetFilteredMocks()
+		if !mm.DeleteFilteredMock(learned(t, got)) {
+			t.Fatal("precondition: the per-test delete is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the per-test consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
+	t.Run("pool", func(t *testing.T) {
+		mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+		got, _ := mm.GetUnFilteredMocks()
+		if !mm.DeleteUnFilteredMock(learned(t, got)) {
+			t.Fatal("precondition: the pool's delete is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the pool's consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
+	t.Run("start-up", func(t *testing.T) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.ResetForReplaySession()
+		mm.SeedStartupCutoff(exactT0.Add(time.Second))
+		boot := beatMock("beat")
+		boot.TestModeInfo.IsFiltered, boot.TestModeInfo.Lifetime = true, models.LifetimePerTest
+		mm.SetMocksWithWindow([]*models.Mock{boot}, nil, models.BaseTime, time.Now())
+		mm.treesMu.RLock()
+		tier := mm.startup
+		mm.treesMu.RUnlock()
+		got, _ := mm.GetStartupMocks()
+		if !mm.deleteStartupMockFrom(tier, learned(t, got)) {
+			t.Fatal("precondition: the start-up delete is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the start-up consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
+}
