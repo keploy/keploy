@@ -287,7 +287,10 @@ func (m *Mapping) StartupMockNames() []string {
 }
 
 type MappedTestCase struct {
-	ID    string      `json:"id" yaml:"id" bson:"id"`
+	ID string `json:"id" yaml:"id" bson:"id"`
+	// Mocks is written and read as mock_entries (MarshalYAML, MarshalJSON);
+	// mocks is the key of the older shapes only, and under the proven switch
+	// an entry with both is refused (errBothMockLists).
 	Mocks []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
 	// Cases names the test cases this test produced when its record captured incoming requests.
 	Cases     []string            `json:"cases,omitempty" yaml:"cases,omitempty" bson:"cases,omitempty"`
@@ -448,9 +451,23 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+// errBothMockLists is a test entry with a mock_entries list and a mocks list
+// beside it, under the proven switch: keploy reads mock_entries only, so the
+// mocks list (a hand edit, or an undo followed to the letter) would be dropped
+// without a word, and the next rewrite of the file would erase it. With the
+// switch off the entry reads as it did before: mock_entries alone.
+const errBothMockLists = "test %q in mappings has both `mocks` and `mock_entries`, and keploy reads only `mock_entries`: move the entries under `mocks` into `mock_entries`, then delete `mocks`"
+
 // unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
 // format's other fields, in whichever shape the entry has.
 func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
+	if provenswitch.On() && nodeHasField(node, "mock_entries") && nodeHasField(node, "mocks") {
+		var e struct {
+			ID string `yaml:"id"`
+		}
+		_ = node.Decode(&e)
+		return fmt.Errorf(errBothMockLists, e.ID)
+	}
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
 	perr := node.Decode(&persisted)
@@ -512,6 +529,13 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 
 // unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
 func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
+	if provenswitch.On() && jsonContainsField(data, "mock_entries") && jsonContainsField(data, "mocks") {
+		var e struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(data, &e)
+		return fmt.Errorf(errBothMockLists, e.ID)
+	}
 	var persisted persistedTestFormat
 	perr := json.Unmarshal(data, &persisted)
 	if perr == nil && (jsonContainsField(data, "mock_entries") || ((jsonContainsField(data, "dir") || jsonContainsField(data, "starts") || jsonContainsField(data, "cases")) && !jsonContainsField(data, "mocks"))) {
