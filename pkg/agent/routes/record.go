@@ -36,6 +36,9 @@ import (
 type Agent struct {
 	logger *zap.Logger
 	svc    agent.Service
+	// consumed is the consumed history kept for the client between
+	// /updatemockparams calls (models.ConsumedSync).
+	consumed consumedStore
 }
 
 // agentReadyFilePath is the path MakeAgentReady writes on success. It
