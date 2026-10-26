@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -329,14 +330,15 @@ func sortedNoVerdicts(r *Replayer) map[string][]string {
 func TestWithoutUnreadLearning(t *testing.T) {
 	consumed := map[string]models.MockState{
 		"mock-1": {Name: "mock-1", ReqBodyNoise: map[string][]string{"body.b": {}, "body.a": {}}, Variables: models.MockVariables{"e": {Echo: true}, "v": {Use: []string{"body.v"}}},
-			Binds: map[string]models.MockVariables{"mock-0": {"v": {Bind: "body.v"}}}},
+			Binds:  map[string]models.MockVariables{"mock-0": {"v": {Bind: "body.v"}}},
+			Clocks: map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}},
 		"mock-2": {Name: "mock-2", ReqBodyNoise: map[string][]string{"body.c": {}}},
 		"boot":   {Name: "boot", ReqBodyNoise: map[string][]string{"body.d": {}}},
 	}
 	consumers := map[string][]string{"mock-1": {"test-1", "test-2"}, "mock-2": {"test-2"}}
 	for i := 0; i < 50; i++ {
 		kept, dropped, byTest, from := withoutUnreadLearning(consumed, consumers, map[string]bool{"test-1": true})
-		want := "mock-1 body.a (noise),mock-1 body.b (noise),mock-1 e (echo),mock-1 v (bound at mock-0),mock-1 v (variable)"
+		want := "mock-1 body.a (noise),mock-1 body.at (clock),mock-1 body.b (noise),mock-1 e (echo),mock-1 v (bound at mock-0),mock-1 v (variable)"
 		if strings.Join(dropped, ",") != want {
 			t.Fatalf("dropped %v; want %s", dropped, want)
 		}
@@ -350,7 +352,7 @@ func TestWithoutUnreadLearning(t *testing.T) {
 		if !reflect.DeepEqual(from, map[string][]string{"test-2": {"test-1"}}) {
 			t.Fatalf("from %v; want test-2's naming test-1", from)
 		}
-		if kept["mock-1"].ReqBodyNoise != nil || kept["mock-1"].Variables != nil || kept["mock-1"].Binds != nil || len(kept["mock-2"].ReqBodyNoise) != 1 || len(kept["boot"].ReqBodyNoise) != 1 {
+		if kept["mock-1"].ReqBodyNoise != nil || kept["mock-1"].Variables != nil || kept["mock-1"].Binds != nil || kept["mock-1"].Clocks != nil || len(kept["mock-2"].ReqBodyNoise) != 1 || len(kept["boot"].ReqBodyNoise) != 1 {
 			t.Fatalf("kept %+v", kept)
 		}
 	}
@@ -359,6 +361,11 @@ func TestWithoutUnreadLearning(t *testing.T) {
 	}
 	if kept, dropped, byTest, from := withoutUnreadLearning(consumed, consumers, nil); dropped != nil || byTest != nil || from != nil || !reflect.DeepEqual(kept, consumed) {
 		t.Fatalf("with every request read: kept %v, dropped %v, by test %v", kept, dropped, byTest)
+	}
+	// A mock the unread test consumed that learned only a clock read is
+	// dropped and named as one that learned anything else is.
+	if kept, dropped, _, _ := withoutUnreadLearning(map[string]models.MockState{"mock-4": {Name: "mock-4", Clocks: map[string]models.ClockOffset{"body.exp": {Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}}}}, map[string][]string{"mock-4": {"test-1"}}, map[string]bool{"test-1": true}); strings.Join(dropped, ",") != "mock-4 body.exp (clock + 30m (from 30m to 30m0.001s))" || kept["mock-4"].Clocks != nil {
+		t.Fatalf("a clock read alone: dropped %v, kept %+v", dropped, kept)
 	}
 	// A mock the unread test consumed that learned nothing marks no test.
 	if _, dropped, byTest, from := withoutUnreadLearning(map[string]models.MockState{"mock-3": {Name: "mock-3"}}, map[string][]string{"mock-3": {"test-1"}}, map[string]bool{"test-1": true}); dropped != nil || byTest != nil || from != nil {
@@ -370,31 +377,37 @@ func TestWithoutUnreadLearning(t *testing.T) {
 // (keptLearning) is what the round keeps of it: nothing learned on a shared
 // recording the settlement did not pin (stripUnresolved), nor what the agent
 // learned for a test whose request it did not say it read
-// (withoutUnreadLearning); the rest as it is, and consumed unchanged.
+// (withoutUnreadLearning); the rest as it is, and consumed unchanged. A
+// clock read is learning like any other: one learned alone is kept or
+// dropped as noise is.
 func TestKeptLearningIsWhatTheRoundKeeps(t *testing.T) {
 	noise := func(name string) models.MockState {
 		return models.MockState{Name: name, Kind: models.HTTP, ReqBodyNoise: map[string][]string{"body.at": {}}}
 	}
-	consumed := map[string]models.MockState{"shared-1": noise("shared-1"), "pinned-1": noise("pinned-1"), "own-2": noise("own-2"), "own-3": noise("own-3")}
+	clock := func(name string) models.MockState {
+		return models.MockState{Name: name, Kind: models.HTTP, Clocks: map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}}
+	}
+	consumed := map[string]models.MockState{"shared-1": noise("shared-1"), "pinned-1": noise("pinned-1"), "own-2": noise("own-2"), "own-3": noise("own-3"),
+		"shared-4": clock("shared-4"), "pinned-4": clock("pinned-4"), "own-4": clock("own-4"), "own-5": clock("own-5")}
 	r := &Replayer{exact: &exactPlan{share: &sharePlan{
 		sharing: true,
-		candOf:  map[string][]string{"shared-1": {"test-1", "test-3"}, "pinned-1": {"test-1", "test-3"}},
-		settled: models.SetShares{Pins: map[string]string{"pinned-1": "test-3"}},
+		candOf:  map[string][]string{"shared-1": {"test-1", "test-3"}, "pinned-1": {"test-1", "test-3"}, "shared-4": {"test-1", "test-3"}, "pinned-4": {"test-1", "test-3"}},
+		settled: models.SetShares{Pins: map[string]string{"pinned-1": "test-3", "pinned-4": "test-3"}},
 	}}}
 	r.requestsUnread.note("test-2", "")
-	kept := r.keptLearning(consumed, map[string][]string{"own-2": {"test-2"}, "own-3": {"test-3"}, "pinned-1": {"test-3"}})
+	kept := r.keptLearning(consumed, map[string][]string{"own-2": {"test-2"}, "own-3": {"test-3"}, "pinned-1": {"test-3"}, "own-4": {"test-2"}, "own-5": {"test-3"}, "pinned-4": {"test-3"}})
 	var learned []string
 	for name, st := range kept {
-		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0 || len(st.Clocks) > 0 {
 			learned = append(learned, name)
 		}
 	}
 	sort.Strings(learned)
-	if want := []string{"own-3", "pinned-1"}; !reflect.DeepEqual(learned, want) {
+	if want := []string{"own-3", "own-5", "pinned-1", "pinned-4"}; !reflect.DeepEqual(learned, want) {
 		t.Fatalf("the retry cycles are served the learning of %v; the round keeps %v (not the unpinned share's, nor what test-2 learned with its request unread)", learned, want)
 	}
 	for name, st := range consumed {
-		if len(st.ReqBodyNoise) == 0 {
+		if len(st.ReqBodyNoise) == 0 && len(st.Clocks) == 0 {
 			t.Fatalf("keptLearning changed what was consumed: %s lost its learning", name)
 		}
 	}

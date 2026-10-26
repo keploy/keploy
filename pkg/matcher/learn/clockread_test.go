@@ -82,6 +82,23 @@ func TestALearnedClockReadIsCheckedAtReplayInItsCallsSpan(t *testing.T) {
 	}
 }
 
+// A place two learnings met as Empty (a plain read and one plus thirty
+// minutes) is refused at replay whatever the call carries, even the value
+// the replay's own clock wrote, saying the learnings disagree, whether or
+// not keploy can tell the application's clock.
+func TestAnEmptyClockReadIsRefusedAtReplaySayingTheLearningsDisagree(t *testing.T) {
+	ms := time.Millisecond
+	e := models.ClockOffset{Res: ms}.Meet(models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + ms, Res: ms})
+	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	now := InstantLeaf("body.at.$date.$numberLong", "body.at", from.Add(5*ms), ms)
+	for _, known := range []bool{true, false} {
+		ok, why := CheckClockRead("at", e, now, Span{From: from, To: from.Add(10 * ms)}, known)
+		if ok || !strings.Contains(why, "at was learned at more than one call as clock reads no one offset holds") || !strings.Contains(why, "no one read of the application's clock explains them all") {
+			t.Errorf("known=%v: %v %q; want refused, saying the learnings disagree", known, ok, why)
+		}
+	}
+}
+
 // A value the application cuts coarser than its encoding (a millisecond
 // value written in nanoseconds) is learned with that cut as its Res, and a
 // replay refuses it whatever it is, saying so: checked at the nanosecond, it
