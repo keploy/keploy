@@ -24,6 +24,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // The tests' agent is this test process, which also claims as the test
@@ -75,6 +76,33 @@ type wireProxy struct {
 	// appClock is the app clock the agent last handed the proxy
 	// (SetAppClock), nil until it did.
 	appClock func(time.Time) (time.Time, bool)
+	// learnEnded is what the agent last said of the learn step
+	// (SetLearnEnded), learnErr fails saying it, and sessions are the
+	// sessions started (Mock).
+	learnEnded bool
+	learnErr   error
+	sessions   []models.OutgoingOptions
+}
+
+// Mock starts a mock-serving session.
+func (p *wireProxy) Mock(_ context.Context, opts models.OutgoingOptions) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessions = append(p.sessions, opts)
+	p.learnEnded = false
+	return nil
+}
+
+// SetLearnEnded takes whether the session's learn step has ended.
+func (p *wireProxy) SetLearnEnded(ended bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.learnErr != nil {
+		return p.learnErr
+	}
+	p.learnEnded = ended
+	p.order = append(p.order, fmt.Sprintf("learn ended %v", ended))
+	return nil
 }
 
 func (p *wireProxy) SetAppClock(f func(time.Time) (time.Time, bool)) {
@@ -724,6 +752,142 @@ func TestTheRecordedWindowsAreSeededBeforeThePoolStagesTheSet(t *testing.T) {
 	require.Equal(t, ws, p.seeded)
 	require.Equal(t, 0, p.seededAt, "seeded before the set was staged")
 	require.Equal(t, 1, p.staged, "the pool's serving staged the set")
+}
+
+// In record's full round (a session with the learn step), a test begun out
+// of the order the set's tests were recorded in ends the learn step for the
+// rest of the round, before its window opens, and says so once, naming the
+// test and the one begun before it. A late call of the test that ran first,
+// landing in it, would otherwise be paired with its own recording and what
+// it differs in learned as noise (the proxy's row:
+// TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses).
+// In recorded order the learn step stays on, and so it does for a test
+// whose window no test names (merged, or not recorded), in a session with
+// no learn step (keploy mock test), and with no windows (an older CLI).
+func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
+	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	recorded := []models.TestWindow{
+		{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second)},
+		{TestCase: "o::TestC", Start: t0.Add(4 * time.Second), End: t0.Add(5 * time.Second)},
+		// Two tests run at once in the recording: one window no test names.
+		{Start: t0.Add(6 * time.Second), End: t0.Add(8 * time.Second)},
+	}
+	for _, c := range []struct {
+		name    string
+		learn   bool
+		windows []models.TestWindow
+		begins  []string
+		// endsAt is the begin, by its index, that ends the learn step; -1
+		// for none. after is the test the WARN names as begun before.
+		endsAt int
+		after  string
+	}{
+		{"begun again: A, B, then A again (go test -count=2, --rerun-fails)", true, recorded, []string{"TestA", "TestB", "TestA"}, 2, "o::TestB"},
+		{"the same test twice: A, A", true, recorded, []string{"TestA", "TestA"}, 1, "o::TestA"},
+		{"shuffled: B, then A", true, recorded, []string{"TestB", "TestA", "TestC"}, 1, "o::TestB"},
+		{"recorded order: A, B, C", true, recorded, []string{"TestA", "TestB", "TestC"}, -1, ""},
+		{"a test with no window of its own does not move the order: C, D (merged or not recorded), D", true, recorded, []string{"TestC", "TestD", "TestD"}, -1, ""},
+		{"skipping a test keeps the order: A, C", true, recorded, []string{"TestA", "TestC"}, -1, ""},
+		{"keploy mock test runs no learn step: B, A", false, recorded, []string{"TestB", "TestA"}, -1, ""},
+		{"an older CLI sends no windows: B, A", true, nil, []string{"TestB", "TestA"}, -1, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, p := wireAgent(t, models.MODE_TEST)
+			core, logs := observer.New(zap.WarnLevel)
+			a.logger = zap.New(core)
+			ctx := context.Background()
+			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: c.learn}))
+			require.NoError(t, a.SetRecordedWindows(ctx, c.windows))
+			claimSelf(t, a)
+			for i, name := range c.begins {
+				p.mu.Lock()
+				p.order = nil
+				p.mu.Unlock()
+				_, serr := a.ProvenBegin(ctx, begin(name))
+				require.Nil(t, serr)
+				p.mu.Lock()
+				order, ended := p.order, p.learnEnded
+				p.mu.Unlock()
+				switch {
+				case i == c.endsAt:
+					require.True(t, ended, "begin %d (%s) ends the learn step", i, name)
+					require.Equal(t, "learn ended true", order[0], "ended before the test's window opens: %v", order)
+					require.Contains(t, order, "continue")
+				case c.endsAt < 0 || i < c.endsAt:
+					require.False(t, ended, "begin %d (%s) keeps the learn step", i, name)
+					require.NotContains(t, order, "learn ended true")
+				default:
+					require.True(t, ended, "ended for the rest of the round")
+					require.NotContains(t, order, "learn ended true", "said once")
+				}
+				_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+				require.Nil(t, serr)
+			}
+			warns := logs.FilterMessageSnippet("stopped record's full round from learning").All()
+			if c.endsAt < 0 {
+				require.Empty(t, warns)
+				return
+			}
+			require.Len(t, warns, 1, "said once")
+			fields := warns[0].ContextMap()
+			require.Equal(t, "o::"+c.begins[c.endsAt], fields["test"])
+			require.Equal(t, c.after, fields["after"])
+			require.Contains(t, fields["next_step"], "--rerun-fails")
+		})
+	}
+
+	// The next session (another set, or the next round) learns again, in
+	// its own order.
+	t.Run("a new session learns again", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
+		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+		claimSelf(t, a)
+		for _, name := range []string{"TestB", "TestA"} {
+			_, serr := a.ProvenBegin(ctx, begin(name))
+			require.Nil(t, serr)
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
+			require.Nil(t, serr)
+		}
+		require.True(t, p.learnEnded)
+		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
+		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+		require.False(t, p.learnEnded, "the session's start takes it back up (Proxy.Mock)")
+		claimSelf(t, a)
+		_, serr := a.ProvenBegin(ctx, begin("TestA"))
+		require.Nil(t, serr)
+		require.False(t, p.learnEnded, "the new session's first test is in its order")
+	})
+
+	// A proxy that cannot end the learn step refuses the begin, which opens
+	// nothing; the next begin out of order asks again.
+	t.Run("a proxy that cannot end it refuses the begin", func(t *testing.T) {
+		a, p := wireAgent(t, models.MODE_TEST)
+		ctx := context.Background()
+		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
+		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+		claimSelf(t, a)
+		_, serr := a.ProvenBegin(ctx, begin("TestB"))
+		require.Nil(t, serr)
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", Outcome: "passed"})
+		require.Nil(t, serr)
+		p.mu.Lock()
+		p.learnErr, p.order = errors.New("no mock manager"), nil
+		p.mu.Unlock()
+		_, serr = a.ProvenBegin(ctx, begin("TestA"))
+		require.NotNil(t, serr)
+		require.Equal(t, models.ScopeErrInternal, serr.Code)
+		require.Contains(t, serr.Message, "no mock manager")
+		p.mu.Lock()
+		require.NotContains(t, p.order, "continue", "nothing opened")
+		p.learnErr = nil
+		p.mu.Unlock()
+		_, serr = a.ProvenBegin(ctx, begin("TestA"))
+		require.Nil(t, serr)
+		require.True(t, p.learnEnded)
+	})
 }
 
 // A test that skipped itself is not failed for the recorded calls it then

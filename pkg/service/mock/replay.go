@@ -2018,11 +2018,12 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 // withBegan puts on each test's line when its latest run began: its latest
 // window's start, a test still open when the run ended included (the agent
 // closes it as failed, from its begin). A cut round names its last test begun
-// by it.
+// by it. windows are the run's test windows (testWindows): an app a test
+// started is not among them.
 func withBegan(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
 	began := make(map[string]time.Time, len(windows))
 	for _, w := range windows {
-		if w.Name == "" || w.App {
+		if w.Name == "" {
 			continue
 		}
 		if prev, seen := began[w.Name]; !seen || w.Start.After(prev) {
