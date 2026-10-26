@@ -567,6 +567,9 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
 		ln.Kind, ln.Echo = KindEcho, echo
 	}
+	if ln.Kind == KindNoise && rt.names == namesMoment && lt.names == namesMoment {
+		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
+	}
 	return ln
 }
 
