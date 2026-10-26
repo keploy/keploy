@@ -265,7 +265,8 @@ type exactState struct {
 	staging atomic.Bool
 	// poolCursor is the key of the pool view installed last: the cursors
 	// the calls between tests advance are under it (cursorSlotIn), and so
-	// are the background's (BackgroundCursor).
+	// are the background's (BackgroundCursor) and, in a test, the worker
+	// scope's (SequenceView.Between).
 	poolCursor atomic.Pointer[string]
 	// pairs says the session pairs (SetPairing); claimed, the recordings a
 	// pairing claimed in the current staging; ofKind, where the pairing
@@ -2265,9 +2266,17 @@ func (m *MockManager) SequenceView() (integrations.SequenceView, bool) {
 }
 
 // sequenceViewOf is the sequence view of v (SequenceView), the view in force
-// now or the one a call was read in (MarkCallRound).
+// now or the one a call was read in (MarkCallRound). In a test that shows
+// worker-scope mocks it tells them (Worker) with the cursor the calls between
+// tests advance (Between), so a worker-scope request is one sequence for the
+// set wherever its calls land: the worker scope belongs to no test.
 func (m *MockManager) sequenceViewOf(v *exactView) integrations.SequenceView {
-	return integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
+	sv := integrations.SequenceView{Cursor: viewCursor{m: m, v: v}, Test: v.test, Start: v.winStart, End: v.winEnd}
+	if v.test != "" && len(v.worker) > 0 {
+		sv.Worker = func(mk *models.Mock) bool { return mk != nil && !mk.IsProtocolPhase() && v.isWorker(mk.Name) }
+		sv.Between = backgroundCursor{m: m}
+	}
+	return sv
 }
 
 // viewCursor is one view's stateful cursor (SequenceView).

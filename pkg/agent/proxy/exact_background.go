@@ -375,7 +375,9 @@ func (m *MockManager) BackgroundCursor() (integrations.MockCursor, bool) {
 	return backgroundCursor{m: m}, true
 }
 
-// backgroundCursor is the background's stateful cursor (BackgroundCursor).
+// backgroundCursor is the background's stateful cursor (BackgroundCursor),
+// and, in a test under any rules, the worker scope's (SequenceView.Between):
+// the one the calls between tests advance.
 type backgroundCursor struct{ m *MockManager }
 
 func (c backgroundCursor) MockCursorIndex(key string, n int) int {

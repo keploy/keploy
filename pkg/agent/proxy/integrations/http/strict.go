@@ -368,12 +368,45 @@ func bandPick(group []*models.Mock, cs integrations.MockCursor, bg bool, mockDb 
 // background's cursor (cs) over every one of them, its sequence one wherever
 // its calls land and whichever test is open. So once the background's last
 // recording can answer no more (a worker scope's answers once in the
-// staging) the call is a miss, never an earlier recording again.
+// staging) the call is a miss, never an earlier recording again. In a test,
+// a band of the set's worker scope (sv.Worker: every recording of it) is
+// walked the same way: on the cursor the calls between tests advance
+// (sv.Between) over every reached recording of it the store stages, by
+// placement, with no window. A worker-scope recording belongs to no test:
+// record files one in the worker scope when no test's window was open as it
+// was recorded, at its place in the gap it was made in, and an idle answer
+// wherever it was recorded; so its call is answered the same whether it lands
+// in a test or in the gap beside it, and the set's end finds none it reached
+// unanswered for want of a window. A test's own recordings are never walked
+// here (a test view serves them ConsumeReuse, each once), so under today's
+// rules a band in a test is the worker scope's; one that holds any other
+// recording keeps the test's window. Each worker-scope recording is spent as
+// it answers, so today the cursor's served marks only restate the spends:
+// what the band changes is the window.
 func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv integrations.SequenceView, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
-	if bg {
+	switch {
+	case bg:
 		sv = integrations.SequenceView{Cursor: cs}
+	case sv.Worker != nil && allOf(group, sv.Worker):
+		worker := sv.Worker
+		sv = integrations.SequenceView{Cursor: sv.Between}
+		if member != nil {
+			of := member
+			member = func(m *models.Mock) bool { return worker(m) && of(m) }
+		}
 	}
 	return servedWalk(group, stagedGroup(mockDb, group, member), sv)
+}
+
+// allOf reports whether is holds for every recording of group, and group has
+// one.
+func allOf(group []*models.Mock, is func(*models.Mock) bool) bool {
+	for _, m := range group {
+		if !is(m) {
+			return false
+		}
+	}
+	return len(group) > 0
 }
 
 // statefulBand is, of group (the stateful recordings that are a call, first

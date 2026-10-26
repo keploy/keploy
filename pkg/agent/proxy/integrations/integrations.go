@@ -334,6 +334,19 @@ type SequenceView struct {
 	// the replay sent no window of (a kind whose test case has no request
 	// time).
 	Start, End time.Time
+	// Worker reports, in a test, whether a data-plane recording is one of
+	// the set's worker-scope mocks the view shows (models.Mapping.Worker):
+	// nil between tests, and in a view that shows none. A worker-scope
+	// recording belongs to no test (record files one there when no test's
+	// window was open, at its place in the gap it was made in, and an idle
+	// answer wherever it was recorded), so its request's sequence is walked
+	// on Between over every reached recording of it, by placement, with no
+	// window: one sequence for the set wherever its calls land.
+	Worker func(*models.Mock) bool
+	// Between is, with Worker, the stateful cursor the calls between tests
+	// advance (the last pool view's), which a worker-scope call in a test
+	// reads and advances too.
+	Between MockCursor
 }
 
 // Span returns the recordings, of n of one reusable request in record order
