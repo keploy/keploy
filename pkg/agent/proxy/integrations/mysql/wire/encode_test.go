@@ -370,10 +370,13 @@ func heapInUse() uint64 {
 // directory (a keploy folder), and every MySQL mock in a .yaml file under it
 // is read. Each recorded answer is served twice through the cache and must
 // give, both times, the bytes main's path encodes for it. The row then says
-// what the cache keeps: the payload bytes cached per served result set, and
-// how much the heap held by the mocks grew once every answer was served. The
-// replay-latency lane runs it on its 100, 1k and 10k recordings; with no
-// corpus named it is skipped.
+// what the cache keeps: the payload bytes cached per served result set, what
+// the corpus's answers cost the cache's budget (whether a replay of it keeps
+// every answer encoded), the bytes the budget counts once every answer and
+// its copy were served (at most the budget), and how much the heap held by
+// the mocks grew by then. The replay-latency
+// lane runs it on its 100, 1k and 10k recordings; with no corpus named it is
+// skipped.
 func TestEncodeToBinaryOverARecordedCorpus(t *testing.T) {
 	dir := os.Getenv("KEPLOY_MYSQL_WIRE_CORPUS")
 	if dir == "" {
@@ -407,6 +410,7 @@ func TestEncodeToBinaryOverARecordedCorpus(t *testing.T) {
 	answers := decodeAnswers(t, paths...)
 	heap1 := heapInUse()
 	sets, erred, payload, largest := 0, 0, 0, 0
+	var cost int64
 	for i := range answers {
 		a := &answers[i]
 		old := mysql.PacketBundle{Header: a.Header, Message: uncached(a.Message)}
@@ -427,18 +431,24 @@ func TestEncodeToBinaryOverARecordedCorpus(t *testing.T) {
 			sets++
 			n := len(c.Load())
 			payload += n
+			cost += int64(cap(c.Load())) + mysql.WireEntryCost
 			largest = max(largest, n)
 		}
 	}
 	heap2 := heapInUse()
+	held, budget := mysql.WireCacheUsage()
 	runtime.KeepAlive(answers)
 	if sets == 0 {
 		t.Fatalf("%s holds no recorded result set: the row tested nothing", dir)
 	}
+	if held > budget {
+		t.Fatalf("the encode cache counts %d bytes, past its %d budget", held, budget)
+	}
 	t.Logf("corpus %s: %d mock files (%d bytes; %d other .yaml files skipped), %d answers, %d result sets, %d erred on both paths; "+
-		"cached payload %d bytes, %d per served result set, largest %d; "+
+		"payload %d bytes, %d per served result set, largest %d; cached alone they cost %d bytes of the %d budget (fit: %v), "+
+		"and with main's copies served beside them the budget counts %d at the end; "+
 		"heap held by the decoded answers %d bytes, by them once all were served %d bytes (+%d)",
 		dir, len(paths), onDisk, skipped, len(answers), sets, erred,
-		payload, payload/sets, largest,
+		payload, payload/sets, largest, cost, budget, cost <= budget, held,
 		int64(heap1)-int64(heap0), int64(heap2)-int64(heap0), int64(heap2)-int64(heap1))
 }
