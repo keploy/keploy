@@ -416,6 +416,74 @@ func TestWithNoRecordedWindowsTheTeardownIsAfterEveryRecordingATestOwns(t *testi
 	perTestReads(t, pooled, "after a test, no recording a test owns")
 }
 
+// keploy mock replay's teardown bound is read once per revision of the
+// trees: the per-test reads of one burst (GetFilteredMocks, its by-kind
+// read, ...) reuse it while the revision and the scope table stand, not
+// every staged recording at every read. An exact serve bumps the revision,
+// so the next burst reads it afresh, to the same bound (exact serving hides
+// what it serves rather than deleting it). A new staging (a recording a test
+// owns, made later) moves it, so the pool's recording made before that one
+// is no teardown any more; a new scope table moves it too.
+func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	mm.SetPoolNames([]string{"end-sessions"})
+	after := mm.teardownAfter()
+	b := mm.exact.teardownLast.Load()
+	if after == nil || b == nil || !after(end.Spec.ReqTimestampMock) || after(owned.Spec.ReqTimestampMock) {
+		t.Fatalf("precondition: end-sessions is not the teardown alone (bound %+v)", b)
+	}
+	if mm.teardownAfter(); mm.exact.teardownLast.Load() != b {
+		t.Errorf("a second read in one revision read the trees again")
+	}
+	// Three bursts of three reads, an exact serve after the second: two scans
+	// of the trees, where every read scanned them (nine).
+	slice := []string{"end-sessions"}
+	mm.ServeExactPool("k", slice)
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatalf("precondition: owned did not answer its test")
+	}
+	mm.ServeExactPool("k", slice)
+	scans, last := 0, mm.exact.teardownLast.Load()
+	burst := func() {
+		for _, read := range []func(){
+			func() { _, _ = mm.GetFilteredMocks() },
+			func() { _, _ = mm.GetFilteredMocksByKind(models.Mongo) },
+			func() { mm.teardownAfter() },
+		} {
+			read()
+			if c := mm.exact.teardownLast.Load(); c != last {
+				scans, last = scans+1, c
+			}
+		}
+	}
+	burst()
+	burst()
+	rev := mm.Revision()
+	if !mm.DeleteFilteredMock(*end) {
+		t.Fatalf("precondition: end-sessions, the teardown, did not answer from the pool")
+	}
+	if mm.Revision() == rev {
+		t.Fatalf("precondition: an exact serve did not move the revision")
+	}
+	burst()
+	if scans != 2 || last == nil || last.last != b.last {
+		t.Errorf("three bursts, an exact serve between: %d scans (bound %+v), want 2 to the same bound %s", scans, last, b.last)
+	}
+	mm.ServeExactPool("k", nil)
+	late := exactMongo("owned-late", 4*time.Second, models.LifetimePerTest)
+	mm.SetMocksWithWindow([]*models.Mock{owned, end, late}, nil, models.BaseTime, time.Now())
+	if after := mm.teardownAfter(); after == nil || after(end.Spec.ReqTimestampMock) || !after(late.Spec.ResTimestampMock.Add(time.Millisecond)) {
+		t.Errorf("FALSE GREEN? a new staging, a test's recording made after end-sessions: end-sessions still the teardown (a stale bound)")
+	}
+	mm.SetPoolNames([]string{"end-sessions", "owned-late"})
+	if after := mm.teardownAfter(); after == nil || !after(end.Spec.ReqTimestampMock) {
+		t.Errorf("a new scope table naming owned-late the pool's: end-sessions is not the teardown (a stale bound)")
+	}
+}
+
 // The reached worker scope is shown whether a test is open or not, so after
 // a test a per-test read shows its per-test recordings of the set's teardown,
 // as it shows the pool slice's, and never one made before the set's last test
