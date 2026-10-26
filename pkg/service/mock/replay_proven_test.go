@@ -388,7 +388,31 @@ func TestAMappingNamingAnAbsentMockIsRefusedUnderTheSwitch(t *testing.T) {
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	err := New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
-	require.ErrorContains(t, err, "its mappings name mocks the recording does not have: mock-9")
+	require.ErrorContains(t, err, "keploy/set/mappings.yaml names mocks keploy/set/mocks.yaml does not have: mock-9 (under test o::TestA)")
+	require.ErrorContains(t, err, "If you edited mappings.yaml, correct those names; otherwise record the set again with keploy mock record")
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "the test command ran unjudged")
+}
+
+// Under the switch every section of a mapping that names mocks is checked:
+// a name under startup:, worker:, shared: or runner: that the recording
+// does not have refuses too, each said where it is. Before, only a test's
+// list and startup: were checked, so a mistyped worker: entry was ignored
+// without a word.
+func TestAMappingNamingAnAbsentMockAnywhereIsRefusedSayingWhere(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\nstartup:\n    - name: mock-7\nworker:\n    - name: mock-1\n    - name: mock-8\nshared:\n    - name: mock-9\nrunner:\n    - name: mock-10\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, named("mock-0", "mock-1"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.ErrorContains(t, err, "names mocks keploy/set/mocks.yaml does not have: mock-10 (under runner:), mock-7 (under startup:), mock-8 (under worker:), mock-9 (under shared:)")
 	runs, _ := instr.counts()
 	require.Zero(t, runs, "the test command ran unjudged")
 }

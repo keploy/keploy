@@ -1148,8 +1148,8 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 		table[testName] = names
 	}
 	pool, unknown := poolSlices(mp, table, loaded, decoded)
-	if len(unknown) > 0 {
-		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
+	if unknown = append(unknown, unknownBesideTests(mp, decoded, unknown)...); len(unknown) > 0 {
+		return m.refuseUnknownMocks(name, mp, unknown)
 	}
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
@@ -1162,6 +1162,60 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
 	return nil
+}
+
+// unknownBesideTests is, sorted, each name mappings' worker:, shared: and
+// runner: give that no decoded mock has and that seen does not list: a name
+// none of them serves (they are the pool's whatever they say), but a hand edit
+// that names a mock the recording does not have, which is refused like one in
+// a test's list or startup: (poolSlices) rather than ignored.
+func unknownBesideTests(mp *models.Mapping, decoded []*models.Mock, seen []string) []string {
+	if mp == nil {
+		return nil
+	}
+	have := make(map[string]bool, len(decoded)+len(seen))
+	for _, mk := range decoded {
+		if mk != nil && mk.Name != "" {
+			have[mk.Name] = true
+		}
+	}
+	for _, n := range seen {
+		have[n] = true
+	}
+	var out []string
+	for _, entries := range [][]models.MockEntry{mp.Worker, mp.Shared, mp.Runner} {
+		for _, e := range entries {
+			if e.Name != "" && !have[e.Name] {
+				have[e.Name] = true
+				out = append(out, e.Name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// refuseUnknownMocks is the refusal of a set whose mappings.yaml names mocks
+// (unknown) its recording does not have: each with where the file names it
+// (models.Mapping.MockPlaces), and what to do, for a hand edit and for a
+// recording that lost them alike.
+func (m *mockService) refuseUnknownMocks(name string, mp *models.Mapping, unknown []string) error {
+	places := mp.MockPlaces()
+	sort.Strings(unknown)
+	named := make([]string, 0, len(unknown))
+	for _, n := range unknown {
+		if where := places[n]; len(where) > 0 {
+			n += " (under " + strings.Join(where, ", ") + ")"
+		}
+		named = append(named, n)
+	}
+	dir := filepath.Base(m.config.Path)
+	mocks := "mocks.yaml"
+	if f := MocksFile(m.config.Path, name); f != "" {
+		mocks = filepath.Base(f)
+	}
+	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s/%s/mappings.yaml names mocks %s/%s/%s does not have: %s. If you edited mappings.yaml, correct those names; otherwise record the set again with keploy mock record",
+		name, dir, name, dir, name, mocks, strings.Join(named, ", "))
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
