@@ -345,7 +345,18 @@ func uuidTimeEnd(s string) int {
 // blankSpans is s with each instant it holds that blank says to blank
 // replaced by spaces.
 func blankSpans(s string, blank func(instant) bool) string {
-	spans := instantSpans(s)
+	return blankSpansIn(s, instantSpans(s), blank)
+}
+
+// blankSpans is blankSpans(s, blank) with s's instants read once for the set
+// (spansOf).
+func (dc *DriftCache) blankSpans(s string, blank func(instant) bool) string {
+	return blankSpansIn(s, dc.spansOf(s), blank)
+}
+
+// blankSpansIn is s with each of spans, the instants s holds, that blank says
+// to blank replaced by spaces.
+func blankSpansIn(s string, spans []instant, blank func(instant) bool) string {
 	if len(spans) == 0 {
 		return s
 	}
@@ -1062,26 +1073,13 @@ func timeOfDay(at int64) int64 {
 	return (at%day + day) % day
 }
 
-// spansOf is instantSpans(text), read once per test (a nil cache reads it
-// now).
+// spansOf is instantSpans(text), read once for the set (textCache.spansOf; a
+// nil cache reads it now).
 func (dc *DriftCache) spansOf(text string) []instant {
 	if dc == nil {
 		return instantSpans(text)
 	}
-	dc.mu.Lock()
-	s, ok := dc.spans[text]
-	dc.mu.Unlock()
-	if ok {
-		return s
-	}
-	s = instantSpans(text)
-	dc.mu.Lock()
-	if dc.spans == nil {
-		dc.spans = map[string][]instant{}
-	}
-	dc.spans[text] = s
-	dc.mu.Unlock()
-	return s
+	return dc.texts.spansOf(text)
 }
 
 // tokensOfForms are the words of forms, by reading.
@@ -1440,23 +1438,11 @@ func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
 	if len(keys) == 0 && len(x.stamps) == 0 {
 		return [2]string{x.text, dc.rawExtra(x.text)}
 	}
-	k := rawKey(x)
-	dc.mu.Lock()
-	s, ok := dc.blanked[k]
-	dc.mu.Unlock()
-	if ok {
-		return s
-	}
-	text := blankStamps(x.text, x.stamps)
-	blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
-	s = [2]string{blankSpans(text, blank), blankSpans(dc.rawExtra(text), blank)}
-	dc.mu.Lock()
-	if dc.blanked == nil {
-		dc.blanked = map[string][2]string{}
-	}
-	dc.blanked[k] = s
-	dc.mu.Unlock()
-	return s
+	return dc.texts.blankedOf(rawKey(x), func() [2]string {
+		text := blankStamps(x.text, x.stamps)
+		blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
+		return [2]string{dc.blankSpans(text, blank), dc.blankSpans(dc.rawExtra(text), blank)}
+	})
 }
 
 // searchedTokens are the words of x's text in every declared form, by
@@ -1470,23 +1456,11 @@ func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
 	if len(keys) == 0 && len(x.stamps) == 0 {
 		return dc.rawTokens(x.text)
 	}
-	k := rawKey(x)
-	dc.mu.Lock()
-	t, ok := dc.blankTok[k]
-	dc.mu.Unlock()
-	if ok {
-		return t
-	}
-	forms := textForms(blankStamps(x.text, x.stamps))
-	for i := range forms {
-		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
-	}
-	t = tokensOfForms(forms)
-	dc.mu.Lock()
-	if dc.blankTok == nil {
-		dc.blankTok = map[string][]map[string]bool{}
-	}
-	dc.blankTok[k] = t
-	dc.mu.Unlock()
-	return t
+	return dc.texts.blankTokOf(rawKey(x), func() []map[string]bool {
+		forms := textForms(blankStamps(x.text, x.stamps))
+		for i := range forms {
+			forms[i] = dc.blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
+		}
+		return tokensOfForms(forms)
+	})
 }

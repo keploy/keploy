@@ -1580,12 +1580,6 @@ type DriftCache struct {
 	// mock: apart from mockText, which RawOf fills with a parked mock's
 	// text without its answer.
 	readText map[*models.Mock]Raw
-	// spans are, by text, the instants it holds (instantSpans); blanked and
-	// blankTok, by payload (rawKey), its texts and words with its answer's
-	// clock reads blanked (searched, searchedTokens).
-	spans    map[string][]instant
-	blanked  map[string][2]string
-	blankTok map[string][]map[string]bool
 }
 
 // ClientTests reports whether dc is of one of keploy mock's client tests
@@ -1641,7 +1635,7 @@ func NewDriftCache() *DriftCache { return newDriftCacheOn(newTextCache()) }
 // newDriftCacheOn is an empty cache that reads payload texts through texts,
 // which the caches of one set's tests share (Tracker.newDrifts).
 func newDriftCacheOn(texts *textCache) *DriftCache {
-	return &DriftCache{m: map[driftKey]*valueDrift{}, texts: texts, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, spans: map[string][]instant{}}
+	return &DriftCache{m: map[driftKey]*valueDrift{}, texts: texts, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}}
 }
 
 // textCache keeps what each payload's text reads as: its other declared
@@ -1654,10 +1648,82 @@ type textCache struct {
 	mu     sync.Mutex
 	extra  map[string]string
 	tokens map[string][]map[string]bool
+	// spans are, by text, the instants it holds (instantSpans); blanked and
+	// blankTok, by payload (rawKey: its text, its answer's clock reads and
+	// its stamps), its texts and words with its answer's clock reads blanked
+	// (searched, searchedTokens). Each depends on its key alone, so the set
+	// reads it once: read for each test instead, every test's first learned
+	// call read every recording before it again, longer the later it came.
+	spans    map[string][]instant
+	blanked  map[string][2]string
+	blankTok map[string][]map[string]bool
 }
 
 func newTextCache() *textCache {
-	return &textCache{extra: map[string]string{}, tokens: map[string][]map[string]bool{}}
+	return &textCache{
+		extra:    map[string]string{},
+		tokens:   map[string][]map[string]bool{},
+		spans:    map[string][]instant{},
+		blanked:  map[string][2]string{},
+		blankTok: map[string][]map[string]bool{},
+	}
+}
+
+// spansOf is instantSpans(text), read once for the set (a nil cache reads it
+// now and keeps nothing).
+func (c *textCache) spansOf(text string) []instant {
+	if c == nil {
+		return instantSpans(text)
+	}
+	c.mu.Lock()
+	s, ok := c.spans[text]
+	c.mu.Unlock()
+	if ok {
+		return s
+	}
+	s = instantSpans(text)
+	c.mu.Lock()
+	c.spans[text] = s
+	c.mu.Unlock()
+	return s
+}
+
+// blankedOf is what read gives for the payload keyed key (rawKey), read once
+// for the set (searched).
+func (c *textCache) blankedOf(key string, read func() [2]string) [2]string {
+	if c == nil {
+		return read()
+	}
+	c.mu.Lock()
+	s, ok := c.blanked[key]
+	c.mu.Unlock()
+	if ok {
+		return s
+	}
+	s = read()
+	c.mu.Lock()
+	c.blanked[key] = s
+	c.mu.Unlock()
+	return s
+}
+
+// blankTokOf is what read gives for the payload keyed key (rawKey), read once
+// for the set (searchedTokens).
+func (c *textCache) blankTokOf(key string, read func() []map[string]bool) []map[string]bool {
+	if c == nil {
+		return read()
+	}
+	c.mu.Lock()
+	t, ok := c.blankTok[key]
+	c.mu.Unlock()
+	if ok {
+		return t
+	}
+	t = read()
+	c.mu.Lock()
+	c.blankTok[key] = t
+	c.mu.Unlock()
+	return t
 }
 
 // extraOf is the text's other forms (textForms), one per line, read once.
