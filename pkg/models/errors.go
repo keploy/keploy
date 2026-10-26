@@ -294,6 +294,10 @@ type MockMismatchReport struct {
 	// Reason is why the call missed, when the learn step decided it
 	// (UnmatchedCall.Reason): only in record's full round.
 	Reason string
+	// Cause, with Reason request_changed, is MissCauseNotFollowed when the
+	// learn step refused what changed because keploy cannot follow the value
+	// yet; "" otherwise (UnmatchedCall.Cause).
+	Cause string
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
 	// the tests the call's recordings were made beside.
 	Concurrent *ConcurrentNote

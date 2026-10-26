@@ -4549,3 +4549,32 @@ func TestLearnMatchAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testin
 		}
 	}
 }
+
+// A learn refusal says, as its cause, when what changed is a value keploy
+// cannot follow yet (from an earlier answer, from a call of another
+// protocol or the inside of a payload, from the test case's own request),
+// which is keploy's limit, not a change the app made; an unexplained change
+// has no cause. Judging classes the first as keploy's, never flaky.
+func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := &models.Mock{Name: "mock-2"}
+	rec := learn.Leaf{Path: "body.id"}
+	for _, c := range []struct {
+		name  string
+		l     learn.Learned
+		cause string
+	}{
+		{"from an answer", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", Side: learn.Response, Path: "body.id", Whole: true}}, learn.CauseNotFollowed},
+		{"from another protocol or a payload", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1"}}, learn.CauseNotFollowed},
+		{"from the test case's request", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "case", Given: true}}, learn.CauseNotFollowed},
+		{"unexplained", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "no earlier call holds it"}, ""},
+	} {
+		_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{c.l}, nil, nil)
+		if why == "" {
+			t.Fatalf("%s: not refused", c.name)
+		}
+		if cause != c.cause {
+			t.Errorf("%s: cause %q, want %q (why: %s)", c.name, cause, c.cause, why)
+		}
+	}
+}
