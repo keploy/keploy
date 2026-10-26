@@ -30,7 +30,8 @@ func TestReportAnswerTravelsAsErrAnswered(t *testing.T) {
 	r := &MockMismatchReport{Protocol: "MongoDB", ActualSummary: "insert keploy.events", Answer: AnswerByKind,
 		WriteKind: "Mongo insert keploy.events", Reused: true, Differs: []string{"body._id"},
 		FieldDiffs: []MockFieldDiff{{Path: "body._id"}}, VariablePlaces: []string{"url.path[1]"},
-		Source: &Origin{Comm: "sqs", Exe: "./sqs"}}
+		FieldReasons: []FieldReason{{Field: "body.since", Why: "body.since was learned as a read of the application's clock"}},
+		Source:       &Origin{Comm: "sqs", Exe: "./sqs"}}
 	if ReportAnswer(context.Background(), r) {
 		t.Fatal("ReportAnswer says a reporter took the answer with none installed")
 	}
@@ -52,8 +53,9 @@ func TestReportAnswerTravelsAsErrAnswered(t *testing.T) {
 	}
 	// The parser reuses its report.
 	r.Differs[0], r.FieldDiffs[0].Path, r.VariablePlaces[0], r.Source.Comm = "body.other", "body.other", "url.path[2]", "other"
-	if sent.Differs[0] != "body._id" || sent.FieldDiffs[0].Path != "body._id" || sent.VariablePlaces[0] != "url.path[1]" || sent.Source.Comm != "sqs" {
-		t.Fatalf("the reported answer changed with the parser's report: %+v, %+v, %+v, %+v", sent.Differs, sent.FieldDiffs, sent.VariablePlaces, sent.Source)
+	r.FieldReasons[0].Field = "body.other"
+	if sent.Differs[0] != "body._id" || sent.FieldDiffs[0].Path != "body._id" || sent.VariablePlaces[0] != "url.path[1]" || sent.Source.Comm != "sqs" || sent.FieldReasons[0].Field != "body.since" {
+		t.Fatalf("the reported answer changed with the parser's report: %+v, %+v, %+v, %+v, %+v", sent.Differs, sent.FieldDiffs, sent.VariablePlaces, sent.Source, sent.FieldReasons)
 	}
 	if errors.Is(got[0], ErrNoMockMatched) {
 		t.Fatal("an answer travels as a miss")

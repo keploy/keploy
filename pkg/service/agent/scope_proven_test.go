@@ -1432,6 +1432,51 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 	require.Contains(t, none, "GET /x had no recorded answer.")
 }
 
+// A miss's reason says why a replay refused a field for a reason of its own
+// (models.UnmatchedCall.FieldReasons: a learned read of the application's
+// clock the call does not carry), the field and why, after the fields that
+// differ, wherever the miss was made; never a value: the evidence keeps only
+// a reason whose field is its own shape (an object key the app sent may be
+// a value its why quotes), once.
+func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
+	since := "body.since was learned as a read of the application's clock, and the value this call carries is not a read of the application's clock made in this call's window: it changed"
+	ttl := "body.expires was learned as clock + 30m, a read of the application's clock plus that offset, and the value this call carries is not a read of the application's clock plus that offset made in this call's window: it changed"
+	miss := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/usage", Destination: "api.internal",
+		Differs:      []string{"body.since", "body.users.kqzx9w.since"},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "body.users.kqzx9w.since was learned as a read of the application's clock"}, {Field: "body.since", Why: since}}})
+	require.Equal(t, []models.FieldReason{{Field: "body.since", Why: since}}, miss.FieldReasons)
+	began := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name    string
+		kind    string
+		at      time.Time
+		beganAt time.Time
+		where   string
+	}{
+		{"in the test", models.MissInTest, began.Add(time.Second), began, " had no recorded answer"},
+		{"before it began", models.MissInTest, began.Add(-time.Second), began, ", made before this one began, had no recorded answer"},
+		{"as it ended", models.MissOutsideTest, began.Add(time.Second), began, ", made as this test ended, had no recorded answer"},
+		{"outside every test", models.MissOutsideTest, time.Time{}, time.Time{}, ", made outside every test before this one began, had no recorded answer"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := miss
+			m.Kind, m.At = c.kind, c.at
+			reason := evidenceReason("usage::TestUsage", &models.ScopeEvidence{Misses: []models.UnmatchedCall{m}}, nil, c.beganAt)
+			require.Contains(t, reason, "GET /v1/usage to api.internal"+c.where+" (body.since and body.users.{}.since differ: "+since+")")
+			require.NotContains(t, reason, "kqzx9w")
+		})
+	}
+	// Not sanitized first, the reason still drops a why its field may quote
+	// a value in; with no field named as differing it gives the why alone,
+	// and two are joined.
+	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x",
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}, {Field: "body.expires", Why: ttl}}}}}, nil, time.Time{})
+	require.Contains(t, two, "GET /x had no recorded answer ("+since+"; "+ttl+")")
+	require.NotContains(t, two, "kqzx9w")
+	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"body.q"}}}}, nil, time.Time{})
+	require.Contains(t, plain, "GET /x had no recorded answer (body.q differs).")
+}
+
 // endOrderProxy notes when the test stops being served and when its outcome
 // is read.
 type endOrderProxy struct {

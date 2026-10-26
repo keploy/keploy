@@ -47,6 +47,33 @@ func TestRenderUnmatchedCalls_StructuredOutput(t *testing.T) {
 	}
 }
 
+// A field the replay refused for a reason of its own (a learned read of the
+// application's clock the call does not carry) is rendered with its why, as
+// the miss report carries it (models.UnmatchedCall.FieldReasons), between
+// the field differences and the next steps; a miss with none renders no such
+// line.
+func TestRenderUnmatchedCalls_SaysWhyAFieldWasRefused(t *testing.T) {
+	why := "body.since was learned as a read of the application's clock, and the value this call carries is not a read of the application's clock made in this call's window: it changed"
+	miss := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /v1/usage", ClosestMock: "mock-3", MatchPhase: models.MatchPhaseStrict,
+		NextSteps:    "re-record",
+		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since", Kind: models.DiffKindValueChanged, Expected: "a", Actual: "b"}},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: why}}}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	out := sb.String()
+	line := "    refused body.since: " + why + "\n"
+	at := strings.Index(out, line)
+	if at < 0 || at < strings.Index(out, "body.since: recorded") || at > strings.Index(out, "next steps: re-record") {
+		t.Fatalf("the refusal's why is not rendered between the field differences and the next steps:\n%s", out)
+	}
+	miss.FieldReasons = nil
+	sb.Reset()
+	renderUnmatchedCalls(&sb, models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{miss}}})
+	if strings.Contains(sb.String(), "refused") {
+		t.Fatalf("a miss with no refused field renders one:\n%s", sb.String())
+	}
+}
+
 func TestRenderUnmatchedCalls_EmptyIsSilent(t *testing.T) {
 	var sb strings.Builder
 	renderUnmatchedCalls(&sb, models.TestResult{})

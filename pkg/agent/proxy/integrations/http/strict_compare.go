@@ -227,8 +227,10 @@ func (k strictKnown) clockDiffs(ctx context.Context, input *req) []strictField {
 		if k.userNoiseAt(p, live.Value) {
 			continue
 		}
-		if ok, why := learn.CheckClockRead(p, k.clocks[p], live, span, known); !ok {
-			f := clockField(p)
+		// The reason names the field as a failed test's reason does (its
+		// shape), never a value an object key of it may be.
+		f := clockField(p)
+		if ok, why := learn.CheckClockRead(f.shape, k.clocks[p], live, span, known); !ok {
 			f.why = why
 			out = append(out, f)
 		}
