@@ -317,24 +317,23 @@ func scoredNothing(status models.TestSetStatus, loaded, success, failure, ignore
 }
 
 // rewindConsumedForRetryCycle folds the finished cycle's consumption into the
-// across-cycles record and returns the map the next cycle starts from: the
-// baseline, so per-test single-use mocks are servable again.
+// across-cycles record and returns the history the next cycle starts from: the
+// baseline, so per-test single-use mocks are servable again. It is a new
+// history, never the old one written back: an agent that keeps the old one
+// (models.ConsumedSync) is sent the new one whole, as entries are only ever
+// added to a history it holds.
 //
 // It also marks the AGENT's own consumption history stale. That rewind reaches
 // the CLI's map only; under KEPLOY_AGENT_OWNS_CONSUMED the agent filters from
 // its own history and nothing rewinds that one, so the retry would filter
 // against the previous cycle and fail with match_phase=no_mocks — precisely the
 // failure the rewind exists to prevent (#4622).
-func (r *Replayer) rewindConsumedForRetryCycle(total, baseline, allAcrossCycles map[string]models.MockState) map[string]models.MockState {
-	for k, v := range total {
+func (r *Replayer) rewindConsumedForRetryCycle(total *models.ConsumedHistory, baseline, allAcrossCycles map[string]models.MockState) *models.ConsumedHistory {
+	for k, v := range total.Map() {
 		allAcrossCycles[k] = v
 	}
-	rewound := make(map[string]models.MockState, len(baseline))
-	for k, v := range baseline {
-		rewound[k] = v
-	}
 	r.agentHistoryStaleForSet.Store(true)
-	return rewound
+	return models.ConsumedHistoryOf(baseline)
 }
 
 // agentConsumedHistoryUnusable reports whether the agent's own consumption
@@ -2027,7 +2026,10 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var failure int
 	var obsolete int
 	var ignored int
-	var totalConsumedMocks = map[string]models.MockState{}
+	// totalConsumedMocks is every mock the set's tests consumed, by name. The
+	// agent client sends an agent that keeps it (models.ConsumedSync) only
+	// what was written since its last call, so it is written only through Set.
+	totalConsumedMocks := models.NewConsumedHistory(0)
 	// consumers are the tests that consumed each mock, by name: whose an
 	// unconsumed test mock went to, when a sibling's (markConsumedBy).
 	consumers := map[string][]string{}
@@ -2039,8 +2041,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	replayStarts := map[string]time.Time{}
 	var passingTotalConsumedMocks = map[string]models.MockState{}
 	// perTestRegion names the per-test mocks this set hands the agent, the
-	// only ones an agent that says so reads consumed entries for (see
-	// consumedForAgent). nil until StoreMocks: then everything is sent.
+	// only ones an agent that says so reads consumed entries for
+	// (models.MockFilterParams.ConsumedRegion). nil until StoreMocks: then
+	// everything is sent.
 	var perTestRegion map[string]struct{}
 
 	testSetStatus := models.TestSetStatusPassed
@@ -2481,7 +2484,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2643,7 +2646,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 
 		// Send initial filtering parameters to set up mocks for test set
-		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
+		err = r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, perTestRegion, useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil)
 		if err != nil {
 			return models.TestSetStatusFailed, err
 		}
@@ -2927,7 +2930,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// counted: the drain is the only read of it.
 	startupConsumed, rearmedConsumed = r.exact.takeWorker(startupConsumed, rearmedConsumed)
 	for _, m := range startupConsumed {
-		totalConsumedMocks[m.Name] = m
+		totalConsumedMocks.Set(m)
 		passingTotalConsumedMocks[m.Name] = m
 	}
 	for _, m := range rearmedConsumed {
@@ -2977,8 +2980,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// fires. Each mock-consistency retry cycle re-runs the passing tests
 	// as a fresh forward pass, so its serving pool must START from this
 	// baseline — see the rewind at the top of the replay loop below.
-	baselineConsumedMocks := make(map[string]models.MockState, len(totalConsumedMocks))
-	for k, v := range totalConsumedMocks {
+	baselineConsumedMocks := make(map[string]models.MockState, totalConsumedMocks.Len())
+	for k, v := range totalConsumedMocks.Map() {
 		baselineConsumedMocks[k] = v
 	}
 	// Persistent union of every MockState consumed across ALL retry cycles.
@@ -2991,8 +2994,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// test failed on). Fold consumed mocks in here as cycles complete; last
 	// write wins, matching the pre-rewind behavior where a re-consumed mock's
 	// final-cycle MockState overwrote earlier ones.
-	allConsumedAcrossCycles := make(map[string]models.MockState, len(totalConsumedMocks))
-	for k, v := range totalConsumedMocks {
+	allConsumedAcrossCycles := make(map[string]models.MockState, totalConsumedMocks.Len())
+	for k, v := range totalConsumedMocks.Map() {
 		allConsumedAcrossCycles[k] = v
 	}
 	// Test-set-scoped dependency-assertion bookkeeping.
@@ -3159,7 +3162,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		if err != nil {
 			for _, m := range answeredInGap {
-				totalConsumedMocks[m.Name] = m
+				totalConsumedMocks.Set(m)
 			}
 			consumptionUnread = appendOnce(consumptionUnread, name)
 			r.exact.noteShares(name, nil, err)
@@ -3167,7 +3170,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		}
 		early = append(answeredInGap, early...)
 		for _, m := range early {
-			totalConsumedMocks[m.Name] = m
+			totalConsumedMocks.Set(m)
 		}
 		noteConsumers(consumers, name, early)
 		noteLearnedAfterEnd(learnedLate, name, early)
@@ -3214,7 +3217,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 						zap.String("next_step", "run keploy record again"))
 				}
 				for _, m := range gap {
-					totalConsumedMocks[m.Name] = m
+					totalConsumedMocks.Set(m)
 				}
 			}
 			totalConsumedMocks = r.rewindConsumedForRetryCycle(totalConsumedMocks, baselineConsumedMocks, allConsumedAcrossCycles)
@@ -3426,7 +3429,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, testCase.Name, opening)
 			} else {
-				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, &opening)
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, expectedNames, reqTime, respTime, totalConsumedMocks, perTestRegion, useMappingBased, recordedSetShape{}, &opening)
 			}
 			if err != nil {
 				if resolvedStatus, ok := resolveTestSetStatus(cmdType, testSetStatus, getErrStatus(), err); ok {
@@ -3485,7 +3488,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					resp, loopErr = retryResp, nil
 				} else {
 					for _, m := range drainedConsumed {
-						totalConsumedMocks[m.Name] = m
+						totalConsumedMocks.Set(m)
 					}
 				}
 			}
@@ -3607,7 +3610,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 				// no-op and stale data can't leak into the next iteration's
 				// filter params (SendMockFilterParamsToAgent).
 				for _, m := range consumedMocks {
-					totalConsumedMocks[m.Name] = m
+					totalConsumedMocks.Set(m)
 				}
 				noteConsumers(consumers, testCase.Name, consumedMocks)
 				noteLearnedAfterEnd(learnedLate, testCase.Name, consumedMocks)
@@ -4472,13 +4475,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					zap.String("next_step", "run keploy record again"))
 			}
 			for _, m := range gap {
-				totalConsumedMocks[m.Name] = m
+				totalConsumedMocks.Set(m)
 			}
-			firstCycleLearned = make(map[string]models.MockState, len(allConsumedAcrossCycles)+len(totalConsumedMocks))
+			firstCycleLearned = make(map[string]models.MockState, len(allConsumedAcrossCycles)+totalConsumedMocks.Len())
 			for k, v := range allConsumedAcrossCycles {
 				firstCycleLearned[k] = v
 			}
-			for k, v := range totalConsumedMocks {
+			for k, v := range totalConsumedMocks.Map() {
 				firstCycleLearned[k] = v
 			}
 			r.logger.Info("keploy runs the test set's streaming test cases after its others, out of the order they were recorded in, without the learn step: they are judged with what the others learned on the recordings, and learn nothing; a streaming test case that needs a varying field learned fails",
@@ -4618,7 +4621,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			if r.exact != nil {
 				err = r.serveExactTest(runTestSetCtx, r.exact, tc.Name, opening)
 			} else {
-				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, r.consumedForAgent(totalConsumedMocks, perTestRegion), useMappingBased, recordedSetShape{}, &opening)
+				err = r.SendMockFilterParamsToAgent(runTestSetCtx, streamExpected, streamReqTime, streamRespTime, totalConsumedMocks, perTestRegion, useMappingBased, recordedSetShape{}, &opening)
 			}
 			if err != nil {
 				utils.LogError(r.logger, err, "failed to update mock parameters for streaming test")
@@ -4677,7 +4680,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					resp, simErr = retryResp, nil
 				} else {
 					for _, m := range drainedConsumed {
-						totalConsumedMocks[m.Name] = m
+						totalConsumedMocks.Set(m)
 					}
 				}
 			}
@@ -4734,7 +4737,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					r.exact.noteShares(tc.Name, nil, err)
 				} else {
 					for _, m := range consumedMocks {
-						totalConsumedMocks[m.Name] = m
+						totalConsumedMocks.Set(m)
 						mockNames = append(mockNames, m.Name)
 					}
 					noteConsumers(consumers, tc.Name, consumedMocks)
@@ -4956,7 +4959,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					utils.LogError(r.logger, drainErr, "failed to get consumed filtered mocks for streaming test")
 				}
 				for _, m := range additionalMocks {
-					totalConsumedMocks[m.Name] = m
+					totalConsumedMocks.Set(m)
 					mockNames = append(mockNames, m.Name)
 				}
 				noteConsumers(consumers, tc.Name, additionalMocks)
@@ -5302,7 +5305,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// must run after Phase 2's last write so the post-loop readers
 	// (PersistMockNoise and the Mocks-Consumed telemetry) see the complete
 	// union of everything consumed across all cycles and phases.
-	for k, v := range totalConsumedMocks {
+	for k, v := range totalConsumedMocks.Map() {
 		allConsumedAcrossCycles[k] = v
 	}
 
@@ -5413,7 +5416,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// that answered at this replay, is named with that recording; the
 	// application may still have held the earlier answer, which the line
 	// claims only when every note's gaps support it.
-	if named, likely := markUnmadeRepeats(testCaseResults, consumers, totalConsumedMocks, mockLookup, replayStarts, testCases); len(named) > 0 {
+	if named, likely := markUnmadeRepeats(testCaseResults, consumers, totalConsumedMocks.Map(), mockLookup, replayStarts, testCases); len(named) > 0 {
 		r.logger.Warn("tests did not make a recorded call identical to one an earlier test made, which keploy answered at this replay with that test's recording: "+repeatUnmadeCause(likely, len(named))+"; each is named under unconsumed_mocks.repeat_of",
 			zap.String("test-set", testSetID),
 			zap.Strings("calls", named[:min(len(named), 20)]),
@@ -5533,9 +5536,9 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// (exactPlan.background): nothing waits for it.
 		checkWorker := r.exact != nil && !r.exact.background && captureOpened && testSetStatus == models.TestSetStatusPassed
 		if checkWorker {
-			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks, func(read []models.MockState) {
+			workerMissing, workerUnread = r.awaitWorkerScope(runTestSetCtx, r.exact, totalConsumedMocks.Map(), func(read []models.MockState) {
 				for _, m := range read {
-					totalConsumedMocks[m.Name] = m
+					totalConsumedMocks.Set(m)
 					allConsumedAcrossCycles[m.Name] = m
 				}
 			})
@@ -5583,7 +5586,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 					consumedAtStopUnread = err
 				} else {
 					for _, m := range consumed {
-						totalConsumedMocks[m.Name] = m
+						totalConsumedMocks.Set(m)
 						allConsumedAcrossCycles[m.Name] = m
 					}
 				}
@@ -5596,7 +5599,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// (MockEntry.AtStop), which nothing waited for. A set whose app
 		// keploy did not stop requires none of those.
 		if checkWorker && workerUnread == nil {
-			workerMissing = r.exact.unansweredWorker(totalConsumedMocks, stopDrained)
+			workerMissing = r.exact.unansweredWorker(totalConsumedMocks.Map(), stopDrained)
 		}
 		// Under background serving what today's rule would require is said, not
 		// required, from what the set's end read (its stop's drain
@@ -5604,7 +5607,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// not caught, and nothing waits for one still to
 		// come.
 		if r.exact != nil && r.exact.background && captureOpened {
-			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks, stopDrained); len(unanswered) > 0 {
+			if unanswered := r.exact.unansweredWorkerOf(totalConsumedMocks.Map(), stopDrained); len(unanswered) > 0 {
 				r.logger.Info("background recordings of this test set that its end had not read answered: proven routing neither requires nor waits for them, so a background call the application stopped making is not caught ("+provenswitch.Env+"=1)",
 					zap.String("test-set", testSetID),
 					zap.Int("count", len(unanswered)),
@@ -7035,18 +7038,6 @@ func addMockDisplayInfo(lookup map[string]mockDisplayInfo, mocks []*models.Mock)
 	}
 }
 
-// consumedForAgent is the consumed history to send with filter params: only the
-// per-test region's entries once the agent has said it reads no others
-// (pkg.ConsumedScopeReader), the whole of it until then. Agents from v3.0.0-beta1
-// through v3.3.22 also applied the history to the session pool, so only that
-// answer, never this client's own view of the agent, may narrow it.
-func (r *Replayer) consumedForAgent(total map[string]models.MockState, region map[string]struct{}) map[string]models.MockState {
-	if s, ok := r.instrumentation.(pkg.ConsumedScopeReader); ok && s.AgentReadsConsumedPerTestOnly() {
-		return pkg.ConsumedForAgent(total, region)
-	}
-	return total
-}
-
 // firstRecordedTestStart returns the request time of the earliest RECORDED test
 // in the set, of any kind that opens a window (models.RecordedWindow: an HTTP
 // or a gRPC test case). It is the earliest of them all, not the first
@@ -7143,9 +7134,12 @@ func testWindowOf(tc *models.TestCase) (time.Time, time.Time) {
 }
 
 // SendMockFilterParamsToAgent sends filtering parameters to agent instead of
-// sending filtered mocks. shape is only meaningful on the set's staging call
-// (see recordedSetShape); pass the zero value on per-test calls.
-func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, totalConsumedMocks map[string]models.MockState, useMappingBased bool, shape recordedSetShape, open *testOpening) error {
+// sending filtered mocks. consumed is the set's consumed history and region its
+// per-test mocks (nil until the set's StoreMocks); the agent client decides how
+// much of the history the call carries (models.ConsumedSync,
+// models.ConsumedScopeHeader). shape is only meaningful on the set's staging
+// call (see recordedSetShape); pass the zero value on per-test calls.
+func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMockMapping []string, afterTime, beforeTime time.Time, consumed *models.ConsumedHistory, region map[string]struct{}, useMappingBased bool, shape recordedSetShape, open *testOpening) error {
 	if !r.instrument {
 		r.logger.Debug("Keploy will not filter and set mocks when base path is provided", zap.String("base path", r.config.Test.BasePath))
 		return nil
@@ -7168,9 +7162,9 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// equivalent by the golden-reference harness.
 	agentOwnsConsumed := os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED") == "1" ||
 		strings.EqualFold(os.Getenv("KEPLOY_AGENT_OWNS_CONSUMED"), "true")
-	consumedForAgent := totalConsumedMocks
+	consumedForAgent, history := consumed.Map(), consumed
 	if agentOwnsConsumed {
-		consumedForAgent = nil
+		consumedForAgent, history = nil, nil
 	}
 	// A replacement agent has no history to own, and never will for the mocks
 	// consumed before it started. Send ours instead of letting it filter from
@@ -7184,11 +7178,11 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 	// the CLI's map is the only complete record there is.
 	if agentOwnsConsumed && r.agentConsumedHistoryUnusable() {
 		agentOwnsConsumed = false
-		consumedForAgent = totalConsumedMocks
+		consumedForAgent, history = consumed.Map(), consumed
 		r.logger.Debug("sending the CLI's consumed-mock history: KEPLOY_AGENT_OWNS_CONSUMED is set but "+
 			"the agent's own history is no longer authoritative for this run — either it was replaced "+
 			"mid-run, or a retry cycle rewound the CLI's map and nothing rewinds the agent's",
-			zap.Int("consumed", len(totalConsumedMocks)))
+			zap.Int("consumed", len(consumedForAgent)))
 	}
 	params := models.MockFilterParams{
 		AfterTime:              afterTime,
@@ -7199,6 +7193,8 @@ func (r *Replayer) SendMockFilterParamsToAgent(ctx context.Context, expectedMock
 		UseMappingBased:        useMappingBased,
 		AgentOwnsConsumed:      agentOwnsConsumed,
 		TotalConsumedMocks:     consumedForAgent,
+		ConsumedHistory:        history,
+		ConsumedRegion:         region,
 		StrictMockWindow:       strictMockWindow,
 	}
 	// A test case's opening: the values its request gives, and in record's
@@ -7316,7 +7312,7 @@ func agentHoldsStoredCorpus(stored, loaded int) bool {
 // agent it replaced (agentStartedBeforeApp, after this): an agent found
 // replaced here may be the bring-up retry's whose setup did not take, or one
 // docker started again under an app that had started.
-func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks map[string]models.MockState, useMappingBased bool, testCases []*models.TestCase) error {
+func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, testSetID string, outgoingOpts models.OutgoingOptions, filteredMocks, unfilteredMocks []*models.Mock, totalConsumedMocks *models.ConsumedHistory, useMappingBased bool, testCases []*models.TestCase) error {
 	stored := len(filteredMocks) + len(unfilteredMocks)
 	if !r.instrument || stored == 0 {
 		return nil
@@ -7405,7 +7401,7 @@ func (r *Replayer) ensureAgentHoldsStoredMocks(ctx context.Context, testRunID, t
 		}
 		return fmt.Errorf("keploy-agent was replaced during the docker compose bring-up and re-registering test set %q's mocks failed at StoreMocks: %w", testSetID, err)
 	}
-	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), r.consumedForAgent(totalConsumedMocks, pkg.PerTestRegion(filteredMocks)), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil); err != nil {
+	if err := r.SendMockFilterParamsToAgent(ctx, []string{}, models.BaseTime, time.Now(), totalConsumedMocks, pkg.PerTestRegion(filteredMocks), useMappingBased, r.recordedSetShape(ctx, testSetID, testCases), nil); err != nil {
 		if exitErr := r.appExitFailure(ctx, testSetID, err); exitErr != nil {
 			return exitErr
 		}

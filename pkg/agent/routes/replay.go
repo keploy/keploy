@@ -239,6 +239,16 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		respondAgent(w, r, http.StatusBadRequest, err)
 		return
 	}
+	// The consumed history this agent keeps for the client (models.
+	// ConsumedSync): from here on the filter carries the whole of it, as a
+	// full send would.
+	held, done, ok := a.consumed.resolve(&updateParamsReq)
+	defer done()
+	if !ok {
+		w.Header().Set(models.ConsumedSyncHeader, models.ConsumedSyncResync)
+		respondAgent(w, r, http.StatusConflict, errConsumedResync)
+		return
+	}
 
 	// A test set's staging and exact serving's pool call begin no test
 	// (BeginsTestVariables below): values they gave would be bound nowhere.
@@ -308,6 +318,9 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
+	if held != "" {
+		w.Header().Set(models.ConsumedSyncHeader, held)
+	}
 	// A set's staging is answered with the background rules it is served by
 	// (models.BackgroundRulesHeader): the replay relaxes today's checks for
 	// it only when the agent says it serves it by the background rules.
@@ -320,6 +333,10 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	}
 	respondAgent(w, r, http.StatusOK, nil)
 }
+
+// errConsumedResync answers a send that builds on a consumed history the
+// agent does not hold (models.ConsumedSyncResync).
+var errConsumedResync = errors.New("the agent does not hold the consumed history this filter builds on; send the whole history")
 
 // testCaseOpener opens a keploy test case in one step (proven switch): its
 // mock filter applies, and the test's variables begin with the values its

@@ -109,6 +109,9 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+	// consumed is what the agent holds of the consumed history this client
+	// sends it (models.ConsumedSync).
+	consumed consumedSync
 	// stagedBackground holds the background rules the agent's answer to the
 	// last staging call said it serves the set by
 	// (models.BackgroundRulesHeader): "" until one says the background rules.
@@ -1641,13 +1644,42 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 
 // updateMockParams is UpdateMockParams, with the headers of the agent's
 // answer to this call (nil for a call that fails).
+//
+// A filter whose consumed history is a models.ConsumedHistory carries, to an
+// agent that holds an earlier state of it (models.ConsumedSync), only the
+// entries written since: a replay no longer sends, and the agent no longer
+// decodes, everything its tests consumed so far before every test.
 func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFilterParams) (_ http.Header, retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			recorded := copyMockParams(params)
-			a.session().record(mockParamsStep(recorded), func(c context.Context) error { return a.UpdateMockParams(c, recorded) })
+			recorded, rebuild := copyMockParams(params)
+			a.session().record(mockParamsStep(recorded), func(c context.Context) error { return a.UpdateMockParams(c, rebuild(recorded)) })
 		}
 	}()
+	// What the agent's last answer said decides how this call carries the
+	// consumed history; it is read before the answer to this call replaces
+	// it.
+	perTest := a.consumedPerTest.Load()
+	if params.ConsumedHistory != nil {
+		a.consumed.mu.Lock()
+		defer a.consumed.mu.Unlock()
+	}
+	hdr, resend, err := a.sendMockParams(ctx, params, perTest)
+	if resend {
+		// The agent does not hold the state this send built on (an agent
+		// started again): the same filter, with the whole history, as the
+		// send that was refused left the client believing the agent holds
+		// none of it.
+		hdr, _, err = a.sendMockParams(ctx, params, perTest)
+	}
+	return hdr, err
+}
+
+// sendMockParams makes one /updatemockparams call for params. resend reports
+// a call the agent did not apply as asked because it does not hold the
+// consumed history the send built on: the caller sends it again, which then
+// carries the history whole.
+func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilterParams, perTest bool) (_ http.Header, resend bool, _ error) {
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
@@ -1657,26 +1689,30 @@ func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFi
 		none := ""
 		a.stagedBackground.Store(&none)
 	}
-	requestBody := models.UpdateMockParamsReq{
-		FilterParams: params,
+	requestBody, send := a.consumed.request(params, perTest)
+	if send.sync != nil {
+		// Until the answer says what the agent holds, it is believed to
+		// hold nothing: a call that fails, or is refused, leaves the next
+		// send whole.
+		a.consumed.forget()
 	}
 
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for updatemockparams")
-		return nil, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
+		return nil, false, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
-		return nil, fmt.Errorf("error creating request for update mock params: %s", err.Error())
+		return nil, false, fmt.Errorf("error creating request for update mock params: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
+		return nil, false, fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
 	defer func() {
 		io.Copy(io.Discard, res.Body)
@@ -1687,11 +1723,19 @@ func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFi
 
 	rawBody, readErr := readAgentBody(res)
 	if readErr != nil {
-		return nil, fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
+		return nil, false, fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
+	if send.sync != nil && !send.sync.Full && res.StatusCode == http.StatusConflict && res.Header.Get(models.ConsumedSyncHeader) == models.ConsumedSyncResync {
+		return nil, true, nil
+	}
 	if err := agentRespErr("update mock params", res, rawBody); err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	if !a.consumed.answered(send, res.Header.Get(models.ConsumedSyncHeader)) {
+		// An agent that keeps no history filtered with the entries since
+		// alone (another binary answers at the address now).
+		return nil, true, nil
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
 	a.noteAgentVersion(res.Header)
@@ -1699,7 +1743,7 @@ func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFi
 		rules := res.Header.Get(models.BackgroundRulesHeader)
 		a.stagedBackground.Store(&rules)
 	}
-	return res.Header, nil
+	return res.Header, false, nil
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
