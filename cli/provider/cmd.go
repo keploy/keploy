@@ -34,6 +34,7 @@ import (
 	"go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
+	"golang.org/x/term"
 )
 
 func LogExample(example string) string {
@@ -1336,7 +1337,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" && !machine {
+	if cmd.Name() != "agent" && !machine && term.IsTerminal(int(os.Stdout.Fd())) {
 		PrintLogo(log.PrimarySink(), disableAnsi)
 	}
 	if c.cfg.Debug {

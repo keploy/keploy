@@ -49,6 +49,7 @@ import (
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/log"
 	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -2304,8 +2305,16 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	// If credentials are cached, this will use sudo -n (non-interactive)
 	cmd := newNativeAgentCommand(keployBin, args, sudoCached)
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// In quiet mode the agent's output goes to the log file so the console
+	// shows only the CLI's structured keploy: lines. Warnings and errors
+	// from the agent are in the log file; keploy: full log: names it.
+	if lf := log.GetActiveLogFile(); log.IsQuiet() && lf != nil {
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	a.mu.Lock()
 	a.agentCmd = cmd // this has been set for proper stopping of the native agent
@@ -3650,8 +3659,13 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 		return a.startInDockerWithPTY(ctx, logger, cmd)
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if lf := log.GetActiveLogFile(); log.IsQuiet() && lf != nil {
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.Canceled {
