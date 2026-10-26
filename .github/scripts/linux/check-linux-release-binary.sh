@@ -15,9 +15,12 @@
 #   * ELF for ARCH, an executable;
 #   * no program interpreter (PT_INTERP) and no dynamic section: nothing of
 #     the host's libc, or any other library, is loaded at run time;
-#   * a PT_GNU_STACK of at least 8 MiB: musl sizes a thread's stack from it
-#     (else 128 KiB), and cgo's C code — the Postgres parser — runs on the
-#     calling thread's stack (see build-linux-release.sh);
+#   * a PT_GNU_STACK of at least 8 MiB: musl sizes every thread's stack from
+#     it (128 KiB without one, at most 8 MiB), and cgo's C code — the
+#     Postgres parser — runs on the calling thread's stack. zig's musl target
+#     writes 16 MiB by default and build-linux-release.sh pins 8 MiB: both
+#     give a thread 8 MiB. Measured, a 128 KiB header crashes the parser at
+#     300 levels of nesting and 512 KiB at 3000 (see build-linux-release.sh);
 #   * stripped: no .symtab and no .debug_* sections. zig cc does not act on
 #     the -s Go's linker passes it, so build-linux-release.sh adds
 #     -Wl,--strip-all; without it the binary carries its symbol table and the
@@ -55,8 +58,9 @@ fi
 if printf '%s\n' "$phdrs" | grep -q '^ *DYNAMIC '; then
   bad "has a dynamic section, needing: $(readelf -dW "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
 fi
-# Section names are the 2nd field of readelf -SW's "[Nr] Name Type ..." rows.
-unstripped="$(readelf -SW "$bin" | awk '$1 ~ /^\[/ && $2 ~ /^(\.symtab|\.debug_)/ { print $2 }' | tr '\n' ' ')"
+# readelf -SW prints a section as "[Nr] Name Type ...", and pads Nr ("[ 1]"),
+# so the name is the first field after the "]".
+unstripped="$(readelf -SW "$bin" | awk '/^ *\[ *[0-9]+\]/ { sub(/^ *\[ *[0-9]+\] */, ""); if ($1 ~ /^(\.symtab|\.debug_)/) print $1 }' | tr '\n' ' ')"
 [ -z "$unstripped" ] || bad "is not stripped (it has $unstripped); the linux builds link with -Wl,--strip-all (see build-linux-release.sh)"
 # GNU_STACK's MemSiz is the 6th field: Type Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align.
 stack="$(printf '%s\n' "$phdrs" | awk '$1 == "GNU_STACK" { print $6 }')"

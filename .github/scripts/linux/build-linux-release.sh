@@ -19,11 +19,14 @@
 #   * netgo, osusergo: the DNS resolver and user lookups stay pure Go (a
 #     static binary cannot load the host's NSS modules), as they were in the
 #     static pure-Go binaries before cgo was turned on.
-#   * -z stack-size=8 MiB: musl gives a thread 128 KiB of stack unless the
-#     binary asks for more in its PT_GNU_STACK header, and cgo's C code (the
-#     parser, which recurses on nested expressions) runs on the stack of the
-#     thread it is called from. 8 MiB is glibc's default (the usual stack
-#     rlimit), so the parser keeps the room it had.
+#   * -static and -z stack-size=8 MiB are pins, not fixes: zig's musl target
+#     already links static and writes a 16 MiB PT_GNU_STACK. musl sizes every
+#     thread's stack from that header (128 KiB without one, at most 8 MiB),
+#     and cgo's C code (the parser, which recurses on nested expressions)
+#     runs on the stack of the thread it is called from. So 16 MiB and 8 MiB
+#     both give a thread 8 MiB, glibc's default; the pins keep it if zig's
+#     defaults change. Measured, a 128 KiB header crashes the parser at 300
+#     levels of nesting and 512 KiB at 3000.
 #   * --strip-all: zig cc does not act on the -s Go's linker passes it;
 #     without it the binary keeps its symbol table and the C code's DWARF.
 #

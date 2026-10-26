@@ -40,9 +40,12 @@ builds:
     # v3.6.164 needed GLIBC_2.34 and exited at once on Debian 11, Ubuntu
     # 20.04, RHEL 8 and Amazon Linux 2. netgo and osusergo keep DNS and user
     # lookups pure Go (a static binary cannot load the host's NSS modules);
-    # -z stack-size gives threads glibc's 8 MiB default stack (musl's is
-    # 128 KiB, and the Postgres parser's C code recurses on the calling
-    # thread's stack); --strip-all because zig cc does not act on -s.
+    # -static and -z stack-size are pins: zig's musl target already links
+    # static with a 16 MiB PT_GNU_STACK, and musl caps a thread at 8 MiB, so
+    # 8 MiB keeps glibc's default thread stack if zig's defaults change (the
+    # Postgres parser's C code recurses on the calling thread's stack; a
+    # 128 KiB header crashes it at 300 levels of nesting); --strip-all
+    # because zig cc does not act on -s.
     env:
       - CGO_ENABLED=1
     goos:

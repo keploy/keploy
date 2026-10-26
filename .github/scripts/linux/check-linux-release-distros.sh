@@ -13,7 +13,8 @@
 #
 #   in debian:11, ubuntu:20.04, amazonlinux:2 and rockylinux:8 (glibc 2.31,
 #   2.31, 2.26 and 2.28):
-#     * the release binary's `--version` exits 0 and prints a Keploy version;
+#     * the release binary's `--version`, run in a read-only directory,
+#       exits 0 and prints a Keploy version;
 #     * PGTEST, the Postgres parser's own tests (libpg_query, the C code that
 #       turned cgo on) built by `build-linux-release.sh pgtest`, so linked as
 #       the release is, pass: a real parse path.
@@ -25,15 +26,22 @@ set -eu
 
 [ $# -eq 3 ] || { echo "usage: check-linux-release-distros.sh BINARY amd64|arm64 PGTEST" >&2; exit 2; }
 bin="$1"; arch="$2"; pgtest="$3"
+# e_machine is the ELF header's 2 bytes at offset 18, little-endian: 0x3e
+# x86-64, 0xb7 AArch64.
 case "$arch" in
-  amd64) host_arch=x86_64 ;;
-  arm64) host_arch=aarch64 ;;
+  amd64) host_arch=x86_64; machine=3e00 ;;
+  arm64) host_arch=aarch64; machine=b700 ;;
   *) echo "check-linux-release-distros: unknown arch '$arch' (amd64 or arm64)" >&2; exit 2 ;;
 esac
 die() { echo "check-linux-release-distros: $*" >&2; exit 1; }
 [ "$(uname -m)" = "$host_arch" ] || die "this runner is $(uname -m), not $host_arch: run it on the $arch runner that built the binary"
 [ -f "$bin" ] || die "no binary at '$bin'"
 [ -f "$pgtest" ] || die "no Postgres parser test binary at '$pgtest'"
+# Each input must be for ARCH: a runner with qemu-user registered would run
+# another arch's binary and pass every row.
+elf_machine() { od -An -tx1 -j18 -N2 "$1" | tr -d ' \n'; }
+[ "$(elf_machine "$bin")" = "$machine" ] || die "'$bin' is not a linux/$arch ELF binary"
+[ "$(elf_machine "$pgtest")" = "$machine" ] || die "'$pgtest' is not a linux/$arch ELF binary"
 IMAGES="debian:11 ubuntu:20.04 amazonlinux:2 rockylinux:8"
 PG_PKG=github.com/keploy/integrations/pkg/postgres/shared/match
 # The tests run in their package's directory, as `go test` runs them.
@@ -66,8 +74,9 @@ for img in $IMAGES; do
     set -u
     . /etc/os-release
     echo "distro: $PRETTY_NAME ($(uname -m)), libc: $(ldd --version 2>&1 | head -n 1)"
-    # keploy opens keploy-logs.txt in its working directory: a writable one.
-    out="$(cd /tmp && /b/keploy --version 2>&1)"; rc=$?
+    # The working directory, /pg, is read-only: keploy logs to the console
+    # only when it cannot write keploy-logs.txt there, and must still run.
+    out="$(/b/keploy --version 2>&1)"; rc=$?
     printf "%s\n" "$out" | tail -n 3
     if [ "$rc" -ne 0 ]; then echo "FAIL: --version exited $rc"; exit 1; fi
     case "$out" in *"Keploy "*) ;; *) echo "FAIL: --version printed no Keploy version"; exit 1 ;; esac
