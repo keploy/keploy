@@ -214,3 +214,19 @@ func TestRenderUnmatchedCalls_AVariableThatDidNotHold(t *testing.T) {
 		t.Errorf("the variable's value is rendered as the recording's:\n%s", out)
 	}
 }
+
+// Under the proven switch a miss names its destination as the recording
+// does, and keeps the address the call was made to as LiveDestination: the
+// out-of-scope line names that one, on which the scope was decided, never
+// a recorded address every mock targets.
+func TestRenderUnmatchedCalls_OutOfScopeNamesTheLiveAddress(t *testing.T) {
+	test := models.TestResult{FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{
+		Protocol: "HTTP", ActualSummary: "GET /v1/secret", Destination: "127.0.0.1:8200", LiveDestination: "localhost:8200",
+		MatchPhase: models.MatchPhaseSchema, DestinationScope: models.DestinationScopeNotInComparedSet,
+	}}}}
+	var sb strings.Builder
+	renderUnmatchedCalls(&sb, test)
+	if out := sb.String(); !strings.Contains(out, "no recorded mock in the compared set targets localhost:8200") {
+		t.Fatalf("the out-of-scope line does not name the live address:\n%s", out)
+	}
+}

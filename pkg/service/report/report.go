@@ -1224,6 +1224,11 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 			// WithNextSteps) removes that accident — leaving a line that
 			// refers to a host it never prints.
 			dest := uc.Destination
+			if uc.LiveDestination != "" {
+				// The scope was decided on the address the call was made
+				// to; Destination names it as the recording does.
+				dest = uc.LiveDestination
+			}
 			if dest == "" {
 				dest = "an unidentified upstream"
 			}
