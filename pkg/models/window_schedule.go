@@ -110,6 +110,17 @@ func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
 	return s.windows[i], true
 }
 
+// After reports whether t is later than every window's End: recorded after
+// the last recorded test ended (a set's teardown). False for an empty
+// schedule: nothing tells a teardown there.
+func (s *WindowSchedule) After(t time.Time) bool {
+	n := s.Len()
+	if n == 0 {
+		return false
+	}
+	return t.After(s.maxEnd[n-1])
+}
+
 // Window returns window i in Start order.
 func (s *WindowSchedule) Window(i int) TestWindow {
 	return s.windows[i]
