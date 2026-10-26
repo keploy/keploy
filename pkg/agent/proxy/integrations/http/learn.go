@@ -2064,6 +2064,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			echoed[r.Value] = name
 			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
+
+		default:
+			// A kind this replay does not carry (a read of the clock
+			// with no read beside it) is refused, never left out of the
+			// noise and compared by luck.
+			why := l.Why
+			if why == "" {
+				why = "keploy learned it as " + string(l.Kind) + ", which this replay cannot check"
+			}
+			return p, r.Path + " changed, and " + why
 		}
 	}
 	return p, ""

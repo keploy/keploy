@@ -18,17 +18,26 @@ import (
 // too: a value checked against no clock would pass whatever it is.
 
 // Clock is what a replay checks of ln's leaf, as models.MockSpec.Clocks
-// holds it: the offset of a KindClockOffset, the plain read of a noise leaf
-// that is a read of the clock (Read). ok is false for any other leaf.
+// holds it: the offset of a KindClockOffset, the plain read of a
+// KindClockRead (Read). ok is false for any other leaf: a KindNoise never
+// carries a read, so a caller that writes its noise leaves to the noise a
+// replay skips never stops comparing a read of the clock.
 func (ln Learned) Clock() (models.ClockOffset, bool) {
 	switch {
 	case ln.Kind == KindClockOffset && ln.Offset != nil:
 		return *ln.Offset, true
-	case ln.Kind == KindNoise && ln.Read != nil:
+	case ln.Kind == KindClockRead && ln.Read != nil:
 		return *ln.Read, true
 	}
 	return models.ClockOffset{}, false
 }
+
+// clockReadUncheckedWhy is a KindClockRead's Why (read after "<field>
+// changed, and "): what a caller whose replay checks no read of the clock
+// refuses it with, where keploy learned it as noise before it learned a read
+// (the lead moved it, or a window held it). One keploy refused before it
+// learned it as a read keeps that refusal's reason instead (classifyInstant).
+const clockReadUncheckedWhy = "keploy learns it as a read of the application's clock, which a replay must check is a read made in its call's own span, and the replay of this call's protocol checks no such read: learned as noise it would let any value pass at every replay, so keploy refuses it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 
 // outsideWindowWhy is why a value that is one instant whole in both runs is
 // refused where its call had a window on the application's clock that does

@@ -306,9 +306,9 @@ func TestClassify(t *testing.T) {
 		// "5" appears earlier (mock-1's answer), where it did not drift with
 		// it: keploy cannot tell, and refuses rather than learn noise.
 		"body.ts":    KindUnaccounted,
-		"body.empty": KindNoise,    // an empty recorded value carries nothing to follow
-		"body.sess":  KindVariable, // its run is a token of an earlier store call
-		"body.at":    KindNoise,    // a clock read F's lead moved, as it did body.sent
+		"body.empty": KindNoise,     // an empty recorded value carries nothing to follow
+		"body.sess":  KindVariable,  // its run is a token of an earlier store call
+		"body.at":    KindClockRead, // a clock read F's lead moved, as it did body.sent
 		// Of a payload F saw no live value of, a run is searched alone,
 		// however short: "1" of "q-1" is the token of pg-3's "$1". It errs
 		// to refusing.
@@ -404,7 +404,7 @@ func TestALateClockReadIsAReadOfTheClockBesideAPostgresRecordingOfTheSameMinute(
 	for _, late := range []time.Duration{10 * time.Millisecond, 600 * time.Millisecond, 2500 * time.Millisecond} {
 		live := Shape{Leaves: map[string]Leaf{"bind.$3": {Path: "bind.$3", Value: recAt.Add(FullRoundLead + late).Format(lay)}}}
 		out := Classify(NewDriftCache(), []string{"bind.$3"}, live, rec, recAt.Add(2*time.Millisecond), nil, []Raw{RawOf(earlier, false)}, nil)
-		if len(out) != 1 || out[0].Kind != KindNoise || out[0].Read == nil {
+		if len(out) != 1 || out[0].Kind != KindClockRead || out[0].Read == nil {
 			t.Fatalf("a clock read %v late: %+v, want a read of the clock, compared at replay", late, out)
 		}
 	}
@@ -1019,7 +1019,7 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 		// Read in the second before its call, at.
 		rec := at.Add(234567*time.Microsecond - time.Second).In(tc.zone).Format(tc.layout)
 		live := at.Add(FullRoundLead).Add(123456*time.Microsecond - time.Second).In(tc.zone).Format(tc.layout)
-		if got := classifyOne(rec, live, at, nil, nil, nil); got.Kind != KindNoise {
+		if got := classifyOne(rec, live, at, nil, nil, nil); !noiseOrRead(got) {
 			t.Errorf("%s: a clock read the lead moved is %s (%q)", tc.name, got.Kind, got.Why)
 		}
 	}
@@ -1165,7 +1165,7 @@ func TestClassifyAWholeClockValueAnEarlierCallHeldInsideALongerOne(t *testing.T)
 	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.note", Noise: "body.note", Type: String, Value: "created at " + rec + " by u1"}, Live: "created at " + live + " by u1", Place: "body.note"},
 	}}}
-	if got := classifyOne(rec, live, at, e, nil, nil); got.Kind != KindNoise {
+	if got := classifyOne(rec, live, at, e, nil, nil); !noiseOrRead(got) {
 		t.Errorf("beside an HTTP leaf: %s (%s)", got.Kind, got.Why)
 	}
 	raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
