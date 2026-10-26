@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch/switchtest"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -404,10 +405,15 @@ var probeFiles = []string{
 
 func TestMain(m *testing.M) {
 	removeProbes()
+	// The rows here check the rules with the proven switch off unless a row
+	// turns it on: a KEPLOY_PROVEN this test process inherited chooses nothing.
+	switchtest.Clear()
 	code := m.Run()
 	removeProbes()
 	os.Exit(code)
 }
+
+func TestARowStartsWithTheProvenSwitchOff(t *testing.T) { switchtest.OffAtEveryRowsStart(t) }
 
 func removeProbes() {
 	for _, f := range probeFiles {

@@ -83,6 +83,11 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 			h.Logger.Debug("on-miss passthrough: failed to close upstream conn", zap.Error(cerr))
 		}
 	}()
+	// The upstream's answer is read with no deadline: the call's end ends
+	// that read, as it ends decodeHTTP's reads of the client, so decodeHTTP,
+	// which waits for its goroutine, is not held by an upstream that does
+	// not answer.
+	defer pUtil.InterruptOnDone(ctx, dstConn)()
 
 	// Forward the exact request bytes upstream.
 	if _, err := dstConn.Write(reqBuf); err != nil {

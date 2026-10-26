@@ -17,6 +17,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // The process tracking the hooks depend on can fail without a sound: when
@@ -190,7 +191,7 @@ func pidMapFields(name string, f pidMapInsertFailure, capacity uint32) []zap.Fie
 
 // initialPIDNSInode is the inode of the initial PID namespace
 // (PROC_PID_INIT_INO), the namespace the BPF programs' TGIDs belong to.
-const initialPIDNSInode = 0xEFFFFFFC
+const initialPIDNSInode = utils.InitialPIDNSInode
 
 // commOfHostTGID is the command name of the process whose TGID, in the initial
 // PID namespace, is tgid; "" when it cannot be told. It is read only by an

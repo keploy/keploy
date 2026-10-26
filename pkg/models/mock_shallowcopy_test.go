@@ -23,6 +23,7 @@ func TestShallowCopyIsAnUnpooledCopy(t *testing.T) {
 		ConnectionID: "c1",
 		SourcePID:    42,
 		Noise:        []string{"x"},
+		Origin:       &Origin{Clock: "proxy:run-1", Comm: "sqs", Exe: "./sqs"},
 	}
 	m.SetResponseHydrator(func() (*HTTPResp, []MongoResponse, error) { return nil, nil, nil })
 	m.onDisk = &payloadOnDisk{at: PayloadAt{Offset: 5, Length: 9, Name: "m"}}

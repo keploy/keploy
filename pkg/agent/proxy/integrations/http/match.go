@@ -93,6 +93,10 @@ type matchDiag struct {
 	// it differs (strictServe): the report diffs against that, with those.
 	closest *models.Mock
 	differs []strictField
+	// answered is, under exact serving, a stateful walk's miss: each
+	// recording of the call the walk holds has answered (answeredSequence),
+	// and the report says so, whatever else the cascade found.
+	answered *answeredSequence
 }
 
 // match returns (matched, mock, diag, err). diag is non-nil only when
@@ -259,7 +263,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 					return false, nil, nil, err
 				}
 				if len(hits) > 0 {
-					hit, commitCursor := h.pickHit(hits, mockDb, statefulMocks)
+					hit, commitCursor, answered := h.pickHit(hits, ownedBy(ctx), mockDb, statefulMocks, h.variableMember(ctx, input, scope, headerNoise, userBodyNoise, urlNoise))
+					if answered != nil {
+						return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, answered: answered}, nil
+					}
 					served, problem, retry, err := h.serveVariables(ctx, hit, mockDb)
 					if err != nil {
 						return false, nil, nil, err
@@ -360,7 +367,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 			// exact request (a counter, a created-then-read row), serve them in
 			// record order via a per-request cursor instead of always the first,
 			// then saturate on the last. No-op for a single recording.
-			bestMatch, commitCursor := h.cursorPick(bestMatch, schemaMatched, own, mockDb, statefulMocks)
+			bestMatch, commitCursor, answered := h.cursorPick(bestMatch, schemaMatched, own, mockDb, statefulMocks)
+			if answered != nil {
+				return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool, answered: answered}, nil
+			}
 			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
 			// A per-test recording served here is kept for its test's
@@ -484,6 +494,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 // applies. Returns bestMatch unchanged (commit nil) when stateful mocks are off,
 // the store exposes no cursor, or there is only one recorded response for the
 // request (the common case, where cursor == reuse — byte-identical to legacy).
+// Under exact serving the walk is servedWalk's, over every recording of the
+// request the store stages: answered, non-nil, is the call's miss (no
+// recording) when each the walk holds has answered and the last can answer
+// no more.
 //
 // Scope: the group is gathered by BYTE-EXACT request body, which covers stateful
 // dependencies whose repeated requests are identical (a counter, a created-then-
@@ -492,27 +506,49 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 // first recording; that case is handled by request→response correlation (masked
 // grouping), tracked separately — see correlation-auto-replay. This is a known,
 // documented limit, not a silent catch-all.
-func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
+func (h *HTTP) cursorPick(bestMatch *models.Mock, schemaMatched []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func(), *answeredSequence) {
 	if !statefulMocks || bestMatch == nil || bestMatch.TestModeInfo.Consume != models.ConsumeCursorSaturate {
-		return bestMatch, nil
+		return bestMatch, nil, nil
 	}
 	if bestMatch.Spec.HTTPReq == nil {
-		return bestMatch, nil
+		return bestMatch, nil, nil
 	}
+	sv, exact := integrations.SequenceViewOf(mockDb)
 	cs, ok := mockDb.(integrations.MockCursor)
-	if !ok {
-		return bestMatch, nil
+	if !ok && !exact {
+		return bestMatch, nil, nil
 	}
-	group, key := cursorGroup(bestMatch, schemaMatched, own)
+	group, key, inBand := cursorGroup(bestMatch, schemaMatched, own)
+	if exact {
+		// Under exact serving each recording carries its served mark in
+		// the view's cursor, and the test's sequence is fixed by every
+		// recording of the request the store stages, from the test's
+		// recorded window on: a recording another call spent leaves the
+		// group without moving the rest, which a position into the group
+		// would skip, and without moving the window. One recording left
+		// may be outside it, so even one is walked. Under the background
+		// rules the background is walked on its own cursor over every
+		// recording of it the store stages (statefulBand, bandWalk), as
+		// the strict and variable passes walk it.
+		band, bcs, bg, ofBand := statefulBand(bestMatch, group, own, mockDb, cs)
+		variables := provenswitch.On()
+		i, commit, answered := bandWalk(band, bcs, bg, sv, mockDb, func(m *models.Mock) bool {
+			return sameCursorRequest(m, bestMatch) && inBand(m) && ofBand(m) && (!variables || !hasVariables(m))
+		})
+		if answered != nil {
+			return nil, nil, answered
+		}
+		return band[i], commit, nil
+	}
 	if len(group) <= 1 {
-		return bestMatch, nil // single recording: nothing to advance through
+		return bestMatch, nil, nil // single recording: nothing to advance through
 	}
 	idx := cs.MockCursorIndex(key, len(group))
 	if idx < 0 || idx >= len(group) {
-		return bestMatch, nil
+		return bestMatch, nil, nil
 	}
 	n := len(group)
-	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }
+	return group[idx], func() { cs.AdvanceMockCursor(key, idx, n) }, nil
 }
 
 // servedPick picks, among a call's reusable recordings (in record order), the
@@ -536,6 +572,116 @@ func servedPick(group []*models.Mock, cs integrations.MockCursor) (int, func()) 
 	return len(group) - 1, nil
 }
 
+// servedWalk is servedPick under exact serving, over one view (sv). live
+// are one request's recordings that can answer the call now, and full every
+// recording of the request the store stages (stagedGroup: live and those
+// spent or not offered), both in record order. Of full, the view's sequence
+// walks those SequenceView.Span gives (in a test, the ones its recorded
+// window holds; with none in it, the one in force when the test began),
+// fixed whichever of them earlier calls spent: it answers the first of them
+// that is live and not served in the view, else the last of them again,
+// while it is live. When the last can answer no more (spent: one of the
+// worker scope's answers at most one request in the staging; or not
+// offered) the call is answered nothing (answered, the miss's reason), never
+// a recording outside them: an earlier one again, which would take the
+// sequence back, or another test's. The index is into live; the commit
+// marks the answer served in the same view's cursor, whichever view is in
+// force when it lands.
+func servedWalk(live, full []*models.Mock, sv integrations.SequenceView) (int, func(), *answeredSequence) {
+	at := make(map[string]int, len(live))
+	for i, m := range live {
+		at[m.Name] = i
+	}
+	lo, hi := sv.Span(len(full), func(i int) time.Time { return full[i].Spec.ReqTimestampMock })
+	for _, m := range full[lo:hi] {
+		i, ok := at[m.Name]
+		if !ok {
+			continue // spent, or not offered
+		}
+		if sv.Cursor == nil {
+			return i, nil, nil
+		}
+		key := servedKey(m)
+		switch idx := sv.Cursor.MockCursorIndex(key, 2); {
+		case idx < 0:
+			return i, nil, nil
+		case idx == 0:
+			return i, func() { sv.Cursor.AdvanceMockCursor(key, 0, 2) }, nil
+		}
+	}
+	if hi > lo {
+		if i, ok := at[full[hi-1].Name]; ok {
+			return i, nil, nil
+		}
+	}
+	a := &answeredSequence{test: sv.Test, held: hi - lo}
+	if hi > lo {
+		a.last = full[hi-1].Name
+		windowed := sv.Test != "" && !sv.Start.IsZero() && !full[lo].Spec.ReqTimestampMock.Before(sv.Start)
+		a.inWindow = windowed && (sv.End.IsZero() || !full[lo].Spec.ReqTimestampMock.After(sv.End))
+		a.after = windowed && !a.inWindow
+	}
+	return -1, nil, a
+}
+
+// stagedGroup is live (one call's recordings that can answer it now, in
+// record order) with every other recording the store stages that is the
+// call's too (member), spent or not offered, in record order (recordedBefore):
+// exact serving spends a recording without taking it out of its tree
+// (stagedOf), so the set a test's sequence walks (servedWalk) is fixed by
+// what the test recorded, whichever of it earlier calls spent. Only their
+// names and record times are read: none of them is handed out. member nil
+// reads none.
+func stagedGroup(mockDb integrations.MockMemDb, live []*models.Mock, member func(*models.Mock) bool) []*models.Mock {
+	out := append(make([]*models.Mock, 0, len(live)), live...)
+	if member == nil {
+		return out
+	}
+	seen := make(map[string]bool, len(live))
+	for _, m := range live {
+		seen[m.Name] = true
+	}
+	for _, m := range stagedOf(mockDb) {
+		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || seen[m.Name] || !member(m) {
+			continue
+		}
+		seen[m.Name] = true
+		out = append(out, m)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return recordedBefore(out[i], out[j]) })
+	return out
+}
+
+// answeredSequence is a stateful walk's miss under exact serving
+// (servedWalk): every recording of the call the walk holds has answered, and
+// the last of them can answer no more.
+type answeredSequence struct {
+	test     string // the open test, "" between tests
+	last     string // the last recording the walk holds
+	held     int    // how many it holds
+	inWindow bool   // whether they are the test's recorded window's
+	after    bool   // whether it is the first recorded after the window (none in or before it)
+}
+
+// why is the miss's reason. It names recordings, never a value.
+func (a *answeredSequence) why() string {
+	switch {
+	case a.test == "":
+		return fmt.Sprintf("each of the %d recordings of this call has answered, and the last, %s, can answer no more (each answers once in the replay)", a.held, a.last)
+	case a.inWindow:
+		return fmt.Sprintf("test %s recorded this call %d time(s) in its recorded window; each has answered, and the last, %s, can answer no more (it answers once in the replay)", a.test, a.held, a.last)
+	case a.after:
+		return fmt.Sprintf("test %s recorded no such call in or before its recorded window; the first recorded after it, %s, has answered and can answer no more (it answers once in the replay)", a.test, a.last)
+	default:
+		return fmt.Sprintf("test %s recorded no such call in its recorded window; the recording in force when it began, %s, has answered and can answer no more (it answers once in the replay)", a.test, a.last)
+	}
+}
+
+// next is the miss's next step.
+func (a *answeredSequence) next() string {
+	return fmt.Sprintf("The application made this call more times than the recording holds. If it should, record again with '%s' so the recording holds every call; keploy never answers it with a recording of another moment.", mismatch.RecordCommand())
+}
+
 // servedKey is the stateful cursor store's key of m's served mark, apart from
 // every request's cursor key (cursorKey). A recording's name is unique in its
 // test set, whose staging resets the store.
@@ -544,7 +690,8 @@ func servedKey(m *models.Mock) string {
 }
 
 // cursorGroup returns the recordings of schemaMatched that are bestMatch's
-// request for the stateful cursor, in record order, and the cursor's key.
+// request for the stateful cursor, in record order, the cursor's key, and
+// whether a recording is of the group's band (inBand).
 //
 // A per-test recording's group is drawn from one band: the open test's own
 // recordings (own, openTestOwner), whose cursor starts over each time a test
@@ -553,7 +700,7 @@ func servedKey(m *models.Mock) string {
 // with no test open, every test's: their cursor runs across stagings. A
 // test's call is never answered with the startup band's recording ahead of
 // its own.
-func cursorGroup(bestMatch *models.Mock, schemaMatched []*models.Mock, own func(*models.Mock) bool) ([]*models.Mock, string) {
+func cursorGroup(bestMatch *models.Mock, schemaMatched []*models.Mock, own func(*models.Mock) bool) ([]*models.Mock, string, func(*models.Mock) bool) {
 	inBand := func(*models.Mock) bool { return true }
 	ownBand := true
 	if bestMatch.TestModeInfo.Lifetime == models.LifetimePerTest {
@@ -579,7 +726,7 @@ func cursorGroup(bestMatch *models.Mock, schemaMatched []*models.Mock, own func(
 		// not start over.
 		key = outsideWindowCursorPrefix + key
 	}
-	return group, key
+	return group, key, inBand
 }
 
 // outsideWindowCursorPrefix keys the cursor of per-test recordings no open
@@ -1690,7 +1837,12 @@ func (h *HTTP) updateMock(ctx context.Context, matchedMock *models.Mock, mockDb 
 // mock's state written by attach, onto the copies it hands the mock DB
 // (never the shared pooled mock): detected noise, or what the learn step
 // learned.
+//
+// What it consumes is told to the learn step as served in this connection's
+// request (integrations.ServingIn), so a request aloft on another connection
+// that reads no recording leaves this one's serve in F's order.
 func (h *HTTP) consumeWith(ctx context.Context, matchedMock *models.Mock, mockDb integrations.MockMemDb, attach func(spec *models.MockSpec)) bool {
+	mockDb = integrations.ServingIn(ctx, mockDb)
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
@@ -2001,6 +2153,18 @@ func (h *HTTP) buildHTTPMismatchReportOf(request *http.Request, liveBody []byte,
 		httpMocks = FilterHTTPMocks(mocks)
 	}
 
+	if diag != nil && diag.answered != nil {
+		// Each recording of the call the stateful walk holds has answered
+		// (servedWalk): the miss names the last, and no request diff, as
+		// the call is that recording's.
+		return withRoutePlaces(mismatch.NewReport(mismatch.ProtocolHTTP, actualKey).
+			WithDestination(dest).
+			WithComparedDestinations(comparedDestinations(diag.pool, diag.candidates)).
+			WithPhase(diag.phase, diag.candidates).
+			WithClosest(diag.answered.last, nil).
+			WithDiff(diag.answered.why()).
+			WithNextSteps(diag.answered.next()).Build(), request, nil, diag.pool, variableTable(mockDb))
+	}
 	if diag != nil && diag.variable != nil {
 		// A variable's place counts the segments of the escaped path
 		// (variables.go), so this miss names its path escaped too: a %2F

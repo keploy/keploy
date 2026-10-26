@@ -5,15 +5,16 @@ package proxy
 import (
 	"net"
 	"os"
+	"strconv"
 	"testing"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 )
 
 func TestListenerOwnerFindsThisProcessListening(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer l.Close()
+	// The port stays held once the listener closes (testnet.SharedPort),
+	// for the check that a closed port has no owner.
+	l := testnet.ListenShared(t, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t))))
 	port := uint32(l.Addr().(*net.TCPAddr).Port)
 	pid, ok := listenerOwner(net.ParseIP("127.0.0.1"), port)
 	if !ok || pid != os.Getpid() {

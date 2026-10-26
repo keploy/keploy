@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,8 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -39,6 +42,11 @@ type wireProxy struct {
 	missErr   error
 	served    map[string]uint64
 	continues int
+	// withdraws counts the windows taken back; order is what the capture
+	// window and exact serving were told, in order: "continue", "withdraw",
+	// "serve <test>".
+	withdraws int
+	order     []string
 	// exactTest and exactNames are what exact serving was last told to
 	// serve: an open test and its test mocks, or ("", the pool slice);
 	// atServe is served when the test opened. setErr fails serving.
@@ -79,7 +87,19 @@ func (p *wireProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, erro
 	return out, nil
 }
 
-func (p *wireProxy) ContinueTestErrorCapture() { p.mu.Lock(); p.continues++; p.mu.Unlock() }
+func (p *wireProxy) ContinueTestErrorCapture() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.continues++
+	p.order = append(p.order, "continue")
+}
+
+func (p *wireProxy) WithdrawTestErrorCapture() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.withdraws++
+	p.order = append(p.order, "withdraw")
+}
 
 // SetMocks takes a staging of the replay's mocks.
 func (p *wireProxy) SetMocks(_ context.Context, _, _ []*models.Mock) error {
@@ -96,6 +116,7 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 		return p.setErr
 	}
 	p.exactTest, p.exactNames = test, nil
+	p.order = append(p.order, "serve "+test)
 	for _, m := range owned {
 		p.exactNames = append(p.exactNames, m.Name)
 	}
@@ -710,6 +731,44 @@ func TestAClaimInARunWithoutAClientSaysWhy(t *testing.T) {
 	require.Contains(t, serr.Message, "docker compose")
 }
 
+// A CLI in another pid namespace than the agent's (a CI step container's,
+// beside a docker agent's own, which the app's containers join) said a pid
+// that names another process here: a claimer that descends from that process
+// is not the run's, and the claim says why. The CLI said in the agent's own
+// namespace, or by an older CLI that says none, keeps its claim.
+func TestAClaimUnderACLIOfAnotherPIDNamespaceIsRefused(t *testing.T) {
+	own := utils.OwnPIDNamespace()
+	ino, boot, ok := strings.Cut(own, "@")
+	if !ok {
+		t.Skipf("this process cannot say its pid namespace with a boot id (%q)", own)
+	}
+	n, err := strconv.ParseUint(ino, 10, 64)
+	require.NoError(t, err)
+	other := strconv.FormatUint(n+1, 10) + "@" + boot
+	for _, c := range []struct {
+		name, ns string
+		taken    bool
+	}{
+		{"another namespace on this kernel", other, false},
+		{"the agent's namespace on another kernel", ino + "@another-boot", false},
+		{"a CLI in no Linux namespace", utils.ClientPIDNSNone, false},
+		{"the agent's own namespace", own, true},
+		{"an older CLI that says none", "", true},
+	} {
+		a, _ := wireAgent(t, models.MODE_TEST)
+		a.config.Agent.ClientPIDNS = c.ns
+		_, serr := a.ClaimInstance(context.Background(), models.InstanceReq{Key: "a"}, os.Getpid())
+		if c.taken {
+			require.Nil(t, serr, c.name)
+			continue
+		}
+		require.NotNil(t, serr, "%s: the claim of a descendant of the process at the CLI's pid", c.name)
+		require.Equal(t, models.ScopeErrNotInRun, serr.Code, c.name)
+		require.Contains(t, serr.Message, "cannot tell its CLI's process", c.name)
+		require.NotContains(t, serr.Message, "docker compose", c.name)
+	}
+}
+
 func TestABeginRefusesAnIDSeparatorInItsFile(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	for _, req := range []models.ScopeReq{
@@ -840,6 +899,14 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Equal(t, "SELECT ?", pg.ActualSummary)
 	redis := sanitizedMiss(models.UnmatchedCall{Protocol: "Redis", ActualSummary: "GET session:abc"})
 	require.Empty(t, redis.ActualSummary, "a protocol keploy has no shape for keeps no call text")
+
+	// A repeat note names recordings, a test and times, never a value the app
+	// sent: it is kept, on a copy, so judging can name the earlier test.
+	note := &models.RepeatNote{Mock: "mock-54", Test: "get-by-id-1", ReplayGapSeconds: 8, ReplayGapFromStart: true, RecordGapSeconds: 2.95, RecordGapKnown: true, RecordedLast: "mock-54"}
+	rep := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /bp/202", ClosestMock: "mock-54", Repeat: note})
+	require.NotNil(t, rep.Repeat, "the repeat note was dropped")
+	require.Equal(t, *note, *rep.Repeat)
+	require.NotSame(t, note, rep.Repeat, "the note is the miss's own: written on a copy")
 }
 
 // A miss, its reason text and a recorded mock's name keep an HTTP call's
@@ -1449,4 +1516,170 @@ func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 	got, ok := p.appClock(at)
 	require.True(t, ok)
 	require.Equal(t, at.Add(21*time.Second), got)
+}
+
+// recBeginProxy is a wireProxy that takes a test's recorded begin
+// (coreAgent.RecordedBeginTaker), and says in which order it was given it and
+// opened the test's capture window.
+type recBeginProxy struct {
+	*wireProxy
+	order []string
+	taken []time.Time
+}
+
+func (p *recBeginProxy) TakeRecordedBegin(at time.Time) {
+	p.order, p.taken = append(p.order, "recorded begin"), append(p.taken, at)
+}
+
+func (p *recBeginProxy) ContinueTestErrorCapture() {
+	p.order = append(p.order, "open")
+	p.wireProxy.ContinueTestErrorCapture()
+}
+
+// A replayed test's begin gives the proxy's learn step the instant the test
+// began at in its recording, before the test's capture window opens (the
+// tracker begins the test with it): a test the recording lists no begin of
+// gives none.
+func TestABeginGivesTheLearnStepItsRecordedBegin(t *testing.T) {
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &recBeginProxy{wireProxy: wp}
+	a.Proxy = p
+	ctx := context.Background()
+	claimSelf(t, a)
+	at := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": at}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	require.Equal(t, []string{"recorded begin", "open", "recorded begin", "open"}, p.order)
+	require.Equal(t, []time.Time{at, {}}, p.taken)
+}
+
+// A begin opens the test's capture window, where the proxy's learn tracker
+// begins the test, before it installs the test's view: a tracker that began
+// after it would file what the view served first as the previous test's. A
+// begin whose view the proxy refuses takes the window back, so what it held
+// is carried into the next test's, and is served nothing.
+func TestABeginOpensItsCaptureWindowBeforeItsView(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"), httpMock("mock-4", "GET", "http://h/pool"))
+	a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}, "o::TestB": {"mock-2"}}
+	ctx := context.Background()
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"mock-4"}}))
+	claimSelf(t, a)
+	p.mu.Lock()
+	p.setErr = errors.New("the proxy refused the test's view")
+	p.order = nil
+	p.mu.Unlock()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.NotNil(t, serr, "a begin whose view the proxy refused")
+	p.mu.Lock()
+	require.Equal(t, []string{"continue", "withdraw"}, p.order, "the refused begin's window is taken back, and nothing is served")
+	p.setErr = nil
+	p.order = nil
+	p.mu.Unlock()
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	p.mu.Lock()
+	require.Equal(t, []string{"continue", "serve o::TestB"}, p.order, "the window opens before the view")
+	p.mu.Unlock()
+}
+
+// movingClock is the no-op hooks with a run's clock that a test's begin
+// moves to when the test began in its recording (TestClock), read as the
+// app reads it (AppClockReader): at a real instant, the offset in force then.
+type movingClock struct {
+	AgentHook
+	mu    sync.Mutex
+	moved time.Time     // the real instant of the latest move
+	off   time.Duration // the offset in force from then
+}
+
+func (h *movingClock) BeginTestClock(_ context.Context, _ string, at time.Time) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.moved = time.Now()
+	h.off = at.Sub(h.moved)
+	return nil
+}
+
+func (h *movingClock) EndTestClock(context.Context, string) error { return nil }
+
+func (h *movingClock) AppClock(real time.Time) (time.Time, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.moved.IsZero() || real.Before(h.moved) {
+		return real, true
+	}
+	return real.Add(h.off), true
+}
+
+// trackerProxy is a wireProxy whose capture window begins a learn tracker's
+// test, as the proxy's does (openTestErrorCapture), with the test's
+// recorded begin given first (coreAgent.RecordedBeginTaker).
+type trackerProxy struct {
+	*wireProxy
+	tracker *learn.Tracker
+}
+
+func (p *trackerProxy) TakeRecordedBegin(at time.Time) { p.tracker.RecordedBegin(at) }
+
+func (p *trackerProxy) ContinueTestErrorCapture() {
+	p.tracker.Begin()
+	p.wireProxy.ContinueTestErrorCapture()
+}
+
+// A client test's begin moves the app's clock to when the test began in its
+// recording, and the learn tracker begins the test on the moved clock: the
+// test's first call, which no earlier call bounds, reads its window on the
+// app's clock from the tracker's begin, so a test that stamps its own time
+// (pg-learn-e2e's TestStampAnEvent) is read as a read of the app's clock.
+// A tracker begun before the move gives that call a span the clock did not
+// run as one, so no window, and keploy mock record refuses the test.
+func TestAClientTestsFirstCallHasAWindowOnTheClockItsBeginMoved(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	clock := &movingClock{}
+	ActiveHooks = clock
+	a, wp := wireAgent(t, models.MODE_TEST)
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetAppClock(clock.AppClock)
+	a.Proxy = &trackerProxy{wireProxy: wp, tracker: tr}
+	ctx := context.Background()
+	claimSelf(t, a)
+	recBegan := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestStampAnEvent": recBegan}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestStampAnEvent"))
+	require.Nil(t, serr)
+	wp.mu.Lock()
+	require.Equal(t, []string{"continue", "serve o::TestStampAnEvent"}, wp.order, "the window opens before the view")
+	wp.mu.Unlock()
+
+	paired := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: recBegan.Add(40 * time.Millisecond)}}
+	w := tr.CallWindowFrom(time.Time{}, paired, time.Now())
+	require.NotNil(t, w, "the test's first call has a window on the clock its begin moved")
+	require.Equal(t, recBegan, w.Rec.From, "in the recording, from the test's recorded begin")
+	require.False(t, w.F.From.Before(recBegan), "in this run, from the tracker's begin on the moved clock: %s", w.F.From)
+}
+
+// A begin whose clock cannot be moved fails before the test's capture window
+// opens, so it takes back no window: the previous test's window, and the
+// misses carried since it closed, stay as they were, for the next test.
+func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	ActiveHooks = &clockHooks{err: errors.New("the clock file is read-only")}
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.NotNil(t, serr, "a begin whose clock cannot move")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Empty(t, p.order, "no window opened, none taken back, nothing served")
 }

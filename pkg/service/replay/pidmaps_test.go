@@ -589,7 +589,7 @@ func TestAReusedComposeStackIsMarkedByTheFirstTestSetToReachItsAgent(t *testing.
 // goes on to the next test set rather than ending after this one. With the
 // switch off the set keeps its status, and the prune it holds names the lost
 // count, not an INTERNAL_ERR of keploy's own; under the switch a run prunes
-// nothing at all (removeUnusedMocks is ignored, S12).
+// nothing at all (removeUnusedMocks is ignored).
 func TestUnderTheSwitchASetWhoseCountIsLostIsNotJudged(t *testing.T) {
 	session := []models.MockState{{Name: "mock-session", Kind: models.HTTP, Lifetime: models.LifetimeSession}}
 	// A set that FAILED on its own is not judged either: its failures rest
@@ -1084,7 +1084,7 @@ func TestUnderTheSwitchALossAfterTheLastTestFailsTheSet(t *testing.T) {
 }
 
 // Under the proven switch a run neither prunes mocks nor writes mappings.yaml
-// (removeUnusedMocks is ignored and only record writes mappings, S12), lost
+// (removeUnusedMocks is ignored and only record writes mappings), lost
 // calls or not: a call keploy lost while a test ran, answered by no mock,
 // can never cut a recording down.
 func TestUnderTheSwitchALossWhileATestRanHoldsThePruneAndMappings(t *testing.T) {

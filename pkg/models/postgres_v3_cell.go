@@ -1275,7 +1275,7 @@ const (
 // document's, where it used to fail the mock's load; a value of the right
 // kind that the decoder rejects (an out-of-range field) still fails it.
 var (
-	yamlNumericFields  = map[string]yamlKind{"int": yamlStr | yamlInt, "exp": yamlInt, "nan": yamlBool, "infinitymodifier": yamlInt, "valid": yamlBool}
+	yamlNumericFields  = map[string]yamlKind{"int": yamlStr | yamlInt | yamlNull, "exp": yamlInt, "nan": yamlBool, "infinitymodifier": yamlInt, "valid": yamlBool}
 	yamlIntervalFields = map[string]yamlKind{"microseconds": yamlInt, "days": yamlInt, "months": yamlInt, "valid": yamlBool}
 	yamlTimeFields     = map[string]yamlKind{"microseconds": yamlInt, "valid": yamlBool}
 	yamlBitsFields     = map[string]yamlKind{"bytes": yamlBinary | yamlSeq, "len": yamlInt, "valid": yamlBool}
@@ -1400,10 +1400,16 @@ func decodePgNumericMapping(node *yaml.Node) (pgtype.Numeric, error) {
 		// form back into *big.Int; an empty string keeps Int=nil so
 		// NaN / ±infinity numerics preserve their nil-Int identity.
 		var s string
-		if intNode.Kind == yaml.ScalarNode {
+		switch {
+		case intNode.Kind == yaml.ScalarNode && intNode.Tag == "!!null":
+			// yaml.v3's reflective write of a nil *big.Int, as an
+			// array's NaN or infinite numeric element is written.
+		case intNode.Kind == yaml.ScalarNode:
 			s = intNode.Value
-		} else if err := intNode.Decode(&s); err != nil {
-			return pgtype.Numeric{}, fmt.Errorf("pg/numeric int: %w", err)
+		default:
+			if err := intNode.Decode(&s); err != nil {
+				return pgtype.Numeric{}, fmt.Errorf("pg/numeric int: %w", err)
+			}
 		}
 		if s != "" {
 			bi := new(big.Int)

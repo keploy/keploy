@@ -68,6 +68,16 @@ func (s *setCalls) failing() []models.UnmatchedCall {
 	return dataPlaneCalls(s.calls)
 }
 
+// answers is the set's calls that were answered (models.UnmatchedCall.Answer,
+// proven switch), in the order they were read: the set's answers, which fail
+// nothing (TestReport.SetAnswers).
+func (s *setCalls) answers() []models.UnmatchedCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, answers := splitAnswers(s.calls)
+	return answers
+}
+
 // setCallsWhy says why the set's calls fail it, naming each: today every one
 // was made before the set's first test (setsCall).
 func setCallsWhy(calls []models.UnmatchedCall) string {

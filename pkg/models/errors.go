@@ -122,16 +122,18 @@ const (
 // CountsAgainstTest reports whether a miss is evidence against the test it was
 // made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
 // itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
-// call was made, and a dependency's TCP health check closes the same way).
-// Every verdict, count and evidence line that judges misses reads this.
+// call was made, and a dependency's TCP health check closes the same way). An
+// answered call (Answer, under the proven switch) is no miss, and counts
+// against nothing. Every verdict, count and evidence line that judges misses
+// reads this.
 func (c UnmatchedCall) CountsAgainstTest() bool {
-	return !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
 }
 
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss
 // is made from, for the places that hold the report and not the call.
 func (r *MockMismatchReport) CountsAgainstTest() bool {
-	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase}.CountsAgainstTest()
+	return UnmatchedCall{Protocol: r.Protocol, MatchPhase: r.MatchPhase, Answer: r.Answer}.CountsAgainstTest()
 }
 
 // Destination-scope verdicts recorded on MockMismatchReport.DestinationScope.
@@ -295,7 +297,82 @@ type MockMismatchReport struct {
 	// Concurrent is UnmatchedCall.Concurrent: what the learn step knows of
 	// the tests the call's recordings were made beside.
 	Concurrent *ConcurrentNote
+	// Answer, under the proven switch, says the call WAS answered, and how;
+	// "" for a miss. AnswerProvisional: record's full round answered it with
+	// ClosestMock, a recording another test owns (a pairing),
+	// which judging then moves to the set's background; RecordedIn stays
+	// empty on an answer (the parser's store names no recording's test), and
+	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
+	// drifted, Differs naming the leaves learned as noise.
+	// AnswerByKind: a background write answered by its kind, unchecked;
+	// Reused says the kind's recordings were used up. An answer never counts
+	// against a test and never lands in a miss list. The proxy's sink copies
+	// these to the UnmatchedCall it makes of the report, as it copies the
+	// miss fields.
+	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
+	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
+	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
+	WriteKind string `json:"write_kind,omitempty" yaml:"write_kind,omitempty"`
+	// Source is the process that made the call (Origin's Comm and Exe; Clock
+	// unused), which the proxy's sink fills from the connection's pid, for a
+	// miss and an answer alike.
+	Source *Origin `json:"source,omitempty" yaml:"source,omitempty"`
+	// RecordedIn is UnmatchedCall.RecordedIn, which the sink copies. No
+	// parser fills it: it stays empty on an answer (see Answer), and on a
+	// miss the replay names the owner (UnmatchedCall.RecordedIn).
+	RecordedIn string `json:"recorded_in,omitempty" yaml:"recorded_in,omitempty"`
+	// Mark is where the call's parser found it when the call first read the
+	// round (integrations.StampMark), under the proven switch: the miss was
+	// decided there, so the proxy says whether it was made while the set's
+	// mocks were being staged from it, never from the view serving when the
+	// miss reaches the proxy, which can be the next staging's. RoundUnmarked
+	// (the zero value) from a parser that marks no round. Never written to a
+	// report: the proxy's sink reads it in the agent.
+	Mark RoundMark `json:"-" yaml:"-"`
+	// MarkedInTest is, with Mark set, that the call's first read found a
+	// test's view (integrations.CallRound.InTest): the proxy files the miss
+	// as made in that test (MissInTest), or outside every test when false,
+	// from it, never from the view serving when the miss reaches the proxy,
+	// which can be the pool view after the call's test ended, or the next
+	// test's. Never written to a report.
+	MarkedInTest bool `json:"-" yaml:"-"`
+	// MarkEpoch is, with Mark set, the staging the call's first read was
+	// made in (integrations.CallRound.Epoch): a miss whose call was marked
+	// before a test set's staging is not that set's, however late its
+	// report reaches the proxy (the proxy's set-start cut). Never written
+	// to a report.
+	MarkEpoch uint64 `json:"-" yaml:"-"`
+	// Repeat says the call is identical to a recording an earlier test of
+	// the set made, which already answered that test's call at this replay
+	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but
+	// for a call that is also a recording made elsewhere (NotOwned): that
+	// recording stays ClosestMock, the reason the call missed, and the note
+	// names the earlier one (RepeatNote.Mock, RepeatNote.ExplainMiss). A
+	// pairing's answer (Answer AnswerProvisional, NotOwned) carries it by
+	// the same rule (none for a call one more than the test recorded):
+	// ClosestMock is the recording that answered, and the note names the
+	// earlier one, for information only.
+	Repeat *RepeatNote
 }
+
+// RoundMark is where a call was when its first read of the round was made
+// (MockMismatchReport.Mark).
+type RoundMark uint8
+
+const (
+	// RoundUnmarked: the call's parser marks no round.
+	RoundUnmarked RoundMark = iota
+	// RoundMarkedSettled: the call's first read found a test's view, or a
+	// pool view of a staged set.
+	RoundMarkedSettled
+	// RoundMarkedStaging: the call's first read found the replay staging the
+	// set's mocks, where no recording answers a call.
+	RoundMarkedStaging
+)
+
+// ErrAnswered is what an answer report travels as (ReportAnswer): no miss;
+// nothing returns it.
+var ErrAnswered = errors.New("keploy: an answered call, reported for judging")
 
 // ErrNoMockMatched is the sentinel for a genuine mock miss — an outgoing call
 // for which no recorded mock matched. Protocol parsers wrap it (errors.Is)
@@ -336,6 +413,10 @@ type ParserError struct {
 	// Recorded is, for MissExtraCall, how many times the call was recorded
 	// for the test.
 	Recorded int
+	// Staging is, under exact serving, that the miss was made while the
+	// replay was staging a test set's mocks, which then answer no call: its
+	// read says so in the call's next steps.
+	Staging bool
 }
 
 type ParserErrorType string

@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch/switchtest"
 	"go.keploy.io/server/v3/pkg/service/mock"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -51,8 +52,13 @@ func TestMain(m *testing.M) {
 	// A stop says Ctrl+C stops the agent now this long after its signal
 	// was seen (stopWatch): short, so a test's press waits little.
 	stopWatchOffer = 20 * time.Millisecond
+	// The rows here check the rules with the proven switch off unless a row
+	// turns it on: a KEPLOY_PROVEN this test process inherited chooses nothing.
+	switchtest.Clear()
 	os.Exit(m.Run())
 }
+
+func TestARowStartsWithTheProvenSwitchOff(t *testing.T) { switchtest.OffAtEveryRowsStart(t) }
 
 // agentExit is what cmd.Wait returns for an agent process that ended with
 // status code: a real *exec.ExitError, from a real process -- this test

@@ -100,10 +100,10 @@ func (w *Watermark) behind(start, end time.Time) *waitingOn {
 		s = start.UnixNano()
 	}
 	for _, c := range w.snapshot() {
-		if c.r.carriedNothingIn(s, e) {
+		if c.r.carriedNothingIn(s, e, unstampedInAnyWindow) {
 			continue
 		}
-		if ok, why := c.r.passedThrough(e); !ok {
+		if ok, why := c.r.passedThrough(e, unstampedInAnyWindow); !ok {
 			return &waitingOn{name: c.name, why: why}
 		}
 	}
@@ -169,9 +169,13 @@ func (w *Watermark) Progress() uint64 {
 // is final unless another parser still holds it. What other connections do
 // (consume bytes outside the window, close) is not counted: it says nothing
 // of this verdict, and a busy capture would otherwise keep a test case whose
-// own parser has stopped held for as long as anything else moves. The hold
-// lets such a test case go unsettled only once it stops moving
-// (syncMock.HeldProgressor).
+// own parser has stopped held for as long as anything else moves. So a chunk
+// in a forwarder's hand not stamped yet is passed over until it is stamped
+// (stampsOnly): for that moment it would take in the bytes of a connection
+// that carried nothing within the window, or whose parser is past it, and
+// then drop them. The verdict (behind) still takes it as one that can land in
+// the window. The hold lets such a test case go unsettled only once it stops
+// moving (syncMock.HeldProgressor).
 func (w *Watermark) HeldProgress(_, _ string, start, end time.Time) uint64 {
 	if w == nil || end.IsZero() {
 		return 0
@@ -182,10 +186,10 @@ func (w *Watermark) HeldProgress(_, _ string, start, end time.Time) uint64 {
 	}
 	var n uint64
 	for _, c := range w.snapshot() {
-		if c.r.carriedNothingIn(s, e) {
+		if c.r.carriedNothingIn(s, e, stampsOnly) {
 			continue
 		}
-		if ok, _ := c.r.passedThrough(e); !ok {
+		if ok, _ := c.r.passedThrough(e, stampsOnly); !ok {
 			n += c.r.consumedBytes()
 		}
 	}

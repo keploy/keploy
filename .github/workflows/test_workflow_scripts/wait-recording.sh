@@ -10,6 +10,10 @@
 #
 #     wait_recording_end "$rec_pid" LOG
 #
+# (A lane that needs keploy record's own exit status joins keploy to its tee
+# through a FIFO instead, both its own jobs: see
+# golang/gin_mongo_after_client_close/golang-linux.sh.)
+#
 # A recording that is stopped drains what the agent captured before the stop,
 # and takes as long as that does: on a loaded runner, longer than any fixed
 # sleep. A lane that slept a fixed time instead started its next step while
@@ -59,12 +63,17 @@ wait_recording_end() {
 
 # _recording_quit_writers sends SIGQUIT (a Go process dumps every goroutine to
 # its stderr on it) to the processes whose stdout or stderr is the pipe tee
-# (PID $1) reads, and lists them: the recording's own processes, never another
+# (PID $1) reads, or the FIFO it reads (a lane that joins keploy to its tee
+# through one), and lists them: the recording's own processes, never another
 # job's.
 _recording_quit_writers() {
     local pipe
     pipe=$(readlink "/proc/$1/fd/0" 2>/dev/null) || return 0
-    case $pipe in pipe:*) ;; *) return 0 ;; esac
+    case $pipe in
+    pipe:*) ;;
+    /*) [ -p "$pipe" ] || return 0 ;;
+    *) return 0 ;;
+    esac
     sudo bash -c '
         for fd in /proc/[0-9]*/fd/1 /proc/[0-9]*/fd/2; do
             [ "$(readlink "$fd" 2>/dev/null)" = "$1" ] || continue

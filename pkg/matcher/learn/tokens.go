@@ -24,21 +24,25 @@ func tokenAt(s, v string, i int) bool {
 
 // ContainsToken reports whether s holds v as a token: "/orders/42" holds
 // "42", "order-42x" does not.
-func ContainsToken(s, v string) bool {
+func ContainsToken(s, v string) bool { return tokenIndex(s, v) >= 0 }
+
+// tokenIndex is where s first holds v as a token (ContainsToken), -1 where
+// it does not.
+func tokenIndex(s, v string) int {
 	if v == "" {
-		return false
+		return -1
 	}
 	for i := 0; i <= len(s)-len(v); {
 		j := strings.Index(s[i:], v)
 		if j < 0 {
-			return false
+			return -1
 		}
 		if tokenAt(s, v, i+j) {
-			return true
+			return i + j
 		}
 		i += j + 1
 	}
-	return false
+	return -1
 }
 
 // ReplaceToken is s with each occurrence of v as a token (ContainsToken)

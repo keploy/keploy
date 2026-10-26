@@ -109,6 +109,18 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+	// stagedBackground holds the background rules the agent's answer to the
+	// last staging call said it serves the set by
+	// (models.BackgroundRulesHeader): "" until one says the background rules.
+	stagedBackground atomic.Pointer[string]
+	// clientTestsRead holds whether the agent's answer to the last /mock
+	// said its learn step reads the session's tests as keploy mock's client
+	// tests (models.ClientTestsReadHeader). Every call clears it first.
+	clientTestsRead atomic.Bool
+	// agentVersion holds the keploy version the agent's last successful
+	// answer to /mock or /updatemockparams named (models.AgentVersionHeader):
+	// "" where it named none, and until one is answered.
+	agentVersion atomic.Pointer[string]
 
 	// concurrentServing holds what the agent's last /storemocks answer said
 	// of serving a test the recordings it shares with the tests that ran
@@ -269,6 +281,56 @@ func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
 // and from the start of every StoreMocks.
 func (a *AgentClient) ServesConcurrent() bool {
 	return a.concurrentServing.Load()
+}
+
+// AgentReadsClientTests reports whether the agent's answer to the last /mock
+// said its learn step reads the session's tests as keploy mock's client
+// tests (models.ClientTestsReadHeader). False until an answer says so, and
+// from the start of every call.
+func (a *AgentClient) AgentReadsClientTests() bool {
+	return a.clientTestsRead.Load()
+}
+
+// AgentVersion is the keploy version the agent's last successful answer to
+// /mock or /updatemockparams named (models.AgentVersionHeader;
+// pkg.AgentVersionReader): "" where it named none, as an agent older than
+// this keploy does not, and until one is answered.
+func (a *AgentClient) AgentVersion() string {
+	if v := a.agentVersion.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// noteAgentVersion keeps the version a successful answer's header names
+// (AgentVersion), "" where it names none.
+func (a *AgentClient) noteAgentVersion(h http.Header) {
+	v := h.Get(models.AgentVersionHeader)
+	a.agentVersion.Store(&v)
+}
+
+// SendTestCaseFilter sends params, a filter that opens a test case and
+// carries its request, as UpdateMockParams does, and reports whether the
+// agent's answer to this call said its learn step took the request
+// (models.TestRequestReadHeader; pkg.TestCaseFilterSender): false for an
+// answer that says nothing, and for a call that fails.
+func (a *AgentClient) SendTestCaseFilter(ctx context.Context, params models.MockFilterParams) (bool, error) {
+	header, err := a.updateMockParams(ctx, params)
+	if err != nil {
+		return false, err
+	}
+	return header.Get(models.TestRequestReadHeader) == models.TestRequestRead, nil
+}
+
+// AgentServesBackground is the background rules the agent's answer to the
+// last staging call said it serves the staged set by
+// (models.BackgroundRulesHeader): "" for today's, and until a staging is
+// answered.
+func (a *AgentClient) AgentServesBackground() string {
+	if r := a.stagedBackground.Load(); r != nil {
+		return *r
+	}
+	return ""
 }
 
 // var initStopScript []byte
@@ -877,6 +939,9 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	// Only a successful answer that says so (models.ClientTestsReadHeader)
+	// sets it again below.
+	a.clientTestsRead.Store(false)
 
 	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
 	// agent still sees the toggle.
@@ -922,8 +987,12 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	if readErr != nil {
 		return fmt.Errorf("failed to read response body for mock outgoing: %s", readErr.Error())
 	}
-
-	return agentRespErr("mock outgoing", res, rawBody)
+	if err := agentRespErr("mock outgoing", res, rawBody); err != nil {
+		return err
+	}
+	a.clientTestsRead.Store(res.Header.Get(models.ClientTestsReadHeader) == models.ClientTestsRead)
+	a.noteAgentVersion(res.Header)
+	return nil
 }
 
 // agentRespErr turns an agent reply into the caller's error, and is the ONE
@@ -1434,18 +1503,110 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 	return res, sent, nil
 }
 
+// maxStoreMocksFailBody bounds what of a failed /storemocks reply is read to
+// tell whether it is the pre-stream agent's, which is one type definition of
+// some 50 bytes. A longer reply is still decoded, but is not taken for it.
+const maxStoreMocksFailBody = 64 << 10
+
+// agentGobMediaType is the media type of an agent's gob replies.
+const agentGobMediaType = "application/x-gob"
+
+// preStreamAgentReply reports whether a failed /storemocks reply is the one an
+// agent from before the mock stream gives: under the agent's gob media type,
+// one or more whole gob messages that each define a type, and nothing after
+// them, so the decoder read them all and then met the end where the value
+// should be (decodeErr is io.ErrUnexpectedEOF). That agent's encoder sends the
+// AgentResp type whole and fails on the value's error, which it cannot encode.
+func preStreamAgentReply(contentType string, body []byte, decodeErr error) bool {
+	if !errors.Is(decodeErr, io.ErrUnexpectedEOF) {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != agentGobMediaType || len(body) > maxStoreMocksFailBody {
+		return false
+	}
+	return gobTypeDefinitionsOnly(body)
+}
+
+// gobTypeDefinitionsOnly reports whether b is one or more whole gob messages
+// (a byte count, then that many bytes), each opening with a negative type id,
+// which marks a type definition, and ends where the last one ends. A value's
+// message opens with its type's positive id.
+func gobTypeDefinitionsOnly(b []byte) bool {
+	messages := 0
+	for len(b) > 0 {
+		size, rest, ok := gobUint(b)
+		if !ok || size > uint64(len(rest)) {
+			return false
+		}
+		// An empty message has no type id, and fails here.
+		id, _, ok := gobUint(rest[:size])
+		// gob sends a signed int as a uint whose low bit is the sign: an
+		// odd one is negative.
+		if !ok || id&1 == 0 {
+			return false
+		}
+		b = rest[size:]
+		messages++
+	}
+	return messages > 0
+}
+
+// gobUint reads one gob unsigned integer off the front of b: a byte below 128
+// is its value, and a higher one is minus the count (at most 8) of the
+// big-endian bytes that follow and hold it.
+func gobUint(b []byte) (uint64, []byte, bool) {
+	if len(b) == 0 {
+		return 0, nil, false
+	}
+	if b[0] < 0x80 {
+		return uint64(b[0]), b[1:], true
+	}
+	n := -int(int8(b[0]))
+	if n > 8 || len(b) < 1+n {
+		return 0, nil, false
+	}
+	var x uint64
+	for _, c := range b[1 : 1+n] {
+		x = x<<8 | uint64(c)
+	}
+	return x, b[1+n:], true
+}
+
 // decodeStoreMocksResp reads the agent's single AgentResp gob reply.
 func decodeStoreMocksResp(res *http.Response) error {
 	// Non-2xx? Try to decode anyway; if that fails, return status text.
 	// An OLD agent reaches the decode failure here on every error: its gob
-	// encode aborted on the `error` interface field, having already written a
-	// PARTIAL type descriptor, so the decode fails with "unexpected EOF" on a
-	// truncated value rather than on an empty body — hence the bare
+	// encode aborted on the `error` interface field, having already written
+	// the AgentResp type's definition but none of the value, so the decode
+	// fails with "unexpected EOF" rather than on an empty body — hence the bare
 	// "storemocks http 500" this used to give. Unchanged for an old agent;
 	// a new one now carries its reason in ErrorMsg.
+	//
+	// A 400 whose reply is that type with no value is the agent from before
+	// the stream: it fails to read the stream's header on every call. The
+	// call is exact, since a caller may take the error as permanent and stop
+	// retrying the agent: the reply is application/x-gob, as every agent's
+	// /storemocks sets it, and it holds whole type definitions and then ends,
+	// where the value would be (preStreamAgentReply). A text 400, from a
+	// proxy or middleware in front of the agent (http.Error) or from net/http
+	// itself, keeps the plain error: a short one fails with
+	// io.ErrUnexpectedEOF too, since gob reads its first byte as a message
+	// length. An empty 400 and a reply cut short keep it too. An agent that
+	// reads the stream but not its reason in ErrorMsg (keploy v3.5.85 to v3.6.61)
+	// sends the same type with no value when its service fails, as a 500,
+	// which the next call may pass; it answers 400 only to a header it cannot
+	// read, which this side sends compressed only to an agent that says it
+	// reads zstd (v3.6.99 on).
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, readErr := io.ReadAll(io.LimitReader(res.Body, maxStoreMocksFailBody+1))
 		var fail models.AgentResp
-		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
+		// The decode goes on past the bound, so a reason of any length is
+		// still read; the bytes past it are not judged.
+		if err := gob.NewDecoder(io.MultiReader(bytes.NewReader(body), res.Body)).Decode(&fail); err != nil {
+			if res.StatusCode == http.StatusBadRequest && readErr == nil && preStreamAgentReply(res.Header.Get("Content-Type"), body, err) {
+				return fmt.Errorf("storemocks http %d: %w", res.StatusCode, models.ErrAgentPredatesMockStream)
+			}
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
 		}
 		if msg := fail.ErrorMsg; msg != "" {
@@ -1473,7 +1634,14 @@ func decodeStoreMocksResp(res *http.Response) error {
 	return nil
 }
 
-func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) (retErr error) {
+func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	_, err := a.updateMockParams(ctx, params)
+	return err
+}
+
+// updateMockParams is UpdateMockParams, with the headers of the agent's
+// answer to this call (nil for a call that fails).
+func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFilterParams) (_ http.Header, retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
@@ -1483,6 +1651,12 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
+	// Nor does it believe a staging's background rules (stagedBackground)
+	// until the agent's answer to it says them.
+	if ex := params.Exact; ex != nil && ex.Stage {
+		none := ""
+		a.stagedBackground.Store(&none)
+	}
 	requestBody := models.UpdateMockParamsReq{
 		FilterParams: params,
 	}
@@ -1490,19 +1664,19 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for updatemockparams")
-		return fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
+		return nil, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
-		return fmt.Errorf("error creating request for update mock params: %s", err.Error())
+		return nil, fmt.Errorf("error creating request for update mock params: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
+		return nil, fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
 	defer func() {
 		io.Copy(io.Discard, res.Body)
@@ -1513,14 +1687,19 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 
 	rawBody, readErr := readAgentBody(res)
 	if readErr != nil {
-		return fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
+		return nil, fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
 	if err := agentRespErr("update mock params", res, rawBody); err != nil {
-		return err
+		return nil, err
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
-	return nil
+	a.noteAgentVersion(res.Header)
+	if ex := params.Exact; ex != nil && ex.Stage {
+		rules := res.Header.Get(models.BackgroundRulesHeader)
+		a.stagedBackground.Store(&rules)
+	}
+	return res.Header, nil
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
@@ -1962,6 +2141,11 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
 		"--mode", string(opts.Mode),
+	}
+	// The pid namespace the pid is this process's in, so the agent takes it
+	// only where it names this process (utils.ClientPIDHere).
+	if ns := utils.OwnPIDNamespace(); ns != "" {
+		args = append(args, "--client-pid-ns", ns)
 	}
 
 	extraArgs := opts.ExtraArgs
