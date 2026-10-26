@@ -404,6 +404,11 @@ func (s *diffSide) stage(start, end time.Time) {
 // of the pools a later command reads.
 func (s *diffSide) match(ctx context.Context, req mysql.Request, eng *schemanoise.Engine, fullScan bool) string {
 	resp, ok, miss, err := replayer.MatchCommandForTest(ctx, zap.NewNop(), req, s.mm, s.dctx, eng, fullScan)
+	return s.describe(resp, ok, miss, err)
+}
+
+// describe is what match returns for a command matched as resp, ok, miss, err.
+func (s *diffSide) describe(resp *mysql.Response, ok bool, miss string, err error) string {
 	var b strings.Builder
 	if resp != nil {
 		body, _ := json.Marshal(resp.Message)

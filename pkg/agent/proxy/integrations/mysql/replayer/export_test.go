@@ -63,3 +63,24 @@ func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db inte
 	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, eng, nil, matchOptions{fullScan: fullScan, examined: &examined})
 	return resp, ok, examined, err
 }
+
+// MatchCommandBodiesForTest is MatchCommandForTest that also returns how many
+// live request bodies the command built (matchOptions.bodiesBuilt). With eager
+// it builds the body before the scan, as the matcher did before it built the
+// body on first read (matchOptions.eagerBody).
+func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
+	built := 0
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{bodiesBuilt: &built, eagerBody: eager})
+	missText := ""
+	if miss != nil {
+		missText = fmt.Sprintf("%+v", *miss)
+	}
+	return resp, ok, missText, built, err
+}
+
+// NoiseEngineForTest is the schema-noise engine matchCommand runs with, with
+// detection (auto-replay learning request-body noise) and strict enforcement
+// on or off.
+func NoiseEngineForTest(detection, strict bool) *schemanoise.Engine {
+	return schemanoise.New(mysqlNoiseAdapter{}, detection, strict)
+}

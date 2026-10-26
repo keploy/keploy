@@ -39,8 +39,7 @@ func TestStrictGate_ExecuteTypesAreComparedOnlyWhenBothPacketsSentThem(t *testin
 		{"both sent other types", executeBundle(1, param{Type: 254, Value: "a"}), executeBundle(1, param{Type: 253, Value: "a"}), false, "body.parameters.0.type"},
 	} {
 		live := tc.live
-		liveBody, _ := mysqlRequestBodyJSON(&live)
-		gate := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &live, liveBody, true, nil)
+		gate := newStrictGate(mocknoise.New(mysqlNoiseAdapter{}, false, true), zap.NewNop(), "COM_STMT_EXECUTE", &live, -1, nil)
 		rec := &models.Mock{Name: "rec", Kind: models.MySQL}
 		rec.Spec.MySQLRequests = []mysql.Request{{PacketBundle: tc.rec}}
 		if got := gate.allows(rec); got != tc.allowed {
