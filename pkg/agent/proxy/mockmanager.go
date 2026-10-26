@@ -169,10 +169,17 @@ type MockManager struct {
 	cursorMu sync.Mutex
 	cursors  map[string]int
 	// testCursors are, under exact serving, each test view's own cursors by
-	// its number (cursorSlotIn): one is made as its view is installed and
-	// dropped once another replaced it, so a test's sequences start empty
-	// and an ended test's late commit moves nothing. Guarded by cursorMu.
+	// its number (cursorSlotIn): one is made as its view is installed, so a
+	// test's sequences start empty. Once another view replaced it, it is
+	// closed (closedTests) and kept: only a call read in that test reaches
+	// it, and such a call walked after the test ended reads and moves the
+	// test's sequence where the test left it. Closed ones are dropped at the
+	// next staging (ResetStatefulCursors). Guarded by cursorMu.
 	testCursors map[uint64]map[string]int
+	// closedTests are the numbers of the test views another view replaced
+	// (closeTestCursors), whose cursors the next staging drops. Guarded by
+	// cursorMu.
+	closedTests map[uint64]struct{}
 	// kept are the per-test recordings an exact match kept for its test's
 	// byte-identical repeats (integrations.RepeatKeeper), by key (a worker's
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
@@ -2024,7 +2031,9 @@ func (m *MockManager) MockCursorIndex(key string, n int) int {
 
 // cursorIndexAt is MockCursorIndex at a cursor slot already resolved
 // (cursorSlotIn, backgroundCursorKey). A slot of a test view no longer in
-// force reads 0.
+// force reads where its test's calls left it (closeTestCursors), so a call
+// read in the test and walked after it ended answers what it would have
+// answered before; once the next set is staged, 0.
 func (m *MockManager) cursorIndexAt(slot cursorSlot, n int) int {
 	if n <= 1 {
 		// Zero or one recorded response: always the first (only) one — identical
@@ -2055,7 +2064,10 @@ func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
 
 // advanceCursorAt is AdvanceMockCursor at a cursor slot already resolved
 // (cursorSlotIn, backgroundCursorKey). A commit to a test view no longer in
-// force moves nothing: that test is over.
+// force moves that test's own sequence, which only calls read in the test
+// walk (closeTestCursors): two calls read in the test and walked after its
+// end answer in record order, wherever the end lands between them. Once the
+// next set is staged it moves nothing.
 func (m *MockManager) advanceCursorAt(slot cursorSlot, servedIdx, n int) {
 	if n <= 1 {
 		return
@@ -2301,10 +2313,15 @@ func clampCursor(cur, n int) int {
 // stateful sequence starts from its first recorded response. The agent calls it
 // once per test-set (on the staging call) via the StatefulCursorResetter
 // capability, so a sequence spans a whole test-set but does not carry across
-// sets. Safe to call when no cursors exist.
+// sets. An ended test's frozen cursors (closeTestCursors) are dropped. Safe
+// to call when no cursors exist.
 func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
+	for gen := range m.closedTests {
+		delete(m.testCursors, gen)
+	}
+	m.closedTests = nil
 	for gen := range m.testCursors {
 		m.testCursors[gen] = make(map[string]int)
 	}

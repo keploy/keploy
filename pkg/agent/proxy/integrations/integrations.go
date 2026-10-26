@@ -324,8 +324,10 @@ func SequenceViewOf(db MockMemDb) (SequenceView, bool) {
 type SequenceView struct {
 	// Cursor is the view's stateful cursor (MockCursor), its keys and served
 	// marks resolved once: between tests the pool slice's, in a test the
-	// test's own, empty when the test opens (a retry too) and gone once it
-	// ends, so a commit that lands after that moves nothing.
+	// test's own, empty when the test opens (a retry too). Once the test
+	// ends it is kept for the calls read in the test: one walked after the
+	// end reads and moves the test's sequence where the test's calls left
+	// it, never the next view's, until the next set is staged.
 	Cursor MockCursor
 	// Test is the open test, "" between tests.
 	Test string

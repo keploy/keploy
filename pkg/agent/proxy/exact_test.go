@@ -296,7 +296,8 @@ func TestPoolCursorsAreEachKeysOwn(t *testing.T) {
 // served mark, a Postgres session sequence) is not answered the first
 // recording at every ask, another ask's answer passed for this one's. The
 // test's cursor is its own: the next test, and the same test opened again (a
-// retry), start the sequence over, and an ended test's cursors are dropped.
+// retry), start the sequence over, and an ended test's cursors are kept
+// for its own calls only until the next staging.
 func TestARequestRecordedTwiceInATestAnswersInRecordOrder(t *testing.T) {
 	mm := stagedManager(t, nil, nil)
 	const seq = "postgres-v3/session-sequence\x00probe"
@@ -330,7 +331,7 @@ func TestARequestRecordedTwiceInATestAnswersInRecordOrder(t *testing.T) {
 		t.Fatalf("the test opened again answered %v; want its sequence started over", got)
 	}
 	// The next test, opened right after: a call of its answered as its view
-	// goes in, before the ended test's cursors are dropped, keeps its place.
+	// goes in, before the ended test's cursors are closed, keeps its place.
 	var early []int
 	mm.exact.beforeBump = func(*exactView) { early = append(early, ask(seq)) }
 	mm.ServeExactTest("U", nil)
@@ -342,19 +343,27 @@ func TestARequestRecordedTwiceInATestAnswersInRecordOrder(t *testing.T) {
 	if got := asks(seq, 1); !reflect.DeepEqual(got, []int{1}) {
 		t.Fatalf("between tests after the tests: %v; want the pool's own cursor, moved once", got)
 	}
-	// A test's cursors go with its view: nothing of an ended test is kept.
+	// An ended test's cursors are closed with its view and kept for the
+	// calls read in it, and the next staging drops them: nothing of an
+	// ended test is kept past its set.
+	mm.cursorMu.Lock()
+	if len(mm.testCursors) == 0 || len(mm.closedTests) != len(mm.testCursors) {
+		t.Fatalf("the ended tests' cursors %v, closed %v; want each kept, closed, until the next staging", mm.testCursors, mm.closedTests)
+	}
+	mm.cursorMu.Unlock()
+	mm.ResetStatefulCursors()
 	mm.cursorMu.Lock()
 	defer mm.cursorMu.Unlock()
-	if len(mm.testCursors) != 0 {
-		t.Fatalf("an ended test's cursors are kept: %v", mm.testCursors)
+	if len(mm.testCursors) != 0 || len(mm.closedTests) != 0 {
+		t.Fatalf("an ended test's cursors are kept past the staging: %v %v", mm.testCursors, mm.closedTests)
 	}
 }
 
 // A call peeks at its sequence and commits after it answers; a view installed
 // between the two (a test opening or ending) does not move the next view's
 // sequence by the peeked one's position. Through one SequenceView the commit
-// moves the sequence it peeked: the pool's own, or nothing for a test that
-// ended (its cursors are gone, and a late commit keeps none).
+// moves the sequence it peeked: the pool's own, or the ended test's own,
+// which no other view reads.
 func TestAPeekAndItsCommitMoveOneViewsSequence(t *testing.T) {
 	const key = "postgres-v3/session-sequence\x00probe"
 	view := func(mm *MockManager) integrations.MockCursor {
@@ -426,10 +435,82 @@ func TestAPeekAndItsCommitMoveOneViewsSequence(t *testing.T) {
 		}
 		mm.cursorMu.Lock()
 		defer mm.cursorMu.Unlock()
-		if len(mm.testCursors) != 0 || len(mm.cursors) != 0 {
-			t.Fatalf("a commit after its test ended kept a cursor: %v %v", mm.testCursors, mm.cursors)
+		if len(mm.cursors) != 0 {
+			t.Fatalf("a commit after its test ended moved the pool's cursors: %v", mm.cursors)
+		}
+		for gen, cursors := range mm.testCursors {
+			if cursors[key] != 3 {
+				t.Fatalf("a commit after its test ended (test view %d): %v; want the test's own sequence moved past the 2 it peeked", gen, cursors)
+			}
 		}
 	})
+}
+
+// A call read in a test and walked after the test ended (a session query in
+// flight across the test's end, a held store's sequence view) reads the
+// position the test's calls reached, so it is answered what it would have
+// been answered before the end, never the test's first recording again.
+// Its commit moves that test's own sequence, which no other view reads, so
+// two calls read in the test and walked after it answer in record order
+// wherever the end lands between them: neither answer depends on when the
+// end lands. The next test's sequence starts at its own start, and the
+// next staging drops the ended test's cursors.
+func TestACallReadInATestAndWalkedAfterItEndedReadsWhereTheTestLeftIt(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const key, n = "postgres-v3/session-sequence\x00probe", 5
+	for _, endBeforeXCommits := range []bool{false, true} {
+		t.Run(fmt.Sprintf("the end lands before the first late call commits=%v", endBeforeXCommits), func(t *testing.T) {
+			mm := stagedManager(t, nil, nil)
+			mm.ServeExactPool("-", nil)
+			mm.ServeExactTest("T", nil)
+			sv, ok := mm.SequenceView()
+			if !ok {
+				t.Fatal("no sequence view under exact serving")
+			}
+			c := sv.Cursor
+			for i := 0; i < 2; i++ {
+				c.AdvanceMockCursor(key, c.MockCursorIndex(key, n), n)
+			}
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			// X, read in T, peeks before T ends; Y, read in T too, is walked
+			// after T ended.
+			x := c.MockCursorIndex(key, n)
+			if !endBeforeXCommits {
+				c.AdvanceMockCursor(key, x, n)
+			}
+			mm.ServeExactPool("-", nil) // T ends
+			if endBeforeXCommits {
+				c.AdvanceMockCursor(key, x, n)
+			}
+			hv, ok := integrations.SequenceViewOf(held)
+			if !ok || hv.Test != "T" {
+				t.Fatalf("the held call's view is test %q (%v); want T's", hv.Test, ok)
+			}
+			if x != 2 {
+				t.Fatalf("X, read in T after two asks, peeked %d; want 2", x)
+			}
+			for name, cur := range map[string]integrations.MockCursor{"the view it read": c, "the held store's view": hv.Cursor} {
+				if got := cur.MockCursorIndex(key, n); got != 3 {
+					t.Fatalf("%s: Y, read in T and walked after T ended, reads %d; want 3, the next of T's sequence (0 re-walks T from its start, 2 answers X's recording again)", name, got)
+				}
+			}
+			if now, _ := mm.SequenceView(); now.Cursor.MockCursorIndex(key, n) != 0 {
+				t.Fatal("a commit of a call read in T moved the pool's sequence")
+			}
+			mm.ServeExactTest("U", nil)
+			if now, _ := mm.SequenceView(); now.Cursor.MockCursorIndex(key, n) != 0 {
+				t.Fatal("the next test's sequence does not start at its own start")
+			}
+			mm.ResetStatefulCursors()
+			if got := c.MockCursorIndex(key, n); got != 0 {
+				t.Fatalf("after the next staging, T's cursor still reads %d; want it dropped", got)
+			}
+			hv.Cursor.AdvanceMockCursor(key, 3, n)
+			if got := c.MockCursorIndex(key, n); got != 0 {
+				t.Fatalf("after the next staging, a commit of a call read in T moved %d; want nothing kept", got)
+			}
+		})
+	}
 }
 
 // openingAt is the manager whose next test opens (open, once) between a

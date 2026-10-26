@@ -2204,7 +2204,8 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 
 // cursorSlot is where a stateful cursor key is kept (cursorSlotIn): in the
 // store-wide map under key, or, for gen > 0, in the cursors of the test view
-// numbered gen (openTestCursors), which hold only while that view is in force.
+// numbered gen (openTestCursors), which only calls read in that view reach,
+// in force or ended (closeTestCursors).
 type cursorSlot struct {
 	key string
 	gen uint64
@@ -2243,13 +2244,24 @@ func (m *MockManager) openTestCursors(gen uint64) {
 	m.testCursors[gen] = make(map[string]int)
 }
 
-// closeTestCursors drops the cursors of the test view numbered gen once
-// another view replaced it: a commit that lands after is refused
-// (advanceCursorAt), so no ended test's cursor is kept.
+// closeTestCursors closes the cursors of the test view numbered gen once
+// another view replaced it, and keeps them: no other view reads them (a
+// retry or the next test gets a view of its own number), so only a call
+// read in the test (a held store's sequence view, one SequenceView) reaches
+// them. Such a call walked after the test ended reads the position the
+// test's calls reached and moves it (cursorIndexAt, advanceCursorAt), so
+// its answer never depends on when the end lands. The next staging drops
+// them (ResetStatefulCursors).
 func (m *MockManager) closeTestCursors(gen uint64) {
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
-	delete(m.testCursors, gen)
+	if _, open := m.testCursors[gen]; !open {
+		return
+	}
+	if m.closedTests == nil {
+		m.closedTests = make(map[uint64]struct{}, 2)
+	}
+	m.closedTests[gen] = struct{}{}
 }
 
 // SequenceView is, under exact serving, the stateful cursor of the view in
