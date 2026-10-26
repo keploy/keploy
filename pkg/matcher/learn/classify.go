@@ -953,6 +953,11 @@ func stricterOf(asPlace, asLate Learned) Learned {
 		}
 		return asLate
 	}
+	if asPlace.Kind == KindUnaccounted && asLate.Kind == KindUnaccounted && !asLate.NotFollowed {
+		// Both refuse it, and one for no limit of keploy's: it may be the
+		// app's change, so it is not keploy's limit.
+		asPlace.NotFollowed = false
+	}
 	return asPlace
 }
 
@@ -1071,15 +1076,6 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
-		// Noise only where no word of what changed comes back in the
-		// call's own answer: an id sent inside a longer value (a GraphQL
-		// argument, an OData filter) that the answer holds is an echo keploy
-		// cannot answer with this run's value.
-		if ln.Kind == KindNoise {
-			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
-				ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, true
-			}
-		}
 		// Words the word rule let go in record's full round: noise only
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood
@@ -1101,6 +1097,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					why, notFollowed = fol.refuted+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", true
 				}
 				ln.Kind, ln.Why, ln.Echo, ln.NotFollowed = KindUnaccounted, why, nil, notFollowed
+			}
+		}
+		// Noise only where no word of what changed comes back in the
+		// call's own answer: an id sent inside a longer value (a GraphQL
+		// argument, an OData filter) that the answer holds is an echo keploy
+		// cannot answer with this run's value. Asked after the follows
+		// check, whose refusal (keploy cannot tell) carries no cause and so
+		// must stand over keploy's limit.
+		if ln.Kind == KindNoise {
+			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
+				ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, true
 			}
 		}
 		out = append(out, ln)

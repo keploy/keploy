@@ -1997,7 +1997,13 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 				limit(why)
 				continue
-			case !own || !from.Own:
+			}
+			// The app's change, whatever keploy can follow: asked before
+			// keploy's limits for this leaf, which must never hide it.
+			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
+				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded", ""
+			}
+			if !own || !from.Own {
 				limit(r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables")
 				continue
 			}
@@ -2005,9 +2011,6 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !ok {
 				limit(r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)")
 				continue
-			}
-			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
-				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded", ""
 			}
 			if limited != "" {
 				// The call is refused for keploy's limit: its app-change

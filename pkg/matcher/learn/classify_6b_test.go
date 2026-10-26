@@ -35,3 +35,17 @@ func TestUnescapedReadsEveryFourDigitEscape(t *testing.T) {
 		}
 	}
 }
+
+// Two readings that both refuse a leaf leave it keploy's limit only when
+// both say so: one that refuses it for no limit of keploy's may be the
+// app's change.
+func TestStricterOfLeavesKeploysLimitOnlyWhenBothSaySo(t *testing.T) {
+	limit := Learned{Kind: KindUnaccounted, Why: "echoed inside a longer value", NotFollowed: true}
+	plain := Learned{Kind: KindUnaccounted, Why: "nothing explains it"}
+	if got := stricterOf(limit, plain); got.NotFollowed {
+		t.Fatalf("one reading refuses it for no limit of keploy's, yet it is keploy's: %+v", got)
+	}
+	if got := stricterOf(limit, limit); !got.NotFollowed {
+		t.Fatalf("both readings say it is keploy's limit, yet it is not: %+v", got)
+	}
+}
