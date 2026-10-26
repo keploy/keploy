@@ -250,7 +250,8 @@ func (t *Tracker) NewSet() {
 }
 
 // Warm reads, in the background, what each of the mocks' texts reads as
-// (ReadRaw: its other forms and its words by reading) into the set's text
+// (ReadRaw: its other forms, its words by reading, and the instants of its
+// text and its other forms) into the set's text
 // cache, the one every test's learn step of the set reads (Begin keeps it):
 // a learned call then finds the set's recordings read, instead of reading
 // every recording made before it while its caller waits. What a text reads
@@ -286,7 +287,15 @@ func (t *Tracker) Warm(lists ...[]*models.Mock) {
 				continue
 			}
 			if r, err := ReadRaw(m, false); err == nil && r.Text() != "" {
-				c.tokensOf(r.Text())
+				// Its words, and the instants of its text and its other
+				// forms, as a learned call reads an earlier place
+				// (heldIn).
+				text := r.Text()
+				c.tokensOf(text)
+				c.spansOf(text)
+				if extra := c.extraOf(text); extra != "" {
+					c.spansOf(extra)
+				}
 			}
 		}
 	}()

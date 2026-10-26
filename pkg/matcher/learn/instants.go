@@ -279,17 +279,117 @@ func isEpochText(s string) bool {
 // its time groups, unkeyed.
 func instantSpans(s string) []instant {
 	var out []instant
+	for _, seg := range instantSegments(s) {
+		out = append(out, instantSpansIn(s, seg[0], seg[1])...)
+	}
+	return out
+}
+
+// instantSegments are the stretches of s that can hold an instant, in order:
+// each a longest run of the bytes some clock layout reads (instantByte) that
+// holds an ASCII digit. Every layout's match holds an ASCII digit and only
+// such bytes, so none crosses a stretch's end, and one found in a stretch is
+// the one found in s: a layout's patterns read text only, never what stands
+// outside it. A long payload is so read where its values are, not whole, six
+// times over.
+func instantSegments(s string) [][2]int {
+	var out [][2]int
+	for i := 0; i < len(s); {
+		if !instantByte[s[i]] {
+			i++
+			continue
+		}
+		j, digit := i, false
+		for j < len(s) && instantByte[s[j]] {
+			digit = digit || s[j] >= '0' && s[j] <= '9'
+			j++
+		}
+		if digit {
+			out = append(out, [2]int{i, j})
+		}
+		i = j
+	}
+	return out
+}
+
+// instantByte are the bytes a clock layout's pattern reads in either case:
+// digits, the letters of its words (weekday, month and zone names, T, Z, a
+// UUID's hex), the separators " ,:+-.", and every byte past ASCII, which a
+// case fold may read as a letter ("ſ" as "s").
+var instantByte = func() (b [256]bool) {
+	for c := '0'; c <= '9'; c++ {
+		b[c] = true
+	}
+	for _, c := range "abcdefghijlmnoprstuvwyz" {
+		b[c], b[c-'a'+'A'] = true, true
+	}
+	for _, c := range " ,:+-." {
+		b[c] = true
+	}
+	for c := 0x80; c <= 0xff; c++ {
+		b[c] = true
+	}
+	return b
+}()
+
+// layoutsIn says, of each clock layout, whether seg can hold a match of it:
+// what every match of the layout holds, read in one pass, so a layout's
+// pattern runs only where it can match. RFC 1123 holds ", " and ":"; ISO 8601
+// a date, ten bytes with "-"; the compact form fifteen bytes with a "T"; a
+// UUID thirty-six bytes with "-"; an epoch ten digits in a row; a time of day
+// five bytes with ":". A layout past these six is always read.
+func layoutsIn(seg string) (can [6]bool) {
+	var comma, colon, dash, tee bool
+	run, longest := 0, 0
+	for i := 0; i < len(seg); i++ {
+		switch c := seg[i]; {
+		case c >= '0' && c <= '9':
+			run++
+			if run > longest {
+				longest = run
+			}
+			continue
+		case c == ',':
+			comma = true
+		case c == ':':
+			colon = true
+		case c == '-':
+			dash = true
+		case c == 'T' || c == 't':
+			tee = true
+		}
+		run = 0
+	}
+	n := len(seg)
+	can[0] = comma && colon && n >= 29
+	can[1] = dash && n >= 10
+	can[2] = tee && n >= 15
+	can[3] = dash && n >= 36
+	can[4] = longest >= 10
+	can[5] = colon && n >= 5
+	return can
+}
+
+// instantSpansIn are instantSpans' instants of s that stand in s[from:to], a
+// stretch of instantSegments.
+func instantSpansIn(s string, from, to int) []instant {
+	var out []instant
 	var taken []bool
+	can := layoutsIn(s[from:to])
 	for k, re := range instantRes {
+		if k < len(can) && !can[k] {
+			continue
+		}
 		lay := clockLayouts[k]
-		for _, m := range re.FindAllStringIndex(s, -1) {
+		for _, m := range re.FindAllStringIndex(s[from:to], -1) {
+			m[0], m[1] = m[0]+from, m[1]+from
 			if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
 				continue
 			}
 			if taken != nil {
 				free := true
 				for i := m[0]; i < m[1]; i++ {
-					if taken[i] {
+					if taken[i-from] {
 						free = false
 						break
 					}
@@ -312,12 +412,12 @@ func instantSpans(s string) []instant {
 				sp.key, sp.wall, sp.res, sp.zone, sp.zoned, sp.keyed = mo.key, mo.wall, res, mo.zone, mo.zoned, true
 			}
 			if taken == nil {
-				taken = make([]bool, len(s))
+				taken = make([]bool, to-from)
 			}
 			// The whole match is taken, a UUID's other groups too: no
 			// later layout reads an instant inside it.
 			for i := m[0]; i < m[1]; i++ {
-				taken[i] = true
+				taken[i-from] = true
 			}
 			out = append(out, sp)
 		}
