@@ -1032,38 +1032,71 @@ func TestHandleHttp1ZeroCopy_AKeepAliveConnectionIsCapturedAgainAfterAPause(t *t
 }
 
 // In the synchronous loop an exchange whose capture a pause decided against is
-// counted as not recorded, once, whichever of the loop's checks saw the pause;
-// one that came while recording ran is captured and counts nothing.
+// counted as not recorded, once, whichever of the loop's checks saw the pause:
+// the one as its request is read, or one of those that read a pause that began
+// mid-exchange (before its request is forwarded, after its response's
+// headers, after its response). One that came while recording ran is captured
+// and counts nothing. A pause that began mid-exchange and that a check read
+// without its count was a request lost without a word.
 func TestHandleHttp1Connection_SyncCountsAnExchangeAPauseCost(t *testing.T) {
-	var paused atomic.Bool
-	stubIngressPaused(t, paused.Load)
-	mgr := syncMock.New(zap.NewNop())
+	// The pause begins at the loop's from-th check of it, and stays: what
+	// the n-th check reads, in the order the exchange reads them; never
+	// for from 0.
+	var checks atomic.Int32
+	var from atomic.Int32
+	stubIngressPaused(t, func() bool {
+		n := checks.Add(1)
+		return from.Load() > 0 && n >= from.Load()
+	})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(upstream.Close)
-	captured := make(chan string, 4)
+	captured := make(chan string, 8)
 	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
 		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
 		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
 		captured <- req.URL.Path
 	})
 	app := strings.TrimPrefix(upstream.URL, "http://")
-	for _, during := range []bool{true, false} {
-		paused.Store(during)
-		pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true}
-		ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
-		client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
-		pausedExchange(t, client, bufio.NewReader(client), "/x", true)
-		<-done
-		pm.captures.Wait()
-		cancel()
-	}
-	if len(captured) != 1 {
-		t.Fatalf("captured %d exchanges, want the one that came while recording ran", len(captured))
-	}
-	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 || got.Connections() != 1 {
-		t.Fatalf("not recorded under pressure: %+v, want the one exchange that came during the pause", got)
+	for _, c := range []struct {
+		what string
+		from int32
+	}{
+		{what: "a pause as the request is read", from: 1},
+		{what: "a pause that begins before the request is forwarded", from: 2},
+		{what: "a pause that begins after the response's headers", from: 3},
+		{what: "a pause that begins after the response", from: 4},
+		{what: "no pause"},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			checks.Store(0)
+			from.Store(c.from)
+			mgr := syncMock.New(zap.NewNop())
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
+			pausedExchange(t, client, bufio.NewReader(client), "/x", true)
+			<-done
+			pm.captures.Wait()
+			if got := checks.Load(); c.from > got {
+				t.Fatalf("the exchange read the pause %d times: check %d is never made", got, c.from)
+			}
+			wantCaptured, wantCounted := 0, uint64(1)
+			if c.from == 0 {
+				wantCaptured, wantCounted = 1, 0
+			}
+			if n := len(captured); n != wantCaptured {
+				t.Fatalf("captured %d exchanges, want %d", n, wantCaptured)
+			}
+			for len(captured) > 0 {
+				<-captured
+			}
+			if got := mgr.NotRecordedUnderPressure(); got.Total != wantCounted || got.Connections() != int(wantCounted) {
+				t.Fatalf("not recorded under pressure: %+v, want %d", got, wantCounted)
+			}
+		})
 	}
 }
 

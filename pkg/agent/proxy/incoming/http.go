@@ -350,11 +350,23 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// When true, expected close errors are handled gracefully (DEBUG level),
 		// the sampling lock is released early, and the loop exits after one exchange.
 		noteIngressRequest()
-		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
-		captureEnabled := !isIngressRecordingPaused()
+		pausedAtRequest := isIngressRecordingPaused()
+		pressureCloseMode := forceCloseMode || pausedAtRequest
+		captureEnabled := !pausedAtRequest
 		// lostToPause: a pause of the memory guard decided this exchange is
 		// not recorded, at any of the checks below; counted once, as it ends.
 		lostToPause := !captureEnabled
+		// pausedNow is every check below of a pause that began mid-exchange:
+		// when the memory guard has paused recording, the exchange is lost
+		// to the pause (lostToPause), so no check can decide it is not
+		// recorded without its count.
+		pausedNow := func() bool {
+			if !isIngressRecordingPaused() {
+				return false
+			}
+			lostToPause = true
+			return true
+		}
 		// The exchange may be captured: open its window before the request
 		// reaches the app, so no egress call it makes is ever older than it.
 		// One that cannot be captured opens none: nothing would decide it.
@@ -387,7 +399,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		// Note: the pressureCloseMode && !forceCloseMode branch was removed
 		// because forceCloseMode is always true here (the !forceCloseMode
-		// path returns early via handleHttp1ZeroCopy/forwardRawTCP).
+		// path returns early via handleHttp1ZeroCopy/forwardRawTCP). So is
+		// pressureCloseMode, and the re-checks that ran only while it was
+		// false (after the request is forwarded, after the response) are
+		// gone too: they could never run.
 
 		// Determine whether capture is eligible for this exchange.
 		// Chunked-encoded exchanges are still captured: the tee reads the
@@ -396,8 +411,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		captureEligible := captureEnabled && (!pm.sampling || acquiredLock)
 
 		// Re-check memory pressure right before attaching capture buffers.
-		if captureEligible && isIngressRecordingPaused() {
-			lostToPause = true
+		if captureEligible && pausedNow() {
 			pressureCloseMode = true
 			captureEligible = false
 			captureEnabled = false
@@ -433,14 +447,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
-		}
-
-		// Re-check memory pressure after forwarding the request.
-		if !pressureCloseMode && isIngressRecordingPaused() {
-			lostToPause = true
-			pressureCloseMode = true
-			captureEnabled = false
-			releaseLock()
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
@@ -525,8 +531,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Re-evaluate capture eligibility after response headers.
 		// Also re-check memory pressure in case it started mid-exchange.
 		captureEligible = captureEnabled && (!pm.sampling || acquiredLock)
-		if captureEligible && isIngressRecordingPaused() {
-			lostToPause = true
+		if captureEligible && pausedNow() {
 			pressureCloseMode = true
 			captureEligible = false
 			captureEnabled = false
@@ -609,14 +614,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// headers already).
 		win.Yield(respTimestamp)
 
-		// Final memory pressure check before capture evaluation.
-		if !pressureCloseMode && isIngressRecordingPaused() {
-			lostToPause = true
-			pressureCloseMode = true
-			captureEnabled = false
-			releaseLock()
-		}
-
 		shouldCapture := captureEnabled
 		if forceCloseMode {
 			// Previously: chunked exchanges were dropped here outright.
@@ -632,8 +629,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 		}
 		// Skip capture if memory pressure kicked in during the exchange
-		if shouldCapture && isIngressRecordingPaused() {
-			lostToPause = true
+		if shouldCapture && pausedNow() {
 			shouldCapture = false
 		}
 
