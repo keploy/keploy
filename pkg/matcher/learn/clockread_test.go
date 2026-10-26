@@ -115,6 +115,21 @@ func TestACutClockReadIsRefusedAtReplayNamingTheCut(t *testing.T) {
 			t.Errorf("a cut read: %v %q; want refused naming the cut", ok, why)
 		}
 	}
+	// The same for an instant its protocol types: a $date of milliseconds
+	// whose two runs' values are whole seconds is learned with the second's
+	// cut, and refused at replay saying so.
+	const p = "body.at.$date.$numberLong"
+	typed := func(at time.Time) Leaf { return InstantLeaf(p, "body.at", at, time.Millisecond) }
+	sec := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: typed(sec.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{p: typed(sec)}}, sec.Add(time.Millisecond), nil, nil, nil, nil)[0]
+	o, ok := ln.Clock()
+	if ln.Kind != KindNoise || !ok || o.Res < time.Second {
+		t.Fatalf("the typed cut read: %s %+v,%v (%s); want noise that is a read at the second's cut", ln.Kind, o, ok, ln.Why)
+	}
+	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	if ok, why := CheckClockRead("at", o, typed(from), Span{From: from, To: from.Add(time.Second)}, true); ok || !strings.Contains(why, "the application cuts its value") {
+		t.Errorf("a typed cut read: %v %q; want refused naming the cut", ok, why)
+	}
 }
 
 // A replay's span (LiveSpan, ClockSpanFrom) is CallWindowFrom's own half: from
