@@ -3,13 +3,15 @@ package models
 import (
 	"container/heap"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // A test set's mappings derived from its recorded test windows: what a
 // recording made without --sync maps each test to under the proven switch
 // (design v14 row S3), and what each test owns in a replay under the switch
-// of a set with no mappings.yaml (S12), which the replay never writes.
+// of a set with no mappings.yaml, which the replay never writes.
 
 // RecordedWindow is the window a recorded test case opens when it runs: its
 // [request, response] span, for an HTTP or a gRPC test case. A test case of any
@@ -18,7 +20,7 @@ func RecordedWindow(tc *TestCase) TestWindow {
 	if tc == nil {
 		return TestWindow{}
 	}
-	w := TestWindow{TestCase: tc.Name}
+	w := TestWindow{TestCase: tc.Name, Clock: tc.Origin.clock()}
 	switch tc.Kind {
 	case HTTP:
 		w.Start, w.End = tc.HTTPReq.Timestamp, tc.HTTPResp.Timestamp
@@ -50,11 +52,40 @@ type WindowedMock struct {
 	// an answer a worker's poll gets while its dependency has nothing, which
 	// no test owns wherever it was recorded.
 	Idle bool
+	// Clock names the clock At is on: the mock's Origin.Clock, "" for an
+	// untrusted stamp. WriteKind is its write kind, by its
+	// parser's registration (WriteKindOf): "" for no by-kind write. Both come
+	// with the mock's origin, which only a record under the proven switch
+	// writes: a mock without one has neither, and its parser is not asked.
+	// Only the switch acts on either.
+	Clock     string
+	WriteKind string
+	// Comm and Exe are the process that made the call (Origin.Comm, Exe), for
+	// the line that says why it was routed; "" when its origin names none.
+	// Unnamed and PID say why its origin names none (Origin.Unnamed, PID),
+	// which that line says instead (Process).
+	Comm, Exe string
+	Unnamed   string
+	PID       uint32
+}
+
+// Process names the process that made the call as a log line does
+// (Origin.ProcessText): "" when its origin names none.
+func (m WindowedMock) Process() string {
+	o := Origin{Comm: m.Comm, Exe: m.Exe, Unnamed: m.Unnamed, PID: m.PID}
+	return o.ProcessText()
+}
+
+// FileProcess names it as a committed reason line does
+// (Origin.FileProcessText): no kernel pid.
+func (m WindowedMock) FileProcess() string {
+	o := Origin{Comm: m.Comm, Exe: m.Exe, Unnamed: m.Unnamed, PID: m.PID}
+	return o.FileProcessText()
 }
 
 // NewWindowedMock is m as the window derivation reads it.
 func NewWindowedMock(m *Mock) WindowedMock {
-	return WindowedMock{
+	w := WindowedMock{
 		Name:     m.Name,
 		Kind:     m.Kind,
 		At:       m.Spec.ReqTimestampMock,
@@ -63,7 +94,14 @@ func NewWindowedMock(m *Mock) WindowedMock {
 		TestMock: !m.IsProtocolPhase() && !m.IsAsync(),
 		InFlight: InFlightEligible(m),
 		Idle:     IsIdleAnswer(m),
+		Clock:    m.Origin.clock(),
 	}
+	if m.Origin != nil {
+		w.WriteKind, _ = WriteKindOf(m)
+		w.Comm, w.Exe = m.Origin.Comm, m.Origin.Exe
+		w.Unnamed, w.PID = m.Origin.Unnamed, m.Origin.PID
+	}
+	return w
 }
 
 // placed is where m sits: its Place, or At for one built without it.
@@ -76,7 +114,14 @@ func (m WindowedMock) placed() time.Time {
 
 // entry is the mock as a mapping lists it.
 func (m WindowedMock) entry() MockEntry {
+	return m.entryIn("")
+}
+
+// entryIn is the mock as a mapping lists it, in concurrency group group ("" for
+// none: recorded while one window was open).
+func (m WindowedMock) entryIn(group string) MockEntry {
 	return MockEntry{
+		Group:            group,
 		Name:             m.Name,
 		Kind:             string(m.Kind),
 		Timestamp:        m.At.Unix(),
@@ -105,12 +150,55 @@ type WindowMappings struct {
 	// together with another test's while a test mock was recorded: which of
 	// them owns that mock was decided by time alone.
 	Concurrent []string
+	// Groups are the concurrency groups the entries of Tests name
+	// (MockEntry.Group), in order of first use: each the windows that
+	// contained a test mock's place when more than one did, in window order,
+	// every window's test named (Unkept is the writer's to count). The
+	// window that opened first lists the mock; any of them may have made
+	// it.
+	Groups []ConcurrencyGroup
 	// Worker is the set's worker scope (Mapping.Worker): the test mocks
 	// recorded while no window was open, and the idle answers wherever they
 	// were recorded, which no test owns, in recorded order, each placed where
 	// its recording holds it (MockEntry.Place): the test whose window began
 	// last before it, or the set's start before every window.
 	Worker []MockEntry
+	// Routed is, under DeriveOptions.RouteInFlightWrites, the in-flight
+	// writes the derivation routed to the worker scope rather than to the
+	// test they were in flight into, in recorded order: each
+	// is also in Worker, at the set's start.
+	Routed []RoutedWrite
+}
+
+// RoutedWrite is one write DeriveWindowMappingsWith routed to the worker
+// scope: the mock as the derivation read it, and the test it was in flight
+// into when that test began.
+type RoutedWrite struct {
+	Mock WindowedMock
+	Test string
+}
+
+// DeriveOptions are the window derivation's options.
+type DeriveOptions struct {
+	// RouteInFlightWrites is proven routing at record: a call
+	// the in-flight rule gives to the test it was in flight into that is a
+	// by-kind write (WindowedMock.WriteKind) whose request was stamped on the
+	// clock that test's window start was (equal non-empty Clock), is no
+	// test's: it was sent before the test began, so the test did not make it.
+	// It goes to the worker scope at the set's start (by-kind answers ignore
+	// a place), and is listed in Routed. A call on an untrusted or another
+	// clock, a call of any other kind (a long poll among them), and one in
+	// flight into the first test (which no gap precedes: it is the start's,
+	// the worker scope's, already) are derived as without it. keploy record
+	// sets it only for a set it marks for the background rules
+	// (RecordedWithS12Routing), which only those rules serve.
+	RouteInFlightWrites bool
+}
+
+// routes reports whether m, in flight into w, is routed to the worker scope
+// (DeriveOptions.RouteInFlightWrites): a by-kind write stamped on w's clock.
+func (o DeriveOptions) routes(m WindowedMock, w TestWindow) bool {
+	return o.RouteInFlightWrites && m.WriteKind != "" && m.Clock != "" && m.Clock == w.Clock
 }
 
 // DeriveWindowMappings gives each test the test mocks recorded inside its
@@ -125,9 +213,12 @@ type WindowMappings struct {
 // while two windows were
 // open goes to the one that opened first: the earliest-started window that
 // contains it, the window models.WindowSchedule releases it at, and the one
-// the sync-mode mock manager gives it when it has nothing else to go by. A
-// --sync recording's mock manager attributes by request time only, so it gives
-// an in-flight call to no test.
+// the sync-mode mock manager gives it when it has nothing else to go by. Time
+// alone cannot tell which of them made it, so its entry names the windows that
+// contained it, its concurrency group (MockEntry.Group, WindowMappings.Groups),
+// from the recorded request and answer times alone: keploy record's full round
+// gives it to the test that makes its call. A --sync recording's mock manager
+// attributes by request time only, so it gives an in-flight call to no test.
 //
 // A test mock recorded while no window was open that the in-flight rule gives
 // to no test is the set's worker scope (WindowMappings.Worker, the founder's
@@ -143,6 +234,11 @@ type WindowMappings struct {
 // A window with no Start is left out; one whose End is missing or before its
 // Start ends at its Start. Mocks that are not test mocks are skipped.
 func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMappings {
+	return DeriveWindowMappingsWith(windows, mocks, DeriveOptions{})
+}
+
+// DeriveWindowMappingsWith is DeriveWindowMappings with opts.
+func DeriveWindowMappingsWith(windows []TestWindow, mocks []WindowedMock, opts DeriveOptions) WindowMappings {
 	ws := make([]TestWindow, 0, len(windows))
 	for _, w := range windows {
 		if w.Start.IsZero() {
@@ -169,6 +265,8 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 		out.Tests[i] = MappedTestCase{ID: w.TestCase, Mocks: []MockEntry{}}
 	}
 	concurrent := make([]bool, len(ws))
+	// groupOf names each concurrency group by its windows (groupKey).
+	groupOf := map[string]string{}
 
 	// A sweep over the mocks in time order. open holds the windows that have
 	// started, in start order: its head, once the windows that ended before
@@ -204,6 +302,13 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			// WindowSchedule.InFlightInto has it. Any other is the worker
 			// scope's, the app's start included.
 			if m.InFlight && next < len(ws) && sched.InFlightInto(m.At, m.Res, ws[next].Start) {
+				if opts.routes(m, ws[next]) {
+					// Sent before the test began, on its window's clock:
+					// not the test's.
+					out.Worker = append(out.Worker, m.entry())
+					out.Routed = append(out.Routed, RoutedWrite{Mock: m, Test: ws[next].TestCase})
+					continue
+				}
 				out.Tests[next].Mocks = append(out.Tests[next].Mocks, m.entry())
 				continue
 			}
@@ -213,12 +318,27 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 			continue
 		}
 		owner := open[0]
-		out.Tests[owner].Mocks = append(out.Tests[owner].Mocks, m.entry())
+		group := ""
 		if ending.Len() > 1 {
-			for _, i := range ending.idx {
+			// ending holds exactly the windows that contain the mock's
+			// place: its concurrency group, named by them in window order.
+			members := append([]int(nil), ending.idx...)
+			sort.Ints(members)
+			key := groupKey(members)
+			if group = groupOf[key]; group == "" {
+				group = "g" + strconv.Itoa(len(out.Groups)+1)
+				groupOf[key] = group
+				g := ConcurrencyGroup{ID: group, Tests: make([]string, 0, len(members))}
+				for _, i := range members {
+					g.Tests = append(g.Tests, ws[i].TestCase)
+				}
+				out.Groups = append(out.Groups, g)
+			}
+			for _, i := range members {
 				concurrent[i] = true
 			}
 		}
+		out.Tests[owner].Mocks = append(out.Tests[owner].Mocks, m.entryIn(group))
 	}
 	for i, c := range concurrent {
 		if c {
@@ -226,6 +346,18 @@ func DeriveWindowMappings(windows []TestWindow, mocks []WindowedMock) WindowMapp
 		}
 	}
 	return out
+}
+
+// groupKey is a concurrency group's windows, sorted, as one key.
+func groupKey(members []int) string {
+	var b strings.Builder
+	for i, w := range members {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.Itoa(w))
+	}
+	return b.String()
 }
 
 // windowEnds is a min-heap of window indexes by the window's End.

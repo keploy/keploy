@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -568,11 +570,10 @@ func TestAMarkedDestinationThatIsAnotherServiceNowIsDispatchedAsOnMain(t *testin
 	for _, proven := range []string{"", "1"} {
 		t.Run("KEPLOY_PROVEN="+proven, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
-			ln, err := net.Listen("tcp4", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			addr := ln.Addr().String()
+			// On Linux the destination's port is held for the test's life
+			// (testnet.SharedPort), so the test can listen there again.
+			addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
+			ln := testnet.ListenShared(t, "tcp4", addr)
 			served := make(chan string, 8)
 			serve := func(ln net.Listener, handle func(net.Conn)) <-chan struct{} {
 				done := make(chan struct{})
@@ -604,12 +605,7 @@ func TestAMarkedDestinationThatIsAnotherServiceNowIsDispatchedAsOnMain(t *testin
 			// The address is a client-first service's now.
 			_ = ln.Close()
 			<-stopped
-			ln2, err := net.Listen("tcp4", addr)
-			if err != nil {
-				t.Skipf("cannot listen at %s again: %v", addr, err)
-			}
-			t.Cleanup(func() { _ = ln2.Close() })
-			serve(ln2, silentUntilAsked)
+			serve(testnet.ListenShared(t, "tcp4", addr), silentUntilAsked)
 			app, src := acceptedConn(t)
 			done := make(chan error, 1)
 			go func() { done <- p.handleConnection(context.Background(), src) }()
@@ -669,11 +665,12 @@ func TestAMarkedDestinationKeepsItsMarkWithoutEvidence(t *testing.T) {
 			t.Setenv(provenswitch.Env, proven)
 			var busy atomic.Bool
 			served := make(chan string, 8)
-			listen := func(addr string) (net.Listener, <-chan struct{}) {
-				ln, err := net.Listen("tcp4", addr)
-				if err != nil {
-					t.Skipf("cannot listen at %s: %v", addr, err)
-				}
+			// On Linux the destination's port is held for the test's life
+			// (testnet.SharedPort), so it refuses the dial while nothing
+			// listens there, and the test can listen there again.
+			addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t)))
+			listen := func() (net.Listener, <-chan struct{}) {
+				ln := testnet.ListenShared(t, "tcp4", addr)
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
@@ -694,8 +691,7 @@ func TestAMarkedDestinationKeepsItsMarkWithoutEvidence(t *testing.T) {
 				}()
 				return ln, done
 			}
-			ln, stopped := listen("127.0.0.1:0")
-			addr := ln.Addr().String()
+			ln, stopped := listen()
 			core, logs := observer.New(zap.DebugLevel)
 			p := recordingProxy(t, addr, zap.New(core))
 			// decided waits for the probe's next verdict: a client that
@@ -768,8 +764,7 @@ func TestAMarkedDestinationKeepsItsMarkWithoutEvidence(t *testing.T) {
 			_ = app.Close()
 			mustBeMarked("a failed dial")
 
-			ln2, _ := listen(addr)
-			t.Cleanup(func() { _ = ln2.Close() })
+			listen()
 			callServerFirst(t, p, served, false)
 			mustBeMarked("the destination greeting again")
 		})

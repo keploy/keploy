@@ -405,25 +405,25 @@ jobs:
           fetch-depth: 0
 
       - name: Download linux amd64 archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-linux-amd64
           path: release-assets
 
       - name: Download linux arm64 archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-linux-arm64
           path: release-assets
 
       - name: Download darwin archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-darwin-arm64
           path: release-assets
 
       - name: Download windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-windows-amd64
           path: release-assets
@@ -530,7 +530,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
 
       - name: Download prebuilt binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: dist/keploy-linux-${{ matrix.arch }}
@@ -600,7 +600,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
 
       - name: Download per-arch digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*

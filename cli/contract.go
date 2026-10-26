@@ -80,7 +80,7 @@ func Download(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 	var cmd = &cobra.Command{
 		Use:     "download",
 		Short:   "Download contract for specified services",
-		Example: `keploy contract download --service="email,notify" --path /local/path`,
+		Example: `keploy contract download --services="email,notify" --path /local/path`,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)
 		},
@@ -112,7 +112,7 @@ func Validate(ctx context.Context, logger *zap.Logger, serviceFactory ServiceFac
 	var cmd = &cobra.Command{
 		Use:     "test",
 		Short:   "Validate contract for specified services",
-		Example: `keploy contract test --service="email,notify" --path /local/path`,
+		Example: `keploy contract test --services="email,notify" --path /local/path`,
 
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
 			return cmdConfigurator.Validate(ctx, cmd)

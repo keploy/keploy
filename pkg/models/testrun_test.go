@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -48,5 +49,42 @@ func TestMappingStaleCountsOnAnObsoleteRowOnly(t *testing.T) {
 	unread := FailureInfo{MappingStale: "not judged: stale mapping", TestMocksUnread: true}
 	if why := (TestResult{Status: TestStatusPassed, FailureInfo: unread}).VerdictUnknown(); len(why) != 1 {
 		t.Fatalf("a PASSED row with another reason too: VerdictUnknown %v, want that reason only", why)
+	}
+}
+
+// A ConcurrentNote's Clone shares no list with it: the replay fills a copy
+// of a parser's note, and the parser's is left as it was.
+func TestConcurrentNoteCloneSharesNothing(t *testing.T) {
+	n := &ConcurrentNote{With: []string{"a"}, MayBe: []string{"b"}, Class: []string{"c"}, Places: []string{"bind.$1"}, Unkept: 1, Case: ConcurrentCaseNotOwn}
+	c := n.Clone()
+	if !reflect.DeepEqual(c, n) {
+		t.Fatalf("clone %+v of %+v", c, n)
+	}
+	c.With[0], c.MayBe[0], c.Class[0], c.Places[0] = "x", "x", "x", "x"
+	if n.With[0] != "a" || n.MayBe[0] != "b" || n.Class[0] != "c" || n.Places[0] != "bind.$1" {
+		t.Fatalf("the clone shares a list: %+v", n)
+	}
+	if (*ConcurrentNote)(nil).Clone() != nil {
+		t.Fatal("a nil note clones to one")
+	}
+}
+
+// A test whose learning record's full round did not keep (its agent did not
+// say it read the test case's request) has no verdict, saying why, unless it
+// failed: what was not kept can only add to why it failed.
+func TestALearningNotKeptLeavesATestWithNoVerdict(t *testing.T) {
+	why := "keploy did not keep what its agent learned on the mocks this test consumed (mock-1 body.at (noise))"
+	fi := FailureInfo{LearningNotKept: why}
+	if got := fi.NotJudged(); len(got) != 1 || got[0] != why {
+		t.Fatalf("NotJudged %v; want the reason", got)
+	}
+	if got := (TestResult{Status: TestStatusPassed, FailureInfo: fi}).VerdictUnknown(); len(got) != 1 || got[0] != why {
+		t.Fatalf("a passed row: VerdictUnknown %v; want the reason", got)
+	}
+	if got := (TestResult{Status: TestStatusFailed, FailureInfo: fi}).VerdictUnknown(); got != nil {
+		t.Fatalf("a failed row: VerdictUnknown %v; want none", got)
+	}
+	if got := (FailureInfo{}).NotJudged(); got != nil {
+		t.Fatalf("no reason: NotJudged %v", got)
 	}
 }

@@ -15,12 +15,16 @@ type CaptureLossKind string
 const (
 	// CaptureLossPIDMap: the kernel refused a process a place in the agent's
 	// target_namespace_pids (pid_map_insert_failures): its calls were not
-	// intercepted.
+	// intercepted. The process lives on, for as long as the application it is
+	// part of runs (AppLife).
 	CaptureLossPIDMap CaptureLossKind = "pid_map_refused"
 	// CaptureLossPIDMapExcluded: the kernel refused a process a place in the
 	// agent's excluded_pids, so a process that should have been left alone
 	// was not excluded, and its children's calls may have been captured as
-	// the application's.
+	// the application's. Such a process started before the recording, or is
+	// a child of one that did (the pre-existing-process filter excludes
+	// those), so it is no part of the application and outlives it, a restart
+	// of it included: counted from the run's start (runLife).
 	CaptureLossPIDMapExcluded CaptureLossKind = "pid_map_refused_excluded"
 	// CaptureLossTLSAbort: a client-side TLS handshake with keploy's proxy
 	// failed other than by the client giving it up: the client rejected the
@@ -187,6 +191,33 @@ const (
 	// it: each test it carries traffic in fails (judged), a test's own kind
 	// (PerTest). Only under the proven switch.
 	CaptureLossUnrecorded CaptureLossKind = "connection_unrecorded"
+	// CaptureLossAppSubtreeUntracked: processes forked in the application's
+	// subtree that a downstream build's capture could not mark as the
+	// application's (its kernel map of the subtree was full, or it could not
+	// read the fork's start time), so whether their calls were the
+	// application's is left to a /proc walk, which a process reaped by then
+	// fails: their calls may be neither recorded nor mocked,
+	// and at replay reach a real dependency and pass. Such a process lives on
+	// and may call in any later test, so the test it was forked in and every
+	// later one fail (judged, not PerTest), for as long as the application
+	// that forked it runs (AppLife): across test sets, where one application
+	// serves them (--keep-app-alive), until it is started again. A fork
+	// between two tests is the next test's. What names the map's bound and
+	// the latest such process. Only under the proven switch.
+	CaptureLossAppSubtreeUntracked CaptureLossKind = "app_subtree_untracked"
+	// CaptureLossAgentStartedAgain: keploy's agent was started again (a new
+	// process answered where the one that counted before had) while a loss
+	// that outlives a test set could still taint the tests: one counted from
+	// the running application's start (AppLife), the run's (runLife), or
+	// however far back (runScoped). What the agent before counted went with
+	// it, and a process of the application's it could not place may run on,
+	// its calls reaching a real dependency that the new agent never sees, so
+	// whether the tests are tainted cannot be told until keploy starts the
+	// application anew under the new agent. The replay charges it to each
+	// such test, never the agent: it leaves the test without a verdict
+	// (NotJudged). What names both agent processes. Only under the proven
+	// switch.
+	CaptureLossAgentStartedAgain CaptureLossKind = "agent_started_again"
 )
 
 // ContainerUnreadMetadata is the mock metadata field the agent stamps a mock
@@ -202,7 +233,7 @@ const ContainerUnreadMetadata = "containerUnread"
 // or a TLS handshake abandoned without a word, which keploy cannot tell lost
 // a call, as opposed to one it saw and lost.
 func (k CaptureLossKind) NotJudged() bool {
-	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossUnclassified
+	return k == CaptureLossUnixSocket || k == CaptureLossUnixUnseen || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossUnclassified || k == CaptureLossAgentStartedAgain
 }
 
 // Evidence reports whether a loss of kind k is evidence only, never a
@@ -215,10 +246,33 @@ func (k CaptureLossKind) Evidence() bool {
 	return k == CaptureLossKernelSkip || k == CaptureLossKernelSkipCall
 }
 
-// runScoped says a loss of kind k is counted from the run's base however far
-// back it was made (SinceWithin): what keploy cannot capture at all over a
-// connection that outlives tests (NotJudged), but for a test's own kind
-// (PerTest), which is counted from the test's mark as every other kind is.
+// AppLife says a loss of kind k lasts as long as the application whose
+// process it lost runs: a test set the same application serves after the one
+// it happened in (--keep-app-alive) is charged it too, from the
+// application's start (LossBases.App), rather than from the set's own mark.
+// That is a process of the application's that keploy could not place: one
+// the kernel refused a place in the PID map (pid_map_refused), or one the
+// capture could not mark as in the application's subtree
+// (app_subtree_untracked).
+func (k CaptureLossKind) AppLife() bool {
+	return k == CaptureLossPIDMap || k == CaptureLossAppSubtreeUntracked
+}
+
+// runLife says a loss of kind k is a process that outlives the application,
+// counted from the run's start (LossBases.Run): one the kernel refused a
+// place in excluded_pids (pid_map_refused_excluded), which started before
+// the recording, or is a child of one that did.
+func (k CaptureLossKind) runLife() bool {
+	return k == CaptureLossPIDMapExcluded
+}
+
+// runScoped says a loss of kind k is counted from the base of what keploy
+// cannot capture at all however far back it was made (LossBases.Capture):
+// what keploy cannot capture at all over a connection that outlives tests
+// (NotJudged), a process keploy could not classify (process_unclassified),
+// and the kernel's count of skipped runs (Evidence), but for a test's own
+// kind (PerTest), which is counted from the test's mark as every other kind
+// is.
 func (k CaptureLossKind) runScoped() bool {
 	return (k.NotJudged() || k.Evidence()) && !k.PerTest()
 }
@@ -277,21 +331,51 @@ func (l CaptureLosses) EvidenceText() string {
 	return strings.Join(parts, "; ")
 }
 
-// SinceWithin is what grew from base on, but for what keploy cannot capture
-// at all over a connection that outlives tests (runScoped: a Unix socket),
-// from runBase on: that connection outlives the test, the test set and the
-// session it was opened in, so the application's first call over one taints
-// every test after it in the run, however far back it was made. A test's own
-// kind that leaves it without a verdict (an abandoned TLS handshake) is
-// counted from base, as the losses that fail a test are.
-func (l CaptureLosses) SinceWithin(base, runBase CaptureLosses) CaptureLosses {
+// LossBases are the counts a caller's losses are counted from, each kind
+// from the one its loss lasts from (SinceWithin):
+//   - Set: the test set's mark (a record's or a session's: its start), for
+//     every kind but those below;
+//   - App: the running application's start (AppLife): Set where it started
+//     for this set, earlier where one application serves several;
+//   - Run: the run's start (runLife): a process that outlives the
+//     application;
+//   - Capture: what keploy cannot capture at all, and the kernel's skips
+//     (runScoped), however far back: the run's first mark, or the hooks'
+//     load (nil) where the application may have run before it.
+type LossBases struct {
+	Set, App, Run, Capture CaptureLosses
+}
+
+// SameBases is LossBases with every base b: a caller whose one base is the
+// start of everything it counts (a record, a single run).
+func SameBases(b CaptureLosses) LossBases { return LossBases{Set: b, App: b, Run: b, Capture: b} }
+
+// SinceWithin is what grew from each kind's base on (LossBases). What keploy
+// cannot capture at all over a connection that outlives tests (runScoped: a
+// Unix socket) outlives the test, the test set and the session it was opened
+// in, so the application's first call over one taints every test after it in
+// the run, however far back it was made. A process that lives as long as the
+// application (AppLife), or outlives it (runLife), taints every test while it
+// lives. A test's own kind that leaves it without a verdict (an abandoned TLS
+// handshake) is counted from Set, as the losses that fail a test are.
+func (l CaptureLosses) SinceWithin(b LossBases) CaptureLosses {
 	var out CaptureLosses
-	for _, c := range l.Since(base) {
-		if !c.Kind.runScoped() {
+	for _, c := range l.Since(b.Set) {
+		if !c.Kind.runScoped() && !c.Kind.AppLife() && !c.Kind.runLife() {
 			out = append(out, c)
 		}
 	}
-	for _, c := range l.Since(runBase) {
+	for _, c := range l.Since(b.App) {
+		if c.Kind.AppLife() {
+			out = append(out, c)
+		}
+	}
+	for _, c := range l.Since(b.Run) {
+		if c.Kind.runLife() {
+			out = append(out, c)
+		}
+	}
+	for _, c := range l.Since(b.Capture) {
 		if c.Kind.runScoped() {
 			out = append(out, c)
 		}
@@ -340,15 +424,21 @@ const UnixUnseenRemedy = "report the reason to keploy (its report of the applica
 // them does not skip them, and the agent's log names the programs.
 const KernelSkipRemedy = "run keploy where the kernel does not preempt its programs (a kernel with voluntary or no preemption: /sys/kernel/debug/sched/preempt lists the modes this one offers), or report the programs keploy's agent log names to keploy"
 
+// AgentStartedAgainRemedy is what to do when keploy's agent was started
+// again while the application ran on (CaptureLossAgentStartedAgain).
+const AgentStartedAgainRemedy = "find why the agent restarted (its container's restart count, an OOM kill, its log); where keploy starts the application (a command, without --keep-app-alive), the test-sets after its next start are judged again"
+
 // NotJudgedRemedy is what to do about losses that leave a test without a
 // verdict (Split's notJudged), for a next_step: reach a Unix-socket
 // dependency over TCP; report to keploy why it cannot see those calls at
 // all; make a TLS client that abandoned its handshake trust keploy's CA; list
 // a server-first destination in mock.real. Empty for none.
 func (l CaptureLosses) NotJudgedRemedy() string {
-	var unix, unseen, tls, serverFirst, refused, docker, unclassified bool
+	var unix, unseen, tls, serverFirst, refused, docker, unclassified, restarted bool
 	for _, c := range l {
 		switch c.Kind {
+		case CaptureLossAgentStartedAgain:
+			restarted = true
 		case CaptureLossUnclassified:
 			unclassified = true
 		case CaptureLossUnixSocket:
@@ -387,6 +477,9 @@ func (l CaptureLosses) NotJudgedRemedy() string {
 	if unclassified {
 		do = append(do, "report it to keploy, with the agent's log, which names the process (a read of a process's PID namespace failed)")
 	}
+	if restarted {
+		do = append(do, AgentStartedAgainRemedy)
+	}
 	return strings.Join(do, ", and ")
 }
 
@@ -415,25 +508,45 @@ var ErrCaptureLossesUnsupported = errors.New("this agent cannot tell whether it 
 
 // PerTest says a loss of kind k, in the agent's counts, is the test's it
 // happened in, not a taint of every later test (design v14 §3.2's taint,
-// which the agent-life kinds carry): a client whose TLS handshake failed, or
-// was abandoned, lost that one call or may have, and its later calls are
-// captured, or lost, on their own; data the application sent over a
-// server-first protocol keploy relays is that test's call. One between two
-// tests is the next test's, as a miss between tests is.
-// (CaptureLossRealUncaptured is a test's own too, but never in the agent's
-// counts: the agent charges it to its test itself.)
+// which the agent-life kinds carry). A kind is a test's own only where what
+// it lost is one call of the test the count lands in:
+//   - a TLS handshake that failed, or was abandoned: that one call, lost or
+//     maybe lost; the client's later calls are captured, or lost, on their
+//     own (tls_handshake_failed, tls_handshake_abandoned);
+//   - the application's data on a connection keploy relays without parsing
+//     (server_first, refused_at_accept), counted for each piece as it is
+//     sent;
+//   - a call whose container's configuration the Docker daemon did not give
+//     (container_unread), counted when the call gives up waiting;
+//   - one call's bytes the capture skipped, could not read, or stopped
+//     recording (kernel_skipped_call, capture_unread,
+//     connection_unrecorded, counted for each piece the connection carries).
+//
+// One between two tests is the next test's, as a miss between tests is.
+// Every other kind is agent-life: it taints the test it happened in and
+// every later one. That is a process keploy could not place, which lives on
+// (pid_map_refused, pid_map_refused_excluded, process_unclassified,
+// app_subtree_untracked); a connection keploy stopped parsing, failed
+// serving, or dropped bytes of, whose later calls may go with it
+// (starttls_failed, parser_stalled, parser_panicked, capture_dropped,
+// app_bytes_lost); a connection that never reached keploy's proxy whole, so
+// that no call of it was read and which test made one cannot be told
+// (app_connection_lost, unpaired_connection); what keploy cannot capture at
+// all (unix_socket, unix_unseen, udp_reply); the kernel's count of skipped
+// runs of a program that sees connections (kernel_skipped); and a kind this
+// build does not know. (CaptureLossRealUncaptured is a test's own too, but never in the
+// agent's counts: the agent charges it to its test itself.)
 func (k CaptureLossKind) PerTest() bool {
 	return k == CaptureLossTLSAbort || k == CaptureLossTLSAbandoned || k == CaptureLossServerFirst || k == CaptureLossRefusedAtAccept || k == CaptureLossContainerUnread || k == CaptureLossKernelSkipCall || k == CaptureLossUnread || k == CaptureLossUnrecorded
 }
 
 // Charged is what a test is charged from l, the counts as it ends: each kind
-// that taints every later test as SinceWithin(base, runBase) has it (base:
-// the counts as the run, or the test set, began), and each kind that is the
-// test's own (PerTest) as it grew since test (the counts as the previous test
-// ended, or base for the first). Sorted by kind.
-func (l CaptureLosses) Charged(base, runBase, test CaptureLosses) CaptureLosses {
+// that taints every later test as SinceWithin(b) has it, and each kind that
+// is the test's own (PerTest) as it grew since test (the counts as the
+// previous test ended, or b.Set for the first). Sorted by kind.
+func (l CaptureLosses) Charged(b LossBases, test CaptureLosses) CaptureLosses {
 	var out CaptureLosses
-	for _, c := range l.SinceWithin(base, runBase) {
+	for _, c := range l.SinceWithin(b) {
 		if !c.Kind.PerTest() {
 			out = append(out, c)
 		}
@@ -611,6 +724,10 @@ func captureLossText(c CaptureLoss) string {
 		return fmt.Sprintf("keploy stopped recording a connection of the application's mid-stream (a capture hole its parser could not re-align across, or a parser that failed), and %d piece(s) of its traffic, its stops included, were neither recorded nor mocked", c.Count)
 	case CaptureLossUnclassified:
 		return fmt.Sprintf("keploy could not tell %d time(s) whether a process was the application's (a read of its PID namespace failed where nothing had classified it), so its calls may have gone unseen while this test or one before it ran", c.Count)
+	case CaptureLossAppSubtreeUntracked:
+		return fmt.Sprintf("keploy could not mark %d process(es) forked in the application's subtree as the application's (its map of the subtree was full, or it could not read the fork's start time), so their calls may have been neither recorded nor mocked while this test ran, or before it; report it to keploy with the agent's log, which names the process", c.Count)
+	case CaptureLossAgentStartedAgain:
+		return "keploy's agent was started again while the application ran on, and what the agent before counted went with it: a process of the application's that it could not place, or a call keploy cannot capture at all, may taint this test, and the new agent cannot see it (keploy judges the tests again once it starts the application anew)"
 	default:
 		return fmt.Sprintf("%d capture loss(es) of kind %s", c.Count, c.Kind)
 	}

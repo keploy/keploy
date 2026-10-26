@@ -128,16 +128,29 @@ type exactStore struct {
 	staged []*models.Mock
 }
 
-func (s exactStore) FindStagedNotOwned(_ models.Kind, match func(*models.Mock) bool) string {
+func (s exactStore) MarkCallRound() integrations.CallRound {
 	if !s.exact {
-		return ""
+		return integrations.CallRound{}
+	}
+	return integrations.NewCallRound(1, nil)
+}
+
+// HoldToRound implements integrations.RoundHolder: s never stages again, so
+// it holds every call it marks as it is.
+func (s exactStore) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return s, func() bool { return false }
+}
+
+func (s exactStore) FindStagedNotOwned(_ models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	if !s.exact || !call.Read() {
+		return "", false
 	}
 	for _, m := range s.staged {
 		if !s.own[m.Name] && match(m) {
-			return m.Name
+			return m.Name, false
 		}
 	}
-	return ""
+	return "", false
 }
 func (s exactStore) GetSessionMocks() ([]*models.Mock, error)         { return nil, nil }
 func (s exactStore) GetPerTestMocksInWindow() ([]*models.Mock, error) { return nil, nil }
@@ -175,12 +188,12 @@ func TestAMissOnAnExchangeTheTestDoesNotOwnIsNamed(t *testing.T) {
 		t.Fatal("the fixture's near request is not within the per-test similarity of mock-frame")
 	}
 	for req, want := range map[string]string{"AUTH step2": "mock-auth-x", string(frame): "mock-frame", string(like): "", "GET y": "", "HELLO": "", "SET z": ""} {
-		if got := notOwnedExchange([][]byte{[]byte(req)}, store); got != want {
+		if got, _ := notOwnedExchange([][]byte{[]byte(req)}, store, store.MarkCallRound()); got != want {
 			t.Errorf("%q: %q, want %q", req, got, want)
 		}
 	}
 	store.exact = false
-	if got := notOwnedExchange([][]byte{[]byte("AUTH step2")}, store); got != "" {
+	if got, _ := notOwnedExchange([][]byte{[]byte("AUTH step2")}, store, store.MarkCallRound()); got != "" {
 		t.Fatalf("without exact serving: %q", got)
 	}
 	// The miss the parser files names it, says it is not the test's, and
@@ -240,9 +253,11 @@ func TestV2AConnectionWhollyInsideATestIsThatTestsWhole(t *testing.T) {
 				}
 				clientCh := make(chan fakeconn.Chunk, 4)
 				destCh := make(chan fakeconn.Chunk, 4)
+				// Numbered as the relay numbers them: each answer after
+				// its request, the second request after the first answer.
 				for i, x := range []string{"publish 1", "publish 2"} {
-					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ReadAt: at(i)}
-					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), WrittenAt: at(i).Add(time.Millisecond)}
+					clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, Bytes: []byte(x), ConnSeq: uint32(2*i + 1), ReadAt: at(i)}
+					destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, Bytes: []byte("ok"), ConnSeq: uint32(2*i + 2), WrittenAt: at(i).Add(time.Millisecond)}
 				}
 				close(clientCh)
 				close(destCh)

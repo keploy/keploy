@@ -105,15 +105,6 @@ func received(t *testing.T, c *net.TCPConn) uint64 {
 	return ti.Bytes_received
 }
 
-func lossesOf(p *Proxy, kind models.CaptureLossKind) uint64 {
-	for _, l := range p.losses.Snapshot() {
-		if l.Kind == kind {
-			return l.Count
-		}
-	}
-	return 0
-}
-
 // A call written to a connection the proxy already holds (a pooled one) is
 // waited for until every byte the application had written when the wait
 // began has reached the proxy's side, however long the bytes take; an idle

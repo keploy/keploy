@@ -185,6 +185,19 @@ replay() {
     if grep -q 'WARNING: DATA RACE' "test-$name.log"; then fail "$CELL: data race in the $name replay's log"; fi
 }
 
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+    local st
+    case $1 in "" | *[!0-9]*) return 1 ;; esac
+    { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+    st=${st##*) }
+    [ "${st%% *}" != Z ]
+}
+
 # run <cell> <pom> <record bin> <expect> <requests...>: build the app with
 # pom, record the requests with the record bin, check the recording as
 # expect says (current: this build's; legacy: a released keploy's), and
@@ -218,7 +231,7 @@ run() {
         >record.log 2>&1 </dev/null &
     REC_PID=$!
     until curl -fsS http://127.0.0.1:8096/healthz >/dev/null 2>&1; do
-        kill -0 "$REC_PID" 2>/dev/null || { fail "$CELL: keploy record exited before the app was up"; tail -30 record.log; return; }
+        pid_running "$REC_PID" || { fail "$CELL: keploy record exited before the app was up"; tail -30 record.log; return; }
         sleep 0.5
     done
     for path in "$@"; do
@@ -229,7 +242,7 @@ run() {
     # request's is written or was left out.
     curl -fsS http://127.0.0.1:8096/healthz >/dev/null
     until [ "$(tests_of '/healthz$')" -ge 2 ]; do
-        kill -0 "$REC_PID" 2>/dev/null || break
+        pid_running "$REC_PID" || break
         sleep 0.5
     done
     stop_pid "$REC_PID"

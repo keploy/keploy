@@ -13,7 +13,7 @@ import (
 )
 
 // Under the proven switch a replay never writes mappings.yaml, whatever its
-// tests consumed: only record writes it (design v14 §5.2, U4; S12). Each case
+// tests consumed: only record writes it (design v14 §5.2, U4). Each case
 // also runs with the switch off, where the run creates the file it always
 // has: for a test that did not consume its recorded call, that file leaves
 // it out, and under the proven model it would then own none of its calls.

@@ -14,7 +14,8 @@ import (
 // process exiting is the stop, though the daemon has not said so (a starved
 // daemon is slow to); a shutdown that keeps making progress past the stall
 // bound is waited for; one that makes none is killed once the stall bound of
-// keploy's runnable time has passed, and the kill is said with the bound.
+// the time both it and keploy could run has passed, and the kill is said with
+// the bound.
 func TestTheComposeAppsStopWaitsForTheContainersStopEvents(t *testing.T) {
 	t.Run("its main process exits before the daemon says so", func(t *testing.T) {
 		stallBudget(t, 3*time.Second)
@@ -58,7 +59,7 @@ func TestTheComposeAppsStopWaitsForTheContainersStopEvents(t *testing.T) {
 		d.pid, d.id = main.Process.Pid, cgroupOf(t, main.Process.Pid)
 		killed, err := composeApp(d).StopComposeApp(context.Background())
 		_, signals, _ := d.state()
-		if err != nil || !strings.Contains(killed, "its container made no progress on its way out for 300ms of keploy's runnable time") || strings.Join(signals, ",") != "SIGINT,SIGKILL" {
+		if err != nil || !strings.Contains(killed, "its container made no progress on its way out for 300ms of its and keploy's runnable time") || strings.Join(signals, ",") != "SIGINT,SIGKILL" {
 			t.Fatalf("said %q (err %v) after %v; want the stall kill said", killed, err, signals)
 		}
 	})

@@ -44,18 +44,31 @@ echo "work dir: $WORK"
 (cd "$SRC" && go build -o "$WORK/app" ./app) || { echo "::error::build failed"; exit 1; }
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+    local st
+    case $1 in "" | *[!0-9]*) return 1 ;; esac
+    { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+    st=${st##*) }
+    [ "${st%% *}" != Z ]
+}
+
 # wait_listen <port> <pid>: until something listens on port; fails at once
 # when pid (the process that should start it) has exited.
 wait_listen() {
     until listening "$1"; do
-        kill -0 "$2" 2>/dev/null || return 1
+        pid_running "$2" || return 1
         sleep 0.2
     done
 }
 test_files() { find keploy/test-set-0/tests -maxdepth 1 -name '*.yaml' -size +0c 2>/dev/null | wc -l; }
 wait_tests() {
     until [ "$(test_files)" -ge "$1" ]; do
-        kill -0 "$2" 2>/dev/null || return 1
+        pid_running "$2" || return 1
         sleep 0.2
     done
 }
@@ -108,8 +121,8 @@ record() {
     wait_tests 8 "$REC_PID" || fail "$LANE: keploy record wrote $(test_files) test cases before the flip, want 8"
     curl -fsS "http://127.0.0.1:$CFG/flip" >/dev/null || fail "$LANE: the flip failed"
     until [ "$(curl -s "http://127.0.0.1:$CFG/served?value=v2")" -ge 2 ] 2>/dev/null; do
-        kill -0 "$REC_PID" 2>/dev/null || { fail "$LANE: keploy record exited before the app read v2"; break; }
-        kill -0 "$CFG_PID" 2>/dev/null || { fail "$LANE: the config service exited before the app read v2"; break; }
+        pid_running "$REC_PID" || { fail "$LANE: keploy record exited before the app read v2"; break; }
+        pid_running "$CFG_PID" || { fail "$LANE: the config service exited before the app read v2"; break; }
         sleep 0.1
     done
     for k in 8 9 10; do value "$k" v2; done

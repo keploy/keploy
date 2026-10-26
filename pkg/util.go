@@ -3408,6 +3408,15 @@ type TestSetMocksReader interface {
 	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
 }
 
+// TestSetMockIndexReader is an optional extension of the mock store a replay
+// loads a test set's mocks from: GetTestSetMocks that leaves each mock's
+// payload in the set's mock file (models.Mock.LeavePayloadOnDisk), so the
+// replay holds a small entry per mock, and reads a payload back only to send
+// the mock to the agent (models.Mock.WithPayload).
+type TestSetMockIndexReader interface {
+	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages
@@ -3415,6 +3424,71 @@ type TestSetMocksReader interface {
 // (ConsumedForAgent). Without it the whole history is sent.
 type ConsumedScopeReader interface {
 	AgentReadsConsumedPerTestOnly() bool
+}
+
+// ClientTestsReader is an optional extension of the instrumentation keploy
+// mock talks to the agent through: whether the agent said, in its answer to
+// the session's MockOutgoing, that its learn step reads the session's tests
+// as client tests (models.ClientTestsReadHeader). Without it, keploy mock
+// takes the agent for one that does not.
+type ClientTestsReader interface {
+	AgentReadsClientTests() bool
+}
+
+// AgentVersionReader is an optional extension of the instrumentation the CLI
+// talks to the agent through: the keploy version the agent named in its last
+// answer (models.AgentVersionHeader), "" where it named none. Without it, the
+// agent is taken for one that named none.
+type AgentVersionReader interface {
+	AgentVersion() string
+}
+
+// AgentVersionOf is the keploy version instr's agent named in its last answer
+// (AgentVersionReader): "" where it named none, or instr cannot say.
+func AgentVersionOf(instr any) string {
+	if r, ok := instr.(AgentVersionReader); ok {
+		return r.AgentVersion()
+	}
+	return ""
+}
+
+// AgentDidNotSay is how a reason that keeps nothing the agent learned says
+// that the agent did not say what (as "it read the test case's request"),
+// naming the agent by the version it named (agent; AgentVersionOf), or as
+// one that named none, and this keploy by its own: "the agent (keploy
+// v3.6.1) did not say <what>, as an agent older than this keploy (v3.7.0)
+// does not", or "the agent did not say <what>, nor its version, as ...".
+func AgentDidNotSay(agent, what string) string {
+	who, nor := "the agent", ", nor its version"
+	if agent != "" {
+		who, nor = "the agent (keploy "+agent+")", ""
+	}
+	own := ""
+	if utils.Version != "" {
+		own = " (" + utils.Version + ")"
+	}
+	return who + " did not say " + what + nor + ", as an agent older than this keploy" + own + " does not"
+}
+
+// TestCaseFilterSender is an optional extension of the instrumentation a
+// replay talks to the agent through: SendTestCaseFilter sends params, a
+// filter that opens a test case and carries its request
+// (models.MockFilterParams.TestRequest), as UpdateMockParams does, and says
+// whether the agent's answer to that call said its learn step took the
+// request (models.TestRequestReadHeader). The answer is that call's own: no
+// other call, concurrent or later, changes what it says. Without it, the
+// request is taken for one the agent did not read.
+type TestCaseFilterSender interface {
+	SendTestCaseFilter(ctx context.Context, params models.MockFilterParams) (requestRead bool, err error)
+}
+
+// BackgroundRulesReader is an optional extension of the instrumentation a
+// replay talks to the agent through: the background rules the agent said, in
+// its answer to the last staging call, it serves the staged set by
+// (models.BackgroundRulesHeader). Without it, or with "", the agent serves by
+// today's rules.
+type BackgroundRulesReader interface {
+	AgentServesBackground() string
 }
 
 // PerTestRegion is the set of names of the per-test mocks a test set hands the

@@ -19,10 +19,24 @@ import (
 
 // Mock Yaml to Binary
 
+// Replay serves the client's MySQL connection from the mocks, on a goroutine,
+// and returns only once that goroutine has returned, ctx's end included: then
+// its read or write of clientConn is ended (pUtil.InterruptOnDone), and it is
+// waited for (pUtil.JoinParser). It used to return ctx's error at once and
+// leave the goroutine reading, matching and logging after it had returned.
 func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	errCh := make(chan error, 1)
 
-	unfiltered, err := mockDb.GetSessionMocks()
+	// Under exact serving the connection's round is marked before its first
+	// read of the store (integrations.MarkCallRound), and its connection
+	// phase reads the store held to that mark (integrations.HoldToRound):
+	// once the replay stages a test set again, the connection finds no
+	// handshake of it to be answered with, and its miss says so
+	// (markConnectionMiss). Its miss carries the mark, for the proxy to say
+	// where it was made from it. The command phase marks each command's own.
+	call := integrations.MarkCallRound(mockDb)
+	held, restaged := integrations.HoldToRound(mockDb, call)
+	unfiltered, err := held.GetSessionMocks()
 	if err != nil {
 		utils.LogError(logger, err, "failed to get session mocks")
 		return err
@@ -68,20 +82,28 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 	// test whose application was refused its database passed with no miss.
 	dst := destinationOf(dstCfg)
 	if !hasMySQLMocks {
-		utils.LogError(logger, nil, "no mysql mocks found")
-		return newConnectionMiss(dst, stepGreeting, "no MySQL session mock is loaded, so there is no recorded server greeting", models.MatchPhaseNoMocks, 0)
+		if !heldAway(restaged, held) {
+			utils.LogError(logger, nil, "no mysql mocks found")
+		}
+		return markConnectionMiss(newConnectionMiss(dst, stepGreeting, "no MySQL session mock is loaded, so there is no recorded server greeting", models.MatchPhaseNoMocks, 0), call, restaged, held)
 	}
 
 	if len(configMocks) == 0 {
-		utils.LogError(logger, nil, "no mysql config mocks found for handshake")
-		return newConnectionMiss(dst, stepGreeting,
+		if !heldAway(restaged, held) {
+			utils.LogError(logger, nil, "no mysql config mocks found for handshake")
+		}
+		return markConnectionMiss(newConnectionMiss(dst, stepGreeting,
 			fmt.Sprintf("none of the %d MySQL mocks in the session pool is a handshake (config) mock, so there is no recorded server greeting", totalMySQLMocks),
-			models.MatchPhaseNoMocks, 0)
+			models.MatchPhaseNoMocks, 0), call, restaged, held)
 	}
 
+	// Before the goroutine starts: it puts the TLS connection it upgrades to
+	// in clientConn's place. A deadline set on the connection the client
+	// dialled ends the TLS connection's reads and writes too.
+	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
 		defer close(errCh)
-		defer pUtil.RecoverInto(logger, clientConn, nil, errCh)
+		defer integrations.RecoverIntoCtx(ctx, logger, clientConn, nil, errCh)
 
 		// Helper struct for decoding packets
 		decodeCtx := &wire.DecodeContext{
@@ -101,9 +123,10 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 		// Simulate the initial client-server handshake (connection phase)
 
-		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, mockDb, decodeCtx, opts, dstCfg)
+		res, err := simulateInitialHandshake(ctx, logger, clientConn, configMocks, held, decodeCtx, opts, dstCfg)
 		if err != nil {
 			if errors.Is(err, models.ErrNoMockMatched) {
+				err = markConnectionMiss(err, call, restaged, held)
 				// A miss is not a failure to simulate the handshake: it is
 				// logged where it is found, and the proxy reports it with
 				// its mismatch report.
@@ -147,13 +170,5 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 
 	}(errCh, configMocks, mockDb, opts)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
+	return pUtil.JoinParser(ctx, errCh)
 }

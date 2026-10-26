@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/pathsafe"
 	"go.uber.org/zap"
@@ -44,8 +45,10 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	}
 
 	finalMappings := make(map[string][]models.MockEntry)
-	var existingStartup, existingWorker []models.MockEntry
+	var existingStartup, existingWorker, existingShared []models.MockEntry
+	var existingGroups []models.ConcurrencyGroup
 	var existingSource string
+	var existingRecordedWith []string
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -75,7 +78,9 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		}
 		existingStartup = existingConfig.Startup
 		existingWorker = existingConfig.Worker
+		existingGroups, existingShared = existingConfig.Groups, existingConfig.Shared
 		existingSource = existingConfig.Source
+		existingRecordedWith = existingConfig.RecordedWith
 	}
 
 	for _, t := range mapping.TestCases {
@@ -121,11 +126,27 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	case len(existingWorker) > 0:
 		newMapping.Worker = existingWorker
 	}
+	// The concurrency groups and shared calls (models.Mapping.Groups,
+	// Shared), replace-or-keep as the worker scope: the entries carry the
+	// group ids they name, which would otherwise name nothing.
+	switch {
+	case len(mapping.Groups) > 0 || len(mapping.Shared) > 0:
+		newMapping.Groups, newMapping.Shared = mapping.Groups, mapping.Shared
+	default:
+		newMapping.Groups, newMapping.Shared = existingGroups, existingShared
+	}
 	// Who wrote the test entries: a writer that names itself, else the
 	// file's (models.Mapping.Source).
 	newMapping.Source = existingSource
 	if mapping.Source != "" {
 		newMapping.Source = mapping.Source
+	}
+	// What keploy record recorded the set with (models.Mapping.RecordedWith):
+	// the set's, as the worker scope is, so replace-or-keep, whatever the
+	// switch. keploy test's whole-file write names none, and keeps it.
+	newMapping.RecordedWith = existingRecordedWith
+	if len(mapping.RecordedWith) > 0 {
+		newMapping.RecordedWith = mapping.RecordedWith
 	}
 
 	encodedData, err := EncodeMappingF(newMapping, db.logger, effFormat)
@@ -334,7 +355,7 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 
 // MoveToWorker bakes recordings into the set's worker scope
 // (models.Mapping.Worker), as record's judging does with a call it saw made
-// outside the window that recorded it (design v14 S12, a2): each of moves
+// outside the window that recorded it (design v14, a2): each of moves
 // names a mock and the place it is to answer from (MockEntry.Place). A mock a
 // test case lists leaves that list and joins the scope at that place, with
 // its entry's kind and recorded times; one the scope lists already takes that
@@ -344,6 +365,15 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 //
 // The caller decides each place: judging only ever moves a place earlier
 // than the one recorded, never later.
+//
+// Each move's Reason (MockEntry.Reason, under the proven switch: why judging
+// moved it, and its undo) is written on the entry as given: the entry's line
+// is the last placement's. So is its Drift (MockEntry.Drift: the move rests on
+// its owner's quarantine). Under the switch a mock taken out of a test's list
+// names that test as its Owner (MockEntry.Owner), unless the move names one;
+// a worker entry placed again keeps its owner unless the move names one.
+// Without the switch no owner is written, so a move writes what it wrote
+// before entries had one.
 func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves []models.MockEntry) ([]string, error) {
 	if len(moves) == 0 {
 		return nil, nil
@@ -394,10 +424,16 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 	for i := range mapping.Worker {
 		if mapping.Worker[i].Name == mv.Name {
 			mapping.Worker[i].Place = mv.Place
+			mapping.Worker[i].Reason = mv.Reason
+			mapping.Worker[i].Drift = mv.Drift
+			if mv.Owner != "" {
+				mapping.Worker[i].Owner = mv.Owner
+			}
 			return true
 		}
 	}
 	var entry *models.MockEntry
+	owner := ""
 	for i := range mapping.TestCases {
 		kept := mapping.TestCases[i].Mocks[:0:0]
 		for _, e := range mapping.TestCases[i].Mocks {
@@ -408,6 +444,7 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 			if entry == nil {
 				e := e
 				entry = &e
+				owner = mapping.TestCases[i].ID
 			}
 		}
 		if len(kept) != len(mapping.TestCases[i].Mocks) {
@@ -418,18 +455,62 @@ func placeWorker(mapping *models.Mapping, mv models.MockEntry) bool {
 		return false
 	}
 	entry.Place = mv.Place
+	entry.Reason = mv.Reason
+	entry.Drift = mv.Drift
+	switch {
+	case mv.Owner != "":
+		entry.Owner = mv.Owner
+	case provenswitch.On():
+		entry.Owner = owner
+	}
 	mapping.Worker = append(mapping.Worker, *entry)
 	return true
 }
 
-// workerAt is when a worker-scope entry's request was recorded, for its
-// order: its recorded time, else its timestamp in seconds.
-func workerAt(e models.MockEntry) time.Time {
-	if at, err := models.ParseMockTimestamp(e.ReqTimestampMock); err == nil && !at.IsZero() {
-		return at
+// MarkRecordedWith adds feature to what the set's mappings.yaml says keploy
+// record recorded it with (models.Mapping.RecordedWith), keeping every other
+// section as it is: keploy record marks a set a proven-routing record wrote
+// (models.RecordedWithS12Routing). A mark the file carries already writes
+// nothing. A set with no mapping file marks none, and says so: a recording
+// that wrote none has nothing to serve by the mark.
+func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature string) error {
+	if feature == "" {
+		return fmt.Errorf("mark what %s was recorded with: an empty mark", testSetID)
 	}
-	return time.Unix(e.Timestamp, 0)
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("mark %s as recorded with %s: the set has no mappings file", testSetID, feature)
+	}
+	fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+	if err != nil {
+		return err
+	}
+	mapping, err := DecodeMappingF(fileData, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if mapping.WasRecordedWith(feature) {
+		return nil
+	}
+	mapping.RecordedWith = append(mapping.RecordedWith, feature)
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
+
+// workerAt is when a worker-scope entry's request was recorded, for its
+// order (models.MockEntry.RecordedAt).
+func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
 
 func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []models.BootSpec) error {
 	mappingPath := filepath.Join(db.path, testSetID)
@@ -744,4 +825,81 @@ func (db *MappingDb) Get(ctx context.Context, testSetID string) (map[string][]mo
 		zap.Bool("hasMeaningfulMappings", hasMeaningfulMappings))
 
 	return testMockMappings, hasMeaningfulMappings, nil
+}
+
+// UpsertConcurrency writes the set's concurrency groups and shared calls
+// (models.Mapping.Groups, Shared), whole, creating the file if absent and
+// keeping every other section as it is: the recording derives them whole from
+// its test windows, so what is written replaces what was there. Empty ones
+// clear them. A file whose groups and shared calls are what it would write is
+// left as it is, byte for byte, and a missing one is not created for none.
+func (db *MappingDb) UpsertConcurrency(ctx context.Context, testSetID string, groups []models.ConcurrencyGroup, shared []models.MockEntry) error {
+	return db.rewrite(ctx, testSetID, len(groups) > 0 || len(shared) > 0, false, func(m *models.Mapping) bool {
+		if len(m.Groups) == 0 && len(m.Shared) == 0 && len(groups) == 0 && len(shared) == 0 {
+			return false
+		}
+		m.Groups, m.Shared = groups, shared
+		return true
+	})
+}
+
+// ApplyShares writes onto the set's mappings.yaml what keploy record's full
+// round settled of the calls it shared between tests that were open together
+// while they were recorded (models.Mapping.ApplyShares): pins, moves and the
+// shared calls, keeping every other section and recorded order, and dropping
+// the groups no entry names any more. Idempotent. A set with no mapping file
+// is an error: there is nothing to pin onto. It reports whether it wrote.
+func (db *MappingDb) ApplyShares(ctx context.Context, testSetID string, s models.SetShares) (bool, error) {
+	wrote := false
+	err := db.rewrite(ctx, testSetID, false, true, func(m *models.Mapping) bool {
+		wrote = m.ApplyShares(s)
+		return wrote
+	})
+	return wrote, err
+}
+
+// rewrite reads the set's mapping file, applies change, and writes it back
+// in the format it was in when change reports a change. A missing file is
+// created (as an empty mapping) when create; otherwise it is an error when
+// mustExist, and left missing when not.
+func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, mustExist bool, change func(*models.Mapping) bool) error {
+	mappingPath := filepath.Join(db.path, testSetID)
+	fileName := db.MapFileName
+	if fileName == "" {
+		fileName = "mappings"
+	}
+	exists, effFormat, err := yaml.FileExistsAny(ctx, db.logger, mappingPath, fileName, db.Format)
+	if err != nil {
+		return err
+	}
+	if !exists && !create {
+		if !mustExist {
+			return nil
+		}
+		return fmt.Errorf("the test set %s has no mappings file", testSetID)
+	}
+	if !exists {
+		effFormat = db.Format
+	}
+	mapping := &models.Mapping{Version: string(models.V1Beta1), Kind: models.MappingKind, TestSetID: testSetID, TestCases: []models.MappedTestCase{}}
+	if exists {
+		fileData, err := yaml.ReadFileF(ctx, db.logger, mappingPath, fileName, effFormat)
+		if err != nil {
+			return err
+		}
+		if mapping, err = DecodeMappingF(fileData, db.logger, effFormat); err != nil {
+			return err
+		}
+	}
+	if !change(mapping) {
+		return nil
+	}
+	encodedData, err := EncodeMappingF(mapping, db.logger, effFormat)
+	if err != nil {
+		return err
+	}
+	if !exists && effFormat == yaml.FormatYAML {
+		encodedData = append([]byte(utils.GetVersionAsComment()), encodedData...)
+	}
+	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }

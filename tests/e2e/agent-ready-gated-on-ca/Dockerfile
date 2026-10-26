@@ -8,7 +8,7 @@
 # (We previously routed through ECR Public as a Hub mirror to dodge
 # Hub's anon rate limits, but ECR Public itself started returning
 # HTTP 429 on shared GHA runners — see PR #4101 CI flake.)
-FROM golang:1.27-bookworm AS build
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS build
 WORKDIR /src
 
 # Copy the full keploy module so the harness build picks up the

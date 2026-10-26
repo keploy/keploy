@@ -151,12 +151,14 @@ func markProcess(m *schedMark, pid int, seen map[int]bool) {
 	}
 	seen[pid] = true
 	dir := "/proc/" + strconv.Itoa(pid) + "/task"
-	tasks, err := os.ReadDir(dir)
-	if err != nil {
+	// Not a bare listing, which, taken while threads exit, can leave out
+	// one that is there throughout (taskIDs).
+	tasks, _, gone, err := taskIDs("/proc", pid)
+	if err != nil || gone {
 		return
 	}
 	for _, t := range tasks {
-		markThread(m, dir+"/"+t.Name())
+		markThread(m, dir+"/"+t)
 	}
 	for _, child := range processChildren(pid, dir, tasks) {
 		markProcess(m, child, seen)
@@ -195,13 +197,13 @@ func threadChildren(dir string) (pids []int, own bool) {
 // processChildren returns the processes process pid started and has not yet
 // reaped: the union of its threads' children files (tasks, read from dir), or
 // on a kernel without them, every process whose parent is pid.
-func processChildren(pid int, dir string, tasks []os.DirEntry) []int {
+func processChildren(pid int, dir string, tasks []string) []int {
 	if !childrenFiles() {
 		return childrenByParent(pid)
 	}
 	var pids []int
 	for _, t := range tasks {
-		b, err := os.ReadFile(dir + "/" + t.Name() + "/children")
+		b, err := os.ReadFile(dir + "/" + t + "/children")
 		if err != nil {
 			continue // the thread exited meanwhile
 		}
@@ -283,6 +285,12 @@ func readSchedstat(path string) (onCPU, waited, slices uint64, ok bool) {
 	if err != nil {
 		return 0, 0, 0, false
 	}
+	return parseSchedstat(b)
+}
+
+// parseSchedstat parses a task's schedstat file (readSchedstat): zeros, or a
+// file too short, are no account, and ok is false.
+func parseSchedstat(b []byte) (onCPU, waited, slices uint64, ok bool) {
 	f := bytes.Fields(b)
 	if len(f) < 3 {
 		return 0, 0, 0, false

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -49,7 +51,7 @@ var bindRetryInterval = 500 * time.Millisecond
 // loopback).
 func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocker bool, router http.Handler) {
 	addr := agentBindAddr(port, isDocker)
-	logger.Info("Starting Agent's HTTP server", zap.String("addr", addr))
+	logger.Info("Starting Agent's HTTP server", serverStartFields(addr)...)
 	srv := newAgentHTTPServer(router)
 
 	// Derive a context tied to both the parent context and the lifetime of this function,
@@ -96,6 +98,26 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 		return
 	}
 	logger.Info("HTTP server stopped")
+}
+
+// serverStartFields are the fields of the line the agent's HTTP server logs as
+// it starts: its address and, under the proven switch, the name this agent
+// process gives itself in every answer (processInstance,
+// models.AgentInstanceHeader) and its pid. A verdict that says keploy's agent
+// was started again under the running application names the process before
+// and the one after by that name ("agent process X, then Y",
+// models.CaptureLossAgentStartedAgain); this line, once per start in the
+// agent's log, says which start each was, so a user can find both starts in
+// the log and match each one's time to a restart of the agent or of its
+// container. The pid is the one in the agent's own PID namespace: under
+// docker that is not the host's pid a kernel log line names. With the switch
+// off the line is as it was: no answer names the process then.
+func serverStartFields(addr string) []zap.Field {
+	fields := []zap.Field{zap.String("addr", addr)}
+	if provenswitch.On() {
+		fields = append(fields, zap.String("agent process", processInstance), zap.Int("pid", os.Getpid()))
+	}
+	return fields
 }
 
 // newAgentHTTPServer builds the control-plane HTTP server around router.

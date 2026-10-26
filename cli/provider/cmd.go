@@ -66,10 +66,10 @@ Golang Application
 
 Node Application
 	Record:
-	keploy record -c “npm start --prefix /path/to/node/app"
+	keploy record -c "npm start --prefix /path/to/node/app"
 
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	keploy test -c "npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
@@ -102,10 +102,10 @@ Golang Application
 
 Node Application
 	Record:
-	keploy record -c “npm start --prefix /path/to/node/app"
+	keploy record -c "npm start --prefix /path/to/node/app"
 
 	Test:
-	keploy test -c “npm start --prefix /path/to/node/app" --delay 10
+	keploy test -c "npm start --prefix /path/to/node/app" --delay 10
 
 Java
 	Record:
@@ -151,11 +151,84 @@ var RootExamples = `
 	keploy record -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --container-name "<containerName>" --buildDelay 60
 
   Test:
-	keploy test --c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 10 --buildDelay 60
+	keploy test -c "docker run -p 8080:8080 --name <containerName> --network keploy-network <applicationImage>" --delay 10 --buildDelay 60
 
   Config:
 	keploy config --generate -p "/path/to/localdir"
 `
+
+// The command lines keploy prints, as "Example:" hints, for a user to copy.
+// Every one must be a command line keploy accepts: cli's
+// TestEveryPrintedExampleIsACommandLineKeployAccepts parses each against the
+// command it names, together with RootExamples, Examples,
+// ExampleOneClickInstall and every command's own Example text.
+//
+// None of the record lines has --delay. `keploy record` has had no --delay
+// since v2.1.0 (#1684 registered it on `keploy test` only; before that,
+// record read it only to pass it on when it re-ran keploy in docker, and never
+// waited on it): record starts the application and captures the calls that
+// reach it, and fires none of its own, so it has nothing to wait for. These
+// hints went on printing `--delay 6`, and the docs and samples copied it, so
+// the first command a new user ran ended in `unknown flag: --delay`. A docker
+// run command names its container (--name), which keploy reads the container
+// from; a compose one cannot, so a compose line passes --container-name,
+// without which keploy refuses it.
+const (
+	RecordDockerExample = `keploy record -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImageName"`
+	TestDockerExample   = `keploy test -c "docker run -p 8080:8080 --name myContainerName --network myNetworkName myApplicationImageName" --delay 6`
+)
+
+// NativeExample is the `keploy <command>` line (record or test) for an
+// application keploy starts natively, the way the user starts it.
+func NativeExample(command string) string {
+	return "keploy " + command + ` -c "./myApp serve"`
+}
+
+// RecordExample is the `keploy record` command line to show a user whose
+// application is started the way cmdType says.
+func RecordExample(cmdType utils.CmdType) string {
+	switch cmdType {
+	case utils.DockerCompose:
+		return ComposeExample("record")
+	case utils.DockerRun, utils.DockerStart:
+		return RecordDockerExample
+	default:
+		return NativeExample("record")
+	}
+}
+
+// DockerExample is the docker run command line to show a user of `keploy
+// <command>` (record or test): a hint printed for both must not hand the user
+// of one the other command.
+func DockerExample(command string) string {
+	if command == "record" {
+		return RecordDockerExample
+	}
+	return TestDockerExample
+}
+
+// ComposeExample is the `keploy <command>` line (record or test) for an
+// application docker compose starts.
+func ComposeExample(command string) string {
+	return "keploy " + command + ` -c "docker compose up" --container-name myContainerName`
+}
+
+// DelayExample is the `keploy test` line, raising --delay, that keploy shows
+// when it runs in docker, where it starts the application as a container: a
+// compose line for an application docker compose starts, a docker run line
+// for any other.
+func DelayExample(cmdType utils.CmdType) string {
+	if cmdType == utils.DockerCompose {
+		return ComposeExample("test") + " --delay 6"
+	}
+	return TestDockerExample
+}
+
+// BuildDelayExample is the `keploy <command>` line (record or test) that
+// gives a compose build longer than the default to finish.
+func BuildDelayExample(command string) string {
+	return "keploy " + command + ` -c "docker compose up --build" --container-name myContainerName --buildDelay 35`
+}
 
 var VersionTemplate = `{{with .Version}}{{printf "Keploy %s" .}}{{end}}{{"\n"}}`
 var IsConfigFileFound = true
@@ -339,6 +412,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
+		cmd.Flags().String("client-pid-ns", "", "The pid namespace the keploy client runs in, beside --client-pid (set by keploy itself)")
+		if err := cmd.Flags().MarkHidden("client-pid-ns"); err != nil {
+			c.logger.Debug("failed to hide the client-pid-ns flag", zap.Error(err))
+		}
 		// Only the PATH travels here. The token itself stays in a 0600 file,
 		// because argv is world-readable through /proc/<pid>/cmdline and `ps`,
 		// and the local users that would read it there are the ones this token
@@ -636,7 +713,26 @@ func aliasNormalizeFunc(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 	return pflag.NormalizedName(name)
 }
 
+// Validate is what every command checks in its PreRunE, before it runs: this
+// machine (isCompatible), keploy.yml and the flags (PreProcessFlags), then the
+// flags' values (ValidateFlags). Each refusal is said in keploy's log where it
+// is found, and no usage text follows it. cobra has parsed the command line by
+// then, and a line it could not parse never gets here: main says that error in
+// one line, with where the command's help is. A refusal is about the values
+// (--must-pass with no --test-sets), keploy.yml, or this machine, and its log
+// line says which. AddFlags silences cobra's own error line, but cobra still
+// printed the command's usage text under an error from PreRunE: 75 lines for
+// test, which said nothing about the refusal and scrolled the line that did
+// out of view. A command Validate lets through is left as it was.
 func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) error {
+	err := c.validate(ctx, cmd)
+	if err != nil {
+		cmd.SilenceUsage = true
+	}
+	return err
+}
+
+func (c *CmdConfigurator) validate(ctx context.Context, cmd *cobra.Command) error {
 	err := isCompatible(c.logger)
 	if err != nil {
 		return err
@@ -648,21 +744,27 @@ func (c *CmdConfigurator) Validate(ctx context.Context, cmd *cobra.Command) erro
 		return err
 	}
 	err = c.ValidateFlags(ctx, cmd)
-	if err != nil {
-		if err == c.noCommandError() {
-			utils.LogError(c.logger, nil, "missing required -c flag or appCmd in config file")
-			if c.cfg.InDocker {
-				c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-			} else {
-				c.logger.Info(LogExample(RootExamples))
-			}
+	if errors.Is(err, errNoCommand) {
+		// Said once, with a line of the user's own command to copy that
+		// starts an application the way keploy runs here, and not again as
+		// "failed to validate flags".
+		utils.LogError(c.logger, nil, errNoCommand.Error())
+		example := NativeExample(cmd.Name())
+		if c.cfg.InDocker {
+			example = DockerExample(cmd.Name())
 		}
+		c.logger.Info(LogExample(example))
+		return err
+	}
+	if err != nil {
 		c.logger.Error("failed to validate flags", zap.Error(err))
 		return err
 	}
 
 	appName, err := utils.GetLastDirectory()
 	if err != nil {
+		// Said here, as every other refusal is: nothing else says it.
+		utils.LogError(c.logger, err, "failed to get the last directory for appName")
 		return fmt.Errorf("failed to get the last directory for appName: %v", err)
 	}
 
@@ -1670,7 +1772,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			// check if the buildDelay is less than 30 seconds
 			if time.Duration(c.cfg.BuildDelay)*time.Second <= 30*time.Second {
 				c.logger.Info(fmt.Sprintf("buildDelay is set to %v, incase your docker container takes more time to build use --buildDelay to set custom delay", c.cfg.BuildDelay))
-				c.logger.Info(`Example usage: keploy record -c "docker-compose up --build" --buildDelay 35`)
+				c.logger.Info(LogExample(BuildDelayExample(cmd.Name())))
 			}
 			// Compare the resolved TYPE, not the raw command string — the
 			// latter is never equal to a CmdType, so this gate never fired
@@ -1682,7 +1784,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if utils.CmdType(c.cfg.CommandType) == utils.DockerCompose {
 				if c.cfg.ContainerName == "" {
 					utils.LogError(c.logger, nil, "Couldn't find containerName")
-					c.logger.Info(`Example usage: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					c.logger.Info(LogExample(ComposeExample(cmd.Name())))
 					return errors.New("missing required --container-name flag or containerName in config file")
 				}
 			}
@@ -1710,7 +1812,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		// handle the app command
 		if c.cfg.Command == "" {
 			if !alreadyRunning(cmd.Name(), c.cfg.Test.BasePath) {
-				return c.noCommandError()
+				return errNoCommand
 			}
 		}
 
@@ -1807,12 +1909,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if _, err := os.Stat(c.cfg.Path); os.IsNotExist(err) {
 				recordCmd := models.HighlightGrayString("keploy record")
 				c.logger.Info(fmt.Sprintf("No test-sets found. Please record testcases using %s command", recordCmd))
-				cmdType := utils.CmdType(c.cfg.CommandType)
-				if cmdType == utils.DockerRun || cmdType == utils.DockerStart || cmdType == utils.DockerCompose {
-					c.logger.Info(`Example: keploy record -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
-				} else {
-					c.logger.Info(`Example: keploy record -c "./myApp serve" --delay 6`)
-				}
+				c.logger.Info("Example: " + RecordExample(utils.CmdType(c.cfg.CommandType)))
 				os.Exit(1)
 			}
 
@@ -1989,7 +2086,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			if c.cfg.Test.Delay <= 5 {
 				c.logger.Info(fmt.Sprintf("Delay is set to %d seconds, incase your app takes more time to start use --delay to set custom delay", c.cfg.Test.Delay))
 				if c.cfg.InDocker {
-					c.logger.Info(`Example usage: keploy test -c "docker run -p 8080:8080 --network myNetworkName myApplicationImageName" --delay 6`)
+					c.logger.Info(LogExample(DelayExample(utils.CmdType(c.cfg.CommandType))))
 				} else {
 					c.logger.Info("Example usage: " + cmd.Example)
 				}
@@ -2262,6 +2359,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
+		clientPIDNS, err := cmd.Flags().GetString("client-pid-ns")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the client-pid-ns flag")
+			return nil
+		}
+		c.cfg.Agent.ClientPIDNS = clientPIDNS
+		// Said once: what reads the CLI's pid in this agent's /proc reads it
+		// through utils.ClientPIDHere, and each takes it, or not, alike. A
+		// docker agent runs in a pid namespace of its own, so there the CLI's
+		// pid is expected to be another namespace's.
+		if here := utils.ClientPIDHere(clientNSPid, clientPIDNS); here.Why != "" {
+			say := c.logger.Warn
+			if isdocker {
+				say = c.logger.Debug
+			}
+			say("keploy's agent does not take the CLI's pid as said, or takes it by its number alone", zap.Uint32("clientPID", clientNSPid), zap.String("clientPIDNS", clientPIDNS), zap.Uint32("takenPID", here.PID), zap.String("why", here.Why))
+		}
 
 		caJavaHome, err := cmd.Flags().GetString("ca-java-home")
 		if err != nil {

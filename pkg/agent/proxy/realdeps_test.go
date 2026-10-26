@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/agent/realdeps"
@@ -54,6 +58,12 @@ func realServer(t *testing.T) string {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
+	return answerReal(ln)
+}
+
+// answerReal answers each connection ln accepts with "real:" and what the
+// connection sent until it half-closed, and returns ln's address.
+func answerReal(ln net.Listener) string {
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -180,10 +190,7 @@ func TestAConnectionKeployCannotNameIsCaptureIncomplete(t *testing.T) {
 // A REAL destination that refuses fails the connection as it would without
 // keploy, and the open test's row counts the failure.
 func TestARefusedRealDestinationFailsTheConnection(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	dst := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	dst := testnet.RefusedAddr(t, "tcp")
 	p := realProxy(t, []string{dst}, nil)
 	p.realTracker.BeginTest()
 	app, accepted := realConnPair(t)
@@ -191,7 +198,7 @@ func TestARefusedRealDestinationFailsTheConnection(t *testing.T) {
 	require.True(t, s.handled)
 	require.NoError(t, s.err)
 	_ = accepted.Close()
-	_, err = app.Read(make([]byte, 1))
+	_, err := app.Read(make([]byte, 1))
 	require.Error(t, err)
 	uses, _ := p.realTracker.EndTest()
 	require.Equal(t, []models.RealUse{{Dest: dst, Failed: 1}}, uses)
@@ -275,11 +282,7 @@ func TestARealNamesDNSIsResolvedLiveAndBooked(t *testing.T) {
 // An upstream that cannot be asked answers a real name SERVFAIL, never
 // keploy's own address.
 func TestARealNameKeployCannotResolveIsServfail(t *testing.T) {
-	ln, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	_, port, _ := net.SplitHostPort(ln.LocalAddr().String())
-	require.NoError(t, ln.Close())
-	p := newProxyWithUpstream(t, "127.0.0.1:"+port, 200*time.Millisecond)
+	p := newProxyWithUpstream(t, testnet.RefusedAddr(t, "udp"), 200*time.Millisecond)
 	t.Setenv(provenswitch.Env, "1")
 	list, err := realdeps.Parse([]string{"auth.test:443"})
 	require.NoError(t, err)
@@ -388,10 +391,7 @@ func TestASearchExpansionOfARealNameIsThatName(t *testing.T) {
 // the open test's REAL row counts, and kept for the relay when it accepts. A
 // connect to anything else is accepted at once, as before.
 func TestAReplaysRealConnectAnswersAsTheRealDestination(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := testnet.RefusedAddr(t, "tcp")
 	up, _ := listenCounting(t)
 
 	p := realProxy(t, []string{refused, up}, nil)
@@ -501,8 +501,11 @@ func TestALocalhostEntryReachesItsOtherLoopbackFamily(t *testing.T) {
 	} else {
 		_ = l6.Close()
 	}
-	dst := realServer(t)
-	_, port, _ := net.SplitHostPort(dst)
+	// On Linux the port is held at every address for the test's life
+	// (testnet.SharedPort), beside the test's listener at 127.0.0.1, so the
+	// dial to [::1] is refused.
+	port := strconv.Itoa(testnet.SharedPort(t))
+	answerReal(testnet.ListenShared(t, "tcp", net.JoinHostPort("127.0.0.1", port)))
 	v6 := net.JoinHostPort("::1", port)
 	p := realProxy(t, []string{"localhost:" + port}, nil)
 	p.realTracker.BeginTest()
@@ -528,9 +531,10 @@ func TestALocalhostEntryReachesItsOtherLoopbackFamily(t *testing.T) {
 // reached through 127.0.0.1:P, which mock.real does not list, and the dial
 // counts as failed, never as reached.
 func TestARealDialReachesOnlyTheListedAddress(t *testing.T) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
+	// On Linux the port is held at every address for the test's life
+	// (testnet.SharedPort), beside the test's listener at 127.0.0.1, so the
+	// dial to [::1] is refused.
+	ln := testnet.ListenShared(t, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t))))
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -666,10 +670,7 @@ func TestKeepRealDepsKeepsTheRunsBookkeeping(t *testing.T) {
 // once it ends. One whose placing does not end is capture_incomplete: never a
 // silent miss.
 func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	for _, placed := range []bool{true, false} {
@@ -713,10 +714,7 @@ func TestARefusedDialToAContainerStillBeingPlacedCountsAgainstTheTest(t *testing
 // A failed connect while Docker cannot be read, or where nothing is being
 // placed, is a dependency's: it charges nothing, and it is answered at once.
 func TestARefusedDialWithNothingBeingPlacedChargesNothing(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	for name, index := range map[string]*containerkey.Keyer{
@@ -766,10 +764,7 @@ func (f placedOnPending) AwaitReadsOf(ctx context.Context, _ []string) {
 // is found placed, and the failure counts at once: the placings are read
 // before the destination is looked up, so the end of one is never missed.
 func TestARefusedDialToAContainerPlacedMeanwhileCountsAtOnce(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refused := ln.Addr().String()
-	require.NoError(t, ln.Close())
+	refused := testnet.RefusedAddr(t, "tcp")
 	saved := containerkey.Default
 	t.Cleanup(func() { containerkey.Default = saved })
 	p := realProxy(t, []string{"container:redis"}, nil)
@@ -824,11 +819,13 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			name = "record: dialled at the handshake"
 		}
 		t.Run(name, func(t *testing.T) {
-			var accepted atomic.Int32
 			ln, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = ln.Close() })
 			acceptLoop := make(chan struct{})
+			// The client address of each connection the destination
+			// accepted, in the order it accepted them.
+			acceptedFrom := make(chan string, 8)
 			go func() {
 				defer close(acceptLoop)
 				for {
@@ -836,7 +833,7 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 					if err != nil {
 						return
 					}
-					accepted.Add(1)
+					acceptedFrom <- c.RemoteAddr().String()
 					go func() {
 						_, _ = c.Write([]byte("220 mail.test ESMTP\r\n"))
 						_, _ = io.Copy(io.Discard, c)
@@ -854,9 +851,11 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 				book.Answered(n, []netip.Addr{netip.MustParseAddr("127.0.0.1")})
 			}
 			var pre *util.Predialed
+			var dialled []string
 			if held {
 				up, err := util.DialUpstream(context.Background(), nil, "tcp", dst)
 				require.NoError(t, err)
+				dialled = append(dialled, up.LocalAddr().String())
 				pre = util.NewPredialed(dst, up)
 				t.Cleanup(pre.CloseIfUnused)
 			}
@@ -897,19 +896,40 @@ func TestAServerFirstRealDestinationKeployCannotNameIsCaptureIncompleteAtItsTest
 			got, err := io.ReadAll(app)
 			require.NoError(t, err)
 			require.Empty(t, got, "the application was sent bytes")
-			want := int32(0)
-			if held {
-				want = 1 // the handshake's own dial, never relayed
-			}
-			// Every accept is counted once the accept loop has ended. The
-			// handshake's connection goes first, as handleConnection's
+			// The destination saw only the handshake's own dial (none on
+			// replay), never relayed. It goes first, as handleConnection's
 			// deferred close lets it go at the run's end.
 			if pre != nil {
 				pre.CloseIfUnused()
 			}
+			// A listener drops a connection still in its queue when it
+			// closes, uncounted. So before closing it, the test dials one
+			// more connection and takes accepts until that one and every
+			// other connection the test dialled have been accepted, in
+			// whatever order they come: a connect can return before the
+			// destination's side of it is queued. A connection the run
+			// itself dialled (keploy relaying, which this checks it never
+			// does) is caught if it was accepted by then: the last dial
+			// gives it that long, and cannot make sure of it.
+			last, err := net.Dial("tcp", dst)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = last.Close() })
+			lastFrom := last.LocalAddr().String()
+			awaited := map[string]bool{lastFrom: true}
+			for _, from := range dialled {
+				awaited[from] = true
+			}
+			var accepted []string // in the order the destination took them
+			for len(awaited) > 0 {
+				from := awaitEvent(t, acceptedFrom, fmt.Sprintf("the destination accepting %v (it has accepted %v; the last dial is from %s)",
+					slices.Sorted(maps.Keys(awaited)), accepted, lastFrom))
+				delete(awaited, from)
+				accepted = append(accepted, from)
+			}
+			reached := slices.DeleteFunc(slices.Clone(accepted), func(from string) bool { return from == lastFrom })
+			require.ElementsMatch(t, dialled, reached, "the connections the destination accepted")
 			_ = ln.Close()
 			awaitEvent(t, acceptLoop, "the destination's accept loop ending")
-			require.Equal(t, want, accepted.Load())
 			run := p.RealRun()
 			require.Empty(t, run.Incomplete, "its test was charged; the run is not charged again")
 			require.Empty(t, run.Reached)

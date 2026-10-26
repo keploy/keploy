@@ -5,7 +5,14 @@
 package fakeconn
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"math"
+	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,6 +48,54 @@ func (d Direction) String() string {
 // ConnSeq's to say (CapturedBefore), never theirs.
 type Chunk struct {
 	Dir Direction
+	// ReadClock is the clock ReadAt is on: set only by a
+	// producer that took the stamp itself, ClockUnset on every other chunk,
+	// which is never trusted. It sits in the padding after Dir, so a chunk
+	// costs no more memory for it (TestChunkSize).
+	ReadClock Clock
+	// AfterClientClose, on a chunk from the destination, says its bytes
+	// reached the producer after the client had closed its side of the
+	// connection: the relay had read the client's FIN (its Read on the client
+	// returned io.EOF), and numbered it as it numbers a client chunk, before it
+	// forwarded it, and this chunk is numbered after it (ConnSeq). The
+	// destination's answer to the FIN itself always is: it can send one only
+	// once the FIN is forwarded. Bytes that were already waiting in the
+	// relay's socket when the FIN was read are not, however late they are
+	// read, where the socket's count can say so (a TCP socket on Linux;
+	// elsewhere bytes the relay had not read yet are numbered after the FIN:
+	// connseq.Upstream).
+	//
+	// The relay forwards these bytes. On Linux it does not tee one the
+	// client refused (relay/client_took.go): written once a look found the
+	// client's FIN at the proxy's socket, after which the connection closed
+	// with nothing acknowledged since that look, as it does for a client
+	// that closed its socket. A client that only half-closed
+	// (shutdown(SHUT_WR)) and waits for its reply, as an EOF-delimited
+	// request does, acknowledges them, and they are teed. So on Linux a
+	// chunk teed with the mark is one a half-closed client's stack took,
+	// except one the client had answered neither way for by the relay's end
+	// or the recording's stop (at once with a negative HalfCloseGrace, where
+	// the relay stops at the client's FIN), one written to a socket that
+	// could not say (keploy closed it), one written after a reset that came
+	// in before any look found the client's FIN (its Write fails, and the
+	// mock is marked incomplete), and one written after a TLS client's
+	// close_notify, which the relay reads as the client's end, while no TCP
+	// FIN is at the socket: until it comes, or for good from a client that
+	// closes only its TLS side. A chunk refused is one the client's
+	// stack did not acknowledge, which is not always one its application
+	// did not read: a half-closed client that resets before its
+	// acknowledgement went out (it closed with part of the chunk unread, or
+	// abortively, with SO_LINGER 0) read some or all of it. Where the relay
+	// cannot ask the client's socket (off Linux, or a client conn with no
+	// TCP socket under it) it tees them all, marked: a parser whose clients
+	// send their FIN as they close the connection, and stop reading then, as
+	// a MongoDB driver does, does not record them.
+	//
+	// False on every chunk from the client, and on every chunk of a producer
+	// that does not number the client's FIN: such a chunk reads as one
+	// captured before it, as every chunk did before the relay numbered it.
+	// In the padding after Dir, so a queued chunk costs no more memory.
+	AfterClientClose bool
 	// ConnSeq is the connection-wide capture sequence: the producer numbers
 	// the chunks of BOTH directions of a connection from one counter, once,
 	// where the bytes enter the capture, with ConnSeqOf, by one rule: a
@@ -63,6 +118,128 @@ type Chunk struct {
 	WrittenAt time.Time // when the relay's Write() returned on the opposite socket
 	SeqNo     uint64    // monotonic, scoped to (connection, direction)
 }
+
+// Clock is the clock a chunk's ReadAt is on. Only a producer
+// that took the stamp itself sets one; every other chunk is ClockUnset, which
+// is never trusted.
+type Clock uint8
+
+const (
+	ClockUnset Clock = iota
+	// ClockProxy: the relay's time.Now as Read returned on the source socket.
+	ClockProxy
+	// ClockKtime: CLOCK_MONOTONIC stamped by the producer at capture (a BPF
+	// event, JSSE's System.nanoTime), converted by the run's shared anchor.
+	ClockKtime
+
+	// clockCount is one past the last clock: a clock below it may be named.
+	clockCount
+)
+
+// String is c's short name: "unset", "proxy", "ktime", or the number of a
+// clock this keploy does not know.
+func (c Clock) String() string {
+	switch c {
+	case ClockUnset:
+		return "unset"
+	case ClockProxy:
+		return "proxy"
+	case ClockKtime:
+		return "ktime"
+	default:
+		return "clock(" + strconv.Itoa(int(c)) + ")"
+	}
+}
+
+// clockIDs are this run's clock names (SetClockID), read on every stamp a
+// record names (ClockID): a slot per clock, written once.
+var (
+	clockIDsMu sync.Mutex // serialises SetClockID
+	clockIDs   [clockCount]atomic.Pointer[string]
+)
+
+// SetClockID names c for this agent run: the relay sets ClockProxy's
+// ("proxy:<run>") at start, the proxyless anchor ClockKtime's
+// ("ktime:<boot id>.<anchor>") when it is taken. An id never changes within a
+// run: a second, different one panics. Setting the one it has again does
+// nothing. ClockUnset is never named, and no id is empty: either panics, as
+// does a clock this keploy does not know. The run is the process's: the names
+// are process-wide and never cleared, so a producer picks its id once per
+// process (a relay that starts again in the same agent sets the same id).
+//
+// Equal non-empty ids are one clock (models.Origin.Clock): two stamps whose
+// clocks' ids are equal may be ordered against each other, and no others.
+func SetClockID(c Clock, id string) {
+	if c == ClockUnset || c >= clockCount {
+		panic("fakeconn.SetClockID: " + c.String() + " cannot be named")
+	}
+	if id == "" {
+		panic("fakeconn.SetClockID(" + c.String() + "): an empty id")
+	}
+	clockIDsMu.Lock()
+	defer clockIDsMu.Unlock()
+	if cur := clockIDs[c].Load(); cur != nil {
+		if *cur != id {
+			panic("fakeconn.SetClockID(" + c.String() + "): named " + strconv.Quote(*cur) + " already, not " + strconv.Quote(id))
+		}
+		return
+	}
+	clockIDs[c].Store(&id)
+}
+
+// NameProxyClock names ClockProxy for this agent run, once per process, and
+// returns its id: "proxy:<run>", with run a random id the process draws the
+// first time it is called. Every producer that stamps on the proxy's clock
+// (the relay, as it reads a chunk; the ingress, as it opens a test's window)
+// calls it before its first stamp, so a stamp on that clock is named.
+func NameProxyClock() string {
+	id := proxyRunID()
+	if ClockID(ClockProxy) != id {
+		SetClockID(ClockProxy, id)
+	}
+	return id
+}
+
+// proxyRunID is this process's proxy clock id, drawn once.
+var proxyRunID = sync.OnceValue(func() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// No randomness: the process's id and start still name this run
+		// apart from another agent's.
+		binary.BigEndian.PutUint32(b[:4], uint32(os.Getpid()))
+		binary.BigEndian.PutUint32(b[4:], uint32(time.Now().UnixNano()))
+	}
+	return "proxy:" + hex.EncodeToString(b[:])
+})
+
+// ClockID is c's name for this run: "" for ClockUnset or a clock not named.
+func ClockID(c Clock) string {
+	if c == ClockUnset || c >= clockCount {
+		return ""
+	}
+	if id := clockIDs[c].Load(); id != nil {
+		return *id
+	}
+	return ""
+}
+
+// The stamped-request line, the contract between a parser
+// that fixes a request's stamp and a lane that waits on it. keploy/integrations'
+// Mongo v2 recorder logs it, at debug, once it has fixed a complete client
+// message's start (clientMessageStartReadAt), for every op, handshakes
+// included:
+//
+//	logger.Debug("mongo v2 request stamped",
+//		zap.String("op", op),            // "insert", "update", "aggregate", "hello", ...
+//		zap.String("ns", db+"."+coll),   // "" for a command with no collection
+//		zap.String("conn", sess.ClientConnID),
+//		zap.String("clock", fakeconn.ClockID(startChunk.ReadClock)))
+//
+// The message text and the field names are the contract; no value of the
+// request is logged. A lane (keploy/enterprise's sqs-s12-chain.sh) records
+// with --debug and greps "mongo v2 request stamped" with "op": "<op>" and
+// "ns": "<ns>", and treats a conn it had not seen before its send as a new
+// connection.
 
 // ConnSeqOf is the ConnSeq of the n-th chunk (n from 1) a producer captures on
 // a connection, counted across both of its directions: n itself, wrapped to 32

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,6 +101,57 @@ func (r *Replayer) forgetNotJudged(testSetID string) {
 	defer r.notJudgedMu.Unlock()
 	delete(r.notJudgedSets, testSetID)
 	delete(r.neverReadySets, testSetID)
+}
+
+// testsWithNoVerdict names the tests of results that have no verdict
+// (TestResult.VerdictUnknown), in result order. With the proven switch off
+// the only one is a wrong answer demoted to OBSOLETE for a stale mapping
+// (FailureInfo.MappingStale): every other reason is set under the switch.
+func testsWithNoVerdict(results []models.TestResult) []string {
+	var out []string
+	for _, r := range results {
+		if len(r.VerdictUnknown()) > 0 {
+			out = append(out, r.TestCaseID)
+		}
+	}
+	return out
+}
+
+// markNoVerdict records tests, the tests of a run of testSetID that have no
+// verdict (testsWithNoVerdict), for the run's exit code. An earlier attempt's
+// mark is not cleared by a later one that has none: an attempt that ended
+// with one failed the run already (its set is not judged, or keeps a failure
+// of its own).
+func (r *Replayer) markNoVerdict(testSetID string, tests []string) {
+	if len(tests) == 0 {
+		return
+	}
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	if r.noVerdictSets == nil {
+		r.noVerdictSets = map[string][]string{}
+	}
+	r.noVerdictSets[testSetID] = tests
+}
+
+// forgetNoVerdicts clears every set's marks of tests with no verdict, as a
+// run starts.
+func (r *Replayer) forgetNoVerdicts() {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	r.noVerdictSets = nil
+}
+
+// noVerdicts is, per test set of this run, its tests with no verdict
+// (markNoVerdict), a copy.
+func (r *Replayer) noVerdicts() map[string][]string {
+	r.notJudgedMu.Lock()
+	defer r.notJudgedMu.Unlock()
+	out := make(map[string][]string, len(r.noVerdictSets))
+	for set, tests := range r.noVerdictSets {
+		out[set] = slices.Clone(tests)
+	}
+	return out
 }
 
 // testsWithUnreadCapture names the tests of a set whose capture could not be
@@ -303,6 +355,10 @@ func (r *Replayer) startFailedRow(run *templates.Run, sent, view *models.TestCas
 		}
 		start := view.GrpcResp
 		start.Headers = got.Headers
+		// The recording's status stands in with its trailers, a
+		// Trailers-Only answer's from its one header block, which the
+		// app's headers have just replaced.
+		start.Trailers = view.GrpcResp.TrailersAsRead()
 		probe := start
 		if same, _ := r.compareGRPCResp(view, &probe, testSetID, false, true); same {
 			return nil, false

@@ -539,21 +539,19 @@ func (s *contract) DownloadTests(_ string) error {
 		s.logger.Info("Service's tests (contracts) downloaded", zap.String("service", service))
 		// Copy the Keploy version (HTTP) tests
 		keployTestsPath := filepath.Join(cprFolder, service, "keploy")
-		testEntries, err := os.ReadDir(keployTestsPath)
+		// The service's test sets: a folder, or a link to one (setDirs).
+		testSetIDs, err := setDirs(keployTestsPath, namedLikeATestSet)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", keployTestsPath))
+			utils.LogError(s.logger, err, "failed to list directory", zap.String("directory", keployTestsPath))
 			return err
 		}
-		for _, testSetID := range testEntries {
-			if !testSetID.IsDir() || !strings.Contains(testSetID.Name(), "test") {
-				continue
-			}
+		for _, testSetID := range testSetIDs {
 			// Copy the directory to the target path
-			if err := yaml.CopyDir(filepath.Join(keployTestsPath, testSetID.Name(), "tests"), filepath.Join(serviceFolder, "schema", testSetID.Name()), false, s.logger); err != nil {
-				utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", filepath.Join(keployTestsPath, testSetID.Name(), "tests")))
+			if err := yaml.CopyDir(filepath.Join(keployTestsPath, testSetID, "tests"), filepath.Join(serviceFolder, "schema", testSetID), false, s.logger); err != nil {
+				utils.LogError(s.logger, err, "failed to copy directory", zap.String("directory", filepath.Join(keployTestsPath, testSetID, "tests")))
 				return err
 			}
-			s.logger.Info("Service's HTTP tests downloaded", zap.String("service", service), zap.String("tests", testSetID.Name()))
+			s.logger.Info("Service's HTTP tests downloaded", zap.String("service", service), zap.String("tests", testSetID))
 
 		}
 
@@ -580,26 +578,22 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		return err
 	}
 
-	// Read all entries (files and directories) in the VirtualCPR folder
-	entries, err := os.ReadDir(cprFolder)
+	// The services in the VirtualCPR folder: a folder, or a link to one
+	// (setDirs).
+	entries, err := setDirs(cprFolder, nil)
 	if err != nil {
-		utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", cprFolder))
+		utils.LogError(s.logger, err, "failed to list directory", zap.String("directory", cprFolder))
 		return err
 	}
 
-	// Loop through each entry in the VirtualCPR folder
+	// Loop through each service in the VirtualCPR folder
 	for _, entry := range entries {
-		// If the entry is not a directory, skip it
-		if !entry.IsDir() {
-			continue
-		}
-
 		// Extract the name of the current service (the one being processed)
 		var self = s.config.Contract.Mappings.Self
 		var schemaConfigMappings config.Mappings
 
 		// Construct the path to the schema configuration file for the current service
-		configFilePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema")
+		configFilePath := filepath.Join(cprFolder, entry, "keploy", "schema")
 
 		// Read the schema configuration YAML schemaConfigMappings
 		if err := yaml.ReadYAMLFile(ctx, s.logger, configFilePath, "serviceMappings", &schemaConfigMappings, true); err != nil {
@@ -626,12 +620,12 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		}
 
 		// Construct the path to the mock files for the current service
-		mocksSourcePath := filepath.Join(cprFolder, entry.Name(), "keploy", "schema", "mocks", self)
+		mocksSourcePath := filepath.Join(cprFolder, entry, "keploy", "schema", "mocks", self)
 
 		// Log and display the start of the mock download process for the service
 		serviceColor := color.New(color.FgYellow).SprintFunc()
 		fmt.Println(serviceColor("=========================================="))
-		fmt.Println(serviceColor(fmt.Sprintf("Starting Downloading Mocks for Service: %s ....", entry.Name())))
+		fmt.Println(serviceColor(fmt.Sprintf("Starting Downloading Mocks for Service: %s ....", entry)))
 		fmt.Println(serviceColor("=========================================="))
 
 		// Copy the mock files from the source directory to the target directory
@@ -641,27 +635,24 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 		}
 
 		// Log that the mocks for the service have been downloaded
-		s.logger.Info("Service's schema mocks contracts downloaded", zap.String("service", entry.Name()), zap.String("mocks", mocksSourcePath))
+		s.logger.Info("Service's schema mocks contracts downloaded", zap.String("service", entry), zap.String("mocks", mocksSourcePath))
 
-		// Move the Keploy version-specific mocks
-		// Read the contents of the "keploy" folder to find the mock folders
-		mocksFolders, err := os.ReadDir(filepath.Join(cprFolder, entry.Name(), "keploy"))
+		// Move the Keploy version-specific mocks: the test sets in the
+		// service's "keploy" folder, each a folder, or a link to one, named
+		// like a test set (setDirs).
+		serviceKeploy := filepath.Join(cprFolder, entry, "keploy")
+		mocksFolders, err := setDirs(serviceKeploy, namedLikeATestSet)
 		if err != nil {
-			utils.LogError(s.logger, err, "failed to read directory", zap.String("directory", cprFolder), zap.Error(err))
+			utils.LogError(s.logger, err, "failed to list directory", zap.String("directory", serviceKeploy))
 			return err
 		}
 
-		// Loop through each folder inside the "keploy" folder
+		// Loop through each test set inside the "keploy" folder
 		for _, mockFolder := range mocksFolders {
-			// If the folder is not a directory or does not contain "test" in its name, skip it
-			if !mockFolder.IsDir() || !strings.Contains(mockFolder.Name(), "test") {
-				continue
-			}
-
 			// Retrieve the HTTP mocks from the mock database for the current test set
-			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder.Name(), filepath.Join(cprFolder, entry.Name(), "keploy"), "mocks")
+			httpMocks, err := s.mockDB.GetHTTPMocks(ctx, mockFolder, filepath.Join(cprFolder, entry, "keploy"), "mocks")
 			if err != nil {
-				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", mockFolder.Name()), zap.Error(err))
+				utils.LogError(s.logger, err, "failed to get HTTP mocks", zap.String("testSetID", mockFolder), zap.Error(err))
 				return err
 			}
 
@@ -688,9 +679,9 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 				}
 
 				// Write the mock YAML file to the target service folder
-				err = yaml.WriteFile(ctx, s.logger, filepath.Join(serviceFolder, mockFolder.Name()), "mocks", mockYAML, !initialMock)
+				err = yaml.WriteFile(ctx, s.logger, filepath.Join(serviceFolder, mockFolder), "mocks", mockYAML, !initialMock)
 				if err != nil {
-					utils.LogError(s.logger, err, "failed to write mock file", zap.String("service", entry.Name()), zap.String("testSetID", mockFolder.Name()))
+					utils.LogError(s.logger, err, "failed to write mock file", zap.String("service", entry), zap.String("testSetID", mockFolder))
 					return err
 				}
 
@@ -701,7 +692,7 @@ func (s *contract) DownloadMocks(ctx context.Context, _ string) error {
 			}
 
 			// Log that the HTTP mocks for the service have been downloaded
-			s.logger.Info("Service's HTTP mocks contracts downloaded", zap.String("service", entry.Name()), zap.String("mocks", mockFolder.Name()))
+			s.logger.Info("Service's HTTP mocks contracts downloaded", zap.String("service", entry), zap.String("mocks", mockFolder))
 		}
 	}
 

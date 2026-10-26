@@ -240,6 +240,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		AppPort: appPort,
 		// Mocks: mocks,
 	}
+	// The clock its window start is on (proven switch).
+	StampOrigin(ctx, testCase)
 
 	if synchronous {
 		// The request's open window (the ingress opened it at the request's
@@ -632,6 +634,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Noise:     map[string][]string{},
 		AppPort:   appPort,
 	}
+	// The clock its window start is on (proven switch).
+	StampOrigin(ctx, testCase)
 
 	select {
 	case <-ctx.Done():

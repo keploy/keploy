@@ -250,7 +250,7 @@ type Record struct {
 // leg is an ordinary Go TLS client, so verifying the real server costs nothing
 // extra: crypto/tls uses the host's system root pool when RootCAs is nil, and
 // the agent additionally embeds the Mozilla NSS roots
-// (pkg/agent/proxy/tls/data/mozilla_roots.pem) for images with no trust store.
+// (from golang.org/x/crypto/x509roots/fallback) for images with no trust store.
 //
 // Verify nevertheless defaults to FALSE, and the reason is fidelity, not a
 // missing CA bundle: a recording proxy must never be stricter than the
@@ -574,6 +574,16 @@ type Test struct {
 	// LearnPool lets the learn step pair the set's pool mocks too: only a
 	// full record replaces the pool (models.OutgoingOptions.LearnPool).
 	LearnPool bool `json:"-" yaml:"-" mapstructure:"-"`
+	// ShareConcurrent shares, in this replay, the recordings made while
+	// several tests' requests were open (models.Mapping.Groups) between those
+	// tests, under the proven switch and beside Learn: each answers whichever
+	// of them makes its call, at most once, and the set's end settles which
+	// test made each (models.SetShares). Only the replay whose round pins
+	// what it settles onto mappings.yaml sets it, in memory: keploy record's
+	// full round, which its judging follows. Never read from keploy.yml or a
+	// flag; every other replay serves each recording to the test that lists
+	// it.
+	ShareConcurrent bool `json:"-" yaml:"-" mapstructure:"-"`
 	// LearnTests, when not nil, are the tests whose recordings the record has
 	// just made: what the learn step learns is written onto their own mocks
 	// only (and onto the pool's with LearnPool). A test that keeps its

@@ -1,12 +1,15 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"iter"
 	"os"
 
 	"go.uber.org/zap"
+	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
 )
 
 // systemCertPoolFn is an indirection seam for tests, mirroring
@@ -137,7 +140,7 @@ const (
 	upstreamRootSourceSystem = "system"
 	// upstreamRootSourceKeployBundle covers both halves of loadSystemCABundle's
 	// own fallback chain (a disk bundle found by systemCABundleSearchPaths, or
-	// the go:embed'd Mozilla roots); loadSystemCABundle logs which one it took.
+	// the compiled-in Mozilla NSS roots); loadSystemCABundle logs which one it took.
 	upstreamRootSourceKeployBundle = "keploy_bundle"
 	upstreamRootSourceEmpty        = "empty"
 )
@@ -165,19 +168,52 @@ func systemOrEmbeddedRootPool(logger *zap.Logger) (*x509.CertPool, string) {
 	}
 
 	// Reuse the loader the shared-volume path already uses: it walks
-	// systemCABundleSearchPaths and falls back to the go:embed'd Mozilla NSS
+	// systemCABundleSearchPaths and falls back to the compiled-in Mozilla NSS
 	// roots, logging the severity of a missing disk bundle for us.
-	bundle, _ := loadSystemCABundleFn(logger)
+	bundle, src := loadSystemCABundleFn(logger)
+	if src == systemCABundleSourceEmbedded && bytes.Equal(bundle, embeddedFallbackRoots) {
+		// Build from the NSS bundle itself rather than its PEM rendering, so a
+		// root's "distrust after" constraint (which X.509 cannot carry) is
+		// enforced for keploy's own upstream verification.
+		if pool, n := nssRootPool(nssRoots()); n > 0 {
+			return pool, upstreamRootSourceKeployBundle
+		}
+	}
 	pool := x509.NewCertPool()
 	if len(bundle) > 0 && pool.AppendCertsFromPEM(bundle) {
 		return pool, upstreamRootSourceKeployBundle
 	}
 
-	// Only reachable if the embedded bundle itself is missing or unparseable,
-	// which go:embed makes a build-time impossibility in production builds.
+	// Only reachable if the compiled-in bundle itself is empty or unparseable,
+	// which cannot happen in a production build.
 	// Report it as empty so LoadUpstreamRootCAs does not pass an empty pool off
 	// as a trust store.
 	logger.Error("no usable trust anchors for upstream TLS verification",
 		zap.String("next_step", "install `ca-certificates` in the keploy agent image, or set record.upstreamTls.caCert to a PEM bundle readable by the agent"))
 	return pool, upstreamRootSourceEmpty
+}
+
+// nssRoots yields the compiled-in Mozilla NSS root set; a variable so tests can
+// inject roots with constraints.
+var nssRoots = nssbundle.Roots
+
+// nssRootPool turns NSS roots into a pool, attaching each root's NSS constraint
+// (e.g. distrust-after) via AddCertWithConstraint. It returns the number of
+// roots added.
+func nssRootPool(roots iter.Seq[nssbundle.Root]) (*x509.CertPool, int) {
+	pool := x509.NewCertPool()
+	n := 0
+	for root := range roots {
+		cert, err := x509.ParseCertificate(root.Certificate)
+		if err != nil {
+			continue
+		}
+		if root.Constraint != nil {
+			pool.AddCertWithConstraint(cert, root.Constraint)
+		} else {
+			pool.AddCert(cert)
+		}
+		n++
+	}
+	return pool, n
 }

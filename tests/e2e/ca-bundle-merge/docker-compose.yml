@@ -27,7 +27,7 @@ services:
       args:
         # Docker Hub's official images (see Dockerfile.setup for why not ECR
         # Public); run.sh pulls them first, with a retry, and exports these.
-        GOLANG_IMAGE: ${GOLANG_IMAGE:-golang:1.27-bookworm}
+        GOLANG_IMAGE: ${GOLANG_IMAGE:-golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5}
         DEBIAN_IMAGE: ${DEBIAN_IMAGE:-debian:trixie-slim}
     image: kpl-ca-merge:local
     container_name: kpl-ca-merge-writer

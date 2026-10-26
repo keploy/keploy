@@ -370,6 +370,12 @@ type IncomingOptions struct {
 
 type SetupOptions struct {
 	ClientNSPID uint32
+	// ClientPIDNS is the pid namespace keploy's CLI said it runs in, beside
+	// its pid (--client-pid-ns, utils.OwnPIDNamespace): "<inode>@<boot_id>",
+	// utils.ClientPIDNSNone for a CLI in no Linux pid namespace, or "" when
+	// the CLI did not say it. What reads ClientNSPID as a pid of the agent's
+	// own /proc reads it through utils.ClientPIDHere with this.
+	ClientPIDNS string
 	Container   string
 	// FromContainer is the already-running container to re-create under
 	// keploy's namespaces. Set only for utils.FromContainer runs.

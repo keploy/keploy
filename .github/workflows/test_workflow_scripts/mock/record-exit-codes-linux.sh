@@ -31,6 +31,19 @@ fail() {
   FAIL=1
 }
 
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+  local st
+  case $1 in "" | *[!0-9]*) return 1 ;; esac
+  { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+  st=${st##*) }
+  [ "${st%% *}" != Z ]
+}
+
 # start <case> <keploy record args...>: starts `keploy record` as root, in a
 # directory of its own, logging to $WORK/<case>.log, and sets PID to sudo's
 # (sudo relays a signal sent to it to keploy, and exits with keploy's code).
@@ -101,7 +114,7 @@ expect record-timer 0 "Time up! Stopping keploy"
 MARK="$WORK/sigint/app-running"
 start sigint -c "sh -c 'touch $MARK; exec sleep 600'"
 until [ -e "$MARK" ]; do
-  kill -0 "$PID" 2>/dev/null || break
+  pid_running "$PID" || break
   sleep 0.2
 done
 if [ -e "$MARK" ]; then

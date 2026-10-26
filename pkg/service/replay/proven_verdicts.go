@@ -409,6 +409,7 @@ func cloneResult(r models.TestResult) models.TestResult {
 	r.FailureInfo.Category = slices.Clone(r.FailureInfo.Category)
 	r.FailureInfo.CaptureIncomplete = slices.Clone(r.FailureInfo.CaptureIncomplete)
 	r.TemplateFailures = slices.Clone(r.TemplateFailures)
+	r.Answers = slices.Clone(r.Answers)
 	return r
 }
 

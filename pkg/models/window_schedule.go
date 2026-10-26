@@ -2,6 +2,7 @@ package models
 
 import (
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,9 @@ type TestWindow struct {
 	TestCase string    `json:"testCase,omitempty"`
 	Start    time.Time `json:"start"`
 	End      time.Time `json:"end"`
+	// Clock names, under the proven switch, the clock Start is on: the test
+	// case's Origin.Clock (RecordedWindow). "" is untrusted.
+	Clock string `json:"clock,omitempty"`
 }
 
 // WindowSchedule is every recorded test window of one test set, sorted by
@@ -46,6 +50,10 @@ type WindowSchedule struct {
 	// maxEnd[i] is the latest End among windows[0..i]. Monotone, so the first
 	// window containing t is a binary search over it.
 	maxEnd []time.Time
+	// byTest is each test case's window, by its name (Of): built at the
+	// first Of, once.
+	byTestOnce sync.Once
+	byTest     map[string]int
 }
 
 // NewWindowSchedule sorts a copy of ws by Start. Windows with a zero Start are
@@ -78,6 +86,28 @@ func (s *WindowSchedule) Len() int {
 		return 0
 	}
 	return len(s.windows)
+}
+
+// Of returns the window recorded for the test case named testCase: false
+// when the schedule holds none (a case with no request time opens none). A
+// name recorded twice gives its first window in Start order.
+func (s *WindowSchedule) Of(testCase string) (TestWindow, bool) {
+	if s.Len() == 0 || testCase == "" {
+		return TestWindow{}, false
+	}
+	s.byTestOnce.Do(func() {
+		s.byTest = make(map[string]int, len(s.windows))
+		for i, w := range s.windows {
+			if _, seen := s.byTest[w.TestCase]; !seen && w.TestCase != "" {
+				s.byTest[w.TestCase] = i
+			}
+		}
+	})
+	i, ok := s.byTest[testCase]
+	if !ok {
+		return TestWindow{}, false
+	}
+	return s.windows[i], true
 }
 
 // Window returns window i in Start order.

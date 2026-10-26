@@ -89,32 +89,51 @@ func startDecode(t *testing.T, first string, proxy net.Conn) <-chan error {
 }
 
 // runDecode runs decode, a decodeHTTP serving the proxy's end of a connection,
-// and returns what it returns. The test's cleanup closes that end and waits
-// for decodeHTTP to return before the test ends, whether the test read its
-// result or failed first. Waiting for decodeHTTP is waiting for its reader:
-// with its context live, decodeHTTP returns only once the goroutine that reads
-// the connection has sent its result, after the last line it logs (but on a
-// panic, which it logs after it has closed that result's channel). Cancelling
-// the context instead returns decodeHTTP at once and leaves that goroutine
-// blocked on the connection; when the connection then closed, it logged its
-// failed read through the test's logger after the test had ended, racing
-// testing's cleanup (go test -race).
+// and returns what it returns. The test's cleanup stops it
+// (startDecodeUntilStopped) before the test ends, whether the test read its
+// result or failed first, and then closes that end.
 func runDecode(t *testing.T, proxy net.Conn, decode func(ctx context.Context) error) <-chan error {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	done := make(chan error, 1)
+	stop := startDecodeUntilStopped(t, func(ctx context.Context) error {
+		err := decode(ctx)
+		done <- err
+		return err
+	})
+	t.Cleanup(func() {
+		stop()
+		_ = proxy.Close()
+	})
+	return done
+}
+
+// startDecodeUntilStopped runs decode, a decodeHTTP, and returns what stops it:
+// it cancels decode's context and returns once decodeHTTP has returned. That is
+// once the goroutine decodeHTTP started has ended too, its read of the
+// connection ended by the context's end, so nothing it started logs through
+// the test's logger after the test. A test that only cancelled the context,
+// and did not wait, left decodeHTTP to log after the test had ended, racing
+// testing's cleanup (a DATA RACE under go test -race); decodeHTTP itself
+// returned at once then, and left that goroutine blocked on the connection.
+// The test's cleanup stops it too, for a test that fails before it does.
+func startDecodeUntilStopped(t *testing.T, decode func(ctx context.Context) error) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
 	returned := make(chan struct{})
 	go func() {
 		defer close(returned)
-		done <- decode(ctx)
+		_ = decode(ctx)
 	}()
-	// Registered after cancel, so it runs before it.
-	t.Cleanup(func() {
-		_ = proxy.Close()
-		<-returned
-	})
-	return done
+	stop = func() {
+		cancel()
+		select {
+		case <-returned:
+		case <-time.After(time.Minute): // the bound only turns a hang into a failure
+			t.Error("decodeHTTP did not return once its context was cancelled")
+		}
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 func wantMockMiss(t *testing.T, done <-chan error) {

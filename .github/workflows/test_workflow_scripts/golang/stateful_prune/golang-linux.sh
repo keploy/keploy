@@ -45,9 +45,22 @@ echo "work dir: $WORK"
 cd "$WORK" || exit 1
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+    local st
+    case $1 in "" | *[!0-9]*) return 1 ;; esac
+    { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+    st=${st##*) }
+    [ "${st%% *}" != Z ]
+}
+
 wait_listen() {
     until listening "$1"; do
-        kill -0 "$2" 2>/dev/null || return 1
+        pid_running "$2" || return 1
         sleep 0.2
     done
 }
@@ -115,7 +128,7 @@ for i in 1 2 3 4 5 6 7 8; do
     [ "$got" = "{\"n\":$i}" ] || fail "GET /tick $i answered $got while recording, want n=$i"
 done
 until [ "$(test_files)" -ge 8 ]; do
-    kill -0 "$REC_PID" 2>/dev/null || break
+    pid_running "$REC_PID" || break
     sleep 0.2
 done
 stop_pid "$REC_PID"

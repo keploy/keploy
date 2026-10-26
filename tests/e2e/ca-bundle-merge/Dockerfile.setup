@@ -15,7 +15,7 @@
 # runners share theirs, so a job on an IP whose quota others have spent gets
 # 429 "toomanyrequests: Data limit exceeded" (check-image-registries.sh).
 
-ARG GOLANG_IMAGE=golang:1.27-bookworm
+ARG GOLANG_IMAGE=golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5
 ARG DEBIAN_IMAGE=debian:trixie-slim
 
 # BuildKit populates TARGETOS / TARGETARCH automatically based on the

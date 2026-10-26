@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // SetEndHook is an optional TestHooks extension: it is told how keploy test
@@ -24,10 +25,31 @@ type SetEndHook interface {
 // UnclaimedCalls); none when there were none. Each carries what its parser
 // found of it, as a test's own misses do in its result
 // (UnmatchedCall.NotOwned, ClosestMock): what record's judging reads to bake a
-// recording made elsewhere into the worker scope (design v14 S12, a2). It is
+// recording made elsewhere into the worker scope (design v14, a2). It is
 // a notification: it changes nothing the replayer does.
 type SetCallsHook interface {
 	SetCalls(testSetID string, calls []models.UnmatchedCall)
+}
+
+// SetSharesHook is an optional TestHooks extension, under the proven switch:
+// it is told, with each run of each test set's end (SetEndHook's moment),
+// what keploy record's full round settled of the recordings it shared between
+// the tests whose requests were open together while they were recorded
+// (models.SetShares): which test made each call, and where each recording it
+// could not give to one test goes. Only a replay that shares
+// (config.Test.ShareConcurrent) tells it; the hook writes it onto
+// mappings.yaml (keploy record's pin step). It is a notification: it changes
+// nothing the replayer does.
+type SetSharesHook interface {
+	SetShares(testSetID string, shares models.SetShares)
+}
+
+// SetAnswersHook is an optional TestHooks extension, under the proven switch:
+// with each run of each set's end (SetCallsHook's moment) it is told the
+// answered calls that end charged to the set, no test (TestReport.SetAnswers):
+// made before its first test or after its last. A notification only.
+type SetAnswersHook interface {
+	SetAnswers(testSetID string, answers []models.UnmatchedCall)
 }
 
 // noteSetEnd keeps how a final report of the set RunTestSet is running ends
@@ -37,6 +59,7 @@ type SetCallsHook interface {
 func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 	r.setEnd = &models.SetEnd{Status: models.TestSetStatus(rep.Status), Why: rep.FailureReason}
 	r.setEndCalls = rep.UnclaimedCalls
+	r.setEndAnswers = rep.SetAnswers
 }
 
 // tellSetEnd tells the hooks, when they take it (SetEndHook), how a run of
@@ -45,12 +68,24 @@ func (r *Replayer) noteSetEnd(rep *models.TestReport) {
 // ended it first: one before any final report, or the failure to write the
 // one at the set's end, which ends the set INTERNAL_ERR whatever it said.
 func (r *Replayer) tellSetEnd(testSetID string, status models.TestSetStatus, err error) {
+	if h, ok := r.hookImpl.(SetSharesHook); ok {
+		if shares, sharing := r.exact.setShares(status); sharing {
+			h.SetShares(testSetID, shares)
+		}
+	}
 	if h, ok := r.hookImpl.(SetCallsHook); ok {
 		var calls []models.UnmatchedCall
 		if noted := r.setEnd; noted != nil && noted.Status == status {
 			calls = append(calls, r.setEndCalls...)
 		}
 		h.SetCalls(testSetID, calls)
+	}
+	if h, ok := r.hookImpl.(SetAnswersHook); ok && provenswitch.On() {
+		var answers []models.UnmatchedCall
+		if noted := r.setEnd; noted != nil && noted.Status == status {
+			answers = append(answers, r.setEndAnswers...)
+		}
+		h.SetAnswers(testSetID, answers)
 	}
 	h, ok := r.hookImpl.(SetEndHook)
 	if !ok {
