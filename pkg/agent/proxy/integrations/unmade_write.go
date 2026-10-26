@@ -1,6 +1,7 @@
 package integrations
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -79,6 +80,35 @@ func (b BeforeUnmadeWrite) Note() string {
 	return fmt.Sprintf("an extra read before %s (a write the test recorded before this read's recording, which the replay has not made yet); "+
 		"the recording has no answer from before it. Under exact serving (KEPLOY_PROVEN) a read is never answered with a recording made after a write the replay has not made",
 		b.Write.Name)
+}
+
+// Answered is the sentence the run report names a read answered from
+// before the write by (ReportAnswered): "" when the rule does not apply, or
+// no recording answers (Note).
+func (b BeforeUnmadeWrite) Answered() string {
+	if b.Write == nil || b.Answer == nil {
+		return ""
+	}
+	return fmt.Sprintf("an extra read before %s, answered from %s: the newest recording of this request made before that write, which the replay had not made yet. "+
+		"The recording made after the write still answers the read made after it, and nothing is learned from this answer",
+		b.Write.Name, b.Answer.Name)
+}
+
+// ReportAnswered reports a read b answers from before the write
+// (models.AnswerBeforeUnmadeWrite) through the reporter misses take
+// (models.ReportAnswer), so the run report names it, the write and the
+// recording that answered (models.BeforeWriteLines). r is the parser's
+// account of the call (its protocol, summary and destination, as
+// mismatch.NewReport builds them), on which Answer, ClosestMock (the
+// recording that answered) and NextSteps (Answered) are set. It reports
+// nothing, and returns false, when b answers nothing (the rule does not
+// apply, or the read misses: Note) or no reporter is installed.
+func ReportAnswered(ctx context.Context, b BeforeUnmadeWrite, r *models.MockMismatchReport) bool {
+	if b.Write == nil || b.Answer == nil || r == nil {
+		return false
+	}
+	r.Answer, r.ClosestMock, r.NextSteps = models.AnswerBeforeUnmadeWrite, b.Answer.Name, b.Answered()
+	return models.ReportAnswer(ctx, r)
 }
 
 // errNoEarlierRecordings is ReadBeforeUnmadeWrite's answer over a store that
