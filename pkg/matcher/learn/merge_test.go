@@ -70,7 +70,17 @@ func TestKeptLearningPutsAClockReadOnTheRecordingAndNoNoiseThere(t *testing.T) {
 	later := models.ClockOffset{Min: 30*time.Minute - 5*ms, Max: 30*time.Minute + 40*ms, Res: ms}
 	kept := NewKeptLearning([]models.MockState{{Name: "mock-1", Clocks: map[string]models.ClockOffset{"body.exp": ttl}, ReqBodyNoise: map[string][]string{"body.exp": nil}}})
 	if !kept.Has("mock-1") {
-		t.Fatal("a state with only a clock read holds no learning")
+		t.Fatal("a state with a clock read holds no learning")
+	}
+	if !NewKeptLearning([]models.MockState{{Name: "mock-2", Clocks: map[string]models.ClockOffset{"body.at": ttl}}}).Has("mock-2") {
+		t.Fatal("a state with only a clock read, no noise or variable, holds no learning")
+	}
+	// Noise at a clock read's place, learned with it or with one on the
+	// recording, is not listed as added: the place stays compared.
+	onDisk := &models.Mock{Name: "m", Spec: models.MockSpec{Clocks: map[string]models.ClockOffset{"body.exp": ttl}}}
+	added := MergeLearned(onDisk, models.MockState{ReqBodyNoise: map[string][]string{"body.exp": nil, "body.at": nil}, Clocks: map[string]models.ClockOffset{"body.at": ttl}}, nil)
+	if want := []string{"body.at (" + ttl.String() + ")"}; !reflect.DeepEqual(added, want) || len(onDisk.Spec.ReqBodyNoise) != 0 {
+		t.Fatalf("added %v, noise %v; want %v and no noise at either clock read's place", added, onDisk.Spec.ReqBodyNoise, want)
 	}
 	rec := &models.Mock{Name: "mock-1", Spec: models.MockSpec{ReqBodyNoise: map[string][]string{"body.exp": nil, "body.trace": nil}}}
 	got := kept.Onto(rec)
