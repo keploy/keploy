@@ -2160,4 +2160,14 @@ func TestVariables_AClockReadBesideAVariableIsCheckedInItsCallsWindow(t *testing
 			}
 		})
 	}
+	// A JSON body's place a variable holds and a clock read was learned at
+	// is refused the same way, the place read in the variables' grammar.
+	t.Run("a read where a body variable sits", func(t *testing.T) {
+		m := varMock("mock-1", "POST", "http://store/orders", `{"at":"`+recAt+`"}`, 201, `{}`, models.MockVariables{"first": clockV(t, recAt, "body.at", false)})
+		m.Spec.Clocks = map[string]models.ClockOffset{"body.at": plain}
+		r := liveReq("POST", "/orders", `{"at":"`+now+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		ok, _, diag := matchVarIn(t, clockConn(true, base), newHTTP(), &varDb{perTest: []*models.Mock{at(m, 1)}}, r)
+		wantProblem(t, ok, diag, "learned both as variable first")
+	})
 }
