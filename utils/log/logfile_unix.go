@@ -20,7 +20,8 @@ const (
 // openLogFile opens LogFileName in the working directory for this run to
 // append to. A file there that is not safely this run's (see LogFileName) is
 // refused -- nil, and why -- and the run logs to the console; a log that
-// cannot be opened at all is an error, as it always was.
+// cannot be opened at all is an error, which New turns into a console-only
+// run too (a read-only directory must not fail the command).
 func openLogFile() (*os.File, string, error) {
 	const flags = os.O_APPEND | os.O_CREATE | os.O_WRONLY | oNoFollow | oNonBlock
 	// Created by this open, or already there: told by the open itself
