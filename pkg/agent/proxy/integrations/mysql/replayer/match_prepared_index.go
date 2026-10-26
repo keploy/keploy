@@ -164,16 +164,6 @@ func recordedPrepEntry(m *models.Mock) (string, prepEntry, bool) {
 	if m == nil || m.Kind != models.MySQL {
 		return "", prepEntry{}, false
 	}
-	// MySQL matcher now reads the typed Lifetime with a defensive
-	// fallback to the raw metadata tag. This handles both the
-	// fully-migrated path (DeriveLifetime has run, Lifetime is
-	// set) and the edge case where a mock reached the pool
-	// without DeriveLifetime having set Lifetime — the raw tag
-	// still says config so we skip it correctly.
-	if m.TestModeInfo.Lifetime == models.LifetimeSession ||
-		(m.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(m)) {
-		return "", prepEntry{}, false
-	}
 	if len(m.Spec.MySQLResponses) == 0 || len(m.Spec.MySQLRequests) == 0 {
 		return "", prepEntry{}, false
 	}
@@ -189,6 +179,19 @@ func recordedPrepEntry(m *models.Mock) (string, prepEntry, bool) {
 	}
 	prepQuery := strings.TrimSpace(sp.Query)
 	if prepQuery == "" {
+		return "", prepEntry{}, false
+	}
+	// MySQL matcher now reads the typed Lifetime with a defensive
+	// fallback to the raw metadata tag. This handles both the
+	// fully-migrated path (DeriveLifetime has run, Lifetime is
+	// set) and the edge case where a mock reached the pool
+	// without DeriveLifetime having set Lifetime — the raw tag
+	// still says config so we skip it correctly. It is checked last:
+	// the tag is a map lookup, and only a PREPARE mock needs it. Every
+	// check here is a condition the entry needs, so their order does
+	// not change which mocks make one.
+	if m.TestModeInfo.Lifetime == models.LifetimeSession ||
+		(m.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(m)) {
 		return "", prepEntry{}, false
 	}
 	connID := ""

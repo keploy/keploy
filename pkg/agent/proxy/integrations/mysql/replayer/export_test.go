@@ -3,6 +3,7 @@ package replayer
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
@@ -83,4 +84,15 @@ func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysq
 // on or off.
 func NoiseEngineForTest(detection, strict bool) *schemanoise.Engine {
 	return schemanoise.New(mysqlNoiseAdapter{}, detection, strict)
+}
+
+// ConfigTagReadsForTest runs fn and returns how many times it read a mock's
+// config tag (hasConfigTag), a map lookup on the mock's metadata.
+func ConfigTagReadsForTest(fn func()) int {
+	var n atomic.Int64
+	h := func() { n.Add(1) }
+	configTagReadHook.Store(&h)
+	defer configTagReadHook.Store(nil)
+	fn()
+	return int(n.Load())
 }
