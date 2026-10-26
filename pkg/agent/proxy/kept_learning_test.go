@@ -630,6 +630,13 @@ func TestEveryConsumeDoorSaysWhenItLearnedAfterTheLearnStepEnded(t *testing.T) {
 				mm, got := door.staged(t, tc.ended)
 				c := *got
 				c.Spec.ReqBodyNoise = tc.noise
+				// While the learn step runs, the copy also carries a clock
+				// read it learned, which every door hands on with its
+				// consume (MockState.Clocks), with exact serving on or off.
+				clocks := map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+				if !tc.ended {
+					c.Spec.Clocks = clocks
+				}
 				if !door.consume(mm)(c) {
 					t.Fatal("precondition: the door did not consume the copy")
 				}
@@ -642,6 +649,9 @@ func TestEveryConsumeDoorSaysWhenItLearnedAfterTheLearnStepEnded(t *testing.T) {
 				}
 				if st == nil {
 					t.Fatal("the consume is not reported")
+				}
+				if !tc.ended && !reflect.DeepEqual(st.Clocks, clocks) {
+					t.Fatalf("the consume carries clock reads %+v, want the copy's %+v", st.Clocks, clocks)
 				}
 				if st.LearnedAfterEnd != tc.want {
 					t.Fatalf("LearnedAfterEnd = %v, want %v", st.LearnedAfterEnd, tc.want)

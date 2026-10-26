@@ -254,3 +254,34 @@ func TestAClockReadSurvivesASwitchOffRewrite(t *testing.T) {
 		})
 	}
 }
+
+// A kind an out-of-tree mapper decodes (the Mongo parser's, in integrations)
+// keeps its document's clock reads, though the mapper rebuilds the mock's
+// spec whole: a replay of it still checks each one, rather than read the
+// place as recorded.
+func TestAMappedKindsClockReadsSurviveItsDecode(t *testing.T) {
+	const kind = models.Kind("EnterpriseKind")
+	clearRegistry(t)
+	RegisterMockYAMLMapper(kind, MockYAMLMapper{
+		Encode: func(*models.Mock, *yaml.NetworkTrafficDoc) error { return nil },
+		Decode: func(doc *yaml.NetworkTrafficDoc, m *models.Mock) error {
+			*m = models.Mock{Version: doc.Version, Name: doc.Name, Kind: doc.Kind}
+			return nil
+		},
+	})
+	clocks := map[string]models.ClockOffset{"body.createdAt": {Res: time.Millisecond}}
+	doc, err := EncodeMock(&models.Mock{Version: models.GetVersion(), Name: "mock-0", Kind: kind, Spec: models.MockSpec{Clocks: clocks}}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(doc.Clocks, clocks) {
+		t.Fatalf("precondition: the mapped kind's document holds clock reads %+v, want %+v", doc.Clocks, clocks)
+	}
+	back, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, zap.NewNop(), false)
+	if err != nil || len(back) != 1 {
+		t.Fatalf("read back %d mocks, %v", len(back), err)
+	}
+	if !reflect.DeepEqual(back[0].Spec.Clocks, clocks) {
+		t.Fatalf("the mapped mock read back with clock reads %+v, want %+v", back[0].Spec.Clocks, clocks)
+	}
+}
