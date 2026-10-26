@@ -709,3 +709,20 @@ func TestOwnsTestMocks(t *testing.T) {
 	require.False(t, ownsTestMocks(map[string][]string{"o::TestA": {"mock-1", "mock-2"}, "o::TestB": {}}, loaded))
 	require.False(t, ownsTestMocks(map[string][]string{}, loaded))
 }
+
+// The refusal names the mapping file the set has: mappings.json for a set
+// stored as JSON, never a mappings.yaml that does not exist.
+func TestARefusalNamesTheMappingFileTheSetHas(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "set"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "set", "mappings.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &mockService{config: &config.Config{Path: dir}}
+	err := m.refuseUnknownMocks("set", &models.Mapping{}, []string{"mock-9"})
+	if err == nil || !strings.Contains(err.Error(), "/set/mappings.json names mocks") || !strings.Contains(err.Error(), "If you edited mappings.json") || strings.Contains(err.Error(), "mappings.yaml") {
+		t.Fatalf("refusal: %v", err)
+	}
+}

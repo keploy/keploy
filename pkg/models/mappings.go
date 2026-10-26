@@ -276,8 +276,9 @@ type BootSpec struct {
 
 // MockPlaces says where in the mapping each mock name is named, as a reader of
 // mappings.yaml finds it: "test <id>" for a test's own list, and "startup:",
-// "worker:", "shared:", "runner:" or "boots:" for the set's sections. A name
-// named in several places has each, in the file's order.
+// "runner:", "worker:", "shared:" or "boots:" for the set's sections. A name
+// named in several places has each once: its tests in the file's order,
+// then the sections in that order.
 func (m *Mapping) MockPlaces() map[string][]string {
 	out := map[string][]string{}
 	if m == nil {

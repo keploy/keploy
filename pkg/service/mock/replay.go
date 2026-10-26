@@ -1214,8 +1214,15 @@ func (m *mockService) refuseUnknownMocks(name string, mp *models.Mapping, unknow
 	if f := MocksFile(m.config.Path, name); f != "" {
 		mocks = filepath.Base(f)
 	}
-	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s/%s/mappings.yaml names mocks %s/%s/%s does not have: %s. If you edited mappings.yaml, correct those names; otherwise record the set again with keploy mock record",
-		name, dir, name, dir, name, mocks, strings.Join(named, ", "))
+	mappings := "mappings.yaml"
+	for _, f := range []string{"mappings.yaml", "mappings.json"} {
+		if info, err := os.Stat(filepath.Join(m.config.Path, name, f)); err == nil && info.Mode().IsRegular() {
+			mappings = f
+			break
+		}
+	}
+	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s/%s/%s names mocks %s/%s/%s does not have: %s. If you edited %s, correct those names; otherwise record the set again with keploy mock record",
+		name, dir, name, mappings, dir, name, mocks, strings.Join(named, ", "), mappings)
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
