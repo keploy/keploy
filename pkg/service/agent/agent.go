@@ -56,6 +56,10 @@ type ClientMockStorage struct {
 	// when it is built (DiskMocks.LoadStatements) and seeded on the proxy when
 	// the store is published (seedStatementCatalog); nil with no on-disk store.
 	statements []*models.Mock
+	// dests is the recording's destinations as its mocks spell them
+	// (recordedDests), noted as the mocks are read, before any is parked on
+	// disk; nil until noted.
+	dests recordedDests
 }
 
 type Agent struct {
@@ -1082,6 +1086,13 @@ func (a *Agent) StoreMocks(ctx context.Context, filtered []*models.Mock, unfilte
 	// test window and the filters pass them through.
 	copy(storage.filtered, filtered)
 	copy(storage.unfiltered, unfiltered)
+	storage.dests = recordedDests{}
+	for _, m := range storage.filtered {
+		storage.dests.add(m)
+	}
+	for _, m := range storage.unfiltered {
+		storage.dests.add(m)
+	}
 	if provenswitch.On() {
 		// Which recorded container keys are ambiguous is read from the whole
 		// set, before any mock is refused or consumed.
@@ -1193,6 +1204,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	storage := &ClientMockStorage{
 		filtered:   make([]*models.Mock, 0, presizeCap(header.FilteredCount)),
 		unfiltered: make([]*models.Mock, 0, presizeCap(header.UnfilteredCount)),
+		dests:      recordedDests{},
 	}
 
 	// Engage the on-disk store when strict mock-window is in effect — the OSS
@@ -1243,6 +1255,7 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 		mock := &m
 		mock.DeriveLifetime()
 		mocknoise.MaterializeCorrelations(mock)
+		storage.dests.add(mock)
 		if proven {
 			tally.Add(mock)
 		}

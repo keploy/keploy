@@ -1058,7 +1058,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 		if !m.CountsAgainstTest() {
 			continue
 		}
-		ev.Misses = append(ev.Misses, sanitizedMiss(m))
+		ev.Misses = append(ev.Misses, sanitizedMiss(a.asRecorded(m)))
 	}
 	if err != nil {
 		return ev, fmt.Errorf("reading its misses: %w", err)
@@ -1284,7 +1284,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // value the test bound). The next step is the matcher's own fixed advice
 // (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
-	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
+	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, LiveDestination: m.LiveDestination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
@@ -1342,7 +1342,7 @@ func (a *Agent) charge(misses []models.UnmatchedCall) {
 	}
 	kept := make([]models.UnmatchedCall, len(misses))
 	for i, m := range misses {
-		kept[i] = sanitizedMiss(m)
+		kept[i] = sanitizedMiss(a.asRecorded(m))
 	}
 	a.provenMu.Lock()
 	a.proven.charged = append(a.proven.charged, kept...)
@@ -1479,6 +1479,9 @@ func missText(m models.UnmatchedCall) string {
 	}
 	if m.Destination != "" {
 		s += " to " + m.Destination
+		if m.LiveDestination != "" {
+			s += " (live " + m.LiveDestination + ")"
+		}
 	}
 	return s
 }
