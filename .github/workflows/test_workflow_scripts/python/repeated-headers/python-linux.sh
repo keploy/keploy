@@ -50,6 +50,10 @@
 # app's request, so /login got no answer while recording and the lane failed
 # at its first /login. The proxy now lets whichever side speaks first decide
 # (the app here), and replays the recorded HTTP mock on that port as HTTP.
+# A pass under KEPLOY_PROVEN=1 replays it too: there a test's own mocks reach
+# the proxy only as the test opens, so the replay must already know, from the
+# whole recording, that 4000 held HTTP and no MySQL; the /login mock is
+# recorded inside its test.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -239,13 +243,19 @@ run_format() {
     # mode: "" for a normal run, "lag" for the run with the capture lagging,
     # "sudo_lag" for that run recorded by a non-root CLI (its agent under
     # sudo), stopped as `sudo pkill -INT -f keploy` stops it, "sync_lag" for
-    # the lagging run recorded with --sync (each test's mapping).
-    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy="" sync_flag=()
+    # the lagging run recorded with --sync (each test's mapping), "proven"
+    # for a normal run recorded and replayed under KEPLOY_PROVEN=1.
+    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy="" sync_flag=() lagging="" proven_env=()
     [ "$format" = json ] && fmt_flag=(--storage-format json)
     [ "$mode" = sync_lag ] && sync_flag=(--sync)
     if [ "$mode" = lag ] || [ "$mode" = sudo_lag ] || [ "$mode" = sync_lag ]; then
         lag_env=(KEPLOY_DEBUG_PARSER_LAG="$PARSER_LAG")
+        lagging=1
         stop_after=0
+        format="${format}_${mode}"
+    fi
+    if [ "$mode" = proven ]; then
+        proven_env=(KEPLOY_PROVEN=1)
         format="${format}_${mode}"
     fi
     if [ "$mode" = sudo_lag ]; then
@@ -274,7 +284,7 @@ KEPLOY_CFG
 
     STOP_AFTER=$stop_after STOP_COPY=$stop_copy drive_requests > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
-    "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" "${sync_flag[@]}" \
+    "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "${proven_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" "${sync_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
     local record_status=$?
@@ -318,7 +328,7 @@ KEPLOY_CFG
             return 1
         fi
     fi
-    if [ -n "$mode" ]; then
+    if [ -n "$lagging" ]; then
         # The lag was really induced: the agent says so at WARN when it is.
         if ! grep -q 'KEPLOY_DEBUG_PARSER_LAG is set' "record_logs_${format}.txt"; then
             echo "::error::the agent did not run its parsers behind the traffic: KEPLOY_DEBUG_PARSER_LAG had no effect ($format)"
@@ -379,7 +389,7 @@ KEPLOY_CFG
         return 1
     fi
 
-    sudo -E env PATH="$PATH" "$REPLAY_BIN" test "${fmt_flag[@]}" \
+    sudo -E env PATH="$PATH" "${proven_env[@]}" "$REPLAY_BIN" test "${fmt_flag[@]}" \
         -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" --delay 5 \
         --generateGithubActions=false > "test_logs_${format}.txt" 2>&1
     echo "test exit status: $?"
@@ -419,6 +429,8 @@ else
     echo "json pass skipped: a binary does not support --storage-format"
 fi
 echo "PASS: repeated headers replay on their recorded lines"
+run_format yaml proven || exit 1
+echo "PASS: under KEPLOY_PROVEN=1 the HTTP upstream on :${UPSTREAM_PORT} records, and replays as HTTP from a mock recorded inside its test"
 run_format yaml lag || exit 1
 echo "PASS: a recording whose capture lags its traffic keeps every test case and its mocks"
 run_format yaml sudo_lag || exit 1
