@@ -44,6 +44,12 @@ THRESHOLD_LARGE_GET_P95="${THRESHOLD_LARGE_GET_P95:-120000}"
 THRESHOLD_LARGE_DELETE_P95="${THRESHOLD_LARGE_DELETE_P95:-120000}"
 # Hard failure rate: fail CI only when more than this fraction of requests fail.
 CI_MAX_HTTP_FAILURE_RATE="${CI_MAX_HTTP_FAILURE_RATE:-0.40}"
+# One memory-guard pause the record forces by ingress request count
+# (KEPLOY_DEBUG_FORCE_PAUSE, "<from>:<to>": requests from..to-1 come during it),
+# so that every run puts a pause in the middle of the k6 load, on any runner,
+# and check_capture_accounted can hold the recording to what a pause may cost.
+# Empty: no forced pause (real memory pressure can still pause the guard).
+FORCE_PAUSE="${FORCE_PAUSE-1500:1530}"
 MEMORY_VIOLATION_FILE="${PWD}/keploy-memory-violation.txt"
 MEMORY_USAGE_LOG="${PWD}/keploy-memory-usage.log"
 MEMORY_MONITOR_PID=""
@@ -97,8 +103,14 @@ dump_logs() {
 }
 
 stop_keploy_record() {
-    local rec_pid
-    rec_pid="$(pgrep -n -f 'keploy[^ ]* record' || true)"
+    local rec_pid pattern
+    # The record CLI's own command line starts with "$RECORD_BIN record" (sudo
+    # and env exec it with the path as given). Match only that: a looser
+    # pattern also matches a wrapper whose command line holds this script's
+    # text (bash -c "..."), and the newest match is then the wrapper, so the
+    # stop never reaches the CLI and the run waits on it forever.
+    pattern="^$(printf '%s' "$RECORD_BIN" | sed 's/[][\.*^$+?(){}|]/\\&/g') record( |$)"
+    rec_pid="$(pgrep -n -f "$pattern" || true)"
     echo "Keploy record PID: ${rec_pid:-not-found}"
     if [ -n "${rec_pid:-}" ]; then
         sudo kill -INT "$rec_pid" 2>/dev/null || true
@@ -207,6 +219,101 @@ check_recorded_tests() {
     fi
 
     echo "Recorded test cases were generated successfully."
+}
+
+# recording_counter LINE NAME prints the counter NAME of the agent's
+# "agent: recording complete" LINE, or nothing when the line does not carry it.
+recording_counter() {
+    printf '%s\n' "$1" | grep -oP "\"$2\": \K[0-9]+" | head -1 || true
+}
+
+# check_capture_accounted fails when the recording loses requests without
+# saying so. Each k6 request must be a recorded test or a loss the agent's
+# summary counts: suppressed, not recorded under memory pressure, left out in
+# flight, dropped at capacity, or held at the end. Requests k6 saw fail may
+# have reached no one, so they are allowed for, with 1% of the requests (at
+# least 10) on top. When the forced pause (FORCE_PAUSE) is the run's only
+# pause, it must also be temporary: it may cost the requests that came during
+# it and those in flight at its two edges (each k6 VU has one request in
+# flight), and every connection's capture resumes after it. One 0.5 s pause
+# used to stop capture on every pooled MySQL connection for the rest of the
+# run: 1,985 tests of 7,287 requests, 1,466 suppressed, 3,836 not counted.
+#
+# Only a recorder built from this tree is checked: a released agent predates
+# the count of requests not recorded under pressure, and does not know the
+# forced pause.
+check_capture_accounted() {
+    section "Checking that the recording accounts for every request"
+    if [ "${RECORD_SRC:-build}" != build ]; then
+        echo "The recorder is ${RECORD_SRC}, not this build: not checked."
+        return 0
+    fi
+
+    local reqs fail_pct failed tests line name value
+    reqs="$(grep -oP 'http_reqs[.]*:\s+\K[0-9]+' "${PWD}/k6-output.log" | head -1 || true)"
+    if [ -z "$reqs" ]; then
+        echo "k6's http_reqs is not in k6-output.log: cannot account for the recording."
+        return 1
+    fi
+    fail_pct="$(grep -oP 'http_req_failed[.]*:\s+\K[0-9]+(\.[0-9]+)?' "${PWD}/k6-output.log" | head -1 || true)"
+    failed="$(awk -v p="${fail_pct:-0}" -v n="$reqs" 'BEGIN { printf "%d", p * n / 100 + 0.999 }')"
+    tests="$(find ./keploy -path '*/tests/*.yaml' 2>/dev/null | wc -l)"
+
+    line="$(grep 'agent: recording complete' record.txt | tail -1 || true)"
+    if [ -z "$line" ]; then
+        echo "record.txt has no 'agent: recording complete' summary: the recording does not say what it lost."
+        return 1
+    fi
+    local rc=0
+    local -A n=()
+    for name in tcs_sent_to_cli tcs_suppressed_total tcs_not_recorded_under_pressure \
+        tcs_left_out_in_flight tcs_dropped_capacity tcs_held_at_end pressure_ranges_total; do
+        value="$(recording_counter "$line" "$name")"
+        if [ -z "$value" ]; then
+            echo "FAIL: the agent's summary does not say ${name}; counted as 0 below."
+            rc=1
+        fi
+        n[$name]="${value:-0}"
+    done
+
+    local reported=$((n[tcs_suppressed_total] + n[tcs_not_recorded_under_pressure] + n[tcs_left_out_in_flight] + n[tcs_dropped_capacity] + n[tcs_held_at_end]))
+    local unaccounted=$((reqs - tests - reported))
+    local slack=$((reqs / 100 > 10 ? reqs / 100 : 10))
+    echo "k6: ${reqs} requests, ${failed} failed (${fail_pct:-?}%). Recorded tests: ${tests} (the agent sent ${n[tcs_sent_to_cli]})."
+    echo "The agent counts as lost: suppressed ${n[tcs_suppressed_total]}, not recorded under pressure ${n[tcs_not_recorded_under_pressure]}, left out in flight ${n[tcs_left_out_in_flight]}, dropped at capacity ${n[tcs_dropped_capacity]}, held at the end ${n[tcs_held_at_end]}; memory-guard pauses: ${n[pressure_ranges_total]}."
+    echo "Requests neither recorded nor counted as lost: ${unaccounted} (allowed: ${failed} failed + ${slack})."
+    if [ "$unaccounted" -gt $((failed + slack)) ]; then
+        echo "FAIL: the recording lost ${unaccounted} requests without saying so."
+        rc=1
+    fi
+
+    [ -n "$FORCE_PAUSE" ] || return "$rc"
+    local from="${FORCE_PAUSE%%:*}" to="${FORCE_PAUSE##*:}"
+    if ! grep -q 'Pausing keploy-agent recording, forced by KEPLOY_DEBUG_FORCE_PAUSE' record.txt; then
+        echo "FAIL: the agent did not force the pause FORCE_PAUSE=${FORCE_PAUSE} asks for."
+        return 1
+    fi
+    if ! grep -q 'Cleared keploy-agent memory pressure, forced by KEPLOY_DEBUG_FORCE_PAUSE' record.txt; then
+        echo "FAIL: the forced pause did not end: it ends at ingress request ${to}, and k6 sent ${reqs}."
+        return 1
+    fi
+    if [ "${n[pressure_ranges_total]}" -ne 1 ]; then
+        echo "Real memory pressure paused the guard too (${n[pressure_ranges_total]} pauses): what each one cost is not known, so the forced pause's cost is not bounded."
+        return "$rc"
+    fi
+    local max_vus=0 vus
+    for vus in "$MIXED_API_START_VUS" ${MIXED_API_VU_STAGE_TARGETS//,/ }; do
+        [ "$vus" -gt "$max_vus" ] && max_vus="$vus"
+    done
+    max_vus=$((max_vus + LARGE_PAYLOAD_MAX_VUS))
+    local pause_cost=$((to - from + 2 * max_vus))
+    echo "The forced pause covers ${from}..$((to - 1)); with ${max_vus} VUs in flight at each edge it may cost ${pause_cost} tests."
+    if [ "$tests" -lt $((reqs - failed - pause_cost)) ]; then
+        echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pause cost more than the requests during it and at its edges, so capture did not resume after it."
+        rc=1
+    fi
+    [ "$rc" -ne 0 ] || echo "The recording accounts for every request, and capture resumed after the pause."
+    return "$rc"
 }
 
 check_test_report() {
@@ -557,7 +664,7 @@ section "Generating Keploy config"
 [ -f keploy.yml ] || "$RECORD_BIN" config --generate
 
 section "Recording load-test traffic"
-run_with_keploy_privileges "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --generate-github-actions=false 2>&1 | tee record.txt &
+run_with_keploy_privileges env KEPLOY_DEBUG_FORCE_PAUSE="$FORCE_PAUSE" "$RECORD_BIN" record -c "docker compose up" --container-name "$APP_CONTAINER_NAME" --memory-limit "$RECORD_MEMORY_LIMIT_MB" --generate-github-actions=false 2>&1 | tee record.txt &
 record_pid=$!
 echo "Started Keploy record process with PID: $record_pid"
 
@@ -577,6 +684,7 @@ stop_memory_monitor
 check_memory_violation
 check_for_errors record.txt
 check_recorded_tests
+check_capture_accounted
 
 section "Preparing Replay"
 cleanup_compose
