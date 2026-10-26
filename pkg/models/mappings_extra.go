@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -53,7 +54,7 @@ func extraFields(n *yaml.Node, known map[string]bool) *yamlExtra {
 	// YAML resolves them.
 	for _, m := range mergedMappings(merged) {
 		for i := 0; i+1 < len(m.Content); i += 2 {
-			if k := m.Content[i]; k.Kind == yaml.ScalarNode && !known[k.Value] && !seen[k.Value] {
+			if k := m.Content[i]; k.Kind == yaml.ScalarNode && k.Value != "<<" && !known[k.Value] && !seen[k.Value] {
 				seen[k.Value] = true
 				c := *k
 				c.HeadComment, c.LineComment, c.FootComment = "", "", ""
@@ -65,18 +66,26 @@ func extraFields(n *yaml.Node, known map[string]bool) *yamlExtra {
 }
 
 // mergedMappings is the mappings the values of a node's merge keys name: a
-// mapping, an alias of one, or a sequence of those.
+// mapping, an alias of one, or a sequence of those, each followed by the
+// mappings its own merge keys name, as YAML resolves them; each once.
 func mergedMappings(values []*yaml.Node) []*yaml.Node {
 	var out []*yaml.Node
+	seen := map[*yaml.Node]bool{}
 	var add func(*yaml.Node)
 	add = func(v *yaml.Node) {
 		for v != nil && v.Kind == yaml.AliasNode && v.Alias != nil {
 			v = v.Alias
 		}
 		switch {
-		case v == nil:
+		case v == nil || seen[v]:
 		case v.Kind == yaml.MappingNode:
+			seen[v] = true
 			out = append(out, v)
+			for i := 0; i+1 < len(v.Content); i += 2 {
+				if v.Content[i].Value == "<<" {
+					add(v.Content[i+1])
+				}
+			}
 		case v.Kind == yaml.SequenceNode:
 			for _, c := range v.Content {
 				add(c)
@@ -244,10 +253,10 @@ func (m *Mapping) UnmarshalYAML(n *yaml.Node) error {
 	*m = Mapping(p)
 	mk, _, _ := known()
 	m.extra = extraFields(n, mk)
-	if m.extra != nil && len(n.Content) > 0 && m.extra.nodes[0] == n.Content[0] && n.Content[0].HeadComment != "" {
+	if provenswitch.On() && m.extra != nil && len(n.Content) > 0 && m.extra.nodes[0] == n.Content[0] && n.Content[0].HeadComment != "" {
 		// YAML hangs the comment the file starts with on its first field:
-		// it is the file's head, which the writer keeps as the head
-		// (mapdb's encodeOver), not this field's.
+		// it is the file's head, which the writer keeps as the head under
+		// the proven switch (mapdb's encodeOver), not this field's.
 		k := *n.Content[0]
 		k.HeadComment = ""
 		m.extra.nodes[0] = &k

@@ -107,3 +107,24 @@ func TestAFieldAMergeBringsIsKept(t *testing.T) {
 		t.Fatalf("the merged field is lost from the entry:\n%s", out)
 	}
 }
+
+// A merge of a mapping that merges another brings both's fields, as YAML
+// resolves them.
+func TestANestedMergeIsKept(t *testing.T) {
+	in := "version: v\nkind: TestMocksMapping\ntest_set_id: s\nb0: &b0 {note0: x}\nb1: &b1 {<<: *b0, note1: y}\n<<: *b1\n"
+	var m Mapping
+	if err := yaml.Unmarshal([]byte(in), &m); err != nil {
+		t.Fatal(err)
+	}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		t.Fatalf("the rewrite does not read back: %v\n%s", err, out)
+	}
+	if back["note0"] != "x" || back["note1"] != "y" {
+		t.Fatalf("read back as %v\n%s", back, out)
+	}
+}

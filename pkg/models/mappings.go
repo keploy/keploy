@@ -704,7 +704,9 @@ func nodeHasField(node *yaml.Node, field string) bool {
 }
 
 // nodeHasEntries reports whether the mapping node holds field with at least
-// one entry: an empty or null list loses nothing when it is not read.
+// one entry: a list with an item, or the earlier format's comma-separated
+// string of names with one. An empty or null value loses nothing when it is
+// not read.
 func nodeHasEntries(node *yaml.Node, field string) bool {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return false
@@ -715,7 +717,13 @@ func nodeHasEntries(node *yaml.Node, field string) bool {
 			for v.Kind == yaml.AliasNode && v.Alias != nil {
 				v = v.Alias
 			}
-			return v.Kind == yaml.SequenceNode && len(v.Content) > 0
+			switch v.Kind {
+			case yaml.SequenceNode:
+				return len(v.Content) > 0
+			case yaml.ScalarNode:
+				return v.Tag != "!!null" && strings.Trim(v.Value, " ,") != ""
+			}
+			return true
 		}
 	}
 	return false
@@ -728,7 +736,14 @@ func jsonHasEntries(data []byte, field string) bool {
 		return false
 	}
 	var list []json.RawMessage
-	return json.Unmarshal(raw[field], &list) == nil && len(list) > 0
+	if json.Unmarshal(raw[field], &list) == nil {
+		return len(list) > 0
+	}
+	var names string
+	if json.Unmarshal(raw[field], &names) == nil {
+		return strings.Trim(names, " ,") != ""
+	}
+	return len(raw[field]) > 0 && string(raw[field]) != "null"
 }
 
 func jsonContainsField(data []byte, field string) bool {

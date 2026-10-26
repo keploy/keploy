@@ -501,8 +501,9 @@ type Learned struct {
 	Why string
 	// NotFollowed, of an unaccounted drift, says keploy cannot follow or
 	// answer the value yet (a word of it echoed inside a longer answer
-	// value, or an echo beside a source it set aside): keploy's limit, not
-	// a change nothing explains.
+	// value, an echo beside a source it set aside, a value a connection's
+	// start-up holds, a recording keploy could not read): keploy's limit,
+	// not a change nothing explains.
 	NotFollowed bool
 }
 
@@ -1003,7 +1004,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
 		if unreadRaw != "" {
-			out = append(out, Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw})
+			out = append(out, Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw, NotFollowed: true})
 			continue
 		}
 		if r.Type == Instant || l.Type == Instant {
@@ -1022,7 +1023,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
 				}
 				if from.startUp {
-					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
+					ln.Kind, ln.From, ln.Why, ln.NotFollowed = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from), true
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
