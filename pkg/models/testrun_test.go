@@ -88,3 +88,54 @@ func TestALearningNotKeptLeavesATestWithNoVerdict(t *testing.T) {
 		t.Fatalf("no reason: NotJudged %v", got)
 	}
 }
+
+// FieldReasonShapes keeps, once each, the reasons a reason may name: those
+// whose field is its own shape (FieldShape). One whose field may name a
+// value (an object key the app sent) is left out, as its why may quote that
+// field; so are an empty field or why. A miss's field_reasons are written
+// in YAML and JSON as field and why, and a miss without any writes none.
+func TestFieldReasonShapesKeepOnlyFieldsThatNameNoValue(t *testing.T) {
+	why := "body.since was learned as a read of the application's clock: it changed"
+	got := FieldReasonShapes([]FieldReason{
+		{Field: "body.since", Why: why},
+		{Field: "body.users.kqzx9w.since", Why: "body.users.kqzx9w.since was learned as a read of the application's clock"},
+		{Field: "body.users.{}.since", Why: "body.users.{}.since was learned as a read of the application's clock"},
+		{Field: "body.since", Why: why},
+		{Field: "", Why: why},
+		{Field: "body.until"},
+	})
+	want := []FieldReason{{Field: "body.since", Why: why}, {Field: "body.users.{}.since", Why: "body.users.{}.since was learned as a read of the application's clock"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FieldReasonShapes = %+v; want %+v", got, want)
+	}
+	if FieldReasonShapes(nil) != nil {
+		t.Fatal("no reasons gave some")
+	}
+
+	miss := UnmatchedCall{Protocol: "HTTP", FieldReasons: []FieldReason{{Field: "body.since", Why: why}}}
+	y, err := yaml.Marshal(miss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(y), "field_reasons:\n") || !strings.Contains(string(y), "- field: body.since\n") || !strings.Contains(string(y), "  why: ") {
+		t.Fatalf("the YAML miss is\n%s", y)
+	}
+	j, err := json.Marshal(miss)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(j), `"field_reasons":[{"field":"body.since","why":"`+why+`"}]`) {
+		t.Fatalf("the JSON miss is %s", j)
+	}
+	var back UnmatchedCall
+	if err := yaml.Unmarshal(y, &back); err != nil || !reflect.DeepEqual(back.FieldReasons, miss.FieldReasons) {
+		t.Fatalf("the YAML miss read back as %+v (%v)", back.FieldReasons, err)
+	}
+	for _, none := range []UnmatchedCall{{Protocol: "HTTP"}} {
+		y, _ := yaml.Marshal(none)
+		j, _ := json.Marshal(none)
+		if strings.Contains(string(y), "field_reasons") || strings.Contains(string(j), "field_reasons") {
+			t.Fatalf("a miss with no field reasons writes them: %s / %s", y, j)
+		}
+	}
+}

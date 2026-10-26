@@ -520,6 +520,13 @@ func TestARepeatNamesTheTwinWithNoOtherRecordingsDiffs(t *testing.T) {
 	if r.ClosestMock != "mock-7" || r.Repeat == nil || len(r.FieldDiffs) != 0 || len(r.Differs) != 0 || r.Diff != "" {
 		t.Fatalf("the repeat's miss is closest %q, note %+v, diffs %v, differs %v, diff %q; want mock-7 with no difference named", r.ClosestMock, r.Repeat, r.FieldDiffs, r.Differs, r.Diff)
 	}
+	// Nor why a field of the other recording was refused.
+	other := &models.MockMismatchReport{ClosestMock: "mock-near", Differs: []string{"body.since"},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: "body.since was learned as a read of the application's clock"}}}
+	markRepeat(other, twin.answered[0])
+	if other.ClosestMock != "mock-7" || other.FieldReasons != nil || other.Differs != nil {
+		t.Fatalf("the repeat's miss is closest %q, differs %v, reasons %+v; want mock-7 with no reason of another recording's", other.ClosestMock, other.Differs, other.FieldReasons)
+	}
 }
 
 // An AWS JSON call names its action in its X-Amz-Target, which is part of

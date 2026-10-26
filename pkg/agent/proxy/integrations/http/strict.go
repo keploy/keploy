@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 
@@ -471,8 +472,22 @@ func strictMismatchReport(request *http.Request, liveBody []byte, dest, actualKe
 		).Build()
 	if r != nil {
 		r.Differs = differs
+		r.FieldReasons = reasonsOf(diag.differs)
 	}
 	return r
+}
+
+// reasonsOf are, of fields, those refused for a reason of their own (a
+// learned read of the application's clock the call does not carry:
+// clockDiffs), each named by its shape, with that reason, once.
+func reasonsOf(fields []strictField) []models.FieldReason {
+	var out []models.FieldReason
+	for _, f := range fields {
+		if r := (models.FieldReason{Field: f.shape, Why: f.why}); f.shape != "" && f.why != "" && !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // differsOf is the names of the fields that differ, as a reason names them

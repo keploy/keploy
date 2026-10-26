@@ -20,7 +20,8 @@ import (
 func TestAReportsAnswersRoundTrip(t *testing.T) {
 	answer := models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "insert keploy.events", ClosestMock: "mock-6",
 		RecordedIn: "post-url-1", Kind: models.MissOutsideTest, BeforeSet: true, Answer: models.AnswerProvisional, Drift: true,
-		Differs: []string{"body.documents[0]._id"}, Source: &models.Origin{Comm: "sqs", Exe: "./sqs"}}
+		Differs: []string{"body.documents[0]._id"}, Source: &models.Origin{Comm: "sqs", Exe: "./sqs"},
+		FieldReasons: []models.FieldReason{{Field: "body.documents[0].at", Why: "body.documents[0].at was learned as a read of the application's clock: it changed"}}}
 	byKind := models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "insert keploy.events", Kind: models.MissInTest,
 		Answer: models.AnswerByKind, Reused: true, WriteKind: "Mongo insert keploy.events", Source: &models.Origin{Comm: "sqs", Exe: "./sqs"}}
 	for _, format := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
