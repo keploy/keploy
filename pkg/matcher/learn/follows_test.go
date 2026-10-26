@@ -172,7 +172,7 @@ func TestACopyFollowsItsSourceForEveryKindOfPlace(t *testing.T) {
 		{"F's word, at a payload F served changed", "82", "1", nil, with(eStartup(), 1, mock1(eRecAt.Add(-850*time.Millisecond)).ServedAs(2)), noF, "mock-1"},
 		// F gave the application 83 at the leaf, and the value took none
 		// of it: a copy moves with its source, so it is no copy of 82 there
-		// (TestAWordAtAPlaceFGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt).
+		// (TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt).
 		{"the recorded word, at a leaf F served drifted", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "83")}, eStartup(), "", ""},
 		{"the recorded word, at a leaf F served without it and nothing new", "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82 7", "7")}, eStartup(), "record's full round gave the application another value there, which holds no word the recorded one lacked", "mock-8"},
 		{"a word both values hold", "82 1", "4 1 1", nil, eStartup(), both, "mock-1"},
@@ -253,7 +253,7 @@ func jobsServed(id, n string, live Raw) []Raw {
 // the value F saw, it stays where the value came from (a variable), or the
 // word is refused: fail closed. ClassifyGiven, the rule's absence, never
 // learns it.
-func TestAWordAtAPlaceFGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
+func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNoneOfIt(t *testing.T) {
 	const (
 		moved   = "where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source"
 		took    = "record's full round gave the application another value there, and the value took a word of it"
