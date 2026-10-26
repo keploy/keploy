@@ -343,7 +343,9 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		{"the call's day before midnight, F's the next", typed(time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), day), typed(time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC), day), time.Date(2026, 10, 22, 23, 59, 31, 0, time.UTC), true},
 		{"an hour after the call", typed(time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 12, 1, 0, 0, time.UTC), time.Minute), at, false},
 		{"a minute after the call's", typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 16, 0, 0, time.UTC), time.Minute), at, false},
-		{"the call's minute, F's two on", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 16, 0, 0, time.UTC), time.Minute), at, false},
+		// With no window, a plain read of the clock all the same, which
+		// every replay checks in its call's span (noWindowRead).
+		{"the call's minute, F's two on", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 16, 0, 0, time.UTC), time.Minute), at, true},
 		{"the call's minute, F's the next", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Minute), typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC), time.Minute), at, true},
 		{"a second a month on", typed(time.Date(2026, 11, 21, 17, 30, 0, 0, time.UTC), time.Second), typed(time.Date(2026, 11, 21, 17, 31, 1, 0, time.UTC), time.Second), at, false},
 		{"the second before the call", typed(at.Add(-time.Second), time.Second), typed(at.Add(-time.Second+FullRoundLead), time.Second), at, true},
