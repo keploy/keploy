@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,7 +17,6 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -576,14 +574,20 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 
 // buildMockResponseBytes serializes a recorded HTTP mock's response to raw
 // wire bytes (status line + headers + recomputed Content-Length + body,
-// compressing the body when Content-Encoding is set). It lives here (not in
-// async.go) because it is the shared serializer for BOTH the ordinary
-// matched-mock path and the async serving branch.
+// compressing the body when Content-Encoding is set; encodeAnswer). It lives
+// here (not in async.go) because it is the shared serializer for BOTH the
+// ordinary matched-mock path and the async serving branch.
 // A response still kept apart from its mock is loaded first (withResponse).
 // A response with no body by rule (to a HEAD, a 1xx, 204 or 304) keeps the
 // Content-Length it was recorded with: a HEAD's is the size of the body a GET
 // gets, which the client takes for that size (an S3 client's Stat).
+// An answer served again is written from the bytes built for it before
+// (keptAnswers), unless it is served rewritten or read back per serve
+// (keepsAnswer). The returned bytes are never to be written to.
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
+	if keepsAnswer(stub) {
+		return keptAnswers.serve(stub, h.encodeAnswer)
+	}
 	name := ""
 	if stub != nil {
 		name = stub.Name
@@ -595,42 +599,7 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
-	protoMajor, protoMinor := 1, 1
-	method := ""
-	if stub.Spec.HTTPReq != nil {
-		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
-		method = string(stub.Spec.HTTPReq.Method)
-	}
-	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
-		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
-	body := stub.Spec.HTTPResp.Body
-	header := pkg.ToWireHTTPHeader(stub.Spec.HTTPResp.Header, stub.Spec.HTTPResp.HeaderLineLengths)
-	var respBody string
-	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
-		if err != nil {
-			return nil, err
-		}
-		respBody = string(compressed)
-	} else {
-		respBody = body
-	}
-	// The digests the recorded body matched as its server sent it, over the
-	// bytes sent now (models.MetadataBodyDigestsKey): obfuscation, encryption
-	// and a variable rewrite a body, and keploy's compressor is not the
-	// server's. Those it did not match are sent as recorded.
-	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
-	noBody := responseHasNoBody(method, stub.Spec.HTTPResp.StatusCode)
-	var headers string
-	for key, values := range header {
-		if key == "Content-Length" && !noBody {
-			values = []string{strconv.Itoa(len(respBody))}
-		}
-		for _, value := range values {
-			headers += fmt.Sprintf("%s: %s\r\n", key, value)
-		}
-	}
-	return []byte(statusLine + headers + "\r\n" + respBody), nil
+	return h.encodeAnswer(stub)
 }
 
 // RequestNoise is what of a request may differ from its recording when it is
