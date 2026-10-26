@@ -180,8 +180,9 @@ func TestAnsweredLogKeepsTheNewest(t *testing.T) {
 }
 
 // What the log keeps of a recording is what a match reads: its request, name,
-// kind, times and noise, never its response, nor the loader that would read
-// one back from disk.
+// kind, times, noise and learned clock reads (a match checks a clock read's
+// place as one, in its zone), never its response, nor the loader that would
+// read one back from disk.
 func TestAnsweredLogKeepsNoResponse(t *testing.T) {
 	byURL(t)
 	t0 := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
@@ -189,6 +190,8 @@ func TestAnsweredLogKeepsNoResponse(t *testing.T) {
 	mk.Noise = []string{"secret"}
 	mk.Spec.Metadata = map[string]string{"type": "http-client"}
 	mk.Spec.ReqBodyNoise = map[string][]string{"body.ts": nil}
+	clock := models.ClockOffset{Res: time.Millisecond, Zone: models.ZoneApp}
+	mk.Spec.Clocks = map[string]models.ClockOffset{"body.seenAt": clock}
 	mk.Spec.HTTPReq.Body = `{"q":1}`
 	mk.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: strings.Repeat("r", 64<<10)}
 	mk.Spec.MongoResponses = []models.MongoResponse{{}}
@@ -208,6 +211,9 @@ func TestAnsweredLogKeepsNoResponse(t *testing.T) {
 	if p.Name != mk.Name || p.Kind != mk.Kind || p.Spec.HTTPReq == nil || p.Spec.HTTPReq.Body != mk.Spec.HTTPReq.Body ||
 		!p.Spec.ReqTimestampMock.Equal(t0) || len(p.Noise) != 1 || p.Spec.Metadata["type"] != "http-client" || len(p.Spec.ReqBodyNoise) != 1 {
 		t.Fatalf("the log lost what a match or the note reads: %+v", p)
+	}
+	if got := p.Spec.Clocks["body.seenAt"]; len(p.Spec.Clocks) != 1 || got != clock {
+		t.Fatalf("the log kept clock reads %+v; want the recording's %+v", p.Spec.Clocks, mk.Spec.Clocks)
 	}
 	if c[0].size >= 8<<10 {
 		t.Fatalf("an entry with a small request counts %d bytes", c[0].size)

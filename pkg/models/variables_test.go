@@ -417,6 +417,11 @@ func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
 		{"a window that ends before it starts", from.Add(5 * ms), ms, o, to, from, false},
 		{"a cut to the second at a millisecond's encoding", from.Truncate(time.Second), ms, ClockOffset{Res: time.Second}, from.Add(-600 * ms), to, false},
 		{"a millisecond's Res at a nanosecond's replay", from.Add(5 * ms), time.Nanosecond, o, from, to, false},
+		{"a wall clock of no zone read in the application's zone", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneApp}, from, to, true},
+		{"a wall clock of no zone read in UTC", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneUTC}, from, to, true},
+		{"two learnings in different zones", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneApart}, from, to, false},
+		{"a zone this keploy does not read", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: "pst"}, from, to, false},
+		{"an offset in a zone this keploy does not read", from.Add(30*time.Minute + 5*ms), ms, ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + ms, Res: ms, Zone: "pst"}, from, to, false},
 	} {
 		if got := row.o.Holds(row.at, row.res, row.from, row.to); got != row.want {
 			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
@@ -485,5 +490,49 @@ func TestAPlainClockReadHoldsNothingInAWindowThatEndsBeforeItStarts(t *testing.T
 	}
 	if o.Holds(from.Add(-300*time.Millisecond), time.Second, from, from.Add(-200*time.Millisecond)) {
 		t.Fatal("a window that ends before it starts held a read")
+	}
+}
+
+// A place's zone (ClockOffset.Zone) is carried through Meet: two learnings
+// in one zone keep it, two in different zones meet as ZoneApart, which is
+// Empty and holds nothing, in either order and however grouped. String
+// names the zone a replay reads a wall clock of no zone in, and says so of
+// ZoneApart and of a zone this keploy does not read; ZoneKnown is true of
+// "", ZoneUTC and ZoneApp alone.
+func TestAClockReadsZoneMeetsAsOneOrHoldsNothing(t *testing.T) {
+	ms := time.Millisecond
+	app, utc, named := ClockOffset{Res: ms, Zone: ZoneApp}, ClockOffset{Res: time.Second, Zone: ZoneUTC}, ClockOffset{Res: ms}
+	if got := app.Meet(ClockOffset{Res: time.Second, Zone: ZoneApp}); got != (ClockOffset{Res: time.Second, Zone: ZoneApp}) || got.Empty() {
+		t.Errorf("two reads in the application's zone met as %+v (Empty %v); want one there at the coarser Res", got, got.Empty())
+	}
+	for _, pair := range [][2]ClockOffset{{app, utc}, {utc, app}, {app, named}, {named, utc}} {
+		got := pair[0].Meet(pair[1])
+		if got.Zone != ZoneApart || !got.Empty() || got.Holds(time.Unix(0, 0), ms, time.Unix(0, 0), time.Unix(1, 0)) {
+			t.Errorf("%+v meet %+v = %+v (Empty %v); want ZoneApart, Empty, holding nothing", pair[0], pair[1], got, got.Empty())
+		}
+		if s := got.String(); !strings.Contains(s, "no one zone") {
+			t.Errorf("String of %+v = %q; want it to say no one zone holds it", got, s)
+		}
+	}
+	if a, b := app.Meet(utc).Meet(app), app.Meet(utc.Meet(app)); a != b {
+		t.Errorf("Meet grouped two ways: %+v and %+v", a, b)
+	}
+	for _, row := range []struct {
+		o    ClockOffset
+		want string
+	}{
+		{named, "clock"},
+		{app, "clock, a wall clock of no zone in the application's zone"},
+		{utc, "clock, a wall clock of no zone in UTC"},
+		{ClockOffset{Res: ms, Zone: "pst"}, `clock read in a zone this keploy does not read ("pst")`},
+	} {
+		if got := row.o.String(); got != row.want {
+			t.Errorf("String of %+v = %q; want %q", row.o, got, row.want)
+		}
+	}
+	for zone, want := range map[string]bool{"": true, ZoneUTC: true, ZoneApp: true, ZoneApart: false, "pst": false} {
+		if got := (ClockOffset{Res: ms, Zone: zone}).ZoneKnown(); got != want {
+			t.Errorf("ZoneKnown of %q = %v; want %v", zone, got, want)
+		}
 	}
 }

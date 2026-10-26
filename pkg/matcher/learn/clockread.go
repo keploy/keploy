@@ -2,6 +2,7 @@ package learn
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -53,10 +54,18 @@ func (dc *DriftCache) windowHolds(v *valueDrift, w *Window) bool {
 // ok only where one layout's pattern matches all of s and reads it, and the
 // layout names a day (a time of day does not: no window holds it).
 func readClockText(s string) (time.Time, time.Duration, bool) {
+	t, res, _, ok := readClockTextWall(s)
+	return t, res, ok
+}
+
+// readClockTextWall is readClockText, and whether s is a wall clock of no
+// zone (namesZone: a date, or a date and time, its text names no zone of),
+// whose instant it reads in UTC.
+func readClockTextWall(s string) (time.Time, time.Duration, bool, bool) {
 	if s == "" {
-		return time.Time{}, 0, false
+		return time.Time{}, 0, false, false
 	}
-	for _, lay := range clockLayouts {
+	for k, lay := range clockLayouts {
 		if lay.wraps {
 			continue
 		}
@@ -66,11 +75,71 @@ func readClockText(s string) (time.Time, time.Duration, bool) {
 		}
 		t, res, ok := lay.read(s)
 		if !ok || !inClockRange(t) {
-			return time.Time{}, 0, false
+			return time.Time{}, 0, false, false
 		}
-		return t, res, true
+		return t, res, !namesZone(k, strings.ToUpper(s)), true
 	}
-	return time.Time{}, 0, false
+	return time.Time{}, 0, false, false
+}
+
+// wallZone is the zone a replay reads a wall clock of no zone in
+// (models.ClockOffset.Zone) that the learn step learns as a plain read of
+// the application's clock, recorded as rt (its reading in UTC) in the call
+// recorded at call: models.ZoneUTC where the learn step reads such a clock
+// in UTC alone (the cache's zone is nil); otherwise the zone of its
+// recorded reading nearest call, one no later than call first
+// (nearestZone). A value is in a call only once the application read it, so
+// a window that holds it in one zone alone, narrower than the zone's offset
+// from UTC as a call's window is, holds that reading: the one nearest its
+// call. The replay checks the value in that zone alone (clockReadIn), so a
+// value read in another fails there, named.
+func (dc *DriftCache) wallZone(rt, call time.Time) string {
+	if dc.zone == nil {
+		return models.ZoneUTC
+	}
+	return nearestZone(rt, call, dc.zone)
+}
+
+// nearestZone is the zone, UTC (models.ZoneUTC) or zone (models.ZoneApp), in
+// which rt, a wall clock of no zone as recorded read in UTC, is the reading
+// nearest the call recorded at call: of two readings no later than call the
+// later, and of one, that one; of none, the earlier. ZoneUTC where the two
+// readings are one instant (zone is UTC there) or call is not known (zero),
+// as the learn step read such a value before it carried a zone.
+func nearestZone(rt, call time.Time, zone *time.Location) string {
+	if call.IsZero() {
+		return models.ZoneUTC
+	}
+	z := wallIn(rt.UnixNano(), zone)
+	uOK, zOK := !rt.After(call), !z.After(call)
+	switch {
+	case uOK && zOK:
+		if z.After(rt) {
+			return models.ZoneApp
+		}
+		return models.ZoneUTC
+	case uOK:
+		return models.ZoneUTC
+	case zOK:
+		return models.ZoneApp
+	}
+	if z.Before(rt) {
+		return models.ZoneApp
+	}
+	return models.ZoneUTC
+}
+
+// textReadZone is the Zone of textClockRead's read of a text recorded as rec
+// and seen in record's full round as live, in the call recorded at call: of
+// a wall clock of no zone in both (readClockTextWall), the zone wallZone
+// reads it in; "" where either names its zone, read as it names it.
+func (dc *DriftCache) textReadZone(rec, live string, call time.Time) string {
+	rt, _, rwall, okR := readClockTextWall(rec)
+	_, _, lwall, okL := readClockTextWall(live)
+	if !okR || !okL || !rwall || !lwall {
+		return ""
+	}
+	return dc.wallZone(rt, call)
 }
 
 // textClockRead is Learned.Read of a text or number leaf recorded as rec
@@ -91,32 +160,68 @@ func textClockRead(rec, live string) *models.ClockOffset {
 }
 
 // clockReadOf reads l, a leaf of a replay's call, as the instant a clock
-// read wrote there: an instant its protocol types that names its moment, or
-// a text or a number that is one instant whole (readClockText), with the
-// resolution its form writes. ok is false for any other value.
-func clockReadOf(l Leaf) (time.Time, time.Duration, bool) {
+// read wrote there: an instant its protocol types that names its moment or
+// is a wall clock of no zone (WallClockLeaf), or a text or a number that is
+// one instant whole (readClockText), with the resolution its form writes,
+// and whether it is a wall clock of no zone (wall), whose instant it reads in
+// UTC. typed says its protocol typed it. ok is false for any other value: a
+// time of day too, which names no day.
+func clockReadOf(l Leaf) (at time.Time, res time.Duration, wall, typed, ok bool) {
 	if l.Type == Instant {
 		ti, ok := readTyped(l)
-		if !ok || ti.names != namesMoment {
-			return time.Time{}, 0, false
+		if !ok || ti.names == namesTimeOfDay {
+			return time.Time{}, 0, false, true, false
 		}
-		return ti.at, ti.res, true
+		return ti.at, ti.res, ti.names == namesWall, true, true
 	}
-	return readClockText(l.Value)
+	at, res, wall, ok = readClockTextWall(l.Value)
+	return at, res, wall, false, ok
+}
+
+// clockReadIn reads live, the leaf a replay's call carries at a place the
+// learn step learned as o, as the instant of the clock read o's Zone says
+// it is (models.ClockOffset.Zone), in zone, the application's
+// (Span.Zone): a wall clock of no zone in UTC (models.ZoneUTC) or as the
+// wall clock of zone (models.ZoneApp, wallIn); of a Zone of "", as the
+// value names its moment, or a text of no zone in UTC, as a replay read it
+// before Zone was learned (a typed wall clock is none then). Otherwise why
+// it reads none, after "<path> was learned as <o>, <read>": the value is no
+// instant keploy reads, it names its zone where the learn step read a wall
+// clock of no zone, or o reads in the application's zone and the replay
+// cannot tell it (zone nil).
+func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) (time.Time, time.Duration, string) {
+	at, res, wall, typed, ok := clockReadOf(live)
+	if !ok || o.Zone == "" && wall && typed {
+		return time.Time{}, 0, ", and the value this call carries is no instant keploy reads: it changed"
+	}
+	switch o.Zone {
+	case models.ZoneUTC, models.ZoneApp:
+		if !wall {
+			return time.Time{}, 0, ", and the value this call carries names its zone, where the learn step read a wall clock of no zone: it changed"
+		}
+		if o.Zone == models.ZoneApp {
+			if zone == nil {
+				return time.Time{}, 0, ", which a replay reads in the application's zone, but keploy cannot tell the application's zone at this call, so it refuses the value rather than read it in another zone"
+			}
+			at = wallIn(at.UnixNano(), zone)
+		}
+	}
+	return at, res, ""
 }
 
 // ClockReadHolds reports whether live, the leaf a replay's call carries at a
 // place the learn step learned a read of the application's clock at (o, as
 // models.MockSpec.Clocks holds it), is such a read: an instant made in s,
 // the call's span on the application's clock (ClockSpanFrom), plus o's
-// offset, read at the resolution its own form writes
-// (models.ClockOffset.Holds; of a plain read, a read in s itself). False for
-// a live value that reads as no instant (another type, a text that is not
-// one instant whole), and for every value where s is no span (its From is
-// zero): it fails closed.
+// offset, read at the resolution its own form writes and in the zone o's
+// Zone says (clockReadIn; models.ClockOffset.Holds; of a plain read, a read
+// in s itself). False for a live value that reads as no instant (another
+// type, a text that is not one instant whole), one clockReadIn reads in no
+// zone, and for every value where s is no span (its From is zero): it fails
+// closed.
 func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
-	at, res, ok := clockReadOf(live)
-	if !ok {
+	at, res, why := clockReadIn(o, live, s.Zone)
+	if why != "" {
 		return false
 	}
 	return o.Holds(at, res, s.From, s.To)
@@ -128,12 +233,16 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // could tell (ClockSpanFrom): ok where live is a read of the clock made in s
 // plus o's offset (ClockReadHolds). Otherwise why it refuses the call, which
 // names path and o and says what failed: keploy could not tell the
-// application's clock at the call; the value is no instant keploy reads; it
-// is cut coarser than the learn step read it (o.Res a cut coarser than the
+// application's clock at the call; the value is no instant keploy reads in
+// o's zone (clockReadIn: one that names its zone where the learn step read a
+// wall clock of no zone, or one of the application's zone, which s does not
+// carry); it is cut coarser than the learn step read it (o.Res a cut coarser than the
 // value's encoding, models.ClockOffset.CutCoarserThan), so it would pass or
 // fail by where its read fell in the cut; or it is no such read: it changed.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they
-// share no offset) is refused whatever the call carries, saying so. It never
+// share no offset, or read it in different zones) is refused whatever the
+// call carries, saying so, and so is one of a Zone this keploy does not
+// read (models.ClockOffset.ZoneKnown). It never
 // passes a value it could not check.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
 	if o.Empty() {
@@ -144,12 +253,15 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		read += " plus that offset"
 	}
 	learned := path + " was learned as " + o.String() + ", " + read
+	if !o.ZoneKnown() {
+		return false, learned + ": keploy refuses the value whatever it is rather than read it in another zone. Record the test again with this keploy"
+	}
 	if !known {
 		return false, learned + ", which a replay checks against its call's window on the application's clock, but keploy cannot tell the application's clock at this call (no time hooks report it, or they could not tell it here), so it refuses the value rather than pass it unchecked"
 	}
-	at, res, ok := clockReadOf(live)
-	if !ok {
-		return false, learned + ", and the value this call carries is no instant keploy reads: it changed"
+	at, res, why := clockReadIn(o, live, s.Zone)
+	if why != "" {
+		return false, learned + why
 	}
 	if o.CutCoarserThan(res) {
 		return false, learned + ", at a resolution of " + models.ShortDuration(o.Res) + " (both of the learn step's values were whole multiples of it), coarser than the " + models.ShortDuration(res) + " this value's encoding writes: the application cuts its value, and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
