@@ -169,3 +169,24 @@ func TestMappedTestCaseKeepsMocksWrittenBesideAFolder(t *testing.T) {
 		}
 	}
 }
+
+// MockPlaces says where each name is: a test's own list by its id, and each
+// set section by its key, in the file's order, once each.
+func TestMockPlaces(t *testing.T) {
+	m := &Mapping{
+		TestCases: []MappedTestCase{{ID: "o::TestA", Mocks: []MockEntry{{Name: "mock-0"}, {Name: "mock-1"}}}, {ID: "o::TestB", Mocks: []MockEntry{{Name: "mock-1"}}}},
+		Startup:   []MockEntry{{Name: "mock-2"}},
+		Worker:    []MockEntry{{Name: "mock-3"}, {Name: "mock-1"}},
+		Shared:    []MockEntry{{Name: "mock-4"}},
+		Runner:    []MockEntry{{Name: "mock-5"}},
+		Boots:     []BootSpec{{Mocks: []MockEntry{{Name: "mock-6"}}}},
+	}
+	want := map[string][]string{
+		"mock-0": {"test o::TestA"},
+		"mock-1": {"test o::TestA", "test o::TestB", "worker:"},
+		"mock-2": {"startup:"}, "mock-3": {"worker:"}, "mock-4": {"shared:"}, "mock-5": {"runner:"}, "mock-6": {"boots:"},
+	}
+	if got := m.MockPlaces(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

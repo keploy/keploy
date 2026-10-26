@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -265,6 +266,41 @@ type BootSpec struct {
 	N       int         `json:"n" yaml:"n" bson:"n"`
 	Ready   bool        `json:"ready" yaml:"ready" bson:"ready"`
 	Mocks   []MockEntry `json:"mocks" yaml:"mocks" bson:"mocks"`
+}
+
+// MockPlaces says where in the mapping each mock name is named, as a reader of
+// mappings.yaml finds it: "test <id>" for a test's own list, and "startup:",
+// "worker:", "shared:", "runner:" or "boots:" for the set's sections. A name
+// named in several places has each, in the file's order.
+func (m *Mapping) MockPlaces() map[string][]string {
+	out := map[string][]string{}
+	if m == nil {
+		return out
+	}
+	add := func(name, place string) {
+		if name != "" && !slices.Contains(out[name], place) {
+			out[name] = append(out[name], place)
+		}
+	}
+	for _, tc := range m.TestCases {
+		for _, e := range tc.Mocks {
+			add(e.Name, "test "+tc.ID)
+		}
+	}
+	for _, s := range []struct {
+		place   string
+		entries []MockEntry
+	}{{"startup:", m.Startup}, {"runner:", m.Runner}, {"worker:", m.Worker}, {"shared:", m.Shared}} {
+		for _, e := range s.entries {
+			add(e.Name, s.place)
+		}
+	}
+	for _, b := range m.Boots {
+		for _, e := range b.Mocks {
+			add(e.Name, "boots:")
+		}
+	}
+	return out
 }
 
 // StartupMockNames returns the names of the test-set-scoped startup mocks. Callers

@@ -1136,7 +1136,7 @@ func (a *Agent) mocksByName(names []string) (map[string]*models.Mock, error) {
 	}
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		return nil, fmt.Errorf("its mapping names mocks the loaded recording does not have: %s; record the set again", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("its mappings.yaml names mocks the loaded recording does not have: %s; if you edited mappings.yaml, correct those names, otherwise record the set again", strings.Join(missing, ", "))
 	}
 	return out, nil
 }
