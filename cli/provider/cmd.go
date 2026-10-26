@@ -1336,7 +1336,7 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 
 	disableAnsi, _ := (cmd.Flags().GetBool("disable-ansi"))
 	// Skip printing logo for agent command to avoid duplicate logos in native mode
-	if cmd.Name() != "agent" && !machine {
+	if cmd.Name() != "agent" && !machine && !provenswitch.On() {
 		PrintLogo(log.PrimarySink(), disableAnsi)
 	}
 	if c.cfg.Debug {
