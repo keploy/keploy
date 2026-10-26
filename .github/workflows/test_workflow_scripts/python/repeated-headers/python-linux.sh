@@ -42,6 +42,14 @@
 # (the agent's summary says ended_by "end"): the stop ends each stream once
 # the agent has put on it all it had from before the stop, mappings included,
 # not once it has been quiet for a while.
+#
+# The upstream listens on 4000, one of the ports keploy takes as a hint of
+# MySQL (3306 and 4000, TiDB's). MySQL's server speaks first, and the proxy
+# used to take any connection to those ports for MySQL by its port alone: it
+# waited for a greeting the HTTP upstream never sends and never relayed the
+# app's request, so /login got no answer while recording and the lane failed
+# at its first /login. The proxy now lets whichever side speaks first decide
+# (the app here), and replays the recorded HTTP mock on that port as HTTP.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -52,7 +60,8 @@ source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/json-pass-help
 
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
 APP_PORT=8000
-UPSTREAM_PORT=9092
+# A MySQL default port, on purpose: see the header.
+UPSTREAM_PORT=4000
 
 # keploy is matched by process name (pkill default): `pkill -f` would match the
 # wrapping bash/sudo argv. The upstream is killed by PID, since "python3"
@@ -121,6 +130,7 @@ drive_requests() {
         if [ "$got" != "$want" ]; then
             echo "::error::live request $* answered $got, want $want"
             failed=1
+            return 1
         fi
     }
     # The header on two lines: valid tenants both, so 200.
@@ -129,8 +139,9 @@ drive_requests() {
     expect 200 -H 'X_tenant: globex' "http://127.0.0.1:${APP_PORT}/tenant"
     # One line with a comma in it: 400, and it must replay as 400.
     expect 400 -H 'X_tenant: acme, globex' "http://127.0.0.1:${APP_PORT}/tenant"
-    # Two Set-Cookie lines from the upstream.
-    expect 200 "http://127.0.0.1:${APP_PORT}/login"
+    # Two Set-Cookie lines from the upstream, an HTTP server on 4000.
+    expect 200 "http://127.0.0.1:${APP_PORT}/login" ||
+        echo "::error::/login's HTTP upstream on :${UPSTREAM_PORT}, a MySQL default port, did not answer through keploy's proxy"
     # STOP_AFTER: how long the recording runs on after the last answer. The
     # lag run stops it at once, with the agent's parsers still behind.
     sleep "${STOP_AFTER:-5}"
@@ -392,8 +403,9 @@ KEPLOY_CFG
     fi
     echo "replay status ($format): $status"
     if [ "$status" != "PASSED" ]; then
-        echo "::error::replay did not pass ($format): a header was not sent on its recorded lines"
+        echo "::error::replay did not pass ($format): a header was not sent on its recorded lines, or the upstream's mock on :${UPSTREAM_PORT} was not served as HTTP"
         grep -E 'Tenant :|not valid tenant|Set-Cookie|cookies' "$report" | head -20
+        grep -m4 -A1 'Mock mismatch' "test_logs_${format}.txt"
         tail -60 "test_logs_${format}.txt"
         return 1
     fi

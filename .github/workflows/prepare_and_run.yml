@@ -827,7 +827,8 @@ jobs:
     uses: ./.github/workflows/startup-mock-capture-linux.yml
   run_repeated_headers_linux:
     # Guard: replay sends a recorded header on the lines it arrived on
-    # (a tenant header sent twice; a mock's two Set-Cookie lines).
+    # (a tenant header sent twice; a mock's two Set-Cookie lines), and an
+    # HTTP dependency on 4000, a MySQL default port, records and replays.
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/repeated-headers-linux.yml
   run_interim_responses_linux:

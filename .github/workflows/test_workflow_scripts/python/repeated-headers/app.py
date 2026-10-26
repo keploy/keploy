@@ -10,7 +10,9 @@ into one (`X_tenant: acme,acme`) is rejected with a 400
 GET /login calls the upstream, which answers with two Set-Cookie lines, and
 returns the cookies it received. At replay the upstream is gone and the mock
 answers instead, so the response only matches when the mock serves both
-lines rather than one folded Set-Cookie.
+lines rather than one folded Set-Cookie. The upstream is on 4000, a port
+keploy also takes as a hint of MySQL, so /login answers only when the proxy
+relays an HTTP request there instead of waiting for a MySQL greeting.
 """
 import http.client
 import json
@@ -18,7 +20,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-UPSTREAM_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9092
+UPSTREAM_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
 TENANTS = {"acme", "globex"}
 
 
