@@ -153,8 +153,10 @@ func (m *mockService) setName() string {
 // back from the stopped container instead -- ComposeOutcomeReader.) The agent client
 // holds a zero-value http.Client with no timeout of its own
 // (pkg/platform/http/agent.go), and a SIGTERM'd server that still accepts but
-// never answers would hang the run: forever on the record side, whose reads sit
-// on a context.WithoutCancel that not even Ctrl+C reaches.
+// never answers would hang the run. (Its reads of capture losses alone carry a
+// bound of their own: an agent that made no answer while keploy had
+// stall.HangBudget of its own runnable time, or the interrupt that gives a
+// stop's waits up, ends them; AgentClient.GetCaptureLosses.)
 //
 // With the switch off these are all best-effort epilogue reads — losing one
 // costs a summary line or a mappings file, never a recorded mock — so a short
