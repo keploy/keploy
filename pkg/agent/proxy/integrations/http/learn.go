@@ -1474,7 +1474,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				// its test, and what F served in it recorded before it):
 				// of one with no recorded time, none can be told, so
 				// where its value came from cannot be either.
-				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, "keploy cannot tell which recordings of the test set came before "+m.Name+", which has no recorded time, so it cannot tell whether what changed came from one"
+				res.Outcome, res.Reason, res.Why, res.Cause = learn.Miss, models.MissRequestChanged, "keploy cannot tell which recordings of the test set came before "+m.Name+", which has no recorded time, so it cannot tell whether what changed came from one", learn.CauseNotFollowed
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			earlier := earlierThan(earlier, m)
@@ -1546,7 +1546,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				return nil, nil, err
 			}
 			if why != "" {
-				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				// The variables learned cannot be declared, or the answer
+				// cannot carry their values: keploy's limit, not the app's.
+				res.Outcome, res.Reason, res.Why, res.Cause = learn.Miss, models.MissRequestChanged, why, learn.CauseNotFollowed
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if !claimed {

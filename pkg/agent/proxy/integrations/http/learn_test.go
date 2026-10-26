@@ -3091,6 +3091,9 @@ func TestLearnMatchAnOwnRecordingWithNoRecordedTimeLearnsNothing(t *testing.T) {
 		!strings.Contains(miss.res.Why, "keploy cannot tell which recordings of the test set came before mock-1, which has no recorded time") {
 		t.Fatalf("served %v miss %+v consumed %d; want the call refused, naming mock-1's missing recorded time", got, miss, len(db.consumed))
 	}
+	if miss.res.Cause != learn.CauseNotFollowed {
+		t.Fatalf("cause %q: a recording with no time is keploy's limit, want %q", miss.res.Cause, learn.CauseNotFollowed)
+	}
 }
 
 // A mock F served before the test is a place of every rule where it is an
