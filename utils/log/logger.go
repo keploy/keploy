@@ -373,10 +373,15 @@ func New() (*zap.Logger, *os.File, error) {
 
 	// The log file is this run's only when it is safely so (LogFileName); a
 	// run that refuses the file there logs to the console, and says why.
+	// A run that cannot open it at all (a read-only mount, a directory it may
+	// not write, one removed under it) loses the file, not the command: it
+	// logs to the console only, and says so once at debug (ChangeLogLevel).
 	logFile, refused, err := openLogFile()
+	note := ""
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
+		note = err.Error()
 	}
+	setLogFileNote(note)
 
 	LogCfg = defaultLogCfg()
 
@@ -432,8 +437,36 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	// Use our custom encoder when building
 	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
-	logger := zap.New(newRedactingCore(core))
-	return reattachDebugFileSink(logger), nil
+	logger := reattachDebugFileSink(zap.New(newRedactingCore(core)))
+	if level == zap.DebugLevel {
+		if note := takeLogFileNote(); note != "" {
+			logger.Debug("not writing "+LogFileName+" in this directory; logging to the console only", zap.String("reason", note))
+		}
+	}
+	return logger, nil
+}
+
+// logFileNote is why New could not open LogFileName, kept for the first
+// debug-level logger (ChangeLogLevel) to say, once: New runs at info level,
+// before --debug is read, so a debug line of its own would never show.
+var (
+	logFileNoteMu sync.Mutex
+	logFileNote   string
+)
+
+func setLogFileNote(note string) {
+	logFileNoteMu.Lock()
+	defer logFileNoteMu.Unlock()
+	logFileNote = note
+}
+
+// takeLogFileNote returns the note and clears it, so it is said only once.
+func takeLogFileNote() string {
+	logFileNoteMu.Lock()
+	defer logFileNoteMu.Unlock()
+	note := logFileNote
+	logFileNote = ""
+	return note
 }
 
 // RedirectToStderr re-creates the logger writing to stderr instead of stdout,

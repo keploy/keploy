@@ -13,8 +13,8 @@ const (
 
 // openLogFile opens LogFileName in the working directory for this run to
 // append to. A symlink there is refused -- nil, and why -- and the run logs to
-// the console; a log that cannot be opened at all is an error, as it always
-// was.
+// the console; a log that cannot be opened at all is an error, which New
+// turns into a console-only run too.
 func openLogFile() (*os.File, string, error) {
 	if fi, err := os.Lstat(LogFileName); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return nil, "it is a symbolic link", nil
