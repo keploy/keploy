@@ -728,6 +728,11 @@ func (a *Agent) MockOutgoing(ctx context.Context, opts models.OutgoingOptions) e
 	if err := a.resetSession(ctx); err != nil {
 		return err
 	}
+	// Whether the session runs the learn step, which its tests' begins keep
+	// to their recorded order (keepRecordedOrder).
+	a.provenMu.Lock()
+	a.proven.order.learn = opts.Learn
+	a.provenMu.Unlock()
 
 	err := a.Proxy.Mock(ctx, opts)
 	if err != nil {

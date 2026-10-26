@@ -215,7 +215,8 @@ func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
 		{Name: "o::TestA", Start: t0, End: t0.Add(time.Second), Outcome: models.ScopeOutcomeFailed},
 		// Its retry: the latest run's begin is the line's.
 		{Name: "o::TestA", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second), Outcome: models.ScopeOutcomePassed},
-		// An app the test started is no run of the test: not its begin.
+		// An app the test started is no run of the test, so not its begin:
+		// the run's test windows leave it out (testWindows).
 		{Name: "o::TestA", Start: t0.Add(2500 * time.Millisecond), End: t0.Add(3 * time.Second), App: true},
 	}
 	src := &models.Origin{Comm: "api", Exe: "./api", PID: 4242, Cmdline: "./api --token <redacted>"}
@@ -251,6 +252,14 @@ func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
 	// it) carries no pid and no command line, neither on the process nor on
 	// the call's source.
 	js, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.Contains(t, string(js), `"comm":"api"`)
+	require.NotContains(t, string(js), "4242")
+	require.NotContains(t, string(js), "--token")
+	// So does the receipt as the run holds it, before its file is written
+	// and read back (which keeps no pid or command line on a call's source,
+	// models.Origin).
+	js, err = json.Marshal(Receipt{UnchargedMisses: unchargedMisses(instr.mockErrors)})
 	require.NoError(t, err)
 	require.Contains(t, string(js), `"comm":"api"`)
 	require.NotContains(t, string(js), "4242")

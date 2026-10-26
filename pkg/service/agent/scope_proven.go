@@ -132,6 +132,26 @@ type provenWire struct {
 	// gone, charged no test with: the run's (UnchargedCaptureLosses).
 	scopeTests    map[uint64]scopeTest
 	unreadOutside models.CaptureLosses
+	// order is, in a session that runs the learn step, the recorded order of
+	// its tests and how far the session's begins went in it
+	// (keepRecordedOrder).
+	order recordedOrder
+}
+
+// recordedOrder is what keeps a session's learn step to tests begun in their
+// recorded order (keepRecordedOrder). learn: the session runs the learn step
+// (models.OutgoingOptions.Learn: keploy mock record's full round). starts is,
+// by test ID, where each test's recorded window starts (the scope table's
+// windows, SetRecordedWindows; a window no test names, merged, is no test's).
+// latest is the latest start among the tests the session began, and
+// latestTest the test that began there. ended: a test began out of that
+// order, and the session's learn step was ended for the rest of the session.
+type recordedOrder struct {
+	learn      bool
+	starts     map[string]time.Time
+	latest     time.Time
+	latestTest string
+	ended      bool
 }
 
 // scopeTest is one attempt of a test: its ID, and its window's start, which
@@ -470,11 +490,85 @@ func teardownOwners(table, pool map[string][]string) map[string]string {
 // them before the pool slices, whose serving may stage the set: seeded at a
 // set boundary they are installed by that staging, else at once. None
 // leaves the set none.
+//
+// The windows also say the order the set's tests were recorded in, which
+// the session's learn step needs its tests begun in (keepRecordedOrder).
 func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) error {
+	starts := make(map[string]time.Time, len(ws))
+	for _, w := range ws {
+		if w.TestCase != "" {
+			starts[w.TestCase] = w.Start
+		}
+	}
+	a.provenMu.Lock()
+	a.proven.order.starts = starts
+	a.provenMu.Unlock()
 	if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
 		seeder.SeedRecordedWindows(slices.Clone(ws))
 	}
 	return nil
+}
+
+// keepRecordedOrder ends the session's learn step, for the rest of the
+// session, when test id begins out of its recorded order: when its recorded
+// window does not start after that of every test the session already began
+// (the same test begun again included: go test -count=N, gotestsum
+// --rerun-fails, or tests run in another order than recorded). It is called
+// at id's begin, before anything is settled or opened.
+//
+// The learn step reads a recording made after the open test's recorded
+// window as no earlier place of the test's (integrations.TestWindows): a
+// call that exactly repeats a later-recorded test's recording is then not
+// looked up there, and stays paired with the open test's own recording. In
+// recorded order such a call is a late call of a test still to come, which
+// cannot be. Out of it, it is a late call of a test that already ran (the
+// later-recorded one ran first), and what it differs in would be learned
+// onto the open test's recording as noise: a false green. Ended, the learn
+// step pairs nothing and learns nothing more (Proxy.SetLearnEnded, as keploy
+// test ends it for a set's retry cycles), so such a call misses, and so does
+// any call of the rest of the session that needed something learned.
+// What was learned before stays.
+//
+// A test whose window no test names (merged, or not recorded) neither ends
+// it nor moves the order. A proxy that cannot end the learn step refuses
+// the begin: its learn step would pair and learn out of the recorded order.
+func (a *Agent) keepRecordedOrder(id string) *models.ScopeError {
+	a.provenMu.Lock()
+	o := a.proven.order
+	a.provenMu.Unlock()
+	start, named := o.starts[id]
+	if !o.learn || o.ended || !named || o.latestTest == "" || start.After(o.latest) {
+		return nil
+	}
+	le, ok := a.Proxy.(coreAgent.LearnEndSetter)
+	if !ok {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": it began out of the order the set's tests were recorded in, and this keploy agent cannot stop its learn step for the rest of the round", "run the keploy agent of this keploy version")
+	}
+	if err := le.SetLearnEnded(true); err != nil {
+		return scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+			"keploy cannot judge "+id+": it began out of the order the set's tests were recorded in, and keploy could not stop its learn step for the rest of the round: "+err.Error(), "check the agent's log")
+	}
+	a.provenMu.Lock()
+	a.proven.order.ended = true
+	a.provenMu.Unlock()
+	a.logger.Warn("keploy stopped record's full round from learning for the rest of the round: a test began after a test recorded later than it (or began again), so a late call of the test that ran first could be paired with this test's own recording and what it differs in learned as noise; what was learned before stays, and a later call that needed learning misses",
+		zap.String("test", id),
+		zap.String("after", o.latestTest),
+		zap.String("next_step", "run keploy mock record with a test command that runs each test once, in one order: no -count above 1, no --rerun-fails, no -shuffle"))
+	return nil
+}
+
+// noteBegunInOrder moves the session's recorded order (keepRecordedOrder)
+// to test id, which began: to its recorded window's start, when that is the
+// latest begun.
+func (a *Agent) noteBegunInOrder(id string) {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	o := &a.proven.order
+	if start, named := o.starts[id]; named && (o.latestTest == "" || !start.Before(o.latest)) {
+		o.latest, o.latestTest = start, id
+	}
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
@@ -606,6 +700,11 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 				"keploy cannot judge "+id+": this keploy agent's proxy cannot keep each test's misses apart", "run the keploy agent of this keploy version")
 		}
 		capture = c
+		// In record's full round, a test begun out of its recorded order
+		// ends the round's learn step before anything is settled or opened.
+		if serr := a.keepRecordedOrder(id); serr != nil {
+			return models.ScopeBeginResp{}, serr
+		}
 	}
 	// The previous test's calls are settled first (settleBegin): they are
 	// never this test's. Calls made since its end are this test's or
@@ -679,6 +778,7 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	a.provenMu.Lock()
 	a.proven.open = id
 	a.provenMu.Unlock()
+	a.noteBegunInOrder(id)
 	// The test is a scope of its own from here (containerkey); closeOpen
 	// goes back to the run's however the test closes.
 	containerkey.Default.BeginTest()
