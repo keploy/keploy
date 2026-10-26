@@ -236,14 +236,12 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		combined = integrations.WithoutSpent(mockDb, combined)
 		unfilteredMocks := FilterHTTPMocks(combined)
 
-		// Log all mock names in a single line for better readability
-		mockNames := make([]string, len(unfilteredMocks))
-		for i, mock := range unfilteredMocks {
-			mockNames[i] = mock.Name
-		}
-		h.Logger.Debug("mocks under consideration for match function", zap.Strings("mock names", mockNames))
+		if debugOn(h.Logger) {
+			// Log all mock names in a single line for better readability
+			h.Logger.Debug("mocks under consideration for match function", zap.Strings("mock names", mockNamesOf(unfilteredMocks)))
 
-		h.Logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
+			h.Logger.Debug(fmt.Sprintf("Length of unfilteredMocks:%v", len(unfilteredMocks)))
+		}
 
 		if len(unfilteredMocks) == 0 {
 			return false, nil, &matchDiag{phase: models.MatchPhaseNoMocks}, nil
@@ -347,8 +345,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 				return false, nil, nil, err
 			}
 			if len(schemaMatched) > 0 {
-				h.Logger.Debug("http url: matched via auto-detected dynamic path segment(s) after no exact/url-noise match",
-					zap.Int("candidates", len(schemaMatched)))
+				if ce := h.Logger.Check(zap.DebugLevel, "http url: matched via auto-detected dynamic path segment(s) after no exact/url-noise match"); ce != nil {
+					ce.Write(zap.Int("candidates", len(schemaMatched)))
+				}
 			}
 		}
 
@@ -356,9 +355,10 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 			return false, nil, &matchDiag{phase: models.MatchPhaseSchema, candidates: len(comparedPool), pool: comparedPool}, nil
 		}
 
-		h.Logger.Debug("http mock schema match results",
-			zap.Int("schema_matched", len(schemaMatched)),
-			zap.Int("total_http_mocks", len(unfilteredMocks)))
+		if ce := h.Logger.Check(zap.DebugLevel, "http mock schema match results"); ce != nil {
+			ce.Write(zap.Int("schema_matched", len(schemaMatched)),
+				zap.Int("total_http_mocks", len(unfilteredMocks)))
+		}
 
 		// Exact body match
 		ok, bestMatch := h.ExactBodyMatch(input.body, schemaMatched)
@@ -371,7 +371,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 			if answered != nil {
 				return false, nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), schemaMatched: schemaMatched, pool: comparedPool, answered: answered}, nil
 			}
-			h.Logger.Debug("exact body match found", zap.String("mock name", bestMatch.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "exact body match found"); ce != nil {
+				ce.Write(zap.String("mock name", bestMatch.Name))
+			}
 			// Exact (byte-equal) body — nothing drifted, so no noise to detect.
 			// A per-test recording served here is kept for its test's
 			// byte-identical repeats (updateMock).
@@ -407,7 +409,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// Under the proven switch an echo is a variable of its call, followed
 		// by the variable pass; shape-detected correlations are not honoured.
 		if okC, bestC, bindings := h.correlationMatch(input.body, schemaMatched, mockCorrelation && !provenswitch.On()); okC {
-			h.Logger.Debug("correlation match found", zap.String("mock name", bestC.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "correlation match found"); ce != nil {
+				ce.Write(zap.String("mock name", bestC.Name))
+			}
 			served, claimed, err := h.claim(ctx, bestC, mockDb, nil, bindings)
 			if err != nil {
 				return false, nil, nil, err
@@ -448,7 +452,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 			}
 
 			if len(bodyMatched) == 1 {
-				h.Logger.Debug("body match found", zap.String("mock name", bodyMatched[0].Name))
+				if ce := h.Logger.Check(zap.DebugLevel, "body match found"); ce != nil {
+					ce.Write(zap.String("mock name", bodyMatched[0].Name))
+				}
 				detected, _ := noiseEngine.Detect(bodyMatched[0], input.body, userBodyNoise)
 				served, claimed, err := h.claim(ctx, bodyMatched[0], mockDb, detected, nil)
 				if err != nil {
@@ -468,7 +474,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// Perform fuzzy match on the request
 		isMatched, bestMatch := h.PerformFuzzyMatch(shortListed, input.raw)
 		if isMatched {
-			h.Logger.Debug("fuzzy match found a matching mock", zap.String("mock name", bestMatch.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "fuzzy match found a matching mock"); ce != nil {
+				ce.Write(zap.String("mock name", bestMatch.Name))
+			}
 			detected, _ := noiseEngine.Detect(bestMatch, input.body, userBodyNoise)
 			served, claimed, err := h.claim(ctx, bestMatch, mockDb, detected, nil)
 			if err != nil {
@@ -795,7 +803,9 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	}
 	mockBodyType := pkg.GuessContentType([]byte(mockBody))
 	reqBodyType := pkg.GuessContentType(reqBody)
-	h.Logger.Debug("mock body type", zap.Any("mock body type", mockBodyType), zap.Any("req body type", reqBodyType))
+	if ce := h.Logger.Check(zap.DebugLevel, "mock body type"); ce != nil {
+		ce.Write(zap.Any("mock body type", mockBodyType), zap.Any("req body type", reqBodyType))
+	}
 	return mockBodyType == reqBodyType
 }
 
@@ -804,7 +814,9 @@ func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDyna
 	if err != nil {
 		return false
 	}
-	h.Logger.Debug("parsed URL", zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
+	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
+		ce.Write(zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
+	}
 	mockPath := parsedURL.Path
 	if mockPath == reqPath {
 		return true
@@ -1021,7 +1033,9 @@ func (h *HTTP) HeadersContainKeys(expected map[string]string, actual http.Header
 	// Ensure every non-ignored expected key exists in the request
 	for k := range expected {
 		if shouldIgnore(k) {
-			h.Logger.Debug("header key is ignored", zap.String("header key", k))
+			if ce := h.Logger.Check(zap.DebugLevel, "header key is ignored"); ce != nil {
+				ce.Write(zap.String("header key", k))
+			}
 			continue
 		}
 		if _, ok := actualKeys[strings.ToLower(k)]; !ok {
@@ -1208,11 +1222,12 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 			// differently and false-reject (~1/900, negligible for longer ids) —
 			// the loud, safe direction versus the silent wrong-mock this replaces.
 			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
-				h.Logger.Debug("http query: value treated as auto-detected dynamic",
-					zap.String("param", key),
-					zap.String("mock value", rv[i]),
-					zap.String("request value", av[i]),
-					zap.String("type class", c))
+				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
+					ce.Write(zap.String("param", key),
+						zap.String("mock value", rv[i]),
+						zap.String("request value", av[i]),
+						zap.String("type class", c))
+				}
 				continue
 			}
 			return false
@@ -1255,48 +1270,60 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			mockMediaTypes := parseMediaTypes(mockCT)
 			inputMediaTypes := parseMediaTypes(strings.Join(inputCTValues, ","))
 			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
-				h.Logger.Debug("The content type of mock and request aren't the same",
-					zap.String("mock name", mock.Name),
-					zap.Strings("input media types", inputMediaTypes),
-					zap.Strings("mock media types", mockMediaTypes))
+				if ce := h.Logger.Check(zap.DebugLevel, "The content type of mock and request aren't the same"); ce != nil {
+					ce.Write(zap.String("mock name", mock.Name),
+						zap.Strings("input media types", inputMediaTypes),
+						zap.Strings("mock media types", mockMediaTypes))
+				}
 				continue
 			}
 		}
 		// Body type check
 		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
-			h.Logger.Debug("The body of mock and request aren't of same type", zap.String("mock name", mock.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "The body of mock and request aren't of same type"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name))
+			}
 			continue
 		}
 
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
-			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
+			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
+			}
 			continue
 		}
 
 		// HTTP method match
 		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
-			h.Logger.Debug("The method of mock and request aren't the same", zap.String("mock name", mock.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "The method of mock and request aren't the same"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name))
+			}
 			continue
 		}
 
 		if proven && !sameDestination(live, recordedDestination(mock)) {
-			h.Logger.Debug("the mock was recorded for another destination", zap.String("mock name", mock.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "the mock was recorded for another destination"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name))
+			}
 			continue
 		}
 
 		// Header key match (presence-only; extra request headers allowed)
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
-			h.Logger.Debug("headers missing required keys for mock name",
-				zap.String("mock name", mock.Name),
-				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
-				zap.Any("input header", input.header))
+			if ce := h.Logger.Check(zap.DebugLevel, "headers missing required keys for mock name"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name),
+					zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
+					zap.Any("input header", input.header))
+			}
 			continue
 		}
 
 		// Query parameter match (key set AND value; url noise aware)
 		if !h.QueryParamsMatch(mock.Spec.HTTPReq.URLParams, reqQuery, urlNoise, autoDynamic) {
-			h.Logger.Debug("The query params of mock and request aren't the same", zap.String("mock name", mock.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "The query params of mock and request aren't the same"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name))
+			}
 			continue
 		}
 
@@ -1319,19 +1346,18 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 //  3. JSON — field-by-field comparison via JSONBodyMatchScore.
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
-	mockNames := make([]string, len(schemaMatched))
-	for i, mock := range schemaMatched {
-		mockNames[i] = mock.Name
+	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for exact body match"); ce != nil {
+		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)), zap.String("req body", string(body)))
 	}
-	h.Logger.Debug("mocks under consideration for exact body match", zap.Strings("mock names", mockNames), zap.String("req body", string(body)))
 
 	// First pass: exact string match (fastest path)
 	for _, mock := range schemaMatched {
 		if mock.Spec.HTTPReq.Body == string(body) {
-			h.Logger.Debug("http mock matched",
-				zap.String("mock", mock.Name),
-				zap.Float64("match_percentage", 100.0),
-				zap.String("match_type", "exact_body"))
+			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+				ce.Write(zap.String("mock", mock.Name),
+					zap.Float64("match_percentage", 100.0),
+					zap.String("match_type", "exact_body"))
+			}
 			return true, mock
 		}
 	}
@@ -1362,11 +1388,12 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// If the entire body is a single noisy value, auto-match
 		// (schema match already filtered by URL, method, headers)
 		if nc.IsNoisy(mockBody) {
-			h.Logger.Debug("http mock matched",
-				zap.String("mock", mock.Name),
-				zap.Float64("match_percentage", 100.0),
-				zap.Int("noisy_fields_skipped", 1),
-				zap.String("match_type", "exact_body_fully_noisy"))
+			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+				ce.Write(zap.String("mock", mock.Name),
+					zap.Float64("match_percentage", 100.0),
+					zap.Int("noisy_fields_skipped", 1),
+					zap.String("match_type", "exact_body_fully_noisy"))
+			}
 			return true, mock
 		}
 
@@ -1376,10 +1403,11 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		// and each non-wildcarded value(s) must be byte-equal.
 		if reqIsForm && looksLikeFormEncoded(mockBody) {
 			if formBodiesMatchModuloNoise(mockBody, reqBodyStr, nc) {
-				h.Logger.Debug("http mock matched",
-					zap.String("mock", mock.Name),
-					zap.Float64("match_percentage", 100.0),
-					zap.String("match_type", "exact_body_form_noise_aware"))
+				if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+					ce.Write(zap.String("mock", mock.Name),
+						zap.Float64("match_percentage", 100.0),
+						zap.String("match_type", "exact_body_form_noise_aware"))
+				}
 				return true, mock
 			}
 			// Mock body is form-encoded — JSON path can't fire, skip to
@@ -1403,12 +1431,13 @@ func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, 
 		if total > 0 {
 			pct = float64(matched) / float64(total) * 100
 		}
-		h.Logger.Debug("http mock match score (noise-aware)",
-			zap.String("mock", mock.Name),
-			zap.Int("matched_fields", matched),
-			zap.Int("total_fields", total),
-			zap.Int("noisy_fields_skipped", noisy),
-			zap.Float64("match_percentage", pct))
+		if ce := h.Logger.Check(zap.DebugLevel, "http mock match score (noise-aware)"); ce != nil {
+			ce.Write(zap.String("mock", mock.Name),
+				zap.Int("matched_fields", matched),
+				zap.Int("total_fields", total),
+				zap.Int("noisy_fields_skipped", noisy),
+				zap.Float64("match_percentage", pct))
+		}
 
 		if matched == total {
 			// Verify the request has no extra non-noisy keys beyond
@@ -1451,11 +1480,9 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 	h.Logger.Debug("Performing schema match for body")
 
 	// Log all mock names in a single line for better readability
-	mockNames := make([]string, len(schemaMatched))
-	for i, mock := range schemaMatched {
-		mockNames[i] = mock.Name
+	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for PerformBodyMatch function"); ce != nil {
+		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)))
 	}
-	h.Logger.Debug("mocks under consideration for PerformBodyMatch function", zap.Strings("mock names", mockNames))
 
 	var bodyMatched []*models.Mock
 	for _, mock := range schemaMatched {
@@ -1471,13 +1498,16 @@ func (h *HTTP) PerformBodyMatch(ctx context.Context, schemaMatched []*models.Moc
 
 		if ok {
 			bodyMatched = append(bodyMatched, mock)
-			h.Logger.Debug("found a mock with body schema match", zap.String("mock name", mock.Name))
+			if ce := h.Logger.Check(zap.DebugLevel, "found a mock with body schema match"); ce != nil {
+				ce.Write(zap.String("mock name", mock.Name))
+			}
 		}
 	}
 
-	h.Logger.Debug("http mock body key match results",
-		zap.Int("body_key_matched", len(bodyMatched)),
-		zap.Int("schema_matched", len(schemaMatched)))
+	if ce := h.Logger.Check(zap.DebugLevel, "http mock body key match results"); ce != nil {
+		ce.Write(zap.Int("body_key_matched", len(bodyMatched)),
+			zap.Int("schema_matched", len(schemaMatched)))
+	}
 
 	return bodyMatched, nil
 }
@@ -1537,20 +1567,19 @@ func (h *HTTP) findBinaryMatch(mocks []*models.Mock, reqBuff []byte) int {
 // similarity so that redacted padding doesn't skew the score.
 func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
-	mockNames := make([]string, len(tcsMocks))
-	for i, mock := range tcsMocks {
-		mockNames[i] = mock.Name
+	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for performfuzzyMatch function"); ce != nil {
+		ce.Write(zap.Strings("mock names", mockNamesOf(tcsMocks)))
 	}
-	h.Logger.Debug("mocks under consideration for performfuzzyMatch function", zap.Strings("mock names", mockNames))
 
 	encodedReq := encode(reqBuff)
 	for _, mock := range tcsMocks {
 		encodedMock, _ := decode(mock.Spec.HTTPReq.Body)
 		if string(encodedMock) == string(reqBuff) || mock.Spec.HTTPReq.Body == encodedReq {
-			h.Logger.Debug("http mock matched",
-				zap.String("mock", mock.Name),
-				zap.Float64("match_percentage", 100.0),
-				zap.String("match_type", "fuzzy_exact"))
+			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+				ce.Write(zap.String("mock", mock.Name),
+					zap.Float64("match_percentage", 100.0),
+					zap.String("match_type", "fuzzy_exact"))
+			}
 			return true, mock
 		}
 	}
@@ -1575,10 +1604,11 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 			if maxLen > 0 {
 				pct = (1.0 - float64(dist)/float64(maxLen)) * 100
 			}
-			h.Logger.Debug("http mock matched",
-				zap.String("mock", tcsMocks[idx].Name),
-				zap.Float64("match_percentage", pct),
-				zap.String("match_type", "fuzzy_levenshtein"))
+			if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+				ce.Write(zap.String("mock", tcsMocks[idx].Name),
+					zap.Float64("match_percentage", pct),
+					zap.String("match_type", "fuzzy_levenshtein"))
+			}
 			return true, tcsMocks[idx]
 		}
 	}
@@ -1590,10 +1620,11 @@ func (h *HTTP) PerformFuzzyMatch(tcsMocks []*models.Mock, reqBuff []byte) (bool,
 	}
 	mxIdx, mxSim := h.jaccardBestMatch(mockBodies, reqBuff)
 	if mxIdx != -1 {
-		h.Logger.Debug("http mock matched",
-			zap.String("mock", tcsMocks[mxIdx].Name),
-			zap.Float64("match_percentage", mxSim*100),
-			zap.String("match_type", "fuzzy_jaccard"))
+		if ce := h.Logger.Check(zap.DebugLevel, "http mock matched"); ce != nil {
+			ce.Write(zap.String("mock", tcsMocks[mxIdx].Name),
+				zap.Float64("match_percentage", mxSim*100),
+				zap.String("match_type", "fuzzy_jaccard"))
+		}
 		return true, tcsMocks[mxIdx]
 	}
 	return false, nil
@@ -1933,8 +1964,9 @@ func (h *HTTP) filterStrictNoiseMatches(eng *schemanoise.Engine, candidates []*m
 			kept = append(kept, m)
 			continue
 		}
-		h.Logger.Debug("strict req-body match rejected mock: non-noise field drift",
-			zap.String("mock name", m.Name), zap.Any("drift", drift))
+		if ce := h.Logger.Check(zap.DebugLevel, "strict req-body match rejected mock: non-noise field drift"); ce != nil {
+			ce.Write(zap.String("mock name", m.Name), zap.Any("drift", drift))
+		}
 	}
 	return kept
 }
@@ -2422,3 +2454,12 @@ func pickClosestCandidate(request *http.Request, schemaSurvivors, pool []*models
 // /ingest} POST) was removed: both paths are built-in telemetry defaults now, so
 // models.ResolvePassThrough handles them — and, unlike the legacy check, it
 // honours a user mode:"off" override instead of unconditionally re-skipping.
+
+// mockNamesOf is the names of mocks, in order, for a debug entry.
+func mockNamesOf(mocks []*models.Mock) []string {
+	names := make([]string, len(mocks))
+	for i, m := range mocks {
+		names[i] = m.Name
+	}
+	return names
+}
