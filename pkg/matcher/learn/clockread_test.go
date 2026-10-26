@@ -236,6 +236,14 @@ func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
 	}
 }
 
+// plainRead reports whether ln is noise that is a plain read of the
+// application's clock (Learned.Read), which a replay checks in its call's
+// span, never noise that lets any value pass.
+func plainRead(ln Learned) bool {
+	o, ok := ln.Clock()
+	return ln.Kind == KindNoise && ok && o.Plain()
+}
+
 // A value that is one instant whole in both runs, in a call with no window
 // (a test's own call, read by the lead alone), is a plain read of the clock,
 // compared at every replay in its call's own span, whether or not the lead
