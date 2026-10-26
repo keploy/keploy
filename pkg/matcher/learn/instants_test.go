@@ -1672,8 +1672,8 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 	}
 	dc = NewDriftCache()
-	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
-		t.Errorf("typed milliseconds beside served seconds: %s from %+v (%s); want it refused for its provenance", ln.Kind, ln.From, ln.Why)
+	if ln := ClassifyIn(dc, []string{p}, typedMs(got), typedMs(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; !plainRead(ln) {
+		t.Errorf("typed milliseconds beside served seconds: %s from %+v (%s); want no copy: a plain read of the clock, with no call window, checked at replay", ln.Kind, ln.From, ln.Why)
 	}
 }
 
@@ -2065,8 +2065,8 @@ func TestAValueBuiltOnAGivenDateIsTheEchos(t *testing.T) {
 		typed := func(d int) Shape {
 			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(2026, 10, d, 9, 0, 0, 0, time.UTC), time.Second)}}
 		}
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(23), typed(22), at, c.earlier, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
-			t.Errorf("typed, beside %s dates: %s from %+v (%s); want it refused for its provenance", c.name, ln.Kind, ln.From, ln.Why)
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(23), typed(22), at, c.earlier, nil, nil, nil)[0]; !plainRead(ln) {
+			t.Errorf("typed, beside %s dates: %s from %+v (%s); want no echo: a plain read of the clock, with no call window, checked at replay", c.name, ln.Kind, ln.From, ln.Why)
 		}
 	}
 	// Only F's date held: refused, naming it.
