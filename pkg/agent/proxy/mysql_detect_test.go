@@ -163,8 +163,9 @@ func TestProbeDetectsMysqlOnUnconfiguredPort(t *testing.T) {
 	}
 }
 
-// Second connection to a learned port must take the fast path — no
-// probe, no latency, no upstream dial.
+// In a replay, a learned port takes the fast path — no probe, no latency,
+// no upstream dial. (In a record it is a hint the connection's first speaker
+// confirms: mysql_detect_hint_test.go.)
 func TestProbeFastPathAfterLearning(t *testing.T) {
 	p := testProxy(t)
 	p.mysqlPorts.Learn(7777)
@@ -172,7 +173,7 @@ func TestProbeFastPathAfterLearning(t *testing.T) {
 	_, srcConn := clientPair(t)
 	start := time.Now()
 	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:7777", nil, 7777,
-		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
+		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -189,13 +190,14 @@ func TestProbeFastPathAfterLearning(t *testing.T) {
 	}
 }
 
-// Configured / default ports keep their exact pre-existing behaviour.
+// Ports listed in mysqlPorts keep their exact pre-existing behaviour. (The
+// built-in defaults are a hint: mysql_detect_hint_test.go.)
 func TestProbeConfiguredPortsUnchanged(t *testing.T) {
 	p := testProxy(t)
 	_, srcConn := clientPair(t)
 
 	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:3306", nil, 3306,
-		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
+		models.MODE_RECORD, models.OutgoingOptions{MysqlPorts: []uint32{3306, 4000}}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
