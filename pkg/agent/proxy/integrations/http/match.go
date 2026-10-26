@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/agnivade/levenshtein"
@@ -809,15 +810,62 @@ func (h *HTTP) MatchBodyType(mockBody string, reqBody []byte) bool {
 	return mockBodyType == reqBodyType
 }
 
+// recordedPaths memoises the path of each recorded request URL. SchemaMatch
+// checks every mock of the pool on every proxied call, and url.Parse of the
+// mock's URL was the largest share of that (49% of agent CPU at a pool of 10k
+// mocks: about 0.75 us and 7 allocations per mock, every call). The URL of a
+// recording does not change and url.Parse is a pure function of it, so each
+// URL is parsed once and its path (or that it does not parse) is read back.
+// Keyed by the URL string, not the mock, so it holds no mock alive; bounded
+// by recordedPathsCap entries, emptied when full (the URLs of the pool in use
+// are then parsed again, once each).
+var recordedPaths struct {
+	m sync.Map     // recorded URL -> recordedPath
+	n atomic.Int64 // entries stored since the last empty
+}
+
+// recordedPath is url.Parse(URL).Path of a recorded URL; ok is false when the
+// URL does not parse, which matches no request path.
+type recordedPath struct {
+	path string
+	ok   bool
+}
+
+const recordedPathsCap = 1 << 16
+
+// recordedPathParses counts url.Parse calls of recorded URLs; the rows read it.
+var recordedPathParses atomic.Int64
+
+// recordedURLPath returns url.Parse(mockURL).Path, and false when it does not
+// parse, parsing each URL once.
+func recordedURLPath(mockURL string) (string, bool) {
+	if v, ok := recordedPaths.m.Load(mockURL); ok {
+		p := v.(*recordedPath)
+		return p.path, p.ok
+	}
+	recordedPathParses.Add(1)
+	// A copy, so the memo keeps no larger buffer the URL may sit in alive.
+	key := strings.Clone(mockURL)
+	p := &recordedPath{}
+	if parsed, err := url.Parse(key); err == nil {
+		p.path, p.ok = parsed.Path, true
+	}
+	if recordedPaths.n.Add(1) > recordedPathsCap {
+		recordedPaths.m.Clear()
+		recordedPaths.n.Store(1)
+	}
+	recordedPaths.m.Store(key, p)
+	return p.path, p.ok
+}
+
 func (h *HTTP) MatchURLPath(mockURL, reqPath string, urlNoise []string, autoDynamic bool) bool {
-	parsedURL, err := url.Parse(mockURL)
-	if err != nil {
+	mockPath, ok := recordedURLPath(mockURL)
+	if !ok {
 		return false
 	}
 	if ce := h.Logger.Check(zap.DebugLevel, "parsed URL"); ce != nil {
-		ce.Write(zap.Any("parsed URL", parsedURL.Path), zap.Any("req path", reqPath))
+		ce.Write(zap.Any("parsed URL", mockPath), zap.Any("req path", reqPath))
 	}
-	mockPath := parsedURL.Path
 	if mockPath == reqPath {
 		return true
 	}
@@ -1253,34 +1301,27 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		live = liveDestination(ctx, input)
 	}
 
+	// The request's side of the content-type check, read once for the pool.
+	inputCTValues := input.header.Values("Content-Type")
+	var inputMediaTypes []string
+	inputMediaTypesRead := false
+
+	// Method and path are checked first. Each check below is a filter of its
+	// own, so their order changes no result, only which check a debug line
+	// names for a mock that fails several. These two cost a string compare
+	// and a read of the parsed path (recordedURLPath) and reject nearly every
+	// mock of a large pool, so the costlier checks run only on the mocks of
+	// this call's method and path. Under url noise or auto-dynamic matching
+	// the path check is MatchURLPath's full compare, mock by mock, as before.
+	method := models.Method(input.method)
 	for _, mock := range unfilteredMocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		// Content type check — only enforced when both the request and
-		// the mock specify a Content-Type. Compares only the media type
-		// (ignoring parameters like charset) so that trivial differences
-		// such as "application/json" vs "application/json;charset=UTF-8"
-		// don't prevent a match. If either side omits Content-Type,
-		// matching falls through to the other criteria.
-		inputCTValues := input.header.Values("Content-Type")
-		mockCT := mock.Spec.HTTPReq.Header["Content-Type"]
-		if len(inputCTValues) > 0 && mockCT != "" {
-			mockMediaTypes := parseMediaTypes(mockCT)
-			inputMediaTypes := parseMediaTypes(strings.Join(inputCTValues, ","))
-			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
-				if ce := h.Logger.Check(zap.DebugLevel, "The content type of mock and request aren't the same"); ce != nil {
-					ce.Write(zap.String("mock name", mock.Name),
-						zap.Strings("input media types", inputMediaTypes),
-						zap.Strings("mock media types", mockMediaTypes))
-				}
-				continue
-			}
-		}
-		// Body type check
-		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
-			if ce := h.Logger.Check(zap.DebugLevel, "The body of mock and request aren't of same type"); ce != nil {
+		// HTTP method match
+		if mock.Spec.HTTPReq.Method != method {
+			if ce := h.Logger.Check(zap.DebugLevel, "The method of mock and request aren't the same"); ce != nil {
 				ce.Write(zap.String("mock name", mock.Name))
 			}
 			continue
@@ -1294,9 +1335,31 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 			continue
 		}
 
-		// HTTP method match
-		if mock.Spec.HTTPReq.Method != models.Method(input.method) {
-			if ce := h.Logger.Check(zap.DebugLevel, "The method of mock and request aren't the same"); ce != nil {
+		// Content type check — only enforced when both the request and
+		// the mock specify a Content-Type. Compares only the media type
+		// (ignoring parameters like charset) so that trivial differences
+		// such as "application/json" vs "application/json;charset=UTF-8"
+		// don't prevent a match. If either side omits Content-Type,
+		// matching falls through to the other criteria.
+		mockCT := mock.Spec.HTTPReq.Header["Content-Type"]
+		if len(inputCTValues) > 0 && mockCT != "" {
+			mockMediaTypes := parseMediaTypes(mockCT)
+			if !inputMediaTypesRead {
+				inputMediaTypes = parseMediaTypes(strings.Join(inputCTValues, ","))
+				inputMediaTypesRead = true
+			}
+			if len(mockMediaTypes) == 0 || len(inputMediaTypes) == 0 || !mediaTypesOverlap(mockMediaTypes, inputMediaTypes) {
+				if ce := h.Logger.Check(zap.DebugLevel, "The content type of mock and request aren't the same"); ce != nil {
+					ce.Write(zap.String("mock name", mock.Name),
+						zap.Strings("input media types", inputMediaTypes),
+						zap.Strings("mock media types", mockMediaTypes))
+				}
+				continue
+			}
+		}
+		// Body type check
+		if !h.MatchBodyType(mock.Spec.HTTPReq.Body, input.body) {
+			if ce := h.Logger.Check(zap.DebugLevel, "The body of mock and request aren't of same type"); ce != nil {
 				ce.Write(zap.String("mock name", mock.Name))
 			}
 			continue
