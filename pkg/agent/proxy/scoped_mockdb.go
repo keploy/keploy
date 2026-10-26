@@ -740,6 +740,21 @@ func (s *scopedMockDb) AdvanceMockCursor(key string, servedIdx, n int) {
 	}
 }
 
+// SequenceView implements integrations.SequenceViewer: under exact serving,
+// where this view passes through (passThrough: its scope is the store's
+// view), the store's sequence view, so a parser on a view made before exact
+// serving began walks the view in force with its window, its peek and commit
+// through one view; else none, and the parser keeps this view's own cursor
+// (MockCursorIndex), its scope's.
+func (s *scopedMockDb) SequenceView() (integrations.SequenceView, bool) {
+	if !s.passThrough() {
+		return integrations.SequenceView{}, false
+	}
+	return integrations.SequenceViewOf(s.MockMemDb)
+}
+
+var _ integrations.SequenceViewer = (*scopedMockDb)(nil)
+
 // resolveCursorScope resolves, for a peek, the scope its cursor key is in
 // (cursorKey), which the commit after it reuses.
 func (s *scopedMockDb) resolveCursorScope() {

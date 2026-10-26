@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -1585,4 +1586,100 @@ func TestABeginOpensItsCaptureWindowBeforeItsView(t *testing.T) {
 	p.mu.Lock()
 	require.Equal(t, []string{"continue", "serve o::TestB"}, p.order, "the window opens before the view")
 	p.mu.Unlock()
+}
+
+// movingClock is the no-op hooks with a run's clock that a test's begin
+// moves to when the test began in its recording (TestClock), read as the
+// app reads it (AppClockReader): at a real instant, the offset in force then.
+type movingClock struct {
+	AgentHook
+	mu    sync.Mutex
+	moved time.Time     // the real instant of the latest move
+	off   time.Duration // the offset in force from then
+}
+
+func (h *movingClock) BeginTestClock(_ context.Context, _ string, at time.Time) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.moved = time.Now()
+	h.off = at.Sub(h.moved)
+	return nil
+}
+
+func (h *movingClock) EndTestClock(context.Context, string) error { return nil }
+
+func (h *movingClock) AppClock(real time.Time) (time.Time, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.moved.IsZero() || real.Before(h.moved) {
+		return real, true
+	}
+	return real.Add(h.off), true
+}
+
+// trackerProxy is a wireProxy whose capture window begins a learn tracker's
+// test, as the proxy's does (openTestErrorCapture), with the test's
+// recorded begin given first (coreAgent.RecordedBeginTaker).
+type trackerProxy struct {
+	*wireProxy
+	tracker *learn.Tracker
+}
+
+func (p *trackerProxy) TakeRecordedBegin(at time.Time) { p.tracker.RecordedBegin(at) }
+
+func (p *trackerProxy) ContinueTestErrorCapture() {
+	p.tracker.Begin()
+	p.wireProxy.ContinueTestErrorCapture()
+}
+
+// A client test's begin moves the app's clock to when the test began in its
+// recording, and the learn tracker begins the test on the moved clock: the
+// test's first call, which no earlier call bounds, reads its window on the
+// app's clock from the tracker's begin, so a test that stamps its own time
+// (pg-learn-e2e's TestStampAnEvent) is read as a read of the app's clock.
+// A tracker begun before the move gives that call a span the clock did not
+// run as one, so no window, and keploy mock record refuses the test.
+func TestAClientTestsFirstCallHasAWindowOnTheClockItsBeginMoved(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	clock := &movingClock{}
+	ActiveHooks = clock
+	a, wp := wireAgent(t, models.MODE_TEST)
+	tr := learn.NewTracker()
+	tr.SetClientTests(true)
+	tr.SetAppClock(clock.AppClock)
+	a.Proxy = &trackerProxy{wireProxy: wp, tracker: tr}
+	ctx := context.Background()
+	claimSelf(t, a)
+	recBegan := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestStampAnEvent": recBegan}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestStampAnEvent"))
+	require.Nil(t, serr)
+	wp.mu.Lock()
+	require.Equal(t, []string{"continue", "serve o::TestStampAnEvent"}, wp.order, "the window opens before the view")
+	wp.mu.Unlock()
+
+	paired := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: recBegan.Add(40 * time.Millisecond)}}
+	w := tr.CallWindowFrom(time.Time{}, paired, time.Now())
+	require.NotNil(t, w, "the test's first call has a window on the clock its begin moved")
+	require.Equal(t, recBegan, w.Rec.From, "in the recording, from the test's recorded begin")
+	require.False(t, w.F.From.Before(recBegan), "in this run, from the tracker's begin on the moved clock: %s", w.F.From)
+}
+
+// A begin whose clock cannot be moved fails before the test's capture window
+// opens, so it takes back no window: the previous test's window, and the
+// misses carried since it closed, stay as they were, for the next test.
+func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	ActiveHooks = &clockHooks{err: errors.New("the clock file is read-only")}
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	claimSelf(t, a)
+	require.NoError(t, a.SetTestBegins(ctx, map[string]time.Time{"o::TestA": time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.NotNil(t, serr, "a begin whose clock cannot move")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	require.Empty(t, p.order, "no window opened, none taken back, nothing served")
 }

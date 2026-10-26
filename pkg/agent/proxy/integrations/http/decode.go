@@ -45,7 +45,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
-		defer pUtil.RecoverInto(h.Logger, clientConn, nil, errCh)
+		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -284,8 +284,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// Then the pairing, under the background rules:
 					// a call that is exactly another test's recording is
 					// answered with it, reported for judging, not missed.
-					if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call); answer != nil {
-						reportPairing(reqCtx, input, x)
+					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
+						// Its repeat note is asked as a miss's is: of the
+						// store held to the round the call first read
+						// (HoldToRound), and none for a call one more than
+						// the test recorded (repeatNoteOf).
+						held, _ := integrations.HoldToRound(mockDb, call)
+						extra := h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+						a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
+						reportPairing(reqCtx, input, x, a, repeat)
 						stub, ok, lmiss = answer, true, nil
 					}
 				}
@@ -398,7 +406,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// call, which this replay, inside the cache's span there,
 				// never made, so its recording is what the call matches.
 				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
-					if a, ok := repeatOfAnswered(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise)); ok {
+					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
 						markRepeat(report, a)
 					}
 				}

@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -655,6 +656,526 @@ func TestATypedInstantLaterThanItsCallIsRefusedSayingSo(t *testing.T) {
 		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || ln.Why != row.why {
 			t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.why)
+		}
+	}
+}
+
+// classifyZoned is ClassifyIn of one drifted leaf at p (rec as recorded,
+// live as F saw it) of a call recorded at call, by a cache whose
+// application writes a wall clock of no zone in zone (nil: UTC alone), of
+// keploy mock's client tests where clientTests is set, in window w.
+func classifyZoned(zone *time.Location, clientTests bool, p string, rec, live Leaf, call time.Time, w *Window) Learned {
+	dc := NewDriftCache()
+	dc.zone, dc.clientTests = zone, clientTests
+	return ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, nil, nil, nil, w)[0]
+}
+
+// A wall clock of no zone its protocol types (a Postgres timestamp an
+// application east of UTC binds its own clock as) that moved by the lead is
+// a read of the clock where it is one in UTC or in the zone the application
+// writes such a clock in, as a text's is (readNoLaterThan): one read in IST
+// is noise, where its reading in UTC alone is later than its call and was
+// refused. No other zone excuses it, the zone not known reads UTC alone, and
+// an instant that names its moment is read in UTC alone, whatever zone the
+// application writes a wall clock in.
+func TestAWallClockOfNoZoneIsAClockReadInTheApplicationsZoneToo(t *testing.T) {
+	const p = "args.0"
+	ist, jst := time.FixedZone("IST", 5*3600+1800), time.FixedZone("JST", 9*3600)
+	call := time.Date(2026, 10, 22, 11, 14, 17, 155e6, time.UTC)
+	read := call.Add(-40 * time.Millisecond)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	wall := func(in *time.Location) func(time.Time) Leaf {
+		return func(at time.Time) Leaf { return WallClockLeaf(p, p, at.In(in), time.Microsecond) }
+	}
+	// The instant its reading in IST names, were it written in UTC.
+	named := func(at time.Time) Leaf {
+		w := at.In(ist)
+		return InstantLeaf(p, p, time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), w.Nanosecond(), time.UTC), time.Microsecond)
+	}
+	for _, row := range []struct {
+		name string
+		zone *time.Location
+		leaf func(time.Time) Leaf
+		why  string
+	}{
+		{"read in the application's zone, east of UTC", ist, wall(ist), ""},
+		{"read in UTC, the application's zone east of it", ist, wall(time.UTC), ""},
+		{"read in UTC, the application's zone not known", nil, wall(time.UTC), ""},
+		{"read in the application's zone, which is not known", nil, wall(ist), instantAfterCall},
+		{"read in a zone that is not the application's", ist, wall(jst), instantAfterCall},
+		{"an instant that names its moment, the application's zone east of UTC", ist, named, instantAfterCall},
+	} {
+		ln := classifyZoned(row.zone, false, p, row.leaf(read), row.leaf(live), call, nil)
+		switch {
+		case row.why == "" && ln.Kind != KindNoise:
+			t.Errorf("%s: %s (%s); want noise, a read of the clock", row.name, ln.Kind, ln.Why)
+		case row.why != "" && (ln.Kind != KindUnaccounted || ln.Why != row.why):
+			t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.why)
+		}
+	}
+	// Recorded as a wall clock, F's an instant that names its moment, moved
+	// by the lead: a change of form is no read of the clock, and the reason
+	// names both forms, never that it did not move by the lead.
+	formWhy := instantFormChangedWhy(namesWall, namesMoment)
+	if !strings.Contains(formWhy, "recorded as a wall clock that names no zone and record's full round saw an instant that names its moment") {
+		t.Errorf("the reason for a change of form: %s", formWhy)
+	}
+	if ln := classifyZoned(ist, false, p, wall(time.UTC)(read), InstantLeaf(p, p, live, time.Microsecond), call, nil); ln.Kind != KindUnaccounted || ln.Why != formWhy {
+		t.Errorf("a wall clock, then an instant naming its moment: %s (%s); want it refused: %s", ln.Kind, ln.Why, formWhy)
+	}
+	if ln := classifyZoned(ist, true, p, TimeOfDayLeaf(p, p, time.Duration(clockOfDay(read)), time.Microsecond), wall(time.UTC)(live), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantFormChangedWhy(namesTimeOfDay, namesWall) {
+		t.Errorf("a time of day, then a wall clock, in a client test: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantFormChangedWhy(namesTimeOfDay, namesWall))
+	}
+	// The call's minute in IST, F's two on: the lead takes two minutes'
+	// move, a read before its call one. Later than the call in UTC alone,
+	// so the reason is that F's is past the lead.
+	minute := func(at time.Time) Leaf { return WallClockLeaf(p, p, at.In(ist), time.Minute) }
+	if ln := classifyZoned(ist, false, p, minute(call), minute(call.Add(2*time.Minute)), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantPastCall {
+		t.Errorf("a minute read in IST, F's past the lead from its call: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantPastCall)
+	}
+	// A day of no zone (a Postgres date), read in IST just before its
+	// midnight, that the lead moved to the next day: in UTC F's day is hours
+	// after the call; in IST it is the lead after it.
+	call = time.Date(2026, 10, 22, 18, 29, 30, 155e6, time.UTC)
+	read = call.Add(-40 * time.Millisecond)
+	live = read.Add(FullRoundLead + 37*time.Millisecond)
+	day := func(at time.Time) Leaf { return WallClockLeaf(p, p, at.In(ist), 24*time.Hour) }
+	if r, l := day(read), day(live); r.Value != "2026-10-22" || l.Value != "2026-10-23" {
+		t.Fatalf("the days as written: %q and %q; want 2026-10-22 and 2026-10-23", r.Value, l.Value)
+	}
+	if ln := classifyZoned(ist, false, p, day(read), day(live), call, nil); ln.Kind != KindNoise {
+		t.Errorf("a day read in the application's zone that the lead moved: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+	if ln := classifyZoned(nil, false, p, day(read), day(live), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantPastCall {
+		t.Errorf("a day read in IST, the application's zone not known: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantPastCall)
+	}
+	// InstantLeaf's date is the same day of no zone.
+	if got := InstantLeaf(p, p, time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), 24*time.Hour); got != day(read) {
+		t.Errorf("InstantLeaf's date %+v; want WallClockLeaf's %+v", got, day(read))
+	}
+}
+
+// A client test's window reads a wall clock of no zone its protocol types in
+// UTC and in the application's zone, as Window.holdsRead reads a text's: a
+// read in IST within the window on both runs is noise, and refused where the
+// zone is not known.
+func TestAClientTestsWindowReadsAWallClockOfNoZoneInTheApplicationsZone(t *testing.T) {
+	const p = "args.0"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 22, 11, 14, 17, 155e6, time.UTC)
+	fCall := call.Add(3 * time.Minute)
+	w := &Window{Rec: Span{From: call.Add(-time.Second), To: call}, F: Span{From: fCall.Add(-time.Second), To: fCall}}
+	rec := WallClockLeaf(p, p, call.Add(-40*time.Millisecond).In(ist), time.Millisecond)
+	live := WallClockLeaf(p, p, fCall.Add(-25*time.Millisecond).In(ist), time.Millisecond)
+	if ln := classifyZoned(ist, true, p, rec, live, call, w); ln.Kind != KindNoise {
+		t.Errorf("read in IST within the window: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+	if ln := classifyZoned(nil, true, p, rec, live, call, w); ln.Kind != KindUnaccounted || ln.Why != clientTestWhy("", true) {
+		t.Errorf("read in IST, the zone not known: %s (%s); want it refused: %s", ln.Kind, ln.Why, clientTestWhy("", true))
+	}
+	// Written in a zone that is neither UTC nor the application's (JST),
+	// within the window on both runs: no read keploy can tell from a value
+	// the test harness gave the application (its clock plus two hours).
+	jst := time.FixedZone("JST", 9*3600)
+	recJST := WallClockLeaf(p, p, call.Add(-40*time.Millisecond).In(jst), time.Millisecond)
+	liveJST := WallClockLeaf(p, p, fCall.Add(-25*time.Millisecond).In(jst), time.Millisecond)
+	if ln := classifyZoned(ist, true, p, recJST, liveJST, call, w); ln.Kind != KindUnaccounted || ln.Why != clientTestWhy("", true) {
+		t.Errorf("read in JST within the window, the application's zone IST: %s (%s); want it refused: %s", ln.Kind, ln.Why, clientTestWhy("", true))
+	}
+	if !(&DriftCache{zone: ist, clientTests: true}).InstantClockRead(rec, live, w) || InstantClockRead(rec, live, w) {
+		t.Errorf("InstantClockRead: the cache's reads the zone, the bare one UTC alone")
+	}
+}
+
+// A time of day its protocol types (a Postgres time) names no day: it is a
+// read of the clock where the lead moved it, read modulo a day (across
+// midnight too), as a text's time of day is (moved), and refused where it
+// moved otherwise, or in a client test, where the lead shows no read. Its
+// hour 24 is the day's end, no 00:00; one outside a day, and a wire text
+// with no designator (a timetz of no zone a parser keeps as its text), are
+// no text InstantOf reads.
+func TestATimeOfDayIsAClockReadWhereTheLeadMovedIt(t *testing.T) {
+	const p = "args.0"
+	call := time.Date(2026, 10, 22, 23, 59, 30, 155e6, time.UTC)
+	read := call.Add(-40 * time.Millisecond)
+	tod := func(at time.Time) Leaf { return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at)), time.Microsecond) }
+	if r, l := tod(read), tod(read.Add(FullRoundLead)); r.Value != "T23:59:30.115000" || l.Value != "T00:00:31.615000" {
+		t.Fatalf("the times as written: %q and %q", r.Value, l.Value)
+	}
+	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil); ln.Kind != KindNoise {
+		t.Errorf("moved by the lead across midnight: %s (%s); want noise", ln.Kind, ln.Why)
+	}
+	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(time.Hour)), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
+		t.Errorf("moved by an hour: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantNotClock)
+	}
+	for _, w := range []*Window{nil, {Rec: Span{From: read.Add(-time.Second), To: call}, F: Span{From: read.Add(FullRoundLead), To: read.Add(FullRoundLead + time.Second)}}} {
+		if ln := classifyZoned(nil, true, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, w); ln.Kind != KindUnaccounted || ln.Why != timeOfDayClientTestWhy {
+			t.Errorf("a client test's, moved by the lead (window %v): %s (%s); want it refused: %s", w != nil, ln.Kind, ln.Why, timeOfDayClientTestWhy)
+		}
+	}
+	// Its moment is a text's time of day's, which names no day.
+	found := false
+	for k, lay := range clockLayouts {
+		if !lay.wraps {
+			continue
+		}
+		if m, _, ok := instantKeyOf(k, "23:59:30.115"); ok {
+			ti, _ := readTyped(TimeOfDayLeaf(p, p, time.Duration(clockOfDay(read)), time.Millisecond))
+			if got := ti.moment(time.Millisecond); got.key != m.key || got.wall != m.wall {
+				t.Errorf("a time of day's moment %+v; want a text's %+v", got.key, m.key)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no layout reads the text 23:59:30.115 as a time of day")
+	}
+	end, midnight := TimeOfDayLeaf(p, p, 24*time.Hour, time.Second), TimeOfDayLeaf(p, p, 0, time.Second)
+	if end.Value != "T24:00:00" || midnight.Value != "T00:00:00" {
+		t.Errorf("the day's end and its start: %q and %q", end.Value, midnight.Value)
+	}
+	if at, res, ok := InstantOf(end); !ok || res != time.Second || at.Sub(timeOfDayDay) != 24*time.Hour {
+		t.Errorf("InstantOf(T24:00:00) = %v, %v, %v; want the day's end, to the second", at, res, ok)
+	}
+	// The day's end is the next day's start where a place is searched for
+	// it (a served 00:00 echoes it).
+	e, _ := readTyped(end)
+	m, _ := readTyped(midnight)
+	if got, want := e.moment(time.Second), m.moment(time.Second); got.key != want.key || got.wall != want.wall {
+		t.Errorf("T24:00:00's moment %+v; want T00:00:00's %+v", got, want)
+	}
+	if got := TimeOfDayLeaf(p, p, 11*time.Hour+14*time.Minute+16*time.Second, time.Hour).Value; got != "T11:00" {
+		t.Errorf("a time of day to the hour: %q; want T11:00", got)
+	}
+	for _, v := range []string{"T24:00:01", "T23:60:00", "T25:00", "T12:00:0x", "T1:00:00", "15:49:55", "12:00", "T12:00:60", "T12:00.00", "T12:00:00:000", "T12:00:00.0x0", "T12x00"} {
+		if _, _, ok := InstantOf(Leaf{Type: Instant, Value: v}); ok {
+			t.Errorf("InstantOf(%q) reads it; want no time of day", v)
+		}
+	}
+	if out := TimeOfDayLeaf(p, p, 25*time.Hour, time.Second); out.Type != Instant || out.Value != (25*time.Hour).String() {
+		t.Errorf("a time outside a day: %+v; want an Instant leaf of a text InstantOf does not read", out)
+	} else if _, _, ok := InstantOf(out); ok {
+		t.Errorf("a time outside a day, %q, is read", out.Value)
+	}
+}
+
+// A wall clock of no zone or a time of day its protocol types that the
+// application picked by its clock from a served timetable and wrote in its
+// own zone (IST) is a variable of the timetable, as the same pick's text and
+// the same pick as an instant naming its moment are, never a read of the
+// clock: the echo reads it in the zone of each instant the timetable holds,
+// as the clock rule reads it in the application's. By the lead or in its
+// call's window, in a client test too, and whether the timetable is written
+// in UTC or with the application's offset.
+func TestAWallClockOrTimeOfDayPickedFromAServedTimetableStaysChecked(t *testing.T) {
+	const p = "args.0"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 22, 5, 44, 20, 0, time.UTC)
+	timetable := func(slots ...string) *models.Mock {
+		return &models.Mock{Name: "mock-2", Kind: models.Mongo, Spec: models.MockSpec{
+			MongoResponses:   []models.MongoResponse{{Header: &models.MongoHeader{Opcode: wiremessage.OpMsg}, Message: &models.MongoOpMessage{Sections: []string{`{ SectionSingle msg: {"cursor":{"firstBatch":[{"at":"` + slots[0] + `"},{"at":"` + slots[1] + `"}]},"ok":1} }`}}}},
+			ReqTimestampMock: call.Add(-time.Second), ResTimestampMock: call.Add(-time.Second),
+		}}
+	}
+	classify := func(zone *time.Location, client bool, rec, live Leaf, w *Window, tt *models.Mock) Learned {
+		dc := NewDriftCache()
+		dc.zone, dc.clientTests = zone, client
+		return ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, nil, []Raw{dc.RawOf(tt, true)}, nil, w)[0]
+	}
+	want := func(name string, ln Learned) {
+		t.Helper()
+		if ln.Kind != KindVariable || ln.From.Mock != "mock-2" {
+			t.Errorf("%s: %s (from %+v, %s); want a variable of mock-2's timetable", name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+	// The departure the clock picks: 05:44Z as recorded, 05:45Z as F saw it.
+	recPick, livePick := time.Date(2026, 10, 22, 5, 44, 0, 0, time.UTC), time.Date(2026, 10, 22, 5, 45, 0, 0, time.UTC)
+	w := &Window{Rec: Span{From: recPick.Add(-time.Second), To: call}, F: Span{From: livePick.Add(-time.Second), To: livePick.Add(time.Second)}}
+	for tname, tt := range map[string]*models.Mock{
+		"in UTC":             timetable("2026-10-22T05:44:00Z", "2026-10-22T05:45:00Z"),
+		"at the app's +5:30": timetable("2026-10-22T11:14:00+05:30", "2026-10-22T11:15:00+05:30"),
+	} {
+		for _, res := range []time.Duration{time.Minute, time.Second, time.Microsecond} {
+			for wname, win := range map[string]*Window{"in its window": w, "by the lead": nil} {
+				for _, client := range []bool{false, true} {
+					rec, live := WallClockLeaf(p, p, recPick.In(ist), res), WallClockLeaf(p, p, livePick.In(ist), res)
+					want(fmt.Sprintf("a wall clock in IST from a timetable %s, to %v, %s, client test %v", tname, res, wname, client), classify(ist, client, rec, live, win, tt))
+				}
+			}
+		}
+	}
+	// The next departure after the clock, written as a time of day in IST:
+	// 11:15 as recorded, 11:16 as F saw it, the lead's move at the minute.
+	recNext, liveNext := time.Date(2026, 10, 22, 5, 45, 0, 0, time.UTC), time.Date(2026, 10, 22, 5, 46, 0, 0, time.UTC)
+	tod := func(at time.Time) Leaf {
+		return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at.In(ist))), time.Minute)
+	}
+	for tname, tt := range map[string]*models.Mock{
+		"in UTC":             timetable("2026-10-22T05:45:00Z", "2026-10-22T05:46:00Z"),
+		"at the app's +5:30": timetable("2026-10-22T11:15:00+05:30", "2026-10-22T11:16:00+05:30"),
+	} {
+		for _, zone := range []*time.Location{nil, ist} {
+			want(fmt.Sprintf("a time of day in IST from a timetable %s, the app's zone %v", tname, zone), classify(zone, false, tod(recNext), tod(liveNext), nil, tt))
+		}
+	}
+}
+
+// A wall clock of no zone or a time of day its protocol types that the
+// application copied from the test case's own request (keploy test sends it
+// with a template value, so F's moved by the lead) and wrote in its own zone
+// is a variable of the request, as the same copy's text is: the request's
+// instant in UTC and the copy in IST are one moment, not one built on the
+// other by an offset of 5h30m.
+func TestAWallClockOrTimeOfDayCopiedFromTheRequestInTheAppsZoneIsFollowed(t *testing.T) {
+	const p = "args.0"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 22, 5, 44, 17, 155e6, time.UTC)
+	read := call.Add(-2 * time.Second)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	given := []Earlier{{Mock: "test-2", At: call.Add(-3 * time.Second), Given: true, Own: true, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.since", Noise: "body.since", Type: String, Value: read.Format("2006-01-02T15:04:05.000000Z")}, Live: live.Format("2006-01-02T15:04:05.000000Z")},
+	}}}
+	tod := func(at time.Time) Leaf {
+		return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at.In(ist))), time.Microsecond)
+	}
+	for _, row := range []struct {
+		name      string
+		rec, live Leaf
+	}{
+		{"a wall clock", WallClockLeaf(p, p, read.In(ist), time.Microsecond), WallClockLeaf(p, p, live.In(ist), time.Microsecond)},
+		{"a time of day", tod(read), tod(live)},
+	} {
+		dc := NewDriftCache()
+		dc.zone = ist
+		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: row.live}}, Shape{Leaves: map[string]Leaf{p: row.rec}}, call, given, nil, nil, nil)[0]
+		if ln.Kind != KindVariable || ln.From.Mock != "test-2" || ln.From.Path != "body.since" {
+			t.Errorf("%s in IST copied from the request's UTC instant: %s (from %+v, %s); want a variable of test-2's body.since", row.name, ln.Kind, ln.From, ln.Why)
+		}
+	}
+}
+
+// An instant that names its moment (a Mongo datetime) is read in UTC alone
+// in its call's window too, whatever zone the application writes a wall
+// clock in: one the test harness gave as the clock plus 5h30m, which read
+// in IST lies within the window on both runs, is refused, in a client test
+// and in a test case, and DriftCache.InstantClockRead says it is no read.
+func TestAnInstantThatNamesItsMomentIsReadInUTCAloneInItsWindow(t *testing.T) {
+	const p = "args.0"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 22, 11, 14, 17, 155e6, time.UTC)
+	fCall := call.Add(3 * time.Minute)
+	w := &Window{Rec: Span{From: call.Add(-time.Second), To: call}, F: Span{From: fCall.Add(-time.Second), To: fCall}}
+	off := 5*time.Hour + 30*time.Minute
+	rec := InstantLeaf(p, p, call.Add(-40*time.Millisecond+off), time.Millisecond)
+	live := InstantLeaf(p, p, fCall.Add(-25*time.Millisecond+off), time.Millisecond)
+	for _, client := range []bool{true, false} {
+		if ln := classifyZoned(ist, client, p, rec, live, call, w); ln.Kind != KindUnaccounted {
+			t.Errorf("client test %v: the clock plus 5h30m as an instant naming its moment, the application's zone IST: %s (%s); want it refused", client, ln.Kind, ln.Why)
+		}
+	}
+	if (&DriftCache{zone: ist, clientTests: true}).InstantClockRead(rec, live, w) {
+		t.Errorf("DriftCache.InstantClockRead reads an instant that names its moment in the application's zone")
+	}
+}
+
+// A time of day its protocol types that an earlier exchange F served holds
+// (a Postgres time column's answer, T11:14:17.115000, then the lead's move)
+// is a moment the learn step reads there, though the text reader reads no
+// typed form (its designator T is glued to its digits): a copy of it at
+// another precision, typed or as a text, and one built on it by an offset,
+// is never learned as noise.
+func TestATypedTimeOfDayAnEarlierExchangeHoldsIsReadThere(t *testing.T) {
+	call := time.Date(2026, 10, 22, 11, 14, 20, 155e6, time.UTC)
+	read := time.Date(2026, 10, 22, 11, 14, 17, 115e6, time.UTC)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	const sp, p = "rows.0.start_at", "args.0"
+	tod := func(path string, at time.Time, res time.Duration) Leaf {
+		return TimeOfDayLeaf(path, path, time.Duration(clockOfDay(at)), res)
+	}
+	text := func(at time.Time, layout string) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: at.Format(layout)}
+	}
+	for _, c := range []struct {
+		name      string
+		rec, live Leaf
+	}{
+		{"typed, to the microsecond", tod(p, read, time.Microsecond), tod(p, live, time.Microsecond)},
+		{"typed, to the millisecond", tod(p, read, time.Millisecond), tod(p, live, time.Millisecond)},
+		{"typed, to the second", tod(p, read, time.Second), tod(p, live, time.Second)},
+		{"a text, to the second", text(read, "15:04:05"), text(live, "15:04:05")},
+		{"a text, to the millisecond", text(read, "15:04:05.000"), text(live, "15:04:05.000")},
+		{"typed, 30 minutes on", tod(p, read.Add(30*time.Minute), time.Microsecond), tod(p, live.Add(30*time.Minute), time.Microsecond)},
+	} {
+		for _, payload := range []bool{false, true} {
+			e := Earlier{Mock: "pg-1", At: call.Add(-time.Second), Own: true, Seen: []Seen{{Side: Response, Leaf: tod(sp, read, time.Microsecond), Live: tod(sp, live, time.Microsecond).Value}}}
+			if payload {
+				e.Payload = payloadOf("pg-1", call.Add(-time.Second))
+			}
+			ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.live}}, Shape{Leaves: map[string]Leaf{p: c.rec}}, call, []Earlier{e}, nil, nil, nil)[0]
+			if ln.Kind == KindNoise {
+				t.Errorf("%s, the exchange's payload given %v: noise; want it followed or refused, never a read of the clock", c.name, payload)
+			}
+			if c.name == "typed, to the microsecond" && (ln.Kind != KindVariable || ln.From.Mock != "pg-1") {
+				t.Errorf("an equal typed time of day, the payload given %v: %s (from %+v, %s); want a variable of pg-1", payload, ln.Kind, ln.From, ln.Why)
+			}
+		}
+	}
+}
+
+// A typed time of day an earlier exchange holds is read there by each of the
+// learn step's readers, and each gives its own outcome, naming the leaf: a
+// drifted value that names the moment the leaf drifted with exactly, typed or
+// a text, is a variable of it (instantServedFrom; a text's, instantSource);
+// one cut coarser than that moment (a second, or a millisecond of a
+// microsecond the millisecond does not hold whole), typed or a text, is the
+// echo's variable there, with its evidence
+// (instantEchoFrom, echoServed); one that names exactly what the leaf held as
+// recorded and F served so is a variable of it, with its evidence
+// (instantLeafFrom); and a move to what the leaf held as recorded, where F
+// served it another (on either side), or to what F served there, where it
+// was recorded as another, typed or a text, is refused as a pick naming it
+// (heldAt), never noise.
+func TestATypedTimeOfDayAnEarlierExchangeHoldsIsBoundOrRefusedNamingItsLeaf(t *testing.T) {
+	call := time.Date(2026, 10, 22, 11, 14, 20, 155e6, time.UTC)
+	read := time.Date(2026, 10, 22, 11, 14, 17, 115e6, time.UTC)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	const sp, p = "rows.0.start_at", "args.0"
+	tod := func(path string, at time.Time, res time.Duration) Leaf {
+		return TimeOfDayLeaf(path, path, time.Duration(clockOfDay(at)), res)
+	}
+	text := func(at time.Time, layout string) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: at.Format(layout)}
+	}
+	seen := func(side Side, rec, f time.Time) Earlier {
+		return Earlier{Mock: "pg-1", At: call.Add(-time.Second), Own: true, Payload: payloadOf("pg-1", call.Add(-time.Second)), Seen: []Seen{{Side: side, Leaf: tod(sp, rec, time.Microsecond), Live: tod(sp, f, time.Microsecond).Value}}}
+	}
+	typed := func(res time.Duration) [2]Leaf { return [2]Leaf{tod(p, read, res), tod(p, live, res)} }
+	texted := func(layout string) [2]Leaf { return [2]Leaf{text(read, layout), text(live, layout)} }
+	fine := 123 * time.Microsecond
+	for _, c := range []struct {
+		name  string
+		e     Earlier
+		v     [2]Leaf
+		want  string
+		whole bool
+	}{
+		{"drifted with it, to the microsecond", seen(Response, read, live), typed(time.Microsecond), "served", true},
+		{"drifted with it, to the millisecond", seen(Response, read, live), typed(time.Millisecond), "served", false},
+		{"drifted with it, to the second", seen(Response, read, live), typed(time.Second), "echo", false},
+		{"drifted with a microsecond the millisecond does not hold whole", seen(Response, read.Add(fine), live.Add(fine)), typed(time.Millisecond), "echo", false},
+		{"a text drifted with it, to the second", seen(Response, read, live), texted("15:04:05"), "echo", false},
+		{"a text drifted with it, to the millisecond", seen(Response, read, live), texted("15:04:05.000"), "served", false},
+		{"held as recorded and served so, to the microsecond", seen(Response, read, read), typed(time.Microsecond), "held", true},
+		{"held as recorded and served so, to the millisecond", seen(Response, read, read), typed(time.Millisecond), "held", false},
+		{"F saw what an answer held as recorded", seen(Response, live, live.Add(time.Hour)), typed(time.Millisecond), "pick", false},
+		{"F saw what a request held as recorded", seen(Request, live, live.Add(time.Hour)), typed(time.Millisecond), "pick", false},
+		{"F saw what an answer served it, recorded as another", seen(Response, read.Add(-time.Hour), live), typed(time.Millisecond), "pick", false},
+		{"a text F saw where an answer held it as recorded", seen(Response, live, live.Add(time.Hour)), texted("15:04:05.000"), "pick", false},
+	} {
+		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.v[1]}}, Shape{Leaves: map[string]Leaf{p: c.v[0]}}, call, []Earlier{c.e}, nil, nil, nil)[0]
+		at := ln.Kind == KindVariable && ln.From.Mock == "pg-1" && ln.From.Path == sp && ln.From.Whole == c.whole
+		var ok bool
+		switch c.want {
+		case "served":
+			ok = at && !ln.From.Echo && ln.Why == ""
+		case "echo":
+			ok = at && ln.From.Echo && strings.Contains(ln.Why, "the moment it was recorded with stands in pg-1 at "+sp) && (c.v[0].Type != Instant || ln.Why == instantEvidence(ln.From))
+		case "held":
+			ok = at && !ln.From.Echo && ln.Why == instantEvidence(ln.From)
+		case "pick":
+			ok = ln.Kind == KindUnaccounted && ln.Why == pickUnaccounted("in pg-1 at "+sp)
+		}
+		if !ok {
+			t.Errorf("%s: %s (from %+v, %q); want the %s outcome at pg-1 %s, whole %v", c.name, ln.Kind, ln.From, ln.Why, c.want, sp, c.whole)
+		}
+	}
+}
+
+// A time of day written as a text and one its protocol types are one moment
+// where they name it exactly, as two texts or two typed leaves are, so the
+// typed rule reads a typed time of day where a text holds it (holdsExact,
+// isInstant): a value that drifted, to the microsecond, with an earlier leaf
+// of the other form, on either side of the exchange, is a variable of that
+// leaf, never noise (two texts or two typed leaves of the same shape are
+// bound there); so is a typed one whose recorded moment such a text leaf
+// held as recorded, whatever F saw there, or a payload holds; and the call's
+// own answer holding it, in either form, is its echo, and one holding
+// another moment is none. A time of day and an instant keploy reads are two
+// moments whatever their forms: one never names the other exactly (only the
+// echo reads a time of day an answer's instant holds, as a pick by its
+// clock).
+func TestATimeOfDayInTheOtherFormIsTheSameMoment(t *testing.T) {
+	call := time.Date(2026, 10, 22, 11, 14, 20, 155e6, time.UTC)
+	read := time.Date(2026, 10, 22, 11, 14, 17, 115123e3, time.UTC)
+	live := read.Add(FullRoundLead + 37*time.Millisecond)
+	const sp, p, ap = "rows.0.start_at", "args.0", "rows.0.0"
+	forms := map[string]func(path string, at time.Time) Leaf{
+		"typed": func(path string, at time.Time) Leaf {
+			return TimeOfDayLeaf(path, path, time.Duration(clockOfDay(at)), time.Microsecond)
+		},
+		"a text": func(path string, at time.Time) Leaf {
+			return Leaf{Path: path, Noise: path, Type: String, Value: at.Format("15:04:05.000000")}
+		},
+		"an instant": func(path string, at time.Time) Leaf {
+			return InstantLeaf(path, path, at, time.Microsecond)
+		},
+	}
+	classify := func(v string, e []Earlier, raw []Raw, resp []Leaf) Learned {
+		rec, lv := forms[v](p, read), forms[v](p, live)
+		return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: lv}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, e, raw, resp, nil)[0]
+	}
+	seen := func(side Side, form string, f time.Time) []Earlier {
+		return []Earlier{{Mock: "pg-1", At: call.Add(-time.Second), Own: true, Payload: payloadOf("pg-1", call.Add(-time.Second)), Seen: []Seen{{Side: side, Leaf: forms[form](sp, read), Live: forms[form](sp, f).Value}}}}
+	}
+	ofLeaf := func(ln Learned) bool {
+		return ln.Kind == KindVariable && ln.From.Mock == "pg-1" && ln.From.Path == sp
+	}
+	for _, side := range []Side{Response, Request} {
+		for _, ef := range []string{"typed", "a text"} {
+			for _, vf := range []string{"typed", "a text"} {
+				if ln := classify(vf, seen(side, ef, live), nil, nil); !ofLeaf(ln) {
+					t.Errorf("%s drifted with %s earlier on the %s side: %s (from %+v, %q); want a variable of pg-1 at %s", vf, ef, side, ln.Kind, ln.From, ln.Why, sp)
+				}
+			}
+		}
+		// Recorded as the moment, F saw another there: an equal moment is
+		// followed whatever its provenance, as one drifted with it
+		// (instantServedFrom), as a typed leaf's is (seenIs).
+		for _, ef := range []string{"typed", "a text"} {
+			if ln := classify("typed", seen(side, ef, live.Add(time.Hour)), nil, nil); !ofLeaf(ln) || ln.From.Echo || ln.Why != "" {
+				t.Errorf("typed, %s earlier on the %s side recorded as its moment, F seeing another: %s (from %+v, %q); want a variable of pg-1 at %s, as one drifted with it", ef, side, ln.Kind, ln.From, ln.Why, sp)
+			}
+		}
+		// Held as recorded and served so (instantLeafFrom).
+		if ln := classify("typed", seen(side, "a text", read), nil, nil); !ofLeaf(ln) || ln.Why != instantEvidence(ln.From) {
+			t.Errorf("typed, a text earlier on the %s side held as recorded and served so: %s (from %+v, %q); want a variable of pg-1 at %s, with its evidence", side, ln.Kind, ln.From, ln.Why, sp)
+		}
+		// An instant at the same time of day is another moment.
+		for _, pair := range [][2]string{{"typed", "an instant"}, {"an instant", "typed"}, {"a text", "an instant"}, {"an instant", "a text"}} {
+			if ln := classify(pair[1], seen(side, pair[0], live), nil, nil); ofLeaf(ln) && !ln.From.Echo {
+				t.Errorf("%s drifted with %s earlier on the %s side: a variable of it, as the same moment; want them two moments", pair[1], pair[0], side)
+			}
+		}
+	}
+	// A payload holding the recorded moment as a text (instantRawFrom).
+	raw := []Raw{{read: true, mock: "mock-db", at: call.Add(-time.Second), served: true, text: `{"rows":[["42","` + read.Format("15:04:05.000000") + `"]]}`}}
+	if ln := classify("typed", nil, raw, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-db" || ln.Why != instantEvidence(ln.From) {
+		t.Errorf("typed, its recorded moment a text in a payload: %s (from %+v, %q); want a variable of mock-db, with its evidence", ln.Kind, ln.From, ln.Why)
+	}
+	// The call's own answer holding it (instantEchoes, Echoes), and holding
+	// another moment: an instant at its time of day, a time of day a second
+	// on.
+	for _, vf := range []string{"typed", "a text"} {
+		for _, af := range []string{"typed", "a text"} {
+			if ln := classify(vf, nil, nil, []Leaf{forms[af](ap, read)}); ln.Kind != KindEcho || len(ln.Echo) != 1 || ln.Echo[0].Path != ap {
+				t.Errorf("%s, the call's answer holding it as %s: %s (echo %v, %q); want its echo at %s", vf, af, ln.Kind, ln.Echo, ln.Why, ap)
+			}
+		}
+		for _, a := range []Leaf{forms["an instant"](ap, read), forms["typed"](ap, read.Add(time.Second)), forms["a text"](ap, read.Add(time.Second))} {
+			if ln := classify(vf, nil, nil, []Leaf{a}); ln.Kind == KindEcho {
+				t.Errorf("%s, the call's answer holding another moment, %s: an echo of it; want none", vf, a.Value)
+			}
 		}
 	}
 }

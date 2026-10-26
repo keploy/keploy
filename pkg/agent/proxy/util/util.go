@@ -1066,6 +1066,14 @@ func RecoverWith(logger *zap.Logger, client, dest net.Conn, then func()) {
 	}
 }
 
+// Recovered is what Recover does with a panic r that a caller's own deferred
+// function recovered (integrations.RecoverCtx: recover stops a panic only in
+// the function the goroutine defers): it logs r, closes client and dest, and
+// reports r to Sentry.
+func Recovered(logger *zap.Logger, r any, client, dest net.Conn) {
+	recovered(logger, r, client, dest)
+}
+
 // recovered is what Recover, RecoverInto and RecoverWith do with a recovered
 // panic: log
 // it, close the parser's connections, and report it to Sentry.

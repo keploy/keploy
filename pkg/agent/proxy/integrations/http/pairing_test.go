@@ -399,6 +399,89 @@ func TestAPairedHTTPCallIsAnsweredAndReported(t *testing.T) {
 	}
 }
 
+// earlierPairingDb is pairingDb that remembers the recordings that answered
+// earlier in the set (integrations.AnsweredFinder), as earlierDb does.
+type earlierPairingDb struct {
+	*pairingDb
+	answered []integrations.AnsweredCall
+}
+
+func (d earlierPairingDb) FindAnsweredEarlier(kind models.Kind, keys []string, match func(*models.Mock) bool) (integrations.AnsweredCall, bool) {
+	return earlierDb{answered: d.answered}.FindAnsweredEarlier(kind, keys, match)
+}
+
+// A paired call that is also identical to a recording an earlier test made,
+// which already answered at this replay (an answer the app kept for a span
+// the round outlasted, asked again), carries the note a missed call made
+// elsewhere carries: the earlier recording, when it was recorded and how
+// long after its answer this call came. The pairing is as it was: the call
+// is answered with the other test's recording, which stays its closest. A
+// call no earlier answer is identical to carries none.
+func TestAPairedRepeatedCallCarriesTheRepeatNote(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const addr, host = "127.0.0.1:50002", "localhost:50002"
+	rec := time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
+	pair := func(t *testing.T, earlierPath string) *models.MockMismatchReport {
+		t.Helper()
+		// mock-3: get-cachedrate-4's recording, unconsumed (its cache was
+		// fresh at this replay); mock-1: get-cachedrate-2's, which answered
+		// that test's identical call nine seconds before.
+		other := answered(onHost("mock-3", "/rates?base=CHF", host), 20*time.Second, 200, `{"rate":1.1}`)
+		earlier := onHost("mock-1", earlierPath, host)
+		earlier.Spec.ReqTimestampMock = rec
+		db := earlierPairingDb{pairingDb: &pairingDb{mockMemDb: &mockMemDb{}, others: []*models.Mock{other}},
+			answered: []integrations.AnsweredCall{{Mock: earlier, AnsweredAt: time.Now().Add(-9 * time.Second)}}}
+		var reported []error
+		ctx := learn.WithTracker(models.WithMockMismatchReporter(context.Background(), func(err error) { reported = append(reported, err) }), learn.NewTracker())
+		app, prox := net.Pipe()
+		defer app.Close()
+		done := make(chan error, 1)
+		go func() {
+			done <- newHTTP().MockOutgoing(ctx, prox, &models.ConditionalDstCfg{Addr: addr}, db, models.OutgoingOptions{Learn: true})
+		}()
+		if _, err := io.WriteString(app, "GET /rates?base=CHF HTTP/1.1\r\nHost: "+host+"\r\nAccept: application/json\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+		if err != nil {
+			t.Fatalf("the app got no answer: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		_ = app.Close()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the parser did not return")
+		}
+		if resp.StatusCode != 200 || string(body) != `{"rate":1.1}` || len(reported) != 1 {
+			t.Fatalf("the app got %d %q with %d reports; want mock-3's answer, reported once", resp.StatusCode, body, len(reported))
+		}
+		var withReport interface {
+			MismatchReport() *models.MockMismatchReport
+		}
+		if !errors.Is(reported[0], models.ErrAnswered) || !errors.As(reported[0], &withReport) {
+			t.Fatalf("reported %v; want an answer", reported[0])
+		}
+		r := withReport.MismatchReport()
+		if r.Answer != models.AnswerProvisional || !r.NotOwned || r.ClosestMock != "mock-3" {
+			t.Fatalf("the answer's report is %+v; want the pairing with mock-3", r)
+		}
+		return r
+	}
+
+	r := pair(t, "/rates?base=CHF")
+	if r.Repeat == nil || r.Repeat.Mock != "mock-1" || !r.Repeat.RecordedAt.Equal(rec) {
+		t.Fatalf("the paired repeat's note is %+v; want mock-1, recorded at %v", r.Repeat, rec)
+	}
+	if r.Repeat.ReplayGapSeconds < 9 || r.Repeat.ReplayGapFromStart || r.Repeat.RecordGapKnown || r.Repeat.Test != "" {
+		t.Fatalf("the note's gaps are %+v; want 9s or more at replay, to the call, and the record gap and the test left to the replay", r.Repeat)
+	}
+	if r := pair(t, "/rates?base=EUR"); r.Repeat != nil {
+		t.Fatalf("a pairing no earlier answer is identical to carries the note %+v", r.Repeat)
+	}
+}
+
 // pacedPairingDb is pairingDb saying its staging (integrations.WindowPacer).
 type pacedPairingDb struct {
 	*pairingDb
@@ -480,7 +563,7 @@ func TestHTTPSaysWhoseRequestItServes(t *testing.T) {
 			}
 		},
 		"a pairing": func(ctx context.Context, _ *learn.Tracker) {
-			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m)
+			reportPairing(ctx, &req{method: "GET", header: http.Header{"Host": {"api.test"}}}, m, integrations.AnsweredCall{}, false)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

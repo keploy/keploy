@@ -66,11 +66,11 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 // (the variable pass's evidence reports those). They are only compared,
 // never served: the match already failed. diag is returned as
 // it is when exact serving is off, when the test has no answered mock, and
-// for a miss whose recording fit but whose variables did not hold (that is
-// what it reports). The caller leaves an extra call's diagnosis as the
+// for a miss whose recording fit but whose variables did not hold, and for a
+// stateful walk's (matchDiag.answered): that is what each reports. The caller leaves an extra call's diagnosis as the
 // match found it.
 func (h *HTTP) answeredDiag(ctx context.Context, input *req, mockDb integrations.MockMemDb, diag *matchDiag, headerNoise, bodyNoise map[string][]string, urlNoise []string) *matchDiag {
-	if !provenswitch.On() || (diag != nil && diag.variable != nil) {
+	if !provenswitch.On() || (diag != nil && (diag.variable != nil || diag.answered != nil)) {
 		return diag
 	}
 	er, ok := mockDb.(integrations.ExactConsumedReader)

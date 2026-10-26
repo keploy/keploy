@@ -5,10 +5,13 @@ import (
 	"errors"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -36,6 +39,77 @@ func TestAReplayWhoseParserPanicsDoesNotEndCleanly(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second): // the bound only turns a hang into a failure
 		t.Fatal("Replay did not return")
+	}
+}
+
+// keptConn is a connection's request aloft as the proxy's kept connection
+// holds it (integrations.FlightCarrier, the proxy's trackedConn): a write
+// lands it and leaves none aloft.
+type keptConn struct {
+	mu sync.Mutex
+	f  *learn.Flight
+}
+
+func (*keptConn) Hold() func() { return func() {} }
+func (k *keptConn) InFlight() *learn.Flight {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.f
+}
+func (k *keptConn) land() {
+	k.mu.Lock()
+	f := k.f
+	k.f = nil
+	k.mu.Unlock()
+	f.Land()
+}
+
+// landsOnClose is the client connection as the TLS layer the proxy serves a
+// kept connection over hands it to a parser: its close writes close_notify,
+// which lands the request aloft on k as an answer's first bytes would (the
+// proxy's trackedConn.Write).
+type landsOnClose struct {
+	net.Conn
+	k *keptConn
+}
+
+func (c landsOnClose) Close() error {
+	c.k.land()
+	return c.Conn.Close()
+}
+
+// A replay whose parser panics with a request aloft ends that request untold
+// before it closes the connection it was handed (integrations.RecoverIntoCtx):
+// the application was given no answer, so a serve told in the request is in an
+// order keploy cannot tell (0,0). The proxy hands MySQL the connection before
+// any TLS (a STARTTLS upgrade is MySQL's own, after the goroutine's defer), and
+// that connection's close ends the request untold by itself; the row pins that
+// the parser ends it first, as a TLS layer handed to it would need (its close
+// writes close_notify, which lands the request: landsOnClose).
+func TestAReplayWhoseParserPanicsEndsItsRequestAloftUntold(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	tr := learn.NewTracker()
+	tr.Begin()
+	k := &keptConn{f: tr.Lift()}
+	told := &models.Mock{Name: "told-before-the-panic"}
+	tr.ServedMock(told)
+	app, agentEnd := net.Pipe()
+	t.Cleanup(func() { _ = app.Close(); _ = agentEnd.Close() })
+	ctx := integrations.WithRequestHolder(learn.WithTracker(context.Background(), tr), k)
+	done := make(chan error, 1)
+	go func() {
+		done <- Replay(ctx, zap.NewNop(), writePanicConn{landsOnClose{agentEnd, k}}, &models.ConditionalDstCfg{Addr: testDBAddr}, &poolDb{fakeMockDb{session: []*models.Mock{nativeHandshake()}}}, models.OutgoingOptions{})
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, util.ErrParserPanicked) {
+			t.Fatalf("Replay = %v, want ErrParserPanicked", err)
+		}
+	case <-time.After(30 * time.Second): // the bound only turns a hang into a failure
+		t.Fatal("Replay did not return")
+	}
+	if first, last := tr.Placed().Order.Of(told); first != 0 || last != 0 {
+		t.Fatalf("the serve told in the request aloft when the parser panicked as it greeted the app is at %d,%d; want 0,0: the application was given no answer", first, last)
 	}
 }
 

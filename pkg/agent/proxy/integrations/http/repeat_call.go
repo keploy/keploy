@@ -45,6 +45,20 @@ func repeatOfAnswered(ctx context.Context, input *req, mockDb integrations.MockM
 	return f.FindAnsweredEarlier(models.HTTP, keys, match)
 }
 
+// repeatNoteOf is the earlier answered recording a call's repeat note names
+// (repeatOfAnswered), for a missed call and a paired one alike: none for a
+// call one more than the open test recorded (extra, extraCall's count, above
+// 0). That call repeats the test's own recorded call, which already answered
+// it, so an earlier test's identical recording does not say why the
+// application asked, and a note naming it would claim the test recorded no
+// such call.
+func repeatNoteOf(ctx context.Context, input *req, db integrations.MockMemDb, n strictNoise, extra int) (integrations.AnsweredCall, bool) {
+	if extra > 0 {
+		return integrations.AnsweredCall{}, false
+	}
+	return repeatOfAnswered(ctx, input, db, n)
+}
+
 // ownRecordingUnder reports whether the open test has a recording of its own
 // under any of keys (models.RequestKeys) that no call of it consumed yet: a
 // recording its call may be, changed. The miss then names that recording as

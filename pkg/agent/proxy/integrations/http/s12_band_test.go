@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestS12StatefulPickKeepsTheTestsOwnApartFromTheBackground(t *testing.T) {
 	h := newHTTP()
 	db := &s12TestDb{bg: &mockMemDb{}}
 	pick := func(fits ...*models.Mock) string {
-		m, commit := h.strictCursorPick(fits, isOwn, db, true)
+		m, commit, _ := h.strictCursorPick(fits, isOwn, db, true, nil)
 		if commit != nil {
 			commit()
 		}
@@ -75,12 +76,12 @@ func TestS12StatefulPickKeepsTheTestsOwnApartFromTheBackground(t *testing.T) {
 
 	// The variable pass.
 	hits := []*varHit{{mock: own}, {mock: starting}, {mock: ready}}
-	if hit, _ := h.pickHit(hits, isOwn, &s12TestDb{bg: &mockMemDb{}}, true); hit.mock != own {
+	if hit, _, _ := h.pickHit(hits, isOwn, &s12TestDb{bg: &mockMemDb{}}, true, nil); hit.mock != own {
 		t.Fatalf("the variable pass answered the test's own call with %s", hit.mock.Name)
 	}
 	vdb := &s12TestDb{bg: &mockMemDb{}}
 	for i, want := range []string{"bg-starting", "bg-ready", "bg-ready"} {
-		hit, commit := h.pickHit([]*varHit{{mock: ready}, {mock: starting}}, isOwn, vdb, true)
+		hit, commit, _ := h.pickHit([]*varHit{{mock: ready}, {mock: starting}}, isOwn, vdb, true, nil)
 		if commit != nil {
 			commit()
 		}
@@ -91,10 +92,10 @@ func TestS12StatefulPickKeepsTheTestsOwnApartFromTheBackground(t *testing.T) {
 
 	// Today's rules: one sequence across the tiers, in record order.
 	plain := &mockMemDb{}
-	if m, _ := h.strictCursorPick([]*models.Mock{own, starting, ready}, isOwn, plain, true); m != starting {
+	if m, _, _ := h.strictCursorPick([]*models.Mock{own, starting, ready}, isOwn, plain, true, nil); m != starting {
 		t.Fatalf("today's rules picked %s; want bg-starting, the first recorded, as before", m.Name)
 	}
-	if hit, _ := h.pickHit([]*varHit{{mock: own}, {mock: starting}}, isOwn, plain, true); hit.mock != starting {
+	if hit, _, _ := h.pickHit([]*varHit{{mock: own}, {mock: starting}}, isOwn, plain, true, nil); hit.mock != starting {
 		t.Fatalf("today's variable pass picked %s; want bg-starting, as before", hit.mock.Name)
 	}
 }
@@ -290,5 +291,160 @@ func TestS12ATestLearnsOnlyFromItsOwnInOneReadOfTheRound(t *testing.T) {
 				t.Fatalf("the test's own call was not learned from its own: %v %+v", served, miss)
 			}
 		})
+	}
+}
+
+// s12ExactDb is s12TestDb under exact serving: the open test's view
+// (SequenceViewer), whose cursor is the test's own, and its recorded window.
+// staged is every recording the store stages (integrations.StagedReader),
+// spent ones included.
+type s12ExactDb struct {
+	s12TestDb
+	view   integrations.SequenceView
+	staged []*models.Mock
+}
+
+func (d *s12ExactDb) SequenceView() (integrations.SequenceView, bool) { return d.view, true }
+func (d *s12ExactDb) StagedMocks() []*models.Mock                     { return d.staged }
+
+// Under exact serving too, a background call walks the background's
+// sequence on the background's cursor, whichever pass picks it (cursorPick,
+// the learn step's and the replay of learned noise's pick; the strict pass;
+// the variable pass): from its first recording, then the last again,
+// wherever its calls land. The test's own cursor and recorded window never restart it, which
+// would answer each test the recording in force when it began, however far
+// the background's sequence had gone.
+func TestS12TheBackgroundWalksOnItsCursorUnderExactServing(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Unix(1_700_000_000, 0)
+	starting := statefulAt("bg-starting", base)
+	ready := statefulAt("bg-ready", base.Add(time.Second))
+	own := statefulAt("own", base.Add(2*time.Second))
+	isOwn := func(m *models.Mock) bool { return m == own }
+	h := newHTTP()
+	var bg *mockMemDb
+	test := func(name string) *s12ExactDb {
+		return &s12ExactDb{s12TestDb: s12TestDb{bg: bg}, view: integrations.SequenceView{
+			Cursor: &mockMemDb{}, Test: name, Start: base.Add(1500 * time.Millisecond), End: base.Add(3 * time.Second)}}
+	}
+	for _, p := range []struct {
+		name string
+		pick func(db *s12ExactDb) (*models.Mock, func(), *answeredSequence)
+	}{
+		{"cursorPick", func(db *s12ExactDb) (*models.Mock, func(), *answeredSequence) {
+			return h.cursorPick(ready, []*models.Mock{ready, starting}, isOwn, db, true)
+		}},
+		{"the strict pass", func(db *s12ExactDb) (*models.Mock, func(), *answeredSequence) {
+			return h.strictCursorPick([]*models.Mock{ready, starting}, isOwn, db, true, nil)
+		}},
+		{"the variable pass", func(db *s12ExactDb) (*models.Mock, func(), *answeredSequence) {
+			hit, commit, answered := h.pickHit([]*varHit{{mock: ready}, {mock: starting}}, isOwn, db, true, nil)
+			if hit == nil {
+				return nil, commit, answered
+			}
+			return hit.mock, commit, answered
+		}},
+	} {
+		bg = &mockMemDb{}
+		a, b := test("A"), test("B")
+		for i, c := range []struct {
+			db   *s12ExactDb
+			want string
+		}{{a, "bg-starting"}, {a, "bg-ready"}, {b, "bg-ready"}} {
+			m, commit, answered := p.pick(c.db)
+			if answered != nil {
+				t.Fatalf("%s: background pick %d in test %s missed: %s", p.name, i+1, c.db.view.Test, answered.why())
+			}
+			if m == nil || m.Name != c.want {
+				t.Fatalf("%s: background pick %d in test %s = %v; want %s (the background's sequence on its cursor, then the last again)", p.name, i+1, c.db.view.Test, m, c.want)
+			}
+			if commit != nil {
+				commit()
+			}
+		}
+		if len(bg.cursors) == 0 {
+			t.Fatalf("%s: the background's picks kept no mark in the background's cursor", p.name)
+		}
+	}
+	a := test("A")
+	if m, _, _ := h.cursorPick(own, []*models.Mock{own, starting, ready}, isOwn, a, true); m != own {
+		t.Fatalf("the test's own call was answered by %v; want its own recording", m)
+	}
+}
+
+// Under exact serving the background's sequence is fixed by every recording
+// of it the store stages, as a test's is: once its last recording can answer
+// no more (a worker scope's answers once in the staging), a call the
+// background answers is a miss that names it, in every pass (cursorPick, the
+// strict pass, the variable pass), whichever test is open; never one of its
+// earlier recordings again, which would take a poller's sequence back (a job
+// read as running after it was read as done). The last may have answered
+// before it was spent, or another call may have spent it first.
+func TestS12TheBackgroundsSpentLastIsAMissNotAnEarlierOneAgain(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Unix(1_700_000_000, 0)
+	starting := statefulAt("bg-starting", base)
+	ready := statefulAt("bg-ready", base.Add(time.Second))
+	done := statefulAt("bg-done", base.Add(1200*time.Millisecond))
+	own := statefulAt("own", base.Add(2*time.Second))
+	isOwn := func(m *models.Mock) bool { return m == own }
+	every := func(*models.Mock) bool { return true }
+	h := newHTTP()
+	for _, p := range []struct {
+		name string
+		pick func(db *s12ExactDb, live []*models.Mock) (*models.Mock, func(), *answeredSequence)
+	}{
+		{"cursorPick", func(db *s12ExactDb, live []*models.Mock) (*models.Mock, func(), *answeredSequence) {
+			return h.cursorPick(live[0], live, isOwn, db, true)
+		}},
+		{"the strict pass", func(db *s12ExactDb, live []*models.Mock) (*models.Mock, func(), *answeredSequence) {
+			return h.strictCursorPick(live, isOwn, db, true, every)
+		}},
+		{"the variable pass", func(db *s12ExactDb, live []*models.Mock) (*models.Mock, func(), *answeredSequence) {
+			hits := make([]*varHit, 0, len(live))
+			for _, m := range live {
+				hits = append(hits, &varHit{mock: m})
+			}
+			hit, commit, answered := h.pickHit(hits, isOwn, db, true, every)
+			if hit == nil {
+				return nil, commit, answered
+			}
+			return hit.mock, commit, answered
+		}},
+	} {
+		for _, c := range []struct {
+			name    string
+			answers []string // the background's calls while bg-done is live
+		}{
+			{"the last answered, then was spent", []string{"bg-starting", "bg-ready", "bg-done"}},
+			{"another call spent the last first", []string{"bg-starting", "bg-ready"}},
+		} {
+			bg := &mockMemDb{}
+			db := func(test string) *s12ExactDb {
+				return &s12ExactDb{s12TestDb: s12TestDb{bg: bg}, staged: []*models.Mock{starting, ready, done, own},
+					view: integrations.SequenceView{Cursor: &mockMemDb{}, Test: test,
+						Start: base.Add(1500 * time.Millisecond), End: base.Add(3 * time.Second)}}
+			}
+			for i, want := range c.answers {
+				m, commit, answered := p.pick(db("A"), []*models.Mock{ready, starting, done})
+				if answered != nil {
+					t.Fatalf("%s, %s: background call %d missed: %s", p.name, c.name, i+1, answered.why())
+				}
+				if m == nil || m.Name != want {
+					t.Fatalf("%s, %s: background call %d = %v; want %s", p.name, c.name, i+1, m, want)
+				}
+				if commit != nil {
+					commit()
+				}
+			}
+			// bg-done is spent: the store no longer offers it, but stages it.
+			m, _, answered := p.pick(db("B"), []*models.Mock{ready, starting})
+			if answered == nil {
+				t.Fatalf("%s, %s: once bg-done is spent the background call was answered %s; want a miss, never an earlier recording again", p.name, c.name, m.Name)
+			}
+			if why := answered.why(); !strings.Contains(why, "bg-done") || !strings.Contains(why, "3 recordings") {
+				t.Fatalf("%s, %s: the miss's reason %q does not name bg-done, the last of the background's 3 recordings", p.name, c.name, why)
+			}
+		}
 	}
 }
