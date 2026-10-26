@@ -295,6 +295,46 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 // offset (learn.KindClockOffset) has a Min above zero.
 func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 
+// Meet is o and p, two learnings of one place's clock read, as one: the
+// offsets both hold (from the later Min up to the earlier Max: a Plain o
+// holds the offset zero alone) at the coarser of their resolutions. Each
+// holds the true offset of a read its learn step saw, so the one place's
+// value holds it only where both do; a Res read coarser refuses more,
+// never less. Two that share no offset (a Plain and one with an offset, or
+// two offsets apart) meet as an Empty one, which holds nothing. Meet is the
+// same in either order and however a place's learnings are grouped, so a
+// recording paired many times keeps one answer whatever order its
+// pairings came in.
+func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
+	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res)}
+}
+
+// Empty reports whether o is the Meet of learnings of one place that share
+// no offset: a Min above zero and a Max not above it. Holds holds nothing
+// for it, and String says why.
+func (o ClockOffset) Empty() bool { return o.Min > 0 && o.Max <= o.Min }
+
+// MergeClocks is a and b, two sets of the places a call's learn steps
+// learned as clock reads (MockSpec.Clocks), as one fresh map: every place
+// of either, a place of both as the Meet of its two offsets. nil when
+// neither holds a place.
+func MergeClocks(a, b map[string]ClockOffset) map[string]ClockOffset {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[string]ClockOffset, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		if cur, ok := out[k]; ok {
+			v = cur.Meet(v)
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // holdsRead is Holds of a Plain o: at, cut to resolution res (it stands for
 // [at, at+res)), is a read of the clock made from from to to, the call's
 // window on the application's clock, itself: some read t in [from, to] lies
@@ -321,10 +361,15 @@ func (o ClockOffset) holdsRead(at time.Time, res time.Duration, from, to time.Ti
 // up to Max of its Unit, and the two bounds after it where they are more
 // than a nanosecond apart: "clock + 30m (from 29m59.998s to 30m0.001s)".
 // Where they hold more than one multiple, it names no offset: "clock plus an
-// offset from 29m59.96s to 32m59.956s". It never decides anything.
+// offset from 29m59.96s to 32m59.956s"; an Empty o says it holds none:
+// "clock reads no one offset holds (from 30m up to 0s)". It never decides
+// anything.
 func (o ClockOffset) String() string {
 	if o.Plain() {
 		return "clock"
+	}
+	if o.Empty() {
+		return "clock reads no one offset holds (from " + ShortDuration(o.Min) + " up to " + ShortDuration(o.Max) + ")"
 	}
 	u := o.Unit()
 	if u == 0 || ceilTo(o.Min, u)+u < o.Max {

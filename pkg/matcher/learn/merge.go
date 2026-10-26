@@ -36,13 +36,21 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 
 // MergeLearned writes what a consumed mock's state carries of what the
 // learn step learned onto the mock read from disk: its learned noise, its
-// variables, and binds, the variables other mocks of its test use that are
-// bound at it. It returns what it added, sorted, each as "<path> (noise)",
-// "<place> (variable <name>: bind|use)" or "<place> (echo <name>)". Noise and
-// variables are monotonic (what is on disk stays), with one exception: a
-// place that is a variable's is never noise, so learned noise there is
-// dropped (the learn step may have learned a value as noise at the call
-// that first sent it, before a later call showed it flowed on).
+// variables, binds, the variables other mocks of its test use that are
+// bound at it, and its clock reads (MockSpec.Clocks). It returns what it
+// added, sorted, each as "<path> (noise)", "<place> (variable <name>:
+// bind|use)", "<place> (echo <name>)" or "<path> (<offset>)" ("clock",
+// "clock + 30m"). Noise and variables are monotonic (what is on disk
+// stays), with two exceptions: a place that is a variable's is never noise,
+// so learned noise there is dropped (the learn step may have learned a
+// value as noise at the call that first sent it, before a later call showed
+// it flowed on); and a place that is a clock read is never noise, so noise
+// there, learned or on disk (an older keploy learned a clock read as
+// noise), is dropped too: the place stays compared. A clock read learned at
+// a place that holds one meets it (models.ClockOffset.Meet), so it holds
+// only the offsets both do, and is added when that changed it; one that
+// shares no offset with it is Empty and refuses every value there. A clock
+// read at a variable's place stays: the replay checks both.
 func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
 	var added []string
 	if !provenswitch.On() {
@@ -107,7 +115,8 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 	if len(st.ReqBodyNoise) > 0 {
 		noise := make(map[string][]string, len(st.ReqBodyNoise))
 		for k, v := range st.ReqBodyNoise {
-			if !varPlaces[k] {
+			_, clock := st.Clocks[k]
+			if _, onDisk := mock.Spec.Clocks[k]; !varPlaces[k] && !clock && !onDisk {
 				noise[k] = v
 			}
 		}
@@ -120,8 +129,27 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
 		}
 	}
+	if len(st.Clocks) > 0 {
+		clocks := models.MergeClocks(mock.Spec.Clocks, nil)
+		if clocks == nil {
+			clocks = make(map[string]models.ClockOffset, len(st.Clocks))
+		}
+		for path, o := range st.Clocks {
+			cur, had := clocks[path]
+			next := o
+			if had {
+				next = cur.Meet(o)
+			}
+			if !had || next != cur {
+				added = append(added, path+" ("+next.String()+")")
+			}
+			clocks[path] = next
+		}
+		mock.Spec.Clocks = clocks
+	}
 	for k := range mock.Spec.ReqBodyNoise {
-		if varPlaces[k] {
+		_, clock := mock.Spec.Clocks[k]
+		if varPlaces[k] || clock {
 			delete(mock.Spec.ReqBodyNoise, k)
 		}
 	}
@@ -190,7 +218,7 @@ func variableAdded(name string, was, next models.MockVariable) []string {
 }
 
 // FoldLearned is, of states (by mock name), the states that carry learning
-// (noise or variables) and, by target mock, the variables other mocks' states
+// (noise, variables or clock reads) and, by target mock, the variables other mocks' states
 // bind at it (MockState.Binds), folded (MergeVariable). A target no state of
 // its own carries learning for is in the first with a bare state, so the
 // merge reaches it (MergeLearned).
@@ -198,7 +226,7 @@ func FoldLearned(states map[string]models.MockState) (map[string]models.MockStat
 	withLearning := make(map[string]models.MockState)
 	binds := map[string]models.MockVariables{}
 	for name, st := range states {
-		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 {
+		if len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Clocks) > 0 {
 			withLearning[name] = st
 		}
 		for target, vs := range st.Binds {

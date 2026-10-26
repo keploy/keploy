@@ -431,10 +431,13 @@ func (p *exactPlan) noteShares(test string, consumed []models.MockState, readErr
 }
 
 // learnedAt is the places the learn step learned on a consumed recording: its
-// noise, and the bound places of its echo variables, sorted.
+// noise, its clock reads, and the bound places of its echo variables, sorted.
 func learnedAt(st models.MockState) []string {
 	set := map[string]bool{}
 	for k := range st.ReqBodyNoise {
+		set[k] = true
+	}
+	for k := range st.Clocks {
 		set[k] = true
 	}
 	for _, v := range st.Variables {
@@ -446,19 +449,23 @@ func learnedAt(st models.MockState) []string {
 }
 
 // learnedOn reports whether the learn step learned anything on a consumed
-// recording: noise, a variable, or a value bound at an earlier recording. A
-// shared recording states none of these (models.ConcurrentKeys.Shareable), so
-// any is what the learn step paired a call with it by.
+// recording: noise, a clock read, a variable, or a value bound at an earlier
+// recording. A shared recording states none of these
+// (models.ConcurrentKeys.Shareable), so any is what the learn step paired a
+// call with it by.
 func learnedOn(st models.MockState) bool {
-	return len(st.ReqBodyNoise) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0
+	return len(st.ReqBodyNoise) > 0 || len(st.Clocks) > 0 || len(st.Variables) > 0 || len(st.Binds) > 0
 }
 
 // learnedPlaces is every place the learn step learned on a consumed
-// recording: its noise, and the bound places of its variables and of what it
-// binds at earlier recordings, sorted.
+// recording: its noise, its clock reads, and the bound places of its
+// variables and of what it binds at earlier recordings, sorted.
 func learnedPlaces(st models.MockState) []string {
 	set := map[string]bool{}
 	for k := range st.ReqBodyNoise {
+		set[k] = true
+	}
+	for k := range st.Clocks {
 		set[k] = true
 	}
 	for _, v := range st.Variables {
@@ -1054,7 +1061,7 @@ func (p *exactPlan) stripUnresolved(consumed map[string]models.MockState) map[st
 	out := make(map[string]models.MockState, len(consumed))
 	for name, st := range consumed {
 		if _, cand := sp.candOf[name]; cand && sp.settled.Pins[name] == "" {
-			st.ReqBodyNoise, st.Variables, st.Binds = nil, nil, nil
+			st.ReqBodyNoise, st.Variables, st.Binds, st.Clocks = nil, nil, nil, nil
 		}
 		out[name] = st
 	}

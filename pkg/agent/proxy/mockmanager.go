@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"sync"
@@ -3441,6 +3442,7 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 			AnswerPlaced:     models.IsAnswerPlaced(new),
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
+			Clocks:           clocksOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
 			LearnedAfterEnd:  m.learnedAfterEnd(old, new),
 		}, old.TestModeInfo.StagedSet); err != nil {
@@ -3527,6 +3529,7 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 			AnswerPlaced:     models.IsAnswerPlaced(&mock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
+			Clocks:           clocksOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
@@ -3601,6 +3604,7 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 				AnswerPlaced:     models.IsAnswerPlaced(mk),
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 				Variables:        variablesOf(mock.Spec),
+				Clocks:           clocksOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
 				LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 				CarryOver:        true,
@@ -3675,6 +3679,7 @@ func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool
 			AnswerPlaced:     models.IsAnswerPlaced(&mock),
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
+			Clocks:           clocksOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
@@ -3841,6 +3846,7 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 			AnswerPlaced:     models.IsAnswerPlaced(mk),
 			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
 			Variables:        variablesOf(mock.Spec),
+			Clocks:           clocksOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 			// A registered kind's startup-band mock first consumed after a
@@ -4079,6 +4085,7 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// reusable stateful recording, a scoped worker's held own mock), as
 		// the other doors carry it (nil with the switch off).
 		Variables: variablesOf(mock.Spec),
+		Clocks:    clocksOf(mock.Spec),
 		Binds:     bindsOf(mock.Spec),
 		// Learning the consume carries beyond what exact serving handed
 		// the parser out, once the set's learn step ended.
@@ -4423,6 +4430,17 @@ func variablesOf(spec models.MockSpec) models.MockVariables {
 	return out
 }
 
+// clocksOf is what a consumed mock's state carries of the places its call's
+// learn step learned as reads of the application's clock (MockSpec.Clocks):
+// under the proven switch its own, which record's full round writes onto the
+// recording. Without the switch nothing, as before it.
+func clocksOf(spec models.MockSpec) map[string]models.ClockOffset {
+	if !provenswitch.On() {
+		return nil
+	}
+	return maps.Clone(spec.Clocks)
+}
+
 // bindsOf is what a consumed mock's state carries of the variables the learn
 // step learned while answering it that are bound at an earlier mock
 // (MockSpec.LearnedBinds): under the proven switch only.
@@ -4482,6 +4500,7 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 		}
 		if ok {
 			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
+			mock.Clocks = models.MergeClocks(prev.Clocks, mock.Clocks)
 			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
 			if len(prev.ReqBodyNoise) > 0 {
 				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)

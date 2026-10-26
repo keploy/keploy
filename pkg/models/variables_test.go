@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -360,7 +361,8 @@ func TestAClockOffsetReadsAsTheClockPlusItsOffset(t *testing.T) {
 		{ClockOffset{Min: 30*time.Minute - 40*ms, Max: 33*time.Minute - 44*ms}, "clock plus an offset from 29m59.96s to 32m59.956s"},
 		{ClockOffset{Min: 30 * time.Minute, Max: 31 * time.Minute}, "clock + 30m (from 30m to 31m)"},
 		{ClockOffset{Min: 30 * time.Minute, Max: 31*time.Minute + 1}, "clock plus an offset from 30m to 31m0.000000001s"},
-		{ClockOffset{Min: 30 * time.Minute, Max: 30 * time.Minute}, "clock plus an offset from 30m to 30m"},
+		{ClockOffset{Min: 30 * time.Minute, Max: 30 * time.Minute}, "clock reads no one offset holds (from 30m up to 30m)"},
+		{ClockOffset{Res: ms}.Meet(ClockOffset{Min: 30 * time.Minute, Max: 31 * time.Minute, Res: ms}), "clock reads no one offset holds (from 30m up to 0s)"},
 		{ClockOffset{Min: 30*24*time.Hour - time.Second, Max: 30*24*time.Hour + time.Second}, "clock + 30d (from 719h59m59s to 720h0m1s)"},
 		{ClockOffset{Min: 90*time.Minute - ms, Max: 90*time.Minute + ms}, "clock + 1h30m (from 1h29m59.999s to 1h30m0.001s)"},
 		{ClockOffset{Min: 1500 * time.Microsecond, Max: 1500*time.Microsecond + 2}, "clock + 1.5ms (from 1.5ms to 1.500002ms)"},
@@ -419,5 +421,57 @@ func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
 		if got := row.o.Holds(row.at, row.res, row.from, row.to); got != row.want {
 			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
 		}
+	}
+}
+
+// Two learnings of one place's clock read meet as the offsets both hold, at
+// the coarser resolution, in either order and however grouped (MergeClocks
+// of many pairings gives one answer whatever order they came in). A plain
+// read met with an offset, or two offsets apart, is Empty: it holds nothing
+// (not even the value the replay's own clock wrote), and says so.
+func TestTwoLearningsOfAClockReadMeetAsWhatBothHold(t *testing.T) {
+	ms := time.Millisecond
+	plain, plainUs := ClockOffset{Res: ms}, ClockOffset{Res: time.Microsecond}
+	a := ClockOffset{Min: 30*time.Minute - 20*ms, Max: 30*time.Minute + 10*ms, Res: time.Microsecond}
+	b := ClockOffset{Min: 30*time.Minute - 5*ms, Max: 30*time.Minute + 40*ms, Res: ms}
+	far := ClockOffset{Min: 31 * time.Minute, Max: 31*time.Minute + 10*ms, Res: ms}
+	if got, want := a.Meet(b), (ClockOffset{Min: b.Min, Max: a.Max, Res: ms}); got != want || b.Meet(a) != want || got.Empty() {
+		t.Fatalf("a meet b = %+v, b meet a = %+v; want %+v, not Empty", got, b.Meet(a), want)
+	}
+	if got := plainUs.Meet(plain); !got.Plain() || got.Res != ms || got.Empty() {
+		t.Fatalf("two plain reads meet as %+v; want a plain read at 1ms", got)
+	}
+	from := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	for _, e := range []ClockOffset{plain.Meet(a), a.Meet(plain), a.Meet(far), far.Meet(a)} {
+		if !e.Empty() || e.Plain() {
+			t.Fatalf("%+v: want Empty, not Plain", e)
+		}
+		if e.Holds(from.Add(5*ms), ms, from, from.Add(10*ms)) || e.Holds(from.Add(30*time.Minute), ms, from, from.Add(10*ms)) {
+			t.Fatalf("%+v holds a value", e)
+		}
+		if s := e.String(); !strings.HasPrefix(s, "clock reads no one offset holds") {
+			t.Fatalf("%+v reads %q", e, s)
+		}
+	}
+	if (ClockOffset{}).Empty() || plain.Empty() || a.Empty() {
+		t.Fatal("a learning on its own is not Empty")
+	}
+	learnings := []map[string]ClockOffset{{"x": a, "p": plain}, {"x": b}, {"x": a, "y": far}, nil, {"p": plainUs}}
+	want := map[string]ClockOffset{"x": a.Meet(b), "p": plain, "y": far}
+	for _, order := range [][]int{{0, 1, 2, 3, 4}, {4, 3, 2, 1, 0}, {2, 0, 4, 1, 3}} {
+		var got map[string]ClockOffset
+		for _, i := range order {
+			got = MergeClocks(got, learnings[i])
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("order %v merges as %+v, want %+v", order, got, want)
+		}
+	}
+	if MergeClocks(nil, map[string]ClockOffset{}) != nil {
+		t.Fatal("MergeClocks of none is not nil")
+	}
+	in := map[string]ClockOffset{"x": a}
+	if out := MergeClocks(in, map[string]ClockOffset{"x": b}); out["x"] == a || in["x"] != a {
+		t.Fatalf("MergeClocks wrote its input: in %+v, out %+v", in, out)
 	}
 }

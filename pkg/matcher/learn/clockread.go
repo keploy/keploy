@@ -113,8 +113,13 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // is cut coarser than the learn step read it (o.Res a cut coarser than the
 // value's encoding, models.ClockOffset.CutCoarserThan), so it would pass or
 // fail by where its read fell in the cut; or it is no such read: it changed.
-// It never passes a value it could not check.
+// An o two learnings of path met as Empty (models.ClockOffset.Meet: they
+// share no offset) is refused whatever the call carries, saying so. It never
+// passes a value it could not check.
 func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known bool) (bool, string) {
+	if o.Empty() {
+		return false, path + " was learned at more than one call as " + o.String() + ": no one read of the application's clock explains them all, so keploy refuses the value whatever it is. Record the test again; if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
 	read := "a read of the application's clock"
 	if !o.Plain() {
 		read += " plus that offset"
