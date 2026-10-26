@@ -18,6 +18,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -1262,6 +1263,59 @@ func TestHandleHttp1Connection_SyncCountsAnExchangeAPauseCost(t *testing.T) {
 	}
 	if got := mgr.NotRecordedUnderPressure(); got.Total != 1 || got.Connections() != 1 {
 		t.Fatalf("not recorded under pressure: %+v, want the one exchange that came during the pause", got)
+	}
+}
+
+// The debug knob that forces a pause by request count
+// (memoryguard.ForcePauseEnv) is driven by both ingress loops: each counts the
+// request it has read before it reads the pause for it, so with "2:3" the
+// second request comes during the pause and is counted as not recorded, and
+// the first and third are captured.
+func TestBothIngressLoopsDriveTheForcedPause(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		name := "zero-copy"
+		if synchronous {
+			name = "synchronous"
+		}
+		t.Run(name, func(t *testing.T) {
+			stubIngressPaused(t, memoryguard.IsRecordingPaused)
+			t.Cleanup(memoryguard.SetForcedPauseForTest("2:3"))
+			mgr := syncMock.New(zap.NewNop())
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("ok"))
+			}))
+			t.Cleanup(upstream.Close)
+			captured := make(chan string, 4)
+			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+				captured <- req.URL.Path
+			})
+			app := strings.TrimPrefix(upstream.URL, "http://")
+			for _, path := range []string{"/1", "/2", "/3"} {
+				pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+				ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+				client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
+				pausedExchange(t, client, bufio.NewReader(client), path, true)
+				<-done
+				pm.captures.Wait()
+				cancel()
+			}
+			close(captured)
+			var got []string
+			for p := range captured {
+				got = append(got, p)
+			}
+			if !slices.Equal(got, []string{"/1", "/3"}) {
+				t.Fatalf("captured %v, want /1 and /3: the second request came during the forced pause", got)
+			}
+			if n := mgr.NotRecordedUnderPressure(); n.Total != 1 {
+				t.Fatalf("not recorded under pressure: %+v, want the second request", n)
+			}
+			if memoryguard.IsRecordingPaused() {
+				t.Fatal("recording is still paused after the third request")
+			}
+		})
 	}
 }
 

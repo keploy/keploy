@@ -125,6 +125,12 @@ func agentHealthcheckStartPeriod() time.Duration {
 // any drain. The agent goes by events, not by it.
 const agentStopGracePeriod = "24h"
 
+// agentForcePauseEnv is memoryguard.ForcePauseEnv, the debug knob that forces
+// a memory-guard pause by request count, which GenerateKeployAgentService
+// hands on to the agent's container. Spelled here so this package does not
+// take on the agent's memory guard; a test holds the two equal.
+const agentForcePauseEnv = "KEPLOY_DEBUG_FORCE_PAUSE"
+
 // ComposeServiceHook is called for each keploy-managed Docker Compose service
 // node during generation so a downstream caller (the enterprise low-latency hook)
 // can mutate the right one. E.g. it adds the deterministic JVM agent (-javaagent
@@ -801,6 +807,13 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// Add installation ID if available
 	if installationID := os.Getenv("INSTALLATION_ID"); installationID != "" {
 		envVars = append(envVars, fmt.Sprintf("INSTALLATION_ID=%s", installationID))
+	}
+
+	// The debug knob that forces a memory-guard pause by request count is
+	// read by the agent, so it travels to the agent's container. Absent
+	// unless the operator set it.
+	if v := os.Getenv(agentForcePauseEnv); v != "" {
+		envVars = append(envVars, agentForcePauseEnv+"="+v)
 	}
 
 	// The control-plane token, by name only: a bare `KEPLOY_AGENT_TOKEN` entry

@@ -158,6 +158,9 @@ func SetRecordingPausedForTest(paused bool) (restore func()) {
 // Start enables the memory guard when a Docker agent is running with a limit.
 func Start(ctx context.Context, logger *zap.Logger, isDocker bool, memoryLimitMB uint64) error {
 	resetAllPressure()
+	// The debug knob that forces a pause by request count, read whether or
+	// not the guard itself runs (ForcePauseEnv).
+	startForcedPause(logger)
 
 	limitBytes, err := LimitBytes(memoryLimitMB)
 	if err != nil {

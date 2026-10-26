@@ -27,6 +27,12 @@ import (
 
 var isIngressRecordingPaused = memoryguard.IsRecordingPaused
 
+// noteIngressRequest counts each request the ingress has read, before it reads
+// the pause for it: the debug knob that forces a pause by request count
+// (memoryguard.ForcePauseEnv) starts and ends its pause here. A no-op unless
+// the knob is set.
+var noteIngressRequest = memoryguard.IngressRequest
+
 type httpCaptureState struct {
 	mu        sync.Mutex
 	maxBytes  int
@@ -670,6 +676,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// pressureCloseMode unifies forceCloseMode with memory pressure.
 		// When true, expected close errors are handled gracefully (DEBUG level),
 		// the sampling lock is released early, and the loop exits after one exchange.
+		noteIngressRequest()
 		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
 		captureEnabled := !isIngressRecordingPaused()
 		// lostToPause: a pause of the memory guard decided this exchange is
@@ -1402,6 +1409,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// exchange, which is counted, and the connection's next one is
 		// captured if the pause is over by then. An Upgrade is a tunnel no
 		// pause costs anything.
+		noteIngressRequest()
 		paused := isIngressRecordingPaused()
 		if paused && connCapture && !isHTTPUpgrade(req) {
 			notRecordedUnderPressure()
