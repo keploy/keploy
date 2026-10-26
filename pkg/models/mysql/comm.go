@@ -43,6 +43,9 @@ type TextResultSet struct {
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
 	Rows            []*TextRow            `yaml:"rows" json:"rows"`
 	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+
+	// wire caches the encoded answer for replay (see EncodedPayload).
+	wire EncodedPayload
 }
 
 // BinaryProtocolResultSet is used as a response packet for COM_STMT_EXECUTE
@@ -52,6 +55,9 @@ type BinaryProtocolResultSet struct {
 	EOFAfterColumns []byte                `yaml:"eofAfterColumns" json:"eofAfterColumns"`
 	Rows            []*BinaryRow          `yaml:"rows" json:"rows"`
 	FinalResponse   *GenericResponse      `yaml:"FinalResponse" json:"FinalResponse"`
+
+	// wire caches the encoded answer for replay (see EncodedPayload).
+	wire EncodedPayload
 }
 
 type GenericResponse struct {
