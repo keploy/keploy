@@ -594,8 +594,10 @@ func TestLearnMatchWithNoWindowsTheScopeTableSaysWhatIsThePools(t *testing.T) {
 			if (served != nil) != tc.paired {
 				t.Fatalf("served %v miss %+v; want paired=%v", served, miss, tc.paired)
 			}
-			if tc.paired && (len(db.pooled) != 1 || !reflect.DeepEqual(db.pooled[0].Spec.ReqBodyNoise, map[string][]string{"body.at": {}})) {
-				t.Fatalf("the start-up recording carries %+v; want body.at learned", db.pooled)
+			// With no window, the stamp, one instant whole, is a read of the
+			// clock a replay checks in its call's own span, never noise.
+			if tc.paired && (len(db.pooled) != 1 || !learnedClockRead(db.pooled[0].Spec, "body.at")) {
+				t.Fatalf("the start-up recording carries %+v; want body.at learned as a read of the clock", db.pooled)
 			}
 		})
 	}
@@ -3305,8 +3307,10 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 // in both runs: noise, and the replay after it answers the call with a
 // third stamp. A slot the harness gave the app that moved a minute on, by
 // about the lead, lies in neither span: refused, saying no clock read by the
-// app matched it; in keploy test, which reads a test's own call by the lead,
-// it is noise. With no app clock (no clock hooks) nothing shows the stamp is
+// app matched it; in keploy test, where a test's own call has no window, it
+// is one instant whole, learned as a read of the clock, which the replay
+// after it (record's confirming round) refuses, naming the field: it is no
+// read of the clock, and record filters it there. With no app clock (no clock hooks) nothing shows the stamp is
 // a read either: refused, saying keploy saw no read of the app's clock for
 // the call. Where the recording has no call before the test's (its first
 // data-plane call), the call's window in the recording runs from the test's
@@ -3385,13 +3389,10 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				return
 			}
 			// The app's stamp, an instant whole, is a read of the clock, still
-			// compared; the slot (read by the lead in keploy test) is noise.
-			learned := len(db.consumed) == 1 && learnedClockRead(db.consumed[0].Spec, field)
-			if field == "body.slot" {
-				learned = len(db.consumed) == 1 && reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{field: {}}) && len(db.consumed[0].Spec.Clocks) == 0
-			}
-			if got == nil || miss != nil || !learned {
-				t.Fatalf("served %v miss %+v consumed %+v; want %s learned", got, miss, db.consumed, field)
+			// compared; so is the slot in keploy test, one instant whole in a
+			// test's own call, which has no window: never noise.
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, field) {
+				t.Fatalf("served %v miss %+v consumed %+v; want %s learned as a read of the clock", got, miss, db.consumed, field)
 			}
 			// The replay after record's full round: a third value is
 			// answered, a stamp read in its own call's window.
@@ -3402,6 +3403,23 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 			}
 			call := live("POST", "/v1/events", `{"event":"signup",`+third+`}`, nil)
 			call.arrived = at.Add(time.Millisecond)
+			if field == "body.slot" {
+				// The slot is no read of the clock: the next replay, record's
+				// confirming round's first, refuses it, naming the field and
+				// why, so record filters the test there.
+				db := &varDb{perTest: learnedOnto([]*models.Mock{signup}, db.consumed)}
+				ok, _, diag := matchVarIn(t, clockConn(true, at.Add(-time.Second)), newHTTP(), db, call)
+				why := ""
+				for _, f := range diag.differs {
+					if f.shape == field {
+						why = f.why
+					}
+				}
+				if ok || !strings.HasPrefix(why, field+" was learned as ") || !strings.Contains(why, "it changed") {
+					t.Fatalf("the replay of the slot: answered %v, differs %v (%q); want it refused, naming %s and why", ok, differs(diag), why, field)
+				}
+				return
+			}
 			inCIIn(t, clockConn(true, at.Add(-time.Second)), learnedOnto([]*models.Mock{signup}, db.consumed), []*req{call})
 		})
 	}
@@ -3746,7 +3764,8 @@ func TestLearnMatchReadsAServedDateHeaderAsItsAnswersStamp(t *testing.T) {
 // recorded in, is its server's clock read as it answered the call: a word
 // of the call's drifted value that it holds by coincidence (the second of a
 // sent_at that no lead or window shows a clock read) is no echo, and the
-// value is learned as noise. A Date header outside that span is read as any
+// value, one instant whole in a call with no window, is learned as a read of
+// the clock, which a replay checks in its call's own span. A Date header outside that span is read as any
 // leaf of the answer, and refuses it.
 func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 	for _, tc := range []struct {
@@ -3770,8 +3789,8 @@ func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.served && (served == nil || !reflect.DeepEqual(db.consumed[len(db.consumed)-1].Spec.ReqBodyNoise, map[string][]string{"body.sent_at": {}})) {
-				t.Fatalf("served %v, miss %+v; want body.sent_at learned as noise", served != nil, miss)
+			if tc.served && (served == nil || !learnedClockRead(db.consumed[len(db.consumed)-1].Spec, "body.sent_at")) {
+				t.Fatalf("served %v, miss %+v; want body.sent_at learned as a read of the clock", served != nil, miss)
 			}
 			if !tc.served && (served != nil || !strings.Contains(miss.res.Why, "comes back in the answer at header.date")) {
 				t.Fatalf("served %v, miss %+v; want it refused, the answer's header.date holding a word of it", served != nil, miss)

@@ -207,8 +207,8 @@ func TestATypedInstantIsComparedWhole(t *testing.T) {
 	if ln.Kind == KindNoise || ln.From.Mock != "mock-15" && !strings.Contains(ln.Why, "mock-15") {
 		t.Errorf("a date-like string, no provenance: %s (from %q, %s); want refused for mock-15's requestId", ln.Kind, ln.From.Mock, ln.Why)
 	}
-	if ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, noMonitor...); ln.Kind != KindNoise {
-		t.Errorf("a date-like string, no provenance, without mock-15: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
+	if ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, noMonitor...); ln.Kind != KindNoise || ln.Read == nil {
+		t.Errorf("a date-like string, no provenance, without mock-15: %s (from %q, %s); want a read of the clock: one instant whole, with no call window, compared at replay", ln.Kind, ln.From.Mock, ln.Why)
 	}
 	if ln := classifyTyped(str(qnRec), str(qnLive), qnWindow(), nil, nil, raw...); ln.Kind != KindNoise {
 		t.Errorf("a date-like string, in its window: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
