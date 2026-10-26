@@ -587,7 +587,8 @@ func TestALearnStepOwnMockAnswersOnceSoTheNextIsPaired(t *testing.T) {
 // default, so test 1's recordings stay visible in test 2. A visible
 // recording of another recorded test is no earlier place of test 2's calls:
 // test 1's call in the same second does not refuse test 2's own clock read
-// (request_changed), as the mocks served before test 2 began do not.
+// (request_changed), as the mocks served before test 2 began do not: it is
+// learned as a read of the clock.
 func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
@@ -614,8 +615,12 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 		misses, _ := p.GetMockErrors(context.Background())
 		t.Fatalf("test 2's own clock read was refused because test 1's recording (same second) is visible: %d %s %+v", code, got, misses)
 	}
-	if _, ok := r3States(mm)["mock-t2"].ReqBodyNoise["body.at"]; !ok {
-		t.Fatalf("test 2's clock read is noise: %+v", r3States(mm)["mock-t2"])
+	// One instant whole (an epoch second) in a test's own call, which has no
+	// window, read 93 s after its recording (no lead moves it): a read of the
+	// clock a replay checks in its call's own span, never noise.
+	st := r3States(mm)["mock-t2"]
+	if _, ok := st.Clocks["body.at"]; !ok || st.ReqBodyNoise["body.at"] != nil {
+		t.Fatalf("test 2's clock read is no read of the clock: %+v", st)
 	}
 }
 
@@ -1062,12 +1067,15 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 
 // Through the HTTP integration, the call's window ends when decodeHTTP had
 // the request whole: a start-up pool call's clock read in it is learned as
-// noise, whatever the receive's Date header holds. Read by the lead alone
-// (the minute and second words of the receive's Date header, in GMT as HTTP
-// writes it), it is learned where that header is its server's stamp, and
-// refused where the server's clock ran a second ahead (its Date header
-// after its answer is no stamp): only the window learns that one. The
-// instants are fixed in UTC, so the row reads the same in every zone.
+// a read of the clock, whatever the receive's Date header holds. With no
+// window (the lead alone, which does not read it: F's clock ran 2 s past the
+// lead), it is learned as one too where that header is its server's stamp,
+// no place the value came from: a read of the clock a replay checks in its
+// call's own span, never noise, which would pass any value at every replay.
+// Where the server's clock ran a second ahead (its Date header after its
+// answer is no stamp), it is refused for that header: only the window learns
+// that one. The instants are fixed in UTC, so the row reads the same in every
+// zone.
 func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
@@ -1108,14 +1116,10 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 				if window || tc.stamp {
 					// An instant whole its call's window holds: a read of the
 					// clock, still compared at every replay (MockState.Clocks),
-					// never noise. Learned by its server's stamp alone, with
-					// no window, it stays noise.
+					// never noise, its window's or, by its server's stamp
+					// alone with no window, its call's own span's.
 					_, clock := st.Clocks["body.processed_at"]
-					learned := clock && noise["body.processed_at"] == nil
-					if !window {
-						learned = !clock && noise["body.processed_at"] != nil
-					}
-					if code != http.StatusOK || got != `{"ok":true}` || !learned {
+					if code != http.StatusOK || got != `{"ok":true}` || !clock || noise["body.processed_at"] != nil {
 						t.Fatalf("answered %d %s, learned noise %v clocks %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise, st.Clocks)
 					}
 					return

@@ -109,9 +109,10 @@ func TestAPickFromTheTestRequestIsRefused(t *testing.T) {
 		rec := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: f[0]}}}
 		live := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: f[1]}}}
 		// Without the request, nothing earlier holds it: noise (what the
-		// learn step did before it read the request).
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
-			t.Errorf("%q -> %q, no test case's request: %s (%s); want noise", f[0], f[1], ln.Kind, ln.Why)
+		// learn step did before it read the request), and of a whole
+		// instant, with no call window, a read of the clock a replay checks.
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, live, rec, at, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
+			t.Errorf("%q -> %q, no test case's request: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", f[0], f[1], ln.Kind, ln.Read, ln.Why)
 		}
 		for _, slots := range [][]string{{"11:13", "11:14", "11:15", "11:16"}, {"2026-10-22T11:14:00Z", "2026-10-22T11:15:00Z"}, {"2026-10-22 11:14", "2026-10-22 11:15"}} {
 			given := []Earlier{GivenRequest(slotRequest(slots...))}
@@ -818,8 +819,10 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 			} else if ln.Kind != KindUnaccounted || !clientTestRefusal(ln.Why, tc.part, tc.w != nil, tc.rec, tc.live) {
 				t.Fatalf("%q -> %q: %s (%s); want it refused, naming %s, saying keploy saw no read of the app's clock that matched it, and quoting no value", tc.rec, tc.live, ln.Kind, ln.Why, tc.part)
 			}
-			if ln := ClassifyIn(NewDriftCache(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
-				t.Fatalf("keploy test, %q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
+			// In keploy test with no call window, a whole instant is a read
+			// of the clock a replay checks, moved by the lead or not.
+			if ln := ClassifyIn(NewDriftCache(), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
+				t.Fatalf("keploy test, %q -> %q: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", tc.rec, tc.live, ln.Kind, ln.Read, ln.Why)
 			}
 		})
 	}

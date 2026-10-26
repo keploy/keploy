@@ -384,11 +384,13 @@ func TestRawOfLeavesOutAPostgresInvocationsWhereAndWhen(t *testing.T) {
 
 // F runs each test FullRoundLead past its recorded instant from when it
 // begins, so an app that reads its clock late in F (a loaded box) binds a
-// value the lead does not account for: it drifted, and it flowed from
-// nowhere, so it is noise. Read as payload, a recording's invocation id made
-// it a value that flowed from that recording (its date and time words), and
-// the call was refused as changed (flaky/request_changed).
-func TestALateClockReadIsNoiseBesideAPostgresRecordingOfTheSameMinute(t *testing.T) {
+// value the lead may not account for. It flowed from nowhere, and with no
+// call window it is a read of the clock, compared at replay, however late it
+// was read: never refused for the recording beside it, never left noise
+// unchecked. Read as payload, a recording's invocation id made it a value
+// that flowed from that recording (its date and time words), and the call
+// was refused as changed (flaky/request_changed).
+func TestALateClockReadIsAReadOfTheClockBesideAPostgresRecordingOfTheSameMinute(t *testing.T) {
 	recAt := time.Date(2026, 10, 21, 4, 5, 9, 989222587, time.UTC)
 	earlier := &models.Mock{Name: "mock-2", Kind: models.PostgresV3, Spec: models.MockSpec{
 		ReqTimestampMock: recAt.Add(-700 * time.Millisecond),
@@ -402,8 +404,8 @@ func TestALateClockReadIsNoiseBesideAPostgresRecordingOfTheSameMinute(t *testing
 	for _, late := range []time.Duration{10 * time.Millisecond, 600 * time.Millisecond, 2500 * time.Millisecond} {
 		live := Shape{Leaves: map[string]Leaf{"bind.$3": {Path: "bind.$3", Value: recAt.Add(FullRoundLead + late).Format(lay)}}}
 		out := Classify(NewDriftCache(), []string{"bind.$3"}, live, rec, recAt.Add(2*time.Millisecond), nil, []Raw{RawOf(earlier, false)}, nil)
-		if len(out) != 1 || out[0].Kind != KindNoise {
-			t.Fatalf("a clock read %v late: %+v, want noise", late, out)
+		if len(out) != 1 || out[0].Kind != KindNoise || out[0].Read == nil {
+			t.Fatalf("a clock read %v late: %+v, want a read of the clock, compared at replay", late, out)
 		}
 	}
 }
