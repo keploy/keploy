@@ -31,7 +31,7 @@ func repeatOfAnswered(ctx context.Context, input *req, mockDb integrations.MockM
 	}
 	live := liveDestination(ctx, input)
 	match := func(m *models.Mock) bool {
-		return m.Spec.HTTPReq != nil && sameRequest(strictDiff(input, live, m, n))
+		return m.Spec.HTTPReq != nil && sameRequest(strictDiff(ctx, input, live, m, n))
 	}
 	path := ""
 	if input.url != nil {

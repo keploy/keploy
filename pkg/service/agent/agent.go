@@ -1165,17 +1165,30 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 	a.wireAppClock()
 }
 
-// wireAppClock hands the proxy the hooks' reading of the app's clock, when
-// both have one (AppClockReader, coreAgent.AppClockSetter).
+// wireAppClock hands the proxy the clock keploy knows the app reads, when
+// the proxy takes one (coreAgent.AppClockSetter): the hooks' reading of it
+// (AppClockReader), or, under the proven switch, the real clock where the
+// hooks are this build's own (AgentHook), which move no clock: with no time
+// hooks the app reads the real clock (realAppClock). Other hooks that report
+// no app clock may move it, so keploy cannot tell which clock the app reads,
+// and hands the proxy none: a replay then refuses every learned read of the
+// clock rather than check it against the wrong clock (learn.CheckClockRead).
 func (a *Agent) wireAppClock() {
-	r, ok := ActiveHooks.(AppClockReader)
+	s, ok := a.Proxy.(coreAgent.AppClockSetter)
 	if !ok {
 		return
 	}
-	if s, ok := a.Proxy.(coreAgent.AppClockSetter); ok {
+	if r, ok := ActiveHooks.(AppClockReader); ok {
 		s.SetAppClock(r.AppClock)
+		return
+	}
+	if _, own := ActiveHooks.(*AgentHook); own && provenswitch.On() {
+		s.SetAppClock(realAppClock)
 	}
 }
+
+// realAppClock is the app's clock where no hooks move it: the real clock.
+func realAppClock(real time.Time) (time.Time, bool) { return real, true }
 
 // StoreMocksStream decodes the mock corpus one frame at a time from dec (header
 // counts split it into filtered then unfiltered), runs DeriveLifetime per mock,
