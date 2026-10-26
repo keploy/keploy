@@ -529,6 +529,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, why
 		return ln
 	}
+	noWindow := false
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
 		// A read of the clock plus a constant offset (a time to live, a
 		// due date), in its call's window in both runs: compared, never
@@ -539,24 +540,29 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if off, ok := clockOffsetOf(rt, lt, w); ok && !dc.clientTests {
 			return dc.clockOffset(ln, off, max(rt.res, lt.res), lt.at.Sub(rt.at), w, unread, rec, resp)
 		}
-		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
-		switch {
-		case rt.names != lt.names:
-			ln.Why = instantFormChangedWhy(rt.names, lt.names)
-		case dc.clientTests && rt.names == namesTimeOfDay:
-			ln.Why = timeOfDayClientTestWhy
-		case dc.clientTests:
-			ln.Why = clientTestWhy("", w != nil)
-		case inClockRange(rt.at) && inClockRange(lt.at) && leadMoved(rt.at, lt.at, rt.res, lt.res, false):
-			// Moved by the lead, as a read made after its call would
-			// (readNoLaterThan): the reason says so, never that it did
-			// not move by it.
-			ln.Why = instantPastCall
-			if rt.afterCall(at, dc.zone) {
-				ln.Why = instantAfterCall
+		// With no window, one that names its moment is a plain read of
+		// the clock all the same, checked at every replay (noWindowRead).
+		if !dc.noWindowRead(rt, lt, w, at) {
+			ln.Kind, ln.Why = KindUnaccounted, instantNotClock
+			switch {
+			case rt.names != lt.names:
+				ln.Why = instantFormChangedWhy(rt.names, lt.names)
+			case dc.clientTests && rt.names == namesTimeOfDay:
+				ln.Why = timeOfDayClientTestWhy
+			case dc.clientTests:
+				ln.Why = clientTestWhy("", w != nil)
+			case inClockRange(rt.at) && inClockRange(lt.at) && leadMoved(rt.at, lt.at, rt.res, lt.res, false):
+				// Moved by the lead, as a read made after its call would
+				// (readNoLaterThan): the reason says so, never that it did
+				// not move by it.
+				ln.Why = instantPastCall
+				if rt.afterCall(at, dc.zone) {
+					ln.Why = instantAfterCall
+				}
 			}
+			return ln
 		}
-		return ln
+		noWindow = true
 	}
 	// Noise, or an echo, only where the echo could read the test case's own
 	// request, where the moment F saw may stand.
@@ -565,12 +571,40 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
+		// An echo answers with this run's value and checks none, so one
+		// that neither the lead nor a window shows a read is refused.
+		if noWindow {
+			ln.Kind, ln.Why = KindUnaccounted, instantNotClock
+			return ln
+		}
 		ln.Kind, ln.Echo = KindEcho, echo
 	}
 	if ln.Kind == KindNoise && rt.names == namesMoment && lt.names == namesMoment {
 		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
 	}
 	return ln
+}
+
+// noWindowRead reports whether r and l, an instant its protocol types as
+// recorded and as F saw it, that neither the lead nor a window shows a read
+// of the application's clock (instantClock), is still learned as a plain
+// read of it (Learned.Read), as a text one instant whole is (classifyRead):
+// in a call with no window w (a test's own call, read by the lead alone), an
+// instant that names its moment in both runs, in the years a recording's
+// clock reads (inClockRange), and recorded no later than its call at (zero:
+// not known), as a read the call carries is made. Every replay, record's
+// confirming round first, checks it in its call's own span on the
+// application's clock (CheckClockRead), so a value that is no read of the
+// clock fails there, naming the field, never noise that lets any value pass.
+// Whether the lead moved it depends on how late record's full round read its
+// clock, and the verdict must not. Not in keploy mock's client tests, whose
+// harness gives the application inputs keploy does not see (clientTestWhy),
+// nor for a wall clock of no zone, whose zone no window shows. An echo of it
+// in its call's own answer stays refused (classifyInstant): an echo is
+// answered with this run's value, never checked as a read.
+func (dc *DriftCache) noWindowRead(r, l typedInstant, w *Window, at time.Time) bool {
+	return w == nil && !dc.clientTests && r.names == namesMoment && l.names == namesMoment &&
+		inClockRange(r.at) && inClockRange(l.at) && !r.afterCall(at, dc.zone)
 }
 
 // clockOffsetOf is the offset (models.ClockOffset) r and l, an instant as
