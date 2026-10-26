@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -337,8 +336,9 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 	// whose read failed is not made, so its retry reads them again.
 	if prev != me && a.replaying() && a.Proxy != nil {
 		misses, err := a.Proxy.GetMockErrors(ctx)
-		// What was read is the run's whether or not the read was whole.
-		a.charge(misses)
+		// What was read is the run's whether or not the read was whole, and
+		// no test's.
+		a.charge(misses, "")
 		if err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
@@ -1131,7 +1131,7 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	ev := &models.ScopeEvidence{}
 	misses, err := a.Proxy.GetMockErrors(ctx)
 	// Misses a read returned with its error are this test's all the same.
-	a.charge(misses)
+	a.charge(misses, id)
 	for _, m := range misses {
 		if !m.CountsAgainstTest() {
 			continue
@@ -1347,135 +1347,30 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 	return nil
 }
 
-// sanitizedMiss is a miss as evidence keeps it: the protocol, the
-// destination, how far the matcher got, the closest recorded mock's name,
-// the matcher's next step, when it happened, why it missed (the learn step's
-// reason, in record's full round), how an answered call was answered and the
-// process that made the call (models.UnmatchedCall.Answer, Source: names,
-// no value), and the call's shape
-// (models.MissShape): for HTTP and gRPC the method and the target's shape,
-// for SQL the statement with its literals written "?". No body, no bound
-// parameter, no SQL literal, no query value, and no path segment that looks
-// like a value (models.PathShape says which do) or that a test variable's
-// place on the call names (VariablePlaces: one the miss names, one the
-// closest mock or a mock on the call's route declares, or one that holds a
-// value the test bound). The next step is the matcher's advice, or the
-// learn step's reason, with each field path it names in its shape
-// (nextStepOf).
-func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
-	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs), FieldReasons: models.FieldReasonShapes(m.FieldReasons),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
-		// An answered call stays one (models.UnmatchedCall.Answer): how it was
-		// answered and by which process, no value.
-		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn,
-		Repeat: m.Repeat.Clone()}
-	// A variable's path places name segments, not values: kept, so a shape
-	// of this miss (models.MissShape) still writes them {}. Any other place
-	// can name a JSON key that is a value.
-	for _, p := range m.VariablePlaces {
-		if models.IsPathPlace(p) {
-			out.VariablePlaces = append(out.VariablePlaces, p)
-		}
-	}
-	if m.MatchPhase == models.MatchPhaseVariable {
-		// A test variable did not hold, or the closest mock's variables could
-		// not be followed. The part of the call it is in is kept: a URL path
-		// segment by its position, a header or query parameter by its name.
-		// A body place is kept as "body" alone, since a JSON key can be a
-		// value the app sent (a map keyed by an email). No value is kept.
-		for _, d := range m.FieldDiffs {
-			path := d.Path
-			if strings.HasPrefix(path, "body.") || strings.HasPrefix(path, "body[") {
-				path = "body"
-			}
-			out.FieldDiffs = append(out.FieldDiffs, models.MockFieldDiff{Path: path, Kind: d.Kind})
-		}
-		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
-	}
-	return out
-}
+// sanitizedMiss is a miss as evidence keeps it (models.UnmatchedCall.Sanitized).
+func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall { return m.Sanitized() }
 
-// nextStepOf is a miss's next step as evidence keeps it: the matcher's
-// advice, or the learn step's reason in record's full round, with every
-// field path it names written in its shape (models.FieldShape). A next step
-// names the fields that differed, and others (where a value was recorded),
-// and a map's keys can be values (an email, a user ID): each of the miss's
-// field paths, whole or without its "body." (as a learn step's reason may
-// name it), and every body path the text names (bodyPlace) keeps its shape,
-// so a key that may be a value is {}. The rest of the text stays: it is the
-// matcher's or the learn step's own words, and holds no value of the call.
-// (It was once replaced whole by a count of the fields, which hid the learn
-// step's reason from every in-test miss of the round.) Why a replay refused
-// a field for a reason of its own (a learned read of the application's
-// clock the call does not carry: models.UnmatchedCall.FieldReasons) is
-// added to it, as the miss's reason says it (missDiffersText), so the run's
-// summary, which shows the next step, says it too.
-func nextStepOf(m models.UnmatchedCall) string {
-	next := shapedNextStep(m)
-	var whys []string
-	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
-		if !strings.Contains(next, r.Why) {
-			whys = append(whys, r.Why)
-		}
-	}
-	switch {
-	case len(whys) == 0:
-		return next
-	case next == "":
-		return strings.Join(whys, "; ")
-	}
-	return next + " (" + strings.Join(whys, "; ") + ")"
-}
-
-// shapedNextStep is the miss's own next step with every field path it names
-// in its shape (nextStepOf).
-func shapedNextStep(m models.UnmatchedCall) string {
-	text := m.NextSteps
-	if text == "" {
-		return ""
-	}
-	var paths []string
-	for _, d := range m.FieldDiffs {
-		for _, p := range []string{d.Path, strings.TrimPrefix(d.Path, "body.")} {
-			if p != "" && models.FieldShape(p) != p && !slices.Contains(paths, p) {
-				paths = append(paths, p)
-			}
-		}
-	}
-	if len(paths) > 0 {
-		// Longest first: a path is shaped whole, never inside a longer one
-		// it begins; the replacer reads the text once, so no shape is
-		// shaped again.
-		sort.SliceStable(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
-		args := make([]string, 0, 2*len(paths))
-		for _, p := range paths {
-			args = append(args, p, models.FieldShape(p))
-		}
-		text = strings.NewReplacer(args...).Replace(text)
-	}
-	return bodyPlace.ReplaceAllStringFunc(text, func(p string) string {
-		// A sentence's full stop or a list's separator is not the path's.
-		trimmed := strings.TrimRight(p, ".,;:")
-		return models.FieldShape(trimmed) + p[len(trimmed):]
-	})
-}
-
-// bodyPlace is a body field path as a matcher's or a learn step's text names
-// one (body.cmd.filter.appId, body.docs.msgs.0.q.entity_id, body[0].id): the
-// root every protocol's compared places share.
-var bodyPlace = regexp.MustCompile(`\bbody[.\[][^\s,;()'"]*`)
+// nextStepOf is a miss's next step as evidence keeps it
+// (models.UnmatchedCall.Sanitized).
+func nextStepOf(m models.UnmatchedCall) string { return m.SanitizedNextStep() }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
 // as evidence keeps them (no value the app sent): they are counted, and
 // named in the run's summary, but no full request piles up across a run.
-func (a *Agent) charge(misses []models.UnmatchedCall) {
+// test is the test whose end drained them, "" for none (the claim's read of
+// the calls made before the test process started): each miss that counts
+// against a test is that test's, as its evidence lists it, and says so
+// (models.UnmatchedCall.ChargedTo); every other is charged to no test.
+func (a *Agent) charge(misses []models.UnmatchedCall, test string) {
 	if len(misses) == 0 {
 		return
 	}
 	kept := make([]models.UnmatchedCall, len(misses))
 	for i, m := range misses {
 		kept[i] = sanitizedMiss(m)
+		if test != "" && m.CountsAgainstTest() {
+			kept[i].ChargedTo = test
+		}
 	}
 	a.provenMu.Lock()
 	a.proven.charged = append(a.proven.charged, kept...)

@@ -803,30 +803,31 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	//     can read it.
 	finished = true
 	writeReceipt(m.logger, m.config.Path, Receipt{
-		Set:            name,
-		At:             started.UTC().Truncate(time.Second),
-		Command:        m.userCommand,
-		OnMiss:         string(policy),
-		Strict:         m.config.Mock.Strict,
-		ExitCode:       utils.ErrCode,
-		RunnerExitCode: runnerExit,
-		FailedBy:       failedBy,
-		Error:          keployErr,
-		Loaded:         loaded,
-		Consumed:       counts.consumed,
-		Missed:         counts.missed,
-		MissedData:     provenCount(counts.missedData),
-		Tests:          tests,
-		Bypass:         bypass,
-		Isolated:       isolated,
-		IsolationNote:  isolationNote,
-		MocksDigest:    digest,
-		Coverage:       cov,
-		CoverageNote:   covNote,
-		MinCoverage:    m.config.Mock.MinCoverage,
-		Version:        utils.Version,
-		Refusals:       m.refusals,
-		CannotCapture:  lostNotJudged,
+		Set:             name,
+		At:              started.UTC().Truncate(time.Second),
+		Command:         m.userCommand,
+		OnMiss:          string(policy),
+		Strict:          m.config.Mock.Strict,
+		ExitCode:        utils.ErrCode,
+		RunnerExitCode:  runnerExit,
+		FailedBy:        failedBy,
+		Error:           keployErr,
+		Loaded:          loaded,
+		Consumed:        counts.consumed,
+		Missed:          counts.missed,
+		MissedData:      provenCount(counts.missedData),
+		Tests:           tests,
+		Bypass:          bypass,
+		Isolated:        isolated,
+		IsolationNote:   isolationNote,
+		MocksDigest:     digest,
+		Coverage:        cov,
+		CoverageNote:    covNote,
+		MinCoverage:     m.config.Mock.MinCoverage,
+		Version:         utils.Version,
+		Refusals:        m.refusals,
+		CannotCapture:   lostNotJudged,
+		UnchargedMisses: counts.uncharged,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:           name,
@@ -1712,6 +1713,10 @@ type replayCounts struct {
 	// learnErr is why what the learn step learned could not be written: the
 	// round did not complete.
 	learnErr error
+	// uncharged are, under the proven switch, the misses missedData counts
+	// that no test was charged with (Receipt.UnchargedMisses); nil when the
+	// misses were not read.
+	uncharged []UnchargedMiss
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
@@ -1881,8 +1886,16 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if missesErr != nil {
 		counts.missed, counts.missedData = -1, -1
 		counts.missesUnread = models.UnreadCause(missesErr)
+	} else if provenswitch.On() {
+		counts.uncharged = unchargedMisses(misses)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	if provenswitch.On() {
+		// When each test began serves the proven flow's reading of a cut
+		// round (the last test begun): without the switch the receipt stays
+		// as it was.
+		counts.tests = withBegan(counts.tests, detail.windows)
+	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned[counts.tests[i].Name]
 	}
@@ -1997,6 +2010,28 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {
 			tests[i].Evidence = ev
+		}
+	}
+	return tests
+}
+
+// withBegan puts on each test's line when its latest run began: its latest
+// window's start, a test still open when the run ended included (the agent
+// closes it as failed, from its begin). A cut round names its last test begun
+// by it.
+func withBegan(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
+	began := make(map[string]time.Time, len(windows))
+	for _, w := range windows {
+		if w.Name == "" || w.App {
+			continue
+		}
+		if prev, seen := began[w.Name]; !seen || w.Start.After(prev) {
+			began[w.Name] = w.Start
+		}
+	}
+	for i := range tests {
+		if b, ok := began[tests[i].Name]; ok && !b.IsZero() {
+			tests[i].Began = b.UTC()
 		}
 	}
 	return tests
