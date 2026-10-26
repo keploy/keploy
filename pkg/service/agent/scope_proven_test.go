@@ -1475,6 +1475,24 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	require.NotContains(t, two, "kqzx9w")
 	plain := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"body.q"}}}}, nil, time.Time{})
 	require.Contains(t, plain, "GET /x had no recorded answer (body.q differs).")
+
+	// The run's summary shows a miss's next step as evidence keeps it
+	// (nextStepOf): a next step that names a field the call differs in is
+	// replaced by fixed advice, and the why still reaches the summary, with
+	// no value; the matcher's own advice keeps it too, once.
+	advice := "2 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
+	mongo := sanitizedMiss(models.UnmatchedCall{Protocol: "MongoDB", Destination: "127.0.0.1:27017", MatchPhase: "body_mismatch", ClosestMock: "mock-12",
+		NextSteps:    "fields differ: body.since, body.users.kqzx9w.since",
+		FieldDiffs:   []models.MockFieldDiff{{Path: "body.since"}, {Path: "body.users.kqzx9w.since"}},
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.users.kqzx9w.since", Why: "kqzx9w"}}})
+	require.Equal(t, advice+" ("+since+")", mongo.NextSteps)
+	own := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: "re-record the test",
+		FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}, {Field: "body.expires", Why: ttl}}})
+	require.Equal(t, "re-record the test ("+since+"; "+ttl+")", own.NextSteps)
+	said := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", NextSteps: since, FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
+	require.Equal(t, since, said.NextSteps, "a why the advice says already is not said twice")
+	bare := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
+	require.Equal(t, since, bare.NextSteps)
 }
 
 // endOrderProxy notes when the test stops being served and when its outcome
