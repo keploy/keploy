@@ -1,5 +1,11 @@
 package models
 
+import (
+	"encoding/json"
+
+	"gopkg.in/yaml.v3"
+)
+
 // Where a run's calls to local listeners went, under the proven switch
 // (design v14 §3.1; release 1 = one run's process tree, release1-cut §5.1
 // items 3 and 8). keploy relays a call to a listener the run's own process
@@ -43,8 +49,11 @@ type MockedRow struct {
 	// the name its recording carries: its image's repository, its own port,
 	// and its configuration's fingerprint; without @<fingerprint> while
 	// keploy has not read its configuration. Empty for any other
-	// destination.
-	Container string `json:"container,omitempty" yaml:"container,omitempty"`
+	// destination. It is written as containerKey, the name mocks.yaml gives
+	// it, so the same key reads the same in both files (never "container:
+	// container:..."); a row an earlier keploy wrote under container still
+	// reads (UnmarshalYAML, UnmarshalJSON).
+	Container string `json:"containerKey,omitempty" yaml:"containerKey,omitempty"`
 	// PID and Exe are a host listener's process and its program; zero and
 	// "" for a container, for a destination nothing listens at (a recorded
 	// dependency that is not running, as in CI), or when keploy could not
@@ -53,4 +62,44 @@ type MockedRow struct {
 	Exe string `json:"exe,omitempty" yaml:"exe,omitempty"`
 	// Port is the port the call was made to.
 	Port uint16 `json:"port" yaml:"port"`
+}
+
+// mockedRowFields is MockedRow as it reads: containerKey, or the container
+// key an earlier keploy wrote.
+type mockedRowFields struct {
+	Test         string `json:"test,omitempty" yaml:"test,omitempty"`
+	Addr         string `json:"addr" yaml:"addr"`
+	Container    string `json:"containerKey,omitempty" yaml:"containerKey,omitempty"`
+	OldContainer string `json:"container,omitempty" yaml:"container,omitempty"`
+	PID          int    `json:"pid,omitempty" yaml:"pid,omitempty"`
+	Exe          string `json:"exe,omitempty" yaml:"exe,omitempty"`
+	Port         uint16 `json:"port" yaml:"port"`
+}
+
+func (r *MockedRow) set(f mockedRowFields) {
+	*r = MockedRow{Test: f.Test, Addr: f.Addr, Container: f.Container, PID: f.PID, Exe: f.Exe, Port: f.Port}
+	if r.Container == "" {
+		r.Container = f.OldContainer
+	}
+}
+
+// UnmarshalYAML reads a row, its container key under containerKey or, as an
+// earlier keploy wrote it, container.
+func (r *MockedRow) UnmarshalYAML(n *yaml.Node) error {
+	var f mockedRowFields
+	if err := n.Decode(&f); err != nil {
+		return err
+	}
+	r.set(f)
+	return nil
+}
+
+// UnmarshalJSON is UnmarshalYAML for a JSON row.
+func (r *MockedRow) UnmarshalJSON(data []byte) error {
+	var f mockedRowFields
+	if err := json.Unmarshal(data, &f); err != nil {
+		return err
+	}
+	r.set(f)
+	return nil
 }

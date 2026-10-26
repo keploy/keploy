@@ -1683,3 +1683,32 @@ func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
 	defer p.mu.Unlock()
 	require.Empty(t, p.order, "no window opened, none taken back, nothing served")
 }
+
+// A miss names its destination as the recording does (the mocks' destAddr):
+// the app reached [::1]:27017 where the recording has 127.0.0.1:27017, the
+// same loopback port, so the evidence says 127.0.0.1:27017 and adds the live
+// address, labelled. A destination the recording names as reached, one that
+// is not loopback, or a loopback port the recording names two ways, is kept
+// as it was.
+func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
+	a, _ := wireAgent(t, models.MODE_TEST)
+	mongo := &models.Mock{Name: "mock-1", Kind: models.Mongo, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:27017"}}}
+	bao := &models.Mock{Name: "mock-2", Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:8200"}}}
+	pg4 := &models.Mock{Name: "mock-3", Kind: models.Postgres, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:5432"}}}
+	pg6 := &models.Mock{Name: "mock-4", Kind: models.Postgres, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "[::1]:5432"}}}
+	storeMocks(a, mongo, bao, pg4, pg6)
+	for _, c := range []struct{ live, dest, liveLabel string }{
+		{"[::1]:27017", "127.0.0.1:27017", "[::1]:27017"},
+		{"localhost:8200", "127.0.0.1:8200", "localhost:8200"},
+		{"127.0.0.1:27017", "127.0.0.1:27017", ""},
+		{"10.0.0.7:27017", "10.0.0.7:27017", ""},
+		{"127.0.0.2:5432", "127.0.0.2:5432", ""},
+		{"api.internal", "api.internal", ""},
+	} {
+		got := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: c.live}))
+		require.Equal(t, c.dest, got.Destination, c.live)
+		require.Equal(t, c.liveLabel, got.LiveDestination, c.live)
+	}
+	m := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: "[::1]:27017"}))
+	require.Equal(t, "a MongoDB call to 127.0.0.1:27017 (live [::1]:27017)", missText(m))
+}
