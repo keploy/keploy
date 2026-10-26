@@ -78,3 +78,32 @@ func TestAKeptFieldThatAliasesAKnownOneStillReads(t *testing.T) {
 		t.Fatalf("kept fields read back as %v\n%s", back, out)
 	}
 }
+
+// A field keploy does not know that an entry has through a merge key (<<)
+// is kept as the entry's own: YAML gives the entry the merged fields.
+func TestAFieldAMergeBringsIsKept(t *testing.T) {
+	in := "version: v\nkind: TestMocksMapping\ntest_set_id: s\ndefaults: &d {name: mock-0, note: hi}\ntests:\n    - id: o::TestA\n      mock_entries:\n        - <<: *d\n          kind: Http\n"
+	var m Mapping
+	if err := yaml.Unmarshal([]byte(in), &m); err != nil {
+		t.Fatal(err)
+	}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Mapping
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		t.Fatalf("the rewrite does not read back: %v\n%s", err, out)
+	}
+	var raw struct {
+		Tests []struct {
+			Entries []map[string]any `yaml:"mock_entries"`
+		} `yaml:"tests"`
+	}
+	if err := yaml.Unmarshal(out, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.Tests[0].Entries[0]["note"] != "hi" || back.TestCases[0].Mocks[0].Name != "mock-0" {
+		t.Fatalf("the merged field is lost from the entry:\n%s", out)
+	}
+}

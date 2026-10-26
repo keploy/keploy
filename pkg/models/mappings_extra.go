@@ -2,6 +2,7 @@ package models
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 
@@ -22,20 +23,70 @@ func extraFields(n *yaml.Node, known map[string]bool) *yamlExtra {
 		return nil
 	}
 	var x *yamlExtra
+	seen := map[string]bool{}
 	for i := 0; i+1 < len(n.Content); i += 2 {
-		if k := n.Content[i]; k.Kind == yaml.ScalarNode && !known[k.Value] && k.Value != "<<" {
-			budget := maxDetached
-			v := detached(n.Content[i+1], &budget)
-			if v == nil {
-				continue
+		seen[n.Content[i].Value] = true
+	}
+	keep := func(k, v *yaml.Node) {
+		budget := maxDetached
+		if v = detached(v, &budget); v == nil {
+			return
+		}
+		if x == nil {
+			x = &yamlExtra{}
+		}
+		x.nodes = append(x.nodes, k, v)
+	}
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		switch {
+		case k.Kind != yaml.ScalarNode:
+		case k.Value == "<<":
+			merged = append(merged, n.Content[i+1])
+		case !known[k.Value]:
+			keep(k, n.Content[i+1])
+		}
+	}
+	// The fields a merge (<<) brings that keploy does not know, written out:
+	// the node's own fields first, then each merged mapping's in order, as
+	// YAML resolves them.
+	for _, m := range mergedMappings(merged) {
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if k := m.Content[i]; k.Kind == yaml.ScalarNode && !known[k.Value] && !seen[k.Value] {
+				seen[k.Value] = true
+				c := *k
+				c.HeadComment, c.LineComment, c.FootComment = "", "", ""
+				keep(&c, m.Content[i+1])
 			}
-			if x == nil {
-				x = &yamlExtra{}
-			}
-			x.nodes = append(x.nodes, k, v)
 		}
 	}
 	return x
+}
+
+// mergedMappings is the mappings the values of a node's merge keys name: a
+// mapping, an alias of one, or a sequence of those.
+func mergedMappings(values []*yaml.Node) []*yaml.Node {
+	var out []*yaml.Node
+	var add func(*yaml.Node)
+	add = func(v *yaml.Node) {
+		for v != nil && v.Kind == yaml.AliasNode && v.Alias != nil {
+			v = v.Alias
+		}
+		switch {
+		case v == nil:
+		case v.Kind == yaml.MappingNode:
+			out = append(out, v)
+		case v.Kind == yaml.SequenceNode:
+			for _, c := range v.Content {
+				add(c)
+			}
+		}
+	}
+	for _, v := range values {
+		add(v)
+	}
+	return out
 }
 
 // maxDetached bounds the nodes one kept field may expand to (detached).
@@ -142,22 +193,42 @@ func (m *Mapping) KeepExtra(from *Mapping) {
 
 // KeepTestExtra gives each test entry of m the fields its entry in from has
 // and this keploy does not know (yamlExtra), by test id, where from's entry
-// has any: a writer that rebuilds a file's test entries from their mocks
-// alone (mapdb's Insert) keeps what a hand edit added to each. A nil from
-// changes nothing.
+// has any, and each of its mock entries those of from's entry of the same
+// mock where it has none: a writer that rebuilds a file's test entries from
+// their mocks (mapdb's Insert) keeps what a hand edit added to each. A nil
+// from changes nothing.
 func (m *Mapping) KeepTestExtra(from *Mapping) {
 	if m == nil || from == nil {
 		return
 	}
 	by := map[string]*yamlExtra{}
+	entries := map[string]map[string]*yamlExtra{}
 	for _, t := range from.TestCases {
 		if t.extra != nil {
 			by[t.ID] = t.extra
 		}
+		for _, e := range t.Mocks {
+			if e.extra != nil {
+				if entries[t.ID] == nil {
+					entries[t.ID] = map[string]*yamlExtra{}
+				}
+				entries[t.ID][e.Name] = e.extra
+			}
+		}
 	}
 	for i := range m.TestCases {
-		if x, ok := by[m.TestCases[i].ID]; ok {
-			m.TestCases[i].extra = x
+		t := &m.TestCases[i]
+		if x, ok := by[t.ID]; ok {
+			t.extra = x
+		}
+		if old := entries[t.ID]; old != nil {
+			// A copy: the entries may be the caller's.
+			t.Mocks = slices.Clone(t.Mocks)
+			for j := range t.Mocks {
+				if x := old[t.Mocks[j].Name]; x != nil && t.Mocks[j].extra == nil {
+					t.Mocks[j].extra = x
+				}
+			}
 		}
 	}
 }
@@ -173,6 +244,14 @@ func (m *Mapping) UnmarshalYAML(n *yaml.Node) error {
 	*m = Mapping(p)
 	mk, _, _ := known()
 	m.extra = extraFields(n, mk)
+	if m.extra != nil && len(n.Content) > 0 && m.extra.nodes[0] == n.Content[0] && n.Content[0].HeadComment != "" {
+		// YAML hangs the comment the file starts with on its first field:
+		// it is the file's head, which the writer keeps as the head
+		// (mapdb's encodeOver), not this field's.
+		k := *n.Content[0]
+		k.HeadComment = ""
+		m.extra.nodes[0] = &k
+	}
 	return nil
 }
 
