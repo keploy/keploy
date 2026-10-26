@@ -327,6 +327,14 @@ type matchOptions struct {
 	// examined, when set, counts the candidates the scan visits, so a test can
 	// check what a command costs without timing it.
 	examined *int
+	// bodiesBuilt, when set, counts the live request bodies the command
+	// builds (strictGate.liveRequestBody).
+	bodiesBuilt *int
+	// eagerBody builds the live request body before the scan, whether or not
+	// strict enforcement or detection reads it, as the matcher did before it
+	// built the body on first read: the reference a test checks that the
+	// lazy build serves, reports and learns the same against.
+	eagerBody bool
 	// refused are the copies whose consume the store refused on this
 	// command's earlier matches (matchCommand): the scan passes over them.
 	refused map[*models.Mock]struct{}
@@ -1129,17 +1137,18 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		liveStmtQuery = liveExec.query
 	}
 
-	// Canonical JSON body of the live request for the schema-noise engine.
-	// liveBodyOK is false for packets with no drift-capable body (utility
-	// commands, CLOSE/RESET) — the engine no-ops for those.
-	liveBody, liveBodyOK := mysqlRequestBody(&req.PacketBundle, liveStatementParams, liveStmtQuery)
-
 	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
 	// before a mock may become a match candidate, and accumulates the
 	// rejection diagnostics (count / closest mock / field-level diffs) the
-	// mismatch report renders on a miss.
-	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveBody, liveBodyOK, userBodyNoise)
-	gate.liveQuery, gate.liveParams = liveStmtQuery, liveStatementParams
+	// mismatch report renders on a miss. It also holds the canonical JSON
+	// body of the live request the schema-noise engine compares, built only
+	// when strict enforcement, the rule of exact serving or detection first
+	// reads it.
+	gate := newStrictGate(noiseEngine, logger, req.Header.Type, &req.PacketBundle, liveStatementParams, liveStmtQuery, userBodyNoise)
+	gate.bodiesBuilt = opts.bodiesBuilt
+	if opts.eagerBody {
+		gate.liveRequestBody()
+	}
 
 	var (
 		// Score-based candidate tracking. Every non-definitive matcher returns
@@ -1831,7 +1840,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			chosenResp, chosenMock = paramsOnlyResp, paramsOnlyMock
 		}
 		if chosenMock != nil {
-			if matchedMock == nil || matchedMock != chosenMock {
+			if debugOn && (matchedMock == nil || matchedMock != chosenMock) {
 				logger.Debug("COM_STMT_EXECUTE FIFO fallback selected next unconsumed mock in recorded order",
 					zap.String("mock_name", chosenMock.Name),
 					zap.Bool("in_window", chosenMock == fifoExecMockWindow || chosenMock == paramsOnlyMockWindow),
@@ -2030,8 +2039,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 			if chosen != nil {
 				var detected map[string][]string
-				if liveBodyOK {
-					detected, _ = noiseEngine.Detect(chosen, liveBody, userBodyNoise)
+				if noiseEngine.DetectionEnabled() {
+					if liveBody, ok := gate.liveRequestBody(); ok {
+						detected, _ = noiseEngine.Detect(chosen, liveBody, userBodyNoise)
+					}
 				}
 				updateMock(ctx, logger, chosen, mockDb, detected)
 			}
@@ -2245,7 +2256,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// (utility commands). The learn is carried out on fresh copies inside
 	// updateMock, never on the shared pooled mock.
 	var detectedNoise map[string][]string
-	if liveBodyOK && noiseEngine.DetectionEnabled() {
+	if noiseEngine.DetectionEnabled() && gate.hasLiveBody() {
 		if body, ok := gate.bodyFor(matchedMock); ok {
 			// The recording as strict compares it (strictGate.recordedBody),
 			// so what is learned is what a strict replay then excuses.
@@ -2303,15 +2314,19 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				decodeCtx.PreparedStatements[prepareOkRespCopy.StatementID] = &prepareOkRespCopy
 				// maintain a runtime stmtID -> query map so EXEC/CLOSE can be matched by query.
 				decodeCtx.StmtIDToQuery[prepareOkRespCopy.StatementID] = sp.Query
-				logger.Debug("Recorded runtime PREP mapping with new statement ID",
-					zap.Uint32("original_stmt_id from mock ", originalStmtID),
-					zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
-					zap.String("query", strings.TrimSpace(sp.Query)))
+				if debugOn {
+					logger.Debug("Recorded runtime PREP mapping with new statement ID",
+						zap.Uint32("original_stmt_id from mock ", originalStmtID),
+						zap.Uint32("new_stmt_id", prepareOkRespCopy.StatementID),
+						zap.String("query", strings.TrimSpace(sp.Query)))
+				}
 			}
 		}
 	}
 
-	logger.Debug("matched command with the mock", zap.Any("mock", matchedMock.Name))
+	if debugOn {
+		logger.Debug("matched command with the mock", zap.String("mock", matchedMock.Name))
+	}
 	return responseCopy, true, nil, nil
 }
 
