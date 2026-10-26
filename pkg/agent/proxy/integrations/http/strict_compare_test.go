@@ -860,6 +860,57 @@ func TestStrictChecksALearnedClockReadInItsCallsWindow(t *testing.T) {
 	}
 }
 
+// A refused read of the application's clock names its field and why in the
+// miss report (MockMismatchReport.FieldReasons), not only in the agent's
+// log: the field as Differs names it, and the check's why, which names it
+// so and no value. An object key that may be a value the app sent is {} in
+// both, so two such keys refused for one reason give it once; a field that
+// differs for no reason of its own (a changed value) gives none.
+func TestARefusedClockReadNamesItsFieldAndWhyInTheMissReport(t *testing.T) {
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	stamp := func(at time.Time) string { return at.Format(time.RFC3339) }
+	moved := stamp(base.AddDate(0, 0, -30))
+	rec := recorded("usage", "/v1/usage", map[string]string{"Content-Type": "application/json"},
+		`{"since":"`+stamp(recAt)+`","users":{"kqzx9w":{"since":"`+stamp(recAt)+`"},"pq8r7s":{"since":"`+stamp(recAt)+`"}},"q":"x"}`)
+	plain := models.ClockOffset{Res: time.Second}
+	rec.Spec.Clocks = map[string]models.ClockOffset{"body.since": plain, "body.users.kqzx9w.since": plain, "body.users.pq8r7s.since": plain}
+	live := sent("/v1/usage", map[string]string{"Content-Type": "application/json"},
+		`{"q":"y","since":"`+moved+`","users":{"kqzx9w":{"since":"`+moved+`"},"pq8r7s":{"since":"`+moved+`"}}}`)
+	live.arrived = base.Add(2 * time.Second)
+	got, diag := strictMatchIn(t, clockConn(true, base), live, nil, nil, nil, rec)
+	if got != nil {
+		t.Fatal("served a call whose reads of the clock moved thirty days")
+	}
+	r := newHTTP().buildHTTPMismatchReport(&http.Request{Method: "POST", URL: &url.URL{Path: "/v1/usage"}, Host: "api.example", Header: live.header}, live.body, &mockMemDb{mocks: []*models.Mock{rec}}, nil, nil, nil, diag)
+	for _, f := range []string{"body.q", "body.since", "body.users.{}.since"} {
+		if !hasField(r.Differs, f) {
+			t.Fatalf("Differs = %v; want %s named", r.Differs, f)
+		}
+	}
+	whys := map[string]string{}
+	for _, fr := range r.FieldReasons {
+		if _, twice := whys[fr.Field]; twice {
+			t.Fatalf("%s is given a reason twice: %+v", fr.Field, r.FieldReasons)
+		}
+		whys[fr.Field] = fr.Why
+	}
+	if len(whys) != 2 {
+		t.Fatalf("FieldReasons = %+v; want body.since and body.users.{}.since, each once", r.FieldReasons)
+	}
+	for _, f := range []string{"body.since", "body.users.{}.since"} {
+		why := whys[f]
+		if !strings.HasPrefix(why, f+" was learned as ") || !strings.HasSuffix(why, "made in this call's window: it changed") {
+			t.Fatalf("the reason of %s is %q; want the check's why naming it", f, why)
+		}
+		for _, v := range []string{"kqzx9w", "pq8r7s", moved, stamp(recAt), "2026"} {
+			if strings.Contains(why, v) {
+				t.Fatalf("the reason of %s names %q: %q", f, v, why)
+			}
+		}
+	}
+}
+
 // Without the proven switch keploy reads no learned read of the clock, and
 // compares as before it.
 func TestNoClockIsReadWithTheSwitchOff(t *testing.T) {

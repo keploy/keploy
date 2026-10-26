@@ -1285,7 +1285,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // (nextStepOf).
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
-		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
+		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs), FieldReasons: models.FieldReasonShapes(m.FieldReasons),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
@@ -1400,7 +1400,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m))
 			continue
 		}
 		switch m.Kind {
@@ -1412,12 +1412,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -1481,6 +1481,26 @@ func missText(m models.UnmatchedCall) string {
 		s += " to " + m.Destination
 	}
 	return s
+}
+
+// missDiffersText is what a reason says of the fields m differs in
+// (differsText), with why a replay refused each it refused for a reason of
+// its own (models.UnmatchedCall.FieldReasons: a learned read of the
+// application's clock the call does not carry): " (body.since differs:
+// body.since was learned as ...)". Neither names a value.
+func missDiffersText(m models.UnmatchedCall) string {
+	t := differsText(models.FieldShapes(m.Differs))
+	var whys []string
+	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
+		whys = append(whys, r.Why)
+	}
+	switch {
+	case len(whys) == 0:
+		return t
+	case t == "":
+		return " (" + strings.Join(whys, "; ") + ")"
+	}
+	return strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
 }
 
 // differsText names, for a miss's reason, the fields in which the call
