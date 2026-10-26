@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -58,9 +61,18 @@ func isResultSet(msg interface{}) bool {
 // mockdb's testdata.
 func recordedAnswers(t *testing.T) []mysql.PacketBundle {
 	t.Helper()
+	dir := filepath.Join("..", "..", "..", "..", "..", "platform", "yaml", "mockdb", "testdata")
+	return decodeAnswers(t, filepath.Join(dir, "mysql_capture_starved_mocks.yaml"), filepath.Join(dir, "no_connfailure_golden", "recorded.yaml"))
+}
+
+// decodeAnswers decodes the MySQL answers of the mock files at paths, in
+// order. Documents of another kind (a test case, another parser's mock) are
+// skipped.
+func decodeAnswers(t *testing.T, paths ...string) []mysql.PacketBundle {
+	t.Helper()
 	var out []mysql.PacketBundle
-	for _, name := range []string{"mysql_capture_starved_mocks.yaml", filepath.Join("no_connfailure_golden", "recorded.yaml")} {
-		f, err := os.Open(filepath.Join("..", "..", "..", "..", "..", "platform", "yaml", "mockdb", "testdata", name))
+	for _, name := range paths {
+		f, err := os.Open(name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +86,9 @@ func recordedAnswers(t *testing.T) []mysql.PacketBundle {
 				}
 				break
 			}
-			docs = append(docs, &d)
+			if d.Kind == models.MySQL {
+				docs = append(docs, &d)
+			}
 		}
 		f.Close()
 		mocks, err := mockdb.DecodeMocks(docs, zap.NewNop())
@@ -82,9 +96,6 @@ func recordedAnswers(t *testing.T) []mysql.PacketBundle {
 			t.Fatalf("%s: %v", name, err)
 		}
 		for _, m := range mocks {
-			if m.Kind != models.MySQL {
-				continue
-			}
 			for _, r := range m.Spec.MySQLResponses {
 				out = append(out, r.PacketBundle)
 			}
@@ -319,4 +330,115 @@ func TestEncodeToBinaryAllocationsDoNotGrowWithTheAnswer(t *testing.T) {
 			t.Fatalf("binary=%v: a later serve allocates %v times for 1 row and %v for 300 rows, want at most 1 for either", binaryRows, allocs[1], allocs[300])
 		}
 	}
+}
+
+// wireCacheOf is the encode cache of a result set; nil for other messages.
+func wireCacheOf(msg interface{}) *mysql.EncodedPayload {
+	switch rs := msg.(type) {
+	case *mysql.TextResultSet:
+		return rs.WireCache()
+	case *mysql.BinaryProtocolResultSet:
+		return rs.WireCache()
+	}
+	return nil
+}
+
+// holdsMocks reports whether the .yaml file at p is a file of recorded
+// documents (mocks or test cases) and not, say, a run's config or verdicts:
+// its first document decodes as one and names its kind.
+func holdsMocks(p string) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var d yaml.NetworkTrafficDoc
+	return yamlLib.NewDecoder(f).Decode(&d) == nil && d.Kind != ""
+}
+
+// heapInUse is the heap the live objects hold, after a collection. The
+// differences of two readings are only as exact as the test's other garbage
+// lets them be: a few KB.
+func heapInUse() uint64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
+
+// A recording made outside the repo: KEPLOY_MYSQL_WIRE_CORPUS names a
+// directory (a keploy folder), and every MySQL mock in a .yaml file under it
+// is read. Each recorded answer is served twice through the cache and must
+// give, both times, the bytes main's path encodes for it. The row then says
+// what the cache keeps: the payload bytes cached per served result set, and
+// how much the heap held by the mocks grew once every answer was served. The
+// replay-latency lane runs it on its 100, 1k and 10k recordings; with no
+// corpus named it is skipped.
+func TestEncodeToBinaryOverARecordedCorpus(t *testing.T) {
+	dir := os.Getenv("KEPLOY_MYSQL_WIRE_CORPUS")
+	if dir == "" {
+		t.Skip("KEPLOY_MYSQL_WIRE_CORPUS names no directory of recorded mocks")
+	}
+	var paths []string
+	var onDisk int64
+	skipped := 0
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".yaml") {
+			return err
+		}
+		if !holdsMocks(p) {
+			skipped++
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		paths = append(paths, p)
+		onDisk += info.Size()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, logger := context.Background(), zap.NewNop()
+	dc, conn := encodeConn(t)
+	heap0 := heapInUse()
+	answers := decodeAnswers(t, paths...)
+	heap1 := heapInUse()
+	sets, erred, payload, largest := 0, 0, 0, 0
+	for i := range answers {
+		a := &answers[i]
+		old := mysql.PacketBundle{Header: a.Header, Message: uncached(a.Message)}
+		want, wantErr := EncodeToBinary(ctx, logger, &old, conn, dc)
+		first, err1 := EncodeToBinary(ctx, logger, a, conn, dc)
+		second, err2 := EncodeToBinary(ctx, logger, a, conn, dc)
+		if (wantErr != nil) != (err1 != nil) || (wantErr != nil) != (err2 != nil) {
+			t.Fatalf("answer %d (%T): main's path erred %v, the cached path %v then %v", i, a.Message, wantErr, err1, err2)
+		}
+		if wantErr != nil {
+			erred++
+			continue
+		}
+		if !bytes.Equal(first, want) || !bytes.Equal(second, want) {
+			t.Fatalf("answer %d (%T): served\n% x\nthen\n% x\nmain serves\n% x", i, a.Message, first, second, want)
+		}
+		if c := wireCacheOf(a.Message); c != nil {
+			sets++
+			n := len(c.Load())
+			payload += n
+			largest = max(largest, n)
+		}
+	}
+	heap2 := heapInUse()
+	runtime.KeepAlive(answers)
+	if sets == 0 {
+		t.Fatalf("%s holds no recorded result set: the row tested nothing", dir)
+	}
+	t.Logf("corpus %s: %d mock files (%d bytes; %d other .yaml files skipped), %d answers, %d result sets, %d erred on both paths; "+
+		"cached payload %d bytes, %d per served result set, largest %d; "+
+		"heap held by the decoded answers %d bytes, by them once all were served %d bytes (+%d)",
+		dir, len(paths), onDisk, skipped, len(answers), sets, erred,
+		payload, payload/sets, largest,
+		int64(heap1)-int64(heap0), int64(heap2)-int64(heap0), int64(heap2)-int64(heap1))
 }

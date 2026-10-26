@@ -1,8 +1,10 @@
 package replayer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -198,6 +200,57 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 	require.True(t, mysqlutils.IsOKReplacingEOF(term), "terminator must be a valid OK-replacing-EOF packet")
 	assert.Equal(t, byte(0x04), term[3], "terminator sequence id must be 4")
 	assert.Equal(t, byte(0x03), term[7], "terminator status flags must be reused from the recorded probe")
+}
+
+// The session-variable resolver is the one replay path that answers with a
+// result set made from a recorded one. It must build a new set, which starts
+// with an empty encode cache, and leave the recorded probe as it was: the
+// probe, served (and so cached) before the resolver ran, serves after it the
+// bytes main's path encodes for it, and the built answer serves the bytes
+// main's path encodes for the built set.
+func TestASessionVarAnswerBuiltFromAServedProbeLeavesTheProbeAsRecorded(t *testing.T) {
+	ctx, log := context.Background(), zap.NewNop()
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { c1.Close(); c2.Close() })
+	dctx := deprecateEOFContext()
+	dctx.LastOp, dctx.ServerGreetings = wire.NewLastOpMap(), wire.NewGreetings()
+	dctx.ServerGreetings.Store(c1, &mysql.HandshakeV10Packet{CapabilityFlags: 0x81bff7ff})
+	// mainServes is what main sends for bundle: its result set encoded from
+	// its recorded fields, in a set of its own with nothing cached.
+	mainServes := func(bundle mysql.PacketBundle) []byte {
+		t.Helper()
+		rs := bundle.Message.(*mysql.TextResultSet)
+		bundle.Message = &mysql.TextResultSet{ColumnCount: rs.ColumnCount, Columns: rs.Columns, EOFAfterColumns: rs.EOFAfterColumns, Rows: rs.Rows, FinalResponse: rs.FinalResponse}
+		b, err := wire.EncodeToBinary(ctx, log, &bundle, c1, dctx)
+		require.NoError(t, err)
+		return b
+	}
+
+	pool := probeMockPool()
+	probe := &pool[0].Spec.MySQLResponses[0].PacketBundle
+	probe.Header = &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 1, SequenceID: 1}, Type: "TextResultSet"}
+	recorded := mainServes(*probe)
+	first, err := wire.EncodeToBinary(ctx, log, probe, c1, dctx)
+	require.NoError(t, err)
+	require.Equal(t, recorded, first)
+	require.NotNil(t, probe.Message.(*mysql.TextResultSet).WireCache().Load(), "the probe's first serve caches its payload")
+
+	// The probe labels this column "@@sql_mode"; the built answer names it
+	// "sql_mode", so a resolver that renamed the probe's own column would
+	// change the recorded probe.
+	resp := buildSessionVarResponse(log, pool, "sql_mode", dctx)
+	require.NotNil(t, resp)
+	built := resp.PacketBundle.Message.(*mysql.TextResultSet)
+	require.Nil(t, built.WireCache().Load(), "the built answer is a new set: nothing cached")
+	servedBuilt, err := wire.EncodeToBinary(ctx, log, &resp.PacketBundle, c1, dctx)
+	require.NoError(t, err)
+	require.Equal(t, mainServes(resp.PacketBundle), servedBuilt)
+	require.False(t, bytes.Equal(servedBuilt, first), "the built answer serves its own bytes, not the probe's")
+
+	again, err := wire.EncodeToBinary(ctx, log, probe, c1, dctx)
+	require.NoError(t, err)
+	require.Equal(t, mainServes(*probe), again, "the probe after the resolver ran: main's path and the cache must agree")
+	require.Equal(t, recorded, again, "the resolver changed the recorded probe")
 }
 
 func TestBuildSessionVarResponse_NonDeprecateEOF_ReturnsNil(t *testing.T) {
