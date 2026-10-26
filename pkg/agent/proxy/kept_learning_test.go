@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -592,16 +593,24 @@ func TestEveryConsumeDoorSaysWhenItLearnedAfterTheLearnStepEnded(t *testing.T) {
 }
 
 // Two stagings that both file a matcher's learned copy of a tree recording
-// of the same name: the second staging's retry cycle is served its
-// recording as staged (the round keeps no learning here), never the copy
-// its first cycle filed, which carries first-cycle learning the round does
-// not write (a false green). A staging's filings replace an earlier
-// staging's bases (filedBases.note's per-staging reset), so the base the
-// retry cycle restores is the second staging's own.
+// of the same name, which holds different recordings in each (mock names
+// repeat across sets, mock-0..N): the second staging's retry cycle is served
+// its own recording as staged (the round keeps no learning here), never the
+// copy its first cycle filed, which carries first-cycle learning the round
+// does not write, nor the first staging's recording, whose file carries
+// noise the second's does not (each a false green). A staging's filings
+// replace an earlier staging's bases (filedBases.note's per-staging reset),
+// so the base the retry cycle restores is the second staging's own: the row
+// fails when an earlier staging's base survives the staging's move.
 func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	const answered = `200 {"ok":true}`
-	file := func(mm *MockManager, noise bool) {
+	beatAnswering := func(resp string) *models.Mock {
+		m := beatMock("beat")
+		m.Spec.HTTPResp.Body = resp
+		m.Spec.HTTPResp.Header["Content-Length"] = strconv.Itoa(len(resp))
+		return m
+	}
+	file := func(mm *MockManager) {
 		t.Helper()
 		var tree *models.Mock
 		un, _ := mm.GetUnFilteredMocks()
@@ -615,33 +624,36 @@ func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
 		}
 		filed := *tree
 		filed.TestModeInfo.IsFiltered = false
-		if noise {
-			filed.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
-		}
+		filed.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
 		if !mm.UpdateUnFilteredMock(tree, &filed) {
 			t.Fatal("precondition: the matcher's copy is not filed")
 		}
 	}
-	// Staging 1: its first cycle files a copy (learned noise on it).
-	mm := stagedManager(t, nil, []*models.Mock{beatMock("beat")})
+	const two = `200 {"set":"two"}`
+	// Staging 1: its beat answers "one", and its file declares the "at"
+	// noise; its first cycle files a learned copy.
+	one := beatAnswering(`{"set":"one"}`)
+	one.Spec.ReqBodyNoise = map[string][]string{"body.at": {}}
+	mm := stagedManager(t, nil, []*models.Mock{one})
 	mm.ServeExactPool("-", []string{"beat"})
-	file(mm, true)
-	// Staging 2: the learn step taken up again, the set staged afresh; its
+	file(mm)
+	// Staging 2: the learn step taken up again, the set staged afresh with a
+	// beat of the same name that answers "two" and declares no noise; its
 	// first cycle files a learned copy too.
 	mm.SetLearnEnded(false)
-	mm.SetMocksWithWindow(nil, []*models.Mock{beatMock("beat")}, models.BaseTime, time.Now())
+	mm.SetMocksWithWindow(nil, []*models.Mock{beatAnswering(`{"set":"two"}`)}, models.BaseTime, time.Now())
 	mm.ServeExactPool("-", []string{"beat"})
-	file(mm, true)
-	if got := beatAt(t, mm, "t-2"); got != answered {
+	file(mm)
+	if got := beatAt(t, mm, "t-2"); got != two {
 		t.Fatalf("precondition: staging 2's first cycle answers through what its matcher filed: %s", got)
 	}
 	// Staging 2's retry cycle, the round keeping no learning.
 	mm.SetLearnEnded(true)
 	mm.ServeExactPool("-", []string{"beat"})
-	if got := beatAt(t, mm, "t-3"); got == answered {
-		t.Fatalf("staging 2's retry cycle answered a drifted call through the copy its first cycle filed, learning the round does not keep (a false green): %s", got)
+	if got := beatAt(t, mm, "t-3"); strings.HasPrefix(got, "200 ") {
+		t.Fatalf("staging 2's retry cycle answered a drifted call %s through noise its own recording does not carry (a false green)", got)
 	}
-	if got := beatAt(t, mm, "t-1"); got != answered {
-		t.Fatalf("the retry cycle misses the recorded call: %s", got)
+	if got := beatAt(t, mm, "t-1"); got != two {
+		t.Fatalf("staging 2's retry cycle answered the recorded call %s; want staging 2's own recording %s", got, two)
 	}
 }
