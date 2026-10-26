@@ -142,10 +142,12 @@ type provenWire struct {
 // recorded order (keepRecordedOrder). learn: the session runs the learn step
 // (models.OutgoingOptions.Learn: keploy mock record's full round). starts is,
 // by test ID, where each test's recorded window starts (the scope table's
-// windows, SetRecordedWindows; a window no test names, merged, is no test's).
-// latest is the latest start among the tests the session began, and
-// latestTest the test that began there. ended: a test began out of that
-// order, and the session's learn step was ended for the rest of the session.
+// windows, SetRecordedWindows; a window no test names, merged, is no test's):
+// the order of a test with no recorded begin (recordedStart). latest is the
+// latest recorded start among the tests the session began, and latestTest
+// the test that began there. ended: a test began out of that order, and the
+// session's learn step was ended for the rest of the session. A new session
+// starts a new order (resetSession).
 type recordedOrder struct {
 	learn      bool
 	starts     map[string]time.Time
@@ -492,7 +494,8 @@ func teardownOwners(table, pool map[string][]string) map[string]string {
 // leaves the set none.
 //
 // The windows also say the order the set's tests were recorded in, which
-// the session's learn step needs its tests begun in (keepRecordedOrder).
+// the session's learn step needs its tests begun in (keepRecordedOrder), for
+// a test the recording gives no begin (recordedStart).
 func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) error {
 	starts := make(map[string]time.Time, len(ws))
 	for _, w := range ws {
@@ -510,11 +513,12 @@ func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) er
 }
 
 // keepRecordedOrder ends the session's learn step, for the rest of the
-// session, when test id begins out of its recorded order: when its recorded
-// window does not start after that of every test the session already began
-// (the same test begun again included: go test -count=N, gotestsum
-// --rerun-fails, or tests run in another order than recorded). It is called
-// at id's begin, before anything is settled or opened.
+// session, when test id begins out of its recorded order: when it did not
+// begin in its recording after every test the session already began
+// (recordedStart; the same test begun again included: go test -count=N,
+// gotestsum --rerun-fails, or tests run in another order than recorded,
+// those of a merged window included). It is called at id's begin, before
+// anything is settled or opened.
 //
 // The learn step reads a recording made after the open test's recorded
 // window as no earlier place of the test's (integrations.TestWindows): a
@@ -529,15 +533,18 @@ func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) er
 // any call of the rest of the session that needed something learned.
 // What was learned before stays.
 //
-// A test whose window no test names (merged, or not recorded) neither ends
-// it nor moves the order. A proxy that cannot end the learn step refuses
-// the begin: its learn step would pair and learn out of the recorded order.
+// A test the recording has no place for (not recorded: no begin, no
+// window) neither ends it nor moves the order. A proxy that cannot end the
+// learn step refuses the begin: its learn step would pair and learn out of
+// the recorded order.
 func (a *Agent) keepRecordedOrder(id string) *models.ScopeError {
 	a.provenMu.Lock()
 	o := a.proven.order
 	a.provenMu.Unlock()
-	start, named := o.starts[id]
-	if !o.learn || o.ended || !named || o.latestTest == "" || start.After(o.latest) {
+	if !o.learn || o.ended || o.latestTest == "" {
+		return nil
+	}
+	if start, known := a.recordedStart(id, o.starts); !known || start.After(o.latest) {
 		return nil
 	}
 	le, ok := a.Proxy.(coreAgent.LearnEndSetter)
@@ -560,15 +567,40 @@ func (a *Agent) keepRecordedOrder(id string) *models.ScopeError {
 }
 
 // noteBegunInOrder moves the session's recorded order (keepRecordedOrder)
-// to test id, which began: to its recorded window's start, when that is the
-// latest begun.
+// to test id, which began: to its recorded start (recordedStart), when that
+// is the latest begun.
 func (a *Agent) noteBegunInOrder(id string) {
+	a.provenMu.Lock()
+	starts := a.proven.order.starts
+	a.provenMu.Unlock()
+	start, known := a.recordedStart(id, starts)
+	if !known {
+		return
+	}
 	a.provenMu.Lock()
 	defer a.provenMu.Unlock()
 	o := &a.proven.order
-	if start, named := o.starts[id]; named && (o.latestTest == "" || !start.Before(o.latest)) {
+	if o.latestTest == "" || !start.Before(o.latest) {
 		o.latest, o.latestTest = start, id
 	}
+}
+
+// recordedStart is when test id began in the recording the session replays,
+// which orders its begins (keepRecordedOrder): its recorded begin
+// (SetTestBegins, which keploy mock replay sends for every test of the set
+// under the proven switch, a test whose window was merged into one no test
+// names included), else the start of its own recorded window (starts, from
+// SetRecordedWindows: a test the recording gives no begin). known is false
+// for a test with neither: one that was not recorded.
+func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start time.Time, known bool) {
+	a.scopeMu.Lock()
+	began := a.testBegins[id]
+	a.scopeMu.Unlock()
+	if !began.IsZero() {
+		return began, true
+	}
+	start, known = starts[id]
+	return start, known
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),

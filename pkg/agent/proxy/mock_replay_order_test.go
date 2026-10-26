@@ -20,13 +20,23 @@ import (
 // windows say mock-own2 was recorded after test-1's window, so the learn step
 // does not read it as another place of the call, and would pair the call
 // with test-1's own mock-own1 and learn what it differs in as noise onto it:
-// a false green. The agent ends the round's learn step at test-1's begin out
-// of order, before its window opens (pkg/service/agent keepRecordedOrder,
+// a false green. So it would where test-2's window touched test-3's, and
+// keploy mock replay sends the two as one window no test names. The agent
+// ends the round's learn step at test-1's begin out of order, before its
+// window opens (pkg/service/agent keepRecordedOrder, ordered by when each
+// test began in its recording, a merged window's tests included;
 // Proxy.SetLearnEnded), and the call then misses, with nothing learned.
 func TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses(t *testing.T) {
-	for _, rerun := range []bool{false, true} {
-		name := map[bool]string{false: "test-2, then test-1", true: "test-1, test-2, then test-1 again"}[rerun]
-		t.Run(name, func(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		rerun, merged bool
+	}{
+		{"test-2, then test-1", false, false},
+		{"test-1, test-2, then test-1 again", true, false},
+		{"test-2 (its window merged with test-3's), then test-1", false, true},
+	} {
+		rerun := c.rerun
+		t.Run(c.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, "1")
 			p := startedDrainProxyLogging(t, 100, zap.NewNop())
 			p.learnTracker = learn.NewTracker()
@@ -34,15 +44,24 @@ func TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses(t *tes
 			pool := r3Mock("mock-pool", now.Add(100*time.Millisecond), "POST", "/orders", `{"item":"apple"}`, `{"order":0}`)
 			own1 := r3Mock("mock-own1", now.Add(700*time.Millisecond), "POST", "/orders", `{"item":"pear"}`, `{"order":1}`)
 			own2 := r3Mock("mock-own2", now.Add(1500*time.Millisecond), "POST", "/orders", `{"item":"plum"}`, `{"order":2}`)
+			mocks := []*models.Mock{pool, own1, own2}
 			mm := NewMockManager(nil, nil, zap.NewNop())
 			// As keploy mock replay derives them from the set's mappings:
 			// test-1 began at +0.5s (mock-own1 at +0.7s), test-2 at +1.0s
 			// (mock-own2 at +1.5s).
-			mm.SeedRecordedWindows([]models.TestWindow{
+			windows := []models.TestWindow{
 				{TestCase: "test-1", Start: now.Add(500 * time.Millisecond), End: own1.Spec.ResTimestampMock},
 				{TestCase: "test-2", Start: now.Add(time.Second), End: own2.Spec.ResTimestampMock},
-			})
-			mm.SetMocksWithWindow([]*models.Mock{pool, own1, own2}, nil, models.BaseTime, now.Add(time.Hour))
+			}
+			if c.merged {
+				// test-3 began at +1.5s, as test-2's recording was
+				// answered: their windows touched, one no test names.
+				own3 := r3Mock("mock-own3", now.Add(2100*time.Millisecond), "POST", "/orders", `{"item":"fig"}`, `{"order":3}`)
+				mocks = append(mocks, own3)
+				windows[1] = models.TestWindow{Start: now.Add(time.Second), End: own3.Spec.ResTimestampMock}
+			}
+			mm.SeedRecordedWindows(windows)
+			mm.SetMocksWithWindow(mocks, nil, models.BaseTime, now.Add(time.Hour))
 			p.setMockManager(mm)
 			t.Cleanup(func() { p.setMockManager(nil) })
 			mm.SetPoolNames([]string{"mock-pool"})
