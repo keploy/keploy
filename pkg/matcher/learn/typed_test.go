@@ -739,11 +739,13 @@ func TestAWallClockOfNoZoneIsAClockReadInTheApplicationsZoneToo(t *testing.T) {
 		t.Errorf("a time of day, then a wall clock, in a client test: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantFormChangedWhy(namesTimeOfDay, namesWall))
 	}
 	// The call's minute in IST, F's two on: the lead takes two minutes'
-	// move, a read before its call one. Later than the call in UTC alone,
-	// so the reason is that F's is past the lead.
+	// move, a read before its call one. With no window, a plain read of the
+	// clock all the same (noWindowRead), in the application's zone, where
+	// its recorded reading is its call's minute: in UTC it is hours after
+	// its call (nearestZone).
 	minute := func(at time.Time) Leaf { return WallClockLeaf(p, p, at.In(ist), time.Minute) }
-	if ln := classifyZoned(ist, false, p, minute(call), minute(call.Add(2*time.Minute)), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantPastCall {
-		t.Errorf("a minute read in IST, F's past the lead from its call: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantPastCall)
+	if ln := classifyZoned(ist, false, p, minute(call), minute(call.Add(2*time.Minute)), call, nil); !zonedRead(ln, models.ZoneApp) {
+		t.Errorf("a minute read in IST, F's past the lead from its call: %s Read=%+v (%s); want a plain read in the application's zone", ln.Kind, ln.Read, ln.Why)
 	}
 	// A day of no zone (a Postgres date), read in IST just before its
 	// midnight, that the lead moved to the next day: in UTC F's day is hours
@@ -758,8 +760,11 @@ func TestAWallClockOfNoZoneIsAClockReadInTheApplicationsZoneToo(t *testing.T) {
 	if ln := classifyZoned(ist, false, p, day(read), day(live), call, nil); ln.Kind != KindNoise {
 		t.Errorf("a day read in the application's zone that the lead moved: %s (%s); want noise", ln.Kind, ln.Why)
 	}
-	if ln := classifyZoned(nil, false, p, day(read), day(live), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantPastCall {
-		t.Errorf("a day read in IST, the application's zone not known: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantPastCall)
+	// The zone not known, the learn step reads it in UTC alone: a plain
+	// read there, with no window (noWindowRead), which a replay checks in
+	// UTC (models.ZoneUTC).
+	if ln := classifyZoned(nil, false, p, day(read), day(live), call, nil); !zonedRead(ln, models.ZoneUTC) {
+		t.Errorf("a day read in IST, the application's zone not known: %s Read=%+v (%s); want a plain read in UTC", ln.Kind, ln.Read, ln.Why)
 	}
 	// InstantLeaf's date is the same day of no zone.
 	if got := InstantLeaf(p, p, time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), 24*time.Hour); got != day(read) {
@@ -1950,9 +1955,11 @@ func TestATypedInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 	if ln := classify(NewDriftCache(), ms(rec), ms(late), call, answer); ln.Kind != KindUnaccounted || len(ln.Echo) != 0 || ln.Why != instantNotClock {
 		t.Errorf("a $date its own answer echoes: %s (echo %+v, %s); want refused: %s", ln.Kind, ln.Echo, ln.Why, instantNotClock)
 	}
+	// A wall clock of no zone with no window: a plain read of the clock
+	// too, in UTC where the learn step reads such a clock in UTC alone.
 	wall := func(at time.Time) Leaf { return WallClockLeaf(p, p, at, time.Millisecond) }
-	if ln := classify(NewDriftCache(), wall(rec), wall(late), call, nil); ln.Kind != KindUnaccounted {
-		t.Errorf("a wall clock of no zone with no window: %s Read=%+v (%s); want refused", ln.Kind, ln.Read, ln.Why)
+	if ln := classify(NewDriftCache(), wall(rec), wall(late), call, nil); !zonedRead(ln, models.ZoneUTC) {
+		t.Errorf("a wall clock of no zone with no window: %s Read=%+v (%s); want a plain read in UTC", ln.Kind, ln.Read, ln.Why)
 	}
 	client := NewDriftCache()
 	client.clientTests = true

@@ -19,7 +19,9 @@ import (
 // keploy cannot tell refuses even the right value, saying so. The typed
 // $date of the same read (an instant its protocol types) is learned and
 // checked alike. A value that is not one instant whole (an id with the read
-// in it) and a wall clock that names no zone stay plain noise (Read nil).
+// in it) stays plain noise (Read nil); a wall clock that names no zone is a
+// plain read too, in UTC where the learn step reads such a clock in UTC
+// alone (models.ZoneUTC).
 func TestALearnedClockReadIsCheckedAtReplayInItsCallsSpan(t *testing.T) {
 	rec := time.Date(2026, 10, 26, 9, 0, 0, 123456789, time.UTC)
 	live := rec.Add(FullRoundLead + 137*time.Microsecond + 11)
@@ -77,8 +79,8 @@ func TestALearnedClockReadIsCheckedAtReplayInItsCallsSpan(t *testing.T) {
 	wall := func(at time.Time) Leaf {
 		return WallClockLeaf("body.at", "body.at", at.Truncate(time.Millisecond), time.Millisecond)
 	}
-	if ln := classify(wall(rec), wall(live)); ln.Read != nil {
-		t.Errorf("a wall clock of no zone: Read=%+v; want none", ln.Read)
+	if ln := classify(wall(rec), wall(live)); !zonedRead(ln, models.ZoneUTC) {
+		t.Errorf("a wall clock of no zone: %s Read=%+v; want a plain read in UTC", ln.Kind, ln.Read)
 	}
 }
 
@@ -197,9 +199,10 @@ func TestAClockReadIsOnlyAWholeInstantNamingItsMoment(t *testing.T) {
 		{"a prefix before it", text("x" + now)},
 		{"a time of day, which names no day", text("12:00:00")},
 		{"a typed wall clock, which names no zone", Leaf{Path: path, Noise: path, Type: Instant, Value: "2026-10-27T12:00"}},
+		{"a typed time of day, which names no day", TimeOfDayLeaf(path, path, 12*time.Hour, time.Second)},
 	} {
-		if ok, _ := CheckClockRead(path, plain, c.live, s, true); ok {
-			t.Errorf("%s: answered as a read of the clock", c.what)
+		if ok, why := CheckClockRead(path, plain, c.live, s, true); ok || !strings.Contains(why, "no instant keploy reads") {
+			t.Errorf("%s: %v %q; want refused as no instant keploy reads", c.what, ok, why)
 		}
 	}
 	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Second, Res: time.Second}
@@ -242,6 +245,13 @@ func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
 func plainRead(ln Learned) bool {
 	o, ok := ln.Clock()
 	return ln.Kind == KindNoise && ok && o.Plain()
+}
+
+// zonedRead reports whether ln is a plain read of the clock (plainRead) that
+// a replay reads in zone (models.ClockOffset.Zone).
+func zonedRead(ln Learned, zone string) bool {
+	o, ok := ln.Clock()
+	return plainRead(ln) && ok && o.Zone == zone
 }
 
 // A value that is one instant whole in both runs, in a call with no window
@@ -361,5 +371,159 @@ func TestAWholeInstantOutsideItsCallsWindowIsRefused(t *testing.T) {
 				t.Errorf("%s: %s Read=%+v (%s); want noise", row.what, ln.Kind, ln.Read, ln.Why)
 			}
 		}
+	}
+}
+
+// A wall clock of no zone (a text "2026-10-27 09:00:00.123", a type of its
+// protocol that names no zone) that its call's window holds only in the
+// application's zone, IST here, is a plain read of the clock in that zone
+// (models.ZoneApp), never noise left unchecked: a replay checks it as the
+// wall clock of the application's zone the replay's span carries
+// (Span.Zone). The replay's own now there passes; one an hour on is
+// refused, naming the field and the zone; with no zone told at replay, even
+// the right value is refused, saying keploy cannot tell the zone; one that
+// names its zone where the learn step read a wall clock of none is refused
+// as changed. One its window holds in UTC is read in UTC
+// (models.ZoneUTC), whatever zone the replay carries.
+func TestAWallClockOfNoZoneIsCheckedAtReplayInTheZoneItWasLearnedIn(t *testing.T) {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	read := call.Add(-5 * time.Millisecond)
+	fRead := read.Add(FullRoundLead + 3400*time.Millisecond)
+	w := &Window{Rec: Span{From: read.Add(-5 * time.Millisecond), To: call}, F: Span{From: fRead.Add(-5 * time.Millisecond), To: fRead.Add(time.Millisecond)}}
+	const p = "body.cmd.filter.seenAt"
+	text := func(in *time.Location) func(time.Time) Leaf {
+		return func(at time.Time) Leaf {
+			return Leaf{Path: p, Noise: p, Type: String, Value: at.In(in).Format("2006-01-02 15:04:05.000")}
+		}
+	}
+	typed := func(in *time.Location) func(time.Time) Leaf {
+		return func(at time.Time) Leaf { return WallClockLeaf(p, p, at.In(in), time.Millisecond) }
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: ist}
+	for _, form := range []struct {
+		what string
+		leaf func(*time.Location) func(time.Time) Leaf
+	}{{"a text", text}, {"a typed wall clock", typed}} {
+		ln := classifyZoned(ist, false, p, form.leaf(ist)(read), form.leaf(ist)(fRead), call, w)
+		if !zonedRead(ln, models.ZoneApp) {
+			t.Fatalf("%s its window holds only in IST: %s Read=%+v (%s); want a plain read in the application's zone", form.what, ln.Kind, ln.Read, ln.Why)
+		}
+		o, _ := ln.Clock()
+		for _, row := range []struct {
+			what string
+			live Leaf
+			s    Span
+			want bool
+			why  string
+		}{
+			{"the replay's now in the application's zone", form.leaf(ist)(now.Add(5 * time.Millisecond)), span, true, ""},
+			{"an hour on", form.leaf(ist)(now.Add(time.Hour)), span, false, "it changed"},
+			{"the replay's now written in UTC", form.leaf(time.UTC)(now.Add(5 * time.Millisecond)), span, false, "it changed"},
+			{"the replay's now, the application's zone not told", form.leaf(ist)(now.Add(5 * time.Millisecond)), Span{From: span.From, To: span.To}, false, "keploy cannot tell the application's zone"},
+		} {
+			ok, why := CheckClockRead(p, o, row.live, row.s, true)
+			if ok != row.want || !strings.Contains(why, row.why) || !ok && !strings.HasPrefix(why, p+" was learned as clock, a wall clock of no zone in the application's zone") {
+				t.Errorf("%s, %s: %v %q; want %v naming %q", form.what, row.what, ok, why, row.want, row.why)
+			}
+			if got := ClockReadHolds(o, row.live, row.s); got != row.want {
+				t.Errorf("%s, %s: ClockReadHolds %v; want %v", form.what, row.what, got, row.want)
+			}
+		}
+		ln = classifyZoned(ist, false, p, form.leaf(time.UTC)(read), form.leaf(time.UTC)(fRead), call, w)
+		if !zonedRead(ln, models.ZoneUTC) {
+			t.Fatalf("%s its window holds in UTC: %s Read=%+v (%s); want a plain read in UTC", form.what, ln.Kind, ln.Read, ln.Why)
+		}
+		o, _ = ln.Clock()
+		if ok, why := CheckClockRead(p, o, form.leaf(time.UTC)(now.Add(5*time.Millisecond)), span, true); !ok {
+			t.Errorf("%s read in UTC, the replay's now in UTC: refused (%s)", form.what, why)
+		}
+		if ok, _ := CheckClockRead(p, o, form.leaf(ist)(now.Add(5*time.Millisecond)), span, true); ok {
+			t.Errorf("%s read in UTC, the replay's now in IST: passed", form.what)
+		}
+	}
+	named := Leaf{Path: p, Type: String, Value: now.Add(5 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")}
+	if ok, why := CheckClockRead(p, models.ClockOffset{Res: time.Millisecond, Zone: models.ZoneApp}, named, span, true); ok || !strings.Contains(why, "names its zone") {
+		t.Errorf("a value that names its zone, learned as a wall clock of none: %v %q; want refused, saying it names its zone", ok, why)
+	}
+	if ok, why := CheckClockRead(p, models.ClockOffset{Res: time.Millisecond, Zone: "pst"}, text(ist)(now.Add(5*time.Millisecond)), span, true); ok || !strings.Contains(why, "rather than read it in another zone. Record the test again with this keploy") {
+		t.Errorf("a zone this keploy does not read: %v %q; want refused whatever it carries, saying so", ok, why)
+	}
+}
+
+// With no window (a test's own call), a wall clock of no zone is read in the
+// zone of its recorded reading nearest its call, no later than it
+// (nearestZone): an application east of UTC (IST) or west of it (New
+// York's -4h) writing its own zone's wall clock is read in the
+// application's zone; one writing UTC's, in UTC; a recorded reading that is
+// one instant in both zones (the application's zone is UTC), in UTC.
+func TestAWallClockWithNoWindowIsReadInTheZoneOfItsReadingNearestItsCall(t *testing.T) {
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	read := call.Add(-5 * time.Millisecond)
+	fRead := read.Add(FullRoundLead + 3400*time.Millisecond)
+	const p = "body.cmd.filter.seenAt"
+	text := func(in *time.Location) func(time.Time) Leaf {
+		return func(at time.Time) Leaf {
+			return Leaf{Path: p, Noise: p, Type: String, Value: at.In(in).Format("2006-01-02 15:04:05.000")}
+		}
+	}
+	east, west := time.FixedZone("IST", 5*3600+1800), time.FixedZone("EDT", -4*3600)
+	for _, row := range []struct {
+		what        string
+		zone, write *time.Location
+		want        string
+	}{
+		{"east of UTC, its own zone's", east, east, models.ZoneApp},
+		{"east of UTC, UTC's", east, time.UTC, models.ZoneUTC},
+		{"west of UTC, its own zone's", west, west, models.ZoneApp},
+		{"west of UTC, UTC's", west, time.UTC, models.ZoneUTC},
+		{"the application's zone UTC", time.UTC, time.UTC, models.ZoneUTC},
+	} {
+		if ln := classifyZoned(row.zone, false, p, text(row.write)(read), text(row.write)(fRead), call, nil); !zonedRead(ln, row.want) {
+			t.Errorf("%s: %s Read=%+v (%s); want a plain read in %q", row.what, ln.Kind, ln.Read, ln.Why, row.want)
+		}
+	}
+	if got := nearestZone(read.Add(5*time.Hour+30*time.Minute), time.Time{}, east); got != models.ZoneUTC {
+		t.Errorf("a call not known: %q; want UTC", got)
+	}
+	// Both readings after the call: the earlier.
+	if got := nearestZone(call.Add(6*time.Hour), call, east); got != models.ZoneApp {
+		t.Errorf("both readings after the call, the application's the earlier: %q; want the application's zone", got)
+	}
+	if got := nearestZone(call.Add(time.Hour), call, west); got != models.ZoneUTC {
+		t.Errorf("both readings after the call, UTC's the earlier: %q; want UTC", got)
+	}
+}
+
+// A replay's span carries the application's zone the tracker was told
+// (SetAppZone), and none where it was told none.
+func TestALiveSpanCarriesTheApplicationsZone(t *testing.T) {
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	tr := NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base)
+	if s, ok := tr.LiveSpan(base.Add(time.Second)); !ok || s.Zone != nil {
+		t.Fatalf("no zone told: %+v,%v; want a span with no zone", s, ok)
+	}
+	ist := time.FixedZone("IST", 5*3600+1800)
+	tr.SetAppZone(ist)
+	if s, ok := tr.LiveSpan(base.Add(time.Second)); !ok || s.Zone != ist {
+		t.Fatalf("IST told: %+v,%v; want a span in IST", s, ok)
+	}
+}
+
+// A time of day its protocol types (a Postgres time) that moved by the lead
+// stays noise with no read of the clock: it names no day, so no call's span
+// holds it and no replay check reads one (clockReadOf). A stated limit,
+// never a read a replay refuses whatever it carries.
+func TestATimeOfDayTheLeadMovedIsNoClockReadAReplayChecks(t *testing.T) {
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	read := call.Add(-5 * time.Millisecond)
+	const p = "body.cmd.filter.at"
+	tod := func(at time.Time) Leaf { return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at)), time.Microsecond) }
+	ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil)
+	if _, ok := ln.Clock(); ln.Kind != KindNoise || ok {
+		t.Errorf("a time of day the lead moved: %s Read=%+v (%s); want noise with no read of the clock", ln.Kind, ln.Read, ln.Why)
 	}
 }
