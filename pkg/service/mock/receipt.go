@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -297,13 +299,14 @@ func isolation(runnerExit int, policy models.MissPolicy, counts replayCounts, by
 	return true, ""
 }
 
-// bypassList renders the bypass rules as destinations.
+// bypassList renders the bypass rules as destinations, an IPv6 host in
+// brackets ([::1]:27017) as the set's other files write one.
 func bypassList(rules []models.BypassRule) []string {
 	var out []string
 	for _, r := range rules {
 		d := r.Host
 		if r.Port != 0 {
-			d += fmt.Sprintf(":%d", r.Port)
+			d = net.JoinHostPort(strings.Trim(r.Host, "[]"), strconv.FormatUint(uint64(r.Port), 10))
 		}
 		d += r.Path
 		if d != "" {
