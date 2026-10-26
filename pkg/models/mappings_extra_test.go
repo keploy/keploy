@@ -35,3 +35,23 @@ func TestAMappingKeepsFieldsItDoesNotKnow(t *testing.T) {
 		t.Fatalf("a mapping with no unknown field read as having some: %+v", p)
 	}
 }
+
+// KeepExtra gives a mapping the top-level fields another one read and this
+// keploy does not know: a writer that builds the file anew (a per-test
+// commit) keeps what a hand edit added there.
+func TestKeepExtra(t *testing.T) {
+	var old Mapping
+	if err := yaml.Unmarshal([]byte("version: v\nkind: TestMocksMapping\ntest_set_id: s\nreviewed_by: agent\n"), &old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := Mapping{Version: "v", Kind: MappingKind, TestSetID: "s"}
+	fresh.KeepExtra(&old)
+	out, err := yaml.Marshal(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "reviewed_by: agent\n") {
+		t.Fatalf("lost the field:\n%s", out)
+	}
+	fresh.KeepExtra(nil)
+}

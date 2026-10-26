@@ -90,6 +90,17 @@ func known() (mapping, test, entry map[string]bool) {
 	return mappingKeys, testKeys, entryKeys
 }
 
+// KeepExtra gives m the top-level fields from read and this keploy does not
+// know (yamlExtra), in place of its own: a writer that builds a mapping file
+// anew from another mapping (a per-test commit) keeps what a hand edit added
+// at the top of the file it replaces. A nil from changes nothing.
+func (m *Mapping) KeepExtra(from *Mapping) {
+	if m == nil || from == nil {
+		return
+	}
+	m.extra = from.extra
+}
+
 // UnmarshalYAML reads a mapping, keeping the fields this keploy does not
 // know (yamlExtra).
 func (m *Mapping) UnmarshalYAML(n *yaml.Node) error {
