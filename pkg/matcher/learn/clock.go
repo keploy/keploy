@@ -126,7 +126,16 @@ func (w *Window) ComparesOffsets() *Window {
 
 // Span is one run's part of a Window: From, when its previous data-plane
 // call reached keploy, and To, when the call itself did, on its app clock.
-type Span struct{ From, To time.Time }
+// Zone is the zone the application writes a wall clock of no zone in
+// (Tracker.SetAppZone), as a replay's span carries it (Tracker.LiveSpan),
+// which a replay reads a learned read of the clock in the application's
+// zone in (models.ZoneApp, CheckClockRead); nil where the tracker was told
+// none: such a read is then refused. A Window's spans carry none: the learn
+// step reads the zone of its DriftCache.
+type Span struct {
+	From, To time.Time
+	Zone     *time.Location
+}
 
 // holds reports whether t, an instant read at resolution res, is a read of
 // the clock within s: each bound is read at the instant's own resolution (a

@@ -1210,13 +1210,18 @@ func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival
 // reads), where it cannot tell the app's clock at either bound, where no
 // bound is known, or where the app's clock did not run as one between the
 // bound and arrival: a replay then cannot check a read of the clock, and
-// refuses it (CheckClockRead).
+// refuses it (CheckClockRead). The span carries the application's zone
+// (SetAppZone; Span.Zone).
 func (t *Tracker) LiveSpan(arrival time.Time) (Span, bool) {
 	if t == nil {
 		return Span{}, false
 	}
 	lc, _ := t.liveClockAt(arrival)
-	return lc.span(arrival)
+	s, ok := lc.span(arrival)
+	if ok {
+		s.Zone = lc.zone
+	}
+	return s, ok
 }
 
 // liveClock is what the tracker knows, at one moment, of this run's clock
@@ -1227,6 +1232,7 @@ type liveClock struct {
 	clock       func(time.Time) (time.Time, bool)
 	prev, began time.Time
 	client      bool
+	zone        *time.Location
 }
 
 // liveClockAt is the tracker's liveClock before arrival, and the running
@@ -1234,7 +1240,7 @@ type liveClock struct {
 func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	lc := liveClock{clock: t.appClock, client: t.clientTests, began: t.beganAt}
+	lc := liveClock{clock: t.appClock, client: t.clientTests, began: t.beganAt, zone: t.appZone}
 	i := sort.Search(len(t.servedAt), func(i int) bool { return !t.servedAt[i].Before(arrival) })
 	if i > 0 {
 		lc.prev = t.servedAt[i-1]

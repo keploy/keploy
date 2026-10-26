@@ -579,8 +579,14 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		}
 		ln.Kind, ln.Echo = KindEcho, echo
 	}
-	if ln.Kind == KindNoise && rt.names == namesMoment && lt.names == namesMoment {
+	// A read of the clock, checked at every replay: one that names its
+	// moment as it names it, a wall clock of no zone in the zone the learn
+	// step read it in (wallZone).
+	if ln.Kind == KindNoise && rt.names == lt.names && rt.names != namesTimeOfDay {
 		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
+		if rt.names == namesWall {
+			ln.Read.Zone = dc.wallZone(rt.at, at)
+		}
 	}
 	return ln
 }
@@ -590,7 +596,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 // of the application's clock (instantClock), is still learned as a plain
 // read of it (Learned.Read), as a text one instant whole is (classifyRead):
 // in a call with no window w (a test's own call, read by the lead alone), an
-// instant that names its moment in both runs, in the years a recording's
+// instant of one form in both runs, in the years a recording's
 // clock reads (inClockRange), and recorded no later than its call at (zero:
 // not known), as a read the call carries is made. Every replay, record's
 // confirming round first, checks it in its call's own span on the
@@ -599,11 +605,13 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 // Whether the lead moved it depends on how late record's full round read its
 // clock, and the verdict must not. Not in keploy mock's client tests, whose
 // harness gives the application inputs keploy does not see (clientTestWhy),
-// nor for a wall clock of no zone, whose zone no window shows. An echo of it
+// nor for a time of day, which names no day. A wall clock of no zone in both
+// runs is one too, read in the zone of its recorded reading nearest its
+// call (wallZone), which a replay checks it in alone. An echo of it
 // in its call's own answer stays refused (classifyInstant): an echo is
 // answered with this run's value, never checked as a read.
 func (dc *DriftCache) noWindowRead(r, l typedInstant, w *Window, at time.Time) bool {
-	return w == nil && !dc.clientTests && r.names == namesMoment && l.names == namesMoment &&
+	return w == nil && !dc.clientTests && r.names == l.names && r.names != namesTimeOfDay &&
 		inClockRange(r.at) && inClockRange(l.at) && !r.afterCall(at, dc.zone)
 }
 
