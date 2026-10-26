@@ -240,6 +240,10 @@ type exactState struct {
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
 	poolNames atomic.Pointer[map[string]struct{}]
+	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
+	// cached for one revision of the trees (each exact serve bumps it) and
+	// one scope table.
+	teardownLast atomic.Pointer[teardownBound]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -1887,6 +1891,13 @@ func (m *MockManager) teardownAfter() func(time.Time) bool {
 	if pool == nil {
 		return nil
 	}
+	// The revision first, then the trees (the revision's sample-read-install
+	// idiom): a bound read from trees a staging swaps meanwhile is cached
+	// under a revision that is already old.
+	rev := m.Revision()
+	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool {
+		return c.after()
+	}
 	m.treesMu.RLock()
 	trees := []*TreeDb{m.filtered, m.unfiltered, m.startup}
 	m.treesMu.RUnlock()
@@ -1903,10 +1914,31 @@ func (m *MockManager) teardownAfter() func(time.Time) bool {
 			}
 		}
 	}
-	if last.IsZero() {
+	b := &teardownBound{rev: rev, pool: pool, last: last}
+	m.exact.teardownLast.Store(b)
+	return b.after()
+}
+
+// teardownBound is teardownAfter's bound for keploy mock replay (last: the
+// latest request or answer of a staged data-plane recording outside the
+// pool), as the trees stood at revision rev (MockManager.Revision) under the
+// scope table pool: the per-test reads after the tests read it once per
+// revision, not every staged recording at every read. Each exact serve
+// bumps the revision, so it is read again once per served call, to the
+// same bound: exact serving hides what it serves rather than deleting it
+// from the trees.
+type teardownBound struct {
+	rev  uint64
+	pool *map[string]struct{}
+	last time.Time
+}
+
+// after is the bound's teardownAfter: nil for a zero last.
+func (b *teardownBound) after() func(time.Time) bool {
+	if b.last.IsZero() {
 		return nil
 	}
-	return last.Before
+	return b.last.Before
 }
 
 // exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
