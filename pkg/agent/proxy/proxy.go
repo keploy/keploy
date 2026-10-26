@@ -5971,9 +5971,10 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 		proxyErr.MismatchReport = &stamped
 	}
 	// The process that made the call (proven switch): its comm and argv[0],
-	// no more of its command line; where keploy runs in a PID namespace of
-	// its own, no name, why, and its kernel pid (starts.Registry.SourceOf).
-	// A copy, as above.
+	// and, only to travel to keploy's receipt, its pid and whole command
+	// line, redacted; where keploy runs in a PID namespace of its own, no
+	// name, why, and its kernel pid (starts.Registry.SourceOf). A copy, as
+	// above.
 	if r := proxyErr.MismatchReport; r != nil && r.Source == nil && pid != 0 && provenswitch.On() {
 		if src := starts.Default.SourceOf(pid); src != nil {
 			stamped := *r

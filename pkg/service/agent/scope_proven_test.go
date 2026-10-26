@@ -1007,6 +1007,35 @@ func TestAFailedTestsReasonSaysWhyEachCallMissed(t *testing.T) {
 
 // End to end on the agent: the test's end answers fail with the learn
 // step's reason, and the run's miss list (the CLI's round log) keeps it.
+// The run's miss list says which test each miss was charged to: a call that
+// counts against a test and that a test's end read is that test's (its
+// evidence lists it); a call made before the test process claimed the run, a
+// DNS lookup a test's end read, and a call after the last test's end are
+// charged to no test, so keploy mock's receipt can name them.
+func TestTheRunsMissesSayWhichTestEachWasChargedTo(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	ctx := context.Background()
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /startup", Destination: "startup:80", Kind: models.MissOutsideTest}}
+	claimSelf(t, a)
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /in-test", Destination: "in-test:80", Kind: models.MissInTest},
+		{Protocol: "DNS", ActualSummary: "A dep", Destination: "dns:53"}}
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: "passed"})
+	require.Nil(t, serr)
+	p.misses = []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /teardown", Destination: "teardown:80", Kind: models.MissOutsideTest}}
+	all, err := a.GetMockErrors(ctx)
+	require.NoError(t, err)
+	charged := map[string]string{}
+	for _, m := range all {
+		charged[m.Destination] = m.ChargedTo
+	}
+	require.Equal(t, map[string]string{"startup:80": "", "in-test:80": "o::TestA", "dns:53": "", "teardown:80": ""}, charged)
+	ev := windowOf(t, a, "o::TestA").Evidence
+	require.Len(t, ev.Misses, 1, "the test's evidence lists the data miss charged to it")
+	require.Equal(t, "in-test:80", ev.Misses[0].Destination)
+}
+
 func TestATestsEndAndTheRunsMissesCarryTheLearnStepsReason(t *testing.T) {
 	a, p := wireAgent(t, models.MODE_TEST)
 	ctx := context.Background()

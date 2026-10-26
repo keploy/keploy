@@ -178,6 +178,7 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	dir, _, _ := replayIn(t, replayCase{mockErrs: misses})
 	require.Nil(t, mustReceipt(t, dir).MissedData, "absent with the switch off")
+	require.Nil(t, mustReceipt(t, dir).UnchargedMisses, "absent with the switch off")
 	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "missedData")
@@ -187,6 +188,100 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	r := mustReceipt(t, dir)
 	require.NotNil(t, r.MissedData)
 	require.Equal(t, 1, *r.MissedData, "a DNS lookup is protocol-phase, and a connection that sent nothing made no call")
+	require.Len(t, r.UnchargedMisses, 1, "the call no test was charged with is named, not only counted")
+	require.Equal(t, "GET /x", r.UnchargedMisses[0].ActualSummary)
+}
+
+// Under the switch the receipt names each call MissedData counts that no
+// test was charged with: as evidence keeps a miss (no value the app sent),
+// with the process that made it (its pid, comm and command line, which only
+// this local receipt holds). A call a test's end charged to it is that
+// test's, not listed; one that does not count against a test (DNS) is not
+// listed either. Each test's line says when its latest run began, so a cut
+// round names the last test begun.
+func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	t0 := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	instr.windows = []models.ScopeWindow{
+		{Name: "o::TestA", Start: t0, End: t0.Add(time.Second), Outcome: models.ScopeOutcomeFailed},
+		// Its retry: the latest run's begin is the line's.
+		{Name: "o::TestA", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second), Outcome: models.ScopeOutcomePassed},
+	}
+	src := &models.Origin{Comm: "api", Exe: "./api", PID: 4242, Cmdline: "./api --token <redacted>"}
+	instr.mockErrors = []models.UnmatchedCall{
+		{Protocol: "HTTP", ActualSummary: "GET /in-test", Destination: "dep:80", At: t0.Add(500 * time.Millisecond), ChargedTo: "o::TestA"},
+		{Protocol: "HTTP", ActualSummary: "POST /teardown", Destination: "dep:80", At: t0.Add(4 * time.Second), Source: src,
+			MatchPhase: models.MatchPhaseBody, NextSteps: "body.user.email drifted.", ReceivedReq: "POST /teardown {\"user\":{\"email\":\"a@b.c\"}}",
+			Diff: "a@b.c", FieldDiffs: []models.MockFieldDiff{{Path: "body.user.email", Expected: "x@y.z", Actual: "a@b.c"}}},
+		{Protocol: "DNS", ActualSummary: "A dep", At: t0.Add(4 * time.Second)},
+	}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	r, err := ReadReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, r.UnchargedMisses, 1)
+	u := r.UnchargedMisses[0]
+	require.Equal(t, "dep:80", u.Destination)
+	require.Equal(t, "body.user.email drifted.", u.NextSteps)
+	require.Equal(t, &MissProcess{PID: 4242, Comm: "api", Exe: "./api", Cmdline: "./api --token <redacted>"}, u.Process)
+	require.Empty(t, u.ReceivedReq, "no value the app sent")
+	require.Empty(t, u.Diff, "no value the app sent")
+	for _, d := range u.FieldDiffs {
+		require.Empty(t, d.Expected+d.Actual, "no value the app sent")
+	}
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", ReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "a@b.c")
+	require.NotContains(t, string(raw), "GET /in-test", "a call a test's end charged is that test's")
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, tests.Tests, 1)
+	require.True(t, tests.Tests[0].Began.Equal(t0.Add(2*time.Second)), "began %v", tests.Tests[0].Began)
+}
+
+// Without the proven switch the tests receipt (last-replay-tests.yaml, what
+// keploy mock status reads) is what it was before: no test's line says when
+// it began, in the file or in its JSON form.
+func TestWithTheSwitchOffTheTestsReceiptSaysNoBegin(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	t0 := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	instr.windows = []models.ScopeWindow{
+		{Name: "o::TestA", Start: t0, End: t0.Add(time.Second), Outcome: models.ScopeOutcomePassed},
+	}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path = keployDir
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	_ = New(zap.NewNop(), instr, named("mock-0"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", TestsReceiptFile))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "o::TestA", "the test's line is written")
+	require.NotContains(t, string(raw), "began", "without the switch no test's line says when it began")
+	tests, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	require.Len(t, tests.Tests, 1)
+	require.True(t, tests.Tests[0].Began.IsZero(), "began %v", tests.Tests[0].Began)
+	js, err := json.Marshal(tests)
+	require.NoError(t, err)
+	require.NotContains(t, string(js), "began")
 }
 
 // Under the switch a run list conflicts with the deny list: --run-only is

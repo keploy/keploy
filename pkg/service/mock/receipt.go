@@ -132,6 +132,59 @@ type Receipt struct {
 	// means the run has no verdict, whatever its tests' lines say: a call
 	// after the last test's read is on no line. Empty with the switch off.
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// UnchargedMisses are, under the proven switch, the misses MissedData
+	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
+	// empty): a call made before the test process claimed the run, between
+	// tests, or after the last test's end. Each is as evidence keeps a miss
+	// (models.UnmatchedCall.Sanitized: no value the app sent), with the
+	// process that made it. nil when the misses were not read, and with the
+	// switch off.
+	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
+}
+
+// UnchargedMiss is a call no recorded mock answered that no test was charged
+// with (Receipt.UnchargedMisses), and the process that made it.
+type UnchargedMiss struct {
+	models.UnmatchedCall `yaml:",inline"`
+	// Process is the process that made the call, as the agent saw it then;
+	// nil when it named none.
+	Process *MissProcess `yaml:"process,omitempty" json:"process,omitempty"`
+}
+
+// MissProcess names the process that made a call: its pid, its comm and its
+// whole command line, its secrets redacted as keploy's log of it is. It is in
+// the receipt only, which describes one run on this machine and is never
+// committed (receiptIgnore): no recording, test case or report holds a pid
+// or a command line (models.Origin.Persisted). Unnamed says why keploy named
+// none (models.UnnamedPIDNamespace), and PID is then the kernel pid it was
+// told.
+type MissProcess struct {
+	PID     uint32 `yaml:"pid,omitempty" json:"pid,omitempty"`
+	Comm    string `yaml:"comm,omitempty" json:"comm,omitempty"`
+	Exe     string `yaml:"exe,omitempty" json:"exe,omitempty"`
+	Cmdline string `yaml:"cmdline,omitempty" json:"cmdline,omitempty"`
+	Unnamed string `yaml:"unnamed,omitempty" json:"unnamed,omitempty"`
+}
+
+// unchargedMisses is, of misses, those that count against a test
+// (models.UnmatchedCall.CountsAgainstTest, what MissedData counts) and that
+// no test was charged with, each as evidence keeps a miss, with its process.
+// The calls a test's end charged come from the agent already kept so; the
+// rest, read from the proxy at the run's end, carry the call's values, which
+// the receipt never holds.
+func unchargedMisses(misses []models.UnmatchedCall) []UnchargedMiss {
+	var out []UnchargedMiss
+	for _, m := range misses {
+		if m.ChargedTo != "" || !m.CountsAgainstTest() {
+			continue
+		}
+		u := UnchargedMiss{UnmatchedCall: m.Sanitized()}
+		if src := m.Source; src != nil {
+			u.Process = &MissProcess{PID: src.PID, Comm: src.Comm, Exe: src.Exe, Cmdline: src.Cmdline, Unnamed: src.Unnamed}
+		}
+		out = append(out, u)
+	}
+	return out
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -250,6 +303,10 @@ type TestReceipt struct {
 	Outcome  string `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 	Consumed int    `yaml:"consumed" json:"consumed"`
 	Missed   int    `yaml:"missed" json:"missed"`
+	// Began is when the test's latest run began (its window's start); zero
+	// when the replay saw it begin no run. The test with the latest Began is
+	// the last test begun: the one a run cut short was in, or left last.
+	Began time.Time `yaml:"began,omitempty" json:"began,omitzero"`
 	// Evidence is, under the proven wire, what failed the test at its end:
 	// its misses, the recorded calls of its mapping it never made, and the
 	// connections keploy could not capture; or what left it not judged
