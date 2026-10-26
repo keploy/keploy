@@ -1847,14 +1847,18 @@ func (v *exactView) ownedReached(name string) bool {
 
 // lastOfRun reports whether name is the last of a timer's recordings of one
 // call within its stretch (models.Stretch.Run) still unanswered in the
-// staging: every other recording of its run the view shows has answered.
+// staging: every other recording of its run the view shows has answered. One
+// that answered and was kept to answer again (it was the run's last reached
+// then) has answered too: once the run reaches a later recording of the run,
+// that one, having answered, is the one answered again, as the walk answers
+// again only the last it holds (servedWalk), never an earlier one.
 func (v *exactView) lastOfRun(name string) bool {
 	st, ok := v.stretch[name]
 	if !ok || st.Run == "" {
 		return false
 	}
 	for n, o := range v.stretch {
-		if n != name && o.Run == st.Run && v.isWorker(n) && !v.spentOutside(n) {
+		if n != name && o.Run == st.Run && v.isWorker(n) && !v.spentOutside(n) && (v.answered == nil || !v.answered(n)) {
 			return false
 		}
 	}
