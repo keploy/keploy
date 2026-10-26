@@ -3430,6 +3430,42 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 // none, and an instant a served recorded answer carries (another receive's
 // Date header, echoed into the event) is refused as with one offset, not
 // read as a clock read in a span minutes wide.
+// A clock read the learn step learns onto a recording that already carries
+// one at another place (an earlier round's, kept on the recording) is added
+// to it: the consumed state carries both, so neither place goes back to
+// being compared as recorded, or unchecked, in the confirm round.
+func TestLearnMatchAClockReadIsAddedToTheRecordingsOwn(t *testing.T) {
+	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
+	h, n, opts := learnOn(t)
+	opts.LearnPool = true
+	receive := learnRecorded("mock-0", 0, "POST", "/queue/receive", `{"MaxNumberOfMessages":10}`, nil, `{"Messages":[{"MessageId":"135dcb85","Body":"m-1"}]}`)
+	receive.Spec.HTTPResp.Header = map[string]string{"Date": learnAt.Format(http.TimeFormat)}
+	event := learnRecorded("mock-1", 4*time.Millisecond, "POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(learnAt.Add(3*time.Millisecond))+`"}`, nil, `{}`)
+	event.TestModeInfo.Lifetime = models.LifetimeSession
+	own := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}
+	event.Spec.Clocks = map[string]models.ClockOffset{"body.seen_at": own}
+	db := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{event}}, staged: []*models.Mock{receive}, pool: map[time.Time]bool{receive.Spec.ReqTimestampMock: true}}
+	tr := learn.NewTracker()
+	offset := learn.FullRoundLead + 2*time.Second - 40*time.Second
+	tr.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+	served := learnAt.Add(40 * time.Second)
+	tr.ServedMockAt(receive, served)
+	in := live("POST", "/v1/events", `{"event":"m-1","processed_at":"`+iso(served.Add(offset+time.Millisecond))+`"}`, nil)
+	in.arrived = served.Add(2 * time.Millisecond)
+	got, miss, err := h.learnMatch(learn.WithTracker(context.Background(), tr), in, db, n, opts)
+	if err != nil || got == nil || miss != nil || len(db.pooled) != 1 {
+		t.Fatalf("served %v miss %+v err %v pooled %d; want served, body.processed_at learned", got, miss, err, len(db.pooled))
+	}
+	for _, m := range db.pooled {
+		if !learnedClockRead(m.Spec, "body.processed_at") || m.Spec.Clocks["body.seen_at"] != own {
+			t.Fatalf("the consumed copy carries clock reads %+v; want body.processed_at learned and the recording's body.seen_at (%s) kept", m.Spec.Clocks, own)
+		}
+	}
+	if event.Spec.Clocks["body.processed_at"] != (models.ClockOffset{}) {
+		t.Fatal("the learn step wrote onto the pooled recording itself")
+	}
+}
+
 func TestLearnMatchAWindowIsOneRunOfTheAppsClock(t *testing.T) {
 	iso := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 	for _, jump := range []time.Duration{0, 300 * time.Second} {
