@@ -1320,17 +1320,35 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 // nextStepOf is a miss's next step as evidence keeps it. Every matcher
 // writes fixed advice, but one lists the fields that differed, and a map's
 // keys can be values (an email, a user ID): a next step that names any of
-// the miss's field paths is replaced by fixed advice that counts them.
+// the miss's field paths is replaced by fixed advice that counts them. Why
+// a replay refused a field for a reason of its own (a learned read of the
+// application's clock the call does not carry: models.UnmatchedCall.FieldReasons)
+// is added to it, as the miss's reason says it (missDiffersText), so the
+// run's summary, which shows the next step, says it too.
 func nextStepOf(m models.UnmatchedCall) string {
+	next := m.NextSteps
 	for _, d := range m.FieldDiffs {
 		if d.Path == "" {
 			continue
 		}
 		if strings.Contains(m.NextSteps, d.Path) || strings.Contains(m.NextSteps, strings.TrimPrefix(d.Path, "body.")) {
-			return fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
+			next = fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
+			break
 		}
 	}
-	return m.NextSteps
+	var whys []string
+	for _, r := range models.FieldReasonShapes(m.FieldReasons) {
+		if !strings.Contains(next, r.Why) {
+			whys = append(whys, r.Why)
+		}
+	}
+	switch {
+	case len(whys) == 0:
+		return next
+	case next == "":
+		return strings.Join(whys, "; ")
+	}
+	return next + " (" + strings.Join(whys, "; ") + ")"
 }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,
