@@ -1905,6 +1905,24 @@ type pairing struct {
 //     the test case is earlier than any call it makes. Its name is the key's
 //     alone in the test: no other variable takes it.
 func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string, string) {
+	p, why, cause := planLeaves(tracker, test, m, rec, own, learned, earlier, given)
+	if cause != learn.CauseNotFollowed {
+		return p, why, cause
+	}
+	// A leaf keploy cannot follow refuses the call first, but a change
+	// nothing explains in another leaf is the app's: that is the reason, so
+	// keploy's limit never hides it.
+	for _, l := range learned {
+		if l.Kind == learn.KindUnaccounted && !l.NotFollowed {
+			return p, l.Recorded.Path + " changed, and " + l.Why, ""
+		}
+	}
+	return p, why, cause
+}
+
+// planLeaves is learnPlan's pairing of each learned leaf, refused at the
+// first leaf it cannot learn, with that leaf's reason and cause.
+func planLeaves(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))

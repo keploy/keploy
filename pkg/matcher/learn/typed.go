@@ -478,7 +478,9 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	rt, okR := readTyped(r)
 	lt, okL := readTyped(l)
 	if !okR || !okL {
-		ln.Kind, ln.Why = KindUnaccounted, instantUnread(r, l)
+		// An instant both sides type as one that keploy cannot decode is
+		// keploy's limit; one typed so on one side alone changed its type.
+		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, instantUnread(r, l), r.Type == Instant && l.Type == Instant
 		return ln
 	}
 	rec, live := rt.moment(rt.res), lt.moment(lt.res)
@@ -528,6 +530,13 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, places().unread != "" && why == places().unread
 		return ln
 	}
+	// The test case's own request keploy could not read may hold the
+	// instant: keploy cannot tell, whatever the clock says (classifyRead
+	// asks it first too).
+	if unread != "" {
+		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, unreadRequestWhy(unread), true
+		return ln
+	}
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
 		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
 		switch {
@@ -546,12 +555,6 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 				ln.Why = instantAfterCall
 			}
 		}
-		return ln
-	}
-	// Noise, or an echo, only where the echo could read the test case's own
-	// request, where the moment F saw may stand.
-	if unread != "" {
-		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, unreadRequestWhy(unread), true
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {

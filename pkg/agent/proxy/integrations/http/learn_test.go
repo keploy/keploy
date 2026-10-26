@@ -4581,4 +4581,12 @@ func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
 			t.Errorf("%s: cause %q, want %q (why: %s)", c.name, cause, c.cause, why)
 		}
 	}
+	// A change nothing explains beside a value keploy cannot follow is the
+	// app's: keploy's limit, refused first, never hides it.
+	limit := learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", Side: learn.Response, Path: "body.id", Whole: true}}
+	app := learn.Learned{Kind: learn.KindUnaccounted, Recorded: learn.Leaf{Path: "body.total"}, Why: "no earlier call holds it"}
+	_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{limit, app}, nil, nil)
+	if cause != "" || !strings.HasPrefix(why, "body.total changed") {
+		t.Fatalf("cause %q, why %q; want the unexplained change as the reason, with no cause", cause, why)
+	}
 }
