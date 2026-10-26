@@ -103,6 +103,38 @@ func TestAPreparedStatementRunWithEachParameterIsAnsweredByThatParametersRecordi
 	}
 }
 
+// A prepared EXECUTE stops its scan at the open test's own recording of its
+// query and parameters, under exact serving as under keploy test. The scan
+// stops at a recording that is the test's own (stmtMatched); read by the
+// window, exact serving had none, so every EXECUTE walked the whole pool, twice
+// (at 10k recordings some 11 ms a call on the box), and then served another
+// parameters' recording. Counted, not timed: the first id of 1000 is
+// answered after the PREPARE and its own recording; read by the window, the
+// scan visited 2002 candidates of the 1001.
+func TestAPreparedExecuteStopsItsScanAtItsOwnRecording(t *testing.T) {
+	params := make([]string, 1000)
+	for i := range params {
+		params[i] = fmt.Sprint(i + 1)
+	}
+	for _, exact := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exact=%v", exact), func(t *testing.T) {
+			preps, execs := poolRecording([][]string{params})
+			mm := stagePool(t, preps, execs, exact)
+			ctx, dctx := poolConn("c1")
+			resp, ok, examined, err := replayer.MatchExaminedForTest(ctx, zap.NewNop(), executeReq(1, "1"), mm, dctx)
+			if err != nil || !ok {
+				t.Fatalf("EXECUTE id=1: ok=%v err=%v", ok, err)
+			}
+			if resp.Payload != "exec-c1-1" {
+				t.Errorf("EXECUTE id=1 was answered with %s; want exec-c1-1", resp.Payload)
+			}
+			if want := len(preps) + 1; examined > want {
+				t.Errorf("EXECUTE id=1 examined %d candidates of %d; want at most %d (the PREPARE and its own recording)", examined, len(preps)+len(execs), want)
+			}
+		})
+	}
+}
+
 // heldHook is the store a command's match holds (HoldToRound), with its
 // consume doors watched: before the first, the command arrives at a barrier
 // and waits there until every connection's command has, so all of them have
