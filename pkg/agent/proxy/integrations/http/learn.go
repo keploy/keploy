@@ -2087,6 +2087,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
+			// The application now holds it: a later call's answer that holds
+			// it is answered with this run's value (mintedAnswers), by the
+			// given name.
+			typ := r.Type
+			if !variables.SameValue(g.Recorded, r.Value, r.Type == learn.Number) {
+				typ = learn.String // a token of a longer text (givenFor)
+			}
+			p.minted = append(p.minted, learn.Minted{Mock: m.Name, Place: place, Recorded: g.Recorded, Live: g.Value, Type: typ, Outside: g.Outside, Given: g.Name})
 			continue
 		}
 		switch l.Kind {
@@ -2523,7 +2531,10 @@ func reservedNames(given []variables.Binding) map[string]bool {
 // variable (the test's, or the key's: Outside): answered here with this
 // run's value, and bound where it first appeared (the bind rides on m's
 // state onto that call, which turns what was learned there, noise or an
-// echo, into the variable's bind). An answer place a variable of p answers
+// echo, into the variable's bind). A value the test case gave (Minted.Given:
+// a name the harness typed into the page, once a call carried it) is its
+// given name's variable, which the table binds: it is only answered here.
+// An answer place a variable of p answers
 // already is left to it. When m's answer cannot hold them all, p is returned
 // as it was: the call is answered as it was before.
 func (h *HTTP) mintedAnswers(tracker *learn.Tracker, test uint64, m *models.Mock, p pairing, reserved map[string]bool, minted []learn.Minted) pairing {
@@ -2582,9 +2593,14 @@ func (h *HTTP) mintedAnswers(tracker *learn.Tracker, test uint64, m *models.Mock
 		}
 		var name string
 		var ok bool
-		if v.Outside {
+		switch {
+		case v.Given != "":
+			// A value the test case gave: the table binds its name (the
+			// harness gives it in every run), so no call binds it.
+			name, ok = v.Given, true
+		case v.Outside:
 			name, ok = tracker.OutsideName(v.Mock, v.Place)
-		} else {
+		default:
 			name, ok = tracker.Name(test, v.Mock, v.Place, reserved)
 		}
 		if !ok {
@@ -2595,6 +2611,12 @@ func (h *HTTP) mintedAnswers(tracker *learn.Tracker, test uint64, m *models.Mock
 			continue
 		}
 		vars[name] = models.MockVariable{Recorded: v.Recorded, Answer: at, Outside: v.Outside}
+		if v.Given != "" {
+			if _, ok := values[name]; !ok {
+				values[name] = variables.Binding{Name: name, Value: v.Live, Recorded: v.Recorded, Outside: v.Outside, Given: true}
+			}
+			continue
+		}
 		if binds[v.Mock] == nil {
 			binds[v.Mock] = models.MockVariables{}
 		}

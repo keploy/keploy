@@ -199,6 +199,11 @@ type Minted struct {
 	// Outside: a call of the claim key made outside every test made it
 	// (Tracker.MintOutside); it is the key's, not one test's.
 	Outside bool
+	// Given is, for a value the test case or its harness gave (a template
+	// key, a typed text, an installed token: variables.Binding.Given), the
+	// name it was given by: its variable is that name, which the table binds,
+	// never a bind at Mock and Place.
+	Given string
 }
 
 // NewTracker makes a tracker with no test open.
