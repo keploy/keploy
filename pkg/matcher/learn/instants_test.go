@@ -101,6 +101,21 @@ func shownClockRead(rec, live time.Time, typed bool, w *Window) bool {
 	return w != nil && in(w.Rec, rec, rr) && in(w.F, live, lr)
 }
 
+// noiseIn reports whether ln is what a drifted value nothing accounts for is
+// learned as in a call read in w: noise, but, for a value that is one instant
+// whole in both runs (textClockRead), never noise left unchecked: a plain
+// read of the clock (Read), which a replay checks, and in a window that holds
+// it neither in both runs nor moved by the lead, refused (outsideWindowWhy).
+func noiseIn(ln Learned, w *Window) bool {
+	if textClockRead(ln.Recorded.Value, ln.Live.Value) == nil {
+		return ln.Kind == KindNoise
+	}
+	if w != nil && ln.Kind == KindUnaccounted {
+		return ln.Why == outsideWindowWhy
+	}
+	return ln.Kind == KindNoise && ln.Read != nil
+}
+
 // heldWord reports whether text holds, as a word of its own, a word the
 // insert's processed_at lost between its recording (rec) and F (live) in a
 // reading: of the typed reading, its minute, its second or its fraction.
@@ -199,13 +214,16 @@ func TestAClockReadIsNoiseOnlyWhereItsWindowShowsIt(t *testing.T) {
 	live := rec.Add(60*time.Second + 638*time.Millisecond)
 	for _, wname := range []string{"read before the previous call", "by the lead alone, no window"} {
 		w := r1Windows(rec, live)[wname]
+		// The value, one instant whole that the lead does not read, is
+		// never noise left unchecked (noiseIn).
+		noise := func(ln Learned) bool { return noiseIn(ln, w) }
 		for i, receive := range receives {
-			if ln := classifyProcessedAt(rec, live, false, time.Time{}, w, receive); ln.Kind != KindNoise {
-				t.Errorf("%s, receive %d, raw: %s (from %q, %s); want noise: the receive holds its milliseconds nowhere", wname, i, ln.Kind, ln.From.Mock, ln.Why)
+			if ln := classifyProcessedAt(rec, live, false, time.Time{}, w, receive); !noise(ln) {
+				t.Errorf("%s, receive %d, raw: %s (from %q, %s); want noise (a read of the clock with no window, refused outside its window): the receive holds its milliseconds nowhere", wname, i, ln.Kind, ln.From.Mock, ln.Why)
 			}
 			ln := classifyProcessedAt(rec, live, true, time.Time{}, w, receive)
-			if i == 0 && ln.Kind != KindNoise {
-				t.Errorf("%s, the receive as recorded, typed: %s (from %q at %q, %s); want noise: its Date header is its server's stamp, and nothing else holds a word of it", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.Why)
+			if i == 0 && !noise(ln) {
+				t.Errorf("%s, the receive as recorded, typed: %s (from %q at %q, %s); want noise (a read of the clock with no window, refused outside its window): its Date header is its server's stamp, and nothing else holds a word of it", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.Why)
 			}
 			if i == 1 && (ln.Kind != KindVariable || ln.From.Mock != "mock-4" || ln.From.Field != "spec.resp.body" || ln.From.Held != "14") {
 				t.Errorf("%s, a receive count of 14, typed: %s (from %q at %q, %q); want refused, a variable from mock-4's spec.resp.body: its minute is a word there, and nothing shows it is a clock read", wname, ln.Kind, ln.From.Mock, ln.From.Field, ln.From.Held)
@@ -294,7 +312,7 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 							t.Errorf("%s then %s (config %v), %s, typed %v: %s from %q; want a variable from mock-4", recorded[i], served[i], m == config, wname, typed, ln.Kind, ln.From.Mock)
 						}
 					}
-					if ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, config); ln.Kind != KindNoise {
+					if ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, config); !noiseIn(ln, w) {
 						t.Errorf("%s, a protocol-phase answer's clock read, F's value in no payload, %s, typed %v: %s from %q; want noise", recorded[i], wname, typed, ln.Kind, ln.From.Mock)
 					}
 					for _, m := range []*models.Mock{receive, early} {
@@ -308,7 +326,7 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 						held := heldWord(recorded[i], sent, got, typed) || m == early && heldWord(m.Spec.HTTPResp.Header["Date"], sent, got, typed)
 						want := sameText(recorded[i], typed) || typed && !shownClockRead(sent, got, typed, w) && held
 						ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, m)
-						if want && (ln.Kind != KindVariable || ln.From.Mock != "mock-4") || !want && ln.Kind != KindNoise {
+						if want && (ln.Kind != KindVariable || ln.From.Mock != "mock-4") || !want && !noiseIn(ln, w) {
 							t.Errorf("%s, no protocol-phase answer's clock read (early %v), F's value in no payload, %s, typed %v: %s from %q; want a variable %v", recorded[i], m == early, wname, typed, ln.Kind, ln.From.Mock, want)
 						}
 						// The variable names the field the value stands
@@ -350,7 +368,7 @@ func TestAWholeInstantEchoIsStillAVariable(t *testing.T) {
 						want = KindVariable
 					}
 					ln := classifyProcessedAt(sent, got, typed, time.Time{}, w, receive, delivered)
-					if ln.Kind != want || other.copied && ln.From.Mock != "mock-4" {
+					if want == KindNoise && !noiseIn(ln, w) || want != KindNoise && ln.Kind != want || other.copied && ln.From.Mock != "mock-4" {
 						t.Errorf("%s then %s, %s, typed %v: %s (from %q); want %s", other.rec, other.live, wname, typed, ln.Kind, ln.From.Mock, want)
 					}
 				}
@@ -449,20 +467,20 @@ func TestAHandshakesLocalTimeIsNoSourceOfAClockRead(t *testing.T) {
 				// (shownClockRead) is searched word by word: the
 				// receive's Date header holds its minute, and is no place
 				// a value came from.
-				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, hello7, upsert); ln.Kind != KindNoise {
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, hello7, upsert); !noiseIn(ln, w) {
 					t.Errorf("live %s, %s, typed %v: %s (from %q at %q, %s); want noise", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, ln.From.Field, ln.Why)
 				}
 				// The server's clock ran ahead: its localTime is later than
 				// its answer reached keploy, no read of its answer's.
 				followed := !typed
 				ahead := r2Hello("mock-5", 8, ts(13, 205118312), ts(13, 457911204), read)
-				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, ahead, count, upsert); followed && (ln.Kind != KindVariable || ln.From.Mock != "mock-5") || !followed && ln.Kind != KindNoise {
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, ahead, count, upsert); followed && (ln.Kind != KindVariable || ln.From.Mock != "mock-5") || !followed && !noiseIn(ln, w) {
 					t.Errorf("a localTime after its answer, live %s, %s, typed %v: %s from %q; want a variable from mock-5 %v", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, followed)
 				}
 				// That millisecond in a request: the app's own, followed.
 				sent := r2Mongo("mock-8", ts(13, 459791587), ts(14, 421828601),
 					[]string{`{ SectionSingle identifier: updates , msgs: [ {"q":{"_id":"Lhr4BWAi"},"u":{"$set":{"created":{"$date":{"$numberLong":"1792694293458"}}}}} ] }`}, `{ SectionSingle msg: {"ok":{"$numberDouble":"1.0"}} }`)
-				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, sent); followed && (ln.Kind != KindVariable || ln.From.Mock != "mock-8") || !followed && ln.Kind != KindNoise {
+				if ln := classifyProcessedAt(rec, live, typed, insert, w, receive, hello5, count, sent); followed && (ln.Kind != KindVariable || ln.From.Mock != "mock-8") || !followed && !noiseIn(ln, w) {
 					t.Errorf("that millisecond in a request, live %s, %s, typed %v: %s from %q; want a variable from mock-8 %v", live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, followed)
 				}
 				// F served a handshake whose localTime is the value F saw:
@@ -865,7 +883,7 @@ func TestAnInstantsWordsAreWordsWhereverTheyAre(t *testing.T) {
 	if ln := ClassifyIn(NewDriftCache(), []string{"body.q"}, now, filter, r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "comes back in the answer") {
 		t.Fatalf("an id the answer echoes: %s (%s); want refused", ln.Kind, ln.Why)
 	}
-	if ln := ClassifyIn(NewDriftCache(), []string{"body.at"}, leaf(f.Format(time.RFC3339)), leaf(at.Format(time.RFC3339)), r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(NewDriftCache(), []string{"body.at"}, leaf(f.Format(time.RFC3339)), leaf(at.Format(time.RFC3339)), r1Insert, nil, nil, resp, nil)[0]; !noiseIn(ln, nil) {
 		t.Fatalf("a stamp no word of whose drift the answer holds: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	minute := []Leaf{{Path: "body.note", Noise: "body.note", Type: String, Value: "seq " + at.Format("04")}}
@@ -939,10 +957,10 @@ func TestTheArchivedLegBHandshakeIsNoSourceOfProcessedAt(t *testing.T) {
 					// where the handshake holds one, and a refusal names the
 					// handshake.
 					if wname == "in its call's window" || !typed {
-						if ln.Kind != KindNoise {
+						if !noiseIn(ln, w) {
 							t.Errorf("%s, live %s, %s, typed %v: %s (from %q, %s); want noise", run.name, live.Format(time.RFC3339Nano), wname, typed, ln.Kind, ln.From.Mock, ln.Why)
 						}
-					} else if ln.Kind != KindNoise && ln.From.Mock != "mock-6" && !strings.Contains(ln.Why, "mock-6") {
+					} else if ln.Kind != KindNoise && !noiseIn(ln, w) && ln.From.Mock != "mock-6" && !strings.Contains(ln.Why, "mock-6") {
 						t.Errorf("%s, live %s, %s, typed: %s (from %q, %s); refused, it names no handshake", run.name, live.Format(time.RFC3339Nano), wname, ln.Kind, ln.From.Mock, ln.Why)
 					}
 				}
@@ -1611,7 +1629,7 @@ func TestACoarserCopyOfAServedInstantIsTheEchos(t *testing.T) {
 		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.UnixMilli(), 10)}}}
 	}
 	dc := NewDriftCache()
-	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(dc, []string{p}, ms(got), ms(sent), r1Insert, nil, []Raw{dc.RawOf(coarse, true), dc.RawOf(coarser, true)}, nil, nil)[0]; !noiseIn(ln, nil) {
 		t.Errorf("milliseconds beside served seconds: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 	// An exact copy a formatter wrote dropping its fraction's trailing
@@ -1866,7 +1884,7 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 		now := r1Insert.Add(-40 * time.Millisecond)
 		dc = NewDriftCache()
 		ln = ClassifyIn(dc, []string{p}, dt(now.Add(FullRoundLead)), dt(now), r1Insert, nil, []Raw{dc.RawOf(receive, true), dc.RawOf(delivered, true)}, nil, nil)[0]
-		if ln.Kind != KindNoise {
+		if !noiseIn(ln, nil) {
 			t.Errorf("%s, a read of the clock: %s from %+v (%s); want noise", zone, ln.Kind, ln.From, ln.Why)
 		}
 		// An instant its protocol types is the moment it names, in UTC:
@@ -2041,7 +2059,7 @@ func TestAValueBuiltOnAGivenDateIsTheEchos(t *testing.T) {
 		if ln.Kind != KindVariable || ln.From.Mock != c.mock || ln.From.Path != "body.dates[0]" || !ln.From.Echo {
 			t.Errorf("built on %s dates: %s from %+v (%s); want an echo's variable of %s at body.dates[0]", c.name, ln.Kind, ln.From, ln.Why, c.mock)
 		}
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22T10:00:00Z"), str("2026-10-22T09:00:00Z"), at, c.earlier, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22T10:00:00Z"), str("2026-10-22T09:00:00Z"), at, c.earlier, nil, nil, nil)[0]; !noiseIn(ln, nil) {
 			t.Errorf("its time alone changed, beside %s dates: %s from %+v (%s); want noise", c.name, ln.Kind, ln.From, ln.Why)
 		}
 		typed := func(d int) Shape {
@@ -2084,7 +2102,7 @@ func TestTheZoneSearchReadsWallClocksOfNoZoneAgainstRecordings(t *testing.T) {
 	}
 	const t1, t2 = "1792667656473", "1792667776784" // 11:14:16.473Z, 11:16:16.784Z: 16:44:16 and 16:46:16 at +05:30
 	both := []Earlier{leaf("mock-4", t1, t1), leaf("mock-11", t2, t2)}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:46:16"), str("2026-10-22T16:44:16Z"), at, both, nil, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:46:16"), str("2026-10-22T16:44:16Z"), at, both, nil, nil, nil)[0]; !noiseIn(ln, nil) {
 		t.Errorf("a zoned recorded instant beside a wall clock of no zone: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 	// The control: both of no zone, one zone (+05:30) names both moments.
@@ -2099,7 +2117,7 @@ func TestTheZoneSearchReadsWallClocksOfNoZoneAgainstRecordings(t *testing.T) {
 		t.Errorf("a wall clock of no zone built on a served zoned date: %s from %+v (%s); want an echo's variable of mock-4", ln.Kind, ln.From, ln.Why)
 	}
 	swapped := []Earlier{leaf("mock-4", t1, t2)}
-	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:44:16"), str("2026-10-22 16:46:16"), at, swapped, nil, nil, nil)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(NewDriftCache(), []string{p}, str("2026-10-22 16:44:16"), str("2026-10-22 16:46:16"), at, swapped, nil, nil, nil)[0]; !noiseIn(ln, nil) {
 		t.Errorf("a recorded moment only what F served names: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 }
@@ -2135,7 +2153,7 @@ func TestAWallClockOfNoZoneFitOnOneSideIsNoEcho(t *testing.T) {
 	// F's 16:46:16 is mock-4's live SentTimestamp in +05:30; the recorded
 	// 16:44:01 is no moment mock-4 recorded, in that zone or any.
 	ln := ClassifyIn(NewDriftCache(), []string{p}, dt("2026-10-22 16:46:16"), dt("2026-10-22 16:44:01"), at, served, nil, nil, nil)[0]
-	if ln.Kind != KindNoise {
+	if !noiseIn(ln, nil) {
 		t.Errorf("a wall clock F's side alone fits: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 }
