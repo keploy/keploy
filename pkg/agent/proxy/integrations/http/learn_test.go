@@ -858,8 +858,8 @@ func TestLearnMatchAnEarlierPlaceThatDidNotDriftIsNoSource(t *testing.T) {
 	if served == nil || miss != nil {
 		t.Fatalf("a drifting timestamp was refused: %+v", miss)
 	}
-	if !reflect.DeepEqual(db.consumed[1].Spec.ReqBodyNoise, map[string][]string{"body.at": {}}) {
-		t.Fatalf("noise %v", db.consumed[1].Spec.ReqBodyNoise)
+	if !learnedClockRead(db.consumed[1].Spec, "body.at") {
+		t.Fatalf("noise %v clocks %v; want body.at learned as a read of the clock", db.consumed[1].Spec.ReqBodyNoise, db.consumed[1].Spec.Clocks)
 	}
 }
 
@@ -969,7 +969,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	var out []*models.Mock
 	for _, r := range recs {
 		cp := *r
-		cp.Spec.Variables, cp.Spec.ReqBodyNoise = nil, nil
+		cp.Spec.Variables, cp.Spec.ReqBodyNoise, cp.Spec.Clocks = nil, nil, nil
 		byName[cp.Name] = &cp
 		out = append(out, &cp)
 	}
@@ -982,6 +982,7 @@ func learnedOnto(recs []*models.Mock, consumed []models.Mock) []*models.Mock {
 	for _, c := range consumed {
 		m := byName[c.Name]
 		m.Spec.ReqBodyNoise = mergeReqBodyNoise(m.Spec.ReqBodyNoise, c.Spec.ReqBodyNoise)
+		m.Spec.Clocks = models.MergeClocks(m.Spec.Clocks, c.Spec.Clocks)
 		for n, v := range c.Spec.Learned() {
 			vars(m)[n] = v
 		}
@@ -1036,10 +1037,16 @@ func fullRound(t *testing.T, recs []*models.Mock, calls []*req) []models.Mock {
 // answered.
 func inCI(t *testing.T, mocks []*models.Mock, calls []*req) {
 	t.Helper()
+	inCIIn(t, context.Background(), mocks, calls)
+}
+
+// inCIIn is inCI on a connection whose context is ctx.
+func inCIIn(t *testing.T, ctx context.Context, mocks []*models.Mock, calls []*req) {
+	t.Helper()
 	h := newHTTP()
 	db := &varDb{perTest: append([]*models.Mock(nil), mocks...)}
 	for i, c := range calls {
-		if ok, _, diag := matchVar(t, h, db, c); !ok {
+		if ok, _, diag := matchVarIn(t, ctx, h, db, c); !ok {
 			t.Fatalf("CI call %d is a miss after F learned it: %+v", i, diag)
 		}
 	}
@@ -2706,8 +2713,8 @@ func TestLearnMatchReadsTheOrderFServedTheTestsMocksIn(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 			}
 		})
 	}
@@ -2783,8 +2790,8 @@ func TestLearnMatchRefusesAnOffsetOnServesInParallelRequests(t *testing.T) {
 				t.Logf("refused: %s", miss.res.Why)
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 			}
 		})
 	}
@@ -2886,8 +2893,8 @@ func TestLearnMatchReadsWhatFServedBeforeTheTestAsGiven(t *testing.T) {
 					}
 					return
 				}
-				if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-					t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+				if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+					t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 				}
 			})
 		}
@@ -2940,8 +2947,8 @@ func TestLearnMatchReadsThePairedRecordingFServedBeforeTheCall(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{"body.visible_after": {}}) {
-				t.Fatalf("served %v miss %+v; want body.visible_after learned as noise", got, miss)
+			if got == nil || miss != nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.visible_after") {
+				t.Fatalf("served %v miss %+v; want body.visible_after learned as a read of the clock, still compared", got, miss)
 			}
 		})
 	}
@@ -3266,18 +3273,24 @@ func TestLearnMatchAStartUpClockReadIsReadInItsCallsWindow(t *testing.T) {
 					}
 					return
 				}
-				var noise []map[string][]string
+				var learned []models.Mock
 				for _, m := range db.pooled {
-					noise = append(noise, m.Spec.ReqBodyNoise)
+					learned = append(learned, *m)
 				}
 				if tc.own {
-					noise = nil
-					for _, m := range db.consumed {
-						noise = append(noise, m.Spec.ReqBodyNoise)
-					}
+					learned = db.consumed
 				}
-				if got == nil || miss != nil || len(noise) != 1 || !reflect.DeepEqual(noise[0], map[string][]string{"body.processed_at": {}}) {
-					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned as noise", got, miss, noise)
+				// A read of the clock inside a longer value stays noise; one
+				// that is an instant whole is still compared, in its call's
+				// window at every replay (MockSpec.Clocks).
+				ok := len(learned) == 1
+				if ok && form.name == "one instant whole" {
+					ok = learnedClockRead(learned[0].Spec, "body.processed_at")
+				} else if ok {
+					ok = reflect.DeepEqual(learned[0].Spec.ReqBodyNoise, map[string][]string{"body.processed_at": {}}) && len(learned[0].Spec.Clocks) == 0
+				}
+				if got == nil || miss != nil || !ok {
+					t.Fatalf("served %v miss %+v learned %+v; want body.processed_at learned (%s)", got, miss, learned, form.name)
 				}
 			})
 		}
@@ -3371,15 +3384,25 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				}
 				return
 			}
-			if got == nil || miss != nil || len(db.consumed) != 1 || !reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{field: {}}) {
-				t.Fatalf("served %v miss %+v consumed %+v; want %s learned as noise", got, miss, db.consumed, field)
+			// The app's stamp, an instant whole, is a read of the clock, still
+			// compared; the slot (read by the lead in keploy test) is noise.
+			learned := len(db.consumed) == 1 && learnedClockRead(db.consumed[0].Spec, field)
+			if field == "body.slot" {
+				learned = len(db.consumed) == 1 && reflect.DeepEqual(db.consumed[0].Spec.ReqBodyNoise, map[string][]string{field: {}}) && len(db.consumed[0].Spec.Clocks) == 0
 			}
-			// The replay after record's full round: a third value is answered.
-			third := `"at":"` + iso(read.Add(after+90*time.Second)) + `"`
+			if got == nil || miss != nil || !learned {
+				t.Fatalf("served %v miss %+v consumed %+v; want %s learned", got, miss, db.consumed, field)
+			}
+			// The replay after record's full round: a third value is
+			// answered, a stamp read in its own call's window.
+			at := read.Add(after + 90*time.Second)
+			third := `"at":"` + iso(at) + `"`
 			if field == "body.slot" {
 				third = `"slot":"2026-10-14T10:09Z"`
 			}
-			inCI(t, learnedOnto([]*models.Mock{signup}, db.consumed), []*req{live("POST", "/v1/events", `{"event":"signup",`+third+`}`, nil)})
+			call := live("POST", "/v1/events", `{"event":"signup",`+third+`}`, nil)
+			call.arrived = at.Add(time.Millisecond)
+			inCIIn(t, clockConn(true, at.Add(-time.Second)), learnedOnto([]*models.Mock{signup}, db.consumed), []*req{call})
 		})
 	}
 }
@@ -4548,4 +4571,12 @@ func TestLearnMatchAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testin
 			t.Errorf("%s, recorded a second before the call: %s (%s); want noise, an earlier place both runs were given showing no copy", tc.name, got, why)
 		}
 	}
+}
+
+// learnedClockRead reports whether spec carries path as a read of the
+// application's clock the learn step learned (MockSpec.Clocks), still
+// compared, and no noise.
+func learnedClockRead(spec models.MockSpec, path string) bool {
+	_, clock := spec.Clocks[path]
+	return clock && len(spec.ReqBodyNoise) == 0
 }

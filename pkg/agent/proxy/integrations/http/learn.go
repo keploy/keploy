@@ -286,7 +286,7 @@ func multipartLeaves(p httpParts, leaves map[string]learn.Leaf, fixed map[string
 // known is what a comparison with the recorded mock m excuses: keploy.yml's
 // noise, the noise learned onto m, and m's obfuscated values (Mock.Noise).
 func (n learnNoise) known(m *models.Mock) learn.Known {
-	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	return httpKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
 }
 
 // knownAsRecorded is known without the noise learned onto m: the recording
@@ -299,15 +299,21 @@ type httpKnown struct {
 	n       learnNoise
 	learned map[string][]string
 	values  *util.NoiseChecker
+	// clocks are the places an earlier learning learned as reads of the
+	// application's clock (clocksOf): no learned noise excuses them, so the
+	// learn step reads each again, in this call's window.
+	clocks map[string]models.ClockOffset
 }
 
 // Excused implements learn.Known. Learned noise keeps its type; keploy.yml's
 // noise and obfuscated values excuse type and presence.
 // What the learn step learned names a leaf by its exact path, an array
 // position included; noise learned before it (by the request-body learner
-// it replaces) names it in the request matcher's dialect.
+// it replaces) names it in the request matcher's dialect. A place learned as
+// a read of the application's clock (clocks) is no learned noise's to excuse.
 func (k httpKnown) Excused(l learn.Leaf) (bool, bool) {
-	if learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise) {
+	_, clock := k.clocks[l.Path]
+	if !clock && (learnedCovers(k.learned, l.Path) || l.Noise != l.Path && hasKey(k.learned, l.Noise)) {
 		return true, true
 	}
 	scalar := l.Type != 0 && l.Type != learn.EmptyObj && l.Type != learn.EmptyArray
@@ -1878,7 +1884,11 @@ func storeRevision(mockDb integrations.MockMemDb) uint64 {
 // mock that it uses (binds, by that mock), and each variable's value in this
 // call, for its answer.
 type pairing struct {
-	noise  map[string][]string
+	noise map[string][]string
+	// clocks are the places learned as a read of the app's clock, plain or
+	// plus a constant offset (learn.Learned.Clock): still compared, at a
+	// replay, against the call's window on the app's clock, so never noise.
+	clocks map[string]models.ClockOffset
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
@@ -1938,6 +1948,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
+			continue
+		}
+		if o, ok := l.Clock(); ok {
+			// A read of the app's clock (a noise leaf that is one whole, or
+			// one plus a constant offset) stays compared: a replay checks it
+			// is a read made in its call's window (learn.CheckClockRead).
+			if p.clocks == nil {
+				p.clocks = map[string]models.ClockOffset{}
+			}
+			p.clocks[r.Path] = o
 			continue
 		}
 		switch l.Kind {
@@ -2152,6 +2172,9 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 	claimed = h.consumeWith(context.WithValue(ctx, ownedKey{}, owner), m, mockDb, func(spec *models.MockSpec) {
 		if len(p.noise) > 0 {
 			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, p.noise)
+		}
+		if len(p.clocks) > 0 {
+			spec.Clocks = models.MergeClocks(spec.Clocks, p.clocks)
 		}
 		// What was learned rides out on the consumed mock's state, never on
 		// what the pool serves next: a reused mock stays the recording the

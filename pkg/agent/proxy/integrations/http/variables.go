@@ -313,7 +313,7 @@ func (v reqView) putBack(p variables.Place, rec held) (reqView, bool) {
 }
 
 func (v reqView) asReq(input *req) *req {
-	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw, encoded: input.sentBody()}
+	out := &req{method: v.method, header: v.header, body: []byte(v.body), raw: input.raw, encoded: input.sentBody(), arrived: input.arrived}
 	u := url.URL{}
 	if input.url != nil {
 		u = *input.url
@@ -488,8 +488,25 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	liveAt := map[string]held{}
 	asRecorded := live
 	var typeChange *varProblem
+	clocks := clocksOf(m)
+	jsonBody := variables.IsJSONDoc(m.Spec.HTTPReq.Body)
+	clockAt := map[string]models.ClockOffset{} // a variable's place -> the read of the clock learned there
+	for k, o := range clocks {
+		if raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody); ok {
+			if place, err := variables.Parse(raw); err == nil {
+				clockAt[place.String()] = o
+			}
+		}
+	}
 	for _, d := range decls {
 		for _, vp := range d.requestPlaces() {
+			if o, clock := clockAt[vp.place.String()]; clock {
+				// Two learnings that disagree on what the place holds: a
+				// variable's value, which its recorded value is put back
+				// at, and a read of the clock, which is checked as it
+				// came. keploy cannot hold one value to both.
+				return refuse(fmt.Sprintf("%s was learned both as variable %s and as %s, a read of the application's clock: keploy cannot hold one value to both, so it refuses the call. Record the test again", vp.raw, d.name, o.String()))
+			}
 			r, ok := rec.read(vp.place)
 			if !ok {
 				return refuse(fmt.Sprintf("its recorded request holds no single value at %s (variable %s)", vp.raw, d.name))
@@ -519,7 +536,6 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 	// (a path segment, a query value, a header value, one element of an
 	// array) is not compared either: its recorded value is put back there
 	// too, the place's presence and JSON type still required.
-	jsonBody := variables.IsJSONDoc(m.Spec.HTTPReq.Body)
 	for k := range m.Spec.ReqBodyNoise {
 		raw, ok := learn.VarPlace(learn.Leaf{Path: k}, jsonBody)
 		if !ok {
@@ -530,6 +546,11 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 			continue
 		}
 		if _, isVar := liveAt[place.String()]; isVar {
+			continue
+		}
+		if _, clock := clocks[k]; clock {
+			// A read of the clock is checked as it came (strictDiff),
+			// never excused by noise on the same place.
 			continue
 		}
 		r, ok := rec.read(place)
@@ -713,7 +734,7 @@ func sameRoute(live, rec reqView, m *models.Mock) bool {
 // variables are checked at their places apart from it, so a noise entry over
 // a variable's place never excuses a wrong value there.
 func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Mock, headerNoise, userBodyNoise map[string][]string, urlNoise []string) bool {
-	return len(strictDiff(asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
+	return len(strictDiff(ctx, asRecorded, liveDestination(ctx, asRecorded), m, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise))) == 0
 }
 
 // pickHit chooses the hit that answers: the first of hits, and among the
