@@ -237,10 +237,32 @@ func TestUnmadeWrite_WhatIsNoReadBeforeAnUnmadeWriteKeepsItsChoice(t *testing.T)
 			mm := unmadeStage(t, []*models.Mock{list1, post, list2}, "test-2", post, list2)
 			return answer(t, mm, viewCopy(t, mm, "list-t2"), "list")
 		}},
-		{"a read the test shares with the tests beside it", func(t *testing.T) integrations.BeforeUnmadeWrite {
-			mm := unmadeStage(t, all, "")
-			mm.ServeExactTestConcurrent("test-2", []*models.Mock{block}, []*models.Mock{list2})
-			return answer(t, mm, viewCopy(t, mm, "list-t2"), "list")
+		{"a recording of another test made after the write, once the write is made", func(t *testing.T) integrations.BeforeUnmadeWrite {
+			list3 := unmadeRecording("list-t3", models.Mongo, 3010, "read", "list")
+			mm := unmadeStage(t, []*models.Mock{list1, block, list2, list3}, "test-2", block, list2)
+			if !mm.MarkMockAsUsed(*viewCopy(t, mm, "block-t2")) {
+				t.Fatal("the block was refused")
+			}
+			return answer(t, mm, list3, "list")
+		}},
+		{"a recording of another test at the write's instant", func(t *testing.T) integrations.BeforeUnmadeWrite {
+			at := unmadeRecording("list-at-block", models.Mongo, 1000, "read", "list")
+			mm := unmadeStage(t, []*models.Mock{list1, at, block, list2}, "test-2", block, list2)
+			return answer(t, mm, at, "list")
+		}},
+		{"after a write the test shares with the tests beside it", func(t *testing.T) integrations.BeforeUnmadeWrite {
+			shared := unmadeRecording("block-shared", models.Mongo, 1000, "write", "block")
+			users := unmadeRecording("users-t2", models.Mongo, 900, "read", "users")
+			list3 := unmadeRecording("list-t3", models.Mongo, 3010, "read", "list")
+			mm := unmadeStage(t, []*models.Mock{list1, users, shared, list3}, "")
+			mm.ServeExactTestConcurrent("test-2", []*models.Mock{users}, []*models.Mock{shared})
+			return answer(t, mm, list3, "list")
+		}},
+		{"a read the test shares with the tests beside it, recorded before the write", func(t *testing.T) integrations.BeforeUnmadeWrite {
+			shared := unmadeRecording("list-shared", models.Mongo, 500, "read", "list")
+			mm := unmadeStage(t, []*models.Mock{shared, block, list2}, "")
+			mm.ServeExactTestConcurrent("test-2", []*models.Mock{block, list2}, []*models.Mock{shared})
+			return answer(t, mm, viewCopy(t, mm, "list-shared"), "list")
 		}},
 		{"held to a staging that moved", func(t *testing.T) integrations.BeforeUnmadeWrite {
 			mm := unmadeStage(t, all, "test-2", block, list2)
@@ -261,6 +283,73 @@ func TestUnmadeWrite_WhatIsNoReadBeforeAnUnmadeWriteKeepsItsChoice(t *testing.T)
 	}
 }
 
+// Every answer step is held to the open test's unmade writes, whoever
+// recorded the answer: a read recorded only after the block, by another
+// test, by the background, or shared with the tests beside the open one at
+// record, is answered from before the block (list-t1, a copy), consuming
+// nothing, or misses naming it.
+func TestUnmadeWrite_ARecordingNotTheTestsOwnMadeAfterTheWriteIsNoAnswer(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block := unmadeRecording("block-t2", models.Mongo, 1000, "write", "block")
+	other := unmadeRecording("users-t2", models.Mongo, 1005, "read", "users")
+	for _, tc := range []struct {
+		name  string
+		early bool
+		stage func(t *testing.T, staged []*models.Mock) (*MockManager, *models.Mock)
+	}{
+		{"another test's later recording", true, func(t *testing.T, staged []*models.Mock) (*MockManager, *models.Mock) {
+			list3 := unmadeRecording("list-t3", models.Mongo, 3010, "read", "list")
+			return unmadeStage(t, append(staged, list3), "test-2", block, other), list3
+		}},
+		{"a background recording", true, func(t *testing.T, staged []*models.Mock) (*MockManager, *models.Mock) {
+			polled := unmadeRecording("bg-list", models.Mongo, 1020, "read", "list")
+			polled.TestModeInfo.Lifetime = models.LifetimeSession
+			return unmadeStage(t, append(staged, polled), "test-2", block, other), polled
+		}},
+		{"a read the test shares with the tests beside it", true, func(t *testing.T, staged []*models.Mock) (*MockManager, *models.Mock) {
+			shared := unmadeRecording("list-shared", models.Mongo, 1010, "read", "list")
+			mm := unmadeStage(t, append(staged, shared), "")
+			mm.ServeExactTestConcurrent("test-2", []*models.Mock{block, other}, []*models.Mock{shared})
+			return mm, viewCopy(t, mm, "list-shared")
+		}},
+		{"another test's later recording, no earlier one", false, func(t *testing.T, staged []*models.Mock) (*MockManager, *models.Mock) {
+			list3 := unmadeRecording("list-t3", models.Mongo, 3010, "read", "list")
+			return unmadeStage(t, append(staged, list3), "test-2", block, other), list3
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			staged := []*models.Mock{block, other}
+			if tc.early {
+				staged = append([]*models.Mock{list1}, staged...)
+			}
+			mm, chosen := tc.stage(t, staged)
+			got := answer(t, mm, chosen, "list")
+			if got.Write == nil || got.Write.Name != "block-t2" {
+				t.Fatalf("got write %v; want block-t2 unmade before %s", got.Write, chosen.Name)
+			}
+			if !tc.early {
+				if got.Answer != nil || !strings.Contains(got.Note(), "an extra read before block-t2") {
+					t.Fatalf("got answer %q note %q; want a miss naming block-t2", answerName(got), got.Note())
+				}
+				return
+			}
+			if answerName(got) != "list-t1" {
+				t.Fatalf("answered by %q; want list-t1, the newest before the block", answerName(got))
+			}
+			// The test's own recordings are untouched: the block and the
+			// other read still answer.
+			for _, name := range []string{"block-t2", "users-t2"} {
+				if !mm.MarkMockAsUsed(*viewCopy(t, mm, name)) {
+					t.Fatalf("%s was refused: serving the earlier answer consumed it", name)
+				}
+			}
+			if got := answer(t, mm, chosen, "list"); got.Applies() {
+				t.Fatalf("after the block %s is still held back by %v", chosen.Name, got.Write)
+			}
+		})
+	}
+}
+
 // A connection's scoped view forwards the rule to the manager.
 func TestUnmadeWrite_AScopedViewForwardsTheRule(t *testing.T) {
 	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
@@ -274,8 +363,8 @@ func TestUnmadeWrite_AScopedViewForwardsTheRule(t *testing.T) {
 }
 
 // The manager asked of no recording, with no write classifier, or of a
-// recording the open test does not own stamped as this view's, says no write
-// is unmade.
+// recording the open test does not own, made before its write, stamped as
+// this view's, says no write is unmade.
 func TestUnmadeWrite_TheManagerAskedOfNothingItCanTellSaysNone(t *testing.T) {
 	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
 	block := unmadeRecording("block-t2", models.Mongo, 1000, "write", "block")
