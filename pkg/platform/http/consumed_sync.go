@@ -41,13 +41,13 @@ type consumedSend struct {
 	next consumedHeld
 }
 
-// consumedRequest is the request body for params. With no history, or one it
-// cannot build on, it carries the consumed history whole, as every client
-// before it did: only the per-test region's entries when perTest (the agent's
-// last answer said it reads no others, models.ConsumedScopeHeader). To an
-// agent that holds an earlier state of the same history, it carries only the
+// request is the request body for params. With no history, or one it cannot
+// build on, it carries the consumed history whole, as every client before it
+// did: only the per-test region's entries when perTest (the agent's last
+// answer said it reads no others, models.ConsumedScopeHeader). To an agent
+// that holds an earlier state of the same history, it carries only the
 // entries written since. Called with c.mu held when params has a history.
-func (c *consumedSync) request(params models.MockFilterParams, perTest, whole bool) (models.UpdateMockParamsReq, consumedSend) {
+func (c *consumedSync) request(params models.MockFilterParams, perTest bool) (models.UpdateMockParamsReq, consumedSend) {
 	h := params.ConsumedHistory
 	params.ConsumedHistory = nil
 	if h == nil || params.TotalConsumedMocks == nil {
@@ -57,7 +57,7 @@ func (c *consumedSync) request(params models.MockFilterParams, perTest, whole bo
 		return models.UpdateMockParamsReq{FilterParams: params}, consumedSend{}
 	}
 	held := c.held
-	if !whole && held.history == h && !held.narrowed {
+	if held.history == h && !held.narrowed {
 		if since, end, ok := h.Since(held.seq); ok {
 			params.TotalConsumedMocks = since
 			cs := &models.ConsumedSync{Stream: held.stream, Base: held.seq, Seq: end}
@@ -81,7 +81,9 @@ func (c *consumedSync) request(params models.MockFilterParams, perTest, whole bo
 // filter with the history the send meant: false only for a send that built
 // on a state of the history and was answered by an agent that does not keep
 // one, which filtered with the entries since that state alone. Called with
-// c.mu held.
+// c.mu held, after the send forgot what the agent held: an answer that does
+// not say it holds the send's state leaves the client believing it holds
+// nothing.
 func (c *consumedSync) answered(send consumedSend, held string) bool {
 	if send.sync == nil {
 		return true
@@ -90,7 +92,7 @@ func (c *consumedSync) answered(send consumedSend, held string) bool {
 		c.held, c.keeps = send.next, true
 		return true
 	}
-	c.held, c.keeps = consumedHeld{}, false
+	c.keeps = false
 	return send.sync.Full
 }
 

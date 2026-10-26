@@ -1664,20 +1664,22 @@ func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFi
 		a.consumed.mu.Lock()
 		defer a.consumed.mu.Unlock()
 	}
-	hdr, resend, err := a.sendMockParams(ctx, params, perTest, false)
+	hdr, resend, err := a.sendMockParams(ctx, params, perTest)
 	if resend {
 		// The agent does not hold the state this send built on (an agent
-		// started again): the same filter, with the whole history.
-		hdr, _, err = a.sendMockParams(ctx, params, perTest, true)
+		// started again): the same filter, with the whole history, as the
+		// send that was refused left the client believing the agent holds
+		// none of it.
+		hdr, _, err = a.sendMockParams(ctx, params, perTest)
 	}
 	return hdr, err
 }
 
-// sendMockParams makes one /updatemockparams call for params. whole sends the
-// consumed history whole. resend reports a call the agent did not apply as
-// asked because it does not hold the consumed history the send built on: the
-// caller sends it again, whole.
-func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilterParams, perTest, whole bool) (_ http.Header, resend bool, _ error) {
+// sendMockParams makes one /updatemockparams call for params. resend reports
+// a call the agent did not apply as asked because it does not hold the
+// consumed history the send built on: the caller sends it again, which then
+// carries the history whole.
+func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilterParams, perTest bool) (_ http.Header, resend bool, _ error) {
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
@@ -1687,10 +1689,11 @@ func (a *AgentClient) sendMockParams(ctx context.Context, params models.MockFilt
 		none := ""
 		a.stagedBackground.Store(&none)
 	}
-	requestBody, send := a.consumed.request(params, perTest, whole)
+	requestBody, send := a.consumed.request(params, perTest)
 	if send.sync != nil {
 		// Until the answer says what the agent holds, it is believed to
-		// hold nothing.
+		// hold nothing: a call that fails, or is refused, leaves the next
+		// send whole.
 		a.consumed.forget()
 	}
 

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -207,6 +208,61 @@ func TestAnAgentStartedAgainIsSentTheWholeHistory(t *testing.T) {
 	}
 	if n := len(again.seen); n != 1 {
 		t.Fatalf("the agent started again applied %d filters; want 1, the refused send applies nothing", n)
+	}
+}
+
+// failOnceSvc fails the filter of call fail (counted from 0), after the
+// route has applied what the send carried to the history it keeps.
+type failOnceSvc struct {
+	historySvc
+	fail, calls int
+}
+
+func (s *failOnceSvc) UpdateMockParams(ctx context.Context, p models.MockFilterParams) error {
+	s.mu.Lock()
+	n := s.calls
+	s.calls++
+	s.mu.Unlock()
+	if n == s.fail {
+		return errors.New("the agent failed this filter")
+	}
+	return s.historySvc.UpdateMockParams(ctx, p)
+}
+
+// A call that fails may leave the agent holding a later state of the history
+// than its last answer said: the client then believes it holds nothing, and
+// sends the next filter whole, in one request, never built on the state the
+// agent held before the failed call.
+func TestAFailedCallLeavesTheNextFilterWhole(t *testing.T) {
+	ctx := context.Background()
+	svc := &failOnceSvc{fail: 3}
+	_, w, uri := serveHistory(t, svc)
+	c := newClient(t, uri)
+
+	h := models.NewConsumedHistory(0)
+	for i := 0; i < 3; i++ {
+		consume(h, i, 2)
+		if err := c.UpdateMockParams(ctx, filterFor(h, nil)); err != nil {
+			t.Fatalf("UpdateMockParams: %v", err)
+		}
+	}
+	consume(h, 3, 2)
+	if err := c.UpdateMockParams(ctx, filterFor(h, nil)); err == nil {
+		t.Fatal("the filter the agent failed returned no error")
+	}
+	consume(h, 4, 2)
+	before := w.calls()
+	if err := c.UpdateMockParams(ctx, filterFor(h, nil)); err != nil {
+		t.Fatalf("UpdateMockParams after the failed call: %v", err)
+	}
+	if got := w.calls() - before; got != 1 {
+		t.Fatalf("%d requests; want 1, the whole history, not a send built on what the agent held before the failed call", got)
+	}
+	if s := w.syncs[len(w.syncs)-1]; s == nil || !s.Full {
+		t.Fatalf("the filter after the failed call was sent with sync %+v; want a full send", s)
+	}
+	if got, want := svc.last(t), h.Map(); !sameHistory(got, want) {
+		t.Fatalf("the agent filtered with %d entries after the failed call; the history has %d", len(got), len(want))
 	}
 }
 
