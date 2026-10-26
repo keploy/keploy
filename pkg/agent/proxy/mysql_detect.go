@@ -82,7 +82,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -491,9 +490,13 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 
 // otherDependencyAddr reads where a recorded mock of a dependency other than
 // MySQL reached, as an address that names its port: its destAddr, else the
-// destination its request names, an HTTP mock's Host (Mock.RecordedDestination,
-// or its URL's host when the Host names no port), an HTTP/2 mock's authority,
-// a gRPC mock's :authority. "" when none names a port. A DNS answer and a
+// destination its request names, an HTTP mock's Host (Mock.RecordedDestination),
+// an HTTP/2 mock's authority, a gRPC mock's :authority. "" when none names a
+// port. Under `keploy mock record` every mock carries its connection's destAddr
+// (starts.Registry.Stamp); under `keploy record` an HTTP mock names its
+// destination only by its Host. A Host that names no port is not completed
+// from the URL: keploy records the request line as sent, which for a call to a
+// service is origin-form ("/x") and names no host. A DNS answer and a
 // connection failure reached no dependency at that port, so they say nothing
 // of it.
 func otherDependencyAddr(m *models.Mock) string {
@@ -505,11 +508,6 @@ func otherDependencyAddr(m *models.Mock) string {
 	case models.HTTP:
 		host, _ := m.RecordedDestination()
 		cands = append(cands, host)
-		if m.Spec.HTTPReq != nil {
-			if u, err := url.Parse(m.Spec.HTTPReq.URL); err == nil {
-				cands = append(cands, u.Host)
-			}
-		}
 	case models.HTTP2:
 		if m.Spec.HTTP2Req != nil {
 			cands = append(cands, m.Spec.HTTP2Req.Authority)

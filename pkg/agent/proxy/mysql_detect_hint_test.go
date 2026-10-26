@@ -356,8 +356,15 @@ func TestReplayDecidesADefaultPortByTheRecording(t *testing.T) {
 		{"MySQL recorded without an address", []*models.Mock{httpMockTo("localhost:4000"), mysqlMockAt("")}, 4000, true, "default-port"},
 		{"gRPC recorded on 4000", []*models.Mock{grpcMockTo("orders:4000")}, 4000, false, "recorded-not-mysql"},
 		{"HTTP/2 recorded on 4000", []*models.Mock{http2MockTo("orders:4000")}, 4000, false, "recorded-not-mysql"},
-		{"HTTP recorded on 4000, its Host naming no port", []*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
-			Method: "GET", URL: "http://127.0.0.1:4000/x", Header: map[string]string{"Host": "api.internal"}}}}}, 4000, false, "recorded-not-mysql"},
+		// keploy mock record stamps every mock with its connection's
+		// destAddr, so a Host that names no port still names 4000.
+		{"HTTP recorded on 4000 with its destAddr, its Host naming no port", []*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata: map[string]string{"destAddr": "127.0.0.1:4000"},
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "/x", Header: map[string]string{"Host": "api.internal"}}}}}, 4000, false, "recorded-not-mysql"},
+		// keploy record writes no destAddr on an HTTP mock and its URL is
+		// origin-form, so this mock says nothing of 4000 (a stated limit).
+		{"HTTP recorded without a destAddr, its Host naming no port", []*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq: &models.HTTPReq{Method: "GET", URL: "/x", Header: map[string]string{"Host": "api.internal"}}}}}, 4000, true, "default-port"},
 		{"gRPC recorded on 8080", []*models.Mock{grpcMockTo("orders:8080")}, 4000, true, "default-port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

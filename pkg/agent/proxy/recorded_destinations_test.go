@@ -70,7 +70,7 @@ func TestDestinationKey_NamesWhatADefaultPortHeld(t *testing.T) {
 	at4000 := map[string]*models.Mock{
 		"HTTP, its Host":        httpMockTo("127.0.0.1:4000"),
 		"HTTP, another host":    httpMockTo("api.internal:4000"),
-		"HTTP, its URL":         {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "http://10.0.0.2:4000/x", Header: map[string]string{"Host": "api.internal"}}}},
+		"HTTP, its destAddr":    {Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:4000"}, HTTPReq: &models.HTTPReq{URL: "/x", Header: map[string]string{"Host": "api.internal"}}}},
 		"gRPC, its :authority":  grpcMockTo("orders:4000"),
 		"HTTP/2, no authority":  {Kind: models.HTTP2, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:4000"}, HTTP2Req: &models.HTTP2Req{Scheme: "http"}}},
 		"generic, its destAddr": destMock(models.GENERIC, map[string]string{"destAddr": "10.0.0.2:4000"}),
@@ -85,9 +85,10 @@ func TestDestinationKey_NamesWhatADefaultPortHeld(t *testing.T) {
 		t.Errorf("HTTP at 3306: key %q, want its own", k)
 	}
 	for name, m := range map[string]*models.Mock{
-		"HTTP at 8080":                 {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Header: map[string]string{"Host": "api:8080"}}}},
-		"a DNS answer naming 4000":     destMock(models.DNS, map[string]string{"destAddr": "10.0.0.2:4000"}),
-		"a connection failure at 4000": destMock(models.ConnectionFailure, map[string]string{"destAddr": "10.0.0.2:4000"}),
+		"HTTP at 8080":                  {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Header: map[string]string{"Host": "api:8080"}}}},
+		"HTTP whose Host names no port": {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "/x", Header: map[string]string{"Host": "api.internal"}}}},
+		"a DNS answer naming 4000":      destMock(models.DNS, map[string]string{"destAddr": "10.0.0.2:4000"}),
+		"a connection failure at 4000":  destMock(models.ConnectionFailure, map[string]string{"destAddr": "10.0.0.2:4000"}),
 	} {
 		if k := destinationKey(m); k != "" {
 			t.Errorf("%s: key %q, want none", name, k)
