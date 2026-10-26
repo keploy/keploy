@@ -499,6 +499,11 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// NotFollowed, of an unaccounted drift, says keploy cannot follow or
+	// answer the value yet (a word of it echoed inside a longer answer
+	// value, or an echo beside a source it set aside): keploy's limit, not
+	// a change nothing explains.
+	NotFollowed bool
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -1069,7 +1074,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// cannot answer with this run's value.
 		if ln.Kind == KindNoise {
 			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
-				ln.Kind, ln.Why = KindUnaccounted, why
+				ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, true
 			}
 		}
 		// Words the word rule let go in record's full round: noise only
@@ -1088,11 +1093,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.refuted + ", and keploy learns it as varying"
 				}
 			case KindEcho:
-				why := fol.first
+				why, notFollowed := fol.first, false
 				if why == "" {
-					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
+					why, notFollowed = fol.refuted+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", true
 				}
-				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
+				ln.Kind, ln.Why, ln.Echo, ln.NotFollowed = KindUnaccounted, why, nil, notFollowed
 			}
 		}
 		out = append(out, ln)

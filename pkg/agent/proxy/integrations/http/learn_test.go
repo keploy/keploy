@@ -4568,6 +4568,7 @@ func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
 		{"from another protocol or a payload", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1"}}, learn.CauseNotFollowed},
 		{"from the test case's request", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "case", Given: true}}, learn.CauseNotFollowed},
 		{"unexplained", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "no earlier call holds it"}, ""},
+		{"echoed inside a longer answer value", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "a word of it comes back in the answer at body.q, which keploy cannot answer with this run's value", NotFollowed: true}, learn.CauseNotFollowed},
 	} {
 		_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{c.l}, nil, nil)
 		if why == "" {

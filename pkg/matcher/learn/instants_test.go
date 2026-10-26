@@ -862,8 +862,8 @@ func TestAnInstantsWordsAreWordsWhereverTheyAre(t *testing.T) {
 	resp := []Leaf{{Path: "body.id", Noise: "body.id", Type: String, Value: "1298498081"}, {Path: "body.note", Noise: "body.note", Type: String, Value: "seq " + at.Format("05")}}
 	filter := Shape{Leaves: map[string]Leaf{"body.q": {Path: "body.q", Noise: "body.q", Type: String, Value: "user-1298498081"}}}
 	now := Shape{Leaves: map[string]Leaf{"body.q": {Path: "body.q", Noise: "body.q", Type: String, Value: "user-1427131847"}}}
-	if ln := ClassifyIn(NewDriftCache(), []string{"body.q"}, now, filter, r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "comes back in the answer") {
-		t.Fatalf("an id the answer echoes: %s (%s); want refused", ln.Kind, ln.Why)
+	if ln := ClassifyIn(NewDriftCache(), []string{"body.q"}, now, filter, r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "comes back in the answer") || !ln.NotFollowed {
+		t.Fatalf("an id the answer echoes: %s (%s, not followed %v); want refused as one keploy cannot follow yet", ln.Kind, ln.Why, ln.NotFollowed)
 	}
 	if ln := ClassifyIn(NewDriftCache(), []string{"body.at"}, leaf(f.Format(time.RFC3339)), leaf(at.Format(time.RFC3339)), r1Insert, nil, nil, resp, nil)[0]; ln.Kind != KindNoise {
 		t.Fatalf("a stamp no word of whose drift the answer holds: %s (%s); want noise", ln.Kind, ln.Why)

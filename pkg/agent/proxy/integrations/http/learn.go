@@ -2010,6 +2010,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
 
 		case learn.KindUnaccounted:
+			if l.NotFollowed {
+				return p, r.Path + " changed, and " + l.Why, learn.CauseNotFollowed
+			}
 			return p, r.Path + " changed, and " + l.Why, ""
 
 		case learn.KindEcho:
