@@ -9,6 +9,7 @@ package learn
 // 1", "16" of "PostgreSQL 16.4").
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -651,5 +652,122 @@ func TestAPidCopiedFromTwoStartUpsOpenedAtOnceIsRefused(t *testing.T) {
 	}
 	if ran[true] == 0 || ran[false] == 0 {
 		t.Fatalf("interleavings: %d opened at once, %d one after the other; want both", ran[true], ran[false])
+	}
+}
+
+// Two connections opened one after the other whose roles in the application
+// swap between the recording and F (a pool's threads that open in either
+// order): at record the application's connection got mock-hs-81 and copied
+// its backend pid, 81; in F the same connection opened second and got
+// mock-hs-82, so it copied 82. F gave both start-ups as recorded, in the
+// recorded order, before the call, so the rule a copy follows its source
+// would read 81's start-up as a source the value moved away from and learn
+// the pid as varying. A word a start-up carries never varies: refused,
+// naming the start-up, whatever the order, under that rule and without it.
+// A value the recording did not copy from a start-up is unchanged: F's word
+// of one the recorded value lacks reads as any word both runs gave.
+func TestAValueCopiedFromAStartUpIsRefusedWhenItsConnectionsSwapRoles(t *testing.T) {
+	a, b := eSession("mock-hs-81", 900*time.Millisecond, 81), eSession("mock-hs-82", 850*time.Millisecond, 82)
+	open := func(c string, m *models.Mock) []flightStep {
+		return []flightStep{{c, "lift", nil}, {c, "handshake", m}, {c, "land", nil}}
+	}
+	const path = "bind.$8"
+	given := func(recorded, live string, raw []Raw) Learned {
+		t.Helper()
+		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		if len(got) != 1 {
+			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
+		}
+		return got[0]
+	}
+	sequential := 0
+	for i, steps := range interleavings(open("A", a), open("B", b)) {
+		if overlapped(steps, "A", "B") {
+			continue
+		}
+		sequential++
+		tr := NewTracker()
+		runFlights(tr, steps)
+		o := tr.Placed().Order
+		raw := make([]Raw, 0, 2)
+		for _, m := range []*models.Mock{a, b} {
+			first, last := o.Of(m)
+			if first == 0 {
+				t.Fatalf("interleaving %d %v: %s unplaced; want each start-up placed in F's order", i, steps, m.Name)
+			}
+			raw = append(raw, RawOf(m, false).ServedIn(first, last).ServedAsRecorded())
+		}
+		for _, tc := range []struct{ name, recorded, live, found string }{
+			{"the backend pid", "81", "82", "its recorded value stands whole in mock-hs-81 at spec.postgresV3.session.backendProcessID"},
+			{"the secret key", "7081", "7082", "its recorded value stands whole in mock-hs-81 at spec.postgresV3.session.backendSecretKey"},
+			{"the pid inside a longer value", "conn-81", "conn-82", "a part of its recorded value (its characters 6 to 7) stands in mock-hs-81 at spec.postgresV3.session.backendProcessID"},
+		} {
+			for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, tc.recorded, tc.live, nil, raw, nil), "without it": given(tc.recorded, tc.live, raw)} {
+				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.found+", a connection's recorded start-up") || !strings.Contains(got.Why, "never varies") {
+					t.Errorf("FALSE GREEN? interleaving %d %v, %s copied from a start-up, %s: %s (%q); want refused, naming the start-up", i, steps, tc.name, rule, got.Kind, got.Why)
+				}
+			}
+		}
+		// Ten-digit secret keys, which half of random keys are, read as
+		// instants too (the echo): refused as a start-up's word all the same.
+		keyed := func(m *models.Mock, key int32) *models.Mock {
+			c := *m
+			c.Spec.PostgresV3 = &models.PostgresV3Spec{Type: models.PostgresV3TypeSession, Session: &models.PostgresV3SessionSpec{}}
+			*c.Spec.PostgresV3.Session = *m.Spec.PostgresV3.Session
+			c.Spec.PostgresV3.Session.BackendSecretKey = key
+			return &c
+		}
+		for _, k := range [][2]int32{{1234567890, 1876543210}, {-1234567890, -1234567891}} {
+			fa, la := o.Of(a)
+			fb, lb := o.Of(b)
+			rk := []Raw{RawOf(keyed(a, k[0]), false).ServedIn(fa, la).ServedAsRecorded(), RawOf(keyed(b, k[1]), false).ServedIn(fb, lb).ServedAsRecorded()}
+			rec, live := strconv.Itoa(int(k[0])), strconv.Itoa(int(k[1]))
+			for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, rec, live, nil, rk, nil), "without it": given(rec, live, rk)} {
+				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "the moment it was recorded with stands in mock-hs-81 at spec.postgresV3.session.backendSecretKey") || !strings.Contains(got.Why, ", a connection's recorded start-up") || !strings.Contains(got.Why, "never varies") {
+					t.Errorf("FALSE GREEN? interleaving %d %v, the secret key %s copied from a start-up, %s in F, %s: %s (%q); want refused, naming the start-up", i, steps, rec, live, rule, got.Kind, got.Why)
+				}
+			}
+		}
+		if got := classifyF(t, "33", "82", nil, raw, nil); got.Kind != KindNoise {
+			t.Errorf("interleaving %d %v: 33 at record, a start-up's pid in F: %s (%q); want noise", i, steps, got.Kind, got.Why)
+		}
+	}
+	if sequential == 0 {
+		t.Fatal("no interleaving opened the connections one after the other")
+	}
+}
+
+// eLaneSession is a connection's recorded start-up as the Flyway lane's
+// Postgres 16 server answers it (protocol 3.0, scram-sha-256, the server's
+// parameters), its backend pid pid.
+func eLaneSession(name string, before time.Duration, pid int32) *models.Mock {
+	m := eSession(name, before, pid)
+	s := m.Spec.PostgresV3.Session
+	s.ProtocolVersion, s.ServerVersion, s.ObservedAuthMode = "3.0", "16.4 (Debian 16.4-1.pgdg120+2)", "scram-sha-256"
+	s.ParameterStatus = map[string]string{
+		"application_name": "PostgreSQL JDBC Driver", "DateStyle": "ISO, MDY", "integer_datetimes": "on",
+		"scram_iterations": "4096", "server_encoding": "UTF8", "server_version": "16.4 (Debian 16.4-1.pgdg120+2)", "TimeZone": "UTC",
+	}
+	return m
+}
+
+// The rule's cost, a stated limit: a changed value recorded equal to a word
+// every start-up carries alike is refused too, though no swap of start-ups
+// could have changed it. On the lane's server that is 0 and 3 of the
+// protocol version, 16 and 4 of the server's, 4096, on, UTC: a migration's
+// execution_time of 0, 3, 4 or 16 ms at record is so refused.
+func TestAValueRecordedAsAWordEveryStartUpCarriesIsRefused(t *testing.T) {
+	raw := []Raw{
+		RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false).ServedAs(1).ServedAsRecorded(),
+		RawOf(eLaneSession("mock-hs-82", 850*time.Millisecond, 82), false).ServedAs(2).ServedAsRecorded(),
+	}
+	for _, tc := range []struct{ recorded, live, field string }{
+		{"0", "12", "protocolVersion"}, {"3", "12", "protocolVersion"}, {"4", "12", "serverVersion"}, {"16", "12", "serverVersion"},
+		{"4096", "12", "parameterStatus.scram_iterations"}, {"on", "off", "parameterStatus.integer_datetimes"}, {"UTC", "IST", "parameterStatus.TimeZone"},
+	} {
+		got := classifyF(t, tc.recorded, tc.live, nil, raw, nil)
+		if got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-hs-81 at spec.postgresV3.session.") || !strings.Contains(got.Why, ", a connection's recorded start-up") {
+			t.Errorf("%s at record, a word every start-up carries (%s), %s in F: %s (%q); want refused, naming the first start-up", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
+		}
 	}
 }

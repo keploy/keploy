@@ -175,6 +175,11 @@ type Raw struct {
 	noTime bool
 	// read: the text was read from the mock (RawOf).
 	read bool
+	// startUp: the mock is a connection's recorded start-up (isStartUp).
+	// Every word it carries never varies: a drifted value one of whose
+	// recorded words stands in it is refused, never learned as varying
+	// or bound there (appearedIn, startUpWhy).
+	startUp bool
 	// asRecorded: F served r unchanged (ServedAsRecorded), so what F sent
 	// and gave the application there is r's recorded text: what the rule a
 	// copy follows its source reads of what F gave at r (follows.go).
@@ -449,6 +454,10 @@ type Place struct {
 	// noTime: that mock's recorded time keploy cannot read, read as the
 	// call's own instant (Raw.noTime): a reason says so (placeAt).
 	noTime bool
+	// startUp, of a place found in a raw mock's payload: the mock is a
+	// connection's recorded start-up (Raw.startUp), whose words never vary,
+	// so a drifted value found there is refused (startUpWhy).
+	startUp bool
 }
 
 // atCallNote is what a reason says of a recording it names that was made at
@@ -998,6 +1007,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
+				}
+				if from.startUp {
+					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
 				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
@@ -2126,24 +2138,29 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
-			from.AtCall, from.noTime = atCall, x.noTime
+			from.AtCall, from.noTime, from.startUp = atCall, x.noTime, x.startUp
 			return from, true
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, startUp: x.startUp}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, startUp: x.startUp}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}
-				if fol.refute(x, texts, v, p) {
+				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime, startUp: x.startUp}
+				// A connection's start-up is never set aside as a source
+				// the value moved away from: F may have given the
+				// application's connection another connection's start-up,
+				// whose word the value then copied (isStartUp). The value
+				// is refused there (startUpWhy).
+				if !x.startUp && fol.refute(x, texts, v, p) {
 					break
 				}
 				return p, true
@@ -2255,6 +2272,24 @@ func evidence(v *valueDrift, from Place) string {
 		provenance = notClock(v)
 	}
 	return found + "; " + provenance + ", so keploy follows it as a value from there. " + correction(from.Mock)
+}
+
+// startUpWhy is why a drifted value v whose recorded value, or a part of
+// it, stands in a connection's recorded start-up (from: isStartUp) is
+// refused: a word a start-up carries never varies, and the value that
+// changed may be a copy of another connection's start-up.
+func startUpWhy(v *valueDrift, from Place) string {
+	at := placeAt(from)
+	var found string
+	switch {
+	case from.Echo:
+		found = echoFound(at)
+	case from.Held == v.rec || from.Held == v.decRec:
+		found = "its recorded value stands whole in " + at
+	default:
+		found = "a part of its recorded value (" + partOf(v.rec, from.Held) + ") stands in " + at
+	}
+	return found + ", a connection's recorded start-up. A word a start-up carries (a backend pid, a secret key, a server parameter) never varies, and keploy gives each connection the application opens a recorded start-up by the order the connections open in, not by what each sent: a connection may get another connection's start-up, and a value that changed may be a copy of its word, so keploy cannot tell a copy from a varying value. If the field changes every run on its own, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // placeAt names where from stands, as a reason names it: "<mock> at
@@ -2482,7 +2517,7 @@ func RawOf(m *models.Mock, served bool) Raw {
 	if !ok {
 		return r
 	}
-	r.read = true
+	r.read, r.startUp = true, isStartUp(m)
 	// The payload's own text, not its JSON: a JSON string escapes what
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.
@@ -2493,6 +2528,24 @@ func RawOf(m *models.Mock, served bool) Raw {
 	}
 	r.stamps = answerStamps(r.text, r.fields, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	return r
+}
+
+// isStartUp reports whether m is a connection's recorded start-up: what the
+// server answered a connection's opening with (a Postgres start-up: its
+// protocol version, the server's version and parameters, the backend pid
+// and secret key; the SSLRequest's answer before it). Record's full round
+// gives each connection the application opens one of the recorded start-ups
+// by the order the connections open in, not by what each connection sent,
+// so two connections whose roles in the application differ between the
+// recording and F (a pool's threads that open in either order) each get the
+// other's. A word a start-up carries is therefore never a source that can
+// vary: the recorded value copied it from its connection's start-up, and a
+// value that changed may be a copy of another connection's (startUpWhy).
+// Only a PostgresV3 session mock is read so; the older Postgres kinds,
+// which carry their start-up in packets, and other protocols' start-ups are
+// read as any recording.
+func isStartUp(m *models.Mock) bool {
+	return m.Kind == models.PostgresV3 && m.Spec.PostgresV3 != nil && m.Spec.PostgresV3.Type == models.PostgresV3TypeSession
 }
 
 // callOf is the call m answers, as one recording of a call is given in place
