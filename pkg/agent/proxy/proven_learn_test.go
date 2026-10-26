@@ -1103,10 +1103,20 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 				body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
 				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
 					"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
-				noise := r3States(mm)["mock-1"].ReqBodyNoise
+				st := r3States(mm)["mock-1"]
+				noise := st.ReqBodyNoise
 				if window || tc.stamp {
-					if code != http.StatusOK || got != `{"ok":true}` || noise["body.processed_at"] == nil {
-						t.Fatalf("answered %d %s, learned %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise)
+					// An instant whole its call's window holds: a read of the
+					// clock, still compared at every replay (MockState.Clocks),
+					// never noise. Learned by its server's stamp alone, with
+					// no window, it stays noise.
+					_, clock := st.Clocks["body.processed_at"]
+					learned := clock && noise["body.processed_at"] == nil
+					if !window {
+						learned = !clock && noise["body.processed_at"] != nil
+					}
+					if code != http.StatusOK || got != `{"ok":true}` || !learned {
+						t.Fatalf("answered %d %s, learned noise %v clocks %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise, st.Clocks)
 					}
 					return
 				}
