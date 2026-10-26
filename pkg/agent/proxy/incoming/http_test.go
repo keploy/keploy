@@ -33,142 +33,6 @@ func stubIngressPaused(t *testing.T, fn func() bool) {
 	})
 }
 
-// TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk locks in the contract
-// that LastReadTime, when called after a successful Read, returns the readAt
-// of the chunk whose data the most recent Read returned bytes from — never
-// a chunk that is queued but not yet consumed.
-//
-// This is the exact race that broke listmonk-postgres on PR #4130's first
-// pass: the previous bridge+pipe design stored chunk N+1's ts BEFORE
-// pipe.Write blocked, so a parser that finished consuming chunk N and
-// queried LastReadTime before the bridge advanced past pipe.Write would
-// observe the next chunk's ts as the current request's reqTimestamp,
-// pushing per-test postgres mocks out of the window. Empty-body GETs
-// hit it deterministically because the parser never re-entered Read
-// between ReadRequest and LastReadTime.
-func TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-
-	f := newAsyncPipeFeeder(0, zap.NewNop())
-
-	// Enqueue three chunks at distinct times.
-	t1 := time.Now()
-	t2 := t1.Add(15 * time.Millisecond)
-	t3 := t2.Add(15 * time.Millisecond)
-	f.ch <- timedChunk{data: []byte("AAA"), readAt: t1}
-	f.ch <- timedChunk{data: []byte("BBB"), readAt: t2}
-	f.ch <- timedChunk{data: []byte("CCC"), readAt: t3}
-	close(f.ch)
-
-	// Before any Read, LastReadTime is zero.
-	if !f.LastReadTime().IsZero() {
-		t.Fatalf("expected zero LastReadTime before any Read, got %v", f.LastReadTime())
-	}
-
-	read := func(n int) string {
-		buf := make([]byte, n)
-		got, err := f.Read(buf)
-		if err != nil && err != io.EOF {
-			t.Fatalf("unexpected Read error: %v", err)
-		}
-		return string(buf[:got])
-	}
-
-	// Consume chunk 1 fully. LastReadTime should equal t1, NOT t2 — even
-	// though chunk 2 is already queued.
-	if got := read(3); got != "AAA" {
-		t.Fatalf("first read: want AAA, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t1) {
-		t.Fatalf("after chunk 1: want %v, got %v (overshoot to next chunk)", t1, f.LastReadTime())
-	}
-
-	// Consume chunk 2 fully. LastReadTime should equal t2.
-	if got := read(3); got != "BBB" {
-		t.Fatalf("second read: want BBB, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t2) {
-		t.Fatalf("after chunk 2: want %v, got %v", t2, f.LastReadTime())
-	}
-
-	// Partial read of chunk 3 still updates LastReadTime to t3 (the
-	// chunk was popped on the partial read; subsequent reads draw
-	// from the same chunk).
-	if got := read(2); got != "CC" {
-		t.Fatalf("third read partial: want CC, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t3) {
-		t.Fatalf("after partial chunk 3: want %v, got %v", t3, f.LastReadTime())
-	}
-	// Drain the rest from the same chunk.
-	if got := read(8); got != "C" {
-		t.Fatalf("third read drain: want C, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t3) {
-		t.Fatalf("after full chunk 3: want %v, got %v", t3, f.LastReadTime())
-	}
-
-	// Channel closed, no more chunks. EOF.
-	buf := make([]byte, 4)
-	if _, err := f.Read(buf); err != io.EOF {
-		t.Fatalf("expected EOF after drain, got %v", err)
-	}
-}
-
-// TestAsyncPipeFeederShutdownDrainWaitsForParser guards the regression
-// fixed alongside python-schema-match's missing /edge/nested_null capture:
-// shutdown's residual-chunk drain MUST wait for the parser goroutine to
-// exit before it consumes anything from the channel. Otherwise the drain
-// races the parser's Read for closed-channel data and silently steals
-// chunks the parser has not yet seen.
-//
-// Repro shape: short-lived HTTP/1.0 + Connection: close exchange where the
-// upstream socket EOFs immediately after the response, triggering Close
-// (and thus shutdown) on the feeder before the parser goroutine has been
-// scheduled. The parser then reads from a channel the drain has already
-// emptied, returns EOF, and emits nothing.
-func TestAsyncPipeFeederShutdownDrainWaitsForParser(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-
-	f := newAsyncPipeFeeder(0, zap.NewNop())
-
-	// Enqueue a chunk, mimicking io.Copy's Write of a single response.
-	if _, err := f.Write([]byte("HELLO")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-
-	// Forwarder finished — close the feeder. This used to spawn a drain
-	// goroutine that started consuming f.ch immediately, racing with the
-	// not-yet-scheduled parser.
-	f.Close()
-
-	// Give the (pre-fix) drain goroutine ample time to win the race and
-	// empty the channel. With the fix in place the drain blocks on the
-	// parserExited signal and stays out of the channel.
-	time.Sleep(20 * time.Millisecond)
-
-	// Now play parser: read the chunk. With the fix this must succeed —
-	// the chunk is still in the channel waiting for us. Pre-fix the
-	// channel is empty and Read returns EOF.
-	buf := make([]byte, 8)
-	n, err := f.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("Read: unexpected error %v", err)
-	}
-	if string(buf[:n]) != "HELLO" {
-		t.Fatalf("parser was supposed to consume HELLO before drain — got %q (drain raced and stole the chunk)", string(buf[:n]))
-	}
-
-	// Signal parser exit so shutdown's drain can proceed and the goroutine
-	// doesn't leak past test end.
-	f.signalParserExit()
-
-	// EOF after drain.
-	if _, err := f.Read(buf); err != io.EOF {
-		t.Fatalf("expected EOF after drain, got %v", err)
-	}
-}
-
 // TestCaptureHookSemaphoreMatchesConcurrencyConstant guards the link
 // between captureHookConcurrency and captureHookSem's buffer size. If
 // the constant is bumped without re-allocating the channel (or vice
@@ -362,69 +226,6 @@ func TestHandleHttp1ZeroCopy_CaptureGivesBackTheSlotItTook(t *testing.T) {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatal("handleHttp1Connection did not return")
-	}
-}
-
-func TestHTTPBodyCaptureBufferStopsWhenPaused(t *testing.T) {
-	paused := false
-	stubIngressPaused(t, func() bool { return paused })
-
-	state := newHTTPCaptureState(32)
-	capture := &httpBodyCaptureBuffer{state: state}
-
-	n, err := capture.Write([]byte("hello"))
-	if err != nil {
-		t.Fatalf("unexpected write error before pause: %v", err)
-	}
-	if n != len("hello") {
-		t.Fatalf("expected to report %d bytes written, got %d", len("hello"), n)
-	}
-	if got := string(capture.Bytes()); got != "hello" {
-		t.Fatalf("expected capture buffer to contain %q, got %q", "hello", got)
-	}
-
-	paused = true
-	n, err = capture.Write([]byte(" world"))
-	if err != nil {
-		t.Fatalf("unexpected write error after pause: %v", err)
-	}
-	if n != len(" world") {
-		t.Fatalf("expected to report %d bytes written after pause, got %d", len(" world"), n)
-	}
-	if !state.isAborted() {
-		t.Fatal("expected capture state to abort after pause")
-	}
-	if got := len(capture.Bytes()); got != 0 {
-		t.Fatalf("expected paused capture buffer to be cleared, got %d bytes", got)
-	}
-}
-
-func TestHTTPBodyCaptureBufferStopsAtBudget(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-
-	state := newHTTPCaptureState(5)
-	capture := &httpBodyCaptureBuffer{state: state}
-
-	n, err := capture.Write([]byte("hello"))
-	if err != nil {
-		t.Fatalf("unexpected write error before limit: %v", err)
-	}
-	if n != 5 {
-		t.Fatalf("expected to report 5 bytes written, got %d", n)
-	}
-
-	n, err = capture.Write([]byte("!"))
-	if err != nil {
-		t.Fatalf("unexpected write error after limit: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("expected to report 1 byte written after limit, got %d", n)
-	}
-	if !state.isAborted() {
-		t.Fatal("expected capture state to abort once the budget is exceeded")
-	}
-	if got := len(capture.Bytes()); got != 0 {
-		t.Fatalf("expected over-budget capture buffer to be cleared, got %d bytes", got)
 	}
 }
 
@@ -1376,5 +1177,136 @@ func TestHandleHttp1ZeroCopy_ASampledConnectionReadsThePauseAsItsRequestComes(t 
 	}
 	if n := mgr.NotRecordedUnderPressure().Total; n != 0 {
 		t.Fatalf("counted %d requests not recorded under pressure, want none", n)
+	}
+}
+
+// A pause that starts while a body is being forwarded and ends before its
+// exchange does cuts that body's capture: the exchange is not recorded, and it
+// is counted as not recorded under pressure, in both loops. Every check the
+// loops make of the pause itself comes before the pause (the zero-copy loop
+// reads it once, as the request comes) or after it, so only the cut capture
+// says the pause cost the exchange; read as the size budget, the exchange was
+// dropped and nothing said so.
+func TestBothIngressLoopsCountAnExchangeAPauseCutMidBody(t *testing.T) {
+	parts := []string{strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)}
+	for _, synchronous := range []bool{false, true} {
+		for _, side := range []string{"request", "response"} {
+			name := "zero-copy/" + side
+			if synchronous {
+				name = "synchronous/" + side
+			}
+			t.Run(name, func(t *testing.T) {
+				var paused atomic.Bool
+				stubIngressPaused(t, paused.Load)
+				mgr := syncMock.New(zap.NewNop())
+				ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+				defer cancel()
+				// step hands each body part on: the app takes the next one
+				// (request) or writes it (response) only once the test says.
+				step, took := make(chan struct{}), make(chan struct{})
+				wait := func(ch chan struct{}, what string) {
+					t.Helper()
+					select {
+					case <-ch:
+					case <-ctx.Done():
+						t.Fatalf("%s: %v", what, ctx.Err())
+					}
+				}
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if side == "request" {
+						buf := make([]byte, len(parts[0]))
+						for range parts {
+							if _, err := io.ReadFull(r.Body, buf); err != nil {
+								return
+							}
+							select {
+							case took <- struct{}{}:
+							case <-ctx.Done():
+								return
+							}
+						}
+						_, _ = w.Write([]byte("ok"))
+						return
+					}
+					for i, part := range parts {
+						if i > 0 {
+							select {
+							case <-step:
+							case <-ctx.Done():
+								return
+							}
+						}
+						_, _ = w.Write([]byte(part))
+						w.(http.Flusher).Flush()
+					}
+				}))
+				t.Cleanup(upstream.Close)
+				captured := make(chan string, 4)
+				stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+					req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+					opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+					captured <- req.URL.Path
+				})
+				pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+				client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1), nil)
+				br := bufio.NewReader(client)
+
+				if side == "request" {
+					head := fmt.Sprintf("POST /cut HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\nContent-Length: %d\r\n\r\n", 3*len(parts[0]))
+					for i, part := range parts {
+						if i == 0 {
+							part = head + part
+						}
+						if _, err := client.Write([]byte(part)); err != nil {
+							t.Fatal(err)
+						}
+						// The app has the part, so its capture has seen it:
+						// the pause covers the second part only.
+						wait(took, "the app did not get part "+fmt.Sprint(i+1))
+						paused.Store(i == 0)
+					}
+					resp, err := http.ReadResponse(br, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, _ = io.ReadAll(resp.Body)
+					resp.Body.Close()
+				} else {
+					if _, err := client.Write([]byte("GET /cut HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\n\r\n")); err != nil {
+						t.Fatal(err)
+					}
+					resp, err := http.ReadResponse(br, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					buf := make([]byte, len(parts[0]))
+					for i := range parts {
+						if i > 0 {
+							select {
+							case step <- struct{}{}:
+							case <-ctx.Done():
+								t.Fatal(ctx.Err())
+							}
+						}
+						// The client has the part, so its capture has seen
+						// it: the pause covers the second part only.
+						if _, err := io.ReadFull(resp.Body, buf); err != nil {
+							t.Fatalf("part %d: %v", i+1, err)
+						}
+						paused.Store(i == 0)
+					}
+					_, _ = io.ReadAll(resp.Body)
+					resp.Body.Close()
+				}
+				wait(done, "the ingress loop did not return")
+				pm.captures.Wait()
+				if len(captured) != 0 {
+					t.Fatalf("captured %s: a pause cut its %s body's capture", <-captured, side)
+				}
+				if got := mgr.NotRecordedUnderPressure(); got.Total != 1 || got.Connections() != 1 {
+					t.Fatalf("not recorded under pressure: %+v, want the exchange whose %s body the pause cut", got, side)
+				}
+			})
+		}
 	}
 }
