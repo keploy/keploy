@@ -1,20 +1,24 @@
 package replayer
 
 import (
+	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
-// preparedIndex files the mocks prepared statements are matched against, so
-// matchCommand finds them in the session tier through the store's index
+// preparedIndex files the mocks commands are matched against, so matchCommand
+// finds them in the session tier through the store's index
 // (integrations.SessionKeyReader) instead of walking the whole pool for every
-// COM_STMT_PREPARE, COM_STMT_EXECUTE and COM_STMT_CLOSE. In lax mode that tier
-// holds every test's traffic, and a walk per command cost more with every test
-// the set held.
+// COM_STMT_PREPARE, COM_STMT_CLOSE and, while no test window is open (between
+// tests, and under exact serving), COM_QUERY and COM_STMT_EXECUTE. In lax mode
+// that tier holds every test's traffic, and a walk per command cost more with
+// every test the set held.
 var preparedIndex = &integrations.MockIndex{Keys: preparedKeys}
 
 const (
@@ -28,12 +32,81 @@ const (
 	// keyClose: a mock with a COM_STMT_CLOSE request, the only requests a
 	// live CLOSE scores against.
 	keyClose = "C"
+	// keyQuery + a statement's identity (sqlStatementIdentity): a mock with a
+	// COM_QUERY request of that statement. A recorded COM_QUERY is an exact
+	// match for a live one only when the two identities are equal
+	// (matchQueryLive).
+	keyQuery = "Q\x00"
+	// keyExecute + the case folding (foldKey) of the identity of the query a
+	// COM_STMT_EXECUTE request recorded (mysql.PacketBundle.StoredQuery): a
+	// mock with such a request. A recorded EXECUTE matches a live one on its
+	// query, definitively or for the FIFO fallback, only when the two
+	// identities are equal ignoring case (matchStmtExecutePacketQueryAware).
+	keyExecute = "E\x00"
+	// keyExecuteUnnamed: a mock with a COM_STMT_EXECUTE request that recorded
+	// no query. Its statement is the one its PREPARE in the pool names, which
+	// no key of its own can say, so a live EXECUTE is matched by the full scan
+	// while the session tier holds one.
+	keyExecuteUnnamed = "E?"
 )
 
 var (
 	comStmtPrepare = mysql.CommandStatusToString(mysql.COM_STMT_PREPARE)
 	comStmtClose   = mysql.CommandStatusToString(mysql.COM_STMT_CLOSE)
+	comQuery       = mysql.CommandStatusToString(mysql.COM_QUERY)
+	comStmtExecute = mysql.CommandStatusToString(mysql.COM_STMT_EXECUTE)
 )
+
+// appendKey appends key to keys unless keys holds it.
+func appendKey(keys []string, key string) []string {
+	if slices.Contains(keys, key) {
+		return keys
+	}
+	return append(keys, key)
+}
+
+// foldKey is s case-folded so that foldKey(a) == foldKey(b) exactly when
+// strings.EqualFold(a, b): each rune, an invalid byte read as
+// utf8.RuneError as EqualFold reads it, becomes the smallest rune of its
+// simple case folding orbit (unicode.SimpleFold). An ASCII letter's is its
+// upper case.
+func foldKey(s string) string {
+	ascii, upper := true, true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			ascii = false
+			break
+		}
+		if 'a' <= c && c <= 'z' {
+			upper = false
+		}
+	}
+	if ascii {
+		if upper {
+			return s
+		}
+		b := []byte(s)
+		for i, c := range b {
+			if 'a' <= c && c <= 'z' {
+				b[i] = c - ('a' - 'A')
+			}
+		}
+		return string(b)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		least := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < least {
+				least = f
+			}
+		}
+		b.WriteRune(least)
+	}
+	return b.String()
+}
 
 func prepEntryKey(connID string, stmtID uint32) string {
 	return keyPrepEntry + connID + "\x00" + strconv.FormatUint(uint64(stmtID), 10)
@@ -61,6 +134,18 @@ func preparedKeys(m *models.Mock) []string {
 			if !closeFiled {
 				keys = append(keys, keyClose)
 				closeFiled = true
+			}
+		case comQuery:
+			if qp, ok := r.PacketBundle.Message.(*mysql.QueryPacket); ok && qp != nil {
+				keys = appendKey(keys, keyQuery+sqlStatementIdentity(qp.Query))
+			}
+		case comStmtExecute:
+			if ep, ok := r.PacketBundle.Message.(*mysql.StmtExecutePacket); ok && ep != nil {
+				if q := r.PacketBundle.StoredQuery(); q != "" {
+					keys = appendKey(keys, keyExecute+foldKey(sqlStatementIdentity(q)))
+				} else {
+					keys = appendKey(keys, keyExecuteUnnamed)
+				}
 			}
 		}
 	}

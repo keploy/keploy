@@ -55,3 +55,11 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 func StrictEngineForTest() *schemanoise.Engine {
 	return schemanoise.New(mysqlNoiseAdapter{}, false, true)
 }
+
+// MatchCommandExaminedForTest is MatchCommandForTest that also returns how
+// many candidates the scan visited (matchOptions.examined).
+func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine, fullScan bool) (*mysql.Response, bool, int, error) {
+	examined := 0
+	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, eng, nil, matchOptions{fullScan: fullScan, examined: &examined})
+	return resp, ok, examined, err
+}
