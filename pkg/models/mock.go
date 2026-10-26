@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/gob"
+	"maps"
 	"net/url"
 	"strings"
 	"time"
@@ -1099,6 +1100,13 @@ type MockState struct {
 	// noise: those the learn step of record's full round learned on it are
 	// written onto the recording.
 	Variables MockVariables `json:"variables,omitempty"`
+	// Clocks carries the places of the mock's call the learn step learned as
+	// reads of the application's clock (MockSpec.Clocks) back from the agent
+	// under the proven switch, as Variables does: record's full round writes
+	// them onto the recording, where a replay compares them through
+	// ClockOffset.Holds. An agent that predates it learns such a place as
+	// noise, as it did.
+	Clocks map[string]ClockOffset `json:"clocks,omitempty"`
 	// Binds are the variables the learn step learned, while answering this
 	// mock, that are bound at an earlier mock of the same test (MockSpec.LearnedBinds),
 	// by that mock's name: the replay writes them onto that mock.
@@ -1202,6 +1210,7 @@ func (m *Mock) DeepCopy() *Mock {
 	}
 
 	c.Spec.Variables = m.Spec.Variables.Clone()
+	c.Spec.Clocks = maps.Clone(m.Spec.Clocks)
 
 	// 3. Deep copy all slices by creating new slices and copying the elements.
 	// This gives each copy its own separate backing array.
