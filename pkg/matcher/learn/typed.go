@@ -517,14 +517,15 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Built on a moved place by an offset (offset.go), before any provenance
 	// excuses it.
 	if m, ok := places().offsetFrom([]driftedInstant{{rec: rec, live: live}}); ok {
-		ln.Kind, ln.Why = KindUnaccounted, offsetWhy(m)
+		// A place keploy could not read is keploy's limit.
+		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, offsetWhy(m), m.unread != ""
 		return ln
 	}
 	// A copy of what F gave the application in another test or in a
 	// recording made after the call, or a pick from it (the echo of those
 	// places), before any provenance excuses it.
 	if why := dc.echoedElsewhere([]driftedInstant{{rec: rec, live: live}}, at, served, raw, places); why != "" {
-		ln.Kind, ln.Why = KindUnaccounted, why
+		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, places().unread != "" && why == places().unread
 		return ln
 	}
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
@@ -550,7 +551,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// Noise, or an echo, only where the echo could read the test case's own
 	// request, where the moment F saw may stand.
 	if unread != "" {
-		ln.Kind, ln.Why = KindUnaccounted, unreadRequestWhy(unread)
+		ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, unreadRequestWhy(unread), true
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {

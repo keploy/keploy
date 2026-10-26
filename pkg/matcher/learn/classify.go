@@ -502,8 +502,8 @@ type Learned struct {
 	// NotFollowed, of an unaccounted drift, says keploy cannot follow or
 	// answer the value yet (a word of it echoed inside a longer answer
 	// value, an echo beside a source it set aside, a value a connection's
-	// start-up holds, a recording keploy could not read): keploy's limit,
-	// not a change nothing explains.
+	// start-up holds, a recording or the test case's request keploy could
+	// not read): keploy's limit, not a change nothing explains.
 	NotFollowed bool
 }
 
@@ -1067,6 +1067,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
+				// What keploy could not read (the test case's request, or a
+				// recording a place search needed) is keploy's limit.
+				ln.NotFollowed = unreadReq != "" || op != nil && op.unread != "" && why == op.unread
 			}
 		}
 		// Noise only where no word of what changed comes back in the

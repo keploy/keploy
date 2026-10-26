@@ -6,7 +6,6 @@ import (
 	"strings"
 	"sync"
 
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -253,10 +252,12 @@ func (m *Mapping) UnmarshalYAML(n *yaml.Node) error {
 	*m = Mapping(p)
 	mk, _, _ := known()
 	m.extra = extraFields(n, mk)
-	if provenswitch.On() && m.extra != nil && len(n.Content) > 0 && m.extra.nodes[0] == n.Content[0] && n.Content[0].HeadComment != "" {
+	if m.extra != nil && len(n.Content) > 0 && m.extra.nodes[0] == n.Content[0] && n.Content[0].HeadComment != "" {
 		// YAML hangs the comment the file starts with on its first field:
-		// it is the file's head, which the writer keeps as the head under
-		// the proven switch (mapdb's encodeOver), not this field's.
+		// it is the file's head, never this field's. Under the proven switch
+		// the writer keeps it as the head (mapdb's encodeOver); with it off
+		// a rewrite keeps no head, as before, rather than move it, a stale
+		// version line and all, after the fields keploy knows.
 		k := *n.Content[0]
 		k.HeadComment = ""
 		m.extra.nodes[0] = &k

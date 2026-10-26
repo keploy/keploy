@@ -193,7 +193,7 @@ func TestAPickFromTheTestRequestThatIsNoInstantIsRefused(t *testing.T) {
 		// Unread, it is refused for the request keploy could not read,
 		// saying to run keploy record with the agent of its version, never
 		// to declare the field noise.
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(c.live), shape(c.rec), at, []Earlier{GivenRequest(nil)}, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(unsentRequest) || strings.Contains(ln.Why, "declare it noise") || !strings.Contains(ln.Why, "Run keploy record with the keploy agent of its own version") {
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape(c.live), shape(c.rec), at, []Earlier{GivenRequest(nil)}, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Why != unreadRequestWhy(unsentRequest) || strings.Contains(ln.Why, "declare it noise") || !strings.Contains(ln.Why, "Run keploy record with the keploy agent of its own version") || !ln.NotFollowed {
 			t.Errorf("%q -> %q, no request sent: %s (%s); want it refused for the request", c.rec, c.live, ln.Kind, ln.Why)
 		}
 	}

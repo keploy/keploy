@@ -185,6 +185,7 @@ func TestAnEntryWithBothMockListsIsRefused(t *testing.T) {
 		{"yaml empty mock_entries", "id: post-url-1\nmock_entries: []\nmocks:\n  - name: mock-6\n", false},
 		{"json", `{"id":"post-url-1","mock_entries":[{"name":"m1"}],"mocks":[{"name":"mock-6"}]}`, true},
 		{"yaml names as a string", "id: post-url-1\nmock_entries:\n  - name: m1\nmocks: \"mock-6,mock-7\"\n", false},
+		{"yaml mocks through a merge", "<<: {mocks: \"mock-6,mock-7\"}\nid: post-url-1\nmock_entries:\n  - name: m1\n", false},
 		{"json names as a string", `{"id":"post-url-1","mock_entries":[{"name":"m1"}],"mocks":"mock-6,mock-7"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

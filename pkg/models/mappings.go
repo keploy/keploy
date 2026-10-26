@@ -509,7 +509,7 @@ const errBothMockLists = "test %q in mappings has both `mocks` and `mock_entries
 // unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
 // format's other fields, in whichever shape the entry has.
 func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
-	if provenswitch.On() && nodeHasField(node, "mock_entries") && nodeHasEntries(node, "mocks") {
+	if provenswitch.On() && mergedField(node, "mock_entries") != nil && nodeHasEntries(mergedField(node, "mocks"), "mocks") {
 		var e struct {
 			ID string `yaml:"id"`
 		}
@@ -727,6 +727,30 @@ func nodeHasEntries(node *yaml.Node, field string) bool {
 		}
 	}
 	return false
+}
+
+// mergedField is the mapping that gives node field: node itself, else the
+// first mapping its merge keys (<<) name that has it, as YAML resolves them;
+// nil when none does.
+func mergedField(node *yaml.Node, field string) *yaml.Node {
+	if nodeHasField(node, field) {
+		return node
+	}
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == "<<" {
+			merged = append(merged, node.Content[i+1])
+		}
+	}
+	for _, m := range mergedMappings(merged) {
+		if nodeHasField(m, field) {
+			return m
+		}
+	}
+	return nil
 }
 
 // jsonHasEntries is nodeHasEntries for a JSON object.
