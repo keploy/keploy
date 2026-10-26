@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
@@ -14,6 +15,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// resultSetEncodes counts the result sets EncodeToBinary encoded rather than
+// served from their cache.
+var resultSetEncodes atomic.Uint64
+
+// ResultSetEncodes returns how many result sets EncodeToBinary has encoded
+// since the process started, rather than served from their cache. Tests read
+// it to prove each recorded answer is encoded once however often it is served.
+func ResultSetEncodes() uint64 { return resultSetEncodes.Load() }
+
+// EncodeToBinary returns the wire bytes of packet. A text or binary result set
+// is encoded on its first serve only: its payload is cached on the result set
+// (mysql.EncodedPayload) and every later serve copies it after a fresh header.
 func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.PacketBundle, clientConn net.Conn, decodeCtx *DecodeContext) ([]byte, error) {
 
 	if packet == nil {
@@ -130,9 +143,13 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("expected TextResultSet, got %T", packet.Message)
 		}
 
-		data, err = query.EncodeTextResultSet(ctx, logger, pkt)
-		if err != nil {
-			return nil, fmt.Errorf("error encoding TextResultSet: %v", err)
+		if data = pkt.WireCache().Load(); data == nil {
+			data, err = query.EncodeTextResultSet(ctx, logger, pkt)
+			if err != nil {
+				return nil, fmt.Errorf("error encoding TextResultSet: %v", err)
+			}
+			data = pkt.WireCache().Store(data)
+			resultSetEncodes.Add(1)
 		}
 
 	case *mysql.BinaryProtocolResultSet:
@@ -141,9 +158,13 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 			return nil, fmt.Errorf("expected BinaryProtocolResultSet, got %T", packet.Message)
 		}
 
-		data, err = query.EncodeBinaryResultSet(ctx, logger, pkt)
-		if err != nil {
-			return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
+		if data = pkt.WireCache().Load(); data == nil {
+			data, err = query.EncodeBinaryResultSet(ctx, logger, pkt)
+			if err != nil {
+				return nil, fmt.Errorf("error encoding BinaryProtocolResultSet: %v", err)
+			}
+			data = pkt.WireCache().Store(data)
+			resultSetEncodes.Add(1)
 		}
 	default:
 		return nil, fmt.Errorf("unhandled mysql message type %T for encoding", packet.Message)
@@ -153,8 +174,10 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 		return nil, fmt.Errorf("packet header is nil for message type %T", packet.Message)
 	}
 
-	// Encode the header for the packet
-	header := make([]byte, 4)
+	// Encode the header for the packet. data may be a result set's cached
+	// payload, shared by every serve of that answer: it is only read here,
+	// into a new slice that holds the header and then the payload.
+	header := make([]byte, 4, 4+len(data))
 	// IMPORTANT:
 	// For composite (multi-packet) messages, `data` contains multiple packets where
 	// only the FIRST sub-packet lacks its 4-byte header. The recorded header's
@@ -170,7 +193,9 @@ func EncodeToBinary(ctx context.Context, logger *zap.Logger, packet *mysql.Packe
 	}
 	data = append(header, data...)
 
-	logger.Debug("Encoded Packet", zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
+	if ce := logger.Check(zap.DebugLevel, "Encoded Packet"); ce != nil {
+		ce.Write(zap.String("packet", packet.Header.Type), zap.ByteString("data", data))
+	}
 
 	return data, nil
 }
