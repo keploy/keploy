@@ -293,6 +293,100 @@ type MockCursor interface {
 	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
+// SequenceViewer is an optional MockMemDb capability, under exact serving: the
+// stateful cursor of the view in force now, resolved once, and where the open
+// test's sequences start (SequenceView). A parser that walks a reusable
+// request's recordings reads one view per call (SequenceViewOf) and both
+// peeks and commits through its Cursor, so a test opened or ended between the
+// peek and the commit moves the sequence the call peeked, never the next
+// view's. False with exact serving off: the parser then keeps MockCursor. The
+// agent's MockManager implements it, and so do the proxy's connection views
+// where they pass through to it (under exact serving); a worker's own scope's
+// view does not: its sequences are its scope's own, resolved per peek and
+// reused by the commit (MockCursor), and a worker's test is not the view's
+// open test. A store held to one call (RoundHolder) gives the view the call
+// was read in (CallRound.Sequence).
+type SequenceViewer interface {
+	SequenceView() (SequenceView, bool)
+}
+
+// SequenceViewOf returns db's sequence view (SequenceViewer): false for a
+// store with none, and with exact serving off.
+func SequenceViewOf(db MockMemDb) (SequenceView, bool) {
+	if s, ok := db.(SequenceViewer); ok {
+		return s.SequenceView()
+	}
+	return SequenceView{}, false
+}
+
+// SequenceView is, under exact serving, one view's stateful cursor and the
+// open test's recorded window (SequenceViewer).
+type SequenceView struct {
+	// Cursor is the view's stateful cursor (MockCursor), its keys and served
+	// marks resolved once: between tests the pool slice's, in a test the
+	// test's own, empty when the test opens (a retry too). Once the test
+	// ends it is kept for the calls read in the test: one walked after the
+	// end reads and moves the test's sequence where the test's calls left
+	// it, never the next view's, until the next set is staged.
+	Cursor MockCursor
+	// Test is the open test, "" between tests.
+	Test string
+	// Start and End are the open test's recorded window, the request and
+	// response times of its recording: zero between tests, and for a test
+	// the replay sent no window of (a kind whose test case has no request
+	// time).
+	Start, End time.Time
+	// Worker reports, in a test, whether a data-plane recording is one of
+	// the set's worker-scope mocks the view shows (models.Mapping.Worker):
+	// nil between tests, and in a view that shows none. A worker-scope
+	// recording belongs to no test (record files one there when no test's
+	// window was open, at its place in the gap it was made in, and an idle
+	// answer wherever it was recorded), so its request's sequence is walked
+	// on Between over every reached recording of it, by placement, with no
+	// window: one sequence for the set wherever its calls land.
+	Worker func(*models.Mock) bool
+	// Between is, with Worker, the stateful cursor the calls between tests
+	// advance (the last pool view's), which a worker-scope call in a test
+	// reads and advances too.
+	Between MockCursor
+}
+
+// Span returns the recordings, of n of one reusable request in record order
+// (at(i) the i-th's recorded request time), that the view's sequence walks,
+// as [lo, hi). In a test with a recorded window: those the window holds, so
+// the test is answered its own recordings whichever tests ran before it (a
+// test's answers never depend on the tests a selective replay or the kept
+// set drops); with none in it, the one recorded last before the window (the
+// answer in force when the test began), else the first. Between tests, and in
+// a test with no window, all of them. The walk answers the first of them not
+// served in the view, then the last again.
+func (v SequenceView) Span(n int, at func(i int) time.Time) (lo, hi int) {
+	if n <= 0 {
+		return 0, 0
+	}
+	if v.Test == "" || v.Start.IsZero() {
+		return 0, n
+	}
+	lo = n
+	for i := 0; i < n; i++ {
+		if !at(i).Before(v.Start) {
+			lo = i
+			break
+		}
+	}
+	hi = lo
+	for hi < n && (v.End.IsZero() || !at(hi).After(v.End)) {
+		hi++
+	}
+	if hi > lo {
+		return lo, hi
+	}
+	if lo > 0 {
+		return lo - 1, lo
+	}
+	return 0, 1
+}
+
 // StatementCatalog is an optional MockMemDb capability: the stored set's
 // statement catalog, the first recorded mock of each statement
 // (models.StatementKey) among the per-test mocks the agent keeps on disk, by
@@ -344,9 +438,13 @@ type ExactConsumedReader interface {
 //   - The account is every mock a parser was served while the view was
 //     installed, of any lifetime and through any door (the test's own, a
 //     protocol-phase or reusable one, one spent through a delete door, a
-//     worker-scope one), a serve whose claim was refused included (the
-//     tracker hears those too), once each by learn.MockID, in the order they
-//     came; none while no test is open, and none with no observer. The
+//     worker-scope one), one the store passed to its pool whose claim there
+//     then failed included (another connection's serve of it: the tracker
+//     hears those too), once each by learn.MockID, in the order they came;
+//     none while no test is open, and none with no observer. A consume the
+//     store's view refused (a mock it does not show, one that answered
+//     already) is no serve: neither this account nor the tracker holds it,
+//     and it makes its request no serve in the tracker's order. The
 //     test's own mocks the pool view answered before the test's view was
 //     installed (in flight when it began: InFlightIntoOpenTest) are in
 //     ConsumedTestMocks and not here: they were served before the test
@@ -395,8 +493,20 @@ type AnsweredCall struct {
 // none. A parser names it on a miss (MockMismatchReport.NotOwned): the call
 // is that recording, made where it was not recorded. For a miss's diagnosis
 // only: the mock is never handed out, nor served.
+//
+// The lookup is asked of the round the call was made in (CallRound), which
+// the parser marks (MarkCallRound) as the call's first read of the store,
+// before any matcher reads it: a recording that read's view held as its own
+// is never named (the replay ended the call's test under it, and the call
+// is that test's, not one record's judging moves to the worker scope), and
+// none is once the replay staged another set (restaged): a recording of the
+// next set named for the call would be moved there, and its one miss spent
+// on a call it never made. The staging is checked last, right before the
+// store spends a name, and again before it returns one. A lookup asked of
+// the zero CallRound names nothing.
 type StagedFinder interface {
-	FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string
+	MarkCallRound() CallRound
+	FindStagedNotOwned(kind models.Kind, call CallRound, match func(*models.Mock) bool) (name string, restaged bool)
 }
 
 // StagedKeyFinder is StagedFinder that also looks, when what is staged holds
@@ -407,8 +517,319 @@ type StagedFinder interface {
 // recording its comparison would accept is indexed under at least one of.
 // For a miss's diagnosis only.
 type StagedKeyFinder interface {
-	FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string
+	StagedFinder
+	FindStagedNotOwnedByKeys(kind models.Kind, call CallRound, keys []string, match func(*models.Mock) bool) (name string, restaged bool)
 }
+
+// CallRound is where a call's first read of the store found it made: the
+// staging it was in (WindowPacer.StagingEpoch) and the recordings, by name,
+// that read's view held as its own (the open test's, in flight into it,
+// shared with it, a pool view's ahead). A store makes it in O(1), keeping
+// what it needs to tell them later (StagedFinder.MarkCallRound); a round
+// snapshot is one too (RoundSnapshot.CallRound). It also says whether that
+// view was one the replay serves while it stages a set's mocks (Staging),
+// for the call's miss to say so (StampMark); whether it was a test's view
+// (InTest), for the miss to be filed where its call was made; and whether
+// its set was served by proven routing (Background), for a parser to say of
+// the call's miss what that view's set learned. Each is the view the read
+// found, never the one serving when the miss is reported: the replay can end
+// the call's test, or stage the next set, before then. A store that reads
+// its round in one snapshot (RoundReader) also keeps the round's generation
+// and boundary count the read was made at (Round, read under the same lock
+// as the epoch and the view), for a parser that marks a call before its
+// learn step's first read of the round to tell whether the round moved
+// between the two (MovedSince). The zero CallRound is of no read.
+type CallRound struct {
+	read       bool
+	staging    bool
+	inTest     bool
+	background bool
+	epoch      uint64
+	// gen and bounds are the round's generation and boundary count the
+	// read was made at (RoundAt.Gen, RoundAt.Bounds), atRead whether the
+	// store that made the read keeps them.
+	gen, bounds uint64
+	atRead      bool
+	held        func(name string) bool
+	// seq is the sequence view of the view the read was made in
+	// (WithSequence), seqOK whether the store keeps one.
+	seq   SequenceView
+	seqOK bool
+}
+
+// NewCallRound is a store's CallRound of staging epoch, held telling, by
+// name, the recordings its view held as its own (nil: none).
+func NewCallRound(epoch uint64, held func(name string) bool) CallRound {
+	return CallRound{read: true, epoch: epoch, held: held}
+}
+
+// Read reports whether c is of a read (not the zero CallRound).
+func (c CallRound) Read() bool { return c.read }
+
+// Epoch is the staging c was read in.
+func (c CallRound) Epoch() uint64 { return c.epoch }
+
+// Held reports whether the read's view held the recording name as its own.
+func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// WithSequence is c, read in the view whose sequence view is sv
+// (SequenceViewer): a store held to c's call (RoundHolder) walks the
+// call's reusable recordings in it, the view the call was read in, never one
+// installed after the read.
+func (c CallRound) WithSequence(sv SequenceView) CallRound {
+	c.seq, c.seqOK = sv, true
+	return c
+}
+
+// Sequence is the sequence view of the view c was read in (WithSequence):
+// false for a store that keeps none, and for a read made with exact serving
+// off.
+func (c CallRound) Sequence() (SequenceView, bool) { return c.seq, c.seqOK }
+
+// ReadAt is c, of a read made at at: its staging (at.Epoch), generation and
+// boundary count (at.Gen, at.Bounds). A store that reads its round in one
+// snapshot (RoundReader) sets it as it marks the call, all read under the
+// round lock with the view the mark describes, so they are of one instant.
+func (c CallRound) ReadAt(at RoundAt) CallRound {
+	c.epoch, c.gen, c.bounds, c.atRead = at.Epoch, at.Gen, at.Bounds, true
+	return c
+}
+
+// Round is the instant of the round c's read was made at (its Epoch, Gen and
+// Bounds; Taken is not kept); known is false for a read of a store that
+// keeps no generation (a CallRound made by NewCallRound alone).
+func (c CallRound) Round() (at RoundAt, known bool) {
+	return RoundAt{Epoch: c.epoch, Gen: c.gen, Bounds: c.bounds}, c.atRead
+}
+
+// MovedSince reports whether the round moved between the read c is of and
+// at, a later read of the round (RoundSnapshot.At): the replay staged a set
+// (another epoch), or a boundary of the round landed (another boundary
+// count, RoundAt.Bounds: a view's install, a boundary of the learn tracker:
+// a test's begin or end on it, a new set). No consume, spend or claim moves
+// it, nor a test process's claim of its key again
+// (MockManager.RestartExactKey), which gives back what its key spent and
+// moves the generation alone: the call is still in the round it was marked
+// in, and its first read decides it from what that round shows then.
+//
+// A parser that marks a call before any matcher reads the store, and
+// decides it with a learn step whose first read of the round comes after,
+// asks this of that first read: a call marked in a test whose end (a pool
+// view's install, the tracker's end of it), or end and the next test's
+// begin, landed between the mark and the first read was made in a round no
+// read shows any more. Decided in the round the first read shows, its mark
+// holds the ended test's recordings as its own while the read's view offers
+// the pool's, or the next test's in-flight recordings: the call is paired
+// with one of them and what it differs in learned onto it as noise, a false
+// green. Moved, it is the moved miss, learning nothing. A mark whose store
+// keeps no generation (Round's known false) is moved for every at: nothing
+// tells the round did not move under it (fail closed). The zero CallRound,
+// of no read, is never moved: the later read is the call's first. The agent's
+// MockManager gives it only where exact serving is off, where no round is
+// read; a call marked so, before exact serving began, is decided by its
+// first read alone (the agent's settle answers every call made before a test
+// opens).
+//
+// Stated limits, each failing closed (the moved miss learns nothing), the
+// same class as a take a boundary refuses under a learn step:
+//   - A call marked where the learn tracker had begun a test and the store
+//     still showed its pool view (RoundSnapshot.PoolsCall) is the pool's,
+//     decided at once by a first read made before the store installs that
+//     test's view, and the moved miss for a first read made after it: which
+//     of the two depends on where the install lands. HTTP's learn step,
+//     whose first read is its mark, reads the pool's call so too: a take
+//     the install lands under is refused, and its next pass is the moved
+//     miss. keploy mock's scope flow settles once, before the tracker
+//     begins the test, and installs its view after with no second settle,
+//     so any call marked between the begin and the install meets it there;
+//     keploy test only a call that arrives after its settle returns and
+//     before the install.
+//   - A call marked where the tracker had begun a test whose view the store
+//     had not installed, over the view of the test before
+//     (RoundSnapshot.TrackerAhead), is moved by the store's install of that
+//     test too, where a wait for that install from the mark could have
+//     decided the call in that test's round. keploy test's flow never
+//     produces the state (it begins no test over the last test's view).
+func (c CallRound) MovedSince(at RoundAt) bool {
+	if !c.read {
+		return false
+	}
+	return c.epoch != at.Epoch || !c.atRead || c.bounds != at.Bounds
+}
+
+// InStaging is c, of a read whose view the replay served while it staged a
+// set's mocks (a staging view: no recording answers a call there) when
+// staging is true. A store sets it as it marks the call, from the view it
+// read.
+func (c CallRound) InStaging(staging bool) CallRound {
+	c.staging = staging
+	return c
+}
+
+// Staging reports whether c's read found the replay staging a set's mocks.
+func (c CallRound) Staging() bool { return c.staging }
+
+// InView is c, of a read whose view was a test's (an open test's view, not a
+// pool view between tests) when inTest is true, and whose set was served by
+// proven routing (S12Background) when background is true. A store sets it as
+// it marks the call, from the view it read, with InStaging.
+func (c CallRound) InView(inTest, background bool) CallRound {
+	c.inTest, c.background = inTest, background
+	return c
+}
+
+// InTest reports whether c's read found a test's view: a miss of the call
+// was made in that test (models.MissInTest), wherever the replay was when
+// the miss is reported.
+func (c CallRound) InTest() bool { return c.inTest }
+
+// Background reports whether c's read found its set served by proven routing
+// (S12Background of the store then).
+func (c CallRound) Background() bool { return c.background }
+
+// S12BackgroundIn is S12Background as the call marked call found it: the
+// view its first read found (CallRound.Background), never the one serving
+// when the parser asks, which can be the next set's. A parser that says of a
+// call's miss whether its set was served by proven routing asks this, not
+// S12Background(db), once the call is marked. For the zero CallRound (a
+// store that marks no round), db's now.
+func S12BackgroundIn(call CallRound, db MockMemDb) bool {
+	if call.Read() {
+		return call.Background()
+	}
+	return S12Background(db)
+}
+
+// StampMark writes onto r, the miss report of the call marked call, where
+// that call was when it first read the round (models.MockMismatchReport.Mark):
+// the proxy says from it whether the miss was made while the set's mocks were
+// being staged, and whether in a test or outside every test
+// (models.MockMismatchReport.MarkedInTest). A miss is decided where its call
+// was marked, and the view serving when the report reaches the proxy can be
+// the next staging's, the staged set's after the call's staging, or the pool
+// view after the call's test ended. The staging it was marked in too
+// (models.MockMismatchReport.MarkEpoch): a miss marked before a test set's
+// staging is not that set's, whenever its report arrives. Nothing for the
+// zero CallRound (a store that marks no round): the proxy reads the view
+// serving then.
+func StampMark(r *models.MockMismatchReport, call CallRound) {
+	if r == nil || !call.Read() {
+		return
+	}
+	r.Mark = models.RoundMarkedSettled
+	if call.Staging() {
+		r.Mark = models.RoundMarkedStaging
+	}
+	r.MarkedInTest = call.InTest()
+	r.MarkEpoch = call.Epoch()
+}
+
+// MarkCallRound is mockDb's CallRound now (StagedFinder.MarkCallRound): the
+// zero CallRound from a store that names no recording made elsewhere.
+func MarkCallRound(mockDb MockMemDb) CallRound {
+	if f, ok := mockDb.(StagedFinder); ok {
+		return f.MarkCallRound()
+	}
+	return CallRound{}
+}
+
+// RoundHolder is an optional MockMemDb capability under exact serving: the
+// store held to the staging a call's first read was made in (call, from
+// MarkCallRound). Once the replay staged a test set after that read, every
+// read of held finds nothing and every consume door of it is refused, so a
+// matcher that reads the store after the mark never answers the call with a
+// recording of the next set, nor names one as its closest: the call misses,
+// and restaged then reports true, for the miss to say why. A read is checked
+// after it is made (a staging moves its epoch before it changes what a read
+// shows), a consume in the step that settles it. held is one call's, as a
+// ServingIn store is: not for sharing between goroutines, nor for keeping as
+// the parser's store. The agent's MockManager and its connection views
+// implement it.
+type RoundHolder interface {
+	HoldToRound(call CallRound) (held MockMemDb, restaged func() bool)
+}
+
+// HoldToRound is db held to call (RoundHolder): the store a parser's matcher
+// reads for the call it marked, and its miss's diagnosis reads too. db
+// itself, never restaged, for the zero CallRound (a store that marks no
+// round). A call db marked but cannot hold (db is no RoundHolder: a wrapper
+// that forwards StagedFinder and not RoundHolder) fails closed: the store
+// returned reads no recording and refuses every consume and write, so the
+// call is never answered with, nor diagnosed against, a recording of a set
+// the replay staged after its mark, and its miss says why (UnheldWhy).
+func HoldToRound(db MockMemDb, call CallRound) (MockMemDb, func() bool) {
+	if !call.Read() {
+		return db, notRestaged
+	}
+	if h, ok := db.(RoundHolder); ok {
+		return h.HoldToRound(call)
+	}
+	return unheldRound{window: db}, notRestaged
+}
+
+func notRestaged() bool { return false }
+
+// UnheldNote is what a miss says when its call's store marked the call's
+// round but could not hold the call to it (HoldToRound's fail-closed store).
+const UnheldNote = "keploy answered this call with no recording and names none made elsewhere for it: its mock store marks the test set a call is made in but cannot hold the call to that set (the store does not implement integrations.RoundHolder), and a call is never answered from, nor diagnosed against, a store the replay could stage another test set into while it is decided."
+
+// UnheldTeller is an optional capability of a store HoldToRound returned:
+// why it reads nothing for its call, non-empty when it could not hold the
+// call to its round (HoldToRound's fail-closed store, or a view over one,
+// which forwards it).
+type UnheldTeller interface {
+	Unheld() string
+}
+
+// UnheldWhy is why db, a store HoldToRound returned, reads nothing for its
+// call when it could not hold the call to its round (UnheldNote); "" for a
+// store that holds or marks no round.
+func UnheldWhy(db MockMemDb) string {
+	if u, ok := db.(UnheldTeller); ok {
+		return u.Unheld()
+	}
+	return ""
+}
+
+// unheldRound is HoldToRound's fail-closed store, for a call a store marked
+// but cannot hold: every read finds no recording, every consume and write
+// door is refused, and no optional capability of the store is offered (a
+// lookup of a recording made elsewhere included). Only the store's test
+// window state, which names no recording, is read through.
+type unheldRound struct{ window WindowAware }
+
+func (unheldRound) Unheld() string { return UnheldNote }
+
+func (unheldRound) GetFilteredMocks() ([]*models.Mock, error)                 { return nil, nil }
+func (unheldRound) GetUnFilteredMocks() ([]*models.Mock, error)               { return nil, nil }
+func (unheldRound) GetMySQLCounts() (total, config, data int)                 { return 0, 0, 0 }
+func (unheldRound) GetFilteredMocksInWindow() ([]*models.Mock, error)         { return nil, nil }
+func (unheldRound) GetPerTestMocksInWindow() ([]*models.Mock, error)          { return nil, nil }
+func (unheldRound) GetSessionMocks() ([]*models.Mock, error)                  { return nil, nil }
+func (unheldRound) GetStartupMocks() ([]*models.Mock, error)                  { return nil, nil }
+func (unheldRound) GetStartupMocksByKind(models.Kind) ([]*models.Mock, error) { return nil, nil }
+func (unheldRound) GetSessionScopedMocks() ([]*models.Mock, error)            { return nil, nil }
+func (unheldRound) GetConnectionMocks(string) ([]*models.Mock, error)         { return nil, nil }
+func (unheldRound) SessionMockHitCounts() map[string]uint64                   { return nil }
+func (unheldRound) UpdateUnFilteredMock(*models.Mock, *models.Mock) bool      { return false }
+func (unheldRound) DeleteFilteredMock(models.Mock) bool                       { return false }
+func (unheldRound) DeleteUnFilteredMock(models.Mock) bool                     { return false }
+func (unheldRound) DeleteStartupMock(models.Mock) bool                        { return false }
+func (unheldRound) MarkMockAsUsed(models.Mock) bool                           { return false }
+
+func (u unheldRound) SetCurrentTestWindow(start, end time.Time) {
+	u.window.SetCurrentTestWindow(start, end)
+}
+func (u unheldRound) IsTestWindowActive() bool                  { return u.window.IsTestWindowActive() }
+func (u unheldRound) HasFirstTestFired() bool                   { return u.window.HasFirstTestFired() }
+func (u unheldRound) FirstTestWindowStart() time.Time           { return u.window.FirstTestWindowStart() }
+func (u unheldRound) WindowSnapshot() models.WindowSnapshot     { return u.window.WindowSnapshot() }
+func (u unheldRound) CurrentTestWindow() (time.Time, time.Time) { return u.window.CurrentTestWindow() }
+
+var (
+	_ MockMemDb    = unheldRound{}
+	_ UnheldTeller = unheldRound{}
+)
 
 // BegunOwnerReader is an optional MockMemDb extension under exact serving:
 // whether a staged mock (one StagedFinder names) is owned by a test that has
@@ -431,8 +852,10 @@ type StagedReader interface {
 }
 
 // RecordedBeforeReader is an optional MockMemDb capability: it visits every
-// recording of the staged test set made before t (by request time), of any
-// kind, whether the store holds it in its trees or keeps it on disk (a test's
+// recording of the staged test set made before t (by request time), and
+// those made at t's own instant (a fixture recorded to the whole second may
+// have made one before t: the caller tells them apart, as the paired
+// recording is one), of any kind, whether the store holds it in its trees or keeps it on disk (a test's
 // own recordings are staged only as that test opens), served or not, each
 // once, until visit returns false. A recording kept on disk is decoded for
 // visit alone and kept by no one: visit must not keep m (or any part of it a
@@ -444,6 +867,56 @@ type StagedReader interface {
 // came from.
 type RecordedBeforeReader interface {
 	RangeRecordedBefore(t time.Time, visit func(m *models.Mock) bool) error
+}
+
+// StagedRecordingReader is an optional MockMemDb capability: it visits every
+// recording of kind of the staged test set, those the store holds in its
+// trees and those of kind it keeps on disk indexed under any of keys
+// (models.RequestKeys; a test's own are staged only as that test opens),
+// served or not and whatever the open view shows, each once, until visit
+// returns false. A recording kept on disk is decoded for visit alone: visit
+// keeps at most the one it stops at. For the learn step alone: a call that
+// is exactly a recording its scope does not offer (another test's, the
+// previous test's own after that test ended) is that recording's call, never
+// a drift of the recording the learn step would pair it with. Nothing it
+// visits is handed out, nor served. err is why the store cannot read them
+// all; the learn step then learns nothing from the call, as it cannot tell.
+type StagedRecordingReader interface {
+	RangeStagedRecordings(kind models.Kind, keys []string, visit func(m *models.Mock) bool) error
+}
+
+// LearnEnder is an optional MockMemDb capability: whether the test set's
+// learn step has ended (models.MockFilterParams.LearnEnded). keploy replay's
+// mock-consistency retry cycles run the passing test cases again, test-1
+// after test-N, so recorded order is not replay order in them: a late call of
+// one test read in another's window would be paired with that test's own
+// recording. Those cycles are judged, and learn nothing.
+type LearnEnder interface {
+	LearnEnded() bool
+}
+
+// LearnEnded reports whether db says the test set's learn step has ended
+// (LearnEnder): a parser's learn step then decides no request, and the
+// request is served as a replay serves it. false for a store that does not
+// tell, which keeps learning as before.
+func LearnEnded(db MockMemDb) bool {
+	e, ok := db.(LearnEnder)
+	return ok && e.LearnEnded()
+}
+
+// RecordedTests is an optional TestWindows capability: where a recording's
+// time lies among the staging's recorded test windows. For the learn step's
+// reasons and its check that a call is exactly a recording its scope does not
+// offer (StagedRecordingReader).
+type RecordedTests interface {
+	// RecordedTestAt is the test case whose recorded window t is inside, ""
+	// where t is inside none, the replay sent none, or the window carries no
+	// name.
+	RecordedTestAt(t time.Time) string
+	// BeforeTestWindow reports whether t is before the start of the
+	// recorded window of the test the view in force serves; known is false
+	// where no such window is known or t is zero.
+	BeforeTestWindow(t time.Time) (before, known bool)
 }
 
 // TestWindows is an optional MockMemDb capability: where the request time of
@@ -472,6 +945,152 @@ type TestWindows interface {
 type VariableScopes interface {
 	AheadVariables() *variables.Table
 	InAheadScope(m *models.Mock) bool
+}
+
+// ExactBackground is exact serving's background, which a
+// parser answers from after the open test's own: the worker scope the run
+// reached (a no-sibling recording from the set's start) and the pool.
+// An optional MockMemDb capability, under the proven switch: the agent's
+// MockManager implements it, and every MockMemDb wrapper must forward it.
+type ExactBackground interface {
+	// Background is kind's background recordings the view shows unused, in
+	// the view's order: the worker scope's by place (the set's start, a
+	// no-sibling recording among them, then each test's in the order the
+	// tests began), within one place a delivering answer before an idle one,
+	// then recorded order; then the pool's, in recorded order. A parser takes
+	// the first that answers, without re-sorting, and consumes it through
+	// its usual delete door.
+	Background(kind models.Kind) []*models.Mock
+	// SpentBackground is kind's background recordings this staging consumed,
+	// read-only, in recorded order: what a by-kind reuse answers with.
+	SpentBackground(kind models.Kind) []*models.Mock
+}
+
+// ByKindBackground is an optional MockMemDb capability under the background
+// rules: a kind's whole background as answering by kind reads it. By-kind
+// answers ignore Place. So whether a kind may be answered
+// by kind (every background reply of the kind equal) is decided over all of
+// the kind's background, and a by-kind answer may spend a recording placed
+// after a test the run has not begun yet: neither depends on which places
+// the run has reached when the call lands. Background, which exact serving
+// reads, keeps identical siblings gated by their places, and its consume
+// doors refuse one the view hides. The agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it.
+type ByKindBackground interface {
+	// KindBackground is kind's background recordings (data-plane, no async
+	// lane's), the worker scope at every place and the pool: those unused,
+	// and those this staging spent, each in recorded order. nil, nil for a
+	// set served by today's rules.
+	KindBackground(kind models.Kind) (unused, spent []*models.Mock)
+	// SpendByKind spends m, one of KindBackground's unused, for the staging:
+	// a by-kind answer's consumption, whatever m's place. False when m is
+	// none (spent already, no background recording, or today's rules); the
+	// parser then answers nothing with it.
+	SpendByKind(m *models.Mock) bool
+}
+
+// KindBackground is db's ByKindBackground.KindBackground: nil, nil when db
+// does not implement it.
+func KindBackground(db MockMemDb, kind models.Kind) (unused, spent []*models.Mock) {
+	if b, ok := db.(ByKindBackground); ok {
+		return b.KindBackground(kind)
+	}
+	return nil, nil
+}
+
+// SpendByKind is db's ByKindBackground.SpendByKind: false when db does not
+// implement it.
+func SpendByKind(db MockMemDb, m *models.Mock) bool {
+	if b, ok := db.(ByKindBackground); ok {
+		return b.SpendByKind(m)
+	}
+	return false
+}
+
+// BackgroundCursor is an optional MockMemDb capability under the background
+// rules (the pool keeps its recorded reuse and cursor-saturate,
+// its cursor shared with background callers): the stateful cursor of the
+// staged set's background, its worker scope and its pool, the one its calls
+// between tests advance. Inside a test the store's own MockCursor keeps no
+// cursor, as a test's own recordings answer once each, in recorded order; a
+// call inside a test that a background recording answers reads and advances
+// this one instead, so the background's recorded sequence, and each of its
+// recordings' served or delivered mark, is one whether its calls land inside
+// a test or between tests. ok is false for a set served by today's rules: a
+// parser then uses MockCursor as before. A test's own recordings and the
+// background are never one sequence: a parser picks among the open test's
+// own first. The agent's MockManager implements it, and every MockMemDb
+// wrapper must forward it.
+type BackgroundCursor interface {
+	BackgroundCursor() (MockCursor, bool)
+}
+
+// BackgroundCursorOf is db's BackgroundCursor: false when db does not
+// implement it, or serves its set by today's rules.
+func BackgroundCursorOf(db MockMemDb) (MockCursor, bool) {
+	if b, ok := db.(BackgroundCursor); ok {
+		return b.BackgroundCursor()
+	}
+	return nil, false
+}
+
+// S12Background reports whether db serves its staged set by the background
+// rules (BackgroundCursorOf's ok): false for a set served by
+// today's rules, and for a store that implements none of them.
+func S12Background(db MockMemDb) bool {
+	_, ok := BackgroundCursorOf(db)
+	return ok
+}
+
+// Pairing is record's full round's pairing. It answers only
+// while the session pairs: OutgoingOptions.Learn under the proven switch.
+// An optional MockMemDb capability: the agent's MockManager implements it,
+// and every MockMemDb wrapper must forward it.
+type Pairing interface {
+	// PairingCandidates is kind's data-plane recordings other tests own that
+	// their owners have not consumed and no pairing has claimed, in recorded
+	// order; nil when the session does not pair.
+	PairingCandidates(kind models.Kind) []*models.Mock
+	// ClaimPairing claims m for one pairing in this staging. It is false
+	// when another call claimed it, its owner consumed it, or the session
+	// does not pair. A claim is no consumption: m stays its owner's.
+	ClaimPairing(m *models.Mock) bool
+}
+
+// Background is db's background recordings of kind (ExactBackground); nil
+// when db does not implement it.
+func Background(db MockMemDb, kind models.Kind) []*models.Mock {
+	if b, ok := db.(ExactBackground); ok {
+		return b.Background(kind)
+	}
+	return nil
+}
+
+// SpentBackground is the background recordings of kind db's staging consumed
+// (ExactBackground); nil when db does not implement it.
+func SpentBackground(db MockMemDb, kind models.Kind) []*models.Mock {
+	if b, ok := db.(ExactBackground); ok {
+		return b.SpentBackground(kind)
+	}
+	return nil
+}
+
+// PairingCandidates is db's pairing candidates of kind (Pairing); nil when db
+// does not implement it.
+func PairingCandidates(db MockMemDb, kind models.Kind) []*models.Mock {
+	if p, ok := db.(Pairing); ok {
+		return p.PairingCandidates(kind)
+	}
+	return nil
+}
+
+// ClaimPairing claims m for one pairing in db's staging (Pairing); false when
+// db does not implement it.
+func ClaimPairing(db MockMemDb, m *models.Mock) bool {
+	if p, ok := db.(Pairing); ok {
+		return p.ClaimPairing(m)
+	}
+	return false
 }
 
 // InFlightOwner is an optional MockMemDb capability: whether a mock was in

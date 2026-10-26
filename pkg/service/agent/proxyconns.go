@@ -268,6 +268,6 @@ func (a *Agent) settlesReads() bool {
 	return a.startedSettlingReads() && a.countsCalls.Load()
 }
 
-// Compile-time proof that the agent offers begin and end the count: S12's
-// waits type-assert for it.
+// Compile-time proof that the agent offers begin and end the count: the
+// background rules' waits type-assert for it.
 var _ coreAgent.ProxyConnCounter = (*Agent)(nil)

@@ -68,3 +68,23 @@ func TestConcurrentNoteCloneSharesNothing(t *testing.T) {
 		t.Fatal("a nil note clones to one")
 	}
 }
+
+// A test whose learning record's full round did not keep (its agent did not
+// say it read the test case's request) has no verdict, saying why, unless it
+// failed: what was not kept can only add to why it failed.
+func TestALearningNotKeptLeavesATestWithNoVerdict(t *testing.T) {
+	why := "keploy did not keep what its agent learned on the mocks this test consumed (mock-1 body.at (noise))"
+	fi := FailureInfo{LearningNotKept: why}
+	if got := fi.NotJudged(); len(got) != 1 || got[0] != why {
+		t.Fatalf("NotJudged %v; want the reason", got)
+	}
+	if got := (TestResult{Status: TestStatusPassed, FailureInfo: fi}).VerdictUnknown(); len(got) != 1 || got[0] != why {
+		t.Fatalf("a passed row: VerdictUnknown %v; want the reason", got)
+	}
+	if got := (TestResult{Status: TestStatusFailed, FailureInfo: fi}).VerdictUnknown(); got != nil {
+		t.Fatalf("a failed row: VerdictUnknown %v; want none", got)
+	}
+	if got := (FailureInfo{}).NotJudged(); got != nil {
+		t.Fatalf("no reason: NotJudged %v", got)
+	}
+}

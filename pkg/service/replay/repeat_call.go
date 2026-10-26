@@ -30,42 +30,62 @@ const repeatRecordCommand = "keploy record"
 // the set's log, and how many of those notes' gaps make an elapsed-time span
 // the likely cause (models.RepeatNote.ElapsedTimeExpiryLikely), which the
 // log's cause clause reads (repeatMissCause).
-func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time) (named []string, likely int) {
+//
+// A call record's full round answered by a pairing (TestResult.Answers: the
+// call is exactly another test's recording, its ClosestMock) carries the
+// note too where the parser found the call identical to an earlier test's
+// answered recording: it is named and measured the same way, so judging,
+// which moves the paired recording to the set's background, names the
+// repeat with the move. Its next step is left as it was: the call was
+// answered, and a miss's explanation is not its. Its line says the pairing
+// answered it; answered counts those lines.
+func markRepeatOf(results []models.TestResult, consumers map[string][]string, testCases []*models.TestCase, lookup map[string]mockDisplayInfo, replayStarts map[string]time.Time) (named []string, likely, answered int) {
 	began := recordedStarts(testCases)
 	var recorded map[string][]recordedTwin
+	mark := func(r *models.TestResult, c *models.UnmatchedCall, isAnswer bool) {
+		if c.Repeat == nil || c.Repeat.Mock == "" {
+			return
+		}
+		if recorded == nil {
+			recorded = recordedTwins(lookup)
+		}
+		// The note is the agent's: written on a copy, never through.
+		n := c.Repeat.Clone()
+		if n.Test == "" {
+			n.Test = earlierConsumer(consumers[n.Mock], r.TestCaseID)
+		}
+		start := began[r.TestCaseID]
+		last, ok := recordAnchor(recorded[lookup[n.Mock].requestOf()], start)
+		if !ok && n.RecordedAt.Before(start) {
+			// A twin the set's lookup does not hold is measured from its
+			// own recording, made before the test began; one made after it
+			// began gives no gap at record.
+			last = recordedTwin{name: n.Mock, recordedAt: n.RecordedAt}
+		}
+		n.Anchor(replayStarts[r.TestCaseID], start, last.name, last.recordedAt)
+		c.Repeat = n
+		line := repeatLine(r.TestCaseID, c)
+		if isAnswer {
+			line += "; answered with " + c.ClosestMock + ", another test's recording (a pairing)"
+			answered++
+		} else {
+			c.NextSteps = c.Repeat.ExplainMiss(c.NotOwned, c.ClosestMock, c.RecordedIn, repeatRecordCommand)
+		}
+		named = append(named, line)
+		if l, _ := n.ElapsedTimeExpiryLikely(); l {
+			likely++
+		}
+	}
 	for i := range results {
 		r := &results[i]
 		for j := range r.FailureInfo.UnmatchedCalls {
-			c := &r.FailureInfo.UnmatchedCalls[j]
-			if c.Repeat == nil || c.Repeat.Mock == "" {
-				continue
-			}
-			if recorded == nil {
-				recorded = recordedTwins(lookup)
-			}
-			// The note is the agent's: written on a copy, never through.
-			n := c.Repeat.Clone()
-			if n.Test == "" {
-				n.Test = earlierConsumer(consumers[n.Mock], r.TestCaseID)
-			}
-			start := began[r.TestCaseID]
-			last, ok := recordAnchor(recorded[lookup[n.Mock].requestOf()], start)
-			if !ok && n.RecordedAt.Before(start) {
-				// A twin the set's lookup does not hold is measured from
-				// its own recording, made before the test began; one
-				// made after it began gives no gap at record.
-				last = recordedTwin{name: n.Mock, recordedAt: n.RecordedAt}
-			}
-			n.Anchor(replayStarts[r.TestCaseID], start, last.name, last.recordedAt)
-			c.Repeat = n
-			c.NextSteps = c.Repeat.ExplainMiss(c.NotOwned, c.ClosestMock, c.RecordedIn, repeatRecordCommand)
-			named = append(named, repeatLine(r.TestCaseID, c))
-			if l, _ := n.ElapsedTimeExpiryLikely(); l {
-				likely++
-			}
+			mark(r, &r.FailureInfo.UnmatchedCalls[j], false)
+		}
+		for j := range r.Answers {
+			mark(r, &r.Answers[j], true)
 		}
 	}
-	return named, likely
+	return named, likely, answered
 }
 
 // repeatMissCause is the cause clause of the set's log line for the total

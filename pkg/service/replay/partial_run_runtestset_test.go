@@ -252,6 +252,12 @@ type prInstr struct {
 	// the last answer, cleared by a store as the real client clears it.
 	perTestScope bool
 	scopeSaid    bool
+	// oldAgent makes the stand-in agent answer a staging as one that predates
+	// background serving does: saying no background rules (models.BackgroundRulesHeader);
+	// otherwise it says it serves the rules the staging named. backgroundSaid
+	// is what the client took from the last staging's answer.
+	oldAgent       bool
+	backgroundSaid string
 	// storedFiltered and storedUnfiltered are the pools of the last store.
 	storedFiltered, storedUnfiltered []*models.Mock
 	// release, when set, holds the stand-in application after the run's
@@ -267,6 +273,12 @@ type prInstr struct {
 	// read of the calls no mock answered during the test that just ran. The
 	// replayer reads them once per test, in test order.
 	mockErrorsFor func() ([]models.UnmatchedCall, error)
+}
+
+func (f *prInstr) AgentServesBackground() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.backgroundSaid
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -375,6 +387,12 @@ func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilter
 	f.allParams = append(f.allParams, params)
 	f.updateCalls++
 	f.scopeSaid = f.perTestScope
+	if ex := params.Exact; ex != nil && ex.Stage {
+		f.backgroundSaid = ""
+		if !f.oldAgent {
+			f.backgroundSaid = ex.Background
+		}
+	}
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than
@@ -524,6 +542,8 @@ type prRun struct {
 	cases    []*models.TestCase
 	// cancel stops the run from outside, as a SIGINT does; set by run.
 	cancel context.CancelFunc
+	// set is the test set the next run replays: test-set-0 where empty.
+	set string
 }
 
 func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
@@ -603,7 +623,11 @@ func (p *prRun) runTestSet(t *testing.T, serveTest bool) models.TestSetStatus {
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	p.cancel = cancel
-	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", serveTest)
+	set := p.set
+	if set == "" {
+		set = "test-set-0"
+	}
+	status, err := p.replayer.RunTestSet(ctx, set, "test-run-0", serveTest)
 	if err != nil {
 		t.Fatalf("RunTestSet returned an error, which is a different path from the one under test: %v", err)
 	}
@@ -1441,7 +1465,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -1453,7 +1477,7 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {

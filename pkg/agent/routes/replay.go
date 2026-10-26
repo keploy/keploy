@@ -36,8 +36,20 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
+	// The learn step reads keploy mock's tests as client tests (models.
+	// ClientTestsReadHeader): keploy mock keeps what it learns only when the
+	// agent says so.
+	if s, ok := a.svc.(clientTestsReader); ok && OutgoingReq.OutgoingOptions.Learn && s.ReadsClientTests() {
+		w.Header().Set(models.ClientTestsReadHeader, models.ClientTestsRead)
+	}
 
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// clientTestsReader says whether the agent's learn step reads its tests as
+// keploy mock's client tests (proven switch).
+type clientTestsReader interface {
+	ReadsClientTests() bool
 }
 
 // respondAgent writes an AgentResp with the given status. It exists so no
@@ -51,6 +63,10 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 // failure with "HTTP 200 {\"isSuccess\":false}", defeating any status check a
 // client might make.
 func respondAgent(w http.ResponseWriter, r *http.Request, status int, err error) {
+	// The agent names its version on every answer (models.AgentVersionHeader).
+	if utils.Version != "" {
+		w.Header().Set(models.AgentVersionHeader, utils.Version)
+	}
 	resp := models.AgentResp{IsSuccess: err == nil}
 	if err != nil {
 		resp.ErrorMsg = err.Error()
@@ -271,6 +287,12 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 			respondAgent(w, r, http.StatusInternalServerError, err)
 			return
 		}
+		// The learn step took the test case's request (models.
+		// TestRequestReadHeader): the replay keeps what it learned for the
+		// test only when the agent says so.
+		if s, ok := a.svc.(testRequestReader); ok && s.ReadsTestRequest() {
+			w.Header().Set(models.TestRequestReadHeader, models.TestRequestRead)
+		}
 	} else if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
@@ -286,6 +308,16 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
+	// A set's staging is answered with the background rules it is served by
+	// (models.BackgroundRulesHeader): the replay relaxes today's checks for
+	// it only when the agent says it serves it by the background rules.
+	if ex := updateParamsReq.FilterParams.Exact; ex != nil && ex.Stage {
+		if s, ok := a.svc.(interface{ ServedBackground() string }); ok {
+			if rules := s.ServedBackground(); rules != "" {
+				w.Header().Set(models.BackgroundRulesHeader, rules)
+			}
+		}
+	}
 	respondAgent(w, r, http.StatusOK, nil)
 }
 
@@ -294,6 +326,12 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 // request gave bound, as its mocks go live.
 type testCaseOpener interface {
 	OpenTestCase(ctx context.Context, params models.MockFilterParams) error
+}
+
+// testRequestReader says whether the agent's OpenTestCase hands the test
+// case's request its filter carries to the learn step (proven switch).
+type testRequestReader interface {
+	ReadsTestRequest() bool
 }
 
 // variableStarter begins a test's variables with the values its test case's

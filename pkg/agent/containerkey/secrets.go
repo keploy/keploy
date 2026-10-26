@@ -228,6 +228,23 @@ func redactArgv(entrypoint, cmd []string) (outEntrypoint, outCmd []string) {
 	return outEntrypoint, outCmd
 }
 
+// RedactArgs is args as keploy may log or store them: every secret they hold
+// (a flag's value named for a secret, a word marked a secret's value, an
+// argument that carries one) is RedactedText, as a container's command line
+// is redacted before keploy fingerprints it. The record log's command line of
+// a process that made a recorded call, and its origin's exe, read it
+// (starts.Registry.StampOrigin).
+func RedactArgs(args []string) []string {
+	out := redactArgs(args)
+	for i, a := range out {
+		out[i] = strings.ReplaceAll(a, redacted, RedactedText)
+	}
+	return out
+}
+
+// RedactedText is what RedactArgs puts in place of a secret's value.
+const RedactedText = "<redacted>"
+
 func redactArgs(args []string) []string {
 	if args == nil {
 		return nil

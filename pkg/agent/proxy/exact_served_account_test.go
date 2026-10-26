@@ -3,6 +3,8 @@ package proxy
 import (
 	"runtime"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,8 +36,9 @@ func heldBy(list []*models.Mock, m *models.Mock) bool {
 // installed (ServedInOpenTest), of any lifetime and through any door: the
 // test's own (a delete door), a protocol-phase one that stays reusable (the
 // update door, served twice, filed once), a protocol-phase one spent through
-// a delete door, a worker-scope one, and a serve whose claim is refused
-// (another test's recording, which the view does not show). The
+// a delete door, and a worker-scope one. A consume the view refuses
+// (another test's recording, which the view does not show) is no serve: the
+// account does not hold it, nor does the tracker. The
 // test's own answered list (ConsumedTestMocks) holds the test's own alone. A
 // pool view files nothing, and the next test's view starts empty. Every mock
 // the store's account holds is one the learn tracker heard of in its running
@@ -82,13 +85,16 @@ func TestTheOpenTestsAccountHoldsEveryServeOfAnyLifetime(t *testing.T) {
 	if mm.MarkMockAsUsed(*other) {
 		t.Fatal("another test's recording answered in the open test")
 	}
-	equalNames(t, "the open test's account", account(mm), "own", "handshake", "set-config", "w-boot", "other")
+	equalNames(t, "the open test's account", account(mm), "own", "handshake", "set-config", "w-boot")
 	equalNames(t, "the open test's own answered", mm.ConsumedTestMocks(), "own")
 	_, _, served, _ := tr.Test()
 	for _, m := range account(mm) {
 		if !heldBy(served, m) {
 			t.Fatalf("the store's account holds %s, which the tracker did not hear of in its running test", m.Name)
 		}
+	}
+	if heldBy(served, other) {
+		t.Fatal("the tracker heard of another test's recording, which the view refused, as served in its running test")
 	}
 
 	// The next test begun over T1's view: the store's account is T1's, and
@@ -97,7 +103,7 @@ func TestTheOpenTestsAccountHoldsEveryServeOfAnyLifetime(t *testing.T) {
 	tr.Begin()
 	_, _, served, before := tr.Test()
 	acct := account(mm)
-	equalNames(t, "begun over the last test's view", acct, "own", "handshake", "set-config", "w-boot", "other")
+	equalNames(t, "begun over the last test's view", acct, "own", "handshake", "set-config", "w-boot")
 	for _, m := range acct {
 		if heldBy(served, m) || !heldBy(before, m) {
 			t.Fatalf("over the last test's view, the tracker files %s as served in its test (%v) or not before it (%v)", m.Name, heldBy(served, m), heldBy(before, m))
@@ -115,11 +121,48 @@ func TestTheOpenTestsAccountHoldsEveryServeOfAnyLifetime(t *testing.T) {
 	equalNames(t, "T2's account", account(mm), "handshake")
 }
 
+// moveDuring starts, from an observer being told of a serve of T1's view,
+// T1's end and T2's begin (the pool view, then T2's) on a goroutine of its
+// own, and returns once that move asks for the round lock. A consume door
+// tells its observer in the step that settles the consume, holding that
+// lock, which moveDuring checks before the move starts (the door's is then
+// the only goroutine), so the move lands only after the serve is filed.
+// It returns T1's view, the one the serve is filed in, and a channel closed
+// once T2's view is in force.
+func moveDuring(t *testing.T, mm *MockManager) (*exactView, <-chan struct{}) {
+	t.Helper()
+	if mm.exact.round.mu.TryLock() {
+		mm.exact.round.mu.Unlock()
+		t.Errorf("the observer was told of a serve without the round lock held: a test's end and the next one's begin can land between the observer and the serve's filing")
+	}
+	served := mm.exactView()
+	parked, moved := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	mm.exact.round.onWait = func() { once.Do(func() { close(parked) }) }
+	go func() {
+		defer close(moved)
+		mm.ServeExactPool("k", nil)
+		mm.ServeExactTest("T2", nil)
+	}()
+	<-parked
+	if v := mm.exactView(); v == nil || v != served || v.test != "T1" {
+		t.Errorf("T1's end landed while its observer was told of a serve: the view served is %+v", v)
+	}
+	return served, moved
+}
+
+// heardBy is what v's account holds (exactView.heard).
+func heardBy(v *exactView) []*models.Mock {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return slices.Clone(v.heard)
+}
+
 // A serve is filed in the store's account after the observer is told of it,
 // and in the view that was installed when the observer was told: the
 // observer never finds the serve it is told of in the account, and a test's
-// end and the next one's begin landing while the observer is told leave the
-// serve out of the next test's account. Both kinds of door: one handed the
+// end and the next one's begin asked for while the observer is told wait
+// for the serve and leave it out of the next test's account. Both kinds of door: one handed the
 // parser's mock (update) and one that takes it by value (delete).
 func TestTheOpenTestsAccountIsFiledAfterTheObserverInTheViewItWasToldIn(t *testing.T) {
 	doors := map[string]func(mm *MockManager, m *models.Mock){
@@ -130,17 +173,19 @@ func TestTheOpenTestsAccountIsFiledAfterTheObserverInTheViewItWasToldIn(t *testi
 		t.Run(name, func(t *testing.T) {
 			own := exactMock("own", 0, models.LifetimePerTest)
 			hs := configMock("handshake", time.Second)
-			mm := stagedManager(t, []*models.Mock{own}, []*models.Mock{hs})
+			hs2 := configMock("handshake-2", 2*time.Second)
+			mm := stagedManager(t, []*models.Mock{own}, []*models.Mock{hs, hs2})
 			var early []string
 			moveOn := false
+			var t1 *exactView
+			var moved <-chan struct{}
 			mm.SetServedObserver(func(m *models.Mock) {
 				if heldBy(account(mm), m) {
 					early = append(early, m.Name)
 				}
 				if moveOn {
 					moveOn = false
-					mm.ServeExactPool("k", nil)
-					mm.ServeExactTest("T2", nil)
+					t1, moved = moveDuring(t, mm)
 				}
 			})
 			mm.ServeExactTest("T1", []*models.Mock{own})
@@ -154,13 +199,80 @@ func TestTheOpenTestsAccountIsFiledAfterTheObserverInTheViewItWasToldIn(t *testi
 			equalNames(t, "T1's account", account(mm), "own", "handshake")
 
 			// T1 ends and T2 begins while the observer is told of a serve
-			// read in T1's view: the serve is not T2's.
+			// read in T1's view, of a mock T1's account does not hold yet:
+			// they wait for the serve, which is filed in T1's view, not
+			// T2's.
 			moveOn = true
-			serve(mm, hs)
+			serve(mm, hs2)
 			if moveOn {
 				t.Fatal("the observer was not told of the serve")
 			}
+			<-moved
 			equalNames(t, "T2's account after a serve read in T1's view", account(mm))
+			equalNames(t, "T1's account after the move", heardBy(t1), "own", "handshake", "handshake-2")
+		})
+	}
+}
+
+// A serve its parser said the request of (integrations.ServingIn) is told to
+// the served-in observer in place of the served observer, and is filed in the
+// open test's account all the same: after that observer is told, in the view
+// installed when it was told. Both kinds of door.
+func TestTheOpenTestsAccountFilesAServeToldInItsRequest(t *testing.T) {
+	doors := map[string]func(db integrations.MockMemDb, m *models.Mock){
+		"update": func(db integrations.MockMemDb, m *models.Mock) { db.UpdateUnFilteredMock(m, m) },
+		"delete": func(db integrations.MockMemDb, m *models.Mock) { db.DeleteUnFilteredMock(*m) },
+	}
+	for name, serve := range doors {
+		t.Run(name, func(t *testing.T) {
+			hs := configMock("handshake", time.Second)
+			hs2 := configMock("handshake-2", 2*time.Second)
+			mm := stagedManager(t, nil, []*models.Mock{hs, hs2})
+			in := learn.NewTracker().Lift()
+			db := mm.ServingFor(in)
+			var early []string
+			told := 0
+			moveOn := false
+			var t1 *exactView
+			var moved <-chan struct{}
+			mm.SetServedObserver(func(m *models.Mock) {
+				t.Errorf("the served observer was told of %s, a serve said in its request", m.Name)
+			})
+			mm.SetServedInObserver(func(m *models.Mock, f *learn.Flight) {
+				told++
+				if f != in {
+					t.Errorf("the serve of %s was told in %v; want its request's", m.Name, f)
+				}
+				if heldBy(account(mm), m) {
+					early = append(early, m.Name)
+				}
+				if moveOn {
+					moveOn = false
+					t1, moved = moveDuring(t, mm)
+				}
+			})
+			mm.ServeExactTest("T1", nil)
+			serve(db, hs)
+			if told != 1 {
+				t.Fatalf("the served-in observer was told %d time(s); want once", told)
+			}
+			if len(early) != 0 {
+				t.Fatalf("the account held %v before the observer was told of them", early)
+			}
+			equalNames(t, "T1's account", account(mm), "handshake")
+
+			// T1 ends and T2 begins while the observer is told of a serve
+			// read in T1's view, of a mock T1's account does not hold yet:
+			// they wait for the serve, which is filed in T1's view, not
+			// T2's.
+			moveOn = true
+			serve(db, hs2)
+			if moveOn {
+				t.Fatal("the observer was not told of the serve")
+			}
+			<-moved
+			equalNames(t, "T2's account after a serve read in T1's view", account(mm))
+			equalNames(t, "T1's account after the move", heardBy(t1), "handshake", "handshake-2")
 		})
 	}
 }
@@ -208,11 +320,11 @@ func TestWithNoObserverADoorByValueAllocatesNothingForTheAccount(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{own}, nil)
 	mk := *own
-	if n := testing.AllocsPerRun(100, func() { mm.observeServedCopy(mk) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { mm.observeServedCopy(mk, nil) }); n != 0 {
 		t.Fatalf("with no view and no observer a by-value door allocates %v per serve", n)
 	}
 	mm.ServeExactTest("T1", []*models.Mock{own})
-	if n := testing.AllocsPerRun(100, func() { mm.observeServedCopy(mk) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { mm.observeServedCopy(mk, nil) }); n != 0 {
 		t.Fatalf("with a test's view and no observer a by-value door allocates %v per serve", n)
 	}
 }
@@ -427,7 +539,9 @@ func TestTheProxyStampsATestsViewWithItsTrackersOpenTest(t *testing.T) {
 // A view published before its stamp was set would be read with no stamp by a
 // learn step reading ServedInOpenTest beside the install: a learn step that
 // refuses a 0 would drop its calls at random, and the stamp's write would
-// race that read in a switch-on replay.
+// race that read in a switch-on replay. The stamp is read holding the round
+// lock too, with the view's binding to the tracker's test, so no snapshot
+// reads the tracker between the two.
 func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimePerTest)
 	shared := exactMock("shared", 0, models.LifetimePerTest)
@@ -549,6 +663,10 @@ func TestATestsViewIsStampedAndServedUnderOneLock(t *testing.T) {
 				reads++
 				if !held() {
 					t.Errorf("install %d read the tracker's open test with no install lock held: another test's view could be installed before its view is published", reads)
+				}
+				if mm.exact.round.mu.TryLock() {
+					mm.exact.round.mu.Unlock()
+					t.Errorf("install %d read the tracker's open test with no round lock held: a snapshot could read the tracker between the stamp and the view's binding to the tracker's test", reads)
 				}
 				return tr.OpenEpoch()
 			})
@@ -985,9 +1103,35 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		}
 	}
 	// refused checks, at a seam after the door read the pool view's
-	// answers, that the pool view is closed and that a consume of each held
-	// copy is refused.
-	refused := func(where string) {
+	// answers, that the pool view is closed, and starts a consume of each
+	// held copy on a goroutine of its own, which must wait: for the door's
+	// view where the pool view is closed (park waitClosed, the consume's
+	// closedWait), or for the round lock the install holds at the seam
+	// before the swap (park waitRound, lockRound). Each is settled against
+	// the door's view once it is in force (pending, read once the door
+	// returns) and must be refused there. Settled in the pool view instead,
+	// it is served and left out of the door's view, or refused there with no
+	// wait, which the row fails as well.
+	const waitClosed, waitRound = 1, 2
+	var park atomic.Int32
+	parked := make(chan struct{}, 1)
+	signal := func(kind int32) {
+		if park.Load() == kind {
+			select {
+			case parked <- struct{}{}:
+			default:
+			}
+		}
+	}
+	mm.exact.onClosedWait = func() { signal(waitClosed) }
+	mm.exact.round.onWait = func() { signal(waitRound) }
+	type pendingConsume struct {
+		where string
+		mk    *models.Mock
+		done  chan bool
+	}
+	var pending []pendingConsume
+	refused := func(where string, kind int32) {
 		gapView.mu.Lock()
 		closed := gapView.closed
 		gapView.mu.Unlock()
@@ -995,14 +1139,16 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 			t.Errorf("%s the pool view the door read its answers from was still open: a consume after the read is served and left out of the door's view", where)
 		}
 		for _, mk := range held {
-			if !mm.DeleteUnFilteredMock(*mk) {
-				continue
+			p := pendingConsume{where: where, mk: mk, done: make(chan bool, 1)}
+			park.Store(kind)
+			go func() { p.done <- mm.DeleteUnFilteredMock(*p.mk) }()
+			select {
+			case <-parked:
+				pending = append(pending, p)
+			case served := <-p.done:
+				t.Errorf("%s a parser's copy of %s, read from the pool view before the door began, was settled (served %v) without waiting for the door's view", where, mk.Name, served)
 			}
-			if mk.Name == slice.Name {
-				t.Errorf("%s a parser's copy of the pool-slice recording %s, read from the pool view before the door began, was served after the door read the pool view's answers: the pool answered a call made as the door began a view that does not show it", where, mk.Name)
-			} else {
-				t.Errorf("%s a parser's copy of %s, read from the pool view before the door began, was served after the door read the pool view's answers: the door's view leaves it out, so it answers that recording a second time, and the first answer is never flagged as the test's", where, mk.Name)
-			}
+			park.Store(0)
 		}
 	}
 	// ours is the view the door installs: a test's view, or the pool view
@@ -1034,7 +1180,7 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 			t.Errorf("closeAhead read a pool view other than the one the gap answered from")
 			return
 		}
-		refused("as closeAhead returned,")
+		refused("as closeAhead returned,", waitClosed)
 	}
 	mm.exact.beforePublish = func(v *exactView) {
 		if !ours(v) {
@@ -1048,7 +1194,7 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		if mm.exact.view.Load() != gapView {
 			t.Errorf("the view being replaced at the seam was not the pool view the gap answered from")
 		}
-		refused("at the seam before the swap,")
+		refused("at the seam before the swap,", waitRound)
 		if len(answered) > 0 {
 			var order []int
 			for _, mk := range answered {
@@ -1109,6 +1255,20 @@ func gapRow(t *testing.T, fixture gapFixture, door gapDoor) {
 		}
 	}
 	door.install(mm, calls, shared)
+	// Each consume started at a seam is settled in the door's view, which
+	// does not show the pool-slice recording, and holds t2's calls in flight
+	// as its own, never the pool view's copies of them: each is refused.
+	for _, p := range pending {
+		if !<-p.done {
+			continue
+		}
+		if p.mk.Name == slice.Name {
+			t.Errorf("%s a parser's copy of the pool-slice recording %s, read from the pool view before the door began, was served after the door read the pool view's answers: the pool answered a call made as the door began a view that does not show it", p.where, p.mk.Name)
+		} else {
+			t.Errorf("%s a parser's copy of %s, read from the pool view before the door began, was served after the door read the pool view's answers: the door's view leaves it out, so it answers that recording a second time, and the first answer is never flagged as the test's", p.where, p.mk.Name)
+		}
+	}
+	mm.exact.onClosedWait, mm.exact.round.onWait = nil, nil
 	if heldChecked != 1 || readChecked != 1 || seamChecked != 1 || endChecked != 1 {
 		t.Fatalf("the door's install ran the seam in closeAhead's hold %d times, the one at closeAhead's return %d times, the one before the swap %d times and the one at installExact's end %d times; want 1 of each", heldChecked, readChecked, seamChecked, endChecked)
 	}

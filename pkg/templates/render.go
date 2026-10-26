@@ -46,7 +46,19 @@ func (r *Run) recordedUse(p Placeholder) (string, bool) {
 // decoded. req itself is not changed, and
 // the copy shares no map or slice with it, so whatever sends it may change it
 // freely and a re-send starts from the test case as written.
-func (r *Run) Request(req models.HTTPReq) models.HTTPReq {
+func (r *Run) Request(req models.HTTPReq) models.HTTPReq { return r.request(req, r.use) }
+
+// RecordedRequest is req as it was recorded: Request with each use
+// placeholder holding its config.yaml value, the text the recording held
+// where the placeholder now is (a capture stays as written), escaped for
+// where it sits as Request escapes it. A secret is the text the recording
+// held, as in Request.
+func (r *Run) RecordedRequest(req models.HTTPReq) models.HTTPReq {
+	return r.request(req, r.recordedUse)
+}
+
+// request is req with each placeholder holding what look gives it (Request).
+func (r *Run) request(req models.HTTPReq, look lookupFunc) models.HTTPReq {
 	out := req
 	out.URLParams = copyStringMap(req.URLParams)
 	out.Header = copyStringMap(req.Header)
@@ -54,7 +66,6 @@ func (r *Run) Request(req models.HTTPReq) models.HTTPReq {
 	if r.Empty() || !anyPlaceholder(req) {
 		return out
 	}
-	look := r.use
 	out.URL = renderURL(req.URL, look, r)
 	for k, v := range out.URLParams {
 		out.URLParams[k] = renderRaw(v, look, r)
@@ -109,17 +120,25 @@ func (r *Run) renamed(m map[string]string) map[string]string {
 }
 
 // GRPCRequest is req with each placeholder holding this run's value, on a copy.
-func (r *Run) GRPCRequest(req models.GrpcReq) models.GrpcReq {
+func (r *Run) GRPCRequest(req models.GrpcReq) models.GrpcReq { return r.grpcRequest(req, r.use) }
+
+// RecordedGRPCRequest is req as it was recorded (RecordedRequest), on a copy.
+func (r *Run) RecordedGRPCRequest(req models.GrpcReq) models.GrpcReq {
+	return r.grpcRequest(req, r.recordedUse)
+}
+
+// grpcRequest is req with each placeholder holding what look gives it.
+func (r *Run) grpcRequest(req models.GrpcReq, look lookupFunc) models.GrpcReq {
 	out := req
 	out.Headers = copyGRPCHeaders(req.Headers)
 	out.AdditionalMessages = append([]models.GrpcLengthPrefixedMessage(nil), req.AdditionalMessages...)
 	if r.Empty() {
 		return out
 	}
-	renderGRPCHeaders(&out.Headers, r.use, r)
-	out.Body.DecodedData = renderRaw(out.Body.DecodedData, r.use, r)
+	renderGRPCHeaders(&out.Headers, look, r)
+	out.Body.DecodedData = renderRaw(out.Body.DecodedData, look, r)
 	for i := range out.AdditionalMessages {
-		out.AdditionalMessages[i].DecodedData = renderRaw(out.AdditionalMessages[i].DecodedData, r.use, r)
+		out.AdditionalMessages[i].DecodedData = renderRaw(out.AdditionalMessages[i].DecodedData, look, r)
 	}
 	return out
 }

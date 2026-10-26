@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"errors"
+	"slices"
 )
 
 // mockMismatchReporterKey is the unexported context key under which the proxy
@@ -59,4 +60,31 @@ func (m MismatchReported) Unwrap() error { return m.Err }
 func IsMismatchReported(err error) bool {
 	var m MismatchReported
 	return errors.As(err, &m)
+}
+
+// ReportAnswer reports an answered call in-band through the reporter that
+// WithMockMismatchReporter installed (the sink misses take), with r.Answer
+// set. The sink stamps At, Kind (MissInTest, MissOutsideTest), BeforeSet and
+// Source as it does for a miss. It returns false when no reporter is
+// installed; the caller answers the call either way. An empty r.Answer is a
+// programming error, and panics.
+//
+// The report travels as ErrAnswered carrying a copy of r that shares nothing
+// with it (NewMockMismatchError), so the parser keeps r, and the sink tells it
+// from a miss by errors.Is(err, ErrAnswered) as well as by its Answer.
+func ReportAnswer(ctx context.Context, r *MockMismatchReport) bool {
+	if r == nil || r.Answer == "" {
+		panic("models.ReportAnswer: a report without an Answer")
+	}
+	report, ok := ctx.Value(mockMismatchReporterKey{}).(func(error))
+	if !ok || report == nil {
+		return false
+	}
+	answered := *r
+	answered.FieldDiffs = slices.Clone(r.FieldDiffs)
+	answered.Differs = slices.Clone(r.Differs)
+	answered.VariablePlaces = slices.Clone(r.VariablePlaces)
+	answered.Source = r.Source.clone()
+	report(NewMockMismatchError(ErrAnswered, &answered))
+	return true
 }

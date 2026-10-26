@@ -227,6 +227,9 @@ var ErrNoTLSUpgrader = errors.New("relay: no TLSUpgradeFn configured for KindUpg
 //	bytes read from dst  → Chunk{Dir: FromDest}   → written to src
 func New(cfg Config, src, dst net.Conn) *Relay {
 	cfg = cfg.withDefaults()
+	// The chunks it reads are stamped on the proxy's clock: named for this
+	// run before the first one is (fakeconn.Chunk.ReadClock).
+	fakeconn.NameProxyClock()
 
 	r := &Relay{
 		cfg:        cfg,
@@ -770,7 +773,9 @@ func (r *Relay) forward(
 			// (heldUnstamped).
 			t.noteReading()
 			chunk.Dir = dir
-			chunk.ReadAt = observedReadAt(src, r.readNow())
+			// The relay's own stamp, on the proxy's clock; one another
+			// producer took is on no clock this relay can name.
+			chunk.ReadAt, chunk.ReadClock = observedRead(src, r.readNow())
 			t.noteCarried(chunk.ReadAt)
 			if dir == fakeconn.FromClient {
 				chunk.ConnSeq = r.order.FromClient()

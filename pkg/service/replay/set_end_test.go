@@ -481,7 +481,7 @@ func (h *setCallsRecorder) last() []models.UnmatchedCall {
 // Under the proven switch the calls the set's end charged to the set, made
 // before its first test and after its last, are told to a SetCallsHook with
 // the set's end, each as its parser reported it, so record's judging can read
-// one that is a recording made elsewhere (S12, a2). A set's end whose report
+// one that is a recording made elsewhere (a2). A set's end whose report
 // does not say the status it ended with tells none.
 func TestTheCallsChargedToTheSetAreToldToTheHooks(t *testing.T) {
 	provenOn(t, true)

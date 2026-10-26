@@ -1,0 +1,49 @@
+{
+  "version": "api.keploy.io/v1beta1",
+  "kind": "Http",
+  "name": "post-url-1",
+  "spec": {
+    "metadata": null,
+    "req": {
+      "method": "POST",
+      "proto_major": 1,
+      "proto_minor": 1,
+      "url": "http://localhost:8080/url",
+      "url_params": null,
+      "header": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\":\"https://example.com\"}",
+      "body_ref": {
+        "path": "",
+        "size": 0
+      },
+      "binary": "",
+      "form": null,
+      "timestamp": "2026-10-22T09:00:01.5Z"
+    },
+    "resp": {
+      "status_code": 200,
+      "header": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"ts\":1,\"url\":\"http://localhost:8080/Lhr4BWAi\"}",
+      "status_message": "",
+      "proto_major": 0,
+      "proto_minor": 0,
+      "binary": "",
+      "timestamp": "2026-10-22T09:00:01.52Z"
+    },
+    "objects": null,
+    "assertions": {
+      "noise": {
+        "body.ts": []
+      }
+    },
+    "created": 1792659601,
+    "reqTimestampMock": "0001-01-01T00:00:00Z",
+    "resTimestampMock": "0001-01-01T00:00:00Z",
+    "app_port": 0
+  },
+  "curl": "curl --request POST --url http://localhost:8080/url"
+}

@@ -38,9 +38,15 @@ type clockLayout struct {
 	wraps bool
 }
 
+// Every layout reads its text in UTC where the text names no offset, and an
+// abbreviated zone ("GMT", "UTC") at its own offset, never at the host's
+// (time.ParseInLocation in UTC): what an instant is, and the time of day its
+// text writes (instant.wall), are the text's, whatever zone keploy runs in.
 var clockLayouts = []clockLayout{
 	{re: regexp.MustCompile(`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} (?:GMT|UTC|[+-]\d{4})`), read: readRFC1123},
-	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?)?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
+	// ISO 8601 at the day, the hour ("2026-10-22T10Z", its reduced
+	// precision, after a T only), the minute, the second and a fraction.
+	{re: regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:[.,]\d{1,9})?)?|T\d{2})?(?:Z|[+-]\d{2}(?::?\d{2})?| ?(?:UTC|GMT))?`), read: readISO},
 	{re: regexp.MustCompile(`\d{8}T\d{6}Z?`), read: readCompact},
 	{re: regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[17][0-9a-fA-F]{3}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`), read: readUUIDTime, timeWord: uuidTimeWord},
 	{re: regexp.MustCompile(`\d{10}\.\d{1,9}|\d{19}|\d{16}|\d{13}|\d{10}`), read: readEpoch},
@@ -77,7 +83,9 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // Window is when one call's clock reads can have been made, in each run
 // (Tracker.CallWindow): in the recording (Rec) and in record's full round
 // (F), each on that run's app clock, after the run's previous data-plane call
-// reached keploy and no later than this call did. A value is in a request
+// reached keploy and no later than this call did (in the recording, the
+// previous call is one answered before this call was sent: PreviousCall).
+// A value is in a request
 // only once the app read it, so a read of the clock is no later than the
 // call that carries it; one made after the previous call is no earlier than
 // that. An instant that falls in its run's span in both runs moved with the
@@ -86,7 +94,13 @@ func ClockReads(recorded, live string) []models.ClockRead {
 // from the read to the call, each at least nothing), however far F's clock
 // ran ahead while the app booted: a constant does not move, nor does an
 // instant an answer the replay serves from its recording carries, so
-// neither falls in both. A read made before the previous call falls in
+// neither falls in both. An app may still pick another of a served answer's
+// instants by its clock (a timetable's next departure), which can fall in
+// both: an earlier place then holds the moment F saw (a payload, or a leaf of
+// an exchange the learn step served, as recorded or as F saw it), and the
+// classifier follows the value as a variable of the place holding its
+// recorded moment, or refuses it, before any window or lead excuses it
+// (instants.go, echoedIn). A read made before the previous call falls in
 // neither. It is no tolerance: the spans are what each run's calls show.
 type Window struct{ Rec, F Span }
 
@@ -139,9 +153,15 @@ func (w *Window) key() [4]int64 {
 
 // clockOf is clockIn with no call's window: the clock reads that moved by
 // FullRoundLead.
-func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, nil) }
+func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, nil, true) }
 
-// clockIn finds in a drifted value the clock reads that moved by
+// clockIn is clockAt of a call whose recorded instant is not known: a move by
+// the lead is bounded by no call (readNoLaterThan).
+func clockIn(recorded, live string, w *Window, lead bool) clockSet {
+	return clockAt(recorded, live, w, lead, time.Time{}, nil)
+}
+
+// clockAt finds in a drifted value the clock reads that moved by
 // FullRoundLead, or that are reads of each run's clock within the window w
 // of the call that carries the value (nil: none): the recorded and the live
 // value are each searched for instants in clockLayouts, at ASCII word
@@ -154,27 +174,43 @@ func clockOf(recorded, live string) clockSet { return clockIn(recorded, live, ni
 // compared at the instant's own resolution, and to the second for finer
 // ones: F's clock is set to each recorded instant plus the lead when the
 // test begins, and how long the app then takes to read its clock is its own
-// (a millisecond read moves by the lead plus that).
-func clockIn(recorded, live string, w *Window) clockSet {
+// (a millisecond read moves by the lead plus that). Without lead (keploy
+// mock's client tests: DriftCache.ClientTests) only the window shows a
+// read: a value the test harness gave the application may move by the lead.
+// A move by the lead is a read only where a read made no later than the call
+// that carries the value, recorded at call (zero: not known), makes it
+// (readNoLaterThan): one at the minute, the hour or the day moves by one
+// unit or two all the same where it was built on another instant, and only
+// its call bounds when it was read. A wall clock whose text names no zone is
+// read in UTC and in zone, the application's (nil: UTC alone).
+func clockAt(recorded, live string, w *Window, lead bool, call time.Time, zone *time.Location) clockSet {
 	c := clockSet{rec: map[string]bool{}, live: map[string]bool{}}
 	takenR, takenL := make([]bool, len(recorded)), make([]bool, len(live))
 	var at []int
-	for _, lay := range clockLayouts {
+	for k, lay := range clockLayouts {
 		rm, lm := clockMatches(lay, recorded, takenR), clockMatches(lay, live, takenL)
-		for k := 0; k < len(rm) && k < len(lm); k++ {
-			rs, ls := recorded[rm[k][0]:rm[k][1]], live[lm[k][0]:lm[k][1]]
-			if rs == ls || !moved(lay, rs, ls) && !w.holds(lay, rs, ls) {
+		for j := 0; j < len(rm) && j < len(lm); j++ {
+			rs, ls := recorded[rm[j][0]:rm[j][1]], live[lm[j][0]:lm[j][1]]
+			if rs == ls {
+				continue
+			}
+			// An instant that changed is read once, in the first layout that
+			// finds it: one that is no read there is none in a coarser
+			// layout read of its words either (the time of day of a date
+			// and time read after its call, which names no day a call
+			// bounds), so its words are taken whether it is a read or not.
+			for i := rm[j][0]; i < rm[j][1]; i++ {
+				takenR[i] = true
+			}
+			for i := lm[j][0]; i < lm[j][1]; i++ {
+				takenL[i] = true
+			}
+			if !(lead && moved(k, rs, ls, call, zone)) && !w.holds(lay, rs, ls) {
 				continue
 			}
 			rt, rres, _ := lay.read(rs)
 			c.reads = append(c.reads, models.ClockRead{At: rt.UTC(), Res: rres, Day: lay.wraps})
-			at = append(at, rm[k][0])
-			for i := rm[k][0]; i < rm[k][1]; i++ {
-				takenR[i] = true
-			}
-			for i := lm[k][0]; i < lm[k][1]; i++ {
-				takenL[i] = true
-			}
+			at = append(at, rm[j][0])
 			rw, lw := wordsBy(rs, isWord), wordsBy(ls, isWord)
 			for i, w := range rw {
 				if lay.timeWord == nil || lay.timeWord(rs, i) {
@@ -248,8 +284,11 @@ func clockMatches(lay clockLayout, s string, taken []bool) [][]int {
 }
 
 // moved reports whether the live text is the recorded one's instant moved by
-// FullRoundLead, read in layout lay.
-func moved(lay clockLayout, recorded, live string) bool {
+// FullRoundLead, read in layout k of clockLayouts, as a read made no later
+// than the call recorded at call (zero: not known) moves (readNoLaterThan),
+// a wall clock of no zone in UTC or in zone, the application's.
+func moved(k int, recorded, live string, call time.Time, zone *time.Location) bool {
+	lay := clockLayouts[k]
 	rt, rres, ok := lay.read(recorded)
 	if !ok {
 		return false
@@ -258,6 +297,60 @@ func moved(lay clockLayout, recorded, live string) bool {
 	if !ok {
 		return false
 	}
+	if !leadMoved(rt, lt, rres, lres, lay.wraps) {
+		return false
+	}
+	// A time of day names no day, and so no moment a call bounds.
+	return lay.wraps || readNoLaterThan(rt, lt, rres, call, namesZone(k, strings.ToUpper(recorded)) && namesZone(k, strings.ToUpper(live)), zone)
+}
+
+// readNoLaterThan reports whether rt, an instant as recorded (at resolution
+// rres), and lt, as record's full round saw it, that the lead moved
+// (leadMoved), can be a read of the application's clock made no later than
+// the call that carries it, recorded at call: a value is in a request only
+// once the application read it. The recorded read then is no later than
+// call (rt, the start of its unit, is no later), and F's read no later than
+// that read moved by the lead, as leadMoved compares the two, to the second:
+// from the latest the recorded read can be, the end of its unit or the call,
+// whichever is first. A value of a minute, an hour or a day that the lead
+// moved by a unit or two, or that a read after its call would give, is no
+// read of the clock by this: a value built on another instant (a served
+// message's time and five minutes) moves so as well. A wall clock whose text
+// names no zone (zoned false) is read in UTC and in zone, the one the
+// application writes such a clock in (Tracker.SetAppZone; nil: UTC alone),
+// and is a read where it is one in either: no other zone, since some zone
+// ahead of UTC would put any value up to fourteen hours after its call no
+// later than it. A zero call is not known, and bounds nothing.
+func readNoLaterThan(rt, lt time.Time, rres time.Duration, call time.Time, zoned bool, zone *time.Location) bool {
+	if call.IsZero() {
+		return true
+	}
+	fits := func(r, l time.Time) bool {
+		if r.After(call) {
+			return false
+		}
+		latest := r.Add(rres - time.Nanosecond)
+		if latest.After(call) {
+			latest = call
+		}
+		return l.Truncate(time.Second).Sub(latest.Truncate(time.Second)) < FullRoundLead+time.Second
+	}
+	if fits(rt, lt) {
+		return true
+	}
+	if zoned || zone == nil {
+		return false
+	}
+	return fits(wallIn(rt.UnixNano(), zone), wallIn(lt.UnixNano(), zone))
+}
+
+// leadMoved reports whether lt, read at resolution lres, is rt, read at
+// rres, moved by FullRoundLead: compared at the coarser of the two
+// resolutions, and to the second for finer ones (F's clock is set to each
+// recorded instant plus the lead when the test begins, and how long the app
+// then takes to read its clock is its own). Of a time of day (wraps), the
+// move is read modulo a day.
+func leadMoved(rt, lt time.Time, rres, lres time.Duration, wraps bool) bool {
 	res := rres
 	if lres > res {
 		res = lres
@@ -266,7 +359,7 @@ func moved(lay clockLayout, recorded, live string) bool {
 		res = time.Second
 	}
 	d := lt.Truncate(res).Sub(rt.Truncate(res))
-	if lay.wraps {
+	if wraps {
 		for d <= -12*time.Hour {
 			d += 24 * time.Hour
 		}
@@ -287,7 +380,7 @@ func inClockRange(t time.Time) bool { return !t.Before(clockFrom) && t.Before(cl
 
 func readRFC1123(s string) (time.Time, time.Duration, bool) {
 	for _, layout := range []string{time.RFC1123, time.RFC1123Z, "Mon, 02 Jan 2006 15:04:05 UTC"} {
-		if t, err := time.Parse(layout, s); err == nil && inClockRange(t) {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil && inClockRange(t) {
 			return t, time.Second, true
 		}
 	}
@@ -305,6 +398,9 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 			clock = clock[:z]
 		}
 		res = time.Minute
+		if !strings.Contains(clock, ":") {
+			res = time.Hour
+		}
 		if strings.Count(clock, ":") >= 2 {
 			res = time.Second
 			if f := strings.IndexByte(clock, '.'); f >= 0 {
@@ -313,8 +409,9 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 		}
 	}
 	for _, layout := range []string{"2006-01-02T15:04:05Z07:00", "2006-01-02T15:04:05Z0700", "2006-01-02T15:04:05Z07", "2006-01-02T15:04:05",
-		"2006-01-02T15:04Z07:00", "2006-01-02T15:04Z0700", "2006-01-02T15:04", "2006-01-02"} {
-		if t, err := time.Parse(layout, n); err == nil && inClockRange(t) {
+		"2006-01-02T15:04Z07:00", "2006-01-02T15:04Z0700", "2006-01-02T15:04",
+		"2006-01-02T15Z07:00", "2006-01-02T15Z0700", "2006-01-02T15Z07", "2006-01-02T15", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, n, time.UTC); err == nil && inClockRange(t) {
 			return t, res, true
 		}
 	}
@@ -323,7 +420,7 @@ func readISO(s string) (time.Time, time.Duration, bool) {
 
 func readCompact(s string) (time.Time, time.Duration, bool) {
 	for _, layout := range []string{"20060102T150405Z", "20060102T150405"} {
-		if t, err := time.Parse(layout, s); err == nil && inClockRange(t) {
+		if t, err := time.ParseInLocation(layout, s, time.UTC); err == nil && inClockRange(t) {
 			return t, time.Second, true
 		}
 	}
@@ -333,13 +430,13 @@ func readCompact(s string) (time.Time, time.Duration, bool) {
 // readTimeOfDay reads a time of day, to the second or the minute, or to its
 // fraction of a second ("10:00:41.250").
 func readTimeOfDay(s string) (time.Time, time.Duration, bool) {
-	if t, err := time.Parse("15:04:05", s); err == nil {
+	if t, err := time.ParseInLocation("15:04:05", s, time.UTC); err == nil {
 		if f := strings.IndexByte(s, '.'); f >= 0 {
 			return t, fractionRes(len(s) - f - 1), true
 		}
 		return t, time.Second, true
 	}
-	if t, err := time.Parse("15:04", s); err == nil {
+	if t, err := time.ParseInLocation("15:04", s, time.UTC); err == nil {
 		return t, time.Minute, true
 	}
 	return time.Time{}, 0, false

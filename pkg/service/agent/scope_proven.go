@@ -545,20 +545,43 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	// The test's end compares the listener's drops with these.
 	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)
+	// opened: the test's capture window opened (open), so a begin that
+	// fails after it takes the window back.
+	var open func()
+	opened := false
 	if capture != nil {
-		// Misses made from here, and those made since the previous test
-		// ended (or before the first test), are this test's: a miss outside
-		// every test is charged to the next test that begins (design v14
-		// §5.1). The window opens before the test's view is installed
-		// (BeginScopeAt), as keploy test's loops open it: opening it is
-		// where the proxy's learn tracker begins the test, and a tracker
-		// that began after the view was installed would file what the view
-		// served before it as the previous test's, so the store's account
-		// of the open test and the tracker's could not be of one test.
-		capture.ContinueTestErrorCapture()
+		open = func() {
+			// The learn step bounds the test's calls by when the test began
+			// in its recording, the instant its begin moved the app's clock
+			// to (coreAgent.RecordedBeginTaker): given before the window
+			// opens, so the test begins with it.
+			if r, ok := a.Proxy.(coreAgent.RecordedBeginTaker); ok {
+				a.scopeMu.Lock()
+				began := a.testBegins[id]
+				a.scopeMu.Unlock()
+				r.TakeRecordedBegin(began)
+			}
+			// Misses made from here, and those made since the previous test
+			// ended (or before the first test), are this test's: a miss
+			// outside every test is charged to the next test that begins
+			// (design v14 §5.1). Opening the window is where the proxy's
+			// learn tracker begins the test, so it opens once the begin has
+			// moved the app's clock (beginScopeAt): a client test's call
+			// reads its window on the app's clock from the tracker's begin
+			// (learn.Tracker.CallWindowFrom), and a begin stamped before the
+			// move would give the test's first call a span the clock did not
+			// run as one, so no window. It opens before the test's view is
+			// installed, as keploy test's loops open it: a tracker that
+			// began after the view was installed would file what the view
+			// served before it as the previous test's, so the store's
+			// account of the open test and the tracker's could not be of one
+			// test.
+			capture.ContinueTestErrorCapture()
+			opened = true
+		}
 	}
-	if err := a.BeginScopeAt(ctx, id, 0, at); err != nil {
-		if capture != nil {
+	if err := a.beginScopeAt(ctx, id, 0, at, open); err != nil {
+		if opened {
 			// The test did not begin: what its window holds is carried
 			// into the next test's, as if it had never opened.
 			capture.WithdrawTestErrorCapture()
@@ -1249,7 +1272,9 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // sanitizedMiss is a miss as evidence keeps it: the protocol, the
 // destination, how far the matcher got, the closest recorded mock's name,
 // the matcher's next step, when it happened, why it missed (the learn step's
-// reason, in record's full round), and the call's shape
+// reason, in record's full round), how an answered call was answered and the
+// process that made the call (models.UnmatchedCall.Answer, Source: names,
+// no value), and the call's shape
 // (models.MissShape): for HTTP and gRPC the method and the target's shape,
 // for SQL the statement with its literals written "?". No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
@@ -1262,6 +1287,9 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
 		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		// An answered call stays one (models.UnmatchedCall.Answer): how it was
+		// answered and by which process, no value.
+		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn,
 		Repeat: m.Repeat.Clone()}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (models.MissShape) still writes them {}. Any other place

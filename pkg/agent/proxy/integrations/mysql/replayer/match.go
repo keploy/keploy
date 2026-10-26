@@ -3,6 +3,7 @@ package replayer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -302,9 +303,49 @@ type matchOptions struct {
 // test.globalNoise.requestBody bucket (root-relative lowercased paths) so
 // configured noise participates in strict gating with the same vocabulary as
 // learned req_body_noise. miss is non-nil only when ok is false without error.
+//
+// Under exact serving the command's round is marked before the matcher reads
+// the store (integrations.MarkCallRound), and the matcher and its miss read
+// the store held to that mark (integrations.HoldToRound): once the replay
+// stages a test set again, the command finds nothing of it to be answered
+// with, nor compared with, and misses saying so (restagedCommandNote). A
+// store that marks the command's round but cannot hold it reads nothing for
+// it, and the miss says why (integrations.UnheldWhy).
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
-	return matchCommandWith(ctx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise, matchOptions{})
+	call := integrations.MarkCallRound(mockDb)
+	db, restaged := integrations.HoldToRound(mockDb, call)
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, matchOptions{})
+	// A store that marked the command's round but could not hold it read
+	// nothing for it (integrations.HoldToRound fails closed): the miss says
+	// why.
+	unheld := integrations.UnheldWhy(db)
+	if !ok && (err == nil || errors.Is(err, errConsumeRefused)) && (restaged() || unheld != "") {
+		// A consume the hold refused is the restage's miss too.
+		err = nil
+		if miss == nil {
+			miss = &mockMiss{matchPhase: models.MatchPhaseExhausted}
+		}
+		miss.restaged = true
+		miss.nextSteps = restagedCommandNote
+		if unheld != "" {
+			miss.nextSteps = unheld
+		}
+	}
+	if miss != nil {
+		miss.call = call
+	}
+	return resp, ok, miss, err
 }
+
+// errConsumeRefused is the matcher's error when the store refused the
+// consume of the mock it matched.
+var errConsumeRefused = errors.New("failed to update matched mock")
+
+// restagedCommandNote is what a miss says when the replay staged a test set
+// again (the next set, or the same set for a replaced agent, which the store
+// does not tell apart) after the command's first read of the round, and the
+// matcher, held to that read, found nothing to answer it with.
+const restagedCommandNote = "keploy replay staged a test set again while it decided this command, so keploy answered it with no recording: a command is never answered with, nor compared with, a recording of a staging made after it began."
 
 // matchCommandWith is matchCommand with test options.
 func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string, opts matchOptions) (*mysql.Response, bool, *mockMiss, error) {
@@ -1859,7 +1900,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
 		logger.Debug("failed to update the matched mock")
 		// Re-fetch once to avoid spin
-		return nil, false, nil, fmt.Errorf("failed to update matched mock")
+		return nil, false, nil, errConsumeRefused
 	}
 
 	// Create a copy of the response to avoid modifying the original mock
@@ -2872,7 +2913,12 @@ func matchResetConnectionPacket(_ context.Context, _ *zap.Logger, expected, actu
 // see the HTTP updateMock's concurrency note, the same pooled-pointer race
 // applies here) and reaches persistence through the same
 // DeleteFilteredMock/UpdateUnFilteredMock paths as HTTP's learned noise.
-func updateMock(_ context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+//
+// What it consumes is told to the learn step as served in this connection's
+// request (integrations.ServingIn), so a request aloft on another connection
+// that reads no recording leaves this one's serve in its order.
+func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Mock, mockDb integrations.MockMemDb, detectedNoise map[string][]string) bool {
+	mockDb = integrations.ServingIn(ctx, mockDb)
 	updatedMock := *matchedMock
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
