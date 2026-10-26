@@ -1529,9 +1529,9 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
 			learned := learn.ClassifyGiven(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			plan, why, cause := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
 			if why != "" {
-				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
+				res.Outcome, res.Reason, res.Why, res.Cause = learn.Miss, models.MissRequestChanged, why, cause
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
 			}
 			if own && !tracker.Answer(test, m) {
@@ -1902,7 +1902,7 @@ type pairing struct {
 //     here under the key's name with no bind, whatever else Classify found:
 //     the test case is earlier than any call it makes. Its name is the key's
 //     alone in the test: no other variable takes it.
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))
@@ -1929,9 +1929,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			place, placeable := learn.VarPlace(r, jsonReq)
 			switch {
 			case !placeable:
-				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)"
+				return p, r.Path + " carries the test case's " + g.Name + " at a place keploy cannot follow a variable to (a form or multipart field)", learn.CauseNotFollowed
 			case !own:
-				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables"
+				return p, r.Path + " carries the test case's " + g.Name + ", and only a test's own calls carry its variables", learn.CauseNotFollowed
 			}
 			v := p.vars[g.Name]
 			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
@@ -1954,38 +1954,38 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
-				return p, why
+				return p, why, learn.CauseNotFollowed
 			case from.Side == "":
 				why := r.Path + " carries a value the test's recording holds earlier (in " + from.Mock + "), where keploy cannot bind it yet: a call of another protocol, or inside its payload"
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
-				return p, why
+				return p, why, learn.CauseNotFollowed
 			case from.Side != learn.Request:
 				why := r.Path + " carries a value " + from.Mock + " answered earlier in the test at " + from.Path + ", which keploy cannot follow from an answer"
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
-				return p, why
+				return p, why, learn.CauseNotFollowed
 			case !from.Whole || from.Var == "":
 				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 				if l.Why != "" {
 					why += "; " + l.Why
 				}
-				return p, why
+				return p, why, learn.CauseNotFollowed
 			case !own || !from.Own:
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables"
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier, and only a test's own calls carry its variables", learn.CauseNotFollowed
 			}
 			use, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
-				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)"
+				return p, r.Path + " carries a value " + from.Mock + " sent earlier in the test, at a place keploy cannot follow a variable to (a form or multipart field)", learn.CauseNotFollowed
 			}
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
-				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
+				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded", ""
 			}
 			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
 			if !ok {
-				return p, "the test ended before " + r.Path + " was learned"
+				return p, "the test ended before " + r.Path + " was learned", ""
 			}
 			v := p.vars[name]
 			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
@@ -2010,27 +2010,27 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
 
 		case learn.KindUnaccounted:
-			return p, r.Path + " changed, and " + l.Why
+			return p, r.Path + " changed, and " + l.Why, ""
 
 		case learn.KindEcho:
 			place, ok := learn.VarPlace(r, jsonReq)
 			if !ok {
-				return p, r.Path + " is echoed in the answer, at a place keploy cannot bind it (a form or multipart field)"
+				return p, r.Path + " is echoed in the answer, at a place keploy cannot bind it (a form or multipart field)", learn.CauseNotFollowed
 			}
 			at := answers(l, l.Echo)
 			if len(at) == 0 {
 				// Echoes names every place the answer holds it; none is
 				// one keploy can answer with this run's value.
 				if e := l.Echo[0]; e.Type != learn.Keys && (learn.WholeEcho(r, e) || e.Unnamed && e.Value == r.Value) {
-					return p, r.Path + " is echoed in the answer whole only at " + l.Echo[0].Path + ", a place keploy cannot answer with this run's value"
+					return p, r.Path + " is echoed in the answer whole only at " + l.Echo[0].Path + ", a place keploy cannot answer with this run's value", learn.CauseNotFollowed
 				}
-				return p, r.Path + " is echoed in the answer only inside a longer value, in another form or at a key (" + l.Echo[0].Path + "), which keploy cannot answer with this run's value"
+				return p, r.Path + " is echoed in the answer only inside a longer value, in another form or at a key (" + l.Echo[0].Path + "), which keploy cannot answer with this run's value", learn.CauseNotFollowed
 			}
 			if name, ok := echoed[r.Value]; ok {
 				// One recorded value is one variable only while the call
 				// sends one value for it.
 				if !variables.SameValue(p.values[name].Value, l.Live.Value, r.Type == learn.Number) {
-					return p, r.Path + " and " + p.values[name].Place + " held one value when recorded and two now, so they are not one value the answer echoes"
+					return p, r.Path + " and " + p.values[name].Place + " held one value when recorded and two now, so they are not one value the answer echoes", ""
 				}
 				v := p.vars[name]
 				v.Use = appendNew(v.Use, place)
@@ -2039,14 +2039,14 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			}
 			name, ok := tracker.Name(test, m.Name, place, reserved)
 			if !ok {
-				return p, "the test ended before " + r.Path + " was learned"
+				return p, "the test ended before " + r.Path + " was learned", ""
 			}
 			echoed[r.Value] = name
 			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
 		}
 	}
-	return p, ""
+	return p, "", ""
 }
 
 // givenBindings are the values the running test case's request gave
@@ -2473,7 +2473,7 @@ func (m *learnMiss) explain(r *models.MockMismatchReport) {
 		r.NextSteps = strings.TrimSpace(why + " " + r.NextSteps)
 		return
 	}
-	r.Reason = m.res.Reason
+	r.Reason, r.Cause = m.res.Reason, m.res.Cause
 	why := "keploy's learn step: " + m.res.Why + "."
 	switch m.res.Reason {
 	case models.MissUnstableOrder:

@@ -477,8 +477,12 @@ type UnmatchedCall struct {
 	ActualSummary string `json:"actual_summary,omitempty" yaml:"actual_summary,omitempty"` // e.g. "POST /comments"
 	Destination   string `json:"destination,omitempty" yaml:"destination,omitempty"`       // outgoing call's destination/domain (HTTP Host, or host:port) — which upstream missed
 	ClosestMock   string `json:"closest_mock,omitempty" yaml:"closest_mock,omitempty"`     // internal mock reference for View Closest
-	Diff          string `json:"diff,omitempty" yaml:"diff,omitempty"`
-	NextSteps     string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
+	// Cause, for a request_changed miss (Reason), is MissCauseNotFollowed when
+	// keploy refused what changed because it cannot follow the value yet; ""
+	// for any other miss. It never holds a value.
+	Cause     string `json:"cause,omitempty" yaml:"cause,omitempty"`
+	Diff      string `json:"diff,omitempty" yaml:"diff,omitempty"`
+	NextSteps string `json:"next_steps,omitempty" yaml:"next_steps,omitempty"` // actionable remediation guidance from the matcher
 	// MatchPhase, CandidateCount and FieldDiffs mirror MockMismatchReport so
 	// report consumers (CLI `keploy report`, report yaml, platform UI) can
 	// render structured field-level drift instead of an opaque string. Paths
@@ -716,6 +720,12 @@ const (
 	// value several recorded calls explain equally, a value that flows from an
 	// earlier call when nothing can follow it).
 	MissRequestChanged = "request_changed"
+	// MissCauseNotFollowed is an UnmatchedCall's Cause for a request_changed
+	// miss whose changed value came from somewhere keploy cannot follow it
+	// from yet (an earlier answer, a call of another protocol, the inside of
+	// a payload, the test case's own request, a form field): keploy's limit,
+	// not a change the app made. A judging build classes it as keploy's.
+	MissCauseNotFollowed = "not_followed"
 	// MissUnstableOrder: the closest recorded call holds an array the request
 	// sent with the recorded elements in another order (the order rule).
 	MissUnstableOrder = "unstable_order"
