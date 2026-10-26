@@ -118,12 +118,13 @@ type trackedConn struct {
 	idle atomic.Int32
 	// flights, under the proven switch, is the learn step's tracker its
 	// requests are told to (learn.Flight): a read that returns bytes while
-	// none is aloft lifts one (flight), the first write after it, its
-	// half-close or its close lands it. Set when it is kept (trackTold),
-	// before anything reads it; nil, nothing is told. fmu orders the lift against the
-	// landing: a handler may read and write from two goroutines. grounded:
-	// its close began, and no read lifts one again (the close's own reads,
-	// pairClosing, are no request).
+	// none is aloft lifts one (flight), and the first write after it lands
+	// it, or ends it untold (EndUntold) if that write fails; its half-close
+	// or its close, with it still aloft, ends it untold. Set when it is kept
+	// (trackTold), before anything reads it; nil, nothing is told. fmu
+	// orders the lift against the landing: a handler may read and write
+	// from two goroutines. grounded: its close began, and no read lifts one
+	// again (the close's own reads, pairClosing, are no request).
 	flights  *learn.Tracker
 	fmu      sync.Mutex
 	flight   *learn.Flight
@@ -384,11 +385,22 @@ func (c *trackedConn) Read(b []byte) (int, error) {
 // first bytes go out: the application cannot send the next request on
 // what it read before the landing, on this connection or another, so a
 // request that waited for the answer is never read as one aloft with it.
+// A landing write that fails ends that request untold instead
+// (learn.Flight.EndUntold): the application was not given its answer, so no
+// serve in it is read as one it had before a later request. A later write that fails ends nothing: c cannot tell the rest of
+// an answer from a write after it (the next request's, TLS's close_notify
+// once the application read its answer and hung up), and a request whose
+// answer is cut after its first write stays landed.
 func (c *trackedConn) Write(b []byte) (int, error) {
+	var f *learn.Flight
 	if len(b) > 0 {
-		c.land(false)
+		f = c.land()
 	}
-	return c.Conn.Write(b)
+	n, err := c.Conn.Write(b)
+	if err != nil {
+		f.EndUntold()
+	}
+	return n, err
 }
 
 // lift is a read of c that returned bytes: the start of a request in
@@ -417,9 +429,24 @@ func (c *trackedConn) InFlight() *learn.Flight {
 
 var _ integrations.FlightCarrier = (*trackedConn)(nil)
 
-// land ends c's request in flight, if one is aloft (learn.Flight.Land);
-// ground too stops any later read lifting one.
-func (c *trackedConn) land(ground bool) {
+// land ends c's request in flight, if one is aloft, as its answer starts
+// to go out (learn.Flight.Land), and returns it; nil with none aloft.
+func (c *trackedConn) land() *learn.Flight {
+	if c.flights == nil {
+		return nil
+	}
+	c.fmu.Lock()
+	f := c.flight
+	c.flight = nil
+	c.fmu.Unlock()
+	f.Land()
+	return f
+}
+
+// endUntold ends c's request in flight, if one is aloft, as one keploy
+// writes no answer to (learn.Flight.EndUntold): c closes, or half-closes,
+// before its answer starts. ground too stops any later read lifting one.
+func (c *trackedConn) endUntold(ground bool) {
 	if c.flights == nil {
 		return
 	}
@@ -428,7 +455,7 @@ func (c *trackedConn) land(ground bool) {
 	c.flight = nil
 	c.grounded = c.grounded || ground
 	c.fmu.Unlock()
-	f.Land()
+	f.EndUntold()
 }
 
 // count changes one of c's counts under c.mu (view).
@@ -540,11 +567,13 @@ func (c *trackedConn) SyscallConn() (syscall.RawConn, error) {
 }
 
 // Close closes the connection; it is kept until its handler is done
-// (forget). A parser that closes the connection and then returns its miss
-// (SQS's) has not filed the miss yet: until the proxy files it, the
-// connection holds the test's work, as a handler not blocked reading does.
+// (forget). A request still aloft is given no answer (endUntold), and no
+// read lifts one again. A parser that closes the connection and then
+// returns its miss (SQS's) has not filed the miss yet: until the proxy
+// files it, the connection holds the test's work, as a handler not blocked
+// reading does.
 func (c *trackedConn) Close() error {
-	c.land(true)
+	c.endUntold(true)
 	c.closing.Store(true)
 	if c.beforeClose != nil {
 		c.closeOnce.Do(c.beforeClose)
@@ -558,9 +587,10 @@ func (c *trackedConn) Close() error {
 // (pTls.TLSLayerHolder), for its close.
 func (c *trackedConn) HoldTLSLayer(l *tls.Conn) { c.tlsLayer.Store(l) }
 
-// CloseWrite forwards a half-close to the conn underneath.
+// CloseWrite forwards a half-close to the conn underneath: a request
+// still aloft is given no answer on c (endUntold).
 func (c *trackedConn) CloseWrite() error {
-	c.land(false)
+	c.endUntold(false)
 	type closeWriter interface{ CloseWrite() error }
 	if cw, ok := c.Conn.(closeWriter); ok {
 		return cw.CloseWrite()

@@ -293,6 +293,100 @@ type MockCursor interface {
 	AdvanceMockCursor(key string, servedIdx, n int)
 }
 
+// SequenceViewer is an optional MockMemDb capability, under exact serving: the
+// stateful cursor of the view in force now, resolved once, and where the open
+// test's sequences start (SequenceView). A parser that walks a reusable
+// request's recordings reads one view per call (SequenceViewOf) and both
+// peeks and commits through its Cursor, so a test opened or ended between the
+// peek and the commit moves the sequence the call peeked, never the next
+// view's. False with exact serving off: the parser then keeps MockCursor. The
+// agent's MockManager implements it, and so do the proxy's connection views
+// where they pass through to it (under exact serving); a worker's own scope's
+// view does not: its sequences are its scope's own, resolved per peek and
+// reused by the commit (MockCursor), and a worker's test is not the view's
+// open test. A store held to one call (RoundHolder) gives the view the call
+// was read in (CallRound.Sequence).
+type SequenceViewer interface {
+	SequenceView() (SequenceView, bool)
+}
+
+// SequenceViewOf returns db's sequence view (SequenceViewer): false for a
+// store with none, and with exact serving off.
+func SequenceViewOf(db MockMemDb) (SequenceView, bool) {
+	if s, ok := db.(SequenceViewer); ok {
+		return s.SequenceView()
+	}
+	return SequenceView{}, false
+}
+
+// SequenceView is, under exact serving, one view's stateful cursor and the
+// open test's recorded window (SequenceViewer).
+type SequenceView struct {
+	// Cursor is the view's stateful cursor (MockCursor), its keys and served
+	// marks resolved once: between tests the pool slice's, in a test the
+	// test's own, empty when the test opens (a retry too). Once the test
+	// ends it is kept for the calls read in the test: one walked after the
+	// end reads and moves the test's sequence where the test's calls left
+	// it, never the next view's, until the next set is staged.
+	Cursor MockCursor
+	// Test is the open test, "" between tests.
+	Test string
+	// Start and End are the open test's recorded window, the request and
+	// response times of its recording: zero between tests, and for a test
+	// the replay sent no window of (a kind whose test case has no request
+	// time).
+	Start, End time.Time
+	// Worker reports, in a test, whether a data-plane recording is one of
+	// the set's worker-scope mocks the view shows (models.Mapping.Worker):
+	// nil between tests, and in a view that shows none. A worker-scope
+	// recording belongs to no test (record files one there when no test's
+	// window was open, at its place in the gap it was made in, and an idle
+	// answer wherever it was recorded), so its request's sequence is walked
+	// on Between over every reached recording of it, by placement, with no
+	// window: one sequence for the set wherever its calls land.
+	Worker func(*models.Mock) bool
+	// Between is, with Worker, the stateful cursor the calls between tests
+	// advance (the last pool view's), which a worker-scope call in a test
+	// reads and advances too.
+	Between MockCursor
+}
+
+// Span returns the recordings, of n of one reusable request in record order
+// (at(i) the i-th's recorded request time), that the view's sequence walks,
+// as [lo, hi). In a test with a recorded window: those the window holds, so
+// the test is answered its own recordings whichever tests ran before it (a
+// test's answers never depend on the tests a selective replay or the kept
+// set drops); with none in it, the one recorded last before the window (the
+// answer in force when the test began), else the first. Between tests, and in
+// a test with no window, all of them. The walk answers the first of them not
+// served in the view, then the last again.
+func (v SequenceView) Span(n int, at func(i int) time.Time) (lo, hi int) {
+	if n <= 0 {
+		return 0, 0
+	}
+	if v.Test == "" || v.Start.IsZero() {
+		return 0, n
+	}
+	lo = n
+	for i := 0; i < n; i++ {
+		if !at(i).Before(v.Start) {
+			lo = i
+			break
+		}
+	}
+	hi = lo
+	for hi < n && (v.End.IsZero() || !at(hi).After(v.End)) {
+		hi++
+	}
+	if hi > lo {
+		return lo, hi
+	}
+	if lo > 0 {
+		return lo - 1, lo
+	}
+	return 0, 1
+}
+
 // StatementCatalog is an optional MockMemDb capability: the stored set's
 // statement catalog, the first recorded mock of each statement
 // (models.StatementKey) among the per-test mocks the agent keeps on disk, by
@@ -344,9 +438,13 @@ type ExactConsumedReader interface {
 //   - The account is every mock a parser was served while the view was
 //     installed, of any lifetime and through any door (the test's own, a
 //     protocol-phase or reusable one, one spent through a delete door, a
-//     worker-scope one), a serve whose claim was refused included (the
-//     tracker hears those too), once each by learn.MockID, in the order they
-//     came; none while no test is open, and none with no observer. The
+//     worker-scope one), one the store passed to its pool whose claim there
+//     then failed included (another connection's serve of it: the tracker
+//     hears those too), once each by learn.MockID, in the order they came;
+//     none while no test is open, and none with no observer. A consume the
+//     store's view refused (a mock it does not show, one that answered
+//     already) is no serve: neither this account nor the tracker holds it,
+//     and it makes its request no serve in the tracker's order. The
 //     test's own mocks the pool view answered before the test's view was
 //     installed (in flight when it began: InFlightIntoOpenTest) are in
 //     ConsumedTestMocks and not here: they were served before the test
@@ -453,6 +551,10 @@ type CallRound struct {
 	gen, bounds uint64
 	atRead      bool
 	held        func(name string) bool
+	// seq is the sequence view of the view the read was made in
+	// (WithSequence), seqOK whether the store keeps one.
+	seq   SequenceView
+	seqOK bool
 }
 
 // NewCallRound is a store's CallRound of staging epoch, held telling, by
@@ -469,6 +571,20 @@ func (c CallRound) Epoch() uint64 { return c.epoch }
 
 // Held reports whether the read's view held the recording name as its own.
 func (c CallRound) Held(name string) bool { return c.held != nil && c.held(name) }
+
+// WithSequence is c, read in the view whose sequence view is sv
+// (SequenceViewer): a store held to c's call (RoundHolder) walks the
+// call's reusable recordings in it, the view the call was read in, never one
+// installed after the read.
+func (c CallRound) WithSequence(sv SequenceView) CallRound {
+	c.seq, c.seqOK = sv, true
+	return c
+}
+
+// Sequence is the sequence view of the view c was read in (WithSequence):
+// false for a store that keeps none, and for a read made with exact serving
+// off.
+func (c CallRound) Sequence() (SequenceView, bool) { return c.seq, c.seqOK }
 
 // ReadAt is c, of a read made at at: its staging (at.Epoch), generation and
 // boundary count (at.Gen, at.Bounds). A store that reads its round in one

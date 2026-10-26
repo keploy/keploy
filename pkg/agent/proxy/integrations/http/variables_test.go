@@ -1223,8 +1223,8 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	pool, _ := splitVariableMocks([]*models.Mock{first, second})
 	hitsX, _, _ := h.variablePass(ctx, x, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	hitsY, _, _ := h.variablePass(ctx, y, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
-	hx, _ := h.pickHit(hitsX, nil, db, true)
-	hy, _ := h.pickHit(hitsY, nil, db, true)
+	hx, _, _ := h.pickHit(hitsX, nil, db, true, nil)
+	hy, _, _ := h.pickHit(hitsY, nil, db, true, nil)
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}

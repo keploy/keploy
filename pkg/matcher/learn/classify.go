@@ -175,6 +175,13 @@ type Raw struct {
 	noTime bool
 	// read: the text was read from the mock (RawOf).
 	read bool
+	// startUp: the mock is a connection's recorded start-up (isStartUp).
+	// A word it carries in a field a swap of start-ups can change
+	// (swapHolds: its backend pid, its secret key, a field another
+	// start-up recorded otherwise) never varies: a drifted value one of
+	// whose recorded words stands there is refused, never learned as
+	// varying or bound there (appearedIn, startUpWhy).
+	startUp bool
 	// asRecorded: F served r unchanged (ServedAsRecorded), so what F sent
 	// and gave the application there is r's recorded text: what the rule a
 	// copy follows its source reads of what F gave at r (follows.go).
@@ -270,6 +277,10 @@ type rawField struct {
 	start, end int
 	path       string
 	key        bool
+	// conn: of a connection's recorded start-up, a field that is the
+	// connection's own, whatever the server: its backend pid or secret key
+	// (BackendKeyData; RawOf, connFields).
+	conn bool
 }
 
 // Text is r's recorded request and answer, the payload only, as one text.
@@ -449,6 +460,12 @@ type Place struct {
 	// noTime: that mock's recorded time keploy cannot read, read as the
 	// call's own instant (Raw.noTime): a reason says so (placeAt).
 	noTime bool
+	// startUp, of a place found in a raw mock's payload: the mock is a
+	// connection's recorded start-up (Raw.startUp) and the value's word
+	// stands there in a field a swap of start-ups can change (swapHolds),
+	// whose words never vary, so a drifted value found there is refused
+	// (startUpWhy).
+	startUp bool
 }
 
 // atCallNote is what a reason says of a recording it names that was made at
@@ -999,6 +1016,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
 				}
+				if from.startUp {
+					ln.Kind, ln.From, ln.Why = KindUnaccounted, Place{}, startUpWhy(dc.ofIn(r.Value, l.Value, w, at), from)
+				}
 			} else if echo := Echoes(dc, r, resp); len(echo) > 0 {
 				ln.Kind, ln.Echo = KindEcho, echo
 			}
@@ -1524,7 +1544,8 @@ type DriftCache struct {
 	clientTests bool
 	// zone is the zone the application writes a wall clock of no zone in,
 	// beside UTC (Tracker.SetAppZone), nil for UTC alone: a client test's
-	// window reads such a wall clock in those two only (Window.holdsRead).
+	// window reads such a wall clock in those two only (Window.holdsRead),
+	// and so does the clock rule of one its protocol types (instantClock).
 	zone   *time.Location
 	mu     sync.Mutex
 	m      map[driftKey]*valueDrift
@@ -1562,8 +1583,9 @@ type DriftCache struct {
 // request the learn step reads (Earlier.Given).
 func (dc *DriftCache) ClientTests() bool { return dc != nil && dc.clientTests }
 
-// Zone is the zone, beside UTC, in which a client test's window reads a
-// wall clock of no zone (Tracker.SetAppZone): nil for UTC alone.
+// Zone is the zone, beside UTC, in which a client test's window, and the
+// clock rule of a wall clock its protocol types, read a wall clock of no
+// zone (Tracker.SetAppZone): nil for UTC alone.
 func (dc *DriftCache) Zone() *time.Location {
 	if dc == nil {
 		return nil
@@ -1586,9 +1608,10 @@ func (dc *DriftCache) ClockReads(recorded, live string) []models.ClockRead {
 
 // InstantClockRead is InstantClockRead of the cache's test: in one of keploy
 // mock's client tests (ClientTests) the lead shows no read of the
-// application's clock, so only w can.
+// application's clock, so only w can; a wall clock of no zone is read in the
+// cache's zone too (Zone).
 func (dc *DriftCache) InstantClockRead(rec, live Leaf, w *Window) bool {
-	return instantClockRead(rec, live, w, !dc.ClientTests())
+	return instantClockRead(rec, live, w, !dc.ClientTests(), dc.Zone())
 }
 
 // NewDriftCache makes an empty cache.
@@ -2124,23 +2147,34 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
 			from.AtCall, from.noTime = atCall, x.noTime
+			from.startUp = x.swapHolds(x.text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
 			return from, true
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime}, true
+					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, startUp: swap}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime}, true
+					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, startUp: swap}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
 				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}
-				if fol.refute(x, texts, v, p) {
+				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
+				// A word of a connection's start-up a swap can change is
+				// never set aside as a source the value moved away from: F
+				// may have given the application's connection another
+				// connection's start-up, whose word the value then copied
+				// (isStartUp, swapHolds). The value is refused there
+				// (startUpWhy). A word every start-up carries alike reads
+				// as any recording's.
+				if !p.startUp && fol.refute(x, texts, v, p) {
 					break
 				}
 				return p, true
@@ -2151,10 +2185,11 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 }
 
 // echoServed is the place of an exchange F served leaf by leaf (or the test
-// case's request) that holds, as recorded, in every form, the moment a
-// drifted value (recorded) was recorded with, by the rule the echo found it
-// a copy by (echoedIn, holdsRecorded): the first by placeRank. ok is false
-// when none does.
+// case's request) that holds, as recorded, in every form (a typed time of
+// day as the echo reads it, seenHoldsRecorded), the moment a drifted value
+// (recorded) was recorded with, by the rule the echo found it a copy by
+// (echoedIn, holdsRecorded): the first by placeRank. ok is false when none
+// does.
 func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []Earlier) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
@@ -2163,7 +2198,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 	rank := 7
 	for _, e := range served {
 		for _, s := range e.Seen {
-			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) {
+			if !dc.holdsRecorded(s.Leaf.Value, echoed) && !dc.holdsRecorded(dc.rawExtra(s.Leaf.Value), echoed) && !seenHoldsRecorded(s.Leaf, s.Leaf.Value, echoed) {
 				continue
 			}
 			whole := s.Leaf.Value == recorded
@@ -2196,8 +2231,9 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 
 // heldAt names the earliest place that holds the moment F saw of one of
 // echoed (holdsLive: an exchange F served leaf by leaf, as recorded or as F
-// served it, then a raw mock served earlier or recorded before at): "in
-// <mock> at <field>", "" when none does.
+// served it, a typed time of day there as the echo reads it, seenHoldsLive,
+// then a raw mock served earlier or recorded before at): "in <mock> at
+// <field>", "" when none does.
 func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier, raw []Raw) string {
 	holds := func(text string) bool {
 		return dc.holdsLive(text, echoed) || dc.holdsLive(dc.rawExtra(text), echoed)
@@ -2207,7 +2243,7 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 			// As echoedIn reads it: what F served, or gave the application
 			// as its test case's request, not what the application itself
 			// sent where it drifted.
-			if holds(s.Leaf.Value) || (s.Side == Response || e.Given || s.Live == s.Leaf.Value) && holds(s.Live) {
+			if holds(s.Leaf.Value) || seenHoldsLive(s.Leaf, s.Leaf.Value, echoed) || (s.Side == Response || e.Given || s.Live == s.Leaf.Value) && (holds(s.Live) || seenHoldsLive(s.Leaf, s.Live, echoed)) {
 				return "in " + e.Mock + " at " + s.Leaf.Path
 			}
 		}
@@ -2250,6 +2286,25 @@ func evidence(v *valueDrift, from Place) string {
 		provenance = notClock(v)
 	}
 	return found + "; " + provenance + ", so keploy follows it as a value from there. " + correction(from.Mock)
+}
+
+// startUpWhy is why a drifted value v whose recorded value, or a part of
+// it, stands in a connection's recorded start-up where a swap of start-ups
+// can change it (from: isStartUp, swapHolds) is refused: a word a start-up
+// carries never varies, and the value that changed may be a copy of
+// another connection's start-up.
+func startUpWhy(v *valueDrift, from Place) string {
+	at := placeAt(from)
+	var found string
+	switch {
+	case from.Echo:
+		found = echoFound(at)
+	case from.Held == v.rec || from.Held == v.decRec:
+		found = "its recorded value stands whole in " + at
+	default:
+		found = "a part of its recorded value (" + partOf(v.rec, from.Held) + ") stands in " + at
+	}
+	return found + ", a connection's recorded start-up. A word a start-up carries where connections differ (a backend pid, a secret key, a server parameter set per connection) never varies, and keploy gives each connection the application opens a recorded start-up by the order the connections open in, not by what each sent: a connection may get another connection's start-up, and a value that changed may be a copy of its word, so keploy cannot tell a copy from a varying value. If the field changes every run on its own, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // placeAt names where from stands, as a reason names it: "<mock> at
@@ -2363,6 +2418,7 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 	for _, e := range served {
 		for _, s := range e.Seen {
 			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
+			heldSeen(&held, s.Leaf, s.Leaf.Value)
 			// What F served (an answer's value, or a request's that did not
 			// drift), and the test case's request as keploy test sent it
 			// (Earlier.Given). What the application itself sent in F, where
@@ -2370,6 +2426,7 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 			// reads: two reads of the clock in one moment drift alike.
 			if s.Side == Response || e.Given || s.Live == s.Leaf.Value {
 				dc.heldIn(&held, s.Live, dc.rawExtra(s.Live))
+				heldSeen(&held, s.Leaf, s.Live)
 			}
 		}
 	}
@@ -2390,6 +2447,7 @@ func (dc *DriftCache) recordedMoments(at time.Time, served []Earlier, raw []Raw)
 	for _, e := range served {
 		for _, s := range e.Seen {
 			dc.heldIn(&held, s.Leaf.Value, dc.rawExtra(s.Leaf.Value))
+			heldSeen(&held, s.Leaf, s.Leaf.Value)
 		}
 	}
 	return &held
@@ -2417,8 +2475,8 @@ func Echoes(dc *DriftCache, r Leaf, resp []Leaf) []Leaf {
 			// An answer's instant its protocol types echoes the value
 			// where the value holds that moment, in any layout and form:
 			// it has no words to hold.
-			if t, res, ok := InstantOf(a); ok {
-				m := instantMoment(t, res)
+			if ti, ok := readTyped(a); ok {
+				m := ti.moment(ti.res)
 				if dc.holdsExact(r.Value, m) || dc.holdsExact(dc.rawExtra(r.Value), m) {
 					out = append(out, a)
 				}
@@ -2474,17 +2532,50 @@ func RawOf(m *models.Mock, served bool) Raw {
 	if !ok {
 		return r
 	}
-	r.read = true
+	r.read, r.startUp = true, isStartUp(m)
 	// The payload's own text, not its JSON: a JSON string escapes what
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.
 	payload := dropKeys(v, 0)
 	r.text, r.fields = textFields(payload)
+	if r.startUp {
+		for i, f := range r.fields {
+			r.fields[i].conn = !f.key && connFields[f.path]
+		}
+	}
 	if m.IsProtocolPhase() {
 		r.answerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	}
 	r.stamps = answerStamps(r.text, r.fields, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	return r
+}
+
+// isStartUp reports whether m is a connection's recorded start-up: what the
+// server answered a connection's opening with (a Postgres start-up: its
+// protocol version, the server's version and parameters, the backend pid
+// and secret key; the SSLRequest's answer before it). Record's full round
+// gives each connection the application opens one of the recorded start-ups
+// by the order the connections open in, not by what each connection sent,
+// so two connections whose roles in the application differ between the
+// recording and F (a pool's threads that open in either order) each get the
+// other's. A word a start-up carries where the start-ups differ (its
+// backend pid and secret key, swapHolds) is therefore never a source that
+// can vary: the recorded value copied it from its connection's start-up,
+// and a value that changed may be a copy of another connection's
+// (startUpWhy). Only a PostgresV3 session mock is read so; the older
+// Postgres kinds, which carry their start-up in packets, and other
+// protocols' start-ups are read as any recording.
+func isStartUp(m *models.Mock) bool {
+	return m.Kind == models.PostgresV3 && m.Spec.PostgresV3 != nil && m.Spec.PostgresV3.Type == models.PostgresV3TypeSession
+}
+
+// connFields are the fields of a connection's recorded start-up (isStartUp)
+// that are the connection's own, whatever the server and the other
+// start-ups recorded: its backend pid and secret key (BackendKeyData), as
+// textFields names them.
+var connFields = map[string]bool{
+	"postgresV3.session.backendProcessID": true,
+	"postgresV3.session.backendSecretKey": true,
 }
 
 // callOf is the call m answers, as one recording of a call is given in place
@@ -2623,6 +2714,71 @@ func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) string {
 		}
 	}
 	return ""
+}
+
+// holdsToken reports whether a field's text own holds word w as a token, in
+// its own text or in a declared form of it (fieldOf).
+func holdsToken(own, w string) bool {
+	if ContainsToken(own, w) {
+		return true
+	}
+	for _, form := range textForms(own)[1:] {
+		if ContainsToken(form, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// swapHolds reports whether x, a connection's recorded start-up, holds what
+// in finds (a word, a whole clock, an echoed moment) in a field a swap of
+// start-ups can change: the connection's own backend pid or secret key
+// (rawField.conn), or a field another start-up of raw recorded otherwise
+// or lacks (a server parameter set per connection), or in no one field.
+// text is x's text as searched. A field every start-up recorded alike (the
+// protocol and server versions, the server's parameters: 0, 3, 16, 4096,
+// on, UTC, UTF8 on Postgres 16) is no such field: whichever start-up F gave
+// a connection, it carried the same word there, so a value that changed
+// while it did not is read as any recording's word. False for any other
+// mock.
+func (x Raw) swapHolds(text string, raw []Raw, in func(own string) bool) bool {
+	if !x.startUp {
+		return false
+	}
+	held := false
+	for _, f := range x.fields {
+		if f.end > len(text) || !in(text[f.start:f.end]) {
+			continue
+		}
+		held = true
+		if f.conn || x.differs(f, raw) {
+			return true
+		}
+	}
+	return !held
+}
+
+// differs reports whether a start-up of raw lacks x's field f, or recorded
+// it otherwise: a swap of start-ups can change the word there. x itself,
+// in raw too, never differs.
+func (x Raw) differs(f rawField, raw []Raw) bool {
+	own := x.text[f.start:f.end]
+	for _, y := range raw {
+		if !y.startUp {
+			continue
+		}
+		same := false
+		for _, g := range y.fields {
+			if g.path == f.path && g.key == f.key {
+				same = y.text[g.start:g.end] == own
+				break
+			}
+		}
+		if !same {
+			return true
+		}
+	}
+	return false
 }
 
 // specNames are the names a mock file gives the spec's fields whose JSON

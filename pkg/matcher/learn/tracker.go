@@ -50,16 +50,20 @@ type Tracker struct {
 	// flights are the request each serve of the set was made in, by its
 	// number (nil: none, or one keploy cannot tell; flightOfLocked). NewSet
 	// replaces it, as serves. aloft are the requests in flight now,
-	// landings the count of those that landed, and flying whether any
+	// landings the count of those that landed or ended untold
+	// (Flight.EndUntold), and flying whether any
 	// connection was ever lifted (Lift): F's order is then read by
 	// flights (Order.told). lifts are the requests lifted in the set, in
 	// the order they lifted (Flight.lift), for a serve one of them caused
 	// (Flight.LiftCaused); NewSet replaces it.
-	flights  map[int]*Flight
-	aloft    map[*Flight]struct{}
-	landings uint64
-	flying   bool
-	lifts    []*Flight
+	flights map[int]*Flight
+	// handshakes are the set's serves told as handshakes
+	// (ServedHandshakeIn), by number.
+	handshakes map[int]bool
+	aloft      map[*Flight]struct{}
+	landings   uint64
+	flying     bool
+	lifts      []*Flight
 	// places are the instants of each mock F served in the running set, as
 	// the offset rule reads them (GivenPlaces), read from its recording once
 	// for the set (Order.GivenPlaces): no text of it is kept. NewSet
@@ -181,7 +185,7 @@ func (t *Tracker) NewSet() {
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq = nil, nil, 0
-	t.flights, t.lifts = nil, nil
+	t.flights, t.lifts, t.handshakes = nil, nil, nil
 	t.places = newSetPlaces()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
@@ -395,8 +399,10 @@ func MockID(m *models.Mock) string {
 // its call's window (Window.holdsRead): a value any other zone would read so
 // is no read keploy can tell from a value the test harness gave it (the
 // clock's reading plus two hours). An application whose zone is neither has
-// such a value refused, a false red that fails closed. The agent sets it
-// once, before any test.
+// such a value refused, a false red that fails closed. A wall clock of no
+// zone its protocol types (WallClockLeaf) is read in those two zones too
+// where the learn step looks for a read of the clock (instantClock), as a
+// text's is. The agent sets it once, before any test.
 func (t *Tracker) SetAppZone(loc *time.Location) {
 	if t == nil {
 		return
@@ -653,7 +659,7 @@ func (t *Tracker) Placed() Placed {
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Open: t.open, Begun: t.began, SetAt: t.setEpoch,
 		Set:   t.set[:len(t.set):len(t.set)],
-		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places, flights: t.flights, landings: t.landings, flying: t.flying},
+		Order: Order{t: t, serves: t.serves, upTo: t.seq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying},
 	}
 }
 
@@ -664,20 +670,49 @@ func (t *Tracker) Placed() Placed {
 func (t *Tracker) ServedMock(m *models.Mock) { t.ServedMockAt(m, time.Now()) }
 
 // ServedMockAt is ServedMock of a mock served at the real instant at.
-func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, nil) }
+func (t *Tracker) ServedMockAt(m *models.Mock, at time.Time) { t.servedIn(m, at, nil, serveKind{}) }
 
 // ServedMockIn is ServedMock of a mock served in the request in, as the
 // parser that served it said (integrations.ServingIn): the serve is that
 // request's whatever other requests are aloft (Flight); in NoRequest, no
 // request's; in one a request caused (Flight.LiftCaused), that one's. A nil
 // in is ServedMock.
-func (t *Tracker) ServedMockIn(m *models.Mock, in *Flight) { t.servedIn(m, time.Now(), in) }
+func (t *Tracker) ServedMockIn(m *models.Mock, in *Flight) {
+	t.servedIn(m, time.Now(), in, serveKind{})
+}
 
 // ServedMockAtIn is ServedMockIn of a mock served at the real instant at.
-func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) { t.servedIn(m, at, in) }
+func (t *Tracker) ServedMockAtIn(m *models.Mock, at time.Time, in *Flight) {
+	t.servedIn(m, at, in, serveKind{})
+}
 
-// servedIn is ServedMockAt of a serve made in the request in (nil: not said).
-func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight) {
+// ServedHandshakeIn is ServedMock of a handshake m, a protocol phase, that
+// answers the request in, its connection's recorded handshake having been
+// chosen in the request chosen, as its parser says: the answer a server
+// gives the request a client opens its connection with (a Postgres start-up
+// answers the StartupMessage, and is picked as the connection's first
+// request arrives: its StartupMessage, or the SSLRequest before it; an
+// SSLRequest's answer, the SSLRequest). A protocol phase told with
+// ServedMockIn (a driver's heartbeat) has no place in F's order and makes no
+// request a serve; a handshake told here has in's place (Flight) where it
+// was chosen in in: told once in landed, unless in was aloft beside a
+// request that was a serve or got a handshake. Chosen in another request, it
+// has no place, as two connections whose choices were aloft together may
+// have got each other's handshakes whatever came after. Either way it makes
+// in one that got a handshake, and no other request's serve untold. The
+// parser tells it while in is aloft, before its answer's first write lands
+// in: told after, it has no place (fail closed), as the application may have
+// read it and sent a request whose serve F numbered before it. A nil in, one
+// of another tracker's, or NoRequest gives it no place once a connection
+// lifted (Order.Of: 0, 0). A data-plane m is numbered and placed so too, and
+// makes no request a serve: tell those with ServedMockIn.
+func (t *Tracker) ServedHandshakeIn(m *models.Mock, chosen, in *Flight) {
+	t.servedIn(m, time.Now(), in, serveKind{handshake: true, placed: chosen == in})
+}
+
+// servedIn is ServedMockAt of a serve made in the request in (nil: not
+// said), told as k says (serveKind).
+func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind) {
 	if t == nil || m == nil {
 		return
 	}
@@ -697,7 +732,13 @@ func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight) {
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
-	if f := t.flightOfLocked(m.IsProtocolPhase(), in); f != nil {
+	if k.handshake {
+		if t.handshakes == nil {
+			t.handshakes = map[int]bool{}
+		}
+		t.handshakes[t.seq] = true
+	}
+	if f := t.flightOfLocked(m.IsProtocolPhase(), in, k); f != nil {
 		if t.flights == nil {
 			t.flights = map[int]*Flight{}
 		}
@@ -736,7 +777,12 @@ type Order struct {
 	// flights, landings and flying are the set's requests of each serve,
 	// the landings the read saw and whether F's order is read by flights
 	// (Order.told).
-	flights  map[int]*Flight
+	flights map[int]*Flight
+	// handshakes are the set's serves told as handshakes
+	// (ServedHandshakeIn), by number.
+	handshakes map[int]bool
+	// set is the epoch of the set the read was of (Tracker.setEpoch).
+	set      uint64
 	landings uint64
 	flying   bool
 }

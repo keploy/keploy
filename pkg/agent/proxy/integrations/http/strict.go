@@ -228,7 +228,15 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		}
 		return nil, diag, false, nil
 	}
-	picked, commit := h.strictCursorPick(fits, ownedBy(ctx), mockDb, statefulMocks)
+	// A stateful walk is fixed by every recording the store stages that is
+	// this very call, those spent included (servedWalk).
+	member := func(m *models.Mock) bool {
+		return !hasVariables(m) && string(m.Spec.HTTPReq.Method) == input.method && len(strictDiff(input, live, m, n)) == 0
+	}
+	picked, commit, answered := h.strictCursorPick(fits, ownedBy(ctx), mockDb, statefulMocks, member)
+	if answered != nil {
+		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, false, nil
+	}
 	served, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 	if err != nil {
 		return nil, nil, false, err
@@ -301,16 +309,20 @@ func routeMatches(diffs []strictField) bool {
 // carries its own served mark, so another caller's calls (other credentials:
 // other recordings) never move it, and a call whose set of recordings grows
 // carries on. Under the background rules the open test's own recordings
-// (own) and the set's background are two bands (statefulBand). commit marks
-// it served once the answer is; nil when no mark applies.
-func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*models.Mock, func()) {
+// (own) and the set's background are two bands (statefulBand). Under exact
+// serving the walk is servedWalk's, over the recordings the store stages
+// that member says are this call too (spent ones: stagedGroup); answered,
+// non-nil, is then the call's miss. commit marks the answer served once the
+// answer is; nil when no mark applies.
+func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool, member func(*models.Mock) bool) (*models.Mock, func(), *answeredSequence) {
 	first := fits[0]
 	if !statefulMocks || first.TestModeInfo.Consume != models.ConsumeCursorSaturate {
-		return first, nil
+		return first, nil, nil
 	}
+	_, exact := integrations.SequenceViewOf(mockDb)
 	cs, ok := mockDb.(integrations.MockCursor)
-	if !ok {
-		return first, nil
+	if !ok && !exact {
+		return first, nil, nil
 	}
 	group := make([]*models.Mock, 0, len(fits))
 	for _, m := range fits {
@@ -318,39 +330,115 @@ func (h *HTTP) strictCursorPick(fits []*models.Mock, own func(*models.Mock) bool
 			group = append(group, m)
 		}
 	}
-	group, cs = statefulBand(first, group, own, mockDb, cs)
+	group, cs, bg, ofBand := statefulBand(first, group, own, mockDb, cs)
 	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i], group[j]) })
+	i, commit, answered := bandPick(group, cs, bg, mockDb, statefulMember(member, ofBand))
+	if answered != nil {
+		return nil, nil, answered
+	}
+	return group[i], commit, nil
+}
+
+// statefulMember is, for stagedGroup, a stateful recording member says is
+// the call's, of the band (ofBand); nil when member is.
+func statefulMember(member, ofBand func(*models.Mock) bool) func(*models.Mock) bool {
+	if member == nil {
+		return nil
+	}
+	return func(m *models.Mock) bool {
+		return m.TestModeInfo.Consume == models.ConsumeCursorSaturate && ofBand(m) && member(m)
+	}
+}
+
+// bandPick is servedPick over a band (statefulBand) in record order, with
+// cs; under exact serving it is bandWalk's, over one view. answered is
+// servedWalk's miss.
+func bandPick(group []*models.Mock, cs integrations.MockCursor, bg bool, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
+	if sv, exact := integrations.SequenceViewOf(mockDb); exact {
+		return bandWalk(group, cs, bg, sv, mockDb, member)
+	}
 	i, commit := servedPick(group, cs)
-	return group[i], commit
+	return i, commit, nil
+}
+
+// bandWalk is servedWalk over a band (statefulBand) under exact serving,
+// fixed by the recordings the store stages that member says are the band's
+// call too (stagedGroup), spent ones included: the open test's band over
+// sv, from the test's recorded window on; the background's (bg) on the
+// background's cursor (cs) over every one of them, its sequence one wherever
+// its calls land and whichever test is open. So once the background's last
+// recording can answer no more (a worker scope's answers once in the
+// staging) the call is a miss, never an earlier recording again. In a test,
+// a band of the set's worker scope (sv.Worker: every recording of it) is
+// walked the same way: on the cursor the calls between tests advance
+// (sv.Between) over every reached recording of it the store stages, by
+// placement, with no window. A worker-scope recording belongs to no test:
+// record files one in the worker scope when no test's window was open as it
+// was recorded, at its place in the gap it was made in, and an idle answer
+// wherever it was recorded; so its call is answered the same whether it lands
+// in a test or in the gap beside it, and the set's end finds none it reached
+// unanswered for want of a window. A test's own recordings are never walked
+// here (a test view serves them ConsumeReuse, each once), so under today's
+// rules a band in a test is the worker scope's; one that holds any other
+// recording keeps the test's window. Each worker-scope recording is spent as
+// it answers, so today the cursor's served marks only restate the spends:
+// what the band changes is the window.
+func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv integrations.SequenceView, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
+	switch {
+	case bg:
+		sv = integrations.SequenceView{Cursor: cs}
+	case sv.Worker != nil && allOf(group, sv.Worker):
+		worker := sv.Worker
+		sv = integrations.SequenceView{Cursor: sv.Between}
+		if member != nil {
+			of := member
+			member = func(m *models.Mock) bool { return worker(m) && of(m) }
+		}
+	}
+	return servedWalk(group, stagedGroup(mockDb, group, member), sv)
+}
+
+// allOf reports whether is holds for every recording of group, and group has
+// one.
+func allOf(group []*models.Mock, is func(*models.Mock) bool) bool {
+	for _, m := range group {
+		if !is(m) {
+			return false
+		}
+	}
+	return len(group) > 0
 }
 
 // statefulBand is, of group (the stateful recordings that are a call, first
-// among them, the one the pool's order puts first), those of first's band, and
-// the cursor their served marks are kept in. Under the background rules
+// among them, the one the pool's order puts first), those of first's band, the
+// cursor their served marks are kept in, and whether a recording is of the
+// band (ofBand). Under the background rules
 // (integrations.BackgroundCursorOf) the open test's own recordings (own) and
 // the set's background are two bands, never one sequence: when
-// first is the test's own, only its own answer, with cs as before (which keeps
-// no cursor in a test: each answers once, in recorded order), so no
+// first is the test's own, only its own answer, with cs as before (each
+// answers once, in recorded order), so no
 // background recording recorded earlier answers the test's own call; else
 // only the background's, with the background's cursor, the one its calls
-// between tests advance, so its sequence is one wherever its calls land.
-// Under today's rules, and with no owner known, group and cs are as given.
-func statefulBand(first *models.Mock, group []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, cs integrations.MockCursor) ([]*models.Mock, integrations.MockCursor) {
+// between tests advance, so its sequence is one wherever its calls land (bg
+// true). Under today's rules, and with no owner known, group and cs are as
+// given, and every recording is of the band.
+func statefulBand(first *models.Mock, group []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, cs integrations.MockCursor) ([]*models.Mock, integrations.MockCursor, bool, func(*models.Mock) bool) {
 	bg, s12 := integrations.BackgroundCursorOf(mockDb)
 	if !s12 || own == nil {
-		return group, cs
+		return group, cs, false, func(*models.Mock) bool { return true }
 	}
 	firstOwn := own(first)
+	ofBand := func(m *models.Mock) bool { return own(m) == firstOwn }
 	band := make([]*models.Mock, 0, len(group))
 	for _, m := range group {
-		if own(m) == firstOwn {
+		if ofBand(m) {
 			band = append(band, m)
 		}
 	}
 	if firstOwn {
-		return band, cs
+		return band, cs, false, ofBand
 	}
-	return band, bg
+	return band, bg, true, ofBand
 }
 
 // strictMismatchReport is the miss report of a call the strict comparison

@@ -168,6 +168,18 @@ type MockManager struct {
 	// replaced (per test-set) so cursors don't bleed across test-sets.
 	cursorMu sync.Mutex
 	cursors  map[string]int
+	// testCursors are, under exact serving, each test view's own cursors by
+	// its number (cursorSlotIn): one is made as its view is installed, so a
+	// test's sequences start empty. Once another view replaced it, it is
+	// closed (closedTests) and kept: only a call read in that test reaches
+	// it, and such a call walked after the test ended reads and moves the
+	// test's sequence where the test left it. Closed ones are dropped at the
+	// next staging (ResetStatefulCursors). Guarded by cursorMu.
+	testCursors map[uint64]map[string]int
+	// closedTests are the numbers of the test views another view replaced
+	// (closeTestCursors), whose cursors the next staging drops. Guarded by
+	// cursorMu.
+	closedTests map[uint64]struct{}
 	// kept are the per-test recordings an exact match kept for its test's
 	// byte-identical repeats (integrations.RepeatKeeper), by key (a worker's
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
@@ -2007,26 +2019,33 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 // caller advances via AdvanceMockCursor only once the response is actually
 // served (a successful claim), so a failed/retried match does not skip a
 // recorded response. Session-scoped: the cursor map is cleared per test-set
-// (ResetStatefulCursors). The map also keeps the HTTP variable pass's served
-// marks, one per reusable recording under a key of its own (n = 2: served or
-// not), which reset with the cursors. Satisfies the matcher's optional cursor
+// (ResetStatefulCursors). Under exact serving a key's cursor is the pool
+// slice's between tests and the open test's own in a test (cursorSlotIn). The
+// map also keeps the HTTP walks' served marks, one per reusable recording
+// under a key of its own (n = 2: served or not), which reset with the
+// cursors. Satisfies the matcher's optional cursor
 // interface; parsers that do not type-assert it are unaffected.
 func (m *MockManager) MockCursorIndex(key string, n int) int {
-	key, cursored := m.exactCursorKey(key)
-	return m.cursorIndexAt(key, cursored, n)
+	return m.cursorIndexAt(cursorSlotIn(m.exactView(), key), n)
 }
 
-// cursorIndexAt is MockCursorIndex at a cursor key already resolved
-// (exactCursorKey, backgroundCursorKey); cursored false keeps no cursor.
-func (m *MockManager) cursorIndexAt(key string, cursored bool, n int) int {
-	if n <= 1 || !cursored {
+// cursorIndexAt is MockCursorIndex at a cursor slot already resolved
+// (cursorSlotIn, backgroundCursorKey). A slot of a test view no longer in
+// force reads where its test's calls left it (closeTestCursors), so a call
+// read in the test and walked after it ended answers what it would have
+// answered before; once the next set is staged, 0.
+func (m *MockManager) cursorIndexAt(slot cursorSlot, n int) int {
+	if n <= 1 {
 		// Zero or one recorded response: always the first (only) one — identical
 		// to the legacy reuse behaviour, no cursor state needed.
 		return 0
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
-	return clampCursor(m.cursors[key], n)
+	if slot.gen != 0 {
+		return clampCursor(m.testCursors[slot.gen][slot.key], n)
+	}
+	return clampCursor(m.cursors[slot.key], n)
 }
 
 // AdvanceMockCursor moves the cursor for key one past servedIdx — the index the
@@ -2036,31 +2055,43 @@ func (m *MockManager) cursorIndexAt(key string, cursored bool, n int) int {
 // both served it settle the cursor to servedIdx+1 rather than jumping two,
 // which would skip a recorded response. Stored value tops out at n (reads clamp
 // to n-1), so a hot repeated request never grows it unbounded. Call it only
-// after the chosen response was actually served.
+// after the chosen response was actually served. Under exact serving it
+// resolves the view again: a caller that peeks and commits across a view
+// install reads one view for both (SequenceView).
 func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
-	key, cursored := m.exactCursorKey(key)
-	m.advanceCursorAt(key, cursored, servedIdx, n)
+	m.advanceCursorAt(cursorSlotIn(m.exactView(), key), servedIdx, n)
 }
 
-// advanceCursorAt is AdvanceMockCursor at a cursor key already resolved
-// (exactCursorKey, backgroundCursorKey); cursored false keeps no cursor.
-func (m *MockManager) advanceCursorAt(key string, cursored bool, servedIdx, n int) {
-	if n <= 1 || !cursored {
+// advanceCursorAt is AdvanceMockCursor at a cursor slot already resolved
+// (cursorSlotIn, backgroundCursorKey). A commit to a test view no longer in
+// force moves that test's own sequence, which only calls read in the test
+// walk (closeTestCursors): two calls read in the test and walked after its
+// end answer in record order, wherever the end lands between them. Once the
+// next set is staged it moves nothing.
+func (m *MockManager) advanceCursorAt(slot cursorSlot, servedIdx, n int) {
+	if n <= 1 {
 		return
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
-	if m.cursors == nil {
+	cursors := m.cursors
+	if slot.gen != 0 {
+		var open bool
+		if cursors, open = m.testCursors[slot.gen]; !open {
+			return
+		}
+	} else if cursors == nil {
 		m.cursors = make(map[string]int)
+		cursors = m.cursors
 	}
 	next := servedIdx + 1
-	if cur := m.cursors[key]; cur > next {
+	if cur := cursors[slot.key]; cur > next {
 		next = cur
 	}
 	if next > n {
 		next = n
 	}
-	m.cursors[key] = next
+	cursors[slot.key] = next
 }
 
 // Spend records that the test which kept the named per-test recordings of
@@ -2282,10 +2313,18 @@ func clampCursor(cur, n int) int {
 // stateful sequence starts from its first recorded response. The agent calls it
 // once per test-set (on the staging call) via the StatefulCursorResetter
 // capability, so a sequence spans a whole test-set but does not carry across
-// sets. Safe to call when no cursors exist.
+// sets. An ended test's frozen cursors (closeTestCursors) are dropped. Safe
+// to call when no cursors exist.
 func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
+	for gen := range m.closedTests {
+		delete(m.testCursors, gen)
+	}
+	m.closedTests = nil
+	for gen := range m.testCursors {
+		m.testCursors[gen] = make(map[string]int)
+	}
 	m.cursorMu.Unlock()
 }
 
@@ -4286,8 +4325,14 @@ func (m *MockManager) SetTrackerSetAt(f func() uint64) {
 // takes it out of the pool, so a request reading the pool and then the
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
-// same mock: the observer is told of a mock that was served either way. in
-// is the request it is served in, as its parser said (nil: not said).
+// same mock: the observer is told of a mock that was served either way.
+// Under exact serving it is told once the view settled the consume as a
+// serve, in the step that takes it and holding the round lock
+// (exactConsumeAt), and never of a consume the view refused: nothing served
+// that one. There the take comes first, so only a reader that reads both
+// under that lock (RoundSnapshot) never finds the mock in neither; no reader
+// reads them without it, and none may. in is the request it is served in, as
+// its parser said (nil: not said).
 //
 // With an observer (the served-in observer for a said request, else the
 // served observer), the serve is then filed in the open test's view

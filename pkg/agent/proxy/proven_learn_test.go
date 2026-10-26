@@ -1062,36 +1062,59 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 
 // Through the HTTP integration, the call's window ends when decodeHTTP had
 // the request whole: a start-up pool call's clock read in it is learned as
-// noise, where the lead alone (its minute and second words of the
-// receive's Date header) refuses it.
+// noise, whatever the receive's Date header holds. Read by the lead alone
+// (the minute and second words of the receive's Date header, in GMT as HTTP
+// writes it), it is learned where that header is its server's stamp, and
+// refused where the server's clock ran a second ahead (its Date header
+// after its answer is no stamp): only the window learns that one. The
+// instants are fixed in UTC, so the row reads the same in every zone.
 func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	p := startedDrainProxy(t, 100)
-	p.learnTracker = learn.NewTracker()
 	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
-	rec := time.Now().Add(-time.Hour).Truncate(time.Second)
-	receive := r3Mock("mock-0", rec, "POST", "/queue/receive", `{"n":10}`, `{"Messages":[{"Body":"m-1"}]}`)
-	receive.Spec.HTTPResp.Header["Date"] = rec.Format(http.TimeFormat)
-	event := r3Mock("mock-1", rec.Add(4*time.Millisecond), "POST", "/v1/events", `{"processed_at":"`+iso(rec.Add(3*time.Millisecond))+`"}`, `{"ok":true}`)
-	event.DeriveLifetime()
-	receive.DeriveLifetime()
-	mm := NewMockManager(nil, nil, zap.NewNop())
-	t.Cleanup(mm.Close)
-	mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: rec.Add(time.Minute), End: rec.Add(2 * time.Minute)}})
-	mm.SetMocksWithWindow(nil, []*models.Mock{receive, event}, models.BaseTime, time.Now())
-	mm.ServeExactPool(models.PoolKeyNone, []string{"mock-1"})
-	served := time.Now()
-	offset := rec.Add(learn.FullRoundLead + 2*time.Second).Sub(served)
-	p.learnTracker.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
-	p.learnTracker.ServedMockAt(receive, served)
-	body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
-	code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
-		"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
-	if code != http.StatusOK || got != `{"ok":true}` {
-		t.Fatalf("answered %d %s; want the pool recording, its clock read learned", code, got)
-	}
-	if noise := r3States(mm)["mock-1"].ReqBodyNoise; noise["body.processed_at"] == nil {
-		t.Fatalf("learned %v; want body.processed_at", noise)
+	rec := time.Date(2026, 10, 20, 15, 49, 55, 0, time.UTC)
+	for _, tc := range []struct {
+		name  string
+		date  time.Time
+		stamp bool
+	}{
+		{"its server's stamp", rec, true},
+		{"its server's clock a second ahead", rec.Add(time.Second), false},
+	} {
+		for _, window := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, window=%v", tc.name, window), func(t *testing.T) {
+				p := startedDrainProxy(t, 100)
+				p.learnTracker = learn.NewTracker()
+				receive := r3Mock("mock-0", rec, "POST", "/queue/receive", `{"n":10}`, `{"Messages":[{"Body":"m-1"}]}`)
+				receive.Spec.HTTPResp.Header["Date"] = tc.date.Format(http.TimeFormat)
+				event := r3Mock("mock-1", rec.Add(4*time.Millisecond), "POST", "/v1/events", `{"processed_at":"`+iso(rec.Add(3*time.Millisecond))+`"}`, `{"ok":true}`)
+				event.DeriveLifetime()
+				receive.DeriveLifetime()
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "test-1", Start: rec.Add(time.Minute), End: rec.Add(2 * time.Minute)}})
+				mm.SetMocksWithWindow(nil, []*models.Mock{receive, event}, models.BaseTime, time.Now())
+				mm.ServeExactPool(models.PoolKeyNone, []string{"mock-1"})
+				served := time.Now()
+				offset := rec.Add(learn.FullRoundLead + 2*time.Second).Sub(served)
+				if window {
+					p.learnTracker.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(offset), true })
+				}
+				p.learnTracker.ServedMockAt(receive, served)
+				body := `{"processed_at":"` + iso(served.Add(offset)) + `"}`
+				code, got := r3Send(t, p, mm, models.OutgoingOptions{Learn: true, LearnPool: true},
+					"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
+				noise := r3States(mm)["mock-1"].ReqBodyNoise
+				if window || tc.stamp {
+					if code != http.StatusOK || got != `{"ok":true}` || noise["body.processed_at"] == nil {
+						t.Fatalf("answered %d %s, learned %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise)
+					}
+					return
+				}
+				if code == http.StatusOK || noise["body.processed_at"] != nil {
+					t.Fatalf("by the lead alone, the server's clock a second ahead: answered %d %s, learned %v; want refused", code, got, noise)
+				}
+			})
+		}
 	}
 }
 
@@ -1241,5 +1264,76 @@ func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
 		if _, _, _, _, awaiting := p.learnTracker.Places(); awaiting {
 			t.Fatalf("%s: the test awaits a request", name)
 		}
+	}
+}
+
+// A paired call's repeat note follows a missed call's rule, through the real
+// store. Five tests recorded one call (an app cache): test-1's mock-s,
+// test-2's mock-t, test-3's mock-u, test-5's mock-v, and test-4 recorded
+// none. In record's full round test-1 makes it (mock-s answers) and test-2
+// makes it twice: its own mock-t answers the first, and the second, one call
+// more than test-2 recorded, is paired with mock-u and carries no note, as
+// its miss would carry none (it repeats test-2's own recorded call, so a note
+// saying the test recorded no such call would be false). test-4's call,
+// which it recorded nothing like, is paired with mock-v and carries the note
+// naming a recording an earlier test's call consumed.
+func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	rec := func(name string, at time.Duration) *models.Mock {
+		return r3Mock(name, now.Add(at), "GET", "/rates?base=CHF", "", `{"rate":1.1}`)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SetMocksWithWindow([]*models.Mock{rec("mock-s", 100*time.Millisecond), rec("mock-t", 1500*time.Millisecond), rec("mock-u", 3000*time.Millisecond), rec("mock-v", 4500*time.Millisecond)}, nil, models.BaseTime, now.Add(time.Hour))
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+	mm.SetPairing(true)
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	get := "GET /rates?base=CHF HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	opts := models.OutgoingOptions{Learn: true}
+	answers := func(t *testing.T) []models.UnmatchedCall {
+		t.Helper()
+		calls, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []models.UnmatchedCall
+		for _, c := range calls {
+			if c.Answer == "" {
+				t.Fatalf("a miss %+v; every call here is answered", c)
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-s")})
+	if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+		t.Fatalf("test-1's call: %d %s", code, got)
+	}
+	if a := answers(t); len(a) != 0 {
+		t.Fatalf("test-1's own call was reported %+v", a)
+	}
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-t")})
+	for i := 1; i <= 2; i++ {
+		if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+			t.Fatalf("test-2's call %d: %d %s", i, code, got)
+		}
+	}
+	if a := answers(t); len(a) != 1 || a[0].ClosestMock != "mock-u" || a[0].Repeat != nil {
+		t.Fatalf("test-2's answers are %+v; want one pairing with mock-u, with no repeat note", a)
+	}
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-4", nil)
+	if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+		t.Fatalf("test-4's call: %d %s", code, got)
+	}
+	a := answers(t)
+	if len(a) != 1 || a[0].ClosestMock != "mock-v" || a[0].Repeat == nil || (a[0].Repeat.Mock != "mock-s" && a[0].Repeat.Mock != "mock-t") {
+		t.Fatalf("test-4's answers are %+v; want one pairing with mock-v, noting mock-s or mock-t", a)
 	}
 }

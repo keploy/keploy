@@ -1560,3 +1560,87 @@ func TestAHeldCallIsNamedNoAnsweredRecordingOnceTheStagingMoved(t *testing.T) {
 		t.Fatalf("precondition: with no hold the manager names %v (%v); want set B's mock-7", got.Mock, ok)
 	}
 }
+
+// A consume the view refuses tells the learn tracker nothing: nothing served
+// the mock, so it is not among the tracker's served in its running test and
+// has no number in F's order. The flow is the one a learn step met in the
+// end gap: T1's view holds own, the replay ends T1 (the pool view with T2's
+// call in flight, then the tracker's end), the tracker begins its next test
+// before the store installs that test's view, and a parser consumes own
+// through each door, unguarded (no round scope): the pool view does not show
+// it, and refuses it. Before, the observer was told first, and the tracker
+// held own as served in its running test, with no take behind it.
+func TestAConsumeTheViewRefusesTellsTheLearnTrackerNothing(t *testing.T) {
+	doors := map[string]func(mm *MockManager, m *models.Mock) bool{
+		"DeleteFilteredMock":   func(mm *MockManager, m *models.Mock) bool { return mm.DeleteFilteredMock(*m) },
+		"DeleteUnFilteredMock": func(mm *MockManager, m *models.Mock) bool { return mm.DeleteUnFilteredMock(*m) },
+		"MarkMockAsUsed":       func(mm *MockManager, m *models.Mock) bool { return mm.MarkMockAsUsed(*m) },
+		"UpdateUnFilteredMock": func(mm *MockManager, m *models.Mock) bool { c := *m; return mm.UpdateUnFilteredMock(m, &c) },
+	}
+	for name, door := range doors {
+		t.Run(name, func(t *testing.T) {
+			s := newRoundStore(t)
+			s.betweenWithAhead()
+			s.begin()
+			if door(s.mm, s.ms["own"]) {
+				t.Fatal("precondition: the pool view served T1's own mock")
+			}
+			snap := s.snapshot(t)
+			if hasName(snap.Learn.Served, "own") {
+				t.Fatalf("the tracker's served in its running test holds own, which the view refused: %v", exactNames(snap.Learn.Served))
+			}
+			if f, l := snap.Learn.Order.Of(s.ms["own"]); f != 0 || l != 0 {
+				t.Fatalf("own, which the view refused, is at %d,%d in F's order; want no serve of it", f, l)
+			}
+			// What the view does serve is still told.
+			if !door(s.mm, s.ms["next"]) {
+				t.Fatal("the call in flight into T2 was refused")
+			}
+			if after := s.snapshot(t); !hasName(after.Learn.Served, "next") {
+				t.Fatalf("the served call in flight is not among the tracker's served: %v", exactNames(after.Learn.Served))
+			}
+		})
+	}
+}
+
+// A consume that finds its view closed (the replay's end of T1 installing
+// the pool view as the consume takes the round lock) is settled again in the
+// view that replaces it, and the learn tracker is told only of that settle:
+// here a refusal, since the pool view does not show T1's own mock, so the
+// tracker hears nothing. Telling it at the closed view would file a serve
+// that never happened.
+func TestAConsumeSettledAgainInTheReplacingViewTellsTheTrackerOnlyOfThatSettle(t *testing.T) {
+	doors := map[string]func(mm *MockManager, m *models.Mock) bool{
+		"DeleteFilteredMock":   func(mm *MockManager, m *models.Mock) bool { return mm.DeleteFilteredMock(*m) },
+		"UpdateUnFilteredMock": func(mm *MockManager, m *models.Mock) bool { c := *m; return mm.UpdateUnFilteredMock(m, &c) },
+	}
+	for name, door := range doors {
+		t.Run(name, func(t *testing.T) {
+			s := newRoundStore(t)
+			s.inTest()
+			closing := s.mm.exactView()
+			fired := false
+			s.mm.exact.round.onWait = func() {
+				if fired {
+					return
+				}
+				fired = true
+				s.mm.ServeExactPool(models.PoolKeyNone, []string{"pool"})
+			}
+			if door(s.mm, s.ms["own"]) {
+				t.Fatal("the pool view that replaced T1's served T1's own mock")
+			}
+			s.mm.exact.round.onWait = nil
+			if !fired || s.mm.exactView() == closing {
+				t.Fatal("precondition: T1's view was not replaced as the consume took the round lock")
+			}
+			snap := s.snapshot(t)
+			if hasName(snap.Learn.Served, "own") {
+				t.Fatalf("the tracker holds own as served, told at the closed view: %v", exactNames(snap.Learn.Served))
+			}
+			if f, l := snap.Learn.Order.Of(s.ms["own"]); f != 0 || l != 0 {
+				t.Fatalf("own at %d,%d in F's order; want no serve of it", f, l)
+			}
+		})
+	}
+}

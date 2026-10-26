@@ -45,10 +45,10 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	store.AddUnmatchedCallForTest("set-1", "test-9", models.UnmatchedCall{ActualSummary: "GET /count", ClosestMock: "mock-7", Repeat: note("mock-7"), NextSteps: "set-1's"})
 	keep := results[0].FailureInfo.UnmatchedCalls[0].Repeat
 
-	lines, likely := markRepeatOf(results, consumers, nil, nil, nil)
+	lines, likely, answered := markRepeatOf(results, consumers, nil, nil, nil)
 	calls := results[0].FailureInfo.UnmatchedCalls
-	if likely != 3 {
-		t.Fatalf("of three notes 6.00s at replay against 2.00s at record, %d count as likely, want 3", likely)
+	if likely != 3 || answered != 0 {
+		t.Fatalf("of three notes 6.00s at replay against 2.00s at record, %d count as likely, want 3; %d answered, want none", likely, answered)
 	}
 	if calls[0].Repeat.Test != "test-3" || !strings.Contains(calls[0].NextSteps, "test test-3's call") {
 		t.Fatalf("the repeat is named %q: %s", calls[0].Repeat.Test, calls[0].NextSteps)
@@ -81,6 +81,52 @@ func TestMarkRepeatOfNamesTheEarlierTest(t *testing.T) {
 	}
 	if rows[4].TestSetID != "set-1" || rows[4].MismatchReport.Repeat.Test != "" || rows[4].MismatchReport.NextSteps != "set-1's" {
 		t.Fatalf("another set's row was named by this set's end: %+v, %q", rows[4].MismatchReport.Repeat, rows[4].MismatchReport.NextSteps)
+	}
+}
+
+// A call record's full round answered by a pairing (TestResult.Answers)
+// whose note the parser wrote is named and measured as a missed call's is:
+// the earlier test whose call the recording answered, both gaps start to
+// start, and the newest identical recording made before the test began at
+// record. Its next step stays as it was (it was answered, no miss), its line
+// says the pairing answered it, and the agent's note is not written through.
+// An answer with no note is left alone.
+func TestMarkRepeatOfNamesTheRepeatAPairingAnswered(t *testing.T) {
+	rec := time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
+	replay := rec.Add(time.Hour)
+	mk := func(name string, at time.Time) *models.Mock {
+		m := &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at,
+			HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://rates/rates?base=CHF"}}}
+		m.TestModeInfo.Lifetime = models.LifetimePerTest
+		return m
+	}
+	// mock-1 is get-cachedrate-2's, which answered at replay; mock-3
+	// get-cachedrate-4's, its refill at record, unconsumed at replay, which
+	// the pairing answered get-cachedrate-7's call with.
+	lookup := map[string]mockDisplayInfo{}
+	addMockDisplayInfo(lookup, []*models.Mock{mk("mock-1", rec), mk("mock-3", rec.Add(20*time.Second))})
+	// get-cachedrate-7 began at record 0.02 s after mock-3; at replay 9 s
+	// after mock-1 answered.
+	agent := models.NewRepeatNote("mock-1", replay, rec, replay.Add(9100*time.Millisecond))
+	results := []models.TestResult{{TestCaseID: "get-cachedrate-7", Status: models.TestStatusPassed, Answers: []models.UnmatchedCall{
+		{ActualSummary: "GET /rates", ClosestMock: "mock-3", NotOwned: true, Answer: models.AnswerProvisional, Repeat: agent},
+		{ActualSummary: "GET /tick", ClosestMock: "mock-6", NotOwned: true, Answer: models.AnswerProvisional, NextSteps: "as it was"},
+	}}}
+	tcs := []*models.TestCase{{Name: "get-cachedrate-7", HTTPReq: models.HTTPReq{Timestamp: rec.Add(20020 * time.Millisecond)}}}
+	named, likely, answered := markRepeatOf(results, map[string][]string{"mock-1": {"get-cachedrate-2"}}, tcs, lookup, map[string]time.Time{"get-cachedrate-7": replay.Add(9 * time.Second)})
+	a := results[0].Answers
+	if agent.Test != "" || agent.RecordGapKnown || agent.ReplayGapFromStart {
+		t.Fatal("naming the test wrote into the note the agent's report shares")
+	}
+	n := a[0].Repeat
+	if n.Test != "get-cachedrate-2" || !n.ReplayGapFromStart || n.ReplayGapSeconds != 9 || !n.RecordGapKnown || n.RecordedLast != "mock-3" {
+		t.Fatalf("the paired call's note is %+v; want get-cachedrate-2 named, 9s at replay from the test's start, measured at record from mock-3", n)
+	}
+	if a[0].NextSteps != "" || a[1].NextSteps != "as it was" || a[1].Repeat != nil {
+		t.Fatalf("the answers' next steps are %q and %q (note %+v); want both as they were", a[0].NextSteps, a[1].NextSteps, a[1].Repeat)
+	}
+	if len(named) != 1 || answered != 1 || likely != 1 || !strings.Contains(named[0], "get-cachedrate-7: GET /rates repeats mock-1, answered for get-cachedrate-2") || !strings.Contains(named[0], "answered with mock-3, another test's recording (a pairing)") {
+		t.Fatalf("the set log lines are %q (%d answered, %d likely)", named, answered, likely)
 	}
 }
 
@@ -248,7 +294,7 @@ func TestMarkRepeatOfAnchorsOnlyOnARecordingMadeBeforeTheTest(t *testing.T) {
 			{ActualSummary: "GET /count", ClosestMock: "mock-7", NextSteps: "the agent's", Repeat: note},
 		}}}}
 		tcs := []*models.TestCase{{Name: "test-9", HTTPReq: models.HTTPReq{Timestamp: start}}}
-		named, _ := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, lookup, map[string]time.Time{"test-9": replay.Add(20 * time.Second)})
+		named, _, _ := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}}, tcs, lookup, map[string]time.Time{"test-9": replay.Add(20 * time.Second)})
 		return results[0].FailureInfo.UnmatchedCalls[0], named
 	}
 	// mock-7's time is not known to the lookup, and mock-13, the only other
@@ -305,7 +351,7 @@ func TestMarkRepeatOfCountsNoNoteWithUnknownGapsAsLikely(t *testing.T) {
 				{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(70*time.Second))},
 				{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: models.NewRepeatNote("mock-7", replay.Add(time.Second), c.recordedAt, replay.Add(80*time.Second))},
 			}}}}
-			named, likely := markRepeatOf(results, consumers, c.testCases, nil, c.replayStarts)
+			named, likely, _ := markRepeatOf(results, consumers, c.testCases, nil, c.replayStarts)
 			if len(named) != 2 {
 				t.Fatalf("named %q, want both calls", named)
 			}
@@ -450,7 +496,7 @@ func TestRepeatCauseClaimsLikelyOnlyWhenEveryNoteDoes(t *testing.T) {
 		{ActualSummary: "GET /rates", ClosestMock: "mock-7", Repeat: refill},
 		{ActualSummary: "GET /tick", ClosestMock: "mock-w", NotOwned: true, RecordedIn: "test-5", Repeat: poller},
 	}}}}
-	named, likely := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}, "mock-8": {"test-3"}}, nil, nil, nil)
+	named, likely, _ := markRepeatOf(results, map[string][]string{"mock-7": {"test-3"}, "mock-8": {"test-3"}}, nil, nil, nil)
 	if len(named) != 2 || likely != 1 {
 		t.Fatalf("a refill and a poller: %d named, %d likely; want 2 and 1", len(named), likely)
 	}
@@ -674,7 +720,7 @@ func TestRunTestSetWiresTheRepeatNotes(t *testing.T) {
 		return false
 	})
 	for mark, want := range map[string]string{
-		"markRepeatOf":      "named, likely -> repeatMissCause(likely, len(named))",
+		"markRepeatOf":      "named, likely, answered -> repeatMissCause(likely, len(named))",
 		"markUnmadeRepeats": "named, likely -> repeatUnmadeCause(likely, len(named))",
 	} {
 		w := lines[mark]

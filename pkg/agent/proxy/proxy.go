@@ -2793,6 +2793,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		parserCtxCancel()
 
 		if srcConn != nil {
+			// The handler is done: a request still aloft is given no
+			// answer. Ended first, as a layer over the kept connection
+			// writes as it closes (TLS's close_notify), which would land
+			// it as an answer's first bytes do (trackedConn.Write).
+			if tracked != nil {
+				tracked.endUntold(true)
+			}
 			util.LogCloseErr(p.logger, srcConn.Close(), "failed to close the source connection", zap.Any("clientConnID", clientConnID))
 		}
 

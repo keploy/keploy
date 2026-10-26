@@ -103,7 +103,7 @@ func Replay(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg
 	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	go func(errCh chan error, configMocks []*models.Mock, mockDb integrations.MockMemDb, opts models.OutgoingOptions) {
 		defer close(errCh)
-		defer pUtil.RecoverInto(logger, clientConn, nil, errCh)
+		defer integrations.RecoverIntoCtx(ctx, logger, clientConn, nil, errCh)
 
 		// Helper struct for decoding packets
 		decodeCtx := &wire.DecodeContext{
