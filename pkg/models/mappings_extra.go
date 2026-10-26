@@ -241,6 +241,30 @@ func (m *Mapping) KeepTestExtra(from *Mapping) {
 	}
 }
 
+// KeepEntriesExtra is entries with the fields from's entry of the same mock
+// has and this keploy does not know (yamlExtra), where an entry has none of
+// its own: a writer that replaces a section's entries (startup:, worker:)
+// with ones it captured anew keeps what a hand edit added to each. entries
+// is not changed; nil stays nil.
+func KeepEntriesExtra(entries, from []MockEntry) []MockEntry {
+	by := map[string]*yamlExtra{}
+	for _, e := range from {
+		if e.extra != nil {
+			by[e.Name] = e.extra
+		}
+	}
+	if len(by) == 0 || entries == nil {
+		return entries
+	}
+	out := slices.Clone(entries)
+	for i := range out {
+		if x := by[out[i].Name]; x != nil && out[i].extra == nil {
+			out[i].extra = x
+		}
+	}
+	return out
+}
+
 // UnmarshalYAML reads a mapping, keeping the fields this keploy does not
 // know (yamlExtra).
 func (m *Mapping) UnmarshalYAML(n *yaml.Node) error {

@@ -199,3 +199,20 @@ func TestACommentKeptBesideAFieldIsNotCountedAsDropped(t *testing.T) {
 		t.Fatalf("DroppedComments of the hand-edited file against this rewrite = %d, want 1 (the comment on TestB)", n)
 	}
 }
+
+// A section's entries a writer captures anew (Insert's start-up) keep what
+// a hand edit added to each, by mock.
+func TestInsertKeepsASectionEntrysFields(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(dir, "s"), 0o755))
+	file := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\ntests:\n    - id: o::TestA\n      mock_entries:\n        - name: mock-0\nstartup:\n    - name: mock-9\n      note: flaky boot call\n"
+	must(t, os.WriteFile(filepath.Join(dir, "s", "mappings.yaml"), []byte(file), 0o644))
+	db := NewWithFormat(zap.NewNop(), dir, "mappings", yaml.FormatYAML)
+	must(t, db.Insert(context.Background(), &models.Mapping{TestSetID: "s", Startup: []models.MockEntry{{Name: "mock-9"}}}))
+	raw, err := os.ReadFile(filepath.Join(dir, "s", "mappings.yaml"))
+	must(t, err)
+	if !strings.Contains(string(raw), "note: flaky boot call") {
+		t.Fatalf("the start-up entry's note was lost:\n%s", raw)
+	}
+}

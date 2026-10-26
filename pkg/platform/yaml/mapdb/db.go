@@ -159,6 +159,9 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	newMapping.KeepExtra(existing)
 	newMapping.KeepTestExtra(existing)
 	newMapping.KeepTestExtra(mapping)
+	newMapping.Startup = models.KeepEntriesExtra(newMapping.Startup, existingStartup)
+	newMapping.Worker = models.KeepEntriesExtra(newMapping.Worker, existingWorker)
+	newMapping.Shared = models.KeepEntriesExtra(newMapping.Shared, existingShared)
 
 	encodedData, err := db.encodeOver(newMapping, effFormat, old, true, testSetID)
 	if err != nil {
