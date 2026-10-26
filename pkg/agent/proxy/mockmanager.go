@@ -905,7 +905,7 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 		return true
 	})
 	if v := m.exactView(); v != nil {
-		return v.perTest("", results), nil
+		return m.exactPerTest(v, "", results), nil
 	}
 	return results, nil
 }
@@ -1080,7 +1080,7 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 
 	// Under exact serving the test's mapping decides, not a recorded time.
 	if v := m.exactView(); v != nil {
-		return v.perTest("", all), nil
+		return m.exactPerTest(v, "", all), nil
 	}
 	if start.IsZero() || end.IsZero() {
 		return all, nil
@@ -3099,7 +3099,7 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		return true
 	})
 	if v := m.exactView(); v != nil {
-		return v.perTest(kind, results), nil
+		return m.exactPerTest(v, kind, results), nil
 	}
 	return results, nil
 }

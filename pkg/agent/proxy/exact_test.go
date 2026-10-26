@@ -263,6 +263,125 @@ func TestBetweenTestsThePoolSliceAnswers(t *testing.T) {
 	}
 }
 
+// exactMongo is an untagged Mongo recording of lifetime lt.
+func exactMongo(name string, at time.Duration, lt models.Lifetime) *models.Mock {
+	m := exactMock(name, at, lt)
+	m.Kind = models.Mongo
+	return m
+}
+
+// perTestReads checks every per-test read of mm (GetFilteredMocks, by kind,
+// in window, and the round snapshot's) shows want, of kind Mongo, and that
+// another kind's read shows nothing.
+func perTestReads(t *testing.T, mm *MockManager, what string, want ...string) {
+	t.Helper()
+	pt, _ := mm.GetFilteredMocks()
+	equalNames(t, what+": GetFilteredMocks", pt, want...)
+	byKind, _ := mm.GetFilteredMocksByKind(models.Mongo)
+	equalNames(t, what+": GetFilteredMocksByKind", byKind, want...)
+	inWindow, _ := mm.GetFilteredMocksInWindow()
+	equalNames(t, what+": GetFilteredMocksInWindow", inWindow, want...)
+	other, _ := mm.GetFilteredMocksByKind(models.HTTP)
+	equalNames(t, what+": another kind's read", other)
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.Mongo})
+	if !ok {
+		t.Fatalf("%s: no round snapshot under exact serving", what)
+	}
+	equalNames(t, what+": the round snapshot's per-test read", snap.PerTest, want...)
+}
+
+// A per-test recording the pool slice holds, recorded after the last test (a
+// Go mongo-driver's endSessions at client.Disconnect) or between two tests,
+// is filed by the staging in the startup tree alone. Once the first test
+// fired a parser reads only the per-test tier for it (Mongo's index), so
+// every per-test read shows it while no test is open after a test, and the
+// round snapshot shows the same. Before the first test the startup read is
+// the parsers' own and nothing is added, and in a test nothing changes. It
+// stays fail-closed: a per-test recording outside the slice (another test's,
+// or one recorded after the last test that the slice does not hold) is never
+// shown, and once the pool's answered through Mongo's delete door, a second
+// call finds nothing through any door.
+func TestAfterTheLastTestThePoolsPerTestRecordingAnswersAPerTestRead(t *testing.T) {
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	unlisted := exactMongo("unlisted", 4*time.Second, models.LifetimePerTest)
+	// A session-tier recording of the slice is a reusable read's (the
+	// staging files it in the session tree too), never a per-test read's.
+	session := exactMongo("session-tier", 5*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, []*models.Mock{owned, owned2, end, unlisted}, []*models.Mock{session})
+	slice := []string{"end-sessions", "session-tier"}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	perTestReads(t, mm, "in the first test", "owned")
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "between two tests", "end-sessions")
+	mm.ServeExactTest("T2", []*models.Mock{owned2})
+	perTestReads(t, mm, "in the second test", "owned-2")
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "end-sessions")
+	if sess, _ := mm.GetSessionMocks(); !hasName(sess, "session-tier") {
+		t.Fatalf("after the last test the reusable read lost the slice's session-tier recording: %v", exactNames(sess))
+	}
+	if !mm.DeleteFilteredMock(*end) {
+		t.Fatal("the pool's recording of the call after the last test did not answer it")
+	}
+	perTestReads(t, mm, "after it answered")
+	c := *end
+	if mm.DeleteFilteredMock(*end) || mm.DeleteStartupMock(*end) || mm.UpdateUnFilteredMock(end, &c) || mm.MarkMockAsUsed(*end) {
+		t.Fatal("the call after the last test, made once more, was answered by the recording that already answered it")
+	}
+	if mm.DeleteFilteredMock(*unlisted) {
+		t.Fatal("a call after the last test was answered by a recording the pool slice does not hold")
+	}
+}
+
+// The reached worker scope is shown whether a test is open or not, so
+// between tests a per-test read shows its per-test recordings, as it shows
+// the pool slice's. In a test a per-test read is unchanged: it shows the
+// test's own alone (the worker scope's per-test recordings there are a stated
+// limit, read through no per-test read).
+func TestBetweenTestsAPerTestReadShowsTheReachedWorkerScope(t *testing.T) {
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	w := exactMongo("worker", 2*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, w}, nil)
+	mm.ServeExactWorker([]string{"worker"})
+	mm.ServeExactPool("k", nil)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	perTestReads(t, mm, "in the test", "owned")
+	mm.ServeExactPool("k", nil)
+	perTestReads(t, mm, "after the test", "worker")
+}
+
+// Under the background rules (a set recorded with proven routing) the call
+// after the last test is answered from the pool's recording too, once.
+func TestUnderTheBackgroundRulesTheCallAfterTheLastTestAnswersOnce(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"end-sessions"}, nil)
+	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
+	perTestReads(t, mm, "after the last test", "end-sessions")
+	if !mm.DeleteFilteredMock(*end) || mm.DeleteFilteredMock(*end) {
+		t.Fatal("under the background rules the call after the last test was not answered exactly once")
+	}
+}
+
 // The pool slice's stateful cursors are its key's own, and a test's are its
 // own: a test does not read the pool's, and a cursor moved in a test leaves
 // the pool's where it was.
