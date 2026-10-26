@@ -105,3 +105,37 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 		}
 	}
 }
+
+// A restarted agent is handed the table again (the session's scope-table
+// step), the recorded test windows with it, as they were pushed: without
+// them its learn step would read every earlier recording of the set as the
+// paired one's place again, and nothing would say so.
+func TestAgentClient_PushProvenTableIsReappliedWithItsWindows(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/scope/table" {
+			http.NotFound(w, r)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { sessions.Delete(srv.URL) })
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.session().configure(true)
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	windows := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}
+	if err := a.PushProvenTable(context.Background(), map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, windows); err != nil {
+		t.Fatal(err)
+	}
+	windows[0].TestCase = "o::Changed" // the caller's slice is its own
+	if err := a.session().reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`
+	if !slices.Equal(bodies, []string{want, want}) {
+		t.Fatalf("posted %q, want the table and its windows twice: %q", bodies, want)
+	}
+}

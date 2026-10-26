@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -214,6 +215,8 @@ func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
 		{Name: "o::TestA", Start: t0, End: t0.Add(time.Second), Outcome: models.ScopeOutcomeFailed},
 		// Its retry: the latest run's begin is the line's.
 		{Name: "o::TestA", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second), Outcome: models.ScopeOutcomePassed},
+		// An app the test started is no run of the test: not its begin.
+		{Name: "o::TestA", Start: t0.Add(2500 * time.Millisecond), End: t0.Add(3 * time.Second), App: true},
 	}
 	src := &models.Origin{Comm: "api", Exe: "./api", PID: 4242, Cmdline: "./api --token <redacted>"}
 	instr.mockErrors = []models.UnmatchedCall{
@@ -244,6 +247,14 @@ func TestTheReceiptNamesTheCallsChargedToNoTest(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(raw), "a@b.c")
 	require.NotContains(t, string(raw), "GET /in-test", "a call a test's end charged is that test's")
+	// The receipt's JSON form (enterprise's keploy mock status --json embeds
+	// it) carries no pid and no command line, neither on the process nor on
+	// the call's source.
+	js, err := json.Marshal(r)
+	require.NoError(t, err)
+	require.Contains(t, string(js), `"comm":"api"`)
+	require.NotContains(t, string(js), "4242")
+	require.NotContains(t, string(js), "--token")
 	tests, err := ReadTestsReceipt(keployDir, "set")
 	require.NoError(t, err)
 	require.Len(t, tests.Tests, 1)
@@ -670,14 +681,17 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 // Under the switch the replay hands the agent, with the table, the recorded
 // window of every test of the set from its mappings (keploy test's staging
 // sends them from its test cases): the learn step then reads another test's
-// recording as that test's, not as an earlier place of the paired one.
+// recording as that test's, not as an earlier place of the paired one. A
+// recording the mapping lists that the agent never holds (a connection
+// failure, models.AgentBound) is left out of the table but still ends its
+// test's window: it was made in it.
 func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	provenOn(t)
 	repo := t.TempDir()
 	t.Chdir(repo)
 	keployDir := filepath.Join(repo, "keploy")
 	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-1\n      at: 2026-01-02T03:04:10Z\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-2\n      at: 2026-01-02T03:04:20Z\nstartup:\n    - name: mock-0\n      key: o\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-1\n      at: 2026-01-02T03:04:10Z\n    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-2\n        - name: mock-3\n      at: 2026-01-02T03:04:20Z\nstartup:\n    - name: mock-0\n      key: o\n"), 0o644))
 	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 	instr.consumedMocks = []models.MockState{{Name: "mock-1"}, {Name: "mock-2"}}
 	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
@@ -685,15 +699,17 @@ func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	utils.ErrCode = 0
 	t.Cleanup(func() { utils.ErrCode = 0 })
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	db := named("mock-0", "mock-1", "mock-2")
-	for i, span := range [][2]int{{1, 2}, {11, 12}, {21, 23}} {
+	db := named("mock-0", "mock-1", "mock-2", "mock-3")
+	for i, span := range [][2]int{{1, 2}, {11, 12}, {21, 23}, {25, 26}} {
 		db.mocks[i].Spec.ReqTimestampMock = t0.Add(time.Duration(span[0]) * time.Second)
 		db.mocks[i].Spec.ResTimestampMock = t0.Add(time.Duration(span[1]) * time.Second)
 	}
+	db.mocks[3].Kind = models.ConnectionFailure
 	require.NoError(t, New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, []string{"mock-2"}, instr.table["o::TestB"], "the agent is handed only the recordings it holds")
 	require.Equal(t, []models.TestWindow{
 		{TestCase: "o::TestA", Start: t0.Add(5 * time.Second), End: t0.Add(12 * time.Second)},
-		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(23 * time.Second)},
+		{TestCase: "o::TestB", Start: t0.Add(15 * time.Second), End: t0.Add(26 * time.Second)},
 	}, instr.recordedWindows)
 }
 

@@ -410,10 +410,11 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	a.provenMu.Lock()
 	a.proven.pool = cp
 	a.provenMu.Unlock()
-	// Whose a mock is, for the learn steps: keploy mock replay sends no
-	// recorded test windows, and the table's pool slices are what says a
-	// mock was recorded while no test was open. Whose tests list each, by
-	// key, bounds each test process's teardown.
+	// Whose a mock is, for the learn steps: the table's pool slices are what
+	// says a mock was recorded while no test was open (the recorded test
+	// windows the table sends, SetRecordedWindows, end at each test's last
+	// recording, not at its scope's end). Whose tests list each, by key,
+	// bounds each test process's teardown.
 	if ps, ok := a.Proxy.(coreAgent.PoolNamesSetter); ok {
 		var names []string
 		for _, slice := range cp {
