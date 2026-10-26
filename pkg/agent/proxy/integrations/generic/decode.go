@@ -27,10 +27,13 @@ import (
 func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
 	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	// The replay pod's own identity becomes the recorded pod's in what is
-	// matched (identity package); the bytes forwarded on a miss are the
-	// client's own.
-	alias := identity.For(opts)
-	genericRequests := [][]byte{alias.Bytes(reqBuf)}
+	// matched (identity package), the identity of the test set armed when each
+	// buffer is read (identity.Current: a connection outlives a test set); the
+	// bytes forwarded on a miss are the client's own.
+	alias := func(b []byte) []byte {
+		return identity.ForAliasing(identity.Current(ctx, opts.Identity)).Bytes(b)
+	}
+	genericRequests := [][]byte{alias(reqBuf)}
 	logger.Debug("Into the generic parser in test mode")
 	// The requests it has read are held from the read on: it reads on with
 	// a deadline before it matches them, blocked reading while it holds them
@@ -79,7 +82,7 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 					if !holding {
 						release, holding = integrations.HoldRequest(ctx), true
 					}
-					genericRequests = append(genericRequests, alias.Bytes(buffer))
+					genericRequests = append(genericRequests, alias(buffer))
 				}
 				if timeout || atEOF {
 					logger.Debug("the timeout for the client read in generic or EOF")

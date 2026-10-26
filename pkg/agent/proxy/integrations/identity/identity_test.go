@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -195,5 +196,35 @@ func TestPresentedReadsTheEnvAndDefaultsTheHostname(t *testing.T) {
 	t.Setenv(PresentedHostEnv, "api")
 	if got := Presented().Hostname; got != "api" {
 		t.Errorf("an explicit presented hostname wins, got %q", got)
+	}
+}
+
+// A connection keeps the options copied when it was accepted; Current is the
+// identity of the test set armed when a request is read, or that copy when
+// nothing says which set is armed.
+func TestCurrentIsTheArmedSetsIdentityElseTheConnectionsCopy(t *testing.T) {
+	connCopy := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set1"}}}
+	armed := &models.IdentityAliasing{RecordedPods: []models.PodIdentity{{Name: "api-55f5fd9659-set2"}}}
+	lookup := func(id *models.IdentityAliasing, ok bool) func() (*models.IdentityAliasing, bool) {
+		return func() (*models.IdentityAliasing, bool) { return id, ok }
+	}
+	ctx := context.Background()
+	if got := Current(ctx, connCopy); got != connCopy {
+		t.Errorf("no lookup on the context: got %v, want the connection's copy", got)
+	}
+	if got := Current(WithCurrent(ctx, nil), connCopy); got != connCopy {
+		t.Errorf("a nil lookup is no lookup: got %v, want the connection's copy", got)
+	}
+	if got := Current(WithCurrent(ctx, lookup(armed, true)), connCopy); got != armed {
+		t.Errorf("a test set armed after the accept: got %v, want its identity", got)
+	}
+	if got := Current(WithCurrent(ctx, lookup(nil, true)), connCopy); got != nil {
+		t.Errorf("the armed set carries no identity: got %v, want none, whatever the connection copied", got)
+	}
+	if got := Current(WithCurrent(ctx, lookup(armed, false)), connCopy); got != connCopy {
+		t.Errorf("no test session armed: got %v, want the connection's copy", got)
+	}
+	if ForAliasing(nil) != nil {
+		t.Error("no identity, no rewriter")
 	}
 }

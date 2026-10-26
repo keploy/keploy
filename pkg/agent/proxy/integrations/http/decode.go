@@ -132,10 +132,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// below sees it) and the body, before any pass compares the call
 			// (identity package). The served response gets the live identity
 			// back only when the replay asked for it (IdentityAliasing.Responses).
-			alias := identity.For(opts)
+			// The identity is the test set's armed when this request is read
+			// (identity.Current), not the one opts copied when the connection
+			// was accepted: a client keeps a connection open across test sets.
+			id := identity.Current(ctx, opts.Identity)
+			alias := identity.ForAliasing(id)
 			aliasIdentity(alias, input)
 			var aliasBack *identity.Rewriter
-			if opts.Identity.ReverseResponses() {
+			if id.ReverseResponses() {
 				aliasBack = alias.Reverse()
 			}
 

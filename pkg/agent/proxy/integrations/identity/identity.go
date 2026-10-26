@@ -39,6 +39,7 @@
 package identity
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -457,7 +458,45 @@ var (
 // options carry no recorded identity, turn the aliasing off, or nothing
 // differs.
 func For(opts models.OutgoingOptions) *Rewriter {
-	id := opts.Identity
+	return ForAliasing(opts.Identity)
+}
+
+// currentKey carries a connection's lookup of the identity the test set armed
+// NOW aliases to (WithCurrent).
+type currentKey struct{}
+
+// WithCurrent is ctx with lookup as where a parser reads the identity of the
+// test set armed when a request is read (Current). A connection copies the
+// session's options once, when it is accepted, and a client keeps it open
+// across test sets: a request read on it after the next set was armed was
+// matched with the previous set's identity. lookup reports false when no test
+// session is armed. A nil lookup leaves ctx as it is.
+func WithCurrent(ctx context.Context, lookup func() (*models.IdentityAliasing, bool)) context.Context {
+	if lookup == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, currentKey{}, lookup)
+}
+
+// Current is the identity aliasing of the test set armed now: what ctx's
+// lookup (WithCurrent) returns, or fallback (the connection's own copy) when
+// ctx carries no lookup or no test session is armed.
+func Current(ctx context.Context, fallback *models.IdentityAliasing) *models.IdentityAliasing {
+	if ctx == nil {
+		return fallback
+	}
+	if lookup, ok := ctx.Value(currentKey{}).(func() (*models.IdentityAliasing, bool)); ok {
+		if id, armed := lookup(); armed {
+			return id
+		}
+	}
+	return fallback
+}
+
+// ForAliasing is the rewriter id asks for (For, on the identity alone), or nil
+// when it carries no recorded identity, turns the aliasing off, or nothing
+// differs.
+func ForAliasing(id *models.IdentityAliasing) *Rewriter {
 	if id == nil || id.Disabled || len(id.RecordedPods) == 0 {
 		return nil
 	}
