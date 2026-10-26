@@ -447,6 +447,15 @@ const (
 	KindNoise    Kind = "noise"
 	KindEcho     Kind = "echo"
 	KindVariable Kind = "variable"
+	// KindClockOffset is an instant its protocol types that is a read of
+	// the application's clock plus a constant offset (an expiry thirty
+	// minutes after now): in its call's window in the recording and in
+	// record's full round, at one offset (Learned.Offset). It is compared,
+	// never noise: a replay checks the value it sees is a read in its own
+	// call's window plus that offset (models.ClockOffset.Holds). The learn
+	// step learns it only for a caller whose replay so compares it
+	// (Window.ComparesOffsets); for any other it is unaccounted.
+	KindClockOffset Kind = "clock-offset"
 	// KindUnaccounted is a drift keploy can learn as none of the three:
 	// no earlier place is its source, and yet its readings cannot show it
 	// came from nowhere (unaccounted). The request is refused.
@@ -526,6 +535,10 @@ type Learned struct {
 	From Place
 	// Echo are an echo's places in the paired mock's recorded answer.
 	Echo []Leaf
+	// Offset is, of a KindClockOffset, the offset its call's windows put
+	// the value at from the application's clock in both runs; nil for any
+	// other kind.
+	Offset *models.ClockOffset
 	// Why, of an unaccounted drift, is why it cannot be noise; of noise
 	// record's full round learned past a source it served unchanged that
 	// the value moved away from (ClassifyFollowing), that source and why it
@@ -974,11 +987,32 @@ func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
 // where the first reading would have bound it. That refuses an application
 // that really did copy the value from a recording made at the call's own
 // instant (a false red, never a false green).
+//
+// A value the late reading learns as the clock plus an offset
+// (KindClockOffset), which the earlier place's reading binds (a variable,
+// or an echo) or learns as noise, is refused too: the two readings explain
+// it differently, and keploy cannot tell which the application did. One
+// the earlier place's reading refuses keeps that refusal and its reason.
+// (The earlier place's reading never learns an offset the late one does
+// not: both read the clock alike, and the late one finds no binding the
+// first does not.)
 func stricterOf(asPlace, asLate Learned) Learned {
 	if asPlace.Kind != KindUnaccounted && asLate.Kind == KindUnaccounted {
 		if b := boundAt(asPlace); b != "" {
 			asLate.Why += "; read as a recording made before the call, the value would be " + b + ", yet keploy refuses a value either reading refuses"
 		}
+		return asLate
+	}
+	if asLate.Kind == KindClockOffset && asPlace.Kind != KindClockOffset {
+		if asPlace.Kind == KindUnaccounted {
+			return asPlace
+		}
+		b := boundAt(asPlace)
+		if b == "" {
+			b = "noise, which no replay compares"
+		}
+		asLate.Why = "read as a recording made after the call, " + clockOffsetSeen(fieldName(asLate.Recorded), *asLate.Offset) + "; read as one made before it, the value would be " + b + ", and keploy refuses a value the two readings explain differently"
+		asLate.Kind, asLate.Offset = KindUnaccounted, nil
 		return asLate
 	}
 	return asPlace
