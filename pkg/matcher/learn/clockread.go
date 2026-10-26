@@ -29,6 +29,25 @@ func (ln Learned) Clock() (models.ClockOffset, bool) {
 	return models.ClockOffset{}, false
 }
 
+// outsideWindowWhy is why a value that is one instant whole in both runs is
+// refused where its call had a window on the application's clock that does
+// not hold it in both runs, and the lead did not show it a read of the clock
+// (read after "<field> changed, and "). A call with no window learns it as a
+// plain read of the clock instead (Learned.Read), which a replay checks.
+const outsideWindowWhy = "it is one instant whole that its call's window on the application's clock does not hold in both runs, a clock read before its call's window or no plain read of the clock, and it did not move by the lead that record's full round runs ahead of the recording: nothing shows it is a read of the application's clock made for its call, which a replay would check in the call's window, and noise there would let any value pass at every replay, so keploy refuses it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+
+// windowHolds reports whether w, the window of the call that carries v, holds a
+// read of the application's clock in both runs at one of the instants v
+// changed (Window.holdsRead), in UTC or in the application's zone.
+func (dc *DriftCache) windowHolds(v *valueDrift, w *Window) bool {
+	for _, p := range v.instants {
+		if w.holdsRead(p.rec, p.live, dc.zone) {
+			return true
+		}
+	}
+	return false
+}
+
 // readClockText reads s as one instant whole, by the clock layouts the word
 // rule reads (clockLayouts): its instant and the resolution its text writes.
 // ok only where one layout's pattern matches all of s and reads it, and the

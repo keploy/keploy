@@ -1187,6 +1187,29 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
 			ln.Read = textClockRead(r.Value, l.Value)
 		}
+		// A value that is one instant whole in both runs (readClockText),
+		// learned as noise that the lead did not show a read of the clock
+		// (Read nil), is never left noise, which would let any value pass at
+		// every replay. In a call with no window (a test's own call, read by
+		// the lead alone, or one whose window keploy could not tell) it is a
+		// plain read of the clock, which every replay, record's confirming
+		// round too, checks in its call's own span on the application's
+		// clock (CheckClockRead): whether it moved by the lead in record's
+		// full round depends on how late that round ran, which its verdict
+		// must not. In a call whose window holds it in neither zone the
+		// application's clock may write (UTC, the application's own:
+		// Window.holdsRead) it is refused, as a read made before that window
+		// or no plain read of the clock (outsideWindowWhy).
+		if ln.Kind == KindNoise && ln.Read == nil {
+			if read := textClockRead(r.Value, l.Value); read != nil {
+				switch {
+				case w == nil:
+					ln.Read = read
+				case !dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w):
+					ln.Kind, ln.Why = KindUnaccounted, outsideWindowWhy
+				}
+			}
+		}
 		out = append(out, ln)
 	}
 	return out
