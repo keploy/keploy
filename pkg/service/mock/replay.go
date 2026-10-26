@@ -2059,11 +2059,17 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 	if miss.MatchPhase == models.MatchPhaseNoRequest {
 		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
 	}
-	logger.Warn(msg,
+	fields := []zap.Field{
 		zap.String("protocol", miss.Protocol),
 		zap.String("call", miss.ActualSummary),
 		zap.String("destination", miss.Destination),
-		zap.String("next_step", next))
+	}
+	if miss.Reason != "" {
+		// Why it missed, in judging's words (record's full round): the
+		// next step then is the learn step's own reason.
+		fields = append(fields, zap.String("reason", miss.Reason))
+	}
+	logger.Warn(msg, append(fields, zap.String("next_step", next))...)
 }
 
 // provenCount is n under the proven switch, and nothing with it off, so a
