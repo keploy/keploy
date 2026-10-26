@@ -132,11 +132,12 @@ type Receipt struct {
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
 	// UnchargedMisses are, under the proven switch, the misses MissedData
 	// counts that no test was charged with (models.UnmatchedCall.ChargedTo
-	// empty): a call made before the test process claimed the run, between
-	// tests, or after the last test's end. Each is as evidence keeps a miss
-	// (models.UnmatchedCall.Sanitized: no value the app sent), with the
-	// process that made it. nil when the misses were not read, and with the
-	// switch off.
+	// empty): a call made before the test process claimed the run, after
+	// the last test's end, or between test processes (within one, a test's
+	// end charges it the misses made since the previous test's end). Each
+	// is as evidence keeps a miss (models.UnmatchedCall.Sanitized: no value
+	// the app sent), with the process that made it. nil when the misses
+	// were not read, and with the switch off.
 	UnchargedMisses []UnchargedMiss `yaml:"unchargedMisses,omitempty" json:"unchargedMisses,omitempty"`
 }
 
@@ -150,17 +151,18 @@ type UnchargedMiss struct {
 }
 
 // MissProcess names the process that made a call: its pid, its comm and its
-// whole command line, its secrets redacted as keploy's log of it is. It is in
-// the receipt only, which describes one run on this machine and is never
-// committed (receiptIgnore): no recording, test case or report holds a pid
-// or a command line (models.Origin.Persisted). Unnamed says why keploy named
-// none (models.UnnamedPIDNamespace), and PID is then the kernel pid it was
-// told.
+// whole command line, its secrets redacted as keploy's log of it is. Its pid
+// and command line are in the receipt's file only, which describes one run
+// on this machine and is never committed (receiptIgnore): the receipt's JSON
+// form (enterprise's keploy mock status --json embeds it) leaves them out,
+// and no recording, test case or report holds a pid or a command line
+// (models.Origin.Persisted). Unnamed says why keploy named none
+// (models.UnnamedPIDNamespace), and PID is then the kernel pid it was told.
 type MissProcess struct {
-	PID     uint32 `yaml:"pid,omitempty" json:"pid,omitempty"`
+	PID     uint32 `yaml:"pid,omitempty" json:"-"`
 	Comm    string `yaml:"comm,omitempty" json:"comm,omitempty"`
 	Exe     string `yaml:"exe,omitempty" json:"exe,omitempty"`
-	Cmdline string `yaml:"cmdline,omitempty" json:"cmdline,omitempty"`
+	Cmdline string `yaml:"cmdline,omitempty" json:"-"`
 	Unnamed string `yaml:"unnamed,omitempty" json:"unnamed,omitempty"`
 }
 
@@ -179,6 +181,10 @@ func unchargedMisses(misses []models.UnmatchedCall) []UnchargedMiss {
 		u := UnchargedMiss{UnmatchedCall: m.Sanitized()}
 		if src := m.Source; src != nil {
 			u.Process = &MissProcess{PID: src.PID, Comm: src.Comm, Exe: src.Exe, Cmdline: src.Cmdline, Unnamed: src.Unnamed}
+			// Process holds what only travels; the call's own source keeps
+			// what a file holds, so the receipt's JSON form carries no pid
+			// or command line through it either.
+			u.Source = src.Persisted()
 		}
 		out = append(out, u)
 	}

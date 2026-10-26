@@ -16,11 +16,12 @@ func windowMock(name string, t0 time.Time, req, res int) *models.Mock {
 }
 
 // keploy mock replay sends the agent the recorded window of every test of the
-// set, from its mappings: from the test's recorded begin (earlier where a
-// recording it lists was sent before it) to the last request or answer of
-// the recordings it lists. A test that lists none spans its begin alone, a
-// test with no begin and no timed recording has none, and windows that
-// overlap are one window no test names.
+// set, from its mappings: from the test's recorded begin (also where a
+// recording it lists was sent before it: in flight into it) to the last
+// request or answer of the recordings it lists. A test that lists none spans
+// its begin alone, a test with no begin starts at its earliest recording, a
+// test with neither has none, a test listed twice begins at its earliest
+// begin, and windows that overlap or touch are one window no test names.
 func TestRecordedTestWindowsAreTheMappingsTests(t *testing.T) {
 	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
@@ -44,7 +45,18 @@ func TestRecordedTestWindowsAreTheMappingsTests(t *testing.T) {
 			table: map[string][]string{"o::TestA": {"a-1", "a-2"}, "o::TestB": {"b-inflight", "b-1"}},
 			want: []models.TestWindow{
 				{TestCase: "o::TestA", Start: at(10), End: at(15)},
-				{TestCase: "o::TestB", Start: at(19), End: at(23)},
+				{TestCase: "o::TestB", Start: at(20), End: at(23)},
+			},
+		},
+		{
+			name: "a test listed twice begins at its earliest begin",
+			mp: &models.Mapping{TestCases: []models.MappedTestCase{
+				{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(21)}, {ID: "o::TestB", At: at(20)}, {ID: "o::TestB"},
+			}},
+			table: map[string][]string{"o::TestA": {"a-1", "a-2"}, "o::TestB": {"b-1"}},
+			want: []models.TestWindow{
+				{TestCase: "o::TestA", Start: at(10), End: at(15)},
+				{TestCase: "o::TestB", Start: at(20), End: at(23)},
 			},
 		},
 		{
@@ -61,6 +73,12 @@ func TestRecordedTestWindowsAreTheMappingsTests(t *testing.T) {
 			mp:    nil,
 			table: map[string][]string{"o::TestB": {"b-1"}},
 			want:  []models.TestWindow{{TestCase: "o::TestB", Start: at(22), End: at(23)}},
+		},
+		{
+			name:  "windows that touch at one instant are one, named by no test",
+			mp:    &models.Mapping{TestCases: []models.MappedTestCase{{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(15)}}},
+			table: map[string][]string{"o::TestA": {"a-1", "a-2"}, "o::TestB": {"b-1"}},
+			want:  []models.TestWindow{{Start: at(10), End: at(23)}},
 		},
 		{
 			name:  "overlapping windows are one, named by no test",
@@ -135,5 +153,38 @@ func TestRecordedTestWindowsTellAnotherTestsRecording(t *testing.T) {
 		if req(name).After(lastEnd) {
 			t.Errorf("a test's recording %s is after every window's end", name)
 		}
+	}
+}
+
+// A test's window starts at its begin, as keploy test's starts at its test
+// case's request, even where a recording it lists was sent before it: the
+// agent gives that in-flight call to the test through the gap rule
+// (models.WindowSchedule.InFlightInto), and a pool recording made in the gap
+// while no test was open stays outside every window, so the learn step reads
+// it as the pool's, not as the next test's.
+func TestAPoolRecordingInTheInFlightGapIsOutsideEveryWindow(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
+	decoded := []*models.Mock{
+		windowMock("a-1", t0, 11, 12),        // TestA's
+		windowMock("b-inflight", t0, 15, 21), // TestB's: sent in the gap, answered inside TestB
+		windowMock("gap-pool", t0, 17, 18),   // the pool's: made in the gap, no test open
+		windowMock("b-1", t0, 22, 23),        // TestB's
+	}
+	mp := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "o::TestA", At: at(10)}, {ID: "o::TestB", At: at(20)}}}
+	table := map[string][]string{"o::TestA": {"a-1"}, "o::TestB": {"b-inflight", "b-1"}}
+	ws := recordedTestWindows(mp, table, decoded)
+	if want := []models.TestWindow{{TestCase: "o::TestA", Start: at(10), End: at(12)}, {TestCase: "o::TestB", Start: at(20), End: at(23)}}; !slices.Equal(ws, want) {
+		t.Fatalf("windows\n %v\nwant\n %v", ws, want)
+	}
+	s := models.NewWindowSchedule(ws)
+	if s.Contains(at(17)) {
+		t.Errorf("the pool's gap recording (sent at +17s, while no test was open) is inside a window: %v", ws)
+	}
+	if !s.InFlightInto(at(15), at(21), at(20)) {
+		t.Errorf("TestB's in-flight recording (sent +15s, answered +21s) is not in flight into TestB's window: %v", ws)
+	}
+	if s.InFlightInto(at(17), at(18), at(20)) {
+		t.Errorf("the pool's gap recording, answered before TestB began, reads as in flight into it")
 	}
 }
