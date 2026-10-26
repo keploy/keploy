@@ -203,6 +203,18 @@ func TestAnEntryWithBothMockListsIsRefused(t *testing.T) {
 			}
 		})
 	}
+	// An empty or null mocks list loses nothing when it is not read: the
+	// entry reads as mock_entries.
+	for _, doc := range []string{"id: t\nmock_entries:\n  - name: m1\nmocks: []\n", "id: t\nmock_entries:\n  - name: m1\nmocks:\n"} {
+		var got MappedTestCase
+		if err := yaml.Unmarshal([]byte(doc), &got); err != nil || len(got.Mocks) != 1 || got.Mocks[0].Name != "m1" {
+			t.Fatalf("%q read as %+v, %v", doc, got, err)
+		}
+	}
+	var got MappedTestCase
+	if err := json.Unmarshal([]byte(`{"id":"t","mock_entries":[{"name":"m1"}],"mocks":[]}`), &got); err != nil || len(got.Mocks) != 1 {
+		t.Fatalf("an empty JSON mocks list read as %+v, %v", got, err)
+	}
 }
 
 // With the proven switch off an entry with both mock lists reads as it did

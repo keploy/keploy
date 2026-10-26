@@ -509,7 +509,7 @@ const errBothMockLists = "test %q in mappings has both `mocks` and `mock_entries
 // unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
 // format's other fields, in whichever shape the entry has.
 func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
-	if provenswitch.On() && nodeHasField(node, "mock_entries") && nodeHasField(node, "mocks") {
+	if provenswitch.On() && nodeHasField(node, "mock_entries") && nodeHasEntries(node, "mocks") {
 		var e struct {
 			ID string `yaml:"id"`
 		}
@@ -577,7 +577,7 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 
 // unmarshalJSONEntry is unmarshalYAMLEntry for a JSON entry.
 func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
-	if provenswitch.On() && jsonContainsField(data, "mock_entries") && jsonContainsField(data, "mocks") {
+	if provenswitch.On() && jsonContainsField(data, "mock_entries") && jsonHasEntries(data, "mocks") {
 		var e struct {
 			ID string `json:"id"`
 		}
@@ -701,6 +701,34 @@ func nodeHasField(node *yaml.Node, field string) bool {
 		}
 	}
 	return false
+}
+
+// nodeHasEntries reports whether the mapping node holds field with at least
+// one entry: an empty or null list loses nothing when it is not read.
+func nodeHasEntries(node *yaml.Node, field string) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == field {
+			v := node.Content[i+1]
+			for v.Kind == yaml.AliasNode && v.Alias != nil {
+				v = v.Alias
+			}
+			return v.Kind == yaml.SequenceNode && len(v.Content) > 0
+		}
+	}
+	return false
+}
+
+// jsonHasEntries is nodeHasEntries for a JSON object.
+func jsonHasEntries(data []byte, field string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
+	}
+	var list []json.RawMessage
+	return json.Unmarshal(raw[field], &list) == nil && len(list) > 0
 }
 
 func jsonContainsField(data []byte, field string) bool {
