@@ -922,6 +922,36 @@ type RecordingSource func(kind models.Kind, keys []string, visit func(name strin
 type recordingSource struct {
 	mu  sync.Mutex
 	src RecordingSource
+	// loaded is, for the source set last, each recording RangeStagedRecordings
+	// decoded, by name: read again for every learned call that asks whether
+	// it is exactly a recording made elsewhere, decoded once. Kept for no
+	// more than maxLoaded recordings.
+	loaded map[string]*models.Mock
+}
+
+// maxLoaded is how many decoded recordings recordingSource.loaded keeps.
+const maxLoaded = 50000
+
+// loadedOr is the recording name the source set last decoded for
+// RangeStagedRecordings, decoded now by load when it has not been. A decoded
+// recording is read, never changed, by whoever visits it.
+func (r *recordingSource) loadedOr(name string, load func() (*models.Mock, error)) (*models.Mock, error) {
+	r.mu.Lock()
+	mk, ok := r.loaded[name]
+	r.mu.Unlock()
+	if ok {
+		return mk, nil
+	}
+	mk, err := load()
+	if err != nil || mk == nil {
+		return mk, err
+	}
+	r.mu.Lock()
+	if r.loaded != nil && len(r.loaded) < maxLoaded {
+		r.loaded[name] = mk
+	}
+	r.mu.Unlock()
+	return mk, nil
 }
 
 // SetRecordingSource sets where a miss's diagnosis reads the staged set's
@@ -931,6 +961,7 @@ func (m *MockManager) SetRecordingSource(src RecordingSource) {
 	m.exact.recorded.mu.Lock()
 	defer m.exact.recorded.mu.Unlock()
 	m.exact.recorded.src = src
+	m.exact.recorded.loaded = map[string]*models.Mock{}
 }
 
 // rangeRecorded visits what the recording source holds of kind under keys
@@ -1034,7 +1065,9 @@ var _ integrations.StagedReader = (*MockManager)(nil)
 // RangeStagedRecordings implements integrations.StagedRecordingReader: the
 // recordings of kind the trees hold (StagedMocks, of kind), then those of
 // kind the agent keeps on disk under any of keys (SetRecordingSource), each
-// decoded only once the trees showed no recording of its name. No keys
+// decoded only once the trees showed no recording of its name, and once for
+// the source (recordingSource.loadedOr): visit reads what it is given and
+// never changes it. No keys
 // visits the trees alone. Nothing visited is handed out, and no name is
 // claimed (FindStagedNotOwned's naming is the miss's): a call that is
 // exactly a recording is told so however many calls are.
@@ -1069,7 +1102,7 @@ func (m *MockManager) RangeStagedRecordings(kind models.Kind, keys []string, vis
 			return true
 		}
 		seen[name] = true
-		mk, err := load()
+		mk, err := m.exact.recorded.loadedOr(name, load)
 		if err != nil {
 			loadErr = fmt.Errorf("read the recording %s kept on disk: %w", name, err)
 			return false

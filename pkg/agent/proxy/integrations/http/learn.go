@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1714,6 +1715,7 @@ func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live 
 	}
 	var found *models.Mock
 	var placeErr error
+	liveOp, liveGQL := liveShape.Leaves["body.operationName"]
 	try := func(m *models.Mock) bool {
 		if m == nil || m.Kind != models.HTTP || m.Spec.HTTPReq == nil || offered[m.Name] || !counts(m) {
 			return true
@@ -1724,6 +1726,18 @@ func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live 
 			return true
 		}
 		known := n.known(m)
+		// A GraphQL call of another operation than m's differs from m at
+		// body.operationName unless what m knows excuses it there: decoding
+		// m's whole body would say so, at the cost of every recording of the
+		// endpoint (operationOf).
+		if liveGQL && liveOp.Type == learn.String {
+			if op, ok := operationOf(m.Spec.HTTPReq.Body); ok && op != liveOp.Value {
+				rec := learn.Leaf{Path: liveOp.Path, Noise: liveOp.Noise, Type: learn.String, Value: op}
+				if excused, _ := known.Excused(rec); !excused && !hasVariables(m) {
+					return true
+				}
+			}
+		}
 		if hasVariables(m) {
 			at, err := variablePlaces(m)
 			if err != nil {
@@ -1757,7 +1771,42 @@ func exactlyElsewhere(input *req, mockDb integrations.MockMemDb, sc scope, live 
 	if placeErr != nil {
 		return nil, placeErr
 	}
+	if found != nil {
+		// What the store visits is read, never changed: the caller gets its
+		// own copy (RangeStagedRecordings).
+		found = found.ShallowCopy()
+	}
 	return found, err
+}
+
+// operationOf is the operationName of body, a GraphQL request's JSON body
+// whose top-level "operationName" is a string; ok is false for any other body.
+// Read up to that key, as the body's own JSON reads it (no value of it after
+// the key is decoded).
+func operationOf(body string) (string, bool) {
+	if strings.Count(body, `"operationName"`) != 1 {
+		return "", false // none, or a body whose readers may take another
+	}
+	dec := json.NewDecoder(strings.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return "", false
+	}
+	for dec.More() {
+		k, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if k == "operationName" {
+			v, err := dec.Token()
+			s, ok := v.(string)
+			return s, err == nil && ok
+		}
+		var skip json.RawMessage
+		if dec.Decode(&skip) != nil {
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // elsewhereCounts is which recordings exactlyElsewhere reads for a call the

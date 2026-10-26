@@ -2473,7 +2473,20 @@ func TestAScopedViewRangesTheStoresStagedRecordings(t *testing.T) {
 	if names, err := visit(&scopedMockDb{MockMemDb: treesOnly{mm, mm}}); err != nil || names != "mock-own1,mock-pool" {
 		t.Fatalf("over a store with no reader: %s %v; want its trees, mock-own1 and mock-pool", names, err)
 	}
+	// A recording is decoded once for the source set: read again, it is the
+	// one decoded, whatever the store would say now. A source set again (the
+	// next staging) reads it afresh, and one it cannot read back fails.
 	fail = errors.New("short read")
+	if names, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "mock-own1,mock-own2,mock-pool" {
+		t.Fatalf("a recording decoded once read again: %s %v; want it as decoded", names, err)
+	}
+	src := func(kind models.Kind, keys []string, visit func(string, func() (*models.Mock, error)) bool) error {
+		if kind == models.HTTP && len(keys) > 0 {
+			visit(own2.Name, func() (*models.Mock, error) { return own2, fail })
+		}
+		return nil
+	}
+	mm.SetRecordingSource(src)
 	if _, err := visit(&scopedMockDb{MockMemDb: mm}); err == nil || !strings.Contains(err.Error(), "mock-own2") {
 		t.Fatalf("a recording the store cannot read back gave %v; want an error naming mock-own2", err)
 	}
