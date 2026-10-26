@@ -158,3 +158,65 @@ func TestAReplaysSpanIsTheLiveHalfOfItsCallWindow(t *testing.T) {
 		t.Fatal("a span with no tracker on ctx")
 	}
 }
+
+// A replay reads a clock read only from a value that is one whole instant
+// naming its moment: a suffix or a prefix around an instant, a time of day
+// and a wall clock with no zone are refused, whatever the window. An
+// offset's refusal says the value is no read of the clock plus that offset.
+// A learning is a clock read only as noise with a read or a clock + offset.
+func TestAClockReadIsOnlyAWholeInstantNamingItsMoment(t *testing.T) {
+	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	s := Span{From: from, To: from.Add(40 * time.Millisecond)}
+	plain := models.ClockOffset{Res: time.Second}
+	const path = "body.since"
+	text := func(v string) Leaf { return Leaf{Path: path, Noise: path, Type: String, Value: v} }
+	const now = "2026-10-27T12:00:00Z"
+	if ok, why := CheckClockRead(path, plain, text(now), s, true); !ok {
+		t.Fatalf("the window's own now refused: %s", why)
+	}
+	for _, c := range []struct {
+		what string
+		live Leaf
+	}{
+		{"a suffix after the instant", text(now + "x")},
+		{"a prefix before it", text("x" + now)},
+		{"a time of day, which names no day", text("12:00:00")},
+		{"a typed wall clock, which names no zone", Leaf{Path: path, Noise: path, Type: Instant, Value: "2026-10-27T12:00"}},
+	} {
+		if ok, _ := CheckClockRead(path, plain, c.live, s, true); ok {
+			t.Errorf("%s: answered as a read of the clock", c.what)
+		}
+	}
+	ttl := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Second, Res: time.Second}
+	if ok, why := CheckClockRead(path, ttl, text(now), s, true); ok || !strings.Contains(why, "plus that offset") {
+		t.Fatalf("an offset's refusal: %v %q", ok, why)
+	}
+	if got, ok := (Learned{Kind: KindClockOffset, Offset: &ttl}).Clock(); !ok || got != ttl {
+		t.Fatalf("a clock + offset learning reads as %+v,%v", got, ok)
+	}
+	if _, ok := (Learned{Kind: KindVariable, Read: &plain}).Clock(); ok {
+		t.Fatal("a variable read as a clock read")
+	}
+	if _, ok := (Learned{Kind: KindNoise}).Clock(); ok {
+		t.Fatal("noise with no read read as a clock read")
+	}
+}
+
+// A live span needs the app's clock even with a serve before the call, and
+// starts at the last serve before the call's arrival, never at one stamped
+// at the arrival itself.
+func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	arrival := base.Add(3 * time.Second)
+	tr := NewTracker()
+	tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base.Add(time.Second))
+	if _, ok := tr.LiveSpan(arrival); ok {
+		t.Fatal("a span with a serve before the call but no app clock")
+	}
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	tr.ServedMockAt(&models.Mock{Name: "mock-2", Kind: models.Mongo}, arrival)
+	s, ok := tr.LiveSpan(arrival)
+	if want := (Span{From: base.Add(time.Second), To: arrival}); !ok || s != want {
+		t.Fatalf("span = %+v,%v; want %+v: a serve at the call's own arrival is no serve before it", s, ok, want)
+	}
+}
