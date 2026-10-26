@@ -444,12 +444,35 @@ apply_keploy_memory_limit() {
 # the container on that inflated number, producing false-positive failures
 # even when keploy's own pressure machinery was healthy and dropping zero mocks.
 #
-# Tries cgroup v2 first (the layout on ubuntu-latest GHA runners), falls back
-# to cgroup v1, and finally to docker stats MemUsage if both cgroup reads fail.
+# Reads first the container's own cgroup v2 files as this host sees them: the
+# cgroup /proc/<its pid>/cgroup names, under this host's /sys/fs/cgroup. That
+# is the file keploy's memory guard reads inside the container. The container's
+# own /sys/fs/cgroup is not: the agent bind-mounts the Docker daemon's whole
+# /sys/fs/cgroup in a cgroup namespace of its own, so there memory.current is
+# the daemon's root cgroup. On a GitHub runner the root has no memory.current
+# (the reads below fell through to docker stats), and under docker-in-docker
+# it is the whole outer container: MySQL, the app and k6 too.
+# Then falls back to cgroup v2 and v1 inside the container, and finally to
+# docker stats MemUsage if every cgroup read fails.
 read_working_set_bytes() {
     local container="$1"
     local current=""
     local inactive=""
+    local pid cg
+
+    pid="$(docker inspect --format '{{.State.Pid}}' "$container" 2>/dev/null || true)"
+    if [ -n "$pid" ] && [ "$pid" != "0" ]; then
+        cg="$(awk -F: '$1 == "0" { print $3; exit }' "/proc/$pid/cgroup" 2>/dev/null || true)"
+        if [ -n "$cg" ] && [ "$cg" != "/" ] && current="$(cat "/sys/fs/cgroup${cg}/memory.current" 2>/dev/null)" && [ -n "$current" ]; then
+            inactive="$(awk '/^inactive_file /{print $2; exit}' "/sys/fs/cgroup${cg}/memory.stat" 2>/dev/null || true)"
+            if [ -n "$inactive" ]; then
+                local ws=$((current - inactive))
+                [ "$ws" -lt 0 ] && ws=0
+                echo "$ws"
+                return 0
+            fi
+        fi
+    fi
 
     # cgroup v2: /sys/fs/cgroup/memory.current + /sys/fs/cgroup/memory.stat
     if current="$(docker exec "$container" cat /sys/fs/cgroup/memory.current 2>/dev/null)" && [ -n "$current" ]; then
