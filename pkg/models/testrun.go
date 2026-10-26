@@ -548,7 +548,10 @@ type UnmatchedCall struct {
 	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
 	// drifted, Differs naming the leaves learned as noise.
 	// AnswerByKind: a background write answered by its kind, unchecked;
-	// Reused says the kind's recordings were used up. An answer never counts
+	// Reused says the kind's recordings were used up.
+	// AnswerBeforeUnmadeWrite: a read made before a write of its test the
+	// replay had not made yet, answered with ClosestMock, recorded before
+	// that write; NextSteps names the write. An answer never counts
 	// against a test and never lands in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
 	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
@@ -705,6 +708,13 @@ const (
 	AnswerProvisional = "provisional"
 	// AnswerByKind: a background write answered by its write kind, unchecked.
 	AnswerByKind = "by_kind"
+	// AnswerBeforeUnmadeWrite: a read the replay made before a write of its
+	// test it had not made yet, that the test recorded only after that
+	// write (an application's cached copy expired at replay where it was
+	// fresh at record), answered with the newest recording of the same
+	// request made before the write, consuming nothing. Nothing is learned
+	// from it; the report names it (BeforeWriteLines).
+	AnswerBeforeUnmadeWrite = "before_unmade_write"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

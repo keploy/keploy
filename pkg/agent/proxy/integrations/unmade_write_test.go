@@ -1,7 +1,9 @@
 package integrations
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,5 +112,57 @@ func TestReadBeforeUnmadeWrite_WhatTheStoreCannotTellKeepsTheChoiceOrFails(t *te
 				t.Fatalf("an answered read notes a miss: %q", got.Note())
 			}
 		})
+	}
+}
+
+// A read answered from before the write is reported as an answer that
+// names the write and the recording that answered, so the run report names
+// it; a choice the rule keeps, and a read that misses (its Note is the
+// miss), report nothing here.
+func TestReportAnswered_NamesTheWriteAndTheRecordingThatAnswered(t *testing.T) {
+	write := &models.Mock{Name: "mock-7"}
+	answer := &models.Mock{Name: "mock-3"}
+	var got []error
+	ctx := models.WithMockMismatchReporter(context.Background(), func(err error) { got = append(got, err) })
+	r := &models.MockMismatchReport{Protocol: "MongoDB", ActualSummary: "find oauth.blocklist"}
+	if !ReportAnswered(ctx, BeforeUnmadeWrite{Write: write, Answer: answer}, r) {
+		t.Fatal("ReportAnswered = false with a reporter installed and an answer")
+	}
+	if len(got) != 1 {
+		t.Fatalf("reported %d errors, want 1", len(got))
+	}
+	var carrier interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if !errors.Is(got[0], models.ErrAnswered) || !errors.As(got[0], &carrier) || carrier.MismatchReport() == nil {
+		t.Fatalf("reported %v, want an answer (models.ErrAnswered) with its report", got[0])
+	}
+	rep := carrier.MismatchReport()
+	if rep.Answer != models.AnswerBeforeUnmadeWrite || rep.ClosestMock != "mock-3" || rep.Protocol != "MongoDB" || rep.ActualSummary != "find oauth.blocklist" {
+		t.Fatalf("report = answer %q closest %q call %q %q, want %q mock-3 MongoDB find oauth.blocklist",
+			rep.Answer, rep.ClosestMock, rep.Protocol, rep.ActualSummary, models.AnswerBeforeUnmadeWrite)
+	}
+	if want := "an extra read before mock-7, answered from mock-3: "; !strings.HasPrefix(rep.NextSteps, want) {
+		t.Fatalf("NextSteps = %q, want it to begin %q", rep.NextSteps, want)
+	}
+	lines := models.BeforeWriteLines("test-2", []models.UnmatchedCall{{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, ClosestMock: rep.ClosestMock, NextSteps: rep.NextSteps, Answer: rep.Answer}})
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "test-2: MongoDB find oauth.blocklist: an extra read before mock-7, answered from mock-3: ") {
+		t.Fatalf("BeforeWriteLines = %q, want the test, the call, the write and the answer", lines)
+	}
+
+	got = nil
+	for _, b := range []BeforeUnmadeWrite{{}, {Write: write}, {Answer: answer}} {
+		if ReportAnswered(ctx, b, &models.MockMismatchReport{Protocol: "MongoDB"}) {
+			t.Errorf("ReportAnswered(%+v) = true, want false: it answers nothing from before a write", b)
+		}
+	}
+	if ReportAnswered(ctx, BeforeUnmadeWrite{Write: write, Answer: answer}, nil) {
+		t.Error("ReportAnswered with no account of the call = true, want false")
+	}
+	if len(got) != 0 {
+		t.Fatalf("reported %d errors for decisions that answer nothing, want 0", len(got))
+	}
+	if ReportAnswered(context.Background(), BeforeUnmadeWrite{Write: write, Answer: answer}, &models.MockMismatchReport{Protocol: "MongoDB"}) {
+		t.Fatal("ReportAnswered = true with no reporter installed")
 	}
 }
