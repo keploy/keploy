@@ -290,27 +290,46 @@ func perTestReads(t *testing.T, mm *MockManager, what string, want ...string) {
 	equalNames(t, what+": the round snapshot's per-test read", snap.PerTest, want...)
 }
 
-// A per-test recording the pool slice holds, recorded after the last test (a
-// Go mongo-driver's endSessions at client.Disconnect) or between two tests,
+// exactWindows seeds mm's recorded windows of the set (the staging call's
+// RecordedWindows): T over [0.5s, 1.5s] and T2 over [1.7s, 2.5s] of exactT0.
+func exactWindows(mm *MockManager) {
+	mm.SeedRecordedWindows([]models.TestWindow{
+		{TestCase: "T", Start: exactT0.Add(500 * time.Millisecond), End: exactT0.Add(1500 * time.Millisecond)},
+		{TestCase: "T2", Start: exactT0.Add(1700 * time.Millisecond), End: exactT0.Add(2500 * time.Millisecond)},
+	})
+}
+
+// A per-test recording the pool slice holds that was sent after the set's
+// last recorded test (a Go mongo-driver's endSessions at client.Disconnect)
 // is filed by the staging in the startup tree alone. Once the first test
 // fired a parser reads only the per-test tier for it (Mongo's index), so
 // every per-test read shows it while no test is open after a test, and the
 // round snapshot shows the same. Before the first test the startup read is
 // the parsers' own and nothing is added, and in a test nothing changes. It
-// stays fail-closed: a per-test recording outside the slice (another test's,
-// or one recorded after the last test that the slice does not hold) is never
-// shown, and once the pool's answered through Mongo's delete door, a second
-// call finds nothing through any door.
-func TestAfterTheLastTestThePoolsPerTestRecordingAnswersAPerTestRead(t *testing.T) {
+// stays fail-closed: the slice's per-test recordings sent before the first
+// test, in the gap between two tests, or in the last test's window (answered
+// after it) are never shown in a per-test read
+// (a late call paired with one, made before another test's own recording,
+// would learn what that test's answer gave the app), nor is a teardown
+// recording outside the slice, and once the teardown recording answered
+// through Mongo's delete door, a second call finds nothing through any door.
+func TestAfterTheLastTestTheSetsTeardownRecordingAnswersAPerTestRead(t *testing.T) {
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
 	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	// Sent in T2's window and answered after it: in flight as the last
+	// test ended, not sent after it.
+	straddle := exactMongo("straddle", 2400*time.Millisecond, models.LifetimePerTest)
+	straddle.Spec.ResTimestampMock = exactT0.Add(2600 * time.Millisecond)
 	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
 	unlisted := exactMongo("unlisted", 4*time.Second, models.LifetimePerTest)
 	// A session-tier recording of the slice is a reusable read's (the
 	// staging files it in the session tree too), never a per-test read's.
 	session := exactMongo("session-tier", 5*time.Second, models.LifetimeSession)
-	mm := stagedManager(t, []*models.Mock{owned, owned2, end, unlisted}, []*models.Mock{session})
-	slice := []string{"end-sessions", "session-tier"}
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, straddle, end, unlisted}, []*models.Mock{session})
+	exactWindows(mm)
+	slice := []string{"boot", "gap", "straddle", "end-sessions", "session-tier"}
 	mm.ServeExactPool("k", slice)
 	perTestReads(t, mm, "before the first test")
 	mm.ServeExactTest("T", []*models.Mock{owned})
@@ -343,16 +362,73 @@ func TestAfterTheLastTestThePoolsPerTestRecordingAnswersAPerTestRead(t *testing.
 	}
 }
 
-// The reached worker scope is shown whether a test is open or not, so
-// between tests a per-test read shows its per-test recordings, as it shows
-// the pool slice's. In a test a per-test read is unchanged: it shows the
-// test's own alone (the worker scope's per-test recordings there are a stated
-// limit, read through no per-test read).
-func TestBetweenTestsAPerTestReadShowsTheReachedWorkerScope(t *testing.T) {
+// keploy mock replay sends no recorded windows but stages the whole
+// recording and names the pool's recordings (SetPoolNames): there the set's
+// teardown is what was sent after every recording a test owns, consumed or
+// not, so after the tests a per-test read shows the pool's recording made
+// after the last test's, never one made before the first test or between two
+// tests. With neither windows nor pool names, or with pool names but no
+// recording a test owns, nothing tells the teardown, and a per-test read
+// after the test shows none.
+func TestWithNoRecordedWindowsTheTeardownIsAfterEveryRecordingATestOwns(t *testing.T) {
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
-	w := exactMongo("worker", 2*time.Second, models.LifetimePerTest)
-	mm := stagedManager(t, []*models.Mock{owned, w}, nil)
-	mm.ServeExactWorker([]string{"worker"})
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	// A session-tier recording a test owns, answered later than its request.
+	reused := exactMongo("reused", 2100*time.Millisecond, models.LifetimeSession)
+	reused.Spec.ResTimestampMock = exactT0.Add(2900 * time.Millisecond)
+	early := exactMongo("before-answer", 2800*time.Millisecond, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	// A protocol-phase recording made later is no test's.
+	hs := configMock("handshake", 3500*time.Millisecond)
+	slice := []string{"boot", "gap", "before-answer", "end-sessions"}
+	mm := stagedManager(t, []*models.Mock{boot, owned, gap, owned2, early, end}, []*models.Mock{reused, hs})
+	mm.SetPoolNames(slice)
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "before the first test")
+	mm.ServeExactTest("T", []*models.Mock{owned})
+	if !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "between two tests", "end-sessions")
+	mm.ServeExactTest("T2", []*models.Mock{owned2, reused})
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "end-sessions")
+
+	bare := stagedManager(t, []*models.Mock{owned, end}, nil)
+	bare.ServeExactPool("k", []string{"end-sessions"})
+	bare.ServeExactTest("T", []*models.Mock{owned})
+	bare.ServeExactPool("k", []string{"end-sessions"})
+	perTestReads(t, bare, "after the test, no windows and no pool names")
+
+	// Pool names, but no test owns a recording: nothing tells where the
+	// tests were, so none is added either.
+	pooled := stagedManager(t, []*models.Mock{boot, end}, nil)
+	pooled.SetPoolNames([]string{"boot", "end-sessions"})
+	pooled.ServeExactPool("k", []string{"boot", "end-sessions"})
+	pooled.ServeExactTest("T", nil)
+	pooled.ServeExactPool("k", []string{"boot", "end-sessions"})
+	perTestReads(t, pooled, "after a test, no recording a test owns")
+}
+
+// The reached worker scope is shown whether a test is open or not, so after
+// a test a per-test read shows its per-test recordings of the set's teardown,
+// as it shows the pool slice's, and never one made before the set's last test
+// ended. In a test a per-test read is unchanged: it shows the test's own
+// alone (the worker scope's per-test recordings there are a stated limit,
+// read through no per-test read).
+func TestAfterTheLastTestAPerTestReadShowsTheReachedWorkerScopesTeardown(t *testing.T) {
+	early := exactMongo("worker-early", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	w := exactMongo("worker", 3*time.Second, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{early, owned, w}, nil)
+	exactWindows(mm)
+	mm.ServeExactWorker([]string{"worker-early", "worker"})
 	mm.ServeExactPool("k", nil)
 	perTestReads(t, mm, "before the first test")
 	mm.ServeExactTest("T", []*models.Mock{owned})
@@ -368,6 +444,7 @@ func TestUnderTheBackgroundRulesTheCallAfterTheLastTestAnswersOnce(t *testing.T)
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
 	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{owned, end}, nil)
+	exactWindows(mm)
 	mm.ServeExactBackground(models.RecordedWithS12Routing, []string{"end-sessions"}, nil)
 	mm.ServeExactPool(models.PoolKeyNone, []string{"end-sessions"})
 	perTestReads(t, mm, "before the first test")
