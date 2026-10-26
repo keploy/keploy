@@ -1810,9 +1810,52 @@ func (v *exactView) backgroundOrder(out, in []*models.Mock) []*models.Mock {
 }
 
 // perTest is a per-test read under exact serving: the open test's unanswered
-// mocks of kind, then what the per-test tree holds that the view shows.
-func (v *exactView) perTest(kind models.Kind, staged []*models.Mock) []*models.Mock {
-	return append(v.unanswered(kind), v.keep(staged)...)
+// mocks of kind (between tests, the next test's ahead), then what the view
+// shows of the per-test tree's values (staged) and of the per-test
+// recordings among startup.
+//
+// startup is the startup tree's values, which the callers (exactPerTest, the
+// round snapshot) pass only while no test is open after the first test fired.
+// The staging files every per-test recording in the startup tree alone, so a
+// per-test recording the view shows between tests (the pool slice's, such as
+// a Go mongo-driver's endSessions at client.Disconnect after the last test,
+// or the reached worker scope's) is in no per-test tree. Mongo's index reads
+// the startup tier only until the first test fires, and from then on reads
+// such a call's recording only through a per-test read: without startup the
+// call missed though the view shows its recording. Before the first test the
+// startup read is the parsers' own, so nothing is added there; in a test
+// nothing is added either. The two trees never hold one mock (a staging
+// files a mock in one of them). What the view does not show is never added: a
+// per-test recording outside the pool slice and the worker scope, or another
+// test's. A pool recording consumed through a delete door (Mongo's per-test
+// consume) is spent outside every test and shown no more, so the same call
+// made once more misses, as a call with no recording does.
+func (v *exactView) perTest(kind models.Kind, staged, startup []*models.Mock) []*models.Mock {
+	all := staged
+	for _, mk := range startup {
+		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest {
+			if len(all) == len(staged) {
+				all = append(make([]*models.Mock, 0, len(staged)+len(startup)), staged...)
+			}
+			all = append(all, mk)
+		}
+	}
+	return append(v.unanswered(kind), v.keep(all)...)
+}
+
+// afterTests reports whether a per-test read in v reads the startup tree's
+// per-test recordings too (perTest): while no test is open, once the first
+// test fired.
+func (v *exactView) afterTests(fired bool) bool { return v.test == "" && fired }
+
+// exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
+// with the startup tree's values of kind when the read takes them.
+func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
+	var startup []*models.Mock
+	if v.afterTests(m.exact.fired.Load()) {
+		startup = m.treeValues(m.startupTree(), kind)
+	}
+	return v.perTest(kind, staged, startup)
 }
 
 // reusable is a session-tier read under exact serving: the open test's
