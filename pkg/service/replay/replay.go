@@ -5393,9 +5393,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// application asked again where its recording did not, perhaps as an
 	// answer it kept for a span of elapsed time ran out (models.RepeatNote).
 	// The line claims that cause only when every note's gaps support it.
-	if named, likely := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
+	if named, likely, answered := markRepeatOf(testCaseResults, consumers, testCases, mockLookup, replayStarts); len(named) > 0 {
 		r.mockMismatchFailures.nameRepeats(testSetID, testCaseResults)
-		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: "+repeatMissCause(likely, len(named))+"; each is named under unmatched_calls.repeat_of",
+		where := "unmatched_calls.repeat_of"
+		if answered > 0 {
+			// A call a pairing answered (proven switch) is no miss: its
+			// note is on the test's answers.
+			where += ", or answers.repeat_of for a call another test's recording answered"
+		}
+		r.logger.Warn("tests made a call identical to one an earlier test made, which keploy already answered at this replay with that test's recording: "+repeatMissCause(likely, len(named))+"; each is named under "+where,
 			zap.String("test-set", testSetID),
 			zap.Strings("calls", named[:min(len(named), 20)]),
 			zap.Int("count", len(named)),

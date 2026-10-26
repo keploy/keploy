@@ -562,7 +562,8 @@ type UnmatchedCall struct {
 	// recording an earlier test of the set made (ClosestMock, or
 	// RepeatNote.Mock for a NotOwned call, whose ClosestMock stays the
 	// recording made elsewhere), which already answered that test's call at
-	// this replay; the replay names that test (RepeatNote.Test). nil
+	// this replay; the replay names that test (RepeatNote.Test). A call a
+	// pairing answered (Answer) carries it by a NotOwned miss's rule. nil
 	// otherwise.
 	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
 }

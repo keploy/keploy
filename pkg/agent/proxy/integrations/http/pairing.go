@@ -248,7 +248,17 @@ func sqsPoll(input *req) bool {
 // ClosestMock off the set's mappings. The pairing's call was served from x
 // though no delete door consumed it: the learn step's tracker is told so, as
 // the store tells it of a consumed one.
-func reportPairing(ctx context.Context, input *req, x *models.Mock) {
+//
+// A call that is also identical to a recording an earlier test made, which
+// already answered at this replay (repeat: a, found by repeatNoteOf by the
+// rule a missed call's note follows), carries the note a call made elsewhere
+// that missed carries (models.RepeatNote, markRepeat): the application asked
+// again where its recording did not, and judging, which moves x to the set's
+// background, names the repeat with the move. The note is information only:
+// the pairing, its answer and x stay as they are, and the replay names the
+// earlier test and measures the gaps at the set's end (markRepeatOf), as it
+// does a miss's.
+func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
 	path, dest := "/", input.header.Get("Host")
 	if input.url != nil {
 		if input.url.Path != "" {
@@ -261,6 +271,9 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock) {
 	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
+	if repeat {
+		r.Repeat = models.NewRepeatNote(a.Mock.Name, a.AnsweredAt, a.Mock.Spec.ReqTimestampMock, r.At)
+	}
 	models.ReportAnswer(ctx, r)
 	if t := learn.TrackerFrom(ctx); t != nil {
 		// In this connection's request (integrations.InFlightOf), as a

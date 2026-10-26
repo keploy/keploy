@@ -38,9 +38,10 @@ import (
 // recording that answered at this replay; there a replay gap meaningfully
 // shorter than the record gap is the likely sign.
 
-// RepeatNote says that a call no mock answered is identical to a recording an
-// earlier test of the set made, which had already answered the same call at
-// this replay (MockMismatchReport.Repeat, UnmatchedCall.Repeat). Identical is
+// RepeatNote says that a call no mock answered, or one record's full round
+// answered by a pairing with another test's recording, is identical to a
+// recording an earlier test of the set made, which had already answered the
+// same call at this replay (MockMismatchReport.Repeat, UnmatchedCall.Repeat). Identical is
 // the parser's judgement: for HTTP the method, destination, path, query and
 // body (and the X-Amz-Target) after the configured and learned noise, other
 // headers aside.

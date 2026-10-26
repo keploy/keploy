@@ -347,7 +347,11 @@ type MockMismatchReport struct {
 	// (RepeatNote); nil otherwise. ClosestMock is then that recording, but
 	// for a call that is also a recording made elsewhere (NotOwned): that
 	// recording stays ClosestMock, the reason the call missed, and the note
-	// names the earlier one (RepeatNote.Mock, RepeatNote.ExplainMiss).
+	// names the earlier one (RepeatNote.Mock, RepeatNote.ExplainMiss). A
+	// pairing's answer (Answer AnswerProvisional, NotOwned) carries it by
+	// the same rule (none for a call one more than the test recorded):
+	// ClosestMock is the recording that answered, and the note names the
+	// earlier one, for information only.
 	Repeat *RepeatNote
 }
 

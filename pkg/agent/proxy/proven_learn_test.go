@@ -1266,3 +1266,74 @@ func TestATestCasesCaptureWindowAwaitsItsRequest(t *testing.T) {
 		}
 	}
 }
+
+// A paired call's repeat note follows a missed call's rule, through the real
+// store. Five tests recorded one call (an app cache): test-1's mock-s,
+// test-2's mock-t, test-3's mock-u, test-5's mock-v, and test-4 recorded
+// none. In record's full round test-1 makes it (mock-s answers) and test-2
+// makes it twice: its own mock-t answers the first, and the second, one call
+// more than test-2 recorded, is paired with mock-u and carries no note, as
+// its miss would carry none (it repeats test-2's own recorded call, so a note
+// saying the test recorded no such call would be false). test-4's call,
+// which it recorded nothing like, is paired with mock-v and carries the note
+// naming a recording an earlier test's call consumed.
+func TestAPairedCallsRepeatNoteFollowsTheMissesRule(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	now := time.Now()
+	rec := func(name string, at time.Duration) *models.Mock {
+		return r3Mock(name, now.Add(at), "GET", "/rates?base=CHF", "", `{"rate":1.1}`)
+	}
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	mm.SetMocksWithWindow([]*models.Mock{rec("mock-s", 100*time.Millisecond), rec("mock-t", 1500*time.Millisecond), rec("mock-u", 3000*time.Millisecond), rec("mock-v", 4500*time.Millisecond)}, nil, models.BaseTime, now.Add(time.Hour))
+	mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+	mm.SetPairing(true)
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	get := "GET /rates?base=CHF HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\n\r\n"
+	opts := models.OutgoingOptions{Learn: true}
+	answers := func(t *testing.T) []models.UnmatchedCall {
+		t.Helper()
+		calls, err := p.GetMockErrors(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []models.UnmatchedCall
+		for _, c := range calls {
+			if c.Answer == "" {
+				t.Fatalf("a miss %+v; every call here is answered", c)
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-1", []*models.Mock{roundMock(mm, "mock-s")})
+	if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+		t.Fatalf("test-1's call: %d %s", code, got)
+	}
+	if a := answers(t); len(a) != 0 {
+		t.Fatalf("test-1's own call was reported %+v", a)
+	}
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-2", []*models.Mock{roundMock(mm, "mock-t")})
+	for i := 1; i <= 2; i++ {
+		if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+			t.Fatalf("test-2's call %d: %d %s", i, code, got)
+		}
+	}
+	if a := answers(t); len(a) != 1 || a[0].ClosestMock != "mock-u" || a[0].Repeat != nil {
+		t.Fatalf("test-2's answers are %+v; want one pairing with mock-u, with no repeat note", a)
+	}
+	p.ContinueTestErrorCapture()
+	mm.ServeExactTest("test-4", nil)
+	if code, got := r3Send(t, p, mm, opts, get); code != http.StatusOK {
+		t.Fatalf("test-4's call: %d %s", code, got)
+	}
+	a := answers(t)
+	if len(a) != 1 || a[0].ClosestMock != "mock-v" || a[0].Repeat == nil || (a[0].Repeat.Mock != "mock-s" && a[0].Repeat.Mock != "mock-t") {
+		t.Fatalf("test-4's answers are %+v; want one pairing with mock-v, noting mock-s or mock-t", a)
+	}
+}
