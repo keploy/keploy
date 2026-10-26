@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -167,5 +168,52 @@ func TestMappedTestCaseKeepsMocksWrittenBesideAFolder(t *testing.T) {
 		if len(tc.Mocks) != 1 || tc.Mocks[0].Name != "mock-1" || tc.Dir != "pkg/x" || tc.Starts != 2 {
 			t.Fatalf("mocks, folder and starts must all be read: %+v", tc)
 		}
+	}
+}
+
+// Under the proven switch an entry with both mock lists is refused, naming
+// the test: keploy reads mock_entries only, so a mocks: list beside it (a hand
+// edit, or an undo followed to the letter) would be dropped without a word,
+// and the next rewrite would erase it. With the switch off it reads as before.
+func TestAnEntryWithBothMockListsIsRefused(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name, doc string
+		json      bool
+	}{
+		{"yaml", "id: post-url-1\nmock_entries:\n  - name: m1\nmocks:\n  - name: mock-6\n", false},
+		{"yaml empty mock_entries", "id: post-url-1\nmock_entries: []\nmocks:\n  - name: mock-6\n", false},
+		{"json", `{"id":"post-url-1","mock_entries":[{"name":"m1"}],"mocks":[{"name":"mock-6"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got MappedTestCase
+			var err error
+			if tc.json {
+				err = json.Unmarshal([]byte(tc.doc), &got)
+			} else {
+				err = yaml.Unmarshal([]byte(tc.doc), &got)
+			}
+			if err == nil {
+				t.Fatalf("read as %+v; want a refusal", got)
+			}
+			for _, want := range []string{"post-url-1", "`mocks`", "`mock_entries`"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal %q does not name %s", err, want)
+				}
+			}
+		})
+	}
+}
+
+// With the proven switch off an entry with both mock lists reads as it did
+// before keploy refused it: mock_entries alone.
+func TestAnEntryWithBothMockListsReadsAsBeforeWithoutTheSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	var got MappedTestCase
+	if err := yaml.Unmarshal([]byte("id: t\nmock_entries:\n  - name: m1\nmocks:\n  - name: mock-6\n"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "t" || !reflect.DeepEqual(got.MockNames(), []string{"m1"}) {
+		t.Fatalf("came back as %+v; want t with m1 alone", got)
 	}
 }

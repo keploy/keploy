@@ -393,6 +393,29 @@ func TestAMappingNamingAnAbsentMockIsRefusedUnderTheSwitch(t *testing.T) {
 	require.Zero(t, runs, "the test command ran unjudged")
 }
 
+// Under the switch a mapping with a test entry that lists mocks under both
+// mock_entries and mocks is refused before the test command runs, naming the
+// test and both keys: read as before, the mocks list would be dropped and its
+// mock served to no test.
+func TestAMappingWithBothMockListsIsRefusedUnderTheSwitch(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n      mocks:\n        - name: mock-1\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, named("mock-0", "mock-1"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.ErrorContains(t, err, "its mappings cannot be read")
+	require.ErrorContains(t, err, "test \"o::TestA\" in mappings has both `mocks` and `mock_entries`")
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "the test command ran")
+}
+
 // Each key's pool slice is every mock no test lists, under the key its
 // startup entry gives it, else the keyless slice; a test's mock is in no
 // slice, and names nothing loaded has are reported.
