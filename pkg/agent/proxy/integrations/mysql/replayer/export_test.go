@@ -28,7 +28,13 @@ func MatchCommandForTest(ctx context.Context, logger *zap.Logger, req mysql.Requ
 // (matchCommand), as simulateCommandPhase runs it for each command it reads.
 // The miss comes back as text.
 func MatchForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, bool, string, error) {
-	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, nil)
+	return MatchWithEngineForTest(ctx, logger, req, db, dctx, nil)
+}
+
+// MatchWithEngineForTest is MatchForTest with the schema-noise engine eng
+// (StrictEngineForTest: strict enforcement).
+func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine) (*mysql.Response, bool, string, error) {
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, eng, nil)
 	missText := ""
 	if miss != nil {
 		missText = fmt.Sprintf("%+v", *miss)

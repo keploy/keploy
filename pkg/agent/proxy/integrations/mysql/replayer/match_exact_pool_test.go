@@ -190,10 +190,29 @@ type poolAnswer struct {
 // params[i], every connection's at once: each reads the pool before any
 // consumes.
 func runPoolAtOnce(mm *proxy.MockManager, params []string) []poolAnswer {
-	var barrier, done sync.WaitGroup
-	barrier.Add(len(params))
-	out := make([]poolAnswer, len(params))
+	reqs := make([]mysql.Request, len(params))
 	for i, p := range params {
+		reqs[i] = executeReq(1, p)
+	}
+	return runAtOnce(mm, reqs)
+}
+
+// runAtOnce runs reqs[i] on connection c<i+1>, every connection's at once:
+// each reads the pool before any consumes.
+func runAtOnce(mm *proxy.MockManager, reqs []mysql.Request) []poolAnswer {
+	return atOnce(mm, len(reqs), func(i int, db integrations.MockMemDb) (*mysql.Response, bool, string, error) {
+		ctx, dctx := poolConn(fmt.Sprintf("c%d", i+1))
+		return replayer.MatchForTest(ctx, zap.NewNop(), reqs[i], db, dctx)
+	})
+}
+
+// atOnce runs match(i, db) for each i below n, all at once, each against the
+// store mm holds for it (heldHook): each reads the pool before any consumes.
+func atOnce(mm *proxy.MockManager, n int, match func(i int, db integrations.MockMemDb) (*mysql.Response, bool, string, error)) []poolAnswer {
+	var barrier, done sync.WaitGroup
+	barrier.Add(n)
+	out := make([]poolAnswer, n)
+	for i := 0; i < n; i++ {
 		done.Add(1)
 		arrive := sync.OnceFunc(barrier.Done)
 		hook := &heldHook{arrive: arrive, barrier: &barrier}
@@ -202,8 +221,7 @@ func runPoolAtOnce(mm *proxy.MockManager, params []string) []poolAnswer {
 			// A command that consumes nothing arrives too, so no other waits
 			// for it.
 			defer arrive()
-			ctx, dctx := poolConn(fmt.Sprintf("c%d", i+1))
-			resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(1, p), &hookedStore{MockManager: mm, hook: hook}, dctx)
+			resp, ok, miss, err := match(i, &hookedStore{MockManager: mm, hook: hook})
 			a := poolAnswer{ok: ok, miss: miss, err: err, held: hook.MockMemDb != nil}
 			if resp != nil {
 				a.payload = resp.Payload
@@ -355,5 +373,77 @@ func TestWithoutExactServingAFailedConsumeIsTheErrorItWas(t *testing.T) {
 	}
 	if db.calls != 2 {
 		t.Fatalf("the consume doors were asked %d time(s); want 2 (one try: delete, then update)", db.calls)
+	}
+}
+
+// poolTextQuery is the text query a pool of connections runs.
+const poolTextQuery = "SELECT id, name FROM small WHERE id = 7"
+
+// queryRecording is one test's recording of poolTextQuery: times[i]
+// recordings on connection c<i+1>, in recorded order, each the test's own
+// (per-test) and answering with its name, query-c<i+1>-<n> for the n-th.
+func queryRecording(times []int) []*models.Mock {
+	ts := diffBase.Add(time.Millisecond)
+	var mocks []*models.Mock
+	for i, n := range times {
+		for k := 1; k <= n; k++ {
+			ts = ts.Add(100 * time.Microsecond)
+			name := fmt.Sprintf("query-c%d-%d", i+1, k)
+			mocks = append(mocks, diffMock(name, fmt.Sprintf("c%d", i+1), []mysql.Request{queryReq(poolTextQuery)}, ts, models.LifetimePerTest, "mocks"))
+		}
+	}
+	return mocks
+}
+
+// Eight connections run one text query at once under exact serving, which
+// the test recorded once on each: each recording answers exactly one of them.
+// All eight read the first recording, the store refuses all consumes of it
+// but one, and each refused query is matched again against what the store
+// shows now, never answered twice by one recording, nor refused.
+func TestConnectionsRunningOneQueryAtOnceEachTakeOneRecording(t *testing.T) {
+	const n = 8
+	times := make([]int, n)
+	reqs := make([]mysql.Request, n)
+	for i := range times {
+		times[i] = 1
+		reqs[i] = queryReq(poolTextQuery)
+	}
+	mocks := queryRecording(times)
+	mm := stagePool(t, nil, mocks, true)
+	served := map[string]int{}
+	for i, a := range runAtOnce(mm, reqs) {
+		if !a.held {
+			t.Fatal("precondition: the command's match held no store")
+		}
+		if a.err != nil || !a.ok {
+			t.Errorf("connection c%d: ok=%v err=%v miss=%s; want an answer", i+1, a.ok, a.err, a.miss)
+			continue
+		}
+		served[a.payload]++
+	}
+	for _, mk := range mocks {
+		if served[mk.Name] != 1 {
+			t.Errorf("recording %s answered %d quer(ies); want 1 (served: %v)", mk.Name, served[mk.Name], served)
+		}
+	}
+}
+
+// A text query whose consume the store refuses is matched again, without the
+// refused copy, and answered with its next recording; it is never answered by
+// the refused one, nor fails.
+func TestARefusedQueryConsumeIsAnsweredByItsNextRecording(t *testing.T) {
+	mocks := queryRecording([]int{2})
+	mm := stagePool(t, nil, mocks, true)
+	ctx, dctx := poolConn("c1")
+	hook := &heldHook{treeDoorsFail: true, refuse: "query-c1-1", refuseAtMost: 3}
+	resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), queryReq(poolTextQuery), &hookedStore{MockManager: mm, hook: hook}, dctx)
+	if hook.MockMemDb == nil {
+		t.Fatal("precondition: the command's match held no store")
+	}
+	if hook.refusals != 1 {
+		t.Fatalf("the refused copy was tried %d time(s); want once", hook.refusals)
+	}
+	if err != nil || !ok || resp.Payload != "query-c1-2" {
+		t.Fatalf("the query was answered with %v (ok=%v err=%v miss=%s); want query-c1-2", resp, ok, err, miss)
 	}
 }
