@@ -582,26 +582,28 @@ func (c *quietConsoleCore) Write(ent zapcore.Entry, fields []zapcore.Field) erro
 	all := append(c.withFields, fields...)
 	for i := range all {
 		if all[i].Key == showKey {
-			fmt.Fprintf(c.out, "keploy: %s\n", all[i].String)
+			_, _ = fmt.Fprintf(c.out, "keploy: %s\n", all[i].String)
 			return nil
 		}
 	}
 	// WARN/ERROR without Show: print the message with any error details.
+	// Two-pass: first collect error details and next_step from all fields
+	// regardless of order, then format once.
 	if ent.Level >= zapcore.WarnLevel {
 		msg := ent.Message
+		var nextStep string
 		for i := range all {
 			if all[i].Type == zapcore.ErrorType && all[i].Interface != nil {
 				msg += ": " + all[i].Interface.(error).Error()
 			}
 			if all[i].Key == "next_step" {
-				// A next_step field carries the actionable fix; put it on
-				// its own line so the agent can read it.
-				fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), msg)
-				fmt.Fprintf(c.out, "keploy: NEXT  fix: %s\n", all[i].String)
-				return nil
+				nextStep = all[i].String
 			}
 		}
-		fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), msg)
+		_, _ = fmt.Fprintf(c.out, "keploy: %s: %s\n", ent.Level.CapitalString(), msg)
+		if nextStep != "" {
+			_, _ = fmt.Fprintf(c.out, "keploy: NEXT  fix: %s\n", nextStep)
+		}
 		return nil
 	}
 	// INFO/DEBUG without Show: console stays silent.

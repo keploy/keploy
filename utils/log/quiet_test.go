@@ -214,6 +214,32 @@ func TestQuietConsole_NextStepGetsOwnLine(t *testing.T) {
 	}
 }
 
+func TestQuietConsole_NextStepBeforeError_BothAppear(t *testing.T) {
+	SetRedactor(nil)
+	var buf bytes.Buffer
+	qc := &quietConsoleCore{out: createTempFile(t)}
+
+	entry := zapcore.Entry{Level: zap.WarnLevel, Message: "no mocks captured"}
+	// next_step BEFORE zap.Error — the two-pass scan must collect both.
+	fields := []zapcore.Field{
+		zap.String("next_step", "re-record"),
+		zap.Error(errors.New("connection refused")),
+	}
+
+	_ = qc.Write(entry, fields)
+
+	b, _ := os.ReadFile(qc.out.Name())
+	buf.Write(b)
+	got := buf.String()
+
+	if !strings.Contains(got, "connection refused") {
+		t.Errorf("error detail should appear even when next_step comes first, got: %q", got)
+	}
+	if !strings.Contains(got, "keploy: NEXT  fix: re-record") {
+		t.Errorf("next_step should appear, got: %q", got)
+	}
+}
+
 func TestQuietConsole_WithCarriesFields(t *testing.T) {
 	SetRedactor(nil)
 	var buf bytes.Buffer
