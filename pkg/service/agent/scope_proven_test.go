@@ -1711,4 +1711,14 @@ func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
 	}
 	m := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: "[::1]:27017"}))
 	require.Equal(t, "a MongoDB call to 127.0.0.1:27017 (live [::1]:27017)", missText(m))
+
+	// A miss no test was charged with, read from the run's misses, names it
+	// the same way: one upstream reads the same in every line of the run.
+	p := a.Proxy.(*wireProxy)
+	p.misses = []models.UnmatchedCall{{Protocol: "MongoDB", Destination: "[::1]:27017"}}
+	all, err := a.GetMockErrors(context.Background())
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	require.Equal(t, "127.0.0.1:27017", all[0].Destination)
+	require.Equal(t, "[::1]:27017", all[0].LiveDestination)
 }

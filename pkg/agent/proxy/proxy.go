@@ -5686,8 +5686,9 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
-					// A parser names no live address (models.MockMismatchReport.
-					// LiveDestination); the agent sets it beside the recorded one.
+					// No parser sets it; copied so the miss holds every field of
+					// its report. The agent sets LiveDestination on the miss
+					// (asRecorded), where it renames Destination.
 					LiveDestination: parserErr.MismatchReport.LiveDestination,
 					Diff:            parserErr.MismatchReport.Diff,
 					NextSteps:       withStagingNote(parserErr, parserErr.MismatchReport.NextSteps),

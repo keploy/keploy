@@ -971,6 +971,14 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		// the charged misses included.
 		return errs, err
 	}
+	// Under the proven switch a miss names its destination as the recording
+	// does, as one charged to a test at its end does (sanitizedMiss): one
+	// upstream reads the same in every line of the run.
+	if provenswitch.On() {
+		for i := range errs {
+			errs[i] = a.asRecorded(errs[i])
+		}
+	}
 	// The misses the proven wire charged to a test at its end were drained
 	// from the proxy then; they are still the run's misses.
 	if charged := a.takeChargedMisses(); len(charged) > 0 {
