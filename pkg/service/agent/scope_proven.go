@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -458,6 +459,20 @@ func teardownOwners(table, pool map[string][]string) map[string]string {
 		}
 	}
 	return out
+}
+
+// SetRecordedWindows installs, for a replay, the recorded window of every
+// test of its set (models.ScopeTableReq.Windows): the learn step reads a
+// recording inside another test's window as that test's, not as an earlier
+// place of the paired one (integrations.TestWindows). The scope table sends
+// them before the pool slices, whose serving may stage the set: seeded at a
+// set boundary they are installed by that staging, else at once. None
+// leaves the set none.
+func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) error {
+	if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
+		seeder.SeedRecordedWindows(slices.Clone(ws))
+	}
+	return nil
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),

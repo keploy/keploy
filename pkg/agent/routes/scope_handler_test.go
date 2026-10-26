@@ -396,8 +396,10 @@ func TestScopeWindowsWithTheSwitchOffReadAnyOtherFinalPlainly(t *testing.T) {
 // poolSvc takes the per-test table and the pool slices.
 type poolSvc struct {
 	agent.Service
-	table map[string][]string
-	pool  map[string][]string
+	table   map[string][]string
+	pool    map[string][]string
+	windows []models.TestWindow
+	order   []string
 }
 
 func (s *poolSvc) SetScopeTable(_ context.Context, t map[string][]string) error {
@@ -407,6 +409,13 @@ func (s *poolSvc) SetScopeTable(_ context.Context, t map[string][]string) error 
 
 func (s *poolSvc) SetScopePool(_ context.Context, p map[string][]string) error {
 	s.pool = p
+	s.order = append(s.order, "pool")
+	return nil
+}
+
+func (s *poolSvc) SetRecordedWindows(_ context.Context, ws []models.TestWindow) error {
+	s.windows = ws
+	s.order = append(s.order, "windows")
 	return nil
 }
 
@@ -447,5 +456,42 @@ func TestScopeTableCarriesThePoolSlices(t *testing.T) {
 	svc = &poolSvc{}
 	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {
 		t.Fatalf("switch off: status %d, pool %v", rec.Code, svc.pool)
+	}
+}
+
+// Under the switch the scope table's recorded test windows (keploy mock
+// replay's, from the set's mappings) are installed before the pool slices,
+// whose serving may stage the set; a table without them installs none, so a
+// set never reads the previous one's. With the switch off they are not read.
+func TestScopeTableInstallsTheRecordedWindowsBeforeThePool(t *testing.T) {
+	post := func(svc *poolSvc, body string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	body := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`
+	t.Setenv(provenswitch.Env, "1")
+	svc := &poolSvc{}
+	post(svc, body)
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if want := []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}; !slices.Equal(svc.windows, want) {
+		t.Fatalf("windows %v, want %v", svc.windows, want)
+	}
+	if !slices.Equal(svc.order, []string{"windows", "pool"}) {
+		t.Fatalf("installed %v, want the windows before the pool", svc.order)
+	}
+	svc = &poolSvc{}
+	post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`)
+	if !slices.Equal(svc.order, []string{"windows", "pool"}) || len(svc.windows) != 0 {
+		t.Fatalf("a table without windows: installed %v, windows %v; want none installed before the pool", svc.order, svc.windows)
+	}
+	t.Setenv(provenswitch.Env, "")
+	svc = &poolSvc{}
+	post(svc, body)
+	if len(svc.order) != 0 {
+		t.Fatalf("switch off: installed %v", svc.order)
 	}
 }

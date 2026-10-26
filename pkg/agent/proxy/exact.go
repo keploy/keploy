@@ -1891,16 +1891,19 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 
 // teardownAfter is what tells a request sent after every test of the set's
 // recording, or under keploy mock replay of the test process of key, nil
-// when nothing does. keploy test's staging sends the recorded windows of
-// every test of the set, the unselected ones included: after every window's
-// end (models.WindowSchedule.After); its application is one process. keploy
-// mock replay sends none, but stages the whole recording at once and names
-// the pool's recordings (SetPoolNames) and the key of each test's
+// when nothing does. keploy test's staging names no pool and sends the
+// recorded windows of every test of the set, the unselected ones included:
+// after every window's end (models.WindowSchedule.After); its application is
+// one process. keploy mock replay stages the whole recording at once and
+// names the pool's recordings (SetPoolNames) and the key of each test's
 // (SetPoolOwners): after every staged data-plane recording outside the pool,
 // request and answer, but one that only another key's tests list. That
 // counts every recording a test of key owns, and any other one outside the
 // pool too (one no test owns, or one a test of no known key owns): a later
-// bound, never an earlier one.
+// bound, never an earlier one. Under the proven switch keploy mock replay
+// sends the recorded windows too; the pool's names still decide its bound,
+// so the windows serve the learn step and a test's stateful sequence only:
+// another process's tests' windows never move this process's bound.
 //
 // So of a suite of several test processes (go test ./..., one test binary
 // per package, run at once by go test's default -p, or one after another),
@@ -1920,11 +1923,11 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 // may be answered by a teardown recording, and the teardown's own call then
 // misses, failing closed.
 func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
-	if s := m.testWindows.Load(); s.Len() > 0 {
-		return s.After
-	}
 	pool := m.exact.poolNames.Load()
 	if pool == nil {
+		if s := m.testWindows.Load(); s.Len() > 0 {
+			return s.After
+		}
 		return nil
 	}
 	owners := m.exact.poolOwners.Load()
