@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
@@ -149,8 +150,8 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 				t.Fatalf("nothing learned: %v", err)
 			}
 			// Each kind of learning, alone, is learning not kept: a variable,
-			// an echo, and a variable bound at an earlier mock of the test
-			// each fail the round, which names it.
+			// an echo, a variable bound at an earlier mock of the test, and a
+			// clock read each fail the round, which names it.
 			for _, only := range []struct {
 				learned models.MockState
 				said    string
@@ -158,6 +159,7 @@ func TestKeployMockKeepsWhatItsAgentLearnedOnlyFromAClientTestsReader(t *testing
 				{models.MockState{Name: "mock-1", Variables: models.MockVariables{"id": {Recorded: "1", Answer: []string{"body.id"}}}}, "mock-1 id (variable)"},
 				{models.MockState{Name: "mock-1", Variables: models.MockVariables{"rid": {Recorded: "r-1", Echo: true}}}, "mock-1 rid (echo)"},
 				{models.MockState{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-0": {"id": {Recorded: "1", Bind: "body.id"}}}}, "mock-1 id (bound at mock-0)"},
+				{models.MockState{Name: "mock-1", Clocks: map[string]models.ClockOffset{"body.since": {Res: time.Millisecond}}}, "mock-1 body.since (clock)"},
 			} {
 				if _, _, err := m.keepLearned(context.Background(), "s", []models.MockState{only.learned}, nil, flows, expected); err == nil || !strings.Contains(err.Error(), "keploy kept nothing its agent learned in record's full round ("+only.said+"): ") {
 					t.Fatalf("only %s learned: err %v; want the round failed, naming it", only.said, err)
