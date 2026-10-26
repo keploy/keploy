@@ -3,16 +3,17 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/spf13/cobra"
 	"go.keploy.io/server/v3/cli/provider"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/token"
-	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
+	"golang.org/x/term"
 )
 
 // removeAgentTokenOnce registers the control-plane token cleanup with cobra at
@@ -43,8 +44,8 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 		Example: provider.RootExamples,
 		Version: utils.Version,
 		PreRun: func(cmd *cobra.Command, _ []string) {
-			if provenswitch.On() {
-				return // quiet console: no logo, no banner
+			if !term.IsTerminal(int(os.Stdout.Fd())) {
+				return // no terminal: an agent or a pipe, no logo
 			}
 			disableAnsi, _ := cmd.Flags().GetBool("disable-ansi")
 			provider.PrintLogo(log.PrimarySink(), disableAnsi)
