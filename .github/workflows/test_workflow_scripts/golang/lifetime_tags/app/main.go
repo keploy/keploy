@@ -16,12 +16,15 @@
 //	POST /orders        the token, the rate, an INSERT in a transaction, the
 //	                    caller's profile
 //	GET  /profile       the token, the caller's profile
+//	GET  /pool          one prepared statement on a pool of eight
+//	                    connections of its own (pool, below)
 //	GET  /quote?qty=N   the rate, a count of the orders
 //	GET  /orders/count  a count of the orders
 //	GET  /healthz       nothing
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -30,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -91,6 +95,7 @@ func main() {
 	mux.HandleFunc("GET /profile", a.profile)
 	mux.HandleFunc("GET /quote", a.quote)
 	mux.HandleFunc("GET /orders/count", a.count)
+	mux.HandleFunc("GET /pool", pool(dsn))
 
 	addr := getenv("SHOP_ADDR", "127.0.0.1:8096")
 	log.Printf("shop listening on %s (region %s)", addr, boot.Region)
@@ -225,6 +230,170 @@ func (a *app) count(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"orders": orders})
+}
+
+// itemQuery is the statement /pool prepares; item is the row it must read
+// for id, as itemRows seeds it.
+const itemQuery = `SELECT id, name, price FROM items WHERE id = ?`
+
+func item(id int) string { return fmt.Sprintf("%d:item-%d:%d", id, id, id*100+7) }
+
+const poolConns = 8
+
+// pool serves GET /pool: itemQuery, a prepared statement, on a pool of eight
+// connections of its own (to dsn), opened by the request and closed with it,
+// as an app over database/sql with a pool does:
+//
+//	seq       one connection prepares it once and executes it for ids 4,
+//	          5, 6, one after the other;
+//	distinct  eight connections each prepare it, then all execute it at
+//	          once (a barrier releases them together), for ids 1 to 8;
+//	same      the same, every connection for id 3.
+//
+// Every call must read its own row: the answer lists the row each call
+// read, and a row that is not the id's (another call's answer) or a call
+// that failed makes it 500 and names the call. So an answer served to the
+// wrong call fails the test by its status and its body, whatever compares
+// it.
+func pool(dsn string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) { servePool(w, r, dsn) }
+}
+
+func servePool(w http.ResponseWriter, r *http.Request, dsn string) {
+	ctx := r.Context()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(poolConns)
+	db.SetMaxIdleConns(poolConns)
+	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS items (id INT PRIMARY KEY, name VARCHAR(32) NOT NULL, price INT NOT NULL)`,
+		itemRows(),
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "seed: " + err.Error()})
+			return
+		}
+	}
+	out := map[string][]string{}
+	var wrong []string
+	check := func(run string, ids []int, got []string, errs []error) {
+		out[run] = got
+		for i, id := range ids {
+			switch {
+			case errs[i] != nil:
+				wrong = append(wrong, fmt.Sprintf("%s call %d (id %d) failed: %v", run, i, id, errs[i]))
+			case got[i] != item(id):
+				wrong = append(wrong, fmt.Sprintf("%s call %d (id %d) read %s, want %s", run, i, id, got[i], item(id)))
+			}
+		}
+	}
+	seqIDs := []int{4, 5, 6}
+	got, errs := sequential(ctx, db, seqIDs)
+	check("seq", seqIDs, got, errs)
+	distinct := make([]int, poolConns)
+	same := make([]int, poolConns)
+	for i := range distinct {
+		distinct[i], same[i] = i+1, 3
+	}
+	got, errs = together(ctx, db, distinct)
+	check("distinct", distinct, got, errs)
+	got, errs = together(ctx, db, same)
+	check("same", same, got, errs)
+	if len(wrong) > 0 {
+		log.Printf("pool: %s", strings.Join(wrong, "; "))
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"wrong": wrong, "read": out})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// itemRows is the INSERT that seeds ids 1 to 8.
+func itemRows() string {
+	vals := make([]string, poolConns)
+	for i := range vals {
+		id := i + 1
+		vals[i] = fmt.Sprintf("(%d, 'item-%d', %d)", id, id, id*100+7)
+	}
+	return "INSERT IGNORE INTO items (id, name, price) VALUES " + strings.Join(vals, ", ")
+}
+
+func scanItem(row *sql.Row) (string, error) {
+	var id, price int
+	var name string
+	if err := row.Scan(&id, &name, &price); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d:%s:%d", id, name, price), nil
+}
+
+// sequential executes itemQuery for each id in turn, on one connection that
+// prepares it once.
+func sequential(ctx context.Context, db *sql.DB, ids []int) ([]string, []error) {
+	got, errs := make([]string, len(ids)), make([]error, len(ids))
+	fill := func(err error) ([]string, []error) {
+		for i := range errs {
+			errs[i] = err
+		}
+		return got, errs
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fill(err)
+	}
+	defer conn.Close()
+	stmt, err := conn.PrepareContext(ctx, itemQuery)
+	if err != nil {
+		return fill(err)
+	}
+	defer stmt.Close()
+	for i, id := range ids {
+		got[i], errs[i] = scanItem(stmt.QueryRowContext(ctx, id))
+	}
+	return got, errs
+}
+
+// together takes one connection per id, all held at once (so each is a
+// connection of its own), prepares itemQuery on each, and then, released
+// together, executes it on every connection at once, each for its id.
+func together(ctx context.Context, db *sql.DB, ids []int) ([]string, []error) {
+	got, errs := make([]string, len(ids)), make([]error, len(ids))
+	fill := func(err error) ([]string, []error) {
+		for i := range errs {
+			errs[i] = err
+		}
+		return got, errs
+	}
+	stmts := make([]*sql.Stmt, len(ids))
+	for i := range ids {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fill(err)
+		}
+		defer conn.Close()
+		stmt, err := conn.PrepareContext(ctx, itemQuery)
+		if err != nil {
+			return fill(err)
+		}
+		defer stmt.Close()
+		stmts[i] = stmt
+	}
+	start := make(chan struct{})
+	var done sync.WaitGroup
+	for i, id := range ids {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			<-start
+			got[i], errs[i] = scanItem(stmts[i].QueryRowContext(ctx, id))
+		}()
+	}
+	close(start)
+	done.Wait()
+	return got, errs
 }
 
 // call sends a request to the auth service and decodes its JSON answer into
