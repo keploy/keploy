@@ -55,3 +55,26 @@ func TestKeepExtra(t *testing.T) {
 	}
 	fresh.KeepExtra(nil)
 }
+
+// A kept field whose value is an alias of an anchor on a field keploy knows
+// reads the same after a rewrite: keploy re-encodes the known field without
+// its anchor, so the kept value is the aliased value itself, not *k, which
+// would name nothing and make the file unreadable.
+func TestAKeptFieldThatAliasesAKnownOneStillReads(t *testing.T) {
+	in := "version: api.keploy.io/v1beta1\nkind: &k TestMocksMapping\ntest_set_id: s\nnote: *k\nmore:\n    of: *k\n"
+	var m Mapping
+	if err := yaml.Unmarshal([]byte(in), &m); err != nil {
+		t.Fatal(err)
+	}
+	out, err := yaml.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := yaml.Unmarshal(out, &back); err != nil {
+		t.Fatalf("the rewrite does not read back: %v\n%s", err, out)
+	}
+	if back["note"] != "TestMocksMapping" || back["more"].(map[string]any)["of"] != "TestMocksMapping" {
+		t.Fatalf("kept fields read back as %v\n%s", back, out)
+	}
+}

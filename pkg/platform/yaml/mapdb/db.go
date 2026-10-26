@@ -50,6 +50,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	var existingSource string
 	var existingRecordedWith []string
 	var old []byte
+	var existing *models.Mapping
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -83,6 +84,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingGroups, existingShared = existingConfig.Groups, existingConfig.Shared
 		existingSource = existingConfig.Source
 		existingRecordedWith = existingConfig.RecordedWith
+		existing = &existingConfig
 	}
 
 	for _, t := range mapping.TestCases {
@@ -150,6 +152,13 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if len(mapping.RecordedWith) > 0 {
 		newMapping.RecordedWith = mapping.RecordedWith
 	}
+
+	// The fields a hand edit added that this keploy does not know, at the
+	// top of the file and on each test's entry, which the rebuild above
+	// cannot see: the file's, then the caller's for a test it names.
+	newMapping.KeepExtra(existing)
+	newMapping.KeepTestExtra(existing)
+	newMapping.KeepTestExtra(mapping)
 
 	encodedData, err := db.encodeOver(newMapping, effFormat, old, true, testSetID)
 	if err != nil {

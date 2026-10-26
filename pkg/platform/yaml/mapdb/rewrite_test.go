@@ -63,6 +63,9 @@ func TestARewriteKeepsWhatAHandEditAdded(t *testing.T) {
 			_, err := db.MoveToWorker(context.Background(), "s", []models.MockEntry{{Name: "mock-1", Reason: "moved"}})
 			return err
 		},
+		"Insert": func(db *MappingDb) error {
+			return db.Insert(context.Background(), &models.Mapping{TestSetID: "s", TestCases: []models.MappedTestCase{{ID: "o::TestC", Mocks: []models.MockEntry{{Name: "mock-2", Kind: "Http"}}}}})
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -125,5 +128,32 @@ func TestHeadComment(t *testing.T) {
 	}
 	if got := HeadComment([]byte("version: v\n")); len(got) != 0 {
 		t.Fatalf("a file with no head comment has none, got %q", got)
+	}
+}
+
+// A comment the rewrite keeps, beside a field keploy does not know, is not
+// counted as dropped: keploy says it dropped only what the file lost.
+func TestACommentKeptBesideAFieldIsNotCountedAsDropped(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dir := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(dir, "s"), 0o755))
+	edited := strings.Replace(handEdited, "reviewed_by: agent\n", "reviewed_by: agent # PR-42\n", 1)
+	edited = strings.Replace(edited, "    # TestB keeps its mock while the payments API migrates\n", "", 1)
+	must(t, os.WriteFile(filepath.Join(dir, "s", "mappings.yaml"), []byte(edited), 0o644))
+	core, logs := observer.New(zapcore.WarnLevel)
+	db := NewWithFormat(zap.New(core), dir, "mappings", yaml.FormatYAML)
+	must(t, db.UpsertWorker(context.Background(), "s", []models.MockEntry{{Name: "mock-9"}}))
+	raw, err := os.ReadFile(filepath.Join(dir, "s", "mappings.yaml"))
+	must(t, err)
+	if !strings.Contains(string(raw), "reviewed_by: agent # PR-42\n") {
+		t.Fatalf("the rewrite lost the comment beside reviewed_by:\n%s", raw)
+	}
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "dropped") {
+			t.Fatalf("keploy said it dropped a comment it kept: %s", e.Message)
+		}
+	}
+	if n := DroppedComments([]byte(handEdited), raw); n != 1 {
+		t.Fatalf("DroppedComments of the hand-edited file against this rewrite = %d, want 1 (the comment on TestB)", n)
 	}
 }
