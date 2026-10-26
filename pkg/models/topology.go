@@ -49,11 +49,12 @@ type MockedRow struct {
 	// the name its recording carries: its image's repository, its own port,
 	// and its configuration's fingerprint; without @<fingerprint> while
 	// keploy has not read its configuration. Empty for any other
-	// destination. It is written as containerKey, the name mocks.yaml gives
-	// it, so the same key reads the same in both files (never "container:
-	// container:..."); a row an earlier keploy wrote under container still
-	// reads (UnmarshalYAML, UnmarshalJSON).
-	Container string `json:"containerKey,omitempty" yaml:"containerKey,omitempty"`
+	// destination. A file writes it as containerKey, the name mocks.yaml
+	// gives it, so the same key reads the same in both files (never
+	// "container: container:..."); JSON, the agent's wire format, keeps
+	// container, so an agent and a CLI of different versions agree. Either
+	// name reads in either format (UnmarshalYAML, UnmarshalJSON).
+	Container string `json:"container,omitempty" yaml:"containerKey,omitempty"`
 	// PID and Exe are a host listener's process and its program; zero and
 	// "" for a container, for a destination nothing listens at (a recorded
 	// dependency that is not running, as in CI), or when keploy could not
@@ -64,8 +65,8 @@ type MockedRow struct {
 	Port uint16 `json:"port" yaml:"port"`
 }
 
-// mockedRowFields is MockedRow as it reads: containerKey, or the container
-// key an earlier keploy wrote.
+// mockedRowFields is MockedRow as it reads: its container key under
+// containerKey or container, in YAML and in JSON.
 type mockedRowFields struct {
 	Test         string `json:"test,omitempty" yaml:"test,omitempty"`
 	Addr         string `json:"addr" yaml:"addr"`

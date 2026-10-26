@@ -244,10 +244,14 @@ type MockMismatchReport struct {
 	Protocol      string    // "HTTP", "MySQL", "PostgreSQL", "MongoDB", "gRPC", "HTTP/2", "Generic", "DNS"
 	ActualSummary string    // Brief description of the actual request
 	Destination   string    // outgoing call's destination/domain (HTTP Host, or host:port) — identifies WHICH upstream missed
-	ClosestMock   string    // Name of the closest mock (empty if none)
-	Diff          string    // Human-readable diff (protocol-specific)
-	NextSteps     string    // Actionable suggestion for the user
-	MatchPhase    string    // how far the match cascade got (MatchPhase* constants)
+	// LiveDestination is UnmatchedCall.LiveDestination: under the proven
+	// switch, the address the call was made to when Destination names it as
+	// the recording does; "" when the two are the same.
+	LiveDestination string
+	ClosestMock     string // Name of the closest mock (empty if none)
+	Diff            string // Human-readable diff (protocol-specific)
+	NextSteps       string // Actionable suggestion for the user
+	MatchPhase      string // how far the match cascade got (MatchPhase* constants)
 	// DestinationScope is the verdict on whether any mock the matcher
 	// compared against targeted this call's upstream (DestinationScope*
 	// constants; empty means the question was never answered). It is a

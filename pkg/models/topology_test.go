@@ -26,8 +26,8 @@ func TestAMockedRowNamesItsContainerAsTheMocksDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(j), `"containerKey":"container:mongo:27017@s1b008db297fc"`) {
-		t.Fatalf("written as %s", j)
+	if !strings.Contains(string(j), `"container":"container:mongo:27017@s1b008db297fc"`) {
+		t.Fatalf("the agent's wire format changed the key an earlier CLI reads: written as %s", j)
 	}
 	for _, old := range []string{"addr: '[::1]:27019'\ncontainer: container:mongo:27017@s1b008db297fc\nport: 27019\n", "addr: '[::1]:27019'\ncontainerKey: container:mongo:27017@s1b008db297fc\nport: 27019\n"} {
 		var back MockedRow
@@ -38,8 +38,10 @@ func TestAMockedRowNamesItsContainerAsTheMocksDo(t *testing.T) {
 			t.Fatalf("%q read as %+v", old, back)
 		}
 	}
-	var back MockedRow
-	if err := json.Unmarshal([]byte(`{"addr":"[::1]:27019","container":"container:mongo:27017@s1b008db297fc","port":27019}`), &back); err != nil || back.Container != row.Container {
-		t.Fatalf("an earlier JSON row read as %+v, %v", back, err)
+	for _, j := range []string{`{"addr":"[::1]:27019","container":"container:mongo:27017@s1b008db297fc","port":27019}`, `{"addr":"[::1]:27019","containerKey":"container:mongo:27017@s1b008db297fc","port":27019}`} {
+		var back MockedRow
+		if err := json.Unmarshal([]byte(j), &back); err != nil || back.Container != row.Container {
+			t.Fatalf("%s read as %+v, %v", j, back, err)
+		}
 	}
 }
