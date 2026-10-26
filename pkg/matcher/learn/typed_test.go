@@ -190,8 +190,8 @@ func TestATypedInstantIsComparedWhole(t *testing.T) {
 	}
 	for name, rs := range map[string][]*models.Mock{"with mock-15": raw, "without mock-15": noMonitor} {
 		ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), nil, nil, nil, rs...)
-		if ln.Kind != KindUnaccounted || ln.From.Mock != "" || !strings.HasPrefix(ln.Why, "nothing shows it is a read of the application's clock") || strings.Contains(ln.Why, "mock-") {
-			t.Errorf("typed, no provenance, %s: %s (from %q, %s); want refused for its provenance, naming no recording", name, ln.Kind, ln.From.Mock, ln.Why)
+		if !plainRead(ln) || ln.From.Mock != "" {
+			t.Errorf("typed, no provenance, %s: %s (from %q, %s); want a plain read of the clock, with no call window, checked at replay, naming no recording", name, ln.Kind, ln.From.Mock, ln.Why)
 		}
 	}
 	// A window F's moment falls outside of shows no read either.
@@ -275,8 +275,8 @@ func TestATypedInstantEqualToAnEarlierOneIsAVariable(t *testing.T) {
 					t.Errorf("%s, %s: %s (from %q, %s); want noise", row.name, wname, ln.Kind, ln.From.Mock, ln.Why)
 				}
 			default:
-				if ln.Kind != KindUnaccounted || ln.From.Mock != "" {
-					t.Errorf("%s, %s: %s (from %q, %s); want refused for its provenance", row.name, wname, ln.Kind, ln.From.Mock, ln.Why)
+				if !plainRead(ln) || ln.From.Mock != "" {
+					t.Errorf("%s, %s: %s (from %q, %s); want a plain read of the clock, with no call window, checked at replay", row.name, wname, ln.Kind, ln.From.Mock, ln.Why)
 				}
 			}
 		}
@@ -393,8 +393,8 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 					t.Errorf("%s, %s: %s (from %+v, %s); want noise", row.name, wname, ln.Kind, ln.From, ln.Why)
 				}
 			default:
-				if ln.Kind != KindUnaccounted || ln.From.Mock != "" {
-					t.Errorf("%s, %s: %s (from %+v, %s); want refused for its provenance", row.name, wname, ln.Kind, ln.From, ln.Why)
+				if !plainRead(ln) || ln.From.Mock != "" {
+					t.Errorf("%s, %s: %s (from %+v, %s); want a plain read of the clock, with no call window, checked at replay", row.name, wname, ln.Kind, ln.From, ln.Why)
 				}
 			}
 		}
@@ -621,8 +621,8 @@ func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
 		if ln := classify(qnTyped(row.rec), qnTyped(row.rec.Add(FullRoundLead+202*time.Millisecond)), nil); ln.Kind != KindNoise {
 			t.Errorf("%s, typed, moved by the lead: %s (from %q, %s); want noise", row.name, ln.Kind, ln.From.Mock, ln.Why)
 		}
-		if ln := classify(qnTyped(row.rec), qnTyped(row.live), nil); ln.Kind != KindUnaccounted || ln.From.Mock != "" || ln.Why != instantNotClock {
-			t.Errorf("%s, typed, no provenance: %s (from %q, %s); want refused for its provenance, naming no recording", row.name, ln.Kind, ln.From.Mock, ln.Why)
+		if ln := classify(qnTyped(row.rec), qnTyped(row.live), nil); !plainRead(ln) || ln.From.Mock != "" {
+			t.Errorf("%s, typed, no provenance: %s (from %q, %s); want a plain read of the clock, with no call window, checked at replay, naming no recording", row.name, ln.Kind, ln.From.Mock, ln.Why)
 		}
 		str := func(at time.Time) Leaf {
 			return Leaf{Path: qnPath, Noise: "body.docs.msgs.0.processed_at", Type: String, Value: at.Format(time.RFC3339Nano)}
@@ -650,10 +650,22 @@ func TestATypedInstantLaterThanItsCallIsRefusedSayingSo(t *testing.T) {
 	}{
 		{"an hour after its call", read.Add(time.Hour), read.Add(time.Hour + FullRoundLead + 37*time.Millisecond), time.Millisecond, instantAfterCall},
 		// The call's minute, F's two on: the lead takes two minutes'
-		// move, a read before its call one.
-		{"F's past the lead from its call", call.Truncate(time.Minute), call.Truncate(time.Minute).Add(2 * time.Minute), time.Minute, instantPastCall},
+		// move, a read before its call one. With no window it is a plain
+		// read of the clock all the same ("" here), which every replay
+		// checks in its call's span: how late record's full round read its
+		// clock must not decide; in a window that does not hold it, it is
+		// refused saying so.
+		{"F's past the lead from its call", call.Truncate(time.Minute), call.Truncate(time.Minute).Add(2 * time.Minute), time.Minute, ""},
 	} {
 		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, nil)[0]
+		if row.why == "" {
+			if !plainRead(ln) {
+				t.Errorf("%s, no window: %s Read=%+v (%s); want a plain read of the clock, checked at replay", row.name, ln.Kind, ln.Read, ln.Why)
+			}
+			w := &Window{Rec: Span{From: call.Add(-time.Hour), To: call.Add(-30 * time.Minute)}, F: Span{From: call.Add(-time.Hour), To: call.Add(-30 * time.Minute)}}
+			ln = ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, w)[0]
+			row.why = instantPastCall
+		}
 		if ln.Kind != KindUnaccounted || ln.Why != row.why {
 			t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.why)
 		}
@@ -1887,5 +1899,64 @@ func TestAClockOffsetLeavesAPlainReadAloneAndRefusesOneTheAnswerHolds(t *testing
 	ln = ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, rec, ms)}}, c.call, []Earlier{GivenRequest(nil)}, nil, nil, c.w.ComparesOffsets())[0]
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != unreadRequestWhy(unsentRequest) {
 		t.Errorf("the test case's request unread: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, unreadRequestWhy(unsentRequest))
+	}
+}
+
+// An instant its protocol types (a Mongo $date) in a call with no window (a
+// test's own call, read by the lead alone) that the lead did not move, as
+// when record's full round read its clock late on a loaded box, is a plain
+// read of the application's clock all the same, read whole, which every
+// replay checks in its call's own span: whether the lead moved it must not
+// decide what is learned (noWindowRead). The confirming round's check passes
+// a read of its own clock and refuses one that is not (the recorded value
+// again, an instant the application built on what the test gave it), naming
+// the field. One recorded later than its call, one echoed in its own answer
+// (answered with this run's value, never checked) and a wall clock of no
+// zone stay refused, and so does one in a client test.
+func TestATypedInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) {
+	rec := time.Date(2026, 10, 27, 9, 0, 0, 123e6, time.UTC)
+	call := rec.Add(time.Millisecond)
+	const p = "body.u.processed_at"
+	shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{p: l}} }
+	ms := func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) }
+	classify := func(dc *DriftCache, r, l Leaf, at time.Time, resp []Leaf) Learned {
+		return ClassifyIn(dc, []string{p}, shape(l), shape(r), at, nil, nil, resp, nil)[0]
+	}
+	late := rec.Add(FullRoundLead + 3400*time.Millisecond)
+	for _, row := range []struct {
+		what string
+		l    time.Time
+	}{{"read late", late}, {"read early", rec.Add(FullRoundLead - 400*time.Millisecond)}, {"moved by the lead", rec.Add(FullRoundLead)}} {
+		if ln := classify(NewDriftCache(), ms(rec), ms(row.l), call, nil); !plainRead(ln) {
+			t.Errorf("a $date with no window, %s: %s Read=%+v (%s); want a plain read of the clock, checked at replay", row.what, ln.Kind, ln.Read, ln.Why)
+		}
+	}
+	o, ok := classify(NewDriftCache(), ms(rec), ms(late), call, nil).Clock()
+	if !ok {
+		t.Fatal("a $date with no window learned no read of the clock")
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+	if ok, why := CheckClockRead(p, o, ms(now.Add(5*time.Millisecond)), span, true); !ok {
+		t.Errorf("the confirming round's read of its own clock: refused (%s); want it passed", why)
+	}
+	if ok, why := CheckClockRead(p, o, ms(rec), span, true); ok || !strings.HasPrefix(why, p+" was learned as clock") || !strings.Contains(why, "it changed") {
+		t.Errorf("the confirming round's recorded value again: ok=%v (%s); want it refused, naming %s", ok, why, p)
+	}
+	if ln := classify(NewDriftCache(), ms(rec), ms(late), rec.Add(-time.Hour), nil); ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
+		t.Errorf("a $date recorded an hour after its call: %s (%s); want refused: %s", ln.Kind, ln.Why, instantNotClock)
+	}
+	answer := []Leaf{{Path: "body.doc.processed_at", Type: Instant, Value: ms(rec).Value}}
+	if ln := classify(NewDriftCache(), ms(rec), ms(late), call, answer); ln.Kind != KindUnaccounted || len(ln.Echo) != 0 || ln.Why != instantNotClock {
+		t.Errorf("a $date its own answer echoes: %s (echo %+v, %s); want refused: %s", ln.Kind, ln.Echo, ln.Why, instantNotClock)
+	}
+	wall := func(at time.Time) Leaf { return WallClockLeaf(p, p, at, time.Millisecond) }
+	if ln := classify(NewDriftCache(), wall(rec), wall(late), call, nil); ln.Kind != KindUnaccounted {
+		t.Errorf("a wall clock of no zone with no window: %s Read=%+v (%s); want refused", ln.Kind, ln.Read, ln.Why)
+	}
+	client := NewDriftCache()
+	client.clientTests = true
+	if ln := classify(client, ms(rec), ms(late), call, nil); ln.Kind != KindUnaccounted {
+		t.Errorf("a $date with no window in a client test: %s Read=%+v (%s); want refused", ln.Kind, ln.Read, ln.Why)
 	}
 }
