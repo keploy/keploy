@@ -492,11 +492,13 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 // MySQL reached, as an address that names its port: its destAddr, else the
 // destination its request names, an HTTP mock's Host (Mock.RecordedDestination),
 // an HTTP/2 mock's authority, a gRPC mock's :authority. "" when none names a
-// port. Under `keploy mock record` every mock carries its connection's destAddr
-// (starts.Registry.Stamp); under `keploy record` an HTTP mock names its
-// destination only by its Host. A Host that names no port is not completed
-// from the URL: keploy records the request line as sent, which for a call to a
-// service is origin-form ("/x") and names no host. A DNS answer and a
+// port. Every mock keploy records carries its connection's destAddr
+// (starts.Registry.StampDest), so destAddr decides first: a Host may name no
+// port, or another one (a virtual host). A recording made before keploy
+// stamped every mock has destAddr only on its MySQL mocks, and its HTTP mock
+// names its destination only by its Host. A Host that names no port is not
+// completed from the URL: keploy records the request line as sent, which for
+// a call to a service is origin-form ("/x") and names no host. A DNS answer and a
 // connection failure reached no dependency at that port, so they say nothing
 // of it.
 func otherDependencyAddr(m *models.Mock) string {

@@ -315,6 +315,19 @@ func httpMockTo(host string) *models.Mock {
 	}}
 }
 
+// httpMockAt is an HTTP mock recorded on a connection that reached destAddr
+// ("" for none, as a recording made before keploy stamped every mock), its
+// Host header host.
+func httpMockAt(destAddr, host string) *models.Mock {
+	m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq: &models.HTTPReq{Method: "GET", URL: "/x", Header: map[string]string{"Host": host}},
+	}}
+	if destAddr != "" {
+		m.Spec.Metadata = map[string]string{"destAddr": destAddr}
+	}
+	return m
+}
+
 func grpcMockTo(authority string) *models.Mock {
 	return &models.Mock{Kind: models.GRPC_EXPORT, Spec: models.MockSpec{GRPCReq: &models.GrpcReq{
 		Headers: models.GrpcHeaders{PseudoHeaders: map[string]string{":authority": authority, ":path": "/orders.V1/Get", ":method": "POST", ":scheme": "http"}},
@@ -356,15 +369,17 @@ func TestReplayDecidesADefaultPortByTheRecording(t *testing.T) {
 		{"MySQL recorded without an address", []*models.Mock{httpMockTo("localhost:4000"), mysqlMockAt("")}, 4000, true, "default-port"},
 		{"gRPC recorded on 4000", []*models.Mock{grpcMockTo("orders:4000")}, 4000, false, "recorded-not-mysql"},
 		{"HTTP/2 recorded on 4000", []*models.Mock{http2MockTo("orders:4000")}, 4000, false, "recorded-not-mysql"},
-		// keploy mock record stamps every mock with its connection's
-		// destAddr, so a Host that names no port still names 4000.
-		{"HTTP recorded on 4000 with its destAddr, its Host naming no port", []*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{
-			Metadata: map[string]string{"destAddr": "127.0.0.1:4000"},
-			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "/x", Header: map[string]string{"Host": "api.internal"}}}}}, 4000, false, "recorded-not-mysql"},
-		// keploy record writes no destAddr on an HTTP mock and its URL is
-		// origin-form, so this mock says nothing of 4000 (a stated limit).
-		{"HTTP recorded without a destAddr, its Host naming no port", []*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{
-			HTTPReq: &models.HTTPReq{Method: "GET", URL: "/x", Header: map[string]string{"Host": "api.internal"}}}}}, 4000, true, "default-port"},
+		// keploy stamps every mock it records with its connection's
+		// destAddr, so a Host that names no port, or another port (a
+		// virtual host), still says the connection reached 4000: destAddr
+		// is read before the Host.
+		{"HTTP recorded on 4000 with its destAddr, its Host naming no port", []*models.Mock{httpMockAt("127.0.0.1:4000", "api.internal")}, 4000, false, "recorded-not-mysql"},
+		{"HTTP recorded on 4000 with its destAddr, its Host naming another port", []*models.Mock{httpMockAt("127.0.0.1:4000", "api.internal:8080")}, 4000, false, "recorded-not-mysql"},
+		{"HTTP whose destAddr names 8080, its Host claiming 4000", []*models.Mock{httpMockAt("10.0.0.9:8080", "api.internal:4000")}, 4000, true, "default-port"},
+		// A recording made before keploy stamped every mock has no destAddr
+		// on an HTTP mock, and its URL is origin-form, so this mock says
+		// nothing of 4000.
+		{"HTTP recorded without a destAddr, its Host naming no port", []*models.Mock{httpMockAt("", "api.internal")}, 4000, true, "default-port"},
 		{"gRPC recorded on 8080", []*models.Mock{grpcMockTo("orders:8080")}, 4000, true, "default-port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

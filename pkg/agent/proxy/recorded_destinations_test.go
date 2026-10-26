@@ -68,12 +68,15 @@ func TestDestinationKey_NamesWhatADefaultPortHeld(t *testing.T) {
 		t.Fatalf("MySQL mocks that name no address have keys %q and %q; want one, shared", a, b)
 	}
 	at4000 := map[string]*models.Mock{
-		"HTTP, its Host":        httpMockTo("127.0.0.1:4000"),
-		"HTTP, another host":    httpMockTo("api.internal:4000"),
-		"HTTP, its destAddr":    {Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:4000"}, HTTPReq: &models.HTTPReq{URL: "/x", Header: map[string]string{"Host": "api.internal"}}}},
-		"gRPC, its :authority":  grpcMockTo("orders:4000"),
-		"HTTP/2, no authority":  {Kind: models.HTTP2, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:4000"}, HTTP2Req: &models.HTTP2Req{Scheme: "http"}}},
-		"generic, its destAddr": destMock(models.GENERIC, map[string]string{"destAddr": "10.0.0.2:4000"}),
+		"HTTP, its Host":     httpMockTo("127.0.0.1:4000"),
+		"HTTP, another host": httpMockTo("api.internal:4000"),
+		"HTTP, its destAddr": httpMockAt("10.0.0.2:4000", "api.internal"),
+		// destAddr is read before the Host: a virtual host naming
+		// another port does not hide that the connection reached 4000.
+		"HTTP, its destAddr, its Host naming another port": httpMockAt("10.0.0.2:4000", "api.internal:8080"),
+		"gRPC, its :authority":                             grpcMockTo("orders:4000"),
+		"HTTP/2, no authority":                             {Kind: models.HTTP2, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "10.0.0.2:4000"}, HTTP2Req: &models.HTTP2Req{Scheme: "http"}}},
+		"generic, its destAddr":                            destMock(models.GENERIC, map[string]string{"destAddr": "10.0.0.2:4000"}),
 	}
 	want := destinationKey(httpMockTo("127.0.0.1:4000"))
 	for name, m := range at4000 {
@@ -87,8 +90,11 @@ func TestDestinationKey_NamesWhatADefaultPortHeld(t *testing.T) {
 	for name, m := range map[string]*models.Mock{
 		"HTTP at 8080":                  {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Header: map[string]string{"Host": "api:8080"}}}},
 		"HTTP whose Host names no port": {Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "/x", Header: map[string]string{"Host": "api.internal"}}}},
-		"a DNS answer naming 4000":      destMock(models.DNS, map[string]string{"destAddr": "10.0.0.2:4000"}),
-		"a connection failure at 4000":  destMock(models.ConnectionFailure, map[string]string{"destAddr": "10.0.0.2:4000"}),
+		// destAddr is read before the Host: a Host claiming 4000 on a
+		// connection that reached 8080 says nothing of 4000.
+		"HTTP whose destAddr names 8080, its Host claiming 4000": httpMockAt("10.0.0.9:8080", "api.internal:4000"),
+		"a DNS answer naming 4000":                               destMock(models.DNS, map[string]string{"destAddr": "10.0.0.2:4000"}),
+		"a connection failure at 4000":                           destMock(models.ConnectionFailure, map[string]string{"destAddr": "10.0.0.2:4000"}),
 	} {
 		if k := destinationKey(m); k != "" {
 			t.Errorf("%s: key %q, want none", name, k)
@@ -339,6 +345,14 @@ func TestASeededDefaultPortDestinationDecidesItsReplay(t *testing.T) {
 				{[]*models.Mock{inTest("login", httpMockTo("127.0.0.1:4000"))}, false, "recorded-not-mysql"},
 				{[]*models.Mock{inTest("tidb", mysqlMockAt("tidb:4000"))}, true, "known-port"},
 				{[]*models.Mock{inTest("orders", grpcMockTo("orders:4000"))}, false, "recorded-not-mysql"},
+				// Every mock keploy records names the address its
+				// connection reached, read before its Host: a Host
+				// naming no port, or another port, still says 4000,
+				// and a Host claiming 4000 on a connection to 8080
+				// says nothing of it.
+				{[]*models.Mock{inTest("login", httpMockAt("127.0.0.1:4000", "api.internal"))}, false, "recorded-not-mysql"},
+				{[]*models.Mock{inTest("login", httpMockAt("127.0.0.1:4000", "api.internal:8080"))}, false, "recorded-not-mysql"},
+				{[]*models.Mock{inTest("login", httpMockAt("10.0.0.9:8080", "api.internal:4000"))}, true, "default-port"},
 				{[]*models.Mock{inTest("login", httpMockTo("127.0.0.1:4000")), inTest("old-mysql", mysqlMockAt(""))}, true, "default-port"},
 				{nil, true, "default-port"},
 			} {

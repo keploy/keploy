@@ -54,6 +54,12 @@
 # the proxy only as the test opens, so the replay must already know, from the
 # whole recording, that 4000 held HTTP and no MySQL; the /login mock is
 # recorded inside its test.
+# And a pass where the app sends its upstream a Host with no port
+# (`Host: auth.internal`, as a client of a virtual host does), so nothing in
+# the recorded request says it went to 4000. keploy record stamps every mock
+# with the address its connection reached (metadata.destAddr); the replay
+# reads it and serves the mock as HTTP. Without it the replay took 4000 for
+# MySQL by its port and greeted the app, and /login failed.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -244,8 +250,9 @@ run_format() {
     # "sudo_lag" for that run recorded by a non-root CLI (its agent under
     # sudo), stopped as `sudo pkill -INT -f keploy` stops it, "sync_lag" for
     # the lagging run recorded with --sync (each test's mapping), "proven"
-    # for a normal run recorded and replayed under KEPLOY_PROVEN=1.
-    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy="" sync_flag=() lagging="" proven_env=()
+    # for a normal run recorded and replayed under KEPLOY_PROVEN=1, "vhost"
+    # for a normal run whose app sends its upstream a Host with no port.
+    local format=$1 mode=${2:-} fmt_flag=() lag_env=() stop_after=5 as_root=(sudo -E) stop_copy="" sync_flag=() lagging="" proven_env=() upstream_host=""
     [ "$format" = json ] && fmt_flag=(--storage-format json)
     [ "$mode" = sync_lag ] && sync_flag=(--sync)
     if [ "$mode" = lag ] || [ "$mode" = sudo_lag ] || [ "$mode" = sync_lag ]; then
@@ -256,6 +263,10 @@ run_format() {
     fi
     if [ "$mode" = proven ]; then
         proven_env=(KEPLOY_PROVEN=1)
+        format="${format}_${mode}"
+    fi
+    if [ "$mode" = vhost ]; then
+        upstream_host=auth.internal
         format="${format}_${mode}"
     fi
     if [ "$mode" = sudo_lag ]; then
@@ -285,7 +296,7 @@ KEPLOY_CFG
     STOP_AFTER=$stop_after STOP_COPY=$stop_copy drive_requests > "driver_logs_${format}.txt" 2>&1 &
     local driver_pid=$!
     "${as_root[@]}" env PATH="$PATH" "${lag_env[@]}" "${proven_env[@]}" "$RECORD_BIN" record "${fmt_flag[@]}" "${sync_flag[@]}" \
-        -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" \
+        -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT} ${upstream_host}" \
         --generateGithubActions=false > "record_logs_${format}.txt" 2>&1
     local record_status=$?
     echo "record exit status: $record_status"
@@ -388,9 +399,25 @@ KEPLOY_CFG
         echo "::error::the upstream's mock did not record the lines of its two Set-Cookie headers"
         return 1
     fi
+    if [ "$mode" = vhost ]; then
+        # The pass tests something only if the recorded request names no
+        # port: its Host is the virtual host's, and no mock's Host says 4000.
+        if ! grep -qsE "^[[:space:]]*Host: ${upstream_host}[[:space:]]*\$" keploy/test-set-0/mocks.*; then
+            echo "::error::the upstream's mock does not carry the app's Host ${upstream_host}: the pass tests nothing ($format)"
+            grep -n 'Host:' keploy/test-set-0/mocks.* | head
+            return 1
+        fi
+        if grep -qsE "^[[:space:]]*Host: .*:${UPSTREAM_PORT}[[:space:]]*\$" keploy/test-set-0/mocks.*; then
+            echo "::error::a mock's Host names :${UPSTREAM_PORT}: the pass tests nothing ($format)"
+            grep -n 'Host:' keploy/test-set-0/mocks.* | head
+            return 1
+        fi
+        echo "recorded destinations ($format):"
+        grep -hoE 'destAddr: .*' keploy/test-set-0/mocks.* | sort | uniq -c
+    fi
 
     sudo -E env PATH="$PATH" "${proven_env[@]}" "$REPLAY_BIN" test "${fmt_flag[@]}" \
-        -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT}" --delay 5 \
+        -c "python3 app.py ${APP_PORT} ${UPSTREAM_PORT} ${upstream_host}" --delay 5 \
         --generateGithubActions=false > "test_logs_${format}.txt" 2>&1
     echo "test exit status: $?"
     if grep -q 'WARNING: DATA RACE' "test_logs_${format}.txt"; then
@@ -431,6 +458,8 @@ fi
 echo "PASS: repeated headers replay on their recorded lines"
 run_format yaml proven || exit 1
 echo "PASS: under KEPLOY_PROVEN=1 the HTTP upstream on :${UPSTREAM_PORT} records, and replays as HTTP from a mock recorded inside its test"
+run_format yaml vhost || exit 1
+echo "PASS: the HTTP upstream on :${UPSTREAM_PORT}, called with a Host that names no port, replays as HTTP by the address keploy record stamped on its mock"
 run_format yaml lag || exit 1
 echo "PASS: a recording whose capture lags its traffic keeps every test case and its mocks"
 run_format yaml sudo_lag || exit 1

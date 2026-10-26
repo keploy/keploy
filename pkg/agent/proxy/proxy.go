@@ -2717,9 +2717,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
-	if p.mockMode {
-		starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
-	}
+	// The address this connection reached, which every mock its parsers
+	// record names (starts.Registry.StampDest), under keploy record as under
+	// keploy mock: a replay tells by it what a port held. Kept until they are
+	// done, as its process is.
+	starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
+	defer starts.Default.ForgetDest(fmt.Sprint(clientConnID))
 
 	if predialed != nil {
 		if predialed.Addr() != dstAddr {
