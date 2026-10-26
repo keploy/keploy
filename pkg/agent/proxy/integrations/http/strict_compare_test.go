@@ -874,3 +874,95 @@ func TestNoClockIsReadWithTheSwitchOff(t *testing.T) {
 		t.Fatal("no clock read with the switch on")
 	}
 }
+
+// keploy.yml's noise skips a learned read of the clock wherever it reaches
+// the place: a header name, a url pattern, a body path with an array
+// position. Elsewhere a value that is not this call's read of the clock is
+// refused, the field named as the walk names it, the refusals in a stable
+// order; a read in a path segment files the recording under the learned
+// request key; learned noise on the place no longer excuses it in the learn
+// step, which reads the place again.
+func TestAClockReadsRefusalsAndKeployYmlNoise(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	plain := models.ClockOffset{Res: time.Second}
+	now, old := base.Add(time.Second).Format(time.RFC3339), time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	mk := func(path, header, body string, clocks ...string) *models.Mock {
+		m := recorded("m", path, map[string]string{"Content-Type": "application/json", "X-Sent-At": header}, body)
+		m.Spec.Clocks = map[string]models.ClockOffset{}
+		for _, c := range clocks {
+			m.Spec.Clocks[c] = plain
+		}
+		return m
+	}
+	call := func(path, header, body string) *req {
+		r := sent(path, map[string]string{"Content-Type": "application/json", "X-Sent-At": header}, body)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	items := `{"items":[{"at":"` + old + `"}]}`
+	for _, c := range []struct {
+		name         string
+		m            *models.Mock
+		in           *req
+		header, body map[string][]string
+		url          []string
+		differs      string
+	}{
+		{"a header keploy.yml names", mk("/v1/u", old, `{}`, "header.x-sent-at"), call("/v1/u", old, `{}`), map[string][]string{"x-sent-at": {}}, nil, nil, ""},
+		{"a header", mk("/v1/u", old, `{}`, "header.x-sent-at"), call("/v1/u", old, `{}`), nil, nil, nil, "header.x-sent-at"},
+		{"a query value a url pattern masks", mk("/v1/u?since="+old, now, `{}`, "url.query.since"), call("/v1/u?since="+old, now, `{}`), nil, nil, []string{`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z`}, ""},
+		{"a path segment", mk("/v1/u/"+old, now, `{}`, "url.path.2"), call("/v1/u/"+old, now, `{}`), nil, nil, nil, "path"},
+		{"an array position keploy.yml names", mk("/v1/u", now, items, "body.items[0].at"), call("/v1/u", now, items), nil, map[string][]string{"items[].at": {}}, nil, ""},
+		{"an array position", mk("/v1/u", now, items, "body.items[0].at"), call("/v1/u", now, items), nil, nil, nil, "body.items[].at"},
+		{"a whole JSON body", mk("/v1/u", now, `"`+old+`"`, "body"), call("/v1/u", now, `"`+old+`"`), nil, nil, nil, "body"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, clockConn(true, base), c.in, c.header, c.body, c.url, c.m)
+			if c.differs == "" {
+				if got == nil {
+					t.Fatalf("refused (%v); want it answered: keploy.yml's noise reaches the place", differs(diag))
+				}
+				return
+			}
+			if got != nil || !hasField(differs(diag), c.differs) {
+				t.Fatalf("answered %v, differs %v; want refused naming %s", got != nil, differs(diag), c.differs)
+			}
+		})
+	}
+	// The refusals of several places come in one order, run after run.
+	body, clocks := `{`, []string{}
+	for i, k := range []string{"f", "b", "e", "a", "d", "c"} {
+		if i > 0 {
+			body += ","
+		}
+		body += `"` + k + `":"` + old + `"`
+		clocks = append(clocks, "body."+k)
+	}
+	body += `}`
+	for run := 0; run < 20; run++ {
+		_, diag := strictMatchIn(t, clockConn(true, base), call("/v1/u", now, body), nil, nil, nil, mk("/v1/u", now, body, clocks...))
+		var order []string
+		for _, f := range diag.differs {
+			if f.why != "" {
+				order = append(order, f.shape)
+			}
+		}
+		if strings.Join(order, " ") != "body.a body.b body.c body.d body.e body.f" {
+			t.Fatalf("run %d: the refusals came as %v; want them sorted", run, order)
+		}
+	}
+	m := mk("/v1/u/"+old, now, `{"since":"`+old+`"}`, "url.path.2", "body.since")
+	if keys := recordedRequestKeys(m); len(keys) != 2 || keys[1] != requestKeyLearned("POST", 3) {
+		t.Fatalf("keys %v; want the learned key %s: the path segment is a read of the clock", keys, requestKeyLearned("POST", 3))
+	}
+	m.Spec.ReqBodyNoise = map[string][]string{"body.since": {}}
+	leaf := learn.Leaf{Path: "body.since", Noise: "body.since", Type: learn.String, Value: old}
+	if ex, _ := (learnNoise{}).known(m).Excused(leaf); ex {
+		t.Fatal("learned noise excused a place learned as a read of the clock")
+	}
+	m.Spec.Clocks = nil
+	if ex, _ := (learnNoise{}).known(m).Excused(leaf); !ex {
+		t.Fatal("learned noise no longer excuses its own place")
+	}
+}
