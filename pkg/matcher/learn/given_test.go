@@ -813,7 +813,7 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			ln := ClassifyIn(clientTestCacheIn(tc.zone), []string{p}, str(tc.live), str(tc.rec), rec, nil, nil, nil, tc.w)[0]
 			if tc.noise {
-				if ln.Kind != KindNoise {
+				if !noiseOrRead(ln) {
 					t.Fatalf("%q -> %q: %s (%s); want noise", tc.rec, tc.live, ln.Kind, ln.Why)
 				}
 			} else if ln.Kind != KindUnaccounted || !clientTestRefusal(ln.Why, tc.part, tc.w != nil, tc.rec, tc.live) {
@@ -839,7 +839,7 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, at, time.Millisecond)}}
 	}
 	tr, tl := rec.Add(-427*time.Millisecond), rec.Add(61_050*time.Millisecond)
-	if ln := ClassifyIn(clientTestCache(), []string{p}, typed(tl), typed(tr), rec, nil, nil, nil, w)[0]; ln.Kind != KindNoise {
+	if ln := ClassifyIn(clientTestCache(), []string{p}, typed(tl), typed(tr), rec, nil, nil, nil, w)[0]; !noiseOrRead(ln) {
 		t.Errorf("a typed stamp in its window: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	for _, c := range []struct {
@@ -852,7 +852,7 @@ func TestAClientTestLearnsAChangedInstantOnlyWhereItsWindowShowsARead(t *testing
 			t.Errorf("a typed stamp, %s: %s (%s); want it refused, saying keploy saw no read of the app's clock that matched it", c.name, ln.Kind, ln.Why)
 		}
 		if c.w == nil {
-			if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(c.l), typed(tr), rec, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
+			if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(c.l), typed(tr), rec, nil, nil, nil, nil)[0]; !noiseOrRead(ln) {
 				t.Errorf("keploy test, a typed stamp the lead moved: %s (%s); want noise", ln.Kind, ln.Why)
 			}
 		}

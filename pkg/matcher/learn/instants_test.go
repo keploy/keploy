@@ -107,13 +107,13 @@ func shownClockRead(rec, live time.Time, typed bool, w *Window) bool {
 // read of the clock (Read), which a replay checks, and in a window that holds
 // it neither in both runs nor moved by the lead, refused (outsideWindowWhy).
 func noiseIn(ln Learned, w *Window) bool {
-	if textClockRead(ln.Recorded.Value, ln.Live.Value) == nil {
+	if textClockRead(ln.Recorded.Value, ln.Live.Value) == nil && ln.Recorded.Type != Instant {
 		return ln.Kind == KindNoise
 	}
 	if w != nil && ln.Kind == KindUnaccounted {
 		return ln.Why == outsideWindowWhy
 	}
-	return ln.Kind == KindNoise && ln.Read != nil
+	return ln.Kind == KindClockRead && ln.Read != nil
 }
 
 // heldWord reports whether text holds, as a word of its own, a word the
@@ -200,7 +200,7 @@ func TestAClockReadIsNoiseOnlyWhereItsWindowShowsIt(t *testing.T) {
 			w := r1Windows(row.rec, live)["in its call's window"]
 			for i, receive := range receives {
 				for _, typed := range []bool{false, true} {
-					if ln := classifyProcessedAt(row.rec, live, typed, time.Time{}, w, receive); ln.Kind != KindNoise {
+					if ln := classifyProcessedAt(row.rec, live, typed, time.Time{}, w, receive); !noiseOrRead(ln) {
 						t.Errorf("%s, live %s, in its call's window, receive %d, typed %v: %s (from %q, %s); want noise", row.name, live.Format(time.RFC3339Nano), i, typed, ln.Kind, ln.From.Mock, ln.Why)
 					}
 				}
@@ -1934,7 +1934,7 @@ func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
 		if ln := ClassifyIn(NewDriftCache(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
 			t.Errorf("beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
 		}
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(11, 15), typed(11, 14), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
+		if ln := ClassifyIn(NewDriftCache(), []string{p}, typed(11, 15), typed(11, 14), at, served, nil, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("typed, beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
 		}
 	}

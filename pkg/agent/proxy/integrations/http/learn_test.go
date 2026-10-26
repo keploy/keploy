@@ -4635,3 +4635,36 @@ func learnedClockRead(spec models.MockSpec, path string) bool {
 	_, clock := spec.Clocks[path]
 	return clock && len(spec.ReqBodyNoise) == 0
 }
+
+// A read of the clock the learn step hands back (learn.KindClockRead) is
+// carried as a read a replay checks, never as noise; a kind the plan does
+// not carry (a read with no read beside it, an offset with no offset, one
+// it does not know) refuses the call with the learn step's reason, never
+// leaves the field out of the noise to be compared by luck.
+func TestALearnedReadOfTheClockIsCarriedAndAKindThePlanCannotCarryIsRefused(t *testing.T) {
+	m := &models.Mock{Name: "mock-1"}
+	leaf := learn.Leaf{Path: "body.at", Value: "2026-10-27T10:00:00Z", Type: learn.String}
+	read := models.ClockOffset{Res: time.Second, Zone: models.ZoneUTC}
+	p, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: learn.KindClockRead, Recorded: leaf, Live: leaf, Read: &read, Why: "unchecked"}}, nil, nil)
+	if why != "" {
+		t.Fatalf("a read of the clock refused: %s", why)
+	}
+	if got, ok := p.clocks["body.at"]; !ok || got != read {
+		t.Fatalf("clocks = %v, want body.at carried as %v", p.clocks, read)
+	}
+	if _, ok := p.noise["body.at"]; ok {
+		t.Fatalf("a read of the clock learned as noise too: %v", p.noise)
+	}
+	for _, k := range []learn.Kind{learn.KindClockRead, learn.KindClockOffset, "a kind of tomorrow"} {
+		p, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: k, Recorded: leaf, Live: leaf, Why: "it is what it is"}}, nil, nil)
+		if want := "body.at changed, and it is what it is"; why != want {
+			t.Errorf("%s with nothing beside it: why %q, want %q", k, why, want)
+		}
+		if len(p.noise) != 0 || len(p.clocks) != 0 {
+			t.Errorf("%s with nothing beside it: noise %v, clocks %v, want neither", k, p.noise, p.clocks)
+		}
+	}
+	if _, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{}, true, []learn.Learned{{Kind: learn.KindClockRead, Recorded: leaf, Live: leaf}}, nil, nil); why != "body.at changed, and keploy learned it as clock-read, which this replay cannot check" {
+		t.Errorf("a read with no read beside it and no reason: why %q, want the kind named", why)
+	}
+}
