@@ -1498,8 +1498,15 @@ type clockHook struct {
 
 func (h *clockHook) AppClock(real time.Time) (time.Time, bool) { return real.Add(h.offset), true }
 
+// otherHooks are hooks of another build that report no app clock: they may
+// move it, so keploy cannot tell which clock the app reads.
+type otherHooks struct{ AgentHook }
+
 // Once the mocks are stored, the proxy reads the app's clock as the hooks
-// move it; hooks that move none hand it nothing.
+// move it. Under the proven switch this build's own hooks, which move no
+// clock, hand it the real clock; hooks of another build that report none
+// hand it nothing (keploy cannot tell), and nor does any hook with the switch
+// off, as before it.
 func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 	prev := ActiveHooks
 	t.Cleanup(func() { ActiveHooks = prev })
@@ -1507,13 +1514,27 @@ func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 
 	ActiveHooks = &AgentHook{}
 	a, p := wireAgent(t, models.MODE_TEST)
+	t.Setenv(provenswitch.Env, "")
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
-	require.Nil(t, p.appClock, "hooks with no app clock")
+	require.Nil(t, p.appClock, "the switch off: no app clock, as before")
+
+	t.Setenv(provenswitch.Env, "1")
+	ActiveHooks = &otherHooks{}
+	a, p = wireAgent(t, models.MODE_TEST)
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.appClock, "another build's hooks that report no app clock: keploy cannot tell it")
+
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, p.appClock, "this build's own hooks move no clock: the app reads the real one")
+	got, ok := p.appClock(at)
+	require.True(t, ok)
+	require.Equal(t, at, got)
 
 	ActiveHooks = &clockHook{offset: 21 * time.Second}
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	require.NotNil(t, p.appClock)
-	got, ok := p.appClock(at)
+	got, ok = p.appClock(at)
 	require.True(t, ok)
 	require.Equal(t, at.Add(21*time.Second), got)
 }

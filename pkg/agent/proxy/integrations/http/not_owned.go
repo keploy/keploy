@@ -32,7 +32,7 @@ func notOwnedRecording(ctx context.Context, input *req, mockDb integrations.Mock
 	// another miss spent its name first, and then offers the next.
 	var accepted *models.Mock
 	match := func(m *models.Mock) bool {
-		if m.Spec.HTTPReq == nil || len(strictDiff(input, live, m, n)) != 0 {
+		if m.Spec.HTTPReq == nil || len(strictDiff(ctx, input, live, m, n)) != 0 {
 			return false
 		}
 		accepted = m
@@ -141,7 +141,9 @@ func recordedRequestKeys(m *models.Mock) []string {
 			break
 		}
 	}
-	k := strictKnown{learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise)}
+	// A read of the application's clock learned in the path or the target
+	// is a value made anew each run there, filed as learned noise is.
+	k := strictKnown{learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
 	learned := hasTarget && (k.learnedAt("header."+strings.ToLower(amzTargetHeader), "") || k.redacted(target))
 	for i := range segs {
 		if learned {
