@@ -35,6 +35,9 @@ import (
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
+	// The replay's own teardown scope: what keploy sees its stops do moves
+	// it, and the drain below waits while it moves (teardownDrain).
+	ctx, teardown := utils.NewTeardownScope(ctx)
 	m.ids = nil
 	name := m.setName()
 	requests := m.requests()
@@ -183,7 +186,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.notifyShutdown()
 		// Cancel so agent-monitor / app-runner goroutines unwind before drain.
 		cancel()
-		if err := utils.DrainErrGroup(m.logger, "mock-replay", errGrp, 30*time.Second); err != nil {
+		if err := m.teardownDrain("mock-replay", errGrp, teardown); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-replay goroutines")
 		}
 	}()
@@ -976,7 +979,7 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 }
 
 // statefulMocksDisabled is test.disableStatefulMocks, ignored under the proven
-// switch (design v14 §10, a U18 row of S12): a test's own mocks answer once
+// switch (design v14 §10, a U18 row): a test's own mocks answer once
 // each in recorded order, and the pool keeps its cursors. The flip deletes it.
 func (m *mockService) statefulMocksDisabled() bool {
 	if !m.config.Test.DisableStatefulMocks {
@@ -1834,11 +1837,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	var learnedPool []string
 	var learnErr error
 	if m.learning() {
-		if consumedErr != nil {
-			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
-		} else {
-			learned, learnedPool, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
-		}
+		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, flows, detail.expected)
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what

@@ -909,6 +909,12 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 		"--mode", string(opts.Mode),
 		"--is-docker",
 	}
+	// The pid namespace clientPid is this CLI's in: keploy-agent's own pid
+	// namespace, which the app's services join, is another, so the agent
+	// takes the pid for none of their processes (utils.ClientPIDHere).
+	if ns := utils.OwnPIDNamespace(); ns != "" {
+		command = append(command, "--client-pid-ns", ns)
+	}
 
 	if idc.conf.Debug {
 		command = append(command, "--debug")

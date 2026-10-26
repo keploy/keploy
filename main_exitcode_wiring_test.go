@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"strings"
 	"testing"
 
 	"go.keploy.io/server/v3/utils"
@@ -15,8 +19,24 @@ import (
 // never being assigned to utils.ErrCode, which a pure unit test cannot see.
 const subprocessEnv = "KEPLOY_EXITCODE_TEST_SUBPROCESS"
 
+// childWouldSudo is the exit status of a child refused because start() would
+// re-execute it through sudo. No code in the exit-code contract is 99.
+const childWouldSudo = 99
+
 func TestMain(m *testing.M) {
 	if os.Getenv(subprocessEnv) == "1" {
+		// start() re-executes keploy through sudo before cobra parses
+		// anything when the -c is a docker command and the user is not root
+		// (utils.ShouldReexecWithSudo). Here that would run this test binary
+		// as root, with the caller's environment, where sudo needs no
+		// password; ask for a password where it does, and block the test;
+		// and fail where there is no sudo. The result would depend on the
+		// machine's sudo, not on keploy, so a case that would do it is
+		// refused, the same way everywhere: give it a native -c.
+		if utils.ShouldReexecWithSudo() {
+			fmt.Fprintf(os.Stderr, "refused: keploy %s would re-execute this test binary through sudo; give the case a native -c\n", strings.Join(os.Args[1:], " "))
+			os.Exit(childWouldSudo)
+		}
 		setVersion()
 		start(utils.NewCtx())
 		os.Exit(utils.ErrCode)
@@ -28,20 +48,29 @@ func TestMain(m *testing.M) {
 // arguments, in a scratch working directory, and returns the exit code.
 func runCLI(t *testing.T, args ...string) int {
 	t.Helper()
+	code, _ := runCLIOutput(t, args...)
+	return code
+}
+
+// runCLIOutput is runCLI, with what the CLI wrote to stdout and stderr.
+func runCLIOutput(t *testing.T, args ...string) (int, string) {
+	t.Helper()
 
 	cmd := exec.Command(os.Args[0])
 	cmd.Args = append([]string{"keploy"}, args...)
 	cmd.Env = append(os.Environ(), subprocessEnv+"=1")
 	cmd.Dir = t.TempDir()
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
 
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
+			return exitErr.ExitCode(), out.String()
 		}
 		t.Fatalf("running %v: %v", args, err)
 	}
-	return 0
+	return 0, out.String()
 }
 
 func TestCLIExitCodes(t *testing.T) {
@@ -77,6 +106,72 @@ func TestCLIExitCodes(t *testing.T) {
 				t.Errorf("keploy %v exit code = %d, want %d", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// A usage error is said once, then where the help of the command that failed
+// is: the flag `keploy record --delay 10` got wrong is one of record's, which
+// `keploy record --help` lists, and the root's help lists only commands. No
+// usage text is printed under it (some 80 lines, which scrolled the error out
+// of view). start takes the failing command from ExecuteC and hands its path
+// to exitCodeForCmdErr, which prints whatever path it is given: only a run of
+// start tells the command that failed from the root.
+func TestCLIPointsAUsageErrorAtTheHelpOfTheCommandThatFailed(t *testing.T) {
+	// A CLI that cannot even print its help is broken, and that is a failure
+	// of this test, not a reason to skip it: skipped, it would go green.
+	if code, out := runCLIOutput(t, "--help"); code != 0 {
+		t.Fatalf("keploy --help exited %d, want 0; the CLI does not start:\n%s", code, out)
+	}
+
+	for _, tc := range []struct {
+		args []string
+		said string // the error, said once
+		help string // the command whose --help it points at
+	}{
+		// The walkthrough's first command, with a native -c: its docker one,
+		// `-c "docker compose up"`, would re-execute the child through sudo
+		// (TestMain refuses that). The docker line itself is run in-process,
+		// where nothing re-executes, by cli's
+		// TestRecordGivenAnUnknownFlagSaysSoWithoutItsUsage.
+		{args: []string{"record", "-c", "./app", "--container-name", "api", "--delay", "10"},
+			said: "unknown flag: --delay", help: "keploy record"},
+		{args: []string{"test", "--nope"}, said: "unknown flag: --nope", help: "keploy test"},
+		{args: []string{"mock", "record", "--nope"}, said: "unknown flag: --nope", help: "keploy mock record"},
+		{args: []string{"diff", "a", "b", "c"}, said: "accepts at most 2 arg(s), received 3", help: "keploy diff"},
+		{args: []string{"bogus-cmd"}, said: `unknown command "bogus-cmd" for "keploy"`, help: "keploy"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			code, out := runCLIOutput(t, tc.args...)
+			if code != utils.ExitUsageError {
+				t.Errorf("exit code = %d, want %d", code, utils.ExitUsageError)
+			}
+			if n := strings.Count(out, tc.said); n != 1 {
+				t.Errorf("%q said %d times, want once:\n%s", tc.said, n, out)
+			}
+			if hint := "Run '" + tc.help + " --help' for usage."; strings.Count(out, "--help' for usage.") != 1 || !strings.Contains(out, hint) {
+				t.Errorf("want one help pointer, %q:\n%s", hint, out)
+			}
+			if strings.Contains(out, "Usage:") {
+				t.Errorf("the usage text was printed under the error:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestMain's refusal is what keeps every case above off sudo, the same way on
+// every machine: a child given a docker -c, run by a user who is not root, is
+// refused before start() runs, and so before anything re-executes. The line is
+// the walkthrough's. Were the refusal gone, start() would re-execute the child
+// through sudo first, since its sudo check runs before cobra parses the line;
+// only the re-executed child would stop at --delay, which record has no flag
+// for. It would never start the application, but it would go through sudo.
+func TestCLIChildThatWouldReexecThroughSudoIsRefused(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("start() re-executes through sudo only on Linux, for a user who is not root")
+	}
+	code, out := runCLIOutput(t, "record", "-c", "docker compose up", "--container-name", "api", "--delay", "10")
+	if code != childWouldSudo || !strings.Contains(out, "would re-execute this test binary through sudo") {
+		t.Errorf("exit code = %d, want %d (refused), and the refusal said:\n%s", code, childWouldSudo, out)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+
+	"go.keploy.io/server/v3/utils/stall"
 )
 
 // The bytes on the application's connections that are already the proxy's
@@ -93,13 +95,17 @@ type pairedConns struct {
 	// gone, not hidden.
 	visible atomic.Bool
 	// progress counts what the bytes waits saw move: a waited-for
-	// connection that received more, or was resolved (PairedBytesProgress).
+	// connection that received more, whose orphan changed state, or that
+	// was resolved (PairedBytesProgress).
 	progress atomic.Uint64
+	// clk is the runnable clock a bytes wait measures its wait for an
+	// orphan on (orphanLooks); nil is the process's. A test sets it.
+	clk stall.Clock
 }
 
 // PairedBytesProgress counts the bytes waits' progress, for the agent's
 // watchdog (agent.PairedBytesWaiter): a waited-for connection that received
-// more, or was resolved. It only ever grows.
+// more, whose orphan changed state, or that was resolved. It only ever grows.
 func (p *Proxy) PairedBytesProgress() uint64 { return p.paired.progress.Load() }
 
 // add keeps an accepted connection the kernel paired with the application's

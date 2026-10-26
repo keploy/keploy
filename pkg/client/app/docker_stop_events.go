@@ -25,10 +25,11 @@ import (
 // which an attached client does once its container stops. While it waits the container's processes make
 // progress on their way out (utils.ExitMark); once they are all gone the
 // container has stopped. It kills only when they made none for
-// utils.StopStallBudget of keploy's runnable time, or at the user's Ctrl+C,
-// which it offers: docker's own stop and removal on a starved host take as
-// long as they take, and are no kill (P101-b-k). killed says why it had to
-// kill, "" when it did not. The drains wait for it (utils.BeginAppStop).
+// utils.StopStallBudget of the time both they and keploy could run
+// (utils.ExitClock), or at the user's Ctrl+C, which it offers: docker's own
+// stop and removal on a starved host take as long as they take, and are no
+// kill (P101-b-k). killed says why it had to kill, "" when it did not. The
+// drains wait for it (utils.BeginAppStop).
 //
 // What it cannot read it does not take for a stall of the app's. A container
 // whose processes keploy cannot see (the daemon in another PID namespace:
@@ -98,7 +99,8 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	}()
 
 	var why string
-	switch utils.WaitExitByEvents(a.logger, stopped, procs) {
+	stop, bound := utils.WaitExitByEvents(a.logger, stopped, procs, a.teardown.Load())
+	switch stop {
 	case utils.StopExited:
 		return "", nil
 	case utils.StopPressed:
@@ -109,7 +111,7 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 	default:
 		switch {
 		case readable:
-			why = fmt.Sprintf("its container made no progress on its way out for %s of keploy's runnable time after keploy interrupted it, so keploy killed it", utils.StopStallBudget)
+			why = fmt.Sprintf("its container made no progress on its way out for %s after keploy interrupted it, so keploy killed it", bound)
 		case seen:
 			why = fmt.Sprintf("keploy could not read its container's processes, and neither the docker daemon nor its docker client said it had stopped, for %s of keploy's runnable time after keploy interrupted it, so keploy killed it", utils.StopStallBudget)
 		default:
@@ -143,11 +145,18 @@ func (a *App) stopDockerRunByEvents(cmd *exec.Cmd) (killed string, err error) {
 // be read), and what releases that watch.
 type containerWatch struct {
 	seen, running, readable bool
-	// exitCode is a stopped container's, as the daemon gave it.
+	// restarting: the daemon is starting it again after an exit, by its
+	// restart policy, and calls it running meanwhile (running is set too).
+	restarting bool
+	// exitCode is a stopped or restarting container's last exit's, as the
+	// daemon gave it.
 	exitCode int
-	procs    []utils.Reached
-	mainGone <-chan struct{}
-	release  func()
+	// stopSignal is the stop signal the container declares (its compose
+	// stop_signal, or its image's STOPSIGNAL), "" when it declares none.
+	stopSignal string
+	procs      []utils.Reached
+	mainGone   <-chan struct{}
+	release    func()
 }
 
 // watchContainer reads container id for its stop. The daemon's word is
@@ -161,7 +170,12 @@ func (a *App) watchContainer(ctx context.Context, id string) containerWatch {
 	switch {
 	case ierr == nil && info.ContainerJSONBase != nil && info.State != nil:
 		w.seen, w.running = true, info.State.Running
-		if !w.running {
+		if info.Config != nil {
+			w.stopSignal = info.Config.StopSignal
+		}
+		if !w.running || info.State.Restarting {
+			// A restarting container has no process to read (its pid is 0).
+			w.restarting = info.State.Restarting
 			w.exitCode = info.State.ExitCode
 			return w
 		}

@@ -27,13 +27,13 @@ func TestEnsureAgentHoldsStoredMocks_RefusesAnAgentWithAnotherProvenSwitch(t *te
 	filtered, unfiltered, consumed, cases := rearmSessionArgs()
 
 	f := &rearmInstr{storeTakesEffect: true, readyErr: fmt.Errorf("%w: the switch is on in this keploy and off in its agent", provenswitch.ErrAgentSwitch)}
-	err := newRearmReplayer(f).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil)
+	err := newRearmReplayer(f).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases)
 	if !errors.Is(err, provenswitch.ErrAgentSwitch) {
 		t.Fatalf("ensureAgentHoldsStoredMocks = %v; an agent with another proven switch must stop the run", err)
 	}
 
 	g := &rearmInstr{storeTakesEffect: true, readyErr: errors.New("readiness file not written")}
-	if err := newRearmReplayer(g).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases, nil); err != nil {
+	if err := newRearmReplayer(g).ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
 		t.Fatalf("a plain readiness failure must stay soft, got: %v", err)
 	}
 }

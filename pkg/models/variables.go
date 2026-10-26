@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // MockVariables names, by variable, the places of a recorded dependency call
 // that hold the value of a test variable: a value the application makes anew
 // on every run and carries from where it first appears into later calls (an id
@@ -54,6 +56,67 @@ type MockVariable struct {
 	// dependency echoes): bound at Bind for this exchange, answered, and
 	// never asked of another call.
 	Echo bool `json:"echo,omitempty" yaml:"echo,omitempty" bson:"echo,omitempty"`
+	// Clock is, for a variable that the learn step saw drift at its Bind
+	// only with F's clock, the clock reads its recorded value held there
+	// that moved by the full round's lead (learn.ClockReads): F's evidence
+	// that it is a read of the app's clock, and when the read was made. Two
+	// variables recorded with two values may share one live value in a
+	// replay only when both are clock reads made in one second, as their
+	// recordings say (ReadInOneSecond): a creation time and an expiry an hour
+	// later both move with F's clock, and one written as the other is a
+	// regression. Each is still asserted at every one of its places. Only the
+	// learn step sets it, with a Bind; none for any other variable.
+	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+}
+
+// ClockRead is one clock read a recorded value holds, as the learn step read
+// it: the instant it says (At), to the resolution it says it at (Res: the
+// read was made in [At, At+Res)), and whether it is a time of day with no
+// date (Day), compared modulo a day.
+type ClockRead struct {
+	At  time.Time     `json:"at" yaml:"at" bson:"at"`
+	Res time.Duration `json:"res" yaml:"res" bson:"res"`
+	Day bool          `json:"day,omitempty" yaml:"day,omitempty" bson:"day,omitempty"`
+}
+
+// ReadInOneSecond reports whether a and b, the clock reads of two variables
+// (MockVariable.Clock), were made in one second, as their recordings say:
+// each holds reads, as many as the other, and at each place the earlier
+// read's resolution ends less than a second before the later one begins.
+// Only two such variables may share one live value though recorded with
+// two values (variables.Table.BindAll): two reads of one clock in one second.
+func ReadInOneSecond(a, b []ClockRead) bool {
+	if len(a) == 0 || len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].inOneSecond(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// inOneSecond reports whether reads r and o can have been made less than a
+// second apart.
+func (r ClockRead) inOneSecond(o ClockRead) bool {
+	if r.Day != o.Day {
+		return false
+	}
+	d := o.At.Sub(r.At)
+	if r.Day {
+		for d > 12*time.Hour {
+			d -= 24 * time.Hour
+		}
+		for d <= -12*time.Hour {
+			d += 24 * time.Hour
+		}
+	}
+	first := r.Res
+	if d < 0 {
+		d, first = -d, o.Res
+	}
+	return d-first < time.Second
 }
 
 // Clone returns a copy of v that shares no map or slice with it; nil for an
@@ -66,6 +129,7 @@ func (v MockVariables) Clone() MockVariables {
 	for name, mv := range v {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
+		mv.Clock = append([]ClockRead(nil), mv.Clock...)
 		out[name] = mv
 	}
 	return out
@@ -73,7 +137,9 @@ func (v MockVariables) Clone() MockVariables {
 
 // MergeVariables is a and b as one block (neither is changed): a variable in
 // both keeps a's bind and both's uses and answers, and is an echo only when
-// both say so.
+// both say so. Clock goes with the bind it was read at: a's bind keeps a's,
+// one taken from b keeps b's, and a variable both bind is a clock read only
+// when both say so.
 func MergeVariables(a, b MockVariables) MockVariables {
 	out := a.Clone()
 	for name, v := range b {
@@ -86,7 +152,9 @@ func MergeVariables(a, b MockVariables) MockVariables {
 			continue
 		}
 		if cur.Bind == "" {
-			cur.Bind = v.Bind
+			cur.Bind, cur.Clock = v.Bind, append([]ClockRead(nil), v.Clock...)
+		} else if v.Bind != "" && len(v.Clock) == 0 {
+			cur.Clock = nil
 		}
 		cur.Use = appendNewPlaces(cur.Use, v.Use...)
 		cur.Answer = appendNewPlaces(cur.Answer, v.Answer...)
@@ -151,4 +219,9 @@ type VariableBinding struct {
 	// value), not one the application made: it binds the variable for the
 	// calls that use it, and is never another variable's value.
 	Given bool `json:"given,omitempty" yaml:"given,omitempty"`
+	// Clock is, for a binding of a clock variable, its clock reads
+	// (MockVariable.Clock): it may share its live value with another clock
+	// variable's binding whose reads were made in the same second
+	// (ReadInOneSecond), and with no other.
+	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty"`
 }

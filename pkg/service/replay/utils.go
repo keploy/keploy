@@ -386,7 +386,11 @@ const resetProbeInterval = 200 * time.Millisecond
 // almost always one the real dispatch will get wrong too, so the run was going
 // to fail regardless. It is bounded, warn-and-proceed, and never turns a passing
 // run into a failing one.
-func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger) (scheme, host, port string, ok bool) {
+//
+// published is where the set's tests go in place of their app port
+// (pkg.SimulationConfig.PublishedPort), nil when nowhere else: the probe goes
+// where the tests will.
+func resolveProbeTarget(ctx context.Context, testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger, published func(context.Context, string, uint16) uint16) (scheme, host, port string, ok bool) {
 	if tc == nil || tc.Kind != models.HTTP {
 		return "", "", "", false
 	}
@@ -401,6 +405,7 @@ func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID stri
 	if err != nil {
 		return "", "", "", false
 	}
+	target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: configPort, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, tc.HTTPReq.URL, target, tc.AppPort, true)
 	u, err := url.Parse(strings.TrimSpace(target))
 	if err != nil || u == nil {
 		return "", "", "", false
@@ -729,10 +734,10 @@ type httpProbeTarget struct {
 // Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
 // unresolvable or unreachable target); the caller then keeps the TCP-accept stage
 // only, which is exactly the pre-existing behaviour.
-func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability) httpProbeTarget {
+func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability, published func(context.Context, string, uint16) uint16) httpProbeTarget {
 	src := &probeTargetSource{
 		testCfg: testCfg, testCases: testCases, testSetID: testSetID, logger: logger,
-		reach: reach, seen: map[string]bool{},
+		reach: reach, published: published, seen: map[string]bool{},
 	}
 	return src.nextTarget(ctx)
 }
@@ -746,8 +751,9 @@ type probeTargetSource struct {
 	testSetID string
 	logger    *zap.Logger
 	reach     pkg.AppPortReachability
-	next      int             // the next test case to look at
-	seen      map[string]bool // addresses, for an app port, already returned or skipped
+	published func(context.Context, string, uint16) uint16 // resolveProbeTarget's
+	next      int                                          // the next test case to look at
+	seen      map[string]bool                              // addresses, for an app port, already returned or skipped
 }
 
 // nextTarget is the next address the set's tests dial that the host may reach,
@@ -759,7 +765,7 @@ func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
 		if tc == nil || tc.Kind != models.HTTP {
 			continue
 		}
-		scheme, host, port, ok := resolveProbeTarget(s.testCfg, tc, s.testSetID, s.logger)
+		scheme, host, port, ok := resolveProbeTarget(ctx, s.testCfg, tc, s.testSetID, s.logger, s.published)
 		if !ok {
 			continue
 		}
@@ -1696,6 +1702,14 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			VariablePlaces:   call.VariablePlaces,
 			NotOwned:         call.NotOwned,
 			Reason:           call.Reason,
+			Concurrent:       call.Concurrent,
+			Answer:           call.Answer,
+			Drift:            call.Drift,
+			Reused:           call.Reused,
+			WriteKind:        call.WriteKind,
+			Source:           call.Source,
+			RecordedIn:       call.RecordedIn,
+			Repeat:           call.Repeat.Clone(),
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)

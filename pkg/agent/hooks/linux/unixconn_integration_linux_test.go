@@ -116,10 +116,10 @@ func TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	h.startUnixConn(ctx)
 	h.unixMu.Lock()
-	off := h.unix.off
+	loaded := h.unix != nil
 	h.unixMu.Unlock()
-	if off != "" {
-		t.Fatalf("the AF_UNIX report did not load: %s", off)
+	if !loaded {
+		t.Fatal("the AF_UNIX report did not load (the agent's WARN says why)")
 	}
 
 	// A member's own socket first, then the outsider's: the reports come in
@@ -198,7 +198,7 @@ func TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt(t *testing.T) {
 	startUnixHelper(t, "listen "+outside) // before the agent: never a member
 	h := unixReportAgent(t)
 	t.Setenv(provenswitch.Env, "1")
-	u, err := loadUnixConn(&h.objects)
+	u, err := loadUnixConn(h.logger, &h.objects)
 	if err != nil {
 		t.Fatalf("the AF_UNIX report did not load: %v", err)
 	}

@@ -191,6 +191,8 @@ type Agent struct {
 	testPool     []string             // keploy test, proven switch: the set's pool, served between test cases (exact_proven.go)
 	testWorker   []models.MockEntry   // keploy test, proven switch: the set's worker scope, each mock with its place (exact_proven.go)
 	testBegun    map[string]bool      // keploy test, proven switch: the set's test cases begun since its staging (exact_proven.go)
+	testBegunAt  map[string]int       // keploy test, proven switch: each begun test case's place in the order they began (exact_proven.go)
+	testBg       *testBackground      // keploy test, proven switch: the set's background under the background rules, nil for today's (exact_proven.go)
 	loadedMocks  int                  // replay: count of mocks stored, for /agent/mock/stats
 	// replay: the tests allowed to run (SetScopeGate); nil = every test runs.
 	// Cleared by resetScopeState.
@@ -647,6 +649,7 @@ func (a *Agent) resetScopeState() {
 	// keploy test's pool belongs to the set that staged it.
 	a.testPool = nil
 	a.testWorker, a.testBegun = nil, nil
+	a.testBegunAt, a.testBg = nil, nil
 	a.scopeMu.Unlock()
 }
 
@@ -969,8 +972,13 @@ func (a *Agent) PIDMapRefusals(ctx context.Context) (models.PIDMapRefusals, erro
 func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 	// a.Proxy is the agent.Proxy interface; reach the concrete capability via a
 	// type-assertion so the interface stays unchanged. Older proxies without it
-	// simply fall back to the legacy global queue.
-	if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
+	// simply fall back to the legacy global queue. Under the proven switch a
+	// proxy whose learn step reads the test case's request opens the window
+	// with the learn step's test awaiting it, in one step
+	// (coreAgent.TestRequestTaker).
+	if taker, ok := a.Proxy.(coreAgent.TestRequestTaker); ok && provenswitch.On() {
+		taker.BeginTestCaseCapture()
+	} else if b, ok := a.Proxy.(interface{ BeginTestErrorCapture() }); ok {
 		b.BeginTestErrorCapture()
 	}
 	if t := a.realTracker(); t != nil && provenswitch.On() {
@@ -984,19 +992,28 @@ func (a *Agent) BeginTestErrorCapture(_ context.Context) error {
 
 // ContinueTestErrorCapture opens the next test's capture window, carrying in
 // the misses made since the previous test's window closed (the proxy's
-// ContinueTestErrorCapture). A proxy without it opens a window as Begin does.
+// ContinueTestErrorCapture; under the proven switch, with the learn step's
+// test awaiting its request, ContinueTestCaseCapture). A proxy without it
+// opens a window as Begin does.
 func (a *Agent) ContinueTestErrorCapture(ctx context.Context) error {
-	if c, ok := a.Proxy.(interface{ ContinueTestErrorCapture() }); ok {
-		c.ContinueTestErrorCapture()
-		if t := a.realTracker(); t != nil && provenswitch.On() {
-			// What was not captured while no test case ran is the run's
-			// (design v14 §3.2 as amended for class e); this one's starts
-			// here.
-			t.BeginTest()
-		}
-		return nil
+	taker, takes := a.Proxy.(coreAgent.TestRequestTaker)
+	takes = takes && provenswitch.On()
+	c, carries := a.Proxy.(interface{ ContinueTestErrorCapture() })
+	if !takes && !carries {
+		return a.BeginTestErrorCapture(ctx)
 	}
-	return a.BeginTestErrorCapture(ctx)
+	if takes {
+		taker.ContinueTestCaseCapture()
+	} else {
+		c.ContinueTestErrorCapture()
+	}
+	if t := a.realTracker(); t != nil && provenswitch.On() {
+		// What was not captured while no test case ran is the run's
+		// (design v14 §3.2 as amended for class e); this one's starts
+		// here.
+		t.BeginTest()
+	}
+	return nil
 }
 
 // collectAsyncMocks returns the async subset (Mock.IsAsync, i.e. Spec.Async != nil).
@@ -1144,6 +1161,19 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 			a.logger.Warn("SetFreezeAnchor hook returned error",
 				zap.Error(err), zap.Time("anchor", anchor))
 		}
+	}
+	a.wireAppClock()
+}
+
+// wireAppClock hands the proxy the hooks' reading of the app's clock, when
+// both have one (AppClockReader, coreAgent.AppClockSetter).
+func (a *Agent) wireAppClock() {
+	r, ok := ActiveHooks.(AppClockReader)
+	if !ok {
+		return
+	}
+	if s, ok := a.Proxy.(coreAgent.AppClockSetter); ok {
+		s.SetAppClock(r.AppClock)
 	}
 }
 
@@ -1784,15 +1814,96 @@ func (a *Agent) TestVariables() ([]models.VariableBinding, bool) {
 func (a *Agent) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	// keploy test's exact serving, under the proven switch (exact_proven.go).
 	if params.Exact != nil && provenswitch.On() {
-		return a.serveKeployTestExactly(ctx, params)
+		return a.serveKeployTestExactly(ctx, params, nil)
 	}
-	return a.stageMocks(ctx, params, nil)
+	return a.stageMocks(ctx, params, nil, nil)
+}
+
+// opening is a test's variables, begun as the mock filter that opens the test
+// applies (OpenTestCase): with given bound.
+type opening struct{ given []models.VariableBinding }
+
+// ReadsClientTests reports whether the learn step reads this agent's tests
+// as keploy mock's client tests (coreAgent.ClientTestsReader), under the
+// proven switch: what the agent answers a keploy mock session's MockOutgoing
+// with (models.ClientTestsReadHeader).
+func (a *Agent) ReadsClientTests() bool {
+	c, ok := a.Proxy.(coreAgent.ClientTestsReader)
+	return ok && provenswitch.On() && c.ClientTests()
+}
+
+// ReadsTestRequest reports whether OpenTestCase hands the learn step the
+// test case's request its filter carries (coreAgent.TestRequestTaker), under
+// the proven switch: what the agent answers the opening filter with
+// (models.TestRequestReadHeader).
+func (a *Agent) ReadsTestRequest() bool {
+	_, ok := a.Proxy.(coreAgent.TestRequestTaker)
+	return ok && provenswitch.On()
+}
+
+// OpenTestCase applies a keploy test case's mock filter that opens a test
+// (models.MockFilterParams.BeginsTestVariables, under the proven switch) as
+// UpdateMockParams does, and begins the test's variables with the values its
+// request gave (the filter's Variables) bound, in the step that makes the
+// test's mocks live (coreAgent.ExactTestOpener, coreAgent.WindowedTestOpener).
+// No call the test's mocks answer binds before its variables begin: begun
+// after, one of a set's first test answered between the two bound in the
+// run's, which every later test of the set reads (a test answered with
+// another's value, a false pass). A proxy that cannot open a test so opens
+// one only when it keeps no variables, and none were given
+// (opensWithoutVariables).
+func (a *Agent) OpenTestCase(ctx context.Context, params models.MockFilterParams) error {
+	if !provenswitch.On() || !params.BeginsTestVariables() {
+		return errors.New("this mock filter opens no test case, and begins no test's variables")
+	}
+	// The test case's own request, for the learn step: the replay sends the
+	// request only after the filter is answered. A filter that carries none
+	// (a keploy older than its agent) is given as such, and the learn step
+	// refuses what only the request could account for. Giving it releases
+	// the calls that wait for it (learn.Tracker.AwaitRequest), each of which
+	// then reads its scope: under exact serving before the test's mocks go
+	// live, since the test opens only once every call made before is
+	// answered (settle_proven.go), the released ones among them, from the
+	// pool; with its window staged otherwise, once the window is in, so
+	// that a released call reads the test's own mocks, never the ones
+	// before them by where the scheduler put it. Given whatever the
+	// opening's outcome: no call waits for a test that did not open.
+	taker, takes := a.Proxy.(coreAgent.TestRequestTaker)
+	give := func() {
+		if takes {
+			taker.TakeTestRequest(params.TestRequest)
+		}
+	}
+	open := &opening{given: params.Variables}
+	if params.Exact != nil {
+		give()
+		// Refused before anything of the test case is served or settled.
+		if _, ok := a.Proxy.(coreAgent.ExactTestOpener); !ok {
+			if err := a.opensWithoutVariables(open.given); err != nil {
+				return err
+			}
+		}
+		return a.serveKeployTestExactly(ctx, params, open)
+	}
+	defer give()
+	return a.stageMocks(ctx, params, nil, open)
 }
 
 // stageMocks stages on the proxy what UpdateMockParams stages for params, and
 // with it the per-test mocks named alsoLoad that the on-disk store holds,
-// whatever params' own load reads (mocksForParams).
-func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string) error {
+// whatever params' own load reads (mocksForParams). With open, the staging
+// opens a test, whose variables begin with it (OpenTestCase).
+func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, alsoLoad []string, open *opening) error {
+	// The window is opened in one step only through WindowedProxy's staging;
+	// a proxy staged by SetMocks never is.
+	_, windowed := a.Proxy.(coreAgent.WindowedProxy)
+	opener, opensInOneStep := a.Proxy.(coreAgent.WindowedTestOpener)
+	opensInOneStep = opensInOneStep && windowed
+	if open != nil && !opensInOneStep {
+		if err := a.opensWithoutVariables(open.given); err != nil {
+			return err
+		}
+	}
 	filteredMocks, unfilteredMocks, err := a.mocksForParams(ctx, params, alsoLoad...)
 	if err != nil {
 		return err
@@ -1803,6 +1914,13 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 	// stable SetMocks contract — third-party proxies without window
 	// support keep working in legacy lax mode.
 	if wp, ok := a.Proxy.(coreAgent.WindowedProxy); ok {
+		if open != nil && opensInOneStep {
+			if err := opener.OpenTestWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime, open.given); err != nil {
+				utils.LogError(a.logger, err, "failed to stage the test case's window on the proxy and begin its variables")
+				return err
+			}
+			return nil
+		}
 		if err := wp.SetMocksWithWindow(ctx, filteredMocks, unfilteredMocks, params.AfterTime, params.BeforeTime); err != nil {
 			utils.LogError(a.logger, err, "failed to set mocks and test window on proxy; verify the proxy implements WindowedProxy and the agent/proxy versions are in sync, or retry via the plain SetMocks fallback path")
 			return err
@@ -1813,7 +1931,32 @@ func (a *Agent) stageMocks(ctx context.Context, params models.MockFilterParams, 
 			return err
 		}
 	}
+	return nil
+}
 
+// errOpensApart refuses a test's opening on a proxy that keeps the test
+// variables a replay binds (coreAgent.VariableBinder,
+// coreAgent.VariableResetter) but cannot begin them as the test's mocks go
+// live (coreAgent.ExactTestOpener, coreAgent.WindowedTestOpener): begun
+// apart, a call one of its mocks answers between the two binds in no scope
+// of the test's, and before a set's first test in the run's, which every
+// later test of the set reads.
+var errOpensApart = errors.New("this keploy agent's proxy keeps test variables but cannot begin them as a test opens; run the keploy agent of this keploy version")
+
+// opensWithoutVariables says why a proxy that cannot open a test with its
+// variables in one step cannot open it, given given: one that keeps
+// variables would begin them apart (errOpensApart), and one that keeps none
+// cannot bind given. nil when it keeps none and none were given: the test
+// opens with nothing to begin.
+func (a *Agent) opensWithoutVariables(given []models.VariableBinding) error {
+	_, binds := a.Proxy.(coreAgent.VariableBinder)
+	_, resets := a.Proxy.(coreAgent.VariableResetter)
+	if binds || resets {
+		return errOpensApart
+	}
+	if len(given) > 0 {
+		return errors.New("this keploy agent's proxy keeps no test variables")
+	}
 	return nil
 }
 

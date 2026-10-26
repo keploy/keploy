@@ -145,19 +145,22 @@ func (k *keptCounter) ProxyConnPair(rc syscall.RawConn) (agent.ProxyConnPairing,
 
 // keeps reports whether p keeps a connection from peer.
 func keeps(p *Proxy) func(peer *net.TCPAddr) bool {
-	return func(peer *net.TCPAddr) bool {
-		if peer == nil {
-			return false
-		}
-		p.inflight.mu.Lock()
-		defer p.inflight.mu.Unlock()
-		for tc := range p.inflight.conns {
-			if ra, ok := tc.RemoteAddr().(*net.TCPAddr); ok && ra.Port == peer.Port && ra.IP.Equal(peer.IP) {
-				return true
-			}
-		}
-		return false
+	return func(peer *net.TCPAddr) bool { return keptFrom(p, peer) != nil }
+}
+
+// keptFrom is the connection from peer p keeps; nil, none.
+func keptFrom(p *Proxy, peer *net.TCPAddr) *trackedConn {
+	if peer == nil {
+		return nil
 	}
+	p.inflight.mu.Lock()
+	defer p.inflight.mu.Unlock()
+	for tc := range p.inflight.conns {
+		if ra, ok := tc.RemoteAddr().(*net.TCPAddr); ok && ra.Port == peer.Port && ra.IP.Equal(peer.IP) {
+			return tc
+		}
+	}
+	return nil
 }
 
 // A connection is kept before it is counted as accepted: a wait that saw the
@@ -343,5 +346,56 @@ func TestAPendingConnectionsProgressIsItsOwn(t *testing.T) {
 	}
 	if now[busy.id] == got[busy.id] {
 		t.Fatal("a read that returned bytes moved no progress for its connection")
+	}
+}
+
+// An accepted connection tells the learn step its requests under the proven
+// switch (learn.Flight), from the instant it is kept; one kept with the
+// switch off (an agent that settles its reads) tells none. Each is read as it
+// is counted accepted, when the proxy already keeps it: read after, its
+// handler may have ended (its destination refuses) and let it go.
+func TestAnAcceptedConnectionTellsTheLearnStepItsRequestsUnderTheSwitch(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		k := &keptCounter{dst: ipv4Dest(t, "127.0.0.1:1")}
+		// told and kept are counted under k.mu, where k.kept runs.
+		var told, kept int
+		p, stop := startListening(t, k, func(p *Proxy) {
+			p.settleReads = true
+			k.kept = func(peer *net.TCPAddr) bool {
+				tc := keptFrom(p, peer)
+				if tc == nil {
+					return false
+				}
+				kept++
+				if tc.flights != nil && tc.flights == p.learnTracker {
+					told++
+				}
+				return true
+			}
+		})
+		c, err := net.Dial("tcp", p.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := p.WaitAccepted(context.Background(), 2); err != nil {
+			t.Fatalf("switch %v: WaitAccepted(2): %v", on, err)
+		}
+		k.mu.Lock()
+		gotTold, gotKept := told, kept
+		k.mu.Unlock()
+		_ = c.Close()
+		stop()
+		want := 0
+		if on {
+			want = gotKept
+		}
+		if gotKept != 1 || gotTold != want {
+			t.Fatalf("switch %v: %d of %d kept connections tell the learn step their requests, want %d of 1", on, gotTold, gotKept, want)
+		}
 	}
 }

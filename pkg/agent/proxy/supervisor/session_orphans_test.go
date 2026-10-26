@@ -156,6 +156,7 @@ func TestAMockLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 		{"desynced", leftOutDesynced},
 		{"short_write", leftOutOther},
 		{"http decode error: response read failed: invalid content-length", leftOutOther},
+		{LeftOutClientClosedPartway, leftOutClientClosed},
 	} {
 		n := len(warns())
 		leaveOut(tc.reason)
@@ -168,14 +169,14 @@ func TestAMockLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 			t.Fatalf("the first %s WARN says warnings were held back before it", tc.reason)
 		}
 	}
-	if n := len(warns()); n != 6 {
+	if n := len(warns()); n != 7 {
 		t.Fatalf("%d WARN lines, want one per cause", n)
 	}
 
 	// The same cause with other error text waits with it, and the cause's
 	// next WARN, past the interval, says how many waited.
 	leaveOut("http decode error: request read failed: EOF")
-	if n := len(warns()); n != 6 {
+	if n := len(warns()); n != 7 {
 		t.Fatalf("%d WARN lines, want a decode error held back behind the WARN of its cause, whatever its text", n)
 	}
 	if n := heldBack(); n != 100 {
@@ -199,8 +200,8 @@ func TestAMockLeftOutForTheIncompleteFlagIsReported(t *testing.T) {
 			t.Fatalf("the %s WARN says %v held back, want the %d of its cause since its last one", tc.reason, last["sameWarningsHeldBack"], tc.held)
 		}
 	}
-	if n := len(warns()); n != 8 {
-		t.Fatalf("%d WARN lines, want the 6 and one per cause past the interval", n)
+	if n := len(warns()); n != 9 {
+		t.Fatalf("%d WARN lines, want the 7 and one per cause past the interval", n)
 	}
 
 	// Each is reported and counted, whatever was logged; a session with no

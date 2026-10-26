@@ -955,6 +955,37 @@ func TestTestsReceiptRoundTripsAndIsLocal(t *testing.T) {
 	require.Nil(t, got, "a replay that named no tests leaves no stale per-test file behind")
 }
 
+// A miss's process is written as a file holds one (models.PersistedCalls):
+// why keploy named none (it runs in a PID namespace of its own) and the
+// kernel pid travel from the agent and are never written (yaml:"-"), so that
+// miss has no source, not an empty one; a named process keeps its name.
+// What the receipt was handed is left as it was.
+func TestATestsReceiptWritesAnUnnamedProcessAsNoSource(t *testing.T) {
+	keployDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(keployDir, "set"), 0o755))
+	unnamed := &models.Origin{Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	named := &models.Origin{Comm: "sqs", Exe: "./sqs", Unnamed: models.UnnamedPIDNamespace, PID: 2912345}
+	r := TestsReceipt{Set: "set", Tests: []TestReceipt{
+		{Name: "pkg.TestA", Outcome: models.ScopeOutcomeFailed, Evidence: &models.ScopeEvidence{Misses: []models.UnmatchedCall{
+			{Protocol: "HTTP", ActualSummary: "GET /x", Source: unnamed},
+			{Protocol: "Mongo", ActualSummary: "insert keploy.events", Source: named},
+		}}},
+		{Name: "pkg.TestB", Outcome: models.ScopeOutcomePassed},
+	}}
+	writeTestsReceipt(zap.NewNop(), keployDir, r)
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", TestsReceiptFile))
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "source: {}")
+	got, err := ReadTestsReceipt(keployDir, "set")
+	require.NoError(t, err)
+	misses := got.Tests[0].Evidence.Misses
+	require.Len(t, misses, 2)
+	require.Nil(t, misses[0].Source)
+	require.Equal(t, &models.Origin{Comm: "sqs", Exe: "./sqs"}, misses[1].Source)
+	require.Same(t, unnamed, r.Tests[0].Evidence.Misses[0].Source, "the receipt it was handed was edited")
+	require.Equal(t, uint32(2912345), r.Tests[0].Evidence.Misses[0].Source.PID)
+}
+
 // A record leaves what each top-level test did against real infra, kept or
 // not, for judging the recording; a run that named no test leaves none.
 func TestRecordTestsReceipt(t *testing.T) {

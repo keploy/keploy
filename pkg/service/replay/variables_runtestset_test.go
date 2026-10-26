@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
@@ -94,7 +99,9 @@ func TestRunTestSet_ATestCaseSendsTheAgentTheVariablesItsRequestCarries(t *testi
 				return
 			}
 			want := models.VariableBinding{Name: "id", Value: "u_live_0002", Recorded: "u_rec_0001", Mock: "test case test-2", Place: "request", Given: true}
-			if len(sent[1]) != 1 || sent[1][0] != want {
+			// Every field, the clock reads (VariableBinding.Clock) too: none
+			// for a value the test case's request gave.
+			if len(sent[1]) != 1 || !reflect.DeepEqual(sent[1][0], want) {
 				t.Fatalf("the read-back sent %+v, want [%+v]", sent[1], want)
 			}
 		})
@@ -464,5 +471,205 @@ func TestRunTestSet_ThePoolCallKeepsWhatTheTestCaseBound(t *testing.T) {
 	}
 	if len(r.TemplateFailures) != 1 || !strings.Contains(r.TemplateFailures[0].Why, `sent "u_other_0003" as id to its dependency (mock-3 body.id)`) {
 		t.Fatalf("the failure does not name the dependency's value: %+v", r.TemplateFailures)
+	}
+}
+
+// In record's full round (the learn step's round, under the proven switch)
+// the filter that opens each test case carries the test case's own request,
+// as recorded and as sent with this run's template values, part by part: the
+// learn step's echo reads it. Outside the full round, and with the switch
+// off, no filter carries it.
+func TestRunTestSet_TheFullRoundSendsEachTestCasesRequest(t *testing.T) {
+	for _, tc := range []struct {
+		proven string
+		learn  bool
+	}{{"1", true}, {"1", false}, {"0", true}} {
+		t.Run("KEPLOY_PROVEN="+tc.proven+",learn="+strconv.FormatBool(tc.learn), func(t *testing.T) {
+			t.Setenv(provenswitch.Env, tc.proven)
+			h, instr := createThenRead(t, "u_live_0002")
+			h.r.config.Test.Learn = tc.learn
+			h.r.instrumentation = &varInstr{prInstr: instr, bound: func() ([]models.VariableBinding, error) { return nil, nil }}
+			h.run(t)
+			var sent []*models.TestRequest
+			instr.mu.Lock()
+			for _, p := range instr.allParams {
+				perTest := !p.AfterTime.Equal(models.BaseTime)
+				if p.Exact != nil {
+					perTest = p.Exact.Test != ""
+				}
+				if perTest {
+					sent = append(sent, p.TestRequest)
+				} else if p.TestRequest != nil {
+					t.Errorf("a filter that opens no test case carries a request: %+v", p)
+				}
+			}
+			instr.mu.Unlock()
+			if len(sent) != 2 {
+				t.Fatalf("%d per-test filters, want 2", len(sent))
+			}
+			if tc.proven != "1" || !tc.learn {
+				if sent[0] != nil || sent[1] != nil {
+					t.Fatalf("outside the full round: sent %+v, %+v", sent[0], sent[1])
+				}
+				return
+			}
+			parts := func(r *models.TestRequest) map[string]models.TestRequestPart {
+				out := map[string]models.TestRequestPart{}
+				for _, p := range r.Parts {
+					out[p.Name] = p
+				}
+				return out
+			}
+			create, read := sent[0], sent[1]
+			if create == nil || create.Test != "test-1" || create.Unread != "" || parts(create)["body"].Recorded != `{"name":"a"}` || parts(create)["body"].Sent != `{"name":"a"}` || parts(create)["header.Content-Type"].Sent != "application/json" {
+				t.Fatalf("the create's request %+v", create)
+			}
+			if create.Parts[0].Name != "url" {
+				t.Errorf("the create's parts begin %q; want the url first", create.Parts[0].Name)
+			}
+			u := parts(read)["url"]
+			if read == nil || read.Test != "test-2" || !strings.HasSuffix(u.Recorded, "/users/u_rec_0001") || !strings.HasSuffix(u.Sent, "/users/u_live_0002") {
+				t.Fatalf("the read-back's request %+v; want its URL as recorded, with the recorded id, and as sent with this run's id", read)
+			}
+		})
+	}
+}
+
+// A test case's request is read part by part in a stable order (url,
+// headers, body, binary, form parts in the order recorded), a gRPC test
+// case's headers and every message it sends too; a body, a form value or a
+// file kept apart from the test case is read back from its asset; a part
+// keploy cannot read, or a request too large, says why, with no parts.
+func TestTestRequestOf(t *testing.T) {
+	run := templates.NewRun(nil, map[string]interface{}{"id": "u_rec"}, nil)
+	tc := &models.TestCase{Kind: models.HTTP, Name: "test-1", HTTPReq: models.HTTPReq{URL: "http://h/u/{{string .id}}",
+		Header: map[string]string{"B": "2", "A": "1"}, Body: `{"at":"2026-10-22T11:14:00Z"}`,
+		Form: []models.FormData{{Key: "slot", Values: []string{"11:14", "11:15"}}}}}
+	got := testRequestOf(run, tc, "")
+	var names []string
+	for _, p := range got.Parts {
+		names = append(names, p.Name)
+	}
+	if strings.Join(names, ",") != "url,header.A,header.B,body,form.slot" || got.Parts[0].Sent != "http://h/u/u_rec" || got.Parts[4].Recorded != "11:14\n11:15" || got.Unread != "" {
+		t.Fatalf("the HTTP request %+v", got)
+	}
+	// As recorded, each placeholder holds the value it was recorded with,
+	// never its text: a template value in the URL, the body, a header and a
+	// form field, and a secret in a header's name, which the recording held
+	// as the request as sent does.
+	run2 := templates.NewRun(nil, map[string]interface{}{"id": "u_rec", "slot": "11:14"}, map[string]interface{}{"tenant": "acme7"})
+	run2.Apply([]templates.Capture{{Key: "id", Value: "u_live"}})
+	keyed := &models.TestCase{Kind: models.HTTP, Name: "test-6", HTTPReq: models.HTTPReq{URL: "http://h/u/{{string .id}}",
+		Header: map[string]string{"X-Tenant-{{string .secret.tenant}}": "{{string .id}}"}, Body: `{"slot":"{{string .slot}}","id":"{{string .id}}"}`,
+		Form: []models.FormData{{Key: "who", Values: []string{"{{string .id}}"}}}}}
+	got = testRequestOf(run2, keyed, "")
+	names = nil
+	for _, p := range got.Parts {
+		names = append(names, p.Name+"="+p.Recorded+">"+p.Sent)
+	}
+	if want := `url=http://h/u/u_rec>http://h/u/u_live,header.X-Tenant-acme7=u_rec>u_live,body={"slot":"11:14","id":"u_rec"}>{"slot":"11:14","id":"u_live"},form.who=u_rec>u_live`; strings.Join(names, ",") != want || got.Unread != "" {
+		t.Fatalf("a templated request:\n%v\nwant\n%s", strings.Join(names, ","), want)
+	}
+	g2 := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-7", GrpcReq: models.GrpcReq{
+		Headers: models.GrpcHeaders{OrdinaryHeaders: map[string]string{"x-id": "{{string .id}}"}}, Body: models.GrpcLengthPrefixedMessage{DecodedData: `id: "{{string .id}}"`}}}
+	got = testRequestOf(run2, g2, "")
+	names = nil
+	for _, p := range got.Parts {
+		names = append(names, p.Name+"="+p.Recorded+">"+p.Sent)
+	}
+	if want := `header.x-id=u_rec>u_live,body=id: "u_rec">id: "u_live"`; strings.Join(names, ",") != want {
+		t.Fatalf("a templated gRPC request:\n%v\nwant\n%s", strings.Join(names, ","), want)
+	}
+	// A multipart form records one part per value: each is a part of its
+	// own, a repeated key's numbered; a value and a file kept apart, and a
+	// body kept apart, are read back from their assets.
+	dir := t.TempDir()
+	write := func(name, text string) string {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+	multi := &models.TestCase{Kind: models.HTTP, Name: "test-5", HTTPReq: models.HTTPReq{URL: "http://h/book",
+		BodyRef: models.BodyRef{Path: write("body.bin", "slots=11:13"), Size: 11},
+		Form: []models.FormData{
+			{Key: "slot", Values: []string{"11:14"}},
+			{Key: "slot", Values: []string{"11:15"}},
+			{Key: "note", Values: []string{""}, Paths: []string{write("note.txt", "after 11:16")}},
+			{Key: "timetable", FileNames: []string{"t.csv"}, Paths: []string{write("t.csv", "11:17\n11:18")}},
+		}}}
+	got = testRequestOf(run, multi, dir)
+	parts := map[string]string{}
+	names = nil
+	for _, p := range got.Parts {
+		names = append(names, p.Name)
+		parts[p.Name] = p.Recorded + "|" + p.Sent
+	}
+	if got.Unread != "" || strings.Join(names, ",") != "url,body,form.slot,form.slot#2,form.note,form.timetable" ||
+		parts["body"] != "slots=11:13|slots=11:13" || parts["form.slot"] != "11:14|11:14" || parts["form.slot#2"] != "11:15|11:15" ||
+		parts["form.note"] != "after 11:16|after 11:16" || parts["form.timetable"] != "11:17\n11:18|11:17\n11:18" {
+		t.Fatalf("the multipart request %+v", got)
+	}
+	g := &models.TestCase{Kind: models.GRPC_EXPORT, Name: "test-2", GrpcReq: models.GrpcReq{
+		Headers:            models.GrpcHeaders{PseudoHeaders: map[string]string{":path": "/svc/Book"}, OrdinaryHeaders: map[string]string{"x-day": "2026-10-22"}},
+		Body:               models.GrpcLengthPrefixedMessage{DecodedData: `slot: "11:14"`},
+		AdditionalMessages: []models.GrpcLengthPrefixedMessage{{DecodedData: `slot: "11:15"`}}}}
+	got = testRequestOf(run, g, "")
+	names = nil
+	for _, p := range got.Parts {
+		names = append(names, p.Name+"="+p.Recorded)
+	}
+	if strings.Join(names, ",") != `header.:path=/svc/Book,header.x-day=2026-10-22,body=slot: "11:14",body#2=slot: "11:15"` || got.Unread != "" {
+		t.Fatalf("the gRPC request %+v", got)
+	}
+	if got := testRequestOf(run, &models.TestCase{Kind: models.Kind("Redis"), Name: "test-3"}, ""); got.Unread == "" || len(got.Parts) != 0 {
+		t.Fatalf("a request of another kind %+v; want it unread", got)
+	}
+	gone := &models.TestCase{Kind: models.HTTP, Name: "test-4", HTTPReq: models.HTTPReq{URL: "http://h/x", BodyRef: models.BodyRef{Path: "assets/test-4.body", Size: 2 << 20}}}
+	if got := testRequestOf(run, gone, dir); got.Unread == "" || len(got.Parts) != 0 || !strings.Contains(got.Unread, "assets/test-4.body") {
+		t.Fatalf("a body kept apart that cannot be read %+v; want it unread", got)
+	}
+	file := &models.TestCase{Kind: models.HTTP, Name: "test-6", HTTPReq: models.HTTPReq{URL: "http://h/x",
+		Form: []models.FormData{{Key: "f", FileNames: []string{"a"}, Paths: []string{"missing.csv"}}}}}
+	if got := testRequestOf(run, file, dir); got.Unread == "" || len(got.Parts) != 0 || !strings.Contains(got.Unread, "form.f") {
+		t.Fatalf("a file that cannot be read %+v; want it unread", got)
+	}
+	big := &models.TestCase{Kind: models.HTTP, Name: "test-7", HTTPReq: models.HTTPReq{URL: "http://h/x", Body: strings.Repeat("x", maxTestRequest/2+1)}}
+	if got := testRequestOf(run, big, ""); got.Unread == "" || len(got.Parts) != 0 {
+		t.Fatalf("a request too large: %d parts, %q; want it unread", len(got.Parts), got.Unread)
+	}
+}
+
+// A test case's opening sent without exact serving (the set's windows serve
+// it) carries its request as exact serving's does: the filter that opens the
+// test case hands it to the agent's learn step with the values it gives.
+func TestSendMockFilterParamsCarriesTheTestCasesOpening(t *testing.T) {
+	h := newPartialRunHarness(t, 1, 0)
+	req := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "/a", Sent: "/a"}}}
+	vars := []models.VariableBinding{{Name: "id", Value: "u_1"}}
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
+		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+	}
+	if got := h.instr.lastParams; got.TestRequest != req || !reflect.DeepEqual(got.Variables, vars) {
+		t.Fatalf("the filter carries %+v and %+v; want the opening's request and values", got.TestRequest, got.Variables)
+	}
+	// The harness's agent cannot say it read the request: the test case is
+	// noted as one whose request it did not read.
+	if unread := h.replayer.requestsUnread.set(); !unread["test-1"] {
+		t.Fatalf("tests whose request the agent did not read: %v; want test-1", unread)
+	}
+	h.replayer.requestsUnread.reset()
+	h.replayer.instrumentation = &readsInstr{prInstr: h.instr, reads: true}
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
+		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+	}
+	if unread := h.replayer.requestsUnread.set(); unread != nil {
+		t.Fatalf("an agent that read the request: noted %v", unread)
+	}
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, nil); err != nil {
+		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
+	}
+	if got := h.instr.lastParams; got.TestRequest != nil || got.Variables != nil {
+		t.Fatalf("a filter with no opening carries %+v and %+v", got.TestRequest, got.Variables)
 	}
 }

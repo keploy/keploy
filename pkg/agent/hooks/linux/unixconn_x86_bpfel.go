@@ -31,9 +31,11 @@ const (
 	unixconnMapOrigDstByCookie             = "orig_dst_by_cookie"
 	unixconnMapPendingBinds                = "pending_binds"
 	unixconnMapPidMapInsertFailures        = "pid_map_insert_failures"
+	unixconnMapPidStartTimes               = "pid_start_times"
 	unixconnMapProxyConnsEstablished       = "proxy_conns_established"
 	unixconnMapProxyListenerMark           = "proxy_listener_mark"
 	unixconnMapRedirectProxyMap            = "redirect_proxy_map"
+	unixconnMapSocketClassifyFailures      = "socket_classify_failures"
 	unixconnMapTargetNamespacePids         = "target_namespace_pids"
 	unixconnMapUnixConnectEvents           = "unix_connect_events"
 	unixconnMapUnixConnectEventsLost       = "unix_connect_events_lost"
@@ -122,9 +124,11 @@ type unixconnMapSpecs struct {
 	OrigDstByCookie             *ebpf.MapSpec `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.MapSpec `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.MapSpec `ebpf:"pid_map_insert_failures"`
+	PidStartTimes               *ebpf.MapSpec `ebpf:"pid_start_times"`
 	ProxyConnsEstablished       *ebpf.MapSpec `ebpf:"proxy_conns_established"`
 	ProxyListenerMark           *ebpf.MapSpec `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.MapSpec `ebpf:"redirect_proxy_map"`
+	SocketClassifyFailures      *ebpf.MapSpec `ebpf:"socket_classify_failures"`
 	TargetNamespacePids         *ebpf.MapSpec `ebpf:"target_namespace_pids"`
 	UnixConnectEvents           *ebpf.MapSpec `ebpf:"unix_connect_events"`
 	UnixConnectEventsLost       *ebpf.MapSpec `ebpf:"unix_connect_events_lost"`
@@ -173,9 +177,11 @@ type unixconnMaps struct {
 	OrigDstByCookie             *ebpf.Map `ebpf:"orig_dst_by_cookie"`
 	PendingBinds                *ebpf.Map `ebpf:"pending_binds"`
 	PidMapInsertFailures        *ebpf.Map `ebpf:"pid_map_insert_failures"`
+	PidStartTimes               *ebpf.Map `ebpf:"pid_start_times"`
 	ProxyConnsEstablished       *ebpf.Map `ebpf:"proxy_conns_established"`
 	ProxyListenerMark           *ebpf.Map `ebpf:"proxy_listener_mark"`
 	RedirectProxyMap            *ebpf.Map `ebpf:"redirect_proxy_map"`
+	SocketClassifyFailures      *ebpf.Map `ebpf:"socket_classify_failures"`
 	TargetNamespacePids         *ebpf.Map `ebpf:"target_namespace_pids"`
 	UnixConnectEvents           *ebpf.Map `ebpf:"unix_connect_events"`
 	UnixConnectEventsLost       *ebpf.Map `ebpf:"unix_connect_events_lost"`
@@ -200,9 +206,11 @@ func (m *unixconnMaps) Close() error {
 		m.OrigDstByCookie,
 		m.PendingBinds,
 		m.PidMapInsertFailures,
+		m.PidStartTimes,
 		m.ProxyConnsEstablished,
 		m.ProxyListenerMark,
 		m.RedirectProxyMap,
+		m.SocketClassifyFailures,
 		m.TargetNamespacePids,
 		m.UnixConnectEvents,
 		m.UnixConnectEventsLost,

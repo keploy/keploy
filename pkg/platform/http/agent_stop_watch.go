@@ -196,6 +196,24 @@ type stopWatch struct {
 	// once the watch has acted on it: whether it waits for a root agent after
 	// a press by then, and the last beat it saw (tests).
 	staled func(waiting bool, beat uint64)
+	// moved is the teardown scope of the run that started the agent: each
+	// report that shows its teardown moving -- a step taken since the report
+	// before (Seq), or busy in a stage at a new beat -- is a movement of it,
+	// which that run's drains wait on (utils.DrainErrGroupProgress). A report
+	// read again, or a beat with nothing done, is none. Nil: none counted.
+	moved *utils.TeardownScope
+}
+
+// movedSince reports whether report p shows the agent's teardown moving
+// since the report before it (prev; had: there was one): a step taken (Seq),
+// or a new beat busy in a stage that must not be cut short
+// (TeardownProgress.Busy). The first report moves when it has taken a step,
+// or is busy.
+func movedSince(prev utils.TeardownProgress, had bool, p utils.TeardownProgress) bool {
+	if !had {
+		return p.Seq > 0 || p.Busy
+	}
+	return p.Seq != prev.Seq || (p.Busy && p.Beat != prev.Beat)
 }
 
 // killReach is what a stopWatch's kill does to the agent, where that is not
@@ -437,6 +455,9 @@ func (w stopWatch) run() bool {
 			}
 			continue
 		case p = <-reports:
+		}
+		if movedSince(last, reported, p) {
+			w.moved.Note()
 		}
 		last = p
 		if !reported {

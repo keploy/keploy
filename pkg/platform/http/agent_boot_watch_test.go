@@ -327,7 +327,7 @@ func TestAnErrorReadBeforeTheAgentsExitLeavesItsExitCode(t *testing.T) {
 func TestAHungLookHoldsUpNoRule(t *testing.T) {
 	look, silence, bootLookFn := bootLook, bootSilence, containerBootLook
 	bootLook, bootSilence = time.Millisecond, 50*time.Millisecond
-	containerBootLook = func(*zap.Logger, string) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+	containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 		read := func(ctx context.Context) (utils.BootProgress, bool) {
 			<-ctx.Done() // the daemon never answers
 			return utils.BootProgress{}, false
@@ -513,7 +513,7 @@ func (c *scriptedContainer) install(t *testing.T) {
 	t.Helper()
 	look, silence, bootLookFn, endFn := bootLook, bootSilence, containerBootLook, containerEnd
 	bootLook, bootSilence = time.Millisecond, 50*time.Millisecond
-	containerBootLook = func(*zap.Logger, string) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+	containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 		read := func(context.Context) (utils.BootProgress, bool) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -527,7 +527,7 @@ func (c *scriptedContainer) install(t *testing.T) {
 		}
 		return read, running
 	}
-	containerEnd = func(*zap.Logger, string) func(context.Context) (int, bool) {
+	containerEnd = func(*zap.Logger, *namedContainer) func(context.Context) (int, bool) {
 		return func(context.Context) (int, bool) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
@@ -582,7 +582,7 @@ func TestWatchAgentStartFollowsTheStartOfAComposeAgent(t *testing.T) {
 			c := &scriptedContainer{}
 			c.install(t)
 			a := clientFor("http://127.0.0.1:1")
-			a.agentContainer = "keploy-v3-test"
+			a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			errs := a.WatchAgentStart(ctx)
@@ -727,7 +727,7 @@ func TestOnlyTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 		c := &scriptedContainer{}
 		c.install(t)
 		a := clientFor("http://127.0.0.1:1")
-		a.agentContainer = "keploy-v3-test"
+		a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 		ctx, cancel := context.WithCancel(context.Background())
 		errs := a.watchAgent(ctx, endOnExit)
 		c.set(true, utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, true)
@@ -796,7 +796,7 @@ func TestTheReleaseEndsOnTheWatchWhileAReadyRequestHangs(t *testing.T) {
 	t.Cleanup(func() { close(block) })
 	t.Setenv("KEPLOY_PROVEN", "")
 	a := clientFor(srv.URL)
-	a.agentContainer = "keploy-v3-test"
+	a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 	c.set(true, utils.BootProgress{Beat: 1, Seq: 1, Ready: true}, true)
 	done := make(chan error, 1)
 	go func() { done <- a.MakeAgentReadyForDockerCompose(context.Background()) }()
@@ -847,7 +847,7 @@ func TestTheReleaseEndsOnTheAgentsContainerHavingExited(t *testing.T) {
 			t.Cleanup(srv.Close)
 			t.Setenv("KEPLOY_PROVEN", "")
 			a := clientFor(srv.URL)
-			a.agentContainer = "keploy-v3-test"
+			a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 			c.set(true, tc.report, true)
 			c.exit(tc.code)
 			done := make(chan error, 1)
@@ -932,7 +932,7 @@ func TestTheWaitForARestartedAgentEndsOnItsFailedStart(t *testing.T) {
 	uri := "http://" + closed.Addr().String() + "/agent"
 	_ = closed.Close()
 	a := clientFor(uri)
-	a.agentContainer = "keploy-v3-test"
+	a.agentContainer = &namedContainer{name: "keploy-v3-test"}
 	c.set(true, utils.BootProgress{Beat: 2, Seq: 2, Failed: true, ExitCode: utils.ExitPrivilegeRequired, Failure: "failed to load eBPF"}, true)
 	done := make(chan error, 1)
 	go func() { done <- a.awaitAgentAnswers(context.Background()) }()
@@ -1042,7 +1042,7 @@ func TestTheContainerWatchEndsOnceTheAgentSaysItListens(t *testing.T) {
 	bootLook = time.Millisecond
 	t.Cleanup(func() { bootLook, containerBootLook = look, lookFn })
 	reads := make(chan struct{}, 16)
-	containerBootLook = func(*zap.Logger, string) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
+	containerBootLook = func(*zap.Logger, *namedContainer) (func(context.Context) (utils.BootProgress, bool), func(context.Context) bool) {
 		read := func(context.Context) (utils.BootProgress, bool) {
 			select {
 			case reads <- struct{}{}:
@@ -1134,14 +1134,25 @@ func TestEngineSaysGoneReadsTheEnginesNotThereWhereverItIsSaid(t *testing.T) {
 }
 
 // Against the real engine CLI, where there is one: a container it does not
-// know does not run, and has ended (containerGone), whatever the CLI's
-// version says of it, and wherever it says it.
+// know does not run, whatever the CLI's version says of it, and wherever it
+// says it. Nor has it ended while it is one docker compose has not created
+// yet: keploy has never known it to be there, and the run that is to create
+// it is not over. It has ended once keploy has known it to be there
+// (containerGone: removed), and, never known, once that run is over
+// (containerNeverThere). Each run of the test names the container afresh,
+// through a client's Setup naming (nameAgentContainer), and forgets it at its
+// end: nothing it knew is left for the next (-count, -shuffle). A naming of
+// the same name again is a new entry: nothing the last one knew is known.
 func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	cli := newEngineCLI(zap.NewNop())
 	if _, err := cli.stdout(context.Background(), "version", "--format", "{{.Server.Version}}"); err != nil {
 		t.Skipf("no container engine to ask here: %v", err)
 	}
 	name := fmt.Sprintf("keploy-v3-no-such-%d", os.Getpid())
+	a := clientFor("http://127.0.0.1:1/agent")
+	t.Cleanup(a.forgetAgentContainer)
+	a.nameAgentContainer(name)
+	c := a.containerNamed(name)
 	n := 0
 	running := runningByStatus(func(ctx context.Context) ([]byte, error) {
 		if n++; n == 1 {
@@ -1155,8 +1166,31 @@ func TestARealEnginesUnknownContainerDoesNotRunAndHasEnded(t *testing.T) {
 	if running(context.Background()) {
 		t.Fatal("the engine does not know the container, and it is still taken to run")
 	}
-	if code, ended := containerExited(cli, name)(context.Background()); !ended || code != containerGone {
-		t.Fatalf("containerExited = %d, %v; want containerGone, ended", code, ended)
+	exited := containerExited(cli, c)
+	if code, ended := exited(context.Background()); ended {
+		t.Fatalf("containerExited = %d, %v of a container keploy never knew to be there, whose run is not over; want not ended", code, ended)
+	}
+	c.noteRun(false)
+	if code, ended := exited(context.Background()); ended {
+		t.Fatalf("containerExited = %d, %v of a container whose run has begun; want not ended", code, ended)
+	}
+	c.noteRun(true)
+	if code, ended := exited(context.Background()); !ended || code != containerNeverThere {
+		t.Fatalf("containerExited = %d, %v once the run that was to create it is over; want containerNeverThere, ended", code, ended)
+	}
+	a.nameAgentContainer(name)
+	c = a.containerNamed(name)
+	exited = containerExited(cli, c)
+	if code, ended := exited(context.Background()); ended {
+		t.Fatalf("containerExited = %d, %v of a container named again, whose run is not over; want not ended", code, ended)
+	}
+	c.know()
+	if code, ended := exited(context.Background()); !ended || code != containerGone {
+		t.Fatalf("containerExited = %d, %v of a container keploy knew; want containerGone, ended", code, ended)
+	}
+	c.noteRun(true)
+	if code, ended := exited(context.Background()); !ended || code != containerGone {
+		t.Fatalf("containerExited = %d, %v of a container keploy knew, whose run is over; want containerGone, ended", code, ended)
 	}
 }
 

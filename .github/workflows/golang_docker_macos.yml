@@ -68,7 +68,16 @@ jobs:
         with:
           src: ${{ matrix.config.record_src }}
 
+      # Downloaded only when it is another artifact than the record binary
+      # (in every cell today it is the same one), as golang_docker_windows.yml
+      # does. download-binary uses download-artifact v8, so the record
+      # download has already put the whole binary in place or failed the
+      # step, and a second download of the same artifact to the same path
+      # over this runner's slow, at times dropping network can only add a
+      # failure. (On v4, in run 39760264652, one stopped part-way and left
+      # part of keploy where the whole binary had been.)
       - id: replay
+        if: matrix.config.replay_src != matrix.config.record_src
         uses: ./.github/actions/download-binary
         with:
           src: ${{ matrix.config.replay_src }}
@@ -98,7 +107,7 @@ jobs:
       - name: Run ${{ matrix.app.name }} application (macOS)
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
-          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path || steps.record.outputs.path }}
           JOB_ID: ${{ github.run_id }}-${{ matrix.app.name }}-${{ github.run_attempt }}
         shell: bash
         run: |

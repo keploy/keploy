@@ -2,14 +2,19 @@ package pkg
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -325,4 +330,75 @@ func TestStreamManagerCompletesASplitBodylessRequestWhoseResponseCameFirst(t *te
 	require.Len(t, streams, 1, "the call did not complete at its request's end")
 	assert.Equal(t, "/svc.Echo/Ping", streams[0].GRPCReq.Headers.PseudoHeaders[":path"])
 	assert.Equal(t, "0", streams[0].GRPCResp.Trailers.OrdinaryHeaders["grpc-status"])
+}
+
+// A gRPC test of an app port published on one other host port is dialled
+// there, which PublishedPort names; without it, it is dialled at its app port.
+func TestAGRPCTestOfAnAppPortPublishedOnOneHostPortIsDialledThere(t *testing.T) {
+	var dialled atomic.Int32
+	addr := serveEachConn(t, func(c net.Conn) { dialled.Add(1); _ = c.Close() })
+	_, hp, _ := net.SplitHostPort(addr)
+	hostPort, _ := strconv.Atoi(hp)
+	appPort := refusedPort(t)
+	tc := func() *models.TestCase {
+		tc := grpcTestCase(addr, []models.GrpcLengthPrefixedMessage{{}})
+		tc.AppPort = appPort
+		return tc
+	}
+
+	_, err := SimulateGRPC(context.Background(), tc(), "set", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}})
+	if !IsUnreachableAppPort(err) || dialled.Load() != 0 {
+		t.Fatalf("without PublishedPort: err %v, %d connections to host port %d; want its app port %d refused", err, dialled.Load(), hostPort, appPort)
+	}
+	published := func(_ context.Context, _ string, port uint16) uint16 {
+		if port == appPort {
+			return uint16(hostPort)
+		}
+		return 0
+	}
+	_, _ = SimulateGRPC(context.Background(), tc(), "set", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{}, PublishedPort: published})
+	if dialled.Load() == 0 {
+		t.Fatalf("with PublishedPort naming host port %d, nothing dialled it", hostPort)
+	}
+
+	// A replaceWith that matches the recorded authority and names the port
+	// is the user's choice: it is asked of the recorded authority, which the
+	// resolved one no longer contains.
+	before := dialled.Load()
+	_, err = SimulateGRPC(context.Background(), tc(), "set", zap.NewNop(), SimulationConfig{APITimeout: 5, AppPortReachability: unreachableAt{},
+		URLReplacements: map[string]string{addr: fmt.Sprintf("localhost:%d", appPort)}, PublishedPort: published})
+	if !IsUnreachableAppPort(err) || dialled.Load() != before {
+		t.Fatalf("a matching replaceWith naming the port: err %v, %d more connections to host port %d; want its app port %d refused", err, dialled.Load()-before, hostPort, appPort)
+	}
+}
+
+// A recorded answer of trailers alone, kept as one empty message, is complete
+// with no message when its status, as a gRPC client reads it, is an error: a
+// keepalive after none is one beyond it. A Trailers-Only recording kept as
+// headers alone (enterprise's low-latency recorder before its fix) has its
+// status in that one header block; trailers, when there are any, are read
+// for it instead.
+func TestRecordedMessagesCompleteReadsTheStatusAsAClientDoes(t *testing.T) {
+	block := func(kv ...string) models.GrpcHeaders {
+		h := models.GrpcHeaders{PseudoHeaders: map[string]string{}, OrdinaryHeaders: map[string]string{}}
+		for i := 0; i < len(kv); i += 2 {
+			h.OrdinaryHeaders[kv[i]] = kv[i+1]
+		}
+		return h
+	}
+	for _, c := range []struct {
+		name string
+		resp models.GrpcResp
+		want int
+	}{
+		{"an error in its trailers", models.GrpcResp{Headers: block("content-type", "application/grpc"), Trailers: block("grpc-status", "5")}, 0},
+		{"OK in its trailers", models.GrpcResp{Headers: block("content-type", "application/grpc"), Trailers: block("grpc-status", "0")}, 1},
+		{"a Trailers-Only error kept as headers alone", models.GrpcResp{Headers: block("content-type", "application/grpc", "grpc-status", "5"), Trailers: block()}, 0},
+		{"a Trailers-Only OK kept as headers alone", models.GrpcResp{Headers: block("content-type", "application/grpc", "grpc-status", "0"), Trailers: block()}, 1},
+		{"trailers without a status, an error in its headers", models.GrpcResp{Headers: block("grpc-status", "5"), Trailers: block("x-done", "yes")}, 1},
+	} {
+		if got := recordedMessagesComplete(c.resp); got != c.want {
+			t.Errorf("%s: complete with %d message(s), want %d", c.name, got, c.want)
+		}
+	}
 }

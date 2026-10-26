@@ -10,7 +10,7 @@
 # This Dockerfile keeps the in-container `go build` path because
 # external users still need a single-command "build from source"
 # entry point. libpg_query / pg_query_go v6.2.2 requires CGo, so
-# the builder image MUST carry a working gcc — golang:1.27 (Debian
+# the builder image MUST carry a working gcc — golang:1.27.x (Debian
 # trixie base) already ships gcc, so no extra apt install is
 # needed. CGO_ENABLED=1 is set explicitly so a mis-configured
 # builder (someone passing CGO_ENABLED=0 as a docker build-arg)
@@ -18,7 +18,11 @@
 # the moment the classifier tries to pg_query.Parse.
 #
 # === Build Stage ===
-FROM golang:1.27 AS build
+# Exact patch, by digest: go.mod requires go >= 1.27.3 (crypto/x509 fix for the
+# eMudhra CA compromise) and golang images set GOTOOLCHAIN=local, so a floating
+# or cached golang:1.27 older than that fails the build instead of downloading.
+# Bump this together with go.mod's go line.
+FROM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS build
 
 # Set the working directory
 WORKDIR /app

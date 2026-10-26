@@ -54,6 +54,11 @@ const (
 	// line (KeysLeaf): an earlier place a value may have come from, and an
 	// answer that echoes one at a key, which keploy cannot answer there.
 	Keys Type = 'k'
+	// Instant is a field its protocol's decoder types as one instant (a
+	// BSON UTC datetime or timestamp), written by InstantLeaf: compared
+	// whole, never word by word (typed.go). Only a decoder makes a leaf
+	// one: a string that reads as a date is a String.
+	Instant Type = 't'
 )
 
 // Leaf is one learnable value of a request or a response.
@@ -265,7 +270,9 @@ type Result struct {
 	// Diff is that candidate's.
 	Diff Diff
 	// Reason, for a miss: models.MissRequestChanged, MissUnstableOrder or
-	// MissUnmockedCall.
+	// MissUnmockedCall; empty for one keploy could not judge because its
+	// own store could not read a recorded answer back (keploy's failure,
+	// not the request's).
 	Reason string
 	// Why, for a miss, is what differed, by path; it never holds a value.
 	Why string

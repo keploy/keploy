@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -22,13 +23,24 @@ type stagedDb struct {
 	staged []*models.Mock
 }
 
-func (d stagedDb) FindStagedNotOwned(kind models.Kind, match func(*models.Mock) bool) string {
+func (d stagedDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
+
+// HoldToRound implements integrations.RoundHolder: d never stages again, so
+// it holds every call it marks as it is.
+func (d stagedDb) HoldToRound(integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	return d, func() bool { return false }
+}
+
+func (d stagedDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	if !call.Read() {
+		return "", false
+	}
 	for _, m := range d.staged {
 		if m.Kind == kind && match(m) {
-			return m.Name
+			return m.Name, false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // A call no read answers that is a staged recording no read shows, by the
@@ -40,13 +52,13 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 	db := stagedDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{onHost("other-test-get", "/get", host), elsewhere}}
 	n := newHTTP().newStrictNoise(nil, nil, nil)
 	ctx := context.Background()
-	if got := notOwnedRecording(ctx, getTo("/delete", host), db, n); got != elsewhere {
+	if got, _ := notOwnedRecording(ctx, getTo("/delete", host), db, n, db.MarkCallRound()); got != elsewhere {
 		t.Fatalf("named %v, want the recording that is this call", got)
 	}
-	if got := notOwnedRecording(ctx, getTo("/changed", host), db, n); got != nil {
+	if got, _ := notOwnedRecording(ctx, getTo("/changed", host), db, n, db.MarkCallRound()); got != nil {
 		t.Fatalf("a call no recording is was named as %s", got.Name)
 	}
-	if got := notOwnedRecording(ctx, getTo("/delete", host), &mockMemDb{mocks: []*models.Mock{elsewhere}}, n); got != nil {
+	if got, _ := notOwnedRecording(ctx, getTo("/delete", host), &mockMemDb{mocks: []*models.Mock{elsewhere}}, n, db.MarkCallRound()); got != nil {
 		t.Fatalf("a store that stages nothing more named %s", got.Name)
 	}
 
@@ -59,7 +71,7 @@ func TestNotOwnedRecordingIsTheCallMadeElsewhere(t *testing.T) {
 
 // Under the proven switch, the HTTP parser's miss on a call that is another
 // test's recording reports it as that recording (NotOwned), which record's
-// judging reads to bake it into the worker scope (S12, a2). With the switch
+// judging reads to bake it into the worker scope (a2). With the switch
 // off nothing is named so.
 func TestAMissOnACallMadeElsewhereNamesItsRecording(t *testing.T) {
 	const addr, host = "127.0.0.1:50001", "localhost:50001"
@@ -116,9 +128,16 @@ type keyedDb struct {
 	offered *[]string
 }
 
-func (d keyedDb) FindStagedNotOwned(models.Kind, func(*models.Mock) bool) string { return "" }
+func (d keyedDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(1, nil) }
 
-func (d keyedDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+func (d keyedDb) FindStagedNotOwned(models.Kind, integrations.CallRound, func(*models.Mock) bool) (string, bool) {
+	return "", false
+}
+
+func (d keyedDb) FindStagedNotOwnedByKeys(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
+	if !call.Read() {
+		return "", false
+	}
 	asked := map[string]bool{}
 	for _, k := range keys {
 		asked[k] = true
@@ -133,10 +152,10 @@ func (d keyedDb) FindStagedNotOwnedByKeys(kind models.Kind, keys []string, match
 		}
 		*d.offered = append(*d.offered, m.Name)
 		if match(m) {
-			return m.Name
+			return m.Name, false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // A call that is a recording kept on disk is named from the recordings under
@@ -200,7 +219,7 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 			}
 			var offered []string
 			db := keyedDb{mockMemDb: &mockMemDb{}, onDisk: append(others, tc.rec), offered: &offered}
-			got := notOwnedRecording(context.Background(), tc.live, db, n)
+			got, _ := notOwnedRecording(context.Background(), tc.live, db, n, db.MarkCallRound())
 			if named := got == tc.rec; named != tc.want {
 				t.Fatalf("named %v (offered %v); want the recording named: %v", got, offered, tc.want)
 			}
@@ -210,5 +229,74 @@ func TestAMissAsksTheDiskStoreByAKeyItsRecordingIsUnder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// roundDb is a store that stages more than its reads show and is asked of a
+// call's round: asked is every round it was asked of, restaged makes it say
+// the replay staged another set, and refuse makes it refuse the name match
+// accepted (another miss spent it first). accepted is what match accepted.
+type roundDb struct {
+	*mockMemDb
+	staged   []*models.Mock
+	asked    []integrations.CallRound
+	restaged bool
+	refuse   bool
+	accepted []string
+}
+
+func (d *roundDb) MarkCallRound() integrations.CallRound { return integrations.NewCallRound(7, nil) }
+
+func (d *roundDb) FindStagedNotOwned(kind models.Kind, call integrations.CallRound, match func(*models.Mock) bool) (string, bool) {
+	d.asked = append(d.asked, call)
+	for _, m := range d.staged {
+		if m.Kind == kind && match(m) {
+			d.accepted = append(d.accepted, m.Name)
+			if d.restaged {
+				return "", true
+			}
+			if d.refuse {
+				continue
+			}
+			return m.Name, false
+		}
+	}
+	return "", false
+}
+
+// A miss's lookup of a recording made elsewhere is asked of the round the
+// call's first read found it made in (notOwnedRecording passes it to the
+// store, which decides by it: MockManager.FindStagedNotOwned): what the
+// store names is the call's, none when the store says the replay staged
+// another set, which the lookup says, and none whose name the store refused
+// (another miss spent it).
+func TestALookupIsAskedOfTheRoundTheCallWasMadeIn(t *testing.T) {
+	const host = "localhost:50001"
+	n := newHTTP().newStrictNoise(nil, nil, nil)
+	ctx := context.Background()
+	call := getTo("/delete", host)
+	fresh := func() (*roundDb, *models.Mock) {
+		r := onHost("other-test-delete", "/delete", host)
+		return &roundDb{mockMemDb: &mockMemDb{}, staged: []*models.Mock{r}}, r
+	}
+	db, r := fresh()
+	at := integrations.NewCallRound(3, nil)
+	if got, moved := notOwnedRecording(ctx, call, db, n, at); got != r || moved {
+		t.Fatalf("in the call's own round: named %v (restaged %v), want %s", got, moved, r.Name)
+	}
+	if len(db.asked) != 1 || db.asked[0].Epoch() != 3 || !db.asked[0].Read() {
+		t.Fatalf("the store was asked of %+v, want once, of the call's round (staging 3)", db.asked)
+	}
+
+	db, _ = fresh()
+	db.restaged = true
+	if got, moved := notOwnedRecording(ctx, call, db, n, at); got != nil || !moved {
+		t.Fatalf("the store said the replay staged another set: named %v (restaged %v), want none, restaged", got, moved)
+	}
+
+	db, _ = fresh()
+	db.refuse = true
+	if got, _ := notOwnedRecording(ctx, call, db, n, at); got != nil || len(db.accepted) != 1 {
+		t.Fatalf("a recording whose name the store refused was named: %v (accepted %v)", got, db.accepted)
 	}
 }

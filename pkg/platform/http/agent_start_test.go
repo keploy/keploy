@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch/switchtest"
 	"go.keploy.io/server/v3/pkg/service/mock"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
@@ -51,8 +52,13 @@ func TestMain(m *testing.M) {
 	// A stop says Ctrl+C stops the agent now this long after its signal
 	// was seen (stopWatch): short, so a test's press waits little.
 	stopWatchOffer = 20 * time.Millisecond
+	// The rows here check the rules with the proven switch off unless a row
+	// turns it on: a KEPLOY_PROVEN this test process inherited chooses nothing.
+	switchtest.Clear()
 	os.Exit(m.Run())
 }
+
+func TestARowStartsWithTheProvenSwitchOff(t *testing.T) { switchtest.OffAtEveryRowsStart(t) }
 
 // agentExit is what cmd.Wait returns for an agent process that ended with
 // status code: a real *exec.ExitError, from a real process -- this test
@@ -454,6 +460,38 @@ func TestDockerModeWithoutItsCapabilitiesChangesNothingAndSaysWhy(t *testing.T) 
 				t.Fatalf("perf_event_paranoid was written (%q) before keploy knew it could not run", got)
 			}
 		})
+	}
+}
+
+// A Setup sets up a new agent: the container its client named for the last
+// one is not this one's, whether the Setup goes on to name its own, sets up a
+// native agent that has none, or is refused. Kept, a native agent's watches
+// would watch that container instead of its process, and its runs would be
+// noted on it. The refused docker run Setup is the one that gets to the
+// forgetting without starting anything.
+func TestASetupForgetsTheContainerItsClientNamedForTheLastAgent(t *testing.T) {
+	if utils.CheckRequiredPermissions() == nil {
+		t.Skip("this process has the capabilities the check asks for, so a docker run Setup would go on to start the agent container")
+	}
+	a := deadAgentClient(t, false)
+	t.Cleanup(a.forgetAgentContainer)
+	a.nameAgentContainer(fmt.Sprintf("keploy-v3-last-%d", os.Getpid()))
+	at := agentHost(a.conf.Agent.AgentURI)
+	if _, ok := containerAt.Load(at); !ok {
+		t.Fatal("setup: the last agent's address does not name its container")
+	}
+	err, _, _ := setupRefused(t, a, "docker run --rm --name app alpine true", models.SetupOptions{CommandType: string(utils.DockerRun)})
+	if !errors.Is(err, utils.ErrPrivilegeRequired) {
+		t.Fatalf("got %v, want the Setup refused, carrying %q", err, utils.ErrPrivilegeRequired)
+	}
+	a.mu.Lock()
+	kept := a.agentContainer
+	a.mu.Unlock()
+	if kept != nil {
+		t.Fatalf("a Setup left its client with the container %q it named for the last agent", kept.name)
+	}
+	if _, ok := containerAt.Load(at); ok {
+		t.Fatal("a Setup left the last agent's address naming its container")
 	}
 }
 

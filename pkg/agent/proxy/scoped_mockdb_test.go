@@ -466,6 +466,28 @@ func TestAViewOverAStoreThatCannotServeExactlyForwardsNothing(t *testing.T) {
 	view := &scopedMockDb{MockMemDb: &fakeMockDb{}}
 	require.False(t, integrations.ExactServing(view))
 	require.Nil(t, view.ConsumedTestMocks())
+	require.Nil(t, view.ExactTakenCandidates(""))
+	_, ok := view.ClaimantOf("mock-1")
+	require.False(t, ok)
+}
+
+// A view made before exact serving began tells a parser's learn step what the
+// open test shares with the tests recorded beside it, as the bare manager
+// does: which shared recording another test answered with, and by whom.
+func TestAViewMadeBeforeExactServingBeganSaysWhatTheOpenTestShares(t *testing.T) {
+	mm := stagedManager(t, nil, nil)
+	view := &scopedMockDb{MockMemDb: mm, pid: uint32(os.Getpid()), live: true}
+	shared := exactMock("shared-1", 0, models.LifetimePerTest)
+	mm.ServeExactTestConcurrent("A", nil, []*models.Mock{shared})
+	read, err := view.GetFilteredMocks()
+	require.NoError(t, err)
+	equalNames(t, "A's shared recording, read through the view", read, "shared-1")
+	require.True(t, view.MarkMockAsUsed(*read[0]), "A answers its call with it")
+	mm.ServeExactTestConcurrent("B", nil, []*models.Mock{shared})
+	who, ok := view.ClaimantOf("shared-1")
+	require.True(t, ok)
+	require.Equal(t, "A", who)
+	equalNames(t, "the shared recording A took, as B's view tells it", view.ExactTakenCandidates(""), "shared-1")
 }
 
 // A worker's view made before exact serving began serves its connection for
@@ -491,7 +513,11 @@ func TestAWorkersViewPassesStraightThroughUnderExactServing(t *testing.T) {
 	mm.ServeExactTest("T", []*models.Mock{b})
 	pt, _ := view.GetPerTestMocksInWindow()
 	equalNames(t, "the open test's mocks on the old view", pt, "b")
-	if got := view.(integrations.StagedFinder).FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return true }); got != "a" {
+	if got := func() string {
+		f := view.(integrations.StagedFinder)
+		n, _ := f.FindStagedNotOwned(models.HTTP, f.MarkCallRound(), func(m *models.Mock) bool { return true })
+		return n
+	}(); got != "a" {
 		t.Fatalf("a miss's diagnosis on the old view found %q, want a, staged and not the open test's", got)
 	}
 

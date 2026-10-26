@@ -36,8 +36,20 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
 	}
+	// The learn step reads keploy mock's tests as client tests (models.
+	// ClientTestsReadHeader): keploy mock keeps what it learns only when the
+	// agent says so.
+	if s, ok := a.svc.(clientTestsReader); ok && OutgoingReq.OutgoingOptions.Learn && s.ReadsClientTests() {
+		w.Header().Set(models.ClientTestsReadHeader, models.ClientTestsRead)
+	}
 
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// clientTestsReader says whether the agent's learn step reads its tests as
+// keploy mock's client tests (proven switch).
+type clientTestsReader interface {
+	ReadsClientTests() bool
 }
 
 // respondAgent writes an AgentResp with the given status. It exists so no
@@ -51,6 +63,10 @@ func (a *Agent) MockOutgoing(w http.ResponseWriter, r *http.Request) {
 // failure with "HTTP 200 {\"isSuccess\":false}", defeating any status check a
 // client might make.
 func respondAgent(w http.ResponseWriter, r *http.Request, status int, err error) {
+	// The agent names its version on every answer (models.AgentVersionHeader).
+	if utils.Version != "" {
+		w.Header().Set(models.AgentVersionHeader, utils.Version)
+	}
 	resp := models.AgentResp{IsSuccess: err == nil}
 	if err != nil {
 		resp.ErrorMsg = err.Error()
@@ -203,6 +219,12 @@ func (a *Agent) StoreMocks(w http.ResponseWriter, r *http.Request) {
 		writeErr(http.StatusInternalServerError, err)
 		return
 	}
+	// Under the proven switch, an agent that serves a test the recordings it
+	// shares with the tests that ran beside it says so (a header, which a
+	// client that predates it never reads): the client sends them only then.
+	if s, ok := a.svc.(interface{ ServesExactConcurrent() bool }); ok && provenswitch.On() && s.ServesExactConcurrent() {
+		w.Header().Set(models.ExactConcurrentHeader, models.ExactConcurrentServes)
+	}
 	w.WriteHeader(http.StatusOK)
 	_ = gob.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 }
@@ -218,52 +240,63 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Exact serving's pool call begins no test (BeginsTestVariables below):
-	// values it gave would be bound nowhere.
+	// A test set's staging and exact serving's pool call begin no test
+	// (BeginsTestVariables below): values they gave would be bound nowhere.
 	if provenswitch.On() && !updateParamsReq.FilterParams.BeginsTestVariables() && len(updateParamsReq.FilterParams.Variables) > 0 {
-		respondAgent(w, r, http.StatusUnprocessableEntity, errors.New("a filter that serves the pool between test cases begins no test, and gives no values to bind"))
+		respondAgent(w, r, http.StatusUnprocessableEntity, errors.New("a filter that stages a test set or serves the pool between test cases begins no test, and gives no values to bind"))
 		return
 	}
-	if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
+	// Under the proven switch a test case's mock filter a client sends
+	// starts a test: keploy test sends one per test case, before the test
+	// case is sent, so a test case begins with none of the previous test
+	// case's variables bound (the run's stay: MockManager.NewVariableSet).
+	// The filter carries the values the test case's request sends: they are
+	// bound as the scope begins. The agent's own filters, as a test of
+	// keploy mock replay begins and ends, do not come through here.
+	// Exact serving's pool call (models.ExactServing, between test cases)
+	// begins no test: the variables the test case bound stay readable, and
+	// keploy test reads them after it. Nor does a test set's staging: the
+	// set's variables began at its Mock, and what its start-up binds after
+	// the staging is the run's, which every test of the set reads
+	// (MockFilterParams.BeginsTestVariables).
+	opens := provenswitch.On() && updateParamsReq.FilterParams.BeginsTestVariables()
+	opener, oneStep := a.svc.(testCaseOpener)
+	if opens && !oneStep {
+		// An agent that cannot open a test case in one step opens none whose
+		// variables it keeps: begun apart, after the test's mocks went live,
+		// a call they answer between the two binds in no scope of the
+		// test's, and before a set's first test in the run's, which every
+		// later test of the set reads. Nor one whose request gave values it
+		// would drop: every call that uses one would be left unbound, a
+		// failure of the app that is keploy's. Refused before the filter
+		// applies, so nothing it stages is served.
+		if keepsVariables(a.svc) {
+			refuseOpen(w, r, a.logger, errOpensApart)
+			return
+		}
+		if len(updateParamsReq.FilterParams.Variables) > 0 {
+			refuseOpen(w, r, a.logger, errCannotBindGiven)
+			return
+		}
+	}
+	if opens && oneStep {
+		// One step: the scope begins as the test's mocks go live, so no
+		// call they answer binds before it.
+		if err := opener.OpenTestCase(r.Context(), updateParamsReq.FilterParams); err != nil {
+			utils.LogError(a.logger, err, "failed to open the test case")
+			respondAgent(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		// The learn step took the test case's request (models.
+		// TestRequestReadHeader): the replay keeps what it learned for the
+		// test only when the agent says so.
+		if s, ok := a.svc.(testRequestReader); ok && s.ReadsTestRequest() {
+			w.Header().Set(models.TestRequestReadHeader, models.TestRequestRead)
+		}
+	} else if err := a.svc.UpdateMockParams(r.Context(), updateParamsReq.FilterParams); err != nil {
 		utils.LogError(a.logger, err, "failed to update mock params")
 		respondAgent(w, r, http.StatusInternalServerError, err)
 		return
-	}
-	// Under the proven switch a mock filter a client sends starts a test:
-	// keploy test sends one per test case, before the test case is sent, so
-	// a test case begins with no variable bound. The scope begins after the
-	// new pool is in, so a call checked against the previous pool binds
-	// nothing in it (variables.Table). The agent's own filters, as a test of
-	// keploy mock replay begins and ends, do not come through here.
-	// The filter carries the values the test case's request sends: they are
-	// bound as the scope begins.
-	// An agent that can only forget begins the test with nothing bound, and
-	// refuses values it cannot bind: dropped, they would leave every call
-	// that uses one unbound, a failure of the app that is keploy's.
-	// Exact serving's pool call (models.ExactServing, between test cases)
-	// begins no test: the variables the test case bound stay readable, and
-	// keploy test reads them after it (MockFilterParams.BeginsTestVariables).
-	if provenswitch.On() && updateParamsReq.FilterParams.BeginsTestVariables() {
-		given := updateParamsReq.FilterParams.Variables
-		switch s := a.svc.(type) {
-		case variableStarter:
-			if err := s.StartTestVariables(given); err != nil {
-				utils.LogError(a.logger, err, "failed to begin the test's variables")
-				respondAgent(w, r, http.StatusInternalServerError, err)
-				return
-			}
-		case interface{ ResetVariables() }:
-			s.ResetVariables()
-			if len(given) > 0 {
-				refuseGiven(w, r, a.logger)
-				return
-			}
-		default:
-			if len(given) > 0 {
-				refuseGiven(w, r, a.logger)
-				return
-			}
-		}
 	}
 
 	a.logger.Debug("Time taken to update mock params duration :", zap.Duration("duration", time.Since(start)))
@@ -275,7 +308,30 @@ func (a *Agent) UpdateMockParams(w http.ResponseWriter, r *http.Request) {
 	}); ok && s.ReadsConsumedForPerTestOnly(a.svc) {
 		w.Header().Set(models.ConsumedScopeHeader, models.ConsumedScopePerTest)
 	}
+	// A set's staging is answered with the background rules it is served by
+	// (models.BackgroundRulesHeader): the replay relaxes today's checks for
+	// it only when the agent says it serves it by the background rules.
+	if ex := updateParamsReq.FilterParams.Exact; ex != nil && ex.Stage {
+		if s, ok := a.svc.(interface{ ServedBackground() string }); ok {
+			if rules := s.ServedBackground(); rules != "" {
+				w.Header().Set(models.BackgroundRulesHeader, rules)
+			}
+		}
+	}
 	respondAgent(w, r, http.StatusOK, nil)
+}
+
+// testCaseOpener opens a keploy test case in one step (proven switch): its
+// mock filter applies, and the test's variables begin with the values its
+// request gave bound, as its mocks go live.
+type testCaseOpener interface {
+	OpenTestCase(ctx context.Context, params models.MockFilterParams) error
+}
+
+// testRequestReader says whether the agent's OpenTestCase hands the test
+// case's request its filter carries to the learn step (proven switch).
+type testRequestReader interface {
+	ReadsTestRequest() bool
 }
 
 // variableStarter begins a test's variables with the values its test case's
@@ -290,11 +346,25 @@ type testVariables interface {
 	TestVariables() ([]models.VariableBinding, bool)
 }
 
-// refuseGiven answers a mock filter whose test case gave values this agent
-// cannot bind.
-func refuseGiven(w http.ResponseWriter, r *http.Request, logger *zap.Logger) {
-	err := errors.New("this keploy agent cannot bind the values a test case's request sends; run the keploy agent of this keploy version")
-	utils.LogError(logger, err, "failed to begin the test's variables")
+// keepsVariables reports whether svc keeps the test variables a replay binds:
+// it can begin a test's (variableStarter), or forget them.
+func keepsVariables(svc any) bool {
+	_, starts := svc.(variableStarter)
+	_, resets := svc.(interface{ ResetVariables() })
+	return starts || resets
+}
+
+var (
+	// errOpensApart: an agent that keeps a replay's variables but cannot
+	// begin them as a test case opens (testCaseOpener).
+	errOpensApart = errors.New("this keploy agent cannot begin a test case's variables as the test case opens; run the keploy agent of this keploy version")
+	// errCannotBindGiven: an agent that keeps no variables, given some.
+	errCannotBindGiven = errors.New("this keploy agent cannot bind the values a test case's request sends; run the keploy agent of this keploy version")
+)
+
+// refuseOpen answers a test case's mock filter this agent cannot open.
+func refuseOpen(w http.ResponseWriter, r *http.Request, logger *zap.Logger, err error) {
+	utils.LogError(logger, err, "failed to open the test case")
 	respondAgent(w, r, http.StatusNotImplemented, err)
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,6 +149,95 @@ func TestLoadBefore_StartupBand(t *testing.T) {
 	got, _ = s.LoadBefore(time.Unix(20, 0).UTC())
 	if _, has := names(got)["m20"]; has {
 		t.Fatalf("LoadBefore(20) must exclude m20 (strictly before)")
+	}
+}
+
+// The recordings before an instant, and at its own (a fixture's whole
+// second may have made one before it: the learn step reads it as an earlier
+// place), are visited by request time, wherever a mock is placed (one placed
+// at its answer past the instant was recorded before it), in recorded order,
+// until the visitor stops.
+func TestRangeRecordedBefore_ByRequestTime(t *testing.T) {
+	defer models.RegisterAnswerPlaced(models.HTTP, func(m *models.Mock) bool { return m.Name == "m15-answered-late" })()
+	late := perTestMockAt("m15-answered-late", 15)
+	late.Spec.ResTimestampMock = time.Unix(40, 0).UTC()
+	late.TestModeInfo.LifetimeDerived = true
+	if !models.PlaceOf(late).Equal(time.Unix(40, 0).UTC()) {
+		t.Fatal("precondition: the late answer places the mock at 40")
+	}
+	s := newDiskWith(t, perTestMockAt("m10", 10), late, perTestMockAt("m20", 20), perTestMockAt("m30", 30))
+	defer s.Close()
+	var order []string
+	if err := s.RangeRecordedBefore(time.Unix(25, 0).UTC(), func(m *models.Mock) bool { order = append(order, m.Name); return true }); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(order, ",") != "m10,m15-answered-late,m20" {
+		t.Fatalf("recorded before 25: %v; want m10, m15-answered-late, m20, in recorded order", order)
+	}
+	order = nil
+	_ = s.RangeRecordedBefore(time.Unix(20, 0).UTC(), func(m *models.Mock) bool { order = append(order, m.Name); return true })
+	if strings.Join(order, ",") != "m10,m15-answered-late,m20" {
+		t.Fatalf("recorded before 20: %v; want m10, m15-answered-late and m20, the one recorded at the instant itself too", order)
+	}
+	order = nil
+	_ = s.RangeRecordedBefore(time.Unix(25, 0).UTC(), func(m *models.Mock) bool { order = append(order, m.Name); return false })
+	if len(order) != 1 {
+		t.Fatalf("a visitor that stops saw %v", order)
+	}
+}
+
+// The on-disk recordings before an instant are decoded one at a time and
+// kept by no one: visiting a set many times larger than one mock holds
+// about one mock's worth of heap at a time, never the set.
+func TestRangeRecordedBefore_HoldsOneMockAtATime(t *testing.T) {
+	const n, size = 48, 1 << 20
+	var ms []*models.Mock
+	for i := 0; i < n; i++ {
+		m := perTestMockAt(fmt.Sprintf("big-%02d", i), int64(100+i))
+		m.Spec.HTTPReq = &models.HTTPReq{Method: "POST", URL: "http://h/big", Body: strings.Repeat(string(rune('a'+i%26)), size)}
+		ms = append(ms, m)
+	}
+	s := newDiskWith(t, ms...)
+	defer s.Close()
+	ms = nil
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	var peak uint64
+	seen := 0
+	if err := s.RangeRecordedBefore(time.Unix(1000, 0).UTC(), func(m *models.Mock) bool {
+		seen++
+		runtime.GC()
+		var st runtime.MemStats
+		runtime.ReadMemStats(&st)
+		if st.HeapAlloc > base.HeapAlloc && st.HeapAlloc-base.HeapAlloc > peak {
+			peak = st.HeapAlloc - base.HeapAlloc
+		}
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if seen != n {
+		t.Fatalf("visited %d of %d", seen, n)
+	}
+	if peak > 8*size {
+		t.Fatalf("the heap grew %d bytes while visiting %d mocks of %d bytes: the visit holds more than a mock at a time", peak, n, size)
+	}
+}
+
+// A recording that cannot be read back is an error, not one skipped: the
+// learn step reads what it holds as an earlier place, and refuses the call
+// when it cannot.
+func TestRangeRecordedBefore_TellsAFailedRead(t *testing.T) {
+	s := newDiskWith(t, perTestMockAt("m10", 10), perTestMockAt("m20", 20))
+	defer s.Close()
+	if err := s.f.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	err := s.RangeRecordedBefore(time.Unix(1000, 0).UTC(), func(*models.Mock) bool { seen++; return true })
+	if err == nil {
+		t.Fatalf("visited %d mocks of a store that cannot read them, and said nothing", seen)
 	}
 }
 

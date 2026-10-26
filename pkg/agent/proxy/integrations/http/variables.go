@@ -59,9 +59,13 @@ type varDecl struct {
 	name     string
 	recorded string
 	echo     bool
-	bind     *varPlace
-	use      []varPlace
-	answer   []varPlace
+	// clock: the clock reads the learn step marked at the variable's bind
+	// (models.MockVariable.Clock). It is read only where the call binds the
+	// variable.
+	clock  []models.ClockRead
+	bind   *varPlace
+	use    []varPlace
+	answer []varPlace
 }
 
 // requestPlaces is the variable's bind place (first) and uses.
@@ -132,7 +136,7 @@ func readDecls(m *models.Mock) ([]varDecl, string) {
 		if mv.Recorded == "" {
 			return nil, fmt.Sprintf("variable %s has no recorded value", name)
 		}
-		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo}
+		d := varDecl{name: name, recorded: mv.Recorded, echo: mv.Echo, clock: mv.Clock}
 		if mv.Bind != "" {
 			p, why := parse(name, "bind", mv.Bind, false)
 			if why != "" {
@@ -361,6 +365,9 @@ type varHit struct {
 	// table's scope then (variables.Table.Gen): its binds land there.
 	table *variables.Table
 	gen   uint64
+	// saw is every binding of table the check read, by name, with its value:
+	// a bind refused over one of them is no race (serveVariablesBy).
+	saw map[string]string
 }
 
 // varScope is the scopes a call's variables are checked in, each read before
@@ -557,7 +564,7 @@ func (h *HTTP) fitVariables(ctx context.Context, input *req, live reqView, m *mo
 // another test's.
 func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, table *variables.Table, refuse func(string) (*varHit, *varProblem)) (*varHit, *varProblem) {
 	// 2. The variables hold.
-	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}}
+	hit := &varHit{mock: m, decls: decls, local: map[string]variables.Binding{}, saw: map[string]string{}}
 	taken := map[string]variables.Binding{} // this call's new bindings, by name
 	for _, d := range decls {
 		places := d.requestPlaces()
@@ -573,6 +580,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			continue
 		}
 		if bound, ok := table.Lookup(d.name); ok {
+			hit.saw[bound.Name] = bound.Value
 			if !variables.SameValue(bound.Recorded, d.recorded, false) {
 				if bound.Given {
 					// A template key holds one recorded value for the whole
@@ -612,13 +620,18 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 			return nil, p
 		}
 		// Two variables are two values: a value the test bound already, as
-		// another variable recorded with another value, is that one's.
-		others := table.Snapshot()
+		// another variable recorded with another value, is that one's, and
+		// so is one the next test's calls in flight bound while this call
+		// binds the run's (variables.Table.Beside, which the bind checks).
+		others := table.Beside()
+		for _, b := range others {
+			hit.saw[b.Name] = b.Value
+		}
 		for _, b := range taken {
 			others = append(others, b)
 		}
 		for _, b := range others {
-			if !b.Given && b.Name != d.name && b.Value == v.value && b.Recorded != d.recorded {
+			if variables.TwoValues(b, variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Clock: d.clock}) {
 				return nil, &varProblem{
 					mock: m.Name, name: d.name, place: d.bind.raw, expected: "a value other than variable " + b.Name + "'s", actual: v.value,
 					why:  fmt.Sprintf("this call binds variable %s at %s to %q, which is variable %s's value in this test (bound at %s %s); they were two values when the test was recorded", d.name, d.bind.raw, v.value, b.Name, b.Mock, b.Place),
@@ -626,7 +639,7 @@ func holdVariables(m *models.Mock, decls []varDecl, liveAt map[string]held, tabl
 				}
 			}
 		}
-		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw}
+		taken[d.name] = variables.Binding{Name: d.name, Value: v.value, Recorded: d.recorded, Mock: m.Name, Place: d.bind.raw, Clock: d.clock}
 	}
 	for _, d := range decls {
 		if b, ok := taken[d.name]; ok {
@@ -717,25 +730,26 @@ func (h *HTTP) fitsRecording(ctx context.Context, asRecorded *req, m *models.Moc
 // order is recordedBefore's, as splitVariableMocks orders a tier. commit
 // marks the answer served once the call is answered (nil when no mark
 // applies).
-func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
+func (h *HTTP) pickHit(hits []*varHit, own func(*models.Mock) bool, mockDb integrations.MockMemDb, statefulMocks bool) (*varHit, func()) {
 	first := hits[0]
 	cs, ok := mockDb.(integrations.MockCursor)
 	if !statefulMocks || !ok || first.mock.TestModeInfo.Consume != models.ConsumeCursorSaturate {
 		return first, nil
 	}
-	group := make([]*varHit, 0, len(hits))
+	byMock := make(map[*models.Mock]*varHit, len(hits))
+	stateful := make([]*models.Mock, 0, len(hits))
 	for _, hit := range hits {
 		if hit.mock.TestModeInfo.Consume == models.ConsumeCursorSaturate {
-			group = append(group, hit)
+			byMock[hit.mock] = hit
+			stateful = append(stateful, hit.mock)
 		}
 	}
-	sort.SliceStable(group, func(i, j int) bool { return recordedBefore(group[i].mock, group[j].mock) })
-	mocks := make([]*models.Mock, len(group))
-	for i, hit := range group {
-		mocks[i] = hit.mock
-	}
+	// Under the background rules the open test's own and the set's
+	// background are two bands (statefulBand).
+	mocks, cs := statefulBand(first.mock, stateful, own, mockDb, cs)
+	sort.SliceStable(mocks, func(i, j int) bool { return recordedBefore(mocks[i], mocks[j]) })
 	i, commit := servedPick(mocks, cs)
-	return group[i], commit
+	return byMock[mocks[i]], commit
 }
 
 // serveVariables answers the call with a hit: loads its response, renders its
@@ -747,6 +761,9 @@ func (h *HTTP) pickHit(hits []*varHit, mockDb integrations.MockMemDb, statefulMo
 // values meanwhile (the next check sees that, and either another recording
 // answers the call or the call is a miss with that evidence), or another
 // connection took the mock first. Nothing is consumed before the binds hold.
+// A bind refused over a binding the check read (varHit.read) is no race but
+// a disagreement of the check and the table: a problem, never a retry, which
+// would be refused again forever.
 func (h *HTTP) serveVariables(ctx context.Context, hit *varHit, mockDb integrations.MockMemDb) (served *models.Mock, problem *varProblem, retry bool, err error) {
 	return h.serveVariablesBy(hit, func(m *models.Mock) bool { return h.updateMock(ctx, m, mockDb, nil) })
 }
@@ -763,7 +780,17 @@ func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (s
 	if problem != nil {
 		return nil, problem, false, nil
 	}
-	if _, _, _, ok := hit.table.BindAll(hit.gen, hit.binds); !ok {
+	if bad, with, stale, ok := hit.table.BindAll(hit.gen, hit.binds); !ok {
+		if !stale && hit.read(with) {
+			// Not another connection's bind meanwhile: the check passed
+			// over a binding the table refuses it beside. Checking the call
+			// again would pass and be refused again, forever.
+			return nil, &varProblem{
+				mock: hit.mock.Name, name: bad.Name, place: bad.Place, expected: "a value variable " + with.Name + " does not hold", actual: bad.Value,
+				why:  fmt.Sprintf("this call binds variable %s at %s to %q, which the test's variables refuse beside variable %s (bound at %s %s to %q), though the check of the call let it", bad.Name, bad.Place, bad.Value, with.Name, with.Mock, with.Place, with.Value),
+				next: "the check of the call and its bind disagree, which is a keploy bug: report it with this test set",
+			}, false, nil
+		}
 		return nil, nil, true, nil
 	}
 	for _, b := range hit.binds {
@@ -774,6 +801,21 @@ func (h *HTTP) serveVariablesBy(hit *varHit, consume func(*models.Mock) bool) (s
 		return nil, nil, true, nil
 	}
 	return rendered, nil, false, nil
+}
+
+// read reports whether b was in force when the call was checked, as the check
+// read it, or is one of the call's own binds: a bind refused over it is no
+// race.
+func (hit *varHit) read(b variables.Binding) bool {
+	if v, ok := hit.saw[b.Name]; ok && v == b.Value {
+		return true
+	}
+	for _, own := range hit.binds {
+		if own.Name == b.Name && own.Value == b.Value {
+			return true
+		}
+	}
+	return false
 }
 
 // renderAnswers returns a copy of served (its response loaded) whose answer

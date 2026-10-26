@@ -388,6 +388,12 @@ type SimulationConfig struct {
 	// never be reached at fails the test at once, saying why, instead of
 	// being re-sent as an app still starting.
 	AppPortReachability AppPortReachability
+	// PublishedPort, when non-nil, is the host port a test for the app's port
+	// appPort goes to from host in place of appPort, or 0 to send it to
+	// appPort (PublishedTarget): in Docker mode, the one host port the app's
+	// port is published on when host port appPort is not published to it
+	// (AppPortPublishing).
+	PublishedPort func(ctx context.Context, host string, appPort uint16) uint16
 	// StallGrace and StallClock are the stall rule on the exchange when
 	// Unbounded, under the proven switch (answerWatch): its grace
 	// (AnswerStallGrace when 0) and the runnable clock it is measured on
@@ -423,6 +429,90 @@ type AppPortReachability interface {
 	// It bounds its own wait: it is asked from a recording's insert loop, a
 	// readiness gate and a failing test, with whatever context they hold.
 	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
+}
+
+// AppPortPublishing is implemented by an instrumentation that can tell, in
+// Docker mode, which host port reaches the app's port a test was recorded on
+// when host port appPort does not: a compose file publishing "18080:8080"
+// makes the app's port 8080 the host's 18080, and the client that was
+// recorded called 18080. Replay sends each test from the host to the port it
+// was recorded on (app_port, over the URL's: an app serving on several ports
+// gets each test on its own), and nothing answers there.
+type AppPortPublishing interface {
+	// PublishedHostPort is the one host port, on an address host reaches,
+	// the app's port appPort is published on, when host port appPort is not
+	// published to it. It is 0 when host port appPort reaches it, and when
+	// appPort is published on several host ports or none: the test then goes
+	// where it was recorded, as without it. known is false when it cannot
+	// tell (not Docker mode, a host not this machine's loopback, a container
+	// that cannot be inspected or is not running, host networking).
+	PublishedHostPort(ctx context.Context, host string, appPort uint16) (port uint16, known bool)
+}
+
+// PublishedTarget is target, as ResolveTestTarget made it from original for a
+// test recorded on the app's port appPort, sent instead to the host port
+// cfg.PublishedPort names: in Docker mode, the one host port the app's port is
+// published on when host port appPort is not published to it. It applies only
+// when target is that app port and nothing the user set chose this test's
+// port (ConfigPort, a replaceWith URL that matches original and names a
+// port, a replaceWith port mapping of appPort, TargetFromURL), since a port
+// the user chose is where they mean the test to go. A replacement or mapping
+// that does not apply to this test, or one that changes only its host or
+// path, does not stop it. Otherwise target is returned as it is.
+func PublishedTarget(ctx context.Context, cfg SimulationConfig, original, target string, appPort uint16, isHTTP bool) string {
+	if cfg.PublishedPort == nil || appPort == 0 || cfg.ConfigPort != 0 || cfg.TargetFromURL {
+		return target
+	}
+	if _, mapped := cfg.PortMappings[uint32(appPort)]; mapped {
+		return target
+	}
+	if _, replacement, ok := urlReplacement(original, cfg.URLReplacements); ok && replacementNamesPort(replacement, isHTTP) {
+		return target
+	}
+	var u *url.URL
+	var host, port string
+	if isHTTP {
+		var err error
+		if u, err = url.Parse(target); err != nil {
+			return target
+		}
+		host, port = u.Hostname(), u.Port()
+	} else {
+		var err error
+		if host, port, err = net.SplitHostPort(target); err != nil {
+			return target
+		}
+	}
+	if port != strconv.Itoa(int(appPort)) {
+		return target
+	}
+	p := cfg.PublishedPort(ctx, host, appPort)
+	if p == 0 || p == appPort {
+		return target
+	}
+	hostPort := net.JoinHostPort(host, strconv.Itoa(int(p)))
+	if !isHTTP {
+		return hostPort
+	}
+	u.Host = hostPort
+	return u.String()
+}
+
+// replacementNamesPort says a replaceWith value names a port of its own (a
+// "host:port", with or without the scheme), which then decides the port its
+// tests go to (ResolveTestTarget's replacementHasPort).
+//
+// ResolveTestTarget asks it of the replacement it applies (urlReplacement).
+func replacementNamesPort(replacement string, isHTTP bool) bool {
+	checkStr := replacement
+	if isHTTP {
+		if strings.HasPrefix(replacement, "http://") {
+			checkStr = strings.TrimPrefix(replacement, "http://")
+		} else if strings.HasPrefix(replacement, "https://") {
+			checkStr = strings.TrimPrefix(replacement, "https://")
+		}
+	}
+	return hasExplicitPort(checkStr)
 }
 
 // UnreachableAppPortError is a test request that failed to connect at an
@@ -700,6 +790,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	if err != nil {
 		return nil, err
 	}
+	testURL = PublishedTarget(ctx, cfg, tc.HTTPReq.URL, testURL, appPort, true)
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -1380,8 +1471,22 @@ func (b *brotliReadCloser) Close() error {
 	return b.underlying.Close()
 }
 
-// DetectHTTPStreamConfig detects the streaming mode of an HTTP response based on content type and other factors.
+// DetectHTTPStreamConfig is how a test case's response is read: as a stream
+// of which format, or whole (HTTPStreamModeNone). It is keploy's one stream
+// rule (models.HTTPStreamOf) on the answer's Content-Type (the recorded one
+// when there is no answer yet, or the answer has none) and on whether the
+// recording kept its body as frames. How the answer framed its length
+// (Transfer-Encoding: chunked, no Content-Length) is no evidence of a stream.
+//
+// A response that HTTP says has no body (the answer to a HEAD, a 1xx, 204 or
+// 304: models.HTTPResponseHasNoBody) is no stream, whatever its Content-Type
+// says: it has no frame to compare, and its status and headers are compared
+// as any response's are. Which response has none the app's answer says
+// (streamResponseHasNoBody), never the recording.
 func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStreamConfig {
+	if streamResponseHasNoBody(tc, resp) {
+		return HTTPStreamConfig{Mode: HTTPStreamModeNone}
+	}
 	contentType := ""
 	if resp != nil {
 		contentType = resp.Header.Get("Content-Type")
@@ -1389,56 +1494,66 @@ func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStream
 	if contentType == "" && tc != nil {
 		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
 	}
+	framed := tc != nil && len(tc.HTTPResp.StreamBody) > 0
 
-	mediaType := ""
-	params := map[string]string{}
-	if contentType != "" {
-		parsedType, parsedParams, err := mime.ParseMediaType(contentType)
-		if err == nil {
-			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
-			params = parsedParams
-		} else {
-			mediaType = strings.ToLower(strings.TrimSpace(contentType))
-		}
-	}
-
-	switch mediaType {
-	case "text/event-stream":
-		if isSSETestCase(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
-		}
-		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-	case "application/x-ndjson", "application/ndjson":
+	switch models.HTTPStreamOf(contentType, framed) {
+	case models.HTTPStreamSSE:
+		return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
+	case models.HTTPStreamNDJSON:
 		return HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}
-	case "multipart/x-mixed-replace", "multipart/mixed":
-		boundary := strings.TrimSpace(params["boundary"])
+	case models.HTTPStreamMultipart:
+		boundary := boundaryFromContentTypeHeader(contentType)
 		if boundary == "" && tc != nil {
 			boundary = boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type"))
 		}
 		if boundary != "" {
 			return HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: boundary}
 		}
-	case "text/plain":
-		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-		}
-		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-		}
-	case "application/octet-stream":
-		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
-		}
-		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
-		}
+	case models.HTTPStreamText:
+		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
+	case models.HTTPStreamBinary:
+		return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
 	}
 
 	return HTTPStreamConfig{Mode: HTTPStreamModeNone}
 }
 
-// IsHTTPStreamingTestCase returns true if the testcase response is identified as a stream format
-// supported by replay-time incremental validators.
+// streamResponseHasNoBody reports whether resp, the app's answer, has no body
+// by HTTP: by the method of the request it answers (the test's recorded one
+// when resp names none) and its status. Before the answer (resp nil:
+// IsHTTPStreamingTestCase, choosing how a test's answer is read) it is false:
+// a test case of a stream's Content-Type is sent as a stream test whatever
+// its recorded method and status, and its answer says how it is read. The
+// recorded status cannot say it: the app may answer a recorded 204 or 304
+// with a stream, which read whole, as a response with no body by its
+// recording was, is a read that never ends when the app never ends the
+// stream (under the proven switch no clock bounds it, and every byte of it
+// is progress to the stall rule). Read as a stream, a recording of no frame
+// ends that read on the stream's first keepalive or frame
+// (streamRecordedWithNoFrame), and an answer with no body (any answer to a
+// HEAD among them) is compared as a response (SimulateHTTPStreaming, by its
+// answer).
+func streamResponseHasNoBody(tc *models.TestCase, resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	method := ""
+	if resp.Request != nil {
+		method = resp.Request.Method
+	} else if tc != nil {
+		method = string(tc.HTTPReq.Method)
+	}
+	return models.HTTPResponseHasNoBody(method, resp.StatusCode)
+}
+
+// IsHTTPStreamingTestCase reports whether a test case's recorded response is a
+// stream by keploy's one stream rule (DetectHTTPStreamConfig, on its recorded
+// Content-Type and frames): such a test case is replayed after its set's other
+// test cases, with a stream's mock window (effectiveStreamMockWindow), and its
+// answer read frame by frame. Every other one runs in its recorded order and
+// is read whole. A recorded HEAD, 204 or 304 is one by its Content-Type, as
+// any test case is, and its answer says whether it has a body
+// (streamResponseHasNoBody): one with none is compared as a response.
 func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 	if tc == nil {
 		return false
@@ -1450,7 +1565,9 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 // It returns whether they match, the captured body content, mismatch details (if any), and any error.
 //
 // Without the proven switch the comparison stops at the last recorded frame
-// (part, or byte), so a stream that goes on is not waited for. Under the
+// (part, or byte), so a stream that goes on is not waited for; a stream
+// recorded with no frame has none to stop at, and is read to its end under
+// either switch (streamRecordedWithNoFrame). Under the
 // switch every response is compared whole (O-K): the stream is read to its
 // end, and a frame after the recorded ones is a difference (trailingFrame),
 // as are bytes beyond a recorded binary stream. A keepalive beyond the
@@ -1522,6 +1639,44 @@ func (streamStalledError) Error() string {
 }
 
 func (streamStalledError) Is(target error) bool { return target == ErrStreamHeldOpen }
+
+// ErrStreamNotRecorded refuses a stream test whose recording saved nothing of
+// its stream: its body was over 1 MB, and a recording does not save one
+// (BodySkipped). Compared with nothing, a stream passed on its first frame,
+// whatever it held, with the proven switch off. The test fails with the
+// reason instead, under either switch, and its stream is not read. A
+// recording that saved its body is compared with it, however little it holds
+// (streamRecordedWithNoFrame): re-recording the app gives the same one.
+var ErrStreamNotRecorded = errors.New("keploy refuses this stream test: its recording keeps nothing of the stream to compare the app's stream with")
+
+// streamRecordedWithNoFrame is the rule for a stream recorded with no frame
+// to compare (no SSE frame, NDJSON line, multipart part, text line or byte).
+// A recording that saved nothing of its stream (its body was over 1 MB, and a
+// recording does not save one: BodySkipped) is refused: the error it returns
+// (ErrStreamNotRecorded). Any other saved its body, and holds what the stream
+// held: nothing, the app having ended it with nothing in it, or blank lines
+// alone (an SSE body of blank lines, NDJSON's keepalives, which a recording
+// keeps no frame of; a multipart body of no part). The app's stream is
+// compared with that, under either switch, and read to its end (nil): with no
+// recorded frame to stop at, the comparison stopped before the answer's first
+// frame, and passed whatever came. A frame (an SSE event, a line, a part) is
+// one past the recording (trailingFrame); a keepalive (an SSE comment, an
+// NDJSON blank line) ends the read with nothing of the answer to compare, not
+// judged (keptOpenWithKeepalivesOnly); and its end passes. A recording of SSE
+// comments alone is none of these: its comments are its frames, compared in
+// order as any recording's are, the comparison stopping at the last of them
+// with the switch off. Re-recording the app gives the same recording, so it
+// is never refused.
+func streamRecordedWithNoFrame(expected models.HTTPResp) error {
+	if !expected.BodySkipped {
+		return nil
+	}
+	why := "its body was over 1 MB, and a recording does not save one"
+	if expected.BodySize > 0 {
+		why = fmt.Sprintf("its body, %d bytes, was over 1 MB, and a recording does not save one", expected.BodySize)
+	}
+	return fmt.Errorf("%w (%s)", ErrStreamNotRecorded, why)
+}
 
 // trailingFrame is the mismatch of a frame the answer streamed after the
 // recorded ones (index of them): under the proven switch a stream is read to
@@ -1607,23 +1762,6 @@ func CollectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNois
 	return keys
 }
 
-func isSSETestCase(tc *models.TestCase, resp *http.Response) bool {
-	if tc != nil {
-		respContentType := getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
-		if hasSSEContentType(respContentType) {
-			return true
-		}
-		acceptHeader := getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept")
-		if hasSSEContentType(acceptHeader) {
-			return true
-		}
-	}
-	if resp != nil && hasSSEContentType(resp.Header.Get("Content-Type")) {
-		return true
-	}
-	return false
-}
-
 func getHeaderValueCaseInsensitive(headers map[string]string, key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	for k, v := range headers {
@@ -1639,12 +1777,16 @@ func hasSSEContentType(value string) bool {
 }
 
 // IsSSERequest checks whether a test case targets an SSE endpoint based on
-// the recorded response Content-Type or request Accept header.
+// the recorded response Content-Type or request Accept header. It picks the
+// port the request is sent to (an app may serve SSE on its own port, and a
+// CORS preflight to it asks for text/event-stream in its Accept), not
+// whether the response is a stream (models.HTTPStreamOf).
 func IsSSERequest(tc *models.TestCase) bool {
 	if tc == nil || tc.Kind != models.HTTP {
 		return false
 	}
-	return isSSETestCase(tc, nil)
+	return hasSSEContentType(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")) ||
+		hasSSEContentType(getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept"))
 }
 
 func boundaryFromContentTypeHeader(contentType string) string {
@@ -1658,31 +1800,6 @@ func boundaryFromContentTypeHeader(contentType string) string {
 	return strings.TrimSpace(params["boundary"])
 }
 
-func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) bool {
-	if resp != nil {
-		for _, te := range resp.TransferEncoding {
-			if strings.EqualFold(strings.TrimSpace(te), "chunked") {
-				return true
-			}
-		}
-		if strings.Contains(strings.ToLower(resp.Header.Get("Transfer-Encoding")), "chunked") {
-			return true
-		}
-		if resp.ContentLength == -1 {
-			return true
-		}
-	}
-
-	if tc != nil {
-		respTE := strings.ToLower(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Transfer-Encoding"))
-		if strings.Contains(respTE, "chunked") {
-			return true
-		}
-	}
-
-	return false
-}
-
 type expectedSSEFrame struct {
 	fields []sseField
 	raw    string
@@ -1690,18 +1807,26 @@ type expectedSSEFrame struct {
 
 func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	readToEnd := provenswitch.On()
-	expectedQueue := extractExpectedSSEQueue(expectedResp)
+	expectedQueue, err := extractExpectedSSEQueue(expectedResp)
+	if err != nil {
+		return false, "", nil, err
+	}
+	if len(expectedQueue) == 0 {
+		// No frame: an empty stream's, or blank lines alone. A recording
+		// of comments alone holds frames, and is compared by them, as any
+		// recording is.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
+	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-	scanner.Split(splitSSEFrames)
-
+	scanner := sseFrameScanner(stream)
 	for scanner.Scan() {
-		rawFrame := normalizeLineEndings(scanner.Text())
-		frame := strings.Trim(rawFrame, "\n")
-		if strings.TrimSpace(frame) == "" {
+		frame, ok := sseFrameOf(scanner.Text())
+		if !ok {
 			continue
 		}
 
@@ -1782,12 +1907,21 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	readToEnd := provenswitch.On()
-	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
+	expectedQueue, err := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
+	if err != nil {
+		return false, "", nil, err
+	}
+	if len(expectedQueue) == 0 {
+		// No line: an empty stream's, or blank lines alone (keepalives).
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
+	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner := lineScanner(stream)
 
 	// keepalives counts the blank lines since the last line.
 	keepalives := 0
@@ -1882,12 +2016,22 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 
 func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	readToEnd := provenswitch.On()
-	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
+	expectedQueue, err := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
+	if err != nil {
+		return false, "", nil, err
+	}
+	if len(expectedQueue) == 0 {
+		// No line (a text stream's blank lines are its lines): an empty
+		// stream's.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
+	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner := lineScanner(stream)
 
 	for scanner.Scan() {
 		line := canonicalizePlainTextLine(scanner.Text())
@@ -1949,6 +2093,14 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	readToEnd := provenswitch.On()
 	expectedBytes := expectedBinaryBytes(expectedResp)
+	if len(expectedBytes) == 0 {
+		// No byte: an empty stream's. The answer's first byte ends the
+		// read and fails it under either switch (the size differs), and
+		// its end with none passes: readToEnd changes nothing here.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+	}
 	expectedSize := len(expectedBytes)
 	actualSize := 0
 	contentMatch := true
@@ -2054,12 +2206,66 @@ func expectedBinaryBytes(expectedResp models.HTTPResp) []byte {
 	return []byte(expectedResp.Body)
 }
 
-func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
-	if len(expectedResp.StreamBody) == 0 {
+// extractExpectedSSEQueue is the recorded SSE events an answer is compared
+// with: those its recording kept (StreamBody), or, when it kept none (a test
+// case carried as JSON carries its body alone), its recorded body read as the
+// answer is read (sseQueueOfBody). One that holds no frame is compared with
+// none, and the answer read to its end (streamRecordedWithNoFrame): stopping
+// before the answer's first frame, any stream would pass.
+func extractExpectedSSEQueue(expectedResp models.HTTPResp) ([]expectedSSEFrame, error) {
+	if queue := sseQueueOf(expectedResp.StreamBody); len(queue) > 0 {
+		return queue, nil
+	}
+	return sseQueueOfBody(expectedResp.Body)
+}
+
+// sseQueueOfBody is a recorded SSE body's events, read as compareSSEStream
+// reads the answer's (sseFrameScanner, sseFrameOf, parseSSEFrame), so an
+// event of the recording and the same event of the answer are read alike. A
+// body that cannot be read so (a frame over maxStreamTokenSize) is an error,
+// never the events before it alone.
+func sseQueueOfBody(body string) ([]expectedSSEFrame, error) {
+	var queue []expectedSSEFrame
+	scanner := sseFrameScanner(strings.NewReader(body))
+	for scanner.Scan() {
+		if frame, ok := sseFrameOf(scanner.Text()); ok {
+			queue = append(queue, expectedSSEFrame{fields: parseSSEFrame(frame), raw: frame})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read the recorded SSE body: %w", err)
+	}
+	return queue, nil
+}
+
+// sseFrameScanner reads an SSE stream frame by frame (splitSSEFrames).
+func sseFrameScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner.Split(splitSSEFrames)
+	return scanner
+}
+
+// sseFrameOf is a frame sseFrameScanner read, its line endings normalized and
+// its edges trimmed; false for a blank one, which carries nothing.
+func sseFrameOf(token string) (string, bool) {
+	frame := strings.Trim(normalizeLineEndings(token), "\n")
+	return frame, strings.TrimSpace(frame) != ""
+}
+
+// lineScanner reads a stream of lines (NDJSON, text) line by line.
+func lineScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	return scanner
+}
+
+func sseQueueOf(chunks []models.HTTPStreamChunk) []expectedSSEFrame {
+	if len(chunks) == 0 {
 		return nil
 	}
-	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
-	for _, chunk := range expectedResp.StreamBody {
+	queue := make([]expectedSSEFrame, 0, len(chunks))
+	for _, chunk := range chunks {
 		if len(chunk.Data) == 0 {
 			continue
 		}
@@ -2100,12 +2306,44 @@ func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
 	return queue
 }
 
-func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	if len(expectedResp.StreamBody) == 0 {
+// extractExpectedRawQueue is the recorded lines (NDJSON, a text stream) an
+// answer is compared with: those its recording kept (StreamBody), or, when it
+// kept none, its recorded body read as the answer is read (rawQueueOfBody),
+// as extractExpectedSSEQueue does for SSE.
+func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) ([]string, error) {
+	if queue := rawQueueOf(expectedResp.StreamBody, canonicalizer, ignoreEmpty); len(queue) > 0 {
+		return queue, nil
+	}
+	return rawQueueOfBody(expectedResp.Body, canonicalizer, ignoreEmpty)
+}
+
+// rawQueueOfBody is a recorded body's lines, read as compareNDJSONStream and
+// comparePlainTextStream read the answer's (lineScanner): each canonicalized,
+// a blank one skipped when ignoreEmpty (NDJSON's keepalives). A body that
+// cannot be read so (a line over maxStreamTokenSize) is an error, never the
+// lines before it alone.
+func rawQueueOfBody(body string, canonicalizer func(string) string, ignoreEmpty bool) ([]string, error) {
+	var queue []string
+	scanner := lineScanner(strings.NewReader(body))
+	for scanner.Scan() {
+		line := canonicalizer(scanner.Text())
+		if ignoreEmpty && line == "" {
+			continue
+		}
+		queue = append(queue, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read the recorded body by its lines: %w", err)
+	}
+	return queue, nil
+}
+
+func rawQueueOf(chunks []models.HTTPStreamChunk, canonicalizer func(string) string, ignoreEmpty bool) []string {
+	if len(chunks) == 0 {
 		return nil
 	}
-	queue := make([]string, 0, len(expectedResp.StreamBody))
-	for _, chunk := range expectedResp.StreamBody {
+	queue := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
 		raw, ok := streamChunkFieldValue(chunk, "raw")
 		if !ok {
 			continue
@@ -2335,18 +2573,39 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 	}
 
 	expectedBody := expectedResp.Body
-	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), boundary)
+	// The recording is read by its own boundary, the answer by its own: a
+	// multipart writer picks a new boundary for each response (Go's does),
+	// and read by the answer's, the recorded body held no part to compare.
+	expectedBoundary := boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(expectedResp.Header, "Content-Type"))
+	if expectedBoundary == "" {
+		expectedBoundary = boundary
+	}
+	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), expectedBoundary)
 	if err != nil {
-		return false, "", nil, err
+		return false, "", nil, fmt.Errorf("failed to read the recorded multipart body by its boundary %q: %w", expectedBoundary, err)
+	}
+	if len(expectedQueue) == 0 {
+		// No part: an empty stream's, or a body of none.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
 	}
 
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
-	reader := multipart.NewReader(stream, boundary)
+	answer := &byteCount{r: stream}
+	reader := multipart.NewReader(answer, boundary)
 
 	for {
 		part, partErr := reader.NextPart()
 		if partErr == io.EOF {
+			break
+		}
+		if partErr != nil && answer.n == 0 && errors.Is(partErr, io.EOF) {
+			// An answer that ended before its first byte holds no
+			// part: multipart.Reader reads it as an error ("NextPart:
+			// EOF"), not as the end of a stream of none.
 			break
 		}
 		if partErr != nil {
@@ -2409,6 +2668,18 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 	}
 
 	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, nil
+}
+
+// byteCount counts the bytes read through it.
+type byteCount struct {
+	r io.Reader
+	n int64
+}
+
+func (c *byteCount) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 type multipartPartPayload struct {
@@ -3137,6 +3408,15 @@ type TestSetMocksReader interface {
 	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
 }
 
+// TestSetMockIndexReader is an optional extension of the mock store a replay
+// loads a test set's mocks from: GetTestSetMocks that leaves each mock's
+// payload in the set's mock file (models.Mock.LeavePayloadOnDisk), so the
+// replay holds a small entry per mock, and reads a payload back only to send
+// the mock to the agent (models.Mock.WithPayload).
+type TestSetMockIndexReader interface {
+	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages
@@ -3144,6 +3424,71 @@ type TestSetMocksReader interface {
 // (ConsumedForAgent). Without it the whole history is sent.
 type ConsumedScopeReader interface {
 	AgentReadsConsumedPerTestOnly() bool
+}
+
+// ClientTestsReader is an optional extension of the instrumentation keploy
+// mock talks to the agent through: whether the agent said, in its answer to
+// the session's MockOutgoing, that its learn step reads the session's tests
+// as client tests (models.ClientTestsReadHeader). Without it, keploy mock
+// takes the agent for one that does not.
+type ClientTestsReader interface {
+	AgentReadsClientTests() bool
+}
+
+// AgentVersionReader is an optional extension of the instrumentation the CLI
+// talks to the agent through: the keploy version the agent named in its last
+// answer (models.AgentVersionHeader), "" where it named none. Without it, the
+// agent is taken for one that named none.
+type AgentVersionReader interface {
+	AgentVersion() string
+}
+
+// AgentVersionOf is the keploy version instr's agent named in its last answer
+// (AgentVersionReader): "" where it named none, or instr cannot say.
+func AgentVersionOf(instr any) string {
+	if r, ok := instr.(AgentVersionReader); ok {
+		return r.AgentVersion()
+	}
+	return ""
+}
+
+// AgentDidNotSay is how a reason that keeps nothing the agent learned says
+// that the agent did not say what (as "it read the test case's request"),
+// naming the agent by the version it named (agent; AgentVersionOf), or as
+// one that named none, and this keploy by its own: "the agent (keploy
+// v3.6.1) did not say <what>, as an agent older than this keploy (v3.7.0)
+// does not", or "the agent did not say <what>, nor its version, as ...".
+func AgentDidNotSay(agent, what string) string {
+	who, nor := "the agent", ", nor its version"
+	if agent != "" {
+		who, nor = "the agent (keploy "+agent+")", ""
+	}
+	own := ""
+	if utils.Version != "" {
+		own = " (" + utils.Version + ")"
+	}
+	return who + " did not say " + what + nor + ", as an agent older than this keploy" + own + " does not"
+}
+
+// TestCaseFilterSender is an optional extension of the instrumentation a
+// replay talks to the agent through: SendTestCaseFilter sends params, a
+// filter that opens a test case and carries its request
+// (models.MockFilterParams.TestRequest), as UpdateMockParams does, and says
+// whether the agent's answer to that call said its learn step took the
+// request (models.TestRequestReadHeader). The answer is that call's own: no
+// other call, concurrent or later, changes what it says. Without it, the
+// request is taken for one the agent did not read.
+type TestCaseFilterSender interface {
+	SendTestCaseFilter(ctx context.Context, params models.MockFilterParams) (requestRead bool, err error)
+}
+
+// BackgroundRulesReader is an optional extension of the instrumentation a
+// replay talks to the agent through: the background rules the agent said, in
+// its answer to the last staging call, it serves the staged set by
+// (models.BackgroundRulesHeader). Without it, or with "", the agent serves by
+// today's rules.
+type BackgroundRulesReader interface {
+	AgentServesBackground() string
 }
 
 // PerTestRegion is the set of names of the per-test mocks a test set hands the
@@ -4429,6 +4774,25 @@ func hasExplicitPort(hostStr string) bool {
 	return false
 }
 
+// urlReplacement is the replaceWith URL entry that applies to target: of those
+// whose substring target contains, the one with the longest substring (the
+// most specific), then the lowest. One entry, chosen the same way wherever it
+// is asked: ResolveTestTarget applies it, and PublishedTarget leaves a test
+// it sends to a port of its own where it is. (A map's order is random: taking
+// the first entry that matched applied a different one from run to run when
+// several did.)
+func urlReplacement(target string, urlReplacements map[string]string) (substr, replacement string, ok bool) {
+	for s, r := range urlReplacements {
+		if !strings.Contains(target, s) {
+			continue
+		}
+		if !ok || len(s) > len(substr) || (len(s) == len(substr) && s < substr) {
+			substr, replacement, ok = s, r, true
+		}
+	}
+	return substr, replacement, ok
+}
+
 // ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
 // by applying replacement logic and precedence rules.
 //
@@ -4443,34 +4807,16 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	replacementMatched := false
 
 	// Step 1: Check replaceWith URL
-	if len(urlReplacements) > 0 {
-		for substr, replacement := range urlReplacements {
-			if strings.Contains(finalTarget, substr) {
-				replacementMatched = true
-				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
-
-				// Check if the replacement value explicitly defines a port.
-				checkStr := replacement
-				if isHTTP {
-					if strings.HasPrefix(replacement, "http://") {
-						checkStr = strings.TrimPrefix(replacement, "http://")
-					} else if strings.HasPrefix(replacement, "https://") {
-						checkStr = strings.TrimPrefix(replacement, "https://")
-					}
-				}
-
-				if hasExplicitPort(checkStr) {
-					replacementHasPort = true
-				}
-
-				logger.Debug("Applied replaceWith substitution",
-					zap.String("find", substr),
-					zap.String("replace", replacement),
-					zap.String("result_target", finalTarget),
-					zap.Bool("replacement_has_port", replacementHasPort))
-				break
-			}
-		}
+	if substr, replacement, ok := urlReplacement(finalTarget, urlReplacements); ok {
+		replacementMatched = true
+		finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
+		// Whether the replacement value explicitly defines a port.
+		replacementHasPort = replacementNamesPort(replacement, isHTTP)
+		logger.Debug("Applied replaceWith substitution",
+			zap.String("find", substr),
+			zap.String("replace", replacement),
+			zap.String("result_target", finalTarget),
+			zap.Bool("replacement_has_port", replacementHasPort))
 	}
 
 	// If URL replacement set a port and there are no port mappings, we are done

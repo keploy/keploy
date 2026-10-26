@@ -160,14 +160,17 @@ func TestReadAfterCloseReturnsErrClosed(t *testing.T) {
 
 // TestReadChunkAfterCloseDrainsBuffered is the FakeConn-side regression
 // guard for the startup-mock "server closed before response" drop. The
-// relay tee delivers the final response chunk into f.ch and the relay
-// then calls Close() during teardown. A chunk already sitting in f.ch is
-// a fully recorded wire event: Close means "no more blocking", not
-// "discard bytes already delivered to me". ReadChunk after Close must
-// therefore return the buffered chunk(s) first and only report ErrClosed
-// once nothing buffered remains. Before the fix, the f.closed short
-// circuit returned ErrClosed immediately and the buffered response chunk
-// (carrying the startup mock body) was lost.
+// relay tee delivers the final response chunk into f.ch, and the FakeConn
+// is then closed. A chunk already sitting in f.ch is a fully recorded wire
+// event: Close means "no more blocking", not "discard bytes already
+// delivered to me". ReadChunk after Close must therefore return the
+// buffered chunk(s) first. Here the channel stays open, as it does when the
+// session's abort closes the FakeConn while the tee could still send, so
+// once nothing buffered remains ReadChunk reports ErrClosed; at the relay's
+// teardown the tee has closed the channel first, and the end reads io.EOF
+// (TestAStreamItsProducerEndedReadsEOFAfterClose). Before the fix, the
+// f.closed short circuit returned ErrClosed immediately and the buffered
+// response chunk (carrying the startup mock body) was lost.
 func TestReadChunkAfterCloseDrainsBuffered(t *testing.T) {
 	t.Parallel()
 	ch := make(chan Chunk, 2)
@@ -212,6 +215,73 @@ func TestReadAfterCloseDrainsBuffered(t *testing.T) {
 	}
 }
 
+// A stream its producer ended (it closed the channel) reads io.EOF once the
+// reader has taken everything, whether the reader got there before the
+// FakeConn was closed or after it: the relay closes the channel and then the
+// FakeConn, and a parser running behind its capture reads the rest after both.
+// Its end must read the same either way: a parser that tells the stream's end
+// (io.EOF) from its reader being closed (ErrClosed) otherwise decides by which
+// of the two it happened to see first. ErrClosed is a reader closed while its
+// producer could still send (TestReadChunkAfterCloseDrainsBuffered).
+func TestAStreamItsProducerEndedReadsEOFAfterClose(t *testing.T) {
+	t.Parallel()
+	for _, read := range []struct {
+		name string
+		next func(*FakeConn) ([]byte, error)
+	}{
+		{"ReadChunk", func(f *FakeConn) ([]byte, error) { c, err := f.ReadChunk(); return c.Bytes, err }},
+		{"Read", func(f *FakeConn) ([]byte, error) { p := make([]byte, 64); n, err := f.Read(p); return p[:n], err }},
+		{"Peek", func(f *FakeConn) ([]byte, error) {
+			c, err := f.Peek()
+			if err == nil {
+				_, err = f.ReadChunk()
+			}
+			return c.Bytes, err
+		}},
+	} {
+		t.Run(read.name, func(t *testing.T) {
+			t.Parallel()
+			ch := make(chan Chunk, 1)
+			ch <- Chunk{Dir: FromDest, Bytes: []byte("the rest of the response"), WrittenAt: time.Unix(7, 0)}
+			close(ch)
+			f := New(ch, nil, nil)
+			_ = f.Close()
+			if b, err := read.next(f); err != nil || string(b) != "the rest of the response" {
+				t.Fatalf("first read after Close = %q, %v; want the chunk delivered before it", b, err)
+			}
+			for i := 0; i < 2; i++ {
+				if _, err := read.next(f); err != io.EOF {
+					t.Fatalf("read %d past the end of a stream its producer ended, after Close = %v, want io.EOF", i+2, err)
+				}
+			}
+		})
+	}
+	t.Run("SkipThrough", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan Chunk, 1)
+		ch <- Chunk{Dir: FromDest, Bytes: []byte("old"), ReadAt: time.Unix(1, 0)}
+		close(ch)
+		f := New(ch, nil, nil)
+		_ = f.Close()
+		if n, _, err := f.SkipThrough(time.Unix(3, 0)); err != io.EOF || n != 3 {
+			t.Fatalf("SkipThrough after Close = (%d, %v), want the 3 bytes skipped and io.EOF", n, err)
+		}
+	})
+	t.Run("drained before the Close", func(t *testing.T) {
+		t.Parallel()
+		ch := make(chan Chunk)
+		close(ch)
+		f := New(ch, nil, nil)
+		if _, err := f.ReadChunk(); err != io.EOF {
+			t.Fatalf("ReadChunk = %v, want io.EOF", err)
+		}
+		_ = f.Close()
+		if _, err := f.ReadChunk(); err != io.EOF {
+			t.Fatalf("ReadChunk after Close = %v, want io.EOF still", err)
+		}
+	})
+}
+
 // A reader that found nothing and is about to wait, when a chunk is delivered
 // and Close follows, still gets the chunk: the relay's teardown delivers what
 // its tee holds and then closes the stream, and a parser a moment behind lost
@@ -248,6 +318,42 @@ func TestReadChunkAboutToWaitWhenAChunkAndCloseArriveGetsTheChunk(t *testing.T) 
 	}
 	if lost != 0 {
 		t.Fatalf("a chunk delivered before Close was lost in %d of %d rounds", lost, rounds)
+	}
+}
+
+// A reader waiting on an empty stream when the relay tears the connection
+// down, which closes the stream's channel and then the FakeConn, reads io.EOF:
+// both arrive between Waiting and the wait (beforeWait) in every round, so the
+// reader waits with both ready every time, and whichever wakes it, the stream
+// has ended. It used to read ErrClosed whenever the Close woke it.
+func TestAReaderWaitingAsTheRelayEndsTheStreamReadsEOF(t *testing.T) {
+	// Not parallel: it sets the package's beforeWait. The hook acts only for
+	// this test's FakeConn, and runs on the goroutine that reads it.
+	t.Cleanup(func() { beforeWait.Store(nil) })
+	const rounds = 2000
+	notEOF := 0
+	for i := 0; i < rounds; i++ {
+		ch := make(chan Chunk)
+		f := New(ch, nil, nil)
+		ended := false
+		hook := func(waiting *FakeConn) {
+			if waiting != f || ended {
+				return
+			}
+			ended = true
+			close(ch)
+			_ = f.Close()
+		}
+		beforeWait.Store(&hook)
+		if _, err := f.ReadChunk(); err != io.EOF {
+			notEOF++
+		}
+		if !ended {
+			t.Fatal("the reader did not wait: the stream did not end as it was about to")
+		}
+	}
+	if notEOF != 0 {
+		t.Fatalf("a stream the relay ended read as something other than io.EOF in %d of %d rounds", notEOF, rounds)
 	}
 }
 

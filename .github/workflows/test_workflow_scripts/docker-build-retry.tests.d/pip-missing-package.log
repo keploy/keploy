@@ -1,0 +1,3 @@
+Looking in indexes: http://127.0.0.1:36201/simple/
+ERROR: Could not find a version that satisfies the requirement nosuchpkg==0.0.0 (from versions: none)
+ERROR: No matching distribution found for nosuchpkg==0.0.0

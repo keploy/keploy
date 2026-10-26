@@ -26,6 +26,14 @@ import (
 // written, not yet received, as when they are on their way.
 func heldPair(t *testing.T, network, addr string) (p *Proxy, app, proxySide *net.TCPConn, reader net.Conn) {
 	t.Helper()
+	p = &Proxy{logger: zap.NewNop()}
+	app, proxySide, reader = heldPairOn(t, p, 1, network, addr)
+	return p, app, proxySide, reader
+}
+
+// heldPairOn is heldPair on p, paired as application connection appSeq.
+func heldPairOn(t *testing.T, p *Proxy, appSeq uint64, network, addr string) (app, proxySide *net.TCPConn, reader net.Conn) {
+	t.Helper()
 	lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
 		var serr error
 		if err := rc.Control(func(fd uintptr) {
@@ -60,12 +68,11 @@ func heldPair(t *testing.T, network, addr string) (p *Proxy, app, proxySide *net
 	}
 	proxySide = s.(*net.TCPConn)
 	t.Cleanup(func() { _ = proxySide.Close() })
-	p = &Proxy{logger: zap.NewNop()}
-	p.paired.add(proxySide, 1)
+	p.paired.add(proxySide, appSeq)
 	tracked := p.inflight.track(proxySide)
 	tracked.beforeClose = func() { p.pairClosing(context.Background(), proxySide, tracked) }
 	t.Cleanup(func() { p.inflight.forget(tracked) })
-	return p, app, proxySide, tracked
+	return app, proxySide, tracked
 }
 
 // queue writes to the application's socket what its send buffer takes
@@ -96,15 +103,6 @@ func received(t *testing.T, c *net.TCPConn) uint64 {
 		t.Fatalf("TCP_INFO: %v %v", err, gerr)
 	}
 	return ti.Bytes_received
-}
-
-func lossesOf(p *Proxy, kind models.CaptureLossKind) uint64 {
-	for _, l := range p.losses.Snapshot() {
-		if l.Kind == kind {
-			return l.Count
-		}
-	}
-	return 0
 }
 
 // A call written to a connection the proxy already holds (a pooled one) is

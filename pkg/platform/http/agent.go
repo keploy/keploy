@@ -74,9 +74,15 @@ type AgentClient struct {
 	agentCancel  context.CancelFunc // Function to cancel the agent context
 
 	// agentContainer is the container Setup set the agent up to run in, in a
-	// docker mode (docker run, or as a service docker compose starts); ""
-	// natively. Under mu. WatchAgentStart watches its start.
-	agentContainer string
+	// docker mode (docker run, or as a service docker compose starts): the
+	// entry its naming made (nameAgentContainer), on which Run and the
+	// watches note what they see of it, its name with it; nil natively.
+	// agentContainerAt is the agent address it is mapped at in containerAt.
+	// Both are what the client forgets, and only that, when it sets up
+	// another agent (forgetAgentContainer). Under mu. WatchAgentStart
+	// watches its start.
+	agentContainer   *namedContainer
+	agentContainerAt string
 
 	// startedAgent: this client started the agent it talks to (natively, or
 	// in a container it runs), so nothing but this client stops it. Not
@@ -103,6 +109,24 @@ type AgentClient struct {
 	// StoreMocks clears it: a store addresses an agent, possibly a fresh one,
 	// whose answer this client has not seen yet.
 	consumedPerTest atomic.Bool
+	// stagedBackground holds the background rules the agent's answer to the
+	// last staging call said it serves the set by
+	// (models.BackgroundRulesHeader): "" until one says the background rules.
+	stagedBackground atomic.Pointer[string]
+	// clientTestsRead holds whether the agent's answer to the last /mock
+	// said its learn step reads the session's tests as keploy mock's client
+	// tests (models.ClientTestsReadHeader). Every call clears it first.
+	clientTestsRead atomic.Bool
+	// agentVersion holds the keploy version the agent's last successful
+	// answer to /mock or /updatemockparams named (models.AgentVersionHeader):
+	// "" where it named none, and until one is answered.
+	agentVersion atomic.Pointer[string]
+
+	// concurrentServing holds what the agent's last /storemocks answer said
+	// of serving a test the recordings it shares with the tests that ran
+	// beside it (models.ExactConcurrentHeader). Each StoreMocks clears it
+	// first: a store addresses an agent, possibly a fresh one.
+	concurrentServing atomic.Bool
 
 	// run is the agent's current start (startAgent); guarded by mu. A stop
 	// reads how to end the agent from the run it stops, never from a later one.
@@ -136,7 +160,11 @@ type AgentClient struct {
 // (startAgent): the stop of an earlier start, which a setup retry waits for,
 // reads its own.
 type agentRun struct {
-	ready    atomic.Bool
+	ready atomic.Bool
+	// scope is the teardown scope of the run that started the agent
+	// (utils.TeardownScopeOf of the start's context): its stop's reports
+	// that move tick it (stopWatch.moved). Set before the run is shared.
+	scope    *utils.TeardownScope
 	gone     chan struct{} // closed once the agent process (or its container's client) has exited
 	goneOnce sync.Once
 	// letGo is closed once its stop killed it at once at the user's Ctrl+C,
@@ -245,6 +273,64 @@ func (a *AgentClient) currentRun() *agentRun {
 // must be sent.
 func (a *AgentClient) AgentReadsConsumedPerTestOnly() bool {
 	return a.consumedPerTest.Load()
+}
+
+// ServesConcurrent reports whether the agent's last /storemocks answer said it
+// serves a test the recordings it shares with the tests that ran beside it at
+// record time (models.ExactConcurrentHeader). False until a store has said so,
+// and from the start of every StoreMocks.
+func (a *AgentClient) ServesConcurrent() bool {
+	return a.concurrentServing.Load()
+}
+
+// AgentReadsClientTests reports whether the agent's answer to the last /mock
+// said its learn step reads the session's tests as keploy mock's client
+// tests (models.ClientTestsReadHeader). False until an answer says so, and
+// from the start of every call.
+func (a *AgentClient) AgentReadsClientTests() bool {
+	return a.clientTestsRead.Load()
+}
+
+// AgentVersion is the keploy version the agent's last successful answer to
+// /mock or /updatemockparams named (models.AgentVersionHeader;
+// pkg.AgentVersionReader): "" where it named none, as an agent older than
+// this keploy does not, and until one is answered.
+func (a *AgentClient) AgentVersion() string {
+	if v := a.agentVersion.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// noteAgentVersion keeps the version a successful answer's header names
+// (AgentVersion), "" where it names none.
+func (a *AgentClient) noteAgentVersion(h http.Header) {
+	v := h.Get(models.AgentVersionHeader)
+	a.agentVersion.Store(&v)
+}
+
+// SendTestCaseFilter sends params, a filter that opens a test case and
+// carries its request, as UpdateMockParams does, and reports whether the
+// agent's answer to this call said its learn step took the request
+// (models.TestRequestReadHeader; pkg.TestCaseFilterSender): false for an
+// answer that says nothing, and for a call that fails.
+func (a *AgentClient) SendTestCaseFilter(ctx context.Context, params models.MockFilterParams) (bool, error) {
+	header, err := a.updateMockParams(ctx, params)
+	if err != nil {
+		return false, err
+	}
+	return header.Get(models.TestRequestReadHeader) == models.TestRequestRead, nil
+}
+
+// AgentServesBackground is the background rules the agent's answer to the
+// last staging call said it serves the staged set by
+// (models.BackgroundRulesHeader): "" for today's, and until a staging is
+// answered.
+func (a *AgentClient) AgentServesBackground() string {
+	if r := a.stagedBackground.Load(); r != nil {
+		return *r
+	}
+	return ""
 }
 
 // var initStopScript []byte
@@ -853,6 +939,9 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	// Only a successful answer that says so (models.ClientTestsReadHeader)
+	// sets it again below.
+	a.clientTestsRead.Store(false)
 
 	// See GetOutgoing: mirror both spellings before the marshal so a pre-rename
 	// agent still sees the toggle.
@@ -898,8 +987,12 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 	if readErr != nil {
 		return fmt.Errorf("failed to read response body for mock outgoing: %s", readErr.Error())
 	}
-
-	return agentRespErr("mock outgoing", res, rawBody)
+	if err := agentRespErr("mock outgoing", res, rawBody); err != nil {
+		return err
+	}
+	a.clientTestsRead.Store(res.Header.Get(models.ClientTestsReadHeader) == models.ClientTestsRead)
+	a.noteAgentVersion(res.Header)
+	return nil
 }
 
 // agentRespErr turns an agent reply into the caller's error, and is the ONE
@@ -1143,21 +1236,14 @@ func (a *AgentClient) whileAgentRuns(ctx context.Context) (context.Context, func
 	}
 }
 
-// StoreMocks sends the mock corpus to the agent. It streams by default (a gob
+// StoreMocks sends the mock corpus to the agent as one stream (a gob
 // MockStreamHeader over an io.Pipe, then filtered then unfiltered mocks, one gob
-// frame each) — streaming was added (#4327) so the agent doesn't buffer the
-// whole corpus and OOM on large recordings.
-//
-// Backward compatibility: a pre-streaming agent (keploy <= v3.5.84) gob-decodes
-// the request body as a single StoreMocksReq and fails the instant it meets the
-// MockStreamHeader ("type mismatch: no fields matched"), returning HTTP 400.
-// Rather than lockstep-break every rolling upgrade where the deployed agent
-// image lags the controller (a fresh streaming controller talking to an
-// already-running old agent), StoreMocks transparently retries such a 400 with
-// the legacy single-shot framing the old agent understands. An agent old enough
-// to reject the stream is old enough to have handled single-shot before — and
-// predates the large-corpus recordings streaming exists for — so the fallback
-// is safe; a genuine bad-request 400 simply fails again on the retry.
+// frame each): the agent never buffers the whole corpus (#4327), and neither
+// does this side. A mock whose payload the replay's read left in its mock file
+// (models.Mock.LeavePayloadOnDisk) is read back as it is encoded, and dropped
+// once it is (models.Mock.WithPayload), so the corpus is never whole in memory
+// here either. A payload that cannot be read back fails the call, and the
+// agent, whose stream ends early, keeps the mocks it held.
 func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) (retErr error) {
 	// The callers strip what the agent does not hold (models.AgentBound) at
 	// the source, so their counts agree with what is sent; this is the same
@@ -1169,35 +1255,39 @@ func (a *AgentClient) StoreMocks(ctx context.Context, filtered []*models.Mock, u
 		}
 	}()
 	a.consumedPerTest.Store(false)
+	a.concurrentServing.Store(false)
 	// A dedicated cancelable context for the stream request: cancelling it tears
 	// down the transport's read of the io.Pipe body, which unblocks the encoder
-	// goroutine's pw.Write if the agent responded (e.g. 400) before consuming the
-	// whole stream — so the fallback path can't leak that goroutine.
+	// goroutine's pw.Write if the agent responded before consuming the whole
+	// stream, so that goroutine can't leak.
 	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
 
 	encoding := a.storeMocksEncoding(ctx)
 	start := time.Now()
 	res, sent, err := a.storeMocksStream(streamCtx, filtered, unFiltered, encoding)
 	if err != nil {
-		cancelStream()
+		if sendErr := sent.failure(); sendErr != nil {
+			return sendErr
+		}
 		return err
 	}
-
-	if res.StatusCode == http.StatusBadRequest {
-		_, _ = io.Copy(io.Discard, res.Body)
-		_ = res.Body.Close()
-		cancelStream()
-		a.logger.Warn("agent rejected streaming /storemocks with HTTP 400; retrying with legacy single-shot framing. The usual cause is a deployed agent that predates streaming (keploy <= v3.5.84) during a rolling upgrade — align the agent image with the controller's keploy version to use streaming and avoid buffering the whole mock corpus. (A new agent that returns 400 for another reason will simply fail the legacy retry too, surfacing the real error.)")
-		return a.storeMocksLegacy(ctx, filtered, unFiltered)
-	}
-
-	defer cancelStream()
 	defer res.Body.Close()
-	if err := decodeStoreMocksResp(res); err != nil {
-		return err
+	respErr := decodeStoreMocksResp(res)
+	// The agent answers a stream that ended early with an error of its
+	// own; the reason it ended is this side's.
+	if sendErr := sent.failure(); sendErr != nil {
+		return sendErr
 	}
+	if respErr != nil {
+		return respErr
+	}
+	a.concurrentServing.Store(res.Header.Get(models.ExactConcurrentHeader) == models.ExactConcurrentServes)
 	a.logger.Info("stored the mocks on the agent",
 		zap.Int("mocks", len(filtered)+len(unFiltered)),
+		// How many of them were read back from their mock file as they were
+		// sent: a set read whole has none.
+		zap.Int64("payloadsReadBack", sent.readBack.Load()),
 		zap.Int64("bytes", sent.raw.Load()),
 		zap.Int64("sentBytes", sent.wire.Load()),
 		zap.String("encoding", encodingName(encoding)),
@@ -1269,11 +1359,28 @@ func encodingName(encoding string) string {
 }
 
 // mockStreamBytes counts a /storemocks stream before compression (raw) and as
-// sent (wire). The encoder goroutine writes them while the caller may read them,
-// hence atomics.
+// sent (wire), and keeps why the encoder could not read a payload back (err).
+// The encoder goroutine writes them while the caller may read them, hence
+// atomics.
 type mockStreamBytes struct {
 	raw  atomic.Int64
 	wire atomic.Int64
+	err  atomic.Pointer[error]
+	// readBack counts the mocks whose payloads were read back from their
+	// mock file as they were encoded (models.Mock.WithPayload).
+	readBack atomic.Int64
+}
+
+// failure is why the encoder ended the stream before its last mock when the
+// reason is this side's: a payload it could not read back. nil otherwise.
+func (s *mockStreamBytes) failure() error {
+	if s == nil {
+		return nil
+	}
+	if p := s.err.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // countingWriter adds what it writes to n.
@@ -1290,7 +1397,7 @@ func (c countingWriter) Write(p []byte) (int, error) {
 
 // storeMocksStream POSTs the corpus as a gob stream (MockStreamHeader + one
 // frame per mock), zstd-compressed when encoding says so, and returns the raw
-// response so the caller can decide whether to fall back on a 400.
+// response. Each mock whose payload is on disk is read back as it is encoded.
 func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock, encoding string) (*http.Response, *mockStreamBytes, error) {
 	pr, pw := io.Pipe()
 	sent := &mockStreamBytes{}
@@ -1336,7 +1443,18 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 					}
 				}
 				i++
-				if err := enc.Encode(m); err != nil {
+				if m.PayloadOnDisk() {
+					sent.readBack.Add(1)
+				}
+				whole, err := m.WithPayload(ctx)
+				if err != nil {
+					// Kept for the caller: the agent sees only a stream that
+					// ended early.
+					err = fmt.Errorf("failed to send the mocks to the agent: %w", err)
+					sent.err.Store(&err)
+					return err
+				}
+				if err := enc.Encode(whole); err != nil {
 					return err
 				}
 			}
@@ -1380,57 +1498,115 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("send request for storemocks: %s", err.Error())
+		return nil, sent, fmt.Errorf("send request for storemocks: %s", err.Error())
 	}
 	return res, sent, nil
 }
 
-// storeMocksLegacy POSTs the corpus in the pre-streaming single-shot framing:
-// one gob-encoded StoreMocksReq with Content-Type application/x-gob. Used only
-// as the compatibility fallback when a deployed agent rejects the stream (see
-// StoreMocks). It buffers the whole corpus in memory the way the pre-#4327 path
-// did — acceptable here because it only runs against an old agent that never
-// supported streaming anyway.
-func (a *AgentClient) storeMocksLegacy(ctx context.Context, filtered []*models.Mock, unFiltered []*models.Mock) error {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(models.StoreMocksReq{
-		Filtered:   filtered,
-		UnFiltered: unFiltered,
-	}); err != nil {
-		utils.LogError(a.logger, err, "failed to gob-encode request body for storemocks (legacy)")
-		return fmt.Errorf("gob encode request for storemocks (legacy): %s", err.Error())
-	}
+// maxStoreMocksFailBody bounds what of a failed /storemocks reply is read to
+// tell whether it is the pre-stream agent's, which is one type definition of
+// some 50 bytes. A longer reply is still decoded, but is not taken for it.
+const maxStoreMocksFailBody = 64 << 10
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/storemocks", a.conf.Agent.AgentURI), &buf)
-	if err != nil {
-		utils.LogError(a.logger, err, "failed to create legacy request for storemocks")
-		return fmt.Errorf("create legacy request for storemocks: %s", err.Error())
-	}
-	req.Header.Set("Content-Type", "application/x-gob")
-	req.Header.Set("Accept", "application/x-gob")
+// agentGobMediaType is the media type of an agent's gob replies.
+const agentGobMediaType = "application/x-gob"
 
-	res, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("send legacy request for storemocks: %s", err.Error())
+// preStreamAgentReply reports whether a failed /storemocks reply is the one an
+// agent from before the mock stream gives: under the agent's gob media type,
+// one or more whole gob messages that each define a type, and nothing after
+// them, so the decoder read them all and then met the end where the value
+// should be (decodeErr is io.ErrUnexpectedEOF). That agent's encoder sends the
+// AgentResp type whole and fails on the value's error, which it cannot encode.
+func preStreamAgentReply(contentType string, body []byte, decodeErr error) bool {
+	if !errors.Is(decodeErr, io.ErrUnexpectedEOF) {
+		return false
 	}
-	defer res.Body.Close()
-	return decodeStoreMocksResp(res)
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != agentGobMediaType || len(body) > maxStoreMocksFailBody {
+		return false
+	}
+	return gobTypeDefinitionsOnly(body)
 }
 
-// decodeStoreMocksResp reads the agent's single AgentResp gob reply, shared by
-// the streaming and legacy paths so their response handling is identical.
+// gobTypeDefinitionsOnly reports whether b is one or more whole gob messages
+// (a byte count, then that many bytes), each opening with a negative type id,
+// which marks a type definition, and ends where the last one ends. A value's
+// message opens with its type's positive id.
+func gobTypeDefinitionsOnly(b []byte) bool {
+	messages := 0
+	for len(b) > 0 {
+		size, rest, ok := gobUint(b)
+		if !ok || size > uint64(len(rest)) {
+			return false
+		}
+		// An empty message has no type id, and fails here.
+		id, _, ok := gobUint(rest[:size])
+		// gob sends a signed int as a uint whose low bit is the sign: an
+		// odd one is negative.
+		if !ok || id&1 == 0 {
+			return false
+		}
+		b = rest[size:]
+		messages++
+	}
+	return messages > 0
+}
+
+// gobUint reads one gob unsigned integer off the front of b: a byte below 128
+// is its value, and a higher one is minus the count (at most 8) of the
+// big-endian bytes that follow and hold it.
+func gobUint(b []byte) (uint64, []byte, bool) {
+	if len(b) == 0 {
+		return 0, nil, false
+	}
+	if b[0] < 0x80 {
+		return uint64(b[0]), b[1:], true
+	}
+	n := -int(int8(b[0]))
+	if n > 8 || len(b) < 1+n {
+		return 0, nil, false
+	}
+	var x uint64
+	for _, c := range b[1 : 1+n] {
+		x = x<<8 | uint64(c)
+	}
+	return x, b[1+n:], true
+}
+
+// decodeStoreMocksResp reads the agent's single AgentResp gob reply.
 func decodeStoreMocksResp(res *http.Response) error {
 	// Non-2xx? Try to decode anyway; if that fails, return status text.
 	// An OLD agent reaches the decode failure here on every error: its gob
-	// encode aborted on the `error` interface field, having already written a
-	// PARTIAL type descriptor, so the decode fails with "unexpected EOF" on a
-	// truncated value rather than on an empty body — hence the bare
+	// encode aborted on the `error` interface field, having already written
+	// the AgentResp type's definition but none of the value, so the decode
+	// fails with "unexpected EOF" rather than on an empty body — hence the bare
 	// "storemocks http 500" this used to give. Unchanged for an old agent;
 	// a new one now carries its reason in ErrorMsg.
+	//
+	// A 400 whose reply is that type with no value is the agent from before
+	// the stream: it fails to read the stream's header on every call. The
+	// call is exact, since a caller may take the error as permanent and stop
+	// retrying the agent: the reply is application/x-gob, as every agent's
+	// /storemocks sets it, and it holds whole type definitions and then ends,
+	// where the value would be (preStreamAgentReply). A text 400, from a
+	// proxy or middleware in front of the agent (http.Error) or from net/http
+	// itself, keeps the plain error: a short one fails with
+	// io.ErrUnexpectedEOF too, since gob reads its first byte as a message
+	// length. An empty 400 and a reply cut short keep it too. An agent that
+	// reads the stream but not its reason in ErrorMsg (keploy v3.5.85 to v3.6.61)
+	// sends the same type with no value when its service fails, as a 500,
+	// which the next call may pass; it answers 400 only to a header it cannot
+	// read, which this side sends compressed only to an agent that says it
+	// reads zstd (v3.6.99 on).
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		body, readErr := io.ReadAll(io.LimitReader(res.Body, maxStoreMocksFailBody+1))
 		var fail models.AgentResp
-		if err := gob.NewDecoder(res.Body).Decode(&fail); err != nil {
+		// The decode goes on past the bound, so a reason of any length is
+		// still read; the bytes past it are not judged.
+		if err := gob.NewDecoder(io.MultiReader(bytes.NewReader(body), res.Body)).Decode(&fail); err != nil {
+			if res.StatusCode == http.StatusBadRequest && readErr == nil && preStreamAgentReply(res.Header.Get("Content-Type"), body, err) {
+				return fmt.Errorf("storemocks http %d: %w", res.StatusCode, models.ErrAgentPredatesMockStream)
+			}
 			return fmt.Errorf("storemocks http %d", res.StatusCode)
 		}
 		if msg := fail.ErrorMsg; msg != "" {
@@ -1458,7 +1634,14 @@ func decodeStoreMocksResp(res *http.Response) error {
 	return nil
 }
 
-func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) (retErr error) {
+func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
+	_, err := a.updateMockParams(ctx, params)
+	return err
+}
+
+// updateMockParams is UpdateMockParams, with the headers of the agent's
+// answer to this call (nil for a call that fails).
+func (a *AgentClient) updateMockParams(ctx context.Context, params models.MockFilterParams) (_ http.Header, retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := copyMockParams(params)
@@ -1468,6 +1651,12 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	// Only a successful answer that says so sets it again below; a call that
 	// fails at any point leaves the client believing nothing.
 	a.consumedPerTest.Store(false)
+	// Nor does it believe a staging's background rules (stagedBackground)
+	// until the agent's answer to it says them.
+	if ex := params.Exact; ex != nil && ex.Stage {
+		none := ""
+		a.stagedBackground.Store(&none)
+	}
 	requestBody := models.UpdateMockParamsReq{
 		FilterParams: params,
 	}
@@ -1475,19 +1664,19 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 	requestJSON, err := json.Marshal(requestBody)
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to marshal request body for updatemockparams")
-		return fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
+		return nil, fmt.Errorf("error marshaling request body for updatemockparams: %s", err.Error())
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/updatemockparams", a.conf.Agent.AgentURI), bytes.NewBuffer(requestJSON))
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to create request for updatemockparams")
-		return fmt.Errorf("error creating request for update mock params: %s", err.Error())
+		return nil, fmt.Errorf("error creating request for update mock params: %s", err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
+		return nil, fmt.Errorf("failed to send request for updatemockparams: %s", err.Error())
 	}
 	defer func() {
 		io.Copy(io.Discard, res.Body)
@@ -1498,14 +1687,19 @@ func (a *AgentClient) UpdateMockParams(ctx context.Context, params models.MockFi
 
 	rawBody, readErr := readAgentBody(res)
 	if readErr != nil {
-		return fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
+		return nil, fmt.Errorf("failed to read response body for updatemockparams: %s", readErr.Error())
 	}
 
 	if err := agentRespErr("update mock params", res, rawBody); err != nil {
-		return err
+		return nil, err
 	}
 	a.consumedPerTest.Store(res.Header.Get(models.ConsumedScopeHeader) == models.ConsumedScopePerTest)
-	return nil
+	a.noteAgentVersion(res.Header)
+	if ex := params.Exact; ex != nil && ex.Stage {
+		rules := res.Header.Get(models.BackgroundRulesHeader)
+		a.stagedBackground.Store(&rules)
+	}
+	return res.Header, nil
 }
 
 func (a *AgentClient) GetConsumedMocks(ctx context.Context) ([]models.MockState, error) {
@@ -1681,14 +1875,24 @@ func (a *AgentClient) GetPIDMapRefusals(ctx context.Context) (models.PIDMapRefus
 // than the route (404) or one that cannot count (501) gives
 // models.ErrCaptureLossesUnsupported, which is "unknown", not "none".
 func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	losses, _, err := a.GetCaptureLossesAndAgent(ctx)
+	return losses, err
+}
+
+// GetCaptureLossesAndAgent is GetCaptureLosses, and the agent process that
+// answered (models.AgentInstanceHeader): its counts are that process's, from
+// its start, and an agent started again in its place counts afresh. "" where
+// the answer names none (an agent with the switch off, or older than the
+// header).
+func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
 	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, "", fmt.Errorf("failed to create request: %w", err)
 	}
 	res, err := a.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
+		return nil, "", fmt.Errorf("failed to ask the agent for its capture losses: %w", err)
 	}
 	defer func() {
 		if err := res.Body.Close(); err != nil {
@@ -1696,17 +1900,17 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 		}
 	}()
 	if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusNotImplemented {
-		return nil, fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
+		return nil, "", fmt.Errorf("%w: agent returned %d", models.ErrCaptureLossesUnsupported, res.StatusCode)
 	}
 	if res.StatusCode != http.StatusOK {
 		rawBody, _ := readAgentBody(res)
-		return nil, agentRespErr("get capture losses", res, rawBody)
+		return nil, "", agentRespErr("get capture losses", res, rawBody)
 	}
 	var losses models.CaptureLosses
 	if err := json.NewDecoder(res.Body).Decode(&losses); err != nil {
-		return nil, fmt.Errorf("failed to decode the capture losses: %w", err)
+		return nil, "", fmt.Errorf("failed to decode the capture losses: %w", err)
 	}
-	return losses, nil
+	return losses, res.Header.Get(models.AgentInstanceHeader), nil
 }
 
 // GetUnchargedCaptureLosses asks the agent what it could not capture since
@@ -1743,6 +1947,18 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 }
 
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+	// The agent's container this run is to create, under docker compose: a
+	// release that waits for it ends once the run is over without it
+	// (containerExited). Its end is noted last, once Run returns, whichever
+	// way it ends: after the app's run has returned (and with it compose's up
+	// and the down after it), or before the app's run began. Both are noted
+	// on this client's entry of the container, not by its name, which
+	// another client's Setup may have drawn too.
+	a.mu.Lock()
+	container := a.agentContainer
+	a.mu.Unlock()
+	container.noteRun(false)
+	defer container.noteRun(true)
 	app, err := a.getApp()
 	if err != nil {
 		utils.LogError(a.logger, err, "failed to get app while running")
@@ -1755,9 +1971,10 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 	runAppErrGrp, runAppCtx := errgroup.WithContext(ctx)
 	appErrCh := make(chan models.AppError, 1)
 	// stopKilled is why the stop at a test set's end, or at a recording's
-	// end, had to kill the app (models.AppError.StopKilled), known once the
-	// app's run has returned.
-	var stopKilled string
+	// end, had to kill the app (models.AppError.StopKilled), and leftRunning
+	// what of its daemons the stop left running (models.AppError.LeftRunning),
+	// known once the app's run has returned.
+	var stopKilled, leftRunning string
 	defer func() {
 		err := runAppErrGrp.Wait()
 		if err != nil {
@@ -1765,6 +1982,14 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		}
 		if ret.AppErrorType == models.ErrCtxCanceled && stopKilled != "" {
 			ret.StopKilled = stopKilled
+		}
+		// On a run that ended with a type (a stop's, an exit's): a clean
+		// return carries no error to read it from. Not a stop's alone: an
+		// application that exited on its own has its daemons stopped too,
+		// and its set's end says what of them was left (the set is not
+		// judged on its tests then, and no set follows it).
+		if ret.AppErrorType != "" {
+			ret.LeftRunning = leftRunning
 		}
 	}()
 
@@ -1779,7 +2004,9 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 		// stopping, and is not asked again when it acts on the interrupt.
 		// When the stop at a set's end had to kill one that made no
 		// progress on its way out, the run says so, as for the app.
-		if why := stopAdopted(a.logger, app.TakeStopReached()); why != "" && stopKilled == "" {
+		why, left := stopAdopted(a.logger, app.TakeStopReached(), utils.TeardownScopeOf(runAppCtx))
+		leftRunning = left
+		if why != "" && stopKilled == "" {
 			switch {
 			case errors.Is(context.Cause(ctx), models.ErrAppStoppedForSetEnd):
 				stopKilled = "keploy interrupted the application at the set's end, and " + why
@@ -1832,10 +2059,10 @@ func (a *AgentClient) StopComposeApp(ctx context.Context) (string, error) {
 
 // StartComposeApp starts the app's container of a docker compose stack again
 // after StopComposeApp (app.App.StartComposeApp, P101-c).
-func (a *AgentClient) StartComposeApp(ctx context.Context) error {
+func (a *AgentClient) StartComposeApp(ctx context.Context) (bool, error) {
 	app, err := a.getApp()
 	if err != nil {
-		return err
+		return false, err
 	}
 	return app.StartComposeApp(ctx)
 }
@@ -1914,6 +2141,11 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 		"--dns-port", strconv.Itoa(int(opts.DnsPort)),
 		"--client-pid", strconv.Itoa(int(os.Getpid())),
 		"--mode", string(opts.Mode),
+	}
+	// The pid namespace the pid is this process's in, so the agent takes it
+	// only where it names this process (utils.ClientPIDHere).
+	if ns := utils.OwnPIDNamespace(); ns != "" {
+		args = append(args, "--client-pid-ns", ns)
 	}
 
 	extraArgs := opts.ExtraArgs
@@ -2407,7 +2639,7 @@ func (a *AgentClient) endAgent(run *agentRun, pid int, ask, terminate func() err
 	// one before may be a copy of the stop itself (stopWatch).
 	watch := stopWatch{logger: a.logger.With(zap.Int("pid", pid)),
 		gone: run.gone, read: read, kill: killIfRunning, poll: nativeStopPoll, reach: reach,
-		settled: sudoAgentSettled(pid)}
+		settled: sudoAgentSettled(pid), moved: run.scope}
 
 	err := ask()
 	switch {
@@ -2464,6 +2696,7 @@ func (a *AgentClient) beginRun(ctx context.Context) (context.Context, context.Ca
 	}
 	agentCtx, cancel := context.WithCancel(ctx)
 	run := newAgentRun()
+	run.scope = utils.TeardownScopeOf(ctx)
 	a.mu.Lock()
 	a.agentCancel = cancel
 	a.run = run
@@ -2694,7 +2927,9 @@ func (a *AgentClient) waitForAgent(ctx context.Context, exited <-chan error, isD
 	read, running := readBootFile(""), alwaysRunning
 	switch {
 	case isDockerCmd:
-		read, running = containerBootLook(a.logger, opts.KeployContainer)
+		// The container this Setup named: what its looks see is noted on
+		// the client's entry of it.
+		read, running = containerBootLook(a.logger, a.containerNamed(opts.KeployContainer))
 	case run != nil:
 		read = readBootFile(run.bootReport)
 		if run.bootPrompt {
@@ -2931,6 +3166,11 @@ func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
+	// A Setup sets up a new agent: the container the client named for the
+	// last one is not this one's. A docker Setup names its own below; a
+	// native one has none, and its watches watch its process, not that
+	// container.
+	a.forgetAgentContainer()
 
 	agentPort, err := utils.GetAvailablePort()
 	if err != nil {
@@ -3011,9 +3251,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 
 		opts.KeployContainer = agentUtils.GenerateRandomContainerName(a.logger, "keploy-v3-")
 		a.conf.KeployContainer = opts.KeployContainer
-		a.mu.Lock()
-		a.agentContainer = opts.KeployContainer
-		a.mu.Unlock()
+		a.nameAgentContainer(opts.KeployContainer)
 		// The agent container maps host.docker.internal to the Docker host
 		// (host-gateway) where the daemon resolves it (extra_hosts.go). A
 		// daemon that does not answer its version would not start the agent
@@ -3475,7 +3713,7 @@ func dockerAgentCancel(logger *zap.Logger, cmd *exec.Cmd, run *agentRun, name st
 // (resendSIGTERM).
 func stopAgentContainerFor(logger *zap.Logger, run *agentRun, name string) {
 	logger.Debug("Context cancelled. Stopping the keploy agent container and waiting for it to exit.")
-	if stopAgentContainer(logger, name, !run.ready.Load()) {
+	if stopAgentContainer(logger, name, !run.ready.Load(), run.scope) {
 		run.stoppedAtOnce()
 	}
 }
@@ -3574,7 +3812,7 @@ var dockerStopPoll = time.Second
 // doing (agentRun says why that must not land in it). unanswered (the agent
 // never answered its readiness check) has SIGTERM sent again until the agent
 // reports its teardown (resendSIGTERM).
-func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (killedAtOnce bool) {
+func stopAgentContainer(logger *zap.Logger, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	logger = logger.With(zap.String("container", name))
 	cli := newEngineCLI(logger)
 	if out, err := cli.combined(context.Background(), "kill", "--signal", "SIGTERM", name); err != nil {
@@ -3582,7 +3820,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 			zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		return
 	}
-	return awaitAgentContainer(logger, cli, name, unanswered)
+	return awaitAgentContainer(logger, cli, name, unanswered, moved)
 }
 
 // awaitAgentContainer waits for an agent's container that has been told to
@@ -3591,7 +3829,7 @@ func stopAgentContainer(logger *zap.Logger, name string, unanswered bool) (kille
 // stopped making any, or has detached everything and not exited, or at the
 // user's Ctrl+C, as stopAgentContainer says. It returns once the container
 // has exited, or once it killed it at once (killedAtOnce).
-func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool) (killedAtOnce bool) {
+func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unanswered bool, moved *utils.TeardownScope) (killedAtOnce bool) {
 	// kill(false) sends the agent the escalation signal, on which it dies
 	// once no teardown work in progress is making progress
 	// (utils.DieOnEscalation); kill(true) is SIGKILL, at once.
@@ -3634,7 +3872,7 @@ func awaitAgentContainer(logger *zap.Logger, cli *engineCLI, name string, unansw
 	// Only a Ctrl+C once the stop has said one stops the agent now forces it:
 	// one before may be a copy of the stop itself (stopWatch).
 	killedAtOnce = stopWatch{logger: logger, gone: gone, read: readContainerProgress(cli, name),
-		kill: kill, poll: dockerStopPoll, reported: reported}.run()
+		kill: kill, poll: dockerStopPoll, reported: reported, moved: moved}.run()
 	stopWaiting()
 	<-gone
 	<-resent
@@ -3669,7 +3907,10 @@ func (a *AgentClient) EndComposeAgent(release bool) {
 				zap.Error(err), zap.String("output", strings.TrimSpace(string(out))))
 		}
 	}
-	awaitAgentContainer(logger, cli, name, false)
+	// No teardown scope: a compose agent is compose's (this client began no
+	// run of it, beginRun), and this wait runs before the stop's drains begin
+	// (drainComposeAgent), so none of them could wait on its movements.
+	awaitAgentContainer(logger, cli, name, false, nil)
 }
 
 // sigtermResendFirst is how long stopAgentContainer's resendSIGTERM waits

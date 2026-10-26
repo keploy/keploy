@@ -201,7 +201,7 @@ func TestLoadSystemCABundle_EmbeddedFallback_ReturnsBytes(t *testing.T) {
 // TestLoadSystemCABundle_EmbeddedFallback_ContainsMozillaRoots is a
 // build-time sanity check that the embedded blob actually parses as a
 // PEM bundle and contains a non-trivial number of x509 root
-// certificates. If a future refresh of mozilla_roots.pem accidentally
+// certificates. If a future bump of x509roots/fallback accidentally
 // truncates or replaces the file with garbage, CI catches it here.
 //
 // We assert >=100 roots — Mozilla NSS typically ships ~140-150. Below
@@ -225,6 +225,41 @@ func TestLoadSystemCABundle_EmbeddedFallback_ContainsMozillaRoots(t *testing.T) 
 	count := bytes.Count(embeddedFallbackRoots, []byte("-----BEGIN CERTIFICATE-----"))
 	if count < minCerts {
 		t.Fatalf("embeddedFallbackRoots has only %d cert(s); expected >=%d (Mozilla NSS bundle is typically ~140). Refresh may have produced a truncated file.", count, minCerts)
+	}
+}
+
+// distrustedRootFingerprints are SHA-256 fingerprints (of the DER cert) of roots
+// Mozilla has removed from NSS for cause. The embedded bundle is handed to
+// recorded apps as their trust store when they have none of their own, so a
+// root that is still in it stays trusted by those apps even after every browser
+// has dropped it.
+var distrustedRootFingerprints = map[string]string{
+	// eMudhra intermediate key compromise (Mozilla bug 2083449, Oct 2026): the
+	// eight compromised intermediates chain to these roots; NSS 3.131.1 removed them.
+	"86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b": "emSign ECC Root CA - G3",
+	"125609aa301da0a249b97a8239cb6a34216f44dcac9f3954b14292f2e8c8608f": "emSign Root CA - C1",
+	"bc4d809b15189d78db3e1d8cf4f9726a795da1643ca5f1358e1ddb0edc0d7eb3": "emSign ECC Root CA - C3",
+}
+
+// TestLoadSystemCABundle_EmbeddedFallback_ExcludesDistrustedRoots fails when the
+// embedded Mozilla bundle still carries a root Mozilla has distrusted, i.e. when
+// golang.org/x/crypto/x509roots/fallback was not bumped after a CA incident
+// (or was downgraded).
+func TestLoadSystemCABundle_EmbeddedFallback_ExcludesDistrustedRoots(t *testing.T) {
+	rest := embeddedFallbackRoots
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		sum := sha256.Sum256(block.Bytes)
+		if name, bad := distrustedRootFingerprints[fmt.Sprintf("%x", sum)]; bad {
+			t.Errorf("embedded NSS bundle still contains distrusted root %q (sha256 %x); bump golang.org/x/crypto/x509roots/fallback", name, sum)
+		}
 	}
 }
 
@@ -838,44 +873,45 @@ func TestTeardownRemovesAnInstallThatDidNotFinish(t *testing.T) {
 // TestCertForClient_NoSNINamesDestinationIP: a client that dialled an IP literal
 // sends no SNI, so the leaf must carry the destination IP as an IP SAN (Go
 // checks it: "cannot validate certificate for 10.96.0.1 because it doesn't
-// contain any IP SANs"). An SNI still names the leaf, and SrcPortToDstURL keeps
-// holding only what the client asked for.
+// contain any IP SANs"). An SNI still names the leaf, and so does a CONNECT
+// target when there is no SNI. SrcPortToDstURL, still filed for readers
+// outside this module, holds what this handshake was asked for, "" included.
+//
+// Every leaf here is minted for one client end, in an order where an earlier
+// one's name could stand in for a later one's: the name comes from what each
+// handshake is handed, never from what an earlier one on the same end asked
+// for. It used to: the SNI was filed under the client's source port and a
+// ClientHello without one took it, so after "api.example.com" the IP literal
+// got a leaf for "api.example.com" (the CI red of
+// TestHandleConnectionNamesTheLeafForAnIPLiteralDestinationOnReplay).
 func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 	resetCertCacheForTest()
 	logger := zap.NewNop()
 	caKey, caCert := helperCA(t)
+	hello, cleanup, err := helperClientHello("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	port := hello.Conn.RemoteAddr().(*net.TCPAddr).Port
+	defer SrcPortToDstURL.Delete(port)
+	filed := func() any { v, _ := SrcPortToDstURL.Load(port); return v }
 
-	leafFor := func(sni string, dstIP net.IP) (*x509.Certificate, int) {
+	leafFor := func(sni, connectTarget string, dstIP net.IP) *x509.Certificate {
 		t.Helper()
-		hello, cleanup, err := helperClientHello(sni)
+		hello.ServerName = sni
+		cert, err := certForClient(logger, hello, caKey, caCert, time.Time{}, connectTarget, dstIP)
 		if err != nil {
-			t.Fatal(err)
-		}
-		defer cleanup()
-		cert, err := certForClient(logger, hello, caKey, caCert, time.Time{}, dstIP)
-		if err != nil {
-			t.Fatalf("certForClient(%q, %v): %v", sni, dstIP, err)
+			t.Fatalf("certForClient(%q, %q, %v): %v", sni, connectTarget, dstIP, err)
 		}
 		leaf, err := x509.ParseCertificate(cert.Certificate[0])
 		if err != nil {
 			t.Fatal(err)
 		}
-		return leaf, hello.Conn.RemoteAddr().(*net.TCPAddr).Port
+		return leaf
 	}
 
-	for _, ip := range []string{"10.96.0.1", "fd00::1"} {
-		leaf, port := leafFor("", net.ParseIP(ip))
-		if err := leaf.VerifyHostname(ip); err != nil {
-			t.Errorf("no SNI, destination %s: leaf does not name it: %v (IP SANs %v)", ip, err, leaf.IPAddresses)
-		}
-		if v, _ := SrcPortToDstURL.Load(port); v != "" {
-			t.Errorf("no SNI: SrcPortToDstURL = %q, want empty (it carries the SNI only)", v)
-		}
-		SrcPortToDstURL.Delete(port)
-	}
-
-	leaf, port := leafFor("api.example.com", net.ParseIP("10.96.0.1"))
-	SrcPortToDstURL.Delete(port)
+	leaf := leafFor("api.example.com", "", net.ParseIP("10.96.0.1"))
 	if err := leaf.VerifyHostname("api.example.com"); err != nil {
 		t.Errorf("SNI set: leaf does not name it: %v", err)
 	}
@@ -883,9 +919,33 @@ func TestCertForClient_NoSNINamesDestinationIP(t *testing.T) {
 		t.Errorf("SNI set: leaf has IP SANs %v, want the SNI alone", leaf.IPAddresses)
 	}
 
-	leaf, port = leafFor("", nil)
-	SrcPortToDstURL.Delete(port)
-	if len(leaf.IPAddresses) != 0 {
-		t.Errorf("no SNI, no destination: leaf has IP SANs %v, want none (as before)", leaf.IPAddresses)
+	for _, ip := range []string{"10.96.0.1", "fd00::1"} {
+		leaf := leafFor("", "", net.ParseIP(ip))
+		if err := leaf.VerifyHostname(ip); err != nil {
+			t.Errorf("no SNI, destination %s, after a leaf for an SNI on the same client end: leaf CN %q does not name it: %v (IP SANs %v)", ip, leaf.Subject.CommonName, err, leaf.IPAddresses)
+		}
+		if v := filed(); v != "" {
+			t.Errorf("no SNI, destination %s: SrcPortToDstURL = %q, want \"\": the client asked for no name, and the IP is none", ip, v)
+		}
+	}
+
+	leaf = leafFor("", "proxied.example.com", net.ParseIP("10.96.0.1"))
+	if err := leaf.VerifyHostname("proxied.example.com"); err != nil {
+		t.Errorf("no SNI, CONNECT target set: leaf does not name it: %v", err)
+	}
+	if v := filed(); v != "proxied.example.com" {
+		t.Errorf("no SNI, CONNECT target set: SrcPortToDstURL = %q, want the target", v)
+	}
+	leaf = leafFor("api.example.com", "proxied.example.com", nil)
+	if err := leaf.VerifyHostname("api.example.com"); err != nil {
+		t.Errorf("SNI and CONNECT target set: leaf does not name the SNI: %v", err)
+	}
+	if v := filed(); v != "api.example.com" {
+		t.Errorf("SNI and CONNECT target set: SrcPortToDstURL = %q, want the SNI", v)
+	}
+
+	leaf = leafFor("", "", nil)
+	if leaf.Subject.CommonName != "" || len(leaf.IPAddresses) != 0 {
+		t.Errorf("no SNI, no CONNECT target, no destination: leaf CN %q, IP SANs %v, want neither (as before)", leaf.Subject.CommonName, leaf.IPAddresses)
 	}
 }

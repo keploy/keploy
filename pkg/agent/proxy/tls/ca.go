@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	_ "embed"
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
@@ -32,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
 )
 
 // The MITM signing CA is no longer a committed, //go:embed-ed static cert+key
@@ -83,11 +83,13 @@ func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
 	hookMu.Unlock()
 }
 
-// embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
-// https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
-// certdata.txt). Compiled into the binary via go:embed so the agent always
-// has a valid trust store regardless of the runtime image's filesystem
-// state. See pkg/agent/proxy/tls/data/REFRESH.md for the refresh procedure.
+// embeddedFallbackRoots is the Mozilla NSS root bundle as PEM, built at startup
+// from golang.org/x/crypto/x509roots/fallback/bundle (the Go team's extract of
+// Mozilla's certdata.txt) so the agent always has a valid trust store
+// regardless of the runtime image's filesystem state. It is refreshed by
+// bumping that module (.github/workflows/refresh-nss-roots.yml proposes a bump
+// weekly), not by hand: a vendored copy went stale and kept trusting roots
+// Mozilla had distrusted (the October 2026 eMudhra/emSign compromise).
 //
 // This bundle is the safety net that prevents the failure mode in
 // keploy/k8s-proxy#375: even if /etc/ssl/certs/ca-certificates.crt is
@@ -98,9 +100,19 @@ func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
 // becomes (system_or_embedded_roots ∪ keploy_mitm_ca) instead of
 // (keploy_mitm_ca alone), which is what made the customer's pods fail
 // CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call.
-//
-//go:embed data/mozilla_roots.pem
-var embeddedFallbackRoots []byte
+var embeddedFallbackRoots = nssRootsPEM()
+
+// nssRootsPEM encodes every root of the NSS bundle as PEM. A few roots carry a
+// "distrust after" constraint that X.509 cannot express; PEM consumers (the
+// recorded app's TLS stack) trust them unconstrained, exactly as they would
+// with curl's cacert.pem or a distro ca-certificates package.
+func nssRootsPEM() []byte {
+	var buf bytes.Buffer
+	for root := range nssbundle.Roots() {
+		_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: root.Certificate})
+	}
+	return buf.Bytes()
+}
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -557,8 +569,8 @@ const (
 //     locations where `ca-certificates` (Debian/Ubuntu/Alpine) or
 //     equivalent (RHEL/Fedora/openSUSE/FreeBSD) installs the OS trust
 //     store. First readable, non-empty file wins.
-//  2. embeddedFallbackRoots — Mozilla NSS roots vendored from curl.se,
-//     compiled into the agent binary via go:embed. Used when every disk
+//  2. embeddedFallbackRoots — Mozilla NSS roots from x509roots/fallback,
+//     compiled into the agent binary. Used when every disk
 //     path was missing/empty.
 //
 // This function used to return (nil, "") on miss, leaving the merged
@@ -697,7 +709,7 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 	}
 	// fallback==nil only happens via the disk-only test entry point.
 	// Production callers always pass embeddedFallbackRoots which is
-	// non-empty by build-time go:embed.
+	// always non-empty (built from the compiled-in NSS bundle).
 	return nil, ""
 }
 
@@ -1508,7 +1520,19 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 	return nil
 }
 
-// SrcPortToDstURL map is used to store the mapping between source port and DstURL for the TLS connection
+// SrcPortToDstURL holds, under a client's source port, the name the client
+// asked for on its latest connection through keploy's MITM: the target of
+// its CONNECT request once it made one, then, from its handshake, the SNI of
+// its ClientHello, else that target ("" for neither).
+//
+// A source port is not a connection: another client with the same port (a pod
+// of the same node reaching the DaemonSet agent, or a connection that took a
+// port before the previous one's entry went) reads or overwrites this one's
+// entry. So nothing in this module reads it. A connection's names are read off
+// the connection: its SNI from the TLS connection keploy served it
+// (util.ClientServerName), its CONNECT target from its context
+// (ConnectTargetFrom). It is still filed for the readers outside this module
+// (keploy/integrations' Postgres v3 recorder).
 var SrcPortToDstURL = sync.Map{}
 
 // srcPortOwner tracks which live connection currently owns a source port,
@@ -1598,14 +1622,20 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 }
 
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
-	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, nil)
+	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
 }
 
-// certForClient is CertForClient with the connection's original destination
-// IP (nil when unknown). The leaf is named from the SNI, or the CONNECT target
-// stored for this source port; with neither, it is named for dstIP, because a
-// client that dialled an IP literal sends no SNI and checks the leaf's IP SANs.
-func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, dstIP net.IP) (*tls.Certificate, error) {
+// certForClient is CertForClient with what the connection itself says of its
+// destination: the host its CONNECT request named ("" when it made none) and
+// the IP it dialled (nil when unknown). The leaf is named from the SNI, else
+// the CONNECT target; with neither, it is named for dstIP, because a client
+// that dialled an IP literal sends no SNI and checks the leaf's IP SANs.
+//
+// Nothing else names it. The name used to fall back to the one filed under
+// the client's source port (SrcPortToDstURL), and a port is not a connection:
+// another client on the same port (a pod of the same node, or a connection
+// whose port was reused) had its host put on this client's leaf.
+func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -1627,25 +1657,28 @@ func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Generate a new server certificate and private key for the given hostname.
 	// When the client omits SNI (common after CONNECT tunnel setup where the
 	// client already knows the target from the CONNECT request), fall back to
-	// the hostname stored by handleConnectTunnel in SrcPortToDstURL.
+	// the host its CONNECT request named.
 	dstURL := clientHello.ServerName
-	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
-	sourcePort := remoteAddr.Port
-
 	if dstURL == "" {
-		if stored, ok := SrcPortToDstURL.Load(sourcePort); ok {
-			if s, ok := stored.(string); ok && s != "" {
-				dstURL = s
-			}
-		}
+		dstURL = connectTarget
+	}
+	// The client's source port names nothing here. It is the key the
+	// channel-binding shim pairs this leaf under (publishMITM) and
+	// SrcPortToDstURL files the name under, which a connection that is not
+	// TCP has none of (0: neither is done).
+	sourcePort := 0
+	if remoteAddr, ok := clientHello.Conn.RemoteAddr().(*net.TCPAddr); ok {
+		sourcePort = remoteAddr.Port
+	}
+	if sourcePort != 0 {
+		// Filed as it always was, for the map's readers outside this module:
+		// what this handshake was asked for, "" included.
+		SrcPortToDstURL.Store(sourcePort, dstURL)
 	}
 
-	SrcPortToDstURL.Store(sourcePort, dstURL)
-
-	// The name the leaf is minted for. SrcPortToDstURL above keeps only what the
-	// client asked for (its readers treat it as the SNI), so the destination IP
-	// stands in here alone: with no SNI the client dialled an IP literal, and it
-	// verifies the leaf against an IP SAN, which cfssl makes of an IP host.
+	// The name the leaf is minted for. With no SNI and no CONNECT target the
+	// client dialled an IP literal, and it verifies the leaf against an IP SAN,
+	// which cfssl makes of an IP host.
 	certHost := dstURL
 	if certHost == "" && dstIP != nil {
 		certHost = dstIP.String()

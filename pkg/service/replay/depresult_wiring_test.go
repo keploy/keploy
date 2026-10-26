@@ -732,16 +732,22 @@ func TestMockLookupCarriesATarget(t *testing.T) {
 		})
 	}
 
-	if len(found) != 1 {
-		t.Fatalf("expected exactly one mockDisplayInfo literal in replay.go, found %d: %v", len(found), found)
+	// Two literals: a mock whose payload is on disk keeps itself, and its
+	// target is worked out from it when asked (mockDisplayInfo.targetOf,
+	// which reads mockTargetFromSpec); a whole mock's is worked out here.
+	if len(found) != 2 {
+		t.Fatalf("expected exactly two mockDisplayInfo literals in replay.go, found %d: %v", len(found), found)
 	}
-	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), }"
-	if found[0] != want {
+	if want := "addMockDisplayInfo: mockDisplayInfo{protocol: string(mock.Kind), onDisk: mock}"; found[0] != want {
+		t.Fatalf("the mock display lookup of a mock whose payload is on disk is now %s, want %s", found[0], want)
+	}
+	const want = "addMockDisplayInfo: mockDisplayInfo{ summary: models.MockSummaryFromSpec(mock), protocol: string(mock.Kind), target: mockTargetFromSpec(mock), request: mock.RequestFingerprint(), recordedAt: mock.Spec.ReqTimestampMock, lifetime: mock.TestModeInfo.Lifetime, }"
+	if found[1] != want {
 		t.Fatalf("the mock display lookup is now %s, want %s.\n\n"+
 			"WHY THIS MATTERS: `target` is the only human-meaningful destination a dependency row "+
 			"can carry — neither models.MockEntry (the mapping side) nor models.MockState (the "+
 			"consumed side) records one. Dropping it collapses five outgoing calls to the same "+
-			"service into rows that differ only by index.", found[0], want)
+			"service into rows that differ only by index.", found[1], want)
 	}
 }
 
@@ -795,7 +801,7 @@ func TestMainLoopReportsEligibilityToTheWarner(t *testing.T) {
 
 // M-1: THE STREAMING HALF OF THE INERT-KNOB WARNING.
 //
-// RunTestSet splits SSE/chunked test cases out of the main replay loop and
+// RunTestSet splits streaming test cases out of the main replay loop and
 // replays them in a Phase-2 pass that deliberately writes no DepResult and
 // never calls resolveTestOutcome, so --assert-dependencies cannot promote
 // anything there. The warning that says so lives in that pass and nowhere
@@ -824,7 +830,7 @@ func TestStreamingPassWarnsTheAssertionDidNotRun(t *testing.T) {
 		t.Fatalf("RunTestSet calls %s %d time(s), want 2 (the main replay loop and the deferred streaming pass).\n\n"+
 			"WHY THIS MATTERS: the streaming pass runs no --assert-dependencies assertion (under "+
 			"KEPLOY_PROVEN=1 it judges only its test mocks, proven_verdicts.go). Without its own call, "+
-			"--assert-dependencies over a set of SSE/chunked tests is silently inert and exits 0.",
+			"--assert-dependencies over a set of streaming tests is silently inert and exits 0.",
 			warner, len(calls))
 	}
 

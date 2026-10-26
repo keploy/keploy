@@ -520,6 +520,182 @@ func TestVariables_AVariableCannotTakeAnothersValue(t *testing.T) {
 	}
 }
 
+// clockV is a variable bound at bind, recorded as recorded (an RFC 3339
+// instant to the second), with the clock read the learn step reads in it at
+// its bind when marked (MockVariable.Clock).
+func clockV(t *testing.T, recorded, bind string, marked bool) models.MockVariable {
+	t.Helper()
+	v := bindV(recorded, bind)
+	if marked {
+		at, err := time.Parse(time.RFC3339, recorded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v.Clock = []models.ClockRead{{At: at, Res: time.Second}}
+	}
+	return v
+}
+
+// Two clock reads the learn step marked at their binds (MockVariable.Clock)
+// may share one live value, though recorded as two, only when they were made
+// in one second as their recordings say (FD-3: two reads of one clock in one
+// second): both calls are answered. Two marked reads an hour apart (a
+// creation time and an expiry) may not, nor may a marked read and a variable
+// the learn step did not mark, whichever binds first: the second is refused
+// with the first's evidence. In one call as across calls.
+func TestVariables_TwoMarkedClockReadsMayShareALiveValue(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const live = "2026-10-19T08:00:00Z"
+	for _, c := range []struct {
+		name                      string
+		first, second             string // recorded
+		firstMarked, secondMarked bool
+		want                      bool
+	}{
+		{"both marked, a second apart", "2026-10-14T10:00:00Z", "2026-10-14T10:00:01Z", true, true, true},
+		{"both marked, an expiry an hour later", "2026-10-14T10:00:00Z", "2026-10-14T11:00:00Z", true, true, false},
+		{"a marked read, then an unmarked variable", "2026-10-14T10:00:00Z", "2026-10-14T10:00:01Z", true, false, false},
+		{"an unmarked variable, then a marked read", "2026-10-14T10:00:00Z", "2026-10-14T10:00:01Z", false, true, false},
+	} {
+		first := clockV(t, c.first, "body.at", c.firstMarked)
+		second := clockV(t, c.second, "body.at", c.secondMarked)
+		// Across calls: the first call binds first, the second is checked
+		// against it.
+		h := newHTTP()
+		db := &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "POST", "http://store/orders", `{"at":"`+c.first+`"}`, 201, `{}`, models.MockVariables{"first": first}), 1),
+			at(varMock("mock-2", "POST", "http://store/polls", `{"at":"`+c.second+`"}`, 200, `{}`, models.MockVariables{"second": second}), 2),
+		}}
+		if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/orders", `{"at":"`+live+`"}`)); !ok {
+			t.Fatalf("%s: the first call was not answered: %+v", c.name, diag)
+		}
+		ok, _, diag := matchVar(t, h, db, liveReq("POST", "/polls", `{"at":"`+live+`"}`))
+		if c.want {
+			if !ok {
+				t.Fatalf("%s: across calls, the two could not share a live value: %+v", c.name, diag)
+			}
+		} else if p := wantProblem(t, ok, diag, "which is variable first's value"); p.name != "second" {
+			t.Fatalf("%s: across calls, evidence %+v", c.name, p)
+		}
+		// In one call: both are bound at one call's two places.
+		h = newHTTP()
+		db = &varDb{perTest: []*models.Mock{
+			at(varMock("mock-1", "POST", "http://store/orders", `{"a":"`+c.first+`","b":"`+c.second+`"}`, 201, `{}`,
+				models.MockVariables{"first": clockV(t, c.first, "body.a", c.firstMarked), "second": clockV(t, c.second, "body.b", c.secondMarked)}), 1),
+		}}
+		ok, _, diag = matchVar(t, h, db, liveReq("POST", "/orders", `{"a":"`+live+`","b":"`+live+`"}`))
+		if c.want {
+			if !ok {
+				t.Fatalf("%s: in one call, the two could not share a live value: %+v", c.name, diag)
+			}
+			continue
+		}
+		wantProblem(t, ok, diag, "'s value in this test")
+	}
+}
+
+// A bind the table refuses because of a binding the call's check read is no
+// race: the check and the bind disagree, and checking the call again would
+// disagree again, forever. The call is a miss with the bind's evidence. A
+// bind refused because of a binding made after the check (another
+// connection's, meanwhile) is checked again, which sees it.
+func TestVariables_ABindRefusedOverWhatTheCheckReadIsAMiss(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := varMock("mock-2", "POST", "http://store/polls", `{"at":"r-2"}`, 200, `{}`, models.MockVariables{"polled": bindV("r-2", "body.at")})
+	for _, c := range []struct {
+		name  string
+		saw   map[string]string
+		retry bool
+	}{
+		{"a binding the check read", map[string]string{"created": "V"}, false},
+		{"a binding made after the check", nil, true},
+		{"a binding the check read with another value", map[string]string{"created": "W"}, true},
+	} {
+		var tb variables.Table
+		tb.Reset()
+		if _, _, _, ok := tb.BindAll(tb.Gen(), []variables.Binding{{Name: "created", Value: "V", Recorded: "r-1", Mock: "mock-1", Place: "body.at"}}); !ok {
+			t.Fatal("created could not bind")
+		}
+		hit := &varHit{mock: m, binds: []variables.Binding{{Name: "polled", Value: "V", Recorded: "r-2", Mock: "mock-2", Place: "body.at"}},
+			local: map[string]variables.Binding{}, table: &tb, gen: tb.Gen(), saw: c.saw}
+		consumed := false
+		served, problem, retry, err := newHTTP().serveVariablesBy(hit, func(*models.Mock) bool { consumed = true; return true })
+		if err != nil || served != nil || consumed {
+			t.Fatalf("%s: served %v, consumed %v, err %v", c.name, served, consumed, err)
+		}
+		if retry != c.retry {
+			t.Fatalf("%s: retry %v, want %v (problem %+v)", c.name, retry, c.retry, problem)
+		}
+		if c.retry {
+			if problem != nil {
+				t.Fatalf("%s: a retry with a problem %+v", c.name, problem)
+			}
+			continue
+		}
+		if problem == nil || problem.name != "polled" || problem.actual != "V" || !strings.Contains(problem.why, "variable created") {
+			t.Fatalf("%s: problem %+v, want polled's bind refused beside created", c.name, problem)
+		}
+	}
+}
+
+// Before the set's first test, the first test's call in flight binds in a
+// scope begun early that reads the run's (variables.Table.ReadRunOf), while
+// the start-up still binds the run's. A start-up call's check reads what that
+// scope bound, as its bind does (variables.Table.Beside): one that sends, as
+// its variable, the live value the call in flight bound as another variable
+// recorded with another value is a miss with that evidence, found by the
+// check, never a bind the table refuses over a binding the check did not read
+// (which would check the call again, forever). Once the first test began, the
+// early scope is the next test's, and its values are another test's.
+func TestVariables_AStartUpCallIsCheckedBesideTheFirstTestsCallInFlight(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	boot := reusable(at(varMock("boot", "POST", "http://store/sessions", `{"key":"s-rec"}`, 200, `{}`,
+		models.MockVariables{"run-session": bindV("s-rec", "body.key")}), 1))
+	db := &varDb{session: []*models.Mock{boot}}
+	db.table.KeepRun()
+	var ahead variables.Table
+	ahead.ReadRunOf(&db.table)
+	ahead.Start(nil)
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []variables.Binding{{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch", Place: "body.id"}}); !ok {
+		t.Fatal("the call in flight could not bind order")
+	}
+	pool, _ := splitVariableMocks(db.session)
+	check := func(key string) ([]*varHit, *varProblem) {
+		t.Helper()
+		hits, problem, err := h.variablePass(context.Background(), liveReq("POST", "/sessions", `{"key":"`+key+`"}`), pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("variablePass: %v", err)
+		}
+		return hits, problem
+	}
+	hits, problem := check("V")
+	if len(hits) != 0 {
+		t.Fatalf("the start-up call's check let it bind run-session to order's live value (%d hits)", len(hits))
+	}
+	if problem == nil || problem.name != "run-session" || problem.actual != "V" || !strings.Contains(problem.why, "which is variable order's value") {
+		t.Fatalf("problem %+v, want run-session refused at order's value", problem)
+	}
+	if ok, _, diag := matchVar(t, h, db, liveReq("POST", "/sessions", `{"key":"V"}`)); ok {
+		t.Fatal("the start-up call that sent order's live value was answered")
+	} else if diag == nil || diag.variable == nil || !strings.Contains(diag.variable.why, "which is variable order's value") {
+		t.Fatalf("the start-up call's miss says %+v; want order's value", diag)
+	}
+	if _, ok := db.table.Lookup("run-session"); ok {
+		t.Fatal("a refused start-up call bound run-session")
+	}
+
+	// The first test began: the early scope is the next test's.
+	db.table.Start(nil)
+	ahead.Reset()
+	if _, _, _, ok := ahead.BindAll(ahead.Gen(), []variables.Binding{{Name: "order", Value: "V", Recorded: "o-rec", Mock: "fetch", Place: "body.id"}}); !ok {
+		t.Fatal("the next test's call in flight could not bind order")
+	}
+	if hits, problem := check("V"); len(hits) == 0 {
+		t.Fatalf("a call of the first test was refused the next test's value: %+v", problem)
+	}
+}
+
 func TestVariables_AnEmptyValueBindsNothing(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	for _, body := range []string{`{"id":null,"item":"pen"}`, `{"id":"","item":"pen"}`} {
@@ -1047,8 +1223,8 @@ func TestVariables_ConcurrentCreatesOfOneShapeAreEachAnswered(t *testing.T) {
 	pool, _ := splitVariableMocks([]*models.Mock{first, second})
 	hitsX, _, _ := h.variablePass(ctx, x, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
 	hitsY, _, _ := h.variablePass(ctx, y, pool, varScope{table: &db.table, gen: db.table.Gen()}, nil, nil, nil)
-	hx, _ := h.pickHit(hitsX, db, true)
-	hy, _ := h.pickHit(hitsY, db, true)
+	hx, _ := h.pickHit(hitsX, nil, db, true)
+	hy, _ := h.pickHit(hitsY, nil, db, true)
 	if hx.mock != first || hy.mock != first {
 		t.Fatalf("both checked before either bound should pick the first recording: %s, %s", hx.mock.Name, hy.mock.Name)
 	}

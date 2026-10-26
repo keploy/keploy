@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -76,6 +77,12 @@ type Hooks struct {
 	// readyMu; nil with the switch off.
 	readyMu sync.Mutex
 	ready   *readyWatch
+	// clientPIDNS is the pid namespace the registered client said it runs
+	// in (config.Agent.ClientPIDNS), beside its pid in the kernel's
+	// registration, under clientMu: the readiness watch reads that pid
+	// through it (utils.ClientPIDIn).
+	clientMu    sync.Mutex
+	clientPIDNS string
 	// eBPF C shared maps
 	clientRegistrationMap *ebpf.Map
 	agentRegistrationMap  *ebpf.Map
@@ -105,6 +112,12 @@ type Hooks struct {
 
 	BindEvents *ebpf.Map
 	sockops    link.Link
+	// sockCreate is k_sock_create's link: sys_enter_socket's backstop,
+	// attached where it is.
+	sockCreate link.Link
+	// skips reads the runs of the hooks' programs the kernel skipped
+	// (skipwatch.go), from their load on.
+	skips *skipWatch
 }
 
 func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.Agent) error {
@@ -133,6 +146,25 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return nil
 	})
 
+	// The entries a process leaves in the PID maps when the kernel skips
+	// k_process_exit's run for its exit: deleted once the process is gone,
+	// whenever the program's skip count grew (skipwatch.go).
+	swept := make(chan struct{})
+	g.Go(func() error {
+		defer close(swept)
+		defer utils.Recover(h.logger)
+		t := time.NewTicker(pidMapPollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-t.C:
+				h.sweepIfExitsSkipped()
+			}
+		}
+	})
+
 	// The application's AF_UNIX connects to sockets no member of it owns
 	// (unixconn.go): calls keploy's proxy never sees.
 	h.startUnixConn(ctx)
@@ -141,6 +173,7 @@ func (h *Hooks) Load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		defer utils.Recover(h.logger)
 		<-ctx.Done()
 		<-watched
+		<-swept
 		h.unLoad(ctx, opts)
 
 		// deleting in order to free the memory on shutdown.
@@ -223,15 +256,20 @@ func (h *Hooks) attachIngress(cGroupPath string, objs bpfObjects) error {
 	return nil
 }
 
-// hookLoadOptions are the options load() loads hookSpec() with: a verifier
-// log of every instruction and branch, from a 1 MiB buffer.
+// hookLoadOptions are the options load() loads hookSpec() with: no verifier
+// log. The kernel formats the log while it verifies, and at the instruction
+// and branch level the agent asked for, that log (and verifying again each
+// program whose log outgrew its buffer: cilium/ebpf grows the buffer on
+// ENOSPC and loads the program again) was nearly all of the load:
+// keploy's hook object (bpf_x86_bpfel.o) loaded in 3.5-6.5 s with it and in
+// 0.09-0.24 s without on 5.10.240, and in 0.84-1.5 s against 0.09-0.11 s on
+// 6.12.40, on 4-vCPU KVM guests, every agent start, and for longer on a host
+// short of CPU. A program the verifier rejects is loaded again by
+// cilium/ebpf with a log (LogLevelBranch, in a buffer it grows until the log
+// fits), so a rejection's *ebpf.VerifierError still carries the verifier's
+// account of the failing path, which load() prints.
 func hookLoadOptions() *ebpf.CollectionOptions {
-	return &ebpf.CollectionOptions{
-		Programs: ebpf.ProgramOptions{
-			LogLevel:     ebpf.LogLevelInstruction | ebpf.LogLevelBranch,
-			LogSizeStart: 1 * 1024 * 1024,
-		},
-	}
+	return &ebpf.CollectionOptions{}
 }
 
 // hookSpec is the collection load() loads into the kernel: the compiled
@@ -265,7 +303,7 @@ func hookSpec() (*ebpf.CollectionSpec, error) {
 // the kernel allocates whole at load (an LRU hash, a ring buffer): with the
 // switch off nothing uses them, so they are loaded at their smallest, and
 // the watch costs nothing (udpwatch.go).
-var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events", "ready_socks", "ready_mains", "ready_live", "ready_listen_events", "ready_seen"}
+var unswitchedMaps = []string{"udp_peer_first", "udp_member_addrs", "udp_reply_events", "ready_socks", "ready_mains", "ready_live", "ready_listen_events", "ready_seen", "ready_holders"}
 
 // shrinkUnswitchedMaps loads unswitchedMaps at their smallest when the
 // proven switch is off: one entry, or one page for a ring buffer.
@@ -295,7 +333,6 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Load pre-compiled programs and maps into the kernel.
 	objs := bpfObjects{}
-	bpfopts := hookLoadOptions()
 
 	spec, err := hookSpec()
 	if err != nil {
@@ -305,19 +342,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 
 	// Now load and assign into the kernel with the corrected spec.
 	//
-	// This is the one call in agent startup that can block forever without
-	// saying anything: BPF_PROG_LOAD is uninterruptible, so a wedged kernel
-	// leaves the agent with no log output at all and the container merely
-	// "not ready". watchStall makes that state describe itself.
-	// Scoped to this one call by a closure rather than a plain defer: the rest of
-	// load() attaches tracepoints and resolves cgroups, and a watchdog left
-	// running across that would blame BPF_PROG_LOAD for whatever else was slow.
-	// The defer inside the closure keeps it from leaking if LoadAndAssign panics.
-	err = func() error {
-		stopStallWatch := watchStall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", stallFirstReport, stallRepeatReport, stallErrorAfter)
-		defer stopStallWatch()
-		return spec.LoadAndAssign(&objs, bpfopts)
-	}()
+	// BPF_PROG_LOAD is uninterruptible while it waits in the kernel, so a load
+	// stuck there leaves the agent with no log output at all and the container
+	// merely "not ready". watchedCall makes that state describe itself, from
+	// the thread making the call. Scoped to this one call: the rest of load()
+	// attaches tracepoints and resolves cgroups, and a watchdog left running
+	// across that would blame BPF_PROG_LOAD for whatever else was slow.
+	err = watchedCall(h.logger, "bpf(BPF_PROG_LOAD) via ebpf.CollectionSpec.LoadAndAssign", func() error {
+		return spec.LoadAndAssign(&objs, hookLoadOptions())
+	})
 	if err != nil {
 		var ve *ebpf.VerifierError
 		if errors.As(err, &ve) {
@@ -332,12 +365,18 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	h.clientRegistrationMap = objs.KeployClientRegistrationMap
 	h.agentRegistrationMap = objs.KeployAgentRegistrationMap
 	h.objects = objs
+	// The runs of these programs the kernel skips, from here on, before
+	// any attaches (skipwatch.go).
+	h.skips = newSkipWatch(h.logger, objs.SocketClassifyFailures)
+	h.skips.watch(programsByName(&objs.bpfPrograms))
 	h.objectsMutex.Unlock()
 	// ---------------
 
-	// sys_enter_socket only ever adds to target_namespace_pids and
-	// excluded_pids; k_process_exit takes a process out of both when its last
-	// thread exits. Without it the maps only grow, and once
+	// sys_enter_socket and k_sock_create add to target_namespace_pids and
+	// excluded_pids (a classification replaces a dead process's entries
+	// under the TGID, track_process); k_process_exit takes a process out of
+	// both when its last thread exits, and the sweep (skipwatch.go) what a
+	// skipped run of it left. Without it the maps only grow, and once
 	// target_namespace_pids is full (10240 TGIDs: seconds of process churn,
 	// and it takes every process in the agent's PID namespace, the whole host
 	// for a native agent) no new process is intercepted, so its calls go to the real dependency with
@@ -378,7 +417,15 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if os.Getenv("KEPLOY_DAEMONSET_ENABLED") == "true" || os.Getenv("KEPLOY_TARGET_CONTAINERS") != "" {
 		h.logger.Info("daemonset/targeting mode: skipping sys_enter_socket PID auto-registration (target_namespace_pids is owned/scoped externally)")
 	} else {
-		socket, err := link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+		// A perf-event attach locks the kernel's tracing event_mutex
+		// (perf_trace_init), which every other tracer's attach and detach on
+		// the host holds too: watched like the load.
+		var socket link.Link
+		err := watchedCall(h.logger, "perf_event_open (tracepoint syscalls/sys_enter_socket) via link.Tracepoint", func() error {
+			var err error
+			socket, err = link.Tracepoint("syscalls", "sys_enter_socket", objs.SyscallProbeEntrySocket, nil)
+			return err
+		})
 		if err != nil {
 			utils.LogError(h.logger, err, "failed to attach the tracepoint hook on sys_socket")
 			return tracepointFailure(err, tracefsMounted())
@@ -426,6 +473,27 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		return err
 	}
 	h.sockops = sockops
+
+	// sys_enter_socket's backstop, where sys_enter_socket is attached: the
+	// kernel skips runs of a tracepoint's program, and from 7.2 a syscall
+	// tracepoint's programs run preemptible, so under load it misses
+	// processes' socket() calls, and such a process is no target.
+	// k_sock_create, a cgroup program the kernel runs for every inet
+	// socket's creation, classifies by the same rule before the process's
+	// first connect, send or bind reaches pid_filter (keploy/ebpf
+	// keploy_ebpf.c).
+	if h.socket != nil {
+		sc, err := link.AttachCgroup(link.CgroupOptions{
+			Path:    cGroupPath,
+			Attach:  ebpf.AttachCGroupInetSockCreate,
+			Program: objs.K_sockCreate,
+		})
+		if err != nil {
+			utils.LogError(h.logger, err, "failed to attach the sock_create cgroup hook that classifies a process sys_enter_socket missed")
+			return err
+		}
+		h.sockCreate = sc
+	}
 
 	// Ingress is captured while recording, and in mock mode whenever requests are on, so a replay can
 	// compare the app's actual responses with the recorded cases. In mock mode the wrapped process is a
@@ -586,6 +654,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 	if h.kernelPortAlloc {
 		agentInfo.Flags |= structs.FlagKernelPortAlloc
 	}
+	agentInfo.Flags = classifyFlag(agentInfo.Flags, h.socket != nil)
 	// Under the proven switch, the application's non-DNS UDP is watched for
 	// replies, and QUIC refused (udpwatch.go).
 	udpFlags, err := h.startProvenUDP(cGroupPath)
@@ -731,6 +800,17 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 	if h.sockops != nil {
 		h.sockops.Close()
 	}
+	if h.sockCreate != nil {
+		if err := h.sockCreate.Close(); err != nil {
+			utils.LogError(h.logger, err, "failed to close the sock_create hook")
+		}
+	}
+	// What each program skipped in the session, read before they close.
+	if h.skips != nil {
+		h.objectsMutex.RLock()
+		h.skips.close()
+		h.objectsMutex.RUnlock()
+	}
 
 	// The UDP watch reads the objects' ring buffer: closed before them.
 	// The watch stays, failed: a read after the hooks unloaded is unknown,
@@ -821,6 +901,9 @@ func (h *Hooks) RegisterClient(ctx context.Context, opts config.Agent, rules []m
 		clientInfo.PassThroughPorts[i] = int32(ports[i])
 	}
 	clientInfo.ClientNSPID = opts.ClientNSPID
+	h.clientMu.Lock()
+	h.clientPIDNS = opts.ClientPIDNS
+	h.clientMu.Unlock()
 
 	return h.SendClientInfo(clientInfo)
 }

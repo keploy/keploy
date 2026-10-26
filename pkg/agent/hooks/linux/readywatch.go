@@ -129,7 +129,7 @@ func (h *Hooks) startProvenReady(cg string, docker bool, mode models.Mode) (uint
 // reports. An error leaves nothing
 // attached.
 func startReadyWatch(objs *bpfObjects, cg string, docker bool) (*readyWatch, error) {
-	if objs.ReadyCfg == nil || objs.ReadyAgentMntns == nil || objs.ReadyMains == nil || objs.ReadyLive == nil || objs.ReadySeen == nil || objs.ReadyLastRestart == nil || objs.ReadySocks == nil || objs.ReadyListenEvents == nil ||
+	if objs.ReadyCfg == nil || objs.ReadyAgentMntns == nil || objs.ReadyMains == nil || objs.ReadyLive == nil || objs.ReadySeen == nil || objs.ReadyHolders == nil || objs.ReadyLastRestart == nil || objs.ReadySocks == nil || objs.ReadyListenEvents == nil ||
 		objs.ReadyListenEventsLost == nil || objs.ReadyProgress == nil || objs.K_readyBind4 == nil || objs.K_readyBind6 == nil ||
 		objs.K_readyConnect4 == nil || objs.K_readyConnect6 == nil || objs.K_readyFork == nil || objs.K_readyExec == nil || objs.K_readyExit == nil {
 		return nil, errors.New("keploy's BPF objects are not loaded: the readiness watch's programs and maps are missing")
@@ -285,12 +285,19 @@ func (w *readyWatch) fail(err error) {
 
 // snapshot is what the watch knows now (models.AppReadiness), of the listens
 // from since on.
-func (w *readyWatch) snapshot(clientPID uint32, since uint64) (models.AppReadiness, error) {
+func (w *readyWatch) snapshot(clientPID uint32, clientPIDNS string, since uint64) (models.AppReadiness, error) {
 	told, listens, err := w.listensFrom(since)
 	if err != nil {
 		return models.AppReadiness{}, err
 	}
 	out := models.AppReadiness{ListenCount: told, Listens: listens}
+	// The CPU time first, then the restarts: a restart after the CPU read is
+	// in the count read after it, so its process's CPU time is never weighed
+	// under the count before it (keploy test weighs CPU time until the start
+	// restarts).
+	if members, ok := memberCPU("/proc", os.Getpid(), w.docker, clientPID, clientPIDNS); ok {
+		out.CPU, out.CPUKnown = w.cpu.add(members), true
+	}
 	if err := w.maps.ReadyListenEventsLost.Lookup(uint32(0), &out.ListensLost); err != nil {
 		return models.AppReadiness{}, fmt.Errorf("read the listens the kernel had no room to report: %w", err)
 	}
@@ -320,9 +327,6 @@ func (w *readyWatch) snapshot(clientPID uint32, since uint64) (models.AppReadine
 		}
 	}
 	out.Listens = latestOfEach(out.Listens)
-	if members, ok := memberCPU("/proc", os.Getpid(), w.docker, clientPID); ok {
-		out.CPU, out.CPUKnown = w.cpu.add(members), true
-	}
 	return out, nil
 }
 
@@ -440,7 +444,7 @@ type procStat struct {
 // shim for its parent too, but started later, and is no member, as the
 // kernel's ready_mains has it (its first exec there). ok is false when it
 // cannot be read.
-func memberCPU(root string, self int, docker bool, client uint32) (map[int]procStat, bool) {
+func memberCPU(root string, self int, docker bool, client uint32, clientNS string) (map[int]procStat, bool) {
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		return nil, false
@@ -477,6 +481,12 @@ func memberCPU(root string, self int, docker bool, client uint32) (map[int]procS
 	notMembers := map[int]bool{}
 	for p := self; p > 0 && !notMembers[p]; p = stats[p].ppid {
 		notMembers[p] = true
+	}
+	// The client's pid as this agent's /proc names it: a pid the client said
+	// in another pid namespace names another process here, or none, whose
+	// descendants are not the application (utils.ClientPIDHere).
+	if !docker {
+		client = utils.ClientPIDIn(root, client, clientNS).PID
 	}
 	if !docker && client == 0 {
 		return nil, false
@@ -636,7 +646,9 @@ func latestOfEach(listens []models.AppListen) []models.AppListen {
 
 // MarkReadiness is the agent's mark for a set whose application keploy
 // starts anew: what the set's processes did is forgotten (the kernel's
-// ready_seen), so the new start's first connects, forks and execs are
+// ready_seen, and the command lines its processes hold, ready_holders, so
+// one left from before exits without letting go of the new start's), so
+// the new start's first connects, forks and execs are
 // progress again, and what it answers (its ListenCount, and its restarts so
 // far) is where the set's listens and restarts begin.
 func (h *Hooks) MarkReadiness() (models.AppReadiness, error) {
@@ -646,21 +658,60 @@ func (h *Hooks) MarkReadiness() (models.AppReadiness, error) {
 	if w == nil {
 		return models.AppReadiness{}, fmt.Errorf("%w: this agent watches no application's readiness", models.ErrReadinessUnsupported)
 	}
-	var k uint64
-	var keys []uint64
-	it := w.maps.ReadySeen.Iterate()
-	for it.Next(&k, new(uint8)) {
-		keys = append(keys, k)
-	}
-	if err := it.Err(); err != nil {
-		return models.AppReadiness{}, fmt.Errorf("read what the set's processes did: %w", err)
-	}
-	for _, k := range keys {
-		if err := w.maps.ReadySeen.Delete(k); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+	// ready_holders first, then ready_seen. A member's exec between the two
+	// clears notes its command line in both (the holder, and a live run);
+	// cleared this way, ready_seen's live count goes with the second clear,
+	// so the command line is new to the set when it is run again, and a
+	// restart once that run exited. The other way round, the live count
+	// stayed with no holder to let it go, and every later run of the command
+	// line was a repeat, never a restart. What is left (pre-flip
+	// W6-ready-holders-generation): the window's run is still a holder, and
+	// its exit, or its exec of another command line, after a fresh run of its
+	// command line started, lets go of the fresh run's live count; the count
+	// then stays one short until every run of the command line has exited
+	// (ready_release stops at 0), and until then a run beside a single live
+	// run is a false restart, each time; a start not judged, never a false
+	// pass.
+	for i, m := range []*ebpf.Map{w.maps.ReadyHolders, w.maps.ReadySeen} {
+		if err := clearMap(m); err != nil {
 			return models.AppReadiness{}, fmt.Errorf("forget what the last set's processes did: %w", err)
+		}
+		if i == 0 && markBetweenClears != nil {
+			markBetweenClears()
 		}
 	}
 	return h.AppReadiness(math.MaxUint64)
+}
+
+// markBetweenClears, when a test sets it, runs between MarkReadiness's two
+// clears: an exec there is the window the clears' order is for.
+var markBetweenClears func()
+
+// clearMap deletes every entry of m, whatever its key and value sizes. An
+// iteration the kernel's own deletes abort (ready_holders loses an entry at
+// every member's exit) deletes what it read and goes round again, a bounded
+// number of times; each round leaves fewer entries.
+func clearMap(m *ebpf.Map) error {
+	k, v := make([]byte, m.KeySize()), make([]byte, m.ValueSize())
+	for round := 0; ; round++ {
+		var keys [][]byte
+		it := m.Iterate()
+		for it.Next(k, v) {
+			keys = append(keys, append([]byte(nil), k...))
+		}
+		err := it.Err()
+		for _, key := range keys {
+			if derr := m.Delete(key); derr != nil && !errors.Is(derr, ebpf.ErrKeyNotExist) {
+				return fmt.Errorf("delete from %s: %w", m, derr)
+			}
+		}
+		switch {
+		case err == nil:
+			return nil
+		case !errors.Is(err, ebpf.ErrIterationAborted) || round == 16:
+			return fmt.Errorf("read %s: %w", m, err)
+		}
+	}
 }
 
 // AppReadiness is what the readiness watch knows now (models.AppReadiness),
@@ -700,7 +751,10 @@ func (h *Hooks) AppReadiness(since uint64) (models.AppReadiness, error) {
 		}
 		client = info.ClientNSPID
 	}
-	return w.snapshot(client, since)
+	h.clientMu.Lock()
+	clientNS := h.clientPIDNS
+	h.clientMu.Unlock()
+	return w.snapshot(client, clientNS, since)
 }
 
 // selfRegistered is registerSelf, once: its error stays.

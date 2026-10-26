@@ -143,8 +143,8 @@ func started(t *testing.T, argv ...string) *exec.Cmd {
 // the daemon's wait, however long docker's own stop and removal take on a
 // starved host: here longer than the old 5 s grace. It kills only when the
 // container's processes made no progress on its way out for the stall bound
-// of keploy's runnable time, and says so. A container keploy never saw is
-// waited for by its docker client.
+// of the time both they and keploy could run, and says so. A container
+// keploy never saw is waited for by its docker client.
 func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 	t.Run("its container stops after the old grace", func(t *testing.T) {
 		main := started(t, "sleep", "600")
@@ -175,7 +175,7 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
 		killed, _ := a.stopDockerRunByEvents(client)
-		if !strings.Contains(killed, "made no progress on its way out for 300ms of keploy's runnable time") || strings.Join(d.kills, ",") != "SIGKILL" {
+		if !strings.Contains(killed, "made no progress on its way out for 300ms of its and keploy's runnable time") || strings.Join(d.kills, ",") != "SIGKILL" {
 			t.Fatalf("said %q after kills %v; want the stall kill said", killed, d.kills)
 		}
 	})
@@ -198,10 +198,16 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 		d := &eventDocker{seen: true, id: cgroupOf(t, main.Process.Pid), pid: main.Process.Pid, stop: make(chan struct{})}
 		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		// The run's teardown: the container's steps out move it.
+		scope := &utils.TeardownScope{}
+		a.teardown.Store(scope)
 		go func() { time.Sleep(5 * time.Second); d.halt() }()
 		killed, _ := a.stopDockerRunByEvents(client)
 		if killed != "" || len(d.kills) != 0 {
 			t.Fatalf("said %q after kills %v; want a container making progress waited for", killed, d.kills)
+		}
+		if scope.Moves() == 0 {
+			t.Fatal("the container's steps out moved the run's teardown not once")
 		}
 	})
 	t.Run("a pid the daemon names from another namespace", func(t *testing.T) {
@@ -210,9 +216,15 @@ func TestADockerRunStopWaitsForTheContainersStopEvent(t *testing.T) {
 		d := &eventDocker{seen: true, id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", pid: other.Process.Pid, stop: make(chan struct{})}
 		client := started(t, "sleep", "600")
 		a := &App{logger: zap.NewNop(), docker: d, container: "app"}
+		scope := &utils.TeardownScope{}
+		a.teardown.Store(scope)
 		killed, _ := a.stopDockerRunByEvents(client)
 		if killed == "" || strings.Join(d.kills, ",") != "SIGKILL" {
 			t.Fatalf("said %q after kills %v; want the stall kill", killed, d.kills)
+		}
+		// Nor are its steps the container's teardown.
+		if n := scope.Moves(); n != 0 {
+			t.Fatalf("another process's progress moved the run's teardown %d times", n)
 		}
 		if n := held(other.Process.Pid); n <= 3 {
 			t.Fatalf("the kill came once the other process had closed its files (%d left): its progress was read for the container's", n)

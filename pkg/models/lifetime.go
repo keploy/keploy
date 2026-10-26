@@ -539,6 +539,9 @@ func kindsWithImplicitSessionLifetime(k Kind) bool {
 // The check uses the packet Header.Type string so the models package
 // doesn't need to import the mysql wire package.
 func mysqlIsSessionReusableCommand(m *Mock) bool {
+	if m != nil && m.onDisk != nil {
+		return m.onDisk.mysqlSessionReusable
+	}
 	if m == nil || len(m.Spec.MySQLRequests) != 1 {
 		return false
 	}
@@ -553,6 +556,9 @@ func mysqlIsSessionReusableCommand(m *Mock) bool {
 // of a prepared statement's lifecycle (IsMySQLStatementLifecycleCommandType),
 // recorded alone.
 func (m *Mock) IsMySQLStatementLifecycle() bool {
+	if m != nil && m.onDisk != nil {
+		return m.onDisk.mysqlStatementLifecycle
+	}
 	if m == nil || m.Kind != MySQL || len(m.Spec.MySQLRequests) != 1 {
 		return false
 	}
@@ -786,6 +792,9 @@ func (r *mockPredicates) storeLocked(edit func(map[Kind][]mockPredicate)) {
 func (r *mockPredicates) match(m *Mock) bool {
 	if m == nil {
 		return false
+	}
+	if m.onDisk != nil {
+		return m.onDisk.matched&predicateBit(r) != 0
 	}
 	cur := r.byKnd.Load()
 	if cur == nil {

@@ -562,18 +562,31 @@ func (r *Runner) strictMockWindow() bool {
 
 // loadMocks returns the test set's per-test and session pools over the widest
 // window, from one read of its mock file when the mock store can (see
-// keployPkg.TestSetMocksReader), otherwise with one read per pool. skipped is
-// the documents the store's decoders skipped (models.TestSetMocks.Skipped),
-// nil from a store that reads one pool per call.
+// keployPkg.TestSetMocksReader), otherwise with one read per pool. A store
+// that indexes the file (keployPkg.TestSetMockIndexReader) leaves each mock's
+// payload in it: the runner holds a small entry per mock, and StoreMocks reads
+// each payload back as it sends the mock to the agent. skipped is the
+// documents the store's decoders skipped (models.TestSetMocks.Skipped), nil
+// from a store that reads one pool per call.
 func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
-	if reader, ok := r.mockDB.(keployPkg.TestSetMocksReader); ok {
-		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
-		if err != nil {
-			// The pass that failed is the one the per-test pool was read in.
-			return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
-		}
-		return set.Filtered, set.Unfiltered, set.Skipped, nil
+	var set models.TestSetMocks
+	switch reader := r.mockDB.(type) {
+	case keployPkg.TestSetMockIndexReader:
+		set, err = reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	case keployPkg.TestSetMocksReader:
+		set, err = reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	default:
+		return r.loadMocksPerPool(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 	}
+	if err != nil {
+		// The pass that failed is the one the per-test pool was read in.
+		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	return set.Filtered, set.Unfiltered, set.Skipped, nil
+}
+
+// loadMocksPerPool is loadMocks for a store that reads one pool per call.
+func (r *Runner) loadMocksPerPool(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)

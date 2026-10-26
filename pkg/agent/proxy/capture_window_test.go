@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -349,5 +353,90 @@ func TestUnderTheSwitchAMissBeforeASetsMocksAreStagedIsNotTheSets(t *testing.T) 
 	p.ContinueTestErrorCapture()
 	if got, _ := p.GetMockErrors(context.Background()); len(got) != 1 || got[0].ActualSummary != "POST /between" || got[0].BeforeSet {
 		t.Fatalf("the next test read %+v; want the miss made between the tests, its own", got)
+	}
+}
+
+// A window the agent's scope begin takes back (WithdrawTestErrorCapture: it
+// opens the test's window before the test's view, and the view was refused)
+// ends the learn tracker's test, and what the window held is carried into
+// the next test's window whole: the misses made between tests that it took
+// in, those made as the begin failed, and those made after it, until the
+// next window opens. None is dropped, and none is left with the test that
+// did not begin.
+func TestAWithdrawnCaptureWindowIsCarriedIntoTheNextTestsWhole(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	core, logs := observer.New(zap.WarnLevel)
+	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 16), learnTracker: learn.NewTracker()}
+	p.BeginTestErrorCapture()
+	if got, err := p.GetMockErrors(context.Background()); err != nil || len(got) != 0 {
+		t.Fatalf("the first test read %+v, %v; want nothing", got, err)
+	}
+	p.pendingMockErrors.addBounded(mockMiss("between tests"), maxPendingMockErrors)
+	p.ContinueTestErrorCapture() // the begin that fails opens its window first
+	if p.learnTracker.OpenEpoch() == 0 {
+		t.Fatal("the window opened no learn tracker test")
+	}
+	// Filed as the drain files a miss: into the window open when it lands.
+	p.activeTestErrors.Load().add(mockMiss("as the begin failed"))
+	p.WithdrawTestErrorCapture()
+	if n := p.learnTracker.OpenEpoch(); n != 0 {
+		t.Fatalf("the window taken back left the tracker's test %d open", n)
+	}
+	p.activeTestErrors.Load().add(mockMiss("after the begin failed"))
+
+	p.ContinueTestErrorCapture()
+	got, err := p.GetMockErrors(context.Background())
+	if err != nil {
+		t.Fatalf("GetMockErrors: %v", err)
+	}
+	var read []string
+	for _, c := range got {
+		read = append(read, c.ActualSummary)
+	}
+	sort.Strings(read)
+	if want := []string{"after the begin failed", "as the begin failed", "between tests"}; !reflect.DeepEqual(read, want) {
+		t.Fatalf("the next test read %q; want %q", read, want)
+	}
+	if n := logs.FilterMessageSnippet("dropped").Len(); n != 0 {
+		t.Fatalf("misses were said to be dropped (%d)", n)
+	}
+}
+
+// A window taken back (WithdrawTestErrorCapture) ends the learn tracker's
+// test through the mock manager, as every boundary of the proxy's tracker
+// does (learnBoundary): holding the round lock, so the manager's round reads
+// the tracker as it is. Ended on the tracker alone, the round still read the
+// withdrawn test as open: a test's view the store then installed, before the
+// tracker began the next test (the store opening it first), was bound to the
+// withdrawn test, and once the tracker began that next test every read of
+// the round found the two apart ("the learn tracker began another test"),
+// though the store showed the very test the tracker had begun. Bound to
+// none, the view is the test the tracker begins next, and the round is in it.
+// No caller installs a view between a failed begin and the next window (the
+// agent opens the window before the view); the row drives that order
+// directly, as the store-led order LearnBoundary binds.
+func TestAWithdrawnWindowEndsTheTrackersTestInTheManagersRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	own := exactMock("own", 0, models.LifetimePerTest)
+	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4), learnTracker: learn.NewTracker()}
+	mm := stagedManager(t, []*models.Mock{own}, nil)
+	p.setMockManager(mm)
+	p.BeginTestErrorCapture()
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	p.EndTestErrorCapture()
+	mm.ServeExactPool("-", nil)
+	p.ContinueTestErrorCapture() // the begin that fails opens its window first
+	p.WithdrawTestErrorCapture()
+	if mm.exact.round.learn.open {
+		t.Fatal("the manager's round still reads the withdrawn test as open")
+	}
+	mm.ServeExactTest("T2", []*models.Mock{own})
+	p.ContinueTestErrorCapture()
+	snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Kind: models.HTTP, Tracker: p.learnTracker})
+	if !ok {
+		t.Fatal("no round snapshot")
+	}
+	if snap.Phase != integrations.RoundInTest || snap.Test != "T2" {
+		t.Fatalf("the round reads phase %v, test %q (%s); want T2's test, the one the tracker began over the view", snap.Phase, snap.Test, snap.Boundary)
 	}
 }

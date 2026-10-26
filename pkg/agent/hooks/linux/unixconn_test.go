@@ -5,11 +5,14 @@ package linux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sys/unix"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -113,23 +116,43 @@ func TestTheUnixReportStaysUnloadedWithoutTheSwitch(t *testing.T) {
 	}
 }
 
-// A report that could not load under the switch is unknown, never 0.
-func TestAUnixReportKeployCannotSeeThroughLeavesEveryTestNotJudged(t *testing.T) {
-	h := &Hooks{logger: zap.NewNop(), unix: &unixConn{off: "no trampoline"}}
+// A kernel that loads the report neither way: keploy cannot see Unix-socket
+// calls there, and does not support them anyway, so it says so once and
+// judges every test as it would without the report: no unix_unseen, no
+// unknown count. (The fallback loading, and a detected call marking its
+// test, are the integration tests'.)
+func TestAUnixReportThatCannotLoadIsOneWarnAndJudgesAsBefore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	was := loadUnixConnFn
+	loadUnixConnFn = func(*zap.Logger, *bpfObjects) (*unixConn, error) {
+		return nil, errors.New("load the unixconn object: the verifier refused it")
+	}
+	t.Cleanup(func() { loadUnixConnFn = was })
+	core, logs := observer.New(zapcore.WarnLevel)
+	h := &Hooks{logger: zap.New(core)}
+	h.startUnixConn(context.Background())
+	warns := logs.All()
+	if len(warns) != 1 || !strings.Contains(warns[0].Message, "Unix sockets are not supported") ||
+		!strings.Contains(fmt.Sprint(warns[0].ContextMap()["error"]), "verifier refused") {
+		t.Fatalf("logged %+v, want one WARN that keploy could not load its Unix-socket report, naming the error", warns)
+	}
+	if got := h.CaptureLosses(); len(got) != 0 {
+		t.Fatalf("the capture losses %+v, want none: every test is judged as without the report", got)
+	}
 	if err := h.CaptureLossesErr(); err != nil {
-		t.Fatalf("CaptureLossesErr = %v, want nil: a report keploy cannot see through is a standing unix_unseen, not an unknown count", err)
+		t.Fatalf("CaptureLossesErr = %v, want nil", err)
 	}
-	got := h.unixLosses()
-	if len(got) != 1 || got[0].Kind != models.CaptureLossUnixUnseen || got[0].Count != 1 || !strings.Contains(got[0].What, "no trampoline") {
-		t.Fatalf("an unloaded report's losses %+v, want one unix_unseen naming why", got)
-	}
+}
 
-	// A report that stopped (a ring keploy cannot read on): the same, with
-	// what it counted before.
+// A report that stopped once loaded is unknown, never 0: a standing
+// unix_unseen.
+func TestAUnixReportThatStoppedLeavesEveryTestNotJudged(t *testing.T) {
+	// A report that stopped (a ring keploy cannot read on), with what it
+	// counted before.
 	d := newReportDrain()
 	d.stop(errors.New("ring broken"))
-	h = &Hooks{logger: zap.NewNop(), unix: &unixConn{drain: d}}
-	got = h.unixLosses()
+	h := &Hooks{logger: zap.NewNop(), unix: &unixConn{drain: d}}
+	got := h.unixLosses()
 	if len(got) != 1 || got[0].Kind != models.CaptureLossUnixUnseen || !strings.Contains(got[0].What, "ring broken") {
 		t.Fatalf("a stopped report's losses %+v, want one unix_unseen naming why", got)
 	}

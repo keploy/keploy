@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -229,11 +230,11 @@ func (p *Proxy) recordViaSupervisor(
 		// A client-side upgrade's failed handshake is charged as any
 		// client-side handshake with the proxy, not as starttls_failed.
 		OnClientHandshakeFailed: p.relayClientHandshake(dstConn),
-		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
-		// captured once per connection: the relay calls the returned fn with
-		// no options in hand. With the flag unset this is the historic
+		// verify / rootCAs come from record.upstreamTls.* and are captured
+		// once per connection: the relay calls the returned fn with no
+		// options in hand. With the flag unset this is the historic
 		// InsecureSkipVerify=true dial, unchanged.
-		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs, srcConn),
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs),
 		// Only when verification is on: run the client-side handshake first so
 		// the application's SNI is captured before keploy dials the upstream it
 		// has to verify. Off (the default) keeps the historic dest-first order
@@ -271,6 +272,12 @@ func (p *Proxy) recordViaSupervisor(
 			svSess.StoppedAt()
 			return !svSess.RecordingStopping()
 		},
+		// The destination's stream ends where the client stopped taking it
+		// (it closed its socket, and refused what came after): a parser
+		// that reaches that end mid-message knows the client's close cut
+		// the message there, not the destination (the HTTP recorder leaves
+		// that exchange out, and says why).
+		ClientStopped: svSess.MarkEndedWhereClientStopped,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -598,16 +605,18 @@ func (p *Proxy) recordViaSupervisor(
 // They are captured at closure-construction time because the relay
 // calls this fn per connection with no options in hand.
 //
-// srcConn is the application-facing socket for THIS connection. It is
-// held only to recover the client's source port, which is the key
-// CertForClient files the application's SNI under; the fn never reads
-// or writes it (the relay owns it). Nil is safe.
+// The fn returned is this connection's alone: it keeps the SNI the
+// application sent in the client-side handshake it serves, for the
+// destination-side dial it makes after (relay.Config.ClientTLSFirst).
 //
 // The conn pointer update (so the forwarders switch to the upgraded
 // conn on subsequent iterations) is the relay's responsibility; this
 // fn only performs the handshake and returns the new net.Conn —
 // hence it does not need the caller's *net.Conn handles.
-func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool, srcConn net.Conn) relay.TLSUpgradeFn {
+func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool) relay.TLSUpgradeFn {
+	// The name the application asked for in this connection's client-side
+	// handshake: its SNI, once that handshake is done.
+	var clientSNI atomic.Pointer[string]
 	return func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
 		if cfg == nil {
 			return conn, nil
@@ -660,8 +669,11 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 				}
 				// ServerName, in descending order of trustworthiness:
 				//
-				//  1. The SNI the APPLICATION sent. Parsers derive their
-				//     ServerName from the destination ADDRESS — e.g.
+				//  1. The name the APPLICATION asked for: the SNI it sent
+				//     in this connection's client-side handshake, else its
+				//     CONNECT target (pTls.ConnectTargetFrom). Parsers
+				//     derive their ServerName from the destination
+				//     ADDRESS — e.g.
 				//     mysql/recorder.buildDestTLSConfigV2 takes the host of
 				//     sess.Opts.DstCfg.Addr, which the proxy always sets to
 				//     the `ip:port` eBPF reported, never the hostname the
@@ -688,7 +700,11 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 				//
 				// The whole ladder is guarded by `verify` so the default
 				// path never gains an SNI the application did not send.
-				if sni := capturedSNIForSrc(srcConn); sni != "" {
+				sni := pTls.ConnectTargetFrom(ctx)
+				if s := clientSNI.Load(); s != nil && *s != "" {
+					sni = *s
+				}
+				if sni != "" {
 					dialCfg.ServerName = sni
 				}
 				if dialCfg.ServerName == "" {
@@ -711,31 +727,10 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 		if err != nil {
 			return nil, fmt.Errorf("client TLS handshake failed: %w", err)
 		}
+		sni := util.ClientServerName(wrapped)
+		clientSNI.Store(&sni)
 		return wrapped, nil
 	}
-}
-
-// capturedSNIForSrc returns the SNI the application sent on srcConn's
-// connection, as filed by CertForClient under the client's source port
-// (pTls.SrcPortToDstURL). "" when the app sent none — the normal case for an
-// IP-literal destination, which RFC 6066 forbids in SNI — or when the value
-// has not been captured yet.
-//
-// srcConn is only ever asked for its RemoteAddr; the relay owns the socket.
-func capturedSNIForSrc(srcConn net.Conn) string {
-	if srcConn == nil {
-		return ""
-	}
-	tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr)
-	if !ok || tcpAddr == nil {
-		return ""
-	}
-	v, ok := pTls.SrcPortToDstURL.Load(tcpAddr.Port)
-	if !ok {
-		return ""
-	}
-	sni, _ := v.(string)
-	return sni
 }
 
 // Compile-time sanity: ensure the dispatcher-side V2 call site can be

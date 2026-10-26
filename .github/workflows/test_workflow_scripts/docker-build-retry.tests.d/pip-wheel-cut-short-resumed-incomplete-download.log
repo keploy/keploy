@@ -1,0 +1,20 @@
+Looking in indexes: http://127.0.0.1:36201/cut/
+Collecting flask==3.1.2
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+  WARNING: Attempting to resume incomplete download (51 kB/103 kB, attempt 1)
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+  WARNING: Attempting to resume incomplete download (51 kB/103 kB, attempt 2)
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+  WARNING: Attempting to resume incomplete download (51 kB/103 kB, attempt 3)
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+  WARNING: Attempting to resume incomplete download (51 kB/103 kB, attempt 4)
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+  WARNING: Attempting to resume incomplete download (51 kB/103 kB, attempt 5)
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+error: incomplete-download
+
+× Download failed after 6 attempts because not enough bytes were received (51 kB/103 kB)
+╰─> URL: http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl
+
+note: This is an issue with network connectivity, not pip.
+hint: Use --resume-retries to configure resume attempt limit.

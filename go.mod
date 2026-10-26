@@ -1,6 +1,6 @@
 module go.keploy.io/server/v3
 
-go 1.27.0
+go 1.27.3
 
 require (
 	charm.land/glamour/v2 v2.0.0
@@ -49,6 +49,7 @@ require (
 	github.com/zricethezav/gitleaks/v8 v8.28.0
 	go.mongodb.org/mongo-driver/v2 v2.4.1
 	go.uber.org/zap v1.27.0
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20261020153306-9f2b28d4331a
 	golang.org/x/net v0.58.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0

@@ -26,6 +26,7 @@ import (
 	"go.keploy.io/server/v3/pkg/service/realclient"
 
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -55,8 +56,8 @@ const (
 	mappingIdleGrace = 3 * time.Second
 
 	// afterRecordingHookTimeout bounds the end-of-recording hook (issue #1867) so a
-	// wedged consumer cannot hang teardown. Matches the 30s DrainErrGroup budgets in
-	// the same teardown defer. It is the hook context's only deadline (WithoutCancel
+	// wedged consumer cannot hang teardown. Matches the 30s stall bound of the
+	// drains (DrainErrGroupProgress) in the same teardown defer. It is the hook context's only deadline (WithoutCancel
 	// drops the upstream one), and consumers are expected to honor it.
 	afterRecordingHookTimeout = 30 * time.Second
 )
@@ -611,11 +612,23 @@ type Recorder struct {
 	// it still holds (forwardUntilDrained); zero means mappingIdleGrace. A
 	// field so tests that are not about the drain need not wait it out.
 	frameQuiet time.Duration
+	// waitNotice is how often a stop that waits for the app ports'
+	// questions says so (unreachablePortWarner.wait); zero means
+	// drainProgressEvery. A field so a test need not wait it out.
+	waitNotice time.Duration
 
 	// backlogHolds counts the looks at which a frame drain kept waiting for
 	// what the agent still held from before the stop (holdForBacklog):
 	// progress for the stop's outer drains (drainProgress).
 	backlogHolds atomic.Uint64
+	// teardown is the recording's own teardown scope (Start): what keploy
+	// sees its stops do -- the agent's, the app's, the daemons', the
+	// compose project's down -- moves it, and it is progress for the stop's
+	// drains (drainProgress). Nil before Start.
+	teardown atomic.Pointer[utils.TeardownScope]
+	// drainClock is the clock the stop's drains measure a stall on: nil,
+	// keploy's own runnable time; a test drives its own.
+	drainClock stall.Clock
 	// captureLost is set when a frame drain stopped waiting for what the
 	// agent still held from before the stop, or the mock store could not
 	// write mocks the recording captured (mocksNotWritten): the recording is
@@ -636,9 +649,11 @@ type Recorder struct {
 	mockWriteStopped atomic.Bool
 	// realUncaptured is set, under the proven switch with a mock.real list,
 	// when keploy could neither capture nor relay as real a connection of
-	// the recording, or could not read whether it did (reportRealRun): the
-	// recording is incomplete, and ends as failed, as for a capture loss.
+	// the recording, and realUnread when it could not read whether it did
+	// (reportRealRun): the recording is incomplete, and ends as failed, as
+	// for a capture loss, unless a later pass judges it (JudgeLossesLater).
 	realUncaptured atomic.Bool
+	realUnread     atomic.Pointer[string]
 	// heldFrames counts the test cases and mocks the frame drains handed on
 	// after the stop that may have been captured before it: what the agent's
 	// answer to a look (holdForBacklog) is about. Mappings, which it does not
@@ -908,12 +923,18 @@ func (r *Recorder) holdForBacklog(stoppedAt time.Time, looks *backlogLooks, kind
 	return true
 }
 
-// drainProgress is what the stop's outer drains wait on while it moves: the
-// frames handed on, and every look at which a frame drain decided to keep
-// waiting for the agent (holdForBacklog), which bounds its own wait.
+// drainProgress is what the stop's drains wait on while it moves: the frames
+// handed on, every look at which a frame drain decided to keep waiting for
+// the agent (holdForBacklog), which bounds its own wait, and every movement
+// keploy saw of the recording's stops (Recorder.teardown).
 func (r *Recorder) drainProgress() uint64 {
-	return r.frameProgress.Load() + r.backlogHolds.Load()
+	return r.frameProgress.Load() + r.backlogHolds.Load() + r.teardown.Load().Moves()
 }
+
+// teardownDrainStall bounds the drains of the recording's stop that wait on
+// its teardown moving (drainProgress): how long, in time keploy could run,
+// it may make no progress.
+const teardownDrainStall = 30 * time.Second
 
 // drainProgressEvery is how often a stop that is still saving what the agent
 // captured says so.
@@ -975,6 +996,14 @@ func (r *Recorder) reportDrainProgress(every time.Duration) (stop func()) {
 		close(done)
 		<-exited
 	}
+}
+
+// noticeEvery is waitNotice, or drainProgressEvery.
+func (r *Recorder) noticeEvery() time.Duration {
+	if r.waitNotice > 0 {
+		return r.waitNotice
+	}
+	return drainProgressEvery
 }
 
 func (r *Recorder) frameQuietGrace() time.Duration {
@@ -1380,6 +1409,9 @@ func recordExitCode(err error) int {
 func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Starting Keploy recording... Please wait.")
+	// The recording's own teardown scope (Recorder.teardown).
+	ctx, teardown := utils.NewTeardownScope(ctx)
+	r.teardown.Store(teardown)
 	// A mock.real keploy cannot read is refused before anything runs (proven
 	// switch only).
 	if err := realclient.Check(r.mockReal()); err != nil {
@@ -1470,7 +1502,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// Writes must therefore outlive cancellation. This does NOT risk a hung
 	// teardown: the consumers are `range` loops that end when the agent closes its
 	// streams (at reqCtxCancel), each write is a local file op, and Start's
-	// teardown still bounds the whole group with DrainErrGroup.
+	// teardown still bounds the whole group (DrainErrGroupProgress).
 	persistCtx := context.WithoutCancel(ctx)
 
 	/*
@@ -1493,6 +1525,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	 * immediately because no join was requested.
 	 */
 	uiJoinObserved := newUIJoinPorts()
+	// Its questions run beside the recording; the stop waits for those still
+	// out once its drains are over (the record drain's inserts start the last
+	// of them).
 	unreachablePorts := newUnreachablePortWarner(r.logger, r.instrumentation, r.config)
 
 	runAppErrGrp, _ := errgroup.WithContext(ctx)
@@ -1624,7 +1659,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	drainFrames := func() (joined bool) {
 		reqCtxCancel()
 		defer r.reportDrainProgress(drainProgressEvery)()
-		err, timedOut := utils.DrainErrGroupProgress(r.logger, "record-req", reqErrGrp, 30*time.Second, r.drainProgress)
+		err, timedOut := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-req", reqErrGrp, teardownDrainStall, r.drainProgress)
 		if err != nil {
 			utils.LogError(r.logger, err, "failed to stop request processing")
 		}
@@ -1659,6 +1694,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					capWatch.afterTestCases(ctx)
 				}
 				joined := drainFrames()
+				capWatch.waitForReads() // while the agent is up
 				if e, ok := r.instrumentation.(composeAgentEnder); ok {
 					// A drain given up on a stall may hold its stream open,
 					// and the agent waits for that stream: it is told to go.
@@ -1670,6 +1706,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			if recordingStarted {
 				r.reportRealRun(ctx)
 				capWatch.afterTestCases(ctx)
+				capWatch.waitForReads() // before the stack, and the agent with it, goes
 			}
 		})
 	}
@@ -1742,7 +1779,9 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 		windowMaps.noteStop(time.Now())
 		runAppCtxCancel()
-		if err := utils.DrainErrGroup(r.logger, "record-app", runAppErrGrp, 30*time.Second); err != nil {
+		// Waited for while the stop moves (drainProgress): the app's way
+		// out, what the agent captures of it, not a fixed time.
+		if err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-app", runAppErrGrp, teardownDrainStall, r.drainProgress); err != nil {
 			utils.LogError(r.logger, err, "failed to stop application")
 		}
 		if !composeAgent {
@@ -1754,6 +1793,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				capWatch.afterTestCases(ctx)
 			}
 			drainFrames()
+			capWatch.waitForReads() // before the agent stops
 		}
 		// The stop had to kill the app, or the agent went before it had
 		// handed over what it captured: the recording's end is cut, and the
@@ -1767,7 +1807,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		}
 
 		setupCtxCancel()
-		if err := utils.DrainErrGroup(r.logger, "record-setup", setupErrGrp, 30*time.Second); err != nil {
+		if err, _ := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record-setup", setupErrGrp, teardownDrainStall, r.drainProgress); err != nil {
 			utils.LogError(r.logger, err, "failed to stop setup execution, that covers init container")
 		}
 
@@ -1775,11 +1815,19 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// only if this drain actually joined every persist goroutine; on the
 		// timeout path a mock/test-case writer may still be in flight (see below).
 		recordDrainedCleanly := true
-		if err, timedOut := utils.DrainErrGroupProgress(r.logger, "record", errGrp, 30*time.Second, r.drainProgress); err != nil {
+		if err, timedOut := utils.DrainErrGroupProgressOn(r.drainClock, r.logger, "record", errGrp, teardownDrainStall, r.drainProgress); err != nil {
 			utils.LogError(r.logger, err, "failed to stop recording")
 		} else if timedOut {
 			recordDrainedCleanly = false
 		}
+		// Every drain is over: nothing still selects on utils.StopNow, which
+		// a press at this wait's offer closes, but what a drain abandoned on
+		// a stall (already counted as cut). The record drain joined the
+		// test-case consumer that asks the questions, if one ever ran (a
+		// recording that ended before it captured has none), or gave it up:
+		// the wait asks no more (it seals the warner), and what those still
+		// out find is said before the session's summary.
+		unreachablePorts.wait(r.noticeEvery())
 
 		// Every mock is now handed to the mock store: a store that writes
 		// in the background (the gob writer) writes the rest here, before
@@ -2020,38 +2068,24 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// A drain that stopped waiting for what the agent still held from
 		// before the stop (holdForBacklog) left the recording incomplete:
 		// said once more here, where the run ends, and the run fails.
-		incomplete := r.captureLost.Load()
-		if incomplete {
+		agentHeldBack := r.captureLost.Load()
+		if agentHeldBack {
 			r.logger.Error("the recording may be incomplete: Keploy could not confirm it saved all the keploy agent captured before the stop",
 				zap.String("testSetID", newTestSetID),
 				zap.String("next_step", "the lines above say why (the agent made no progress, went away before it said it had handed everything over, a second interrupt stopped the saving, or the mock store could not write every mock); re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 		}
 		// Under the proven switch: test cases recorded while the agent could
-		// not capture every call, or that could not be checked, fail the run.
-		if capWatch.finish(newTestSetID) {
+		// not capture every call, or that could not be checked, and
+		// connections to a mock.real destination neither captured nor
+		// relayed, fail the run, unless a later pass judges each test case
+		// (JudgeLossesLater).
+		fail, lossy := r.finishCapture(capWatch, newTestSetID)
+		if fail {
 			utils.SetExitCodeOnce(utils.ExitKeployError)
-			incomplete = true
-		}
-		if r.realUncaptured.Load() {
-			utils.SetExitCodeOnce(utils.ExitKeployError)
-			incomplete = true
 		}
 		if recordingStarted || stopReason != "" {
-			status := "completed"
-			reason := stopReason
-			switch {
-			case stopReason != "":
-				status = "aborted"
-			case incomplete:
-				status, reason = "incomplete", "the agent's captures from before the stop were not all handed over"
-				if !storeWrote {
-					reason = "mocks the recording captured were not written to the mock file"
-					if agentLost {
-						reason = "the agent's captures from before the stop were not all handed over, and mocks the recording captured were not written to the mock file"
-					}
-				}
-			}
+			status, reason := sessionEnd(stopReason, agentHeldBack, lossy, storeWrote, agentLost)
 			r.telemetry.RecordSessionCompleted(int64(testCountSnapshot), int64(totalMocks), time.Since(sessionStart).Milliseconds(), status, reason)
 		}
 		/*

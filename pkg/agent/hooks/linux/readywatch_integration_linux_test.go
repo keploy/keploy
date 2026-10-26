@@ -54,6 +54,14 @@ func burn(d time.Duration) {
 //	                 registers so), starts a child of its own that only uses CPU,
 //	                 and says "ready"
 //	cpu              only uses CPU, for ever
+//	sleeper          waits for a line, calls socket() (registers as the
+//	                 client), says "ready"; then at each "run [NAME]" line
+//	                 starts a child (sleeper-child: this binary, another
+//	                 command line than its own, one for every NAME) and says
+//	                 "ready" once the child says "up", and at each
+//	                 "kill [NAME]" kills that child and waits for it (a
+//	                 NAME it has no child for fails)
+//	sleeper-child    says "up": its exec, and the exec's tracepoint, are done
 //	exec-twice       waits for a line, calls socket() (registers as the
 //	                 client), runs /bin/sh -c "exit 0" twice, and says "ready"
 //
@@ -98,6 +106,65 @@ func runReadyHelper(mode string) int {
 	case mode == "cpu":
 		for {
 			burn(time.Second)
+		}
+	case mode == "sleeper-child":
+		fmt.Println("up")
+	case mode == "sleeper":
+		in := bufio.NewReader(os.Stdin)
+		if _, err := in.ReadString('\n'); err != nil {
+			return fail(err)
+		}
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+		if err != nil {
+			return fail(err)
+		}
+		_ = unix.Close(fd)
+		fmt.Println("ready")
+		children := map[string]*exec.Cmd{}
+		for {
+			line, err := in.ReadString('\n')
+			if err != nil {
+				return 0
+			}
+			f := strings.Fields(line)
+			if len(f) == 0 {
+				continue
+			}
+			name := strings.Join(f[1:], " ")
+			switch f[0] {
+			case "run":
+				// Start returns once the exec closed the child's
+				// close-on-exec descriptors, before the exec is done and its
+				// tracepoint has run; the child's "up" comes after both.
+				child := exec.Command("/proc/self/exe", "-test.run=^$", "-test.count=2")
+				child.Env = append(os.Environ(), readyHelperEnv+"=sleeper-child")
+				child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+				if _, err := child.StdinPipe(); err != nil {
+					return fail(err)
+				}
+				up, err := child.StdoutPipe()
+				if err != nil {
+					return fail(err)
+				}
+				if err := child.Start(); err != nil {
+					return fail(err)
+				}
+				if line, _ := bufio.NewReader(up).ReadString('\n'); strings.TrimSpace(line) != "up" {
+					return fail(fmt.Errorf("the child: %q", line))
+				}
+				children[name] = child
+			case "kill":
+				// Wait returns once the child was reaped, after its exit
+				// tracepoint.
+				child := children[name]
+				if child == nil {
+					return fail(fmt.Errorf("kill %q: no such child", name))
+				}
+				_ = child.Process.Kill()
+				_ = child.Wait()
+				delete(children, name)
+			}
+			fmt.Println("ready")
 		}
 	case mode == "exec-twice":
 		if _, err := bufio.NewReader(os.Stdin).ReadString('\n'); err != nil {
@@ -357,9 +424,15 @@ func TestUnderTheSwitchTheAgentSeesTheApplicationListen(t *testing.T) {
 	if err != nil || marked.ListenCount != st.ListenCount || len(marked.Listens) != 0 {
 		t.Fatalf("mark: %+v (%v), want the count %d, no listen", marked, err, st.ListenCount)
 	}
-	var k uint64
-	if h.objects.ReadySeen.Iterate().Next(&k, new(uint8)) {
-		t.Fatalf("after the mark ready_seen still holds %#x", k)
+	for _, m := range []*ebpf.Map{h.objects.ReadySeen, h.objects.ReadyHolders} {
+		k, v := make([]byte, m.KeySize()), make([]byte, m.ValueSize())
+		it := m.Iterate()
+		if it.Next(k, v) {
+			t.Fatalf("after the mark %s still holds %x", m, k)
+		}
+		if err := it.Err(); err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
 	}
 	// The helper ends, its socket with it: the listen is told, no longer live.
 	if c, ok := in.(io.Closer); ok {
@@ -427,5 +500,179 @@ func TestUnderTheSwitchTheAgentCountsARestartAndNamesIt(t *testing.T) {
 	marked, err := h.MarkReadiness()
 	if err != nil || marked.Progress.Restarts != st.Progress.Restarts {
 		t.Fatalf("mark: %+v (%v), want the restarts so far, %d", marked.Progress, err, st.Progress.Restarts)
+	}
+}
+
+// A run that starts while the set's mark clears (its exec between the two
+// clears) is let go of at its exit: its command line is then new to the set,
+// and run again a restart. Cleared the other way round (ready_seen first),
+// the run's live count outlived the holder the mark had cleared, and every
+// later run of the command line was a repeat, never a restart.
+func TestARunTheMarkClearsAroundIsLetGoOfAtItsExit(t *testing.T) {
+	h, cg := provenReadyHooks(t, false)
+	in, out, pid := startReadyHelper(t, cg, "sleeper")
+	client := structs.ClientInfo{Mode: 1, ClientNSPID: uint32(pid)}
+	for i := range client.PassThroughPorts {
+		client.PassThroughPorts[i] = -1
+	}
+	if err := h.objects.KeployClientRegistrationMap.Update(uint64(0), client, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	step := func(line string) {
+		t.Helper()
+		if _, err := in.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := out.ReadString('\n'); strings.TrimSpace(got) != "ready" {
+			t.Fatalf("helper, after %q: %q", line, got)
+		}
+	}
+	progress := func() models.ReadyProgress {
+		t.Helper()
+		st, err := h.AppReadiness(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Progress
+	}
+	step("go")
+	markBetweenClears = func() { step("run") }
+	t.Cleanup(func() { markBetweenClears = nil })
+	if _, err := h.MarkReadiness(); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	markBetweenClears = nil
+	step("kill")
+	// Counted in the exec's own tracepoint, before the child said "up".
+	before := progress()
+	step("run")
+	if got := progress(); got.Execs != before.Execs+1 || got.Restarts != before.Restarts {
+		t.Fatalf("the command line run again after the mark: progress %+v -> %+v, want one exec more (new to the set)", before, got)
+	}
+	step("kill")
+	before = progress()
+	step("run")
+	if got := progress(); got.Restarts != before.Restarts+1 {
+		t.Fatalf("the command line run again once its last run exited: progress %+v -> %+v, want one restart more", before, got)
+	}
+	step("kill")
+}
+
+// A known limit of the mark, pre-flip W6-ready-holders-generation: a run
+// exec'd between its two clears stays its command line's holder after the
+// mark, while ready_seen forgot its live run. Its exit, or its exec of
+// another command line, after a fresh run of the command line has started,
+// lets go of the fresh run's live count; the count then stays one short
+// until every run of the command line has exited (ready_release stops at 0),
+// and until then a run beside a single live run is counted as a restart, a
+// false one (a second worker), each time. That is a start
+// not judged (its CPU time no longer weighed), never a false pass. A release
+// checked against the run it counted closes it (design in the ledger: an
+// instance stamp each ready_seen entry takes at insert and its holders copy,
+// or the mark as a generation ebpf reads at each exec); a stamp of the
+// mark's generation on holders alone does not. This pins today's behaviour,
+// so the fix shows here; the control, a run started before the mark, is let
+// go of at the mark and counts nothing.
+func TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday(t *testing.T) {
+	for _, inWindow := range []bool{true, false} {
+		t.Run(fmt.Sprintf("run 0 between the clears: %v", inWindow), func(t *testing.T) {
+			h, cg := provenReadyHooks(t, false)
+			in, out, pid := startReadyHelper(t, cg, "sleeper")
+			client := structs.ClientInfo{Mode: 1, ClientNSPID: uint32(pid)}
+			for i := range client.PassThroughPorts {
+				client.PassThroughPorts[i] = -1
+			}
+			if err := h.objects.KeployClientRegistrationMap.Update(uint64(0), client, ebpf.UpdateAny); err != nil {
+				t.Fatal(err)
+			}
+			step := func(line string) {
+				t.Helper()
+				if _, err := in.Write([]byte(line + "\n")); err != nil {
+					t.Fatal(err)
+				}
+				if got, _ := out.ReadString('\n'); strings.TrimSpace(got) != "ready" {
+					t.Fatalf("helper, after %q: %q", line, got)
+				}
+			}
+			progress := func() models.ReadyProgress {
+				t.Helper()
+				st, err := h.AppReadiness(0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return st.Progress
+			}
+			step("go")
+			if inWindow {
+				markBetweenClears = func() { step("run 0") }
+				t.Cleanup(func() { markBetweenClears = nil })
+			} else {
+				step("run 0")
+			}
+			if _, err := h.MarkReadiness(); err != nil {
+				t.Fatalf("mark: %v", err)
+			}
+			markBetweenClears = nil
+			step("run 1") // a fresh run, run 0 still running
+			step("kill 0")
+			before := progress()
+			step("run 2") // run 1 still running: a second worker
+			got := progress()
+			want := before.Restarts
+			if inWindow {
+				want++ // today's false restart
+			}
+			if got.Restarts != want {
+				t.Fatalf("run 2, beside run 1: restarts %d -> %d, want %d (in the window: %v)", before.Restarts, got.Restarts, want, inWindow)
+			}
+			step("kill 2")
+			step("kill 1")
+		})
+	}
+}
+
+// The mark clears ready_holders while the kernel deletes from it (a member's
+// exit), which aborts an iteration: clearMap reads again, so the mark does
+// not fail and leave the set not judged. Here a full map is churned, its
+// keys deleted and put back, as clearMap runs, twenty times.
+func TestClearingAMapItsKeysChurnInGoesOn(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Fatal("this test needs root (it creates BPF maps); run the test binary with sudo")
+	}
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8192
+	for round := 0; round < 20; round++ {
+		m, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: 4, ValueSize: 8, MaxEntries: n})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k := uint32(0); k < n; k++ {
+			if err := m.Put(k, uint64(k)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for k := uint32(0); ; k = (k + 1) % n {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = m.Delete(k)
+				_ = m.Put(k, uint64(k))
+			}
+		}()
+		err = clearMap(m)
+		close(stop)
+		<-done
+		_ = m.Close()
+		if err != nil {
+			t.Fatalf("round %d: clearMap of a map its keys churn in: %v", round, err)
+		}
 	}
 }

@@ -33,6 +33,10 @@ func (t *instanceTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	res, err := base.RoundTrip(req)
 	if err == nil && res != nil {
+		// Any answer is the agent's: its container is there (known, on
+		// the entry of the Setup that set it up at this address), whether
+		// or not the answer names its process.
+		answeredAt(req.URL.Host)
 		// An answer that names no process says nothing about which one
 		// answered: an agent with the switch off, or one older than the
 		// header. It neither keeps a watch to a process nor ends one.
@@ -52,8 +56,13 @@ func (t *instanceTransport) RoundTrip(req *http.Request) (*http.Response, error)
 type agentInstances struct {
 	mu sync.Mutex
 	// latest is the process that gave the latest answer naming one.
-	latest  string
-	watches map[*instanceWatch]struct{}
+	latest string
+	// beforeApp are the processes docker compose's bring-up retry started
+	// in place of keploy's agent while the application's container had
+	// never started (setUpRestartedAgent): the application ran against none
+	// of the ones they replaced.
+	beforeApp map[string]bool
+	watches   map[*instanceWatch]struct{}
 }
 
 var instances sync.Map // host:port -> *agentInstances
@@ -92,6 +101,28 @@ func (s *agentInstances) watch() *instanceWatch {
 	w := &instanceWatch{at: s}
 	s.watches[w] = struct{}{}
 	return w
+}
+
+// startedBeforeApp notes that the process answering now was started in
+// place of keploy's agent before the application ever ran
+// (setUpRestartedAgent). Nothing where no answer named a process.
+func (s *agentInstances) startedBeforeApp() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.latest == "" {
+		return
+	}
+	if s.beforeApp == nil {
+		s.beforeApp = map[string]bool{}
+	}
+	s.beforeApp[s.latest] = true
+}
+
+// wasStartedBeforeApp reports whether startedBeforeApp noted instance.
+func (s *agentInstances) wasStartedBeforeApp(instance string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return instance != "" && s.beforeApp[instance]
 }
 
 // accept has every watch on the address keep to the process that answers now
@@ -136,6 +167,19 @@ func (w *instanceWatch) Stop() {
 // client's agent address (models.AgentInstanceWatch).
 func (a *AgentClient) WatchAgentInstance() models.AgentInstanceWatch {
 	return instancesAt(agentHost(a.conf.Agent.AgentURI)).watch()
+}
+
+// AgentStartedBeforeApp reports whether the agent process instance
+// (models.AgentInstanceHeader) is one docker compose's bring-up retry started
+// in place of keploy's agent while the application's container had never
+// started, and this client went on to set up again once it answered
+// (setUpRestartedAgent), whether or not that setup took: the application ran
+// against none of the process it replaced, so what this one counts is all of
+// the application's run. False for any other process, an agent docker or
+// kubelet started again under a running application included, and for ""
+// (an answer that names none).
+func (a *AgentClient) AgentStartedBeforeApp(instance string) bool {
+	return instancesAt(agentHost(a.conf.Agent.AgentURI)).wasStartedBeforeApp(instance)
 }
 
 // agentHost is the host:port of the agent URI uri, as its requests carry it.

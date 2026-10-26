@@ -350,6 +350,22 @@ type StoreMocksReq struct {
 
 const StoreMocksStreamContentType = "application/x-gob-stream"
 
+// MockStreamMinAgentVersion is the first keploy release whose agent takes the
+// /storemocks stream (keploy #4327). Keploy Enterprise's first agent image built
+// on it is v3.5.76.
+const MockStreamMinAgentVersion = "v3.5.85"
+
+// ErrAgentPredatesMockStream is the /storemocks failure of an agent older than
+// MockStreamMinAgentVersion. Such an agent reads the body as one StoreMocksReq,
+// fails on the MockStreamHeader that opens the stream, and answers 400 with an
+// AgentResp whose error it cannot encode, so the reply holds a type and no
+// value. Nothing this side sends makes it take the mocks, and the legacy
+// single-shot framing it reads is gone (it held the whole corpus in memory), so
+// the agent has to be upgraded. A caller that knows which agent it is talking
+// to (k8s-proxy knows the image of the replay pods it made) names it.
+var ErrAgentPredatesMockStream = errors.New("the agent is older than keploy " + MockStreamMinAgentVersion +
+	" and cannot take the streamed mocks; upgrade the agent image to the version of the keploy that runs the replay")
+
 // MockStreamEncodingZstd is the Content-Encoding of a zstd-compressed /storemocks
 // stream. An agent that can decode it says so with "Accept-Encoding: zstd" on its
 // /health response (RFC 7694), and the client compresses only for such an agent:
@@ -429,6 +445,77 @@ type MockFilterParams struct {
 	// serves each test case exactly its own mocks. nil for every other
 	// caller, and always without the switch.
 	Exact *ExactServing `json:"exact,omitempty"`
+
+	// TestRequest is, on the filter that opens a test case in record's full
+	// round (the learn step's round, under the proven switch), the test
+	// case's own request: what the application was given before any call
+	// of the test. The agent's learn step reads it as the test's earliest
+	// place: a value the application took from it (a part of it, the next
+	// of the slots it lists picked by its clock) is refused, never learned
+	// as noise. nil for every other caller. An agent that reads it says so
+	// in its answer (TestRequestReadHeader); one that predates it ignores
+	// it, and the replay then keeps none of what that agent learned as noise
+	// for the test (its request was not read). An agent that has it reads a
+	// filter that opens a test case without it (a keploy older than its
+	// agent) as a request it could not read, and refuses every value that
+	// changed in the test.
+	TestRequest *TestRequest `json:"testRequest,omitempty"`
+
+	// LearnEnded is set, in record's full round (the learn step's round,
+	// under the proven switch), on every filter of a test set's cycle after
+	// its first: keploy replay's mock-consistency retry cycles
+	// (config.RetryPassing) run the passing test cases again, test-1 after
+	// test-N, so recorded order is no longer replay order there. The agent's
+	// learn step then decides no request and pairs none until the next
+	// set's staging: such a cycle is served as keploy test serves (exact
+	// serving), with what the first cycle learned on the recordings
+	// (Learned), judged, and learns nothing. What the set's first cycle
+	// learned is what the replay keeps.
+	// false on a set's staging and on each filter of its first cycle. The
+	// agent keeps it ended for the rest of the set, whatever a later filter
+	// says: only the next set's staging takes the learn step back up. The
+	// agent's answer does not say it took it: an agent that ignored it would
+	// learn on, but no released keploy agent has the learn step, so every
+	// agent that learns is one that reads it.
+	LearnEnded bool `json:"learnEnded,omitempty"`
+
+	// Learned is, in record's full round, what the replay keeps of what its
+	// test set's first cycle learned (the states of the mocks it consumed
+	// that carry learned noise, variables or binds), sent once, with
+	// LearnEnded, on the pool filter before the set's first retry cycle. The
+	// agent serves every recording of the set from then on with it merged
+	// (learn.KeptLearning), as the recording carries it once persisted: a
+	// test that passed in the first cycle only through drift its learn step
+	// learned is judged the same way in the retry cycles, never failed for
+	// learning they do not take. It holds for the rest of the set: the next
+	// set's mocks come without it. The agent refuses it on a filter without
+	// LearnEnded (the learn step would read learned recordings as recorded).
+	// nil on every other filter.
+	Learned []MockState `json:"learned,omitempty"`
+}
+
+// TestRequest is a keploy test case's own request, as the filter that opens
+// it in record's full round carries it to the agent (MockFilterParams): each
+// part as recorded and as keploy test sends it in this run (with its
+// template values), or why keploy could not read it.
+type TestRequest struct {
+	// Test is the test case's name.
+	Test string `json:"test"`
+	// Parts are the request's parts, in a stable order: "url", each header
+	// as "header.<name>", "body", each form field as "form.<key>".
+	Parts []TestRequestPart `json:"parts,omitempty"`
+	// Unread says why keploy could not read the request (a test case of a
+	// kind it reads no request of, a body kept apart from the test case),
+	// "" when it could. A request keploy could not read has no parts.
+	Unread string `json:"unread,omitempty"`
+}
+
+// TestRequestPart is one part of a test case's request, as recorded and as
+// sent in this run.
+type TestRequestPart struct {
+	Name     string `json:"name"`
+	Recorded string `json:"recorded"`
+	Sent     string `json:"sent"`
 }
 
 // ExactServing is what a keploy test filter asks of exact serving, under the
@@ -461,15 +548,63 @@ type ExactServing struct {
 	// test case is open or not, after the open test case's own, at most one
 	// request in the staging.
 	Worker []MockEntry `json:"worker,omitempty"`
+	// Concurrent is, on a call that opens a test case (Test), the
+	// recordings it may answer with beside Owned: those recorded while its
+	// request and other tests' requests were open together, which keploy
+	// record's full round shares between those tests (Mapping.Groups). Each
+	// answers at most once in the staging, for whichever of those tests
+	// makes its call first, and is never required of the test. Owned answer
+	// before them. Sent only to an agent that says it serves them
+	// (ExactConcurrentHeader); an agent that predates it ignores it.
+	Concurrent []string `json:"concurrent,omitempty"`
+	// Background names, on the staging call, the rules the set's background
+	// (Worker and Pool) is served by: RecordedWithS12Routing for the background rules, which
+	// the replay sends only for a set marked so (Mapping.RecordedWith), under
+	// the proven switch, in a build whose judging enables them
+	// (replay.RegisterS12Serving); empty for today's. An agent that predates
+	// it ignores it, and serves by today's rules: never looser.
+	Background string `json:"background,omitempty"`
 }
 
+// ExactConcurrentHeader is the /storemocks response header in which an agent
+// with the proven switch on says it serves a test case the recordings it
+// shares with the tests that ran beside it (ExactServing.Concurrent).
+// ExactConcurrentServes is its value. An agent that does not send it is never
+// sent them.
+const (
+	ExactConcurrentHeader = "Keploy-Exact-Concurrent"
+	ExactConcurrentServes = "1"
+)
+
 // BeginsTestVariables reports whether, under the proven switch, the agent
-// begins a test's variables as it applies this filter: every filter but
-// exact serving's pool call. That call ends a test case's serving, and the
-// variables its dependency calls bound stay readable until the next test
-// case's filter begins the next scope: keploy test reads them after it.
+// begins a test's variables as it applies this filter: a filter that opens a
+// test case, with exact serving or without. Two filters begin none:
+//
+//   - A test set's staging (StagesSet). The set's variables began at its
+//     Mock (MockManager.NewVariableSet), as the learn step's set did
+//     (learn.Tracker.NewSet), and what the set's start-up binds before its
+//     first test begins is the run's, which every test of the set reads: a
+//     scope begun at the staging would take the start-up's bindings as its
+//     own, and the first test's would forget them.
+//   - Exact serving's pool call. It ends a test case's serving, and the
+//     variables its dependency calls bound stay readable until the next test
+//     case's filter begins the next scope: keploy test reads them after it.
 func (p MockFilterParams) BeginsTestVariables() bool {
-	return p.Exact == nil || p.Exact.Stage || p.Exact.Test != ""
+	if p.StagesSet() {
+		return false
+	}
+	return p.Exact == nil || p.Exact.Test != ""
+}
+
+// StagesSet reports whether the filter is a test set's staging: the set's
+// mocks staged before any of its tests runs, from BaseTime and naming no
+// test's mapping, as keploy test sends it once per set (exact serving's
+// Stage, which it sends on that same call).
+func (p MockFilterParams) StagesSet() bool {
+	if p.Exact != nil {
+		return p.Exact.Stage
+	}
+	return p.AfterTime.Equal(BaseTime) && len(p.MockMapping) == 0
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent
@@ -484,6 +619,52 @@ const (
 	ConsumedScopeHeader  = "X-Keploy-Consumed-Scope"
 	ConsumedScopePerTest = "per-test"
 )
+
+// BackgroundRulesHeader is the /updatemockparams response header in which an
+// agent says, answering a set's staging call (ExactServing.Stage), the rules
+// it serves the set's background by: RecordedWithS12Routing when it applied
+// the background rules (ExactServing.Background), absent for today's. An agent that does not
+// send it, every agent released before background serving among them, serves by today's
+// rules, and the replay then keeps today's checks for the set (its worker
+// scope required by its end) whatever it asked for: never looser than the
+// rules the set was served by.
+const BackgroundRulesHeader = "X-Keploy-Background-Rules"
+
+// TestRequestReadHeader is the /updatemockparams response header in which an
+// agent says, answering the filter that opens a keploy test case
+// (MockFilterParams.TestRequest), that its learn step took the request the
+// filter carried, or that it carried none (TestRequestRead). An agent that
+// does not send it, every agent released before it among them, learns from
+// the test without reading its request, so a value the application took from
+// the request may be learned as noise: the replay keeps nothing the agent
+// learned as noise, or as an echo, on the mocks the test consumed.
+const (
+	TestRequestReadHeader = "X-Keploy-Test-Request"
+	TestRequestRead       = "read"
+)
+
+// ClientTestsReadHeader is the /mock response header in which an agent says,
+// answering a keploy mock session's MockOutgoing that turns its learn step on
+// (OutgoingOptions.Learn, under the proven switch), that the learn step reads
+// the session's tests as a test harness's client tests (ClientTestsRead):
+// there a changed instant is learned as noise only where its call's window
+// shows it a read of the application's clock. An agent that does not send
+// it, every agent released before it among them, learns a value the harness
+// gave the application as noise where it changed: keploy mock keeps nothing
+// such an agent learned.
+const (
+	ClientTestsReadHeader = "X-Keploy-Client-Tests"
+	ClientTestsRead       = "read"
+)
+
+// AgentVersionHeader is the response header in which an agent names its own
+// keploy version, on every answer of its routes, where it was built with one.
+// Where the CLI keeps nothing of what the agent learned, because the agent
+// did not say it reads what this keploy sends it (TestRequestReadHeader,
+// ClientTestsReadHeader), its reasons name the agent by it. An agent that
+// does not send it, every agent released before it among them, is named as
+// one that did not say its version.
+const AgentVersionHeader = "X-Keploy-Agent-Version"
 
 // UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
 // agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with

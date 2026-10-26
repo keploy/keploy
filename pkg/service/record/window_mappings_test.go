@@ -594,7 +594,7 @@ func TestStart_ProvenRecordChargesAnUnreadMockToItsTestCase(t *testing.T) {
 			if apart := logs.FilterMessageSnippet("mocks no test case holds").All(); len(apart) != 0 {
 				t.Fatalf("a mock test-1 holds was said to be no test case's: %+v", apart)
 			}
-			charged := logs.FilterMessageSnippet("did not answer keploy's read of a container they called").All()
+			charged := logs.FilterMessageSnippet("a container the Docker daemon did not answer keploy's read of").All()
 			if len(charged) != 1 || fmt.Sprint(charged[0].ContextMap()["testCases"]) != "[test-1]" ||
 				!strings.Contains(fmt.Sprint(charged[0].ContextMap()["reason"]), "pg (postgres:16)") {
 				t.Fatalf("%d WARNs for test cases, want one naming test-1, which holds the mock: %+v", len(charged), charged)
@@ -735,5 +735,131 @@ func TestMarkAtStopReadsAMocksPlace(t *testing.T) {
 	}
 	if want := map[string]bool{"held-poll": true, "early": false, "unplaced": true}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("marked %v; want %v", got, want)
+	}
+}
+
+// concMappingDB is recMappingDB that also writes the set's concurrency groups
+// and shared calls (concurrencyStore).
+type concMappingDB struct {
+	recMappingDB
+	groups []models.ConcurrencyGroup
+	shared []models.MockEntry
+	writes int
+}
+
+func (d *concMappingDB) UpsertConcurrency(_ context.Context, _ string, groups []models.ConcurrencyGroup, shared []models.MockEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.groups = append([]models.ConcurrencyGroup(nil), groups...)
+	d.shared = append([]models.MockEntry(nil), shared...)
+	d.writes++
+	return nil
+}
+
+// A call recorded while several tests were open is listed under the one whose
+// request came first, with the group of tests that were open: the group names
+// the kept ones, in window order, and counts those the recording did not keep
+// (deleted, or lost). A call whose first-opened test was not kept, which the
+// recording used to drop, is written as shared when a kept test was open as
+// it was recorded: keploy record's full round may give it to that test. One
+// that only unkept tests were open for is dropped, as before.
+func TestWindowMappingsWriteTheConcurrencyGroupsAndTheSharedCalls(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	db := &concMappingDB{}
+	w := &windowMappings{}
+	w.addLostTest(winTest("", 1000, 1500))
+	w.addTest(winTest("kept-a", 1100, 1600))
+	w.addTest(winTest("deleted", 1150, 1250))
+	w.addTest(winTest("kept-b", 1300, 1700))
+	w.addTest(winTest("only-unkept", 5000, 5100))
+	w.addTest(winTest("deleted-2", 5050, 5200))
+	w.addMock(winMock("lost-a-deleted", models.HTTP, "", 1200)) // lost, kept-a, deleted
+	w.addMock(winMock("lost-a-b", models.HTTP, "", 1400))       // lost, kept-a, kept-b
+	w.addMock(winMock("a-b", models.HTTP, "", 1550))            // kept-a, kept-b
+	w.addMock(winMock("alone", models.HTTP, "", 1650))          // kept-b only
+	w.addMock(winMock("unkept-only", models.HTTP, "", 5150))    // deleted-2 only, after only-unkept ended
+	w.addMock(winMock("both-unkept", models.HTTP, "", 5060))    // only-unkept (deleted) and deleted-2
+	deleted := map[string]struct{}{"deleted": {}, "deleted-2": {}, "only-unkept": {}}
+	w.write(context.Background(), zap.New(core), db, "test-set-0", deleted, true, 0)
+
+	if len(db.batches) != 1 {
+		t.Fatalf("want one batch, got %v", db.batches)
+	}
+	listed := map[string]string{}
+	for test, entries := range db.batches[0] {
+		for _, e := range entries {
+			listed[e.Name] = test + "/" + e.Group
+		}
+	}
+	if want := map[string]string{"a-b": "kept-a/g3", "alone": "kept-b/"}; !reflect.DeepEqual(listed, want) {
+		t.Fatalf("listed %v; want %v", listed, want)
+	}
+	shared := map[string]string{}
+	for _, e := range db.shared {
+		shared[e.Name] = e.Group
+	}
+	if want := map[string]string{"lost-a-deleted": "g1", "lost-a-b": "g2"}; !reflect.DeepEqual(shared, want) {
+		t.Fatalf("shared %v; want %v (both-unkept had no kept test open, so it is dropped)", shared, want)
+	}
+	want := []models.ConcurrencyGroup{
+		{ID: "g1", Tests: []string{"kept-a"}, Unkept: 2},
+		{ID: "g2", Tests: []string{"kept-a", "kept-b"}, Unkept: 1},
+		{ID: "g3", Tests: []string{"kept-a", "kept-b"}},
+	}
+	if !reflect.DeepEqual(db.groups, want) {
+		t.Fatalf("groups %+v; want %+v (the group of both-unkept names no kept test: not written)", db.groups, want)
+	}
+	if db.writes != 1 {
+		t.Fatalf("groups written %d times; want once", db.writes)
+	}
+	warned := logs.FilterMessageSnippet("recorded while another test's request was still open").All()
+	if len(warned) != 1 || !strings.Contains(warned[0].Message, "which time alone cannot tell made it") {
+		t.Fatalf("want the warning to say time alone cannot tell who made each call, got %+v", logs.All())
+	}
+	// True of every recording: only plain keploy record's full round shares
+	// such calls, never keploy record sandbox's.
+	if next := warned[0].ContextMap()["next_step"]; !strings.Contains(fmt.Sprint(next), "only plain keploy record's full round") || !strings.Contains(fmt.Sprint(next), "keploy record sandbox's too, serves it to the test it is listed under") {
+		t.Fatalf("next_step %q", next)
+	}
+}
+
+// A recording with no call made while several tests were open writes no
+// groups and nothing shared: the store is handed none, whole (so a file it
+// writes into holds none from before; mapdb leaves a file with none as it
+// is, byte for byte).
+func TestWindowMappingsWriteNoGroupsWithoutConcurrency(t *testing.T) {
+	db := &concMappingDB{groups: []models.ConcurrencyGroup{{ID: "stale"}}, shared: []models.MockEntry{{Name: "stale"}}}
+	w := &windowMappings{}
+	w.addTest(winTest("a", 1000, 1100))
+	w.addTest(winTest("b", 2000, 2100))
+	w.addMock(winMock("a-call", models.HTTP, "", 1050))
+	w.addMock(winMock("b-call", models.HTTP, "", 2050))
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	if db.writes != 1 || len(db.groups) != 0 || len(db.shared) != 0 {
+		t.Fatalf("groups written %d times (%+v, %+v) for a recording without concurrency; want once, empty", db.writes, db.groups, db.shared)
+	}
+	for _, entries := range db.batches[0] {
+		for _, e := range entries {
+			if e.Group != "" {
+				t.Fatalf("%s has group %q", e.Name, e.Group)
+			}
+		}
+	}
+}
+
+// Every concurrency group is written, however many there are: one per set of
+// windows a call was recorded in, never more than the calls.
+func TestWindowMappingsWriteEveryGroupWithNoBound(t *testing.T) {
+	db := &concMappingDB{}
+	w := &windowMappings{}
+	const n = 300
+	for i := 0; i < n; i++ {
+		// Each window overlaps the next: n-1 groups of two.
+		w.addTest(winTest(fmt.Sprintf("t-%03d", i), 1000+i*10, 1000+i*10+15))
+		w.addMock(winMock(fmt.Sprintf("m-%03d", i), models.HTTP, "", 1000+i*10+12))
+	}
+	w.write(context.Background(), zap.NewNop(), db, "test-set-0", nil, true, 0)
+	if len(db.groups) != n-1 {
+		t.Fatalf("%d groups written; want %d", len(db.groups), n-1)
 	}
 }

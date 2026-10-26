@@ -207,15 +207,27 @@ type TestCaseReporter interface {
 	AfterTestCaseRun(ctx context.Context, testSetID string, tc *models.TestCase, result *models.TestResult) error
 }
 
-// MockMutator is an optional extension to TestHooks.
-// RunTestSet detects it via type assertion after GetMocks returns and before
-// StoreMocks pushes mocks to the proxy. Implementations may mutate mocks
-// in-place (e.g. decrypt ENC: fields) so the proxy always receives plaintext
-// values without ever writing plaintext to disk.
-type MockMutator interface {
-	// AfterGetMocks is invoked once per test set, after all mocks are loaded
-	// from disk and before they are sent to the proxy. Both slices may be
-	// mutated in-place; nil slices are a no-op.
+// MockPayloadMutator is an optional extension to TestHooks: it changes each
+// mock's payload before the mock is sent to the agent (e.g. decrypts ENC:
+// fields), so the agent receives plaintext values without plaintext ever being
+// written to disk.
+//
+// A test set's mocks are not loaded whole: a read of a yaml or json mock file
+// leaves each mock's payload in the file (models.Mock.LeavePayloadOnDisk), and
+// the payload is read back, one mock at a time, only to be sent. The mutator
+// is handed each mock whole as it is, and may change its payload only
+// (models.MutatePayload): what decides a mock's pool was read before its
+// payload was. It runs again on a mock sent again (a restarted agent's), on
+// the payload as recorded.
+type MockPayloadMutator interface {
+	MutateMockPayload(ctx context.Context, m *models.Mock) error
+}
+
+// wholeSetMockMutator is the hook a replay called with a test set's mocks
+// loaded whole, which it no longer loads (MockPayloadMutator). Hooks that
+// still implement it are refused, loudly, rather than left uncalled: a
+// decryption among them would otherwise silently stop.
+type wholeSetMockMutator interface {
 	AfterGetMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error
 }
 

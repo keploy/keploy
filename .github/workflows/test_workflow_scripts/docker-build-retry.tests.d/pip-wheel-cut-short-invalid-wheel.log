@@ -1,0 +1,4 @@
+Looking in indexes: http://127.0.0.1:36201/cut/
+Collecting flask==3.1.2
+  Downloading http://127.0.0.1:32999/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+ERROR: Wheel 'flask' located at /var/tmp/pip-unpack-sypcqc9j/flask-3.1.2-py3-none-any.whl is invalid.

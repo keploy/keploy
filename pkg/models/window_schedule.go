@@ -12,6 +12,9 @@ type TestWindow struct {
 	TestCase string    `json:"testCase,omitempty"`
 	Start    time.Time `json:"start"`
 	End      time.Time `json:"end"`
+	// Clock names, under the proven switch, the clock Start is on: the test
+	// case's Origin.Clock (RecordedWindow). "" is untrusted.
+	Clock string `json:"clock,omitempty"`
 }
 
 // WindowSchedule is every recorded test window of one test set, sorted by

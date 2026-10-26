@@ -354,7 +354,7 @@ func TestUnderTheSwitchCPUTimeIsNoProgressOnceTheAppListens(t *testing.T) {
 	stallLimit(t, 3)
 	idle := models.AppReadiness{Progress: models.ReadyProgress{Listens: 1, Restarts: 2}, Listens: []models.AppListen{{Port: 9090, Here: true, Live: true}}}
 	a := &fakeAgent{answers: []models.AppReadiness{idle}, moving: true}
-	res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: a, host: "localhost", port: "8080", listen: 8080, restartsMarked: true})
+	res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: a, host: "localhost", port: "8080", listen: 8080})
 	r := wakeUntil(t, wake, res, 10)
 	if r.ready || !strings.Contains(r.why, "never listened on :8080") || !strings.Contains(r.why, "it listens on :9090") {
 		t.Fatalf("wait = %+v, want not judged, naming :9090, though its CPU time moved", r)
@@ -1796,9 +1796,10 @@ func TestUnderTheSwitchAKeptAliveRestartLoopsStallIsCarried(t *testing.T) {
 	wake := manualWake(t)
 	stallLimit(t, 2)
 	a := &fakeAgent{answers: []models.AppReadiness{{Progress: models.ReadyProgress{Execs: 1, Restarts: 4}}}, moving: true}
+	// No mark, as a --keep-app-alive run takes none (its application is
+	// started once for the run): its restarts begin at 0.
 	r := &Replayer{logger: zap.NewNop(), config: testCfg(), readyTally: new(readTally),
 		instrumentation: markerInstr{readyInstr: readyInstr{fakeAgent: a}}}
-	r.markReadiness(context.Background())
 	tcs := httpCase("http://localhost:8080/")
 	run := func(warm bool) waitResult {
 		out := tallied(make(chan waitResult, 1), r.readyTally)
@@ -1834,7 +1835,7 @@ func TestUnderTheSwitchACrashLoopListeningOnASidePortStalls(t *testing.T) {
 			Listens:     []models.AppListen{{Port: 5005, Addr: "0.0.0.0", Here: true, Seq: i}},
 		})
 	}
-	res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: &fakeAgent{answers: answers}, host: "localhost", port: "8080", listen: 8080, restartsMarked: true})
+	res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: &fakeAgent{answers: answers}, host: "localhost", port: "8080", listen: 8080})
 	r := wakeUntil(t, wake, res, 20)
 	if r.ready || !strings.Contains(r.why, "without listening (the last: /usr/bin/java)") {
 		t.Fatalf("wait = %+v, want not judged, its restarts said", r)
@@ -1858,5 +1859,253 @@ func TestOnlyANeverReadySetsUnreadResultsGoUnsaid(t *testing.T) {
 	r.forgetNotJudged("idle")
 	if !r.saysResultsUnread(models.TestSetStatusInternalErr, "idle") {
 		t.Fatal("a set run again is still taken as never ready")
+	}
+}
+
+// With no mark (an application kept alive for the run, or one that came up
+// with its agent), a set's restarts begin at 0: three before the wait's
+// first read are three, said, and its CPU time no progress.
+func TestUnderTheSwitchWithNoMarkASetsRestartsBeginAtNone(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	wake := manualWake(t)
+	stallLimit(t, 3)
+	looped := models.AppReadiness{Progress: models.ReadyProgress{Restarts: 3}, LastRestart: "/usr/bin/app"}
+	a := &fakeAgent{answers: []models.AppReadiness{looped}, moving: true}
+	r := &Replayer{logger: zap.NewNop(), config: testCfg(), readyTally: new(readTally),
+		instrumentation: markerInstr{readyInstr: readyInstr{fakeAgent: a}}}
+	out := tallied(make(chan waitResult, 1), r.readyTally)
+	go func() {
+		ready, why := r.appReady(context.Background(), httpCase("http://localhost:8080/"), "test-set-0", true, false)
+		out <- waitResult{ready, why}
+	}()
+	if res := wakeUntil(t, wake, out, 20); res.ready || !strings.Contains(res.why, "it restarted 3 time(s) without listening (the last: /usr/bin/app)") {
+		t.Fatalf("wait = %+v, want not judged, its three restarts said", res)
+	}
+}
+
+// docker's answer, taken first, is judged against the latest read: a read's
+// answer that came with it, saying the application's listen on that port
+// closed since (a probe), is weighed, not the read before it. Here the wait
+// is held while both come in; it is not ready on the stale read.
+func TestUnderTheSwitchDockersAnswerIsJudgedOnTheLatestRead(t *testing.T) {
+	wake := manualWake(t)
+	stallLimit(t, 3)
+	was := readyStatusEvery
+	readyStatusEvery = 1
+	t.Cleanup(func() { readyStatusEvery = was })
+	up := models.AppReadiness{Listens: []models.AppListen{{Port: 3000, Addr: "0.0.0.0", Here: true, Live: true}}}
+	down := models.AppReadiness{Listens: []models.AppListen{{Port: 3000, Addr: "0.0.0.0", Here: true}}}
+	blocked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	core, _ := observer.New(zap.InfoLevel)
+	logger := zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if strings.HasPrefix(e.Message, "still waiting") {
+			once.Do(func() { close(blocked); <-release })
+		}
+		return nil
+	}))
+	answer := make(chan uint16)
+	agent := &gatedAgent{fakeAgent: &fakeAgent{answers: []models.AppReadiness{up, down}}, at: 1, gate: make(chan struct{})}
+	tally := new(readTally)
+	res := startWait(provenReadiness{logger: logger, cfg: testCfg(), agent: agent, host: "localhost", port: "8098", docker: true, tally: tally,
+		resolve: func(context.Context) uint16 { return <-answer }})
+	readsWeighed(t, res, 0)
+	wake <- struct{}{}
+	wake <- struct{}{}
+	<-blocked
+	close(agent.gate) // the held read answers: :3000 closed
+	answer <- 3000    // and docker answers
+	until(t, func() bool { return tally.answered.Load() == 2 && tally.portsSent.Load() == 1 })
+	close(release)
+	if r := wakeUntil(t, wake, res, 10); r.ready || !strings.Contains(r.why, "never listened on :3000") {
+		t.Fatalf("wait = %+v, want not judged: the latest read says :3000 closed", r)
+	}
+}
+
+// The status line before docker answers names no port docker never gave.
+func TestUnderTheSwitchTheStatusLineBeforeDockerAnswersNamesNoPort(t *testing.T) {
+	wake := manualWake(t)
+	stallLimit(t, 3)
+	was := readyStatusEvery
+	readyStatusEvery = 1
+	t.Cleanup(func() { readyStatusEvery = was })
+	core, logs := observer.New(zap.InfoLevel)
+	never := func(ctx context.Context) uint16 { <-ctx.Done(); return 0 }
+	up := models.AppReadiness{Listens: []models.AppListen{{Port: 3000, Addr: "0.0.0.0", Here: true, Live: true}}}
+	res := startWait(provenReadiness{logger: zap.New(core), cfg: testCfg(), agent: &fakeAgent{answers: []models.AppReadiness{up}}, host: "localhost", port: "8098", docker: true, resolve: never})
+	_ = wakeUntil(t, wake, res, 10)
+	lines := logs.FilterMessage("still waiting for the application before the set's first test (KEPLOY_PROVEN=1)").All()
+	if len(lines) == 0 {
+		t.Fatal("no status line")
+	}
+	for _, l := range lines {
+		if s, _ := l.ContextMap()["waitingFor"].(string); strings.Contains(s, ":0,") || !strings.Contains(s, "docker has not said") {
+			t.Fatalf("status line waits for %q, want no port docker never gave, and why", s)
+		}
+	}
+}
+
+// A listen is progress the first time its socket address is listened on:
+// once the application listens, a crash loop re-listening on its live side
+// port is none (it stalls); before, a listen the kernel had no room to
+// report is one, a new address on the same port is one, and the same port
+// and address in another network namespace is one.
+func TestUnderTheSwitchAListenIsProgressByItsAddress(t *testing.T) {
+	t.Run("a live side port again", func(t *testing.T) {
+		wake := manualWake(t)
+		stallLimit(t, 3)
+		var answers []models.AppReadiness
+		for i := uint64(0); i < 30; i++ {
+			answers = append(answers, models.AppReadiness{
+				Progress: models.ReadyProgress{Listens: i + 1, Execs: 1, Restarts: i},
+				Listens:  []models.AppListen{{Port: 5005, Addr: "0.0.0.0", Here: true, Live: true, Seq: i}},
+			})
+		}
+		res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: &fakeAgent{answers: answers}, host: "localhost", port: "8080", listen: 8080})
+		if r := wakeUntil(t, wake, res, 20); r.ready || !strings.Contains(r.why, "it listens on :5005") {
+			t.Fatalf("wait = %+v, want not judged: listening on :5005 again is no progress", r)
+		}
+	})
+	progressEveryOther := func(t *testing.T, at func(i int) models.AppReadiness) {
+		t.Helper()
+		wake := manualWake(t)
+		stallLimit(t, 2)
+		var answers []models.AppReadiness
+		for i := 0; i < 12; i++ {
+			answers = append(answers, at(i/2)) // moves every other wake-up
+		}
+		last := at(6)
+		last.Listens = append(last.Listens, models.AppListen{Port: 80, Here: true, Live: true, Seq: 100})
+		answers = append(answers, last)
+		res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: &fakeAgent{answers: answers}, host: "localhost", port: "80", listen: 80})
+		if r := wakeUntil(t, wake, res, 20); !r.ready {
+			t.Fatalf("wait = %+v, want ready: each new listen was progress", r)
+		}
+	}
+	t.Run("a lost listen", func(t *testing.T) {
+		progressEveryOther(t, func(i int) models.AppReadiness { return models.AppReadiness{ListensLost: uint64(i)} })
+	})
+	t.Run("a new address on one port", func(t *testing.T) {
+		progressEveryOther(t, func(i int) models.AppReadiness {
+			var st models.AppReadiness
+			for k := 0; k <= i; k++ {
+				st.Listens = append(st.Listens, models.AppListen{Port: 9000, Addr: fmt.Sprintf("10.0.0.%d", k+1), Here: true, Seq: uint64(k)})
+			}
+			return st
+		})
+	})
+	t.Run("the same address in another namespace", func(t *testing.T) {
+		wake := manualWake(t)
+		stallLimit(t, 2)
+		here := models.AppListen{Port: 9000, Addr: "0.0.0.0", Here: true}
+		there := models.AppListen{Port: 9000, Addr: "0.0.0.0", Seq: 1}
+		live := models.AppListen{Port: 80, Here: true, Live: true, Seq: 2}
+		answers := []models.AppReadiness{{}, {Listens: []models.AppListen{here}}, {Listens: []models.AppListen{here}},
+			{Listens: []models.AppListen{here, there}}, {Listens: []models.AppListen{here, there}}, {Listens: []models.AppListen{here, there, live}}}
+		res := startWait(provenReadiness{logger: zap.NewNop(), cfg: testCfg(), agent: &fakeAgent{answers: answers}, host: "localhost", port: "80", listen: 80})
+		if r := wakeUntil(t, wake, res, 10); !r.ready {
+			t.Fatalf("wait = %+v, want ready: :9000 in another namespace was a new listen", r)
+		}
+	})
+}
+
+// bufferedWake is manualWake with room for one wake-up: one sent while the
+// wait is held is in when it goes on, beside whatever else came in.
+func bufferedWake(t *testing.T) chan struct{} {
+	t.Helper()
+	ch := make(chan struct{}, 1)
+	was := readyWake
+	readyWake = func(ctx context.Context) (<-chan struct{}, func()) { return ch, func() {} }
+	t.Cleanup(func() { readyWake = was })
+	return ch
+}
+
+// heldWait starts a wait whose first status line holds it until release:
+// the second wake-up is weighed with the first wake-up's read (gated in the
+// agent) in flight, and while it is held that read answers.
+func heldWait(t *testing.T, p provenReadiness, agent *gatedAgent) (res chan waitResult, blocked, release chan struct{}) {
+	t.Helper()
+	blocked, release = make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	core, _ := observer.New(zap.InfoLevel)
+	p.logger = zap.New(zapcore.RegisterHooks(core, func(e zapcore.Entry) error {
+		if strings.HasPrefix(e.Message, "still waiting") {
+			once.Do(func() { close(blocked); <-release })
+		}
+		return nil
+	}))
+	p.agent = agent
+	return startWait(p), blocked, release
+}
+
+// A read's answer already in is weighed before a wake-up that came with it:
+// the wake-up before is weighed by that answer, not as one whose read never
+// answered. Here the answer says the application listens: it is ready, never
+// a stall weighed with its answer in (a starved keploy, the next wake-up due
+// at once).
+func TestUnderTheSwitchAReadsAnswerIsWeighedBeforeAWakeUpThatCameWithIt(t *testing.T) {
+	wake := bufferedWake(t)
+	stallLimit(t, 2)
+	was := readyStatusEvery
+	readyStatusEvery = 1
+	t.Cleanup(func() { readyStatusEvery = was })
+	up := models.AppReadiness{Listens: []models.AppListen{{Port: 3000, Addr: "0.0.0.0", Here: true, Live: true}}}
+	for i := 0; i < 50; i++ {
+		tally := new(readTally)
+		agent := &gatedAgent{fakeAgent: &fakeAgent{answers: []models.AppReadiness{{}, up}}, at: 1, gate: make(chan struct{})}
+		res, blocked, release := heldWait(t, provenReadiness{cfg: testCfg(), host: "localhost", port: "3000", listen: 3000, tally: tally}, agent)
+		readsWeighed(t, res, 0)
+		wake <- struct{}{} // its read held in the agent
+		wake <- struct{}{} // weighed with that read in flight: the status line, held
+		<-blocked
+		close(agent.gate) // the read answers: :3000 listens
+		until(t, func() bool { return tally.answered.Load() == 2 })
+		wake <- struct{}{} // the next wake-up, due at once: in before the wait goes on
+		close(release)
+		r := <-res
+		select { // a wake-up the wait never took is none of the next round's
+		case <-wake:
+		default:
+		}
+		if !r.ready {
+			t.Fatalf("round %d: wait = %+v, want ready on :3000, the read's answer weighed first", i, r)
+		}
+	}
+}
+
+// docker's answer, a read's and the next wake-up all at once (a starved
+// keploy, on the stall limit's last wake-up): the read's answer is weighed
+// with the port before the wake-up, so an application listening on the port
+// docker gives is ready.
+func TestUnderTheSwitchDockersAnswerAReadsAndAWakeUpAtOnce(t *testing.T) {
+	wake := bufferedWake(t)
+	stallLimit(t, 2)
+	was := readyStatusEvery
+	readyStatusEvery = 1
+	t.Cleanup(func() { readyStatusEvery = was })
+	up := models.AppReadiness{Listens: []models.AppListen{{Port: 3000, Addr: "0.0.0.0", Here: true, Live: true}}}
+	for i := 0; i < 50; i++ {
+		answer := make(chan uint16)
+		tally := new(readTally)
+		agent := &gatedAgent{fakeAgent: &fakeAgent{answers: []models.AppReadiness{up}}, at: 1, gate: make(chan struct{})}
+		res, blocked, release := heldWait(t, provenReadiness{cfg: testCfg(), host: "localhost", port: "8098", docker: true, tally: tally,
+			resolve: func(context.Context) uint16 { return <-answer }}, agent)
+		readsWeighed(t, res, 0)
+		wake <- struct{}{}
+		wake <- struct{}{}
+		<-blocked
+		close(agent.gate)
+		answer <- 3000
+		until(t, func() bool { return tally.answered.Load() == 2 && tally.portsSent.Load() == 1 })
+		wake <- struct{}{} // the next wake-up, due at once: in before the wait goes on
+		close(release)
+		r := <-res
+		select { // a wake-up the wait never took is none of the next round's
+		case <-wake:
+		default:
+		}
+		if !r.ready {
+			t.Fatalf("round %d: wait = %+v, want ready on :3000 with docker's answer in", i, r)
+		}
 	}
 }
