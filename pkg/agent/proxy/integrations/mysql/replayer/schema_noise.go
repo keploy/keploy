@@ -151,9 +151,19 @@ type strictGate struct {
 	logger        *zap.Logger
 	requestType   string
 	live          *mysql.PacketBundle
-	liveBody      []byte
-	liveBodyOK    bool
 	userBodyNoise map[string][]string
+
+	// liveBody is the live command's canonical JSON body
+	// (mysqlRequestBody, holding liveBodyParams of an EXECUTE's
+	// parameters), liveBodyOK false for a command with no drift-capable
+	// body (utility commands, CLOSE/RESET). Only strict enforcement and
+	// detection read it, so it is built on first read (liveRequestBody),
+	// never for a replay that runs neither. bodiesBuilt, when set, counts
+	// the builds, so a test can check what a command costs without timing it.
+	liveBodyParams           int
+	liveBody                 []byte
+	liveBodyOK, liveBodyRead bool
+	bodiesBuilt              *int
 
 	// liveQuery and liveParams are a live COM_STMT_EXECUTE's statement and
 	// its own parameter count (-1 not known): a recording of that statement
@@ -196,7 +206,7 @@ type strictGate struct {
 // (legacyRecordedMock), else as this one reads it.
 func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
 	if !legacyRecordedMock(mock) {
-		return g.liveBody, g.liveBodyOK
+		return g.liveRequestBody()
 	}
 	if !g.legacyBodyRead {
 		g.legacyBodyRead = true
@@ -222,9 +232,28 @@ func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
 		}
 	}
 	if !g.legacyBodyOK {
-		return g.liveBody, g.liveBodyOK
+		return g.liveRequestBody()
 	}
 	return g.legacyBody, true
+}
+
+// liveRequestBody is the live command's body (liveBody), built on its first
+// read.
+func (g *strictGate) liveRequestBody() ([]byte, bool) {
+	if !g.liveBodyRead {
+		g.liveBodyRead = true
+		g.liveBody, g.liveBodyOK = mysqlRequestBody(g.live, g.liveBodyParams)
+		if g.bodiesBuilt != nil {
+			*g.bodiesBuilt++
+		}
+	}
+	return g.liveBody, g.liveBodyOK
+}
+
+// hasLiveBody reports whether the live command has a drift-capable body.
+func (g *strictGate) hasLiveBody() bool {
+	_, ok := g.liveRequestBody()
+	return ok
 }
 
 type gateVerdict struct {
@@ -232,16 +261,18 @@ type gateVerdict struct {
 	drift   map[string][]string
 }
 
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+// newStrictGate is the gate for the live command live, whose body holds
+// liveBodyParams of an EXECUTE's parameters (-1: all of them, see
+// mysqlRequestBody).
+func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBodyParams int, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
-		engine:        engine,
-		logger:        logger,
-		requestType:   requestType,
-		live:          live,
-		liveBody:      liveBody,
-		liveBodyOK:    liveBodyOK,
-		userBodyNoise: userBodyNoise,
-		liveParams:    -1,
+		engine:         engine,
+		logger:         logger,
+		requestType:    requestType,
+		live:           live,
+		liveBodyParams: liveBodyParams,
+		userBodyNoise:  userBodyNoise,
+		liveParams:     -1,
 	}
 }
 
@@ -278,14 +309,17 @@ func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
 // allows reports whether the candidate mock survives strict enforcement,
 // recording rejection diagnostics for the mismatch report when it doesn't.
 func (g *strictGate) allows(mock *models.Mock) bool {
-	if !g.engine.StrictEnabled() || !g.liveBodyOK {
+	if !g.engine.StrictEnabled() || !g.hasLiveBody() {
+		return true
+	}
+	v, seen := g.verdicts[mock]
+	if seen && v.allowed {
 		return true
 	}
 	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
 	body, _ := g.bodyFor(mock)
-	v, seen := g.verdicts[mock]
-	recorded, recordedOK := g.recordedBody(mock)
 	if !seen {
+		recorded, recordedOK := g.recordedBody(mock)
 		v.allowed, v.drift = g.engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
 		if g.verdicts == nil {
 			g.verdicts = make(map[*models.Mock]gateVerdict)
@@ -298,20 +332,19 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	g.rejected++
 	if g.closestMock == "" {
 		g.closestMock = mock.Name
-		if recordedOK {
+		if recorded, recordedOK := g.recordedBody(mock); recordedOK {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
 			known := g.engine.KnownNoise(mock, noise)
 			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96), mock, g.live)
 		}
 	}
-	if !seen {
+	if ce := g.logger.Check(zap.DebugLevel, "schema-noise strict: rejected candidate mock (non-noise request field drifted)"); ce != nil && !seen {
 		paths := make([]string, 0, len(v.drift))
 		for p := range v.drift {
 			paths = append(paths, p)
 		}
-		g.logger.Debug("schema-noise strict: rejected candidate mock (non-noise request field drifted)",
-			zap.String("mock", mock.Name),
+		ce.Write(zap.String("mock", mock.Name),
 			zap.String("request_type", g.requestType),
 			zap.Strings("drifted_fields", paths))
 	}
