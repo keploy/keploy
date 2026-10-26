@@ -760,37 +760,57 @@ func TestTheRecordedWindowsAreSeededBeforeThePoolStagesTheSet(t *testing.T) {
 // test and the one begun before it. A late call of the test that ran first,
 // landing in it, would otherwise be paired with its own recording and what
 // it differs in learned as noise (the proxy's row:
-// TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses).
-// In recorded order the learn step stays on, and so it does for a test
-// whose window no test names (merged, or not recorded), in a session with
-// no learn step (keploy mock test), and with no windows (an older CLI).
+// TestAnOutOfOrderBeginEndsLearningSoALaterRecordedTestsLateCallMisses, a
+// merged window's test included). The order is when each test began in its
+// recording (SetTestBegins, which keploy mock replay sends whenever it
+// learns), which names the tests of a merged window too, else its own
+// window's start. In
+// recorded order the learn step stays on, and so it does for a test the
+// recording has no place for (not recorded), in a session with no learn
+// step (keploy mock test), and with neither windows nor begins (an older
+// CLI).
 func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
 	t0 := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
 	recorded := []models.TestWindow{
 		{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)},
 		{TestCase: "o::TestB", Start: t0.Add(2 * time.Second), End: t0.Add(3 * time.Second)},
 		{TestCase: "o::TestC", Start: t0.Add(4 * time.Second), End: t0.Add(5 * time.Second)},
-		// Two tests run at once in the recording: one window no test names.
-		{Start: t0.Add(6 * time.Second), End: t0.Add(8 * time.Second)},
+		// TestU and TestV ran at once in the recording, or touched: one
+		// window no test names.
+		{Start: t0.Add(6 * time.Second), End: t0.Add(9 * time.Second)},
+	}
+	// When each test began in its recording, as keploy mock replay sends it
+	// beside the windows (pushTestBegins): the merged window's tests too.
+	began := map[string]time.Time{
+		"o::TestA": t0, "o::TestB": t0.Add(2 * time.Second), "o::TestC": t0.Add(4 * time.Second),
+		"o::TestU": t0.Add(6 * time.Second), "o::TestV": t0.Add(7 * time.Second),
 	}
 	for _, c := range []struct {
 		name    string
 		learn   bool
 		windows []models.TestWindow
+		began   map[string]time.Time
 		begins  []string
 		// endsAt is the begin, by its index, that ends the learn step; -1
 		// for none. after is the test the WARN names as begun before.
 		endsAt int
 		after  string
 	}{
-		{"begun again: A, B, then A again (go test -count=2, --rerun-fails)", true, recorded, []string{"TestA", "TestB", "TestA"}, 2, "o::TestB"},
-		{"the same test twice: A, A", true, recorded, []string{"TestA", "TestA"}, 1, "o::TestA"},
-		{"shuffled: B, then A", true, recorded, []string{"TestB", "TestA", "TestC"}, 1, "o::TestB"},
-		{"recorded order: A, B, C", true, recorded, []string{"TestA", "TestB", "TestC"}, -1, ""},
-		{"a test with no window of its own does not move the order: C, D (merged or not recorded), D", true, recorded, []string{"TestC", "TestD", "TestD"}, -1, ""},
-		{"skipping a test keeps the order: A, C", true, recorded, []string{"TestA", "TestC"}, -1, ""},
-		{"keploy mock test runs no learn step: B, A", false, recorded, []string{"TestB", "TestA"}, -1, ""},
-		{"an older CLI sends no windows: B, A", true, nil, []string{"TestB", "TestA"}, -1, ""},
+		{"begun again: A, B, then A again (go test -count=2, --rerun-fails)", true, recorded, began, []string{"TestA", "TestB", "TestA"}, 2, "o::TestB"},
+		{"the same test twice: A, A", true, recorded, began, []string{"TestA", "TestA"}, 1, "o::TestA"},
+		{"shuffled: B, then A", true, recorded, began, []string{"TestB", "TestA", "TestC"}, 1, "o::TestB"},
+		{"a merged window's test recorded later runs first: U, then A", true, recorded, began, []string{"TestU", "TestA"}, 1, "o::TestU"},
+		{"within a merged window: V, then U", true, recorded, began, []string{"TestV", "TestU"}, 1, "o::TestV"},
+		{"a merged window's test begun again: U, V, then U again", true, recorded, began, []string{"TestU", "TestV", "TestU"}, 2, "o::TestV"},
+		{"out of order after the last begun, not the first: A, C, then B", true, recorded, began, []string{"TestA", "TestC", "TestB"}, 2, "o::TestC"},
+		{"two begins out of order, said once: C, A, then B", true, recorded, began, []string{"TestC", "TestA", "TestB"}, 1, "o::TestC"},
+		{"recorded order: A, B, C, U, V", true, recorded, began, []string{"TestA", "TestB", "TestC", "TestU", "TestV"}, -1, ""},
+		{"a test the recording has no place for does not move the order: C, D (not recorded), D", true, recorded, began, []string{"TestC", "TestD", "TestD"}, -1, ""},
+		{"skipping a test keeps the order: A, C", true, recorded, began, []string{"TestA", "TestC"}, -1, ""},
+		{"keploy mock test runs no learn step: B, A", false, recorded, began, []string{"TestB", "TestA"}, -1, ""},
+		{"windows and no begins: the windows order it: B, then A", true, recorded, nil, []string{"TestB", "TestA"}, 1, "o::TestB"},
+		{"windows and no begins: a merged window's test has no place: U, A", true, recorded, nil, []string{"TestU", "TestA"}, -1, ""},
+		{"an older CLI sends neither: B, A", true, nil, nil, []string{"TestB", "TestA"}, -1, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			a, p := wireAgent(t, models.MODE_TEST)
@@ -799,6 +819,7 @@ func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
 			ctx := context.Background()
 			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: c.learn}))
 			require.NoError(t, a.SetRecordedWindows(ctx, c.windows))
+			require.NoError(t, a.SetTestBegins(ctx, c.began, nil))
 			claimSelf(t, a)
 			for i, name := range c.begins {
 				p.mu.Lock()
@@ -838,27 +859,33 @@ func TestATestBegunOutOfItsRecordedOrderEndsTheRoundsLearnStep(t *testing.T) {
 	}
 
 	// The next session (another set, or the next round) learns again, in
-	// its own order.
-	t.Run("a new session learns again", func(t *testing.T) {
+	// its own order, and ends its learn step again at a begin out of it:
+	// the order and its end are the session's (resetSession).
+	t.Run("a new session learns again, and ends again out of order", func(t *testing.T) {
 		a, p := wireAgent(t, models.MODE_TEST)
 		ctx := context.Background()
-		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
-		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
-		claimSelf(t, a)
-		for _, name := range []string{"TestB", "TestA"} {
+		session := func() {
+			require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
+			require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+			require.NoError(t, a.SetTestBegins(ctx, began, nil))
+			claimSelf(t, a)
+		}
+		run := func(name string) {
 			_, serr := a.ProvenBegin(ctx, begin(name))
 			require.Nil(t, serr)
 			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, Outcome: "passed"})
 			require.Nil(t, serr)
 		}
+		session()
+		run("TestB")
+		run("TestA")
 		require.True(t, p.learnEnded)
-		require.NoError(t, a.MockOutgoing(ctx, models.OutgoingOptions{Learn: true}))
-		require.NoError(t, a.SetRecordedWindows(ctx, recorded))
+		session()
 		require.False(t, p.learnEnded, "the session's start takes it back up (Proxy.Mock)")
-		claimSelf(t, a)
-		_, serr := a.ProvenBegin(ctx, begin("TestA"))
-		require.Nil(t, serr)
+		run("TestB")
 		require.False(t, p.learnEnded, "the new session's first test is in its order")
+		run("TestA")
+		require.True(t, p.learnEnded, "the new session's own out-of-order begin ends its learn step again")
 	})
 
 	// A proxy that cannot end the learn step refuses the begin, which opens
