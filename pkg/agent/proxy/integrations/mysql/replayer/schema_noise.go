@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
@@ -591,8 +592,37 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int) ([]byte, 
 // (CALL) or function (SELECT f()), a view, a trigger, or EXECUTE of a
 // statement prepared from a variable.
 func readsQueryAttributes(query string) bool {
-	return strings.Contains(strings.ToLower(query), "mysql_query_attribute_string")
+	for i := 0; i < len(query); i++ {
+		if query[i] >= utf8.RuneSelf {
+			// A rune outside ASCII may lower-case to an ASCII letter (the
+			// Kelvin sign to 'k'): read it as strings.ToLower does.
+			return strings.Contains(strings.ToLower(query), queryAttributeFunction)
+		}
+	}
+	// ASCII: strings.ToLower lower-cases A-Z only. Compared in place, so the
+	// matcher, which asks for every candidate, allocates nothing.
+	n := len(queryAttributeFunction)
+	for i := 0; i+n <= len(query); i++ {
+		j := 0
+		for ; j < n; j++ {
+			c := query[i+j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != queryAttributeFunction[j] {
+				break
+			}
+		}
+		if j == n {
+			return true
+		}
+	}
+	return false
 }
+
+// queryAttributeFunction is the function that reads a query attribute, lower
+// case (readsQueryAttributes).
+const queryAttributeFunction = "mysql_query_attribute_string"
 
 // parametersByIndex converts a parameter slice to an index-keyed map (see
 // mysqlRequestBodyJSON for why an object beats an array here).
