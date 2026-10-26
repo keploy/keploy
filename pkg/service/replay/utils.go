@@ -1699,6 +1699,7 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			MissKind:         call.Kind,
 			Recorded:         call.Recorded,
 			Differs:          call.Differs,
+			FieldReasons:     call.FieldReasons,
 			VariablePlaces:   call.VariablePlaces,
 			NotOwned:         call.NotOwned,
 			Reason:           call.Reason,

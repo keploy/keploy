@@ -1259,6 +1259,12 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 		} else if uc.Diff != "" {
 			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
 		}
+		// Why the replay refused a field for a reason of its own (a learned
+		// read of the application's clock the call does not carry): the
+		// field and why, which names no value (models.FieldReason).
+		for _, r := range uc.FieldReasons {
+			sb.WriteString(fmt.Sprintf("    refused %s: %s\n", r.Field, r.Why))
+		}
 		if uc.NextSteps != "" {
 			sb.WriteString(fmt.Sprintf("    next steps: %s\n", uc.NextSteps))
 		}

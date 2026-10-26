@@ -193,7 +193,7 @@ func init() {
 // field named as differing, since none does, and its rendered request is m's.
 func markNotOwned(report *models.MockMismatchReport, m *models.Mock) {
 	report.ClosestMock, report.NotOwned = m.Name, true
-	report.FieldDiffs, report.Differs = nil, nil
+	report.FieldDiffs, report.Differs, report.FieldReasons = nil, nil, nil
 	report.ClosestMockReq = renderMockRequest(m.Spec.HTTPReq, m.Noise)
 	report.NextSteps = notOwnedNextSteps(m.Name)
 }
