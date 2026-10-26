@@ -84,13 +84,18 @@ func TestCycleIncomplete(t *testing.T) {
 func TestRewindConsumedForRetryCycleMarksAgentHistoryStale(t *testing.T) {
 	r := &Replayer{}
 	baseline := map[string]models.MockState{"mock-1": {Name: "mock-1"}}
-	total := map[string]models.MockState{
+	total := models.ConsumedHistoryOf(map[string]models.MockState{
 		"mock-1": {Name: "mock-1"},
 		"mock-2": {Name: "mock-2", Usage: models.Deleted}, // consumed during cycle 1
-	}
+	})
 	across := map[string]models.MockState{}
 
-	rewound := r.rewindConsumedForRetryCycle(total, baseline, across)
+	next := r.rewindConsumedForRetryCycle(total, baseline, across)
+	if next == total {
+		t.Fatal("the rewind handed back the cycle's own history; an agent that keeps it is only ever " +
+			"sent entries added to it, so it would keep every per-test mock the cycle consumed")
+	}
+	rewound := next.Map()
 
 	if !r.agentHistoryStaleForSet.Load() {
 		t.Fatal("the retry rewind did not mark the agent's history stale; cycle 2 would be filtered " +
@@ -184,7 +189,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 	t.Run("a retry rewind is cleared by the next set's MockOutgoing", func(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{}}
 		r.rewindConsumedForRetryCycle(
-			map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
+			models.NewConsumedHistory(0), map[string]models.MockState{}, map[string]models.MockState{})
 
 		if !r.agentConsumedHistoryUnusable() {
 			t.Fatal("the rewind did not disqualify the agent's history; cycle 2 would be filtered " +

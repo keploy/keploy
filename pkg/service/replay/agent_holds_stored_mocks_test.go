@@ -235,9 +235,9 @@ func newRearmReplayerWithHooks(f *rearmInstr) (*Replayer, *rearmHooks) {
 
 // rearmSessionArgs is a two-mock corpus with one test case (the arguments the
 // compose branch passes through from its setup).
-func rearmSessionArgs() ([]*models.Mock, []*models.Mock, map[string]models.MockState, []*models.TestCase) {
+func rearmSessionArgs() ([]*models.Mock, []*models.Mock, *models.ConsumedHistory, []*models.TestCase) {
 	return []*models.Mock{{Name: "mock-a"}, {Name: "mock-b"}}, []*models.Mock{},
-		map[string]models.MockState{}, []*models.TestCase{{}}
+		models.NewConsumedHistory(0), []*models.TestCase{{}}
 }
 
 func TestAgentHoldsStoredCorpus(t *testing.T) {
@@ -697,7 +697,7 @@ func TestEnsureAgentHoldsStoredMocks_SkipsProbeForEmptyCorpus(t *testing.T) {
 	f := &rearmInstr{}
 	r := newRearmReplayer(f)
 
-	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, nil, nil, map[string]models.MockState{}, false, []*models.TestCase{{}}); err != nil {
+	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0", models.OutgoingOptions{}, nil, nil, models.NewConsumedHistory(0), false, []*models.TestCase{{}}); err != nil {
 		t.Fatalf("an empty corpus must be a no-op, got: %v", err)
 	}
 
@@ -901,7 +901,7 @@ func TestEnsureAgentHoldsStoredMocks_RepairDoesNotDeferToTheReplacementsOwnHisto
 	f := &rearmInstr{loaded: 0, storeTakesEffect: true}
 	r := newRearmReplayer(f)
 	filtered, unfiltered, _, cases := rearmSessionArgs()
-	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
+	consumed := models.ConsumedHistoryOf(map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}})
 
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
 		models.OutgoingOptions{}, filtered, unfiltered, consumed, false, cases); err != nil {
@@ -928,10 +928,10 @@ func TestSendMockFilterParamsKeepsAgentOwnsConsumedOnTheNormalPath(t *testing.T)
 
 	f := &rearmInstr{}
 	r := newRearmReplayer(f)
-	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
+	consumed := models.ConsumedHistoryOf(map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
-		consumed, false, recordedSetShape{}, nil); err != nil {
+		consumed, nil, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("send failed: %v", err)
 	}
 
@@ -956,7 +956,7 @@ func TestConsumedHistoryRebuildSticksAfterARepair(t *testing.T) {
 	f := &rearmInstr{loaded: 0, storeTakesEffect: true}
 	r := newRearmReplayer(f)
 	filtered, unfiltered, _, cases := rearmSessionArgs()
-	consumed := map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}}
+	consumed := models.ConsumedHistoryOf(map[string]models.MockState{"mock-a": {Name: "mock-a", Usage: models.Deleted}})
 
 	// The repair.
 	if err := r.ensureAgentHoldsStoredMocks(context.Background(), "run-1", "test-set-0",
@@ -966,7 +966,7 @@ func TestConsumedHistoryRebuildSticksAfterARepair(t *testing.T) {
 
 	// A subsequent ORDINARY per-test send, which passes rebuildConsumed=false.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), []string{}, models.BaseTime, time.Now(),
-		consumed, false, recordedSetShape{}, nil); err != nil {
+		consumed, nil, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("per-test send failed: %v", err)
 	}
 
