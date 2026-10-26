@@ -1937,7 +1937,28 @@ func (a *AgentClient) GetCaptureLosses(ctx context.Context) (models.CaptureLosse
 // its start, and an agent started again in its place counts afresh. "" where
 // the answer names none (an agent with the switch off, or older than the
 // header).
+//
+// The read ends at the agent's answer, the end of ctx, the interrupt that
+// gives a stop's waits up, or once keploy had captureLossStall of its own
+// runnable time with no answer (boundedAgentRead): an error then, never a
+// count.
 func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
+	got, err := boundedAgentRead(ctx, "the read of the agent's capture losses", func(ctx context.Context) (lossesAnswer, error) {
+		losses, agent, err := a.getCaptureLossesAndAgent(ctx)
+		return lossesAnswer{losses, agent}, err
+	})
+	return got.losses, got.agent, err
+}
+
+// lossesAnswer is an answer of GET /capturelosses: the counts, and the agent
+// process that gave them.
+type lossesAnswer struct {
+	losses models.CaptureLosses
+	agent  string
+}
+
+// getCaptureLossesAndAgent is GetCaptureLossesAndAgent's exchange, unbounded.
+func (a *AgentClient) getCaptureLossesAndAgent(ctx context.Context) (models.CaptureLosses, string, error) {
 	url := fmt.Sprintf("%s/capturelosses", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -1969,8 +1990,15 @@ func (a *AgentClient) GetCaptureLossesAndAgent(ctx context.Context) (models.Capt
 // GetUnchargedCaptureLosses asks the agent what it could not capture since
 // the run began that no test was charged with: what was lost after the last
 // test ended (GET /agent/capturelosses/uncharged). An agent that cannot say
-// is ErrCaptureLossesUnsupported.
+// is ErrCaptureLossesUnsupported. The read is bounded as
+// GetCaptureLossesAndAgent's is (boundedAgentRead).
 func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	return boundedAgentRead(ctx, "the read of the agent's capture losses no test was charged with", a.getUnchargedCaptureLosses)
+}
+
+// getUnchargedCaptureLosses is GetUnchargedCaptureLosses's exchange,
+// unbounded.
+func (a *AgentClient) getUnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
 	url := fmt.Sprintf("%s/capturelosses/uncharged", a.conf.Agent.AgentURI)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -1997,6 +2025,66 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 		return nil, fmt.Errorf("failed to decode the capture losses no test was charged with: %w", err)
 	}
 	return losses, nil
+}
+
+// captureLossStall is how long, in time keploy could run (utils/stall), a
+// read of the agent's capture losses may go with no answer before keploy
+// gives it up: stall.HangBudget, as for a read of a container's
+// configuration the Docker daemon does not answer. The agent client's
+// http.Client has no timeout of its own, and a wedged agent that took the
+// read and never answered it held the run, and a CI job with it, for good:
+// record's per-test read is made on a context the stop does not end. A
+// starved keploy accrues it only as fast as it gets to run, so load is never
+// taken for a silent agent. captureLossClock is the clock it is counted on
+// (nil: keploy's own runnable time); tests drive one of their own.
+var (
+	captureLossStall = stall.HangBudget
+	captureLossClock stall.Clock
+)
+
+// errAgentSilent is a read of the agent given up on: it made no answer while
+// keploy had the read's whole bound of its own time to run.
+var errAgentSilent = errors.New("the keploy agent made no answer")
+
+// boundedAgentRead is read, an exchange with the agent, made on a context it
+// ends. It returns read's answer, or an error, never an answer, when one of
+// these comes first: ctx ends; the interrupt that gives a stop's waits up
+// (utils.StopNow, "press Ctrl+C again to stop now": the Ctrl+C escape of a
+// read made on a context the stop does not end, as record's per-test read
+// is); or keploy had captureLossStall of its own runnable time with no
+// answer (errAgentSilent; what names the read). The count it would have
+// given is then unknown, and every caller fails closed on an error: no
+// count, no verdict that relies on one. A read given up on ends as its
+// context does, on its own goroutine.
+func boundedAgentRead[T any](ctx context.Context, what string, read func(context.Context) (T, error)) (T, error) {
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type answer struct {
+		v   T
+		err error
+	}
+	got := make(chan answer, 1) // a read given up on does not block
+	go func() {
+		v, err := read(readCtx)
+		got <- answer{v, err}
+	}()
+	m := stall.NewMeter(captureLossClock, captureLossStall)
+	defer m.Stop()
+	var zero T
+	for {
+		select {
+		case a := <-got:
+			return a.v, a.err
+		case <-ctx.Done():
+			return zero, fmt.Errorf("%s ended: %w", what, ctx.Err())
+		case <-utils.StopNow():
+			return zero, fmt.Errorf("keploy gave up %s at the interrupt", what)
+		case <-m.Wait():
+			if m.Expired() {
+				return zero, fmt.Errorf("%w to %s while keploy had %s of its own time to run", errAgentSilent, what, m.Grace())
+			}
+		}
+	}
 }
 
 func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
