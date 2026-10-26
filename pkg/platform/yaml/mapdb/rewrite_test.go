@@ -114,3 +114,16 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// HeadComment is the comment lines a mapping file starts with, its version
+// line brought up to this keploy: what a writer outside mapdb (enterprise's
+// per-test commit) keeps when it writes the file anew.
+func TestHeadComment(t *testing.T) {
+	head := string(HeadComment([]byte(handEdited)))
+	if head != utils.GetVersionAsComment()+"# Notes: TestB's mock-1 was moved back by hand, see the README.\n" {
+		t.Fatalf("head %q", head)
+	}
+	if got := HeadComment([]byte("version: v\n")); len(got) != 0 {
+		t.Fatalf("a file with no head comment has none, got %q", got)
+	}
+}
