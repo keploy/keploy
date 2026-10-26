@@ -235,3 +235,56 @@ func TestNoWindowCommandAllocationsDoNotGrowWithOtherStatements(t *testing.T) {
 		}
 	}
 }
+
+// TestExactServedCommandReadsNoTierOfAOneCommandCandidate counts the reads of
+// the config tag (a map lookup on a mock's metadata) by commands served under
+// exact serving while the open test owns a whole set, as keploy mock replay
+// serves one go test whose subtests made the recording. A COM_QUERY and an
+// EXECUTE of each recorded query read the tag only of the one owned mock that
+// is not a single COM_* command, so the count is the same for 100 owned mocks
+// as for 1,000. Main read it for every owned mock on every command, twice for
+// an EXECUTE (its index keys, then the scan's filter): 18% of the agent's CPU
+// at 10,000 mocks.
+func TestExactServedCommandReadsNoTierOfAOneCommandCandidate(t *testing.T) {
+	readsFor := func(n int) []int {
+		// First, a bundle of two requests tagged config, which every command's
+		// filter must classify (and skip): the count is not zero by a hook
+		// never called.
+		pool := append([]*models.Mock{diffMock("bundle", "c1", []mysql.Request{queryReq("SET NAMES utf8mb4"), queryReq("SELECT @@version")},
+			diffBase.Add(-time.Millisecond), models.LifetimePerTest, "config")}, keyedSet(n, models.LifetimePerTest)...)
+		s := newDiffSide(pool)
+		defer s.mm.Close()
+		s.stageNoWindow()
+		owned := make([]*models.Mock, len(pool))
+		for i, m := range pool {
+			owned[i] = m.DeepCopy()
+		}
+		s.mm.ServeExactTest("whole-set", owned)
+		var reads []int
+		for _, req := range []mysql.Request{
+			queryReq(keyedSetText(n - 3)),
+			executeReq(7, fmt.Sprintf("k%d", (n-2)%500)),
+			executeReq(8, fmt.Sprintf("k%d", (n-1)%500)),
+		} {
+			var resp *mysql.Response
+			var ok bool
+			var err error
+			reads = append(reads, replayer.ConfigTagReadsForTest(func() {
+				resp, ok, _, err = replayer.MatchCommandExaminedForTest(context.Background(), req, s.mm, s.dctx, nil, false)
+			}))
+			if err != nil || !ok || resp == nil {
+				t.Fatalf("set of %d: %s not served: ok=%v err=%v", n, req.Header.Type, ok, err)
+			}
+		}
+		return reads
+	}
+	small, large := readsFor(100), readsFor(1000)
+	for i, name := range []string{"COM_QUERY", "EXECUTE of the upper-case query", "EXECUTE of the lower-case query"} {
+		if small[i] == 0 {
+			t.Errorf("%s: no config tag read, though the owned set holds a bundle the filter must classify", name)
+		}
+		if large[i] != small[i] {
+			t.Errorf("%s: %d config tag reads with 1,000 owned mocks, %d with 100: the reads grow with the mocks the test owns", name, large[i], small[i])
+		}
+	}
+}

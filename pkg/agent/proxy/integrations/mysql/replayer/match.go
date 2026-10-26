@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -249,7 +250,27 @@ func matchHanshakeResponse41(_ context.Context, _ *zap.Logger, expected, actual 
 // alongside TestModeInfo.Lifetime so mocks that reached the matcher
 // without DeriveLifetime having run still classify correctly.
 func hasConfigTag(m *models.Mock) bool {
+	if h := configTagReadHook.Load(); h != nil {
+		(*h)()
+	}
 	return m != nil && m.Spec.Metadata != nil && m.Spec.Metadata["type"] == "config"
+}
+
+// configTagReadHook, when set, is called on every read of a mock's config tag
+// (hasConfigTag), so a test can count them. Replay never sets it.
+var configTagReadHook atomic.Pointer[func()]
+
+// skippedAtCommandPhase reports whether the command phase skips mock: a
+// session-tier or config mock (its handshake and auth were matched at the
+// command prologue) that is not a session-reusable command. The shape check
+// runs first: a candidate that is one COM_* command, as nearly every data
+// mock is, is kept whatever its tier, so its tier is never read. The config
+// tag is a map lookup on the mock's metadata, and was the costliest part of
+// the filter for a command that walks thousands of candidates.
+func skippedAtCommandPhase(mock *models.Mock) bool {
+	return !isSessionReusableCommandMock(mock) &&
+		(mock.TestModeInfo.Lifetime == models.LifetimeSession ||
+			(mock.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(mock)))
 }
 
 // isSessionReusableCommandMock reports whether a session/config-tagged
@@ -809,11 +830,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			// setup) mocks are KEPT here so the prepared-statement index
 			// below picks them up and executes can match their setups
 			// across test-window boundaries.
-			if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
-				(mock.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(mock)) {
-				if !isSessionReusableCommandMock(mock) {
-					continue
-				}
+			if skippedAtCommandPhase(mock) {
+				continue
 			}
 			for _, mockReq := range mock.Spec.MySQLRequests {
 				if mockReq.PacketBundle.Header.Type == sCOM_STMT_EXEC {
@@ -1227,11 +1245,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			// command prologue; skip them at command phase. Connection-
 			// scoped (prepared-statement setup) mocks ARE retained —
 			// they're how COM_STMT_EXEC finds its matching prepare.
-			if mock.TestModeInfo.Lifetime == models.LifetimeSession ||
-				(mock.TestModeInfo.Lifetime == models.LifetimePerTest && hasConfigTag(mock)) {
-				if !isSessionReusableCommandMock(mock) {
-					continue // command-phase only wants data + connection mocks + session-reusable commands
-				}
+			if skippedAtCommandPhase(mock) {
+				continue // command-phase only wants data + connection mocks + session-reusable commands
 			}
 			mysqlCandidates++
 			for reqIdx, mockReq := range mock.Spec.MySQLRequests {
