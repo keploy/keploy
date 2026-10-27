@@ -3,6 +3,7 @@ package http
 import (
 	"fmt"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -47,14 +48,23 @@ type learnEntry struct {
 	masked  string
 }
 
-// learnIndexes keeps the last learnIndex an HTTP parser built, and the
-// generation its last call read without one: an index is built on the second
-// call that reads the same store at the same generation, so a store whose
-// generation moves on every call (one not under exact serving) is walked as
-// before and never pays for an index it would not reuse.
+// learnIndexes keeps the last learnIndex an HTTP parser built (genIndexes).
 type learnIndexes struct {
+	genIndexes[*learnIndex]
+}
+
+// genIndexes keeps the last index of a store's reads an HTTP parser built at
+// one staging generation, and the generation its last call read without one:
+// an index is built on the second call that reads the same store at the same
+// generation, so a store whose generation moves on every call (one not under
+// exact serving) is walked as before and never pays for an index it would
+// not reuse.
+type genIndexes[T any] struct {
 	mu   sync.Mutex
-	last *learnIndex
+	last T
+	// key is last's; has is false while none is kept.
+	key  learnIndexKey
+	has  bool
 	seen learnIndexKey
 }
 
@@ -62,6 +72,57 @@ type learnIndexKey struct {
 	store integrations.MockMemDb
 	gen   uint64
 	url   string
+}
+
+// of is the index of what db reads now, for base (the store db is held from:
+// a store held to a call is made for each call, and shares base's reads while
+// its staging is the call's), with url the url noise its paths are masked
+// with; false where the call reads the store instead: db is not under exact
+// serving (a consume would move the generation), keeps no staging
+// generation, is held to a staging that moved
+// (integrations.RestagedGeneration: it reads nothing), base cannot be told
+// apart from another store by identity, or this is the first call to read
+// base at this generation. read is the store's read the index is built from,
+// and build builds it from that read.
+func (x *genIndexes[T]) of(base, db integrations.MockMemDb, url string, read func() error, build func(learnIndexKey) T) (T, bool) {
+	var none T
+	if !integrations.ExactServing(db) || base == nil || reflect.ValueOf(base).Kind() != reflect.Pointer {
+		return none, false
+	}
+	gen, ok := integrations.StagingGenerationOf(db, models.HTTP)
+	if !ok || gen == integrations.RestagedGeneration {
+		return none, false
+	}
+	key := learnIndexKey{store: base, gen: gen, url: url}
+	x.mu.Lock()
+	if x.has && x.key == key {
+		ix := x.last
+		x.mu.Unlock()
+		return ix, true
+	}
+	second := x.seen == key
+	x.seen = key
+	// The kept index is of another store, generation or url noise: let go
+	// of it, and of the recordings it holds, now rather than at the next
+	// build.
+	x.last, x.key, x.has = none, learnIndexKey{}, false
+	x.mu.Unlock()
+	if !second {
+		return none, false
+	}
+	if read() != nil {
+		return none, false
+	}
+	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
+		// The generation moved under the read: what it read is of no one
+		// generation.
+		return none, false
+	}
+	ix := build(key)
+	x.mu.Lock()
+	x.last, x.key, x.has = ix, key, true
+	x.mu.Unlock()
+	return ix, true
 }
 
 // learnIndexBuilds counts the indexes built: what the rows count to see that
@@ -75,59 +136,26 @@ var learnVisits atomic.Int64
 
 // urlNoiseKey names keploy.yml's url noise, which the masked paths an index
 // files recordings under are read with.
-func urlNoiseKey(n learnNoise) string {
+func urlNoiseKey(url []*regexp.Regexp) string {
 	var b strings.Builder
-	for _, re := range n.url {
+	for _, re := range url {
 		b.WriteString(strconv.Quote(re.String()))
 	}
 	return b.String()
 }
 
-// of is the index of what db reads now, for base (the store db is held from:
-// a store held to a call is made for each call, and shares base's reads while
-// its staging is the call's), or nil where the call reads the store instead:
-// db is not under exact serving (a consume would move the generation), keeps
-// no staging generation, is held to a staging that moved
-// (integrations.RestagedGeneration: it reads nothing), base cannot be told
-// apart from another store by identity, or this is the first call to read
-// base at this generation. read is the store's read the index is built from.
+// of is the learn step's index of what db reads now, for base, or nil where
+// the call reads the store instead (genIndexes.of). read is the store's read
+// the index is built from.
 func (x *learnIndexes) of(base, db integrations.MockMemDb, n learnNoise, read func() (perTest, session []*models.Mock, err error)) *learnIndex {
-	if !integrations.ExactServing(db) || base == nil || reflect.ValueOf(base).Kind() != reflect.Pointer {
-		return nil
-	}
-	gen, ok := integrations.StagingGenerationOf(db, models.HTTP)
-	if !ok || gen == integrations.RestagedGeneration {
-		return nil
-	}
-	key := learnIndexKey{store: base, gen: gen, url: urlNoiseKey(n)}
-	x.mu.Lock()
-	if ix := x.last; ix != nil && ix.store == base && ix.gen == gen && ix.url == key.url {
-		x.mu.Unlock()
-		return ix
-	}
-	second := x.seen == key
-	x.seen = key
-	// The kept index is of another store, generation or url noise: let go
-	// of it, and of the recordings it holds, now rather than at the next
-	// build.
-	x.last = nil
-	x.mu.Unlock()
-	if !second {
-		return nil
-	}
-	perTest, session, err := read()
-	if err != nil {
-		return nil
-	}
-	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
-		// The generation moved under the read: what it read is of no one
-		// generation.
-		return nil
-	}
-	ix := buildLearnIndex(key, perTest, session, n)
-	x.mu.Lock()
-	x.last = ix
-	x.mu.Unlock()
+	var perTest, session []*models.Mock
+	ix, _ := x.genIndexes.of(base, db, urlNoiseKey(n.url), func() error {
+		var err error
+		perTest, session, err = read()
+		return err
+	}, func(key learnIndexKey) *learnIndex {
+		return buildLearnIndex(key, perTest, session, n)
+	})
 	return ix
 }
 

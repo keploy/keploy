@@ -245,14 +245,28 @@ func (h *HTTP) strictServe(ctx context.Context, input *req, pool, comparedPool [
 		}
 		return nil, diag, false, nil
 	}
+	served, answered, retry, err := h.strictServeFits(ctx, input, live, fits, ownedBy(ctx), mockDb, n, statefulMocks)
+	if answered != nil {
+		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, false, nil
+	}
+	return served, nil, retry, err
+}
+
+// strictServeFits serves the live request with the first of fits, the
+// recordings that are this very call in the pool's order, or with each in
+// turn for a request recorded several times (strictCursorPick), own telling
+// whose each is. answered is a stateful walk's miss (every recording of it
+// has answered); retry is true when another connection took the recording
+// first.
+func (h *HTTP) strictServeFits(ctx context.Context, input *req, live destination, fits []*models.Mock, own func(*models.Mock) bool, mockDb integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, answered *answeredSequence, retry bool, err error) {
 	// A stateful walk is fixed by every recording the store stages that is
 	// this very call, those spent included (servedWalk).
 	member := func(m *models.Mock) bool {
 		return !hasVariables(m) && string(m.Spec.HTTPReq.Method) == input.method && len(strictDiff(ctx, input, live, m, n)) == 0
 	}
-	picked, commit, answered := h.strictCursorPick(fits, ownedBy(ctx), mockDb, statefulMocks, member)
+	picked, commit, answered := h.strictCursorPick(fits, own, mockDb, statefulMocks, member)
 	if answered != nil {
-		return nil, &matchDiag{phase: models.MatchPhaseExhausted, candidates: len(comparedPool), pool: comparedPool, live: &live, answered: answered}, false, nil
+		return nil, answered, false, nil
 	}
 	served, claimed, err := h.claim(ctx, picked, mockDb, nil, nil)
 	if err != nil {
@@ -293,6 +307,7 @@ func (c nearest) closerThan(o nearest) bool {
 // difference panics.
 func strictFits(ctx context.Context, input *req, live destination, pool []*models.Mock, n strictNoise) ([]*models.Mock, error) {
 	sieve := newStrictSieve(input, n)
+	strictVisits.Add(int64(len(pool)))
 	var fits []*models.Mock
 	for _, m := range pool {
 		if ctx.Err() != nil {

@@ -106,8 +106,15 @@ type matchDiag struct {
 // manual noise config participates in mock matching with the same vocabulary
 // as response assertions.
 func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+	return h.matchOf(ctx, input, mockDb, nil, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+}
+
+// matchOf is match reading mockDb, held to the call from base
+// (integrations.HoldToRound), or base itself: the strict pass's index of a
+// staging generation is kept for base (strictIndexed). A nil base keeps none.
+func (h *HTTP) matchOf(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 	ctx = context.WithValue(ctx, statefulMocksKey{}, statefulMocks)
-	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, base, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
 	if diag != nil && provenswitch.On() {
 		// Under the proven switch a miss names where the call went too
 		// (strict.go), so its report can name a destination that differs.
@@ -164,7 +171,7 @@ func ownedBy(ctx context.Context) func(*models.Mock) bool {
 }
 
 // matchCascade is match without its proven-switch report additions.
-func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
+func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 
 	// Shared schema-noise engine for this match. HTTP is a full client of the
 	// same engine Pulsar (and any future parser) uses — httpNoiseAdapter owns
@@ -176,13 +183,38 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 	// replay is declared or learned, never guessed from how it looks. (The
 	// variable and strict passes answer every call before the passes below;
 	// this holds if one is ever reached under the switch.)
+	var strict strictNoise
 	if provenswitch.On() {
 		autoURLDynamic = false
+		strict = h.newStrictNoise(headerNoise, userBodyNoise, urlNoise)
 	}
 
+	// reread: a claim through the strict pass's index failed (another call
+	// took the recording first): the call reads the store itself from then
+	// on, so a recording the index still lists and the store no longer hands
+	// out is never chosen again.
+	reread := false
 	for {
 		if ctx.Err() != nil {
 			return false, nil, nil, ctx.Err()
+		}
+
+		// Under the proven switch a call the strict pass finds in its bucket
+		// of the staging generation's index is answered from it, as from the
+		// read below (strictIndexed); a miss, and every call of a generation
+		// with variables, reads the store.
+		if provenswitch.On() && base != nil && !reread {
+			served, retry, err := h.strictIndexed(ctx, input, mockDb, base, strict, statefulMocks)
+			if err != nil {
+				return false, nil, nil, err
+			}
+			if retry {
+				reread = true
+				continue
+			}
+			if served != nil {
+				return true, served, nil, nil
+			}
 		}
 
 		// The variables' scope this attempt checks against is read before
@@ -316,7 +348,7 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// strict_compare.go): no lenient pass, no closest match and no fuzzy
 		// fallback below (design v14 row S1).
 		if provenswitch.On() {
-			served, diag, retry, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
+			served, diag, retry, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, strict, statefulMocks)
 			if err != nil {
 				return false, nil, nil, err
 			}
