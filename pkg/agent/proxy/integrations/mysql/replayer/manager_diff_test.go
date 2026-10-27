@@ -285,7 +285,7 @@ func diffPool(r *rand.Rand, windows int) []*models.Mock {
 				// as its client sent it (another case, a trace comment) or
 				// another statement's; older ones keep none.
 				if r.Intn(3) != 0 {
-					exec.PacketBundle.SetStoredQuery(diffStoredQuery(r, prep))
+					exec.SetStoredQuery(diffStoredQuery(r, prep))
 				}
 				pool = append(pool, diffMock(name("exec"), c, []mysql.Request{exec}, ts.Add(time.Duration(k+1)*100*time.Microsecond), lt, typ))
 			}
