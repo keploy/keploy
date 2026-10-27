@@ -53,6 +53,9 @@ type composeDocker struct {
 	// intDelay, set: a SIGINT stops the container this long after it,
 	// not at once (an app whose shutdown takes a while).
 	intDelay time.Duration
+	// onKill, set, is given each signal first; true: the daemon has yet to
+	// record what it did (the container still runs, as it says).
+	onKill func(signal string) bool
 }
 
 func (d *composeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
@@ -101,6 +104,9 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 	d.signals = append(d.signals, signal)
 	if !d.running {
 		return errdefs.Conflict(errors.New("container is not running"))
+	}
+	if d.onKill != nil && d.onKill(signal) {
+		return nil
 	}
 	switch {
 	case signal == "SIGINT" && d.intDelay > 0:

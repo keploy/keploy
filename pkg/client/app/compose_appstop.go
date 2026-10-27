@@ -58,6 +58,11 @@ type composeAppState struct {
 	stopMu sync.Mutex
 	// stopping: keploy has asked the app to stop, so its exit is no halt.
 	stopping atomic.Bool
+	// exitSeen: keploy's last stop ended on the app's exit, which it may
+	// have seen (its main process's exit, its processes all gone) before
+	// the daemon recorded it. StartComposeApp waits for the daemon's word
+	// before its start.
+	exitSeen atomic.Bool
 	// halted is how the app's container exited when keploy had not asked
 	// it to (watchComposeApp); nil while it has not.
 	halted atomic.Pointer[composeHalt]
@@ -585,6 +590,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	end, bound := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load())
 	switch end {
 	case utils.StopExited:
+		a.composeApp.exitSeen.Store(true)
 		return "", nil
 	case utils.StopPressed:
 		killed = "keploy killed its container at the press of Ctrl+C, before it had stopped"
@@ -609,6 +615,7 @@ func (a *App) stopComposeApp(ctx context.Context) (killed string, err error) {
 	if end, _ := utils.WaitExitByEvents(a.logger, stopped, w.procs, a.teardown.Load()); end != utils.StopExited {
 		return killed, fmt.Errorf("the application's container %q had not stopped after keploy killed it", a.container)
 	}
+	a.composeApp.exitSeen.Store(true)
 	return killed, nil
 }
 
@@ -651,6 +658,8 @@ func (a *App) signalComposeApp(ctx context.Context, id, signal string) error {
 // runs already (a stop that did not end it, or a start told failed that the
 // daemon carried out: the start is the daemon's no-op), where the inspect
 // could not tell, and with an error: the app may be the one that ran before.
+// A container whose exit keploy's stop saw, and that the daemon still calls
+// running, is started once the daemon says it stopped: a new one.
 func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 	// Under stopMu, as keploy's stops are made and the watch decides
 	// (composeAppDied): a die the watch takes during the start is told
@@ -664,7 +673,25 @@ func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 	ictx, icancel := context.WithTimeout(ctx, dockerInspectBudget)
 	info, ierr := a.docker.ContainerInspect(ictx, id)
 	icancel()
-	stopped := ierr == nil && info.ContainerJSONBase != nil && info.State != nil && !info.State.Running
+	described := ierr == nil && info.ContainerJSONBase != nil && info.State != nil
+	stopped := described && !info.State.Running
+	if described && info.State.Running && a.composeApp.exitSeen.Load() {
+		// keploy's stop saw the app exit, by its main process's exit or
+		// its processes all gone, before the daemon recorded it (a daemon
+		// under load is slow to). A start now is the daemon's no-op on a
+		// container it still calls running: the app was not started for
+		// this set, and the exit the daemon then recorded, keploy's own
+		// stop's, came with stopping unset and was taken for a halt,
+		// which ended the run before this set had a report. So the start
+		// waits for the daemon's word that the container stopped: an
+		// event (its wait), not a poll, which the run's end cuts short.
+		a.logger.Debug("the docker daemon has yet to record the exit keploy's stop saw; waiting for it before starting the app again",
+			zap.String("container", a.container))
+		if err := a.awaitComposeAppStopped(ctx, id); err != nil {
+			return false, fmt.Errorf("keploy could not start the application's container %q again: the docker daemon did not say it had stopped: %w", a.container, err)
+		}
+		stopped = true
+	}
 	// Bounded only as a hang guard (utils.StopStallBudget), as the stop's
 	// calls are: a wedged daemon cannot hold the set for good.
 	sctx, cancel := context.WithTimeout(ctx, utils.StopStallBudget)
@@ -673,5 +700,22 @@ func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 		return false, fmt.Errorf("keploy could not start the application's container %q again: %w", a.container, err)
 	}
 	a.composeApp.stopping.Store(false)
+	a.composeApp.exitSeen.Store(false)
 	return stopped, nil
+}
+
+// awaitComposeAppStopped waits for the daemon to say the app's container,
+// id, is not running: its wait, which answers at once for one that is not.
+func (a *App) awaitComposeAppStopped(ctx context.Context, id string) error {
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	said, errs := a.docker.ContainerWait(wctx, id, container.WaitConditionNotRunning)
+	select {
+	case <-said:
+		return nil
+	case err := <-errs:
+		return err
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
