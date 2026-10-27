@@ -142,19 +142,25 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	}
 	// The watchdog reads the counts at every wake-up: that read is also what
 	// ends an application connection's wait when the kernel dropped its
-	// event (WaitAppConnsSettled). While the wait is for the counts, they
-	// are what must move; once it is for the connections' work, each
-	// connection that still holds some must.
+	// event (WaitAppConnsSettled). While the wait is for the counts, what it
+	// waits for must move: the application's connections numbered up to the
+	// count read (counts.AppConns), the accepts it then waits for (accepts),
+	// and the bytes on the connections paired with those. A connection the
+	// application opens after the wait began is numbered after them and
+	// moves none of it: an application that keeps connecting (a timer's
+	// call, its miss, a reset, a new connection) does not feed the watchdog
+	// while one of the wait's own connections never reaches the proxy. Once
+	// the wait is for the connections' work, each connection that still
+	// holds some must move.
 	var working atomic.Bool
+	var accepts atomic.Uint64
 	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
 		c, err := a.ProxyConns(ctx)
 		if !working.Load() {
 			if err != nil {
 				return nil
 			}
-			// The bytes on the connections the proxy holds are the wait's
-			// last part (WaitProxySettled): their arrivals move it too.
-			v := c.Accepted + c.AppSettled
+			v := min(c.AppSettled, counts.AppConns) + min(c.Accepted, accepts.Load())
 			if pb, ok := a.Proxy.(coreAgent.PairedBytesWaiter); ok {
 				v += pb.PairedBytesProgress()
 			}
@@ -167,7 +173,7 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		return out
 	})
 	defer stop()
-	if err := a.WaitProxySettled(ctx, counts); err != nil {
+	if err := a.waitProxySettled(ctx, counts, accepts.Store); err != nil {
 		if cause := context.Cause(ctx); cause != nil {
 			return 0, cause
 		}

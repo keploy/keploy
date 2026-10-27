@@ -443,3 +443,118 @@ func TestTheSettleWatchdogFiresForTheOneThatDoesNotMove(t *testing.T) {
 	wake()
 	require.ErrorIs(t, context.Cause(ctx), errNoProgress, "a stuck connection beside a busy one")
 }
+
+// A test's end waits for what the application had sent before it began: an
+// application connection that never reaches the proxy, or bytes written to
+// one that never arrive, hold the wait, and the watchdog fails it at
+// settleStallLimit wake-ups however many connections the application opens
+// after the end began (an app whose timers make an unrecorded call, take its
+// miss, have the connection reset and connect again, every few seconds, as
+// api-server's do). Those connections are no part of the wait: the kernel
+// numbers each one after the ones the end read, pairs it, and the proxy
+// accepts it. Before, their pairings and accepts were the wait's progress, and
+// the end waited for as long as the application kept connecting: 31 minutes,
+// until go test's -timeout ended the run.
+func TestTheSettleWatchdogIsNotFedByConnectionsOpenedAfterTheEndBegan(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// connStuck: the end's second application connection never
+		// reaches the proxy; otherwise the bytes written to its first never
+		// arrive.
+		connStuck bool
+	}{
+		{"an application connection that never reaches the proxy", true},
+		{"bytes on a pooled connection that never arrive", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wake, woken := make(chan struct{}), make(chan struct{})
+			prevWake, prevWoken, prevLimit := settleWake, settleWoken, settleStallLimit
+			settleWake = func(context.Context) (<-chan struct{}, func()) { return wake, func() {} }
+			settleWoken = func() { woken <- struct{}{} }
+			settleStallLimit = 3
+			t.Cleanup(func() { settleWake, settleWoken, settleStallLimit = prevWake, prevWoken, prevLimit })
+			a, h, p := settleAgent()
+			h.mu.Lock()
+			if tc.connStuck {
+				h.established, h.appConns, h.appSettled = 1, 2, 1
+			} else {
+				h.established, h.appConns, h.appSettled = 1, 1, 1
+				p.bytesWait = func(ctx context.Context, _ uint64) error {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+			}
+			h.mu.Unlock()
+			p.set(1, 0)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			done := make(chan error, 1)
+			go func() {
+				_, err := a.settle(ctx, true)
+				done <- err
+			}()
+			for i := 0; i < 10*settleStallLimit; i++ {
+				select {
+				case err := <-done:
+					require.ErrorIs(t, err, errNoProgress, "what the end waits for fails the wait, at the watchdog's count")
+					require.GreaterOrEqual(t, i, settleStallLimit, "the watchdog failed the wait before its count")
+					return
+				case wake <- struct{}{}:
+					<-woken
+				}
+				// Between two wake-ups the application opens one more
+				// connection, after the end began: the kernel completes
+				// it to the proxy and pairs it, and the proxy accepts
+				// it. A stuck application connection keeps the settled
+				// count where it was (every connection numbered up to
+				// it).
+				h.mu.Lock()
+				h.established++
+				h.appConns++
+				if !tc.connStuck {
+					h.appSettled++
+				}
+				est := h.established
+				h.mu.Unlock()
+				p.set(est, 0)
+			}
+			t.Fatalf("the end still waited after %d wake-ups at which only connections opened after it began moved: the watchdog counted them as the wait's progress", 10*settleStallLimit)
+		})
+	}
+}
+
+// The accepts the end waits for are the wait's progress: the watchdog counts
+// each one, so a proxy that accepts the end's connections one by one, slower
+// than settleStallLimit wake-ups in all, is no stuck wait.
+func TestTheSettleWatchdogWeighsTheAcceptsTheEndWaitsFor(t *testing.T) {
+	wake, woken := make(chan struct{}), make(chan struct{})
+	prevWake, prevWoken, prevLimit := settleWake, settleWoken, settleStallLimit
+	settleWake = func(context.Context) (<-chan struct{}, func()) { return wake, func() {} }
+	settleWoken = func() { woken <- struct{}{} }
+	settleStallLimit = 3
+	t.Cleanup(func() { settleWake, settleWoken, settleStallLimit = prevWake, prevWoken, prevLimit })
+	a, h, p := settleAgent()
+	// The kernel completed 5 connections to the proxy; it has accepted 1.
+	h.mu.Lock()
+	h.established = 5
+	h.mu.Unlock()
+	p.set(1, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.settle(ctx, true)
+		done <- err
+	}()
+	for acc := uint64(2); acc <= 5; acc++ {
+		select {
+		case err := <-done:
+			require.NoError(t, err, "the proxy accepted one more of the end's connections at every wake-up")
+			t.Fatalf("the end settled with %d of the 5 connections it waited for accepted", acc-1)
+		case wake <- struct{}{}:
+			<-woken
+		}
+		p.set(acc, 0)
+	}
+	require.NoError(t, <-done)
+}
