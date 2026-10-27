@@ -977,9 +977,11 @@ func stricterOf(asPlace, asLate Learned) Learned {
 }
 
 // sameBinding says two readings learn a drift alike: of one kind, from one
-// place.
+// place, found there alike (a copy of it whole or in part, or a moment the
+// echo found).
 func sameBinding(a, b Learned) bool {
-	return a.Kind == b.Kind && a.From.Mock == b.From.Mock && a.From.Side == b.From.Side && a.From.Path == b.From.Path
+	return a.Kind == b.Kind && a.From.Mock == b.From.Mock && a.From.Side == b.From.Side && a.From.Path == b.From.Path &&
+		a.From.Var == b.From.Var && a.From.Whole == b.From.Whole && a.From.Echo == b.From.Echo
 }
 
 // boundAt says where a reading binds its drifted value: a variable of the

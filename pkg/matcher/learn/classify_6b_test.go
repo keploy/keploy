@@ -61,4 +61,12 @@ func TestStricterOfLeavesKeploysLimitOnlyWhenBothSaySo(t *testing.T) {
 	if got := stricterOf(raw, raw); got.Doubted {
 		t.Fatalf("both readings bind it at one place, yet it is doubted: %+v", got)
 	}
+	// One place, found as a copy by one reading and as a clock pick by the
+	// other: the readings disagree.
+	copied := Learned{Kind: KindVariable, From: Place{Mock: "mock-1", Side: Request, Path: "body.at", Var: "body.at", Whole: true}}
+	picked := copied
+	picked.From.Echo = true
+	if got := stricterOf(copied, picked); !got.Doubted {
+		t.Fatalf("one reading finds a copy and the other a clock pick, yet the binding is not doubted: %+v", got)
+	}
 }
