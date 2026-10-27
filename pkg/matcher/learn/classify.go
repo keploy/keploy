@@ -1201,6 +1201,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why, ln.SetAside = fol.refuted+", and keploy learns it as varying", fol.refutedMock
 				case fol.moved != "":
 					ln.Why, ln.SetAside = fol.moved+", and keploy learns it as varying", fol.movedMock
+				case fol.kept != "":
+					ln.Why, ln.SetAside = fol.kept+", and keploy learns it as varying", fol.keptMock
 				}
 			case KindEcho:
 				why := fol.first

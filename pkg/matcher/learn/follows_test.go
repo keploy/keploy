@@ -1019,3 +1019,25 @@ func TestNoiseLearnedPastTheTestCasesRequestNamesNoMock(t *testing.T) {
 		t.Fatalf("%s (%q), set aside %q: want noise naming test case t1 and no mock", got.Kind, got.Why, got.SetAside)
 	}
 }
+
+// Noise learned past a word of the value that both runs gave the
+// application at an earlier place, as recorded, while the value took none
+// of it, says so in its why and names that place's mock as the source it set
+// aside, as noise learned past a source F moved from does: so the about of
+// such noise never says keploy found the value nowhere. A place F moved
+// from, where there is one, is the one named.
+func TestNoiseLearnedPastAWordFGaveAsRecordedNamesItsSource(t *testing.T) {
+	before := eRecAt.Add(-50 * time.Millisecond)
+	got := classifyF(t, "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "82")}, eStartup(), nil)
+	const kept = "where record's full round gave the application that word as recorded, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying"
+	if got.Kind != KindNoise || !strings.Contains(got.Why, " stands in mock-8 at body.retries, "+kept) {
+		t.Errorf("82 recorded beside a leaf both runs gave 82 at, 5 in F: %s (%q), want noise naming mock-8's place", got.Kind, got.Why)
+	}
+	if got.SetAside != "mock-8" || !namesItsSource(got) {
+		t.Errorf("the noise names %q as the source it set aside (its why %q), want mock-8", got.SetAside, got.Why)
+	}
+	got = classifyF(t, chanceValRec, chanceValLive, []Earlier{eLeaf(before, 6, chanceSrcRec, chanceSrcRec), eLeaf(before.Add(time.Millisecond), 7, chanceSrcRec, chanceSrcLive)}, eStartup(), nil)
+	if got.Kind != KindNoise || strings.Contains(got.Why, kept) || !strings.Contains(got.Why, "another value, which the value took none of the words of") {
+		t.Errorf("a word both runs gave as recorded and one F moved from: %s (%q), want noise naming the place F moved from", got.Kind, got.Why)
+	}
+}

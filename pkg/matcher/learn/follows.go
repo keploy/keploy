@@ -104,9 +104,14 @@ type follows struct {
 	// words of (movedAway), names the first such place: what a value learned
 	// as noise says of it, where no place was refuted.
 	moved string
-	// refutedMock and movedMock are the mocks refuted and moved name
-	// (Learned.SetAside); "" for the test case's own request.
-	refutedMock, movedMock string
+	// kept, where the word rule let a word of the value go at a place F
+	// gave the application that word at, as recorded, while the value took
+	// none of it (fSame), names the first such place: what a value learned
+	// as noise says of it, where no place was refuted or moved from.
+	kept string
+	// refutedMock, movedMock and keptMock are the mocks refuted, moved and
+	// kept name (Learned.SetAside); "" for the test case's own request.
+	refutedMock, movedMock, keptMock string
 	// sources are the mocks of the places the word rule let a word of the
 	// value go at (excused), and of the place the search for its source went
 	// past (refute): the value's candidate sources, the only places whose
@@ -241,9 +246,13 @@ func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, w
 		if f.first == "" {
 			f.first = why
 		}
-		if fv == fMoved && f.moved == "" {
+		switch {
+		case fv == fMoved && f.moved == "":
 			f.moved = stands + ", where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source, so the value is no copy of it"
 			f.movedMock = mock
+		case fv == fSame && f.kept == "":
+			f.kept = stands + ", where record's full round gave the application that word as recorded, while the value changed: a copy moves with its source, so the value is no copy of it"
+			f.keptMock = mock
 		}
 		return true
 	}
