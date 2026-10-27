@@ -956,9 +956,10 @@ func stricterOf(asPlace, asLate Learned) Learned {
 		asLate.NotFollowed = false
 		return asLate
 	}
-	if asPlace.Kind == KindUnaccounted && asLate.Kind == KindUnaccounted && !asLate.NotFollowed {
-		// Both refuse it, and one for no limit of keploy's: it may be the
-		// app's change, so it is not keploy's limit.
+	if asPlace.Kind == KindUnaccounted && !asLate.NotFollowed {
+		// The late reading binds it, or refuses it for no limit of
+		// keploy's: the readings disagree, or it may be the app's change,
+		// so it is not keploy's limit.
 		asPlace.NotFollowed = false
 	}
 	return asPlace

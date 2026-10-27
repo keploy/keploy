@@ -48,4 +48,7 @@ func TestStricterOfLeavesKeploysLimitOnlyWhenBothSaySo(t *testing.T) {
 	if got := stricterOf(limit, limit); !got.NotFollowed {
 		t.Fatalf("both readings say it is keploy's limit, yet it is not: %+v", got)
 	}
+	if got := stricterOf(limit, Learned{Kind: KindEcho}); got.NotFollowed {
+		t.Fatalf("the late reading binds it as an echo, yet the refusal is keploy's limit: %+v", got)
+	}
 }
