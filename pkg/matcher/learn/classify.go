@@ -197,7 +197,11 @@ type Raw struct {
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
 	// text is Text; answerClock is AnswerClock.
-	text        string
+	text string
+	// id is the recording's identity (MockID) where text is all of its
+	// payload, as RawOf read it; "" otherwise. What is read of text alone
+	// is kept by it for the set (setDerived).
+	id          string
 	answerClock []time.Time
 	// fields are where each scalar and key of text stands in it, and the
 	// field of the mock's spec it is (rawField): what a reason names where a
@@ -1806,6 +1810,9 @@ type driftState struct {
 	spans    map[string][]instant
 	blanked  map[string][2]string
 	blankTok map[string][]map[string]bool
+	// set keeps what is read of a recording's payload alone for the
+	// tracker's running set (setDerived); nil for a cache no tracker made.
+	set *setDerived
 }
 
 // InZone is dc read in z, the zone the process that made a call writes a
@@ -2691,7 +2698,7 @@ func (dc *DriftCache) earlierMoments(at time.Time, served []Earlier, raw []Raw) 
 	var held heldMoments
 	for _, x := range raw {
 		if x.earlierThan(at) {
-			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
+			held.addMoments(dc.payloadMoments(x))
 		}
 	}
 	for _, e := range served {
@@ -2720,7 +2727,7 @@ func (dc *DriftCache) recordedMoments(at time.Time, served []Earlier, raw []Raw)
 	var held heldMoments
 	for _, x := range raw {
 		if x.earlierThan(at) {
-			dc.heldIn(&held, x.text, dc.rawExtra(x.text))
+			held.addMoments(dc.payloadMoments(x))
 		}
 	}
 	for _, e := range served {
@@ -2812,6 +2819,9 @@ func RawOf(m *models.Mock, served bool) Raw {
 		return r
 	}
 	r.read, r.startUp = true, isStartUp(m)
+	if !m.HasSpilledResponse() {
+		r.id = MockID(m)
+	}
 	// The payload's own text, not its JSON: a JSON string escapes what
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.

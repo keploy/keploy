@@ -361,8 +361,17 @@ type keyedPlace struct {
 // request and answer in one; none, of a recording that holds no answer
 // apart from its request: answerApart), in its text and in its other
 // declared forms,
-// with its stamps and its answer's own clock reads blanked (searched).
+// with its stamps and its answer's own clock reads blanked (searched). They
+// are read once for the set where dc keeps x's (setPlaces).
 func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
+	if out, ok := dc.setPlaces(x); ok {
+		return out
+	}
+	return dc.readPlaces(x)
+}
+
+// readPlaces reads keyedPlaces(x) from x's text.
+func (dc *DriftCache) readPlaces(x Raw) []keyedPlace {
 	var out []keyedPlace
 	text := dc.searched(x, false)[0]
 	answers := answerApart(x.fields)
