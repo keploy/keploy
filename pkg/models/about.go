@@ -135,6 +135,22 @@ func CloneAbouts(m map[string]About) map[string]About {
 	return out
 }
 
+// MergeAbouts is a and b, abouts by place, as one (neither is changed): the
+// first learner wins, so a place in both keeps a's.
+func MergeAbouts(a, b map[string]About) map[string]About {
+	out := CloneAbouts(a)
+	for k, v := range b {
+		if _, ok := out[k]; ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]About, len(b))
+		}
+		out[k] = v.Clone()
+	}
+	return out
+}
+
 // CloneUnknowns returns a copy of m that shares nothing with it; nil for an
 // empty m.
 func CloneUnknowns(m map[string]UnknownKeys) map[string]UnknownKeys {

@@ -1535,7 +1535,8 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				w = tracker.CallWindowFrom(prev.At(), m, input.arrived)
 			}
 			learned := learn.ClassifyGiven(tracker.Drifts(), res.Diff.Drift, liveShape, c.Shape, m.Spec.ReqTimestampMock, earlier, raw, classifiedAnswer(answered), w, givenEarlier(m, set, served, given, earlier, order))
-			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb))
+			calls := httpCallKeys(staged, m, windows, own)
+			plan, why := learnPlan(tracker, test, answered, c.Shape, own, learned, earlier, givenBindings(mockDb), calls)
 			if why != "" {
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
@@ -1892,6 +1893,11 @@ type pairing struct {
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
+	// noiseAbout and clockAbout say where each of noise and clocks came
+	// from (models.About: why, seen, call); a variable and a bind carry
+	// their own (models.MockVariable.About). The CLI stamps the rest.
+	noiseAbout map[string]models.About
+	clockAbout map[string]models.About
 }
 
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
@@ -1912,8 +1918,29 @@ type pairing struct {
 //     here under the key's name with no bind, whatever else Classify found:
 //     the test case is earlier than any call it makes. Its name is the key's
 //     alone in the test: no other variable takes it.
-func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
-	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
+//
+// Each decision carries where it came from (models.About): why, in words
+// that hold no value and name other calls by their call key (calls, by mock
+// name; nil or "" names none), what the recording and the full round saw at
+// it (seen), and its own call's key.
+func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding, calls func(mock string) string) (pairing, string) {
+	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{},
+		noiseAbout: map[string]models.About{}}
+	if calls == nil {
+		calls = func(string) string { return "" }
+	}
+	call := calls(m.Name)
+	// A variable's value is one value at each of its places: its seen is
+	// left out when any of them is a credential's (models.NewAboutSeen).
+	placesOf := map[string][]string{}
+	about := func(key string, cur *models.About, why, call, record, full string, places ...string) *models.About {
+		placesOf[key] = append(placesOf[key], places...)
+		if cur == nil {
+			cur = &models.About{Why: why, Call: call}
+		}
+		cur.Seen = models.NewAboutSeen(record, full, placesOf[key]...)
+		return cur
+	}
 	jsonReq := rec.Fixed["body"] == "json"
 	reserved := make(map[string]bool, len(given))
 	for _, g := range given {
@@ -1946,6 +1973,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v := p.vars[g.Name]
 			v.Recorded, v.Use = g.Recorded, appendNew(v.Use, place)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			v.About = about("var "+g.Name, v.About, givenWhy(g.Name), call, r.Value, l.Live.Value, r.Path)
 			p.vars[g.Name] = v
 			p.values[g.Name] = g
 			continue
@@ -1955,14 +1983,16 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// one plus a constant offset) stays compared: a replay checks it
 			// is a read made in its call's window (learn.CheckClockRead).
 			if p.clocks == nil {
-				p.clocks = map[string]models.ClockOffset{}
+				p.clocks, p.clockAbout = map[string]models.ClockOffset{}, map[string]models.About{}
 			}
 			p.clocks[r.Path] = o
+			p.clockAbout[r.Path] = models.About{Why: clockWhy(o), Seen: models.NewAboutSeen(r.Value, l.Live.Value, r.Path), Call: call}
 			continue
 		}
 		switch l.Kind {
 		case learn.KindNoise:
 			p.noise[r.Path] = []string{}
+			p.noiseAbout[r.Path] = models.About{Why: noiseWhy, Seen: models.NewAboutSeen(r.Value, l.Live.Value, r.Path), Call: call}
 
 		case learn.KindVariable:
 			from := l.From
@@ -2010,6 +2040,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			v := p.vars[name]
 			v.Recorded, v.Use = r.Value, appendNew(v.Use, use)
 			v.Answer = appendNew(v.Answer, answers(l, respLeavesOf(m))...)
+			v.About = about("var "+name, v.About, useWhy(calls(from.Mock), from.Var, len(v.Answer) > 0), call, r.Value, l.Live.Value, r.Path, from.Path)
 			p.vars[name] = v
 			b := p.binds[from.Mock]
 			if b == nil {
@@ -2026,6 +2057,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			// (learn.DriftCache.ClockReads).
 			bv.Clock = tracker.Drifts().ClockReads(r.Value, from.Live)
 			bv.Answer = appendNew(bv.Answer, earlierAnswers(earlier, from.Mock, r)...)
+			bv.About = about("bind "+from.Mock+" "+name, bv.About, bindWhy(call), calls(from.Mock), r.Value, from.Live, from.Path, r.Path)
 			b[name] = bv
 			p.values[name] = variables.Binding{Name: name, Value: from.Live, Recorded: r.Value, Mock: from.Mock, Place: from.Var}
 
@@ -2054,6 +2086,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 				v := p.vars[name]
 				v.Use = appendNew(v.Use, place)
+				v.About = about("var "+name, v.About, "", call, r.Value, l.Live.Value, r.Path)
 				p.vars[name] = v
 				continue
 			}
@@ -2062,7 +2095,8 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				return p, "the test ended before " + r.Path + " was learned"
 			}
 			echoed[r.Value] = name
-			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
+			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true,
+				About: about("var "+name, nil, echoWhy(at), call, r.Value, l.Live.Value, r.Path)}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
 
 		default:
@@ -2077,6 +2111,136 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		}
 	}
 	return p, ""
+}
+
+// The words the learn step writes into a decision's about (models.About.Why):
+// what keploy saw and the rule that decided. They hold no value (the about's
+// seen does) and name another call by its call key (httpCallKeys), never by
+// its mock's name, which a carry renames.
+const noiseWhy = "changed between the recording and the full round, and keploy found the value in no earlier call of the test, not in the test case's request and not in the answer, so it is not compared"
+
+// clockWhy is the about's why of a place learned as a read of the app's
+// clock o.
+func clockWhy(o models.ClockOffset) string {
+	return "a read of the app's clock (" + o.String() + "): in the full round it moved with the clock, so a replay checks it is a read of the clock made in its call's window"
+}
+
+// givenWhy is the about's why of a value the test case's request gave, as
+// its template key key.
+func givenWhy(key string) string {
+	return "the test case's request gives this value (its template key " + key + ") and this call sends it, so it must hold the value the test case gives in each run"
+}
+
+// useWhy is the about's why of a variable this call uses: the test's earlier
+// call from (its call key; "" when keploy cannot name it) sent the value at
+// place; answered, the call's answer holds it too.
+func useWhy(from, place string, answered bool) string {
+	earlier := "the test's earlier call"
+	if from != "" {
+		earlier += " (" + from + ")"
+	}
+	why := earlier + " sent this value at " + place + ", and this call sends the same value, so it must hold that run's value"
+	if answered {
+		why += " and is answered with it"
+	}
+	return why
+}
+
+// bindWhy is the about's why of a variable bound at an earlier call that the
+// later call by (its call key; "" when keploy cannot name it) sends.
+func bindWhy(by string) string {
+	later := "a later call of the test"
+	if by != "" {
+		later += " (" + by + ")"
+	}
+	return "the app makes this value anew each run; it first appears in the test here, and " + later + " sends it, so that call must hold the value this one sends"
+}
+
+// echoWhy is the about's why of a value this call sends that its answer
+// echoes at the places at.
+func echoWhy(at []string) string {
+	return "this call sends a value that changed between the recording and the full round, and its answer holds it whole at " + strings.Join(at, ", ") + ", so a replay answers there with the value the call sends"
+}
+
+// httpCallKey is an HTTP mock's call key without its place (models.AboutCall):
+// the destination as recorded (its Host, else its URL's), the method and
+// the path without its query.
+func httpCallKey(m *models.Mock) (dest, operation string) {
+	r := m.Spec.HTTPReq
+	if r == nil {
+		return "", ""
+	}
+	for k, v := range r.Header {
+		if strings.EqualFold(k, "host") {
+			dest = strings.ToLower(v)
+			break
+		}
+	}
+	path := r.URL
+	if u, err := url.Parse(r.URL); err == nil {
+		path = u.Path
+		if dest == "" {
+			dest = strings.ToLower(u.Host)
+		}
+	}
+	return dest, string(r.Method) + " " + path
+}
+
+// httpCallKeys names each HTTP call of paired's test by its call key
+// (models.AboutCall), by mock name, read once on first use: among mocks
+// (every recording the store stages, served or not: under the proven switch
+// a served recording stays in its tree; a store that stages none names no
+// call, since a call it cannot see would shift the numbers), paired's test's calls
+// are the recordings of its recorded window when it is the open test's own
+// (own) and the store places it in one (another test's other calls need not
+// be staged, so its place among them is not known), else the recordings
+// outside every
+// window (the start-up, the gaps between tests), else, with no windows,
+// every one. Each is numbered among those with its key in recorded order.
+// A mock not among them is named "" (the about then has no call).
+func httpCallKeys(mocks []*models.Mock, paired *models.Mock, windows integrations.TestWindows, own bool) func(mock string) string {
+	var names map[string]string
+	return func(mock string) string {
+		if names == nil {
+			names = map[string]string{}
+			ofTest := func(m *models.Mock) bool { return true }
+			if windows != nil {
+				inside, known := windows.InRecordedTestWindow(paired.Spec.ReqTimestampMock)
+				switch {
+				case own && known && inside:
+					ofTest = func(m *models.Mock) bool {
+						same, known := windows.SameRecordedTestWindow(m.Spec.ReqTimestampMock, paired.Spec.ReqTimestampMock)
+						return known && same
+					}
+				case known:
+					ofTest = func(m *models.Mock) bool {
+						inside, known := windows.InRecordedTestWindow(m.Spec.ReqTimestampMock)
+						return known && !inside
+					}
+				}
+			}
+			seen := map[string]bool{}
+			var test []*models.Mock
+			for _, m := range mocks {
+				if m == nil || seen[m.Name] || !ofTest(m) {
+					continue
+				}
+				seen[m.Name] = true
+				test = append(test, m)
+			}
+			n := map[string]int{}
+			for _, m := range inRecordedOrder(test) {
+				dest, op := httpCallKey(m)
+				if op == "" {
+					continue
+				}
+				k := dest + " " + op
+				n[k]++
+				names[m.Name] = models.AboutCall("http", dest, op, n[k])
+			}
+		}
+		return names[mock]
+	}
 }
 
 // givenBindings are the values the running test case's request gave
@@ -2182,9 +2346,11 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 	claimed = h.consumeWith(context.WithValue(ctx, ownedKey{}, owner), m, mockDb, func(spec *models.MockSpec) {
 		if len(p.noise) > 0 {
 			spec.ReqBodyNoise = mergeReqBodyNoise(spec.ReqBodyNoise, p.noise)
+			spec.NoiseAbout = models.MergeAbouts(spec.NoiseAbout, p.noiseAbout)
 		}
 		if len(p.clocks) > 0 {
 			spec.Clocks = models.MergeClocks(spec.Clocks, p.clocks)
+			spec.ClockAbout = models.MergeAbouts(spec.ClockAbout, p.clockAbout)
 		}
 		// What was learned rides out on the consumed mock's state, never on
 		// what the pool serves next: a reused mock stays the recording the

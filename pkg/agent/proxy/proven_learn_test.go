@@ -99,6 +99,33 @@ func TestALearnStepMissCarriesItsReason(t *testing.T) {
 	}
 }
 
+// decided is vs with each variable's about taken off, after failing the test
+// unless every variable carries one with a why (under the switch the learn
+// step owes each decision its about): a test that asserts what was learned
+// compares the decisions.
+func decided(t *testing.T, vs models.MockVariables) models.MockVariables {
+	t.Helper()
+	out := vs.Clone()
+	for n, v := range out {
+		if v.About == nil || v.About.Why == "" {
+			t.Errorf("variable %s: about %+v, want one with a why", n, v.About)
+		}
+		v.About = nil
+		out[n] = v
+	}
+	return out
+}
+
+// decidedBinds is decided over each mock's binds.
+func decidedBinds(t *testing.T, binds map[string]models.MockVariables) map[string]models.MockVariables {
+	t.Helper()
+	out := make(map[string]models.MockVariables, len(binds))
+	for m, vs := range binds {
+		out[m] = decided(t, vs)
+	}
+	return out
+}
+
 // A request that drifted only in a value is answered from the mock it drifted
 // from, and the consumed mock carries what was learned, which the replay
 // writes onto the recording; the echo is rendered into the answer.
@@ -119,7 +146,7 @@ func TestALearnStepPairingAnswersAndLearns(t *testing.T) {
 		t.Fatalf("consumed %+v", consumed)
 	}
 	want := models.MockVariables{"rid": {Recorded: "r-1", Bind: "body.rid", Answer: []string{"body.rid"}, Echo: true}}
-	if !reflect.DeepEqual(consumed[0].Variables, want) {
+	if !reflect.DeepEqual(decided(t, consumed[0].Variables), want) {
 		t.Fatalf("the consumed mock's state carries %+v", consumed[0].Variables)
 	}
 }
@@ -182,10 +209,10 @@ func TestALearnStepFollowsAVariableAcrossCalls(t *testing.T) {
 	for _, st := range mm.GetConsumedMocks() {
 		states[st.Name] = st
 	}
-	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(states["mock-b"].Variables, want) {
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(decided(t, states["mock-b"].Variables), want) {
 		t.Fatalf("mock-b's state carries %+v", states["mock-b"].Variables)
 	}
-	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
+	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(decidedBinds(t, states["mock-b"].Binds), want) {
 		t.Fatalf("mock-b's state binds %+v", states["mock-b"].Binds)
 	}
 }

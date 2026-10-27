@@ -198,7 +198,8 @@ func (m *MockManager) warnUnstaged(name string) {
 }
 
 // asStaged is mk, a copy a matcher filed over the staged recording base,
-// with base's noise, variables and clock reads and none of what the learn
+// with base's noise, variables and clock reads (and where they came from)
+// and none of what the learn
 // step learned on the copy: the rest of the copy (its place in the trees) is
 // mk's.
 func asStaged(mk, base *models.Mock) *models.Mock {
@@ -206,6 +207,7 @@ func asStaged(mk, base *models.Mock) *models.Mock {
 	c.Spec.ReqBodyNoise = base.Spec.ReqBodyNoise
 	c.Spec.Variables = base.Spec.Variables
 	c.Spec.Clocks = base.Spec.Clocks
+	c.Spec.NoiseAbout, c.Spec.ClockAbout = base.Spec.NoiseAbout, base.Spec.ClockAbout
 	c.Spec.SetLearned(base.Spec.Learned(), base.Spec.LearnedBinds())
 	return c
 }
