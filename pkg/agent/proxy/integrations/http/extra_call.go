@@ -54,6 +54,42 @@ func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.Mo
 	return max(n, 1)
 }
 
+// backgroundAgain is, for a request no mock answered under exact serving (the
+// proven switch), the recording of the open test that judging marked as the
+// application's background work and that the request repeats: identical, as
+// the matcher judges it, to such a recording that already answered in the
+// test's window (integrations.AnsweredBackgroundReader). A timer or a
+// start-up job ran more often at replay than at record, and its call is
+// answered again with that recording, unchecked, where it would otherwise be
+// one call more than the test recorded (extraCall). nil when the request
+// repeats none, or the store marks nothing.
+//
+// The marked recordings are matched as the live pool's would be, on a view
+// that holds only them and that no match can consume, and on a copy of the
+// test's bindings: the answer binds nothing, as the background work's answer
+// is not the test's.
+func (h *HTTP) backgroundAgain(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseStrict bool) *models.Mock {
+	br, ok := mockDb.(integrations.AnsweredBackgroundReader)
+	if !ok {
+		return nil
+	}
+	marked := FilterHTTPMocks(br.AnsweredBackground())
+	if len(marked) == 0 {
+		return nil
+	}
+	vars := variableTable(mockDb)
+	if vars != nil {
+		vars = vars.Clone()
+	}
+	// As the replay's matcher reads under the switch: no request noise is
+	// detected, and a learned correlation is followed.
+	matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: marked, vars: vars}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, false, schemaNoiseStrict, false, true)
+	if err != nil || !matched || mk == nil || mk.Spec.HTTPReq == nil {
+		return nil
+	}
+	return mk
+}
+
 // answeredDiag widens the diagnosis of a miss, under exact serving (the
 // proven switch), to the open test's answered mocks. Each test mock answers
 // once and is then in no read, so a call a test makes after the recording
