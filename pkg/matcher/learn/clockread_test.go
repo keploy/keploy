@@ -103,37 +103,79 @@ func TestAnEmptyClockReadIsRefusedAtReplaySayingTheLearningsDisagree(t *testing.
 	}
 }
 
-// A value the application cuts coarser than its encoding (a millisecond
-// value written in nanoseconds) is learned as a cut, at the unit above its
-// encoding (readRes: a microsecond above a nanosecond), and a replay refuses
-// it whatever it is, saying so: checked at the nanosecond, it would pass or
-// fail by where its read fell in its millisecond.
+// A value the application cuts coarser than a millisecond, below its
+// encoding (a second's value written in nanoseconds), shows its cut
+// (readRes: the coarsest step both values are whole multiples of), which
+// the learn step refuses, naming it (cutWhy): checked at the nanosecond, it
+// would pass or fail by where its read fell in its second. A replay that
+// meets a Res so coarse all the same (one learned at an encoding coarser
+// than its value's) refuses a value cut so, naming the cut, and checks one
+// that is no whole second at its own nanosecond. A cut of a millisecond is
+// learned and checked at the cut instead (CheckClockRead): the value stands
+// for its whole millisecond, so it passes wherever in it the read fell, and
+// one a millisecond before the span is refused as changed. An offset whose
+// Res is coarser than the replay's encoding is refused up front, naming
+// both resolutions.
 func TestACutClockReadIsRefusedAtReplayNamingTheCut(t *testing.T) {
-	rec := time.Date(2026, 10, 26, 9, 0, 0, 123000000, time.UTC)
-	live := rec.Add(FullRoundLead + 7*time.Millisecond)
-	if r := textClockRead(strconv.FormatInt(rec.UnixNano(), 10), strconv.FormatInt(live.UnixNano(), 10)); r == nil || r.Res != time.Microsecond {
-		t.Fatalf("textClockRead = %+v; want a Res of the microsecond above the nanosecond, a cut", r)
+	ns := func(at time.Time) Leaf { return Leaf{Type: String, Value: strconv.FormatInt(at.UnixNano(), 10)} }
+	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	span := Span{From: from, To: from.Add(time.Second)}
+	rec := time.Date(2026, 10, 26, 9, 0, 1, 0, time.UTC)
+	if r := textClockRead(ns(rec).Value, ns(rec.Add(62*time.Second)).Value); r == nil || r.Res != time.Second {
+		t.Fatalf("textClockRead = %+v; want a Res of the second both values are cut to", r)
 	} else {
-		from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
-		ok, why := CheckClockRead("createdAt", *r, Leaf{Type: String, Value: strconv.FormatInt(from.UnixNano(), 10)}, Span{From: from, To: from.Add(time.Second)}, true)
-		if ok || !strings.Contains(why, "the application cuts its value") {
-			t.Errorf("a cut read: %v %q; want refused naming the cut", ok, why)
+		const p = "createdAt"
+		in := func(at time.Time) Shape {
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: ns(at).Value}}}
+		}
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, in(rec.Add(62*time.Second)), in(rec), rec.Add(time.Millisecond), nil, nil, nil, nil)[0]; ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != cutWhy(time.Second, time.Nanosecond) || !strings.Contains(ln.Why, "the application cuts its value to 1s") {
+			t.Errorf("an epoch in nanoseconds cut to the second, at learn: %s Read=%+v (%s); want refused naming the 1s cut", ln.Kind, ln.Read, ln.Why)
+		}
+		if ok, why := CheckClockRead("createdAt", *r, ns(from), span, true); ok || !strings.Contains(why, "the application cuts its value to 1s") {
+			t.Errorf("a value cut to the second: %v %q; want refused naming the cut", ok, why)
+		}
+		if ok, why := CheckClockRead("createdAt", *r, ns(from.Add(time.Millisecond+7)), span, true); !ok {
+			t.Errorf("a value no whole second, in the span: %v %q; want it checked at its own nanosecond, and passed", ok, why)
+		}
+		if ok, why := CheckClockRead("createdAt", *r, ns(from.Add(-7)), span, true); ok || !strings.HasSuffix(why, "it changed") {
+			t.Errorf("a value no whole second, 7ns before the span: %v %q; want refused as changed", ok, why)
+		}
+	}
+	rec = time.Date(2026, 10, 26, 9, 0, 0, 123000000, time.UTC)
+	if r := textClockRead(ns(rec).Value, ns(rec.Add(FullRoundLead+7*time.Millisecond)).Value); r == nil || r.Res != time.Millisecond {
+		t.Fatalf("textClockRead = %+v; want a Res of the millisecond both values are cut to", r)
+	} else {
+		late := Span{From: from.Add(5*time.Millisecond + 400*time.Microsecond), To: from.Add(5*time.Millisecond + 600*time.Microsecond)}
+		if ok, why := CheckClockRead("createdAt", *r, ns(from.Add(5*time.Millisecond)), late, true); !ok {
+			t.Errorf("a value cut to the millisecond its read fell in: %v %q; want it checked at the cut, and passed", ok, why)
+		}
+		if ok, why := CheckClockRead("createdAt", *r, ns(from.Add(4*time.Millisecond)), late, true); ok || !strings.HasSuffix(why, "it changed") {
+			t.Errorf("a value cut to the millisecond before its span's: %v %q; want refused as changed", ok, why)
 		}
 	}
 	// The same for an instant its protocol types: a $date of milliseconds
-	// whose two runs' values are whole seconds is learned with the second's
-	// cut, and refused at replay saying so.
+	// whose two runs' values are whole seconds is refused at learn, naming
+	// the second's cut; a replay that meets a Res of a second refuses a
+	// value cut so.
 	const p = "body.at.$date.$numberLong"
 	typed := func(at time.Time) Leaf { return InstantLeaf(p, "body.at", at, time.Millisecond) }
 	sec := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
 	ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: typed(sec.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{p: typed(sec)}}, sec.Add(time.Millisecond), nil, nil, nil, nil)[0]
-	o, ok := ln.Clock()
-	if ln.Kind != KindClockRead || !ok || o.Res < time.Second {
-		t.Fatalf("the typed cut read: %s %+v,%v (%s); want noise that is a read at the second's cut", ln.Kind, o, ok, ln.Why)
+	if ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != cutWhy(time.Second, time.Millisecond) {
+		t.Errorf("the typed cut read: %s Read=%+v (%s); want refused at learn naming the second's cut", ln.Kind, ln.Read, ln.Why)
 	}
-	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
-	if ok, why := CheckClockRead("at", o, typed(from), Span{From: from, To: from.Add(time.Second)}, true); ok || !strings.Contains(why, "the application cuts its value") {
-		t.Errorf("a typed cut read: %v %q; want refused naming the cut", ok, why)
+	if ok, why := CheckClockRead("at", models.ClockOffset{Res: time.Second, Layout: models.LayoutTyped}, typed(from), span, true); ok || !strings.Contains(why, "the application cuts its value to 1s") {
+		t.Errorf("a typed value cut to the second at a Res of 1s: %v %q; want refused naming the cut", ok, why)
+	}
+	// An offset learned at a millisecond, against a value written in
+	// nanoseconds: refused up front, naming both resolutions, whatever the
+	// value, never read as a plain read's cut.
+	off := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}
+	for _, v := range []time.Time{from.Add(30*time.Minute + 5*time.Millisecond + 7), from.Add(30*time.Minute + 5*time.Millisecond)} {
+		want := "at a resolution of 1ms (both of the learn step's values were whole multiples of it), coarser than the 1ns this value's encoding writes"
+		if ok, why := CheckClockRead("expiresAt", off, ns(v), span, true); ok || !strings.Contains(why, want) {
+			t.Errorf("an offset learned at 1ms, a nanosecond value %s: %v %q; want refused naming 1ms and 1ns", ns(v).Value, ok, why)
+		}
 	}
 }
 

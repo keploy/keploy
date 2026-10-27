@@ -1133,7 +1133,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		copied    string
 	}{
 		{"a minute", strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute)), recT.Add(time.Minute).Format(minute)},
-		{"a typed instant", typedLeaf(p, recT, time.Millisecond), typedLeaf(p, recT.Add(61*time.Second), time.Millisecond), recT.Add(61 * time.Second).Format(time.RFC3339Nano)},
+		{"a typed instant", typedLeaf(p, recT.Add(137*time.Millisecond), time.Millisecond), typedLeaf(p, recT.Add(FullRoundLead+137*time.Millisecond), time.Millisecond), recT.Add(FullRoundLead + 137*time.Millisecond).Format(time.RFC3339Nano)},
 	}
 	for _, f := range forms {
 		// Nothing gave the application the moment: a read of the clock the
