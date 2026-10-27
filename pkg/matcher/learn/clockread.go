@@ -315,17 +315,13 @@ func (dc *DriftCache) textTodRead(rec, live string, w *Window, call time.Time) *
 
 // leafLayout is the layout l, a leaf of a replay's call, is written in
 // (models.ClockOffset.Layout): models.LayoutTyped for an instant its
-// protocol types, models.LayoutTypedTimeOfDay for a time of day it types,
-// clockTextLayout of a text or a number, or the layout of a text that is a
-// time of day whole (textTimeOfDay).
+// protocol types, clockTextLayout of a text or a number. A time of day is
+// none clockReadIn reads here: todReadIn reads its layout (timeOfDayOf).
 func leafLayout(l Leaf) string {
 	if l.Type == Instant {
-		if ti, ok := readTyped(l); ok && ti.names == namesTimeOfDay {
-			return models.LayoutTypedTimeOfDay
-		}
 		return models.LayoutTyped
 	}
-	return textLayout(l.Value)
+	return clockTextLayout(l.Value)
 }
 
 // timeOfDayOf reads l, a leaf of a call, as a time of day whole: one its

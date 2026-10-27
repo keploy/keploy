@@ -635,6 +635,30 @@ func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 			}
 		}
 	}
+	// Where the recording could not tell UTC from the application's zone
+	// (models.ZoneEither), a replay in IST passes the time of day read in
+	// either zone, and no other.
+	either := models.ClockOffset{Res: time.Millisecond, Zone: models.ZoneEither, Layout: "time-second"}
+	is := Span{From: time.Date(2026, 10, 30, 3, 30, 0, 0, time.UTC), To: time.Date(2026, 10, 30, 3, 30, 1, 0, time.UTC), Zone: ist}
+	for _, loc := range []*time.Location{time.UTC, ist} {
+		if ok, why := CheckClockRead(p, either, text(todIn(is.To, loc)), is, true); !ok {
+			t.Errorf("either zone, a replay in IST, the time of day in %s: refused: %s", loc, why)
+		}
+	}
+	if ok, _ := CheckClockRead(p, either, text(todIn(is.To, time.FixedZone("EDT", -4*3600))), is, true); ok {
+		t.Error("either zone, a replay in IST, the time of day in EDT: passed")
+	}
+	// A text time of day the lead moved where keploy cannot tell the
+	// application's clock: a plain read all the same, as a typed one is,
+	// which a replay with no app clock refuses.
+	{
+		read := time.Date(2026, 10, 27, 3, 29, 59, 123e6, time.UTC)
+		dc := NewDriftCache()
+		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: text(todIn(read.Add(FullRoundLead+37*time.Millisecond), time.UTC))}}, Shape{Leaves: map[string]Leaf{p: text(todIn(read, time.UTC))}}, read.Add(5*time.Millisecond), nil, nil, nil, nil)[0]
+		if !todRead(ln, models.ZoneUTC) {
+			t.Errorf("a text time of day the lead moved, no app clock: %s Read=%+v (%s); want a plain read modulo a day, in UTC", ln.Kind, ln.Read, ln.Why)
+		}
+	}
 	// A time of day where the place was learned as an instant: none.
 	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
 	s := Span{From: call.Add(-time.Second), To: call}
