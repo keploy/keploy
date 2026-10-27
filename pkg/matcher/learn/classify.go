@@ -579,6 +579,11 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// SetAside is, of noise whose Why names the source it set aside, that
+	// source's mock, as Why names it, so a caller can name its call in a
+	// form that survives renames instead; "" otherwise, and for the test
+	// case's own request.
+	SetAside string
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -1193,9 +1198,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				switch {
 				case ln.Kind != KindNoise:
 				case fol.refuted != "":
-					ln.Why = fol.refuted + ", and keploy learns it as varying"
+					ln.Why, ln.SetAside = fol.refuted+", and keploy learns it as varying", fol.refutedMock
 				case fol.moved != "":
-					ln.Why = fol.moved + ", and keploy learns it as varying"
+					ln.Why, ln.SetAside = fol.moved+", and keploy learns it as varying", fol.movedMock
 				}
 			case KindEcho:
 				why := fol.first

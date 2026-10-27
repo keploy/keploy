@@ -104,6 +104,9 @@ type follows struct {
 	// words of (movedAway), names the first such place: what a value learned
 	// as noise says of it, where no place was refuted.
 	moved string
+	// refutedMock and movedMock are the mocks refuted and moved name
+	// (Learned.SetAside); "" for the test case's own request.
+	refutedMock, movedMock string
 	// sources are the mocks of the places the word rule let a word of the
 	// value go at (excused), and of the place the search for its source went
 	// past (refute): the value's candidate sources, the only places whose
@@ -177,6 +180,7 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 			found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
 		}
 		f.refuted = found + gave + ": a copy moves with its source, so the value is no copy of it"
+		f.refutedMock = p.Mock
 	}
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
@@ -214,8 +218,9 @@ const (
 // application t there before the call; fv, what record's full round gave
 // there (followed: of fFollowed, why the value follows it; of fElsewhere,
 // where); untimed, of a place the recording gave, says why keploy cannot
-// tell when it did ("" where it can).
-func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands string) bool {
+// tell when it did ("" where it can); mock is the mock stands names ("" for
+// the test case's own request).
+func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands, mock string) bool {
 	if f == nil {
 		return false
 	}
@@ -238,6 +243,7 @@ func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, w
 		}
 		if fv == fMoved && f.moved == "" {
 			f.moved = stands + ", where record's full round gave the application another value, which the value took none of the words of: a copy moves with its source, so the value is no copy of it"
+			f.movedMock = mock
 		}
 		return true
 	}
@@ -383,7 +389,11 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 			fv = fFollowed
 		}
 	}
-	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path) {
+	mock := e.Mock
+	if e.Given {
+		mock = ""
+	}
+	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, mock) {
 		return false
 	}
 	f.source(e.Mock)
@@ -414,7 +424,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 	case x.Live():
 		fv, followed = f.dc.liveAt(x, f.dc.searched(x, false)[0], false, v, func(own string) bool { return f.dc.rawTokens(own)[i][t] })
 	}
-	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place) {
+	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, x.mock) {
 		return false
 	}
 	f.source(x.mock)

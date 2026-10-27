@@ -327,6 +327,8 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 			t.Errorf("%s: a variable of %q (%+v), want of %s", tc.name, got.From.Mock, got.From, tc.from)
 		case tc.why != "" && !strings.Contains(got.Why, tc.why):
 			t.Errorf("%s: %s, why %q, want it to hold %q", tc.name, got.Kind, got.Why, tc.why)
+		case strings.Contains(tc.why, moved) && !namesItsSource(got):
+			t.Errorf("%s: the noise names %q as the source it set aside, its why %q", tc.name, got.SetAside, got.Why)
 		}
 		if tc.kind != KindNoise {
 			continue
@@ -373,6 +375,9 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	got := classifyF(t, "50", "7", nil, startup(eHistory(before, 6, true)), nil)
 	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
 		t.Errorf("50 recorded beside VARCHAR(50) F sent unchanged, 7 in F: %s (%q), want noise naming mock-5", got.Kind, got.Why)
+	}
+	if got.SetAside != "mock-5" || !namesItsSource(got) {
+		t.Errorf("the noise names mock-5 as the source it set aside, but SetAside is %q", got.SetAside)
 	}
 	if today := ClassifyGiven(clockedDrifts(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
 		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want a variable of mock-5 (the rule is ClassifyFollowing's)", today[0].Kind, today[0].Why)
@@ -990,5 +995,27 @@ func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
 	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
 	if other.swapHolds(other.text, raw, func(string) bool { return false }) {
 		t.Error("a recording that is no start-up is read as one")
+	}
+}
+
+// namesItsSource reports whether noise learned past a source names, in
+// SetAside, the mock its Why names, so a caller can name that call by its
+// call key instead.
+func namesItsSource(l Learned) bool {
+	return l.Why != "" && l.SetAside != "" && (strings.Contains(l.Why, l.SetAside+" at ") || strings.Contains(l.Why, l.SetAside+"'s payload"))
+}
+
+// Noise learned past a word of the test case's own request, which F gave
+// the application another value at, names that request in its why and no
+// mock as the source it set aside: the request is no recording, so a caller
+// keeps the why's own words for it.
+func TestNoiseLearnedPastTheTestCasesRequestNamesNoMock(t *testing.T) {
+	before := eRecAt.Add(-50 * time.Millisecond)
+	given := []Earlier{{Mock: givenPlace("t1"), Given: true, At: before, Payload: eLeaf(before, 6, "", "").Payload, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.cmd.documents.0._id", Type: String, Value: chanceSrcRec}, Live: chanceSrcLive},
+	}}}
+	got := classifyF(t, chanceValRec, chanceValLive, given, eStartup(), nil)
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "stands in test case t1 at") || got.SetAside != "" {
+		t.Fatalf("%s (%q), set aside %q: want noise naming test case t1 and no mock", got.Kind, got.Why, got.SetAside)
 	}
 }

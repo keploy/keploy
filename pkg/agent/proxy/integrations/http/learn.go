@@ -1992,7 +1992,11 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 		switch l.Kind {
 		case learn.KindNoise:
 			p.noise[r.Path] = []string{}
-			p.noiseAbout[r.Path] = models.About{Why: noiseWhy, Seen: models.NewAboutSeen(r.Value, l.Live.Value, r.Path), Call: call}
+			why := noiseWhy
+			if l.Why != "" {
+				why = setAsideNoiseWhy(l.Why, l.SetAside, calls)
+			}
+			p.noiseAbout[r.Path] = models.About{Why: why, Seen: models.NewAboutSeen(r.Value, l.Live.Value, r.Path), Call: call}
 
 		case learn.KindVariable:
 			from := l.From
@@ -2118,6 +2122,22 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 // seen does) and name another call by its call key (httpCallKeys), never by
 // its mock's name, which a carry renames.
 const noiseWhy = "changed between the recording and the full round, and keploy found the value in no earlier call of the test, not in the test case's request and not in the answer, so it is not compared"
+
+// setAsideNoiseWhy is the about's why of noise the classifier learned after
+// finding its value in an earlier recording, setAside, and setting that
+// source aside (learn.Learned.Why, SetAside): the classifier's own words,
+// that source named by its call key (calls; "an earlier recording" for one
+// that has none, such as another protocol's call), never by mock name.
+func setAsideNoiseWhy(why, setAside string, calls func(mock string) string) string {
+	if setAside != "" {
+		name := "an earlier recording"
+		if k := calls(setAside); k != "" {
+			name = "the test's earlier call (" + k + ")"
+		}
+		why = regexp.MustCompile(regexp.QuoteMeta(setAside)+`\b`).ReplaceAllLiteralString(why, name)
+	}
+	return "changed between the recording and the full round, and keploy found a source and set it aside: " + why + ", so it is not compared"
+}
 
 // clockWhy is the about's why of a place learned as a read of the app's
 // clock o.
