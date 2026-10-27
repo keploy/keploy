@@ -2725,6 +2725,24 @@ func (c *CmdConfigurator) readMockSetName(cmd *cobra.Command) error {
 	return nil
 }
 
+// readMockLocal resolves --local against keploy.yml's mock.local, guarded like
+// min-coverage: the flag's default was captured from a zero config before viper
+// read keploy.yml, so an unguarded read replaced a committed `mock.local: true`
+// with false and sent the run to the cloud registry. An explicit --local or
+// --local=false still wins over the file.
+func (c *CmdConfigurator) readMockLocal(cmd *cobra.Command) error {
+	if !cmd.Flags().Changed("local") && viper.IsSet("mock.local") {
+		return nil
+	}
+	local, err := cmd.Flags().GetBool("local")
+	if err != nil {
+		utils.LogError(c.logger, err, "failed to get the local flag")
+		return errors.New("failed to get the local flag")
+	}
+	c.cfg.Mock.Local = local
+	return nil
+}
+
 // readMockCoverageFlags resolves --min-coverage and --coverage-report against
 // keploy.yml's mock.minCoverage and mock.coverageReport.
 //
@@ -2900,12 +2918,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		return err
 	}
 
-	local, err := cmd.Flags().GetBool("local")
-	if err != nil {
-		utils.LogError(c.logger, err, "failed to get the local flag")
-		return errors.New("failed to get the local flag")
+	if err := c.readMockLocal(cmd); err != nil {
+		return err
 	}
-	c.cfg.Mock.Local = local
 
 	// The flag, when given, wins over keploy.yml's record.disableHandshakeHold.
 	if cmd.Flags().Changed("disable-handshake-hold") {
