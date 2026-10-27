@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -61,6 +62,42 @@ var closestWhy = map[string]string{
 	MatchPhaseStrict:    "a call of the same shape, a field it checks strictly differs",
 	MatchPhaseExhausted: "the nearest the matcher found",
 	MatchPhaseVariable:  "a test variable it declares did not hold",
+}
+
+// DiffersNamed is how many of the fields a call differs in a reason names
+// before it counts the rest (DiffersPhrase).
+const DiffersNamed = 3
+
+// DiffersPhrase says which fields a call differs in from its closest
+// recording, in the words a miss's reason and its next step say it in:
+// "body.amount differs", "host and header.accept differ", "a, b, c and 2
+// more differ"; "" for none. fields are names in their shape, never values.
+func DiffersPhrase(fields []string) string {
+	switch len(fields) {
+	case 0:
+		return ""
+	case 1:
+		return fields[0] + " differs"
+	}
+	return NamedFields(fields, DiffersNamed) + " differ"
+}
+
+// NamedFields is DiffersPhrase's naming of fields without its verb, naming
+// up to the first named of them (one at least) and counting the rest: "a",
+// "a, b and c", "a, b and 2 more"; "" for none. A report that must fit the
+// text in a bound names fewer of them by it, in the same words.
+func NamedFields(fields []string, named int) string {
+	named = max(named, 1)
+	switch n := len(fields); {
+	case n == 0:
+		return ""
+	case n == 1:
+		return fields[0]
+	case named >= n:
+		return strings.Join(fields[:n-1], ", ") + " and " + fields[n-1]
+	default:
+		return strings.Join(fields[:named], ", ") + " and " + strconv.Itoa(n-named) + " more"
+	}
 }
 
 // CallShape is a miss's summary in its shape: for HTTP and gRPC the method

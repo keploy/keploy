@@ -1338,7 +1338,7 @@ func nextStepOf(m models.UnmatchedCall) string {
 			if fields := models.FieldShapes(m.Differs); len(fields) > 0 {
 				// The fields the miss's reason names (missDiffersText):
 				// the matcher's own names for them, in their shape.
-				next = differsPhrase(fields) + " from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
+				next = models.DiffersPhrase(fields) + " from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
 			}
 			break
 		}
@@ -1541,23 +1541,7 @@ func differsText(fields []string) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	return " (" + differsPhrase(fields) + ")"
-}
-
-// differsPhrase says which fields differ: "body.amount differs", "host and
-// header.accept differ", "a, b, c and 2 more differ"; "" for none.
-func differsPhrase(fields []string) string {
-	const most = 3
-	switch n := len(fields); {
-	case n == 0:
-		return ""
-	case n == 1:
-		return fields[0] + " differs"
-	case n <= most:
-		return strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ"
-	default:
-		return fmt.Sprintf("%s and %d more differ", strings.Join(fields[:most], ", "), n-most)
-	}
+	return " (" + models.DiffersPhrase(fields) + ")"
 }
 
 // isMongoMiss reports whether m is a MongoDB call's miss.

@@ -213,6 +213,18 @@ func pairCases(windows []models.ScopeWindow, recorded map[string][]*models.TestC
 	return out
 }
 
+// chargedTest is the test a miss is charged to: the one running when it was
+// made (flowAt), as the run's account of each test counts it
+// (attributeMocks); none for a miss made outside every test's window, before
+// the set's first test included, and for one whose agent did not say when it
+// was made.
+func chargedTest(windows []models.ScopeWindow, expected map[string][]models.MockEntry, miss models.UnmatchedCall) (string, bool) {
+	if miss.At.IsZero() {
+		return "", false
+	}
+	return flowAt(windows, miss.At, expected)
+}
+
 // attributeMocks puts each served mock and each miss under the test that was running when it happened.
 func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.MockEntry, consumed []models.MockState, misses []models.UnmatchedCall) []FlowMocks {
 	byFlow := make(map[string]*FlowMocks)
@@ -236,10 +248,7 @@ func attributeMocks(windows []models.ScopeWindow, expected map[string][]models.M
 		}
 	}
 	for _, miss := range misses {
-		if miss.At.IsZero() {
-			continue
-		}
-		if flow, ok := flowAt(windows, miss.At, expected); ok {
+		if flow, ok := chargedTest(windows, expected, miss); ok {
 			get(flow).Missed = append(get(flow).Missed, miss)
 		}
 	}

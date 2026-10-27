@@ -1823,7 +1823,11 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 
 	for _, miss := range misses {
-		logMiss(m.logger, miss)
+		test := ""
+		if provenswitch.On() {
+			test, _ = chargedTest(detail.windows, detail.expected, miss)
+		}
+		logMiss(m.logger, miss, test)
 	}
 
 	// What each test used and missed, and its verdict: for the receipt, and
@@ -1891,11 +1895,12 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 // logMiss warns of a call no recorded mock answered, with the next step its
 // matcher gave it (a MySQL endpoint that moved names the port to list, a value
 // drift the fields), and, where it gave none, to record the call; under the
-// proven switch, with the recording its matcher found closest. A
-// connection whose client sent nothing made no call: it is said as such, and
-// as what it was if its client waited for its server to speak first (a TCP
-// health check closes the same way).
-func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
+// proven switch, with the recording its matcher found closest and test, the
+// test the miss is charged to (chargedTest; "" for none, and the line names
+// none). A connection whose client sent nothing made no call: it is said as
+// such, and as what it was if its client waited for its server to speak
+// first (a TCP health check closes the same way).
+func logMiss(logger *zap.Logger, miss models.UnmatchedCall, test string) {
 	next := miss.NextSteps
 	if next == "" {
 		next = "record this call with --on-miss record, or re-record the set"
@@ -1914,6 +1919,9 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		// The recording the matcher found closest, and why, in the words
 		// the test's reason says it in: no value of the call.
 		fields = append(fields, zap.String("closest", strings.TrimPrefix(t, "closest recording ")))
+	}
+	if test != "" && provenswitch.On() {
+		fields = append(fields, zap.String("test", test))
 	}
 	logger.Warn(msg, fields...)
 }

@@ -97,3 +97,41 @@ func TestClosestText(t *testing.T) {
 	require.Empty(t, ClosestText(UnmatchedCall{MatchPhase: MatchPhaseBody}))
 	require.False(t, strings.Contains(ClosestText(UnmatchedCall{ClosestMock: "mock-1", MatchPhase: MatchPhaseBody, ActualSummary: "find on app.u-1"}), "u-1"))
 }
+
+// DiffersPhrase is the one naming of a miss's fields every reason, next step
+// and evidence line uses; NamedFields is it without the verb, naming fewer
+// fields when asked and counting the rest, never naming none.
+func TestDiffersPhraseNamesThreeFieldsAndCountsTheRest(t *testing.T) {
+	for _, c := range []struct {
+		fields []string
+		want   string
+	}{
+		{nil, ""},
+		{[]string{"a"}, "a differs"},
+		{[]string{"a", "b"}, "a and b differ"},
+		{[]string{"a", "b", "c"}, "a, b and c differ"},
+		{[]string{"a", "b", "c", "d"}, "a, b, c and 1 more differ"},
+		{[]string{"a", "b", "c", "d", "e"}, "a, b, c and 2 more differ"},
+	} {
+		if got := DiffersPhrase(c.fields); got != c.want {
+			t.Errorf("DiffersPhrase(%q) = %q, want %q", c.fields, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		fields []string
+		named  int
+		want   string
+	}{
+		{nil, 3, ""},
+		{[]string{"a"}, 0, "a"},
+		{[]string{"a", "b", "c"}, 0, "a and 2 more"},
+		{[]string{"a", "b", "c"}, 1, "a and 2 more"},
+		{[]string{"a", "b", "c"}, 2, "a, b and 1 more"},
+		{[]string{"a", "b", "c"}, 3, "a, b and c"},
+		{[]string{"a", "b", "c"}, 9, "a, b and c"},
+	} {
+		if got := NamedFields(c.fields, c.named); got != c.want {
+			t.Errorf("NamedFields(%q, %d) = %q, want %q", c.fields, c.named, got, c.want)
+		}
+	}
+}

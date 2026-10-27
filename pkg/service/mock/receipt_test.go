@@ -76,6 +76,8 @@ type replayCase struct {
 	// losses: the agent counts what it could not capture (GET
 	// /agent/capturelosses).
 	losses *lossCounter
+	// windows: what the agent answers the read of each test's window with.
+	windows []models.ScopeWindow
 }
 
 // replayIn runs one replay against a real keploy/ directory in a temp repo
@@ -115,6 +117,7 @@ func replayIn(t *testing.T, c replayCase) (string, int, *observer.ObservedLogs) 
 	base.mockErrors = c.mockErrs
 	base.mockErrorsErr = c.mockErrErr
 	base.windowsErr = c.windowsErr
+	base.windows = c.windows
 	if !c.noneServed {
 		base.consumedMocks = []models.MockState{{Name: "mock-0"}}
 	}
