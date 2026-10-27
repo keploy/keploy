@@ -116,13 +116,7 @@ func (h *Hooks) startIngressHold(ctx context.Context, cgroupPath string) {
 	h.ingressMu.Unlock()
 	go func() {
 		<-ctx.Done()
-		h.ingressMu.Lock()
-		hold := h.ingress
-		h.ingress = nil
-		h.ingressMu.Unlock()
-		if hold != nil {
-			hold.close()
-		}
+		h.closeIngressHold()
 	}()
 	h.logger.Debug("Holding the application's moved ports from their bind (BPF sk_lookup).")
 }
@@ -214,6 +208,20 @@ func ingressHoldFlag(flags uint32, held bool) uint32 {
 	return flags
 }
 
+// closeIngressHold stops the hold, once: it takes the hold under the write
+// lock, which waits out every call still using the hold's maps (each holds
+// the read lock for the whole call), so later calls find no hold and none
+// runs on a map closed under it.
+func (h *Hooks) closeIngressHold() {
+	h.ingressMu.Lock()
+	hold := h.ingress
+	h.ingress = nil
+	h.ingressMu.Unlock()
+	if hold != nil {
+		hold.close()
+	}
+}
+
 func (hold *ingressHold) close() {
 	if hold.netnsLink != nil {
 		_ = hold.netnsLink.Close()
@@ -255,8 +263,8 @@ func putListener(m *ebpf.Map, key uint32, ln net.Listener) error {
 // ingress manager serves what the park accepts, each connection to the port
 // its local address names. It satisfies incoming's IngressPortHolder.
 func (h *Hooks) IngressParkListener() net.Listener {
-	h.ingressMu.Lock()
-	defer h.ingressMu.Unlock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	if h.ingress == nil {
 		return nil
 	}
@@ -266,9 +274,9 @@ func (h *Hooks) IngressParkListener() net.Listener {
 // MovedPort is the port the app's bind of orig was moved to (app_port_info),
 // and whether it is known: a parked connection to orig is forwarded there.
 func (h *Hooks) MovedPort(orig uint16) (uint16, bool) {
-	h.ingressMu.Lock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	hold := h.ingress
-	h.ingressMu.Unlock()
 	if hold == nil || hold.appPort == nil {
 		return 0, false
 	}
@@ -283,9 +291,9 @@ func (h *Hooks) MovedPort(orig uint16) (uint16, bool) {
 // sockhash, so the lookup steers the port's connections to it instead of the
 // park once it listens. A no-op when nothing is held.
 func (h *Hooks) RegisterIngressForwarder(origPort uint16, ln net.Listener) {
-	h.ingressMu.Lock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	hold := h.ingress
-	h.ingressMu.Unlock()
 	if hold == nil || hold.forwarders == nil {
 		return
 	}
@@ -307,9 +315,9 @@ func (h *Hooks) RegisterIngressForwarder(origPort uint16, ln net.Listener) {
 // leaves the port's calls to the kernel, and so to that listener, as without
 // keploy. A no-op when nothing is held.
 func (h *Hooks) YieldIngressPort(origPort uint16) {
-	h.ingressMu.Lock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	hold := h.ingress
-	h.ingressMu.Unlock()
 	if hold == nil {
 		return
 	}
@@ -327,9 +335,9 @@ func (h *Hooks) YieldIngressPort(origPort uint16) {
 // port that no forwarder takes is then refused, as without the hold, never
 // held for a park nothing accepts. A no-op when nothing is held.
 func (h *Hooks) StopIngressPark() {
-	h.ingressMu.Lock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	hold := h.ingress
-	h.ingressMu.Unlock()
 	if hold == nil {
 		return
 	}
@@ -347,9 +355,9 @@ func (h *Hooks) StopIngressPark() {
 // sockhash. A closed socket leaves a sockhash by itself, so this only tidies
 // the entry; a no-op when nothing is held.
 func (h *Hooks) UnregisterIngressForwarder(origPort uint16) {
-	h.ingressMu.Lock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	hold := h.ingress
-	h.ingressMu.Unlock()
 	if hold == nil || hold.forwarders == nil {
 		return
 	}
@@ -362,8 +370,8 @@ func (h *Hooks) UnregisterIngressForwarder(origPort uint16) {
 // their bind: the ingress manager's fallback (binding the port as soon as the
 // bind event arrives, which only shrinks the window) runs when it does not.
 func (h *Hooks) IngressHeld() bool {
-	h.ingressMu.Lock()
-	defer h.ingressMu.Unlock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	return h.ingress != nil
 }
 
@@ -371,9 +379,9 @@ func (h *Hooks) IngressHeld() bool {
 // moved port, by name (ingressStatNames), or nil when nothing is held:
 // lookups, not connections, for the Debug line at the end of recording.
 func (h *Hooks) IngressLookupCounts() map[string]uint64 {
-	h.ingressMu.Lock()
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
 	hold := h.ingress
-	h.ingressMu.Unlock()
 	if hold == nil || hold.stats == nil {
 		return nil
 	}
