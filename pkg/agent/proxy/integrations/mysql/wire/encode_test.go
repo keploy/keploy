@@ -30,7 +30,7 @@ import (
 func encodeConn(t testing.TB) (*DecodeContext, net.Conn) {
 	t.Helper()
 	c1, c2 := net.Pipe()
-	t.Cleanup(func() { c1.Close(); c2.Close() })
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
 	dc := &DecodeContext{LastOp: NewLastOpMap(), ServerGreetings: NewGreetings()}
 	dc.ServerGreetings.Store(c1, &mysql.HandshakeV10Packet{CapabilityFlags: 0x81bff7ff})
 	return dc, c1
@@ -90,7 +90,7 @@ func decodeAnswers(t *testing.T, paths ...string) []mysql.PacketBundle {
 				docs = append(docs, &d)
 			}
 		}
-		f.Close()
+		_ = f.Close()
 		mocks, err := mockdb.DecodeMocks(docs, zap.NewNop())
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -351,7 +351,7 @@ func holdsMocks(p string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var d yaml.NetworkTrafficDoc
 	return yamlLib.NewDecoder(f).Decode(&d) == nil && d.Kind != ""
 }
