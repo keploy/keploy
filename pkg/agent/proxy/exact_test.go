@@ -441,12 +441,13 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 	aSlice, bSlice := []string{"a-boot", "a-end"}, []string{"b-boot", "b-end"}
 	all := []*models.Mock{aBoot, a1, a2, aEnd, bBoot, b1, bEnd}
 	owners := map[string]string{"a1": "a", "a2": "a", "b1": "b"}
+	// As the agent hands them (agent.PoolNamesSetter): the owners with the
+	// pool names, through the proxy.
 	setup := func(owners map[string]string) *MockManager {
 		mm := stagedManager(t, all, nil)
-		if owners != nil {
-			mm.SetPoolOwners(owners)
+		if err := (&Proxy{mockManager: mm}).SetPoolNames(append(append([]string{}, aSlice...), bSlice...), owners); err != nil {
+			t.Fatalf("SetPoolNames: %v", err)
 		}
-		mm.SetPoolNames(append(append([]string{}, aSlice...), bSlice...))
 		return mm
 	}
 	runA := func(mm *MockManager) {
@@ -479,6 +480,13 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 	if after := mm.teardownAfter("b"); after == nil || !after(bEnd.Spec.ReqTimestampMock) {
 		t.Errorf("key b: b-end is not b's teardown")
 	}
+	// New owners in the same revision move a's bound: b1 now a's too.
+	mm.teardownAfter("a")
+	mm.SetPoolOwners(map[string]string{"a1": "a", "a2": "a", "b1": "a"})
+	if after := mm.teardownAfter("a"); after == nil || after(at) {
+		t.Errorf("FALSE GREEN? new owners naming b1 a's: a-end still a's teardown (a stale bound)")
+	}
+	mm.SetPoolOwners(owners)
 	runA(mm)
 	perTestReads(t, mm, "after a's last test", "a-end")
 	if !mm.DeleteFilteredMock(*aEnd) {
