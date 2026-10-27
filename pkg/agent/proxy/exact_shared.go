@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"sort"
+	"strings"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -16,20 +18,49 @@ import (
 // the copies learned hands out are per staging epoch, but a staging moves the
 // stored generation of every kind it touches (setMocksWithWindowLocked), the
 // SharedGen's other half: the ident leaves the epoch out.
+//
+// own is what the view leaves out of its shared part for being its own
+// (ownShared): two views that own different recordings of the pool or the
+// worker scope show different shared parts.
 type sharedIdent struct {
 	worker *reachedWorker
 	bg     *backgroundState
 	kept   *keptLoad
+	own    string
 }
 
 // sharedIdentOf is v's ident now; w is the reached worker scope it was
 // installed with.
 func sharedIdentOf(v *exactView, w *reachedWorker) sharedIdent {
-	id := sharedIdent{worker: w, bg: v.bg}
+	id := sharedIdent{worker: w, bg: v.bg, own: v.ownShared()}
 	if v.kept != nil {
 		id.kept = v.kept.cur.Load()
 	}
 	return id
+}
+
+// ownShared is, sorted and each ended by a NUL, the names of v's own
+// recordings that its shared part would show were they not its own
+// (showsStaticRest): one of the worker scope or the pool. "" when there are
+// none, as for every test of the agent's plans, where a test owns what its
+// mapping lists and the pool and the worker scope are what no mapping lists.
+func (v *exactView) ownShared() string {
+	var names []string
+	for _, mk := range v.owned {
+		if !mk.IsProtocolPhase() && v.sharesRest(mk) {
+			names = append(names, mk.Name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, n := range names {
+		b.WriteString(n)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // sharedViews numbers the views' shared parts (SharedGen's View): a view whose
@@ -82,8 +113,9 @@ func (m *MockManager) SharedGeneration(kind models.Kind) (integrations.SharedGen
 // SharedMocks is the shared part of the open test's per-test read
 // (GetPerTestMocksInWindow) and session read (GetSessionMocks): each read
 // less the open test's unanswered recordings that lead it, with what the
-// view spent kept (showsStatic in place of shows). False while no test is
-// open.
+// view spent kept (showsStatic in place of shows). It holds none of the open
+// test's own recordings, answered or not: the view never shows its own from
+// the trees (showsStaticRest). False while no test is open.
 func (m *MockManager) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 	v := m.exactView()
 	if v == nil || v.test == "" {
@@ -175,9 +207,9 @@ func (s *scopedMockDb) OwnedUnanswered() ([]*models.Mock, bool) {
 
 var _ integrations.SharedReads = (*scopedMockDb)(nil)
 
-// WhenRestaged runs release once, at the next move of every kind's stored
-// generation (a staging, a store into the trees, a delete from the shared
-// tree) or at Close; at once once closed (integrations.Restaged). A parser's index
+// WhenRestaged runs release once, at the next staging, once the staging
+// moved every generation, or at Close; at once once closed
+// (integrations.Restaged). A parser's index
 // of the staged recordings then lets them go with the trees, not at its next
 // call. One slot keeps one release.
 func (m *MockManager) WhenRestaged(slot any, release func()) {
@@ -194,9 +226,12 @@ func (m *MockManager) WhenRestaged(slot any, release func()) {
 	m.restagedMu.Unlock()
 }
 
-// letDerivedGo runs what the parsers asked to run at the stored generation's
-// move or Close (WhenRestaged), outside the lock: called after the move, so a
-// parser that asks after the call samples the moved generation.
+// letDerivedGo runs what the parsers asked to run at a staging or Close
+// (WhenRestaged), outside the lock: called after the staging's moves, so a
+// parser that asks after the call samples the moved generation. A parser
+// that sampled the generation before the move and asks after this call keeps
+// what it built until the next staging or its next call, which finds the
+// generation moved: what it keeps is then one staging's recordings, not more.
 func (m *MockManager) letDerivedGo() {
 	m.restagedMu.Lock()
 	fns := m.restaged

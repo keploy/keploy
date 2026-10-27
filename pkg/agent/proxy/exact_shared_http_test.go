@@ -18,8 +18,8 @@ import (
 // sharedPoolRun stages pool recordings shown to every test under the
 // background rules, in the session tier, and tests recordings each of their
 // own, in the per-test tier, one recorded window per test, and serves exactly
-// with the pool between tests.
-func sharedPoolRun(t *testing.T, pool, tests, own int) (*Proxy, *MockManager, []string) {
+// with the pool between tests. extra is staged in the session tier too.
+func sharedPoolRun(t *testing.T, pool, tests, own int, extra ...*models.Mock) (*Proxy, *MockManager, []string) {
 	t.Helper()
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
@@ -40,6 +40,7 @@ func sharedPoolRun(t *testing.T, pool, tests, own int) (*Proxy, *MockManager, []
 			staged = append(staged, r3Mock(fmt.Sprintf("mock-own-%d-%d", k, j), start.Add(time.Duration(j+1)*100*time.Millisecond), "GET", fmt.Sprintf("/own/%d/%d", k, j), "", fmt.Sprintf(`{"own":"%d-%d"}`, k, j)))
 		}
 	}
+	session = append(session, extra...)
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	t.Cleanup(mm.Close)
 	mm.SeedRecordedWindows(windows)
@@ -100,6 +101,64 @@ func TestATestsOpenDoesNotRebuildTheHTTPIndexesOfTheSharedPool(t *testing.T) {
 	t.Logf("the reads handed the parser %d recordings over %d tests of %d staged", narrowed, tests, staged)
 	if narrowed > uint64(4*staged) {
 		t.Fatalf("the store's reads handed the HTTP parser %d recordings over %d tests, %.1f staged sets: its indexes of the shared pool are rebuilt as each test opens", narrowed, tests, float64(narrowed)/float64(staged))
+	}
+}
+
+// A store of another kind's changed copy (MySQL's matcher stores one of a
+// protocol-phase recording on each connection's match, generic's on each
+// match) moves every kind's stored generation, but not HTTP's, and keeps the
+// HTTP parser's indexes of the shared pool: the count row's 20 tests, with
+// two such stores a test, hand the parser what they hand it without, not a
+// staged set per store.
+func TestAnotherKindsStoreKeepsTheHTTPIndexesOfTheSharedPool(t *testing.T) {
+	const pool, tests, own = 500, 20, 2
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false) // the verify mode reads the whole set on every call: counted alone
+	cfg := newMockForTest("mysql-handshake", time.Now().Add(-time.Second), models.LifetimeSession)
+	cfg.Kind = models.MySQL
+	cfg.Spec.Metadata = map[string]string{"type": "config"}
+	p, mm, poolNames := sharedPoolRun(t, pool, tests, own, cfg)
+	h := httpint.New(zap.NewNop())
+	var narrowed uint64
+	send := func(target, want string) {
+		t.Helper()
+		before := viewNarrowed.Load()
+		code, body := r3SendVia(t, context.Background(), h, p, mm, models.OutgoingOptions{}, httpGet(target))
+		narrowed += viewNarrowed.Load() - before
+		if code != http.StatusOK || body != want {
+			t.Fatalf("%s got %d %s; want %s", target, code, body, want)
+		}
+	}
+	cur, stores := cfg, 0
+	for k := 0; k < tests; k++ {
+		var owned []*models.Mock
+		for j := 0; j < own; j++ {
+			owned = append(owned, roundMock(mm, fmt.Sprintf("mock-own-%d-%d", k, j)))
+		}
+		mm.ServeExactTest(fmt.Sprintf("test-%d", k), owned)
+		p.ContinueTestErrorCapture()
+		for j := 0; j < own; j++ {
+			httpGen, _ := mm.SharedGeneration(models.HTTP)
+			cp := cur.ShallowCopy()
+			cp.Spec.Metadata = map[string]string{"type": "config", "rev": fmt.Sprint(k, j)}
+			if !mm.UpdateUnFilteredMock(cur, cp) {
+				t.Fatalf("test-%d: the changed copy %d was not stored", k, j)
+			}
+			stores++
+			cur = cp
+			if again, _ := mm.SharedGeneration(models.HTTP); again != httpGen {
+				t.Fatalf("a MySQL store moved HTTP's shared generation %v -> %v", httpGen, again)
+			}
+			send(fmt.Sprintf("/own/%d/%d", k, j), fmt.Sprintf(`{"own":"%d-%d"}`, k, j))
+		}
+		at := k * 7 % pool
+		send(fmt.Sprintf("/pool/%d", at), fmt.Sprintf(`{"pool":%d}`, at))
+		mm.ServeExactPool(models.PoolKeyNone, poolNames)
+	}
+	staged := pool + 1 + tests*own
+	t.Logf("%d MySQL stores; the reads handed the HTTP parser %d recordings over %d tests of %d staged (%.1f sets)", stores, narrowed, tests, staged, float64(narrowed)/float64(staged))
+	if narrowed > uint64(4*staged) {
+		t.Fatalf("the reads handed the HTTP parser %d recordings over %d tests, %.1f staged sets: another kind's store rebuilt its indexes of the shared pool", narrowed, tests, float64(narrowed)/float64(staged))
 	}
 }
 

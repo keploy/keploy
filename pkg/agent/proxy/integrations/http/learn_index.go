@@ -232,10 +232,7 @@ type learnLook struct {
 	ix     *learnIndex
 	shared bool
 	owned  []learnEntry
-	// ownedMocks are the owned recordings of every kind: the session read
-	// holds each recording once, the first place kept.
-	ownedMocks map[*models.Mock]bool
-	gen        uint64
+	gen    uint64
 }
 
 // of is the learn step's indexed read of what db reads now, for base, or
@@ -262,10 +259,7 @@ func (x *learnIndexes) of(base, db integrations.MockMemDb, n learnNoise, read fu
 			if !ok {
 				return learnLook{}, false
 			}
-			look := learnLook{ix: ix, shared: true, gen: gen, ownedMocks: make(map[*models.Mock]bool, len(owned))}
-			for _, m := range owned {
-				look.ownedMocks[m] = true
-			}
+			look := learnLook{ix: ix, shared: true, gen: gen}
 			for _, m := range inRecordedOrder(FilterHTTPMocks(owned)) {
 				if m.Spec.HTTPReq == nil || hasVariables(m) {
 					continue
@@ -370,7 +364,8 @@ func (e learnEntry) mayBe(method, masked string) bool {
 // an index of an open test's shared part they are each tier's read: the
 // test's unanswered recordings the call may be, then the tier's shared part,
 // merged in recorded order, the test's first where two are of one instant
-// and name; the session read holds each recording once.
+// and name. The shared part holds none of the test's own recordings
+// (integrations.SharedReads).
 func (l learnLook) entries(method, masked string, spent func(string) bool) []learnEntry {
 	ps := l.ix.positions(method, masked)
 	if !l.shared {
@@ -394,7 +389,7 @@ func (l learnLook) entries(method, masked string, spent func(string) bool) []lea
 		var tier []learnEntry
 		for ; i < len(ps) && (ps[i] < l.ix.split) == perTest; i++ {
 			e := l.ix.entries[ps[i]]
-			if spent(e.m.Name) || !perTest && l.ownedMocks[e.m] {
+			if spent(e.m.Name) {
 				continue
 			}
 			tier = append(tier, e)

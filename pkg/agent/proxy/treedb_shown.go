@@ -152,7 +152,22 @@ func (v *exactView) showsStatic(mk *models.Mock) bool {
 }
 
 // showsStaticRest is showsStatic of a mock that is not protocol-phase.
+//
+// The view's own recordings (the open test's, a pool view's ahead: holds) are
+// never shown from the staged trees, whatever else the view shows them as: a
+// read hands each out once, as the view's (unanswered), and only until it
+// answered. The trees' copy would be one the view refuses once its own
+// answered (exactConsumeIn), and a parser that reads a refused recording
+// again reads it again without end. The agent never makes a protocol-phase
+// recording a test's own (testMocks), so showsStatic needs no such check.
 func (v *exactView) showsStaticRest(mk *models.Mock) bool {
+	return !v.holds(mk.Name) && v.sharesRest(mk)
+}
+
+// sharesRest is what the view shows of a mock that is not protocol-phase, its
+// own apart: one of the reached worker scope; in a test, one of the pool
+// under the background rules; between tests, one of the pool slice served.
+func (v *exactView) sharesRest(mk *models.Mock) bool {
 	if v.isWorker(mk.Name) {
 		return true
 	}
