@@ -211,7 +211,7 @@ func TestBuildSessionVarResponse_RoundTrip(t *testing.T) {
 func TestASessionVarAnswerBuiltFromAServedProbeLeavesTheProbeAsRecorded(t *testing.T) {
 	ctx, log := context.Background(), zap.NewNop()
 	c1, c2 := net.Pipe()
-	t.Cleanup(func() { c1.Close(); c2.Close() })
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
 	dctx := deprecateEOFContext()
 	dctx.LastOp, dctx.ServerGreetings = wire.NewLastOpMap(), wire.NewGreetings()
 	dctx.ServerGreetings.Store(c1, &mysql.HandshakeV10Packet{CapabilityFlags: 0x81bff7ff})
@@ -240,7 +240,7 @@ func TestASessionVarAnswerBuiltFromAServedProbeLeavesTheProbeAsRecorded(t *testi
 	// change the recorded probe.
 	resp := buildSessionVarResponse(log, pool, "sql_mode", dctx)
 	require.NotNil(t, resp)
-	built := resp.PacketBundle.Message.(*mysql.TextResultSet)
+	built := resp.Message.(*mysql.TextResultSet)
 	require.Nil(t, built.WireCache().Load(), "the built answer is a new set: nothing cached")
 	servedBuilt, err := wire.EncodeToBinary(ctx, log, &resp.PacketBundle, c1, dctx)
 	require.NoError(t, err)

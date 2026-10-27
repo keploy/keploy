@@ -22,7 +22,7 @@ import (
 func serveConn(t testing.TB) (*wire.DecodeContext, net.Conn) {
 	t.Helper()
 	c1, c2 := net.Pipe()
-	t.Cleanup(func() { c1.Close(); c2.Close() })
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
 	dc := &wire.DecodeContext{LastOp: wire.NewLastOpMap(), ServerGreetings: wire.NewGreetings()}
 	dc.ServerGreetings.Store(c1, &mysql.HandshakeV10Packet{CapabilityFlags: 0x81bff7ff})
 	return dc, c1
