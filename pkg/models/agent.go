@@ -292,12 +292,14 @@ type ScopeTableReq struct {
 	// and from a set with no test: the agent then knows none.
 	Windows []TestWindow `json:"windows,omitempty"`
 	// Background is, under the proven switch, the recordings of the set's
-	// tests that judging marked as the application's own background work
-	// (MockEntry.Background), each with why: a test is served one in its
+	// Background is, under the proven switch, per test, the recordings of its
+	// own list that judging marked as the application's own background work
+	// (MockEntry.Background), each with why: the test is served one in its
 	// window when it makes the call, and is never failed for not making it.
+	// Another test listing the same recording without a mark still must.
 	// Absent when no entry is marked; an agent that predates it ignores it
 	// and requires them, which is never looser.
-	Background map[string]string `json:"background,omitempty"`
+	Background BackgroundMarks `json:"background_by_test,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
@@ -596,13 +598,14 @@ type ExactServing struct {
 	// (replay.RegisterS12Serving); empty for today's. An agent that predates
 	// it ignores it, and serves by today's rules: never looser.
 	Background string `json:"background,omitempty"`
-	// Unrequired is, on the staging call, the recordings of the set's test
-	// cases that judging marked as the application's own background work
-	// (MockEntry.Background), each with why: a test case is served one in
-	// its window when it makes the call, and is never failed for not making
-	// it. Absent when no entry is marked. An agent that predates it ignores
-	// it and requires them, which is never looser.
-	Unrequired map[string]string `json:"unrequired,omitempty"`
+	// Unrequired is, on the staging call, per test case, the recordings of
+	// its own list that judging marked as the application's own background
+	// work (MockEntry.Background), each with why: the test case is served one
+	// in its window when it makes the call, and is never failed for not
+	// making it. Another test case listing the same recording without a mark
+	// still must. Absent when no entry is marked. An agent that predates it
+	// ignores it and requires them, which is never looser.
+	Unrequired BackgroundMarks `json:"unrequired_by_test,omitempty"`
 }
 
 // ExactConcurrentHeader is the /storemocks response header in which an agent
