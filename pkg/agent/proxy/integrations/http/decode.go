@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -84,9 +85,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			arrived := time.Now()
-			if debugOn(h.Logger) {
-				h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
-			}
 
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
@@ -96,9 +94,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			if ce := h.Logger.Check(zap.DebugLevel, "Decoded HTTP request headers"); ce != nil {
-				ce.Write(zap.Any("headers", request.Header))
-			}
 			// Set the host header explicitly because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -145,12 +140,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
+			// The request is customer content: its credentials, cookies,
+			// query and body never go to the log, only its shape.
 			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
-				ce.Write(zap.Any("method", input.method),
-					zap.Any("url", input.url),
-					zap.Any("header", input.header),
-					zap.Any("body", string(input.body)),
-					zap.Any("raw", string(input.raw)))
+				ce.Write(zap.String("method", input.method),
+					zap.String("path", input.url.Path),
+					zap.Strings("header names", headerNames(input.header)),
+					zap.Int("body bytes", len(input.body)))
 			}
 
 			noise := requestNoiseFor(h.Logger, opts)
@@ -808,4 +804,14 @@ func sameNoiseConfig(a, b map[string]map[string][]string) bool {
 		}
 	}
 	return true
+}
+
+// headerNames are h's header names, sorted, without their values.
+func headerNames(h http.Header) []string {
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }

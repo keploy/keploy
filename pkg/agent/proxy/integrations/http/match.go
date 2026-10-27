@@ -1410,7 +1410,7 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 func (h *HTTP) ExactBodyMatch(body []byte, schemaMatched []*models.Mock) (bool, *models.Mock) {
 	// Log all mock names in a single line for better readability
 	if ce := h.Logger.Check(zap.DebugLevel, "mocks under consideration for exact body match"); ce != nil {
-		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)), zap.String("req body", string(body)))
+		ce.Write(zap.Strings("mock names", mockNamesOf(schemaMatched)), zap.Int("req body bytes", len(body)))
 	}
 
 	// First pass: exact string match (fastest path)

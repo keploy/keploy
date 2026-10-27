@@ -140,6 +140,62 @@ func TestRequestNoiseForBuildsOncePerOptionsValue(t *testing.T) {
 	}
 }
 
+// With debug on, the request a call came with is logged by its shape only:
+// its method, its path without the query, its header names and its body's
+// length. Its credentials, cookies, query and body are customer content and
+// none of their values is logged. Main logged the complete request, its
+// headers and its body.
+func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
+	secrets := []string{"Bearer au7h-v4lue", "s1d=c00k1e-v4lue", "q-t0ken-v4lue", "b0dy-v4lue"}
+	body := `{"note":"` + secrets[3] + `"}`
+	req := "POST /u?token=" + secrets[2] + " HTTP/1.1\r\nHost: api.example\r\nAuthorization: " + secrets[0] +
+		"\r\nCookie: " + secrets[1] + "\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"
+	core, logs := observer.New(zapcore.DebugLevel)
+	h := &HTTP{Logger: zap.New(core)}
+	db := serveHTTPMock(t, h, req, resp)
+	app, proxy := tcpPair(t)
+	runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, []byte(req), proxy, nil, db, models.OutgoingOptions{})
+	})
+	if got := readServed(t, bufio.NewReader(app)); got != "pong" {
+		t.Fatalf("served %q, want the mock's answer", got)
+	}
+	input := logs.FilterMessage("decodeHTTP debug logs for input").All()
+	if len(input) != 1 {
+		t.Fatalf("logged the request %d times, want once", len(input))
+	}
+	want := map[string]interface{}{
+		"method":       "POST",
+		"path":         "/u",
+		"header names": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
+		"body bytes":   int64(len(body)),
+	}
+	if got := input[0].ContextMap(); !reflect.DeepEqual(got, want) {
+		t.Errorf("logged the request as %#v, want %#v", got, want)
+	}
+	// Every entry, as the agent's JSON log writes it. The matched recording
+	// and the answer sent are the recording's content (the test set holds it
+	// as it is), so those two entries are not the request's.
+	recording := map[string]bool{"after matching the http request": true}
+	enc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+	for _, e := range logs.All() {
+		if recording[e.Message] || strings.HasPrefix(e.Message, "Mock Response sending back to client:") {
+			continue
+		}
+		buf, err := enc.EncodeEntry(e.Entry, e.Context)
+		if err != nil {
+			t.Fatalf("encode %q: %v", e.Message, err)
+		}
+		for _, v := range secrets {
+			if strings.Contains(buf.String(), v) {
+				t.Errorf("the entry %q carries the request's %q", e.Message, v)
+			}
+		}
+		buf.Free()
+	}
+}
+
 // serveHTTPMock records req and resp as a mock and returns a database that
 // serves it, again and again.
 func serveHTTPMock(t *testing.T, h *HTTP, req, resp string) *mockMemDb {
@@ -274,9 +330,8 @@ func TestAServedCallBuildsNoDebugEntryWithDebugOff(t *testing.T) {
 	}
 }
 
-// With debug on, a served call still logs its debug entries whole: the request
-// as read, the parsed input with its body and raw bytes, the noise, the match
-// and the answer sent.
+// With debug on, a served call still logs its debug entries: the request's
+// shape, the noise, the match and the answer sent.
 func TestAServedCallLogsItsDebugEntriesWithDebugOn(t *testing.T) {
 	const req = "POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nping"
 	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"
@@ -290,12 +345,9 @@ func TestAServedCallLogsItsDebugEntriesWithDebugOn(t *testing.T) {
 	if got := readServed(t, bufio.NewReader(app)); got != "pong" {
 		t.Fatalf("served %q, want the mock's answer", got)
 	}
-	if n := logs.FilterMessage("This is the complete request:\n" + req).Len(); n != 1 {
-		t.Errorf("logged the complete request %d times, want once", n)
-	}
 	input := logs.FilterMessage("decodeHTTP debug logs for input").All()
-	if len(input) != 1 || input[0].ContextMap()["body"] != "ping" || input[0].ContextMap()["raw"] != req {
-		t.Errorf("logged the input as %v, want its body and raw request", input)
+	if len(input) != 1 || input[0].ContextMap()["path"] != "/u" || input[0].ContextMap()["body bytes"] != int64(4) {
+		t.Errorf("logged the input as %v, want its path and body length", input)
 	}
 	for _, msg := range []string{"header noise", "body noise", "url noise", "after matching the http request",
 		"mocks under consideration for match function", "http mock schema match results", "exact body match found"} {
