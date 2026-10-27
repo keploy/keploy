@@ -240,9 +240,14 @@ type exactState struct {
 	// poolNames are the names the replay's scope table puts in a pool slice,
 	// of every key (SetPoolNames): nil until a replay sent one.
 	poolNames atomic.Pointer[map[string]struct{}]
+	// poolOwners is, of the same scope table, the key of the test process
+	// whose tests list each mock a test lists (SetPoolOwners), "" where no
+	// one key is known: what bounds each test process's teardown
+	// (teardownAfter). nil until a replay sent one.
+	poolOwners atomic.Pointer[map[string]string]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
-	// cached for one revision of the trees (each exact serve bumps it) and
-	// one scope table.
+	// cached for one revision of the trees (each exact serve bumps it), one
+	// scope table and one key.
 	teardownLast atomic.Pointer[teardownBound]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
@@ -1299,6 +1304,23 @@ func (m *MockManager) SetPoolNames(names []string) {
 	m.exact.poolNames.Store(&set)
 }
 
+// SetPoolOwners installs, of the replay's scope table, the key of the test
+// process whose tests list each mock (keploy mock replay under the proven
+// switch): a test's key is its ID's path where that path is the key of a
+// pool slice (the agent's teardownOwners), and a mock no one known key's
+// tests list is "". It bounds each test process's teardown (teardownAfter):
+// a recording only another process's tests list is no bound of this one's.
+// The agent installs it before the pool names of the same table.
+func (m *MockManager) SetPoolOwners(owners map[string]string) {
+	cp := make(map[string]string, len(owners))
+	for n, k := range owners {
+		if n != "" {
+			cp[n] = k
+		}
+	}
+	m.exact.poolOwners.Store(&cp)
+}
+
 // InPool reports whether mk is the pool's by the scope table SetPoolNames
 // installed (integrations.PoolMembership); known is false until one was. A
 // mock is named once in a recording, and the table is the running
@@ -1843,16 +1865,18 @@ func (v *exactView) perTest(kind models.Kind, staged, teardown []*models.Mock) [
 func (v *exactView) afterTests(fired bool) bool { return v.test == "" && fired }
 
 // teardown is, of startup (the startup tree's values), the per-test
-// recordings sent after every test of the set's recording: the set's
-// teardown (teardownAfter). Those alone, never a pool recording made before
-// the first test or in a gap between two tests: a late call paired with such
-// a recording, made before another test's own, would learn as noise a value
-// that test's answer gave the application, which the learn step's earlier
-// places (every recording made before the paired one) do not hold. Every
-// test's recording is an earlier place of a teardown recording. A set whose
-// tests' place nothing tells gets none, and such a call misses.
-func (m *MockManager) teardown(startup []*models.Mock) []*models.Mock {
-	after := m.teardownAfter()
+// recordings sent after every test of the set's recording, or under keploy
+// mock replay after every test of the test process of key (the view's pool
+// key): the teardown (teardownAfter). Those alone, never a pool recording
+// made before the first test or in a gap between two tests: a late call
+// paired with such a recording, made before another test's own, would learn
+// as noise a value that test's answer gave the application, which the learn
+// step's earlier places (every recording made before the paired one) do not
+// hold. Every recording of the calling process's tests is an earlier place
+// of a teardown recording. A set whose tests' place nothing tells gets none,
+// and such a call misses.
+func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Mock {
+	after := m.teardownAfter(key)
 	if after == nil {
 		return nil
 	}
@@ -1866,24 +1890,36 @@ func (m *MockManager) teardown(startup []*models.Mock) []*models.Mock {
 }
 
 // teardownAfter is what tells a request sent after every test of the set's
-// recording, nil when nothing does. keploy test's staging sends the recorded
-// windows of every test of the set, the unselected ones included: after
-// every window's end (models.WindowSchedule.After). keploy mock replay sends
-// none, but stages the whole recording at once and names the pool's
-// recordings (SetPoolNames): after every staged data-plane recording outside
-// the pool, request and answer. That counts every recording a test owns, and
-// any other one outside the pool too (one no test owns): a later bound,
-// never an earlier one. That bound is the whole recording's, not a test
-// process's: of a suite whose test processes ran one after another, only the
-// last one's teardown is after every test's recording, so an earlier
-// process's call after its last test misses, as before, and the last
-// process's teardown recordings are shown from the first test fired on,
-// while an earlier process runs and in the last one's start-up.
+// recording, or under keploy mock replay of the test process of key, nil
+// when nothing does. keploy test's staging sends the recorded windows of
+// every test of the set, the unselected ones included: after every window's
+// end (models.WindowSchedule.After); its application is one process. keploy
+// mock replay sends none, but stages the whole recording at once and names
+// the pool's recordings (SetPoolNames) and the key of each test's
+// (SetPoolOwners): after every staged data-plane recording outside the pool,
+// request and answer, but one that only another key's tests list. That
+// counts every recording a test of key owns, and any other one outside the
+// pool too (one no test owns, or one a test of no known key owns): a later
+// bound, never an earlier one.
+//
+// So of a suite whose test processes ran one after another (go test ./...,
+// one test binary per package), each process's teardown is its own: the
+// calls a binary makes after its own last test (a Go mongo-driver's
+// endSessions at client.Disconnect) are answered by its pool slice's
+// recordings of them, which only the process of that key is served, while
+// it holds the run. A recording another process's tests list is no bound of
+// this one's: that process never ran while this one did, and none of its
+// answers reached this one. Where a test's key is not known (its ID's path
+// names its test file, not a pool slice's key; or its process recorded no
+// pool call), its recordings bound every process, as the whole recording's
+// bound did; two processes of one key share one bound, the later's, so the
+// earlier's call after its last test misses.
 //
 // Once the first test fired, the teardown is shown in every gap, not only
-// after the last test: a call made in a gap may be answered by a teardown
-// recording, and the teardown's own call then misses, failing closed.
-func (m *MockManager) teardownAfter() func(time.Time) bool {
+// after the last test, and in a later process's start-up: a call made there
+// may be answered by a teardown recording, and the teardown's own call then
+// misses, failing closed.
+func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
 	if s := m.testWindows.Load(); s.Len() > 0 {
 		return s.After
 	}
@@ -1891,11 +1927,12 @@ func (m *MockManager) teardownAfter() func(time.Time) bool {
 	if pool == nil {
 		return nil
 	}
+	owners := m.exact.poolOwners.Load()
 	// The revision first, then the trees (the revision's sample-read-install
 	// idiom): a bound read from trees a staging swaps meanwhile is cached
 	// under a revision that is already old.
 	rev := m.Revision()
-	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool {
+	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.key == key {
 		return c.after()
 	}
 	m.treesMu.RLock()
@@ -1907,6 +1944,11 @@ func (m *MockManager) teardownAfter() func(time.Time) bool {
 			if _, inPool := (*pool)[mk.Name]; inPool || mk.IsProtocolPhase() {
 				continue
 			}
+			if owners != nil && key != "" && key != models.PoolKeyNone {
+				if k := (*owners)[mk.Name]; k != "" && k != key {
+					continue
+				}
+			}
 			for _, at := range []time.Time{mk.Spec.ReqTimestampMock, mk.Spec.ResTimestampMock} {
 				if at.After(last) {
 					last = at
@@ -1914,23 +1956,25 @@ func (m *MockManager) teardownAfter() func(time.Time) bool {
 			}
 		}
 	}
-	b := &teardownBound{rev: rev, pool: pool, last: last}
+	b := &teardownBound{rev: rev, pool: pool, owners: owners, key: key, last: last}
 	m.exact.teardownLast.Store(b)
 	return b.after()
 }
 
 // teardownBound is teardownAfter's bound for keploy mock replay (last: the
 // latest request or answer of a staged data-plane recording outside the
-// pool), as the trees stood at revision rev (MockManager.Revision) under the
-// scope table pool: the per-test reads after the tests read it once per
-// revision, not every staged recording at every read. Each exact serve
-// bumps the revision, so it is read again once per served call, to the
-// same bound: exact serving hides what it serves rather than deleting it
-// from the trees.
+// pool that bounds key's process), as the trees stood at revision rev
+// (MockManager.Revision) under the scope table pool and owners: the per-test
+// reads after the tests read it once per revision, not every staged
+// recording at every read. Each exact serve bumps the revision, so it is
+// read again once per served call, to the same bound: exact serving hides
+// what it serves rather than deleting it from the trees.
 type teardownBound struct {
-	rev  uint64
-	pool *map[string]struct{}
-	last time.Time
+	rev    uint64
+	pool   *map[string]struct{}
+	owners *map[string]string
+	key    string
+	last   time.Time
 }
 
 // after is the bound's teardownAfter: nil for a zero last.
@@ -1946,7 +1990,7 @@ func (b *teardownBound) after() func(time.Time) bool {
 func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
 	var teardown []*models.Mock
 	if v.afterTests(m.exact.fired.Load()) {
-		teardown = m.teardown(m.treeValues(m.startupTree(), kind))
+		teardown = m.teardown(v.poolKey, m.treeValues(m.startupTree(), kind))
 	}
 	return v.perTest(kind, staged, teardown)
 }
