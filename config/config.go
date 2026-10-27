@@ -51,7 +51,10 @@ type Config struct {
 	SessionCalls []models.SessionCallRule `json:"sessionCalls,omitempty" yaml:"sessionCalls,omitempty" mapstructure:"sessionCalls"`
 	// MysqlPorts pins destination ports to the MySQL parser, skipping
 	// auto-detection for them; a non-empty list replaces the built-in
-	// defaults (3306, 4000). Needed in replay for a MySQL endpoint that
+	// defaults (3306, 4000). The defaults are only a hint (a client that
+	// speaks first there, as HTTP's does, is relayed as its protocol); a
+	// listed port is pinned, so an HTTP service on a listed port gets no
+	// answer. Needed in replay for a MySQL endpoint that
 	// moved since the recording and is neither the recorded container nor
 	// the recorded host (see DisableMysqlEndpointDrift; another port of
 	// this machine (localhost, or any address of its own), or of the Docker
@@ -63,7 +66,8 @@ type Config struct {
 	// port by reading the server's handshake during record and by
 	// recalling the port from recorded mocks during replay. Turn it off
 	// to restore the strict port-list behaviour — then MySQL on a port
-	// outside MysqlPorts will hang its handshake.
+	// outside MysqlPorts will hang its handshake, and the defaults are
+	// pinned to MySQL again, as listed ports are.
 	DisableMysqlAutoDetect bool `json:"disableMysqlAutoDetect" yaml:"disableMysqlAutoDetect" mapstructure:"disableMysqlAutoDetect"`
 	// DisablePgTimeSliceCohort turns off, for this project, the PostgreSQL
 	// v3 replayer's time-slice fallback, as KEPLOY_PG_V3_TIMESLICE_COHORT=0

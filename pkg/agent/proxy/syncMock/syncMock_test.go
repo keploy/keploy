@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -2152,6 +2153,35 @@ func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("proven=%v: the mock's container key = %q, want %q", on, got, want)
+		}
+	}
+}
+
+// Every mock a parser hands over is stamped with the address its connection
+// reached, with the proven switch on or off (keploy record as keploy mock
+// record), while that connection is still open: a replay tells by it what a
+// built-in default MySQL port held. A recorder's own destAddr stays.
+func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
+	const conn = "add-mock-dest-4000"
+	starts.Default.Dest(conn, "127.0.0.1:4000")
+	t.Cleanup(func() { starts.Default.ForgetDest(conn) })
+
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		mgr := New(zap.NewNop())
+		ch := make(chan *models.Mock, 2)
+		mgr.SetOutputChannel(ch)
+		mgr.AddMock(&models.Mock{Kind: models.HTTP, ConnectionID: conn})
+		if got := (<-ch).Spec.Metadata["destAddr"]; got != "127.0.0.1:4000" {
+			t.Fatalf("proven=%v: the HTTP mock's destAddr = %q, want 127.0.0.1:4000", on, got)
+		}
+		mgr.AddMock(&models.Mock{Kind: models.MySQL, ConnectionID: conn, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "db:3306"}}})
+		if got := (<-ch).Spec.Metadata["destAddr"]; got != "db:3306" {
+			t.Fatalf("proven=%v: a recorder's own destAddr = %q, want db:3306 kept", on, got)
 		}
 	}
 }
