@@ -43,7 +43,7 @@ func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 					Variables: models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}},
 					Binds:     map[string]models.MockVariables{"mock-0": {"key": {Recorded: "k-1", Bind: "body.key"}}}},
 			}
-			added, err := ys.PersistLearned(ctx, set, states)
+			added, _, err := ys.PersistLearned(ctx, set, states)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +84,7 @@ func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 			if want := (models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}}); !reflect.DeepEqual(withoutAbout(m1.Spec.Variables), want) {
 				t.Fatalf("mock-1's variables read back %+v", m1.Spec.Variables)
 			}
-			again, err := ys.PersistLearned(ctx, set, states)
+			again, _, err := ys.PersistLearned(ctx, set, states)
 			if err != nil || len(again) != 0 {
 				t.Fatalf("what a mock already carries is not added again: %v %v", again, err)
 			}
@@ -117,7 +117,7 @@ func TestPersistLearnedKeepsAClockVariablesReads(t *testing.T) {
 			}
 			states := map[string]models.MockState{"mock-0": {Name: "mock-0",
 				Variables: models.MockVariables{"at": {Recorded: "2026-10-14T10:00:00.250Z 10:00:41", Bind: "body.at", Clock: reads}}}}
-			if _, err := ys.PersistLearned(ctx, set, states); err != nil {
+			if _, _, err := ys.PersistLearned(ctx, set, states); err != nil {
 				t.Fatal(err)
 			}
 			mocks, err := ys.GetUnFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)

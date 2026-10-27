@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -34,7 +35,9 @@ func setFiles(t *testing.T, dir string) map[string]string {
 // learns is written with its about and reads back as learned (its sum
 // survives the encoding); a person's entries in the same file survive the
 // rewrite as written, never stamped, and a learned use place does not join
-// their variable; and learning it all again in a later run writes nothing.
+// their variable, but is said (blocked) in each run, the one that rewrites
+// the file and the one that does not; and learning it all again in a later
+// run writes nothing.
 func TestLearningWritesWhereItCameFromOnceAndLeavesAPersonsEntries(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	for _, format := range []string{string(yaml.FormatYAML), string(yaml.FormatJSON), mockFormatGob} {
@@ -50,7 +53,11 @@ func TestLearningWritesWhereItCameFromOnceAndLeavesAPersonsEntries(t *testing.T)
 			person.Spec.NoiseAbout = map[string]models.About{"body.item": *hand}
 			fresh := variablesMock()
 			fresh.Spec.Variables = nil
-			for _, m := range []*models.Mock{person, fresh} {
+			// late is a person's too, after the first mock the learning
+			// changes: the pass that only reads stops before it.
+			late := variablesMock()
+			late.Spec.Variables = models.MockVariables{"orderId": {Recorded: "o1", Bind: "body.id", About: hand}}
+			for _, m := range []*models.Mock{person, fresh, late} {
 				if err := ys.InsertMock(ctx, m, "test-set-0"); err != nil {
 					t.Fatal(err)
 				}
@@ -66,11 +73,17 @@ func TestLearningWritesWhereItCameFromOnceAndLeavesAPersonsEntries(t *testing.T)
 						Variables: models.MockVariables{"orderId": {Recorded: "o1", Bind: "body.id", Answer: []string{"body.id"},
 							Clock: []models.ClockRead{{At: time.Date(2026, 10, 27, 5, 0, 0, 0, time.FixedZone("x", 3600)), Res: time.Second}}}},
 						Clocks: map[string]models.ClockOffset{"body.at": {Res: time.Millisecond, Layout: "rfc3339"}}},
+					"mock-2": {Name: "mock-2", Variables: models.MockVariables{"orderId": {Recorded: "o1", Bind: "body.id", Use: []string{"body.ref"}}}},
 				}, learn.Stamp{Round: models.AboutRoundFull, Run: run, Keploy: "3.8.91", Test: map[string]string{"mock-0": "t::A", "mock-1": "t::A"}})
 			}
-			added, err := clockStore(dir, format).PersistLearned(ctx, "test-set-0", states("2026-10-27T05:00:00Z"))
+			held := []string{"body.ref (variable orderId: use); kept the entry there, written by hand"}
+			wantBlocked := map[string][]string{"mock-0": held, "mock-2": held}
+			added, blocked, err := clockStore(dir, format).PersistLearned(ctx, "test-set-0", states("2026-10-27T05:00:00Z"))
 			if err != nil || len(added["mock-0"]) != 0 || len(added["mock-1"]) != 3 {
 				t.Fatalf("persist: %v %v", added, err)
+			}
+			if !reflect.DeepEqual(blocked, wantBlocked) {
+				t.Fatalf("blocked by the rewrite: %q, want %q", blocked, wantBlocked)
 			}
 			back := clockStore(dir, format)
 			m1 := readBack(t, back, "test-set-0", "mock-1")
@@ -97,9 +110,12 @@ func TestLearningWritesWhereItCameFromOnceAndLeavesAPersonsEntries(t *testing.T)
 				t.Fatal(err)
 			}
 			before := setFiles(t, filepath.Join(dir, "test-set-0"))
-			added, err = clockStore(dir, format).PersistLearned(ctx, "test-set-0", states("2026-10-28T09:00:00Z"))
+			added, blocked, err = clockStore(dir, format).PersistLearned(ctx, "test-set-0", states("2026-10-28T09:00:00Z"))
 			if err != nil || len(added) != 0 {
 				t.Fatalf("re-learning: %v %v", added, err)
+			}
+			if !reflect.DeepEqual(blocked, wantBlocked) {
+				t.Fatalf("blocked by a run that rewrites nothing: %q, want %q", blocked, wantBlocked)
 			}
 			if after := setFiles(t, filepath.Join(dir, "test-set-0")); len(after) != len(before) {
 				t.Fatalf("re-learning changed the set's files: %v", after)

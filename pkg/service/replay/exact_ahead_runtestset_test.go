@@ -239,9 +239,9 @@ type aheadMockDB struct {
 	persisted func(map[string]models.MockState)
 }
 
-func (m aheadMockDB) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+func (m aheadMockDB) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, map[string][]string, error) {
 	m.persisted(states)
-	return nil, nil
+	return nil, nil, nil
 }
 
 // aheadRun runs, under exact serving, a set of five test cases, test-4 and

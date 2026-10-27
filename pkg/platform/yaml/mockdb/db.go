@@ -569,7 +569,7 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 // only inside UpdateMocks, so running detection without pruning silently
 // discarded everything that was learned at process exit.
 func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error {
-	_, err := ys.persistLearned(ctx, testSetID, mockStates)
+	_, _, err := ys.persistLearned(ctx, testSetID, mockStates)
 	return err
 }
 
@@ -577,19 +577,35 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 // (MockState.ReqBodyNoise, Variables and Binds; package matcher/learn) onto
 // the set's mocks, without pruning anything, as PersistMockNoise does, and
 // returns by mock name what it added (mergeLearned), sorted. What a mock
-// already carried is not added again.
-func (ys *MockYaml) PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
+// already carried is not added again. blocked is, by mock name, each learned
+// change a person's entry at its place kept from being applied
+// (mergeLearned's blocked), whether or not the file was rewritten: the
+// file never carries it.
+func (ys *MockYaml) PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (added, blocked map[string][]string, err error) {
 	return ys.persistLearned(ctx, testSetID, mockStates)
 }
 
-func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
+func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, map[string][]string, error) {
 	// Only mocks that carry learned noise or variables matter, and the
 	// earlier mocks other mocks' variables are bound at (Binds).
 	withNoise, binds := learn.FoldLearned(mockStates)
 	if len(withNoise) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	added := map[string][]string{}
+	// blocked is set by both passes: the decode-only one reads every mock
+	// when nothing would change, and the writing one when something does.
+	// A mock gives the same list in each.
+	var blocked map[string][]string
+	block := func(name string, b []string) {
+		if len(b) == 0 {
+			return
+		}
+		if blocked == nil {
+			blocked = map[string][]string{}
+		}
+		blocked[name] = b
+	}
 
 	mockFileName := "mocks"
 	if ys.MockName != "" {
@@ -611,7 +627,9 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		if !ok {
 			return false
 		}
-		return len(mergeLearned(mock, st, binds[mock.Name])) > 0
+		a, b := mergeLearned(mock, st, binds[mock.Name])
+		block(mock.Name, b)
+		return len(a) > 0
 	}
 	// record is merge for the pass that writes: it keeps what it added.
 	record := func(mock *models.Mock) {
@@ -619,9 +637,11 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		if !ok {
 			return
 		}
-		if a := mergeLearned(mock, st, binds[mock.Name]); len(a) > 0 {
+		a, b := mergeLearned(mock, st, binds[mock.Name])
+		if len(a) > 0 {
 			added[mock.Name] = a
 		}
+		block(mock.Name, b)
 	}
 
 	logPersisted := func(total int) {
@@ -642,7 +662,7 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		// same reasoning as updateMocksGob.
 		if err := ys.Close(); err != nil {
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
-			return nil, err
+			return nil, nil, err
 		}
 		scanned, changes := 0, false
 		err := forEachGobMock(gobPath, func(mock *models.Mock) error {
@@ -657,14 +677,14 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 			return nil
 		})
 		if err != nil && !errors.Is(err, errStopScan) {
-			return nil, err
+			return nil, nil, err
 		}
 		if !changes {
-			return nil, nil
+			return nil, blocked, nil
 		}
 		rw, err := newGobFileRewriter(gobPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		defer rw.discard()
 		total := 0
@@ -677,21 +697,21 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 			return rw.write(mock)
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := rw.commit(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		logPersisted(total)
-		return added, nil
+		return added, blocked, nil
 	}
 
 	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !existsAny {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// eachMock streams the file's mocks to fn, and the documents a rewrite
@@ -740,10 +760,10 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		return nil
 	}, nil)
 	if err != nil && !errors.Is(err, errStopScan) {
-		return nil, err
+		return nil, nil, err
 	}
 	if !changes {
-		return nil, nil
+		return nil, blocked, nil
 	}
 
 	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
@@ -754,13 +774,13 @@ func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockSt
 		record(mock)
 		return rw.write(mock)
 	}, rw.copyDoc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := rw.commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	logPersisted(total)
-	return added, nil
+	return added, blocked, nil
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {

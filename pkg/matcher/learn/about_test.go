@@ -79,7 +79,7 @@ func TestEachLearnedDecisionSaysWhereItCameFrom(t *testing.T) {
 	t.Setenv("KEPLOY_PROVEN", "1")
 	mock := &models.Mock{Name: "mock-1"}
 	st := StampStates(learnedAll(), testStamp)["mock-1"]
-	if added := MergeLearned(mock, st, nil); len(added) != 5 {
+	if added, _ := MergeLearned(mock, st, nil); len(added) != 5 {
 		t.Fatalf("added: %v", added)
 	}
 	n := mock.Spec.NoiseAbout["body.eventId"]
@@ -133,7 +133,7 @@ func TestReLearningADecisionOnDiskChangesNothing(t *testing.T) {
 	before := learnedOn(t, mock)
 	later := testStamp
 	later.Run, later.Keploy = "2026-10-28T09:00:00Z", "3.8.92"
-	if added := MergeLearned(mock, StampStates(learnedAll(), later)["mock-1"], nil); len(added) != 0 {
+	if added, _ := MergeLearned(mock, StampStates(learnedAll(), later)["mock-1"], nil); len(added) != 0 {
 		t.Fatalf("re-learning added %v", added)
 	}
 	if got := learnedOn(t, mock); got != before {
@@ -172,18 +172,54 @@ func TestAPersonsDecisionWinsAndIsNeverStamped(t *testing.T) {
 	all := learnedAll()
 	st := all["mock-1"]
 	st.ReqBodyNoise["body.gone"] = nil
-	if added := MergeLearned(mock, StampStates(all, testStamp)["mock-1"], nil); len(added) != 0 {
+	rid := st.Variables["rid"]
+	rid.Use = []string{"body.rid"}
+	st.Variables["rid"] = rid
+	added, blocked := MergeLearned(mock, StampStates(all, testStamp)["mock-1"], nil)
+	if len(added) != 0 {
 		t.Fatalf("a learned decision changed a person's: %v", added)
 	}
 	if got := learnedOn(t, mock); got != before {
 		t.Fatalf("a person's decisions were changed:\n%s\nwant\n%s", got, before)
 	}
+	// Each learned change a person's entry kept from being applied is
+	// listed once, naming the entry that held; the learned noise already on
+	// their list changes nothing, so it is not.
+	wantBlocked := []string{
+		"body.at (" + wide.Meet(models.ClockOffset{Res: time.Millisecond}).String() + "); kept the entry there, written by hand",
+		"body.gone (noise); kept the entry there, written by hand",
+		"body.ref (variable _id: use); kept the entry there, written by hand",
+		"body.rid (variable rid: use); kept the entry there, edited by hand after keploy learned it",
+	}
+	if !reflect.DeepEqual(blocked, wantBlocked) {
+		t.Fatalf("blocked:\n%q\nwant\n%q", blocked, wantBlocked)
+	}
+	// Learning the same again blocks the same, and the hand clock read a
+	// learned one would not change blocks nothing.
+	if _, again := MergeLearned(mock, StampStates(all, testStamp)["mock-1"], nil); !reflect.DeepEqual(again, wantBlocked) {
+		t.Fatalf("blocked again: %q", again)
+	}
+	same := StampStates(map[string]models.MockState{"mock-1": {Name: "mock-1", Clocks: map[string]models.ClockOffset{"body.at": wide}}}, testStamp)["mock-1"]
+	if _, b := MergeLearned(mock, same, nil); len(b) != 0 {
+		t.Fatalf("a learned clock read equal to a person's was blocked: %q", b)
+	}
 
-	// Unknown origin: the use place joins as it always has; no about.
+	// Unknown origin: the use place joins as it always has; no about, and
+	// nothing blocked.
 	old := &models.Mock{Name: "mock-1", Spec: models.MockSpec{Variables: models.MockVariables{"_id": {Recorded: "6adf", Bind: "body.id"}}}}
-	added := MergeLearned(old, StampStates(learnedAll(), testStamp)["mock-1"], nil)
+	added, blocked = MergeLearned(old, StampStates(learnedAll(), testStamp)["mock-1"], nil)
 	if v := old.Spec.Variables["_id"]; !reflect.DeepEqual(v.Use, []string{"body.ref"}) || v.About != nil {
 		t.Fatalf("a variable of unknown origin: %+v (added %v)", v, added)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("an entry of unknown origin blocked learning: %q", blocked)
+	}
+
+	// Without the switch nothing is blocked: noise merges as it always has.
+	t.Setenv("KEPLOY_PROVEN", "")
+	off := &models.Mock{Name: "mock-1", Spec: models.MockSpec{NoiseAbout: map[string]models.About{"body.gone": *hand}}}
+	if added, blocked := MergeLearned(off, models.MockState{ReqBodyNoise: map[string][]string{"body.gone": nil}}, nil); !reflect.DeepEqual(added, []string{"body.gone (noise)"}) || blocked != nil {
+		t.Fatalf("switch off: added %q, blocked %q", added, blocked)
 	}
 }
 
@@ -198,7 +234,7 @@ func TestKeploysOwnVariableKeepsItsAboutAndItsSumFollows(t *testing.T) {
 	was := *mock.Spec.Variables["_id"].About
 	later := testStamp
 	later.Run = "2026-10-28T09:00:00Z"
-	if added := MergeLearned(mock, StampStates(learnedAll(), later)["mock-1"], nil); !slices.Contains(added, "body.ref (variable _id: use)") {
+	if added, _ := MergeLearned(mock, StampStates(learnedAll(), later)["mock-1"], nil); !slices.Contains(added, "body.ref (variable _id: use)") {
 		t.Fatalf("added: %v", added)
 	}
 	v := mock.Spec.Variables["_id"]
@@ -227,7 +263,11 @@ func TestNoiseAtAVariablesPlaceTakesOnlyKeploysAbout(t *testing.T) {
 		},
 	}}
 	st := map[string]models.MockState{"mock-1": {Name: "mock-1", Variables: models.MockVariables{"_id": {Recorded: "6adf", Bind: "body.id", Use: []string{"body.ref"}}}}}
-	MergeLearned(mock, StampStates(st, testStamp)["mock-1"], nil)
+	if _, blocked := MergeLearned(mock, StampStates(st, testStamp)["mock-1"], nil); len(blocked) != 0 {
+		// A learned check replaces a person's noise at its place: applied,
+		// so not blocked.
+		t.Fatalf("a learned variable over a person's noise was blocked: %q", blocked)
+	}
 	if len(mock.Spec.ReqBodyNoise) != 0 {
 		t.Fatalf("noise kept at a variable's places: %v", mock.Spec.ReqBodyNoise)
 	}
@@ -247,7 +287,7 @@ func TestKeploysOwnClockReadNarrowedKeepsItsAbout(t *testing.T) {
 	wide := map[string]models.MockState{"mock-1": {Name: "mock-1", Clocks: map[string]models.ClockOffset{"body.at": {Min: -time.Hour, Max: time.Hour, Res: time.Millisecond}}}}
 	MergeLearned(mock, StampStates(wide, testStamp)["mock-1"], nil)
 	was := mock.Spec.ClockAbout["body.at"]
-	if added := MergeLearned(mock, StampStates(learnedAll(), testStamp)["mock-1"], nil); !slices.Contains(added, "body.at (clock)") {
+	if added, _ := MergeLearned(mock, StampStates(learnedAll(), testStamp)["mock-1"], nil); !slices.Contains(added, "body.at (clock)") {
 		t.Fatalf("the narrowed clock read was not added: %v", added)
 	}
 	a := mock.Spec.ClockAbout["body.at"]

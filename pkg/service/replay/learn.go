@@ -26,9 +26,10 @@ func (r *Replayer) learningPool() bool {
 }
 
 // learnedPersister writes what the learn step learned onto a set's mocks and
-// says what it added, by mock (the yaml mock store, PersistLearned).
+// says what it added, by mock, and what a person's entry kept from being
+// applied (blocked) (the yaml mock store, PersistLearned).
 type learnedPersister interface {
-	PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error)
+	PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (added, blocked map[string][]string, err error)
 }
 
 // persistLearned writes what the learn step learned in a test set's replay
@@ -49,13 +50,17 @@ func (r *Replayer) persistLearned(ctx context.Context, testSetID string, consume
 	if len(consumerOf) > 0 {
 		by = consumerOf[0]
 	}
-	added, err := p.PersistLearned(ctx, testSetID, learn.StampStates(consumed, learnedStamp(mapping, by)))
+	added, blocked, err := p.PersistLearned(ctx, testSetID, learn.StampStates(consumed, learnedStamp(mapping, by)))
 	if err != nil {
 		return err
 	}
 	for _, line := range learnedByTest(added, mapping, by) {
 		r.logger.Info("learned fields that changed between record and replay",
 			zap.String("testSetID", testSetID), zap.String("test", line.test), zap.Strings("fields", line.fields))
+	}
+	if fields := learn.BlockedFields(blocked); len(fields) > 0 {
+		r.logger.Warn(learn.BlockedMessage,
+			zap.String("testSetID", testSetID), zap.Strings("fields", fields), zap.String("next_step", learn.BlockedNextStep))
 	}
 	return nil
 }

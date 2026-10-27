@@ -78,7 +78,7 @@ func TestKeptLearningPutsAClockReadOnTheRecordingAndNoNoiseThere(t *testing.T) {
 	// Noise at a clock read's place, learned with it or with one on the
 	// recording, is not listed as added: the place stays compared.
 	onDisk := &models.Mock{Name: "m", Spec: models.MockSpec{Clocks: map[string]models.ClockOffset{"body.exp": ttl}}}
-	added := MergeLearned(onDisk, models.MockState{ReqBodyNoise: map[string][]string{"body.exp": nil, "body.at": nil}, Clocks: map[string]models.ClockOffset{"body.at": ttl}}, nil)
+	added, _ := MergeLearned(onDisk, models.MockState{ReqBodyNoise: map[string][]string{"body.exp": nil, "body.at": nil}, Clocks: map[string]models.ClockOffset{"body.at": ttl}}, nil)
 	if want := []string{"body.at (" + ttl.String() + ")"}; !reflect.DeepEqual(added, want) || len(onDisk.Spec.ReqBodyNoise) != 0 {
 		t.Fatalf("added %v, noise %v; want %v and no noise at either clock read's place", added, onDisk.Spec.ReqBodyNoise, want)
 	}
@@ -94,19 +94,19 @@ func TestKeptLearningPutsAClockReadOnTheRecordingAndNoNoiseThere(t *testing.T) {
 		m := &models.Mock{Name: "m"}
 		var added []string
 		for _, o := range order {
-			added = append(added, MergeLearned(m, models.MockState{Clocks: map[string]models.ClockOffset{"body.exp": o}}, nil)...)
+			added = append(added, addedOf(MergeLearned(m, models.MockState{Clocks: map[string]models.ClockOffset{"body.exp": o}}, nil))...)
 		}
 		want := ttl.Meet(later)
 		if m.Spec.Clocks["body.exp"] != want || len(added) != 2 || added[1] != "body.exp ("+want.String()+")" {
 			t.Fatalf("%v: clock %+v, added %v; want %+v", order, m.Spec.Clocks, added, want)
 		}
-		if again := MergeLearned(m, models.MockState{Clocks: map[string]models.ClockOffset{"body.exp": order[0]}}, nil); len(again) != 0 {
+		if again, _ := MergeLearned(m, models.MockState{Clocks: map[string]models.ClockOffset{"body.exp": order[0]}}, nil); len(again) != 0 {
 			t.Fatalf("a clock read already held is added again: %v", again)
 		}
 	}
 	t.Setenv("KEPLOY_PROVEN", "")
 	m := &models.Mock{Name: "m", Spec: models.MockSpec{Clocks: map[string]models.ClockOffset{"body.exp": ttl}}}
-	if added := MergeLearned(m, models.MockState{ReqBodyNoise: map[string][]string{"body.exp": nil}, Clocks: map[string]models.ClockOffset{"body.at": ttl}}, nil); !reflect.DeepEqual(added, []string{"body.exp (noise)"}) || !reflect.DeepEqual(m.Spec.Clocks, map[string]models.ClockOffset{"body.exp": ttl}) {
+	if added, _ := MergeLearned(m, models.MockState{ReqBodyNoise: map[string][]string{"body.exp": nil}, Clocks: map[string]models.ClockOffset{"body.at": ttl}}, nil); !reflect.DeepEqual(added, []string{"body.exp (noise)"}) || !reflect.DeepEqual(m.Spec.Clocks, map[string]models.ClockOffset{"body.exp": ttl}) {
 		t.Fatalf("switch off: added %v, clocks %+v; want noise merged as always and the clock reads as they were", added, m.Spec.Clocks)
 	}
 }
@@ -134,5 +134,28 @@ func TestMergeVariableKeepsTheFirstDeclarationsAbout(t *testing.T) {
 	}
 	if got := MergeVariable(models.MockVariable{Recorded: "1"}, b); got.About != nil {
 		t.Fatalf("an entry of unknown origin took an about: %+v", got.About)
+	}
+}
+
+// addedOf is what MergeLearned added, of its two lists.
+func addedOf(added, _ []string) []string { return added }
+
+// What a person's entries blocked is said as "<mock> <what>", sorted, so the
+// learn summary reads the same in every run.
+func TestBlockedFieldsAreSorted(t *testing.T) {
+	blocked := map[string][]string{}
+	var want []string
+	for i := 0; i < 12; i++ {
+		name := "mock-" + string(rune('a'+i))
+		blocked[name] = []string{"body.x (noise); kept the entry there, written by hand"}
+		want = append(want, name+" body.x (noise); kept the entry there, written by hand")
+	}
+	for range 20 {
+		if got := BlockedFields(blocked); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %q\nwant %q", got, want)
+		}
+	}
+	if BlockedFields(nil) != nil {
+		t.Fatal("nothing blocked says nothing")
 	}
 }

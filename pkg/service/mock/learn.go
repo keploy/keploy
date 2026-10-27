@@ -127,9 +127,10 @@ func (m *mockService) clientTestsRead() bool {
 }
 
 // learnedPersister writes what the learn step learned onto a set's mocks and
-// says what it added, by mock (the yaml mock store, PersistLearned).
+// says what it added, by mock, and what a person's entry kept from being
+// applied (blocked) (the yaml mock store, PersistLearned).
 type learnedPersister interface {
-	PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error)
+	PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (added, blocked map[string][]string, err error)
 }
 
 // learnedStamp is what record's full round writes into the about of each
@@ -187,9 +188,13 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		}
 		states[st.Name] = st
 	}
-	added, err := p.PersistLearned(ctx, set, learn.StampStates(states, learnedStamp(flows, owner)))
+	added, blocked, err := p.PersistLearned(ctx, set, learn.StampStates(states, learnedStamp(flows, owner)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
+	}
+	if fields := learn.BlockedFields(blocked); len(fields) > 0 {
+		m.logger.Warn(learn.BlockedMessage,
+			zap.String("mock-set", set), zap.Strings("fields", fields), zap.String("next_step", learn.BlockedNextStep))
 	}
 	byTest := map[string][]string{}
 	seen := map[string]bool{}

@@ -152,7 +152,7 @@ func TestPersistLearnedWritesClockReadsAndDropsNoiseThere(t *testing.T) {
 			states := map[string]models.MockState{"mock-0": {Name: "mock-0",
 				ReqBodyNoise: map[string][]string{"body.expiresAt": {}},
 				Clocks:       map[string]models.ClockOffset{"body.createdAt": plain, "body.expiresAt": ttl}}}
-			added, err := ys.PersistLearned(ctx, set, states)
+			added, _, err := ys.PersistLearned(ctx, set, states)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,12 +167,12 @@ func TestPersistLearnedWritesClockReadsAndDropsNoiseThere(t *testing.T) {
 			if want := (map[string][]string{"body.other": {}}); !reflect.DeepEqual(got.Spec.ReqBodyNoise, want) {
 				t.Fatalf("noise read back %v, want %v: a clock read's place is never noise", got.Spec.ReqBodyNoise, want)
 			}
-			if again, err := ys.PersistLearned(ctx, set, states); err != nil || len(again) != 0 {
+			if again, _, err := ys.PersistLearned(ctx, set, states); err != nil || len(again) != 0 {
 				t.Fatalf("what a mock already carries is not added again: %v %v", again, err)
 			}
 
 			narrower := models.ClockOffset{Min: ttl.Min + 10*time.Millisecond, Max: ttl.Max, Res: time.Millisecond}
-			added, err = ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-0": {Name: "mock-0",
+			added, _, err = ys.PersistLearned(ctx, set, map[string]models.MockState{"mock-0": {Name: "mock-0",
 				Clocks: map[string]models.ClockOffset{"body.expiresAt": narrower, "body.createdAt": ttl}}})
 			if err != nil {
 				t.Fatal(err)

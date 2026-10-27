@@ -215,7 +215,7 @@ func TestALearnRewriteKeepsAboutAndUnknownKeys(t *testing.T) {
 				t.Fatalf("the file before the rewrite lacks what the test keeps: %+v", want)
 			}
 			ys = clockStore(dir, format)
-			added, err := ys.PersistLearned(ctx, "test-set-0", map[string]models.MockState{
+			added, _, err := ys.PersistLearned(ctx, "test-set-0", map[string]models.MockState{
 				"mock-0": {Name: "mock-0", ReqBodyNoise: map[string][]string{"body.item": {}}},
 			})
 			if err != nil || len(added["mock-0"]) != 1 {

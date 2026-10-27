@@ -52,8 +52,16 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // only the offsets both do, and is added when that changed it; one that
 // shares no offset with it is Empty and refuses every value there. A clock
 // read at a variable's place stays: the replay checks both.
-func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
-	var added []string
+//
+// A person's entry (models.AboutState.Hand: by hand, or learned and then
+// edited) wins over what was learned at its place, and blocked is each
+// learned change it kept from being applied, sorted, in added's spelling
+// and naming the entry that held (notApplied): the run's learn summary says
+// it once, and the file never carries it. A learned check (a variable or a
+// clock read) still replaces a person's noise at its place: the place is
+// then compared, and their about stays, an orphan keploy mock check
+// reports.
+func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) (added, blocked []string) {
 	if !provenswitch.On() {
 		// Without the switch nothing learns variables, and noise merges as
 		// it always has.
@@ -66,7 +74,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 		}
 		sort.Strings(added)
-		return added
+		return added, nil
 	}
 	if len(st.Variables) > 0 || len(binds) > 0 {
 		vars := mock.Spec.Variables.Clone()
@@ -96,8 +104,11 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				// Another variable of the same name: not this one.
 				continue
 			}
-			if had && models.VariableAboutState(n, cur).Hand() {
+			if s := models.VariableAboutState(n, cur); had && s.Hand() {
 				// A person's variable: a learned one never changes it.
+				for _, c := range variableAdded(n, cur, MergeVariable(cur, v)) {
+					blocked = append(blocked, notApplied(c, s))
+				}
 				continue
 			}
 			next := v
@@ -130,9 +141,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			if _, ok := mock.Spec.ReqBodyNoise[k]; ok {
 				continue
 			}
-			if models.NoiseAboutState(&mock.Spec, k) == models.AboutHand {
+			if s := models.NoiseAboutState(&mock.Spec, k); s == models.AboutHand {
 				// A person's about at a path they took out of the noise:
 				// the place stays compared.
+				blocked = append(blocked, notApplied(k+" (noise)", s))
 				delete(noise, k)
 				continue
 			}
@@ -152,14 +164,17 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		for path, o := range st.Clocks {
 			cur, had := clocks[path]
 			state := models.ClockAboutState(&mock.Spec, path)
-			if had && state.Hand() || !had && state == models.AboutHand {
-				// A person's clock read (or their about at a path they took
-				// out of the clocks): a learned one never changes it.
-				continue
-			}
 			next := o
 			if had {
 				next = cur.Meet(o)
+			}
+			if had && state.Hand() || !had && state == models.AboutHand {
+				// A person's clock read (or their about at a path they took
+				// out of the clocks): a learned one never changes it.
+				if !had || next != cur {
+					blocked = append(blocked, notApplied(path+" ("+next.String()+")", state))
+				}
+				continue
 			}
 			if !had || next != cur {
 				added = append(added, path+" ("+next.String()+")")
@@ -192,7 +207,39 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		}
 	}
 	sort.Strings(added)
-	return added
+	sort.Strings(blocked)
+	return added, blocked
+}
+
+// notApplied is how blocked (MergeLearned) names change, a learned change
+// in added's spelling, that the person's entry at its place, in state s,
+// kept from being applied.
+func notApplied(change string, s models.AboutState) string {
+	if s == models.AboutEdited {
+		return change + "; kept the entry there, edited by hand after keploy learned it"
+	}
+	return change + "; kept the entry there, written by hand"
+}
+
+// BlockedMessage is the run's learn summary line over what a person's
+// entries kept from being applied (BlockedFields), and BlockedNextStep what
+// to do about it.
+const (
+	BlockedMessage  = "keploy kept the entries a person wrote or edited, and did not apply what the learn step learned at their places"
+	BlockedNextStep = "to let keploy learn a place again, delete the entry there with its about block, and record again"
+)
+
+// BlockedFields is what a person's entries kept from being applied, by mock
+// name (blocked, MergeLearned), each as "<mock> <what was blocked>", sorted.
+func BlockedFields(blocked map[string][]string) []string {
+	var out []string
+	for name, bs := range blocked {
+		for _, b := range bs {
+			out = append(out, name+" "+b)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // setAbout sets (*m)[key] to a, making the map when there is none.

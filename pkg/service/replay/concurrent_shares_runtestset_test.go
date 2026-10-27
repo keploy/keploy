@@ -97,8 +97,8 @@ func (m *shMappingDB) GetMapping(context.Context, string) (*models.Mapping, erro
 // nothing): the full round writes it.
 type shMockDB struct{ *prMockDB }
 
-func (shMockDB) PersistLearned(context.Context, string, map[string]models.MockState) (map[string][]string, error) {
-	return nil, nil
+func (shMockDB) PersistLearned(context.Context, string, map[string]models.MockState) (map[string][]string, map[string][]string, error) {
+	return nil, nil, nil
 }
 
 // seenHooks are the replay's hooks, keeping what BeforeTestResult was handed.
