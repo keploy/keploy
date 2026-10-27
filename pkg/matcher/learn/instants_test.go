@@ -108,6 +108,10 @@ func shownClockRead(rec, live time.Time, typed bool, w *Window) bool {
 // it neither in both runs nor moved by the lead, refused (outsideWindowWhy).
 func noiseIn(ln Learned, w *Window) bool {
 	read := textClockRead(ln.Recorded.Value, ln.Live.Value)
+	if read == nil {
+		// A time of day whole: a read modulo a day (textTodRead).
+		read = NewDriftCache().textTodRead(ln.Recorded.Value, ln.Live.Value, nil, time.Time{})
+	}
 	if read == nil && ln.Recorded.Type != Instant {
 		return ln.Kind == KindNoise
 	}
@@ -1524,7 +1528,7 @@ func TestAMomentHeldOnBothSidesOfALeafIsNoCoDrift(t *testing.T) {
 // a host in British Summer Time too, where Go would read the abbreviation
 // "GMT" in the host's zone and give its wall clock 12:15:17. So a drifted
 // time of day 12:14:16 -> 12:15:17 beside it is no pick from it, on every
-// host.
+// host: a read of the clock modulo a day, in UTC.
 func TestAnInstantsWrittenTimeOfDayIsNotTheHosts(t *testing.T) {
 	london, err := time.LoadLocation("Europe/London")
 	if err != nil {
@@ -1546,8 +1550,8 @@ func TestAnInstantsWrittenTimeOfDayIsNotTheHosts(t *testing.T) {
 				HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": "Thu, 22 Oct 2026 11:15:17 GMT"}, Body: `{"ok":true}`},
 				ReqTimestampMock: at.Add(-14 * time.Second), ResTimestampMock: at.Add(-12 * time.Second),
 			}}
-			if ln := classifyDeparture("12:14:16", "12:15:17", at, nil, nil, m); ln.Kind != KindNoise {
-				t.Errorf("host zone %s: %s from %q (%s); want noise", loc, ln.Kind, ln.From.Mock, ln.Why)
+			if ln := classifyDeparture("12:14:16", "12:15:17", at, nil, nil, m); !todRead(ln, models.ZoneUTC) {
+				t.Errorf("host zone %s: %s from %q Read=%+v (%s); want a read of the clock modulo a day, in UTC", loc, ln.Kind, ln.From.Mock, ln.Read, ln.Why)
 			}
 		}()
 	}
@@ -1919,8 +1923,8 @@ func TestACoarserCopyInTheApplicationsOwnZoneIsTheEchos(t *testing.T) {
 // One instant an earlier place holds, cut by one rule, is one value: a
 // minute read of the clock ("11:14" then "11:15", moved by the lead) beside
 // a served created_at of 11:14:40.120, which names 11:14 truncated and 11:15
-// rounded, is no pick from it, and stays noise wherever in the minute the
-// neighbour was recorded.
+// rounded, is no pick from it, and is a read of the clock modulo a day
+// (never noise) wherever in the minute the neighbour was recorded.
 func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
 	at := time.Date(2026, 10, 22, 11, 14, 50, 0, time.UTC)
 	const p = "body.at"
@@ -1936,8 +1940,8 @@ func TestAnInstantThatNamesBothMomentsIsNoSource(t *testing.T) {
 		served := []Earlier{{Mock: "mock-3", At: at.Add(-5 * time.Second), Payload: payloadOf("mock-3", at.Add(-5*time.Second)), Seen: []Seen{
 			{Side: Response, Leaf: Leaf{Path: "body.created_at", Noise: "body.created_at", Type: String, Value: created}, Live: created},
 		}}}
-		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]; ln.Kind != KindNoise {
-			t.Errorf("beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape("11:15"), shape("11:14"), at, served, nil, nil, nil)[0]; !todRead(ln, "") {
+			t.Errorf("beside %s: %s from %+v Read=%+v (%s); want a read of the clock modulo a day", created, ln.Kind, ln.From, ln.Read, ln.Why)
 		}
 		if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(11, 15), typed(11, 14), at, served, nil, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("typed, beside %s: %s from %+v (%s); want noise", created, ln.Kind, ln.From, ln.Why)
