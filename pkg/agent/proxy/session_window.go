@@ -5,7 +5,9 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"sync"
 	"time"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
@@ -218,9 +220,12 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
 	if v := m.exactView(); v != nil {
 		// What GetSessionMocks shows under exact serving: the open test's
-		// unanswered mocks first, then the staged ones the view shows.
-		for _, mk := range v.unanswered("") {
-			if slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+		// unanswered mocks first, then the staged ones the view shows. The
+		// open test's are found through the view's own key index
+		// (ownedKeyed), so a lookup reads only the mocks filed under key,
+		// and computes no mock's keys after the view's first lookup.
+		for _, mk := range unansweredAt(v, ownedKeyed(v, ix).byKey[key]) {
+			if !fn(mk) {
 				return nil
 			}
 		}
@@ -257,4 +262,96 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 		session.rangeKeyed(ix, key, visit)
 	}
 	return nil
+}
+
+// ownedIndex files the mocks an exact view owns (exactView.owned) under the
+// keys a MockIndex gives them: byKey lists, for each key, the owned positions
+// filed under it, ascending, so a walk of one key's list is unanswered's
+// order narrowed to the key.
+//
+// A view's owned set is fixed once the view is made (exactView.add runs
+// before it is installed), and a MockIndex's keys depend only on what a mock
+// recorded and how replay classified it, so the index is built once per view
+// and MockIndex. Under keploy mock replay one test can own a whole set: a
+// lookup that computed every owned mock's keys walked thousands of mocks per
+// command, more than a scan of the whole pool costs.
+type ownedIndex struct {
+	once  sync.Once
+	byKey map[string][]int
+}
+
+// ownedIndexID names one view's index for one MockIndex. The view is held
+// weakly: an index never keeps a replaced view, and the mocks it owns, alive.
+type ownedIndexID struct {
+	view weak.Pointer[exactView]
+	ix   *integrations.MockIndex
+}
+
+// ownedIndexes holds the index of each live view and MockIndex. Entries of
+// views the collector has freed are dropped when the map reaches
+// ownedIndexCap entries, and when that leaves it full, every entry is
+// dropped: an index is rebuilt on its view's next lookup, with the same
+// result.
+var ownedIndexes struct {
+	mu sync.Mutex
+	m  map[ownedIndexID]*ownedIndex
+}
+
+// ownedIndexCap bounds ownedIndexes. A manager installs one view at a time,
+// and a parser declares its MockIndex once, so a replay holds a few entries.
+const ownedIndexCap = 64
+
+// ownedKeyed is v's owned index for ix, built on its first use.
+func ownedKeyed(v *exactView, ix *integrations.MockIndex) *ownedIndex {
+	id := ownedIndexID{weak.Make(v), ix}
+	ownedIndexes.mu.Lock()
+	oi := ownedIndexes.m[id]
+	if oi == nil {
+		if len(ownedIndexes.m) >= ownedIndexCap {
+			for k := range ownedIndexes.m {
+				if k.view.Value() == nil {
+					delete(ownedIndexes.m, k)
+				}
+			}
+			if len(ownedIndexes.m) >= ownedIndexCap {
+				clear(ownedIndexes.m)
+			}
+		}
+		if ownedIndexes.m == nil {
+			ownedIndexes.m = map[ownedIndexID]*ownedIndex{}
+		}
+		oi = &ownedIndex{}
+		ownedIndexes.m[id] = oi
+	}
+	ownedIndexes.mu.Unlock()
+	oi.once.Do(func() {
+		oi.byKey = map[string][]int{}
+		// owned is fixed once the view is installed: read it without v.mu,
+		// as unanswered's callers read the mocks it returns.
+		for i, mk := range v.owned {
+			for _, k := range ix.Keys(mk) {
+				if l := oi.byKey[k]; len(l) == 0 || l[len(l)-1] != i {
+					oi.byKey[k] = append(l, i)
+				}
+			}
+		}
+	})
+	return oi
+}
+
+// unansweredAt is unanswered("") narrowed to the owned positions at
+// (ascending): those of at that have not answered, in at's order.
+func unansweredAt(v *exactView, at []int) []*models.Mock {
+	if len(at) == 0 || len(v.owned) == 0 {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]*models.Mock, 0, len(at))
+	for _, i := range at {
+		if i < len(v.owned) && !v.consumed[i] && !v.takenByOther(i) {
+			out = append(out, v.owned[i])
+		}
+	}
+	return out
 }

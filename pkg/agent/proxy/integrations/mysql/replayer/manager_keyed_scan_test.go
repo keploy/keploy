@@ -196,6 +196,9 @@ func TestNoWindowCommandReadsOnlyItsStatement(t *testing.T) {
 		{"COM_QUERY", pool, queryReq(keyedSetText(n - 3)), 1},
 		{"COM_STMT_EXECUTE", pool, executeReq(8, fmt.Sprintf("k%d", (n-1)%500)), ofB},
 		{"COM_STMT_EXECUTE, every candidate of its parameters", sameParams, executeReq(8, "k1"), ofB},
+		// Parameters no recording bound (a value the app made at replay):
+		// only FIFO candidates, and they settle it too.
+		{"COM_STMT_EXECUTE, parameters no recording binds", pool, executeReq(8, "no-such-key"), ofB},
 	} {
 		s := newDiffSide(tc.pool)
 		s.stageNoWindow()
@@ -301,5 +304,133 @@ func TestExactServedCommandReadsNoTierOfAOneCommandCandidate(t *testing.T) {
 		if large[i] != small[i] {
 			t.Errorf("%s: %d config tag reads with 1,000 owned mocks, %d with 100: the reads grow with the mocks the test owns", name, large[i], small[i])
 		}
+	}
+}
+
+// ownWholeSet opens one test owning every mock of s's pool, as keploy mock
+// replay serves a go test whose run recorded the whole set.
+func (s *diffSide) ownWholeSet() {
+	owned := make([]*models.Mock, len(s.pool))
+	for i, m := range s.pool {
+		owned[i] = m.DeepCopy()
+	}
+	s.mm.ServeExactTest("whole-set", owned)
+}
+
+// TestExactServingWholeSetServesWhatTheFullScanServes: one test owns a set of
+// 1,000 mocks, and each command is matched by the keyed pass on one side and
+// by the full scan on the other: recorded reads, EXECUTEs whose parameters no
+// recording bound (each settled by the test's own FIFO candidate) and reads
+// of rows the set never recorded. Both serve, consume and report the same.
+func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		pool := keyedSet(1000, models.LifetimePerTest)
+		ref, fast := newDiffSide(pool), newDiffSide(pool)
+		var eng *schemanoise.Engine
+		if strict {
+			eng = replayer.StrictEngineForTest()
+		}
+		for _, s := range []*diffSide{ref, fast} {
+			s.stageNoWindow()
+			s.ownWholeSet()
+		}
+		for i := 0; i < 400; i++ {
+			var req mysql.Request
+			switch i % 8 {
+			case 0:
+				req = queryReq(keyedSetText(i))
+			case 1:
+				req = queryReq("SELECT id, name, payload FROM small WHERE id = 9999")
+			case 2, 4:
+				req = executeReq(7, fmt.Sprintf("k%d", i%500))
+			case 3:
+				req = executeReq(8, fmt.Sprintf("k%d", i%500))
+			default:
+				req = executeReq(uint32(7+i%2), fmt.Sprintf("app-made-%d", i))
+			}
+			want := ref.match(context.Background(), req, eng, true)
+			got := fast.match(context.Background(), req, eng, false)
+			if want != got {
+				t.Fatalf("strict=%v command %d:\n full scan:  %s\n keyed pass: %s", strict, i, want, got)
+			}
+			if i == 5 && !strict && !strings.Contains(want, "ok=true") {
+				t.Fatalf("the FIFO candidate was not served: %s", want)
+			}
+		}
+		ref.mm.Close()
+		fast.mm.Close()
+	}
+}
+
+// TestExactServingOwnedSetCommandCosts bounds what a command costs under exact
+// serving while one test owns a whole set of 1,000 or 10,000 mocks:
+//
+//   - an EXECUTE visits at most the candidates the full scan visits;
+//   - an EXECUTE whose parameters no recording bound is settled by the test's
+//     own FIFO candidate: it visits the test's mocks and its statement's,
+//     and the full scan does not run on top;
+//   - after the test's first command, a command computes no mock's
+//     preparedIndex keys: the view's index is built once. Each EXECUTE
+//     computed the keys of every mock the test had not consumed, twice.
+func TestExactServingOwnedSetCommandCosts(t *testing.T) {
+	sizes := []int{1000, 10000}
+	if testing.Short() {
+		sizes = sizes[:1]
+	}
+	for _, n := range sizes {
+		ofB := n / 4 // the set's EXECUTEs of diffQueryB
+		for _, tc := range []struct {
+			name string
+			req  mysql.Request
+			max  int // visits at most, besides the full scan's
+		}{
+			{"EXECUTE, parameters no recording binds", executeReq(8, "no-such-key"), n + ofB},
+			{"EXECUTE, its own recording at pool index 3", executeReq(8, "k3"), 4},
+			{"EXECUTE, its own recording at pool index 499", executeReq(8, "k499"), 500},
+		} {
+			var visits [2]int
+			var served [2]string
+			for k, full := range []bool{false, true} {
+				s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+				s.stageNoWindow()
+				s.ownWholeSet()
+				resp, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), tc.req, s.mm, s.dctx, nil, full)
+				if err != nil || !ok || resp == nil {
+					t.Fatalf("n=%d %s (full scan %v): ok=%v err=%v", n, tc.name, full, ok, err)
+				}
+				visits[k], served[k] = examined, s.describe(resp, ok, "", err)
+				s.mm.Close()
+			}
+			if served[0] != served[1] {
+				t.Fatalf("n=%d %s: keyed pass served %s, full scan %s", n, tc.name, served[0], served[1])
+			}
+			if visits[0] > visits[1] {
+				t.Errorf("n=%d %s: keyed pass visited %d candidates, more than the full scan's %d", n, tc.name, visits[0], visits[1])
+			}
+			if visits[0] > tc.max {
+				t.Errorf("n=%d %s: keyed pass visited %d candidates, want at most %d", n, tc.name, visits[0], tc.max)
+			}
+		}
+
+		s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+		s.stageNoWindow()
+		s.ownWholeSet()
+		match := func(req mysql.Request) {
+			if _, ok, _, err := replayer.MatchCommandExaminedForTest(context.Background(), req, s.mm, s.dctx, nil, false); err != nil || !ok {
+				t.Fatalf("n=%d: ok=%v err=%v", n, ok, err)
+			}
+		}
+		match(executeReq(8, "k1")) // the test's first command builds the indexes
+		computed := replayer.CountPreparedKeysForTest(func() {
+			for i := 0; i < 6; i++ {
+				match(executeReq(8, "no-such-key"))
+				match(executeReq(7, fmt.Sprintf("k%d", 2+4*i)))
+				match(queryReq(keyedSetText(4 * i)))
+			}
+		})
+		if computed != 0 {
+			t.Errorf("n=%d: 18 commands after the test's first computed %d mocks' keys, want 0", n, computed)
+		}
+		s.mm.Close()
 	}
 }

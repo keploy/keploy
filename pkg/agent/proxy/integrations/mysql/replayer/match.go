@@ -1549,9 +1549,17 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			// See firstPass: the window's FIFO candidate, and its match on the
 			// parameters alone, outrank every other fallback.
 			(windowPass && req.Header.Type == sCOM_STMT_EXEC && (fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
-			// With no window, the first FIFO candidate of the live query, else
-			// its first definitive match, outranks every other fallback.
-			(keyedExec && (fifoExecMock != nil || defExecMock != nil)) ||
+			// With no window, the keyed pass has compared every candidate of
+			// the live query and every mock the open test owns (exact
+			// serving: the per-test tier is the open test's unanswered mocks,
+			// walked whole). A fallback it found outranks every candidate
+			// left unread, which can only be another statement's match on
+			// its parameters or score, or one unowned: the open test's match
+			// on the parameters alone and its FIFO candidate rank above
+			// every unowned one, and the FIFO and definitive candidates of
+			// the live query above the rest.
+			(keyedExec && (fifoExecMock != nil || defExecMock != nil ||
+				fifoExecMockWindow != nil || paramsOnlyMockWindow != nil)) ||
 			// The CLOSE pass scored every recorded CLOSE.
 			(req.Header.Type == sCOM_STMT_CLOSE && matchedMock != nil)
 		if !firstPass || settled {
