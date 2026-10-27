@@ -1545,7 +1545,14 @@ func ownedOf(v *exactView) []*models.Mock {
 	return v.owned
 }
 
-// stagedKinds is every kind the staged trees hold or have held.
+// stagedKinds is every kind the staged trees hold or have held. It never
+// walks the startup tier: an install runs at every test's open and close,
+// and a walk there cost each test the size of the whole staged set (an
+// initial staging files the session pool in the startup tier too). Each
+// kind the startup tier holds has a revision of its own (revByKind): the
+// staging that filed a mock there moved its kind's (setMocksWithWindowLocked
+// moves every kind it files, the startup tier's included), and a session
+// update mirrored there (mirrorStartup) moves its new kind's.
 func (m *MockManager) stagedKinds() map[models.Kind]struct{} {
 	kinds := map[models.Kind]struct{}{}
 	m.treesMu.RLock()
@@ -1555,16 +1562,7 @@ func (m *MockManager) stagedKinds() map[models.Kind]struct{} {
 	for k := range m.unfilteredByKind {
 		kinds[k] = struct{}{}
 	}
-	startup := m.startup
 	m.treesMu.RUnlock()
-	if startup != nil {
-		startup.rangeValues(func(v interface{}) bool {
-			if mk, ok := v.(*models.Mock); ok && mk != nil {
-				kinds[mk.Kind] = struct{}{}
-			}
-			return true
-		})
-	}
 	m.revMu.RLock()
 	for k := range m.revByKind {
 		kinds[k] = struct{}{}
