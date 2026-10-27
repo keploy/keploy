@@ -378,3 +378,216 @@ func TestAGenerationWithVariablesIsNotServedThroughTheStrictIndex(t *testing.T) 
 		t.Fatal("the generation's index was not built, or does not say it holds variables")
 	}
 }
+
+// sharedVarDb is genVarDb offering the shared part of its reads
+// (integrations.SharedReads) as the manager does in a test: its per-test
+// read is the open test's unanswered recordings, its session read those then
+// the shared session part, each once, at one SharedGen.
+type sharedVarDb struct{ *genVarDb }
+
+func (d *sharedVarDb) SharedGeneration(models.Kind) (integrations.SharedGen, bool) {
+	return integrations.SharedGen{View: 1, Store: d.gen}, true
+}
+
+func (d *sharedVarDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
+	return nil, slices.Clone(d.session), true
+}
+
+func (d *sharedVarDb) OwnedUnanswered() ([]*models.Mock, bool) { return slices.Clone(d.perTest), true }
+
+func (d *sharedVarDb) GetSessionMocks() ([]*models.Mock, error) {
+	out := slices.Clone(d.perTest)
+	for _, m := range d.session {
+		if !slices.Contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// An open test's own recording that declares variables keeps the test's
+// calls off the strict index of the shared part of its reads, as one in the
+// staged set keeps its generation's: the variable pass serves it first, from
+// a read (here the create, which the shared part's plain recording would
+// answer too). The learn step's index never places it: a call that is it
+// exactly finds the group a read gives (the verify mode panics otherwise).
+func TestAnOwnedRecordingWithVariablesIsNotServedThroughTheSharedIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	body, recorded := `{"id":"ord-live-9","item":"pen"}`, `{"id":"ord-rec-1","item":"pen"}`
+	newDb := func() *sharedVarDb {
+		return &sharedVarDb{&genVarDb{varDb: &varDb{
+			perTest: []*models.Mock{
+				at(varMock("ping", "GET", "http://store/ping", "", 200, `{}`, nil), 1),
+				at(varMock("bind", "POST", "http://store/orders", recorded, 201, `{"id":"ord-rec-1"}`,
+					models.MockVariables{"orderId": bindV("ord-rec-1", "body.id", "body.id")}), 2),
+			},
+			session: []*models.Mock{reusable(at(varMock("plain", "POST", "http://store/orders", body, 200, `{}`, nil), 3))},
+		}, gen: 1}}
+	}
+	verifyOff(t)
+	h, db := newHTTP(), newDb()
+	for _, c := range []struct{ method, path, body, want string }{{"GET", "/ping", "", "ping"}, {"POST", "/orders", body, "bind"}} {
+		ok, stub, _, err := h.matchOf(context.Background(), liveReq(c.method, c.path, c.body), db, db, nil, nil, nil, true, false, false, true, true)
+		if err != nil || !ok || stub.Name != c.want {
+			t.Fatalf("%s %s: served %v (ok %v, err %v); want %s", c.method, c.path, stub, ok, err, c.want)
+		}
+	}
+	if !h.strictIx.shared.has {
+		t.Fatal("no index of the shared part was built")
+	}
+	integrations.ExactViewVerify.Store(true)
+	hl, n, _ := learnOn(t)
+	if _, err := hl.learnedMatch(context.Background(), liveReq("POST", "/orders", recorded), newDb(), n, models.OutgoingOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !hl.learnIx.shared.has {
+		t.Fatal("no learn index of the shared part was built")
+	}
+}
+
+// racedSharedDb is sharedVarDb whose owned read meets a test's close (no test
+// open: false) or a staging (the shared part moves, its session read
+// replaced) once, between the call's sample of the shared generation and its
+// read of the open test's recordings.
+type racedSharedDb struct {
+	*sharedVarDb
+	closeOnce  bool
+	restage    []*models.Mock
+	ownedReads int
+}
+
+func (d *racedSharedDb) OwnedUnanswered() ([]*models.Mock, bool) {
+	d.ownedReads++
+	if d.ownedReads == 1 && d.closeOnce {
+		return nil, false
+	}
+	owned, ok := d.sharedVarDb.OwnedUnanswered()
+	if d.ownedReads == 1 && d.restage != nil {
+		d.session, d.gen = d.restage, d.gen+1
+	}
+	return owned, ok
+}
+
+// A call whose read of the open test's recordings meets the test's close, or
+// a staging that moves the shared part, reads the store: the index of the
+// shared part is not read beside what no one test owns, nor beside a staging
+// it is not of. Here a create the test recorded and the shared part holds
+// alike is the test's own from a read; through the index without the test's
+// recordings it would be the shared one, and through the index of the old
+// staging the replaced one.
+func TestACallWhoseOwnedReadMeetsACloseOrAStagingReadsTheStore(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	body := `{"item":"pen"}`
+	for _, c := range []struct {
+		name string
+		race func(*racedSharedDb)
+		want string
+	}{
+		{"a close", func(d *racedSharedDb) { d.closeOnce = true }, "own"},
+		{"a staging", func(d *racedSharedDb) {
+			d.perTest = nil
+			d.restage = []*models.Mock{reusable(at(varMock("plain-2", "POST", "http://store/orders", body, 200, `{}`, nil), 4))}
+		}, "plain-2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := &racedSharedDb{sharedVarDb: &sharedVarDb{&genVarDb{varDb: &varDb{
+				perTest: []*models.Mock{at(varMock("own", "POST", "http://store/orders", body, 201, `{}`, nil), 1)},
+				session: []*models.Mock{reusable(at(varMock("plain", "POST", "http://store/orders", body, 200, `{}`, nil), 3))},
+			}, gen: 1}}}
+			c.race(db)
+			h := newHTTP()
+			ok, stub, _, err := h.matchOf(context.Background(), liveReq("POST", "/orders", body), db, db, nil, nil, nil, true, false, false, true, true)
+			if err != nil || !ok || stub.Name != c.want {
+				t.Fatalf("served %v (ok %v, err %v); want %s", stub, ok, err, c.want)
+			}
+		})
+	}
+}
+
+// sharedOwnDb is ownGenDb offering the shared part of its reads
+// (integrations.SharedReads) as the manager does in a test: the open test's
+// own are its per-test read, the shared part (shared) its session read's
+// rest.
+type sharedOwnDb struct {
+	*ownGenDb
+	shared []*models.Mock
+}
+
+func (d *sharedOwnDb) SharedGeneration(models.Kind) (integrations.SharedGen, bool) {
+	return integrations.SharedGen{View: 1, Store: d.gen}, true
+}
+
+func (d *sharedOwnDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
+	return nil, slices.Clone(d.shared), true
+}
+
+func (d *sharedOwnDb) OwnedUnanswered() ([]*models.Mock, bool) { return slices.Clone(d.perTest), true }
+
+func (d *sharedOwnDb) GetSessionMocks() ([]*models.Mock, error) {
+	out := slices.Clone(d.perTest)
+	for _, m := range d.shared {
+		if !slices.Contains(out, m) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// Through the index of the shared part of a test's reads a call compares,
+// of the test's own recordings, those of its path only, in each read that
+// holds them (the per-test read and the session read): a test that owns 300
+// recordings costs a call two strict comparisons and two learn placements,
+// not one of each per recording it owns.
+func TestACallThroughTheSharedIndexComparesOnlyTheOwnRecordingsOfItsPath(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	db := &sharedOwnDb{ownGenDb: newOwnGenDb(strictItems("own", 300), nil)}
+	h := newHTTP()
+	if v := strictVisitsOf(func() {
+		if got := strictMatchOf(t, h, strictCall(150), db, db, nil); got == nil || got.Name != "own-150" {
+			t.Fatalf("served %v; want own-150", got)
+		}
+	}); v != 2 {
+		t.Fatalf("a strict call compared %d recordings; want 2 (own-150 in each read)", v)
+	}
+	if !h.strictIx.shared.has {
+		t.Fatal("no index of the shared part was built")
+	}
+	hl, n, _ := learnOn(t)
+	if v := learnVisitsOf(func() {
+		if _, err := hl.learnedMatch(context.Background(), strictCall(151), db, n, models.OutgoingOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}); v != 2 {
+		t.Fatalf("a learned call placed %d recordings; want 2 (own-151 in each read)", v)
+	}
+}
+
+// A store whose shared part holds a recording the open test owns too reads
+// it once in its session read (integrations.SharedReads: the first place
+// kept), so the index of the shared part places it once there too: in the
+// verify mode a strict call and a learned call of it find what a read finds
+// (one place in each read), and a third place panics.
+func TestARecordingOwnedAndSharedIsReadOnceInTheSessionReadThroughTheIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	was := integrations.ExactViewVerify.Load()
+	integrations.ExactViewVerify.Store(true)
+	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
+	own := strictItems("own", 2)
+	db := &sharedOwnDb{ownGenDb: newOwnGenDb(own, nil), shared: []*models.Mock{own[1]}}
+	hl, n, _ := learnOn(t)
+	if _, err := hl.learnedMatch(context.Background(), strictCall(1), db, n, models.OutgoingOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !hl.learnIx.shared.has {
+		t.Fatal("no learn index of the shared part was built")
+	}
+	h := newHTTP()
+	if got := strictMatchOf(t, h, strictCall(1), db, db, nil); got == nil || got.Name != "own-1" {
+		t.Fatalf("served %v; want own-1", got)
+	}
+	if !h.strictIx.shared.has {
+		t.Fatal("no index of the shared part was built")
+	}
+}

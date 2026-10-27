@@ -24,11 +24,17 @@ import (
 // began, less the mocks MockSpent reports (a consume under exact serving), so
 // the index, less those and less what a test kept for its repeats and is
 // over with (integrations.SpentReader), is the pool a read would give.
+// While a test is open the index is of the shared part of its reads, beside
+// the test's unanswered recordings read for each call (learnIndex,
+// strictLook).
 type strictIndex struct {
 	gen     uint64
 	entries []*models.Mock
-	byPath  map[string][]int
-	wild    map[string][]int
+	// split: entries[:split] are the per-test read's, the rest the session
+	// read's.
+	split  int
+	byPath map[string][]int
+	wild   map[string][]int
 	// vars: a read held a recording that declares variables. The variable
 	// pass serves those before the strict pass, from the whole read, so no
 	// call of the generation is served through the index.
@@ -48,7 +54,10 @@ var (
 func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise) *strictIndex {
 	strictIndexBuilds.Add(1)
 	ix := &strictIndex{gen: gen, byPath: map[string][]int{}, wild: map[string][]int{}}
-	for _, mocks := range [][]*models.Mock{perTest, session} {
+	for i, mocks := range [][]*models.Mock{perTest, session} {
+		if i == 1 {
+			ix.split = len(ix.entries)
+		}
 		for _, m := range FilterHTTPMocks(mocks) {
 			if hasVariables(m) {
 				ix.vars = true
@@ -64,8 +73,7 @@ func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise
 				ix.wild[string(r.Method)] = append(ix.wild[string(r.Method)], p)
 				continue
 			}
-			path, _ := recordedStrictURL(m)
-			k := string(r.Method) + " " + strings.TrimPrefix(maskURLNoise(path, n.url), "/")
+			k := strictKey(m, n)
 			ix.byPath[k] = append(ix.byPath[k], p)
 		}
 	}
@@ -81,6 +89,122 @@ func (ix *strictIndex) positions(s strictSieve) []int {
 	}
 	out := append(append(make([]int, 0, len(exact)+len(wild)), exact...), wild...)
 	slices.Sort(out)
+	return out
+}
+
+// strictKey is what buildStrictIndex files m under, a recording that learned
+// no place of its URL: its method and its path with the url noise masked.
+func strictKey(m *models.Mock, n strictNoise) string {
+	path, _ := recordedStrictURL(m)
+	return string(m.Spec.HTTPReq.Method) + " " + strings.TrimPrefix(maskURLNoise(path, n.url), "/")
+}
+
+// strictIndexes keeps the last strictIndex an HTTP parser built
+// (genIndexes): of a store's reads at one staging generation, and of the
+// shared part of an open test's reads at one SharedGen
+// (integrations.SharedReads).
+type strictIndexes struct {
+	genIndexes[*strictIndex]
+	shared genIndexes[*strictIndex]
+}
+
+// strictLook is the strict pass's indexed read for one call (learnLook's
+// kind): an index, and for an index of the shared part of an open test's
+// reads, the test's unanswered HTTP recordings of a request read for the
+// call (owned), in their order, which lead each read. vars: a recording
+// the call reads declares variables (strictIndex.vars). gen is the staging
+// generation the read is of.
+type strictLook struct {
+	ix         *strictIndex
+	shared     bool
+	owned      []*models.Mock
+	ownedMocks map[*models.Mock]bool
+	vars       bool
+	gen        uint64
+}
+
+// of is the strict pass's indexed read of what db reads now, for base, or
+// false where the call reads the store instead (learnIndexes.of's rule).
+func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise) (strictLook, bool) {
+	url := urlNoiseKey(n.url)
+	if sr, ok := db.(integrations.SharedReads); ok {
+		var perTest, session []*models.Mock
+		ix, key, ok := x.shared.sharedOf(base, db, url, func() error {
+			var ok bool
+			if perTest, session, ok = sr.SharedMocks(); !ok {
+				return errNoSharedReads
+			}
+			return nil
+		}, func(key learnIndexKey) *strictIndex {
+			return buildStrictIndex(key.gen, perTest, session, n)
+		})
+		if ok {
+			gen, owned, ok := ownedRead(sr, key)
+			if !ok {
+				return strictLook{}, false
+			}
+			look := strictLook{ix: ix, shared: true, gen: gen, vars: ix.vars, ownedMocks: make(map[*models.Mock]bool, len(owned))}
+			for _, m := range owned {
+				look.ownedMocks[m] = true
+			}
+			for _, m := range FilterHTTPMocks(owned) {
+				if hasVariables(m) {
+					look.vars = true
+					continue
+				}
+				if m.Spec.HTTPReq != nil {
+					look.owned = append(look.owned, m)
+				}
+			}
+			return look, true
+		}
+	}
+	var perTest, session []*models.Mock
+	ix, ok := x.genIndexes.of(base, db, url, func() error {
+		var err error
+		perTest, session, _, err = strictPool(db)
+		return err
+	}, func(key learnIndexKey) *strictIndex {
+		return buildStrictIndex(key.gen, perTest, session, n)
+	})
+	if !ok {
+		return strictLook{}, false
+	}
+	return strictLook{ix: ix, gen: ix.gen, vars: ix.vars}, true
+}
+
+// candidates are the recordings a call of the sieve's method and masked path
+// may be, in the pool's order (strictPool), less what spent reports (a test
+// kept them for its repeats and is over with) and, of the index, what
+// mockSpent reports the store dropped since the generation began. Of an index
+// of an open test's shared part the pool is the per-test read (the test's
+// unanswered recordings, then the tier's shared part) then the session read
+// (the test's unanswered recordings, then the tier's shared part less those).
+func (l strictLook) candidates(s strictSieve, n strictNoise, mockSpent func(string) bool, spent func(*models.Mock) bool) []*models.Mock {
+	ps := l.ix.positions(s)
+	var owned []*models.Mock
+	if l.shared {
+		for _, m := range l.owned {
+			if string(m.Spec.HTTPReq.Method) != s.method || spent(m) {
+				continue
+			}
+			if learnsURL(m) || strictKey(m, n) == s.method+" "+s.masked {
+				owned = append(owned, m)
+			}
+		}
+	}
+	out := make([]*models.Mock, 0, 2*len(owned)+len(ps))
+	i := 0
+	for _, perTest := range []bool{true, false} {
+		out = append(out, owned...)
+		for ; i < len(ps) && (ps[i] < l.ix.split) == perTest; i++ {
+			m := l.ix.entries[ps[i]]
+			if mockSpent(m.Name) || spent(m) || !perTest && l.ownedMocks[m] {
+				continue
+			}
+			out = append(out, m)
+		}
+	}
 	return out
 }
 
@@ -125,37 +249,25 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	if !tells {
 		return nil, false, nil
 	}
-	var perTest, session []*models.Mock
-	ix, ok := h.strictIx.of(base, db, urlNoiseKey(n.url), func() error {
-		var err error
-		perTest, session, _, err = strictPool(db)
-		return err
-	}, func(key learnIndexKey) *strictIndex {
-		return buildStrictIndex(key.gen, perTest, session, n)
-	})
-	if !ok || ix.vars {
+	look, ok := h.strictIx.of(base, db, n)
+	if !ok || look.vars {
 		return nil, false, nil
 	}
 	live := liveDestination(ctx, input)
 	sieve := newStrictSieve(input, n)
-	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
-	positions := ix.positions(sieve)
-	strictVisits.Add(int64(len(positions)))
+	cands := look.candidates(sieve, n, mockSpentOf(db), spentReaderOf(db))
+	strictVisits.Add(int64(len(cands)))
 	var fits []*models.Mock
-	for _, p := range positions {
+	for _, m := range cands {
 		if ctx.Err() != nil {
 			return nil, false, ctx.Err()
-		}
-		m := ix.entries[p]
-		if mockSpent(m.Name) || spent(m) {
-			continue
 		}
 		if len(strictDiff(ctx, input, live, m, n)) == 0 {
 			fits = append(fits, m)
 		}
 	}
 	if integrations.ExactViewVerify.Load() {
-		if err := verifyStrictIndexed(ctx, input, live, db, ix, fits, n); err != nil {
+		if err := verifyStrictIndexed(ctx, input, live, db, look.gen, fits, n); err != nil {
 			return nil, false, err
 		}
 	}
@@ -170,16 +282,17 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	return served, retry, err
 }
 
-// verifyStrictIndexed compares the fits a strict call found through ix with
-// those of a read's whole pool (strictCompare), both less what the store
-// reports spent after the read, while ix's generation still holds (a test's
-// open or close moves it), and panics on a difference.
-func verifyStrictIndexed(ctx context.Context, input *req, live destination, db integrations.MockMemDb, ix *strictIndex, fits []*models.Mock, n strictNoise) error {
+// verifyStrictIndexed compares the fits a strict call found through an
+// indexed read of staging generation gen with those of a read's whole pool
+// (strictCompare), both less what the store reports spent after the read,
+// while gen still holds (a test's open or close moves it), and panics on a
+// difference.
+func verifyStrictIndexed(ctx context.Context, input *req, live destination, db integrations.MockMemDb, gen uint64, fits []*models.Mock, n strictNoise) error {
 	_, _, pool, err := strictPool(db)
 	if err != nil {
 		return err
 	}
-	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != ix.gen {
+	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
 		return nil
 	}
 	_, pool = splitVariableMocks(pool)
