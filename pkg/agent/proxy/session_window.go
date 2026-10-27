@@ -219,8 +219,8 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 	if v := m.exactView(); v != nil {
 		// What GetSessionMocks shows under exact serving: the open test's
 		// unanswered mocks first, then the staged ones the view shows.
-		for _, mk := range v.unanswered("") {
-			if slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+		for _, mk := range v.unansweredWithKey(ix, key) {
+			if !fn(mk) {
 				return nil
 			}
 		}
