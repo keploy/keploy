@@ -3,6 +3,7 @@ package replayer
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
@@ -98,19 +99,39 @@ func ConfigTagReadsForTest(fn func()) int {
 	return int(n.Load())
 }
 
-// CountPreparedKeysForTest runs f and returns how many times a mock's
-// preparedIndex keys were computed meanwhile, by the store's indexes or by a
-// walk. f must not run matches on other goroutines past its return.
-func CountPreparedKeysForTest(f func()) int {
-	var n atomic.Int64
-	keys := preparedIndex.Keys
-	preparedIndex.Keys = func(m *models.Mock) []string {
-		n.Add(1)
-		return keys(m)
+// CountStatementKeysForTest runs f and returns how many times a mock's
+// statement keys (preparedIndex's, queryIndex's or executeIndex's) were
+// computed meanwhile, by the store's indexes or by a walk, and how many keys
+// of each kind they filed, by the key's first byte: P (a PREPARE), S (a
+// PREPARE's entry), C (a CLOSE), Q (a COM_QUERY) or E (an EXECUTE). f must
+// not run matches on other goroutines past its return.
+func CountStatementKeysForTest(f func()) (int, map[string]int) {
+	var (
+		mu     sync.Mutex
+		calls  int
+		filed  = map[string]int{}
+		counts = func(keys func(*models.Mock) []string) func(*models.Mock) []string {
+			return func(m *models.Mock) []string {
+				ks := keys(m)
+				mu.Lock()
+				calls++
+				for _, k := range ks {
+					filed[k[:1]]++
+				}
+				mu.Unlock()
+				return ks
+			}
+		}
+	)
+	for _, ix := range []*integrations.MockIndex{preparedIndex, queryIndex, executeIndex} {
+		keys := ix.Keys
+		ix.Keys = counts(keys)
+		defer func() { ix.Keys = keys }()
 	}
-	defer func() { preparedIndex.Keys = keys }()
 	f()
-	return int(n.Load())
+	mu.Lock()
+	defer mu.Unlock()
+	return calls, filed
 }
 
 // CountUnnamedExecKeysForTest runs f and returns how many times a mock's

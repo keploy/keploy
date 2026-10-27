@@ -16,7 +16,8 @@ import (
 // The tests in this file cover a command matched while no test window is
 // active: under exact serving, whose store reports none, and in keploy test
 // before a set's first test. A COM_QUERY or COM_STMT_EXECUTE then reads, of
-// the session tier, only the mocks preparedIndex files under its statement.
+// the session tier, only the mocks its index (queryIndex, executeIndex) files
+// under its statement.
 
 // keyedSetText is the text query of mock i of keyedSet: a key read of one of
 // 500 rows.
@@ -376,17 +377,17 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 //     per-test tier (the keyed walk of the session tier leaves them out), and
 //     the full scan does not run on top;
 //   - once the staged trees' indexes are built, no command computes a mock's
-//     preparedIndex keys, the test's first command included: the test's view
-//     files each mock it owns once, by unnamedExecIndex alone. The view's
-//     index of every key of every mock the test owned made its first EXECUTE
-//     cost two to four times main's call; before that index, each EXECUTE
-//     computed the keys of every mock the test had not consumed, twice;
+//     keys, the test's first command included: the test's view files the
+//     mocks it owns under no key. The view's index of every key of every mock
+//     the test owned made its first EXECUTE cost two to four times main's
+//     call; before that index, each EXECUTE computed the keys of every mock
+//     the test had not consumed, twice;
 //   - the first command of a fresh staging, an EXECUTE its own recording
-//     settles in the per-test tier, computes no mock's preparedIndex keys
-//     either: its look-up of an EXECUTE recorded without its query reads
-//     unnamedExecIndex, and builds no index of every key of every staged mock.
-//     It computes each mock's unnamedExecIndex keys at most once in the
-//     staged trees and once in the test's view.
+//     settles in the per-test tier, computes no mock's statement keys either:
+//     its look-up of an EXECUTE recorded without its query reads
+//     unnamedExecIndex, and builds no index of the staged mocks' statements.
+//     It computes each staged mock's unnamedExecIndex keys once, and none of
+//     the mocks the test owns.
 func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 	sizes := []int{1000, 10000}
 	if testing.Short() || raceEnabled {
@@ -439,7 +440,7 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		s.ownWholeSet()
 		computed := 0
 		filed := replayer.CountUnnamedExecKeysForTest(func() {
-			computed = replayer.CountPreparedKeysForTest(func() {
+			computed, _ = replayer.CountStatementKeysForTest(func() {
 				match(executeReq(8, "no-such-key")) // the test's first command
 				for i := 0; i < 6; i++ {
 					match(executeReq(8, "no-such-key"))
@@ -451,8 +452,8 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		if computed != 0 {
 			t.Errorf("n=%d: the test's first command and 18 more computed %d mocks' keys, want 0", n, computed)
 		}
-		if filed != n {
-			t.Errorf("n=%d: the test's commands filed its mocks %d times, want %d (each once)", n, filed, n)
+		if filed != 0 {
+			t.Errorf("n=%d: the test's commands computed %d mocks' unnamedExecIndex keys, want 0 (the view files its mocks under no key)", n, filed)
 		}
 		s.mm.Close()
 
@@ -462,19 +463,79 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		cold.ownWholeSet()
 		computed = 0
 		probed := replayer.CountUnnamedExecKeysForTest(func() {
-			computed = replayer.CountPreparedKeysForTest(func() {
+			computed, _ = replayer.CountStatementKeysForTest(func() {
 				if _, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), executeReq(8, "k3"), cold.mm, cold.dctx, nil, false); err != nil || !ok || examined > 4 {
 					t.Fatalf("n=%d: a fresh staging's first EXECUTE: ok=%v visited=%d err=%v, want it served from the first 4", n, ok, examined, err)
 				}
 			})
 		})
 		if computed != 0 {
-			t.Errorf("n=%d: a fresh staging's first EXECUTE, settled by its own recording, computed %d mocks' preparedIndex keys, want 0", n, computed)
+			t.Errorf("n=%d: a fresh staging's first EXECUTE, settled by its own recording, computed %d mocks' statement keys, want 0", n, computed)
 		}
-		if probed > 2*n {
-			t.Errorf("n=%d: a fresh staging's first EXECUTE computed %d mocks' unnamedExecIndex keys, want at most %d (each mock once staged, once owned)", n, probed, 2*n)
+		if probed > n {
+			t.Errorf("n=%d: a fresh staging's first EXECUTE computed %d mocks' unnamedExecIndex keys, want at most %d (each staged mock once, no owned one)", n, probed, n)
 		}
 		cold.mm.Close()
+	}
+}
+
+// TestStagingsFirstUnsettledCommandComputesOnlyItsOwnKeys: the first command
+// of a staging that the per-test tier does not settle walks the session tier
+// through the store's index of its own kind of command, which the staged
+// trees build on that walk. A COM_QUERY whose literal no recording has (served
+// by score) computes the staged mocks' COM_QUERY keys alone, and an EXECUTE of
+// a statement the set never prepared their EXECUTE keys alone: neither
+// computes a statement identity of the other kind. One index of every key
+// made that first command cost twice main's call at 10,000 staged mocks. The
+// build is once per staging: a second such command computes no key. Each
+// command serves what the full scan serves.
+func TestStagingsFirstUnsettledCommandComputesOnlyItsOwnKeys(t *testing.T) {
+	sizes := []int{1000, 10000}
+	if testing.Short() || raceEnabled {
+		sizes = sizes[:1]
+	}
+	for _, n := range sizes {
+		for _, tc := range []struct {
+			name string
+			req  mysql.Request
+			kind string // the only kind of key the command's walk files
+		}{
+			{"COM_QUERY, literal no recording has", queryReq("SELECT id, name, payload FROM small WHERE id = 100000"), "Q"},
+			{"EXECUTE, statement the set never prepared", executeReq(10, "k1"), "E"},
+		} {
+			ref := newDiffSide(keyedSet(n, models.LifetimePerTest))
+			ref.stageNoWindow()
+			ref.ownWholeSet()
+			want := ref.match(context.Background(), tc.req, nil, true)
+			want2 := ref.match(context.Background(), tc.req, nil, true)
+			ref.mm.Close()
+
+			s := newDiffSide(keyedSet(n, models.LifetimePerTest))
+			s.stageNoWindow()
+			s.ownWholeSet()
+			got := ""
+			calls, filed := replayer.CountStatementKeysForTest(func() {
+				got = s.match(context.Background(), tc.req, nil, false)
+			})
+			if got != want {
+				t.Fatalf("n=%d %s:\n full scan:  %s\n keyed pass: %s", n, tc.name, want, got)
+			}
+			// keyedSet: half the mocks are COM_QUERYs, half EXECUTEs that
+			// recorded their query, and no PREPARE.
+			if calls != n || len(filed) != 1 || filed[tc.kind] != n/2 {
+				t.Errorf("n=%d %s: the staging's first such command computed %d mocks' statement keys, filing %v; want %d (each staged mock once), filing %d keys of kind %s alone", n, tc.name, calls, filed, n, n/2, tc.kind)
+			}
+			calls, _ = replayer.CountStatementKeysForTest(func() {
+				got = s.match(context.Background(), tc.req, nil, false)
+			})
+			if got != want2 {
+				t.Fatalf("n=%d %s, again:\n full scan:  %s\n keyed pass: %s", n, tc.name, want2, got)
+			}
+			if calls != 0 {
+				t.Errorf("n=%d %s: the staging's second such command computed %d mocks' statement keys, want 0 (the index is built once per staging)", n, tc.name, calls)
+			}
+			s.mm.Close()
+		}
 	}
 }
 
@@ -495,8 +556,9 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 //     candidate.
 //   - Under exact serving the open test owns an unnamed EXECUTE before a named
 //     one of the same query. The keyed walk of the session tier reads none of
-//     the test's mocks (the per-test tier holds them), and the unnamed one
-//     still sends the command to the full scan.
+//     the test's mocks, and the look-up of an unnamed one none either: the
+//     keyed pass reads the test's mocks in the per-test tier, the unnamed one
+//     first, as the full scan does.
 func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *testing.T) {
 	at := func(ms int) time.Time { return diffBase.Add(time.Duration(ms) * time.Millisecond) }
 	named := func(name, param string, ms int) *models.Mock {

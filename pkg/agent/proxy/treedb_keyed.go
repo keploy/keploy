@@ -26,7 +26,8 @@ type keyIndex struct {
 }
 
 // keyedEntry is one mock filed under one key. key is the tree key it was filed
-// under, boxed once here rather than on every lookup.
+// under, as the tree holds it (boxed), so neither a build nor a lookup boxes
+// it again.
 type keyedEntry struct {
 	key interface{}
 	mk  *models.Mock
@@ -55,15 +56,16 @@ func (db *TreeDb) buildKeyIndexLocked(ix *integrations.MockIndex) *keyIndex {
 	ki := &keyIndex{lists: map[string][]keyedEntry{}}
 	it := db.rbt.Iterator()
 	for it.Next() {
-		key, ok := it.Key().(models.TestModeInfo)
-		if !ok {
+		// The tree's key, boxed as the tree holds it: a mock filed under no
+		// key costs the build no allocation.
+		boxed := it.Key()
+		if _, ok := boxed.(models.TestModeInfo); !ok {
 			continue
 		}
 		mk, ok := it.Value().(*models.Mock)
 		if !ok || mk == nil {
 			continue
 		}
-		var boxed interface{} = key
 		for _, k := range distinctKeys(ix, mk) {
 			ki.lists[k] = append(ki.lists[k], keyedEntry{boxed, mk})
 		}

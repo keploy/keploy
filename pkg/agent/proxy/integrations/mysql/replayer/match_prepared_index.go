@@ -12,15 +12,24 @@ import (
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
-// preparedIndex files the mocks commands are matched against, so matchCommand
-// finds them in the session tier through the store's index
-// (integrations.SessionKeyReader) instead of walking the whole pool for every
-// COM_STMT_PREPARE, COM_STMT_CLOSE and, while no test window is open,
-// COM_QUERY and COM_STMT_EXECUTE. No window is open under exact serving (keploy
-// mock replay), and in keploy test only before a set's first test: a test's
-// window stays open until the next test is staged. In lax mode that tier holds
-// every test's traffic, and a walk per command cost more with every test the
-// set held.
+// preparedIndex, queryIndex and executeIndex file the mocks commands are
+// matched against, so matchCommand finds them in the session tier through the
+// store's index (integrations.SessionKeyReader) instead of walking the whole
+// pool for every COM_STMT_PREPARE, COM_STMT_CLOSE and, while no test window is
+// open, COM_QUERY and COM_STMT_EXECUTE. No window is open under exact serving
+// (keploy mock replay), and in keploy test only before a set's first test: a
+// test's window stays open until the next test is staged. In lax mode that
+// tier holds every test's traffic, and a walk per command cost more with
+// every test the set held.
+//
+// Each command reads one index, and a store builds an index on its first
+// walk: preparedIndex files the PREPAREs, the CLOSEs and the PREPAREs
+// recordedQuery looks up (as on main), queryIndex the COM_QUERYs and
+// executeIndex the EXECUTEs that recorded their query. So the first command
+// of a staging that reaches the session tier computes the keys of its own
+// kind of command alone: a COM_QUERY computes no EXECUTE's or PREPARE's
+// statement identity. When one index filed every key, that command built all
+// of them, which cost twice main's whole call at 10,000 staged mocks.
 //
 // Under exact serving the per-test tier leads with every mock the open test
 // owns, and matchCommand walks it whole before each keyed walk of the session
@@ -33,16 +42,16 @@ import (
 // call.
 //
 // The one key matchCommand reads before the per-test tier,
-// keyExecuteUnnamed, is read through unnamedExecIndex instead, which computes
-// no statement identity of any mock: a COM_STMT_EXECUTE's look-up of it builds
-// no store index of every key of every staged mock, and the trees' index of
-// preparedIndex is built only by a keyed walk that reaches the session tier.
-var preparedIndex = &integrations.MockIndex{Keys: preparedKeys, OwnedKeys: fileNone}
-
-// unnamedExecIndex files under keyExecuteUnnamed the mocks preparedKeys files
-// there (unnamedExecKeys), the open test's own and the staged ones alike, and
-// files no mock under any other key.
-var unnamedExecIndex = &integrations.MockIndex{Keys: unnamedExecKeys}
+// keyExecuteUnnamed, is read through unnamedExecIndex, which computes no
+// statement identity of any mock and files the open test's own mocks under no
+// key either: an EXECUTE the test owns is read in the per-test tier, ahead of
+// every staged one.
+var (
+	preparedIndex    = &integrations.MockIndex{Keys: preparedKeys, OwnedKeys: fileNone}
+	queryIndex       = &integrations.MockIndex{Keys: queryKeys, OwnedKeys: fileNone}
+	executeIndex     = &integrations.MockIndex{Keys: executeKeys, OwnedKeys: fileNone}
+	unnamedExecIndex = &integrations.MockIndex{Keys: unnamedExecKeys, OwnedKeys: fileNone}
+)
 
 const (
 	// keyPrepare + a statement's identity (sqlStatementIdentity): a mock with a
@@ -69,7 +78,8 @@ const (
 	// keyExecuteUnnamed: a mock with a COM_STMT_EXECUTE request that recorded
 	// no query. Its statement is the one its PREPARE in the pool names, which
 	// no key of its own can say, so a live EXECUTE is matched by the full scan
-	// while the session tier holds one.
+	// while the staged mocks of the session tier hold one. One the open test
+	// owns is read in the per-test tier, ahead of every staged mock.
 	keyExecuteUnnamed = "E?"
 )
 
@@ -135,8 +145,10 @@ func prepEntryKey(connID string, stmtID uint32) string {
 	return keyPrepEntry + connID + "\x00" + strconv.FormatUint(uint64(stmtID), 10)
 }
 
-// preparedKeys is preparedIndex's Keys. Each key depends only on the mock's
-// recording and its Lifetime, which do not change while it is pooled.
+// preparedKeys is preparedIndex's Keys: a PREPARE's statement, a CLOSE, and
+// the entry recordedQuery looks up. Each key, here and in queryKeys,
+// executeKeys and unnamedExecKeys, depends only on the mock's recording and
+// its Lifetime, which do not change while it is pooled.
 func preparedKeys(m *models.Mock) []string {
 	if m == nil || m.Kind != models.MySQL {
 		return nil
@@ -159,18 +171,6 @@ func preparedKeys(m *models.Mock) []string {
 				keys = append(keys, keyClose)
 				closeFiled = true
 			}
-		case comQuery:
-			if qp, ok := r.Message.(*mysql.QueryPacket); ok && qp != nil {
-				keys = appendKey(keys, keyQuery+sqlStatementIdentity(qp.Query))
-			}
-		case comStmtExecute:
-			if ep, ok := r.Message.(*mysql.StmtExecutePacket); ok && ep != nil {
-				if executeUnnamed(r) {
-					keys = appendKey(keys, keyExecuteUnnamed)
-				} else {
-					keys = appendKey(keys, keyExecute+foldKey(sqlStatementIdentity(r.StoredQuery())))
-				}
-			}
 		}
 	}
 	if connID, e, ok := recordedPrepEntry(m); ok {
@@ -179,8 +179,47 @@ func preparedKeys(m *models.Mock) []string {
 	return keys
 }
 
+// queryKeys is queryIndex's Keys: each COM_QUERY's statement.
+func queryKeys(m *models.Mock) []string {
+	if m == nil || m.Kind != models.MySQL {
+		return nil
+	}
+	var keys []string
+	for i := range m.Spec.MySQLRequests {
+		r := &m.Spec.MySQLRequests[i]
+		if r.Header == nil || r.Header.Type != comQuery {
+			continue
+		}
+		if qp, ok := r.Message.(*mysql.QueryPacket); ok && qp != nil {
+			keys = appendKey(keys, keyQuery+sqlStatementIdentity(qp.Query))
+		}
+	}
+	return keys
+}
+
+// executeKeys is executeIndex's Keys: the query each COM_STMT_EXECUTE
+// recorded, case-folded. An EXECUTE that recorded none is unnamedExecKeys'.
+func executeKeys(m *models.Mock) []string {
+	if m == nil || m.Kind != models.MySQL {
+		return nil
+	}
+	var keys []string
+	for i := range m.Spec.MySQLRequests {
+		r := &m.Spec.MySQLRequests[i]
+		if r.Header == nil || r.Header.Type != comStmtExecute {
+			continue
+		}
+		if ep, ok := r.Message.(*mysql.StmtExecutePacket); ok && ep != nil {
+			if q := r.StoredQuery(); q != "" {
+				keys = appendKey(keys, keyExecute+foldKey(sqlStatementIdentity(q)))
+			}
+		}
+	}
+	return keys
+}
+
 // executeUnnamed reports whether r is a COM_STMT_EXECUTE request that recorded
-// no query: preparedKeys files its mock under keyExecuteUnnamed.
+// no query: unnamedExecKeys files its mock under keyExecuteUnnamed.
 func executeUnnamed(r *mysql.Request) bool {
 	if r.Header == nil || r.Header.Type != comStmtExecute {
 		return false
@@ -190,8 +229,8 @@ func executeUnnamed(r *mysql.Request) bool {
 }
 
 // unnamedExecKeys is unnamedExecIndex's Keys: keyExecuteUnnamed for a mock
-// preparedKeys files under it, no key otherwise. It reads each request's type,
-// and the stored query of an EXECUTE alone.
+// that holds an EXECUTE recorded without its query, no key otherwise. It
+// reads each request's type, and the stored query of an EXECUTE alone.
 func unnamedExecKeys(m *models.Mock) []string {
 	if m == nil || m.Kind != models.MySQL {
 		return nil
@@ -204,7 +243,8 @@ func unnamedExecKeys(m *models.Mock) []string {
 	return nil
 }
 
-// fileNone is preparedIndex's OwnedKeys: it files no mock under any key.
+// fileNone is the OwnedKeys of every index here: it files no mock under any
+// key.
 func fileNone(*models.Mock) []string { return nil }
 
 // recordedPrepEntry reports the entry buildRecordedPrepIndex makes of m, and
