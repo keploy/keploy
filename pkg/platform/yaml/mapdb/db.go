@@ -50,7 +50,6 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	var existingSource string
 	var existingRecordedWith []string
 	var old []byte
-	var existing *models.Mapping
 
 	// Detect whether a mappings file already exists in either format,
 	// and remember which one so we write back in the same format.
@@ -84,7 +83,6 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		existingGroups, existingShared = existingConfig.Groups, existingConfig.Shared
 		existingSource = existingConfig.Source
 		existingRecordedWith = existingConfig.RecordedWith
-		existing = &existingConfig
 	}
 
 	for _, t := range mapping.TestCases {
@@ -153,17 +151,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		newMapping.RecordedWith = mapping.RecordedWith
 	}
 
-	// The fields a hand edit added that this keploy does not know, at the
-	// top of the file and on each test's entry, which the rebuild above
-	// cannot see: the file's, then the caller's for a test it names.
-	newMapping.KeepExtra(existing)
-	newMapping.KeepTestExtra(existing)
-	newMapping.KeepTestExtra(mapping)
-	newMapping.Startup = models.KeepEntriesExtra(newMapping.Startup, existingStartup)
-	newMapping.Worker = models.KeepEntriesExtra(newMapping.Worker, existingWorker)
-	newMapping.Shared = models.KeepEntriesExtra(newMapping.Shared, existingShared)
-
-	encodedData, err := db.encodeOver(newMapping, effFormat, old, true, testSetID)
+	encodedData, err := db.encodeOver(newMapping, effFormat, old, headerAlways, testSetID)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping", zap.String("testSetID", testSetID))
 		return err
@@ -302,7 +290,7 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 		})
 	}
 
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		utils.LogError(db.logger, err, "failed to encode mapping during upsert",
 			zap.String("testSetID", testSetID))
@@ -351,10 +339,8 @@ func (db *MappingDb) UpsertWorker(ctx context.Context, testSetID string, worker 
 			return err
 		}
 	}
-	// The new worker scope keeps what a hand edit added to each of its
-	// entries the file had (models.KeepEntriesExtra).
-	mapping.Worker = models.KeepEntriesExtra(worker, mapping.Worker)
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	mapping.Worker = worker
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		return err
 	}
@@ -415,7 +401,7 @@ func (db *MappingDb) MoveToWorker(ctx context.Context, testSetID string, moves [
 	sort.SliceStable(mapping.Worker, func(i, j int) bool {
 		return workerAt(mapping.Worker[i]).Before(workerAt(mapping.Worker[j]))
 	})
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +495,7 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 		return nil
 	}
 	mapping.RecordedWith = append(mapping.RecordedWith, feature)
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
 	if err != nil {
 		return err
 	}
@@ -543,7 +529,7 @@ func (db *MappingDb) UpsertBoots(ctx context.Context, testSetID string, boots []
 	}
 	mapping.Boots = boots
 	mapping.Startup = nil
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerNever, testSetID)
 	if err != nil {
 		return err
 	}
@@ -614,9 +600,9 @@ func (db *MappingDb) UpsertCases(ctx context.Context, testSetID string, byTest m
 		mapping.Suites = suites
 	}
 	if len(startup) > 0 {
-		mapping.Startup = models.KeepEntriesExtra(startup, mapping.Startup)
+		mapping.Startup = startup
 	}
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		return err
 	}
@@ -902,7 +888,7 @@ func (db *MappingDb) rewrite(ctx context.Context, testSetID string, create, must
 	if !change(mapping) {
 		return nil
 	}
-	encodedData, err := db.encodeOver(mapping, effFormat, fileData, false, testSetID)
+	encodedData, err := db.encodeOver(mapping, effFormat, fileData, headerOnNew, testSetID)
 	if err != nil {
 		return err
 	}
