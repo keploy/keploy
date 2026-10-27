@@ -857,12 +857,20 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// application in a payload it served changed (ServedLive), and
 			// not in what the recording gave there: F gave it, the
 			// recording did not, as at a leaf whose recorded text lacks it.
+			// Under the rule a copy follows its source, a word F gave at
+			// fields where the recording gave another value, which the
+			// recorded value took none of the words of, is let go
+			// (follows.excusedLive).
 			if !recorded && x.Live() && dc.searchedTokens(*x.live, keep)[i][t] {
 				place := x.mock + "'s payload, as record's full round gave it"
 				if f := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
 					place = x.mock + " at " + f + ", as record's full round gave it"
 				}
-				return word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				why := word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				if fol.excusedLive(x, v, i, t, at, why, place) {
+					continue
+				}
+				return why
 			}
 		}
 		return ""
