@@ -1405,21 +1405,26 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// window knows each run's test begin), a value learned as a
 		// variable of an earlier place (a copy of what the test's earlier
 		// call sent, which held it in both runs) that, read as a value no
-		// earlier place is the source of, is a plain read of the clock its
-		// call's window holds in both runs, is learned as a read of the
-		// clock since its test began (models.SinceTestBegin), never as the
-		// variable. Both explanations hold in the rounds, and that read
-		// holds under both: the earlier place's read was made after the
-		// test began too. Learned as a variable, a full round that made the
-		// two reads in one second would bind the value to the earlier
-		// place, and one that made them a second apart would learn a read,
-		// so a replay whose reads land a second apart would miss, or not,
-		// by the full round's timing. A copy its own window does not hold
-		// stays the variable (the copy alone explains it), and so does
-		// anything else learned as a value with no source (noise, an echo,
-		// a read plus an offset, a refusal).
+		// earlier place is the source of and no moved place builds by an
+		// offset, is a plain read of the clock its call's window holds in
+		// both runs, is learned as a read of the clock since its test began
+		// (models.SinceTestBegin), never as the variable. Both explanations
+		// hold in the rounds, and that read holds under both: the earlier
+		// place's read was made after the test began too. Learned as a
+		// variable, a full round that made the two reads in one second
+		// would bind the value to the earlier place, and one that made them
+		// a second apart would learn a read, so a replay whose reads land a
+		// second apart would miss, or not, by the full round's timing. The
+		// offset rule is set aside in that reading as well: a copy that is
+		// also an offset of a start-up stamp the application was given (the
+		// rule below) holds as that read under all three explanations, and
+		// read with the rule, it would stay the variable by the same
+		// timing. A copy its own window does not hold stays the variable
+		// (the copy alone explains it), and so does anything else learned
+		// as a value with no source (noise, an echo, a read plus an offset
+		// of its own, a refusal).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil {
-			if own := leaf(r, l, w, skipSource); own.Kind == KindClockRead && own.Read != nil {
+			if own := leaf(r, l, w, skipSource|skipOffset); own.Kind == KindClockRead && own.Read != nil {
 				own.Read.Since = models.SinceTestBegin
 				ln = own
 			}
