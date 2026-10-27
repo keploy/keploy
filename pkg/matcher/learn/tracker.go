@@ -1228,7 +1228,11 @@ func (t *Tracker) CallWindowFrom(prevRec time.Time, paired *models.Mock, arrival
 	if !ok {
 		return nil
 	}
-	return &Window{Rec: Span{From: recFrom, To: paired.Spec.ReqTimestampMock}, F: f}
+	rec := Span{From: recFrom, To: paired.Spec.ReqTimestampMock}
+	if lc.client {
+		rec.Began = recBegan
+	}
+	return &Window{Rec: rec, F: f}
 }
 
 // LiveSpan is the span on the app's clock in which the call that reached
@@ -1284,7 +1288,9 @@ func (t *Tracker) liveClockAt(arrival time.Time) (liveClock, time.Time) {
 
 // span is this run's span to arrival (LiveSpan): from the previous serve,
 // or, in a client test, from the test's begin where that came after it and
-// the span from it is none.
+// the span from it is none. In a client test it carries the test's begin on
+// the app's clock (Span.Began) where the app's clock ran as one from there
+// to arrival.
 func (lc liveClock) span(arrival time.Time) (Span, bool) {
 	if lc.clock == nil {
 		return Span{}, false
@@ -1292,6 +1298,11 @@ func (lc liveClock) span(arrival time.Time) (Span, bool) {
 	f, ok := lc.from(lc.prev, arrival)
 	if !ok && lc.client && lc.began.After(lc.prev) {
 		f, ok = lc.from(lc.began, arrival)
+	}
+	if ok && lc.client {
+		if b, bok := lc.from(lc.began, arrival); bok {
+			f.Began = b.From
+		}
 	}
 	return f, ok
 }

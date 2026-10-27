@@ -1134,15 +1134,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		return op
 	}
 	out := make([]Learned, 0, len(drift))
-	for _, p := range drift {
-		r, l := rec.Leaves[p], live.Leaves[p]
+	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
+	// a value of the call whose window is w.
+	leaf := func(r, l Leaf, w *Window) Learned {
 		if unreadRaw != "" {
-			out = append(out, Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw})
-			continue
+			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			out = append(out, dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places))
-			continue
+			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
@@ -1310,6 +1309,29 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
 			}
 			ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
+		}
+		return ln
+	}
+	for _, p := range drift {
+		r, l := rec.Leaves[p], live.Leaves[p]
+		ln := leaf(r, l, w)
+		// A read made before its call's window: in keploy mock's client
+		// tests (the only calls whose window knows each run's test begin),
+		// a value refused in its call's window is classified again in the
+		// window from each run's test begin to the call (Window.sinceBegin:
+		// an application that reads its clock once for a request and writes
+		// it at a later call). Only a plain read of the clock it learns
+		// there is taken (one instant whole in both runs, or a typed one),
+		// checked at every replay from its test's begin
+		// (models.SinceTestBegin); anything else it learns there (noise, a
+		// variable, an echo, a read plus an offset) is not, and the refusal
+		// stands: the wider window turns a refusal into a checked read,
+		// never into noise.
+		if wb := w.sinceBegin(); ln.Kind == KindUnaccounted && wb != nil {
+			if early := leaf(r, l, wb); early.Kind == KindClockRead && early.Read != nil {
+				early.Read.Since = models.SinceTestBegin
+				ln = early
+			}
 		}
 		out = append(out, ln)
 	}

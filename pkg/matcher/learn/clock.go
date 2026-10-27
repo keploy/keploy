@@ -153,6 +153,15 @@ func (w *Window) ComparesOffsets() *Window {
 // readings: CheckClockRead); nil where the tracker was told none: such a
 // read is then refused. A Window's spans carry none: the learn
 // step reads the zone of its DriftCache.
+//
+// Began is where the running test began on the run's clock, in a client
+// test (SetClientTests) where the app's clock ran as one from there to the
+// call (zero otherwise, and in keploy test): a read made before the call's
+// window and after the test began is a read of the clock all the same (an
+// application that reads its clock once for a request and writes it at a
+// later call), which the learn step learns only where both runs' spans from
+// their test's begin hold it (Window.sinceBegin), and a replay checks from
+// its own test's begin (models.SinceTestBegin), never from an earlier start.
 type Span struct {
 	From, To time.Time
 	Zone     *time.Location
@@ -160,7 +169,37 @@ type Span struct {
 	// ClockSpanFrom): the zone the application writes its clock in in this
 	// run, in which a replay checks a learned read whatever zone the learn
 	// step named (CheckClockRead). false where Zone is the agent's own.
-	Own bool
+	Own   bool
+	Began time.Time
+}
+
+// sinceBegin is s from the running test's begin (Began) to its call: false
+// where s knows no begin. A begin is never after its call (the tracker sets
+// none there: CallWindowFrom, liveClock.span).
+func (s Span) sinceBegin() (Span, bool) {
+	if s.Began.IsZero() {
+		return Span{}, false
+	}
+	return Span{From: s.Began, To: s.To, Zone: s.Zone, Own: s.Own}, true
+}
+
+// sinceBegin is w, the window of a client test's call, from each run's test
+// begin to the call (Span.sinceBegin): the window in which the learn step
+// reads a read of the clock made before the call's window, earlier in the
+// test. nil where either run knows no begin (keploy test's calls: none).
+func (w *Window) sinceBegin() *Window {
+	if w == nil {
+		return nil
+	}
+	rec, ok := w.Rec.sinceBegin()
+	if !ok {
+		return nil
+	}
+	f, ok := w.F.sinceBegin()
+	if !ok {
+		return nil
+	}
+	return &Window{Rec: rec, F: f, offsets: w.offsets}
 }
 
 // holds reports whether t, an instant read at resolution res, is a read of
