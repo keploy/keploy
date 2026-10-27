@@ -2,6 +2,8 @@ package learn
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,7 +35,7 @@ func TestALearnedClockReadIsCheckedAtReplayInItsCallsSpan(t *testing.T) {
 
 	classify := func(r, l Leaf) Learned {
 		p := r.Path
-		return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, rec.Add(time.Millisecond), nil, nil, nil, nil)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, rec.Add(time.Millisecond), nil, nil, nil, nil)[0]
 	}
 	ln := classify(text(rec), text(live))
 	o, ok := ln.Clock()
@@ -123,7 +125,7 @@ func TestACutClockReadIsRefusedAtReplayNamingTheCut(t *testing.T) {
 	const p = "body.at.$date.$numberLong"
 	typed := func(at time.Time) Leaf { return InstantLeaf(p, "body.at", at, time.Millisecond) }
 	sec := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
-	ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: typed(sec.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{p: typed(sec)}}, sec.Add(time.Millisecond), nil, nil, nil, nil)[0]
+	ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: typed(sec.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{p: typed(sec)}}, sec.Add(time.Millisecond), nil, nil, nil, nil)[0]
 	o, ok := ln.Clock()
 	if ln.Kind != KindClockRead || !ok || o.Res < time.Second {
 		t.Fatalf("the typed cut read: %s %+v,%v (%s); want noise that is a read at the second's cut", ln.Kind, o, ok, ln.Why)
@@ -239,6 +241,16 @@ func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
 	}
 }
 
+// clockedDrifts is an empty cache of a tracker that knows which clock the
+// application reads (DriftCache.appClock), as the agent's own hooks tell it
+// (Tracker.SetAppClock): the learn step's every row but those of a run
+// whose clock keploy cannot tell, which make theirs with NewDriftCache.
+func clockedDrifts() *DriftCache {
+	dc := NewDriftCache()
+	dc.appClock = true
+	return dc
+}
+
 // plainRead reports whether ln is noise that is a plain read of the
 // application's clock (Learned.Read), which a replay checks in its call's
 // span, never noise that lets any value pass.
@@ -282,7 +294,7 @@ func TestAWholeInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 	}
 	iso := func(at time.Time) string { return at.Format("2006-01-02T15:04:05.000Z07:00") }
 	classify := func(r, l string, w *Window) Learned {
-		return ClassifyIn(NewDriftCache(), []string{p}, shape(l), shape(r), call, nil, nil, nil, w)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, shape(l), shape(r), call, nil, nil, nil, w)[0]
 	}
 	// F read its clock 3.4 s later than the lead puts it (a loaded box), or
 	// 0.4 s earlier.
@@ -365,7 +377,7 @@ func TestAWholeInstantOutsideItsCallsWindowIsRefused(t *testing.T) {
 		{"outside its window, moved by the lead", iso(before), iso(before.Add(FullRoundLead)), false},
 		{"a random id", "a7f3c2e9", "9c21e04b", false},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(row.l), shape(row.r), call, nil, nil, nil, window)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(row.l), shape(row.r), call, nil, nil, nil, window)[0]
 		switch {
 		case row.refuse:
 			if ln.Kind != KindUnaccounted || ln.Why != outsideWindowWhy || !strings.Contains(ln.Why, "a clock read before its call's window") {
@@ -537,6 +549,78 @@ func TestATimeOfDayTheLeadMovedIsNoClockReadAReplayChecks(t *testing.T) {
 	}
 }
 
+// Where keploy cannot tell which clock the application reads (no app clock:
+// DriftCache.appClock), its calls have no window and no replay can check a
+// read of the clock (Tracker.LiveSpan): an instant whole that neither the
+// lead nor a window shows a read (one F read 5 s past the lead) is refused at
+// learn, the reason saying why, never learned as a read only a replay would
+// refuse. With an app clock it is a plain read, checked at replay. Either
+// verdict is one wherever the recording fell in its second (.500, .996 and
+// the last three milliseconds, where the recorded read and its call fall in
+// the next second), for a typed instant (a Mongo $date, read whole) and a
+// text one (RFC 3339, epoch milliseconds), beside the served receive whose
+// Date header names the recording's second. One the lead moved is a read
+// with no app clock too, which a replay with none refuses: fail closed
+// either way.
+func TestAnInstantIsRefusedAtLearnWhereKeployCannotTellTheAppsClock(t *testing.T) {
+	const p = "body.cmd.documents.0.at"
+	iso := func(at time.Time) string { return at.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
+	forms := map[string]func(time.Time) Leaf{
+		"a $date": func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) },
+		"RFC 3339 text": func(at time.Time) Leaf {
+			return Leaf{Path: p, Noise: p, Type: String, Value: iso(at)}
+		},
+		"epoch milliseconds": func(at time.Time) Leaf {
+			return Leaf{Path: p, Noise: p, Type: String, Value: strconv.FormatInt(at.UnixMilli(), 10)}
+		},
+	}
+	for _, msec := range []int{500, 996, 997, 998, 999} {
+		rec := time.Date(2026, 10, 24, 22, 4, 38, msec*int(time.Millisecond), time.UTC)
+		read, call := rec.Add(3*time.Millisecond), rec.Add(4*time.Millisecond)
+		receive := &models.Mock{Name: "mock-0", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq: &models.HTTPReq{Method: "POST", URL: "/queue/receive", Body: `{"n":10}`},
+			HTTPResp: &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Date": rec.Format(http.TimeFormat)},
+				Body: `{"Messages":[{"Body":"m-1"}]}`},
+			ReqTimestampMock: rec.Add(-2 * time.Second), ResTimestampMock: rec,
+		}}
+		for name, leaf := range forms {
+			classify := func(dc *DriftCache, l time.Time) Learned {
+				raw := []Raw{dc.RawOf(receive, true)}
+				shape := func(at time.Time) Shape { return Shape{Leaves: map[string]Leaf{p: leaf(at)}} }
+				return ClassifyIn(dc, []string{p}, shape(l), shape(read), call, nil, raw, nil, nil)[0]
+			}
+			at := fmt.Sprintf("recorded at .%d, %s", msec, name)
+			past := read.Add(FullRoundLead + 5*time.Second)
+			if ln := classify(NewDriftCache(), past); ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != noAppClockWhy {
+				t.Errorf("%s, 5 s past the lead, no app clock: %s Read=%+v (%s); want refused: %s", at, ln.Kind, ln.Read, ln.Why, noAppClockWhy)
+			}
+			if ln := classify(clockedDrifts(), past); !plainRead(ln) {
+				t.Errorf("%s, 5 s past the lead, an app clock: %s Read=%+v (%s); want a plain read, checked at replay", at, ln.Kind, ln.Read, ln.Why)
+			}
+			if ln := classify(NewDriftCache(), read.Add(FullRoundLead)); !plainRead(ln) {
+				t.Errorf("%s, moved by the lead, no app clock: %s Read=%+v (%s); want a plain read, which a replay with no app clock refuses", at, ln.Kind, ln.Read, ln.Why)
+			}
+		}
+	}
+	tr := NewTracker()
+	tr.ServedMockAt(&models.Mock{Name: "mock-0", Kind: models.HTTP}, time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC))
+	if _, ok := tr.LiveSpan(time.Date(2026, 10, 28, 7, 30, 1, 0, time.UTC)); ok || tr.Drifts().appClock {
+		t.Fatal("a tracker with no app clock gives a call a span, or its cache says it knows the application's clock")
+	}
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	if !tr.Drifts().appClock {
+		t.Fatal("SetAppClock left the running cache with no app clock")
+	}
+	tr.Begin()
+	if !tr.Drifts().appClock {
+		t.Fatal("the next test's cache forgot the app clock")
+	}
+	tr.SetAppClock(nil)
+	if tr.Drifts().appClock {
+		t.Fatal("SetAppClock(nil) left the cache with an app clock")
+	}
+}
+
 // A caller whose replay checks no read of the clock, and switches on the
 // kind alone (a parser that writes every KindNoise to the noise its replay
 // skips, and refuses any kind it does not know with its Why), never receives
@@ -585,7 +669,7 @@ func TestACallerThatChecksNoClockReadNeverReceivesOneAsNoise(t *testing.T) {
 		{"a wall clock of no zone the lead moved", wall(rec), wall(lead), nil, ""},
 		{"a wall clock of no zone with no window, read late", wall(rec), wall(late), nil, instantNotClock},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, shape(row.l), shape(row.r), call, nil, nil, nil, row.w)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(row.l), shape(row.r), call, nil, nil, nil, row.w)[0]
 		if o, ok := ln.Clock(); ln.Kind != KindClockRead || ln.Read == nil || !ok || !o.Plain() {
 			t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock, of its own kind", row.what, ln.Kind, ln.Read, ln.Why)
 			continue

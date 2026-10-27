@@ -291,20 +291,20 @@ func TestAValueComesFromTheTestsOwnCallBeforeTheRuns(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	boot := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.x-build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "header.x-build"}}}
 	own := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "header.x-build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "header.x-build"}}}
-	p, ok := appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot, own}, nil)
+	p, ok := appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot, own}, nil)
 	if !ok || !p.Own || p.Mock != "mock-5" {
 		t.Fatalf("the value comes from %+v (%v), want the test's own call", p, ok)
 	}
-	p, ok = appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot}, nil)
+	p, ok = appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{boot}, nil)
 	if !ok || !p.Run || p.Mock != "mock-0" {
 		t.Fatalf("with no own call the value comes from %+v (%v), want the run's", p, ok)
 	}
 	answered := Earlier{Mock: "mock-6", At: t0.Add(time.Minute), Own: true, Seen: []Seen{{Side: Response, Leaf: Leaf{Path: "body.items.0.build", Type: String, Value: "rec-build-1"}, Live: "live-build-7", Place: "body.items.0.build"}}}
-	p, ok = appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered, boot}, nil)
+	p, ok = appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered, boot}, nil)
 	if !ok || !p.Run || p.Side != Request || p.Mock != "mock-0" {
 		t.Fatalf("a value the test's own answer gave, which the start-up sent, comes from %+v (%v), want where it was sent", p, ok)
 	}
-	p, ok = appeared(NewDriftCache(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered}, nil)
+	p, ok = appeared(clockedDrifts(), "rec-build-1", "live-build-7", t0.Add(2*time.Minute), []Earlier{answered}, nil)
 	if !ok || p.Side != Response || p.Mock != "mock-6" {
 		t.Fatalf("a value only an answer gave comes from %+v (%v), want that answer", p, ok)
 	}
@@ -577,17 +577,17 @@ func TestAValueComesFromWhereItWasSentWhole(t *testing.T) {
 	}
 	boot := Earlier{Mock: "mock-0", At: t0, Run: true, Seen: seen("body.docs.msgs.0._id", "rec-id-aaaaaa", "live-id-bbbbbb")}
 	ownPart := Earlier{Mock: "mock-5", At: t0.Add(time.Minute), Own: true, Seen: seen("body.cmd.filter.ref", "USER:rec-id-aaaaaa", "USER:live-id-bbbbbb")}
-	p, ok := appeared(NewDriftCache(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{ownPart, boot}, nil)
+	p, ok := appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{ownPart, boot}, nil)
 	if !ok || !p.Whole || !p.Run || p.Mock != "mock-0" {
 		t.Fatalf("the value comes from %+v (%v), want the start-up's whole place over the test's own part", p, ok)
 	}
 	other := Earlier{Mock: "mock-9", At: t0.Add(-time.Minute), Seen: seen("body.x", "rec-id-aaaaaa", "live-id-bbbbbb")}
-	p, _ = appeared(NewDriftCache(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{other, boot}, nil)
+	p, _ = appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{other, boot}, nil)
 	if !p.Run || p.Mock != "mock-0" {
 		t.Fatalf("the value comes from %+v, want the run's place over another's that is earlier", p)
 	}
 	later := Earlier{Mock: "mock-1", At: t0.Add(time.Second), Run: true, Seen: seen("body.docs.msgs.0._id", "rec-id-aaaaaa", "live-id-bbbbbb")}
-	p, _ = appeared(NewDriftCache(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{boot, later}, nil)
+	p, _ = appeared(clockedDrifts(), "rec-id-aaaaaa", "live-id-bbbbbb", t0.Add(2*time.Minute), []Earlier{boot, later}, nil)
 	if p.Mock != "mock-0" {
 		t.Fatalf("the value comes from %+v, want the earliest of two places of one kind", p)
 	}
@@ -684,7 +684,7 @@ func TestAStartUpCallNamesItsEarlierPlacesEarlierInTheRecording(t *testing.T) {
 	classify := func(tr *Tracker) string {
 		t.Helper()
 		_, earlier, _, _ := tr.Test()
-		got := Classify(NewDriftCache(), []string{path},
+		got := Classify(clockedDrifts(), []string{path},
 			Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "7"}}},
 			Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
 			t0.Add(time.Second), earlier, nil, nil)

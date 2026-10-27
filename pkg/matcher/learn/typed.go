@@ -568,6 +568,13 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 			ln.Kind, ln.Why = KindUnaccounted, why
 			return ln
 		}
+		// Where keploy cannot tell which clock the application reads, no
+		// replay can check such a read: refused here, at learn, whatever the
+		// lead did not show.
+		if !dc.appClock {
+			ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
+			return ln
+		}
 		noWindow = why
 	}
 	// Noise, or an echo, only where the echo could read the test case's own

@@ -342,10 +342,12 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 }
 
 // newDrifts is an empty DriftCache of the tracker's tests: one of keploy
-// mock's client tests where the tracker's are (SetClientTests). t.mu is held.
+// mock's client tests where the tracker's are (SetClientTests), in the
+// application's zone (SetAppZone), with an app clock where the tracker has
+// one (SetAppClock). t.mu is held.
 func (t *Tracker) newDrifts() *DriftCache {
 	dc := NewDriftCache()
-	dc.clientTests, dc.zone = t.clientTests, t.appZone
+	dc.clientTests, dc.zone, dc.appClock = t.clientTests, t.appZone, t.appClock != nil
 	return dc
 }
 
@@ -1082,13 +1084,15 @@ func (t *Tracker) free(base string, reserved, taken map[string]bool) string {
 // SetAppClock makes the tracker read the app's clock through f: the instant
 // the app's clock showed at a real one, false where f cannot tell (the
 // agent's time-freeze hooks, which move the app's clock; nil: none, and no
-// call's window is read).
+// call's window is read, and an instant only a window or a replay's check
+// could show a read of the clock is refused at learn: DriftCache.appClock).
 func (t *Tracker) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	t.appClock = f
+	t.drifts.appClock = f != nil
 	t.mu.Unlock()
 }
 

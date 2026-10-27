@@ -74,7 +74,7 @@ func TestAnInstantBuiltOnAServedOneByAnOffsetIsRefused(t *testing.T) {
 		{"a time of day, the minute", strLeaf(p, offSent.Add(5*time.Minute).Format("15:04")), strLeaf(p, offGot.Add(5*time.Minute).Format("15:04")), "5m0s after"},
 	} {
 		for _, served := range []string{"payloads", "delivered leaf by leaf", "delivered leaf by leaf, recorded before the call too"} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			raw := []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}
 			var earlier []Earlier
 			switch served {
@@ -127,7 +127,7 @@ func TestAnUnreadLeafByLeafPayloadIsRefusedNamingIt(t *testing.T) {
 		{"a word", strLeaf(p, "slot-7"), strLeaf(p, "slot-9")},
 	} {
 		for _, payload := range []string{"unread", "none given", "read"} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			e := Earlier{Mock: delivered.Name, At: delivered.Spec.ReqTimestampMock}
 			switch payload {
 			case "unread":
@@ -180,7 +180,7 @@ func TestADateBuiltOnAServedOneByAnOffsetIsRefused(t *testing.T) {
 		{"text, the day", strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), strLeaf(p, got.Add(-2*day).Format("2006-01-02"))},
 		{"typed, the day", typedLeaf(p, sent.Add(-2*day), day), typedLeaf(p, got.Add(-2*day), day)},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") {
 			t.Errorf("%s: %s from %+v (%s); want it refused, naming the receive and the offset", row.name, ln.Kind, ln.From, ln.Why)
@@ -204,7 +204,7 @@ func TestAReadOfTheClockBesideAMovedPlaceItDoesNotMatchIsNoise(t *testing.T) {
 		{"typed, the minute", typedLeaf(p, now, time.Minute), typedLeaf(p, now.Add(FullRoundLead), time.Minute)},
 		{"typed, the millisecond", typedLeaf(p, now, time.Millisecond), typedLeaf(p, now.Add(FullRoundLead+37*time.Millisecond), time.Millisecond)},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(receive, false), dc.RawOf(delivered, true)}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
@@ -239,17 +239,17 @@ func TestAMoveIsWhatTheFullRoundGaveInPlaceOfTheRecordings(t *testing.T) {
 		{"text, the minute", strLeaf(p, now.Format("2006-01-02T15:04Z07:00")), strLeaf(p, now.Add(FullRoundLead).Format("2006-01-02T15:04Z07:00"))},
 		{"typed, the minute", typedLeaf(p, now, time.Minute), typedLeaf(p, now.Add(FullRoundLead), time.Minute)},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(first, false), dc.RawOf(second, false)}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s, F serving neither: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
 		later1, later2 := *first, *second
 		later1.Spec.ReqTimestampMock, later2.Spec.ReqTimestampMock = r1Insert.Add(time.Second), r1Insert.Add(61*time.Second)
-		dc = NewDriftCache()
+		dc = clockedDrifts()
 		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(&later1, true), dc.RawOf(&later2, true)}, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Errorf("%s, F serving two recorded after the call: %s from %+v (%s); want noise", row.name, ln.Kind, ln.From, ln.Why)
 		}
-		dc = NewDriftCache()
+		dc = clockedDrifts()
 		if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, []Raw{dc.RawOf(first, false), dc.RawOf(second, true)}, nil, nil)[0]; ln.Kind != KindUnaccounted ||
 			!strings.Contains(ln.Why, "the moment mock-4 at spec.resp.body holds as the recording gave it") || !strings.Contains(ln.Why, "the moment mock-5 at spec.resp.body holds, which record's full round gave the application in its place") {
 			t.Errorf("%s, F serving the later: %s from %+v (%s); want it refused, naming both receives", row.name, ln.Kind, ln.From, ln.Why)
@@ -277,7 +277,7 @@ func TestOnlyAnAnswersPlaceMovesForTheOffsetRule(t *testing.T) {
 	const p = "body.processed_at"
 	call := next.Spec.ResTimestampMock.Add(time.Second)
 	now := call.Add(-40 * time.Millisecond)
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	raw := []Raw{dc.RawOf(first, false), dc.RawOf(next, true)}
 	for _, row := range []struct {
 		name      string
@@ -309,7 +309,7 @@ func TestAValueBuiltOnAMovedPartOfTheRequestIsRefused(t *testing.T) {
 		{"text, the minute", strLeaf(p, "2026-10-22T11:14Z"), strLeaf(p, "2026-10-22T11:15Z")},
 		{"typed, the minute", typedLeaf(p, at.Truncate(time.Minute), time.Minute), typedLeaf(p, at.Truncate(time.Minute).Add(time.Minute), time.Minute)},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, row.live, row.rec, at, req, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, row.live, row.rec, at, req, nil, nil, nil)[0]
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 5m0s after the moment test case test-1 at body.since holds as the recording gave it") {
 			t.Errorf("%s: %s from %+v (%s); want it refused, built on the request's since", row.name, ln.Kind, ln.From, ln.Why)
 		}
@@ -329,7 +329,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 	const p = "body.due"
 	day := 24 * time.Hour
 	one := func(r, l Leaf, at time.Time, earlier []Earlier) Learned {
-		return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, at, earlier, nil, nil, nil)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: l}}, Shape{Leaves: map[string]Leaf{p: r}}, at, earlier, nil, nil, nil)[0]
 	}
 	typed := func(at time.Time, res time.Duration) Leaf { return InstantLeaf(p, p, at, res) }
 	for _, row := range []struct {
@@ -379,7 +379,7 @@ func TestAReadOfTheClockIsNoLaterThanItsCall(t *testing.T) {
 		zone  *time.Location
 		noise bool
 	}{{"the application's zone IST", ist, true}, {"UTC alone", nil, false}, {"the application's zone UTC-5", time.FixedZone("EST", -5*3600), false}} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		dc.zone = z.zone
 		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second+FullRoundLead).In(ist).Format("2006-01-02 15:04:05")}}}, Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: "book " + at.Add(-time.Second).In(ist).Format("2006-01-02 15:04:05")}}}, at,
 			[]Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{{Side: Request, Leaf: Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.Add(-time.Second).In(ist).Format("15:04:05")}, Live: "x", Place: "body.at"}}}}, nil, nil, nil)[0]
@@ -503,7 +503,7 @@ func TestAnswersBothRunsGaveOrOfTwoCallsAreNoMove(t *testing.T) {
 			{"text, the second", strLeaf(p, now.Format(time.RFC3339)), strLeaf(p, now.Add(FullRoundLead).Format(time.RFC3339))},
 			{"typed, the second", typedLeaf(p, now, time.Second), typedLeaf(p, now.Add(FullRoundLead), time.Second)},
 		} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			if ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, nil, set.raw(dc), nil, nil)[0]; !noiseOrRead(ln) {
 				t.Errorf("%s, %s: %s from %+v (%s); want noise", set.name, row.name, ln.Kind, ln.From, ln.Why)
 			}
@@ -594,7 +594,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 					return []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(2)}, []Earlier{{Mock: a.Name, At: a.Spec.ReqTimestampMock, Own: true, Payload: RawOf(a, true).ServedAs(1)}}
 				}},
 			} {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				raw, earlier := served.of(dc)
 				ln := ClassifyIn(dc, []string{p}, row.live, row.rec, r1Insert, earlier, raw, nil, nil)[0]
 				if row.name == "text, the hour" {
@@ -631,7 +631,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 	sentB := sentA.Add(2*time.Minute + 311*time.Millisecond)
 	a := receive("mock-4", sentA, time.Date(2026, 10, 22, 11, 14, 13, 778e6, time.UTC))
 	b := receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 16, 20, 0, time.UTC))
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	if ln := ClassifyIn(dc, []string{p}, strLeaf(p, sentB.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), strLeaf(p, sentA.Add(time.Minute).Format("2006-01-02T15:04Z07:00")), r1Insert, nil, []Raw{dc.RawOf(a, false), dc.RawOf(b, true).ServedAs(1)}, nil, nil)[0]; ln.Kind != KindUnaccounted {
 		t.Errorf("B alone served, after the call: %s (%s); want it refused", ln.Kind, ln.Why)
 	}
@@ -649,7 +649,7 @@ func TestRecordingsBothRunsGaveInAnotherOrderAreAMove(t *testing.T) {
 		{"B at the call's own instant, F serving A then B", a, receive("mock-11", sentB, r1Insert), "", ", and"},
 		{"A at the call's own instant, F serving B then A", receive("mock-4", sentA, r1Insert), receive("mock-11", sentB, time.Date(2026, 10, 22, 11, 14, 15, 101e6, time.UTC)), "b", " (recorded at the call's own instant, so keploy reads it as given to the application before the call), and"},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		ra, rb := dc.RawOf(c.a, true).ServedAs(1), dc.RawOf(c.b, true).ServedAs(2)
 		if c.firstA == "b" {
 			ra, rb = dc.RawOf(c.a, true).ServedAs(2), dc.RawOf(c.b, true).ServedAs(1)
@@ -730,7 +730,7 @@ func TestAnInstantBuiltOnAnotherIndexOfAServedListIsRefused(t *testing.T) {
 			{"a time of day", strLeaf(p, "retry at "+recJob.Add(off).Format("15:04")), strLeaf(p, "retry at "+fJob.Add(off).Format("15:04")), true},
 			{"typed", typedLeaf(p, recJob.Add(off).Truncate(time.Minute), time.Minute), typedLeaf(p, fJob.Add(off).Truncate(time.Minute), time.Minute), false},
 		} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			ln := ClassifyIn(dc, []string{p}, row.live, row.rec, call, nil, []Raw{dc.RawOf(rec, false), dc.RawOf(f, true)}, nil, nil)[0]
 			if row.noZone && off == 15*time.Minute {
 				if ln.Kind != KindVariable || !ln.From.Echo || ln.From.Mock != "mock-1" {
@@ -765,7 +765,7 @@ func TestAnotherTestsRecordingIsAPlaceOfTheOffsetAndWordRulesAlone(t *testing.T)
 	}
 	const p = "body.due"
 	day := 24 * time.Hour
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	raw := []Raw{dc.RawOf(receive, true).ServedAs(2).OfAnotherTest(), dc.RawOf(delivered, true).ServedAs(1).OfAnotherTest()}
 	ln := ClassifyIn(dc, []string{p}, strLeaf(p, got.Add(-2*day).Format("2006-01-02")), strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), r1Insert, nil, raw, nil, nil)[0]
 	if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") {
@@ -778,7 +778,7 @@ func TestAnotherTestsRecordingIsAPlaceOfTheOffsetAndWordRulesAlone(t *testing.T)
 		if another {
 			x = x.OfAnotherTest()
 		}
-		ln := ClassifyIn(NewDriftCache(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{x}, nil, nil)[0]
 		if want := map[bool]Kind{false: KindVariable, true: KindUnaccounted}[another]; ln.Kind != want || another && !strings.Contains(ln.Why, "appears in pg-3, a recording record's full round gave the application before the call that is another test's") {
 			t.Errorf("another test's %v: %s from %+v (%s); want %s", another, ln.Kind, ln.From, ln.Why, want)
 		}
@@ -829,7 +829,7 @@ func TestAWordOfAnotherTestsAnswerIsRefusedNamingIt(t *testing.T) {
 		{"the live id in another test's request alone", sentOnly, recID, liveID, ""},
 	} {
 		for _, viaSet := range []bool{false, true} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			x := dc.RawOf(row.m, true).ServedAs(3)
 			var ln Learned
 			if viaSet {
@@ -891,7 +891,7 @@ func TestAnotherTestsAnswerStampIsSearchedWhereTheValueEchoesAStamp(t *testing.T
 			if echoed {
 				earlier = own
 			}
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			x := dc.RawOf(other, true).ServedAs(3).OfAnotherTest()
 			ln := ClassifyIn(dc, []string{p}, strLeaf(p, live), strLeaf(p, rec), r1Insert, earlier, []Raw{x}, nil, nil)[0]
 			if stampHolds && echoed {
@@ -925,7 +925,7 @@ func TestARecordingThatHoldsNoAnswerGaveTheApplicationNothing(t *testing.T) {
 		if answered {
 			m.Spec.GenericResponses = frame(models.FromServer, "VALUE user u-77 at 2026-10-22T11:13:16Z")
 		}
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(m, true).ServedAs(2)
 		places := dc.keyedPlaces(x)
 		if len(places) > 0 != answered {
@@ -975,7 +975,7 @@ func TestAPostgresQueryRecordingGaveTheApplicationOnlyItsAnswer(t *testing.T) {
 		m := &models.Mock{Name: "conn-2", Kind: models.PostgresV3, Spec: models.MockSpec{
 			PostgresV3:       &models.PostgresV3Spec{Type: models.PostgresV3TypeQuery, Query: &q},
 			ReqTimestampMock: r1Insert.Add(-time.Minute), ResTimestampMock: r1Insert.Add(-time.Minute + time.Millisecond)}}
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(m, true).ServedAs(2)
 		places := dc.keyedPlaces(x)
 		if len(places) > 0 != tc.answers {
@@ -1046,27 +1046,27 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	}
 	// A value a place of the call's own test accounts for: the set is not
 	// read, and it is a variable of that place.
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{row}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindVariable || reads != 0 {
 		t.Errorf("a place of the test's own: %s (%s), the set read %d times; want a variable, the set unread", ln.Kind, ln.Why, reads)
 	}
 	// A value a place of the call's own test refuses (a word of it there):
 	// the set is not read.
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	own := Raw{read: true, mock: "pg-5", at: r1Insert.Add(-time.Second), text: `{"params":["77"]}`}
 	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{own}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "pg-5") || reads != 0 {
 		t.Errorf("refused by a place of the test's own: %s (%s), the set read %d times; want it refused, naming pg-5, the set unread", ln.Kind, ln.Why, reads)
 	}
 	// A value of no changed instant whose word F gave earlier in the set:
 	// refused, naming it, never bound; the set read once for the call.
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	if ln := ClassifyGiven(dc, []string{q, "body.user2"}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-77").Leaves[q], "body.user2": strLeaf(q, "u-77").Leaves[q]}}, Shape{Leaves: map[string]Leaf{q: strLeaf(q, "u-12").Leaves[q], "body.user2": strLeaf(q, "u-12").Leaves[q]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil)); ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "appears in pg-3, a recording record's full round gave the application before the call that is another test's") || ln[1].Kind != KindUnaccounted || reads != 1 {
 		t.Errorf("a word F gave earlier in the set: %s (%s), the set read %d times; want it refused, naming pg-3, the set read once", ln[0].Kind, ln[0].Why, reads)
 	}
 	// A changed instant built on what F gave earlier in the set by an
 	// offset: refused, the set read once for the call.
 	reads = 0
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	ln := ClassifyGiven(dc, []string{p, "body.due2"}, Shape{Leaves: map[string]Leaf{p: due(got).Leaves[p], "body.due2": due(got).Leaves[p]}}, Shape{Leaves: map[string]Leaf{p: due(sent).Leaves[p], "body.due2": due(sent).Leaves[p]}}, r1Insert, nil, nil, nil, nil, set(both(dc), nil))
 	if ln[0].Kind != KindUnaccounted || !strings.Contains(ln[0].Why, "stands 48h0m0s before the moment mock-4 at spec.resp.body holds as the recording gave it") || reads != 1 {
 		t.Errorf("an offset from the set: %s (%s), the set read %d times; want it refused, naming the receive, the set read once", ln[0].Kind, ln[0].Why, reads)
@@ -1085,7 +1085,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 			if leaf == q {
 				live, rec = strLeaf(q, "u-77"), strLeaf(q, "u-12")
 			}
-			ln := ClassifyGiven(NewDriftCache(), []string{leaf}, live, rec, r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
+			ln := ClassifyGiven(clockedDrifts(), []string{leaf}, live, rec, r1Insert, nil, nil, nil, nil, set(c.raw, c.err))[0]
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, c.want) {
 				t.Errorf("%s, at %s: %s (%s); want it refused, naming mock-9", name, leaf, ln.Kind, ln.Why)
 			}
@@ -1138,7 +1138,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 	for _, f := range forms {
 		// Nothing gave the application the moment: a read of the clock the
 		// lead moved, learned as noise.
-		if ln := ClassifyIn(NewDriftCache(), []string{p}, f.live, f.rec, at, nil, nil, nil, nil)[0]; !noiseOrRead(ln) {
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, f.live, f.rec, at, nil, nil, nil, nil)[0]; !noiseOrRead(ln) {
 			t.Fatalf("%s given nowhere: %s (%s); want a read of the clock, noise", f.name, ln.Kind, ln.Why)
 		}
 		for _, row := range []struct {
@@ -1153,7 +1153,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 			{"copied, inside a base64 body", base64Receive("mock-36", after, f.copied), "was recorded after the call"},
 		} {
 			for _, viaSet := range []bool{false, true} {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				x := dc.RawOf(row.m, true).ServedAs(2)
 				var ln Learned
 				if viaSet {
@@ -1193,7 +1193,7 @@ func TestATimeCopiedFromWhatFGaveElsewhereIsRefusedNamingIt(t *testing.T) {
 		{"recorded after the call", sentAtReceive("mock-34", after, both, neighbour), "was recorded after the call"},
 	} {
 		for _, viaSet := range []bool{false, true} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			x := dc.RawOf(row.m, true).ServedAs(2)
 			var ln Learned
 			if viaSet {
@@ -1271,7 +1271,7 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 				want = " the moment mock-44 at spec.resp.body holds as the recording gave it (recorded at the call's own instant, so keploy reads it as given to the application before the call), and record's full round saw it "
 			}
 			for _, viaSet := range []bool{false, true} {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				nb := dc.RawOf(sentAtReceive("mock-44", when.at, tc.sent.Format(time.RFC3339)), true).ServedAs(1)
 				var own []Raw
 				if tc.withOwn {
@@ -1300,7 +1300,7 @@ func TestARecordingMadeAtOrAfterTheCallCountsOnlyWhatFServed(t *testing.T) {
 		// it is the source of no change (what changed is the application's
 		// own minute), so the value is noise, never refused naming it.
 		for _, viaSet := range []bool{false, true} {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			nb := dc.RawOf(sentAtReceive("mock-45", when.at, base.Format("2006-01-02")), true).ServedAs(1)
 			var ln Learned
 			if viaSet {
@@ -1328,7 +1328,7 @@ func TestAnUnservedRecordingAtTheCallsOwnInstantIsAnEarlierPlace(t *testing.T) {
 	recID, liveID := "ce3bb3a8-8bbe-4fd8-b25d-1efc489f7323", "0b6e2f1c-5d7a-4e8b-9c3d-2a1f4e6b8c7d"
 	at := r1Insert
 	verdict := func(when time.Time) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(receiveOf("mock-50", liveID, when), false)
 		return ClassifyIn(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, []Raw{x}, nil, nil)[0]
 	}
@@ -1363,7 +1363,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing
 	at := r1Insert
 	for _, viaSet := range []bool{false, true} {
 		verdict := func(when time.Time) Learned {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			x := dc.RawOf(receiveOf("mock-50", recID, when), true).ServedAs(1)
 			if viaSet {
 				return ClassifyGiven(dc, []string{p}, strLeaf(p, liveID), strLeaf(p, recID), at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
@@ -1405,7 +1405,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadAsOneAMomentBefore(t *testing
 	base := recT.Truncate(time.Minute)
 	rec, live := strLeaf(sp, recT.Format(minute)), strLeaf(sp, recT.Add(time.Minute).Format(minute))
 	echo := func(when time.Time) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		x := dc.RawOf(sentAtReceive("mock-51", when, base.Add(65*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 		return ClassifyIn(dc, []string{sp}, live, rec, at, nil, []Raw{x}, nil, nil)[0]
 	}
@@ -1446,7 +1446,7 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	before, after := at.Add(-time.Minute), at.Add(3*time.Minute)
 	const minute = "2006-01-02T15:04Z07:00"
 	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	other, copied := dc.RawOf(sentAtReceive("mock-40", after, recT.Add(-time.Hour).Format(time.RFC3339)), true).ServedAs(1), dc.RawOf(sentAtReceive("mock-41", after, recT.Add(time.Minute).Format(minute)), true).ServedAs(2)
 	ln := ClassifyGiven(dc, []string{p}, live, rec, at, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
 		return []GivenPlaces{PlacesOf(other), PlacesOf(copied)}, nil
@@ -1459,7 +1459,7 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	// recorded before the call, holds 11:14:10, the recorded minute rounded.
 	base := recT.Truncate(time.Minute)
 	for _, viaSet := range []bool{false, true} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 		nb := dc.RawOf(sentAtReceive("mock-43", before.Add(-time.Minute), base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 		if ln := ClassifyIn(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil)[0]; !noiseOrRead(ln) {
@@ -1485,7 +1485,7 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	// (no copy alone), so nothing shows a copy: the value is noise, never
 	// refused naming the later recording as where the recorded moment
 	// stands.
-	dc = NewDriftCache()
+	dc = clockedDrifts()
 	own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 	late := dc.RawOf(sentAtReceive("mock-44", after, base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 	ln = ClassifyGiven(dc, []string{p}, live, rec, at, nil, []Raw{own}, nil, nil, func() ([]GivenPlaces, error) {
@@ -1500,7 +1500,7 @@ func TestTheEchoOfWhatFGaveElsewhereNamesItsPlace(t *testing.T) {
 	// neighbour as where the recorded moment stands, never the later one,
 	// which the recording made the call before.
 	for _, viaSet := range []bool{false, true} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		own := dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 		late := dc.RawOf(sentAtReceive("mock-44", after, base.Add(-10*time.Second).Format(time.RFC3339)), true).ServedAs(1)
 		nb := dc.RawOf(sentAtReceive("mock-43", before.Add(-time.Minute), base.Add(10*time.Second).Format(time.RFC3339)), true).ServedAs(2)
@@ -1541,7 +1541,7 @@ func TestAnOffsetOnARecordingAtTheCallsOwnInstantIsRefused(t *testing.T) {
 		for _, m := range []*models.Mock{receive, delivered} {
 			m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = when, when
 		}
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		raw := []Raw{dc.RawOf(receive, true).ServedAs(2).OfAnotherTest(), dc.RawOf(delivered, true).ServedAs(1).OfAnotherTest()}
 		return ClassifyIn(dc, []string{p}, strLeaf(p, got.Add(-2*day).Format("2006-01-02")), strLeaf(p, sent.Add(-2*day).Format("2006-01-02")), r1Insert, nil, raw, nil, nil)[0]
 	}
@@ -1571,7 +1571,7 @@ func TestARecordingOfAnotherCallAtTheCallsOwnInstantIsWhereTheRecordedMomentStan
 	rec, live := strLeaf(p, recT.Format(minute)), strLeaf(p, recT.Add(time.Minute).Format(minute))
 	base := recT.Truncate(time.Minute)
 	for _, viaSet := range []bool{false, true} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		own := dc.RawOf(sentAtReceive("mock-42", at.Add(-time.Minute), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3)
 		other := sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339))
 		other.Spec.HTTPReq.Method = "GET"
@@ -1636,7 +1636,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	} {
 		for _, hand := range []string{"served in the test", "served before the test", "unserved, the set showing F gave it"} {
 			verdict := func(when time.Time) (string, string) {
-				dc := NewDriftCache()
+				dc := clockedDrifts()
 				m := sentAtReceive("mock-44", when, base.Add(tc.sent).Format(time.RFC3339))
 				var nb Raw
 				var given GivenEarlier
@@ -1692,7 +1692,7 @@ func TestAServedRecordingAtTheCallsOwnInstantIsReadBothWays(t *testing.T) {
 	// first binds the value to the own place without reading the set. A
 	// value one reading binds and the other refuses is refused (fail
 	// closed), and the reason says where the first would have bound it.
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	raw := []Raw{
 		dc.RawOf(sentAtReceive("mock-44", at, base.Add(10*time.Second).Format(time.RFC3339)), false),
 		dc.RawOf(sentAtReceive("mock-42", before, base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(3),
@@ -1795,8 +1795,8 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 					if rc.at.After(at) {
 						twin = twin.OfAnotherTest()
 					}
-					asRaw := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, nil, append([]Raw{twin}, ownRaw...), nil, nil, nil)[0]
-					got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, rc.own, nbN)}, ownRaw, nil, nil, nil)[0]
+					asRaw := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, nil, append([]Raw{twin}, ownRaw...), nil, nil, nil)[0]
+					got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, rc.own, nbN)}, ownRaw, nil, nil, nil)[0]
 					if f.copy && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44")) {
 						t.Errorf("FALSE GREEN? %s: %s (%s); want it refused naming mock-44, whose answer F served before the call", name, got.Kind, got.Why)
 					}
@@ -1821,7 +1821,7 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 				e.Seen[i].Live = servedAs
 			}
 		}
-		got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]
+		got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]
 		copied := servedAs != base.Add(10*time.Second).Format(time.RFC3339)
 		if copied && (got.Kind != KindUnaccounted || !strings.Contains(got.Why, "mock-44 at spec.resp.body.Messages[0].SentAt")) {
 			t.Errorf("FALSE GREEN? F served %s at a leaf of an exchange recorded after the call that holds 15:50:10: %s (%s); want it refused naming the leaf F served it at", servedAs, got.Kind, got.Why)
@@ -1835,7 +1835,7 @@ func TestAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testing.T) {
 	// it and why, never read as nothing.
 	e := leafedOf(sentAtReceive("mock-44", at.Add(30*time.Second), base.Add(10*time.Second).Format(time.RFC3339)), true, 1)
 	e.Payload = Raw{}
-	if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]; got.Kind != KindUnaccounted || !strings.Contains(got.Why, "was given no payload of mock-44") {
+	if got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, nil, nil, nil, nil)[0]; got.Kind != KindUnaccounted || !strings.Contains(got.Why, "was given no payload of mock-44") {
 		t.Errorf("FALSE GREEN? an exchange recorded after the call with no payload: %s (%s); want it refused, naming it", got.Kind, got.Why)
 	}
 }
@@ -1885,7 +1885,7 @@ func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
 					}
 				}
 				name := rc.name + ", " + leaf + " served " + servedAs
-				got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{RawOf(m43, false)}, nil, nil, nil)[0]
+				got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, []Raw{RawOf(m43, false)}, nil, nil, nil)[0]
 				if servedAs == recorded {
 					if !noiseOrRead(got) {
 						t.Errorf("%s: %s (%s); want noise: the leaf served as recorded names no moment of F's", name, got.Kind, got.Why)
@@ -1902,7 +1902,7 @@ func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
 	}
 	m43 := RawOf(sentAtReceive("mock-43", at.Add(-3*time.Second), "2026-10-22T11:09:10Z"), true).ServedAs(1)
 	e := leafedOf(sentAtReceive("mock-44", at.Add(-time.Second), template), true, 2)
-	if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{m43}, nil, nil, nil)[0]; !noiseOrRead(got) {
+	if got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, []Raw{m43}, nil, nil, nil)[0]; !noiseOrRead(got) {
 		t.Errorf("two recordings both runs gave in the recording's order, the later one's leaf served as recorded: %s (%s); want noise", got.Kind, got.Why)
 	}
 	// What F served at the leaf is no place the recording gave the
@@ -1924,7 +1924,7 @@ func TestAnOffsetOnWhatFServedAtAnExchangesLeafIsRefused(t *testing.T) {
 					e.Seen[i].Live = template
 				}
 			}
-			if got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{e}, []Raw{x43}, nil, nil, nil)[0]; !noiseOrRead(got) {
+			if got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{e}, []Raw{x43}, nil, nil, nil)[0]; !noiseOrRead(got) {
 				t.Errorf("mock-43 served as serve %d, mock-44 recorded %v from the call, its leaf served %s: %s (%s); want noise: what F served there is no place the recording gave the application", n43, when, template, got.Kind, got.Why)
 			}
 		}
@@ -1966,8 +1966,8 @@ func TestAnExchangeWithNoRecordedTimeIsReadBothWays(t *testing.T) {
 				ownRaw = []Raw{RawOf(sentAtReceive("mock-42", at.Add(-time.Second), base.Add(45*time.Second).Format(time.RFC3339)), true).ServedAs(2)}
 			}
 			nb := sentAtReceive("mock-44", time.Time{}, f.sent)
-			got := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, true, 1)}, ownRaw, nil, nil, nil)[0]
-			twin := ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, []Earlier{leafedOf(sentAtReceive("mock-44", at, f.sent), true, 1)}, ownRaw, nil, nil, nil)[0]
+			got := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{leafedOf(nb, true, 1)}, ownRaw, nil, nil, nil)[0]
+			twin := ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, []Earlier{leafedOf(sentAtReceive("mock-44", at, f.sent), true, 1)}, ownRaw, nil, nil, nil)[0]
 			if got.Kind != twin.Kind {
 				t.Errorf("%s: %s (%s); the same exchange recorded at the call's own instant is %s (%s)", name, got.Kind, got.Why, twin.Kind, twin.Why)
 			}
@@ -2047,7 +2047,7 @@ func TestARecordingWithNoRecordedTimeIsReadBothWays(t *testing.T) {
 							return []GivenPlaces{PlacesOf(RawOf(sentAtReceive("mock-44", rat, f.sent), true).ServedAs(1))}, nil
 						}
 					}
-					return ClassifyGiven(NewDriftCache(), []string{p}, live, rec, at, nil, nb(rat), nil, nil, given)[0]
+					return ClassifyGiven(clockedDrifts(), []string{p}, live, rec, at, nil, nb(rat), nil, nil, given)[0]
 				}
 				got, twin := read(time.Time{}), read(at)
 				if got.Kind != twin.Kind {
