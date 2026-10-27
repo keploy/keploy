@@ -107,7 +107,7 @@ func (p *servingProxy) noteMiss(err error) {
 			uc.At = rep.At
 		}
 		if rep.MissKind == models.MissExtraCall {
-			uc.Kind, uc.Recorded = models.MissExtraCall, rep.Recorded
+			uc.Kind, uc.Recorded, uc.Read = models.MissExtraCall, rep.Recorded, rep.Read
 		}
 	}
 	p.mu.Lock()

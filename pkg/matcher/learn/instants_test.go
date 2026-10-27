@@ -2139,3 +2139,22 @@ func TestAWallClockOfNoZoneFitOnOneSideIsNoEcho(t *testing.T) {
 		t.Errorf("a wall clock F's side alone fits: %s from %+v (%s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 }
+
+func TestTokenValue(t *testing.T) {
+	for _, tc := range []struct {
+		rec, v, live, want string
+		ok                 bool
+	}{
+		{"e2e-role-1792678689546", "1792678689546", "e2e-role-1792678752275", "1792678752275", true},
+		{"a-17926786-b-17926786", "17926786", "a-99-b-99", "99", true},
+		{"a-17926786-b-17926786", "17926786", "a-99-b-98", "", false},
+		{"e2e-role-1792678689546", "1792678689546", "e2e-admin-1792678752275", "", false},
+		{"e2e-role-1792678689546", "1792678689546", "e2e-role-1792678689546", "", false},
+		{"order-1792678689546x", "1792678689546", "order-1x", "", false},
+	} {
+		got, ok := TokenValue(tc.rec, tc.v, tc.live)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("TokenValue(%q, %q, %q) = %q, %v; want %q, %v", tc.rec, tc.v, tc.live, got, ok, tc.want, tc.ok)
+		}
+	}
+}

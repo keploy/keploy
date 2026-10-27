@@ -17,10 +17,12 @@ import (
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -185,11 +187,15 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		// (LeftOutClientClosedPartway): the client gave up on the call (its
 		// timeout) or wanted no more of it, and nothing tells which. Recorded
 		// as far as the client had it, a call that timed out at record would
-		// be served a complete-looking shorter response at replay. An
-		// observe-only capture carries only what the client read, so when its
-		// stream ended with the connection (EndedWithConnection) it is the
-		// client that stopped reading and closed, and the response is
-		// recorded as the client had it (FinalHTTP.RespReadInPart).
+		// be served a complete-looking shorter response at replay. Nor is it
+		// the server's doing when the client went away where the relay had
+		// not ended the stream so (clientLeft, below: the client reset the
+		// connection, or keploy's write of a chunk it gave the parser
+		// failed). An observe-only capture carries only what the
+		// client read, so when its stream ended with the connection
+		// (EndedWithConnection) it is the client that stopped reading and
+		// closed, and the response is recorded as the client had it
+		// (FinalHTTP.RespReadInPart).
 		streamEnded := false
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, fakeconn.ErrClosed) {
@@ -233,13 +239,31 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return nil
 		}
 
+		// Where keploy relays the connection, a stream that ended in the
+		// middle of the response because the client went away (it closed or
+		// reset the connection, and keploy could not hand it the server's
+		// next bytes: Session.ReceiverGone) ended where the client left the
+		// response. Under the proven switch the response is recorded as
+		// keploy relayed it to the client, less the bytes of the write that
+		// failed, which never reached it (FinalHTTP.ClientLeft). A stream
+		// the server ended, or the capture lost, is not that, and is not
+		// recorded, as before.
+		clientLeft := false
+		if streamEnded && !sess.Opts.SkipTLSMITM && provenswitch.On() {
+			var undelivered int
+			if undelivered, clientLeft = sess.ReceiverGone(fakeconn.FromDest); clientLeft {
+				finalResp = finalResp[:len(finalResp)-min(undelivered, len(finalResp))]
+			}
+		}
+
 		// Build and emit the mock. Identical shape to the legacy path.
 		mock, err := h.buildHTTPMock(&FinalHTTP{
 			Req:              finalReq,
 			Resp:             finalResp,
 			ReqTimestampMock: reqTs,
 			ResTimestampMock: resTs,
-			RespReadInPart:   streamEnded && sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest),
+			RespReadInPart:   streamEnded && (clientLeft || sess.Opts.SkipTLSMITM && sess.EndedWithConnection(fakeconn.FromDest)),
+			ClientLeft:       clientLeft,
 		}, destPort, sess.ClientConnID, sess.Opts)
 		if err != nil {
 			sess.ReportStoppedOn(models.HTTP, reqTs, "http decode error: "+err.Error())
@@ -247,6 +271,17 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		if mock != nil {
+			// The client's going away is a write the relay could not make,
+			// which marked the exchange incomplete (relay.MarkWriteError):
+			// that mark is this response's end, recorded as the client had
+			// it, and leaves nothing out. Any other mark is a loss of the
+			// capture's, and leaves the mock out as ever.
+			if clientLeft {
+				if reason, marked := sess.TakeMockIncomplete(); marked && reason != relay.MarkWriteError {
+					sess.ReportLeftOut(mock, reason)
+					continue
+				}
+			}
 			// EmitMock takes the incomplete-mock flag itself. Clearing it
 			// again here would wipe a mark set while EmitMock delivered
 			// (on another goroutine, meanwhile): that mark is the
@@ -733,6 +768,15 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		"operation": req.Method,
 		"connID":    connID,
 	}
+	// A response the client left before its end: cut short where it left,
+	// or one whose end is the server's close (no length, not chunked), which
+	// the client did not wait for. A replay serves the part it had, and no
+	// end (metaClientLeft).
+	closeDelimited := respParsed.ContentLength < 0 && len(respParsed.TransferEncoding) == 0
+	if m.ClientLeft && (cut || closeDelimited) && !responseHasNoBody(req.Method, respParsed.StatusCode) {
+		meta[metaClientLeft] = "true"
+	}
+
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("V2: request is a passThrough, skipping mock emit",
 			zap.Any("metadata", utils.GetReqMeta(req)))
@@ -776,12 +820,21 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 		}
 	}
 
+	// A browser's CORS preflight is protocol-phase (isCORSPreflight): tagged
+	// config, so a replay serves it to every test as often as the browser
+	// sends it, and no test owns it.
+	preflight := isCORSPreflight(req)
+	if preflight {
+		meta["type"] = "config"
+	}
+
 	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
 	// type tag older replayers read: an exchange is the data of the test it
-	// was made in, a recordOne representative is served to every test.
+	// was made in, a recordOne representative and a CORS preflight are served
+	// to every test.
 	ptLifetime := models.LifetimePerTest
 	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
-	if ptRecordOne {
+	if ptRecordOne || preflight {
 		ptLifetime = models.LifetimeSession
 		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}

@@ -53,6 +53,9 @@ type provenWire struct {
 	// directory.
 	key string
 	dir string
+	// browser: the current claim's harness drives a browser page
+	// (models.InstanceReq.Browser), whose reads are judged count-free.
+	browser bool
 	// open is the open test's ID, "" when none is.
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
@@ -343,7 +346,7 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 		now := time.Now()
 		a.proven.claims = append(a.proven.claims, models.ScopeWindow{Claim: key, Start: now, End: now})
 	}
-	a.proven.key, a.proven.dir = key, req.Dir
+	a.proven.key, a.proven.dir, a.proven.browser = key, req.Dir, req.Browser
 	a.provenMu.Unlock()
 	if newClaim {
 		// The instance is a scope of its own outside its tests: two
@@ -361,11 +364,20 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 					"keploy could not start the calls of "+key+" made outside its tests afresh: "+err.Error(), "check the agent's log")
 			}
+			// So do the variables those calls bind: what the new claim's
+			// beforeAll mints is bound anew, for the key's tests.
+			a.beginClaimVariables(key)
 		}
 		// Calls made from now while no test is open are this key's.
 		if err := a.applyPool(ctx); err != nil {
 			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 				"keploy could not arm the recorded calls of "+key+" made outside its tests: "+err.Error(), "check the agent's log")
+		}
+		// What the key does outside its tests runs on the clock its tests
+		// run on when they all run on real time (RealOutsideClock).
+		if err := a.claimTestClock(ctx, key); err != nil {
+			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+				"keploy could not set the run's clock outside the tests of "+key+": "+err.Error(), "check the agent's log")
 		}
 	}
 	// The clock record the run's processes read: the integration exports it
@@ -772,6 +784,15 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 			a.logger.Warn("keploy could not stop serving the test before reading it; its end serves the pool again", zap.String("test", id), zap.Error(err))
 		}
 		ev, readErr = a.testEvidence(ctx, id, outcome != models.ScopeOutcomeSkipped)
+		a.provenMu.Lock()
+		browser := a.proven.browser
+		a.provenMu.Unlock()
+		if readErr == nil && browser {
+			// A browser page's reads made more or fewer times than
+			// recorded, where only the count differs, are said, not
+			// counted (count_free_proven.go).
+			a.countFree(id, ev, outcome == models.ScopeOutcomePassed, beganAt)
+		}
 	}
 	if len(incomplete) > 0 {
 		if ev == nil {
@@ -826,7 +847,7 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
-	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
+	if ev != nil && (ev.Reason != "" || !ev.Empty() || len(ev.CountFree) > 0) {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
@@ -1286,7 +1307,7 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 	out := models.UnmatchedCall{Protocol: m.Protocol, Destination: m.Destination, MatchPhase: m.MatchPhase,
 		ClosestMock: m.ClosestMock, NextSteps: nextStepOf(m), At: m.At, ActualSummary: models.MissShape(m), Differs: models.FieldShapes(m.Differs),
-		Kind: m.Kind, Recorded: m.Recorded, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
+		Kind: m.Kind, Recorded: m.Recorded, Read: m.Read, NotOwned: m.NotOwned, Reason: m.Reason, Concurrent: m.Concurrent.Clone(),
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
 		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn,

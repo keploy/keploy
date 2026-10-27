@@ -353,7 +353,7 @@ func (r *Relay) handleUpgradeTLS(ctx context.Context, stopping <-chan struct{}, 
 				// whatever this connection records next is missing its
 				// head. Say so rather than scoring the mock clean.
 				if r.cfg.OnMarkMockIncomplete != nil {
-					r.cfg.OnMarkMockIncomplete("write_error")
+					r.cfg.OnMarkMockIncomplete(MarkWriteError)
 				}
 				r.endUpgradePause(heldAtEntry, false, barrierTeeOffset)
 				return directive.Ack{
@@ -919,7 +919,7 @@ func (r *Relay) handleReleaseClient(ctx context.Context, stopping <-chan struct{
 		)
 	}
 	if err != nil && r.cfg.OnMarkMockIncomplete != nil {
-		r.cfg.OnMarkMockIncomplete("write_error")
+		r.cfg.OnMarkMockIncomplete(MarkWriteError)
 	}
 
 	// Deliver anything the D2C forwarder stashed at the pause boundary

@@ -282,7 +282,7 @@ func (a *Agent) closeWindow(name string, pid int, at time.Time) bool {
 		if len(meta.unread) > 0 {
 			ev = withUnread(ev, meta.unread)
 		}
-		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real})
+		a.scopeWindows = append(a.scopeWindows, models.ScopeWindow{Name: name, Start: start, End: boundaryTime(at), PID: uint32(pid), Dir: meta.dir, Suite: meta.suite, Outcome: meta.outcome, Evidence: ev, Real: meta.real, Given: meta.given})
 		delete(a.scopeMeta, k)
 	}
 	a.scopeMu.Unlock()
@@ -461,6 +461,9 @@ type scopeMeta struct {
 	// whose container the Docker daemon did not answer the read of
 	// (unreadMock): its window says so as it closes.
 	unread models.CaptureLosses
+	// given is, in a record, what the test's harness gave while it was open
+	// (Give), in order.
+	given []models.GivenValue
 }
 
 func (a *Agent) NoteScope(name string, pid int, dir string, suite bool) {

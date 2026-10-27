@@ -84,7 +84,7 @@ func (c HTTPStreamChunk) ValueByKey(key string) (string, bool) {
 // as a YAML sequence of chunks. Otherwise, it is written as a plain scalar string.
 func (h HTTPResp) MarshalYAML() (interface{}, error) {
 	bodyNode := &yamlLib.Node{}
-	if chunks, ok := streamChunksForYAML(h); ok {
+	if chunks, ok := streamChunksForYAML(h); ok && (!h.exactBody || streamChunksGiveBack(chunks, h)) {
 		// Streaming response — encode as a YAML sequence of chunks
 		bodyNode = encodeStreamChunksNode(chunks)
 	} else {
@@ -185,6 +185,13 @@ func (h *HTTPResp) UnmarshalYAML(node *yamlLib.Node) error {
 	h.StreamBody = streamChunks
 
 	return nil
+}
+
+// streamChunksGiveBack reports whether chunks, h's body as the chunks of a
+// stream (streamChunksForYAML), read back as h's body byte for byte
+// (decodeStreamBody). A body given only as chunks (Body empty) is its chunks.
+func streamChunksGiveBack(chunks []HTTPStreamChunk, h HTTPResp) bool {
+	return h.Body == "" || streamChunksToLegacyBody(chunks, detectStreamBodyKind(h.Header)) == h.Body
 }
 
 // ── Stream body kind detection ─────────────────────────────────────────────────

@@ -117,11 +117,15 @@ func encodeMockInPlace(mock *models.Mock) (any, bool) {
 
 // The specs EncodeMock and encodeMockInPlace both write, built once.
 
+// httpSpecOf's response is written with its body exactly as it is
+// (models.HTTPResp.WithExactBody): a replay serves a mock's body as it was
+// recorded, so a streamed one is written as its chunks only when they give it
+// back byte for byte.
 func httpSpecOf(mock *models.Mock) models.HTTPSchema {
 	return models.HTTPSchema{
 		Metadata:         mock.Spec.Metadata,
 		Request:          *mock.Spec.HTTPReq,
-		Response:         *mock.Spec.HTTPResp,
+		Response:         mock.Spec.HTTPResp.WithExactBody(),
 		Created:          mock.Spec.Created,
 		ReqTimestampMock: mock.Spec.ReqTimestampMock,
 		ResTimestampMock: mock.Spec.ResTimestampMock,

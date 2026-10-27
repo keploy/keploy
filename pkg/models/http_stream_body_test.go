@@ -540,6 +540,50 @@ func TestHTTPResp_MarshalYAML_StreamContentTypesStillFrame(t *testing.T) {
 	}
 }
 
+// A mock's response is served as recorded, byte for byte, and the app reads a
+// stream by its bytes: an NDJSON reader takes a line once its newline comes.
+// The chunks of a stream keep its frames, not its bytes (the newline after the
+// last line, blank lines, CRs, an SSE field's space after its colon), so a
+// response written with its body exact (WithExactBody, as the mock writer
+// writes it) is chunked only where the chunks give the body back, and is flat
+// otherwise. A test case's response keeps the chunked form, whose frames its
+// stream comparison reads.
+func TestHTTPResp_YAML_WithExactBodyKeepsAStreamsBytes(t *testing.T) {
+	roundTrip := func(t *testing.T, in HTTPResp) (string, HTTPResp) {
+		t.Helper()
+		out, err := yamlLib.Marshal(in)
+		require.NoError(t, err)
+		var got HTTPResp
+		require.NoError(t, yamlLib.Unmarshal(out, &got))
+		return string(out), got
+	}
+	ndjson := map[string]string{"Content-Type": "application/x-ndjson"}
+	sse := map[string]string{"Content-Type": "text/event-stream"}
+	for _, tc := range []struct {
+		name    string
+		header  map[string]string
+		body    string
+		chunked bool // with its body exact, still written as chunks
+	}{
+		{"NDJSON lines, each with its newline", ndjson, "{\"p\":1}\n{\"p\":2}\n", false},
+		{"NDJSON with a blank keepalive line", ndjson, "{\"p\":1}\n\n{\"p\":2}", false},
+		{"NDJSON cut before the last newline", ndjson, "{\"p\":1}\n{\"p\":2}", true},
+		{"SSE events", sse, "data: {\"p\":1}\n\ndata: {\"p\":2}\n\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := HTTPResp{StatusCode: 200, Header: tc.header, Body: tc.body}
+
+			text, got := roundTrip(t, in.WithExactBody())
+			assert.Equal(t, tc.body, got.Body, "a mock's body read back:\n%s", text)
+			assert.Equal(t, tc.chunked, len(got.StreamBody) > 0, "written as chunks:\n%s", text)
+
+			// A test case's is written as chunks, as before.
+			text, got = roundTrip(t, in)
+			assert.NotEmpty(t, got.StreamBody, "a test case's stream is no longer chunked:\n%s", text)
+		})
+	}
+}
+
 // framesData is the fields of each frame, what a stream is compared by (a
 // frame's TS is when it came).
 func framesData(chunks []HTTPStreamChunk) [][]HTTPStreamDataField {

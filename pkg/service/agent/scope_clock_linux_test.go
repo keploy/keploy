@@ -308,3 +308,51 @@ func TestASessionResetGivesBackAClockTakenAfterTheRelease(t *testing.T) {
 	_, serr = a.ProvenBegin(ctx, begin("TestNew"))
 	require.Nil(t, serr, "the new session's test begins")
 }
+
+// On the wire, a replay's claim sets the run's clock outside tests: a
+// Playwright worker's own claim and a spec with a test that runs at its
+// recorded begin keep the start time, and a spec whose recorded tests all use
+// mock.real puts it on real time from its claim, before its beforeAll, until
+// the next claim. A record's claims move nothing: it runs on real time.
+func TestTheWireClaimSetsTheClockOutsideTests(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &outsideClockHooks{realClockHooks{clockHooks{file: "/tmp/kclk1/t"}}}
+	useHooks(t, h)
+	a, _ := wireAgent(t, models.MODE_TEST)
+	storeMocks(a)
+	ctx := context.Background()
+	b := time.Date(2026, 10, 6, 9, 1, 0, 0, time.UTC)
+	stripe := []string{"api.stripe.com:443"}
+	require.NoError(t, a.SetTestBegins(ctx,
+		map[string]time.Time{"e2e/a.spec.ts::pays": b, "e2e/b.spec.ts::lists": b},
+		map[string][]string{"e2e/a.spec.ts::pays": stripe}))
+	claim := func(a *Agent, key string) {
+		t.Helper()
+		_, serr := a.ClaimInstance(ctx, models.InstanceReq{Key: key}, os.Getpid())
+		require.Nil(t, serr)
+	}
+	run := func(file, name string) {
+		t.Helper()
+		_, serr := a.ProvenBegin(ctx, models.ScopeReq{Name: name, File: file, CanSkip: true})
+		require.Nil(t, serr)
+		_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: name, File: file, Outcome: models.ScopeOutcomePassed})
+		require.Nil(t, serr)
+	}
+	claim(a, "chromium")
+	claim(a, "e2e/a.spec.ts")
+	run("e2e/a.spec.ts", "pays")
+	claim(a, "e2e/b.spec.ts")
+	run("e2e/b.spec.ts", "lists")
+	require.Equal(t, []string{
+		"outside real",
+		"real e2e/a.spec.ts::pays", "end e2e/a.spec.ts::pays",
+		"outside start",
+		"begin e2e/b.spec.ts::lists 2026-10-06T09:01:00Z", "end e2e/b.spec.ts::lists",
+	}, h.moves)
+
+	h.moves = nil
+	r, _ := wireAgent(t, models.MODE_RECORD)
+	require.NoError(t, r.SetTestBegins(ctx, nil, map[string][]string{"e2e/a.spec.ts::pays": stripe}))
+	claim(r, "e2e/a.spec.ts")
+	require.Empty(t, h.moves)
+}

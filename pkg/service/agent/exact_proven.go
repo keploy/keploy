@@ -116,6 +116,18 @@ func (a *Agent) restartKey(key string) error {
 	return r.RestartExactKey(key, names)
 }
 
+// beginClaimVariables starts the claim key's variables, those its calls made
+// outside every test bind, afresh on the proxy (coreAgent.ClaimVariables),
+// and the learn step's record of those calls, under the proven switch.
+func (a *Agent) beginClaimVariables(key string) {
+	if !provenswitch.On() {
+		return
+	}
+	if cv, ok := a.Proxy.(coreAgent.ClaimVariables); ok {
+		cv.BeginClaimVariables(key)
+	}
+}
+
 // serveTestExactly opens test id under exact serving: its test mocks, the
 // data-plane mocks of its mapping, in recorded order, and its variables, with
 // none bound, in the same step (openExactTest). A mapping that names a mock

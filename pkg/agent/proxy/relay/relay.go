@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
@@ -990,7 +991,7 @@ func (r *Relay) forward(
 			mark := ""
 			switch {
 			case werr != nil:
-				mark = "write_error"
+				mark = MarkWriteError
 			case wn != n:
 				mark = "short_write"
 			}
@@ -1005,6 +1006,9 @@ func (r *Relay) forward(
 			if dir == fakeconn.FromDest {
 				fate = r.destWritten(ctx, t, seq, chunk, finBefore, from, mark)
 			}
+			// Whether the parser was given this chunk now: a chunk set
+			// aside or refused is not.
+			teed := false
 			if fate == fateTee {
 				// Tee regardless of Write outcome: the bytes were
 				// observed, the parser gets to see them. If Write failed
@@ -1014,7 +1018,7 @@ func (r *Relay) forward(
 				if r.cfg.beforeTee != nil {
 					r.cfg.beforeTee(dir)
 				}
-				teed := t.push(chunk)
+				teed = t.push(chunk)
 				r.noteCarried(t, chunk, teed)
 				// On a successful client→dest tee, signal the supervisor
 				// that a request chunk is in flight and awaiting a mock
@@ -1040,6 +1044,16 @@ func (r *Relay) forward(
 						zap.Int("written_bytes", wn),
 						zap.Error(werr),
 					)
+				}
+				// This chunk is the direction's last: the forwarder
+				// returns. Say so first, with what of it the peer never
+				// took, so a parser that reaches the stream's end knows
+				// the peer left there (Config.OnReceiverGone). Only for a
+				// chunk the parser was given now: a refused one is no
+				// part of its stream, which ended where the client
+				// stopped (Config.ClientStopped).
+				if teed && r.cfg.OnReceiverGone != nil {
+					r.cfg.OnReceiverGone(dir, n-max(wn, 0))
 				}
 				// Marked only for a chunk teed now. A chunk set aside
 				// is marked if it is teed in the end (settle). One the
@@ -1088,6 +1102,13 @@ func (r *Relay) forward(
 				}
 				return io.EOF
 			}
+			// The client reset the connection: the relay stops reading
+			// the destination, whose stream ends here because the client
+			// left (Config.OnReceiverGone). A clean EOF is not that: a
+			// client that half-closes may still read its answer.
+			if dir == fakeconn.FromClient && errors.Is(err, syscall.ECONNRESET) && r.cfg.OnReceiverGone != nil {
+				r.cfg.OnReceiverGone(fakeconn.FromDest, 0)
+			}
 			// A SetReadDeadline-driven timeout fired by beginPause
 			// (and cleared by endPause once the pause lifts) is the
 			// expected wake-up path that lets a forwarder blocked
@@ -1113,6 +1134,11 @@ func (r *Relay) forward(
 		}
 	}
 }
+
+// MarkWriteError is the reason the relay marks a mock incomplete for
+// (Config.OnMarkMockIncomplete) when it could not write bytes on to their
+// peer: the peer did not get them.
+const MarkWriteError = "write_error"
 
 // readNow is the time a forwarder stamps a chunk it read with when its socket
 // reports none ([Config.readClock]; nil: time.Now).

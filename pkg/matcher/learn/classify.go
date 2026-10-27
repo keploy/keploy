@@ -77,6 +77,11 @@ type Earlier struct {
 	// Own: the mock is one of the test's own, not the pool's. Only a test's
 	// own mocks carry its variables.
 	Own bool
+	// Outside: a pool call made outside every test under the claim key the
+	// test runs in (a Playwright beforeAll): its values are the key's, which
+	// the key's tests carry (Tracker.ServedOutside). A claimed run's calls
+	// outside its tests are its keys', never the run's (Run).
+	Outside bool
 	// Run: served while no test was open (Tracker.Served): a variable bound
 	// at it is the run's, which every later test uses (Tracker.RunName).
 	Run bool
@@ -433,6 +438,9 @@ type Place struct {
 	Whole bool
 	// Own: the mock is one of the test's own (Earlier.Own).
 	Own bool
+	// Outside: the mock is a call of the claim key made outside every test
+	// (Earlier.Outside).
+	Outside bool
 	// Run: the mock was served while no test was open (Earlier.Run).
 	Run bool
 	// Given: the place is the test case's own request (Earlier.Given), no
@@ -499,6 +507,10 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// Echoed: the drift is unaccounted only because a word of what changed
+	// comes back in the call's own answer (echoedPart), which a variable
+	// that answers those places with this run's value accounts for.
+	Echoed bool
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -1069,7 +1081,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// cannot answer with this run's value.
 		if ln.Kind == KindNoise {
 			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
-				ln.Kind, ln.Why = KindUnaccounted, why
+				ln.Kind, ln.Why, ln.Echoed = KindUnaccounted, why, true
 			}
 		}
 		// Words the word rule let go in record's full round: noise only
@@ -1546,11 +1558,13 @@ type DriftCache struct {
 	// beside UTC (Tracker.SetAppZone), nil for UTC alone: a client test's
 	// window reads such a wall clock in those two only (Window.holdsRead),
 	// and so does the clock rule of one its protocol types (instantClock).
-	zone   *time.Location
-	mu     sync.Mutex
-	m      map[driftKey]*valueDrift
-	raw    map[string]string
-	rawTok map[string][]map[string]bool
+	zone *time.Location
+	mu   sync.Mutex
+	m    map[driftKey]*valueDrift
+	// texts is what each payload's text reads as (rawExtra, rawTokens), kept
+	// for the set (Tracker.NewSet), not for one test: it depends on the text
+	// alone.
+	texts *textCache
 	// mockText is each mock as Classify reads it (RawOf: its text and its
 	// answer's clock reads), by mock: the store's mocks are read once per
 	// test, not once per request.
@@ -1615,8 +1629,55 @@ func (dc *DriftCache) InstantClockRead(rec, live Leaf, w *Window) bool {
 }
 
 // NewDriftCache makes an empty cache.
-func NewDriftCache() *DriftCache {
-	return &DriftCache{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, spans: map[string][]instant{}}
+func NewDriftCache() *DriftCache { return newDriftCacheOn(newTextCache()) }
+
+// newDriftCacheOn is an empty cache that reads payload texts through texts,
+// which the caches of one set's tests share (Tracker.newDrifts).
+func newDriftCacheOn(texts *textCache) *DriftCache {
+	return &DriftCache{m: map[driftKey]*valueDrift{}, texts: texts, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, spans: map[string][]instant{}}
+}
+
+// textCache keeps what each payload's text reads as: its other declared
+// forms (rawExtra) and their words by reading (rawTokens). Both depend on
+// the text alone, so one set's recordings are read once for the set, not
+// once for every test: reading them again at each test's begin was a large
+// part of a learned call's time, and grew with the recording before it. A
+// nil cache reads each text now and keeps nothing.
+type textCache struct {
+	mu     sync.Mutex
+	extra  map[string]string
+	tokens map[string][]map[string]bool
+}
+
+func newTextCache() *textCache {
+	return &textCache{extra: map[string]string{}, tokens: map[string][]map[string]bool{}}
+}
+
+// read is the text's other forms, one per line, and its words in every
+// form by reading, each read once (textForms) for both.
+func (c *textCache) read(text string) (string, []map[string]bool) {
+	c.mu.Lock()
+	extra, ok := c.extra[text]
+	toks := c.tokens[text]
+	c.mu.Unlock()
+	if ok {
+		return extra, toks
+	}
+	forms := textForms(text)
+	extra = strings.Join(forms[1:], "\n")
+	for _, word := range readings {
+		set := map[string]bool{}
+		for _, f := range forms {
+			for w := range tokensBy(f, word) {
+				set[w] = true
+			}
+		}
+		toks = append(toks, set)
+	}
+	c.mu.Lock()
+	c.extra[text], c.tokens[text] = extra, toks
+	c.mu.Unlock()
+	return extra, toks
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -1692,34 +1753,16 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 // rawTokens are every word of a payload's text in every declared form, by
 // reading.
 func (dc *DriftCache) rawTokens(text string) []map[string]bool {
-	dc.mu.Lock()
-	t, ok := dc.rawTok[text]
-	dc.mu.Unlock()
-	if ok {
-		return t
-	}
-	t = tokensOfForms(textForms(text))
-	dc.mu.Lock()
-	dc.rawTok[text] = t
-	dc.mu.Unlock()
-	return t
+	_, toks := dc.texts.read(text)
+	return toks
 }
 
 // rawExtra is what a payload's text is searched in besides itself: its
 // other declared forms (textForms: decoded, case-folded, and the text its
 // encoded runs decode to), one per line.
 func (dc *DriftCache) rawExtra(text string) string {
-	dc.mu.Lock()
-	t, ok := dc.raw[text]
-	dc.mu.Unlock()
-	if ok {
-		return t
-	}
-	t = strings.Join(textForms(text)[1:], "\n")
-	dc.mu.Lock()
-	dc.raw[text] = t
-	dc.mu.Unlock()
-	return t
+	extra, _ := dc.texts.read(text)
+	return extra
 }
 
 // driftKey is a drifted value, with the window of the call it is read in
@@ -2361,9 +2404,10 @@ func partOf(value, part string) string {
 }
 
 // placeRank orders the places a value may have come from (appearedIn): the
-// request that sent it whole first, the test's own call before the run's,
-// the run's before another's; then the same inside a longer value; then an
-// answer, or the test case's own request, the earlier first.
+// request that sent it whole first, the test's own call before the run's
+// (or the claim key's, made outside every test: Earlier.Outside), those
+// before another's; then the same inside a longer value; then an answer, or
+// the test case's own request, the earlier first.
 func placeRank(e Earlier, s Seen, whole bool) int {
 	// The test case's own request is what the application was given, as an
 	// answer is: a call that sent the value, where it can be bound, is
@@ -2375,7 +2419,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 	switch {
 	case e.Own:
 		r = 0
-	case e.Run:
+	case e.Run || e.Outside:
 		r = 1
 	}
 	if !whole {
@@ -2387,7 +2431,7 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name}
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Outside: e.Outside, Given: e.Given, Name: s.Name}
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the
@@ -2851,10 +2895,11 @@ func containsWholeClock(text, v string) bool {
 	if v == "" {
 		return false
 	}
+	// The text's clock reads are read once v stands in it as a token, not
+	// before: a fresh value stands in almost no earlier payload, and reading
+	// every payload's clock reads for it was most of a learned call's time.
 	var spans [][]int
-	for _, lay := range clockLayouts {
-		spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
-	}
+	read := false
 	for i := 0; i <= len(text)-len(v); {
 		j := strings.Index(text[i:], v)
 		if j < 0 {
@@ -2862,6 +2907,12 @@ func containsWholeClock(text, v string) bool {
 		}
 		at := i + j
 		if tokenAt(text, v, at) {
+			if !read {
+				for _, lay := range clockLayouts {
+					spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
+				}
+				read = true
+			}
 			longer := false
 			for _, sp := range spans {
 				if sp[0] <= at && at+len(v) <= sp[1] && sp[1]-sp[0] > len(v) {

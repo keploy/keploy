@@ -582,7 +582,45 @@ func readBytes(ctx context.Context, logger *zap.Logger, reader io.Reader, eofRet
 		if n < len(scratch) {
 			return buffer, nil
 		}
+		// A full piece ends the message too when the bytes are one whole HTTP request: its client sent all of it
+		// and waits for the answer, so another Read would wait until the client gave up. A browser's request of
+		// exactly 2048 bytes was held this way until the page closed its connection, 30 s later.
+		if httpRequestEnds(buffer) {
+			return buffer, nil
+		}
 	}
+}
+
+// httpRequestEnds reports whether buf is exactly one whole HTTP/1.x request, by the request's own framing: the
+// end of its headers, then as many body bytes as its Content-Length says (none without one). A Transfer-Encoding
+// body, or bytes past the request, are not judged here (false), so they are read on as before.
+func httpRequestEnds(buf []byte) bool {
+	if !IsHTTPReq(buf) {
+		return false
+	}
+	end := bytes.Index(buf, []byte("\r\n\r\n"))
+	if end < 0 {
+		return false
+	}
+	length := 0
+	for _, line := range bytes.Split(buf[:end], []byte("\r\n"))[1:] {
+		name, value, ok := bytes.Cut(line, []byte(":"))
+		if !ok {
+			continue
+		}
+		name = bytes.TrimSpace(name)
+		switch {
+		case bytes.EqualFold(name, []byte("Transfer-Encoding")):
+			return false
+		case bytes.EqualFold(name, []byte("Content-Length")):
+			n, err := strconv.Atoi(string(bytes.TrimSpace(value)))
+			if err != nil || n < 0 {
+				return false
+			}
+			length = n
+		}
+	}
+	return len(buf)-(end+4) == length
 }
 
 // ReadRequiredBytes reads exactly numBytes from reader, returning fewer only

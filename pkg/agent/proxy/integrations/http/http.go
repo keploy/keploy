@@ -88,7 +88,42 @@ type FinalHTTP struct {
 	// response rather than leaving it unread. What the capture cannot tell
 	// apart is a server that closed the connection partway through its
 	// response: the client read all there was, and it is recorded as that.
+	//
+	// Where keploy relays the connection it is set, under the proven switch,
+	// for a response the client left before its end (ClientLeft).
 	RespReadInPart bool
+	// ClientLeft: Resp is a response the client went away in the middle of,
+	// where keploy relays the connection (supervisor.Session.ReceiverGone):
+	// it closed or reset the connection, and keploy could not hand it the
+	// server's next bytes. Resp is what keploy relayed to it before that,
+	// and RespReadInPart is set. A mock whose response it cuts short is
+	// tagged so (metaClientLeft): a replay serves what the client had and
+	// leaves the response open, as the server did, until the client goes.
+	ClientLeft bool
+}
+
+// metaClientLeft is the Spec.Metadata key that tags a mock whose response its
+// client left before the end (FinalHTTP.ClientLeft), with the value "true". A
+// replay serves its recorded part and never ends the response
+// (buildMockResponseBytes): the client had no more of it, and no end, when it
+// went. The key is additive: an older replayer serves the recorded part as a
+// whole response.
+const metaClientLeft = "clientLeft"
+
+// isCORSPreflight reports whether req is a browser's CORS preflight (the Fetch
+// standard's CORS-preflight request): an OPTIONS request that carries an Origin
+// and an Access-Control-Request-Method header. The browser sends it before a
+// cross-origin call, as its preflight cache, not the app, decides: when no
+// answer it cached for the call is still fresh. How many a test makes depends
+// on that cache's clock, so a replay sees more or fewer than were recorded,
+// and no test may own one or be judged on how many it made. Its recording is
+// tagged config, served to every test and between tests as often as asked
+// (models.Mock.IsProtocolPhase), and still compared as strictly as any call:
+// method, path, every header.
+func isCORSPreflight(req *http.Request) bool {
+	return req != nil && req.Method == http.MethodOptions &&
+		len(req.Header.Values("Origin")) > 0 &&
+		len(req.Header.Values("Access-Control-Request-Method")) > 0
 }
 
 // MatchType determines if the outgoing network call is HTTP by checking for
@@ -330,12 +365,21 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		meta[models.MetadataBodyDigestsKey] = note
 	}
 
+	// A browser's CORS preflight is protocol-phase (isCORSPreflight): tagged
+	// config, so a replay serves it to every test as often as the browser
+	// sends it, and no test owns it.
+	preflight := isCORSPreflight(req)
+	if preflight {
+		meta["type"] = "config"
+	}
+
 	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
 	// type tag older replayers read: an exchange is the data of the test it
-	// was made in, a recordOne representative is served to every test.
+	// was made in, a recordOne representative and a CORS preflight are served
+	// to every test.
 	ptLifetime := models.LifetimePerTest
 	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
-	if ptRecordOne {
+	if ptRecordOne || preflight {
 		ptLifetime = models.LifetimeSession
 		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}
