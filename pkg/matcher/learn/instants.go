@@ -277,7 +277,7 @@ func isEpochText(s string) bool {
 // reads as an instant, no two overlapping (an earlier layout's first, as
 // clockIn takes them), in the order they stand. A time-ordered UUID's span is
 // its time groups, unkeyed.
-func instantSpans(s string) []instant {
+var instantSpans = func(s string) []instant {
 	var out []instant
 	var taken []bool
 	for k, re := range instantRes {
@@ -613,6 +613,13 @@ func (h *heldMoments) add(spans []instant) {
 			continue
 		}
 		h.addMoment(sp.moment())
+	}
+}
+
+// addMoments files ms.
+func (h *heldMoments) addMoments(ms []moment) {
+	for _, m := range ms {
+		h.addMoment(m)
 	}
 }
 
@@ -1085,7 +1092,7 @@ func (dc *DriftCache) spansOf(text string) []instant {
 }
 
 // tokensOfForms are the words of forms, by reading.
-func tokensOfForms(forms []string) []map[string]bool {
+var tokensOfForms = func(forms []string) []map[string]bool {
 	var t []map[string]bool
 	for _, word := range readings {
 		set := map[string]bool{}
@@ -1461,8 +1468,17 @@ func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
 
 // searchedTokens are the words of x's text in every declared form, by
 // reading, its answer's stamps (unless keep) and own clock reads blanked
-// (rules 2 and 3).
+// (rules 2 and 3). They are read once for the set where dc keeps x's
+// (setTokens).
 func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
+	if out, ok := dc.setTokens(x, keep); ok {
+		return out
+	}
+	return dc.readTokens(x, keep)
+}
+
+// readTokens reads searchedTokens(x, keep) from x's text.
+func (dc *DriftCache) readTokens(x Raw, keep bool) []map[string]bool {
 	if keep {
 		x.stamps = nil
 	}

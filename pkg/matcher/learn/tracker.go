@@ -69,6 +69,10 @@ type Tracker struct {
 	// for the set (Order.GivenPlaces): no text of it is kept. NewSet
 	// replaces it.
 	places *setPlaces
+	// derived is what the learn step read of each recording's payload alone
+	// in the running set (setDerived), shared by each test's drift cache
+	// (newDrifts): none of its text is kept. NewSet replaces it.
+	derived *setDerived
 	// outside are the mocks served while no test was open (the start-up,
 	// between tests), by every later test: each is an earlier place of every
 	// test that follows, not of the next one alone. The exact view shows a
@@ -173,7 +177,9 @@ type Tracker struct {
 
 // NewTracker makes a tracker with no test open.
 func NewTracker() *Tracker {
-	return &Tracker{drifts: NewDriftCache(), places: newSetPlaces()}
+	t := &Tracker{places: newSetPlaces(), derived: newSetDerived()}
+	t.drifts = t.newDrifts()
+	return t
 }
 
 // NewSet starts the next test set's replay on the same agent: what was served
@@ -200,7 +206,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq = nil, nil, 0
 	t.flights, t.lifts, t.handshakes = nil, nil, nil
-	t.places = newSetPlaces()
+	t.places, t.derived = newSetPlaces(), newSetDerived()
 	t.outside, t.outsideKept = nil, nil
 	t.run, t.runNames, t.runTaken, t.setTaken = nil, nil, nil, nil
 	t.names, t.taken = nil, nil
@@ -362,8 +368,10 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 // one (SetAppClock). t.mu is held.
 func (t *Tracker) newDrifts() *DriftCache {
 	dc := NewDriftCache()
-	dc.clientTests, dc.zone, dc.appClock = t.clientTests, t.appZone, t.appClock != nil
-	dc.zoneName, dc.zoneNoName = t.drifts.zoneName, t.drifts.zoneNoName
+	dc.clientTests, dc.zone, dc.appClock, dc.set = t.clientTests, t.appZone, t.appClock != nil, t.derived
+	if t.drifts != nil { // none yet as NewTracker makes the first
+		dc.zoneName, dc.zoneNoName = t.drifts.zoneName, t.drifts.zoneNoName
+	}
 	return dc
 }
 
