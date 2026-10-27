@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
 	"go.keploy.io/server/v3/utils"
 )
 
@@ -132,20 +131,23 @@ func TestTheComposeAppsStartWaitsForTheDaemonToRecordTheExitItsStopSaw(t *testin
 				waited := false
 				d.mu.Lock()
 				if at == "once the start's wait is asked" {
-					d.onWait = func(_ container.WaitCondition, pending bool) {
+					d.onWait = func(w askedWait) {
 						waited = true
-						if pending {
+						switch w.answer {
+						case waitAtExit:
 							record()
+						case waitAtRemoval:
+							cancel(fmt.Errorf("the start's wait (%s) waits for the container's removal, which no exit answers", w.cond))
 						}
 					}
 				} else {
 					d.afterInspect = record
 					// Nothing records an exit after this one: a wait
 					// left pending would wait for good.
-					d.onWait = func(cond container.WaitCondition, pending bool) {
+					d.onWait = func(w askedWait) {
 						waited = true
-						if pending {
-							cancel(fmt.Errorf("the start's wait (%s) waits for an exit after the one the daemon recorded already", cond))
+						if w.answer != waitMet {
+							cancel(fmt.Errorf("the start's wait (%s) waits for more than the exit the daemon recorded already", w.cond))
 						}
 					}
 				}
@@ -188,9 +190,9 @@ func TestTheComposeAppsStartAfterAKillThatDidNotEndTheAppDoesNotWait(t *testing.
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	d.mu.Lock()
-	d.onWait = func(cond container.WaitCondition, pending bool) {
-		if pending {
-			cancel(fmt.Errorf("the start waits (%s) for the exit of an app whose processes are all still there", cond))
+	d.onWait = func(w askedWait) {
+		if w.answer != waitMet {
+			cancel(fmt.Errorf("the start waits (%s) for the exit of an app whose processes are all still there", w.cond))
 		}
 	}
 	d.mu.Unlock()
@@ -214,6 +216,56 @@ func TestTheComposeAppsStartErrsWhenTheDaemonsWaitFails(t *testing.T) {
 	_, _, starts := d.state()
 	if !errors.Is(err, failed) || anew || starts != 0 {
 		t.Fatalf("the start said anew=%v (err %v) after %d start(s); want the wait's error, no start", anew, err, starts)
+	}
+}
+
+// The start's wait for the daemon to record the exit keploy's stop saw has
+// no bound of its own: on a daemon that never records it, the run's end is
+// its only way out. Cancelling the run while the start waits ends the
+// daemon's wait with it, and the start returns the run's cause, starting
+// nothing, however the client's error and the run's end reach it. The run
+// is cancelled as the wait is asked, so the client's call has failed (its
+// ctx canceled, no cause) by the time the start reads it, with the run's end
+// there as well: each of the starts below (the exit still unrecorded, each
+// waits as the first) gets both at once.
+func TestTheComposeAppsStartEndsItsWaitWhenTheRunIsCancelled(t *testing.T) {
+	d, a := stoppedUnrecorded(t, false)
+	for i := 0; i < 32; i++ {
+		// Each start inspects the container; no one reads those here.
+		for drained := false; !drained; {
+			select {
+			case <-d.inspected:
+			default:
+				drained = true
+			}
+		}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		ended := fmt.Errorf("run %d was cancelled", i)
+		asked, followed := false, false
+		d.mu.Lock()
+		// The daemon never records the exit: only the run's end can end
+		// the wait.
+		d.onWait = func(w askedWait) {
+			if w.answer == waitMet {
+				return
+			}
+			asked = true
+			cancel(ended)
+			if followed = w.ctx.Err() != nil; !followed {
+				// The daemon's wait outlives the run: end it, so the row
+				// fails on what the start then does rather than hang.
+				d.mu.Lock()
+				d.stop()
+				d.mu.Unlock()
+			}
+		}
+		d.mu.Unlock()
+		anew, err := a.StartComposeApp(ctx)
+		cancel(nil)
+		_, _, starts := d.state()
+		if !asked || !followed || !errors.Is(err, ended) || anew || starts != 0 {
+			t.Fatalf("start %d said anew=%v (err %v) after %d start(s); the daemon asked to wait %v, its wait ended with the run %v; want the run's cause, the wait ended with the run, no start", i, anew, err, starts, asked, followed)
+		}
 	}
 }
 
@@ -244,9 +296,9 @@ func TestTheComposeAppsStartAfterAFailedStartTheDaemonCarriedOutDoesNotWait(t *t
 	defer cancel(nil)
 	d.mu.Lock()
 	d.startErr = nil
-	d.onWait = func(cond container.WaitCondition, pending bool) {
-		if pending {
-			cancel(fmt.Errorf("the start waits (%s) for the exit of the app the failed start ran", cond))
+	d.onWait = func(w askedWait) {
+		if w.answer != waitMet {
+			cancel(fmt.Errorf("the start waits (%s) for the exit of the app the failed start ran", w.cond))
 		}
 	}
 	d.mu.Unlock()

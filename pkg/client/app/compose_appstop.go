@@ -713,6 +713,7 @@ func (a *App) StartComposeApp(ctx context.Context) (anew bool, err error) {
 
 // awaitComposeAppStopped waits for the daemon to say the app's container,
 // id, is not running: its wait, which answers at once for one that is not.
+// It has no bound of its own: the run's end ends it, with the run's cause.
 func (a *App) awaitComposeAppStopped(ctx context.Context, id string) error {
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -721,6 +722,11 @@ func (a *App) awaitComposeAppStopped(ctx context.Context, id string) error {
 	case <-said:
 		return nil
 	case err := <-errs:
+		if ctx.Err() != nil {
+			// The run ended, which ended the wait: the client says only
+			// that its ctx was canceled, the run's cause says why.
+			return context.Cause(ctx)
+		}
 		return err
 	case <-ctx.Done():
 		return context.Cause(ctx)

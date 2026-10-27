@@ -67,9 +67,8 @@ type composeDocker struct {
 	// waitErr, set, fails each wait the daemon is asked for.
 	waitErr error
 	// onWait, set, is told of each wait the daemon is asked for, as it is
-	// asked: pending, the container's state did not meet its condition,
-	// so only a later exit answers it.
-	onWait func(cond container.WaitCondition, pending bool)
+	// asked, before the daemon answers it.
+	onWait func(w askedWait)
 	// afterInspect, set, runs once, after the next inspect has read the
 	// container and before it answers: what the daemon does between an
 	// inspect and the caller's next call.
@@ -141,9 +140,34 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 	return nil
 }
 
-// ContainerWait answers as the daemon does: not-running (the default) at once
-// for a container that is not running, else at its exit; next-exit only at an
-// exit after the wait was asked, though the container is not running.
+// waitAnswer is when the daemon answers a wait, as it is asked.
+type waitAnswer int
+
+const (
+	// waitMet: the container's state meets the wait's condition; the
+	// daemon answers it at once.
+	waitMet waitAnswer = iota
+	// waitAtExit: the container's next exit answers it.
+	waitAtExit
+	// waitAtRemoval: only the container's removal answers it, and these
+	// tests remove no container: it waits until its ctx ends.
+	waitAtRemoval
+)
+
+// askedWait is a wait the daemon is asked for: its ctx, its condition, and
+// when the daemon answers it.
+type askedWait struct {
+	ctx    context.Context
+	cond   container.WaitCondition
+	answer waitAnswer
+}
+
+// ContainerWait answers as the daemon does: not-running (also asked as "")
+// at once for a container that is not running, else at its exit; next-exit
+// only at an exit after the wait was asked, though the container is not
+// running; removed only at the container's removal, which these tests never
+// make, though the container is not running. A wait whose ctx ends as it is
+// asked fails at once, as the client's does.
 func (d *composeDocker) ContainerWait(ctx context.Context, _ string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	d.mu.Lock()
 	running, next, waitErr, onWait := d.running, d.nextExit, d.waitErr, d.onWait
@@ -153,13 +177,32 @@ func (d *composeDocker) ContainerWait(ctx context.Context, _ string, cond contai
 		errs <- waitErr
 		return out, errs
 	}
-	met := !running && cond != container.WaitConditionNextExit
-	if onWait != nil {
-		onWait(cond, !met)
+	answer := waitAtExit
+	switch cond {
+	case container.WaitConditionNotRunning, "":
+		if !running {
+			answer = waitMet
+		}
+	case container.WaitConditionRemoved:
+		answer = waitAtRemoval
 	}
-	if met {
+	if onWait != nil {
+		onWait(askedWait{ctx: ctx, cond: cond, answer: answer})
+	}
+	if err := ctx.Err(); err != nil {
+		// A ctx that ended as the wait was asked fails the call at once,
+		// before it returns, as the client's request does: its error is
+		// there with the ctx's end.
+		errs <- err
+		return out, errs
+	}
+	if answer == waitMet {
 		out <- container.WaitResponse{}
 		return out, errs
+	}
+	if answer == waitAtRemoval {
+		// Nothing removes the container: no exit answers this wait.
+		next = nil
 	}
 	go func() {
 		select {
