@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/recorder"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
@@ -34,10 +35,10 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
-// DeclaresMockNoise reports that MySQL does field-level request-body mock-noise
-// learning (mysqlNoiseAdapter + the shared engine). Satisfies
-// integrations.NoiseDeclarer.
-func (m *MySQL) DeclaresMockNoise() bool { return true }
+// MockNoise returns MySQL's field-level request-body mock-noise adapter
+// (mysqlNoiseAdapter, exposed via replayer.NoiseAdapter), wiring the parser into
+// the shared mocknoise engine. Satisfies integrations.Integrations.
+func (m *MySQL) MockNoise() mocknoise.Adapter { return replayer.NoiseAdapter() }
 
 func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	// The default proxy path routes MySQL by destination port (3306), so
@@ -275,7 +276,3 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 	}
 	return nil
 }
-
-// ReportsMockMiss confirms MySQL reports a no-mock-matched miss (mock diff).
-// Satisfies integrations.MissReporter.
-func (m *MySQL) ReportsMockMiss() bool { return true }

@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
@@ -70,10 +71,10 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
-// DeclaresMockNoise reports that HTTP does field-level request-body mock-noise
-// learning (httpNoiseAdapter + the shared engine). Satisfies
-// integrations.NoiseDeclarer.
-func (h *HTTP) DeclaresMockNoise() bool { return true }
+// MockNoise returns HTTP's field-level request-body mock-noise adapter, wiring
+// the parser into the shared mocknoise engine (auto-replay learns
+// req_body_noise). Satisfies integrations.Integrations.
+func (h *HTTP) MockNoise() mocknoise.Adapter { return httpNoiseAdapter{} }
 
 type FinalHTTP struct {
 	Req              []byte
@@ -424,7 +425,3 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 	return nil
 }
-
-// ReportsMockMiss confirms HTTP reports a no-mock-matched miss (mock diff).
-// Satisfies integrations.MissReporter.
-func (h *HTTP) ReportsMockMiss() bool { return true }
