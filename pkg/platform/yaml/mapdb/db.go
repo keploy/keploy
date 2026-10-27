@@ -589,11 +589,12 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 // A recording is marked only on the list of the test that names it: another
 // test listing the same recording keeps its entry as it was. An empty line
 // takes a mark off. Every other section and entry is kept as it is, and a
-// file the marks do not change is not written. It returns, sorted, the
-// recordings whose entry it changed. A set with no mapping file is an error:
-// there is nothing to mark.
-func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks map[string]map[string]string) ([]string, error) {
-	var changed []string
+// file the marks do not change is not written. It returns, by test, the
+// recordings whose entry on that test's list it changed, sorted: a mark is
+// the test's entry's, never the recording's. A set with no mapping file is an
+// error: there is nothing to mark.
+func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks models.BackgroundMarks) (map[string][]string, error) {
+	var changed map[string][]string
 	if len(marks) == 0 {
 		return nil, nil
 	}
@@ -607,7 +608,11 @@ func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks
 				e := &m.TestCases[i].Mocks[j]
 				if why, ok := byName[e.Name]; ok && e.Background != why {
 					e.Background = why
-					changed = append(changed, e.Name)
+					if changed == nil {
+						changed = map[string][]string{}
+					}
+					test := m.TestCases[i].ID
+					changed[test] = append(changed[test], e.Name)
 				}
 			}
 		}
@@ -616,7 +621,9 @@ func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(changed)
+	for _, names := range changed {
+		sort.Strings(names)
+	}
 	return changed, nil
 }
 
@@ -625,12 +632,13 @@ func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks
 // a background mark (models.MockEntry.Background): an entry whose mark was
 // taken off is required again and stays, and another test listing the same
 // recording keeps its entry. Every other section and entry is kept as it is,
-// and a file it does not change is not written. It returns, sorted, the
-// recordings it took off a list (once each), and of those the ones no list
-// of the file names any more (a test's, or the startup, runner, worker or
-// shared list): only those may leave the set's mock file, whose every other
-// recording a list still serves. A set with no mapping file is an error.
-func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byTest map[string][]string) (removed, unlisted []string, err error) {
+// and a file it does not change is not written. It returns, by test, the
+// recordings it took off that test's list, sorted, and, sorted, those of them
+// no list of the file names any more (a test's, the startup, runner, worker
+// or shared list, or a boot's): only those may leave the set's mock file,
+// whose every other recording a list still serves. A set with no mapping file
+// is an error.
+func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byTest map[string][]string) (removed map[string][]string, unlisted []string, err error) {
 	if len(byTest) == 0 {
 		return nil, nil, nil
 	}
@@ -645,6 +653,11 @@ func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byT
 			for _, e := range m.TestCases[i].Mocks {
 				if e.Background != "" && slices.Contains(names, e.Name) {
 					took[e.Name] = true
+					if removed == nil {
+						removed = map[string][]string{}
+					}
+					test := m.TestCases[i].ID
+					removed[test] = append(removed[test], e.Name)
 					continue
 				}
 				kept = append(kept, e)
@@ -660,13 +673,16 @@ func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byT
 				listed[e.Name] = true
 			}
 		}
-		for _, list := range [][]models.MockEntry{m.Startup, m.Runner, m.Worker, m.Shared} {
+		lists := [][]models.MockEntry{m.Startup, m.Runner, m.Worker, m.Shared}
+		for _, b := range m.Boots {
+			lists = append(lists, b.Mocks)
+		}
+		for _, list := range lists {
 			for _, e := range list {
 				listed[e.Name] = true
 			}
 		}
 		for n := range took {
-			removed = append(removed, n)
 			if !listed[n] {
 				unlisted = append(unlisted, n)
 			}
@@ -676,7 +692,9 @@ func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byT
 	if err != nil {
 		return nil, nil, err
 	}
-	sort.Strings(removed)
+	for _, names := range removed {
+		sort.Strings(names)
+	}
 	sort.Strings(unlisted)
 	return removed, unlisted, nil
 }
