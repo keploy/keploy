@@ -790,7 +790,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 			return true, ""
 		}
 		if !o.Checkable(res, s.From, s.To) {
-			return false, learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell a time to live changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint
+			return false, learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell " + offsetNamed(o) + " changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint
 		}
 		cut := ""
 		if c := o.CheckedAt(res); c > res {

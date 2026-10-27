@@ -1271,7 +1271,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != clockOffsetUncomparedWhy(p, want) {
 		t.Errorf("not compared: %s (%s); want refused: %s", ln.Kind, ln.Why, clockOffsetUncomparedWhy(p, want))
 	}
-	if !strings.Contains(ln.Why, "clock + 30m") || !strings.Contains(ln.Why, "a changed time to live would pass") {
+	if !strings.Contains(ln.Why, "clock + 30m") || !strings.Contains(ln.Why, "a time to live changed by any amount would pass") {
 		t.Errorf("not compared: %q names neither the offset nor why it is refused", ln.Why)
 	}
 

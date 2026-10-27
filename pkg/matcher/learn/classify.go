@@ -521,6 +521,10 @@ type Place struct {
 	// noTime: that mock's recorded time keploy cannot read, read as the
 	// call's own instant (Raw.noTime): a reason says so (placeAt).
 	noTime bool
+	// unserved, of a place found in a raw mock's payload: record's full
+	// round never served that mock before the call (Raw.Served false): a
+	// reason says so (correction).
+	unserved bool
 	// startUp, of a place found in a raw mock's payload: the mock is a
 	// connection's recorded start-up (Raw.startUp) and the value's word
 	// stands there in a field a swap of start-ups can change (swapHolds),
@@ -1248,6 +1252,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.refuted + ", and keploy learns it as varying"
 				case fol.moved != "":
 					ln.Why = fol.moved + ", and keploy learns it as varying"
+				case fol.chance != "":
+					ln.Why = fol.chance + ", and keploy learns it as varying"
 				}
 			case KindEcho:
 				why := fol.first
@@ -2534,7 +2540,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
-			from.AtCall, from.noTime = atCall, x.noTime
+			from.AtCall, from.noTime, from.unserved = atCall, x.noTime, !x.served
 			from.startUp = x.swapHolds(x.text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
 			return from, true
 		}
@@ -2552,17 +2558,17 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, startUp: swap}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, startUp: swap}, true
+					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime}
+				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served}
 				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
 				// A word of a connection's start-up a swap can change is
 				// never set aside as a source the value moved away from: F
@@ -2704,7 +2710,7 @@ func evidence(v *valueDrift, from Place) string {
 	if provenance == "" {
 		provenance = notClock(v)
 	}
-	return found + "; " + provenance + ", so keploy follows it as a value from there. " + correction(from.Mock)
+	return found + "; " + provenance + ", so keploy follows it as a value from there. " + correction(from.Mock, from.unserved)
 }
 
 // startUpWhy is why a drifted value v whose recorded value, or a part of
@@ -2762,9 +2768,17 @@ func notClock(v *valueDrift) string {
 	return "nothing shows the value is a read of the application's clock (it did not move by the lead that record's full round runs ahead of the recording, and no window of its call shows a read)"
 }
 
-// correction is how to correct a refusal of a value found in mock.
-func correction(mock string) string {
-	return "If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it flowed from " + mock + ", where keploy cannot follow it yet"
+// correction is how to correct a refusal of a value found in mock. Where
+// record's full round never served mock before the call (unserved:
+// Raw.Served false, Place.unserved), the reason says so, rather than that
+// keploy cannot follow the value there yet: that round gave the application
+// nothing from there.
+func correction(mock string, unserved bool) string {
+	head := "If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it; otherwise it flowed from " + mock
+	if unserved {
+		return head + ", its source recording, which record's full round never served before this call (its own call missed earlier, was answered from another recording, or was not made)"
+	}
+	return head + ", where keploy cannot follow it yet"
 }
 
 // partOf names where part stands in value, by its characters' places,
