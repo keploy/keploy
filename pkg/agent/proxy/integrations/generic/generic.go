@@ -143,4 +143,3 @@ func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models
 	}
 	return nil
 }
-
