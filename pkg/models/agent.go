@@ -291,6 +291,13 @@ type ScopeTableReq struct {
 	// another test's (integrations.TestWindows). Absent from an older CLI
 	// and from a set with no test: the agent then knows none.
 	Windows []TestWindow `json:"windows,omitempty"`
+	// Background is, under the proven switch, the recordings of the set's
+	// tests that judging marked as the application's own background work
+	// (MockEntry.Background), each with why: a test is served one in its
+	// window when it makes the call, and is never failed for not making it.
+	// Absent when no entry is marked; an agent that predates it ignores it
+	// and requires them, which is never looser.
+	Background map[string]string `json:"background,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
@@ -589,6 +596,13 @@ type ExactServing struct {
 	// (replay.RegisterS12Serving); empty for today's. An agent that predates
 	// it ignores it, and serves by today's rules: never looser.
 	Background string `json:"background,omitempty"`
+	// Unrequired is, on the staging call, the recordings of the set's test
+	// cases that judging marked as the application's own background work
+	// (MockEntry.Background), each with why: a test case is served one in
+	// its window when it makes the call, and is never failed for not making
+	// it. Absent when no entry is marked. An agent that predates it ignores
+	// it and requires them, which is never looser.
+	Unrequired map[string]string `json:"unrequired,omitempty"`
 }
 
 // ExactConcurrentHeader is the /storemocks response header in which an agent
