@@ -109,7 +109,7 @@ func TestClassifyInTheStartUpInsertsInstantIsNoiseInItsWindow(t *testing.T) {
 	iso := func(t time.Time) string { return t.Format("2006-01-02T15:04:05.000Z07:00") }
 	inText := func(t time.Time) string { return "at " + iso(t) + " by w-1" }
 	sent := recReceive.Add(-time.Millisecond).Truncate(time.Millisecond)
-	raw := []Raw{{read: true, mock: "mock-0", at: recReceive, text: "200 Date: " + recReceive.Format(http.TimeFormat) +
+	raw := []Raw{{rRead: true, mock: "mock-0", at: recReceive, rText: "200 Date: " + recReceive.Format(http.TimeFormat) +
 		` {"Messages":[{"MessageId":"135dcb85-3c73-4bb1-8569-a5c7092b89e8","Attributes":{"SentTimestamp":"` + iso(sent) + `"},"Body":"Test message 1"}]}`}}
 	w, live := fWindow(2 * time.Second)
 	classify := func(form func(time.Time) string, rec, now time.Time, w *Window) Learned {

@@ -274,10 +274,10 @@ func TestClassify(t *testing.T) {
 	}
 	raw := []Raw{
 		// A database row the test inserted before: the id came from there.
-		{read: true, mock: "pg-3", at: at.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
+		{rRead: true, mock: "pg-3", at: at.Add(-2 * time.Second), rText: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
 		// Recorded after the paired call, and not served before it: not
 		// earlier.
-		{read: true, mock: "pg-9", at: at.Add(time.Second), text: `{"params":["t-5"]}`},
+		{rRead: true, mock: "pg-9", at: at.Add(time.Second), rText: `{"params":["t-5"]}`},
 		// A run of a drifted value that drifted counts in a payload as a
 		// token there: "71a" of "sess s-71a" is one, a row's minutes are
 		// not body.at's run.
@@ -903,7 +903,7 @@ func TestPairSpent(t *testing.T) {
 func TestAppearedInRawPayloads(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
 	raw := func(text string) []Raw {
-		return []Raw{{read: true, mock: "mock-db", at: at.Add(-time.Second), served: true, text: text}}
+		return []Raw{{rRead: true, mock: "mock-db", at: at.Add(-time.Second), served: true, rText: text}}
 	}
 	for _, tc := range []struct {
 		name, text, recorded, now string
@@ -966,7 +966,7 @@ func TestUnaccounted(t *testing.T) {
 	earlier := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.kind", Type: String, Value: "batch-7"}, Live: "batch-7"},
 	}}}
-	raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO jobs (shard) VALUES ('s3')"}}
+	raw := []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: "INSERT INTO jobs (shard) VALUES ('s3')"}}
 	for _, tc := range []struct {
 		name, recorded, now string
 		refused             bool
@@ -1026,7 +1026,7 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 			live:    "Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436103}`) + "." + b64u("\x07\x08\x09\xfa\xfb"),
 			earlier: earlier("1760436042", "1760436103")},
 		{name: "an id after a backslash, from a payload", rec: `{"path":"C:\\b3f2b8c1e9a4d"}`, live: `{"path":"C:\\f1e2d3c4b5a69"}`,
-			raw: []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO jobs (id) VALUES ('b3f2b8c1e9a4d')"}}},
+			raw: []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: "INSERT INTO jobs (id) VALUES ('b3f2b8c1e9a4d')"}}},
 		{name: "an echoed id picked from an earlier answer", rec: "ord-7Q2K", live: "ord-9MX4",
 			earlier: []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 				{Side: Response, Leaf: Leaf{Path: "body.items[0].id", Type: String, Value: "ord-7Q2K"}, Live: "ord-7Q2K"},
@@ -1089,7 +1089,7 @@ func TestClassifyAccountsForWhatFlowedInEveryForm(t *testing.T) {
 	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	b64s := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	payload := func(text string) []Raw {
-		return []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: text}}
+		return []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: text}}
 	}
 	sent := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.user", Noise: "body.user", Type: String, Value: "A7K29QXM"}, Live: "Zq81Lm0X", Place: "body.user"},
@@ -1202,7 +1202,7 @@ func TestClassifyAWholeClockValueAnEarlierCallHeldInsideALongerOne(t *testing.T)
 	if got := classifyOne(rec, live, at, e, nil, nil); !noiseOrRead(got) {
 		t.Errorf("beside an HTTP leaf: %s (%s)", got.Kind, got.Why)
 	}
-	raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
+	raw := []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
 	if got := classifyOne(rec, live, at, nil, raw, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 		t.Errorf("beside a payload: %s", got.Kind)
 	}
@@ -1316,7 +1316,7 @@ func TestClassifyReadsWrappedGluedAndPaddedEncodings(t *testing.T) {
 			if got := classifyOne(tc.enc(pad, a), tc.enc(pad, b), at, sent, nil, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 				t.Fatalf("%s (pad %d): an id that flowed into it learned as %s", tc.name, pad, got.Kind)
 			}
-			raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO s (blob) VALUES ('" + tc.enc(pad, a) + "')"}}
+			raw := []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: "INSERT INTO s (blob) VALUES ('" + tc.enc(pad, a) + "')"}}
 			if got := classifyOne(a, b, at, nil, raw, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 				t.Fatalf("%s (pad %d), in a payload: an id that flowed from it learned as %s", tc.name, pad, got.Kind)
 			}

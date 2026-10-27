@@ -1355,8 +1355,9 @@ func stamped(s Seen) bool { return s.Stamp && s.Live == s.Leaf.Value }
 func (dc *DriftCache) stampsEchoed(v *valueDrift, served []Earlier, raw []Raw) bool {
 	var given, all []string
 	for _, x := range raw {
-		for _, f := range x.stamps {
-			text := x.text[f.start:f.end]
+		xb := x.payload()
+		for _, f := range xb.stamps {
+			text := xb.text[f.start:f.end]
 			all = append(all, text)
 			if x.served {
 				given = append(given, text)
@@ -1416,11 +1417,12 @@ func blankStamps(text string, stamps []rawField) string {
 
 // clockKeys are x's answer's clock reads (Raw.AnswerClock) as moments.
 func clockKeys(x Raw) map[instantKey]bool {
-	if len(x.answerClock) == 0 {
+	xb := x.payload()
+	if len(xb.answerClock) == 0 {
 		return nil
 	}
-	out := make(map[instantKey]bool, len(x.answerClock))
-	for _, t := range x.answerClock {
+	out := make(map[instantKey]bool, len(xb.answerClock))
+	for _, t := range xb.answerClock {
 		out[instantKey{at: t.UnixNano()}] = true
 	}
 	return out
@@ -1429,16 +1431,17 @@ func clockKeys(x Raw) map[instantKey]bool {
 // rawKey is a payload's text with its answer's clock reads and stamps, as a
 // cache key.
 func rawKey(x Raw) string {
-	if len(x.answerClock) == 0 && len(x.stamps) == 0 {
-		return x.text
+	xb := x.payload()
+	if len(xb.answerClock) == 0 && len(xb.stamps) == 0 {
+		return xb.text
 	}
 	var sb strings.Builder
-	sb.WriteString(x.text)
-	for _, t := range x.answerClock {
+	sb.WriteString(xb.text)
+	for _, t := range xb.answerClock {
 		sb.WriteByte(0)
 		sb.WriteString(strconv.FormatInt(t.UnixNano(), 10))
 	}
-	for _, f := range x.stamps {
+	for _, f := range xb.stamps {
 		sb.WriteByte(1)
 		sb.WriteString(strconv.Itoa(f.start))
 		sb.WriteByte('-')
@@ -1454,11 +1457,12 @@ func rawKey(x Raw) string {
 // form.
 func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
 	if keep {
-		x.stamps = nil
+		x = x.withoutStamps()
 	}
 	keys := clockKeys(x)
-	if len(keys) == 0 && len(x.stamps) == 0 {
-		return [2]string{x.text, dc.rawExtra(x.text)}
+	xb := x.payload()
+	if len(keys) == 0 && len(xb.stamps) == 0 {
+		return [2]string{xb.text, dc.rawExtra(xb.text)}
 	}
 	k := rawKey(x)
 	dc.mu.Lock()
@@ -1467,7 +1471,7 @@ func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
 	if ok {
 		return s
 	}
-	text := blankStamps(x.text, x.stamps)
+	text := blankStamps(xb.text, xb.stamps)
 	blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
 	s = [2]string{blankSpans(text, blank), blankSpans(dc.rawExtra(text), blank)}
 	dc.mu.Lock()
@@ -1493,11 +1497,12 @@ func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
 // readTokens reads searchedTokens(x, keep) from x's text.
 func (dc *DriftCache) readTokens(x Raw, keep bool) []map[string]bool {
 	if keep {
-		x.stamps = nil
+		x = x.withoutStamps()
 	}
 	keys := clockKeys(x)
-	if len(keys) == 0 && len(x.stamps) == 0 {
-		return dc.rawTokens(x.text)
+	xb := x.payload()
+	if len(keys) == 0 && len(xb.stamps) == 0 {
+		return dc.rawTokens(xb.text)
 	}
 	k := rawKey(x)
 	dc.mu.Lock()
@@ -1506,7 +1511,7 @@ func (dc *DriftCache) readTokens(x Raw, keep bool) []map[string]bool {
 	if ok {
 		return t
 	}
-	forms := textForms(blankStamps(x.text, x.stamps))
+	forms := textForms(blankStamps(xb.text, xb.stamps))
 	for i := range forms {
 		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
 	}

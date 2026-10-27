@@ -188,7 +188,7 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 	case x.Live():
 		// Searched unblanked: a stamp or clock read F gave there that holds
 		// the value F saw keeps the place too.
-		for _, text := range [2]string{x.live.text, f.dc.rawExtra(x.live.text)} {
+		for _, text := range [2]string{x.live.payload().text, f.dc.rawExtra(x.live.payload().text)} {
 			if ContainsToken(text, v.live) || v.decoded && ContainsToken(text, v.decLive) {
 				return false
 			}
@@ -383,7 +383,7 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 				continue
 			}
 			for _, y := range []Raw{x, f.liveOf(x, recorded)} {
-				if y.read && f.dc.searchedTokens(y, keep)[i][w] {
+				if y.isRead() && f.dc.searchedTokens(y, keep)[i][w] {
 					if fd := f.dc.fieldOf(y, f.dc.searched(y, keep), w); fd != "" {
 						return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + " at " + fd
 					}
@@ -483,6 +483,7 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 		return fNone, ""
 	}
 	liveText := dc.searched(*x.live, keep)[0]
+	xfields := x.payload().fields
 	at := func(fields []rawField, text string, f rawField) (string, bool) {
 		for _, g := range fields {
 			if g.path == f.path && g.key == f.key {
@@ -494,22 +495,22 @@ func (dc *DriftCache) liveAt(x Raw, text string, keep bool, v *valueDrift, in fu
 		}
 		return "", false
 	}
-	for _, g := range x.live.fields {
+	for _, g := range x.live.payload().fields {
 		if g.end > len(liveText) || !in(liveText[g.start:g.end]) {
 			continue
 		}
-		if own, ok := at(x.fields, text, g); !ok || !in(own) {
+		if own, ok := at(xfields, text, g); !ok || !in(own) {
 			return fElsewhere, g.describe()
 		}
 	}
 	view = fSame
 	held := false
-	for _, f := range x.fields {
+	for _, f := range xfields {
 		if f.end > len(text) || !in(text[f.start:f.end]) {
 			continue
 		}
 		held = true
-		lv, ok := at(x.live.fields, liveText, f)
+		lv, ok := at(x.live.payload().fields, liveText, f)
 		if !ok {
 			return fNone, ""
 		}
@@ -677,14 +678,14 @@ func (dc *DriftCache) recordedThere(x Raw, v *valueDrift, in func(own string) bo
 	text := dc.searched(x, false)[0]
 	liveText := dc.searched(*x.live, false)[0]
 	view = fNone
-	for _, g := range x.live.fields {
+	for _, g := range x.live.payload().fields {
 		if g.end > len(liveText) || !in(liveText[g.start:g.end]) {
 			continue
 		}
 		if !answerPath(g.path) {
 			return fSent, g.describe()
 		}
-		own, ok := fieldText(x.fields, text, g)
+		own, ok := fieldText(x.payload().fields, text, g)
 		if !ok {
 			return fElsewhere, g.describe()
 		}
@@ -821,7 +822,7 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 				return true
 			}
 		}
-		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, read: true, first: g.first, last: g.last})
+		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, rRead: true, first: g.first, last: g.last})
 	}
 	return true
 }

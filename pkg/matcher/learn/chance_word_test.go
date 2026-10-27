@@ -179,10 +179,10 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 	if !strings.HasPrefix(recStamp.Spec.HTTPResp.Header["Date"], "Thu, ") || !strings.HasPrefix(viewStamp.Spec.HTTPResp.Header["Date"], "Fri, ") {
 		t.Fatalf("the stamps %q and %q are not a Thursday's and a Friday's", recStamp.Spec.HTTPResp.Header["Date"], viewStamp.Spec.HTTPResp.Header["Date"])
 	}
-	if x := RawOf(recStamp, true); len(x.stamps) != 1 {
+	if x := RawOf(recStamp, true); len(x.payload().stamps) != 1 {
 		t.Fatalf("the recording's Date header is not its one stamp")
 	}
-	if x := RawOf(viewStamp, true); len(x.stamps) != 1 {
+	if x := RawOf(viewStamp, true); len(x.payload().stamps) != 1 {
 		t.Fatalf("the view's Date header is not its one stamp")
 	}
 	asRecorded := func(dc *DriftCache, m *models.Mock) Raw { return dc.RawOf(m, true).ServedAs(3).ServedAsRecorded() }

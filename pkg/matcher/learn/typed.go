@@ -1314,7 +1314,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw
 			continue
 		}
 		field := ""
-		for _, f := range x.fields {
+		for _, f := range x.payload().fields {
 			if f.key || f.end > len(texts[0]) {
 				continue
 			}

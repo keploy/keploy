@@ -252,7 +252,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		payloads = append(payloads, p)
 	}
 	for _, x := range raw {
-		if !x.read || !x.earlierThan(at) {
+		if !x.isRead() || !x.earlierThan(at) {
 			continue
 		}
 		if len(x.moves) > 0 {
@@ -282,7 +282,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			}
 			continue
 		}
-		if e.Payload.read {
+		if e.Payload.isRead() {
 			add(e.Payload, true)
 			if mv := e.servedMoves(); len(mv) > 0 {
 				moves = append(moves, moved{mock: e.Mock, call: e.Payload.call, at: e.At, first: e.Payload.first, last: e.Payload.last, moves: mv})
@@ -295,7 +295,7 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		}
 	}
 	for _, x := range raw {
-		if x.read && x.elsewhere {
+		if x.isRead() && x.elsewhere {
 			op.words = append(op.words, dc.wordsOf(x))
 			op.answers = append(op.answers, dc.answerMoments(x)...)
 		}
@@ -376,8 +376,9 @@ func (dc *DriftCache) keyedPlaces(x Raw) []keyedPlace {
 func (dc *DriftCache) readPlaces(x Raw) []keyedPlace {
 	var out []keyedPlace
 	text := dc.searched(x, false)[0]
-	answers := answerApart(x.fields)
-	for _, f := range x.fields {
+	xb := x.payload()
+	answers := answerApart(xb.fields)
+	for _, f := range xb.fields {
 		if f.key || f.end > len(text) || answers && !answerPath(f.path) {
 			continue
 		}
@@ -471,7 +472,7 @@ func PlacesOf(x Raw) GivenPlaces {
 		a := &answer[i]
 		a.mock, a.where = strings.Clone(a.mock), strings.Clone(a.where)
 	}
-	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.read, first: x.first, last: x.last, places: places, words: dc.wordsOf(x), answer: answer}
+	return GivenPlaces{mock: strings.Clone(x.mock), call: x.call, at: x.at, read: x.isRead(), first: x.first, last: x.last, places: places, words: dc.wordsOf(x), answer: answer}
 }
 
 // givenMoment is an instant the answer of a recording F gave the application
@@ -509,15 +510,16 @@ func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
 			}
 		}
 	}
-	if !answerApart(x.fields) {
-		add(x.text, x.mock+"'s payload")
+	xb := x.payload()
+	if !answerApart(xb.fields) {
+		add(xb.text, x.mock+"'s payload")
 		return out
 	}
-	for _, f := range x.fields {
-		if f.key || f.end > len(x.text) || !answerPath(f.path) {
+	for _, f := range xb.fields {
+		if f.key || f.end > len(xb.text) || !answerPath(f.path) {
 			continue
 		}
-		add(x.text[f.start:f.end], x.mock+" at "+f.describe())
+		add(xb.text[f.start:f.end], x.mock+" at "+f.describe())
 	}
 	return out
 }
@@ -687,7 +689,7 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
 	plain := dc.answerWords(x, false)
 	kept := plain
-	if len(x.stamps) > 0 {
+	if len(x.payload().stamps) > 0 {
 		kept = dc.answerWords(x, true)
 	}
 	for i := range plain {
@@ -773,8 +775,9 @@ func (dc *DriftCache) sameWords(x Raw, words []map[string]bool) []map[string]boo
 			}
 		}
 	}
-	read(x.fields, rec, x.live.fields, live, true)
-	read(x.live.fields, live, x.fields, rec, false)
+	xb := x.payload()
+	read(xb.fields, rec, x.live.payload().fields, live, true)
+	read(x.live.payload().fields, live, xb.fields, rec, false)
 	for i := range words {
 		out[i] = map[string]bool{}
 		for w := range held[i] {
@@ -852,16 +855,17 @@ func (g givenWords) inAnswer(i int, t string) string {
 // a request the application sent in another test: a recording that holds no
 // answer apart from its request has no words here.
 func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
-	if !answerApart(x.fields) {
+	if !answerApart(x.payload().fields) {
 		return dc.searchedTokens(x, keep)
 	}
 	if keep {
-		x.stamps = nil
+		x = x.withoutStamps()
 	}
-	text := blankStamps(x.text, x.stamps)
+	xb := x.payload()
+	text := blankStamps(xb.text, xb.stamps)
 	keys := clockKeys(x)
 	var forms []string
-	for _, f := range x.fields {
+	for _, f := range xb.fields {
 		if f.end > len(text) || !answerPath(f.path) {
 			continue
 		}

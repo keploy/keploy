@@ -28,6 +28,9 @@ type setDerived struct {
 	tokens  map[derivedWords][]map[string]bool
 	words   map[derivedWords]map[string]bool
 	fields  map[string][][]moment
+	// bodies are the set's lazy Raws' payloads, loaded within a fixed
+	// budget (bodyStore), made at the first lazy Raw.
+	bodies *bodyStore
 }
 
 // derivedWords names a payload's words as searchedTokens reads them: with
@@ -58,7 +61,7 @@ func (dc *DriftCache) setOf(x Raw) *setDerived {
 func (dc *DriftCache) payloadMoments(x Raw) []moment {
 	read := func() []moment {
 		var out []moment
-		for _, text := range []string{x.text, dc.rawExtra(x.text)} {
+		for _, text := range []string{x.payload().text, dc.rawExtra(x.payload().text)} {
 			if text == "" {
 				continue
 			}
@@ -202,12 +205,13 @@ func (dc *DriftCache) fieldMoments(x Raw) (out [][]moment, ok bool) {
 	if ok {
 		return out, true
 	}
-	out = make([][]moment, len(x.fields))
-	for i, f := range x.fields {
+	xb := x.payload()
+	out = make([][]moment, len(xb.fields))
+	for i, f := range xb.fields {
 		if f.key {
 			continue
 		}
-		for _, sp := range dc.spansOf(x.text[f.start:f.end]) {
+		for _, sp := range dc.spansOf(xb.text[f.start:f.end]) {
 			if sp.keyed {
 				out[i] = append(out[i], sp.moment())
 			}
