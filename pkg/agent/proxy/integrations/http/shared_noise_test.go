@@ -40,7 +40,10 @@ func sharedNoiseOpts(learn bool) models.OutgoingOptions {
 }
 
 func orderCall(path string, id, q int, reqID string) string {
-	body := fmt.Sprintf(`{"order":{"id":%d,"q":%d}}`, id, q)
+	return orderCallOf(path, fmt.Sprintf(`{"order":{"id":%d,"q":%d}}`, id, q), reqID)
+}
+
+func orderCallOf(path, body, reqID string) string {
 	return fmt.Sprintf("POST /orders/%s HTTP/1.1\r\nHost: api.test\r\nContent-Type: application/json\r\nX-Request-Id: %s\r\nX-Trace: t-%s\r\nContent-Length: %d\r\n\r\n%s",
 		path, reqID, reqID, len(body), body)
 }
@@ -101,8 +104,9 @@ func serveOne(t *testing.T, h *HTTP, db integrations.MockMemDb, opts models.Outg
 // value) is never written by what reads it. Main built fresh maps per call, so
 // a matcher that wrote into them changed only its own call; the shared noise
 // would carry such a write into every later call and test. Calls with header,
-// request-body and URL noise are served through decodeHTTP with the switch
-// off (schema, fuzzy and exact matching), on (the learned match, the variable
+// request-body and URL noise, against recordings with and without learned
+// request-body noise, are served through decodeHTTP with the switch off
+// (schema, fuzzy and exact matching), on (the learned match, the variable
 // pass and, for a variable that does not hold, the exact-only pass, the strict
 // matcher), on in record's full round (the learn step, which learns a
 // changed field or path as noise there, and the pairing), and off with
@@ -110,7 +114,8 @@ func serveOne(t *testing.T, h *HTTP, db integrations.MockMemDb, opts models.Outg
 // --schema-noise-strict: a call that misses the exact body match reaches the
 // body-schema match, where the strict filter and the detection hand the body
 // noise to the mock-noise engine; a call that differs only in its noise is
-// served there, one that differs in a field is refused), answered and missed
+// served there, one that differs in a field is refused; between two
+// recordings that both pass, the fuzzy match picks one), answered and missed
 // (the mismatch report, the extra-call count, the answered diagnosis, the
 // recording made elsewhere and the repeat note), and then the noise they were
 // all handed must still be the noise of the options (NewRequestNoise), and the
@@ -139,11 +144,36 @@ func TestNoServedCallWritesTheSharedRequestNoise(t *testing.T) {
 			recordedAs(t, h, "mock-read", 2, readBackCall("ord-rec-1"), jsonAnswer(200, `{"id":"ord-rec-1","item":"pen","n":1}`), use),
 		}
 	}
+	// Two recordings of one shape with request-body noise learned on each
+	// (Spec.ReqBodyNoise): the matchers merge it with the shared noise
+	// (KnownNoise, and the mismatch report's ignore set), so a merge into the
+	// shared map in place would be a write.
+	learnedRecs := func(t *testing.T) []*models.Mock {
+		recs := []*models.Mock{
+			recordedAs(t, h, "mock-learned-a", 1, orderCall("17", 1, 2, "r-1"), jsonAnswer(200, `{"ok":1}`), nil),
+			recordedAs(t, h, "mock-learned-b", 2, orderCall("19", 3, 4, "r-2"), jsonAnswer(200, `{"ok":2}`), nil),
+		}
+		for _, m := range recs {
+			m.Spec.ReqBodyNoise = map[string][]string{"body.order.q": {}}
+		}
+		return recs
+	}
 	scenarios := []struct {
 		name  string
 		recs  func(*testing.T) []*models.Mock
 		calls []call
 	}{
+		// The first call's order is a string, not an object. Under the
+		// switch and the strict filter it is refused, and the mismatch report
+		// diffs its body against the closest recording (pickClosestCandidate)
+		// with that recording's learned noise ignored; with the switch off
+		// and no strict filter, main's matching serves it. The second differs
+		// from the recordings only in noise, the learned field's included: in
+		// the mock-noise row both recordings pass the body-schema match and
+		// the strict filter, and the fuzzy match picks one.
+		{"recordings with learned noise", learnedRecs, []call{
+			{orderCallOf("18", `{"order":"2-5"}`, "r-9"), map[string]int{"off": 200, "on": 502, "learn": 502, "mock noise": 502}},
+			{orderCall("18", 2, 5, "r-9"), map[string]int{"off": 200, "on": 200, "learn": 200, "mock noise": 200}}}},
 		{"a call that differs in its noise", orderRec, []call{
 			{orderCall("18", 2, 2, "r-9"), map[string]int{"off": 200, "on": 200, "learn": 200, "mock noise": 200}}}},
 		{"a call that differs in a field", orderRec, []call{
