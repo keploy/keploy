@@ -161,7 +161,8 @@ func TestRequestNoiseForBuildsOncePerOptionsValue(t *testing.T) {
 //     auto-dynamic query pass (the proven switch off, the default);
 //   - a passthrough destination;
 //   - a missed call --on-miss passthrough or record serves from the real
-//     dependency (an info entry);
+//     dependency, whose answer sets a cookie (an info entry, its fields
+//     compared whole);
 //   - a call whose body does not decode (an error entry).
 //
 // Values are searched as plain text: a field that encodes one (base64, say)
@@ -284,6 +285,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 	for _, policy := range []models.MissPolicy{models.MissPassthrough, models.MissRecord} {
 		t.Run("a missed call served from the real dependency, on-miss "+string(policy), func(t *testing.T) {
 			dep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Set-Cookie", "s1d=dep-c00k1e")
 				_, _ = w.Write([]byte("dep-an5wer"))
 			}))
 			t.Cleanup(dep.Close)
@@ -294,18 +296,36 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			h := &HTTP{Logger: zap.New(core)}
 			dst := &models.ConditionalDstCfg{Addr: strings.TrimPrefix(dep.URL, "http://")}
 			app, ended := start(t, req, &mockMemDb{}, models.OutgoingOptions{OnMiss: policy}, h, dst)
-			if got := readServed(t, app); got != "dep-an5wer" {
-				t.Fatalf("served %q, want the dependency's answer", got)
+			// The dependency's whole answer, its cookie too, reaches the
+			// application, so the entry had both in reach.
+			resp, err := http.ReadResponse(app, nil)
+			if err != nil {
+				t.Fatalf("read the served answer: %v", err)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read the served body: %v", err)
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Fatalf("close the served body: %v", err)
+			}
+			if string(body) != "dep-an5wer" || resp.Header.Get("Set-Cookie") != "s1d=dep-c00k1e" {
+				t.Fatalf("served %q with Set-Cookie %q, want the dependency's answer and cookie", body, resp.Header.Get("Set-Cookie"))
 			}
 			if err := ended(); err != nil {
 				t.Fatalf("decodeHTTP = %v", err)
 			}
-			served := logs.FilterMessage("on-miss: served an unrecorded call from the real dependency").All()
-			if len(served) != 1 || served[0].Level != zapcore.InfoLevel || !reflect.DeepEqual(metadataOf(served[0]), reqMeta("/u")) ||
-				served[0].ContextMap()["policy"] != string(policy) {
-				t.Errorf("logged the on-miss call as %v, want one info entry with the request's method, host, path and query keys", served)
+			const msg = "on-miss: served an unrecorded call from the real dependency"
+			if served := logs.FilterMessage(msg).All(); len(served) != 1 || served[0].Level != zapcore.InfoLevel {
+				t.Errorf("logged the on-miss call as %v, want one info entry", served)
 			}
-			noValueLogged(t, logs, append(shapeValues("live"), "dep-an5wer"))
+			// Every field, so one added beside these (a header of the
+			// answer, a value's first characters) fails the row too.
+			wantOnce(t, logs, msg, map[string]interface{}{
+				"metadata": map[string]string{"method": "POST", "host": "api.example", "path": "/u", "query keys": "token"},
+				"policy":   string(policy),
+			})
+			noValueLogged(t, logs, append(shapeValues("live"), "dep-an5wer", "dep-c00k1e"))
 		})
 	}
 
