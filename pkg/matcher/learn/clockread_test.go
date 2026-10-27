@@ -589,8 +589,7 @@ func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 				t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock modulo a day, in %s", at, ln.Kind, ln.Read, ln.Why, tc.zone)
 				continue
 			}
-			// A replay 3 days later, its call a second long, ending 20 ms
-			// past midnight in the zone where the recording's was.
+			// A replay 3 days later, its call a second long.
 			replay := tc.call.Add(72*time.Hour + 2*time.Second)
 			s := Span{From: replay.Add(-time.Second), To: replay, Zone: tc.app}
 			for _, held := range []time.Time{s.From, s.From.Add(400 * time.Millisecond), s.To} {
@@ -602,6 +601,21 @@ func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 				v := leaf(todIn(s.From.Add(400*time.Millisecond+moved), tc.loc))
 				if ok, why := CheckClockRead(p, o, v, s, true); ok || !strings.HasPrefix(why, p+" was learned as") {
 					t.Errorf("%s: the replay's time of day moved by %s: %v (%s); want refused, naming the place", at, moved, ok, why)
+				}
+			}
+			// A replay whose call's span crosses midnight in the zone: a
+			// read on either side of it passes, one a minute off does not.
+			y, m, d := replay.In(tc.loc).Date()
+			midnight := time.Date(y, m, d+1, 0, 0, 0, 0, tc.loc)
+			ms := Span{From: midnight.Add(-980 * time.Millisecond), To: midnight.Add(20 * time.Millisecond), Zone: tc.app}
+			for _, held := range []time.Time{ms.From.Add(100 * time.Millisecond), midnight, ms.To} {
+				if ok, why := CheckClockRead(p, o, leaf(todIn(held, tc.loc)), ms, true); !ok {
+					t.Errorf("%s: the replay's own time of day %s, its span across midnight, refused: %s", at, held.In(tc.loc).Format("15:04:05.000"), why)
+				}
+			}
+			for _, moved := range []time.Duration{-time.Minute, time.Minute} {
+				if ok, _ := CheckClockRead(p, o, leaf(todIn(midnight.Add(moved), tc.loc)), ms, true); ok {
+					t.Errorf("%s: a time of day %s off midnight passed a span across midnight", at, moved)
 				}
 			}
 			if tc.zone != models.ZoneUTC {
