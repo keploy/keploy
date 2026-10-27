@@ -1902,10 +1902,8 @@ type DriftCache struct {
 // driftState is what one test's DriftCaches keep, shared by each zone it
 // is read in (DriftCache.InZone).
 type driftState struct {
-	mu     sync.Mutex
-	m      map[driftKey]*valueDrift
-	raw    map[string]string
-	rawTok map[string][]map[string]bool
+	mu sync.Mutex
+	m  map[driftKey]*valueDrift
 	// mockText is each mock as Classify reads it (RawOf: its text and its
 	// answer's clock reads), by mock: the store's mocks are read once per
 	// test, not once per request.
@@ -1914,12 +1912,13 @@ type driftState struct {
 	// mock: apart from mockText, which RawOf fills with a parked mock's
 	// text without its answer.
 	readText map[*models.Mock]Raw
-	// spans are, by text, the instants it holds (instantSpans); blanked and
-	// blankTok, by payload (rawKey), its texts and words with its answer's
-	// clock reads blanked (searched, searchedTokens).
-	spans    map[string][]instant
-	blanked  map[string][2]string
-	blankTok map[string][]map[string]bool
+	// text keeps, by text, what is derived of it: its other forms
+	// (rawExtra), its words (rawTokens), the instants it holds (spansOf);
+	// by payload (rawKey), its texts and words with its answer's clock
+	// reads blanked (searched, searchedTokens). Within a fixed budget
+	// (textCache); nil for a cache not made by NewDriftCache, which keeps
+	// none.
+	text *textCache
 	// set keeps what is read of a recording's payload alone for the
 	// tracker's running set (setDerived); nil for a cache no tracker made.
 	set *setDerived
@@ -1997,7 +1996,7 @@ func (dc *DriftCache) InstantClockRead(rec, live Leaf, w *Window) bool {
 
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{driftState: &driftState{m: map[driftKey]*valueDrift{}, raw: map[string]string{}, rawTok: map[string][]map[string]bool{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, spans: map[string][]instant{}}}
+	return &DriftCache{driftState: &driftState{m: map[driftKey]*valueDrift{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, text: newTextCache()}}
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
@@ -2070,37 +2069,21 @@ func (dc *DriftCache) RawOf(m *models.Mock, served bool) Raw {
 	return r
 }
 
-// rawTokens are every word of a payload's text in every declared form, by
-// reading.
+// rawTokens are every word of a text in every declared form, by reading,
+// read once for the test where dc keeps it (textCache).
 func (dc *DriftCache) rawTokens(text string) []map[string]bool {
-	dc.mu.Lock()
-	t, ok := dc.rawTok[text]
-	dc.mu.Unlock()
-	if ok {
-		return t
-	}
-	t = tokensOfForms(textForms(text))
-	dc.mu.Lock()
-	dc.rawTok[text] = t
-	dc.mu.Unlock()
-	return t
+	return derivedOfText(dc, textTokens, text, func(own string) []map[string]bool { return tokensOfForms(textForms(own)) }, tokensBytes)
 }
 
-// rawExtra is what a payload's text is searched in besides itself: its
-// other declared forms (textForms: decoded, case-folded, and the text its
-// encoded runs decode to), one per line.
+// extraOf is what text is searched in besides itself: its other declared
+// forms (textForms: decoded, case-folded, and the text its encoded runs
+// decode to), one per line.
+func extraOf(text string) string { return strings.Join(textForms(text)[1:], "\n") }
+
+// rawExtra is extraOf(text), read once for the test where dc keeps it
+// (textCache).
 func (dc *DriftCache) rawExtra(text string) string {
-	dc.mu.Lock()
-	t, ok := dc.raw[text]
-	dc.mu.Unlock()
-	if ok {
-		return t
-	}
-	t = strings.Join(textForms(text)[1:], "\n")
-	dc.mu.Lock()
-	dc.raw[text] = t
-	dc.mu.Unlock()
-	return t
+	return derivedOfText(dc, textExtra, text, extraOf, stringBytes)
 }
 
 // driftKey is a drifted value, with the window of the call it is read in

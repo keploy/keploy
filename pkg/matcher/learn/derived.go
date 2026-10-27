@@ -11,9 +11,10 @@ import (
 // payload RawOf read whole): the instants its text and its other forms hold
 // (payloadMoments), its instants where the offset rule reads them
 // (keyedPlaces), its words in every form (searchedTokens), the words the
-// word rule's text search can find in it (searchWords) and the instants each
-// of its fields holds (fieldMoments). A test's drift
-// cache starts empty, so without it every test of a set read the payloads of
+// word rule's text search can find in it (searchWords), the instants each
+// of its fields holds (fieldMoments), its other forms (payloadExtra) and its
+// texts with its answer's stamps and clock reads blanked (setSearched). A
+// test's drift cache starts empty, so without it every test of a set read the payloads of
 // every recording served or recorded before its calls again, and the learn
 // step's cost per call grew with the set. It keeps none of a payload's text:
 // each word and name it keeps is a copy, so an answer the agent parked on
@@ -49,11 +50,16 @@ type derivedEntry struct {
 	tokens                [2][]map[string]bool // by keep
 	words                 [2]map[string]bool   // by keep
 	fields                [][]moment
+	extra                 string
+	searched              [2][2]string // by keep, where not plain
 	hasMoments, hasPlaces bool
 	hasTokens, hasWords   [2]bool
-	hasFields             bool
-	size                  int64
-	at                    *list.Element
+	hasFields, hasExtra   bool
+	// hasSearched: searched is kept, or plain says the payload's searched
+	// texts are its own text and extra (no stamp or clock read to blank).
+	hasSearched, plain [2]bool
+	size               int64
+	at                 *list.Element
 }
 
 // derivedBudget is the bytes of derived data setDerived keeps for a set.
@@ -96,13 +102,13 @@ func (s *setDerived) find(id string, have func(e *derivedEntry) bool) (e *derive
 
 // keep puts a part of size bytes into id's entry (put), unless have says
 // another read put it first, then lets go of the recordings read least
-// recently until the set's parts are within the budget: the entry just
-// kept too, where it alone is past it.
+// recently until the set's parts are within the budget. A part past the
+// whole budget is kept by none and lets go of nothing.
 func (s *setDerived) keep(id string, size int64, have func(e *derivedEntry) bool, put func(e *derivedEntry)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e := s.by[id]
-	if e != nil && have(e) {
+	if e != nil && have(e) || size > s.budget {
 		return
 	}
 	if e == nil {
@@ -148,13 +154,13 @@ func (dc *DriftCache) setOf(x Raw) *setDerived {
 // (heldIn's), read once for the set where dc keeps x's (setOf), once per
 // test otherwise.
 func (dc *DriftCache) payloadMoments(x Raw) []moment {
-	read := func() []moment {
+	read := func(spans func(string) []instant, extra string) []moment {
 		var out []moment
-		for _, text := range []string{x.payload().text, dc.rawExtra(x.payload().text)} {
+		for _, text := range []string{x.payload().text, extra} {
 			if text == "" {
 				continue
 			}
-			for _, sp := range dc.spansOf(text) {
+			for _, sp := range spans(text) {
 				if sp.keyed {
 					out = append(out, sp.moment())
 				}
@@ -164,13 +170,15 @@ func (dc *DriftCache) payloadMoments(x Raw) []moment {
 	}
 	s := dc.setOf(x)
 	if s == nil {
-		return read()
+		return read(dc.spansOf, dc.rawExtra(x.payload().text))
 	}
 	has := func(e *derivedEntry) bool { return e.hasMoments }
 	if e, ok := s.find(x.id, has); ok {
 		return e.moments
 	}
-	m := read()
+	// Read now, never into the test's cache of texts (textCache), which
+	// would key them by the payload's text.
+	m := read(instantSpans, dc.payloadExtra(x))
 	s.keep(x.id, headerBytes+momentBytes*int64(len(m)), has, func(e *derivedEntry) { e.moments, e.hasMoments = m, true })
 	return m
 }
@@ -209,7 +217,7 @@ func (dc *DriftCache) setTokens(x Raw, keep bool) (out []map[string]bool, ok boo
 	if e, ok := s.find(x.id, has); ok {
 		return e.tokens[k], true
 	}
-	read := dc.readTokens(x, keep)
+	read := tokensIn(x, keep)
 	out = make([]map[string]bool, len(read))
 	size := int64(headerBytes)
 	for i, words := range read {
@@ -294,7 +302,7 @@ func (dc *DriftCache) fieldMoments(x Raw) (out [][]moment, ok bool) {
 		if f.key {
 			continue
 		}
-		for _, sp := range dc.spansOf(xb.text[f.start:f.end]) {
+		for _, sp := range instantSpans(xb.text[f.start:f.end]) {
 			if sp.keyed {
 				out[i] = append(out[i], sp.moment())
 			}
@@ -306,4 +314,49 @@ func (dc *DriftCache) fieldMoments(x Raw) (out [][]moment, ok bool) {
 	}
 	s.keep(x.id, size, has, func(e *derivedEntry) { e.fields, e.hasFields = out, true })
 	return out, true
+}
+
+// payloadExtra is rawExtra of x's text, read once for the set where dc keeps
+// x's (setOf), by the recording and as a copy, never by its text; once per
+// test otherwise.
+func (dc *DriftCache) payloadExtra(x Raw) string {
+	s := dc.setOf(x)
+	if s == nil {
+		return dc.rawExtra(x.payload().text)
+	}
+	has := func(e *derivedEntry) bool { return e.hasExtra }
+	if e, ok := s.find(x.id, has); ok {
+		return e.extra
+	}
+	out := strings.Clone(extraOf(x.payload().text))
+	s.keep(x.id, headerBytes+int64(len(out)), has, func(e *derivedEntry) { e.extra, e.hasExtra = out, true })
+	return out
+}
+
+// setSearched is searched(x, keep) of an x whose set s keeps it: the texts
+// with x's stamps or clock reads blanked, as copies, by the recording; a
+// payload with none to blank is searched as its own text (the set's store
+// of payloads, bodyStore) and payloadExtra, and s keeps only that it is.
+func (dc *DriftCache) setSearched(s *setDerived, x Raw, keep bool) [2]string {
+	k := keepIndex(keep)
+	has := func(e *derivedEntry) bool { return e.hasSearched[k] }
+	if e, ok := s.find(x.id, has); ok {
+		if e.plain[k] {
+			return [2]string{x.payload().text, dc.payloadExtra(x)}
+		}
+		return e.searched[k]
+	}
+	y := x
+	if keep {
+		y = x.withoutStamps()
+	}
+	keys := clockKeys(y)
+	yb := y.payload()
+	if len(keys) == 0 && len(yb.stamps) == 0 {
+		s.keep(x.id, 0, has, func(e *derivedEntry) { e.plain[k], e.hasSearched[k] = true, true })
+		return [2]string{yb.text, dc.payloadExtra(x)}
+	}
+	out := blankedPair(yb.text, yb.stamps, keys)
+	s.keep(x.id, headerBytes+pairBytes(out), has, func(e *derivedEntry) { e.searched[k], e.hasSearched[k] = out, true })
+	return out
 }

@@ -793,6 +793,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 	}
 	keep := dc.stampsEchoed(v, served, raw)
 	word := v.wordOf
+	held := dc.wordsHeld(v, keep, raw)
 	return v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
@@ -834,13 +835,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 			}
 		}
-		for _, x := range raw {
+		for j, x := range raw {
 			if !x.earlierThan(at) {
 				continue
 			}
 			// A protocol-phase answer's own clock reads blanked
 			// (instants.go, rule 2).
-			if dc.searchedTokens(x, keep)[i][t] {
+			if held.of(j).raw[changedWord{i, t}] {
 				note := x.atNote(at)
 				place := x.mock + "'s payload"
 				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
@@ -861,7 +862,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// fields where the recording gave another value, which the
 			// recorded value took none of the words of, is let go
 			// (follows.excusedLive).
-			if !recorded && x.Live() && dc.searchedTokens(*x.live, keep)[i][t] {
+			if !recorded && x.Live() && held.of(j).live[changedWord{i, t}] {
 				place := x.mock + "'s payload, as record's full round gave it"
 				if f := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
 					place = x.mock + " at " + f + ", as record's full round gave it"
@@ -971,6 +972,62 @@ func (v *valueDrift) wordOf(t string, recorded bool) string {
 // (clockWord). Each set of words is handed in the order its words stand in
 // the value (inOrder), never in a set's: the first one found names the
 // place and the reason.
+// changedWord is a word of what changed (eachChanged): its reading and its
+// text.
+type changedWord struct {
+	i int
+	t string
+}
+
+// heldWords are which of a value's changed words each earlier payload
+// holds (searchedTokens), by the payload's index, each payload's read once,
+// where unaccounted first asks of it.
+type heldWords struct {
+	of func(j int) wordsIn
+}
+
+// wordsIn are the changed words a payload holds, as recorded (raw) and as
+// F gave it (live: its ServedLive view).
+type wordsIn struct{ raw, live map[changedWord]bool }
+
+// wordsHeld are which of v's changed words each of raw holds, searched as
+// keep says (stampsEchoed). Each payload's words are read once for the
+// value, not once for each of its changed words: the set keeps them within
+// a budget (setDerived), and a payload let go would be read again at each
+// word of each reading, its cost per call growing with the value's words.
+func (dc *DriftCache) wordsHeld(v *valueDrift, keep bool, raw []Raw) heldWords {
+	var words []changedWord
+	seen := map[changedWord]bool{}
+	v.eachChanged(func(i int, t string, _ bool) string {
+		if w := (changedWord{i, t}); !seen[w] {
+			seen[w] = true
+			words = append(words, w)
+		}
+		return ""
+	})
+	in := func(toks []map[string]bool) map[changedWord]bool {
+		out := map[changedWord]bool{}
+		for _, w := range words {
+			if toks[w.i][w.t] {
+				out[w] = true
+			}
+		}
+		return out
+	}
+	read := make([]*wordsIn, len(raw))
+	return heldWords{of: func(j int) wordsIn {
+		if read[j] == nil {
+			x := raw[j]
+			h := wordsIn{raw: in(dc.searchedTokens(x, keep))}
+			if x.Live() {
+				h.live = in(dc.searchedTokens(*x.live, keep))
+			}
+			read[j] = &h
+		}
+		return *read[j]
+	}}
+}
+
 func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) string) string {
 	for i := range readings {
 		for _, set := range []struct {

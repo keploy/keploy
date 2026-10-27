@@ -1082,26 +1082,10 @@ func timeOfDay(at int64) int64 {
 	return (at%day + day) % day
 }
 
-// spansOf is instantSpans(text), read once per test (a nil cache reads it
-// now).
+// spansOf is instantSpans(text), read once for the test where dc keeps it
+// (textCache; a nil cache reads it now).
 func (dc *DriftCache) spansOf(text string) []instant {
-	if dc == nil {
-		return instantSpans(text)
-	}
-	dc.mu.Lock()
-	s, ok := dc.spans[text]
-	dc.mu.Unlock()
-	if ok {
-		return s
-	}
-	s = instantSpans(text)
-	dc.mu.Lock()
-	if dc.spans == nil {
-		dc.spans = map[string][]instant{}
-	}
-	dc.spans[text] = s
-	dc.mu.Unlock()
-	return s
+	return derivedOfText(dc, textSpans, text, instantSpans, spansBytes)
 }
 
 // tokensOfForms are the words of forms, by reading.
@@ -1454,8 +1438,12 @@ func rawKey(x Raw) string {
 // text and its other forms (rawExtra), with its answer's stamps blanked
 // before its forms are read (but where keep says the stamps are searched as
 // any text: stampsEchoed), and its answer's own clock reads blanked in every
-// form.
+// form. It is read once for the set where dc keeps x's (setSearched), once
+// per test otherwise.
 func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
+	if s := dc.setOf(x); s != nil {
+		return dc.setSearched(s, x, keep)
+	}
 	if keep {
 		x = x.withoutStamps()
 	}
@@ -1464,23 +1452,26 @@ func (dc *DriftCache) searched(x Raw, keep bool) [2]string {
 	if len(keys) == 0 && len(xb.stamps) == 0 {
 		return [2]string{xb.text, dc.rawExtra(xb.text)}
 	}
-	k := rawKey(x)
-	dc.mu.Lock()
-	s, ok := dc.blanked[k]
-	dc.mu.Unlock()
-	if ok {
-		return s
-	}
-	text := blankStamps(xb.text, xb.stamps)
+	return derivedOfText(dc, textBlanked, rawKey(x), func(string) [2]string { return blankedPair(xb.text, xb.stamps, keys) }, pairBytes)
+}
+
+// blankedPair is searched's text and other forms of a payload's text whose
+// answer has stamps or clock reads keys: each a copy, holding no part of
+// text.
+func blankedPair(text string, stamps []rawField, keys map[instantKey]bool) [2]string {
+	t := blankStamps(text, stamps)
 	blank := func(sp instant) bool { return sp.keyed && keys[sp.key] }
-	s = [2]string{blankSpans(text, blank), blankSpans(dc.rawExtra(text), blank)}
-	dc.mu.Lock()
-	if dc.blanked == nil {
-		dc.blanked = map[string][2]string{}
+	return [2]string{strings.Clone(blankSpans(t, blank)), strings.Clone(blankSpans(extraOf(t), blank))}
+}
+
+// blankedForms are text's declared forms (textForms) with stamps blanked
+// before they are read, and the clock reads keys holds blanked in each.
+func blankedForms(text string, stamps []rawField, keys map[instantKey]bool) []string {
+	forms := textForms(blankStamps(text, stamps))
+	for i := range forms {
+		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
 	}
-	dc.blanked[k] = s
-	dc.mu.Unlock()
-	return s
+	return forms
 }
 
 // searchedTokens are the words of x's text in every declared form, by
@@ -1494,7 +1485,22 @@ func (dc *DriftCache) searchedTokens(x Raw, keep bool) []map[string]bool {
 	return dc.readTokens(x, keep)
 }
 
-// readTokens reads searchedTokens(x, keep) from x's text.
+// tokensIn reads searchedTokens(x, keep) from x's text now; each word may
+// be a part of x's text.
+func tokensIn(x Raw, keep bool) []map[string]bool {
+	if keep {
+		x = x.withoutStamps()
+	}
+	keys := clockKeys(x)
+	xb := x.payload()
+	if len(keys) == 0 && len(xb.stamps) == 0 {
+		return tokensOfForms(textForms(xb.text))
+	}
+	return tokensOfForms(blankedForms(xb.text, xb.stamps, keys))
+}
+
+// readTokens is searchedTokens(x, keep) of an x whose set keeps none of it:
+// read once for the test (textCache).
 func (dc *DriftCache) readTokens(x Raw, keep bool) []map[string]bool {
 	if keep {
 		x = x.withoutStamps()
@@ -1504,23 +1510,8 @@ func (dc *DriftCache) readTokens(x Raw, keep bool) []map[string]bool {
 	if len(keys) == 0 && len(xb.stamps) == 0 {
 		return dc.rawTokens(xb.text)
 	}
-	k := rawKey(x)
-	dc.mu.Lock()
-	t, ok := dc.blankTok[k]
-	dc.mu.Unlock()
-	if ok {
-		return t
-	}
-	forms := textForms(blankStamps(xb.text, xb.stamps))
-	for i := range forms {
-		forms[i] = blankSpans(forms[i], func(sp instant) bool { return sp.keyed && keys[sp.key] })
-	}
-	t = tokensOfForms(forms)
-	dc.mu.Lock()
-	if dc.blankTok == nil {
-		dc.blankTok = map[string][]map[string]bool{}
-	}
-	dc.blankTok[k] = t
-	dc.mu.Unlock()
-	return t
+	// Its words are parts of a copy of the text, read with them.
+	return derivedOfText(dc, textBlankTok, rawKey(x), func(string) []map[string]bool {
+		return tokensOfForms(blankedForms(strings.Clone(xb.text), xb.stamps, keys))
+	}, func(t []map[string]bool) int64 { return tokensBytes(t) + int64(len(xb.text)) })
 }
