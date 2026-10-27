@@ -137,6 +137,54 @@ func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
 	return max(n, 1)
 }
 
+// backgroundAgain is, for an exchange no mock answered under exact serving
+// (the proven switch), the recording of the open test that judging marked as
+// the application's background work and that the exchange repeats: matched
+// as the per-test pool is (exactly, or at the per-test similarity) against
+// such recordings that already answered in the test's window
+// (integrations.AnsweredBackgroundReader). A timer or a start-up job ran more
+// often at replay than at record, and its exchange is answered again with
+// that recording, unchecked, where it would otherwise be one exchange more
+// than the test recorded (extraCall). nil when it repeats none, or the store
+// marks nothing.
+func backgroundAgain(reqBuffs [][]byte, mockDb integrations.MockMemDb) *models.Mock {
+	br, ok := mockDb.(integrations.AnsweredBackgroundReader)
+	if !ok {
+		return nil
+	}
+	var marked []*models.Mock
+	for _, mk := range br.AnsweredBackground() {
+		if mk.Kind == models.GENERIC {
+			marked = append(marked, mk)
+		}
+	}
+	if len(marked) == 0 {
+		return nil
+	}
+	idx := findExactMatch(marked, reqBuffs)
+	if idx == -1 {
+		idx = findBinaryMatch(marked, reqBuffs, 0.9)
+	}
+	if idx == -1 {
+		return nil
+	}
+	return marked[idx]
+}
+
+// reportBackgroundAgain reports an exchange answered again
+// (models.AnswerBackgroundAgain): it repeats x, a recording of the open test
+// that judging marked as the application's background work and that already
+// answered in its window (backgroundAgain). It counts against no test.
+func reportBackgroundAgain(ctx context.Context, reqBuffs [][]byte, x *models.Mock) {
+	first := 0
+	if len(reqBuffs) > 0 {
+		first = len(reqBuffs[0])
+	}
+	r := mismatch.NewReport(mismatch.ProtocolGeneric, fmt.Sprintf("opaque TCP exchange (%d request buffer(s), first %d bytes)", len(reqBuffs), first)).Build()
+	r.Answer, r.ClosestMock = models.AnswerBackgroundAgain, x.Name
+	models.ReportAnswer(ctx, r)
+}
+
 // answeredExchanges are, under exact serving (the proven switch), the open
 // test's Generic mocks that have answered, in the order they did: in no read
 // any more, each answers once. None when exact serving is off.
