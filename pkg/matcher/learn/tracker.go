@@ -989,13 +989,15 @@ func drifted(e Earlier) bool {
 // template keys). ok is false when that test has ended. A place of the run's
 // (RunName) is named the run's variable's name, whatever test of the set n
 // is; ok is false when reserved holds that name (RunName), or n is of an
-// earlier set: the set's run is not its. A nil tracker, which knows of no
-// test, names a variable by its place alone.
-func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (name string, ok bool) {
+// earlier set: the set's run is not its. places are the recording's request
+// places (RequestPlaces), which a place holding a key that may be a value is
+// ranked among for its name (varName). A nil tracker, which knows of no
+// test, names a variable by its place and recording alone.
+func (t *Tracker) Name(n uint64, mock, place string, places []string, reserved map[string]bool) (name string, ok bool) {
 	if t == nil {
-		name = varName(mock, place)
+		name = varName(mock, place, places)
 		for i := 2; reserved[name]; i++ {
-			name = varName(mock, place) + "-" + strconv.Itoa(i)
+			name = varName(mock, place, places) + "-" + strconv.Itoa(i)
 		}
 		return name, true
 	}
@@ -1020,7 +1022,7 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	if t.setTaken == nil {
 		t.setTaken = map[string]bool{}
 	}
-	name = t.free(varName(mock, place), reserved, t.taken)
+	name = t.free(varName(mock, place, places), reserved, t.taken)
 	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
 	return name, true
 }
@@ -1043,12 +1045,13 @@ const runPrefix = "run-"
 // rather than read its own key as the run's variable. ok is false, and no
 // name is given, when n is of an earlier set: the set's mock names are that
 // set's too, and its run is not this one. A nil tracker, which keeps no set,
-// names it by its place alone, apart from reserved.
-func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool) (string, bool) {
+// names it by its place and recording alone, apart from reserved. places
+// are as Name's.
+func (t *Tracker) RunName(n uint64, mock, place string, places []string, reserved map[string]bool) (string, bool) {
 	if t == nil {
-		name := runPrefix + varName(mock, place)
+		name := runPrefix + varName(mock, place, places)
 		for i := 2; reserved[name]; i++ {
-			name = runPrefix + varName(mock, place) + "-" + strconv.Itoa(i)
+			name = runPrefix + varName(mock, place, places) + "-" + strconv.Itoa(i)
 		}
 		return name, true
 	}
@@ -1064,7 +1067,7 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 	if t.runNames == nil {
 		t.runNames, t.runTaken = map[string]string{}, map[string]bool{}
 	}
-	name := t.free(runPrefix+varName(mock, place), reserved, t.setTaken)
+	name := t.free(runPrefix+varName(mock, place, places), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
 	return name, true
 }

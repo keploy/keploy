@@ -1,6 +1,8 @@
 package learn
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +24,7 @@ func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
 	t0 := time.Unix(1_792_000_000, 0)
 	tr.Served(0, sent("mock-1", t0, "body.auth_time", "body.auth_time", "1792000000", "1792000777"))
 	tr.Served(0, sent("mock-2", t0, "body.status", "body.status", "ok", "ok"))
-	run, _ := tr.RunName(0, "mock-1", "body.auth_time", nil)
+	run, _ := tr.RunName(0, "mock-1", "body.auth_time", nil, nil)
 
 	for i := 0; i < 2; i++ {
 		tr.Begin()
@@ -30,10 +32,10 @@ func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
 		if len(earlier) != 1 || !earlier[0].Run || earlier[0].Mock != "mock-1" {
 			t.Fatalf("test %d: the run's exchanges are %+v, want the start-up call that carried a value the run made", i, earlier)
 		}
-		if name, ok := tr.Name(n, "mock-1", "body.auth_time", nil); !ok || name != run {
+		if name, ok := tr.Name(n, "mock-1", "body.auth_time", nil, nil); !ok || name != run {
 			t.Fatalf("test %d: the run's variable is named %q here, %q at the start-up", i, name, run)
 		}
-		if name, _ := tr.Name(n, "mock-9", "body.auth_time", nil); name == run {
+		if name, _ := tr.Name(n, "mock-9", "body.auth_time", nil, nil); name == run {
 			t.Fatalf("test %d: a test's own variable took the run's name %q", i, run)
 		}
 		tr.End()
@@ -51,7 +53,7 @@ func TestTrackerKeepsTheRunsExchangesForEveryTest(t *testing.T) {
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 1 || !earlier[0].Run {
 		t.Fatalf("the next set's start-up is not the run's: %+v", earlier)
 	}
-	if again, _ := tr.RunName(n, "mock-1", "body.auth_time", nil); again != run {
+	if again, _ := tr.RunName(n, "mock-1", "body.auth_time", nil, nil); again != run {
 		t.Fatalf("the next set's run's variable is named %q, want %q again", again, run)
 	}
 }
@@ -65,18 +67,18 @@ func TestTheRunsVariableTakesNoTemplateKey(t *testing.T) {
 	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
 	tr.Begin()
 	n1, _, _, _ := tr.Test()
-	run, _ := tr.RunName(n1, "mock-1", "body._id", nil)
+	run, _ := tr.RunName(n1, "mock-1", "body._id", nil, nil)
 	tr.End()
 	tr.Begin()
 	n, _, _, _ := tr.Test()
 	reserved := map[string]bool{"_id": true}
-	if again, _ := tr.RunName(n, "mock-1", "body._id", reserved); again != run || reserved[run] {
+	if again, _ := tr.RunName(n, "mock-1", "body._id", nil, reserved); again != run || reserved[run] {
 		t.Fatalf("the run's variable is %q in a test that reserves _id, %q before", again, run)
 	}
-	if own, _ := tr.Name(n, "mock-5", "body._id", reserved); own == run || reserved[own] {
+	if own, _ := tr.Name(n, "mock-5", "body._id", nil, reserved); own == run || reserved[own] {
 		t.Fatalf("the test's own variable is %q, next to the run's %q and its reserved _id", own, run)
 	}
-	if name, _ := (*Tracker)(nil).RunName(0, "mock-1", "body._id", map[string]bool{"run-_id": true}); name != "run-_id-2" {
+	if name, _ := (*Tracker)(nil).RunName(0, "mock-1", "body._id", nil, map[string]bool{"run-_id": true}); name != "run-_id-2" {
 		t.Fatalf("a nil tracker names the run's variable %q, want run-_id-2", name)
 	}
 }
@@ -92,7 +94,7 @@ func TestARunsNameATestReservesIsRefusedThere(t *testing.T) {
 	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
 	tr.Begin()
 	n1, _, _, _ := tr.Test()
-	run, ok := tr.RunName(n1, "mock-1", "body._id", nil)
+	run, ok := tr.RunName(n1, "mock-1", "body._id", nil, nil)
 	if !ok || run != "run-_id" {
 		t.Fatalf("the run's variable is named %q (%v), want run-_id", run, ok)
 	}
@@ -103,16 +105,16 @@ func TestARunsNameATestReservesIsRefusedThere(t *testing.T) {
 	tr.Begin()
 	n, _, _, _ := tr.Test()
 	reserved := map[string]bool{run: true}
-	if name, ok := tr.Name(n, "mock-1", "body._id", reserved); ok {
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil, reserved); ok {
 		t.Fatalf("a test that reserves %q named the run's place %q", run, name)
 	}
-	if name, ok := tr.RunName(n, "mock-1", "body._id", reserved); ok {
+	if name, ok := tr.RunName(n, "mock-1", "body._id", nil, reserved); ok {
 		t.Fatalf("a test that reserves %q named the run's variable %q", run, name)
 	}
 	tr.End()
 	tr.Begin()
 	n, _, _, _ = tr.Test()
-	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil, nil); !ok || name != run {
 		t.Fatalf("the next test names the run's place %q (%v), want %q", name, ok, run)
 	}
 }
@@ -126,12 +128,12 @@ func TestTheRunsVariableTakesNoTestsName(t *testing.T) {
 	tr.Served(0, sent("mock-1", t0, "body.docs.msgs.0._id", "body.docs.msgs.0._id", "rec-id", "live-id"))
 	tr.Begin()
 	n1, _, _, _ := tr.Test()
-	own, _ := tr.Name(n1, "mock-5", "body.docs.msgs.0._id", nil)
+	own, _ := tr.Name(n1, "mock-5", "body.docs.msgs.0._id", nil, nil)
 	tr.End()
 	tr.Begin()
 	n2, _, _, _ := tr.Test()
-	run, _ := tr.RunName(n2, "mock-1", "body.docs.msgs.0._id", nil)
-	later, _ := tr.Name(n2, "mock-7", "body.docs.msgs.0._id", nil)
+	run, _ := tr.RunName(n2, "mock-1", "body.docs.msgs.0._id", nil, nil)
+	later, _ := tr.Name(n2, "mock-7", "body.docs.msgs.0._id", nil, nil)
 	if own != "_id" || run == own || later == run {
 		t.Fatalf("test 1 named its own %q, the run's is %q, test 2's own is %q; want the run's apart from both", own, run, later)
 	}
@@ -183,7 +185,7 @@ func TestOnlyTheStartUpsExchangesAreTheRuns(t *testing.T) {
 	if _, earlier, _, _ := tr.Test(); len(earlier) != 0 {
 		t.Fatalf("a request of the previous set, of a test that never ran, or one that took its scope from the previous set, is kept as the new set's: %+v", earlier)
 	}
-	if name, ok := tr.Name(last, "mock-2", "body.docs.msgs.0._id", nil); ok {
+	if name, ok := tr.Name(last, "mock-2", "body.docs.msgs.0._id", nil, nil); ok {
 		t.Fatalf("a request of the previous set named a variable %q in the new set", name)
 	}
 	if tr.Answer(next, &models.Mock{Name: "mock-7"}) || tr.Answered("mock-7") || len(tr.AnsweredMocks()) != 0 || tr.Drifts() == drifts {
@@ -210,42 +212,42 @@ func TestANewSetsNamesAreItsOwn(t *testing.T) {
 	tr.NewSet()
 	tr.Begin()
 	old, _, _, _ := tr.Test()
-	if own, _ := tr.Name(old, "mock-1", "body.code", nil); own != "code" {
+	if own, _ := tr.Name(old, "mock-1", "body.code", nil, nil); own != "code" {
 		t.Fatalf("the previous set's test names mock-1's body.code %q", own)
 	}
-	if own, _ := tr.Name(old, "mock-2", "body.code", nil); own != "code-2" {
+	if own, _ := tr.Name(old, "mock-2", "body.code", nil, nil); own != "code-2" {
 		t.Fatalf("the previous set's test names mock-2's body.code %q", own)
 	}
 	tr.End()
 	tr.NewSet()
 	boot, _, _, _ := tr.Test()
-	if name, ok := tr.Name(boot, "mock-2", "body.code", nil); !ok || name != "code" {
+	if name, ok := tr.Name(boot, "mock-2", "body.code", nil, nil); !ok || name != "code" {
 		t.Fatalf("the new set's start-up names mock-2's body.code %q (%v); want code, not the previous set's name of it", name, ok)
 	}
 	tr.Served(boot, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
-	if name, ok := tr.RunName(old, "mock-1", "body._id", map[string]bool{"run-_id": true}); ok {
+	if name, ok := tr.RunName(old, "mock-1", "body._id", nil, map[string]bool{"run-_id": true}); ok {
 		t.Fatalf("a request of the previous set named the new set's run's variable %q", name)
 	}
-	run, ok := tr.RunName(boot, "mock-1", "body._id", nil)
+	run, ok := tr.RunName(boot, "mock-1", "body._id", nil, nil)
 	if !ok || run != "run-_id" {
 		t.Fatalf("the new set's start-up names its run's variable %q (%v); want run-_id", run, ok)
 	}
-	if name, ok := tr.Name(old, "mock-1", "body._id", nil); ok {
+	if name, ok := tr.Name(old, "mock-1", "body._id", nil, nil); ok {
 		t.Fatalf("a request of the previous set is named the new set's run's variable %q", name)
 	}
-	if name, ok := tr.RunName(old, "mock-1", "body._id", nil); ok {
+	if name, ok := tr.RunName(old, "mock-1", "body._id", nil, nil); ok {
 		t.Fatalf("a request of the previous set is named the new set's run's variable %q by RunName", name)
 	}
 	tr.Begin()
 	n, _, _, _ := tr.Test()
-	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil, nil); !ok || name != run {
 		t.Fatalf("the new set's test names the run's place %q (%v); want %q", name, ok, run)
 	}
 	tr.End()
-	if name, ok := tr.Name(n, "mock-1", "body._id", nil); !ok || name != run {
+	if name, ok := tr.Name(n, "mock-1", "body._id", nil, nil); !ok || name != run {
 		t.Fatalf("a late request of the set's ended test names the run's place %q (%v); want %q", name, ok, run)
 	}
-	if name, ok := tr.RunName(n, "mock-1", "body._id", nil); !ok || name != run {
+	if name, ok := tr.RunName(n, "mock-1", "body._id", nil, nil); !ok || name != run {
 		t.Fatalf("a late request of the set's ended test names the run's variable %q (%v); want %q", name, ok, run)
 	}
 }
@@ -603,8 +605,8 @@ func TestARunsNameAndATestsNameNeverMeet(t *testing.T) {
 	tr.Served(0, sent("mock-1", t0, "body.x", "body.x", "rec-x", "live-x"))
 	tr.Begin()
 	n, _, _, _ := tr.Test()
-	run, _ := tr.RunName(n, "mock-1", "body.x", nil)
-	own, _ := tr.Name(n, "mock-5", "body.run-x", nil)
+	run, _ := tr.RunName(n, "mock-1", "body.x", nil, nil)
+	own, _ := tr.Name(n, "mock-5", "body.run-x", nil, nil)
 	if run != "run-x" || own == run {
 		t.Fatalf("run's first: the run's is %q, the test's own %q; want run-x and another", run, own)
 	}
@@ -613,11 +615,11 @@ func TestARunsNameAndATestsNameNeverMeet(t *testing.T) {
 	tr.Served(0, sent("mock-1", t0, "body.x", "body.x", "rec-x", "live-x"))
 	tr.Begin()
 	n, _, _, _ = tr.Test()
-	own, _ = tr.Name(n, "mock-5", "body.run-x", nil)
+	own, _ = tr.Name(n, "mock-5", "body.run-x", nil, nil)
 	tr.End()
 	tr.Begin()
 	n, _, _, _ = tr.Test()
-	run, _ = tr.RunName(n, "mock-1", "body.x", nil)
+	run, _ = tr.RunName(n, "mock-1", "body.x", nil, nil)
 	if own != "run-x" || run == own {
 		t.Fatalf("test's first: the test's own is %q, the run's %q; want run-x and another", own, run)
 	}
@@ -631,13 +633,13 @@ func TestARunsPlaceIsNamedForAStaleTest(t *testing.T) {
 	tr.Served(0, sent("mock-1", t0, "body._id", "body._id", "rec-id", "live-id"))
 	tr.Begin()
 	stale, _, _, _ := tr.Test()
-	run, _ := tr.RunName(stale, "mock-1", "body._id", nil)
+	run, _ := tr.RunName(stale, "mock-1", "body._id", nil, nil)
 	tr.End()
 	tr.Begin()
-	if name, ok := tr.Name(stale, "mock-1", "body._id", nil); !ok || name != run {
+	if name, ok := tr.Name(stale, "mock-1", "body._id", nil, nil); !ok || name != run {
 		t.Fatalf("an ended test's call names the run's place %q (%v), want %q", name, ok, run)
 	}
-	if name, ok := tr.Name(stale, "mock-5", "body._id", nil); ok {
+	if name, ok := tr.Name(stale, "mock-5", "body._id", nil, nil); ok {
 		t.Fatalf("an ended test's call named its own variable %q", name)
 	}
 }
@@ -668,30 +670,36 @@ func TestAVariableIsNamedAboveADollarKey(t *testing.T) {
 		"body.created":           "created",
 		"body.$date":             "var",
 	} {
-		if got := varName("", place); got != want {
+		if got := varName("", place, nil); got != want {
 			t.Errorf("varName(%q) = %q, want %q", place, got, want)
 		}
 	}
 }
 
 // A variable's name is never made of a key that may be a value the app sent
-// (models.FieldShape): a map keyed by an email address or an ID is named
-// "var", whichever key the place ends in, since a MongoDB place joins its
-// keys with '.' as they are, so the keys either side of a dotted key's {}
-// part may be the rest of that key (alice.smith@example.com is alice,
-// smith@example and com). An array position (MongoDB writes it as a key,
+// (models.FieldShape): a place holding one, a map keyed by an email address
+// or an ID, is named by its recording and its rank among the recording's
+// such places ("mock-1-v2"), whichever key the place ends in, since a
+// MongoDB place joins its keys with '.' as they are, so the keys either side
+// of a dotted key's {} part may be the rest of that key (alice.smith@example.com
+// is alice, smith@example and com). The rank orders the places by their
+// shape, then by themselves. An array position (MongoDB writes it as a key,
 // documents.0) is no name and no value: the name is the key above it. A
 // place of plain keys is named as before.
 func TestAVariableIsNeverNamedByAKeyThatMayBeAValue(t *testing.T) {
-	for place, want := range map[string]string{
-		"body.cmd.update.$set.tokens.alice.smith@example.com": "var",
-		`body.tokens["alice.smith@example.com"]`:              "var",
-		`body.tokens["alice.smith@example.com"].token`:        "var",
-		"body.users.u12345x9.name":                            "var",
-		"body.users.u12345x9":                                 "var",
-		"body.cmd.filter.owners.alice@example.com.$oid":       "var",
-		"url.query.alice@example.com":                         "var",
-		"url.query.u12345x9":                                  "var",
+	want := map[string]string{
+		// By shape: body.cmd.filter.owners.{}.com.$oid,
+		// body.cmd.update.$set.tokens.alice.{}.com, body.users.{},
+		// body.users.{}.name, body.{}.{}.{}, body.{}.{}.{}.token,
+		// url.query.{}, url.query.{}.com.
+		"body.cmd.filter.owners.alice@example.com.$oid":       "mock-1-v1",
+		"body.cmd.update.$set.tokens.alice.smith@example.com": "mock-1-v2",
+		"body.users.u12345x9":                                 "mock-1-v3",
+		"body.users.u12345x9.name":                            "mock-1-v4",
+		`body.tokens["alice.smith@example.com"]`:              "mock-1-v5",
+		`body.tokens["alice.smith@example.com"].token`:        "mock-1-v6",
+		"url.query.u12345x9":                                  "mock-1-v7",
+		"url.query.alice@example.com":                         "mock-1-v8",
 		"body.scores.12345":                                   "scores",
 		"body.cmd.documents.0._id":                            "_id",
 		"body.cmd.documents.0":                                "documents",
@@ -704,8 +712,13 @@ func TestAVariableIsNeverNamedByAKeyThatMayBeAValue(t *testing.T) {
 		"url.query.user_id":                                   "user_id",
 		"header.X-Request-Id":                                 "X-Request-Id",
 		"url.path[2]":                                         "path2",
-	} {
-		got := varName("mock-1", place)
+	}
+	var places []string
+	for place := range want {
+		places = append(places, place)
+	}
+	for place, want := range want {
+		got := varName("mock-1", place, places)
 		if got != want {
 			t.Errorf("varName(%q) = %q, want %q", place, got, want)
 		}
@@ -715,43 +728,131 @@ func TestAVariableIsNeverNamedByAKeyThatMayBeAValue(t *testing.T) {
 			}
 		}
 	}
+	// A recording with no name, or places that leave the place out, still
+	// name it by none of its keys.
+	if got := varName("", "body.users.u12345x9", nil); got != "var-v1" {
+		t.Errorf("varName with no recording = %q, want var-v1", got)
+	}
+	if got := varName("mock.1", "url.query.alice@example.com", []string{"body.users.u12345x9"}); got != "mock1-v2" {
+		t.Errorf("varName with the place not among places = %q, want mock1-v2", got)
+	}
+	// A recording's echo place (keploy's words) and its plain places are
+	// no value places, and do not move a value place's rank.
+	if got := varName("mock-3", "body.u12345x9.name", []string{"body.mock-3-bind1", "body._id", "body.u12345x9.name"}); got != "mock-3-v1" {
+		t.Errorf("varName ranked among an echo place = %q, want mock-3-v1", got)
+	}
+	// A place given twice is ranked once.
+	if got := varName("mock-1", "body.users.u12345x9.name", []string{"body.users.u12345x9", "body.users.u12345x9", "body.users.u12345x9.name"}); got != "mock-1-v2" {
+		t.Errorf("varName ranked among a place given twice = %q, want mock-1-v2", got)
+	}
 }
 
-// A recording's echo place, the one key a protocol with no place of the
-// variables grammar (a Postgres bind) names an echo by, is keploy's words:
-// its variable is named by it, the same however the test's calls are
-// learned, though the recording's name and the position hold digits. Only
-// that recording's own key, and only the whole of it, is: another
-// recording's key, a key that merely begins so, or one under another key, is
-// shaped as any other.
+// RequestPlaces are a recording's request places in the exchanges a test
+// served it in, each once: never its answer's, another recording's, a
+// leaf no place names, or the test case's own request.
+func TestRequestPlacesAreARecordingsRequestPlacesOnce(t *testing.T) {
+	earlier := []Earlier{
+		{Mock: "mock-1", Seen: []Seen{{Side: Request, Place: "body.a"}, {Side: Response, Place: "body.r"}, {Side: Request}, {Side: Request, Place: "body.b"}}},
+		{Mock: "mock-2", Seen: []Seen{{Side: Request, Place: "body.other"}}},
+		{Mock: "mock-1", Seen: []Seen{{Side: Request, Place: "body.b"}, {Side: Request, Place: "body.c"}}},
+		{Mock: "mock-1", Given: true, Seen: []Seen{{Side: Request, Place: "body.given"}}},
+	}
+	if got, want := RequestPlaces(earlier, "mock-1"), []string{"body.a", "body.b", "body.c"}; !slices.Equal(got, want) {
+		t.Errorf("RequestPlaces(mock-1) = %q, want %q", got, want)
+	}
+	if got := RequestPlaces(earlier, "mock-9"); len(got) != 0 {
+		t.Errorf("RequestPlaces(mock-9) = %q, want none", got)
+	}
+}
+
+// A value place's variable (one holding a key that may be a value) is named
+// by its recording alone, so the same recording learned again, its calls in
+// another order or another of its places drifting, names it the same: a
+// re-learn never renames a variable and churns the recordings it is in. The
+// names are a test's and the run's alike.
+func TestAValuePlacesNameIsTheSameInEveryOrderItsCallsAreLearned(t *testing.T) {
+	const mock = "mock-2"
+	email := "body.cmd.update.$set.tokens.alice.smith@example.com"
+	other := "body.cmd.update.$set.tokens.bob.jones@example.org"
+	id := "body.cmd.update.$set.users.u12345x9.name"
+	recording := []string{"body.cmd.filter._id", email, "body.cmd.update.$set.count", other, id}
+	names := func(order []string, places []string, run bool) map[string]string {
+		t.Helper()
+		tr := NewTracker()
+		tr.BeginAt(time.Unix(1_792_000_000, 0))
+		n, _, _, _ := tr.Test()
+		out := map[string]string{}
+		for _, place := range order {
+			name, ok := tr.Name(n, mock, place, places, nil)
+			if run {
+				name, ok = tr.RunName(n, mock, place, places, nil)
+			}
+			if !ok {
+				t.Fatalf("Name(%s) refused", place)
+			}
+			out[place] = name
+		}
+		return out
+	}
+	reversed := slices.Clone(recording)
+	slices.Reverse(reversed)
+	for _, run := range []bool{false, true} {
+		prefix := ""
+		if run {
+			prefix = runPrefix
+		}
+		first := names(recording, recording, run)
+		again := names(reversed, reversed, run)
+		alone := names([]string{other}, recording, run)
+		if !maps.Equal(first, again) {
+			t.Errorf("run=%v: learned in another order, the names changed: %v, then %v", run, first, again)
+		}
+		if alone[other] != first[other] {
+			t.Errorf("run=%v: learned alone, %s is named %q, %q when the rest were too", run, other, alone[other], first[other])
+		}
+		for place, want := range map[string]string{email: "mock-2-v1", other: "mock-2-v2", id: "mock-2-v3", "body.cmd.filter._id": "_id", "body.cmd.update.$set.count": "count"} {
+			if first[place] != prefix+want {
+				t.Errorf("run=%v: %s is named %q, want %q", run, place, first[place], prefix+want)
+			}
+		}
+		for place, name := range first {
+			for _, part := range []string{"alice", "smith", "bob", "jones", "example", "com", "org", "u12345x9"} {
+				if strings.Contains(name, part) {
+					t.Errorf("run=%v: %s is named %q, which holds %q of a key", run, place, name, part)
+				}
+			}
+		}
+	}
+}
+
 func TestARecordingsEchoPlaceNamesItsVariable(t *testing.T) {
 	for _, c := range []struct{ mock, place, want string }{
 		{"mock-3", "body.mock-3-bind1", "mock-3-bind1"},
 		{"mock-3", "body.mock-3-bind12", "mock-3-bind12"},
 		{"mock.3", "body.mock_2e_3-bind2", "mock_2e_3-bind2"},
 		{"my_mock-7", "body.my__mock-7-bind1", "my__mock-7-bind1"},
-		{"mock-4", "body.mock-3-bind1", "var"},
-		{"mock-3", "body.mock-3-bind0", "var"},
-		{"mock-3", "body.mock-3-bind", "var"},
-		{"mock-3", "body.mock-3-bind1x", "var"},
-		{"mock-3", "body.x.mock-3-bind1", "var"},
-		{"", "body.mock-3-bind1", "var"},
+		{"mock-4", "body.mock-3-bind1", "mock-4-v1"},
+		{"mock-3", "body.mock-3-bind0", "mock-3-v1"},
+		{"mock-3", "body.mock-3-bind", "mock-3-v1"},
+		{"mock-3", "body.mock-3-bind1x", "mock-3-v1"},
+		{"mock-3", "body.x.mock-3-bind1", "mock-3-v1"},
+		{"", "body.mock-3-bind1", "var-v1"},
 	} {
-		if got := varName(c.mock, c.place); got != c.want {
+		if got := varName(c.mock, c.place, nil); got != c.want {
 			t.Errorf("varName(%q, %q) = %q, want %q", c.mock, c.place, got, c.want)
 		}
 	}
 	var nilTracker *Tracker
-	if name, _ := nilTracker.Name(1, "mock-3", "body.mock-3-bind1", nil); name != "mock-3-bind1" {
+	if name, _ := nilTracker.Name(1, "mock-3", "body.mock-3-bind1", nil, nil); name != "mock-3-bind1" {
 		t.Errorf("Name(mock-3, body.mock-3-bind1) = %q, want mock-3-bind1", name)
 	}
 	tr := NewTracker()
 	tr.BeginAt(time.Unix(1_792_000_000, 0))
 	n, _, _, _ := tr.Test()
-	if name, ok := tr.Name(n, "mock-3", "body.mock-3-bind1", nil); !ok || name != "mock-3-bind1" {
+	if name, ok := tr.Name(n, "mock-3", "body.mock-3-bind1", nil, nil); !ok || name != "mock-3-bind1" {
 		t.Errorf("a test's Name(mock-3, body.mock-3-bind1) = %q, %v, want mock-3-bind1", name, ok)
 	}
-	if name, ok := tr.RunName(n, "mock-3", "body.mock-3-bind2", nil); !ok || name != "run-mock-3-bind2" {
+	if name, ok := tr.RunName(n, "mock-3", "body.mock-3-bind2", nil, nil); !ok || name != "run-mock-3-bind2" {
 		t.Errorf("RunName(mock-3, body.mock-3-bind2) = %q, %v, want run-mock-3-bind2", name, ok)
 	}
 }

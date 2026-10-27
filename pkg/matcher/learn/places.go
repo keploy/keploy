@@ -105,38 +105,34 @@ func jsonSegs(s string) ([]templates.PathSeg, bool) {
 	return out, len(out) > 0
 }
 
-// varName is the name a variable first found at place gets: the place's last
-// key, header or query name, or "path<n>" for a URL segment, in letters,
-// digits, '_' and '-'. A name is never made of a key that may be a value the
-// app sent (keyMayBeValue): a body place holding one such key, or such a
-// query name, is named "var". The whole body place is, not only that key: a
-// MongoDB place joins its keys with '.' as they are, so the keys either side
-// of a dotted key's {} part may be the rest of that key (alice.smith@example.com
-// is alice, smith@example and com). An operator key ($date, $oid) and an
-// array position (documents.0, as MongoDB writes it) name nothing: the key
-// above them names the variable. The one key of a recording's echo place
-// (echoKeyOf) is keploy's words, the recording's name, and names it.
-func varName(mock, place string) string {
+// varName is the name a variable first found at place of recording mock
+// gets: the place's last key, header or query name, or "path<n>" for a URL
+// segment, in letters, digits, '_' and '-'. A name is never made of a key
+// that may be a value the app sent (keyMayBeValue): a place holding one
+// (valuePlace) is named by its recording and its rank instead,
+// "<mock>-v<N>" (rankedName), none of its keys. The whole body place is,
+// not only that key: a MongoDB place joins its keys with '.' as they are, so
+// the keys either side of a dotted key's {} part may be the rest of that key
+// (alice.smith@example.com is alice, smith@example and com). An operator key
+// ($date, $oid) and an array position (documents.0, as MongoDB writes it)
+// name nothing: the key above them names the variable. The one key of a
+// recording's echo place (echoKeyOf) is keploy's words, the recording's
+// name, no value place, and names it. places are the recording's request
+// places (RequestPlaces), which a value place is ranked among.
+func varName(mock, place string, places []string) string {
 	p, err := variables.Parse(place)
 	base := ""
 	switch {
 	case err != nil:
-	case len(p.Path) == 1 && echoKeyOf(mock, p.Path[0].Key):
-		base = p.Path[0].Key
+	case valuePlace(mock, p):
+		return rankedName(mock, place, places)
 	default:
 		switch p.Part {
 		case variables.PartPath:
 			base = "path" + strconv.Itoa(p.Index)
-		case variables.PartQuery:
-			if models.KeyShape(p.Name) == p.Name {
-				base = p.Name
-			}
-		case variables.PartHeader:
+		case variables.PartQuery, variables.PartHeader:
 			base = p.Name
 		case variables.PartBody:
-			if slices.ContainsFunc(p.Path, func(s templates.PathSeg) bool { return !s.IsIndex && keyMayBeValue(s.Key) }) {
-				break
-			}
 			for i := len(p.Path) - 1; i >= 0 && base == ""; i-- {
 				if k := p.Path[i].Key; !p.Path[i].IsIndex && !strings.HasPrefix(k, "$") && !allDigits(k) {
 					base = k
@@ -144,16 +140,94 @@ func varName(mock, place string) string {
 			}
 		}
 	}
-	base = strings.Map(func(r rune) rune {
+	if base = nameRunes(base); base == "" {
+		base = "var"
+	}
+	return base
+}
+
+// valuePlace reports whether place p of recording mock holds a key that may
+// be a value the app sent: a body key keyMayBeValue reads so, or a query
+// name models.KeyShape does not keep. A recording's echo place (echoKeyOf)
+// is keploy's words, never one.
+func valuePlace(mock string, p variables.Place) bool {
+	switch p.Part {
+	case variables.PartQuery:
+		return models.KeyShape(p.Name) != p.Name
+	case variables.PartBody:
+		if len(p.Path) == 1 && echoKeyOf(mock, p.Path[0].Key) {
+			return false
+		}
+		return slices.ContainsFunc(p.Path, func(s templates.PathSeg) bool { return !s.IsIndex && keyMayBeValue(s.Key) })
+	}
+	return false
+}
+
+// rankedName names the variable at value place place of recording mock
+// (valuePlace): the recording's name, "-v" and the place's rank from 1
+// among the recording's value places (those of places, and place), ordered
+// by their shape (models.FieldShape), then by themselves where two shapes
+// are one. It carries no key, and is the recording's alone: the same
+// whichever of its places a learn names first, and in whatever order a
+// test's calls are learned, so a re-learn of the recording names it the
+// same. A recording with no name ("") is "var".
+func rankedName(mock, place string, places []string) string {
+	ranked, seen := []string{place}, map[string]bool{place: true}
+	for _, q := range places {
+		if seen[q] {
+			continue
+		}
+		seen[q] = true
+		if p, err := variables.Parse(q); err == nil && valuePlace(mock, p) {
+			ranked = append(ranked, q)
+		}
+	}
+	slices.SortFunc(ranked, func(a, b string) int {
+		if c := strings.Compare(models.FieldShape(a), models.FieldShape(b)); c != 0 {
+			return c
+		}
+		return strings.Compare(a, b)
+	})
+	name := nameRunes(mock)
+	if name == "" {
+		name = "var"
+	}
+	return name + "-v" + strconv.Itoa(slices.Index(ranked, place)+1)
+}
+
+// nameRunes is s in the runes a variable's name holds: letters, digits, '_'
+// and '-'; every other rune is left out.
+func nameRunes(s string) string {
+	return strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
 			return r
 		}
 		return -1
-	}, base)
-	if base == "" {
-		base = "var"
+	}, s)
+}
+
+// RequestPlaces are the places of recording mock's request that earlier
+// holds (Seen.Place of its request side, each once, in their order there):
+// every place of it a variable may be bound or echoed at, which a protocol
+// reads off the whole recorded request, whatever the call. Tracker.Name
+// ranks a value place among them (varName); a protocol naming a variable
+// at a place of the call's own recording passes the same places, read off
+// that recording as its Earlier reads them.
+func RequestPlaces(earlier []Earlier, mock string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range earlier {
+		if e.Mock != mock || e.Given {
+			continue
+		}
+		for _, s := range e.Seen {
+			if s.Side == Request && s.Place != "" && !seen[s.Place] {
+				seen[s.Place] = true
+				out = append(out, s.Place)
+			}
+		}
 	}
-	return base
+	return out
 }
 
 // echoKeyOf reports whether key is the key a protocol with no place of the

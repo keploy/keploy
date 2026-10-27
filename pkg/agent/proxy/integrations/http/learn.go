@@ -1915,6 +1915,12 @@ type pairing struct {
 func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Shape, own bool, learned []learn.Learned, earlier []learn.Earlier, given []variables.Binding) (pairing, string) {
 	p := pairing{noise: map[string][]string{}, vars: models.MockVariables{}, binds: map[string]models.MockVariables{}, values: map[string]variables.Binding{}}
 	jsonReq := rec.Fixed["body"] == "json"
+	// ownPlaces are the places of m's request, as its exchange names them
+	// to a later call (earlierOf), read once an echo is named: its variable
+	// is ranked among them for its name when its place holds a key that may
+	// be a value (Tracker.Name).
+	var ownPlaces []string
+	readOwn := false
 	reserved := make(map[string]bool, len(given))
 	for _, g := range given {
 		reserved[g.Name] = true
@@ -2003,7 +2009,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			if !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
 				return p, r.Path + " does not hold the value the test sent at " + from.Var + " of " + from.Mock + ", which it held when recorded"
 			}
-			name, ok := tracker.Name(test, from.Mock, from.Var, reserved)
+			name, ok := tracker.Name(test, from.Mock, from.Var, learn.RequestPlaces(earlier, from.Mock), reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}
@@ -2057,7 +2063,15 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				p.vars[name] = v
 				continue
 			}
-			name, ok := tracker.Name(test, m.Name, place, reserved)
+			if !readOwn {
+				readOwn = true
+				for _, r := range rec.Leaves {
+					if at, ok := learn.VarPlace(r, jsonReq); ok {
+						ownPlaces = append(ownPlaces, at)
+					}
+				}
+			}
+			name, ok := tracker.Name(test, m.Name, place, ownPlaces, reserved)
 			if !ok {
 				return p, "the test ended before " + r.Path + " was learned"
 			}

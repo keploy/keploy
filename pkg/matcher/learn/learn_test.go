@@ -517,28 +517,28 @@ func TestTracker(t *testing.T) {
 	}
 	// Variables are named per test, by where each is bound.
 	n, _, _, _ = tr.Test()
-	id, ok := tr.Name(n, "mock-1", "body.id", nil)
+	id, ok := tr.Name(n, "mock-1", "body.id", nil, nil)
 	if !ok || id != "id" {
 		t.Fatalf("Name = %q %v", id, ok)
 	}
-	if again, _ := tr.Name(n, "mock-1", "body.id", nil); again != id {
+	if again, _ := tr.Name(n, "mock-1", "body.id", nil, nil); again != id {
 		t.Fatal("a variable has one name in its test")
 	}
-	if other, _ := tr.Name(n, "mock-2", "body.order.id", nil); other != "id-2" {
+	if other, _ := tr.Name(n, "mock-2", "body.order.id", nil, nil); other != "id-2" {
 		t.Fatalf("another variable gets another name: %q", other)
 	}
-	if seg, _ := tr.Name(n, "mock-2", "url.path[1]", nil); seg != "path1" {
+	if seg, _ := tr.Name(n, "mock-2", "url.path[1]", nil, nil); seg != "path1" {
 		t.Fatalf("a URL segment's variable: %q", seg)
 	}
-	if res, _ := tr.Name(n, "mock-3", "body.user.id", map[string]bool{"id-3": true}); res != "id-4" {
+	if res, _ := tr.Name(n, "mock-3", "body.user.id", nil, map[string]bool{"id-3": true}); res != "id-4" {
 		t.Fatalf("a template key's name is taken by no other variable: %q", res)
 	}
-	if _, ok := tr.Name(n-1, "mock-3", "body.id", nil); ok {
+	if _, ok := tr.Name(n-1, "mock-3", "body.id", nil, nil); ok {
 		t.Fatal("a test that ended names nothing")
 	}
 	tr.Begin()
 	n, _, _, _ = tr.Test()
-	if fresh, _ := tr.Name(n, "mock-2", "body.order.id", nil); fresh != "id" {
+	if fresh, _ := tr.Name(n, "mock-2", "body.order.id", nil, nil); fresh != "id" {
 		t.Fatalf("names are per test: %q", fresh)
 	}
 	var nilTracker *Tracker
@@ -546,7 +546,7 @@ func TestTracker(t *testing.T) {
 	nilTracker.End()
 	nilTracker.Served(0, Earlier{})
 	nilTracker.ServedMock(&models.Mock{})
-	if name, ok := nilTracker.Name(0, "m", "header.x-request-id", nil); !ok || name != "x-request-id" {
+	if name, ok := nilTracker.Name(0, "m", "header.x-request-id", nil, nil); !ok || name != "x-request-id" {
 		t.Fatalf("a nil tracker names a variable by its place: %q %v", name, ok)
 	}
 	if n, e, m, b := nilTracker.Test(); n != 0 || e != nil || m != nil || b != nil || !nilTracker.Open() {
