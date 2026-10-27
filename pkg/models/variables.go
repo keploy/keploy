@@ -137,9 +137,14 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // bounded to a few milliseconds, never to a few minutes. Min is above zero
 // and Unit coarser than a second for any offset the learn step finds.
 //
-// Res is the resolution the learn step read the value at: the coarser of
-// the one its encoding writes and the granularity both runs' values share
-// (the greatest duration both are whole multiples of, from the Unix epoch).
+// Res is the resolution the learn step read the value at: of an offset, the
+// coarser of the one its encoding writes and the granularity both runs'
+// values share (the greatest duration both are whole multiples of, from the
+// Unix epoch); of a Plain read, the one its encoding writes, or, where both
+// values are a cut the application made (CutCoarserThan), the unit above it
+// (UnitAbove), never what the two share by chance (learn's readRes), so the
+// same recording learns the same Res whichever value record's full round
+// read.
 // An application that cuts its value coarser than its encoding
 // (Truncate(time.Second) stored as a millisecond $date) shows that cut in
 // both values, and the sums that decide whether a replay can compare the
