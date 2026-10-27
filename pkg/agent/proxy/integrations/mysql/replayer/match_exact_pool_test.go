@@ -3,6 +3,7 @@ package replayer_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -149,14 +150,14 @@ type heldHook struct {
 	// every consume without asking the store, as a tree that does not hold
 	// the view's copy does.
 	treeDoorsFail bool
-	// refuse is a recording MarkMockAsUsed turns down without asking the
-	// store, which goes on listing it, at most refuseAtMost times (so a
-	// matcher that asks again ends), counted in refusals.
-	refuse       string
+	// refuse are the recordings MarkMockAsUsed turns down without asking
+	// the store, which goes on listing them, each at most refuseAtMost times
+	// (so a matcher that asks again ends), counted by name in refusals.
+	refuse       []string
 	refuseAtMost int
 	mu           sync.Mutex
 	deletes      []bool
-	refusals     int
+	refusals     map[string]int
 }
 
 func (h *heldHook) wait() {
@@ -190,8 +191,11 @@ func (h *heldHook) UpdateUnFilteredMock(old, nw *models.Mock) bool {
 
 func (h *heldHook) MarkMockAsUsed(m models.Mock) bool {
 	h.wait()
-	if m.Name == h.refuse && h.refusals < h.refuseAtMost {
-		h.refusals++
+	if slices.Contains(h.refuse, m.Name) && h.refusals[m.Name] < h.refuseAtMost {
+		if h.refusals == nil {
+			h.refusals = map[string]int{}
+		}
+		h.refusals[m.Name]++
 		return false
 	}
 	return h.MockMemDb.MarkMockAsUsed(m)
@@ -356,16 +360,57 @@ func TestARefusedCopyTheStoreStillListsIsNotTriedAgain(t *testing.T) {
 	preps, execs := poolRecording([][]string{{"7", "7"}})
 	mm := stagePool(t, preps, execs, true)
 	ctx, dctx := poolConn("c1")
-	hook := &heldHook{treeDoorsFail: true, refuse: "exec-c1-7", refuseAtMost: 3}
+	hook := &heldHook{treeDoorsFail: true, refuse: []string{"exec-c1-7"}, refuseAtMost: 3}
 	resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(1, "7"), &hookedStore{MockManager: mm, hook: hook}, dctx)
 	if hook.MockMemDb == nil {
 		t.Fatal("precondition: the command's match held no store")
 	}
-	if hook.refusals != 1 {
-		t.Fatalf("the refused copy was tried %d time(s); want once", hook.refusals)
+	if n := hook.refusals[hook.refuse[0]]; n != 1 {
+		t.Fatalf("the refused copy was tried %d time(s); want once", n)
 	}
 	if err != nil || !ok || resp.Payload != "exec-c1-7-2" {
 		t.Fatalf("EXECUTE id=7 was answered with %v (ok=%v err=%v miss=%s); want exec-c1-7-2", resp, ok, err, miss)
+	}
+}
+
+// Each match again passes over every copy the store refused before, not
+// only the last one: two copies it refuses while it goes on listing them are
+// each asked once, and the third answers.
+func TestEachRefusedCopyIsAskedOnce(t *testing.T) {
+	preps, execs := poolRecording([][]string{{"7", "7", "7"}})
+	mm := stagePool(t, preps, execs, true)
+	ctx, dctx := poolConn("c1")
+	hook := &heldHook{treeDoorsFail: true, refuse: []string{"exec-c1-7", "exec-c1-7-2"}, refuseAtMost: 3}
+	resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(1, "7"), &hookedStore{MockManager: mm, hook: hook}, dctx)
+	if hook.MockMemDb == nil {
+		t.Fatal("precondition: the command's match held no store")
+	}
+	for _, name := range hook.refuse {
+		if n := hook.refusals[name]; n != 1 {
+			t.Errorf("the refused copy %s was asked %d time(s); want once", name, n)
+		}
+	}
+	if err != nil || !ok || resp.Payload != "exec-c1-7-3" {
+		t.Fatalf("EXECUTE id=7 was answered with %v (ok=%v err=%v miss=%s); want exec-c1-7-3", resp, ok, err, miss)
+	}
+}
+
+// Under exact serving a connection's recording (a PREPARE, lifetime
+// connection) whose tree update is turned down while the view accepts its
+// consume answers the command: MarkMockAsUsed says so at the session and
+// connection door too. Taken for a refusal, the PREPARE was matched again
+// and answered with another connection's PREPARE, or missed.
+func TestAConnectionRecordingTheTreeTurnsDownButTheViewAcceptsAnswersTheCommand(t *testing.T) {
+	preps, execs := poolRecording([][]string{{"1"}, {"2"}})
+	mm := stagePool(t, preps, execs, true)
+	ctx, dctx := poolConn("c1")
+	hook := &heldHook{treeDoorsFail: true}
+	resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), prepareReq(poolQuery), &hookedStore{MockManager: mm, hook: hook}, dctx)
+	if hook.MockMemDb == nil {
+		t.Fatal("precondition: the command's match held no store")
+	}
+	if err != nil || !ok || resp.Payload != "prep-c1" {
+		t.Fatalf("PREPARE on c1 was answered with %v (ok=%v err=%v miss=%s); want prep-c1", resp, ok, err, miss)
 	}
 }
 
@@ -467,13 +512,13 @@ func TestARefusedQueryConsumeIsAnsweredByItsNextRecording(t *testing.T) {
 	mocks := queryRecording([]int{2})
 	mm := stagePool(t, nil, mocks, true)
 	ctx, dctx := poolConn("c1")
-	hook := &heldHook{treeDoorsFail: true, refuse: "query-c1-1", refuseAtMost: 3}
+	hook := &heldHook{treeDoorsFail: true, refuse: []string{"query-c1-1"}, refuseAtMost: 3}
 	resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), queryReq(poolTextQuery), &hookedStore{MockManager: mm, hook: hook}, dctx)
 	if hook.MockMemDb == nil {
 		t.Fatal("precondition: the command's match held no store")
 	}
-	if hook.refusals != 1 {
-		t.Fatalf("the refused copy was tried %d time(s); want once", hook.refusals)
+	if n := hook.refusals[hook.refuse[0]]; n != 1 {
+		t.Fatalf("the refused copy was tried %d time(s); want once", n)
 	}
 	if err != nil || !ok || resp.Payload != "query-c1-2" {
 		t.Fatalf("the query was answered with %v (ok=%v err=%v miss=%s); want query-c1-2", resp, ok, err, miss)

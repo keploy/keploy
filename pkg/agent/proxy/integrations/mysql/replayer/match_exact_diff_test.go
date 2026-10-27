@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +99,98 @@ func setMocks(tests [][]setCommand) []*models.Mock {
 	return out
 }
 
+// outsideStartCalls and outsideBetweenCalls are how many commands the app of
+// a recorded set made at start-up, and after each test of outsideTests
+// before the next.
+const outsideStartCalls, outsideBetweenCalls = 8, 2
+
+// outsideTests are the tests of a set after which its app made commands
+// before the next test began: every tenth test a replay runs. Each such
+// command reads, under exact serving, every recording the store holds (the
+// pool view's read filters the whole staged set), so there are 10 of them in
+// the 100 set and 28 in the larger sets, which keeps the replayer package
+// under -race well inside go test's ten minutes.
+func outsideTests(tests int) []int {
+	replayed := replayedTests(tests)
+	var out []int
+	for i := 0; i < len(replayed); i += 10 {
+		out = append(out, replayed[i])
+	}
+	return out
+}
+
+// outsideCalls are the commands a recorded set's app made outside every
+// test: at start-up, before the first test's window, and after test i's
+// window, before the next one's (after[i]).
+type outsideCalls struct {
+	startup []setCommand
+	after   map[int][]setCommand
+}
+
+// recordedOutside is a recording, beside recordedSet's tests, of the
+// commands its app made on conns connections outside every test:
+// outsideStartCalls at start-up and outsideBetweenCalls after each test of
+// between (outsideTests). Each is, at random, an EXECUTE of statement 1 or 2 with a
+// parameter from a range of 3 (so the recordings outside every test hold
+// each statement with several parameters, and some requests several times)
+// or one of the text queries. They are per-test recordings, as recorded,
+// that no test owns: exact serving shows them in its pool view, while no
+// test is open.
+func recordedOutside(conns int, between []int, seed int64) *outsideCalls {
+	r := rand.New(rand.NewSource(seed))
+	cmd := func(name string, at time.Time) setCommand {
+		conn := fmt.Sprintf("c%d", 1+r.Intn(conns))
+		var req mysql.Request
+		var key string
+		if k := r.Intn(5); k < 4 {
+			stmt := uint32(1 + k%2)
+			p := fmt.Sprint(1 + r.Intn(3))
+			req, key = executeReq(stmt, p), fmt.Sprintf("exec-%d-%s", stmt, p)
+		} else {
+			q := setTexts[r.Intn(len(setTexts))]
+			req, key = queryReq(q), "query-"+q
+		}
+		mk := diffMock(fmt.Sprintf("%s-%s-%s", name, conn, key), conn, []mysql.Request{req}, at, models.LifetimePerTest, "mocks")
+		return setCommand{conn: conn, req: req, key: key, mock: mk}
+	}
+	o := &outsideCalls{after: map[int][]setCommand{}}
+	for i := 0; i < outsideStartCalls; i++ {
+		// After the PREPAREs, before the first window.
+		o.startup = append(o.startup, cmd(fmt.Sprintf("o-start-%02d", i), diffBase.Add(-time.Millisecond+time.Duration(100+50*i)*time.Microsecond)))
+	}
+	for _, ti := range between {
+		_, end := diffWindow(ti)
+		for i := 0; i < outsideBetweenCalls; i++ {
+			o.after[ti] = append(o.after[ti], cmd(fmt.Sprintf("o-after-%05d-%d", ti, i), end.Add(time.Duration(1+i)*time.Millisecond)))
+		}
+	}
+	return o
+}
+
+// commands are o's commands, in recorded order.
+func (o *outsideCalls) commands() []setCommand {
+	out := append([]setCommand{}, o.startup...)
+	tests := make([]int, 0, len(o.after))
+	for ti := range o.after {
+		tests = append(tests, ti)
+	}
+	sort.Ints(tests)
+	for _, ti := range tests {
+		out = append(out, o.after[ti]...)
+	}
+	return out
+}
+
+// names are the names of o's recordings: the pool view exact serving shows
+// while no test is open.
+func (o *outsideCalls) names() []string {
+	var out []string
+	for _, c := range o.commands() {
+		out = append(out, c.mock.Name)
+	}
+	return out
+}
+
 // setConn is connection conn of a replay of a recorded set, its statements
 // prepared as recorded.
 func setConn(conn string) (context.Context, *wire.DecodeContext) {
@@ -125,8 +219,16 @@ type setReplay struct {
 	ctxs  map[string]context.Context
 }
 
-func newSetReplay(t *testing.T, preps []*models.Mock, tests [][]setCommand, exact, strict bool) *setReplay {
-	pool := append(append([]*models.Mock{}, preps...), setMocks(tests)...)
+func newSetReplay(t *testing.T, preps []*models.Mock, tests [][]setCommand, outside *outsideCalls, exact, strict bool) *setReplay {
+	pool := append([]*models.Mock{}, preps...)
+	for _, c := range outside.startup {
+		pool = append(pool, c.mock)
+	}
+	for i, cmds := range tests {
+		for _, c := range append(append([]setCommand{}, cmds...), outside.after[i]...) {
+			pool = append(pool, c.mock)
+		}
+	}
 	s := &setReplay{exact: exact, dctxs: map[string]*wire.DecodeContext{}, ctxs: map[string]context.Context{}}
 	if exact {
 		s.mm = proxy.NewMockManager(nil, nil, zap.NewNop())
@@ -159,6 +261,12 @@ func (s *setReplay) open(tests [][]setCommand, i int) {
 	s.side.stage(diffWindow(i))
 }
 
+// openPool serves, under exact serving, the pool view: no test open, the
+// recordings made outside every test shown.
+func (s *setReplay) openPool(outside *outsideCalls) {
+	s.mm.ServeExactPool("pool", outside.names())
+}
+
 func (s *setReplay) run(c setCommand) (*mysql.Response, error) {
 	resp, ok, miss, err := replayer.MatchWithEngineForTest(s.ctxs[c.conn], zap.NewNop(), c.req, s.mm, s.dctxs[c.conn], s.eng)
 	if err == nil && !ok {
@@ -174,6 +282,11 @@ var setOrders = []string{"recorded", "reversed"}
 
 // setRuns are the replays of a set: in each order, with and without strict
 // enforcement.
+//
+// The replays run side by side (t.Parallel), each against stores of its own.
+// Every command of a replay under exact serving reads the whole staged set
+// (the view filters it), so one at a time the 10k replays alone took most of
+// go test's ten minutes under -race.
 var setRuns = []struct {
 	order  string
 	strict bool
@@ -215,23 +328,57 @@ func replayedTests(tests int) []int {
 // recorded earlier with other parameters was answered with those parameters'
 // rows.
 //
+// The set's app also made commands outside every test (recordedOutside: at
+// start-up and between tests), which exact serving answers from its pool
+// view, where no recording is a test's own: each is answered with a
+// recording of its own request, none twice, and the recordings the tests
+// made answer them never. There the first recording of the statement with
+// other parameters outranked the one recorded with the command's own. keploy
+// test, which answers them with its own ranking, runs the tests' commands
+// only, with those recordings staged.
+//
 // The keploy test answers' digest is logged, so runs of this test on two
 // builds show the switch-off answers byte-identical between them.
 func TestExactServingAnswersARecordedSetAsKeployTestDoes(t *testing.T) {
 	for _, n := range []int{100, 1000, 10000} {
 		for _, run := range setRuns {
 			t.Run(fmt.Sprintf("n=%d/%s/strict=%v", n, run.order, run.strict), func(t *testing.T) {
+				// Each run builds its own stores and shares nothing with the
+				// others, so they run side by side (see setRuns).
+				t.Parallel()
 				order := run.order
 				preps, tests := recordedSet(n, 4, int64(n))
+				outside := recordedOutside(4, outsideTests(len(tests)), int64(n))
 				byName := map[string]setCommand{}
-				for _, c := range setMocksCommands(tests) {
+				for _, c := range append(setMocksCommands(tests), outside.commands()...) {
 					byName[c.mock.Name] = c
 				}
-				ref := newSetReplay(t, preps, tests, false, run.strict)
-				exact := newSetReplay(t, preps, tests, true, run.strict)
+				ref := newSetReplay(t, preps, tests, outside, false, run.strict)
+				exact := newSetReplay(t, preps, tests, outside, true, run.strict)
 				digest := sha256.New()
 				served := map[string]int{}
 				commands, wrong := 0, 0
+				outsideRun, outsideWrong := 0, 0
+				runOutside := func(where string, cmds []setCommand) {
+					exact.openPool(outside)
+					for i, c := range ordered(cmds, order) {
+						outsideRun++
+						got, err := exact.run(c)
+						if err != nil {
+							t.Fatalf("%s command %d (%s on %s): exact serving: %v", where, i, c.key, c.conn, err)
+						}
+						if own := byName[got.Payload]; own.key != c.key || !strings.HasPrefix(got.Payload, "o-") {
+							if outsideWrong++; outsideWrong <= 5 {
+								t.Errorf("%s command %d (%s on %s) was answered with %s, the recording of %s; want one made outside every test of its own request", where, i, c.key, c.conn, got.Payload, own.key)
+							}
+							continue
+						}
+						if served[got.Payload]++; served[got.Payload] > 1 {
+							t.Fatalf("recording %s answered a second command", got.Payload)
+						}
+					}
+				}
+				runOutside("start-up", outside.startup)
 				for _, ti := range replayedTests(len(tests)) {
 					ref.open(tests, ti)
 					exact.open(tests, ti)
@@ -260,10 +407,14 @@ func TestExactServingAnswersARecordedSetAsKeployTestDoes(t *testing.T) {
 							t.Fatalf("recording %s answered a second command", got.Payload)
 						}
 					}
+					runOutside(fmt.Sprintf("after test %d,", ti), outside.after[ti])
 				}
-				t.Logf("%d commands; keploy test answers sha256 %x", commands, digest.Sum(nil))
+				t.Logf("n=%d/%s/strict=%v: %d commands in tests, %d outside; keploy test answers sha256 %x", n, order, run.strict, commands, outsideRun, digest.Sum(nil))
 				if wrong > 0 {
-					t.Fatalf("%d of %d commands answered differently under exact serving", wrong, commands)
+					t.Errorf("%d of %d commands answered differently under exact serving", wrong, commands)
+				}
+				if outsideWrong > 0 {
+					t.Errorf("%d of %d commands outside every test answered with the recording of another request", outsideWrong, outsideRun)
 				}
 			})
 		}
@@ -281,15 +432,18 @@ func setMocksCommands(tests [][]setCommand) []setCommand {
 // TestExactServingAnswersARecordedSetRunEightAtOnce replays recorded sets of
 // 100, 1k and 10k commands under exact serving on eight connections: in each
 // test, each connection's commands in recorded order, the eight connections'
-// next commands at once (each reads the pool before any consumes). Every
-// command is answered with a recording of its own request, and no recording
-// answers twice. Which of two recordings of one request answers which
-// command is the order of the consumes, not compared.
+// next commands at once (each reads the pool before any consumes), and so
+// the commands made outside every test (recordedOutside), from the pool view.
+// Every command is answered with a recording of its own request, one made
+// outside every test for a command made there, and no recording answers
+// twice. Which of two recordings of one request answers which command is the
+// order of the consumes, not compared.
 func TestExactServingAnswersARecordedSetRunEightAtOnce(t *testing.T) {
 	const conns = 8
 	for _, n := range []int{100, 1000, 10000} {
 		for _, strict := range []bool{false, true} {
 			t.Run(fmt.Sprintf("n=%d/strict=%v", n, strict), func(t *testing.T) {
+				t.Parallel()
 				eightAtOnce(t, n, conns, strict)
 			})
 		}
@@ -298,17 +452,19 @@ func TestExactServingAnswersARecordedSetRunEightAtOnce(t *testing.T) {
 
 func eightAtOnce(t *testing.T, n, conns int, strict bool) {
 	preps, tests := recordedSet(n, conns, int64(n))
+	outside := recordedOutside(conns, outsideTests(len(tests)), int64(n))
 	byName := map[string]setCommand{}
-	for _, c := range setMocksCommands(tests) {
+	for _, c := range append(setMocksCommands(tests), outside.commands()...) {
 		byName[c.mock.Name] = c
 	}
-	s := newSetReplay(t, preps, tests, true, strict)
+	s := newSetReplay(t, preps, tests, outside, true, strict)
 	served := map[string]int{}
-	commands := 0
-	for _, ti := range replayedTests(len(tests)) {
-		s.open(tests, ti)
+	commands, outsideRun, outsideWrong := 0, 0, 0
+	// runRounds runs cmds, each connection's in recorded order, the
+	// connections' next commands at once.
+	runRounds := func(where string, cmds []setCommand, isOutside bool) {
 		perConn := map[string][]setCommand{}
-		for _, c := range tests[ti] {
+		for _, c := range cmds {
 			perConn[c.conn] = append(perConn[c.conn], c)
 		}
 		for round := 0; ; round++ {
@@ -323,12 +479,23 @@ func eightAtOnce(t *testing.T, n, conns int, strict bool) {
 			}
 			for i, a := range runSetAtOnce(s, batch) {
 				c := batch[i]
-				commands++
 				if a.err != nil || !a.ok {
-					t.Fatalf("test %d round %d, %s on %s: ok=%v err=%v miss=%s", ti, round, c.key, c.conn, a.ok, a.err, a.miss)
+					t.Fatalf("%s round %d, %s on %s: ok=%v err=%v miss=%s", where, round, c.key, c.conn, a.ok, a.err, a.miss)
 				}
-				if own := byName[a.payload]; own.key != c.key {
-					t.Fatalf("test %d round %d, %s on %s was answered with %s, the recording of %s", ti, round, c.key, c.conn, a.payload, own.key)
+				own := byName[a.payload]
+				if isOutside {
+					outsideRun++
+					if own.key != c.key || !strings.HasPrefix(a.payload, "o-") {
+						if outsideWrong++; outsideWrong <= 5 {
+							t.Errorf("%s round %d, %s on %s was answered with %s, the recording of %s; want one made outside every test of its own request", where, round, c.key, c.conn, a.payload, own.key)
+						}
+						continue
+					}
+				} else {
+					commands++
+					if own.key != c.key {
+						t.Fatalf("%s round %d, %s on %s was answered with %s, the recording of %s", where, round, c.key, c.conn, a.payload, own.key)
+					}
 				}
 				if served[a.payload]++; served[a.payload] > 1 {
 					t.Fatalf("recording %s answered a second command", a.payload)
@@ -336,7 +503,18 @@ func eightAtOnce(t *testing.T, n, conns int, strict bool) {
 			}
 		}
 	}
-	t.Logf("%d commands", commands)
+	s.openPool(outside)
+	runRounds("start-up", outside.startup, true)
+	for _, ti := range replayedTests(len(tests)) {
+		s.open(tests, ti)
+		runRounds(fmt.Sprintf("test %d", ti), tests[ti], false)
+		s.openPool(outside)
+		runRounds(fmt.Sprintf("after test %d,", ti), outside.after[ti], true)
+	}
+	t.Logf("%d commands in tests, %d outside", commands, outsideRun)
+	if outsideWrong > 0 {
+		t.Errorf("%d of %d commands outside every test answered with the recording of another request", outsideWrong, outsideRun)
+	}
 }
 
 // runSetAtOnce runs each of batch's commands on its connection, all at once:

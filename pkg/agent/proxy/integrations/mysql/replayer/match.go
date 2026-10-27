@@ -374,6 +374,26 @@ type refusedConsume struct{ mock *models.Mock }
 func (e *refusedConsume) Error() string { return errConsumeRefused.Error() }
 func (e *refusedConsume) Unwrap() error { return errConsumeRefused }
 
+// paramExactOutranksFIFO reports whether, among the COM_STMT_EXECUTE
+// candidates that are not the open test's own, one recorded with the
+// command's own query and parameters (defExecMock) ranks above the first one
+// recorded with its query and other parameters (fifoExecMock). The open
+// test's own candidates rank above both either way.
+//
+// Under exact serving it does. The view shows no other test's recordings:
+// a candidate that is not the open test's own is the pool's (recorded at
+// start-up or between tests, the only data recordings the view shows while
+// no test is open), the worker scope's (made for no test's request) or a
+// protocol phase's, so no stale earlier-test match is among them, and of two
+// the one recorded with the command's parameters is its answer. Ranked the other way, a statement run
+// at start-up or between tests with two parameters was answered with each
+// other's rows.
+//
+// Without exact serving (keploy test) the ranking is as it was.
+func paramExactOutranksFIFO(exactServing bool) bool {
+	return exactServing
+}
+
 // restagedCommandNote is what a miss says when the replay staged a test set
 // again (the next set, or the same set for a replaced agent, which the store
 // does not tell apart) after the command's first read of the round, and the
@@ -1523,10 +1543,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// stale earlier-test exact match; it ranks above the score-based
 		// pick because exact query+params is strictly stronger evidence
 		// than partial-shape scoring. Under exact serving "in-window" is
-		// the open test's own (testsOwn).
+		// the open test's own (testsOwn), and 4 ranks above 3
+		// (paramExactOutranksFIFO).
 		chosenResp, chosenMock := paramsOnlyRespWindow, paramsOnlyMockWindow
 		if chosenMock == nil {
 			chosenResp, chosenMock = fifoExecRespWindow, fifoExecMockWindow
+		}
+		if chosenMock == nil && defExecMock != nil && paramExactOutranksFIFO(exactServing) {
+			chosenResp, chosenMock = defExecResp, defExecMock
 		}
 		if chosenMock == nil {
 			chosenResp, chosenMock = fifoExecResp, fifoExecMock
