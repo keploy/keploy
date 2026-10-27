@@ -35,10 +35,24 @@ const (
 	// The path inside the container where certs are mounted
 	KeployTLSMountPath = "/tmp/keploy-tls"
 
+	// KeployAppGateServiceName is the one-shot compose service that parks the
+	// app until the CLI posts /agent/ready. The app depends on it with
+	// condition: service_completed_successfully (#4894).
+	KeployAppGateServiceName = "keploy-app-gate"
+
+	// keployAppGateImage is a tiny image whose only job is to wait for
+	// AgentReleaseFile on the shared TLS volume, then exit 0.
+	keployAppGateImage = "alpine:3.21"
+
 	// AgentReadyFile is the readiness marker file written by the agent once
 	// setup is complete. Used by the Docker Compose healthcheck and cleared
 	// on agent startup to prevent stale state from passing the healthcheck.
 	AgentReadyFile = "/tmp/agent.ready"
+
+	// AgentReleaseFile is the shared-volume marker keploy-app-gate waits on.
+	// MakeAgentReady writes it alongside AgentReadyFile so the app is released
+	// by a CLI event, not by the agent's healthcheck wall-clock (#4894).
+	AgentReleaseFile = KeployTLSMountPath + "/agent.ready"
 
 	// AgentOutcomeFile is where a containerised agent serving a mock replay
 	// leaves what it served and what it could not match (models.MockOutcome)
@@ -66,47 +80,18 @@ const (
 
 // agentHealthcheckStartPeriod is the docker-compose healthcheck start_period for
 // the keploy-agent service: the window in which a FAILING healthcheck neither
-// counts toward `retries` nor marks the container unhealthy, so a dependent app
-// (depends_on: service_healthy) simply keeps waiting.
+// counts toward `retries` nor marks the container unhealthy.
 //
-// WHAT IT IS NOT. For a LITERAL `docker compose` command it is NOT the
-// mechanism that detects a dead agent: keploy rewrites such commands to inject
-// `--abort-on-container-exit` (ensureComposeExitOnAppFailure, called from
-// modifyDockerComposeCommand / ensureInMemoryComposeFlags in pkg/client/app),
-// so a crashed or OOM-killed agent container EXITS and aborts the whole run
-// immediately, independent of this budget. That covers the go-memory-load lanes
-// this fix targets (they run `-c "docker compose up"`). For a WRAPPER command
-// (make / npm / a shell script) keploy passes its compose file via COMPOSE_FILE
-// and cannot splice the flag in — it warns about exactly this at app.go:~288 —
-// so there this window genuinely IS the backstop, which is a further reason to
-// keep it generous. In both cases the window's job is the same: avoid
-// false-failing an agent that is ALIVE and still doing its one-time setup.
+// The app is NOT released by this healthcheck. The app waits on keploy-app-gate
+// (service_completed_successfully), which exits only when MakeAgentReady writes
+// AgentReleaseFile — a CLI event, not a wall-clock (#4894). This start_period
+// remains as an observability / wedged-agent backstop for wrapper commands that
+// cannot get `--abort-on-container-failure`, and for operators reading
+// `docker compose ps`.
 //
-// WHAT IT BOUNDS. The agent writes AgentReadyFile only after the CLI has read
-// and decoded the test-set's mock corpus (GetFilteredMocks) and streamed it to
-// the agent (StoreMocks -> MakeAgentReady). Measured, the stream+park itself is
-// not the cost — gob encode/decode + on-disk parking runs at ~380 MB/s, so even
-// a multi-hundred-MB corpus lands in seconds (measured with a throwaway
-// benchmark, since removed). What actually stretches the
-// wall-clock is the CLI-side corpus DECODE racing everything else on a
-// contended shared runner: on the go-memory-load lanes a ~80 MB / ~1.1k-mock
-// set decoded while the app's own DB seeded on the same 2 vCPUs took ~60s, and
-// on a slower run crossed the old fixed 10s+60x5s=310s budget — flipping a
-// healthy-but-still-setting-up agent to unhealthy and failing the app's
-// depends_on. That is the flake.
-//
-// WHY GENEROUS IS THE RIGHT SHAPE, NOT A GUESS. The container flips healthy the
-// instant the ready file appears, so in the common case the app starts in
-// seconds no matter how large this window is — a generous value costs the fast
-// path nothing. For literal compose, agent death is caught by container-exit
-// (--abort-on-container-exit), not by this window. So this
-// is a floor sized to "comfortably longer than any legitimate setup," not a
-// delicate estimate of load time; its exact value is not correctness-critical.
-// The only case it still bounds is an agent that is alive but wedged (never
-// ready, never exits): retries*interval past this window it is declared
-// unhealthy and the run fails with a clear cause rather than hanging to the CI
-// job timeout. 600s default keeps that backstop while giving the observed
-// worst case ~10x headroom.
+// For a LITERAL `docker compose` command, a crashed agent EXITS and aborts the
+// run via `--abort-on-container-failure` (or `--abort-on-container-exit` when
+// no completion dependency is present), independent of this budget.
 //
 // Overridable via KEPLOY_AGENT_HEALTHCHECK_START_PERIOD_SECONDS. Non-positive or
 // unparsable falls back to the default.
@@ -1375,6 +1360,59 @@ func (idc *Impl) AddKeployAgentToCompose(compose *Compose, opts models.SetupOpti
 	return nil
 }
 
+// AddKeployAppGateToCompose adds the one-shot service that parks the app until
+// MakeAgentReady writes AgentReleaseFile. The app depends on it with
+// service_completed_successfully, so a long CLI-side mock decode cannot flip
+// the agent unhealthy and strand the app (#4894).
+func (idc *Impl) AddKeployAppGateToCompose(compose *Compose) error {
+	resolveServiceAlias(&compose.Services)
+	for _, e := range effectiveServiceEntries(&compose.Services) {
+		if aliasTarget(e.key).Value == KeployAppGateServiceName {
+			return fmt.Errorf("the compose file already defines a service named %q; rename it so keploy can add its own",
+				KeployAppGateServiceName)
+		}
+	}
+
+	// RW mount: the gate must delete any leftover AgentReleaseFile from a
+	// prior run (ComposeDown keeps the named volume) before it waits. A :ro
+	// mount would leave a stale marker and release the app before MakeAgentReady.
+	gateNode := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "image"},
+		{Kind: yaml.ScalarNode, Value: keployAppGateImage},
+		{Kind: yaml.ScalarNode, Value: "restart"},
+		{Kind: yaml.ScalarNode, Value: "no"},
+		{Kind: yaml.ScalarNode, Value: "volumes"},
+		{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: fmt.Sprintf("%s:%s", KeployTLSVolumeName, KeployTLSMountPath)},
+		}},
+		{Kind: yaml.ScalarNode, Value: "depends_on"},
+		{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "keploy-agent"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Value: "condition"},
+				{Kind: yaml.ScalarNode, Value: "service_started"},
+			}},
+		}},
+		// Clear any stale marker, then poll until MakeAgentReady writes a
+		// fresh one. MakeAgentReady runs only after the agent is reachable
+		// and mocks are staged, so it cannot race this rm on a normal start.
+		{Kind: yaml.ScalarNode, Value: "command"},
+		{Kind: yaml.SequenceNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "sh"},
+			{Kind: yaml.ScalarNode, Value: "-c"},
+			{Kind: yaml.ScalarNode, Value: fmt.Sprintf(
+				"rm -f %s; while [ ! -f %s ]; do sleep 0.25; done",
+				AgentReleaseFile, AgentReleaseFile)},
+		}},
+	}}
+
+	compose.Services.Content = append(compose.Services.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: KeployAppGateServiceName},
+		gateNode,
+	)
+	return nil
+}
+
 // Helper: findServiceNodeAndName finds the YAML node and the Service Key (name)
 func (idc *Impl) findServiceNodeAndName(compose *Compose, appIdentifier string) (*yaml.Node, string, error) {
 	// `services: *svcs` is legal compose, and an alias holds no entries of its
@@ -1471,6 +1509,11 @@ func (idc *Impl) ModifyComposeForAgent(compose *Compose, opts models.SetupOption
 	err = idc.AddKeployAgentToCompose(compose, opts)
 	if err != nil {
 		return fmt.Errorf("failed to add keploy-agent service: %w", err)
+	}
+
+	// Then the one-shot gate the app waits on (MakeAgentReady → AgentReleaseFile).
+	if err := idc.AddKeployAppGateToCompose(compose); err != nil {
+		return fmt.Errorf("failed to add %s service: %w", KeployAppGateServiceName, err)
 	}
 
 	// Now modify the app container to integrate with keploy-agent
@@ -2644,6 +2687,59 @@ func (idc *Impl) addServiceProperty(serviceNode *yaml.Node, key, value string) {
 	)
 }
 
+// keployAppDependsOn is the depends_on mapping keploy forces on the app:
+// agent must exist (network_mode: service:keploy-agent), and the app-gate must
+// have exited 0 after MakeAgentReady wrote AgentReleaseFile (#4894).
+func keployAppDependsOn() []*yaml.Node {
+	return []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "keploy-agent"},
+		{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "condition"},
+			{Kind: yaml.ScalarNode, Value: "service_started"},
+		}},
+		{Kind: yaml.ScalarNode, Value: KeployAppGateServiceName},
+		{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "condition"},
+			{Kind: yaml.ScalarNode, Value: "service_completed_successfully"},
+		}},
+	}
+}
+
+// setDependsOnCondition sets condition on an existing extended depends_on entry
+// for service, or appends one when missing.
+func setDependsOnCondition(dependsOnNode *yaml.Node, service, condition string) {
+	for j := 0; j+1 < len(dependsOnNode.Content); j += 2 {
+		if dependsOnNode.Content[j].Kind == yaml.ScalarNode && dependsOnNode.Content[j].Value == service {
+			cond := dependsOnNode.Content[j+1]
+			if cond.Kind != yaml.MappingNode {
+				dependsOnNode.Content[j+1] = &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					{Kind: yaml.ScalarNode, Value: "condition"},
+					{Kind: yaml.ScalarNode, Value: condition},
+				}}
+				return
+			}
+			for k := 0; k+1 < len(cond.Content); k += 2 {
+				if cond.Content[k].Value == "condition" {
+					setScalarValue(&cond.Content[k+1], condition)
+					return
+				}
+			}
+			cond.Content = append(cond.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Value: "condition"},
+				&yaml.Node{Kind: yaml.ScalarNode, Value: condition},
+			)
+			return
+		}
+	}
+	dependsOnNode.Content = append(dependsOnNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: service},
+		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "condition"},
+			{Kind: yaml.ScalarNode, Value: condition},
+		}},
+	)
+}
+
 // addOrUpdateDependsOn adds or updates the depends_on configuration
 func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 	if serviceNode.Content == nil {
@@ -2660,16 +2756,16 @@ func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 			// Update existing depends_on.
 			//
 			// An aliased or present-but-empty `depends_on:` matches neither
-			// branch below, and falling through drops the `keploy-agent:
-			// {condition: service_healthy}` gate without a word -- so the app
-			// container starts before the agent's proxy is listening and races
-			// it, which surfaces as a handful of unrecorded calls at the head of
-			// the session rather than as an error.
+			// branch below, and falling through drops the keploy-agent /
+			// keploy-app-gate gate without a word -- so the app container
+			// starts before interception is ready and races it, which surfaces
+			// as a handful of unrecorded calls at the head of the session
+			// rather than as an error.
 			dependsOnNode := resolveAliasByCopy(serviceNode.Content[i+1])
 			ensureSequence(dependsOnNode)
 			if dependsOnNode.Kind != yaml.SequenceNode && dependsOnNode.Kind != yaml.MappingNode {
 				idc.logger.Warn("`depends_on:` cannot hold an entry, so keploy cannot "+
-					"make the app wait for keploy-agent to become healthy; the app "+
+					"make the app wait for keploy-agent / keploy-app-gate; the app "+
 					"may start before interception is ready",
 					zap.String("dependsOnShape", yamlKindName(serviceNode.Content[i+1].Kind)),
 					zap.String("resolvesTo", yamlKindName(resolvedKind(serviceNode.Content[i+1]))))
@@ -2685,7 +2781,7 @@ func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 					// real dependency, and the app stops waiting for it.
 					dep = aliasTarget(dep)
 					if dep.Kind == yaml.ScalarNode && !isEmptyNode(dep) &&
-						dep.Value != "keploy-agent" {
+						dep.Value != "keploy-agent" && dep.Value != KeployAppGateServiceName {
 						existingDeps = append(existingDeps, dep.Value)
 					}
 				}
@@ -2694,16 +2790,7 @@ func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 				dependsOnNode.Kind = yaml.MappingNode
 				dependsOnNode.Tag = ""  // Clear the !!seq tag
 				dependsOnNode.Style = 0 // Reset style
-				dependsOnNode.Content = []*yaml.Node{}
-
-				// Add keploy-agent first
-				dependsOnNode.Content = append(dependsOnNode.Content,
-					&yaml.Node{Kind: yaml.ScalarNode, Value: "keploy-agent"},
-					&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
-						{Kind: yaml.ScalarNode, Value: "condition"},
-						{Kind: yaml.ScalarNode, Value: "service_healthy"},
-					}},
-				)
+				dependsOnNode.Content = keployAppDependsOn()
 
 				// Add existing dependencies with service_started condition
 				for _, depName := range existingDeps {
@@ -2716,24 +2803,9 @@ func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 					)
 				}
 			} else if dependsOnNode.Kind == yaml.MappingNode {
-				// Add keploy-agent to existing mapping
-				keployExists := false
-				for j := 0; j < len(dependsOnNode.Content); j += 2 {
-					if j < len(dependsOnNode.Content) && dependsOnNode.Content[j].Kind == yaml.ScalarNode && dependsOnNode.Content[j].Value == "keploy-agent" {
-						keployExists = true
-						break
-					}
-				}
-
-				if !keployExists {
-					dependsOnNode.Content = append([]*yaml.Node{
-						{Kind: yaml.ScalarNode, Value: "keploy-agent"},
-						{Kind: yaml.MappingNode, Content: []*yaml.Node{
-							{Kind: yaml.ScalarNode, Value: "condition"},
-							{Kind: yaml.ScalarNode, Value: "service_healthy"},
-						}},
-					}, dependsOnNode.Content...)
-				}
+				// Force keploy's gates; preserve the user's other dependencies.
+				setDependsOnCondition(dependsOnNode, "keploy-agent", "service_started")
+				setDependsOnCondition(dependsOnNode, KeployAppGateServiceName, "service_completed_successfully")
 			}
 			return
 		}
@@ -2742,12 +2814,6 @@ func (idc *Impl) addOrUpdateDependsOn(serviceNode *yaml.Node) {
 	// Add new depends_on
 	serviceNode.Content = append(serviceNode.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: "depends_on"},
-		&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
-			{Kind: yaml.ScalarNode, Value: "keploy-agent"},
-			{Kind: yaml.MappingNode, Content: []*yaml.Node{
-				{Kind: yaml.ScalarNode, Value: "condition"},
-				{Kind: yaml.ScalarNode, Value: "service_healthy"},
-			}},
-		}},
+		&yaml.Node{Kind: yaml.MappingNode, Content: keployAppDependsOn()},
 	)
 }

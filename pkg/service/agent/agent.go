@@ -255,16 +255,21 @@ func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client
 // only so that a test running Setup leaves the host's alone.
 var agentReadyFile = kdocker.AgentReadyFile
 
+// agentReleaseFile is kdocker.AgentReleaseFile, cleared with agentReadyFile so
+// keploy-app-gate does not exit on a stale marker from a previous run.
+var agentReleaseFile = kdocker.AgentReleaseFile
+
 // Setup will create a new app and store it in the map, all the setup will be done here
 func (a *Agent) Setup(ctx context.Context, startCh chan int) error {
 
-	// Remove stale readiness file from a previous run so the Docker
-	// healthcheck (`cat <AgentReadyFile>`) does not pass before the
-	// CLI has stored mocks on the agent. The file is re-created later
-	// by the MakeAgentReady HTTP handler in pkg/agent/routes/record.go
-	// once setup is complete.
-	if err := os.Remove(agentReadyFile); err != nil && !os.IsNotExist(err) {
-		a.logger.Debug("failed to remove stale agent readiness file", zap.Error(err))
+	// Remove stale readiness / release markers from a previous run so the
+	// Docker healthcheck and keploy-app-gate do not pass before the CLI has
+	// stored mocks on the agent. Recreated later by MakeAgentReady.
+	for _, file := range []string{agentReadyFile, agentReleaseFile} {
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			a.logger.Debug("failed to remove stale agent readiness file",
+				zap.String("file", file), zap.Error(err))
+		}
 	}
 
 	// A replay's outcome, left as the agent is stopped for a CLI that cannot

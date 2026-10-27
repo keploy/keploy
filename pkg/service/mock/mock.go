@@ -194,10 +194,11 @@ func (m *mockService) isDockerCompose() bool {
 // have called Run.
 //
 // That would leave the app racing the proxy, which is what releaseComposeApp
-// exists to prevent: the app service is gated behind the agent service's
-// healthcheck, and that healthcheck only passes once keploy posts /agent/ready.
-// This function therefore waits only for the agent to become REACHABLE; the
-// app stays parked at its healthcheck until the caller has armed the proxy.
+// exists to prevent: the app service waits on keploy-app-gate
+// (service_completed_successfully), which exits only once keploy posts
+// /agent/ready and writes the shared-volume release file. This function
+// therefore waits only for the agent to become REACHABLE; the app stays
+// parked at the gate until the caller has armed the proxy.
 func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Group, phase string) (chan models.AppError, error) {
 	if !m.isDockerCompose() {
 		return nil, nil
@@ -297,19 +298,16 @@ func (m *mockService) composeAgentFailure() error {
 	return reader.ComposeAgentFailure()
 }
 
-// releaseComposeApp releases the app service, which has been parked at its
-// healthcheck ever since startComposeApp brought the project up.
+// releaseComposeApp releases the app service, which has been parked behind
+// keploy-app-gate ever since startComposeApp brought the project up.
 //
-// POST /agent/ready is not a readiness probe: it writes the file the agent
-// service's compose healthcheck reads (pkg/agent/routes/record.go), and the
-// app service depends_on that health. So it must be posted only once the proxy
-// is armed — any earlier and the app's first dependency calls go out
-// unintercepted. All three other callers post it at that same point: after the
-// recorder is installed (Recorder.Start) or after the mocks are stored and
-// staged (Replayer.RunTestSet, Runner.setupTestSet). Only Recorder.Start also
-// gates it on the command type, as this does; the two replay-side callers post
-// it for every command type, where it writes a file nothing but the generated
-// compose healthcheck ever reads.
+// POST /agent/ready is not a readiness probe: it writes AgentReleaseFile on the
+// shared TLS volume (and the agent healthcheck marker). keploy-app-gate exits
+// once that file appears, and the app depends_on that completion — so the post
+// must happen only once the proxy is armed. Any earlier and the app's first
+// dependency calls go out unintercepted. All three other callers post it at
+// that same point: after the recorder is installed (Recorder.Start) or after
+// the mocks are stored and staged (Replayer.RunTestSet, Runner.setupTestSet).
 func (m *mockService) releaseComposeApp(ctx context.Context) error {
 	if !m.isDockerCompose() {
 		return nil
@@ -319,7 +317,7 @@ func (m *mockService) releaseComposeApp(ctx context.Context) error {
 	// latched CA-install failure the agent answers, and once the agent's
 	// container has exited or its start has stopped making progress
 	// (MakeAgentReadyForDockerCompose), so an agent that dies between the
-	// health check and this call does not stall the run.
+	// gate wait and this call does not stall the run.
 	return m.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 }
 

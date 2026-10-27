@@ -49,6 +49,11 @@ type Agent struct {
 // into /tmp on the host. Production code MUST NOT mutate it.
 var agentReadyFilePath = kdocker.AgentReadyFile
 
+// agentReleaseFilePath is the shared-volume marker keploy-app-gate waits on
+// (kdocker.AgentReleaseFile). A var so tests can redirect it with the ready
+// file; production code MUST NOT mutate it.
+var agentReleaseFilePath = kdocker.AgentReleaseFile
+
 // massSuppressionPercent is the share of a session's test cases that must be
 // suppressed before the completion summary is raised from Info to Warn.
 //
@@ -1389,27 +1394,50 @@ func (a *Agent) MakeAgentReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create or overwrite the readiness file with a timestamp
+	// Create or overwrite the readiness markers with a timestamp. AgentReadyFile
+	// feeds the agent healthcheck; AgentReleaseFile on the shared TLS volume
+	// lets keploy-app-gate exit so the app may start (#4894).
 	content := []byte(time.Now().Format(time.RFC3339) + "\n")
-	if err := os.WriteFile(agentReadyFilePath, content, 0644); err != nil {
-		// This path blocks docker-compose / kubelet startup, so the
-		// log line must point operators at the common root causes:
-		// read-only mount, missing parent dir, or disk pressure.
-		a.logger.Error(
-			"failed to create readiness file",
-			zap.String("file", agentReadyFilePath),
-			zap.String("parent_dir", filepath.Dir(agentReadyFilePath)),
-			zap.String("next_step",
-				"ensure the parent directory exists, is writable by the agent "+
-					"user, and that the container filesystem / volume is not "+
-					"read-only or out of space"),
-			zap.Error(err),
-		)
-		http.Error(w, fmt.Sprintf("failed to mark agent as ready: %v", err), http.StatusInternalServerError)
-		return
+	files := []string{agentReadyFilePath}
+	if agentReleaseFilePath != "" && agentReleaseFilePath != agentReadyFilePath {
+		files = append(files, agentReleaseFilePath)
+	}
+	for _, file := range files {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			a.logger.Error(
+				"failed to create readiness file parent directory",
+				zap.String("file", file),
+				zap.String("parent_dir", filepath.Dir(file)),
+				zap.String("next_step",
+					"ensure the parent directory path is writable by the agent user "+
+						"and that the container filesystem / volume is not read-only"),
+				zap.Error(err),
+			)
+			http.Error(w, fmt.Sprintf("failed to mark agent as ready: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(file, content, 0644); err != nil {
+			// This path blocks docker-compose / kubelet startup, so the
+			// log line must point operators at the common root causes:
+			// read-only mount, missing parent dir, or disk pressure.
+			a.logger.Error(
+				"failed to create readiness file",
+				zap.String("file", file),
+				zap.String("parent_dir", filepath.Dir(file)),
+				zap.String("next_step",
+					"ensure the parent directory exists, is writable by the agent "+
+						"user, and that the container filesystem / volume is not "+
+						"read-only or out of space"),
+				zap.Error(err),
+			)
+			http.Error(w, fmt.Sprintf("failed to mark agent as ready: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
-	a.logger.Debug("Agent marked as ready", zap.String("file", agentReadyFilePath))
+	a.logger.Debug("Agent marked as ready",
+		zap.String("file", agentReadyFilePath),
+		zap.String("release_file", agentReleaseFilePath))
 	w.WriteHeader(http.StatusOK)
 	a.logger.Debug("Keploy Agent is ready from the ...")
 	_, _ = w.Write([]byte("Agent is now ready\n"))
