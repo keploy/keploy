@@ -21,6 +21,13 @@ var exactViewVerify atomic.Bool
 
 func init() { exactViewVerify.Store(os.Getenv("KEPLOY_EXACT_VIEW_VERIFY") == "1") }
 
+// SetExactViewVerify turns the verify mode on or off for this process. The
+// agent calls it from its --exact-view-verify flag (provenswitch.VerifyFlag):
+// an agent inherits no environment from the keploy that starts it (sudo drops
+// it, its container is not given it), so the flag is how CI's lanes under the
+// proven switch reach it.
+func SetExactViewVerify(on bool) { exactViewVerify.Store(on) }
+
 // verifyExactRead panics when got, a materialised read of the exact view, is
 // not want, the same read recomputed: the same mocks, by identity, in the
 // same order.
