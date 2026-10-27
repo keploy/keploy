@@ -295,3 +295,54 @@ func TestKeploysOwnClockReadNarrowedKeepsItsAbout(t *testing.T) {
 		t.Fatalf("the narrowed clock read's about: %+v, was %+v", a, was)
 	}
 }
+
+// Each line the learn step adds finds, by its own spelling, the about the
+// file holds at its place, so the judge prints the why the file says: on a
+// fresh learning, and on a use a later learning adds to keploy's own
+// variable (the first learner's why). An orphan about, and an entry of
+// unknown origin, name no line.
+func TestEachLearnedLineFindsTheAboutAtItsPlace(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	if AddedAbouts(nil) != nil || AddedAbouts(&models.Mock{}) != nil {
+		t.Fatal("a mock with no about named a line")
+	}
+	mock := &models.Mock{Name: "mock-1"}
+	added, _ := MergeLearned(mock, StampStates(learnedAll(), testStamp)["mock-1"], nil)
+	abouts := AddedAbouts(mock)
+	if len(added) != 5 || len(abouts) != len(added) {
+		t.Fatalf("added %q, abouts %v", added, abouts)
+	}
+	at := map[string]string{
+		"body.eventId (noise)":                             mock.Spec.NoiseAbout["body.eventId"].Why,
+		"body.id (variable _id: bind)":                     mock.Spec.Variables["_id"].About.Why,
+		"body.ref (variable _id: use)":                     mock.Spec.Variables["_id"].About.Why,
+		"header.x-request-id (echo rid)":                   mock.Spec.Variables["rid"].About.Why,
+		clockAdded("body.at", mock.Spec.Clocks["body.at"]): mock.Spec.ClockAbout["body.at"].Why,
+	}
+	for _, a := range added {
+		got, ok := abouts[a]
+		if !ok || got.Why == "" || got.Why != at[a] || got.Sum == "" {
+			t.Fatalf("line %q: about %+v, want the why %q the file holds there", a, got, at[a])
+		}
+	}
+
+	later := learnedAll()
+	st := later["mock-1"]
+	st.Variables = models.MockVariables{"_id": {Recorded: "6adf", Use: []string{"body.items.0.ref"}}}
+	later["mock-1"] = st
+	again, _ := MergeLearned(mock, StampStates(later, Stamp{Round: models.AboutRoundFull, Run: "2026-10-28T05:00:00Z"})["mock-1"], nil)
+	if !reflect.DeepEqual(again, []string{"body.items.0.ref (variable _id: use)"}) {
+		t.Fatalf("a later use: added %q", again)
+	}
+	if got := AddedAbouts(mock)[again[0]]; got.Why != at["body.ref (variable _id: use)"] || got.Run != testStamp.Run {
+		t.Fatalf("a later use of keploy's own variable: %+v, want the first learner's about", got)
+	}
+
+	m := &models.Mock{Spec: models.MockSpec{
+		ReqBodyNoise: map[string][]string{"body.old": nil},
+		NoiseAbout:   map[string]models.About{"body.gone": {By: models.AboutByHand, Why: "a person's"}},
+	}}
+	if got := AddedAbouts(m); got != nil {
+		t.Fatalf("an orphan about or an entry of unknown origin named a line: %v", got)
+	}
+}

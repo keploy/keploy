@@ -67,7 +67,7 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		// it always has.
 		for k := range st.ReqBodyNoise {
 			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
+				added = append(added, noiseAdded(k))
 			}
 		}
 		if len(st.ReqBodyNoise) > 0 {
@@ -144,11 +144,11 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			if s := models.NoiseAboutState(&mock.Spec, k); s == models.AboutHand {
 				// A person's about at a path they took out of the noise:
 				// the place stays compared.
-				blocked = append(blocked, notApplied(k+" (noise)", s))
+				blocked = append(blocked, notApplied(noiseAdded(k), s))
 				delete(noise, k)
 				continue
 			}
-			added = append(added, k+" (noise)")
+			added = append(added, noiseAdded(k))
 			path := k
 			setAbout(&mock.Spec.NoiseAbout, k, st.NoiseAbout[k].Stamped(models.AboutKindNoise, k, false, func(run string) string { return models.NoiseSum(path, run) }))
 		}
@@ -172,12 +172,12 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				// A person's clock read (or their about at a path they took
 				// out of the clocks): a learned one never changes it.
 				if !had || next != cur {
-					blocked = append(blocked, notApplied(path+" ("+next.String()+")", state))
+					blocked = append(blocked, notApplied(clockAdded(path, next), state))
 				}
 				continue
 			}
 			if !had || next != cur {
-				added = append(added, path+" ("+next.String()+")")
+				added = append(added, clockAdded(path, next))
 			}
 			clocks[path] = next
 			at := path
@@ -315,6 +315,48 @@ func unionSorted(a, b []string) []string {
 
 // variableAdded says what next declares of variable name that was not
 // declared before (was).
+// noiseAdded is how added (MergeLearned) names noise learned at path.
+func noiseAdded(path string) string { return path + " (noise)" }
+
+// clockAdded is how added names the clock read o learned at path.
+func clockAdded(path string, o models.ClockOffset) string { return path + " (" + o.String() + ")" }
+
+// AddedAbouts is, by the name added (MergeLearned) gives each, the about of
+// every decision on mock that carries one: each ignored field, each clock
+// read, and each variable's bind and use places. The judge prints the why
+// of a learned line from it, so the line says what the file says. An about
+// at a path that is no longer noise or a clock read (an orphan) names no
+// decision, and a decision with no about (unknown origin) is not in it;
+// nil when there is none. The abouts share mock's Seen.
+func AddedAbouts(mock *models.Mock) map[string]models.About {
+	if mock == nil {
+		return nil
+	}
+	out := map[string]models.About{}
+	for path, a := range mock.Spec.NoiseAbout {
+		if _, ok := mock.Spec.ReqBodyNoise[path]; ok {
+			out[noiseAdded(path)] = a
+		}
+	}
+	for path, a := range mock.Spec.ClockAbout {
+		if o, ok := mock.Spec.Clocks[path]; ok {
+			out[clockAdded(path, o)] = a
+		}
+	}
+	for name, v := range mock.Spec.Variables {
+		if v.About == nil {
+			continue
+		}
+		for _, e := range variableAdded(name, models.MockVariable{}, v) {
+			out[e] = *v.About
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func variableAdded(name string, was, next models.MockVariable) []string {
 	var out []string
 	if next.Bind != "" && next.Bind != was.Bind {
