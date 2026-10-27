@@ -1193,8 +1193,10 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// an instant of it copied from there, or picked from it,
 				// which the word rule leaves to the clock (the echo of
 				// those places).
-				if why = givenWhy(dc, v, at, served, raw, places); why == "" {
+				if why = givenWhy(dc, v, at, served, raw, places, fol); why == "" {
 					why = dc.echoedElsewhere(v.instants, at, served, raw, places)
+				} else if fol != nil && fol.refused != "" {
+					why += "; " + fol.refused
 				}
 			}
 			// In keploy mock's client tests, a changed instant only where the

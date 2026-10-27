@@ -54,11 +54,18 @@ import (
 //     connections are refused.
 //
 // Otherwise the value is refused, the reason naming which of these failed.
-// Nothing is read from a value's shape. Everything else the classifier
+// Nothing is read from a value's shape. The same holds of a word the rule
+// finds in the answer of a recording F gave the application before the call
+// that no earlier place of the call's own test is (another recorded test's,
+// or one F gave earlier in the set: givenWhy, excusedGiven): a group of a
+// random id that another test's random id holds by chance is let go where
+// the recording gave that answer strictly before the call, F gave the word
+// at the same fields, the two values do not both hold it, and the order
+// holds; keploy still follows no value of another test's, and a value that
+// moved with such a word stays refused. Everything else the classifier
 // refuses (an offset, an instant, a glued word of an undeclared body, a word
-// of another test's or of a recording made after the call, an echo in the
-// answer) stays refused: the rule reads the word rule's plain matches of the
-// call's own earlier places alone.
+// of a recording made after the call, an echo in the answer) stays refused:
+// the rule reads the word rule's plain matches alone.
 //
 // A connection's recorded start-up (isStartUp) is no place the rule reads
 // where the start-ups differ (swapHolds: its backend pid and secret key, a
@@ -109,6 +116,11 @@ type follows struct {
 	// past (refute): the value's candidate sources, the only places whose
 	// order the rule reads (followed).
 	sources map[string]bool
+	// given are the recordings F gave the application earlier in the set
+	// (GivenEarlier) that the word rule let a word of the value go at
+	// (excusedGiven): candidate sources no Raw handed to the call stands
+	// for, ordered with the rest (followed).
+	given []Raw
 }
 
 // source notes mock as a candidate source of the value (follows.sources).
@@ -421,6 +433,50 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 	return true
 }
 
+// excusedGiven is excused of word t of the drifted value v, found in reading
+// i in the answer of a recording F gave the application before the call
+// that no earlier place of the call's own test is (g: another recorded
+// test's, or one F gave earlier in the running set), whose reason there is
+// why (givenWhy): the recording gave the application g's answer strictly
+// before the call (recordedGave), and F gave it t at the fields the
+// recording gave it at (givenWords.same: g served unchanged, or its view
+// showing t there). Both runs then gave the application that word there, and
+// one of the two values lacks it (excused): the value was made beside the
+// word without taking it, and an application that copied it would have
+// copied it in both runs. That is what tells a word a value holds by chance
+// (a group of a random id that another test's random id holds too) from a
+// copy, never the word's shape. A recording F served changed with no view, a
+// view that gives the word at another field or not at all, one the recording
+// answered at or after the call, or whose times keploy cannot read, shows
+// nothing, and the word stays refused, naming why.
+func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at time.Time, why string) bool {
+	if f == nil {
+		return false
+	}
+	gat := g.at
+	if g.noTime {
+		gat = time.Time{}
+	}
+	before, untimed := recordedGave(gat, g.answered, at, g.mock)
+	fv := fNone
+	if g.sameHolds(i, t) {
+		fv = fSame
+	}
+	if !f.excused(t, before, fv, "", untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+g.mock) {
+		return false
+	}
+	f.source(g.mock)
+	if g.set {
+		for _, x := range f.given {
+			if x.mock == g.mock && x.at.Equal(g.at) {
+				return true
+			}
+		}
+		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, read: true, first: g.first, last: g.last})
+	}
+	return true
+}
+
 // recordedGave reports whether the recording gave the application a place
 // whose request was recorded at req and its answer at answered before a call
 // recorded at at: answered strictly before the call's request was recorded.
@@ -461,6 +517,7 @@ func (dc *DriftCache) holdsWord(value, t string) bool {
 // set); only the sources among them are ordered.
 func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []Raw) Learned {
 	source := func(mock string) bool { return fol.sources[mock] }
+	raw = append(raw[:len(raw):len(raw)], fol.given...)
 	rec, untoldRec := recordedOrder(at, earlier, raw, source)
 	f, untoldF := servedOrder(earlier, raw, source)
 	why := ""
