@@ -1,9 +1,11 @@
 package learn
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.keploy.io/server/v3/pkg/variables"
 )
@@ -105,20 +107,39 @@ func jsonSegs(s string) ([]templates.PathSeg, bool) {
 
 // varName is the name a variable first found at place gets: the place's last
 // key, header or query name, or "path<n>" for a URL segment, in letters,
-// digits, '_' and '-'.
-func varName(place string) string {
+// digits, '_' and '-'. A name is never made of a key that may be a value the
+// app sent (keyMayBeValue): a body place holding one such key, or such a
+// query name, is named "var". The whole body place is, not only that key: a
+// MongoDB place joins its keys with '.' as they are, so the keys either side
+// of a dotted key's {} part may be the rest of that key (alice.smith@example.com
+// is alice, smith@example and com). An operator key ($date, $oid) and an
+// array position (documents.0, as MongoDB writes it) name nothing: the key
+// above them names the variable. The one key of a recording's echo place
+// (echoKeyOf) is keploy's words, the recording's name, and names it.
+func varName(mock, place string) string {
 	p, err := variables.Parse(place)
 	base := ""
-	if err == nil {
+	switch {
+	case err != nil:
+	case len(p.Path) == 1 && echoKeyOf(mock, p.Path[0].Key):
+		base = p.Path[0].Key
+	default:
 		switch p.Part {
 		case variables.PartPath:
 			base = "path" + strconv.Itoa(p.Index)
-		case variables.PartQuery, variables.PartHeader:
+		case variables.PartQuery:
+			if models.KeyShape(p.Name) == p.Name {
+				base = p.Name
+			}
+		case variables.PartHeader:
 			base = p.Name
 		case variables.PartBody:
+			if slices.ContainsFunc(p.Path, func(s templates.PathSeg) bool { return !s.IsIndex && keyMayBeValue(s.Key) }) {
+				break
+			}
 			for i := len(p.Path) - 1; i >= 0 && base == ""; i-- {
-				if !p.Path[i].IsIndex && !strings.HasPrefix(p.Path[i].Key, "$") {
-					base = p.Path[i].Key
+				if k := p.Path[i].Key; !p.Path[i].IsIndex && !strings.HasPrefix(k, "$") && !allDigits(k) {
+					base = k
 				}
 			}
 		}
@@ -133,4 +154,61 @@ func varName(place string) string {
 		base = "var"
 	}
 	return base
+}
+
+// echoKeyOf reports whether key is the key a protocol with no place of the
+// variables grammar (a Postgres bind) names the echo of recording mock bound
+// at a position by: the recording's name, then "-bind" and the position from
+// 1 ("mock-3-bind1"). The name is spelled in the runes a variable's name
+// keeps: letters, digits and '-' as they are, '_' as "__", any other rune as
+// '_', its code in hex and '_' ("mock.3" is "mock_2e_3"). Named after its
+// recording, an echo's name is the same however a test's calls are learned;
+// the key holds no part of a call, so it is no value the app sent.
+func echoKeyOf(mock, key string) bool {
+	if mock == "" {
+		return false
+	}
+	var spelled strings.Builder
+	for _, r := range mock {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-':
+			spelled.WriteRune(r)
+		case r == '_':
+			spelled.WriteString("__")
+		default:
+			spelled.WriteString("_" + strconv.FormatInt(int64(r), 16) + "_")
+		}
+	}
+	pos, ok := strings.CutPrefix(key, spelled.String()+"-bind")
+	return ok && allDigits(pos) && pos[0] != '0'
+}
+
+// keyMayBeValue reports whether a body key may be a value the app sent: one
+// of its dot-separated parts is not kept by models.FieldShape (an email
+// address, an ID with a digit in it). An operator key FieldShape keeps ($set,
+// $oid) is no value, and neither is a key of digits alone: MongoDB writes an
+// array position so, and varName never names a variable by one.
+func keyMayBeValue(k string) bool {
+	if allDigits(k) {
+		return false
+	}
+	for _, part := range strings.Split(k, ".") {
+		if models.FieldShape(part) != part {
+			return true
+		}
+	}
+	return false
+}
+
+// allDigits reports whether s is one or more of the digits 0-9.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

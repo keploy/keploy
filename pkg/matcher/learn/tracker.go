@@ -993,9 +993,9 @@ func drifted(e Earlier) bool {
 // test, names a variable by its place alone.
 func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (name string, ok bool) {
 	if t == nil {
-		name = varName(place)
+		name = varName(mock, place)
 		for i := 2; reserved[name]; i++ {
-			name = varName(place) + "-" + strconv.Itoa(i)
+			name = varName(mock, place) + "-" + strconv.Itoa(i)
 		}
 		return name, true
 	}
@@ -1020,7 +1020,7 @@ func (t *Tracker) Name(n uint64, mock, place string, reserved map[string]bool) (
 	if t.setTaken == nil {
 		t.setTaken = map[string]bool{}
 	}
-	name = t.free(varName(place), reserved, t.taken)
+	name = t.free(varName(mock, place), reserved, t.taken)
 	t.names[key], t.taken[name], t.setTaken[name] = name, true, true
 	return name, true
 }
@@ -1046,9 +1046,9 @@ const runPrefix = "run-"
 // names it by its place alone, apart from reserved.
 func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool) (string, bool) {
 	if t == nil {
-		name := runPrefix + varName(place)
+		name := runPrefix + varName(mock, place)
 		for i := 2; reserved[name]; i++ {
-			name = runPrefix + varName(place) + "-" + strconv.Itoa(i)
+			name = runPrefix + varName(mock, place) + "-" + strconv.Itoa(i)
 		}
 		return name, true
 	}
@@ -1064,7 +1064,7 @@ func (t *Tracker) RunName(n uint64, mock, place string, reserved map[string]bool
 	if t.runNames == nil {
 		t.runNames, t.runTaken = map[string]string{}, map[string]bool{}
 	}
-	name := t.free(runPrefix+varName(place), reserved, t.setTaken)
+	name := t.free(runPrefix+varName(mock, place), reserved, t.setTaken)
 	t.runNames[key], t.runTaken[name] = name, true
 	return name, true
 }

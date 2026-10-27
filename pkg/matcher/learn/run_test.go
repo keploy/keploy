@@ -668,9 +668,91 @@ func TestAVariableIsNamedAboveADollarKey(t *testing.T) {
 		"body.created":           "created",
 		"body.$date":             "var",
 	} {
-		if got := varName(place); got != want {
+		if got := varName("", place); got != want {
 			t.Errorf("varName(%q) = %q, want %q", place, got, want)
 		}
+	}
+}
+
+// A variable's name is never made of a key that may be a value the app sent
+// (models.FieldShape): a map keyed by an email address or an ID is named
+// "var", whichever key the place ends in, since a MongoDB place joins its
+// keys with '.' as they are, so the keys either side of a dotted key's {}
+// part may be the rest of that key (alice.smith@example.com is alice,
+// smith@example and com). An array position (MongoDB writes it as a key,
+// documents.0) is no name and no value: the name is the key above it. A
+// place of plain keys is named as before.
+func TestAVariableIsNeverNamedByAKeyThatMayBeAValue(t *testing.T) {
+	for place, want := range map[string]string{
+		"body.cmd.update.$set.tokens.alice.smith@example.com": "var",
+		`body.tokens["alice.smith@example.com"]`:              "var",
+		`body.tokens["alice.smith@example.com"].token`:        "var",
+		"body.users.u12345x9.name":                            "var",
+		"body.users.u12345x9":                                 "var",
+		"body.cmd.filter.owners.alice@example.com.$oid":       "var",
+		"url.query.alice@example.com":                         "var",
+		"url.query.u12345x9":                                  "var",
+		"body.scores.12345":                                   "scores",
+		"body.cmd.documents.0._id":                            "_id",
+		"body.cmd.documents.0":                                "documents",
+		"body.items[0].ref.$oid":                              "ref",
+		"body._id":                                            "_id",
+		"body.cmd.update.$set.session_token":                  "session_token",
+		"body.orderId":                                        "orderId",
+		`body.meta["x.y"]`:                                    "xy",
+		"url.query.page":                                      "page",
+		"url.query.user_id":                                   "user_id",
+		"header.X-Request-Id":                                 "X-Request-Id",
+		"url.path[2]":                                         "path2",
+	} {
+		got := varName("mock-1", place)
+		if got != want {
+			t.Errorf("varName(%q) = %q, want %q", place, got, want)
+		}
+		for _, part := range []string{"alice", "smith", "example", "com", "u12345x9", "12345"} {
+			if strings.Contains(got, part) {
+				t.Errorf("varName(%q) = %q names %q, part of a key that may be a value", place, got, part)
+			}
+		}
+	}
+}
+
+// A recording's echo place, the one key a protocol with no place of the
+// variables grammar (a Postgres bind) names an echo by, is keploy's words:
+// its variable is named by it, the same however the test's calls are
+// learned, though the recording's name and the position hold digits. Only
+// that recording's own key, and only the whole of it, is: another
+// recording's key, a key that merely begins so, or one under another key, is
+// shaped as any other.
+func TestARecordingsEchoPlaceNamesItsVariable(t *testing.T) {
+	for _, c := range []struct{ mock, place, want string }{
+		{"mock-3", "body.mock-3-bind1", "mock-3-bind1"},
+		{"mock-3", "body.mock-3-bind12", "mock-3-bind12"},
+		{"mock.3", "body.mock_2e_3-bind2", "mock_2e_3-bind2"},
+		{"my_mock-7", "body.my__mock-7-bind1", "my__mock-7-bind1"},
+		{"mock-4", "body.mock-3-bind1", "var"},
+		{"mock-3", "body.mock-3-bind0", "var"},
+		{"mock-3", "body.mock-3-bind", "var"},
+		{"mock-3", "body.mock-3-bind1x", "var"},
+		{"mock-3", "body.x.mock-3-bind1", "var"},
+		{"", "body.mock-3-bind1", "var"},
+	} {
+		if got := varName(c.mock, c.place); got != c.want {
+			t.Errorf("varName(%q, %q) = %q, want %q", c.mock, c.place, got, c.want)
+		}
+	}
+	var nilTracker *Tracker
+	if name, _ := nilTracker.Name(1, "mock-3", "body.mock-3-bind1", nil); name != "mock-3-bind1" {
+		t.Errorf("Name(mock-3, body.mock-3-bind1) = %q, want mock-3-bind1", name)
+	}
+	tr := NewTracker()
+	tr.BeginAt(time.Unix(1_792_000_000, 0))
+	n, _, _, _ := tr.Test()
+	if name, ok := tr.Name(n, "mock-3", "body.mock-3-bind1", nil); !ok || name != "mock-3-bind1" {
+		t.Errorf("a test's Name(mock-3, body.mock-3-bind1) = %q, %v, want mock-3-bind1", name, ok)
+	}
+	if name, ok := tr.RunName(n, "mock-3", "body.mock-3-bind2", nil); !ok || name != "run-mock-3-bind2" {
+		t.Errorf("RunName(mock-3, body.mock-3-bind2) = %q, %v, want run-mock-3-bind2", name, ok)
 	}
 }
 
