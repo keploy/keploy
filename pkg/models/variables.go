@@ -177,13 +177,16 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // value's encoding as a cut only where its value is a whole multiple of a
 // step above its encoding, no coarser than Res, too (CutOf; learn's
 // CheckClockRead): one that is, is checked at that cut, as standing for its
-// whole cut, so it holds where its cut meets the call's span (a value v cut
-// to c, where from-c < v <= to: exactly the values a read in the span
-// writes); one that is not is checked at its own resolution, which is
-// stricter. A value read in the call's span holds either way, wherever its
-// read fell in its cut, where the cut is read on the instant the value
-// writes (a cut the application makes in another zone: learn's
-// CheckClockRead).
+// whole cut: it holds within one cut of the call's span on either side (a
+// value v cut to c, where the start of the cut that holds from, less c, <=
+// v <= to+c: holdsRead); one that is not is checked so at its own
+// resolution, which is stricter. A value read in the call's span holds
+// either way, wherever its read fell in its cut, cut down or rounded, and so
+// does one up to one cut stale or ahead. Both the learn step and a replay
+// read a cut in UTC, in the offset the value writes, and in the
+// application's zone (learn's zonedRes, CheckClockRead), so an hour or a
+// day the application cuts in its own zone (an hour in UTC+05:30, a day in
+// UTC+02:00) is read as one.
 //
 // Zone says in which zone a replay reads the value at the place, where the
 // learn step learned a wall clock of no zone there (a text, or a type of its
@@ -544,7 +547,7 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // value holds it only where both do; of an offset, a Res read coarser
 // refuses more, never less; of a Plain read, a coarser Res is a cut (or an
 // encoding's resolution), at which a replay checks a value that shows it, a
-// read up to one cut before its span (CheckClockRead in learn). Two that
+// read within one cut of its span on either side (CheckClockRead in learn). Two that
 // share no offset (a Plain and one with an offset, or
 // two offsets apart), or that read it in zones no one zone holds (UTC and
 // the application's: ZoneApart, meetZones), meet as an Empty one, which
@@ -588,27 +591,156 @@ func MergeClocks(a, b map[string]ClockOffset) map[string]ClockOffset {
 	return out
 }
 
-// holdsRead is Holds of a Plain o: at, cut to resolution res (it stands for
-// [at, at+res)), is a read of the clock made from from to to, the call's
-// window on the application's clock, itself: some read t in [from, to] lies
-// in [at, at+res). A read the application made for the call lies in its
-// window whenever the replay ran, so a value the replay's own clock wrote
-// always holds and one moved by a resolution past the window never does:
-// the verdict does not turn on timing. It holds nothing for a res of none,
-// a window with no start or that ends before it starts, an o with no Res
-// (one built without the resolution it was learned at), or an o whose Res
-// is coarser than res: a cut (a value the application cut to the second,
-// stored at the millisecond, would hold only where its read fell early
-// enough in its second, by when the replay ran), or one learned at an
-// encoding coarser than the replay's. Learn's CheckClockRead decides those
-// first, by the cut the value itself shows, and asks Holds of o read at the
-// resolution it checks the value at. There is no unit to tell apart, so the
-// window's width bounds nothing more.
+// holdsRead is Holds of a Plain o: at, a value written at resolution res
+// (its own encoding's, or a cut it shows: learn's CheckClockRead), lies
+// within one res of from to to, the call's window on the application's
+// clock, on either side (founder decision, 2026-10-27): from the start of
+// the res that holds from, less one res, up to to plus one res, both
+// included, read on the instant at writes, in the zone at carries (its
+// Location: the zone its res is read in, where a value cut to an hour or a
+// day shows that cut, ReadCut). A day is a day of that zone's calendar
+// (CutBefore, CutAfter): a day of 25 hours, when its clocks go back, is one
+// day, never 24 hours. So a value a read in the window writes holds
+// wherever the read fell in its res: cut down (Go's Truncate, a database
+// column of seconds) it lies at or after the start of the res that holds
+// from; rounded (JavaScript's Math.round(Date.now()/1000)) up to one res
+// after to. One stale by up to one res holds too (a timestamp cached for
+// under a second at a second's res, yesterday's date at a day's), and one
+// moved by more than one res past either side never does, however the
+// replay's read falls: the verdict does not turn on timing. It holds
+// nothing for a res of none, a window with no start or that ends before it
+// starts, an o with no Res (one built without the resolution it was learned
+// at), or an o whose Res is coarser than res: a cut the value does not
+// show, or one learned at an encoding coarser than the replay's. Learn's
+// CheckClockRead decides those first, by the cut the value itself shows,
+// and asks Holds of o read at the resolution it checks the value at. There
+// is no unit to tell apart, so the window's width bounds nothing more.
 func (o ClockOffset) holdsRead(at time.Time, res time.Duration, from, to time.Time) bool {
 	if o.Res <= 0 || res <= 0 || from.IsZero() || to.Before(from) || o.Res > res {
 		return false
 	}
-	return from.Before(at.Add(res)) && !at.After(to)
+	loc := at.Location()
+	return !at.Before(CutBefore(ReadCut(from, res, loc), res, loc)) && !at.After(CutAfter(to, res, loc))
+}
+
+// ReadCut is the start of the cut of resolution res that holds t, read in
+// loc: for an hour or a day, the first instant of t's hour or calendar day
+// there (UnitStart: 01:00 on a day whose clocks skip midnight, 02:30 in an
+// hour whose first half hour they skip); for a finer res, t's wall clock
+// in loc cut down to a whole res (zones' offsets are whole minutes). Of res
+// none, t.
+func ReadCut(t time.Time, res time.Duration, loc *time.Location) time.Time {
+	t = t.In(loc)
+	switch {
+	case res <= 0:
+		return t
+	case res >= 24*time.Hour:
+		return UnitStart(t, 24*time.Hour, loc)
+	case res == time.Hour:
+		return UnitStart(t, time.Hour, loc)
+	}
+	r := WallNanos(t, loc) % int64(res)
+	if r < 0 {
+		r += int64(res)
+	}
+	return t.Add(-time.Duration(r))
+}
+
+// UnitStart is the first instant of t's hour (unit an hour) or calendar day
+// (a day) in loc: the instant its wall clock there turns to t's hour or
+// date, as an application's clock library cuts a time (Go's time.Date,
+// Java's truncatedTo and atStartOfDay, JavaScript's setHours(0)): midnight,
+// or, on a day whose clocks skip midnight (Cairo, Santiago, Havana on the
+// day summer time starts), the first instant after the skipped hour.
+func UnitStart(t time.Time, unit time.Duration, loc *time.Location) time.Time {
+	l := t.In(loc)
+	y, m, d := l.Date()
+	h := 0
+	if unit < 24*time.Hour {
+		h = l.Hour()
+	}
+	same := func(x time.Time) bool {
+		xl := x.In(loc)
+		xy, xm, xd := xl.Date()
+		return xy == y && xm == m && xd == d && (unit >= 24*time.Hour || xl.Hour() == h)
+	}
+	s := time.Date(y, m, d, h, 0, 0, 0, loc)
+	if same(s) && !s.After(l) && !same(s.Add(-1)) {
+		return s
+	}
+	// The wall clock skipped the unit's start (time.Date then gives an
+	// instant outside it): the first instant at which it shows the unit,
+	// at most a day and a few hours before t.
+	lo, hi := l.Add(-unit-6*time.Hour), l
+	if s.Before(l) && !same(s) {
+		lo = s
+	}
+	for hi.Sub(lo) > 1 {
+		if mid := lo.Add(hi.Sub(lo) / 2); same(mid) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return hi
+}
+
+// CutIn is the cut at's wall clock in loc shows (CutOf of WallNanos), or an
+// hour or a day where at is the first instant of its hour or calendar day
+// there (UnitStart), which the wall clock does not show where the zone's
+// clocks skipped its start: above enc and no coarser than upTo, as CutOf.
+func CutIn(at time.Time, loc *time.Location, enc, upTo time.Duration) time.Duration {
+	w := WallNanos(at, loc)
+	c := CutOf(w, enc, upTo)
+	if w%int64(time.Minute) != 0 {
+		return c
+	}
+	for _, u := range []time.Duration{24 * time.Hour, time.Hour} {
+		if u > c && u > enc && u <= upTo && at.Equal(UnitStart(at, u, loc)) {
+			return u
+		}
+	}
+	return c
+}
+
+// CutBefore is t one res earlier, read in loc: for a res of a day, the
+// first instant of the calendar day before t's there (t is a day's start:
+// ReadCut), a day of 25 or 23 hours one day; otherwise t less res.
+func CutBefore(t time.Time, res time.Duration, loc *time.Location) time.Time {
+	if res >= 24*time.Hour {
+		for n := res / (24 * time.Hour); n > 0; n-- {
+			t = UnitStart(UnitStart(t, 24*time.Hour, loc).Add(-1), 24*time.Hour, loc)
+		}
+		return t
+	}
+	return t.Add(-res)
+}
+
+// CutAfter is t one res later, read in loc: for a res of a day, the same
+// time of day on the next calendar day there (24 hours later, or 25 or
+// 23), and never before that day's first instant (where the next day's
+// clocks skip t's time of day); otherwise t plus res.
+func CutAfter(t time.Time, res time.Duration, loc *time.Location) time.Time {
+	if res >= 24*time.Hour {
+		next, start := t.In(loc), t
+		for n := res / (24 * time.Hour); n > 0; n-- {
+			next = next.AddDate(0, 0, 1)
+			start = UnitStart(UnitStart(start, 24*time.Hour, loc).Add(26*time.Hour), 24*time.Hour, loc)
+		}
+		if next.Before(start) {
+			return start
+		}
+		return next
+	}
+	return t.Add(res)
+}
+
+// WallNanos is t's wall clock in loc as nanoseconds from the Unix epoch
+// (t's instant plus loc's offset at it): a value cut to an hour or a day
+// in loc is a whole number of them there, whatever its offset from UTC.
+func WallNanos(t time.Time, loc *time.Location) int64 {
+	_, off := t.In(loc).Zone()
+	return t.UnixNano() + int64(off)*int64(time.Second)
 }
 
 // String is o as a person reads it: "clock" for a Plain o; "clock + 30m",
