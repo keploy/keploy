@@ -76,8 +76,8 @@ func (p *servingProxy) RestartExactKey(key string, names []string) error {
 func (p *servingProxy) ExactTestOutcome() (string, []string, []string, bool) {
 	return p.mm.ExactTestOutcome()
 }
-func (p *servingProxy) SetUnrequired(names map[string]string) error {
-	p.mm.SetUnrequired(names)
+func (p *servingProxy) SetUnrequired(marks models.BackgroundMarks) error {
+	p.mm.SetUnrequired(marks)
 	return nil
 }
 func (p *servingProxy) ExactTestUnusedBackground() (string, []string, bool) {
