@@ -18,6 +18,37 @@ func (f *fakeWatermark) Settled(_, pod string, _, end time.Time) bool {
 	return !f.at[pod].Before(end)
 }
 
+// windowWatermark notes the windows the hold asks it about, and settles none.
+type windowWatermark struct{ asked [][2]time.Time }
+
+func (w *windowWatermark) Settled(_, _ string, start, end time.Time) bool {
+	w.asked = append(w.asked, [2]time.Time{start, end})
+	return false
+}
+
+// The hold asks after a gRPC test case's verdict by its own window
+// (TestCase.Window), and says where its pod's held test cases start by its
+// request: by its zero HTTP stamps, a watermark settled it at once, and a span
+// over its window told later never reached it.
+func TestTestCaseHold_JudgesAGRPCTestCaseByItsOwnWindow(t *testing.T) {
+	w := &windowWatermark{}
+	h := NewTestCaseHold(w, time.Minute, 1<<20)
+	req, resp := time.Unix(2000, 0), time.Unix(2001, 0)
+	h.Add(&models.TestCase{Name: "grpc", Kind: models.GRPC_EXPORT,
+		GrpcReq: models.GrpcReq{Timestamp: req}, GrpcResp: models.GrpcResp{Timestamp: resp}}, "", "a")
+	if got := h.Release(); len(got) != 0 {
+		t.Fatalf("released %v, whose verdict is not final", names(got))
+	}
+	if len(w.asked) == 0 || !w.asked[0][0].Equal(req) || !w.asked[0][1].Equal(resp) {
+		t.Fatalf("the hold asked the watermark about %v, want the gRPC test case's window [%v %v]", w.asked, req, resp)
+	}
+	var earliest time.Time
+	h.EarliestStarts(func(_, _ string, at time.Time) { earliest = at })
+	if !earliest.Equal(req) {
+		t.Fatalf("the pod's held test cases start at %v, want the gRPC request's %v", earliest, req)
+	}
+}
+
 func heldTC(name string, end time.Time) *models.TestCase {
 	return &models.TestCase{Name: name, HTTPReq: models.HTTPReq{Timestamp: end.Add(-time.Millisecond)}, HTTPResp: models.HTTPResp{Timestamp: end}}
 }

@@ -549,27 +549,32 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// concurrently with channel receive — otherwise the handler blocks
 	// forever during shutdown when no test cases are arriving.
 	var tcsSentSoFar int       // TCs sent to CLI this session
-	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's HTTP window, or its mock was capacity-dropped
+	var tcsSuppressedSoFar int // TCs suppressed: a pressure or orphan span overlapped the TC's window, or its mock was capacity-dropped
 	var tcsUnsettled int       // TCs the hold's bound released before their verdict was final
+	// leftOutBy counts, by the reason of the scoped orphan span that left
+	// each out, the TCs those spans suppressed: what the summary says.
+	var leftOutBy reasonTally
 	// send checks one test case and streams it unless it is left out. It
 	// reports false once the stream is broken.
 	send := func(t *models.TestCase) bool {
 		// Whether t is streamed, left out or lost to a broken stream, this
 		// is the last that sees it.
 		defer discardUpload(a.logger, t)
-		if _, left := leftovers[t.HTTPReq.Timestamp.UnixNano()]; left && !t.HTTPReq.Timestamp.IsZero() {
+		// The test case's window by its kind (TestCase.Window): a gRPC test
+		// case's times are its GrpcReq's and GrpcResp's, its HTTP ones zero.
+		tcReqTime, tcRespTime := testCaseWindow(t)
+		if _, left := leftovers[tcReqTime.UnixNano()]; left && !tcReqTime.IsZero() {
 			a.logger.Debug("Test case left out: its request was in flight across the stop of a recording that has ended",
-				zap.Time("request_time", t.HTTPReq.Timestamp))
+				zap.Time("request_time", tcReqTime))
 			return true
 		}
-		// Skip this test case if memory pressure overlapped its HTTP window
+		// Skip this test case if memory pressure overlapped its window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
 		// TC window against recorded pressure ranges (not individual mock
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
-		tcRespTime := t.HTTPResp.Timestamp
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(tcReqTime, tcRespTime)
 		// An exchange a connection carried but did not record as a mock
 		// strands its TC mock-less, whether or not a pressure range covers
 		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
@@ -582,7 +587,11 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// only the TCs checked after it: without a watermark (the hold
 		// below), a TC streamed before it is saved without the mock, as the
 		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		// A scoped span (a loss only some processes' test cases can need,
+		// syncMock.OpenScopedOrphanWindow) leaves this one out only if its
+		// scope names the process that served it (t.ServedBy; one the
+		// capture could not tell is left out by every span), and says why.
+		hasOrphan, orphanOverlaps, orphanReasons := syncmgr.Get().WasMockOrphanedFor(tcReqTime, tcRespTime, t.ServedBy)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
 		// above cannot catch it. Suppress by EXACT owning test name so a
@@ -593,12 +602,17 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 
 		if hasPressure || hasOrphan || mockDropped {
 			tcsSuppressedSoFar++
+			for _, why := range orphanReasons {
+				leftOutBy.note(why)
+			}
 			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
-				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
 				zap.Int("orphan_overlaps", orphanOverlaps),
+				zap.Strings("orphan_reasons", orphanReasons),
+				zap.Uint32("served_by", t.ServedBy),
 				zap.Bool("capacity_drop", mockDropped),
 				zap.Int("tcs_suppressed_so_far", tcsSuppressedSoFar),
 			)
@@ -810,6 +824,16 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_ranges_total", orphanRecorded),
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
+			// By the reason a scoped orphan span gave (a process whose TLS
+			// keploy could not decrypt, named): how many TCs each left out
+			// (a TC two left out counts under both); past the tally's
+			// first reasons, how many more; and how many scoped spans
+			// were joined past their cap into spans of every test case's
+			// (syncMock.ScopedOrphansJoined), which leave out more than
+			// their scopes did.
+			zap.Any("tcs_left_out_by_scoped_reason", leftOutBy.summary()),
+			zap.Int("tcs_left_out_by_other_scoped_reasons", leftOutBy.other),
+			zap.Int("orphan_scoped_spans_joined", syncmgr.Get().ScopedOrphansJoined()),
 			zap.Int64("mocks_dropped_by_pressure", finalDropped),
 			// Every mock a parser left out, the exchange it stopped
 			// on included, each reported with Session.ReportLeftOut
@@ -1389,4 +1413,33 @@ func (a *Agent) HandleGracefulShutdown(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("Graceful shutdown flag set\n"))
+}
+
+// reasonTally counts test cases by the reason that left them out, for the
+// session summary: the first reasonTallyMax reasons by name, the rest in
+// other.
+type reasonTally struct {
+	counts map[string]int
+	other  int
+}
+
+const reasonTallyMax = 32
+
+func (r *reasonTally) note(why string) {
+	if r.counts == nil {
+		r.counts = map[string]int{}
+	}
+	if _, ok := r.counts[why]; !ok && len(r.counts) >= reasonTallyMax {
+		r.other++
+		return
+	}
+	r.counts[why]++
+}
+
+// summary is the tally, an empty map when nothing was counted.
+func (r *reasonTally) summary() map[string]int {
+	if r.counts == nil {
+		return map[string]int{}
+	}
+	return r.counts
 }

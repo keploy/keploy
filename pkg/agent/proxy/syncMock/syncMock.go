@@ -549,7 +549,7 @@ type SyncMockManager struct {
 	// record, the exchange it stopped on included (supervisor.Session's
 	// ReportLeftOut, ReportStoppedOn), or a connection that can no longer be
 	// recorded at all (see unrecorded.go). Like the pressure spans they feed a suppressor
-	// query, WasMockOrphanedInWindow, which record.go checks alongside
+	// query, WasMockOrphanedFor, which record.go checks alongside
 	// WasPressureActiveInWindow, so record.go suppresses every TC whose window
 	// overlaps one rather than shipping it mock-less (replay would report
 	// match_phase=no_mocks).
@@ -575,6 +575,12 @@ type SyncMockManager struct {
 	// session-global for every TC whose window overlaps a span, so keeping a
 	// span narrow is the recorder's responsibility. Spans has its own lock.
 	orphans Spans
+	// scopedOrphans are the orphan spans that can have stranded only some
+	// test cases, by the process that served each, and say why
+	// (scoped_orphans.go): OpenScopedOrphanWindow, RecordScopedOrphanWindow.
+	// WasMockOrphanedFor reads them with orphans; WasMockOrphanedInWindow,
+	// which has no test case's server, takes every one that overlaps.
+	scopedOrphans ScopedSpans
 
 	// watermark says when a test case's verdict is final (settle.go); nil
 	// when nothing can tell.
@@ -3516,7 +3522,7 @@ func (m *SyncMockManager) MocksLeftOut() int64 {
 // Called by the TC-send path in routes/record.go right before forwarding a
 // TC to the CLI: if it returns true, the TC is suppressed and never reaches
 // disk, so replay cannot encounter a missing-mock EOF for it. record.go
-// queries WasMockOrphanedInWindow alongside this so a TC stranded by EITHER
+// queries WasMockOrphanedFor alongside this so a TC stranded by EITHER
 // cause is suppressed; the two are kept as separate methods so each scans only
 // its own slice and diagnostics attribute a suppression to its real cause.
 //
@@ -3545,28 +3551,30 @@ func (m *SyncMockManager) WasPressureActiveInWindow(start, end time.Time) (bool,
 }
 
 // WasMockOrphanedInWindow returns (true, overlapCount) if any orphan span
-// (see RecordOrphanWindow and OpenOrphanWindow) overlaps [start, end]. It is
-// the orphan-window twin of WasPressureActiveInWindow: routes/record.go
-// queries BOTH before forwarding a TC and suppresses it if EITHER overlaps, so
-// a TC stranded by an exchange its connection did not record as a mock — a
-// delivered-but-unframable op, a mock the incomplete flag left out, a
-// connection that can no longer be recorded — is never shipped mock-less
-// (replay would report match_phase=no_mocks).
+// (see RecordOrphanWindow and OpenOrphanWindow) overlaps [start, end], scoped
+// spans included: with no test case's server to judge by, every one that
+// overlaps can have stranded it (WasMockOrphanedFor with servedBy 0). It is the
+// orphan-window twin of WasPressureActiveInWindow, for a caller that has a
+// window and no test case; routes/record.go asks WasMockOrphanedFor, which
+// judges each test case by its serving process.
 //
 // Kept as a SEPARATE method rather than folded into WasPressureActiveInWindow
-// so each scans only its own slice, the two suppression causes stay distinct in
-// diagnostics, and the enterprise mongo parser's orphanWindowChecker probe
-// (WasMockOrphanedInWindow) resolves against it. Same degenerate-input guard
-// as its twin (Spans.Overlaps).
+// so each scans only its own slice and the two suppression causes stay
+// distinct in diagnostics. Same degenerate-input guard as its twin
+// (Spans.Overlaps): a zero bound makes no claim, (false, 0). WasMockOrphanedFor
+// does not take that guard: a test case it is asked of with no window is left
+// out by every span.
 func (m *SyncMockManager) WasMockOrphanedInWindow(start, end time.Time) (bool, int) {
-	if m == nil {
+	if m == nil || start.IsZero() || end.IsZero() {
 		return false, 0
 	}
-	// Still-open spans extend to now, matching WasPressureActiveInWindow's
-	// treatment of an open pressure interval. Without that a connection that
-	// is un-capturable RIGHT NOW would suppress nothing, which is precisely the
-	// window whose test cases must not be shipped mock-less.
-	return m.orphans.Overlaps(start, end)
+	// Still-open spans cover every time from their start, a time past now
+	// included (an open pressure interval, WasPressureActiveInWindow, reaches
+	// only to now). Without that a connection that is un-capturable RIGHT NOW
+	// would suppress nothing, which is precisely the window whose test cases
+	// must not be shipped mock-less.
+	ok, n, _ := m.WasMockOrphanedFor(start, end, 0)
+	return ok, n
 }
 
 // OpenOrphanWindow marks the start of a hole whose end is not yet known and
@@ -3595,7 +3603,7 @@ func (m *SyncMockManager) OpenOrphanWindow(start time.Time) func() {
 // pressure included, or that its parser reported it could not record, the
 // exchange it stopped on included (supervisor.Session.RecordOrphanWindow
 // lists them). It feeds
-// WasMockOrphanedInWindow so record.go suppresses every TC whose window
+// WasMockOrphanedFor so record.go suppresses every TC whose window
 // overlaps the span — the same coverage-for-stability tradeoff the
 // memory-pressure suppressor makes — instead of shipping that TC mock-less
 // (replay would then report match_phase=no_mocks). Only a TC checked after
@@ -3662,7 +3670,10 @@ func (m *SyncMockManager) OrphanRangeCount() (recorded, closed, open int) {
 	// windows all closed cleanly that suppression ran to end of session: the
 	// exact wrong diagnosis, in the field added to prevent one.
 	closed, open = m.orphans.Counts()
-	return m.orphans.Recorded(), closed, open
+	// Scoped spans (scoped_orphans.go) too; one kept as a global span past
+	// their cap is counted with the global ones.
+	sr, sc, so := m.scopedOrphans.counts()
+	return m.orphans.Recorded() + sr, closed + sc, open + so
 }
 
 // PressureRangeCount returns how many memory-pressure intervals have been

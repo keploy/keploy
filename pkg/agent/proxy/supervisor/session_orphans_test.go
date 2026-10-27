@@ -509,7 +509,7 @@ func TestAParserReportingAnExchangeItCannotRecordLeavesTheFlagAlone(t *testing.T
 }
 
 // With no Orphans, the exchange goes to the session's manager, where
-// routes/record.go checks each test case (WasMockOrphanedInWindow).
+// routes/record.go checks each test case (WasMockOrphanedFor).
 func TestAMockLeftOutIsReportedToTheManagerWithoutOrphans(t *testing.T) {
 	mgr := syncMock.New(nil)
 	s := &Session{Mgr: mgr, Mocks: make(chan *models.Mock, 1), Ctx: context.Background()}
