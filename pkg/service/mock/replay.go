@@ -1160,16 +1160,18 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	if err := pp.PushProvenTable(ctx, table, pool, background); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("background recordings", len(background)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("background recordings", background.Len()), zap.String("mock-set", name))
 	return nil
 }
 
-// backgroundMarks is, of the mappings' test entries the agent is handed
-// (table), those judging marked as the application's own background work
-// (models.MockEntry.Background), each with why: the agent serves each in its
-// test's window and never requires it. nil when none is marked.
-func backgroundMarks(mappings map[string][]models.MockEntry, table map[string][]string) map[string]string {
-	var marks map[string]string
+// backgroundMarks is, per test of the mappings the agent is handed (table),
+// the entries of its own list judging marked as the application's own
+// background work (models.MockEntry.Background), each with why: the agent
+// serves each in that test's window and never requires it of that test.
+// Another test listing the same recording without a mark gets none, so it
+// must still make the call. nil when none is marked.
+func backgroundMarks(mappings map[string][]models.MockEntry, table map[string][]string) models.BackgroundMarks {
+	var marks models.BackgroundMarks
 	for test, entries := range mappings {
 		held := make(map[string]bool, len(table[test]))
 		for _, n := range table[test] {
@@ -1180,9 +1182,9 @@ func backgroundMarks(mappings map[string][]models.MockEntry, table map[string][]
 				continue
 			}
 			if marks == nil {
-				marks = map[string]string{}
+				marks = models.BackgroundMarks{}
 			}
-			marks[e.Name] = e.Background
+			marks.Add(test, e.Name, e.Background)
 		}
 	}
 	return marks
