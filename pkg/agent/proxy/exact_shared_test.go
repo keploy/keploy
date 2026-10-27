@@ -3,11 +3,14 @@ package proxy
 import (
 	"fmt"
 	"math/rand"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -26,6 +29,12 @@ type sharedCache struct {
 }
 
 func (c *sharedCache) lookup(t *testing.T, db integrations.MockMemDb) (perTest, session []string, ok bool) {
+	t.Helper()
+	p, s, ok := c.lookupMocks(t, db)
+	return exactNames(p), exactNames(s), ok
+}
+
+func (c *sharedCache) lookupMocks(t *testing.T, db integrations.MockMemDb) (perTest, session []*models.Mock, ok bool) {
 	t.Helper()
 	sr, ok := db.(integrations.SharedReads)
 	if !ok {
@@ -62,7 +71,7 @@ func (c *sharedCache) lookup(t *testing.T, db integrations.MockMemDb) (perTest, 
 	unspent := func(ms []*models.Mock) []*models.Mock {
 		return slices.DeleteFunc(slices.Clone(ms), func(mk *models.Mock) bool { return sr.MockSpent(mk.Name) })
 	}
-	perTest = exactNames(of(append(slices.Clone(owned), unspent(c.perTest)...)))
+	perTest = of(append(slices.Clone(owned), unspent(c.perTest)...))
 	seen := map[*models.Mock]bool{}
 	var s []*models.Mock
 	for _, mk := range append(slices.Clone(owned), unspent(c.sessio)...) {
@@ -71,7 +80,7 @@ func (c *sharedCache) lookup(t *testing.T, db integrations.MockMemDb) (perTest, 
 			s = append(s, mk)
 		}
 	}
-	return perTest, exactNames(of(s)), true
+	return perTest, of(s), true
 }
 
 func namesOfKind(t *testing.T, read func() ([]*models.Mock, error), kind models.Kind) []string {
@@ -86,17 +95,64 @@ func namesOfKind(t *testing.T, read func() ([]*models.Mock, error), kind models.
 	return exactNames(ms)
 }
 
-// TestASharedIndexIsTheReadUnderRandomChanges: over random stagings, test
-// opens (with random and with unchanged worker scopes), pool views and
-// consumes through each door, an index of the shared part of the open test's
-// reads, kept per SharedGen (every kind's and HTTP's), with the open test's
-// unanswered recordings before it and less what MockSpent reports, reads what
-// the store's per-test and session reads give, in the same order, after every
-// step while a test is open. A test's open with the worker scope unchanged
+// sameValues reports whether a and b hold the same recordings in the same
+// order, each the same value: the same pointer, or one equal to it in name,
+// kind and spec (a learned copy handed out again).
+func sameValues(a, b []*models.Mock) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] == b[i] {
+			continue
+		}
+		if a[i] == nil || b[i] == nil || a[i].Name != b[i].Name || a[i].Kind != b[i].Kind || !reflect.DeepEqual(a[i].Spec, b[i].Spec) {
+			return false
+		}
+	}
+	return true
+}
+
+func describeMocks(ms []*models.Mock) string {
+	var out []string
+	for _, mk := range ms {
+		out = append(out, fmt.Sprintf("%s(rev %q)", mk.Name, mk.Spec.Metadata["rev"]))
+	}
+	return "[" + strings.Join(out, " ") + "]"
+}
+
+func ofKind(read func() ([]*models.Mock, error), kind models.Kind) []*models.Mock {
+	ms, _ := read()
+	if kind != "" {
+		ms = slices.DeleteFunc(slices.Clone(ms), func(mk *models.Mock) bool { return mk.Kind != kind })
+	}
+	return ms
+}
+
+// sharedWalk is what a shared-index walk runs under: the background rules
+// (S12 routing, the pool shown in a test's session read) and kept learning
+// (each recording handed out as its learned copy, the learning set again at
+// random test opens).
+type sharedWalk struct {
+	seed       int64
+	background bool
+	kept       bool
+}
+
+// walkSharedIndex: over random stagings, test opens (with random and with
+// unchanged worker scopes), pool views and consumes through each door, an
+// index of the shared part of the open test's reads, kept per SharedGen
+// (every kind's, HTTP's and DNS's), with the open test's unanswered
+// recordings before it and less what MockSpent reports, reads what the
+// store's per-test and session reads give, value for value and in the same
+// order, after every step while a test is open. An update stores a changed
+// copy (its metadata names the update) or the same recording again. A
+// staging may leave out some of the pool's and the worker scope's
+// recordings. A test's open with the worker scope and learning unchanged
 // builds nothing again.
-func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
+func walkSharedIndex(t *testing.T, w sharedWalk) {
 	t.Setenv(provenswitch.Env, "1")
-	rng := rand.New(rand.NewSource(20261027))
+	rng := rand.New(rand.NewSource(w.seed))
 	const tests, perTest = 5, 4
 	var staged []*models.Mock
 	byTest := make([][]*models.Mock, tests)
@@ -130,11 +186,32 @@ func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
 		session = append(session, httpCall(p, 2*time.Second+time.Duration(i)*time.Millisecond, "/"+p))
 	}
 	workers := []string{"w0", "w1", "w2"}
-	for i, w := range workers {
-		session = append(session, httpCall(w, 3*time.Second+time.Duration(i)*time.Millisecond, "/"+w))
+	for i, wk := range workers {
+		session = append(session, httpCall(wk, 3*time.Second+time.Duration(i)*time.Millisecond, "/"+wk))
 	}
 	mm := stagedManager(t, staged, session)
+	// serveBackground serves the background rules over the pool and worker
+	// recordings a staging kept, as the replay does once a set is staged.
+	serveBackground := func(present []*models.Mock) {
+		if !w.background {
+			return
+		}
+		var pl, wk []string
+		for _, mk := range present {
+			switch {
+			case strings.HasPrefix(mk.Name, "p"):
+				pl = append(pl, mk.Name)
+			case strings.HasPrefix(mk.Name, "w"):
+				wk = append(wk, mk.Name)
+			}
+		}
+		mm.ServeExactBackground(models.RecordedWithS12Routing, pl, wk)
+	}
+	serveBackground(session)
 	mm.ServeExactPool("k", nil)
+	if w.kept {
+		mm.SetLearnEnded(true)
+	}
 	subset := func(names []string) []string {
 		var out []string
 		for _, n := range names {
@@ -144,12 +221,13 @@ func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
 		}
 		return out
 	}
-	caches := []*sharedCache{{}, {kind: models.HTTP}}
+	learnable := []string{"p0", "p1", "w0", "w1", "cfg-0", "cfg-1", "dns-0"}
+	caches := []*sharedCache{{}, {kind: models.HTTP}, {kind: models.DNS}}
 	const steps = 3000
-	opens, sameOpens, checked := 0, 0, 0
+	opens, sameOpens, checked, changed, keptSets, poolRead, learnedRead := 0, 0, 0, 0, 0, 0, 0
 	for step := 0; step < steps; step++ {
 		what := ""
-		sameWorker := false
+		sameOpen := false
 		switch r := rng.Intn(20); {
 		case r == 0:
 			// A scope's staging keeps the per-test tier as handed, so the
@@ -162,6 +240,9 @@ func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
 			restaged := slices.DeleteFunc(slices.Clone(session), func(mk *models.Mock) bool {
 				return mk.Kind == models.HTTP && rng.Intn(3) == 0
 			})
+			if w.background {
+				mm.StageExactBackground(models.RecordedWithS12Routing)
+			}
 			if rng.Intn(2) == 0 {
 				what = fmt.Sprintf("restage of %d session recordings", len(restaged))
 				mm.SetMocksWithWindow(staged, restaged, models.BaseTime, time.Now())
@@ -169,13 +250,27 @@ func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
 				what = fmt.Sprintf("scope restage of %d session recordings", len(restaged))
 				mm.SetScopeMocks(staged, restaged, true)
 			}
+			serveBackground(restaged)
+			if w.kept {
+				mm.SetLearnEnded(true)
+			}
 		case r <= 4:
 			k := rng.Intn(tests)
 			what = fmt.Sprintf("open t%d", k)
+			sameOpen = true
 			if rng.Intn(3) == 0 {
 				mm.ServeExactWorker(subset(workers))
-			} else {
-				sameWorker = true
+				sameOpen = false
+			}
+			if w.kept && rng.Intn(3) == 0 {
+				var states []models.MockState
+				for _, n := range subset(learnable) {
+					states = append(states, models.MockState{Name: n, ReqBodyNoise: map[string][]string{fmt.Sprintf("body.k%d", step): {}}})
+				}
+				mm.SetKeptLearning(learn.NewKeptLearning(states))
+				keptSets++
+				sameOpen = false
+				what += " with new kept learning"
 			}
 			mm.ServeExactTest(fmt.Sprintf("T%d", k), byTest[k])
 			opens++
@@ -197,48 +292,154 @@ func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
 				break
 			}
 			mk := shown[rng.Intn(len(shown))]
-			switch rng.Intn(3) {
+			switch rng.Intn(4) {
 			case 0:
 				what = "delete-filtered " + mk.Name
 				mm.DeleteFilteredMock(*mk)
 			case 1:
 				what = "delete-unfiltered " + mk.Name
 				mm.DeleteUnFilteredMock(*mk)
-			default:
-				what = "update " + mk.Name
+			case 2:
+				what = "update " + mk.Name + " with itself"
 				mm.UpdateUnFilteredMock(mk, mk)
+			default:
+				// A matcher stores a changed copy (a learned-noise copy,
+				// say): every index must read the stored value.
+				cp := mk.ShallowCopy()
+				md := make(map[string]string, len(mk.Spec.Metadata)+1)
+				for k, v := range mk.Spec.Metadata {
+					md[k] = v
+				}
+				changed++
+				md["rev"] = fmt.Sprint(changed)
+				cp.Spec.Metadata = md
+				what = "update " + mk.Name + " with a changed value"
+				mm.UpdateUnFilteredMock(mk, cp)
 			}
+		}
+		if sameOpen {
+			sameOpens++
 		}
 		// A parser looks up only when a call comes: one consumes a
 		// recording before any lookup in its test now and then (another
 		// connection's), so an index is built after a view's spends too.
-		if sameWorker {
-			sameOpens++
-		}
 		if rng.Intn(3) == 0 {
 			continue
 		}
 		for _, c := range caches {
-			gotP, gotS, ok := c.lookup(t, mm)
+			gotP, gotS, ok := c.lookupMocks(t, mm)
 			if !ok {
 				continue
 			}
 			checked++
-			if want := namesOfKind(t, mm.GetPerTestMocksInWindow, c.kind); !slices.Equal(gotP, want) {
-				t.Fatalf("step %d (%s): the shared per-test index of kind %q reads %v; the store reads %v", step, what, c.kind, gotP, want)
+			for _, mk := range gotS {
+				if strings.HasPrefix(mk.Name, "p") {
+					poolRead++
+				}
+				for k := range mk.Spec.ReqBodyNoise {
+					if strings.HasPrefix(k, "body.k") {
+						learnedRead++
+					}
+				}
 			}
-			if want := namesOfKind(t, mm.GetSessionMocks, c.kind); !slices.Equal(gotS, want) {
-				t.Fatalf("step %d (%s): the shared session index of kind %q reads %v; the store reads %v", step, what, c.kind, gotS, want)
+			if want := ofKind(mm.GetPerTestMocksInWindow, c.kind); !sameValues(gotP, want) {
+				t.Fatalf("step %d (%s): the shared per-test index of kind %q reads %s; the store reads %s", step, what, c.kind, describeMocks(gotP), describeMocks(want))
+			}
+			if want := ofKind(mm.GetSessionMocks, c.kind); !sameValues(gotS, want) {
+				t.Fatalf("step %d (%s): the shared session index of kind %q reads %s; the store reads %s", step, what, c.kind, describeMocks(gotS), describeMocks(want))
 			}
 		}
 	}
 	if checked < steps/2 {
 		t.Fatalf("only %d checks over %d steps: the walk opens too few tests", checked, steps)
 	}
-	if b := caches[0].builds; b >= opens {
-		t.Fatalf("the shared index was built %d times over %d test opens (%d with the worker scope unchanged): a test's open rebuilds it", b, opens, sameOpens)
+	if changed == 0 {
+		t.Fatal("precondition: no update with a changed value")
 	}
-	t.Logf("%d steps, %d test opens (%d with the worker scope unchanged), %d checks, shared index built %d times (HTTP's %d)", steps, opens, sameOpens, checked, caches[0].builds, caches[1].builds)
+	if w.background && poolRead == 0 {
+		t.Fatal("precondition: no test's shared session read held the pool under the background rules")
+	}
+	if w.kept && learnedRead == 0 {
+		t.Fatal("precondition: no lookup read a learned copy")
+	}
+	if !w.kept {
+		if b := caches[0].builds; b >= opens {
+			t.Fatalf("the shared index was built %d times over %d test opens (%d with the worker scope unchanged): a test's open rebuilds it", b, opens, sameOpens)
+		}
+	}
+	t.Logf("%d steps, %d test opens (%d with the worker scope and learning unchanged), %d checks, %d updates with a changed value, %d learning sets; the pool read %d times, learned copies %d; shared index built %d times (HTTP's %d, DNS's %d)", steps, opens, sameOpens, checked, changed, keptSets, poolRead, learnedRead, caches[0].builds, caches[1].builds, caches[2].builds)
+}
+
+var sharedWalkSeeds = []int64{20261027, 1, 2, 3}
+
+// TestASharedIndexIsTheReadUnderRandomChanges: walkSharedIndex with neither
+// the background rules nor kept learning.
+func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
+	for _, seed := range sharedWalkSeeds {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) { walkSharedIndex(t, sharedWalk{seed: seed}) })
+	}
+}
+
+// TestASharedIndexIsTheReadUnderTheBackgroundRules: walkSharedIndex under the
+// background rules, which show the pool in a test's session read and keep a
+// protocol-phase recording a test spent for the next test. A background
+// order that drops what the view spent, or an ident that leaves out the
+// rules, leaves an index that misses or keeps serving the pool.
+func TestASharedIndexIsTheReadUnderTheBackgroundRules(t *testing.T) {
+	for _, seed := range sharedWalkSeeds {
+		t.Run(fmt.Sprint(seed), func(t *testing.T) { walkSharedIndex(t, sharedWalk{seed: seed, background: true}) })
+	}
+}
+
+// TestASharedIndexIsTheReadUnderKeptLearning: walkSharedIndex with kept
+// learning set again at random test opens (alone and under the background
+// rules). The index must read each recording as the learned copy the store
+// hands out now, never one the learning before handed out.
+func TestASharedIndexIsTheReadUnderKeptLearning(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		for _, seed := range sharedWalkSeeds {
+			name := fmt.Sprint(seed)
+			if background {
+				name += " under the background rules"
+			}
+			t.Run(name, func(t *testing.T) { walkSharedIndex(t, sharedWalk{seed: seed, background: background, kept: true}) })
+		}
+	}
+}
+
+// TestASharedIndexReadsTheValueAnUpdateStored: a matcher that stores a changed
+// copy of a protocol-phase recording a test reads (a learned-noise copy, say)
+// moves its kind's stored generation, so an index built before the update
+// reads the copy after it, never the value it replaced.
+func TestASharedIndexReadsTheValueAnUpdateStored(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	cfg := configMock("cfg", 0)
+	mm := stagedManager(t, nil, []*models.Mock{cfg, httpCall("other", time.Second, "/other")})
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T", nil)
+	caches := []*sharedCache{{}, {kind: cfg.Kind}}
+	for _, c := range caches {
+		if _, s, _ := c.lookupMocks(t, mm); !slices.Contains(s, cfg) {
+			t.Fatalf("precondition: the shared session index of kind %q reads %s", c.kind, describeMocks(s))
+		}
+	}
+	cp := cfg.ShallowCopy()
+	cp.Spec.Metadata = map[string]string{"rev": "1"}
+	for k, v := range cfg.Spec.Metadata {
+		cp.Spec.Metadata[k] = v
+	}
+	if !mm.UpdateUnFilteredMock(cfg, cp) {
+		t.Fatal("precondition: the update stored nothing")
+	}
+	if want := ofKind(mm.GetSessionMocks, ""); !slices.Contains(want, cp) {
+		t.Fatalf("precondition: the store reads %s after the update", describeMocks(want))
+	}
+	for _, c := range caches {
+		_, got, _ := c.lookupMocks(t, mm)
+		if want := ofKind(mm.GetSessionMocks, c.kind); !sameValues(got, want) {
+			t.Fatalf("the shared session index of kind %q reads %s after an update stored a changed copy; the store reads %s", c.kind, describeMocks(got), describeMocks(want))
+		}
+	}
 }
 
 // TestATestsOpenDoesNotRebuildTheSharedIndex: with a worker scope of 200

@@ -190,6 +190,65 @@ func TestAHeldStoreReportsTheGenerationOfTheSetItReads(t *testing.T) {
 	}
 }
 
+// A store held to a call (the manager, or a connection's view over it)
+// reports the shared generation, the shared part and the open test's
+// unanswered recordings the store does while the staging is still the
+// call's, and none of them once the staging moved, when it reads nothing: a
+// parser keyed on SharedGen then keys on the staging generation, never
+// files the held call's empty read under the next set's SharedGen, and never
+// answers it from the shared part of the next set. A call marked after the
+// staging reports them again.
+func TestAHeldStoreReportsNoSharedPartOnceTheStagingMoved(t *testing.T) {
+	for _, view := range []bool{false, true} {
+		t.Run("held"+viewName(view), func(t *testing.T) {
+			store, stage, _ := heldGenerationStore(t, view)
+			held, restaged := holdCall(store)
+			sr, ok := held.(integrations.SharedReads)
+			if !ok {
+				t.Fatal("a held store offers no shared reads")
+			}
+			for _, kind := range []models.Kind{"", models.HTTP} {
+				g, ok := integrations.SharedGenerationOf(held, kind)
+				gs, oks := integrations.SharedGenerationOf(store, kind)
+				if !ok || !oks || g != gs {
+					t.Fatalf("before the staging moved, a held store reports shared generation %v (%v) of kind %q; the store %v (%v)", g, ok, kind, gs, oks)
+				}
+			}
+			if _, _, ok := sr.SharedMocks(); !ok {
+				t.Fatal("before the staging moved, a held store reports no shared part")
+			}
+			if _, ok := sr.OwnedUnanswered(); !ok {
+				t.Fatal("before the staging moved, a held store reports no open test")
+			}
+
+			stage()
+			for _, kind := range []models.Kind{"", models.HTTP} {
+				if g, ok := integrations.SharedGenerationOf(held, kind); ok {
+					t.Fatalf("a held store reports shared generation %v of kind %q after the staging moved", g, kind)
+				}
+			}
+			if p, s, ok := sr.SharedMocks(); ok {
+				t.Fatalf("a held store reports a shared part after the staging moved: %v %v", exactNames(p), exactNames(s))
+			}
+			if o, ok := sr.OwnedUnanswered(); ok {
+				t.Fatalf("a held store reports the open test's recordings after the staging moved: %v", exactNames(o))
+			}
+			if !restaged() {
+				t.Fatal("a held call the staging moved under does not say the set was staged again")
+			}
+
+			next, _ := holdCall(store)
+			for _, kind := range []models.Kind{"", models.HTTP} {
+				g, ok := integrations.SharedGenerationOf(next, kind)
+				gs, _ := integrations.SharedGenerationOf(store, kind)
+				if !ok || g != gs {
+					t.Fatalf("a call marked after the staging reports shared generation %v (%v) of kind %q; the store %v", g, ok, kind, gs)
+				}
+			}
+		})
+	}
+}
+
 func viewName(view bool) string {
 	if view {
 		return " through a connection's view"
