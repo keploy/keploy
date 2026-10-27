@@ -110,6 +110,11 @@ type follows struct {
 	// value learned as noise says of it (followed).
 	at      time.Time
 	refuted string
+	// aside, where the search for the value's source went past a leaf that
+	// held its recorded value whole and that F saw hold another value
+	// (refuteSeen), names the first such leaf: what a value learned as noise
+	// or refused as an echo says of it.
+	aside string
 	// moved, where the word rule let a word of the value go at a place F
 	// gave the application another value at that the value took none of the
 	// words of (movedAway), names the first such place: what a value learned
@@ -198,6 +203,42 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 	// and notes it there too (excusedRaw); a source set aside is noted here
 	// as well, so it is ordered should the two searches ever part.
 	f.source(x.mock)
+	return true
+}
+
+// refuteSeen reports whether s, a leaf of e, an exchange F served before the
+// call, that held v's recorded value whole (whole), is no place the value came
+// from: an earlier place is a later value's source only where it held that
+// value in both runs, and F saw it hold another value than the one F saw at
+// v's place (Seen.Live). A copy moves with its source, so the search goes on
+// past it; the first such place is named (aside), and the place is a
+// candidate source (sources). A value then learned as noise, which no replay
+// checks, is noise only where the recording and F gave the application its
+// candidate sources in the same order (followed), and an echo of the call's
+// answer is refused, both naming the place; a value learned as a read of the
+// clock is checked against its call's clock at every replay, which no order
+// of its sources changes (classifyRead).
+//
+// Everywhere else the place stays where the value came from, as before: fol
+// nil (the rule's absence), a part of the value (a part that drifted with it
+// moved with it in both runs: sources), a leaf F saw hold the value F saw,
+// and an instant its protocol types, whose text and the value's can write
+// one moment in two ways (dc.instantSource reads its moments). A place set
+// aside whose recorded times keploy cannot read, or that the recording
+// answered at the call's own instant, is ordered all the same: a value
+// learned as noise is then refused, naming it (followed).
+func (f *follows) refuteSeen(e Earlier, s Seen, whole bool, v *valueDrift) bool {
+	if f == nil || !whole || s.Leaf.Type == Instant || s.Live == v.live {
+		return false
+	}
+	if f.aside == "" {
+		saw := ", where record's full round gave the application another value than the value's"
+		if s.Side == Request && !e.Given {
+			saw = ", where record's full round saw the application send another value than the value's"
+		}
+		f.aside = "its recorded value stands whole in " + placeAt(seenPlace(e, s, true)) + saw + ": a copy moves with its source, so the value is no copy of it"
+	}
+	f.source(e.Mock)
 	return true
 }
 
@@ -717,16 +758,20 @@ func (fol *follows) followed(ln Learned, at time.Time, earlier []Earlier, raw []
 	}
 	if why != "" {
 		lead := fol.first
-		// No call reaches this today, and no row does: refute sets a source
-		// aside only where F served it as recorded, the recording gave it
-		// before the call and F's value is not in it, and the word rule
-		// then reads the same word at the same place on the same terms
-		// (excused), so it lets the word go there and sets first before a
-		// value is learned as noise. Should the two searches ever part, the
-		// refusal still names the source set aside (fail closed), and the
-		// echo's refusal in classifyRead does the same.
+		// refute sets a source aside only where F served it as recorded, the
+		// recording gave it before the call and F's value is not in it, and
+		// the word rule then reads the same word at the same place on the
+		// same terms (excused), so it lets the word go there and sets first
+		// before a value is learned as noise. A leaf refuteSeen sets aside
+		// leaves first unset where the value's words there are a clock
+		// read's, which the word rule never reads (aside). Either way the
+		// refusal names the source set aside (fail closed), and the echo's
+		// refusal in classifyRead does the same.
 		if lead == "" {
 			lead = fol.refuted
+		}
+		if lead == "" {
+			lead = fol.aside
 		}
 		ln.Kind, ln.Why, ln.Echo = KindUnaccounted, lead+"; "+why+", so keploy cannot tell a copy from a varying value", nil
 	}

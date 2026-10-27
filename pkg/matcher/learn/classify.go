@@ -1255,6 +1255,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
+		// A leaf set aside as no source (follows.refuteSeen), and nothing
+		// else: an echo beside it is refused as beside any source set aside;
+		// a value left noise is ordered below, once its kind is final.
+		asideOnly := fol != nil && fol.first == "" && fol.refuted == "" && fol.aside != ""
+		if asideOnly && ln.Kind == KindEcho {
+			ln.Kind, ln.Why, ln.Echo = KindUnaccounted, fol.aside+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", nil
+		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
 		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
@@ -1327,6 +1334,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
 			}
 			ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
+		}
+		// A value left noise, which no replay checks, whose source search
+		// went past a leaf only (asideOnly): noise only where the recording
+		// and F gave the application its candidate sources in the same
+		// order, named so (follows.followed); refused otherwise. A read of
+		// the clock (KindClockRead) is checked against its call's clock at
+		// every replay, which no order of its sources changes.
+		if asideOnly && ln.Kind == KindNoise {
+			if ln = fol.followed(ln, at, served, all); ln.Kind == KindNoise {
+				ln.Why = fol.aside + ", and keploy learns it as varying"
+			}
 		}
 		return ln
 	}
@@ -2370,6 +2388,9 @@ func appeared(dc *DriftCache, recorded, now string, at time.Time, served []Earli
 // followed). A place F did not serve, or served changed, or whose payload
 // holds the value F saw too, stays where the value came from. A leaf F
 // served as recorded (Seen.Live) is no place either way: it did not drift.
+// A leaf that held the recorded value whole is the value's source only where
+// it held the value F saw too: one F saw hold another value is set aside the
+// same way, and named so (follows.refuteSeen).
 func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) (Place, bool) {
 	recorded := v.rec
 	// The place is where the value was sent whole, not where it was answered
@@ -2395,7 +2416,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			} else {
 				ok, whole = sources(dc.of(s.Leaf.Value, s.Live), v)
 			}
-			if !ok {
+			if !ok || fol.refuteSeen(e, s, whole, v) {
 				continue
 			}
 			if r := placeRank(e, s, whole); r < rank {
