@@ -148,26 +148,26 @@ func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
 
 var _ integrations.SharedReads = (*heldScope)(nil)
 
-// SharedGeneration, SharedMocks and OwnedUnanswered are the store's while
-// this view passes through to it (exact serving), and false otherwise: the
-// view then narrows each read by its worker's names, which the shared part
-// does not.
+// SharedGeneration, SharedMocks and OwnedUnanswered are the store's. They
+// report something only while a test is open, when the view passes through
+// to the store (exact serving, passThrough) and narrows no read by its
+// worker's names.
 func (s *scopedMockDb) SharedGeneration(kind models.Kind) (integrations.SharedGen, bool) {
-	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok && s.passThrough() {
+	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok {
 		return sr.SharedGeneration(kind)
 	}
 	return integrations.SharedGen{}, false
 }
 
 func (s *scopedMockDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
-	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok && s.passThrough() {
+	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok {
 		return sr.SharedMocks()
 	}
 	return nil, nil, false
 }
 
 func (s *scopedMockDb) OwnedUnanswered() ([]*models.Mock, bool) {
-	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok && s.passThrough() {
+	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok {
 		return sr.OwnedUnanswered()
 	}
 	return nil, false

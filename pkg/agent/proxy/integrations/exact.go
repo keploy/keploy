@@ -160,6 +160,15 @@ type SharedGen struct {
 // false (or nothing) while no test is open, and for a store held to a call
 // once the staging moved from the call's (RoundHolder): such a parser keys on
 // the staging generation then.
+//
+// A parser builds its index in this order: sample SharedGeneration, read
+// SharedMocks, sample SharedGeneration again, and keep the index only when
+// both samples agree (and report true). A staging swaps the trees and then
+// moves the generation, and SharedMocks never reads between the two, so when
+// both samples agree the read is of the trees they name. A parser that reads
+// SharedMocks before its first sample may file the trees a staging is
+// replacing under the generation that staging moves to, and keep serving
+// them until the next move.
 type SharedReads interface {
 	StagingGenerations
 	SharedGeneration(kind models.Kind) (SharedGen, bool)
