@@ -1243,7 +1243,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				}
 			}
 		}
-		if ln.Read != nil {
+		// A read whose two runs wrote it in two layouts (an ISO text, then
+		// an epoch number; a time to the second, then to the minute) is
+		// refused: a replay checks the form its learn step saw, and this
+		// one saw two.
+		switch {
+		case ln.Read != nil && ln.Read.Layout == models.LayoutApart:
+			ln.Kind, ln.Why, ln.Read = KindUnaccounted, textLayoutChangedWhy(r.Value, l.Value), nil
+		case ln.Read != nil:
 			ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
 			ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
 		}

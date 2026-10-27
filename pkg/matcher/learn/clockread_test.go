@@ -847,3 +847,136 @@ func TestASpanHoldsTheUnitOfAnInstantOnOrOffUTCsGrid(t *testing.T) {
 		}
 	}
 }
+
+// A read of the clock is checked at replay in the layout its learn step saw
+// it written in (models.ClockOffset.Layout): a value cut to the minute, the
+// hour or the day, an epoch number where an ISO text was learned, or another
+// separator, is refused, naming the form; the learned form passes, with a
+// fraction or without one, as a writer that drops a fraction's trailing
+// zeros writes a read that fell on a whole second (the stated limit: a value
+// cut to the second where a fraction was learned passes). A read whose two
+// runs wrote it in two layouts is refused at learn, naming both. A typed
+// read refuses a text, and a read learned before Layout was reads any form.
+func TestAClockReadIsCheckedAtReplayInTheLayoutItWasLearnedIn(t *testing.T) {
+	rec := time.Date(2026, 10, 27, 9, 0, 0, 123e6, time.UTC)
+	call := rec.Add(time.Millisecond)
+	late := rec.Add(FullRoundLead + 3400*time.Millisecond)
+	const p = "body.processed_at"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	classify := func(r, l string) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, shape(l), shape(r), call, nil, nil, nil, nil)[0]
+	}
+	iso := func(at time.Time) string { return at.Format("2006-01-02T15:04:05.000Z07:00") }
+	ln := classify(iso(rec), iso(late))
+	o, ok := ln.Clock()
+	if ln.Kind != KindClockRead || !ok || o.Layout != "iso-second" {
+		t.Fatalf("an ISO text to the millisecond: %s %+v (%s); want a read in the layout iso-second", ln.Kind, ln.Read, ln.Why)
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+	for _, row := range []struct {
+		what, value string
+		ok          bool
+	}{
+		{"the learned form", "2026-10-28T07:30:00.012Z", true},
+		{"the learned form, its fraction's trailing zeros dropped", "2026-10-28T07:30:00.01Z", true},
+		{"the learned form on a whole second (the stated limit)", "2026-10-28T07:30:00Z", true},
+		{"the learned form, another zone named", "2026-10-28T13:00:00.012+05:30", true},
+		{"cut to the minute", "2026-10-28T07:30Z", false},
+		{"cut to the hour", "2026-10-28T07Z", false},
+		{"cut to the day", "2026-10-28", false},
+		{"an epoch number of seconds", "1793172600", false},
+		{"an epoch number of milliseconds", "1793172600012", false},
+		{"a space before the time", "2026-10-28 07:30:00.012Z", false},
+		{"an HTTP date", "Wed, 28 Oct 2026 07:30:00 GMT", false},
+	} {
+		got, why := CheckClockRead(p, o, Leaf{Path: p, Type: String, Value: row.value}, span, true)
+		if got != row.ok {
+			t.Errorf("%s (%s): %v (%s); want %v", row.what, row.value, got, why, row.ok)
+		}
+		if !row.ok && !strings.Contains(why, "in another form than the learn step saw") {
+			t.Errorf("%s: why %q; want it to name the form", row.what, why)
+		}
+	}
+	// An application-zone wall clock learned at a millisecond refuses a date
+	// and a time to the minute in that zone.
+	ist := time.FixedZone("IST", 5*3600+1800)
+	app := models.ClockOffset{Res: time.Millisecond, Zone: models.ZoneApp, Layout: "iso-second-space"}
+	istSpan := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: ist}
+	for _, row := range []struct {
+		value string
+		ok    bool
+	}{{"2026-10-28 13:00:00.012", true}, {"2026-10-28", false}, {"2026-10-28 13:00", false}} {
+		if got, why := CheckClockRead(p, app, Leaf{Path: p, Type: String, Value: row.value}, istSpan, true); got != row.ok {
+			t.Errorf("an app-zone wall clock at %s: %v (%s); want %v", row.value, got, why, row.ok)
+		}
+	}
+	// Two layouts in the two runs: refused at learn, naming both.
+	for _, row := range []struct{ what, r, l string }{
+		{"an ISO text, then an epoch millisecond", iso(rec), strconv.FormatInt(late.UnixMilli(), 10)},
+		{"to the second, then to the minute", rec.Format("2006-01-02T15:04:05Z"), late.Format("2006-01-02T15:04Z")},
+		{"a T, then a space", iso(rec), late.Format("2006-01-02 15:04:05.000Z07:00")},
+	} {
+		ln := classify(row.r, row.l)
+		if ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != textLayoutChangedWhy(row.r, row.l) || !strings.Contains(ln.Why, "as recorded and as") {
+			t.Errorf("%s: %s Read=%+v (%s); want refused, naming both layouts", row.what, ln.Kind, ln.Read, ln.Why)
+		}
+	}
+	// A typed read refuses a text; a read learned before Layout was reads
+	// any form, as it did then.
+	typed := models.ClockOffset{Res: time.Millisecond, Layout: models.LayoutTyped}
+	if got, why := CheckClockRead(p, typed, Leaf{Path: p, Type: String, Value: "2026-10-28T07:30:00.012Z"}, span, true); got || !strings.Contains(why, "in another form") {
+		t.Errorf("a typed read, a text at replay: %v (%s); want refused, naming the form", got, why)
+	}
+	if got, why := CheckClockRead(p, typed, InstantLeaf(p, p, now.Add(12*time.Millisecond), time.Millisecond), span, true); !got {
+		t.Errorf("a typed read, typed at replay: refused (%s); want it to pass", why)
+	}
+	old := models.ClockOffset{Res: time.Millisecond}
+	for _, v := range []string{"2026-10-28T07:30:00.012Z", "1793172600012"} {
+		if got, why := CheckClockRead(p, old, Leaf{Path: p, Type: String, Value: v}, span, true); !got {
+			t.Errorf("a read learned before Layout was, %s at replay: refused (%s); want it to pass", v, why)
+		}
+	}
+	// A Layout this keploy does not name holds nothing.
+	if got, why := CheckClockRead(p, models.ClockOffset{Res: time.Millisecond, Layout: "iso-week"}, Leaf{Path: p, Type: String, Value: "2026-10-28T07:30:00.012Z"}, span, true); got {
+		t.Errorf("an unknown layout: passed (%s); want refused", why)
+	}
+}
+
+// clockTextLayout names each form's layout and resolution, but no fraction
+// of a second and no zone.
+func TestAClockTextsLayoutNamesItsFormAndResolution(t *testing.T) {
+	for _, row := range []struct{ s, want string }{
+		{"2026-10-28", "iso-date"},
+		{"2026-10-28 UTC", "iso-date"},
+		{"2026-10-28T07Z", "iso-hour"},
+		{"2026-10-28T07:30", "iso-minute"},
+		{"2026-10-28 07:30", "iso-minute-space"},
+		{"2026-10-28T07:30:00", "iso-second"},
+		{"2026-10-28T07:30:00.5Z", "iso-second"},
+		{"2026-10-28T07:30:00,123456789+05:30", "iso-second"},
+		{"2026-10-28 07:30:00.000", "iso-second-space"},
+		{"Wed, 28 Oct 2026 07:30:00 GMT", "rfc1123"},
+		{"20261028T073000Z", "compact"},
+		{"1793172600", "epoch-s"},
+		{"1793172600.25", "epoch-s"},
+		{"1793172600012", "epoch-ms"},
+		{"1793172600012345", "epoch-us"},
+		{"1793172600012345678", "epoch-ns"},
+		{"0199f1c4-8f40-7c3a-9b1e-2f6d3a4b5c6d", "uuid7"},
+		{"07:30:00", ""},
+		{"a7f3c2e9", ""},
+		{"ord-2026-10-28", ""},
+	} {
+		if got := clockTextLayout(row.s); got != row.want {
+			t.Errorf("%q: %q; want %q", row.s, got, row.want)
+		}
+		if row.want != "" {
+			if _, ok := models.ClockLayoutNames[row.want]; !ok {
+				t.Errorf("%q: layout %q has no name", row.s, row.want)
+			}
+		}
+	}
+}
