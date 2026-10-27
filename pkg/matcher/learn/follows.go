@@ -122,6 +122,13 @@ type follows struct {
 	// words of (movedAway), names the first such place: what a value learned
 	// as noise says of it, where no place was refuted.
 	moved string
+	// chance, where the word rule let a word of the value go at a recording
+	// both runs gave the application that word at before the call, and the
+	// value lacking it holds no word of any place the rule reads
+	// (excusedGiven), names the first such word and why it stands there by
+	// chance: what a value learned as noise says of it, where no place was
+	// refuted and none moved.
+	chance string
 	// sources are the mocks of the places the word rule let a word of the
 	// value go at (excused), and of the place the search for its source went
 	// past (refute): the value's candidate sources, the only places whose
@@ -796,8 +803,16 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 	if g.sameHolds(i, t) {
 		fv, took = fSame, f.tookElsewhere(v, t)
 	}
-	if !f.excused(t, before, fv, "", untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+g.mock, took) {
+	stands := v.wordOf(t, v.recTok[i][t]) + " stands in " + g.mock
+	if !f.excused(t, before, fv, "", untimed, why, stands, took) {
 		return false
+	}
+	if f.chance == "" {
+		lacks := "the value record's full round saw"
+		if !v.recTok[i][t] {
+			lacks = "the recorded value"
+		}
+		f.chance = stands + ", which the recording and record's full round both gave the application at the same fields before the call, and " + lacks + " lacks that word and holds no word of any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance"
 	}
 	f.source(g.mock)
 	if g.set {

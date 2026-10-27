@@ -331,15 +331,16 @@ func TestClassify(t *testing.T) {
 		t.Fatalf("body.file from %+v: a part of a longer value, found where it drifted together", f)
 	}
 	// A raw mock's place has no leaf: it names the mock, and what was found
-	// in which field of its payload.
+	// in which field of its payload; neither mock was served before the
+	// call (a reason says so: correction).
 	leafless := func(p Place) Place { p.Field, p.Held = "", ""; return p }
-	if leafless(from["body.sess"]) != (Place{Mock: "redis-2"}) || leafless(from["body.seq"]) != (Place{Mock: "pg-3"}) {
+	if leafless(from["body.sess"]) != (Place{Mock: "redis-2", unserved: true}) || leafless(from["body.seq"]) != (Place{Mock: "pg-3", unserved: true}) {
 		t.Fatalf("body.sess from %+v, body.seq from %+v", from["body.sess"], from["body.seq"])
 	}
 	if f := from["body.sess"]; f.Field != "spec.genericrequests[0].message[0].data" || f.Held != "71a" {
 		t.Fatalf("body.sess from %+v: want its word 71a found in spec.genericrequests[0].message[0].data", f)
 	}
-	if leafless(from["body.db"]) != (Place{Mock: "pg-3"}) {
+	if leafless(from["body.db"]) != (Place{Mock: "pg-3", unserved: true}) {
 		t.Fatalf("body.db from %+v: a raw mock's place has no leaf", from["body.db"])
 	}
 }
