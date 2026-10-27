@@ -874,6 +874,66 @@ func TestStrictChecksALearnedClockReadInItsCallsWindow(t *testing.T) {
 	}
 }
 
+// A wall clock of no zone learned as a read of the clock in the
+// application's zone (models.ZoneApp) is checked at a replay end to end in
+// the zone the connection's tracker carries (Tracker.SetAppZone, through
+// learn.ClockSpanFrom's Span.Zone): the replay's now written in IST, the
+// application's zone, is answered; the same instant written in UTC, and one
+// written in IST an hour stale, are refused, naming the field; with no zone
+// told at the replay even the right value is refused, saying keploy cannot
+// tell the application's zone.
+func TestStrictChecksAClockReadLearnedInTheAppsZone(t *testing.T) {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	base := time.Date(2026, 10, 26, 15, 50, 35, 0, time.UTC)
+	recAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	wall := func(at time.Time, in *time.Location) string { return at.In(in).Format("2006-01-02T15:04:05") }
+	now := base.Add(time.Second)
+	m := recorded("seen", "/v1/seen", map[string]string{"Content-Type": "application/json"}, `{"q":"x","seenAt":"`+wall(recAt, ist)+`"}`)
+	m.Spec.Clocks = map[string]models.ClockOffset{"body.seenAt": {Res: time.Second, Zone: models.ZoneApp, Layout: "iso-second"}}
+	conn := func(zone *time.Location) context.Context {
+		tr := learn.NewTracker()
+		tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+		tr.SetAppZone(zone)
+		tr.ServedMockAt(httpMock("earlier", "GET", "/v1/account"), base)
+		tr.SetLearnEnded(true)
+		return learn.WithTracker(context.Background(), tr)
+	}
+	call := func(seenAt string) *req {
+		r := sent("/v1/seen", map[string]string{"Content-Type": "application/json"}, `{"q":"x","seenAt":"`+seenAt+`"}`)
+		r.arrived = base.Add(2 * time.Second)
+		return r
+	}
+	for _, c := range []struct {
+		name   string
+		zone   *time.Location
+		seenAt string
+		says   string
+	}{
+		{"the replay's now in the application's zone", ist, wall(now, ist), ""},
+		{"the replay's now written in UTC", ist, wall(now, time.UTC), "is not a read of the application's clock made in this call's window"},
+		{"an hour stale in the application's zone", ist, wall(now.Add(-time.Hour), ist), "is not a read of the application's clock made in this call's window"},
+		{"the application's zone not told", nil, wall(now, ist), "keploy cannot tell the application's zone at this call"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, diag := strictMatchIn(t, conn(c.zone), call(c.seenAt), nil, nil, nil, m)
+			if c.says == "" {
+				if got != nil {
+					return
+				}
+				t.Fatalf("refused (%v); want it answered", differs(diag))
+			}
+			if got != nil || !hasField(differs(diag), "body.seenAt") {
+				t.Fatalf("answered %v, differs %v; want refused naming body.seenAt", got != nil, differs(diag))
+			}
+			for _, f := range diag.differs {
+				if f.shape == "body.seenAt" && !strings.Contains(f.why, c.says) {
+					t.Fatalf("the refusal says %q; want it to say %q", f.why, c.says)
+				}
+			}
+		})
+	}
+}
+
 // A refused read of the application's clock names its field and why in the
 // miss report (MockMismatchReport.FieldReasons), not only in the agent's
 // log: the field as Differs names it, and the check's why, which names it
