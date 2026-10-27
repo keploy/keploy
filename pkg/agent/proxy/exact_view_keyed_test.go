@@ -33,7 +33,9 @@ func keyedSet(t *testing.T, n int) (*MockManager, []*models.Mock, *integrations.
 	ix := &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
 		*calls++
 		var i int
-		fmt.Sscanf(strings.TrimPrefix(mk.Name, "mock-"), "%d", &i)
+		if _, err := fmt.Sscanf(strings.TrimPrefix(mk.Name, "mock-"), "%d", &i); err != nil {
+			t.Errorf("the index was asked for the keys of %q, which keyedSet did not make: %v", mk.Name, err)
+		}
 		parity := "even"
 		if i%2 == 1 {
 			parity = "odd"
