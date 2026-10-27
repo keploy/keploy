@@ -35,38 +35,3 @@ func TestUnescapedReadsEveryFourDigitEscape(t *testing.T) {
 		}
 	}
 }
-
-// Two readings that both refuse a leaf leave it keploy's limit only when
-// both say so: one that refuses it for no limit of keploy's may be the
-// app's change.
-func TestStricterOfLeavesKeploysLimitOnlyWhenBothSaySo(t *testing.T) {
-	limit := Learned{Kind: KindUnaccounted, Why: "echoed inside a longer value", NotFollowed: true}
-	plain := Learned{Kind: KindUnaccounted, Why: "nothing explains it"}
-	if got := stricterOf(limit, plain); got.NotFollowed {
-		t.Fatalf("one reading refuses it for no limit of keploy's, yet it is keploy's: %+v", got)
-	}
-	if got := stricterOf(limit, limit); !got.NotFollowed {
-		t.Fatalf("both readings say it is keploy's limit, yet it is not: %+v", got)
-	}
-	if got := stricterOf(limit, Learned{Kind: KindEcho}); got.NotFollowed {
-		t.Fatalf("the late reading binds it as an echo, yet the refusal is keploy's limit: %+v", got)
-	}
-	// A value the earlier place's reading finds in a payload recorded at the
-	// call's own instant, which the late reading learns as noise: a refusal
-	// of that binding is keploy's doubt.
-	raw := Learned{Kind: KindVariable, From: Place{Mock: "mock-1", AtCall: true}}
-	if got := stricterOf(raw, Learned{Kind: KindNoise}); !got.Doubted {
-		t.Fatalf("the late reading learns it as noise, yet the binding is not doubted: %+v", got)
-	}
-	if got := stricterOf(raw, raw); got.Doubted {
-		t.Fatalf("both readings bind it at one place, yet it is doubted: %+v", got)
-	}
-	// One place, found as a copy by one reading and as a clock pick by the
-	// other: the readings disagree.
-	copied := Learned{Kind: KindVariable, From: Place{Mock: "mock-1", Side: Request, Path: "body.at", Var: "body.at", Whole: true}}
-	picked := copied
-	picked.From.Echo = true
-	if got := stricterOf(copied, picked); !got.Doubted {
-		t.Fatalf("one reading finds a copy and the other a clock pick, yet the binding is not doubted: %+v", got)
-	}
-}

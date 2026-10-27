@@ -499,20 +499,6 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
-	// NotFollowed, of an unaccounted drift, says keploy found where the
-	// value is and cannot follow or answer it there yet (a word of it
-	// echoed inside a longer answer value, an echo beside a source it set
-	// aside): keploy's limit, never the app's change. A drift keploy cannot
-	// tell about (a recording or request it could not read, a copy it
-	// cannot tell from a varying value) is not: it may be the app's change,
-	// and keploy's limit must never stand for one.
-	NotFollowed bool
-	// Doubted, of a variable or an echo, says the call was read two ways
-	// (classifyGiven) and the late reading does not bind the value where
-	// this one does: keploy cannot tell whether the recording came before
-	// the call. A refusal of it (learnPlan) is keploy's doubt, never its
-	// limit.
-	Doubted bool
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -957,31 +943,9 @@ func stricterOf(asPlace, asLate Learned) Learned {
 		if b := boundAt(asPlace); b != "" {
 			asLate.Why += "; read as a recording made before the call, the value would be " + b + ", yet keploy refuses a value either reading refuses"
 		}
-		// The two readings disagree: keploy's doubt, never its limit (the
-		// first reading's place may show the app's change).
-		asLate.NotFollowed = false
 		return asLate
 	}
-	if asPlace.Kind == KindUnaccounted && !asLate.NotFollowed {
-		// The late reading binds it, or refuses it for no limit of
-		// keploy's: the readings disagree, or it may be the app's change,
-		// so it is not keploy's limit.
-		asPlace.NotFollowed = false
-	}
-	if (asPlace.Kind == KindVariable || asPlace.Kind == KindEcho) && !sameBinding(asPlace, asLate) {
-		// The late reading learns it as noise, or binds it elsewhere: the
-		// readings disagree, so a refusal of this binding is keploy's doubt.
-		asPlace.Doubted = true
-	}
 	return asPlace
-}
-
-// sameBinding says two readings learn a drift alike: of one kind, from one
-// place, found there alike (a copy of it whole or in part, or a moment the
-// echo found).
-func sameBinding(a, b Learned) bool {
-	return a.Kind == b.Kind && a.From.Mock == b.From.Mock && a.From.Side == b.From.Side && a.From.Path == b.From.Path &&
-		a.From.Var == b.From.Var && a.From.Whole == b.From.Whole && a.From.Echo == b.From.Echo
 }
 
 // boundAt says where a reading binds its drifted value: a variable of the
@@ -1099,6 +1063,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
+		// Noise only where no word of what changed comes back in the
+		// call's own answer: an id sent inside a longer value (a GraphQL
+		// argument, an OData filter) that the answer holds is an echo keploy
+		// cannot answer with this run's value.
+		if ln.Kind == KindNoise {
+			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
+				ln.Kind, ln.Why = KindUnaccounted, why
+			}
+		}
 		// Words the word rule let go in record's full round: noise only
 		// where the recording and F gave the application the places before
 		// the call in the same order (follows.followed); an echo they stood
@@ -1115,22 +1088,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					ln.Why = fol.refuted + ", and keploy learns it as varying"
 				}
 			case KindEcho:
-				why, notFollowed := fol.first, false
+				why := fol.first
 				if why == "" {
-					why, notFollowed = fol.refuted+"; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside", true
+					why = fol.refuted + "; but the call's recorded answer holds it, an echo keploy cannot answer beside a source it set aside"
 				}
-				ln.Kind, ln.Why, ln.Echo, ln.NotFollowed = KindUnaccounted, why, nil, notFollowed
-			}
-		}
-		// Noise only where no word of what changed comes back in the
-		// call's own answer: an id sent inside a longer value (a GraphQL
-		// argument, an OData filter) that the answer holds is an echo keploy
-		// cannot answer with this run's value. Asked after the follows
-		// check, whose refusal (keploy cannot tell) carries no cause and so
-		// must stand over keploy's limit.
-		if ln.Kind == KindNoise {
-			if why := echoedPart(dc, dc.ofIn(r.Value, l.Value, w, at), resp); why != "" {
-				ln.Kind, ln.Why, ln.NotFollowed = KindUnaccounted, why, true
+				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
 		out = append(out, ln)

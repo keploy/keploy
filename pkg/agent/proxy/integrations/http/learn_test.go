@@ -3091,9 +3091,6 @@ func TestLearnMatchAnOwnRecordingWithNoRecordedTimeLearnsNothing(t *testing.T) {
 		!strings.Contains(miss.res.Why, "keploy cannot tell which recordings of the test set came before mock-1, which has no recorded time") {
 		t.Fatalf("served %v miss %+v consumed %d; want the call refused, naming mock-1's missing recorded time", got, miss, len(db.consumed))
 	}
-	if miss.res.Cause != "" {
-		t.Fatalf("cause %q: refused before any leaf is read, it may be the app's change, want none", miss.res.Cause)
-	}
 }
 
 // A mock F served before the test is a place of every rule where it is an
@@ -4550,73 +4547,5 @@ func TestLearnMatchAnExchangeServedLeafByLeafIsReadByWhenItWasRecorded(t *testin
 		if got, why := verdict(call - time.Second); got != "served true" {
 			t.Errorf("%s, recorded a second before the call: %s (%s); want noise, an earlier place both runs were given showing no copy", tc.name, got, why)
 		}
-	}
-}
-
-// A learn refusal says, as its cause, when what changed is a value keploy
-// cannot follow yet (from an earlier answer, from a call of another
-// protocol or the inside of a payload, from the test case's own request),
-// which is keploy's limit, not a change the app made; an unexplained change
-// has no cause. Judging classes the first as keploy's, never flaky.
-func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	m := &models.Mock{Name: "mock-2"}
-	rec := learn.Leaf{Path: "body.id"}
-	for _, c := range []struct {
-		name  string
-		l     learn.Learned
-		cause string
-	}{
-		{"from an answer", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", Side: learn.Response, Path: "body.id", Whole: true}}, learn.CauseNotFollowed},
-		{"from another protocol or a payload", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1"}}, learn.CauseNotFollowed},
-		{"from the test case's request", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "case", Given: true}}, learn.CauseNotFollowed},
-		{"unexplained", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "no earlier call holds it"}, ""},
-		{"echoed inside a longer answer value", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "a word of it comes back in the answer at body.q, which keploy cannot answer with this run's value", NotFollowed: true}, learn.CauseNotFollowed},
-		{"from a form field that held it", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.user", Value: "abc"}, Live: learn.Leaf{Path: "body.user", Value: "xyz"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "id", Whole: true, Live: "xyz", Own: true}}, learn.CauseNotFollowed},
-		{"not what a form field held", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.user", Value: "abc"}, Live: learn.Leaf{Path: "body.user", Value: "qqq"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "id", Whole: true, Live: "xyz", Own: true}}, ""},
-		{"read two ways that disagree", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", AtCall: true}, Doubted: true}, ""},
-		{"picked by the clock from a field", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.at", Value: "10:00"}, Live: learn.Leaf{Path: "body.at", Value: "11:00"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "body.at", Var: "body.at", Whole: true, Echo: true, Live: "10:00", Own: true}}, learn.CauseNotFollowed},
-		{"picked by the clock from a form field", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.at", Value: "10:00"}, Live: learn.Leaf{Path: "body.at", Value: "11:00"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "at", Whole: true, Echo: true, Live: "10:00", Own: true}}, learn.CauseNotFollowed},
-	} {
-		_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{c.l}, nil, nil)
-		if why == "" {
-			t.Fatalf("%s: not refused", c.name)
-		}
-		if cause != c.cause {
-			t.Errorf("%s: cause %q, want %q (why: %s)", c.name, cause, c.cause, why)
-		}
-	}
-	// A change nothing explains beside a value keploy cannot follow is the
-	// app's: keploy's limit, refused first, never hides it.
-	limit := learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", Side: learn.Response, Path: "body.id", Whole: true}}
-	app := learn.Learned{Kind: learn.KindUnaccounted, Recorded: learn.Leaf{Path: "body.total"}, Why: "no earlier call holds it"}
-	_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{limit, app}, nil, nil)
-	if cause != "" || !strings.HasPrefix(why, "body.total changed") {
-		t.Fatalf("cause %q, why %q; want the unexplained change as the reason, with no cause", cause, why)
-	}
-	// Nor does a leaf the call's two readings disagree on, though the first
-	// binds it: it may be the app's change.
-	bound := learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.x", Value: "1"}, Live: learn.Leaf{Path: "body.x", Value: "2"}, From: learn.Place{Mock: "mock-0", Side: learn.Request, Path: "body.x", Var: "body.x", Whole: true, Live: "2", Own: true}, Doubted: true}
-	_, why, cause = learnPlan(nil, 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, []learn.Learned{bound, limit}, nil, nil)
-	if why == "" || cause != "" {
-		t.Fatalf("cause %q, why %q; want keploy's limit refused with no cause beside a doubted leaf", cause, why)
-	}
-	// Nor does it hide one recorded value the call now sends as two: the
-	// echoes after keploy's limit are still read for it.
-	echo := func(path, live string) learn.Learned {
-		r := learn.Leaf{Path: path, Value: "5", Type: learn.String}
-		return learn.Learned{Kind: learn.KindEcho, Recorded: r, Live: learn.Leaf{Path: path, Value: live, Type: learn.String}, Echo: []learn.Leaf{{Path: "body.echo", Value: "5", Type: learn.String}}}
-	}
-	_, why, cause = learnPlan(learn.NewTracker(), 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, []learn.Learned{limit, echo("body.a", "6"), echo("body.b", "7")}, nil, nil)
-	if cause != "" || !strings.Contains(why, "held one value when recorded and two now") {
-		t.Fatalf("cause %q, why %q; want one value now two, the app's, with no cause", cause, why)
-	}
-	// Nor when the second is an echo keploy cannot answer: it is still
-	// compared with the first.
-	inside := echo("body.b", "7")
-	inside.Echo = []learn.Leaf{{Path: "body.note", Value: "id 5 here", Type: learn.String}}
-	_, why, cause = learnPlan(nil, 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, []learn.Learned{echo("body.a", "6"), inside}, nil, nil)
-	if cause != "" || !strings.Contains(why, "held one value when recorded and two now") {
-		t.Fatalf("cause %q, why %q; want one value now two, the app's, with no cause", cause, why)
 	}
 }

@@ -5713,7 +5713,6 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					// Why the call missed, when record's full round's learn
 					// step decided it: judging's evidence.
 					Reason:     parserErr.MismatchReport.Reason,
-					Cause:      parserErr.MismatchReport.Cause,
 					Concurrent: parserErr.MismatchReport.Concurrent,
 					// An answered call's report (models.ReportAnswer, proven
 					// switch): how it was answered, never a miss.

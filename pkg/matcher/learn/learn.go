@@ -276,15 +276,7 @@ type Result struct {
 	Reason string
 	// Why, for a miss, is what differed, by path; it never holds a value.
 	Why string
-	// Cause, for a request_changed miss, is why keploy refused what changed
-	// when that is keploy's own limit rather than the request's:
-	// CauseNotFollowed. "" otherwise.
-	Cause string
 }
-
-// CauseNotFollowed is a Result's Cause, and models.UnmatchedCall's, for a
-// value keploy cannot follow yet (models.MissCauseNotFollowed).
-const CauseNotFollowed = models.MissCauseNotFollowed
 
 // Pair decides one request against its candidates (design §7.2 steps 1-5),
 // which come in the order their scope offers them: the test's mocks in

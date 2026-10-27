@@ -703,7 +703,7 @@ func TestAValueCopiedFromAStartUpIsRefusedWhenItsConnectionsSwapRoles(t *testing
 			{"the pid inside a longer value", "conn-81", "conn-82", "a part of its recorded value (its characters 6 to 7) stands in mock-hs-81 at spec.postgresV3.session.backendProcessID"},
 		} {
 			for rule, got := range map[string]Learned{"a copy follows its source": classifyF(t, tc.recorded, tc.live, nil, raw, nil), "without it": given(tc.recorded, tc.live, raw)} {
-				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.found+", a connection's recorded start-up") || !strings.Contains(got.Why, "never varies") || got.NotFollowed {
+				if got.Kind != KindUnaccounted || !strings.Contains(got.Why, tc.found+", a connection's recorded start-up") || !strings.Contains(got.Why, "never varies") {
 					t.Errorf("FALSE GREEN? interleaving %d %v, %s copied from a start-up, %s: %s (%q); want refused, naming the start-up", i, steps, tc.name, rule, got.Kind, got.Why)
 				}
 			}

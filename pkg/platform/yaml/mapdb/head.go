@@ -50,7 +50,7 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 	if n := DroppedComments(old, data); n > 0 {
 		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d comment line(s) that were not at its head", n),
 			zap.String("testSetID", testSetID),
-			zap.String("next_step", "keploy keeps the comment lines a mappings file starts with, and every field, even one it does not know; move a note to the top of the file, or into the set's README.md"))
+			zap.String("next_step", "keploy keeps the comment lines a mappings file starts with, and every field, even one it does not know; move a note to the top of the file"))
 	}
 	return data, nil
 }
