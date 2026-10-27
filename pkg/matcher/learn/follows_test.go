@@ -66,7 +66,7 @@ func classifyF(t *testing.T, recorded, live string, earlier []Earlier, raw []Raw
 	t.Helper()
 	const path = "bind.$8"
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
-	got := ClassifyFollowing(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
+	got := ClassifyFollowing(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 	}
@@ -97,7 +97,7 @@ func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
 			t.Errorf("execution_time 82 at record, %s in F (%s): %s (%q), want noise", tc.f, tc.matched, got.Kind, got.Why)
 		}
 		path := "bind.$8"
-		today := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
+		today := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
 		if today[0].Kind != KindUnaccounted {
 			t.Errorf("ClassifyGiven, execution_time 82 at record, %s in F: %s, want refused (the rule is ClassifyFollowing's)", tc.f, today[0].Kind)
 		}
@@ -332,7 +332,7 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 			continue
 		}
 		path := "bind.$8"
-		given := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
+		given := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
 		if given[0].Kind == KindNoise {
 			t.Errorf("FALSE GREEN? ClassifyGiven, %s: noise (%q), want it never learned (the rule is ClassifyFollowing's)", tc.name, given[0].Why)
 		}
@@ -374,7 +374,7 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
 		t.Errorf("50 recorded beside VARCHAR(50) F sent unchanged, 7 in F: %s (%q), want noise naming mock-5", got.Kind, got.Why)
 	}
-	if today := ClassifyGiven(NewDriftCache(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
+	if today := ClassifyGiven(clockedDrifts(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
 		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want a variable of mock-5 (the rule is ClassifyFollowing's)", today[0].Kind, today[0].Why)
 	}
 	for _, tc := range []struct {
@@ -812,7 +812,7 @@ func TestAValueCopiedFromAStartUpIsRefusedWhenItsConnectionsSwapRoles(t *testing
 	const path = "bind.$8"
 	given := func(recorded, live string, raw []Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}
@@ -911,7 +911,7 @@ func TestAValueRecordedAsAWordEveryStartUpCarriesAlikeIsReadAsAnyRecordings(t *t
 		if got := classifyF(t, tc.recorded, tc.live, nil, raw, nil); got.Kind != KindNoise {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, the rule a copy follows its source: %s (%q); want noise", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
 		}
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-hs-81" || got[0].From.startUp {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, without the rule: %+v; want a variable at mock-hs-81 like any recording's word, not a start-up refusal", tc.recorded, tc.field, tc.live, got)
 		}
@@ -930,7 +930,7 @@ func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.
 	const path = "bind.$8"
 	given := func(recorded, live string, raw []Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}

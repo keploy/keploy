@@ -293,6 +293,16 @@ func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
 	}
 }
 
+// clockedTracker is a tracker that knows the application reads the real
+// clock (Tracker.SetAppClock), as the agent's own hooks tell it: with no app
+// clock a test's own clock read, in a call with no window, is refused at
+// learn (TestLearnMatchRefusesAClockReadWhereKeployCannotTellTheAppsClock).
+func clockedTracker() *learn.Tracker {
+	tr := learn.NewTracker()
+	tr.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
+	return tr
+}
+
 // A variable whose value F saw drift only with its clock where it is bound (a
 // clock read moved by the lead: learn.ClockOf) is marked so at its bind with
 // the read its recording holds, the instant and resolution it says
@@ -308,7 +318,7 @@ func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
 		{"moved by another amount", rec.Add(5 * time.Minute).Format(time.RFC3339), nil},
 	} {
 		h, n, opts := learnOn(t)
-		tr := learn.NewTracker()
+		tr := clockedTracker()
 		tr.Begin()
 		recorded := rec.Format(time.RFC3339)
 		db := &learnDb{perTest: []*models.Mock{
@@ -572,7 +582,7 @@ func (d *umDb) UpdateUnFilteredMock(old, new *models.Mock) bool {
 func TestLearnMatchWithNoWindowsTheScopeTableSaysWhatIsThePools(t *testing.T) {
 	h, n, opts := learnOn(t)
 	opts.LearnPool = true
-	ctx := learn.WithTracker(context.Background(), learn.NewTracker()) // the start-up: no test begun
+	ctx := learn.WithTracker(context.Background(), clockedTracker()) // the start-up: no test begun
 	for _, tc := range []struct {
 		what     string
 		pool     map[string]bool
@@ -1175,6 +1185,35 @@ func TestLearnMatchACredentialTokenFromASQLTextIsNotNoise(t *testing.T) {
 	}
 }
 
+// Through the HTTP integration, a test's own call (no window) whose epoch
+// second F read 93 s after its recording (no lead moves it) is learned as a
+// read of the clock, checked at replay, where keploy knows which clock the
+// application reads; where it cannot tell (no app clock), no replay could
+// check that read, and the call is refused at learn, its reason saying so,
+// never served with the value noise.
+func TestLearnMatchRefusesAClockReadWhereKeployCannotTellTheAppsClock(t *testing.T) {
+	for _, clocked := range []bool{true, false} {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		if clocked {
+			tr = clockedTracker()
+		}
+		tr.Begin()
+		ctx := learn.WithTracker(context.Background(), tr)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-1", time.Second, "POST", "/v1/ping", `{"at":1760436000}`, nil, `{}`)}}
+		served, miss, err := h.learnMatch(ctx, live("POST", "/v1/ping", `{"at":1760436093}`, nil), db, n, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if clocked && (served == nil || len(db.consumed) != 1 || !learnedClockRead(db.consumed[0].Spec, "body.at")) {
+			t.Fatalf("an app clock: served %v miss %+v; want body.at learned as a read of the clock", served != nil, miss)
+		}
+		if !clocked && (served != nil || miss == nil || !strings.Contains(miss.res.Why, "body.at changed, and nothing shows it is a read of the application's clock: keploy cannot tell which clock the application reads")) {
+			t.Fatalf("no app clock: served %v miss %+v; want refused, the reason naming body.at and the clock keploy cannot tell", served != nil, miss)
+		}
+	}
+}
+
 // (Round-4 review repro.) the previous test inserted a row stamped with the second it ran in;
 // this test's own call carries its own clock read, the same second when
 // recorded. Nothing flowed, so in F the drifted value is noise; with the
@@ -1182,7 +1221,7 @@ func TestLearnMatchACredentialTokenFromASQLTextIsNotNoise(t *testing.T) {
 // is quarantined as flaky.
 func TestLearnMatchAPreviousTestsSameSecondIsNoSource(t *testing.T) {
 	h, n, opts := learnOn(t)
-	tr := learn.NewTracker()
+	tr := clockedTracker()
 	tr.Begin() // test 1
 	tr.ServedMock(&models.Mock{Name: "pg-0", Kind: models.GENERIC, Spec: models.MockSpec{ReqTimestampMock: learnAt,
 		GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "utf-8",
@@ -3814,7 +3853,7 @@ func TestLearnMatchReadsItsOwnAnswersDateAsItsStamp(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, n, opts := learnOn(t)
-			tr := learn.NewTracker()
+			tr := clockedTracker()
 			tr.Begin()
 			ctx := learn.WithTracker(context.Background(), tr)
 			send := learnRecorded("mock-0", time.Second, "POST", "/v1/send", `{"sent_at":"2026-10-14T10:00:01Z"}`, nil, `{"ok":true}`)

@@ -286,7 +286,7 @@ func TestClassify(t *testing.T) {
 	}
 	// The application writes its wall clock of no zone in UTC+10, where the
 	// call at midnight UTC is 10:00 and body.at's read just before it.
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	dc.zone = time.FixedZone("AEST", 10*3600)
 	got := Classify(dc, []string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts", "body.sess", "body.at", "body.seq", "body.file"}, live, rec, at, earlier, raw, respLeaves)
 	kinds := map[string]Kind{}
@@ -403,7 +403,7 @@ func TestALateClockReadIsAReadOfTheClockBesideAPostgresRecordingOfTheSameMinute(
 	rec := Shape{Leaves: map[string]Leaf{"bind.$3": {Path: "bind.$3", Value: recAt.Format(lay)}}}
 	for _, late := range []time.Duration{10 * time.Millisecond, 600 * time.Millisecond, 2500 * time.Millisecond} {
 		live := Shape{Leaves: map[string]Leaf{"bind.$3": {Path: "bind.$3", Value: recAt.Add(FullRoundLead + late).Format(lay)}}}
-		out := Classify(NewDriftCache(), []string{"bind.$3"}, live, rec, recAt.Add(2*time.Millisecond), nil, []Raw{RawOf(earlier, false)}, nil)
+		out := Classify(clockedDrifts(), []string{"bind.$3"}, live, rec, recAt.Add(2*time.Millisecond), nil, []Raw{RawOf(earlier, false)}, nil)
 		if len(out) != 1 || out[0].Kind != KindClockRead || out[0].Read == nil {
 			t.Fatalf("a clock read %v late: %+v, want a read of the clock, compared at replay", late, out)
 		}
@@ -694,7 +694,7 @@ func TestSources(t *testing.T) {
 		// shared, a value that flowed.
 		{"one UUID v7 next to a fresh part in both", uuid7(at, "abc123456789abcdef") + ":n1", uuid7(f, "def0123456789abcde") + ":n2", "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(f, "def0123456789abcde"), true, false},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		found, whole := sources(dc.of(tc.rec, tc.live), dc.of(tc.recorded, tc.now))
 		if found != tc.found || whole != tc.whole {
 			t.Errorf("%s: found %v whole %v, want %v %v (%q→%q at %q→%q)", tc.name, found, whole, tc.found, tc.whole, tc.recorded, tc.now, tc.rec, tc.live)
@@ -894,7 +894,7 @@ func TestAppearedInRawPayloads(t *testing.T) {
 		{"an id after a percent escape in a payload", `{"query":"INSERT INTO uploads VALUES ('https://storage.googleapis.com/b/o/uploads%2FA7K29QXM.png')"}`, "A7K29QXM", "Zq81Lm0X", true},
 		{"a percent-encoded clock read of one second", `{"url":"https://a.blob/x?st=2026-10-14T10%3A00%3A41Z"}`, "2026-10-14T10:00:41.123Z", "2026-10-14T10:01:42.623Z", false},
 	} {
-		_, found := appeared(NewDriftCache(), tc.recorded, tc.now, at, nil, raw(tc.text))
+		_, found := appeared(clockedDrifts(), tc.recorded, tc.now, at, nil, raw(tc.text))
 		if found != tc.found {
 			t.Errorf("%s: found %v, want %v", tc.name, found, tc.found)
 		}
@@ -915,7 +915,7 @@ func TestRawOfReadsThePayloadsOwnText(t *testing.T) {
 	} {
 		m := &models.Mock{Name: "raw-0", Kind: models.GENERIC, Spec: models.MockSpec{ReqTimestampMock: at.Add(-time.Second),
 			GenericRequests: []models.Payload{{Origin: models.FromClient, Message: []models.OutputBinary{{Type: "string", Data: data}}}}}}
-		if _, ok := appeared(NewDriftCache(), "A7K29QXM", "Zq81Lm0X", at, nil, []Raw{RawOf(m, true)}); !ok {
+		if _, ok := appeared(clockedDrifts(), "A7K29QXM", "Zq81Lm0X", at, nil, []Raw{RawOf(m, true)}); !ok {
 			t.Errorf("a token in %q is no source", data)
 		}
 	}
@@ -946,7 +946,7 @@ func TestUnaccounted(t *testing.T) {
 		{"a standard base64 run that does not decode", "sig=ab+cd", "sig=ef+gh", true},
 		{"text of a script with no spaces", "您的订单已创建", "您的订单已发货", true},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		why := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw, nil)
 		if (why != "") != tc.refused {
 			t.Errorf("%s: unaccounted %q, want refused %v", tc.name, why, tc.refused)
@@ -1598,7 +1598,7 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 	if r := RawOf(m, true); strings.Contains(r.Text(), "tok-7f3a9c") {
 		t.Fatal("RawOf read the parked answer: the test's premise moved")
 	}
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	for i := 0; i < 2; i++ {
 		r, err := dc.ReadRaw(m, true)
 		if err != nil || !strings.Contains(r.Text(), "tok-7f3a9c") {
@@ -1661,7 +1661,7 @@ func TestAReasonIsOneTextForOneInput(t *testing.T) {
 	} {
 		seen := map[string]int{}
 		for i := 0; i < 200; i++ {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			var raw []Raw
 			for _, m := range tc.mocks {
 				raw = append(raw, dc.RawOf(m, true))
@@ -1704,7 +1704,7 @@ func TestARawNotReadFromItsMockIsRefused(t *testing.T) {
 	}
 	for name, raw := range map[string][]Raw{"the zero Raw": {good, {}}, "ReadRaw's unread Raw": {unread, good}} {
 		for _, live := range []string{"req-a7c4e2d10b3f", "2026-10-22T11:15:00Z"} {
-			ln := ClassifyIn(NewDriftCache(), []string{p}, shape(live), shape("req-3f2b8c1e9a4d"), at, nil, raw, nil, nil)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, shape(live), shape("req-3f2b8c1e9a4d"), at, nil, raw, nil, nil)[0]
 			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "keploy could not read") || name != "the zero Raw" && !strings.Contains(ln.Why, "mock-7") {
 				t.Errorf("%s, -> %q: %s (%s); want every drift refused, naming the recording", name, live, ln.Kind, ln.Why)
 			}
@@ -1745,7 +1745,7 @@ func TestAReasonIsOneTextAtEveryPlace(t *testing.T) {
 	} {
 		seen := map[string]int{}
 		for i := 0; i < 200; i++ {
-			ln := ClassifyIn(NewDriftCache(), []string{p}, tc.live, tc.rec, at, tc.earlier, nil, nil, nil)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, tc.live, tc.rec, at, tc.earlier, nil, nil, nil)[0]
 			seen[string(ln.Kind)+" | "+ln.From.Mock+" | "+ln.From.Path+" | "+ln.Why]++
 			if i == 0 && !strings.Contains(ln.Why, tc.want) {
 				t.Errorf("%s: %s (%s); want it to name %q", tc.name, ln.Kind, ln.Why, tc.want)
