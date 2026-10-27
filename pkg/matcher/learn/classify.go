@@ -1103,6 +1103,20 @@ func boundAt(ln Learned) string {
 	return ""
 }
 
+// skipRule names rules classifyRead's leaf can classify a value without, to
+// tell which explanations of the value hold in the rounds.
+type skipRule uint8
+
+const (
+	// skipSource: as a value no earlier place is the source of (no
+	// variable's search: appearedIn, and an instant's searches of the
+	// places that held the moment it was recorded with).
+	skipSource skipRule = 1 << iota
+	// skipOffset: as a value no moved place builds by an offset (no offset
+	// rule: offsetOfValue, offsetFrom).
+	skipOffset
+)
+
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
 // place it is.
 func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time, earlier []Earlier, raw []Raw, resp []Leaf, w *Window, given GivenEarlier, follow bool) []Learned {
@@ -1139,15 +1153,14 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	out := make([]Learned, 0, len(drift))
 	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
-	// a value of the call whose window is w. noSource: as a value no
-	// earlier place is the source of (no variable's search), every other
-	// rule as it stands.
-	leaf := func(r, l Leaf, w *Window, noSource bool) Learned {
+	// a value of the call whose window is w, without the rules skip names
+	// (skipRule), every other rule as it stands.
+	leaf := func(r, l Leaf, w *Window, skip skipRule) Learned {
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, noSource)
+			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, skip)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
@@ -1155,7 +1168,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && !noSource {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && skip&skipSource == 0 {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1180,7 +1193,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				why = unreadRequestWhy(unreadReq)
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
 				why = requestHoldsWhy(where, asRecorded)
-			} else if m, ok := offsetOfValue(v, places); ok {
+			} else if m, ok := offsetOfValue(v, places); ok && skip&skipOffset == 0 {
 				// An instant of it built on a moved place by an offset, before
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
@@ -1367,7 +1380,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
-		ln := leaf(r, l, w, false)
+		ln := leaf(r, l, w, 0)
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
 		// a value refused in its call's window is classified again in the
@@ -1381,7 +1394,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// stands: the wider window turns a refusal into a checked read,
 		// never into noise.
 		if wb := w.sinceBegin(); ln.Kind == KindUnaccounted && wb != nil {
-			if early := leaf(r, l, wb, false); early.Kind == KindClockRead && early.Read != nil {
+			if early := leaf(r, l, wb, 0); early.Kind == KindClockRead && early.Read != nil {
 				early.Read.Since = models.SinceTestBegin
 				ln = early
 			}
@@ -1406,7 +1419,32 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// anything else learned as a value with no source (noise, an echo,
 		// a read plus an offset, a refusal).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil {
-			if own := leaf(r, l, w, true); own.Kind == KindClockRead && own.Read != nil {
+			if own := leaf(r, l, w, skipSource); own.Kind == KindClockRead && own.Read != nil {
+				own.Read.Since = models.SinceTestBegin
+				ln = own
+			}
+		}
+		// A value built by an offset on what the application was given that
+		// is a read in its own call's window too: under the rule a copy
+		// follows its source (follow), in keploy mock's client tests (the
+		// only calls whose window knows each run's test begin), a value the
+		// offset rule refuses (offset.go: an instant the recording gave the
+		// application, and the one record's full round gave it in its place,
+		// each that offset before the value) that, read without that rule,
+		// is a plain read of the clock its call's window holds in both runs,
+		// is learned as a read of the clock since its test began
+		// (models.SinceTestBegin), never refused. Both explanations hold in
+		// the rounds (a start-up recording's stamp, minutes before the test
+		// began, that F's start-up wrote as many minutes before F's), and
+		// that read holds under both: a replay passes the value only inside
+		// its test's span on the application's clock, whichever it was built
+		// on. Refused, the test would be set aside for a place a replay can
+		// check. A value its own window does not hold stays refused (the
+		// offset alone explains it), and so does anything else the value
+		// reads as without the rule (noise, a read plus an offset of its
+		// own, another refusal).
+		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
+			if own := leaf(r, l, w, skipOffset); own.Kind == KindClockRead && own.Read != nil {
 				own.Read.Since = models.SinceTestBegin
 				ln = own
 			}
