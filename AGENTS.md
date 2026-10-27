@@ -98,9 +98,10 @@ Linter is `golangci-lint` with config schema v2, at `.golangci.yml`:
 - Enabled linters: `govet`, `staticcheck`, `errcheck`, `ineffassign`, `unused`
 - Formatters: `gofmt`, `goimports`
 - Generated files (Go's `// Code generated ... DO NOT EDIT.` header, such as the eBPF Go files) are not linted; no path is excluded.
-- CI fails on any issue on a line your change adds or edits. Issues already on lines you leave alone are not reported: the code base still holds older ones.
+- CI lints the Linux build of the root module: files built only for Windows or macOS, files behind a build tag such as `composelib`, and the lanes' own Go modules under `.github/` are not linted.
+- In what it lints, CI fails on any issue on a line your change adds or edits. Issues already on lines you leave alone are not reported: the code base still holds older ones.
 
-Check what CI checks (from your branch, with `origin/main` fetched):
+Check what CI checks (on Linux, from your branch, with `origin/main` fetched):
 
 ```bash
 golangci-lint run --new-from-merge-base=origin/main
