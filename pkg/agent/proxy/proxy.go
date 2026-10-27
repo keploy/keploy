@@ -1247,10 +1247,9 @@ func (p *Proxy) recordMySQLOutgoing(
 	// gate far below in handleConnection, but the MySQL PROBE branch returns
 	// before ever reaching it — so without this check KEPLOY_DISABLE_PARSING /
 	// SIGUSR1 / the admin endpoint silently did NOTHING for MySQL on its normal
-	// route. probeMysql's zero-cost fast path is the port check against
-	// MysqlPorts (3306 and 4000 by default), so the probe branch IS the common
-	// MySQL path: an operator set the switch, restarted, and every MySQL
-	// connection was still parsed.
+	// route. probeMysql routes MySQL on MysqlPorts (3306 and 4000 by default)
+	// here, so the probe branch IS the common MySQL path: an operator set the
+	// switch, restarted, and every MySQL connection was still parsed.
 	//
 	// Gated here rather than at the call site so it covers every caller of this
 	// dispatch function and is reachable from a test. The probe's connections
@@ -1263,9 +1262,9 @@ func (p *Proxy) recordMySQLOutgoing(
 	// — the end-of-request signal for every EOF-delimited exchange — has its
 	// connection torn down instead of receiving the reply. Reproduced on this
 	// exact path before the switch: the app half-closed and read back nothing.
-	// The probe's fast path admits by PORT alone (MysqlPorts, 3306/4000 by
-	// default, no content inspection), so any protocol on those ports reaches
-	// here, including half-closing ones.
+	// The probe's fast path admits a port listed in MysqlPorts by PORT alone
+	// (no content inspection), so any protocol on those ports reaches here,
+	// including half-closing ones.
 	if util.DefaultKillSwitch.Enabled() {
 		mysqlLogger.Debug("record-mode parsing kill switch tripped; relaying raw",
 			zap.String("parser", string(integrations.MYSQL)),
@@ -2718,9 +2717,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	mgr := syncMock.Get()
 	mgr.SetOutputChannel(rule.MC)
-	if p.mockMode {
-		starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
-	}
+	// The address this connection reached, which every mock its parsers
+	// record names (starts.Registry.StampDest), under keploy record as under
+	// keploy mock: a replay tells by it what a port held. Kept until they are
+	// done, as its process is.
+	starts.Default.Dest(fmt.Sprint(clientConnID), dstAddr)
+	defer starts.Default.ForgetDest(fmt.Sprint(clientConnID))
 
 	if predialed != nil {
 		if predialed.Addr() != dstAddr {
@@ -2876,11 +2878,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 
 	// Decide whether this connection speaks MySQL. Historically this was
 	// a pure port check against outgoingOpts.MysqlPorts (defaults
-	// [3306, 4000]); probeMysql keeps that as its zero-cost fast path
-	// and adds automatic detection for every other port — by reading the
-	// upstream's handshake during record, and by recalling ports from
-	// the recorded mocks during replay. See mysql_detect.go for why the
-	// two modes need different mechanisms.
+	// [3306, 4000]); probeMysql keeps a listed port as its zero-cost fast
+	// path, takes the defaults and learned ports as a hint the connection
+	// confirms, and detects every other port — by reading the upstream's
+	// handshake during record, and by recalling ports from the recorded
+	// mocks during replay. See mysql_detect.go for why the two modes need
+	// different mechanisms.
 	//
 	// The probe may consume bytes off either socket and may dial
 	// upstream, so its connections are adopted unconditionally — both

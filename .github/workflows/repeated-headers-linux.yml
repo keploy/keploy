@@ -5,6 +5,10 @@ name: Repeated Headers Replay (Linux)
 # whose dependency answered with two Set-Cookie lines served them as one
 # cookie.
 #
+# The upstream that sends those cookies is an HTTP server on port 4000, one of
+# the ports keploy takes as a hint of MySQL: the proxy must relay its HTTP
+# request there, not wait for a MySQL greeting, and replay its mock as HTTP.
+#
 # Runs only the `build` (PR) binary, for record and replay, like the other
 # guards of a feature the published `latest` does not have
 # (startup-mock-capture-linux.yml, mock_linux.yml). The feature spans both

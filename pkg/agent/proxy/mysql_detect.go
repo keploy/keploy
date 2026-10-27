@@ -67,8 +67,12 @@
 // destination to finish, a dial generic dispatch makes anyway. That dial
 // is made when the connection arrives, which is when the application's
 // own connect reached the proxy (where handshakes are held, it has
-// already happened and is reused). Ports on the configured/default/
-// learned list skip the probe entirely.
+// already happened and is reused). Ports listed in mysqlPorts skip the
+// probe entirely. The built-in defaults (3306, 4000) and learned ports are
+// a hint, not a verdict: a record still lets whichever end speaks first
+// decide (a client that speaks first is never MySQL, so an HTTP service on
+// 4000 is relayed as HTTP), and a replay asks the recording what it reached
+// there (probeMysqlReplay).
 package proxy
 
 import (
@@ -160,6 +164,16 @@ type mysqlPortRegistry struct {
 	// a replay with no MySQL mocks at all, and the connection would be routed
 	// to a replayer with nothing to serve.
 	fromMocks map[uint32]struct{}
+	// What the recording says of a built-in default port (3306, 4000) that
+	// none of its MySQL mocks names, which decides how a replay serves it
+	// (recordedNotMysql): otherPorts holds the ports of the recording's
+	// other dependencies (otherDependencyPort: a mock's destAddr, else the
+	// destination its HTTP, HTTP/2 or gRPC request names), and
+	// portless says a MySQL mock names no port at all (a recording made
+	// before MySQL mocks carried destAddr), so any default port may be its.
+	// Swapped with fromMocks at a session's derive.
+	otherPorts map[uint32]struct{}
+	portless   bool
 	// sessionStale is set when a new replay session begins and consumed by the
 	// next DeriveFromMocks. See MarkSessionStale for why the swap is deferred
 	// to derive time rather than done eagerly.
@@ -182,6 +196,7 @@ func newMysqlPortRegistry() *mysqlPortRegistry {
 		plainHosts:     make(map[netip.Addr]struct{}),
 		containerHosts: make(map[netip.Addr]struct{}),
 		fromMocks:      make(map[uint32]struct{}),
+		otherPorts:     make(map[uint32]struct{}),
 		derivedCh:      make(chan struct{}),
 	}
 }
@@ -426,11 +441,19 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 		r.mockKeys = make(map[string]struct{})
 		r.plainHosts = make(map[netip.Addr]struct{})
 		r.containerHosts = make(map[netip.Addr]struct{})
+		r.otherPorts = make(map[uint32]struct{})
+		r.portless = false
 		r.sessionStale = false
 	}
 	for _, mocks := range mockSets {
 		for _, m := range mocks {
-			if m == nil || m.Kind != models.MySQL {
+			if m == nil {
+				continue
+			}
+			if m.Kind != models.MySQL {
+				if port, ok := otherDependencyPort(m); ok {
+					r.otherPorts[port] = struct{}{}
+				}
 				continue
 			}
 			if key, ok := containerkey.Recorded(m); ok {
@@ -439,6 +462,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 			destAddr := m.Spec.Metadata["destAddr"]
 			port, ok := portFromAddr(destAddr)
 			if !ok {
+				r.portless = true
 				continue
 			}
 			if ap, err := containerkey.ParseAddrPort(destAddr); err == nil {
@@ -462,6 +486,61 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 	r.mu.Unlock()
 
 	return added
+}
+
+// otherDependencyAddr reads where a recorded mock of a dependency other than
+// MySQL reached, as an address that names its port: its destAddr, else the
+// destination its request names, an HTTP mock's Host (Mock.RecordedDestination),
+// an HTTP/2 mock's authority, a gRPC mock's :authority. "" when none names a
+// port. Every mock keploy records carries its connection's destAddr
+// (starts.Registry.StampDest), so destAddr decides first: a Host may name no
+// port, or another one (a virtual host). A recording made before keploy
+// stamped every mock has destAddr only on its MySQL mocks, and its HTTP mock
+// names its destination only by its Host. A Host that names no port is not
+// completed from the URL: keploy records the request line as sent, which for
+// a call to a service is origin-form ("/x") and names no host. A DNS answer and a
+// connection failure reached no dependency at that port, so they say nothing
+// of it.
+func otherDependencyAddr(m *models.Mock) string {
+	if m == nil || m.Kind == models.MySQL || m.Kind == models.DNS || m.Kind == models.ConnectionFailure {
+		return ""
+	}
+	cands := []string{m.Spec.Metadata["destAddr"]}
+	switch m.Kind {
+	case models.HTTP:
+		host, _ := m.RecordedDestination()
+		cands = append(cands, host)
+	case models.HTTP2:
+		if m.Spec.HTTP2Req != nil {
+			cands = append(cands, m.Spec.HTTP2Req.Authority)
+		}
+	case models.GRPC_EXPORT:
+		if m.Spec.GRPCReq != nil {
+			cands = append(cands, m.Spec.GRPCReq.Headers.PseudoHeaders[":authority"])
+		}
+	}
+	for _, addr := range cands {
+		if _, ok := portFromAddr(addr); ok {
+			return addr
+		}
+	}
+	return ""
+}
+
+// otherDependencyPort is the port of otherDependencyAddr.
+func otherDependencyPort(m *models.Mock) (uint32, bool) {
+	return portFromAddr(otherDependencyAddr(m))
+}
+
+// recordedNotMysql reports whether the recording reached a dependency other
+// than MySQL at port and holds no MySQL there: none of its MySQL mocks names
+// the port, and none names no port (portless).
+func (r *mysqlPortRegistry) recordedNotMysql(port uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, other := r.otherPorts[port]
+	_, mysql := r.fromMocks[port]
+	return other && !mysql && !r.portless
 }
 
 // derivedSignal is closed once DeriveFromMocks has run: a replay connection
@@ -562,15 +641,37 @@ func (p *Proxy) probeMysql(
 	opts models.OutgoingOptions,
 	logger *zap.Logger,
 ) (*mysqlProbe, error) {
-	// ── Fast path: a port we already know ──
-	// Configured mysqlPorts, the built-in defaults, or a port learned
-	// earlier in this session / derived from mocks. Zero probe cost,
-	// and byte-identical to the pre-auto-detection behaviour.
-	if isMysqlPort(port, opts.MysqlPorts) {
+	// ── A port that names MySQL ──
+	// A port listed in mysqlPorts is pinned to the MySQL parser, as is every
+	// port named so while detection is turned off. A built-in default (3306,
+	// 4000) or a port learned earlier in this session / derived from mocks
+	// is only a hint: an HTTP service on 4000 is common, and MySQL's client
+	// waits to be greeted while HTTP's speaks first, so a connection taken
+	// for MySQL by its port alone waited for a greeting that never came and
+	// never relayed its request. A record decides by which end speaks first
+	// (probeMysqlRecord, hinted); a replay by what the recording holds at the
+	// port (probeMysqlReplay).
+	listed := len(opts.MysqlPorts) > 0 && isMysqlPort(port, opts.MysqlPorts)
+	builtIn := len(opts.MysqlPorts) == 0 && isMysqlPort(port, nil)
+	known := p.mysqlPorts.Has(port)
+	if listed || (builtIn && opts.DisableMysqlAutoDetect) {
 		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "configured-port"}, nil
 	}
-	if p.mysqlPorts.Has(port) {
-		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "known-port"}, nil
+	if builtIn || known {
+		reason := "known-port"
+		if !known {
+			reason = "default-port"
+		}
+		// No verdict on a hinted port is cached: the hint stays, and the
+		// next connection is judged by what it does.
+		hinted := func(why string, src net.Conn) *mysqlProbe { return &mysqlProbe{SrcConn: src, Reason: why} }
+		if mode != models.MODE_TEST {
+			return p.probeMysqlRecord(ctx, srcConn, dstAddr, pre, port, reason, logger, hinted)
+		}
+		if known {
+			return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: reason}, nil
+		}
+		return p.probeMysqlReplay(ctx, srcConn, dstAddr, port, true, opts, logger, hinted)
 	}
 	// A port already probed and found not to speak MySQL. Skipping here
 	// is what keeps the probe a one-time cost per port rather than a
@@ -602,10 +703,10 @@ func (p *Proxy) probeMysql(
 	}
 
 	if mode == models.MODE_TEST {
-		return p.probeMysqlReplay(ctx, srcConn, dstAddr, port, opts, logger, notMysql)
+		return p.probeMysqlReplay(ctx, srcConn, dstAddr, port, false, opts, logger, notMysql)
 	}
 	marked := p.serverFirstDests.has(dstAddr)
-	probe, err := p.probeMysqlRecord(ctx, srcConn, dstAddr, pre, port, logger, notMysql)
+	probe, err := p.probeMysqlRecord(ctx, srcConn, dstAddr, pre, port, "", logger, notMysql)
 	if marked && probe != nil && (probe.IsMySQL || probe.clientFirst) {
 		// The destination's own bytes say another service is there now:
 		// MySQL greeted, or a client-first protocol's server did. No
@@ -651,12 +752,21 @@ func (p *Proxy) probeMysql(
 // was held (pre), which is the application's own; without one it is dialled
 // here, when the application's connect reached the proxy, and handed on
 // (mysqlProbe.Predialed) so the destination still sees one connection.
+//
+// hint, when not empty, is why the port names MySQL (a built-in default, or a
+// port learned or derived): the reason a MySQL verdict carries. On such a port
+// only a client that speaks first, or a destination whose first bytes are a
+// client-first protocol's server's (clientFirstPreamble), is not MySQL;
+// anything else the destination does first (a greeting of any kind, an ERR
+// packet in place of the handshake, closing) takes the MySQL path, as the
+// port alone took it before. The port is not learned again.
 func (p *Proxy) probeMysqlRecord(
 	ctx context.Context,
 	srcConn net.Conn,
 	dstAddr string,
 	pre *util.Predialed,
 	port uint32,
+	hint string,
 	logger *zap.Logger,
 	notMysql func(reason string, src net.Conn) *mysqlProbe,
 ) (*mysqlProbe, error) {
@@ -665,6 +775,11 @@ func (p *Proxy) probeMysqlRecord(
 	// shape and is deliberately strict about false positives.
 	matcher, ok := p.Integrations[integrations.MYSQL]
 	if !ok {
+		if hint != "" {
+			// No parser to match a greeting with: the port decides, as
+			// before (recordMySQLOutgoing relays without a parser).
+			return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: hint}, nil
+		}
 		// No MySQL parser registered in this build: nothing could route
 		// there anyway. Don't cache a negative — this says nothing about
 		// the port, only about the build.
@@ -672,6 +787,10 @@ func (p *Proxy) probeMysqlRecord(
 		return &mysqlProbe{SrcConn: srcConn, Reason: "mysql-parser-unregistered"}, nil
 	}
 	if !wakeable(srcConn) {
+		if hint != "" {
+			// A connection the probe cannot read: the port decides, as before.
+			return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: hint}, nil
+		}
 		return &mysqlProbe{SrcConn: srcConn, Reason: "client-read-error"}, nil
 	}
 
@@ -747,6 +866,9 @@ func (p *Proxy) probeMysqlRecord(
 	case len(greeting) > 0 && matcher.MatchType(ctx, greeting):
 		// The server identified itself; a client that spoke at the same
 		// moment changes nothing about that.
+		if hint != "" {
+			return &mysqlProbe{IsMySQL: true, SrcConn: src, DstConn: replayConn(dstConn, greeting, logger), Reason: hint}, nil
+		}
 		if p.mysqlPorts.Learn(port) {
 			logger.Info("detected MySQL wire protocol on a non-default port; routing it to the MySQL parser for the rest of this session",
 				zap.Uint32("port", port),
@@ -771,6 +893,20 @@ func (p *Proxy) probeMysqlRecord(
 			return notMysql("client-spoke-first", src), nil
 		}
 		return with(notMysql("client-spoke-first", src), greeting), nil
+
+	case hint != "" && len(greeting) > 0 && clientFirstPreamble(greeting):
+		// A client-first protocol's server spoke at accept (an HTTP/2
+		// server's SETTINGS): its client speaks without waiting to be
+		// greeted, so the connection is dispatched on the client's bytes.
+		return with(notMysql("greeting-not-mysql", src), greeting), nil
+
+	case hint != "":
+		// The destination spoke or closed first, the client silent: the
+		// MySQL path, as the port alone took it before. A greeting that is
+		// not a HandshakeV10 (an ERR packet in place of it: Too many
+		// connections) is relayed to the client by the MySQL parser; a close
+		// ends the client's connection there.
+		return &mysqlProbe{IsMySQL: true, SrcConn: src, DstConn: replayConn(dstConn, greeting, logger), Reason: hint}, nil
 
 	case len(greeting) > 0 && provenswitch.On() && refusalAtAccept(greeting):
 		// The destination refused the connection at accept: relayed, so
@@ -815,11 +951,22 @@ func (p *Proxy) probeMysqlRecord(
 // (the docker-compose path starts the app first) waits for them, or for its
 // client to speak first, whichever comes first, with its client's first
 // bytes read the moment they arrive.
+//
+// builtIn says port is a built-in default (3306, 4000) that no mysqlPorts list
+// replaced. Such a port is MySQL unless the recording says otherwise: it holds
+// another dependency there and no MySQL (recordedNotMysql), as when the
+// application called an HTTP service on 4000. That connection is dispatched
+// on its client's bytes, as on any other port, and is not handed to the MySQL
+// replayer, which would greet an HTTP client. A recording that says nothing of
+// the port keeps it MySQL, so a MySQL connection in a test set that recorded
+// none is still answered with its miss (the MySQL replayer's), not left
+// waiting for a greeting.
 func (p *Proxy) probeMysqlReplay(
 	ctx context.Context,
 	srcConn net.Conn,
 	dstAddr string,
 	port uint32,
+	builtIn bool,
 	opts models.OutgoingOptions,
 	logger *zap.Logger,
 	notMysql func(reason string, src net.Conn) *mysqlProbe,
@@ -857,6 +1004,14 @@ func (p *Proxy) probeMysqlReplay(
 	if p.mysqlPorts.Has(port) {
 		logger.Debug("recalled mysql port from recorded mocks", zap.Uint32("port", port))
 		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "derived-from-mocks"}, nil
+	}
+	if builtIn {
+		if p.mysqlPorts.recordedNotMysql(port) {
+			logger.Debug("the recording reached another dependency at this default MySQL port, and no MySQL there; dispatching on the client's bytes",
+				zap.Uint32("port", port), zap.String("dstAddr", dstAddr))
+			return notMysql("recorded-not-mysql", srcConn), nil
+		}
+		return &mysqlProbe{IsMySQL: true, SrcConn: srcConn, Reason: "default-port"}, nil
 	}
 	// The port is not one the recording saw. The gate is MockPorts, not
 	// Ports: the latter also holds ports learned by probing during a record

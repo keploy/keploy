@@ -67,7 +67,6 @@ type Registry struct {
 	byProc   map[procKey]*Start
 	byPID    map[uint32]*Start
 	conns    map[string]uint32
-	dests    map[string]string
 	child    map[string]bool
 	root     string
 	sets     map[string]models.SetTable
@@ -78,6 +77,9 @@ type Registry struct {
 	// origin is, under the proven switch, the process each recorded
 	// connection came from (origin.go).
 	origin origins
+	// dest is each connection's address, which every recorded mock names
+	// (dest.go).
+	dest destinations
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -93,13 +95,13 @@ func (r *Registry) Reset() {
 	r.byProc = nil
 	r.byPID = nil
 	r.conns = nil
-	r.dests = nil
 	r.child = nil
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
 	r.marked = false
 	r.resetOrigins()
+	r.resetDests()
 }
 
 func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time) {
@@ -178,18 +180,6 @@ func (r *Registry) Note(conn string, pid uint32, at time.Time) {
 		r.conns[conn] = pid
 	}
 	r.startOf(pid, at)
-}
-
-func (r *Registry) Dest(conn, addr string) {
-	if conn == "" || addr == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.dests == nil {
-		r.dests = map[string]string{}
-	}
-	r.dests[conn] = addr
 }
 
 func (r *Registry) Child(conn string) {
@@ -280,17 +270,14 @@ func (r *Registry) Stamp(m *models.Mock) {
 	if provenswitch.On() {
 		r.StampOrigin(m)
 	}
+	// The address its connection reached, for a mock no parser handed the
+	// sync manager, which stamps it as it is handed over (StampDest).
+	r.StampDest(m)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	id := m.ConnectionID
 	if id == "" && m.Spec.Metadata != nil {
 		id = m.Spec.Metadata["connID"]
-	}
-	if addr := r.dests[id]; addr != "" && m.Spec.Metadata["destAddr"] == "" {
-		if m.Spec.Metadata == nil {
-			m.Spec.Metadata = map[string]string{}
-		}
-		m.Spec.Metadata["destAddr"] = addr
 	}
 	if r.child[id] {
 		if m.Spec.Metadata == nil {

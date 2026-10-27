@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -421,6 +422,17 @@ type MockFilterParams struct {
 	// (which is O(testcases^2) marshaling). Default false = legacy behaviour.
 	AgentOwnsConsumed  bool                 `json:"agentOwnsConsumed,omitempty"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// ConsumedHistory, when set, is the history TotalConsumedMocks is the live
+	// map of (ConsumedHistory.Map). It lets the client send an agent that
+	// already holds an earlier state of it only the entries written since
+	// (ConsumedSync), instead of the whole history at every test. Never on
+	// the wire.
+	ConsumedHistory *ConsumedHistory `json:"-"`
+	// ConsumedRegion names the per-test mocks of the set: the only ones whose
+	// entries an agent that reads the history for per-test mocks only
+	// (ConsumedScopeHeader) is sent, when it is sent the whole history. Never
+	// on the wire.
+	ConsumedRegion map[string]struct{} `json:"-"`
 	// StrictMockWindow controls whether out-of-window non-config mocks are
 	// dropped rather than being promoted into the cross-test config pool.
 	// Default TRUE (see config.Test default) — out-of-window per-test
@@ -710,6 +722,46 @@ type AgentInstanceWatch interface {
 
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
+	// ConsumedSync, when set, says how FilterParams.TotalConsumedMocks relates
+	// to the consumed history an agent keeps between calls. A client that
+	// predates it never sends it, and an agent that predates it ignores it.
+	ConsumedSync *ConsumedSync `json:"consumedSync,omitempty"`
+}
+
+// ConsumedSync lets an agent keep a client's consumed history between
+// /updatemockparams calls, so the client does not send the whole history with
+// every test, which made a replay's cost grow with the square of its tests.
+//
+// A full send (Full) carries the whole history in TotalConsumedMocks and starts
+// a stream: the agent keeps the map under Stream at Seq. A later send of the
+// same stream carries only the entries written since Base, the Seq of the
+// send before it, and the agent adds them to what it keeps and filters with
+// the result, which is exactly the map a full send would have carried. An
+// agent that does not hold Stream at Base applies nothing and answers 409
+// with ConsumedSyncHeader set to ConsumedSyncResync; the client then sends the
+// whole history again.
+type ConsumedSync struct {
+	Stream string `json:"stream"`
+	Full   bool   `json:"full,omitempty"`
+	Base   uint64 `json:"base,omitempty"`
+	Seq    uint64 `json:"seq"`
+}
+
+// ConsumedSyncHeader is the /updatemockparams response header in which an
+// agent that keeps a client's consumed history (ConsumedSync) says what it
+// holds after the call: "<stream>/<seq>". An agent that does not send it,
+// which includes every agent released before it, keeps nothing, and is sent
+// the whole history every time. ConsumedSyncResync, with status 409, says it
+// does not hold the stream a send built on.
+const (
+	ConsumedSyncHeader = "X-Keploy-Consumed-Sync"
+	ConsumedSyncResync = "resync"
+)
+
+// ConsumedSyncHeld is the ConsumedSyncHeader value of an agent that holds
+// stream at seq.
+func ConsumedSyncHeld(stream string, seq uint64) string {
+	return stream + "/" + strconv.FormatUint(seq, 10)
 }
 
 type BeforeSimulateRequest struct {

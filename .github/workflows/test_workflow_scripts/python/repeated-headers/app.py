@@ -10,7 +10,15 @@ into one (`X_tenant: acme,acme`) is rejected with a 400
 GET /login calls the upstream, which answers with two Set-Cookie lines, and
 returns the cookies it received. At replay the upstream is gone and the mock
 answers instead, so the response only matches when the mock serves both
-lines rather than one folded Set-Cookie.
+lines rather than one folded Set-Cookie. The upstream is on 4000, a port
+keploy also takes as a hint of MySQL, so /login answers only when the proxy
+relays an HTTP request there instead of waiting for a MySQL greeting.
+
+A third argument names the Host the app sends its upstream, as a client of a
+virtual host does: a name with no port. Then nothing in the recorded request
+says it went to 4000; only the address the connection reached does, which
+keploy records on the mock (metadata.destAddr), and the replay must read it
+to serve the mock as HTTP rather than greet the app as MySQL.
 """
 import http.client
 import json
@@ -18,7 +26,8 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-UPSTREAM_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 9092
+UPSTREAM_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
+UPSTREAM_HOST = sys.argv[3] if len(sys.argv) > 3 else ""
 TENANTS = {"acme", "globex"}
 
 
@@ -45,7 +54,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/login":
             conn = http.client.HTTPConnection("127.0.0.1", UPSTREAM_PORT, timeout=10)
             try:
-                conn.request("GET", "/session")
+                # http.client sends "Host: 127.0.0.1:4000" unless given one.
+                headers = {"Host": UPSTREAM_HOST} if UPSTREAM_HOST else {}
+                conn.request("GET", "/session", headers=headers)
                 resp = conn.getresponse()
                 resp.read()
                 cookies = resp.headers.get_all("Set-Cookie") or []
