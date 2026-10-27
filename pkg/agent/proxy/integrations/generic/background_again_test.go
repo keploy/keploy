@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -70,6 +71,17 @@ func TestABackgroundExchangeMadeAgainInItsWindowIsAnsweredAgain(t *testing.T) {
 	// Marked, but another exchange.
 	if r := missReport(t, againStore{answeredStore{answered: []*models.Mock{tick}}, []*models.Mock{tick}}, "SET k v"); r.Answer != "" || r.MissKind == models.MissExtraCall {
 		t.Fatalf("an exchange that repeats no marked recording was reported %+v; want a miss", r)
+	}
+	// Marked, and only like the exchange: answered again only on the same
+	// bytes, never at the per-test pool's similarity (this one is above it).
+	// Binary, as a driver's frames are (recorded base64).
+	const recorded, live = "\x00\x01LEASE SWEEP owner=worker-01 batch=0000000001 at=1761555000", "\x00\x01LEASE SWEEP owner=worker-01 batch=0000000001 at=1761555009"
+	near := exchange("mock-bg", util.EncodeBase64([]byte(recorded)))
+	if findBinaryMatch([]*models.Mock{near}, [][]byte{[]byte(live)}, 0.9) != 0 {
+		t.Fatal("the near exchange is not within the per-test similarity: the row proves nothing")
+	}
+	if x := backgroundAgain([][]byte{[]byte(live)}, againStore{answeredStore{answered: []*models.Mock{near}}, []*models.Mock{near}}); x != nil {
+		t.Fatalf("an exchange only like marked recording %s was answered again with it; want a miss", x.Name)
 	}
 	t.Setenv(provenswitch.Env, "0")
 	if r := missReport(t, againStore{answeredStore{answered: []*models.Mock{tick}}, []*models.Mock{tick}}, "PING"); r.Answer != "" {
