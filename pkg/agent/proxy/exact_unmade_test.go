@@ -561,3 +561,69 @@ func TestUnmadeWrite_AReadAnsweredFromBeforeTheWriteIsItsRecordingsCall(t *testi
 		}
 	})
 }
+
+// What a parser keeps for a view alone (AtViewEnd) is forgotten once, when
+// the view ends: the next view's install, or the manager's Close; never
+// before, never twice, and never kept on a view that ended.
+func TestUnmadeWrite_WhatAParserKeepsForAViewIsForgottenWhenItEnds(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block := unmadeRecording("block-t2", models.Mongo, 1000, "write", "block")
+	staged := []*models.Mock{list1, block}
+	counter := func(n *int) func() { return func() { *n++ } }
+	t.Run("the next view's install ends the test's view", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block)
+		var ran int
+		if !mm.AtViewEnd(counter(&ran)) {
+			t.Fatal("refused in an open test")
+		}
+		if ran != 0 {
+			t.Fatalf("ran %d times while the test is open", ran)
+		}
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTest("test-3", nil)
+		if ran != 1 {
+			t.Fatalf("ran %d times; want once, as test-2's view ended", ran)
+		}
+	})
+	t.Run("the manager's close ends the view in force", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block)
+		var ran, late int
+		mm.AtViewEnd(counter(&ran))
+		mm.Close()
+		if ran != 1 {
+			t.Fatalf("ran %d times; want once, at Close", ran)
+		}
+		if mm.AtViewEnd(counter(&late)) {
+			t.Fatal("kept on a view that ended; want refused, so the caller keeps nothing")
+		}
+		mm.Close()
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		if ran != 1 || late != 0 {
+			t.Fatalf("ran %d and %d times after a second Close and an install; want 1 and 0", ran, late)
+		}
+	})
+	t.Run("with exact serving off, nothing", func(t *testing.T) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		if mm.AtViewEnd(func() {}) {
+			t.Fatal("kept with no view in force")
+		}
+	})
+	t.Run("a scoped view forwards it", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block)
+		var ran int
+		if !(&scopedMockDb{MockMemDb: mm, live: true}).AtViewEnd(counter(&ran)) {
+			t.Fatal("the scoped view refused")
+		}
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		if ran != 1 {
+			t.Fatalf("ran %d times; want once", ran)
+		}
+		if (&scopedMockDb{MockMemDb: noViewEndDb{}}).AtViewEnd(func() {}) {
+			t.Fatal("a scoped view over a store with no view end kept it")
+		}
+	})
+}
+
+// noViewEndDb is a store with no ViewEnd.
+type noViewEndDb struct{ integrations.MockMemDb }

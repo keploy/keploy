@@ -146,6 +146,11 @@ type exactView struct {
 	// took counts as answered as the view closes (standInsLocked). nil for
 	// a view with none.
 	stood []bool
+	// atEnd are what parsers kept for this view alone, to forget when it
+	// ends (AtViewEnd); ended says the view has ended (endLocked): they
+	// ran, and nothing more is filed.
+	atEnd []func()
+	ended bool
 	// spent are the staged mocks this view shows that a parser consumed
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
@@ -1457,16 +1462,21 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	}
 	prev := m.exact.view.Swap(v)
 	var stoodIn []*models.Mock
+	var ends []func()
 	if prev != nil {
 		prev.mu.Lock()
 		prev.closed = true
 		// Final with the close: no consume reaches prev after it.
 		stoodIn = prev.standInsLocked()
+		ends = prev.endLocked()
 		prev.mu.Unlock()
 	}
 	r.mu.Unlock()
 	for _, mk := range stoodIn {
 		m.noteExactStoodIn(mk)
+	}
+	for _, f := range ends {
+		f()
 	}
 	if m.exact.beforeBump != nil {
 		m.exact.beforeBump(prev)

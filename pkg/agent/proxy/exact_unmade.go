@@ -145,3 +145,60 @@ func (s *scopedMockDb) StandIn(mk *models.Mock) {
 }
 
 var _ integrations.OwnRecordingStandIn = (*scopedMockDb)(nil)
+
+// AtViewEnd implements integrations.ViewEnd: f runs once, without the view's
+// lock, when the view in force now ends (endLocked): as the next view is
+// installed (installExactWith) or the manager closes (endExactView). False
+// when no view is in force (exact serving off) or it has ended already: a
+// view that ended between the caller's answer and this call keeps nothing.
+func (m *MockManager) AtViewEnd(f func()) bool {
+	v := m.exactView()
+	if v == nil {
+		return false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.ended {
+		return false
+	}
+	v.atEnd = append(v.atEnd, f)
+	return true
+}
+
+var _ integrations.ViewEnd = (*MockManager)(nil)
+
+// endLocked, with v.mu held, ends v: it returns what parsers kept for v
+// alone to forget (AtViewEnd), each once, for the caller to run once it
+// holds no lock.
+func (v *exactView) endLocked() []func() {
+	v.ended = true
+	ends := v.atEnd
+	v.atEnd = nil
+	return ends
+}
+
+// endExactView ends the view in force as the manager closes (Close): no
+// view replaces it, so what parsers kept for it alone is forgotten here.
+func (m *MockManager) endExactView() {
+	v := m.exactView()
+	if v == nil {
+		return
+	}
+	v.mu.Lock()
+	ends := v.endLocked()
+	v.mu.Unlock()
+	for _, f := range ends {
+		f()
+	}
+}
+
+// AtViewEnd forwards to the store's (integrations.ViewEnd); false when it
+// keeps none: the caller then keeps nothing for the view.
+func (s *scopedMockDb) AtViewEnd(f func()) bool {
+	if ve, ok := s.MockMemDb.(integrations.ViewEnd); ok {
+		return ve.AtViewEnd(f)
+	}
+	return false
+}
+
+var _ integrations.ViewEnd = (*scopedMockDb)(nil)

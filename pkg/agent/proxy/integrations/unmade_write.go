@@ -85,6 +85,22 @@ type OwnRecordingStandIn interface {
 	StandIn(mk *models.Mock)
 }
 
+// ViewEnd is an optional MockMemDb capability under exact serving: what a
+// parser keeps for the view in force alone (the open test's, or the pool's
+// between tests), such as a cursor an answer from before an unmade write
+// opened, is forgotten when that view ends, so nothing of it reaches a later
+// test, round or run the same agent serves. The agent's MockManager
+// implements it, and every MockMemDb wrapper that passes reads through to it
+// must forward it.
+type ViewEnd interface {
+	// AtViewEnd runs f once, when the view in force now ends: the next
+	// view is installed (the next test, the pool between tests, a new
+	// set), or the manager closes. False when no view is in force or it
+	// has ended already: f never runs, and the caller keeps nothing for
+	// the view. f is called without the store's locks held.
+	AtViewEnd(f func()) bool
+}
+
 // BeforeUnmadeWrite is what ReadBeforeUnmadeWrite decided for a read.
 type BeforeUnmadeWrite struct {
 	// Write is the open test's write, recorded before the recording the
