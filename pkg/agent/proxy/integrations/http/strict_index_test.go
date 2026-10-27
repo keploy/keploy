@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,6 +42,20 @@ func strictCall(i int) *req {
 	return r
 }
 
+// ownGenDb is genDb that tells whose a recording is (integrations.TestOwner),
+// as every store that serves under the switch does: the open test's own are
+// its per-test recordings, as the exact view's mapping names them.
+type ownGenDb struct{ *genDb }
+
+func (d ownGenDb) OwnedByOpenTest(m *models.Mock) bool {
+	return m.TestModeInfo.Lifetime == models.LifetimePerTest
+}
+
+// newOwnGenDb is newGenDb that tells whose a recording is.
+func newOwnGenDb(perTest, session []*models.Mock) *ownGenDb {
+	return &ownGenDb{newGenDb(perTest, session)}
+}
+
 // strictMatchOf matches r against db as decode does under the switch: held
 // from base.
 func strictMatchOf(t *testing.T, h *HTTP, r *req, db, base integrations.MockMemDb, urlNoise []string) *models.Mock {
@@ -67,7 +82,7 @@ func TestAStrictCallUnderAStagingGenerationLooksOnlyAtItsPath(t *testing.T) {
 	for _, size := range []int{100, 2000} {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			h := newHTTP()
-			db := newGenDb(strictItems("mock", size), nil)
+			db := newOwnGenDb(strictItems("mock", size), nil)
 			strictMatchOf(t, h, strictCall(0), db, db, nil)
 			strictMatchOf(t, h, strictCall(1), db, db, nil)
 			builds, reads := strictIndexBuilds.Load(), db.reads
@@ -98,7 +113,7 @@ func TestAStrictCallReadsTheIndexOfItsOwnGenerationAndURLNoise(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
 	h := newHTTP()
-	db := newGenDb(strictItems("a", 10), nil)
+	db := newOwnGenDb(strictItems("a", 10), nil)
 	for i := 0; i < 3; i++ {
 		if s := strictMatchOf(t, h, strictCall(i), db, db, nil); s == nil || s.Name != "a-"+strconv.Itoa(i) {
 			t.Fatalf("served %v; want a-%d", s, i)
@@ -171,7 +186,7 @@ func strictPoolOf(seed int64, size int) (perTest, session []*models.Mock) {
 // exactGenDb is genDb whose reusable recordings answer as the exact view's
 // do: a claim keeps the recording the reads give, not the copy the parser
 // reports (MockManager.updateUnFilteredMock).
-type exactGenDb struct{ *genDb }
+type exactGenDb struct{ *ownGenDb }
 
 func (d *exactGenDb) UpdateUnFilteredMock(old, _ *models.Mock) bool {
 	for _, m := range d.mocks {
@@ -196,8 +211,8 @@ func TestAnIndexedStrictMatchIsTheOneAReadGives(t *testing.T) {
 			noise = []string{`/q/[0-9]+`}
 		}
 		indexed, read := newHTTP(), newHTTP()
-		ixDb := &exactGenDb{newGenDb(strictPoolOf(seed, 400))}
-		readDb := &exactGenDb{newGenDb(strictPoolOf(seed, 400))}
+		ixDb := &exactGenDb{newOwnGenDb(strictPoolOf(seed, 400))}
+		readDb := &exactGenDb{newOwnGenDb(strictPoolOf(seed, 400))}
 		rnd := rand.New(rand.NewSource(seed * 7))
 		for c := 0; c < 300; c++ {
 			r := getTo(fmt.Sprintf("/p/%d/q/%d", rnd.Intn(7), rnd.Intn(4)), strictIxHost)
@@ -225,7 +240,7 @@ func TestAStrictIndexThatLostAMatchPanicsInVerifyMode(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
 	h := newHTTP()
-	db := newGenDb(strictItems("mock", 10), nil)
+	db := newOwnGenDb(strictItems("mock", 10), nil)
 	strictMatchOf(t, h, strictCall(0), db, db, nil)
 	strictMatchOf(t, h, strictCall(1), db, db, nil)
 	for k := range h.strictIx.last.byPath {
@@ -249,7 +264,7 @@ func TestARefusedClaimOfAnIndexedStrictRecordingRereadsTheStore(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
 	h := newHTTP()
-	db := newGenDb(strictItems("mock", 10), nil)
+	db := newOwnGenDb(strictItems("mock", 10), nil)
 	strictMatchOf(t, h, strictCall(0), db, db, nil)
 	strictMatchOf(t, h, strictCall(1), db, db, nil)
 	// Another call took mock-5 without the store reporting it spent.
@@ -272,7 +287,7 @@ func TestARefusedClaimOfAnIndexedStrictRecordingRereadsTheStore(t *testing.T) {
 // its repeats and is over with (integrations.SpentReader): still staged,
 // never served.
 type spentGenDb struct {
-	*genDb
+	*ownGenDb
 	over map[string]bool
 }
 
@@ -284,7 +299,7 @@ func TestASpentRecordingIsNotServedThroughTheStrictIndex(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
 	h := newHTTP()
-	db := &spentGenDb{genDb: newGenDb(strictItems("mock", 10), nil), over: map[string]bool{}}
+	db := &spentGenDb{ownGenDb: newOwnGenDb(strictItems("mock", 10), nil), over: map[string]bool{}}
 	strictMatchOf(t, h, strictCall(0), db, db, nil)
 	strictMatchOf(t, h, strictCall(1), db, db, nil)
 	db.over["mock-5"] = true
@@ -297,15 +312,15 @@ func TestASpentRecordingIsNotServedThroughTheStrictIndex(t *testing.T) {
 }
 
 // A store that does not tell whose a recording is (integrations.TestOwner)
-// owns the per-test read's: a per-test recording its session read gives is
-// served through the index as a read serves it, as a reusable one, each
-// call, with the same claims asked of the store.
-func TestASessionReadRecordingIsServedAsReusableThroughTheStrictIndex(t *testing.T) {
+// keeps no strict index: a read serves each call, and answers it as it
+// answers with no index to try.
+func TestAStoreThatDoesNotTellOwnershipIsNotServedThroughTheStrictIndex(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	verifyOff(t)
 	indexed, read := newHTTP(), newHTTP()
-	ixDb := &exactGenDb{newGenDb(strictItems("own", 2), strictItems("shared", 6))}
-	readDb := &exactGenDb{newGenDb(strictItems("own", 2), strictItems("shared", 6))}
+	ixDb := newGenDb(strictItems("own", 2), strictItems("shared", 6))
+	readDb := newGenDb(strictItems("own", 2), strictItems("shared", 6))
+	builds := strictIndexBuilds.Load()
 	for i, want := range []string{"own-0", "own-1", "shared-4", "shared-4", "shared-4"} {
 		c := i
 		if i >= 2 {
@@ -313,11 +328,11 @@ func TestASessionReadRecordingIsServedAsReusableThroughTheStrictIndex(t *testing
 		}
 		got, again := strictMatchOf(t, indexed, strictCall(c), ixDb, ixDb, nil), strictMatchOf(t, read, strictCall(c), readDb, nil, nil)
 		if got == nil || got.Name != want || again == nil || again.Name != want {
-			t.Fatalf("call %d: served %v through the index and %v from a read; want %s", i, got, again, want)
+			t.Fatalf("call %d: served %v held from a base and %v from a read; want %s", i, got, again, want)
 		}
 	}
-	if !indexed.strictIx.has || ixDb.refused != readDb.refused || len(ixDb.consumed) != len(readDb.consumed) {
-		t.Fatalf("index built %v; the store refused %d claims through it and %d from a read, and consumed %d and %d", indexed.strictIx.has, ixDb.refused, readDb.refused, len(ixDb.consumed), len(readDb.consumed))
+	if indexed.strictIx.has || strictIndexBuilds.Load() != builds || ixDb.reads != readDb.reads {
+		t.Fatalf("index kept %v, %d built; the store was read %d times held from a base and %d from a read", indexed.strictIx.has, strictIndexBuilds.Load()-builds, ixDb.reads, readDb.reads)
 	}
 }
 
@@ -331,6 +346,9 @@ func (d *genVarDb) ExactServing() bool                         { return true }
 func (d *genVarDb) StagingGeneration() uint64                  { return d.gen }
 func (d *genVarDb) StagingGenerationByKind(models.Kind) uint64 { return d.gen }
 func (d *genVarDb) MockSpent(name string) bool                 { return d.consumed[name] }
+
+// OwnedByOpenTest: the open test's own are the per-test read's.
+func (d *genVarDb) OwnedByOpenTest(m *models.Mock) bool { return slices.Contains(d.perTest, m) }
 
 // A generation that stages a recording declaring variables is never served
 // through the strict index: the variable pass serves those first, from a

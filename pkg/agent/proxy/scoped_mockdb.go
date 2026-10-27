@@ -452,6 +452,7 @@ func (s *scopedMockDb) Unheld() string { return integrations.UnheldWhy(s.MockMem
 var (
 	_ integrations.RoundHolder  = (*scopedMockDb)(nil)
 	_ integrations.UnheldTeller = (*scopedMockDb)(nil)
+	_ integrations.TestOwner    = (*scopedMockDb)(nil)
 )
 
 // passThrough reports whether this view passes every read and consume

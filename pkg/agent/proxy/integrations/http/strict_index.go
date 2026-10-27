@@ -27,9 +27,6 @@ import (
 type strictIndex struct {
 	gen     uint64
 	entries []*models.Mock
-	// perTest holds the per-test read's recordings: whose each is, for a
-	// store that does not tell (openTestOwner).
-	perTest map[*models.Mock]struct{}
 	byPath  map[string][]int
 	wild    map[string][]int
 	// vars: a read held a recording that declares variables. The variable
@@ -50,8 +47,8 @@ var (
 // buildStrictIndex files the strict pool of the reads perTest and session.
 func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise) *strictIndex {
 	strictIndexBuilds.Add(1)
-	ix := &strictIndex{gen: gen, perTest: map[*models.Mock]struct{}{}, byPath: map[string][]int{}, wild: map[string][]int{}}
-	add := func(mocks []*models.Mock, perTest bool) {
+	ix := &strictIndex{gen: gen, byPath: map[string][]int{}, wild: map[string][]int{}}
+	for _, mocks := range [][]*models.Mock{perTest, session} {
 		for _, m := range FilterHTTPMocks(mocks) {
 			if hasVariables(m) {
 				ix.vars = true
@@ -60,9 +57,6 @@ func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise
 			r := m.Spec.HTTPReq
 			if r == nil {
 				continue // strictSieve: a recording of no request is no call
-			}
-			if perTest {
-				ix.perTest[m] = struct{}{}
 			}
 			p := len(ix.entries)
 			ix.entries = append(ix.entries, m)
@@ -75,8 +69,6 @@ func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise
 			ix.byPath[k] = append(ix.byPath[k], p)
 		}
 	}
-	add(perTest, true)
-	add(session, false)
 	return ix
 }
 
@@ -90,18 +82,6 @@ func (ix *strictIndex) positions(s strictSieve) []int {
 	out := append(append(make([]int, 0, len(exact)+len(wild)), exact...), wild...)
 	slices.Sort(out)
 	return out
-}
-
-// owner is whose each recording of the index is: the store's account where
-// it tells (integrations.TestOwner), else the per-test read's.
-func (ix *strictIndex) owner(db integrations.MockMemDb) func(*models.Mock) bool {
-	if o, tells := db.(integrations.TestOwner); tells {
-		return o.OwnedByOpenTest
-	}
-	return func(m *models.Mock) bool {
-		_, own := ix.perTest[m]
-		return own
-	}
 }
 
 // spentReaderOf is db's account of the recordings a test kept for its
@@ -131,14 +111,19 @@ func strictPool(db integrations.MockMemDb) (perTest, session, pool []*models.Moc
 // strictIndexed answers, under the proven switch, a call the strict pass
 // finds in its bucket of h's index of db's staging generation, for base (the
 // store db is held from: genIndexes.of), as strictServe would from a read.
-// served nil and retry false is no answer here: there is no index, the
-// generation holds a recording that declares variables, or the call is a
-// miss or a stateful walk's miss, which a read decides (and names the
-// closest recording of: strictServe). retry is true when another connection
+// served nil and retry false is no answer here: there is no index, the store
+// does not tell whose a recording is (integrations.TestOwner: every store
+// that serves under the switch does), the generation holds a recording that
+// declares variables, or the call is a miss or a stateful walk's miss, which
+// a read decides (and names the closest recording of: strictServe). retry is true when another connection
 // took the recording first; the caller then reads the store. In the exact
 // view's verify mode the fits found through the index are compared with
 // those of a read while the generation holds, and a difference panics.
 func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, retry bool, err error) {
+	owner, tells := db.(integrations.TestOwner)
+	if !tells {
+		return nil, false, nil
+	}
 	var perTest, session []*models.Mock
 	ix, ok := h.strictIx.of(base, db, urlNoiseKey(n.url), func() error {
 		var err error
@@ -176,7 +161,7 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	if len(fits) == 0 {
 		return nil, false, nil
 	}
-	own := ix.owner(db)
+	own := owner.OwnedByOpenTest
 	served, answered, retry, err := h.strictServeFits(context.WithValue(ctx, ownedKey{}, own), input, live, fits, own, db, n, statefulMocks)
 	if answered != nil {
 		return nil, false, err

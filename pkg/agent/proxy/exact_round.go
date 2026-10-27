@@ -913,6 +913,9 @@ func (m *MockManager) HoldToRound(call integrations.CallRound) (integrations.Moc
 var (
 	_ integrations.RoundHolder = (*MockManager)(nil)
 	_ integrations.ServeTeller = (*heldScope)(nil)
+	// A parser's per-generation index serves only a store that tells whose
+	// a recording is (the HTTP strict index).
+	_ integrations.TestOwner = (*heldScope)(nil)
 )
 
 // heldScope is the manager held to one call's staging (HoldToRound): its
