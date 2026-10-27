@@ -226,3 +226,117 @@ func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayl
 		}
 	}
 }
+
+// From the review of the chance-word rule (rv3): the application writes one
+// of two ids that two recordings it was given before the call hold, picked
+// by an order neither run shows (a map's iteration, a concurrent consumer):
+// mock-31's id at record and mock-32's in record's full round, or the other
+// way about. Each value then lacks the word the other holds, and each holds
+// a word of a place both runs gave: neither word shows the value made beside
+// it without taking any, so both stay refused, naming the place the value
+// that lacks the word took a word of (tookElsewhere). That place may be the
+// other test's answer, or an earlier place of the call's own test. A fresh
+// value, holding no word of any place, beside the same two answers is still
+// learned as varying. keploy test (ClassifyGiven) learns none of them as
+// noise, as before.
+func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAWordOfAnyPlaceBothRunsGave(t *testing.T) {
+	const p = "body.message_id"
+	const (
+		idA    = "bb7ed9ee-670e-48d1-982f-b54b2b73982f" // mock-31's message id
+		idB    = "5c0e9a7b-1f2d-4c3e-9a3b-c4d5e6f70812" // mock-32's message id
+		chance = "0c1d2e3f-4a5b-48d1-8e9f-a0b1c2d3e4f5" // a fresh id: "48d1" by chance
+		fresh  = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d" // a fresh id, no word of any place
+	)
+	before := r1Insert.Add(-time.Minute)
+	const lacks = "the value that lacks that word holds a word of a place both runs gave the application before the call: "
+	for _, row := range []struct {
+		name      string
+		own       bool // mock-32 an earlier place of the call's own test
+		rec, live string
+		want      string // "" noise under ClassifyFollowing
+	}{
+		{"mock-31's id at record, mock-32's in F", false, idA, idB, "stands in mock-32's answer as the recording gave it"},
+		{"mock-32's id at record, mock-31's in F", false, idB, idA, "stands in mock-31's answer as the recording gave it"},
+		{"mock-31's id at record, the own place's in F", true, idA, idB, "stands in mock-32 at spec.resp.body"},
+		{"the own place's id at record, mock-31's in F", true, idB, idA, "stands in mock-32 at spec.resp.body"},
+		{"a word by chance at record, a fresh id in F", false, chance, fresh, ""},
+		{"a fresh id at record, a word by chance in F", true, fresh, chance, ""},
+	} {
+		for _, viaSet := range []bool{false, true} {
+			for _, follow := range []bool{false, true} {
+				dc := clockedDrifts()
+				x1 := dc.RawOf(receiveOf("mock-31", idA, before), true).ServedAs(3).ServedAsRecorded()
+				x2 := dc.RawOf(receiveOf("mock-32", idB, before.Add(5*time.Second)), true).ServedAs(4).ServedAsRecorded()
+				classify := ClassifyGiven
+				if follow {
+					classify = ClassifyFollowing
+				}
+				var raw []Raw
+				var set GivenEarlier
+				switch {
+				case row.own && viaSet:
+					raw = []Raw{x2}
+					set = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x1)}, nil }
+				case row.own:
+					raw = []Raw{x1.OfAnotherTest(), x2}
+				case viaSet:
+					set = func() ([]GivenPlaces, error) { return []GivenPlaces{PlacesOf(x1), PlacesOf(x2)}, nil }
+				default:
+					raw = []Raw{x1.OfAnotherTest(), x2.OfAnotherTest()}
+				}
+				ln := classify(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, raw, nil, nil, set)[0]
+				switch {
+				case !follow && ln.Kind == KindNoise:
+					t.Errorf("%s (set %v), keploy test: %s (%s); want it refused, or bound where the recorded value stands whole in the own place, as before", row.name, viaSet, ln.Kind, ln.Why)
+				case follow && row.want == "" && ln.Kind != KindNoise:
+					t.Errorf("%s (set %v): %s (%s); want noise", row.name, viaSet, ln.Kind, ln.Why)
+				case follow && row.want != "" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, lacks) || !strings.Contains(ln.Why, row.want)):
+					t.Errorf("FALSE GREEN? %s (set %v): %s (%s); want it refused: %s", row.name, viaSet, ln.Kind, ln.Why, row.want)
+				}
+			}
+		}
+	}
+	// The value that lacks the word is read as its run gave the places: the
+	// value F saw by what F gave (an own place's view, a leaf F served), the
+	// recorded value by what the recording gave, not by F's view; a leaf's
+	// stamp as the word rule reads it.
+	idC := "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b" // what the other run gave there
+	leaf := func(rec, live string) Earlier {
+		e := eLeaf(before.Add(10*time.Second), 5, "0", "0")
+		e.Seen = append(e.Seen, Seen{Side: Response, Leaf: Leaf{Path: "body.id", Type: String, Value: rec}, Live: live})
+		return e
+	}
+	// An answer's own clock stamp (its Date header) is no place a value came
+	// from, as the word rule reads it (Seen.Stamp).
+	stamp := eLeaf(before.Add(10*time.Second), 5, "0", "0")
+	stamp.Seen = append(stamp.Seen, Seen{Side: Response, Leaf: Leaf{Path: "header.Date", Type: String, Value: "Fri, 23 Oct 2026 09:01:02 GMT"}, Live: "Fri, 23 Oct 2026 09:01:02 GMT", Stamp: true})
+	for _, row := range []struct {
+		name      string
+		raw       func(dc *DriftCache) Raw
+		served    []Earlier
+		rec, live string
+		want      string // "" noise
+	}{
+		{"F's id stands in what F gave at an own place, the recording gave another there", func(dc *DriftCache) Raw {
+			return dc.RawOf(receiveOf("mock-32", idC, before.Add(5*time.Second)), true).ServedAs(4).ServedLive(dc.RawOf(receiveOf("mock-32", idB, before.Add(5*time.Second)), true))
+		}, nil, idA, idB, "stands in mock-32"},
+		{"the recorded id stands only in what F gave at an own place", func(dc *DriftCache) Raw {
+			return dc.RawOf(receiveOf("mock-32", idC, before.Add(5*time.Second)), true).ServedAs(4).ServedLive(dc.RawOf(receiveOf("mock-32", idB, before.Add(5*time.Second)), true))
+		}, nil, idB, idA, ""},
+		{"F's id stands at a leaf F served", nil, []Earlier{leaf(idB, idB)}, idA, idB, "stands in mock-8 at body.id"},
+		{"F's id holds a word only an answer's own date stamp holds", nil, []Earlier{stamp}, chance, fresh + "-Fri", ""},
+	} {
+		dc := clockedDrifts()
+		raw := []Raw{dc.RawOf(receiveOf("mock-31", idA, before), true).ServedAs(3).ServedAsRecorded().OfAnotherTest()}
+		if row.raw != nil {
+			raw = append(raw, row.raw(dc))
+		}
+		ln := ClassifyFollowing(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, row.served, raw, nil, nil, nil)[0]
+		switch {
+		case row.want == "" && ln.Kind != KindNoise:
+			t.Errorf("%s: %s (%s); want noise", row.name, ln.Kind, ln.Why)
+		case row.want != "" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, lacks) || !strings.Contains(ln.Why, row.want)):
+			t.Errorf("FALSE GREEN? %s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.want)
+		}
+	}
+}
