@@ -76,7 +76,7 @@ func unmadeStage(t *testing.T, staged []*models.Mock, test string, owned ...*mod
 // manager now.
 func viewCopy(t *testing.T, db integrations.MockMemDb, name string) *models.Mock {
 	t.Helper()
-	got, err := db.GetFilteredMocks()
+	got, err := db.GetPerTestMocksInWindow()
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
