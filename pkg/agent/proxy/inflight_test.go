@@ -440,55 +440,197 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 	}
 }
 
-// A multiplexed connection (HTTP/2's parser holds a request for each new
-// client stream and releases one hold for each request a handler is done
-// with, by count, not by stream) holds a scope while it holds any request:
-// the test's own request may be the one still held, even after the
-// application opened later ones on it. The scope is released once the
-// connection holds none at one instant with its reads past the cut. So an
-// application that keeps a request in flight on such a connection at every
-// instant holds the end for as long as it does so (a stated limit, as on
-// main), and none of the test's requests is ever left out.
-func TestAMultiplexedConnectionHoldsTheScopeWhileItHoldsAnyRequest(t *testing.T) {
+// streamParser stands for a parser that answers several requests on one
+// connection at once (HTTP/2's streams): its frame reader reads the
+// application's next request, holds it, and reads on at once, and each
+// request's hold is released as that request is answered, in any order.
+type streamParser struct {
+	t     *testing.T
+	tr    *inflight
+	app   net.Conn
+	proxy *trackedConn
+	got   chan string
+}
+
+func newStreamParser(t *testing.T) *streamParser {
 	tr := &inflight{}
 	app, proxy := acceptedPair(t, tr)
-	const call, tick = "HEADERS stream 1", "HEADERS stream 3"
-	got := make(chan string, 4)
-	// open reads the application's next request on a new stream, holds it
-	// as the parser does, and has the frame reader read on.
-	open := func(req string) (release func()) {
-		t.Helper()
-		if _, err := io.WriteString(app, req); err != nil {
-			t.Fatal(err)
-		}
-		if r := <-got; r != req {
-			t.Fatalf("read %q", r)
-		}
-		release = proxy.Hold()
-		go readOnce(proxy, got)
-		waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
-		return release
+	p := &streamParser{t: t, tr: tr, app: app, proxy: proxy, got: make(chan string, 4)}
+	go readOnce(proxy, p.got)
+	return p
+}
+
+// send has the application send req, with the frame reader waiting for it.
+func (p *streamParser) send(req string) {
+	p.t.Helper()
+	if _, err := io.WriteString(p.app, req); err != nil {
+		p.t.Fatal(err)
 	}
-	go readOnce(proxy, got)
-	first := open(call)
-	sc := tr.scope()
+}
+
+// open sends req (unless sent) and has the frame reader read it, hold it and
+// read on.
+func (p *streamParser) open(req string, sent bool) (release func()) {
+	p.t.Helper()
+	if !sent {
+		p.send(req)
+	}
+	if r := <-p.got; r != req {
+		p.t.Fatalf("read %q, want %q", r, req)
+	}
+	release = p.proxy.Hold()
+	go readOnce(p.proxy, p.got)
+	waitSettled(p.t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
+	return release
+}
+
+// A connection that answers several requests at once (HTTP/2's streams)
+// holds a scope only while it holds a request the scope's cut covers: the
+// test's own request, held, holds it however many later ones the
+// application opens and has answered, and once that one is answered, the
+// later ones, held at every instant, do not. Nor do they move its work for
+// the watchdog: what it weighs moves only as the scope's own holds go.
+func TestALaterStreamOnAMultiplexedConnectionDoesNotHoldTheScope(t *testing.T) {
+	const call = "HEADERS stream 1"
+	p := newStreamParser(t)
+	test := p.open(call, false)
+	sc := p.tr.scope()
 	if n, _ := sc.State(true); n != 1 {
 		t.Fatalf("the test's request held: scope pending %d, want 1", n)
 	}
-	// Each answer releases one hold while the application has opened the
-	// next request: by count, the request still held may be the test's.
-	release := first
-	for i := 0; i < 3; i++ {
-		next := open(tick)
+	moved := sc.PendingProgress(true)[p.proxy.id]
+	// Background requests overlap at every instant, each answered while
+	// the next is held: the test's request is still held.
+	release := p.open("HEADERS stream 3", false)
+	for i := 5; i < 11; i += 2 {
+		next := p.open(fmt.Sprintf("HEADERS stream %d", i), false)
 		release()
-		if n, _ := sc.State(true); n != 1 {
-			t.Fatalf("one request answered while another is held (overlap %d): scope pending %d, want 1", i, n)
-		}
 		release = next
+		if n, _ := sc.State(true); n != 1 {
+			t.Fatalf("later requests answered, the test's held (stream %d open): scope pending %d, want 1", i, n)
+		}
+		if got := sc.PendingProgress(true)[p.proxy.id]; got != moved {
+			t.Fatalf("later requests moved the scope's work for the watchdog: %d, was %d", got, moved)
+		}
 	}
-	release()
+	// The frame reader takes a later request and is not reading as the
+	// test's request is answered: what it handles now is not the scope's.
+	p.send("HEADERS stream 11")
+	if r := <-p.got; r != "HEADERS stream 11" {
+		t.Fatalf("read %q", r)
+	}
+	test()
 	if n, _ := sc.State(true); n != 0 {
-		t.Fatalf("no request held, the frame reader reading: scope pending %d, want 0", n)
+		t.Fatalf("the test's request answered, a later one held, the frame reader busy: scope pending %d, want 0", n)
+	}
+	go readOnce(p.proxy, p.got)
+	waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
+	// A scope that begins now waits for the request held now, and only
+	// until it is answered.
+	next := p.tr.scope()
+	if n, _ := next.State(true); n != 1 {
+		t.Fatalf("a request held as a scope begins: next scope pending %d, want 1", n)
+	}
+	later := p.open("HEADERS stream 13", false)
+	release()
+	if n, _ := next.State(true); n != 0 {
+		t.Fatalf("the request held as it began answered, a later one held: next scope pending %d, want 0", n)
+	}
+	later()
+}
+
+// The test's request still in the socket when the scope begins is the
+// scope's, though the frame reader holds it only after the cut: the scope
+// waits for it until it is answered, not for one the application sends
+// after the cut, held while the test's is.
+func TestARequestReceivedBeforeTheCutAndHeldAfterItHoldsTheScope(t *testing.T) {
+	const call, tick = "HEADERS stream 1", "HEADERS stream 3"
+	p := newStreamParser(t)
+	// The frame reader is busy (not reading) as the test's request arrives.
+	if r := func() string { p.send("PING"); return <-p.got }(); r != "PING" {
+		t.Fatalf("read %q", r)
+	}
+	p.send(call)
+	waitInq(t, p.proxy, len(call))
+	sc := p.tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's request in the socket: scope pending %d, want 1", n)
+	}
+	go readOnce(p.proxy, p.got)
+	test := p.open(call, true)
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's request held after the cut: scope pending %d, want 1", n)
+	}
+	later := p.open(tick, false)
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's and a later request held: scope pending %d, want 1", n)
+	}
+	test()
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("the test's request answered, a later one held: scope pending %d, want 0", n)
+	}
+	later()
+}
+
+// A settle that gives up on a multiplexed connection names the requests its
+// cut covers that its parser holds, not the later request its frame reader
+// is busy with.
+func TestAGiveUpOnAMultiplexedConnectionNamesTheRequestsItCovered(t *testing.T) {
+	p := newStreamParser(t)
+	p.open("HEADERS stream 1", false)
+	sc := p.tr.scope()
+	p.send("HEADERS stream 3")
+	if r := <-p.got; r != "HEADERS stream 3" {
+		t.Fatalf("read %q", r)
+	}
+	words := sc.GiveUp([]uint64{p.proxy.id}, true)
+	want := fmt.Sprintf("connection %d from %s, which held 1 request(s) its parser had read and not answered", p.proxy.id, p.proxy.RemoteAddr())
+	if len(words) != 1 || words[0] != want {
+		t.Fatalf("give-up words %q, want %q", words, want)
+	}
+}
+
+// A settle that gave up on a multiplexed connection gave up on the requests
+// its cut covered, the test's own still in the socket then: once those are
+// answered, no later scope leaves it out, though the application keeps a
+// later request held.
+func TestAGiveUpOnAMultiplexedConnectionEndsWithTheRequestsItCovered(t *testing.T) {
+	const call = "HEADERS stream 1"
+	p := newStreamParser(t)
+	// The frame reader is busy (not reading) as the test's request arrives.
+	if r := func() string { p.send("PING"); return <-p.got }(); r != "PING" {
+		t.Fatalf("read %q", r)
+	}
+	p.send(call)
+	waitInq(t, p.proxy, len(call))
+	sc := p.tr.scope()
+	var ids []uint64
+	for id := range sc.PendingProgress(true) {
+		ids = append(ids, id)
+	}
+	want := fmt.Sprintf("%d byte(s) the application had sent that its handler had not read", len(call))
+	if words := sc.GiveUp(ids, true); len(words) != 1 || !strings.Contains(words[0], want) {
+		t.Fatalf("give-up words %q: want %q", words, want)
+	}
+	go readOnce(p.proxy, p.got)
+	test := p.open(call, true)
+	later := p.open("HEADERS stream 3", false)
+	if n, _ := p.tr.scope().State(true); n != 0 {
+		t.Fatalf("a connection given up on: next scope pending %d, want 0", n)
+	}
+	test()
+	// The given-up request answered: a scope that begins now waits for the
+	// request held now.
+	again := p.tr.scope()
+	if n, _ := again.State(true); n != 1 {
+		t.Fatalf("the given-up request answered, a later one held: scope pending %d, want 1", n)
+	}
+	if b, _ := again.Behind(); len(b) != 0 {
+		t.Fatalf("nothing left out: behind %q", b)
+	}
+	later()
+	if n, _ := again.State(true); n != 0 {
+		t.Fatalf("every request it covered answered: scope pending %d, want 0", n)
 	}
 }
 
