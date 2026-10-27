@@ -405,6 +405,7 @@ func statusRank(s models.TestStatus) int {
 func cloneResult(r models.TestResult) models.TestResult {
 	r.FailureInfo.UnmatchedCalls = slices.Clone(r.FailureInfo.UnmatchedCalls)
 	r.FailureInfo.UnconsumedMocks = slices.Clone(r.FailureInfo.UnconsumedMocks)
+	r.FailureInfo.UnusedBackground = slices.Clone(r.FailureInfo.UnusedBackground)
 	r.FailureInfo.Category = slices.Clone(r.FailureInfo.Category)
 	r.FailureInfo.CaptureIncomplete = slices.Clone(r.FailureInfo.CaptureIncomplete)
 	r.TemplateFailures = slices.Clone(r.TemplateFailures)
@@ -643,11 +644,19 @@ func (p *exactPlan) ownersOf() map[string][]string {
 // markConsumedBy names, on each unconsumed test mock of the set's results
 // (FailureInfo.UnconsumedMocks), the first other test that consumed it, if
 // any: the call was made, by a sibling. It returns "test: mock (by sibling)"
-// for each it named.
+// for each it named. A marked background recording the test left unused
+// (FailureInfo.UnusedBackground) is named the same way, and fails nothing,
+// so it is not returned: the call was made, so judging keeps the recording.
 func markConsumedBy(results []models.TestResult, consumers map[string][]string) []string {
 	var pairs []string
 	for i := range results {
 		r := &results[i]
+		for j := range r.FailureInfo.UnusedBackground {
+			u := &r.FailureInfo.UnusedBackground[j]
+			if k := slices.IndexFunc(consumers[u.Name], func(by string) bool { return by != r.TestCaseID }); k >= 0 {
+				u.ConsumedBy = consumers[u.Name][k]
+			}
+		}
 		for j := range r.FailureInfo.UnconsumedMocks {
 			u := &r.FailureInfo.UnconsumedMocks[j]
 			for _, by := range consumers[u.Name] {
