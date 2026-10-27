@@ -285,6 +285,10 @@ type exactState struct {
 	// recordings the trees do not hold (SetRecordingTimes): nil until the
 	// agent set one.
 	times atomic.Pointer[recordingTimes]
+	// unrequired are the recordings of the staged set that a test is served
+	// in its window but never required to make (SetUnrequired), with why:
+	// nil until a replay sent them, which requires every test mock.
+	unrequired atomic.Pointer[map[string]string]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -1571,7 +1575,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 		prev.closed = true
 		// Closed, its outcome is final: no consume reaches it any more.
 		if prev.test != "" && m.exact.last.Load() == prev {
-			m.exact.ended.Store(prev.outcomeLocked())
+			m.exact.ended.Store(prev.outcomeLocked(m.unrequiredNames()))
 			m.exact.last.Store(nil)
 		}
 		prev.mu.Unlock()
@@ -1651,27 +1655,44 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	if m.exactView() == nil {
 		return "", nil, nil, false
 	}
-	var o *testOutcome
-	if v := m.exact.last.Load(); v != nil {
-		v.mu.Lock()
-		o = v.outcomeLocked()
-		v.mu.Unlock()
-	} else if o = m.exact.ended.Load(); o == nil {
+	o := m.latestOutcome()
+	if o == nil {
 		return "", nil, nil, true
 	}
 	return o.test, append([]string(nil), o.consumed...), append([]string(nil), o.unconsumed...), true
 }
 
-// testOutcome is a test view's outcome, by name (ExactTestOutcome).
+// latestOutcome is the outcome of the latest test opened: read from its view
+// while that view is in force, else as kept when another replaced it (ended);
+// nil when no test has been opened.
+func (m *MockManager) latestOutcome() *testOutcome {
+	v := m.exact.last.Load()
+	if v == nil {
+		return m.exact.ended.Load()
+	}
+	unrequired := m.unrequiredNames()
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.outcomeLocked(unrequired)
+}
+
+// testOutcome is a test view's outcome, by name (ExactTestOutcome,
+// ExactTestUnusedBackground).
 type testOutcome struct {
 	test                 string
 	consumed, unconsumed []string
+	// unusedBackground is those of its own recordings judging marked as the
+	// application's background work that have not answered, in recorded
+	// order: no unconsumed one.
+	unusedBackground []string
 }
 
 // outcomeLocked is v's outcome, v.mu held: which of its test mocks have
 // answered (in the order they did) and which have not (in recorded order).
-// Only the test's own: a shared recording is never required of it.
-func (v *exactView) outcomeLocked() *testOutcome {
+// Only the test's own: a shared recording is never required of it, nor one
+// judging marked as the application's background work (unrequired, as
+// SetUnrequired installed them).
+func (v *exactView) outcomeLocked(unrequired map[string]string) *testOutcome {
 	o := &testOutcome{test: v.test}
 	for _, i := range v.order {
 		if !v.isCand(i) {
@@ -1680,6 +1701,10 @@ func (v *exactView) outcomeLocked() *testOutcome {
 	}
 	for i, done := range v.consumed {
 		if !done && !v.isCand(i) {
+			if _, bg := unrequired[v.owned[i].Name]; bg {
+				o.unusedBackground = append(o.unusedBackground, v.owned[i].Name)
+				continue
+			}
 			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
 	}
