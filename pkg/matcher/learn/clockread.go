@@ -289,9 +289,11 @@ func textClockRead(rec, live string) *models.ClockOffset {
 // Java's Instant, a Python float) writes ".495123" where its read fell on a
 // whole microsecond, so one value that happens to end in zeros must not
 // coarsen it. Two values of a layout that fixes its resolution share it.
-// Where the two are both whole multiples of a unit above the finer, the
-// coarsest such unit (readRes): a cut every replay reads by its own value
-// (CheckClockRead), in either value's form.
+// Where the two are both whole multiples of a step above the finer (a unit,
+// or a decimal step between units: models.CutOf), the coarsest such step
+// (readRes): a cut of a millisecond or finer a replay reads by its own value
+// (CheckClockRead), in either value's form; a coarser one the learn step
+// refuses (textCutWhy).
 func textReadRes(rres, lres, grain time.Duration) time.Duration {
 	return readRes(min(rres, lres), grain)
 }
@@ -687,8 +689,10 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // (epoch seconds, a time to the second), and a value written finer than it
 // shows a coarser cut only where it falls on one: a writer that drops
 // trailing zeros, whose two learned values both fell on a whole second
-// (about one recording in a million at a millisecond's encoding, fewer at a
-// finer one), then has one replay in a thousand refused. An offset's Res is
+// (only where F's read moved about half a second or more against the
+// recording's, FullRoundLead, and then about one recording in a million at
+// a millisecond's encoding, fewer at a finer one), then has one replay in a
+// thousand refused. An offset's Res is
 // never a cut (the learn step refuses one), and a value against one is
 // refused as before.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they

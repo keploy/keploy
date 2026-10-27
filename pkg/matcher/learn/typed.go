@@ -781,11 +781,21 @@ func readRes(enc, grain time.Duration) time.Duration {
 // could stand a whole cut stale. So the recording is refused, whatever value
 // a replay would carry: the same verdict at every replay, the confirming
 // round's first, never one that flips. Two values of a writer that does not
-// cut fall on such a cut by chance (both on a whole minute, one recording in
-// 3,600 at a second's encoding; on a whole second, one in a hundred of a
-// writer of one fraction digit, about one in a million of one of
-// milliseconds), and are refused the same: a false red, which recording the
-// test again clears.
+// cut fall on such a cut by chance, and are refused the same: a false red,
+// which recording the test again clears. FullRoundLead keeps a fast call's
+// two values off every such step: F's read within 5 ms of the recording's
+// against its call, less r, the resolution the values carry (the clock's or
+// the writer's, the coarser: 4 ms on a clock of milliseconds, 4.99 ms for
+// five fraction digits). Where F's read moved further, over a spread a
+// whole number of steps wide (or many steps), each value falls on it in one
+// recording in step/r and both in the square of that: on a clock of milliseconds, five to
+// nine fraction digits, epoch micro- or nanoseconds and a typed microsecond
+// in one recording in a hundred (a whole 10 ms); four digits, and a writer
+// of two digits, in one in 10,000 (a whole 100 ms, a whole second); three
+// digits and a typed millisecond (a BSON date) in one in a million (a whole
+// second); a writer of tenths in one in a hundred (a whole second); a writer
+// of seconds in one in 3,600 (a whole minute). Measured counts, F's read
+// spread over 10 ms up to two minutes, agree.
 func cutWhy(res, enc time.Duration) string {
 	if res <= enc || res <= time.Millisecond {
 		return ""

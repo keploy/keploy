@@ -13,8 +13,27 @@ import (
 
 // FullRoundLead is how far past each recorded instant record's full round F
 // runs every test (design v14 §3.4): second- and minute-resolution values the
-// app reads from its clock drift there, by this much, and are learned.
-const FullRoundLead = 61500 * time.Millisecond
+// app reads from its clock drift there, by this much, and are learned. It
+// moves a value's minute, second and millisecond, and it is a whole number of
+// no step a cut is read at above a millisecond (models.CutOf): 5 ms past a
+// whole 10 ms, 45 ms past a whole 100 ms, 545 ms past a whole second, 1.545 s
+// past a whole minute. Let r be the resolution a field's values carry: the
+// clock's or the writer's, the coarser. Two values of a writer that does not
+// cut both fall on a step only where F's read moved, against the
+// recording's and its call, by more than: 5 ms less r either way (a whole
+// 10 ms); 45 ms back or 55 ms on, less r (100 ms); 455 ms on or 545 ms back,
+// less r (a second: 355 ms on or 445 ms back for a writer of tenths);
+// 1.545 s back or 58.455 s on, less r (a minute: 545 ms back for a writer
+// of seconds). So the learn step, which refuses a cut coarser than a millisecond both values
+// show (cutWhy), never refuses the pair of a fast call by chance: one whose
+// read in F lies within 5 ms less r of the recording's (4 ms on a clock of
+// milliseconds, 4.99 ms for five fraction digits, 4.999 ms for six or on a
+// clock of microseconds; a writer of 10 ms or coarser has no step nearer
+// than 355 ms). A lead that is a whole number of a step (61.5 s, of 10 and
+// 100 ms) kept a millisecond clock's value on a whole 10 ms on one in F:
+// one recording in twelve with F's read within 0.3 ms of the recording's,
+// one in 80 within 4 ms.
+const FullRoundLead = 61545 * time.Millisecond
 
 // clockSet is what of a drifted value (recorded, live) is a clock read that
 // moved by FullRoundLead: the ASCII words of such reads, recorded (rec) and

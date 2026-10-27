@@ -417,6 +417,8 @@ func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
 		{"a window that ends before it starts", from.Add(5 * ms), ms, o, to, from, false},
 		{"a cut to the second at a millisecond's encoding", from.Truncate(time.Second), ms, ClockOffset{Res: time.Second}, from.Add(-600 * ms), to, false},
 		{"a millisecond's Res at a nanosecond's replay", from.Add(5 * ms), time.Nanosecond, o, from, to, false},
+		{"a Res of a tenth (learned at an encoding of tenths) at a millisecond's replay", from.Add(5 * ms), ms, ClockOffset{Res: 100 * ms}, from, to, false},
+		{"a Res of 10 ms at a millisecond's replay", from.Add(5 * ms), ms, ClockOffset{Res: 10 * ms}, from, to, false},
 		{"a wall clock of no zone read in the application's zone", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneApp}, from, to, true},
 		{"a wall clock of no zone read in UTC", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneUTC}, from, to, true},
 		{"two learnings in different zones", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneApart}, from, to, false},

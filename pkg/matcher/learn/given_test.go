@@ -111,8 +111,16 @@ func TestAPickFromTheTestRequestIsRefused(t *testing.T) {
 		// Without the request, nothing earlier holds it: noise (what the
 		// learn step did before it read the request), and of a whole
 		// instant, with no call window, a read of the clock a replay checks.
-		if ln := ClassifyIn(clockedDrifts(), []string{p}, live, rec, at, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
-			t.Errorf("%q -> %q, no test case's request: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", f[0], f[1], ln.Kind, ln.Read, ln.Why)
+		// Written to the second, the pair is taken off the whole minute
+		// (:07), where the learn step would refuse it as a cut (cutWhy).
+		off := func(v string) Shape {
+			if strings.HasSuffix(v, ":00Z") {
+				v = strings.TrimSuffix(v, ":00Z") + ":07Z"
+			}
+			return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+		}
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, off(f[1]), off(f[0]), at, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) || ln.Kind == KindUnaccounted {
+			t.Errorf("%q -> %q (off the whole minute), no test case's request: %s Read=%+v (%s); want noise, and of a whole instant a read of the clock", f[0], f[1], ln.Kind, ln.Read, ln.Why)
 		}
 		for _, slots := range [][]string{{"11:13", "11:14", "11:15", "11:16"}, {"2026-10-22T11:14:00Z", "2026-10-22T11:15:00Z"}, {"2026-10-22 11:14", "2026-10-22 11:15"}} {
 			given := []Earlier{GivenRequest(slotRequest(slots...))}
