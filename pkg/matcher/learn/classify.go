@@ -1260,7 +1260,20 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		}
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
-		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
+		//
+		// One instant whole that names its moment, made before its call's
+		// window (in keploy test the lead shows a read made no later than
+		// its call in a cutoff made minutes before its window, createdAt >=
+		// now - 2m), is tried as an offset below zero first, as
+		// classifyInstant tries a typed one: where its window shows it
+		// before every read in it in both runs at one offset, and the
+		// offset rule learns it (textClockOffset), that offset, checked at
+		// every replay in its call's span; only otherwise the plain read,
+		// as before. A value its window holds shows no offset.
+		if v := dc.ofIn(r.Value, l.Value, w, at); ln.Kind == KindNoise && v.clock.whole {
+			if off, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+				return off
+			}
 			ln.Read = textClockReadIn(r.Value, l.Value, dc.zone)
 			if ln.Read == nil {
 				ln.Read = dc.textTodRead(r.Value, l.Value, w, at)

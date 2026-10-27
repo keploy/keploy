@@ -231,7 +231,8 @@ func TestAClientTestsClockLessAnOffsetIsRefusedWhereNoOneOffsetReads(t *testing.
 }
 
 // keploy test learns an offset below zero as keploy mock's client tests do
-// where the lead does not read it as a plain read made before its call:
+// where the lead does not move it too (one it moves:
+// TestAKeployTestTriesAValueBeforeItsWindowAsAnOffsetBelowZeroFirst):
 // record's full round made its call five seconds later past the lead than
 // the recording, so a typed cutoff two minutes before its call's window in
 // both runs moved by the lead and those five seconds, and is learned as that
@@ -267,6 +268,99 @@ func TestAKeployTestsClockLessAnOffsetIsLearnedAndAnEarlierReadKeepsItsReason(t 
 	} {
 		if ln := c.classify(p, tc.rec.Truncate(ms), tc.live.Truncate(ms), ms, c.w.ComparesOffsets()); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != instantNotClock {
 			t.Errorf("%s: %s %+v (%s); want refused: %s", tc.name, ln.Kind, ln.Offset, ln.Why, instantNotClock)
+		}
+	}
+}
+
+// keploy test tries a value made before its call's window as an offset below
+// zero first, and only then as a plain read: a cutoff two minutes before its
+// call's window in both runs (createdAt $gte now - 2m), which moved by the
+// lead record's full round runs ahead of the recording, as a read made no
+// later than its call would, is learned as that offset, as its protocol
+// types it (a $date) and as recorded (its millisecond text), and every
+// replay checks it in its call's span: a read in the replay's window less
+// two minutes holds; one less one or three minutes, or a plain read, fails.
+// Where the offset rule refuses it (a read two seconds before the window,
+// an offset that reads in seconds; a replay that compares no offset; the
+// call's answer holding it), keploy test learns it as before: a plain read
+// of the clock, or the answer's echo.
+func TestAKeployTestTriesAValueBeforeItsWindowAsAnOffsetBelowZeroFirst(t *testing.T) {
+	const p = "body.filter.createdAt.$gte"
+	c := newClockOffsetCall()
+	ms, min2 := time.Millisecond, 2*time.Minute
+	text := func(rec, live time.Time, w *Window, resp ...Leaf) Learned {
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: millisText(p, live)}}, Shape{Leaves: map[string]Leaf{p: millisText(p, rec)}}, c.call, nil, nil, resp, w)[0]
+	}
+	rec, live := c.read.Add(-min2).Truncate(ms), c.fread.Add(-min2).Truncate(ms)
+	if !leadMoved(rec, live, ms, ms, false) {
+		t.Fatalf("the cutoff %s, then %s, did not move by the lead", rec, live)
+	}
+	want := models.ClockOffset{Min: -min2 - 40*ms, Max: -min2 + 11*ms, Res: ms, Layout: models.LayoutTyped}
+	ln := c.classify(p, rec, live, ms, c.w.ComparesOffsets())
+	if ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want || ln.Read != nil || ln.Why != clockOffsetEvidence(p, want) {
+		t.Fatalf("a $date: %s %+v %+v (%s); want the offset %+v", ln.Kind, ln.Offset, ln.Read, ln.Why, want)
+	}
+	o, ok := ln.Clock()
+	if !ok {
+		t.Fatalf("%s (%s): no clock to check", ln.Kind, ln.Why)
+	}
+	call := c.call.Add(48 * time.Hour)
+	s := Span{From: call.Add(-30 * ms), To: call}
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		ok   bool
+	}{
+		{"read in the window, less 2m", call.Add(-10 * ms).Add(-min2), true},
+		{"less 1m", call.Add(-10 * ms).Add(-time.Minute), false},
+		{"less 3m", call.Add(-10 * ms).Add(-3 * time.Minute), false},
+		{"a plain read", call.Add(-10 * ms), false},
+	} {
+		if got, why := CheckClockRead(p, o, InstantLeaf(p, p, tc.at.Truncate(ms), ms), s, true); got != tc.ok {
+			t.Errorf("a $date %s: %v (%s); want %v", tc.name, got, why, tc.ok)
+		}
+	}
+	millis := models.ClockOffset{Min: -min2 - 40*ms, Max: -min2 + 11*ms, Res: ms, Layout: "epoch-ms"}
+	if ln := text(c.read.Add(-min2), c.fread.Add(-min2), c.w.ComparesOffsets()); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != millis || ln.Read != nil || ln.Why != clockOffsetEvidence(p, millis) {
+		t.Errorf("its millisecond text: %s %+v %+v (%s); want the offset %+v", ln.Kind, ln.Offset, ln.Read, ln.Why, millis)
+	}
+
+	answer := func(at time.Time) Leaf {
+		return millisText("body.cursor.firstBatch[].createdAt", at)
+	}
+	for _, tc := range []struct {
+		name      string
+		rec, live time.Time
+		w         *Window
+		resp      []Leaf
+		kind      Kind
+	}{
+		{"a read two seconds before the window", c.read.Add(-2 * time.Second), c.fread.Add(-2 * time.Second), c.w.ComparesOffsets(), nil, KindClockRead},
+		{"no replay compares an offset", c.read.Add(-min2), c.fread.Add(-min2), c.w, nil, KindClockRead},
+		{"the call's answer holds it", c.read.Add(-min2), c.fread.Add(-min2), c.w.ComparesOffsets(), []Leaf{answer(c.read.Add(-min2))}, KindEcho},
+	} {
+		r, l := tc.rec.Truncate(ms), tc.live.Truncate(ms)
+		if !leadMoved(r, l, ms, ms, false) {
+			t.Fatalf("%s: %s, then %s, did not move by the lead", tc.name, r, l)
+		}
+		var typedResp []Leaf
+		for _, a := range tc.resp {
+			typedResp = append(typedResp, InstantLeaf(a.Path, a.Path, r, ms))
+		}
+		for _, got := range []struct {
+			form string
+			ln   Learned
+		}{
+			{"a $date", c.classify(p, r, l, ms, tc.w, typedResp...)},
+			{"its millisecond text", text(tc.rec, tc.live, tc.w, tc.resp...)},
+		} {
+			ln := got.ln
+			switch {
+			case ln.Kind != tc.kind || ln.Offset != nil:
+				t.Errorf("%s, %s: %s %+v (%s); want %s as before", tc.name, got.form, ln.Kind, ln.Offset, ln.Why, tc.kind)
+			case tc.kind == KindClockRead && (ln.Read == nil || !ln.Read.Plain()):
+				t.Errorf("%s, %s: read %+v; want a plain read", tc.name, got.form, ln.Read)
+			}
 		}
 	}
 }
