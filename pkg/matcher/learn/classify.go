@@ -2650,6 +2650,21 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		}
 	}
 	keep := dc.stampsEchoed(v, served, raw)
+	// What a payload must hold for the search to find a value in it
+	// (mayHold): each value's runs of letters and digits. A payload whose
+	// words (searchWords, read once for the set) hold no searched value's
+	// runs is not read: the search finds nothing there.
+	runs := make([][]string, len(searched))
+	for i, w := range searched {
+		runs[i] = wordsBy(w, isWord)
+	}
+	var wholeRuns, decRuns []string
+	if v.clock.whole {
+		wholeRuns = wordsBy(recorded, isWord)
+		if v.decoded {
+			decRuns = wordsBy(v.decRec, isWord)
+		}
+	}
 	for _, x := range raw {
 		if !x.earlierThan(at) {
 			continue
@@ -2659,6 +2674,15 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			from.AtCall, from.noTime, from.unserved = atCall, x.noTime, !x.served
 			from.startUp = x.swapHolds(x.text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
 			return from, true
+		}
+		if words, ok := dc.searchWords(x, keep); ok {
+			may := v.clock.whole && (mayHold(words, wholeRuns) || v.decoded && mayHold(words, decRuns))
+			for i := 0; i < len(runs) && !may; i++ {
+				may = mayHold(words, runs[i])
+			}
+			if !may {
+				continue
+			}
 		}
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
@@ -2745,9 +2769,21 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 // echoRaw is the place of payload x that holds the recorded moment of one of
 // echoed (echoServed): the field that does, in every form (a token's
 // base64 or URL-encoded text), else the payload, in every form.
-// ok is false when x holds none.
+// ok is false when x holds none. The instants it reads of x are read once
+// for the set where dc keeps x's (fieldMoments, payloadMoments).
 func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 	if len(echoed) == 0 {
+		return Place{}, false
+	}
+	if fields, ok := dc.fieldMoments(x); ok {
+		for i, f := range x.fields {
+			if !f.key && holdsRecordedIn(fields[i], echoed) {
+				return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
+			}
+		}
+		if holdsRecordedIn(dc.payloadMoments(x), echoed) {
+			return Place{Mock: x.mock, Echo: true}, true
+		}
 		return Place{}, false
 	}
 	for _, f := range x.fields {
