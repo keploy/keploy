@@ -14,9 +14,9 @@ import (
 )
 
 // The tests in this file cover a command matched while no test window is
-// active: between tests, and under exact serving, whose store reports none. A
-// COM_QUERY or COM_STMT_EXECUTE then reads, of the session tier, only the
-// mocks preparedIndex files under its statement.
+// active: under exact serving, whose store reports none, and in keploy test
+// before a set's first test. A COM_QUERY or COM_STMT_EXECUTE then reads, of
+// the session tier, only the mocks preparedIndex files under its statement.
 
 // keyedSetText is the text query of mock i of keyedSet: a key read of one of
 // 500 rows.
@@ -159,37 +159,52 @@ func TestExactServingServesWhatTheFullScanServes(t *testing.T) {
 	}
 }
 
-// TestNoWindowCommandReadsOnlyItsStatement counts the candidates a command
+// TestNoWindowCommandReadsOnlyItsStatement bounds the candidates a command
 // visits with no test window active: a COM_QUERY the first mock of its
-// statement, a COM_STMT_EXECUTE the mocks of its own statement. The full scan
-// visited the whole set for each EXECUTE, and for a COM_QUERY every mock
-// recorded before its statement's first.
+// statement, a COM_STMT_EXECUTE at most the mocks of its own statement (fewer
+// where the scan stops at the command's own recording). The full scan visited
+// the whole set for each EXECUTE, and for a COM_QUERY every mock recorded
+// before its statement's first.
+//
+// The EXECUTE is settled by its statement's candidates whether they hold a
+// FIFO one (the statement recorded with other parameters) or only definitive
+// ones (every recording of the statement made with the live parameters, as
+// when all its calls bind the same values, or one recording is left): either
+// outranks every candidate of another statement.
 func TestNoWindowCommandReadsOnlyItsStatement(t *testing.T) {
 	const n = 1000
 	pool := keyedSet(n, models.LifetimePerTest)
+	// sameParams is pool with every EXECUTE of diffQueryB bound to "k1".
+	sameParams := append([]*models.Mock(nil), pool...)
 	ofB := 0
 	for i := range pool {
-		if i%4 == 3 {
-			ofB++
+		if i%4 != 3 {
+			continue
 		}
+		ofB++
+		req := executeReq(8, "k1")
+		req.PacketBundle.SetStoredQuery(strings.ToLower(diffQueryB))
+		sameParams[i] = diffMock(pool[i].Name, "c1", []mysql.Request{req}, diffBase.Add(time.Duration(i)*time.Millisecond), models.LifetimePerTest, "mocks")
 	}
 	for _, tc := range []struct {
 		name string
+		pool []*models.Mock
 		req  mysql.Request
-		want int
+		max  int
 	}{
 		// The last text query whose statement the set records once.
-		{"COM_QUERY", queryReq(keyedSetText(n - 3)), 1},
-		{"COM_STMT_EXECUTE", executeReq(8, fmt.Sprintf("k%d", (n-1)%500)), ofB},
+		{"COM_QUERY", pool, queryReq(keyedSetText(n - 3)), 1},
+		{"COM_STMT_EXECUTE", pool, executeReq(8, fmt.Sprintf("k%d", (n-1)%500)), ofB},
+		{"COM_STMT_EXECUTE, every candidate of its parameters", sameParams, executeReq(8, "k1"), ofB},
 	} {
-		s := newDiffSide(pool)
+		s := newDiffSide(tc.pool)
 		s.stageNoWindow()
 		resp, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), tc.req, s.mm, s.dctx, nil, false)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("%s: ok=%v err=%v", tc.name, ok, err)
 		}
-		if examined != tc.want {
-			t.Errorf("%s: visited %d candidates of %d, want %d", tc.name, examined, n, tc.want)
+		if examined < 1 || examined > tc.max {
+			t.Errorf("%s: visited %d candidates of %d, want 1 to %d", tc.name, examined, n, tc.max)
 		}
 		s.mm.Close()
 	}
