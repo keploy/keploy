@@ -61,7 +61,7 @@ func (h *HTTP) mainSchemaMatch(ctx context.Context, input *req, unfilteredMocks 
 		}
 
 		if !h.mainMatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
-			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
+			h.Logger.Debug("The url path of mock and request aren't the same", zap.String("mock name", mock.Name), zap.String("input path", input.url.Path))
 			continue
 		}
 
@@ -78,8 +78,8 @@ func (h *HTTP) mainSchemaMatch(ctx context.Context, input *req, unfilteredMocks 
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
 			h.Logger.Debug("headers missing required keys for mock name",
 				zap.String("mock name", mock.Name),
-				zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
-				zap.Any("input header", input.header))
+				zap.Strings("expected header keys", headerNames(mock.Spec.HTTPReq.Header)),
+				zap.Strings("input header keys", headerNames(input.header)))
 			continue
 		}
 
@@ -362,7 +362,7 @@ func recordedHTTPSets(t *testing.T, dir string) map[string][]*models.Mock {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		dec := yamlLib.NewDecoder(f)
 		var docs []*yaml.NetworkTrafficDoc
 		for {

@@ -352,8 +352,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
+			// The recording matched is named, not dumped: its credentials and
+			// body are the application's content too, and the test set holds it.
 			if ce := h.Logger.Check(zap.DebugLevel, "after matching the http request"); ce != nil {
-				ce.Write(zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
+				ce.Write(zap.Bool("isMatched", ok), zap.String("mock name", mockNameOf(stub)), zap.Error(err))
 			}
 
 			if !ok {
@@ -523,8 +525,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			if debugOn(h.Logger) {
-				h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", string(respBytes)))
+			if ce := h.Logger.Check(zap.DebugLevel, "Mock Response sending back to client"); ce != nil {
+				ce.Write(zap.String("mock name", stub.Name), zap.Int("status", stub.Spec.HTTPResp.StatusCode),
+					zap.Int("answer bytes", len(respBytes)))
 			}
 
 			_, err = clientConn.Write(respBytes)
@@ -540,8 +543,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
-				if debugOn(h.Logger) {
-					h.Logger.Debug("This was the last response from the server:\n" + string(respBytes))
+				if ce := h.Logger.Check(zap.DebugLevel, "This was the last response from the server"); ce != nil {
+					ce.Write(zap.Int("answer bytes", len(respBytes)))
 				}
 				errCh <- nil
 				return
@@ -806,12 +809,21 @@ func sameNoiseConfig(a, b map[string]map[string][]string) bool {
 	return true
 }
 
-// headerNames are h's header names, sorted, without their values.
-func headerNames(h http.Header) []string {
+// headerNames are h's header names, sorted, without their values: a live
+// request's (http.Header) or a recording's.
+func headerNames[V any](h map[string]V) []string {
 	names := make([]string, 0, len(h))
 	for k := range h {
 		names = append(names, k)
 	}
 	sort.Strings(names)
 	return names
+}
+
+// mockNameOf is m's name, or "" for no mock.
+func mockNameOf(m *models.Mock) string {
+	if m == nil {
+		return ""
+	}
+	return m.Name
 }

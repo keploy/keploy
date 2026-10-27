@@ -140,56 +140,200 @@ func TestRequestNoiseForBuildsOncePerOptionsValue(t *testing.T) {
 	}
 }
 
-// With debug on, the request a call came with is logged by its shape only:
-// its method, its path without the query, its header names and its body's
-// length. Its credentials, cookies, query and body are customer content and
-// none of their values is logged. Main logged the complete request, its
-// headers and its body.
+// With debug on, no entry of a call replay serves, passes through or fails
+// to read carries a value of the request or of a recording: credentials,
+// cookies, query values, bodies and answers are the application's content,
+// and debug logs get pasted into issues. (A missed call's report names the
+// values it differs in, on purpose.) The request is logged by its method, its path, its header names
+// and its body's length; a recording by its name, path and header names; an
+// answer by its status and length; GetReqMeta, in debug and error entries
+// alike, by the method, host, path and query keys. Main logged the complete
+// request, its headers and body, a skipped recording's headers beside the
+// request's, the recording matched and the answer sent. Each scenario checks
+// every entry, as the agent's JSON log writes it, for every value of the
+// request and of each recording in its pool:
+//   - one recording, the request's own;
+//   - three: one recorded with one more header and other credentials, one on
+//     another path, and the request's (its header-key and path checks skip
+//     the first two);
+//   - a passthrough destination;
+//   - a call whose body does not decode (an error entry).
+//
+// Values are searched as plain text: a field that encodes one (base64, say)
+// is not found.
 func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
-	secrets := []string{"Bearer au7h-v4lue", "s1d=c00k1e-v4lue", "q-t0ken-v4lue", "b0dy-v4lue"}
-	body := `{"note":"` + secrets[3] + `"}`
-	req := "POST /u?token=" + secrets[2] + " HTTP/1.1\r\nHost: api.example\r\nAuthorization: " + secrets[0] +
-		"\r\nCookie: " + secrets[1] + "\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
-	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"
-	core, logs := observer.New(zapcore.DebugLevel)
-	h := &HTTP{Logger: zap.New(core)}
-	db := serveHTTPMock(t, h, req, resp)
-	app, proxy := tcpPair(t)
-	runDecode(t, proxy, func(ctx context.Context) error {
-		return h.decodeHTTP(ctx, []byte(req), proxy, nil, db, models.OutgoingOptions{})
+	answer := func(tag string) string {
+		body := tag + "-an5wer"
+		return "HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
+	}
+	start := func(t *testing.T, req string, db *mockMemDb, opts models.OutgoingOptions, h *HTTP) (*bufio.Reader, func() error) {
+		app, proxy := tcpPair(t)
+		done := runDecode(t, proxy, func(ctx context.Context) error {
+			return h.decodeHTTP(ctx, []byte(req), proxy, nil, db, opts)
+		})
+		// ended closes the application's side and waits for decodeHTTP to
+		// return, so every entry the connection logs is in.
+		ended := func() error {
+			_ = app.Close()
+			return <-done
+		}
+		return bufio.NewReader(app), ended
+	}
+	reqMeta := func(path string) map[string]interface{} {
+		return map[string]interface{}{"method": "POST", "host": "api.example", "path": path, "query keys": "token"}
+	}
+	metadataOf := func(e observer.LoggedEntry) interface{} {
+		m, _ := e.ContextMap()["metadata"].(map[string]string)
+		got := map[string]interface{}{}
+		for k, v := range m {
+			got[k] = v
+		}
+		return got
+	}
+
+	t.Run("one recording", func(t *testing.T) {
+		req := shapeCall("/u", "live", "")
+		core, logs := observer.New(zapcore.DebugLevel)
+		h := &HTTP{Logger: zap.New(core)}
+		db := serveHTTPMock(t, h, req, answer("live"))
+		db.mocks[0].Name = "mock-live"
+		logs.TakeAll()
+		app, ended := start(t, req, db, models.OutgoingOptions{}, h)
+		if got := readServed(t, app); got != "live-an5wer" {
+			t.Fatalf("served %q, want the mock's answer", got)
+		}
+		if err := ended(); err != nil {
+			t.Fatalf("decodeHTTP = %v", err)
+		}
+		bodyLen := int64(len(shapeBody("live")))
+		wantOnce(t, logs, "decodeHTTP debug logs for input", map[string]interface{}{
+			"method":       "POST",
+			"path":         "/u",
+			"header names": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
+			"body bytes":   bodyLen,
+		})
+		wantOnce(t, logs, "after matching the http request", map[string]interface{}{"isMatched": true, "mock name": "mock-live"})
+		wantOnce(t, logs, "Mock Response sending back to client", map[string]interface{}{
+			"mock name": "mock-live", "status": int64(200), "answer bytes": int64(len(answer("live"))),
+		})
+		wantOnce(t, logs, "This was the last response from the server", map[string]interface{}{"answer bytes": int64(len(answer("live")))})
+		noValueLogged(t, logs, shapeValues("live"))
 	})
-	if got := readServed(t, bufio.NewReader(app)); got != "pong" {
-		t.Fatalf("served %q, want the mock's answer", got)
+
+	t.Run("three recordings", func(t *testing.T) {
+		req := shapeCall("/u", "live", "")
+		core, logs := observer.New(zapcore.DebugLevel)
+		h := &HTTP{Logger: zap.New(core)}
+		build := func(name, r, resp string) *models.Mock {
+			m := serveHTTPMock(t, h, r, resp).mocks[0]
+			m.Name = name
+			return m
+		}
+		db := &mockMemDb{mocks: []*models.Mock{
+			build("mock-header", shapeCall("/u", "rec2", "X-Api-Version: 2\r\n"), answer("rec2")),
+			build("mock-path", shapeCall("/v", "rec3", ""), answer("rec3")),
+			build("mock-live", req, answer("live")),
+		}, updateUnFilteredReturn: true, deleteFilteredReturn: true}
+		logs.TakeAll()
+		app, ended := start(t, req, db, models.OutgoingOptions{}, h)
+		if got := readServed(t, app); got != "live-an5wer" {
+			t.Fatalf("served %q, want the matching recording's answer", got)
+		}
+		if err := ended(); err != nil {
+			t.Fatalf("decodeHTTP = %v", err)
+		}
+		wantOnce(t, logs, "headers missing required keys for mock name", map[string]interface{}{
+			"mock name":            "mock-header",
+			"expected header keys": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host", "X-Api-Version"},
+			"input header keys":    []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
+		})
+		wantOnce(t, logs, "The url path of mock and request aren't the same", map[string]interface{}{
+			"mock name": "mock-path", "input path": "/u", "mock path": "/v",
+		})
+		wantOnce(t, logs, "after matching the http request", map[string]interface{}{"isMatched": true, "mock name": "mock-live"})
+		noValueLogged(t, logs, append(append(shapeValues("live"), shapeValues("rec2")...), shapeValues("rec3")...))
+	})
+
+	t.Run("a passthrough destination", func(t *testing.T) {
+		req := shapeCall("/u", "live", "")
+		core, logs := observer.New(zapcore.DebugLevel)
+		h := &HTTP{Logger: zap.New(core)}
+		opts := models.OutgoingOptions{PassThroughHosts: []models.PassThroughRule{{Host: "api.example", Mode: models.PassThroughSkip}}}
+		app, ended := start(t, req, &mockMemDb{}, opts, h)
+		if got := readServed(t, app); got != "" {
+			t.Fatalf("served %q, want the synthetic empty 200", got)
+		}
+		if err := ended(); err != nil {
+			t.Fatalf("decodeHTTP = %v", err)
+		}
+		pt := logs.FilterMessage("egress passthrough: serving without mock match").All()
+		if len(pt) != 1 || pt[0].ContextMap()["path"] != "/u" || !reflect.DeepEqual(metadataOf(pt[0]), reqMeta("/u")) {
+			t.Errorf("logged the passthrough as %v, want its path and the request's method, host, path and query keys", pt)
+		}
+		noValueLogged(t, logs, shapeValues("live"))
+	})
+
+	t.Run("a call whose body does not decode", func(t *testing.T) {
+		req := shapeCall("/u", "live", "Content-Encoding: gzip\r\n")
+		core, logs := observer.New(zapcore.DebugLevel)
+		h := &HTTP{Logger: zap.New(core)}
+		_, ended := start(t, req, &mockMemDb{}, models.OutgoingOptions{}, h)
+		if err := ended(); err == nil {
+			t.Fatalf("decodeHTTP = nil, want the body's decode error")
+		}
+		failed := logs.FilterMessage("failed to decode the http request body").All()
+		if len(failed) != 1 || failed[0].Level != zapcore.ErrorLevel || !reflect.DeepEqual(metadataOf(failed[0]), reqMeta("/u")) {
+			t.Errorf("logged the failure as %v, want one error entry with the request's method, host, path and query keys", failed)
+		}
+		noValueLogged(t, logs, shapeValues("live"))
+	})
+}
+
+// shapeBody is the body of shapeCall(_, tag, _).
+func shapeBody(tag string) string { return `{"note":"` + tag + `-b0dy"}` }
+
+// shapeCall is a POST to path?token=… on api.example carrying an
+// Authorization header, a cookie, a query token and a body, each of them a
+// value of tag's (shapeValues), and the extra header lines.
+func shapeCall(path, tag, extra string) string {
+	body := shapeBody(tag)
+	return "POST " + path + "?token=" + tag + "-q-t0ken HTTP/1.1\r\nHost: api.example\r\nAuthorization: Bearer " + tag +
+		"-au7h\r\nCookie: s1d=" + tag + "-c00k1e\r\n" + extra + "Content-Type: application/json\r\nContent-Length: " +
+		strconv.Itoa(len(body)) + "\r\n\r\n" + body
+}
+
+// shapeValues are the values shapeCall(_, tag, _) carries, and the answer
+// body of tag's recording.
+func shapeValues(tag string) []string {
+	return []string{tag + "-au7h", tag + "-c00k1e", tag + "-q-t0ken", tag + "-b0dy", tag + "-an5wer"}
+}
+
+// wantOnce fails t unless logs holds one entry msg, with fields want.
+func wantOnce(t *testing.T, logs *observer.ObservedLogs, msg string, want map[string]interface{}) {
+	t.Helper()
+	got := logs.FilterMessage(msg).All()
+	if len(got) != 1 {
+		t.Errorf("logged %q %d times, want once", msg, len(got))
+		return
 	}
-	input := logs.FilterMessage("decodeHTTP debug logs for input").All()
-	if len(input) != 1 {
-		t.Fatalf("logged the request %d times, want once", len(input))
+	if fields := got[0].ContextMap(); !reflect.DeepEqual(fields, want) {
+		t.Errorf("logged %q as %#v, want %#v", msg, fields, want)
 	}
-	want := map[string]interface{}{
-		"method":       "POST",
-		"path":         "/u",
-		"header names": []interface{}{"Authorization", "Content-Length", "Content-Type", "Cookie", "Host"},
-		"body bytes":   int64(len(body)),
-	}
-	if got := input[0].ContextMap(); !reflect.DeepEqual(got, want) {
-		t.Errorf("logged the request as %#v, want %#v", got, want)
-	}
-	// Every entry, as the agent's JSON log writes it. The matched recording
-	// and the answer sent are the recording's content (the test set holds it
-	// as it is), so those two entries are not the request's.
-	recording := map[string]bool{"after matching the http request": true}
+}
+
+// noValueLogged fails t for each entry in logs that, as the agent's JSON log
+// writes it, carries one of values.
+func noValueLogged(t *testing.T, logs *observer.ObservedLogs, values []string) {
+	t.Helper()
 	enc := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
 	for _, e := range logs.All() {
-		if recording[e.Message] || strings.HasPrefix(e.Message, "Mock Response sending back to client:") {
-			continue
-		}
 		buf, err := enc.EncodeEntry(e.Entry, e.Context)
 		if err != nil {
 			t.Fatalf("encode %q: %v", e.Message, err)
 		}
-		for _, v := range secrets {
+		for _, v := range values {
 			if strings.Contains(buf.String(), v) {
-				t.Errorf("the entry %q carries the request's %q", e.Message, v)
+				t.Errorf("the entry %q carries %q", e.Message, v)
 			}
 		}
 		buf.Free()
@@ -215,7 +359,7 @@ func readServed(t *testing.T, r *bufio.Reader) string {
 	if err != nil {
 		t.Fatalf("read the served answer: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var body bytes.Buffer
 	if _, err := body.ReadFrom(resp.Body); err != nil {
 		t.Fatalf("read the served body: %v", err)
@@ -331,7 +475,7 @@ func TestAServedCallBuildsNoDebugEntryWithDebugOff(t *testing.T) {
 }
 
 // With debug on, a served call still logs its debug entries: the request's
-// shape, the noise, the match and the answer sent.
+// shape, the noise, the match and the answer sent (its length).
 func TestAServedCallLogsItsDebugEntriesWithDebugOn(t *testing.T) {
 	const req = "POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nping"
 	const resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong"
@@ -355,8 +499,8 @@ func TestAServedCallLogsItsDebugEntriesWithDebugOn(t *testing.T) {
 			t.Errorf("logged %q %d times, want once", msg, n)
 		}
 	}
-	served := logs.FilterMessageSnippet("Mock Response sending back to client:\n").All()
-	if len(served) != 1 || !strings.HasSuffix(served[0].Message, "\r\n\r\npong") {
-		t.Errorf("logged the answer sent as %v, want it whole", served)
+	served := logs.FilterMessage("Mock Response sending back to client").All()
+	if len(served) != 1 || served[0].ContextMap()["answer bytes"] != int64(len(resp)) {
+		t.Errorf("logged the answer sent as %v, want its length", served)
 	}
 }

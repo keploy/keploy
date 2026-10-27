@@ -1330,7 +1330,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		// URL path match
 		if !h.MatchURLPath(mock.Spec.HTTPReq.URL, input.url.Path, urlNoise, autoDynamic) {
 			if ce := h.Logger.Check(zap.DebugLevel, "The url path of mock and request aren't the same"); ce != nil {
-				ce.Write(zap.String("mock name", mock.Name), zap.Any("input url", input.url.Path), zap.Any("mock url", mock.Spec.HTTPReq.URL))
+				mockPath, _ := recordedURLPath(mock.Spec.HTTPReq.URL)
+				ce.Write(zap.String("mock name", mock.Name), zap.String("input path", input.url.Path), zap.String("mock path", mockPath))
 			}
 			continue
 		}
@@ -1376,8 +1377,8 @@ func (h *HTTP) SchemaMatch(ctx context.Context, input *req, unfilteredMocks []*m
 		if !h.HeadersContainKeys(mock.Spec.HTTPReq.Header, input.header, headerNoise) {
 			if ce := h.Logger.Check(zap.DebugLevel, "headers missing required keys for mock name"); ce != nil {
 				ce.Write(zap.String("mock name", mock.Name),
-					zap.Any("expected header keys", mock.Spec.HTTPReq.Header),
-					zap.Any("input header", input.header))
+					zap.Strings("expected header keys", headerNames(mock.Spec.HTTPReq.Header)),
+					zap.Strings("input header keys", headerNames(input.header)))
 			}
 			continue
 		}
