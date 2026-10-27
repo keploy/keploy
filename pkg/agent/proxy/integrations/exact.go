@@ -97,11 +97,26 @@ type ExactConcurrentReader interface {
 // makes is still settled against the view in force, and refused when the mock
 // may not answer (ConsumeRefused), so the skip saves a refused consume and
 // never decides alone whether a mock answers.
+//
+// A store held to a call (RoundHolder) reports the generation of what it can
+// read: the store's while the staging is still the call's, and
+// RestagedGeneration once it moved, when it reads nothing. So an index a
+// parser built from a held read the staging moved under is never kept for
+// the generation of the set staged after the call, which an unheld read (or
+// a call marked after the staging) finds whole.
 type StagingGenerations interface {
 	StagingGeneration() uint64
 	StagingGenerationByKind(kind models.Kind) uint64
 	MockSpent(name string) bool
 }
+
+// RestagedGeneration is the staging generation (and the revision) a store held
+// to a call (RoundHolder) reports once the staging moved from the call's: it
+// reads nothing then, so the generation names the empty set, the same for
+// every such call. A store's own generations and revisions count up from zero
+// by one per change (a view over a store adds its own small version) and
+// never reach it, so no index of a staged set is keyed on it.
+const RestagedGeneration uint64 = 1 << 63
 
 // StagingGenerationOf returns db's staging generation for kind's reads (every
 // kind's for ""), and false when db keeps none: the parser then keys its index
