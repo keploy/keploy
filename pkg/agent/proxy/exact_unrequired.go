@@ -1,8 +1,6 @@
 package proxy
 
 import (
-	"maps"
-
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -20,32 +18,39 @@ import (
 // on its own (ExactTestUnusedBackground), so judging can say which ones a
 // replay never used and take them out of the recording. A call identical to
 // one that already answered in the window is answered again with it
-// (AnsweredBackground): the job ran more often than at record. A recording
-// with no mark is required as before.
+// (AnsweredBackground): the job ran more often than at record. The marks are
+// per test (models.BackgroundMarks): a recording with no mark on the open
+// test's own entry is required as before, and a second copy of its call is an
+// extra-call miss, whatever another test's entry of the same recording says.
 
-// SetUnrequired installs, for the staged set, the recordings a test is served
-// in its window but never required to make, each with why (judging's
-// models.MockEntry.Background). A replay that sends none installs an empty
-// set, which requires every test mock, as does a session reset.
-func (m *MockManager) SetUnrequired(names map[string]string) {
-	set := maps.Clone(names)
+// SetUnrequired installs, for the staged set, per test, the recordings of its
+// own list it is served in its window but never required to make, each with
+// why (judging's models.MockEntry.Background). A mark is the test's: another
+// test listing the same recording without one must still make it, and its
+// second copy of the call is still an extra-call miss. A replay that sends
+// none installs an empty set, which requires every test mock, as does a
+// session reset.
+func (m *MockManager) SetUnrequired(marks models.BackgroundMarks) {
+	set := marks.Clone()
 	if set == nil {
-		set = map[string]string{}
+		set = models.BackgroundMarks{}
 	}
 	m.exact.unrequired.Store(&set)
 }
 
-// unrequiredNames is what SetUnrequired last installed; nil when nothing was.
-func (m *MockManager) unrequiredNames() map[string]string {
+// unrequiredOf is the marks SetUnrequired last installed on test's own list;
+// nil when it has none or nothing was installed.
+func (m *MockManager) unrequiredOf(test string) map[string]string {
 	if p := m.exact.unrequired.Load(); p != nil {
-		return *p
+		return p.Of(test)
 	}
 	return nil
 }
 
 // ExactTestUnusedBackground is, under exact serving, the latest test opened
 // (as ExactTestOutcome names it) and those of its own recordings marked as
-// the application's background work (SetUnrequired) that have not answered,
+// the application's background work on its own list (SetUnrequired) that have
+// not answered,
 // in recorded order. Read once the test stops being served, it is final. ok
 // is false when exact serving is off.
 func (m *MockManager) ExactTestUnusedBackground() (test string, unused []string, ok bool) {
@@ -68,7 +73,7 @@ func (m *MockManager) AnsweredBackground() []*models.Mock {
 	if v == nil || v.test == "" {
 		return nil
 	}
-	unrequired := m.unrequiredNames()
+	unrequired := m.unrequiredOf(v.test)
 	if len(unrequired) == 0 {
 		return nil
 	}
