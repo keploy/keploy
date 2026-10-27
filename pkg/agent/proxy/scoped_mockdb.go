@@ -604,6 +604,33 @@ func (s *scopedMockDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetPerTestMocksInWindow())
 }
 
+// RangePerTestMocksInWindow forwards the per-test walk of the wrapped store
+// through the same name filter as GetPerTestMocksInWindow. A store without
+// the walk, or a live view (which orders the read by start), is read whole.
+func (s *scopedMockDb) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	r, ok := s.MockMemDb.(integrations.PerTestRanger)
+	if ok && s.passThrough() {
+		return r.RangePerTestMocksInWindow(fn)
+	}
+	if !ok || s.live {
+		all, err := s.GetPerTestMocksInWindow()
+		if err != nil {
+			return err
+		}
+		for _, mk := range all {
+			if !fn(mk) {
+				break
+			}
+		}
+		return nil
+	}
+	v := s.current()
+	gone := s.consumed(v)
+	return r.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+		return !visibleIn(v, mk) || (gone != nil && gone(mk.Name)) || fn(mk)
+	})
+}
+
 func (s *scopedMockDb) GetSessionMocks() ([]*models.Mock, error) {
 	return s.keep(s.MockMemDb.GetSessionMocks())
 }

@@ -191,6 +191,11 @@ type exactView struct {
 	// without the lock.
 	keyedMu sync.Mutex
 	keyed   map[*integrations.MockIndex]map[string][]int
+	// live is, for each kind (every kind for "") and session filter a
+	// per-test read used (unanswered, rangeUnanswered), the positions in
+	// owned it reads, with links forward past the consumed ones
+	// (liveList). Built on the first read of each, under mu.
+	live map[liveKey]*liveList
 	// shown is, for each tree, MockIndex and key a keyed read walked
 	// (rangeShownKeyed), the entries of the tree's split under the key
 	// (keyPart.rest) the view shows, at the tree's generation they were
@@ -1715,7 +1720,8 @@ func (m *MockManager) missMadeInStaging(r *models.MockMismatchReport) bool {
 // unanswered is the view's test mocks that have not answered, of kind (every
 // kind for ""), in recorded order; with sessionOnly, those staged in the
 // session tier. A pool view's are the next test's mocks in flight when it
-// began (ServeExactPool's ahead).
+// began (ServeExactPool's ahead). It walks only the positions not consumed
+// (liveList), so a test's read never walks again the mocks it answered.
 func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.Mock {
 	if len(v.owned) == 0 {
 		return nil
@@ -1723,13 +1729,161 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 	only := len(sessionOnly) > 0 && sessionOnly[0]
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	out := make([]*models.Mock, 0, len(v.owned))
-	for i, mk := range v.owned {
-		if !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) {
+	l := v.liveListLocked(kind, only)
+	var out []*models.Mock
+	visited := 0
+	for j := l.firstLive(0, v.consumed, &visited); j < len(l.at); j = l.firstLive(j+1, v.consumed, &visited) {
+		visited++
+		if i := l.at[j]; !v.takenByOther(i) {
+			out = append(out, v.owned[i])
+		}
+	}
+	unansweredVisited.Add(uint64(visited))
+	if exactViewVerify.Load() {
+		verifyExactRead("the open test's unanswered mocks of kind "+strconv.Quote(string(kind)), v.unansweredWalkLocked(kind, only, 0, len(v.owned)), out)
+	}
+	return out
+}
+
+// rangeUnanswered calls fn with each of unanswered(kind, sessionOnly) in
+// order until fn returns false, and reports whether fn never did. It reads
+// them a few at a time (unansweredChunk) under mu and calls fn without it, so fn may call back
+// into the view (a consume); each later few are read as the view is by then,
+// as successive reads would be. A read that stops at the test's next
+// unanswered mock visits only it: the consumed ones before it are skipped by
+// their links (liveList), not walked.
+func (v *exactView) rangeUnanswered(kind models.Kind, only bool, fn func(*models.Mock) bool) bool {
+	if len(v.owned) == 0 {
+		return true
+	}
+	var buf [unansweredChunk]*models.Mock
+	j, size := 0, 1
+	for {
+		got := buf[:0]
+		visited := 0
+		v.mu.Lock()
+		l := v.liveListLocked(kind, only)
+		from := 0
+		if j < len(l.at) {
+			from = l.at[j]
+		}
+		for len(got) < size {
+			if j = l.firstLive(j, v.consumed, &visited); j >= len(l.at) {
+				break
+			}
+			visited++
+			if i := l.at[j]; !v.takenByOther(i) {
+				got = append(got, v.owned[i])
+			}
+			j++
+		}
+		if exactViewVerify.Load() {
+			// What a walk of these positions gives, in the same hold
+			// of the lock: no consume falls between the two.
+			to := len(v.owned)
+			if j < len(l.at) {
+				to = l.at[j]
+			}
+			verifyExactRead("the open test's unanswered mocks of kind "+strconv.Quote(string(kind))+" read a few at a time", v.unansweredWalkLocked(kind, only, from, to), got)
+		}
+		v.mu.Unlock()
+		unansweredVisited.Add(uint64(visited))
+		for _, mk := range got {
+			if !fn(mk) {
+				return false
+			}
+		}
+		if j >= len(l.at) {
+			return true
+		}
+		size = min(2*size, len(buf))
+	}
+}
+
+// unansweredChunk is the most unanswered mocks rangeUnanswered reads in one
+// hold of the view's lock: it reads one, then twice as many each time, so a
+// read that stops at the first looks at no more, and a whole read takes the
+// lock once per unansweredChunk.
+const unansweredChunk = 64
+
+// unansweredWalkLocked is unanswered's answer for the owned positions in
+// [from, to), by a walk of each: what the verify mode compares the kept
+// read with. Under v.mu.
+func (v *exactView) unansweredWalkLocked(kind models.Kind, only bool, from, to int) []*models.Mock {
+	var out []*models.Mock
+	for i := from; i < to; i++ {
+		if mk := v.owned[i]; !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) {
 			out = append(out, mk)
 		}
 	}
 	return out
+}
+
+// liveKey names one of a view's liveLists: the kind (every kind for "") and
+// whether the session tier's alone.
+type liveKey struct {
+	kind    models.Kind
+	session bool
+}
+
+// liveList is the positions in a view's owned that one per-test read reads
+// (liveKey), in recorded order, each linked forward past consumed ones. A
+// view's consumed only ever turns true, so a link, once set, stays true: a
+// walk skips each run of consumed positions in one step, and shortens the
+// links it followed to where it stopped. A test that answers in recorded
+// order so finds its next unanswered mock without walking the ones before.
+type liveList struct {
+	at []int
+	// skip[j] > j says each of at[j:skip[j]] is consumed; 0 says nothing.
+	skip []int32
+}
+
+// liveListLocked is v's liveList for kind and only, built on its first use.
+// Under v.mu.
+func (v *exactView) liveListLocked(kind models.Kind, only bool) *liveList {
+	k := liveKey{kind: kind, session: only}
+	if l, ok := v.live[k]; ok {
+		return l
+	}
+	l := &liveList{}
+	for i, mk := range v.owned {
+		if (kind == "" || mk.Kind == kind) && (!only || v.session[i]) {
+			l.at = append(l.at, i)
+		}
+	}
+	l.skip = make([]int32, len(l.at))
+	if v.live == nil {
+		v.live = map[liveKey]*liveList{}
+	}
+	v.live[k] = l
+	return l
+}
+
+// firstLive is the first j at or after from whose position consumed does not
+// mark, or len(at); it adds each consumed position it looks at to *visited.
+// Under the view's lock.
+func (l *liveList) firstLive(from int, consumed []bool, visited *int) int {
+	r := from
+	for r < len(l.at) && consumed[l.at[r]] {
+		*visited++
+		if s := int(l.skip[r]); s > r && !liveReadsWalk.Load() {
+			r = s
+		} else {
+			r++
+		}
+	}
+	if liveReadsWalk.Load() {
+		return r
+	}
+	for x := from; x < r; {
+		next := int(l.skip[x])
+		if next <= x {
+			next = x + 1
+		}
+		l.skip[x] = int32(r)
+		x = next
+	}
+	return r
 }
 
 // unansweredWithKey is unanswered("") narrowed to the owned mocks ix files
@@ -1925,11 +2079,17 @@ func (v *exactView) backgroundOrder(out, in []*models.Mock) []*models.Mock {
 // outside every test and shown no more, so the same call made once more
 // misses, as a call with no recording does.
 func (v *exactView) perTest(kind models.Kind, staged, teardown []*models.Mock) []*models.Mock {
+	return append(v.unanswered(kind), v.keepPerTest(staged, teardown)...)
+}
+
+// keepPerTest is what perTest hands after the test's own mocks: what v shows
+// of staged, then of teardown.
+func (v *exactView) keepPerTest(staged, teardown []*models.Mock) []*models.Mock {
 	all := staged
 	if len(teardown) > 0 {
 		all = append(append(make([]*models.Mock, 0, len(staged)+len(teardown)), staged...), teardown...)
 	}
-	return append(v.unanswered(kind), v.keep(all)...)
+	return v.keep(all)
 }
 
 // afterTests reports whether a per-test read in v reads the set's teardown
@@ -2068,12 +2228,33 @@ func (b *teardownBound) after() func(time.Time) bool {
 // exactPerTest is v's per-test read of staged, of kind (exactView.perTest),
 // with the set's teardown recordings of kind when the read takes them.
 func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
-	var teardown []*models.Mock
-	if v.afterTests(m.exact.fired.Load()) {
-		// What the view shows of the startup tier: perTest keeps only those.
-		teardown = m.teardown(v.poolKey, v.shownOf(m.startupTree(), kind))
+	return v.perTest(kind, staged, m.exactTeardown(v, kind))
+}
+
+// exactTeardown is the set's teardown recordings of kind v's per-test read
+// takes (exactView.afterTests), nil when it takes none.
+func (m *MockManager) exactTeardown(v *exactView, kind models.Kind) []*models.Mock {
+	if !v.afterTests(m.exact.fired.Load()) {
+		return nil
 	}
-	return v.perTest(kind, staged, teardown)
+	// What the view shows of the startup tier: perTest keeps only those.
+	return m.teardown(v.poolKey, v.shownOf(m.startupTree(), kind))
+}
+
+// rangeExactPerTest calls fn with each mock of exactPerTest(v, kind, staged
+// of tree) in order until fn returns false. The test's own unanswered mocks
+// are read first, a few at a time (rangeUnanswered); the tier is read only
+// when fn has not stopped by then, so a parser that stops at the test's next
+// recording reads neither the tier nor the mocks the test answered.
+func (m *MockManager) rangeExactPerTest(v *exactView, kind models.Kind, tree *TreeDb, fn func(*models.Mock) bool) {
+	if !v.rangeUnanswered(kind, false, fn) {
+		return
+	}
+	for _, mk := range v.keepPerTest(v.shownOf(tree, kind), m.exactTeardown(v, kind)) {
+		if !fn(mk) {
+			return
+		}
+	}
 }
 
 // reusable is a session-tier read under exact serving: the open test's

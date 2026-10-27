@@ -2782,6 +2782,32 @@ func (m *MockManager) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return m.GetFilteredMocksInWindow()
 }
 
+// RangePerTestMocksInWindow is GetPerTestMocksInWindow handed to fn one mock
+// at a time (integrations.PerTestRanger). Under exact serving the open test's
+// unanswered mocks are read a few at a time and the tier only once fn has
+// not stopped at them (rangeExactPerTest); otherwise the read is walked.
+func (m *MockManager) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	m.swapMu.RLock()
+	m.treesMu.RLock()
+	tree := m.filtered
+	m.treesMu.RUnlock()
+	m.swapMu.RUnlock()
+	if v := m.exactView(); v != nil {
+		m.rangeExactPerTest(v, "", tree, fn)
+		return nil
+	}
+	mocks, err := m.GetPerTestMocksInWindow()
+	if err != nil {
+		return err
+	}
+	for _, mk := range mocks {
+		if !fn(mk) {
+			break
+		}
+	}
+	return nil
+}
+
 // StatesLifetimes reports whether the recording of the set being replayed
 // states its kind mocks' lifetimes (models.Mock.StatesLifetime): a mock of the
 // kind staged since the set's boundary does. Its per-test mocks are then
