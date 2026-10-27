@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,4 +66,245 @@ func TestTheComposeAppsStopWaitsForTheContainersStopEvents(t *testing.T) {
 			t.Fatalf("said %q (err %v) after %v; want the stall kill said", killed, err, signals)
 		}
 	})
+}
+
+// stoppedUnrecorded is a compose app keploy stopped, its stop seeing the exit
+// the daemon has yet to record: on the interrupt, its main process's exit;
+// with kill set, the end of its processes at keploy's kill.
+func stoppedUnrecorded(t *testing.T, kill bool) (*composeDocker, *App) {
+	t.Helper()
+	argv, stall, said := []string{"sh", "-c", "sleep 600 & sleep 1"}, 3*time.Second, ""
+	if kill {
+		argv, stall, said = []string{"sleep", "600"}, 300*time.Millisecond, "its container made no progress"
+	}
+	stallBudget(t, stall)
+	main := started(t, argv...)
+	d := newComposeDocker(true, false)
+	d.pid, d.id = main.Process.Pid, cgroupOf(t, main.Process.Pid)
+	// The kill ends the app's processes; the daemon records it later.
+	d.onKill = func(signal string) bool {
+		if signal != "SIGKILL" {
+			return false
+		}
+		_ = syscall.Kill(-main.Process.Pid, syscall.SIGKILL)
+		return true
+	}
+	a := composeApp(d)
+	killed, err := a.StopComposeApp(context.Background())
+	if err != nil || (said == "") != (killed == "") || !strings.Contains(killed, said) {
+		t.Fatalf("the stop said %q (err %v); want the app's exit taken for it, a kill said only where it killed", killed, err)
+	}
+	if running, _, _ := d.state(); !running {
+		t.Fatal("the daemon recorded the exit before the start; the case needs it unrecorded")
+	}
+	return d, a
+}
+
+// keploy's start of a compose app again, after its stop saw the app exit
+// before the daemon recorded the exit, waits for the daemon's word, then
+// starts a new app: an exit on the interrupt (its main process's) and one
+// on keploy's kill alike, whether the daemon records the exit once the
+// start's wait is asked or between the start's inspect and its wait (where
+// a wait for the next exit would wait for good). Started while the daemon
+// still called the container running, the start was the daemon's no-op:
+// the app was not started for the next set, and the exit the daemon
+// recorded next, keploy's own stop's, was taken for a halt, which ended the
+// run before that set had a report.
+func TestTheComposeAppsStartWaitsForTheDaemonToRecordTheExitItsStopSaw(t *testing.T) {
+	for _, stop := range []struct {
+		name string
+		kill bool
+	}{
+		{"its main process exits on the interrupt", false},
+		{"keploy kills it", true},
+	} {
+		for _, at := range []string{"once the start's wait is asked", "between the start's inspect and its wait"} {
+			t.Run(stop.name+", the daemon records it "+at, func(t *testing.T) {
+				d, a := stoppedUnrecorded(t, stop.kill)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				record := func() {
+					d.mu.Lock()
+					d.stop()
+					d.mu.Unlock()
+				}
+				waited := false
+				d.mu.Lock()
+				if at == "once the start's wait is asked" {
+					d.onWait = func(w askedWait) {
+						waited = true
+						switch w.answer {
+						case waitAtExit:
+							record()
+						case waitAtRemoval:
+							cancel(fmt.Errorf("the start's wait (%s) waits for the container's removal, which no exit answers", w.cond))
+						}
+					}
+				} else {
+					d.afterInspect = record
+					// Nothing records an exit after this one: a wait
+					// left pending would wait for good.
+					d.onWait = func(w askedWait) {
+						waited = true
+						if w.answer != waitMet {
+							cancel(fmt.Errorf("the start's wait (%s) waits for more than the exit the daemon recorded already", w.cond))
+						}
+					}
+				}
+				d.mu.Unlock()
+				anew, err := a.StartComposeApp(ctx)
+				running, _, starts := d.state()
+				if err != nil || !anew || !running || starts != 1 || !waited {
+					t.Fatalf("the start said anew=%v (err %v; %v), the container running=%v after %d start(s), the daemon asked to wait %v; want a new app started once the daemon recorded the exit", anew, err, context.Cause(ctx), running, starts, waited)
+				}
+				if a.composeAppDied(context.Background(), die("1")) || a.composeAppHalt() != nil {
+					t.Fatal("the daemon's record of the exit keploy's stop saw was taken for a halt of the app")
+				}
+				// The start is through: a later stop that does not end the
+				// app (an interrupt the daemon refused) leaves it running,
+				// which the next start must not wait on.
+				if a.composeApp.exitSeen.Load() != nil {
+					t.Fatal("the start left the stop's exit marked seen")
+				}
+			})
+		}
+	}
+}
+
+// A stop whose kill did not end the app (its processes still there) fails,
+// and replay starts the next set all the same: that start finds the app
+// running, as it is, and starts nothing anew, with no wait for an exit that
+// will not come.
+func TestTheComposeAppsStartAfterAKillThatDidNotEndTheAppDoesNotWait(t *testing.T) {
+	stallBudget(t, 300*time.Millisecond)
+	main := started(t, "sleep", "600")
+	d := newComposeDocker(true, false)
+	d.pid, d.id = main.Process.Pid, cgroupOf(t, main.Process.Pid)
+	// The daemon takes the kill; the app's processes stay.
+	d.onKill = func(signal string) bool { return signal == "SIGKILL" }
+	a := composeApp(d)
+	killed, err := a.StopComposeApp(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "had not stopped after keploy killed it") || killed == "" {
+		t.Fatalf("the stop said %q (err %v); want the kill said, and the app still there an error", killed, err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	d.mu.Lock()
+	d.onWait = func(w askedWait) {
+		if w.answer != waitMet {
+			cancel(fmt.Errorf("the start waits (%s) for the exit of an app whose processes are all still there", w.cond))
+		}
+	}
+	d.mu.Unlock()
+	anew, err := a.StartComposeApp(ctx)
+	running, _, starts := d.state()
+	if err != nil || anew || !running || starts != 1 {
+		t.Fatalf("the start said anew=%v (err %v; %v), the container running=%v after %d start(s); want the running app found, nothing new", anew, err, context.Cause(ctx), running, starts)
+	}
+}
+
+// A daemon whose wait fails cannot say the container stopped: the start
+// errors and starts nothing, for a start then is the daemon's no-op on a
+// container it still calls running.
+func TestTheComposeAppsStartErrsWhenTheDaemonsWaitFails(t *testing.T) {
+	d, a := stoppedUnrecorded(t, false)
+	failed := errors.New("the daemon's wait failed")
+	d.mu.Lock()
+	d.waitErr = failed
+	d.mu.Unlock()
+	anew, err := a.StartComposeApp(context.Background())
+	_, _, starts := d.state()
+	if !errors.Is(err, failed) || anew || starts != 0 {
+		t.Fatalf("the start said anew=%v (err %v) after %d start(s); want the wait's error, no start", anew, err, starts)
+	}
+}
+
+// The start's wait for the daemon to record the exit keploy's stop saw has
+// no bound of its own: on a daemon that never records it, the run's end is
+// its only way out. Cancelling the run while the start waits ends the
+// daemon's wait with it, and the start returns the run's cause, starting
+// nothing, however the client's error and the run's end reach it. The run
+// is cancelled as the wait is asked, so the client's call has failed (its
+// ctx canceled, no cause) by the time the start reads it, with the run's end
+// there as well: each of the starts below (the exit still unrecorded, each
+// waits as the first) gets both at once.
+func TestTheComposeAppsStartEndsItsWaitWhenTheRunIsCancelled(t *testing.T) {
+	d, a := stoppedUnrecorded(t, false)
+	for i := 0; i < 32; i++ {
+		// Each start inspects the container; no one reads those here.
+		for drained := false; !drained; {
+			select {
+			case <-d.inspected:
+			default:
+				drained = true
+			}
+		}
+		ctx, cancel := context.WithCancelCause(context.Background())
+		ended := fmt.Errorf("run %d was cancelled", i)
+		asked, followed := false, false
+		d.mu.Lock()
+		// The daemon never records the exit: only the run's end can end
+		// the wait.
+		d.onWait = func(w askedWait) {
+			if w.answer == waitMet {
+				return
+			}
+			asked = true
+			cancel(ended)
+			if followed = w.ctx.Err() != nil; !followed {
+				// The daemon's wait outlives the run: end it, so the row
+				// fails on what the start then does rather than hang.
+				d.mu.Lock()
+				d.stop()
+				d.mu.Unlock()
+			}
+		}
+		d.mu.Unlock()
+		anew, err := a.StartComposeApp(ctx)
+		cancel(nil)
+		_, _, starts := d.state()
+		if !asked || !followed || !errors.Is(err, ended) || anew || starts != 0 {
+			t.Fatalf("start %d said anew=%v (err %v) after %d start(s); the daemon asked to wait %v, its wait ended with the run %v; want the run's cause, the wait ended with the run, no start", i, anew, err, starts, asked, followed)
+		}
+	}
+}
+
+// A start told failed that the daemon carried out ran the app anew, after
+// the daemon had recorded the exit keploy's stop saw. Replay starts the next
+// set's app all the same, with no stop between: that start finds the app
+// running, the run the failed start began, and starts nothing anew, with no
+// wait for its exit, which is not the one keploy's stop saw.
+func TestTheComposeAppsStartAfterAFailedStartTheDaemonCarriedOutDoesNotWait(t *testing.T) {
+	d, a := stoppedUnrecorded(t, false)
+	told := errors.New("the start's call timed out")
+	d.mu.Lock()
+	d.startErr = told
+	// The daemon records the exit once the start has read the container.
+	d.afterInspect = func() {
+		d.mu.Lock()
+		d.stop()
+		d.mu.Unlock()
+	}
+	d.mu.Unlock()
+	if anew, err := a.StartComposeApp(context.Background()); !errors.Is(err, told) || anew {
+		t.Fatalf("the first start said anew=%v (err %v); want the start's error", anew, err)
+	}
+	if running, _, starts := d.state(); !running || starts != 1 {
+		t.Fatalf("the container running=%v after %d start(s); want the failed start carried out", running, starts)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	d.mu.Lock()
+	d.startErr = nil
+	d.onWait = func(w askedWait) {
+		if w.answer != waitMet {
+			cancel(fmt.Errorf("the start waits (%s) for the exit of the app the failed start ran", w.cond))
+		}
+	}
+	d.mu.Unlock()
+	anew, err := a.StartComposeApp(ctx)
+	running, _, starts := d.state()
+	if err != nil || anew || !running || starts != 2 {
+		t.Fatalf("the next start said anew=%v (err %v; %v), the container running=%v after %d start(s); want the running app found, nothing new", anew, err, context.Cause(ctx), running, starts)
+	}
 }

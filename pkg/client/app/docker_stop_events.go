@@ -154,9 +154,12 @@ type containerWatch struct {
 	// stopSignal is the stop signal the container declares (its compose
 	// stop_signal, or its image's STOPSIGNAL), "" when it declares none.
 	stopSignal string
-	procs      []utils.Reached
-	mainGone   <-chan struct{}
-	release    func()
+	// startedAt is when the daemon started the container's run it
+	// described: what tells that run from a later one.
+	startedAt string
+	procs     []utils.Reached
+	mainGone  <-chan struct{}
+	release   func()
 }
 
 // watchContainer reads container id for its stop. The daemon's word is
@@ -169,7 +172,7 @@ func (a *App) watchContainer(ctx context.Context, id string) containerWatch {
 	icancel()
 	switch {
 	case ierr == nil && info.ContainerJSONBase != nil && info.State != nil:
-		w.seen, w.running = true, info.State.Running
+		w.seen, w.running, w.startedAt = true, info.State.Running, info.State.StartedAt
 		if info.Config != nil {
 			w.stopSignal = info.Config.StopSignal
 		}

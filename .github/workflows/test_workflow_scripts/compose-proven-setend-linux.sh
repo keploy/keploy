@@ -272,19 +272,22 @@ set_status() { sudo grep -m1 '^status:' "$(report "$1")" 2>/dev/null | awk '{pri
 # whose answer is BULK random bytes). keploy record's stop, its own, waits
 # for the app's shutdown publish, which the recording must hold.
 record() {
-  local n=$1 log="record$1.log" pid before=$FAIL
+  local n=$1 log="record$1.log" pid before=$FAIL want p
   shift
+  want=$(test_files)
   sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 "$@" "$RECORD_BIN" record -c "docker compose -p $PROJECT up" --container-name "$KNAME" \
     --disable-tele > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
-    curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/r${n}a" || fail "record $n: GET /price/r${n}a failed"
-    curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/r${n}b" || fail "record $n: GET /price/r${n}b failed"
-    local want=$((2 * (n + 1)))
-    if [ -n "${BULK:-}" ]; then
-      curl -fsS -o /dev/null "http://127.0.0.1:$PORT/bulk/$BULK" || fail "record $n: GET /bulk/$BULK failed"
-      want=$((want + 1))
-    fi
+    # Each call the app answers makes one test case; a failed one makes
+    # none, so the wait is for the answered calls' only.
+    for p in "/price/r${n}a" "/price/r${n}b" ${BULK:+"/bulk/$BULK"}; do
+      if curl -fsS -o /dev/null "http://127.0.0.1:$PORT$p"; then
+        want=$((want + 1))
+      else
+        fail "record $n: GET $p failed"
+      fi
+    done
     wait_tests "$want" "$pid" || fail "record $n: keploy record wrote $(test_files) test cases, want $want"
   else
     fail "record $n: keploy exited before the app listened"

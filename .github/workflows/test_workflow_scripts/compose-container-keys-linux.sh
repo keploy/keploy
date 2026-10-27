@@ -175,17 +175,24 @@ for d in sys.stdin.read().split("\n---"):
 # $PORT, while the lane makes two calls through it; it is stopped once both
 # calls' test cases are written. The log is NAME.log.
 record() {
-  local name=$1 proven=$2 cmd=$3 ctr=$4 log="$1.log" pid rc p before=$FAIL
+  local name=$1 proven=$2 cmd=$3 ctr=$4 log="$1.log" pid rc p before=$FAIL made=0
   sudo rm -rf keploy
   : > "$log"
   sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "$cmd" --container-name "$ctr" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
   if await "$log" "$pid" "APP LISTENING" 1; then
+    # A failed call makes no test case: wait for the answered calls' only,
+    # or keploy, running on, is waited for for ever.
     for p in /price/aapl /price/msft; do
-      curl -fsS -o /dev/null "http://127.0.0.1:$PORT$p" || { echo "FAIL: $name: GET $p through the app failed"; FAIL=1; }
+      if curl -fsS -o /dev/null "http://127.0.0.1:$PORT$p"; then
+        made=$((made + 1))
+      else
+        echo "FAIL: $name: GET $p through the app failed"; FAIL=1
+      fi
     done
-    await "$log" "$pid" "Keploy has captured test cases" 2 || { echo "FAIL: $name: keploy did not write both calls' test cases"; FAIL=1; }
+    [ "$made" -eq 0 ] || await "$log" "$pid" "Keploy has captured test cases" "$made" ||
+      { echo "FAIL: $name: keploy did not write the test cases of the $made calls made"; FAIL=1; }
     sudo kill -INT "$pid" 2>/dev/null
   else
     echo "FAIL: $name: keploy exited before the app listened"

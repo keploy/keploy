@@ -150,7 +150,7 @@ PY
 # its own, 0. The log is NAME.log. With FLAGS (compose's global -p NAME), the
 # app container must run in that project.
 record() {
-  local name=$1 proven=$2 flags=${3:-} log="$1.log" pid rc i before=$FAIL
+  local name=$1 proven=$2 flags=${3:-} log="$1.log" pid rc i before=$FAIL failed=0
   sudo rm -rf keploy
   : > "$log"
   sudo -E env PATH="$PATH" KEPLOY_PROVEN="$proven" "$RECORD_BIN" record -c "docker compose ${flags:+$flags }up" --container-name "cae-app-$ID" \
@@ -166,8 +166,11 @@ record() {
       FAIL=1
     fi
     for i in $(seq 1 "$N"); do
-      curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/s$i" || { echo "FAIL: $name: GET /price/s$i through the app failed"; FAIL=1; }
+      curl -fsS -o /dev/null "http://127.0.0.1:$PORT/price/s$i" || { echo "FAIL: $name: GET /price/s$i through the app failed"; FAIL=1; failed=1; }
     done
+    # The app exits only after its N answers: a call that failed leaves it
+    # up, and keploy with it, so the lane stops keploy.
+    [ "$failed" -eq 0 ] || sudo kill -INT "$pid" 2>/dev/null
   else
     echo "FAIL: $name: keploy exited before the app listened"
     FAIL=1
