@@ -599,7 +599,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// two values show (readRes), which a replay checks it at
 	// (CheckClockRead).
 	if ln.Kind == KindNoise && rt.names == lt.names && rt.names != namesTimeOfDay {
-		res := readRes(max(rt.res, lt.res), sharedGrain(rt.at, lt.at))
+		res := zonedRes(max(rt.res, lt.res), rt.at, lt.at, rt.names == namesWall, dc.zone)
 		ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
 		if noWindow != "" {
 			ln.Why = noWindow
@@ -767,6 +767,44 @@ func readRes(enc, grain time.Duration) time.Duration {
 		return u
 	}
 	return enc
+}
+
+// zonedRes is readRes of two values of a plain read of the clock, a and b,
+// written at enc, read as the cut both show in each zone an application
+// cuts its clock in: the coarsest of the cuts read in UTC, in the offset
+// each value writes (a.Location(), b.Location(): "+05:30" of a text that
+// names it), and in zone, the application's (nil: not known). An hour or a
+// day the application cuts in a zone whose offset is no whole number of it
+// (an hour in UTC+05:30, a day in UTC+02:00) is a finer cut in UTC (a
+// minute, an hour), which a replay would check at that finer cut, and so
+// fail by when in the hour or the day it ran; read in that zone, it is
+// learned as the hour or the day it is. A minute or any finer step is one
+// in every zone (zones' offsets are whole minutes). A wall clock of no zone
+// (wall) writes its own zone's clock, so its cut is read on what it writes
+// alone (a and b are those read in UTC). A replay reads its value's cut in
+// the same zones (CheckClockRead).
+func zonedRes(enc time.Duration, a, b time.Time, wall bool, zone *time.Location) time.Duration {
+	res := readRes(enc, sharedGrain(a, b))
+	// in is the cut both show read in x and y (models.CutIn: the coarsest
+	// step each shows; steps nest, so both show the finer of the two).
+	in := func(a, b time.Time, x, y *time.Location) {
+		if x == nil || y == nil {
+			return
+		}
+		res = max(res, enc, min(models.CutIn(a, x, enc, 24*time.Hour), models.CutIn(b, y, enc, 24*time.Hour)))
+	}
+	if wall {
+		// A wall clock writes its own zone's clock: its digits, read where
+		// the application's zone skipped the start of their hour or day.
+		if zone != nil {
+			in(wallIn(a.UnixNano(), zone), wallIn(b.UnixNano(), zone), zone, zone)
+		}
+		return res
+	}
+	in(a, b, time.UTC, time.UTC)
+	in(a, b, a.Location(), b.Location())
+	in(a, b, zone, zone)
+	return res
 }
 
 // offsetBounds are the offsets d, from lo up to, not including, hi, that put
