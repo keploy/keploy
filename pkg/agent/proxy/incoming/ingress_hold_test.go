@@ -304,8 +304,11 @@ func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
 		if len(yielded) != 1 || yielded[0] != orig || registered != 0 {
 			t.Fatalf("yielded %v (registered %d), want [%d] and no forwarder", yielded, registered, orig)
 		}
-		if len(warns) != 1 || warns[0].ContextMap()["port"] != uint16(orig) {
-			t.Fatalf("WARNs %v, want one naming port %d", warns, orig)
+		if len(warns) != 1 || warns[0].ContextMap()["port"] != uint16(orig) || warns[0].ContextMap()["family"] != "IPv4" {
+			t.Fatalf("WARNs %v, want one naming port %d and IPv4", warns, orig)
+		}
+		if !errors.Is(err, errIngressPortYielded) {
+			t.Fatalf("a yield's error %v does not say the port was yielded", err)
 		}
 	}
 
@@ -318,6 +321,38 @@ func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
 	}
 	if len(holder.yielded) != 0 {
 		t.Fatalf("a forwarder that failed for a canceled context yielded %v", holder.yielded)
+	}
+}
+
+// A port keploy yields by design is logged once, as the yield's WARN: the
+// manager logs no "Ingress hook failed to start" ERROR for it, which it still
+// does, as on main, for a forwarder that cannot listen on a port nothing
+// holds for keploy.
+func TestAYieldedPortLogsOnlyItsWarn(t *testing.T) {
+	saved := ingressTargetWait
+	t.Cleanup(func() { ingressTargetWait = saved })
+	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
+	other, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	orig := portOf(t, other.Addr().String())
+	for _, held := range []bool{true, false} {
+		core, logs := observer.New(zapcore.DebugLevel)
+		holder := &fakePortHolder{held: held}
+		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1),
+			active: make(map[uint16]proxyStop), portHolder: holder}
+		pm.ingressHook = newGoTCPIngressHook(pm)
+		pm.StartIngressProxy(context.Background(), orig, portOf(t, freeAddr(t)))
+		errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
+		warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
+		if held && (len(errs) != 0 || len(warns) != 1) {
+			t.Fatalf("a yielded port logged %d ERRORs and %d WARNs, want only the yield's WARN: %v", len(errs), len(warns), logs.All())
+		}
+		if !held && (len(errs) != 1 || len(warns) != 0) {
+			t.Fatalf("without a hold, a taken port logged %d ERRORs and %d WARNs, want main's one ERROR: %v", len(errs), len(warns), logs.All())
+		}
 	}
 }
 
@@ -488,6 +523,143 @@ func TestAParkThatCannotAcceptIsStopped(t *testing.T) {
 	}
 }
 
+// stubParkRetryWait replaces the park's retry wait: each pause the loop asks
+// for is sent on the returned channel, and the wait reports what more says
+// (true: the pause passed).
+func stubParkRetryWait(t *testing.T, more func() bool) <-chan time.Duration {
+	t.Helper()
+	pauses := make(chan time.Duration, 64)
+	saved := parkRetryWait
+	t.Cleanup(func() { parkRetryWait = saved })
+	parkRetryWait = func(_ context.Context, d time.Duration) bool {
+		pauses <- d
+		return more()
+	}
+	return pauses
+}
+
+// The park's retries after Accepts that fail for want of a resource (out of
+// descriptors, buffers or memory) pause 5 ms, then twice as long each time,
+// never more than 1 s; a good Accept starts the pauses again from 5 ms. Each
+// is retried: the park is never stopped for one, and one WARN says so.
+func TestTheParksRetryPausesGrowTo1sAndStartAgainAfterAGoodAccept(t *testing.T) {
+	pauses := stubParkRetryWait(t, func() bool { return true })
+	holder := &fakePortHolder{held: true}
+	core, logs := observer.New(zapcore.WarnLevel)
+	pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
+	park := newScriptedPark()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { pm.serveParkedConnections(ctx, park); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	ms := time.Millisecond
+	steps := []struct {
+		result any
+		pause  time.Duration // 0: a good Accept, no pause
+	}{
+		{acceptErr(syscall.EMFILE), 5 * ms}, {acceptErr(syscall.ENFILE), 10 * ms}, {acceptErr(syscall.EMFILE), 20 * ms},
+		{acceptErr(syscall.EMFILE), 40 * ms}, {acceptErr(syscall.EMFILE), 80 * ms}, {acceptErr(syscall.EMFILE), 160 * ms},
+		{acceptErr(syscall.EMFILE), 320 * ms}, {acceptErr(syscall.EMFILE), 640 * ms}, {acceptErr(syscall.EMFILE), time.Second},
+		{acceptErr(syscall.EMFILE), time.Second}, {acceptErr(syscall.EMFILE), time.Second},
+		{nil, 0}, // a good Accept
+		{acceptErr(syscall.ENOBUFS), 5 * ms}, {acceptErr(syscall.ENOMEM), 10 * ms},
+	}
+	for i, st := range steps {
+		if st.result == nil {
+			a, b := net.Pipe() // not a TCP connection: the park closes it
+			t.Cleanup(func() { _ = b.Close() })
+			park.results <- a
+			continue
+		}
+		park.results <- st.result
+		select {
+		case got := <-pauses:
+			if got != st.pause {
+				t.Fatalf("step %d (%v): paused %v, want %v", i, st.result, got, st.pause)
+			}
+		case <-done:
+			t.Fatalf("step %d (%v): the park's accept loop ended instead of retrying", i, st.result)
+		}
+	}
+	holder.mu.Lock()
+	stopped := holder.parkStopped
+	holder.mu.Unlock()
+	if stopped != 0 || park.isClosed() {
+		t.Fatalf("the park was stopped (%d) or closed (%v) on accept errors it can get past", stopped, park.isClosed())
+	}
+	if w := logs.FilterMessageSnippet("for want of a resource").All(); len(w) != 1 {
+		t.Fatalf("%d WARNs for the failed accepts, want one: %v", len(w), logs.All())
+	}
+}
+
+// When recording ends (the context is canceled), the park's accept loop just
+// returns: its Accept then fails because the park is closed, or its retry
+// pause is cut short, and neither stops the hold's park (StopIngressPark) or
+// logs a WARN, which are for a park that cannot accept.
+func TestARecordingThatEndsLeavesTheParkUnstoppedAndSaysNothing(t *testing.T) {
+	t.Run("in its Accept", func(t *testing.T) {
+		holder := &fakePortHolder{held: true}
+		core, logs := observer.New(zapcore.WarnLevel)
+		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
+		park := newScriptedPark()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { pm.serveParkedConnections(ctx, park); close(done) }()
+		<-park.accepts
+		cancel() // the park is closed, and its Accept fails with net.ErrClosed
+		<-done
+		holder.mu.Lock()
+		stopped := holder.parkStopped
+		holder.mu.Unlock()
+		if stopped != 0 || logs.Len() != 0 {
+			t.Fatalf("a recording's end stopped the park %d times and logged %v", stopped, logs.All())
+		}
+	})
+	t.Run("in its retry pause", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		pauses := stubParkRetryWait(t, func() bool { cancel(); return false })
+		holder := &fakePortHolder{held: true}
+		core, logs := observer.New(zapcore.WarnLevel)
+		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
+		park := newScriptedPark()
+		done := make(chan struct{})
+		go func() { pm.serveParkedConnections(ctx, park); close(done) }()
+		park.results <- acceptErr(syscall.EMFILE)
+		<-done
+		if len(pauses) != 1 || len(park.accepts) != 1 {
+			t.Fatalf("the loop paused %d times and accepted %d times, want one each: no Accept after a pause the recording's end cut short", len(pauses), len(park.accepts))
+		}
+		holder.mu.Lock()
+		stopped := holder.parkStopped
+		holder.mu.Unlock()
+		if stopped != 0 || len(logs.FilterMessageSnippet("ingress hold stopped").All()) != 0 {
+			t.Fatalf("a recording's end in a retry pause stopped the park %d times: %v", stopped, logs.All())
+		}
+	})
+}
+
+// The park's retry wait passes its pause, and ends at once, false, with the
+// recording's context: a canceled one never waits out even an hour's pause.
+func TestTheParksRetryWaitEndsWithTheRecording(t *testing.T) {
+	if !parkRetryWait(context.Background(), time.Millisecond) {
+		t.Fatal("the retry wait did not pass its pause")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := make(chan bool, 1)
+	go func() { res <- parkRetryWait(ctx, time.Hour) }()
+	select {
+	case ok := <-res:
+		if ok {
+			t.Fatal("the retry wait passed on a canceled context")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the retry wait outlived its canceled context")
+	}
+}
+
 // The end of recording counts the hold's IPv4 and IPv6 calls apart: an IPv4
 // call reaches the park only before the port's forwarder listens, an IPv6
 // one (an app bound to :: takes both families) for the whole run, since
@@ -569,7 +741,7 @@ func TestAForwarderIsRegisteredWithTheHoldAndUnregisteredWhenItStops(t *testing.
 // Without a hold, the manager has no park to serve and registers nothing.
 func TestWithoutAHoldThereIsNoParkToServe(t *testing.T) {
 	pm := &IngressProxyManager{logger: zap.NewNop()}
-	if pm.ingressPark() != nil || pm.ingressHeld() || pm.IngressParked() != 0 {
+	if pm.ingressPark() != nil || pm.ingressHeld() {
 		t.Fatal("a manager without a hold reported one")
 	}
 	pm.registerIngressForwarder(1, nil) // no-ops, no panic
@@ -670,7 +842,7 @@ func heldUpstream(t *testing.T) (addr string, got <-chan string, answer chan<- s
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				req, err := http.ReadRequest(bufio.NewReader(c))
 				if err != nil {
 					return
