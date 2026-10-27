@@ -104,12 +104,17 @@ func serveOne(t *testing.T, h *HTTP, db integrations.MockMemDb, opts models.Outg
 // request-body and URL noise are served through decodeHTTP with the switch
 // off (schema, fuzzy and exact matching), on (the learned match, the variable
 // pass and, for a variable that does not hold, the exact-only pass, the strict
-// matcher) and on in record's full round (the learn step, which learns a
-// changed field or path as noise there, and the pairing), answered and missed
-// (the mismatch report, the extra-call
-// count, the answered diagnosis, the recording made elsewhere and the repeat
-// note), and then the noise they were all handed must still be the noise of
-// the options (NewRequestNoise), and the options' configuration as given.
+// matcher), on in record's full round (the learn step, which learns a
+// changed field or path as noise there, and the pairing), and off with
+// mock-noise detection and strict on (--schema-noise-detection and
+// --schema-noise-strict: a call that misses the exact body match reaches the
+// body-schema match, where the strict filter and the detection hand the body
+// noise to the mock-noise engine; a call that differs only in its noise is
+// served there, one that differs in a field is refused), answered and missed
+// (the mismatch report, the extra-call count, the answered diagnosis, the
+// recording made elsewhere and the repeat note), and then the noise they were
+// all handed must still be the noise of the options (NewRequestNoise), and the
+// options' configuration as given.
 func TestNoServedCallWritesTheSharedRequestNoise(t *testing.T) {
 	h := newHTTP()
 	learnRound := false
@@ -140,26 +145,27 @@ func TestNoServedCallWritesTheSharedRequestNoise(t *testing.T) {
 		calls []call
 	}{
 		{"a call that differs in its noise", orderRec, []call{
-			{orderCall("18", 2, 2, "r-9"), map[string]int{"off": 200, "on": 200, "learn": 200}}}},
+			{orderCall("18", 2, 2, "r-9"), map[string]int{"off": 200, "on": 200, "learn": 200, "mock noise": 200}}}},
 		{"a call that differs in a field", orderRec, []call{
-			{orderCall("18", 2, 3, "r-9"), map[string]int{"off": 200, "on": 502, "learn": 200}}}},
+			{orderCall("18", 2, 3, "r-9"), map[string]int{"off": 200, "on": 502, "learn": 200, "mock noise": 502}}}},
 		{"an unrecorded call", orderRec, []call{
-			{"GET /none HTTP/1.1\r\nHost: api.test\r\nX-Request-Id: r-9\r\n\r\n", map[string]int{"off": 502, "on": 502, "learn": 502}}}},
+			{"GET /none HTTP/1.1\r\nHost: api.test\r\nX-Request-Id: r-9\r\n\r\n", map[string]int{"off": 502, "on": 502, "learn": 502, "mock noise": 502}}}},
 		{"a variable bound and used", varRecs, []call{
-			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201}},
-			{readBackCall("ord-liv-9"), map[string]int{"off": 502, "on": 200, "learn": 200}}}},
+			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 502}},
+			{readBackCall("ord-liv-9"), map[string]int{"off": 502, "on": 200, "learn": 200, "mock noise": 502}}}},
 		{"a variable used with another value", varRecs, []call{
-			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201}},
-			{readBackCall("ord-oth-7"), map[string]int{"off": 502, "on": 502, "learn": 200}}}},
+			{createCall("ord-liv-9"), map[string]int{"off": 201, "on": 201, "learn": 201, "mock noise": 502}},
+			{readBackCall("ord-oth-7"), map[string]int{"off": 502, "on": 502, "learn": 200, "mock noise": 502}}}},
 	}
 	for _, row := range []struct {
-		name, proven string
-		learn        bool
-	}{{"off", "0", false}, {"on", "1", false}, {"learn", "1", true}} {
+		name, proven     string
+		learn, mockNoise bool
+	}{{"off", "0", false, false}, {"on", "1", false, false}, {"learn", "1", true, false}, {"mock noise", "0", false, true}} {
 		t.Run(row.name, func(t *testing.T) {
 			t.Setenv(provenswitch.Env, row.proven)
 			learnRound = row.learn
 			opts := sharedNoiseOpts(row.learn)
+			opts.MockNoiseDetection, opts.MockNoiseStrict = row.mockNoise, row.mockNoise
 			given := cloneNoiseConfig(opts.NoiseConfig)
 			lastRequestNoise.Store(nil)
 			before := requestNoiseBuilds.Load()
