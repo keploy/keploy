@@ -458,3 +458,67 @@ func TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing(t *testing.T) {
 		t.Fatalf("the stopped park's Accept: %v, want it closed", err)
 	}
 }
+
+// The hold closes while the ingress manager still calls it, as at the end of
+// a recording, when StopAll unregisters the forwarders as the hold's context
+// ends: every call either runs before the close, on maps still open, or
+// finds no hold. Under the race detector (the root job builds these rows
+// with -race) a call that used a map after letting go of the hold's lock is
+// a race with the close. Once closed, the calls answer as with no hold.
+func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
+	h := ingressHoldAgent(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.startIngressHold(ctx, holdCgroup(t))
+	if !h.IngressHeld() {
+		t.Fatal("the hold did not start")
+	}
+	orig := unusedPort(t)
+	movedAndNoted(t, h, orig, true)
+	var lc net.ListenConfig
+	lc.SetMultipathTCP(false)
+	fwd, err := lc.Listen(context.Background(), "tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = fwd.Close() })
+
+	const callers = 4
+	stop := make(chan struct{})
+	started := make(chan struct{}, callers)
+	done := make(chan struct{}, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for n := 0; ; n++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				h.RegisterIngressForwarder(orig, fwd)
+				h.MovedPort(orig)
+				h.UnregisterIngressForwarder(orig)
+				h.YieldIngressPort(orig)
+				h.IngressLookupCounts()
+				if n == 50 {
+					started <- struct{}{}
+				}
+			}
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		<-started
+	}
+	h.closeIngressHold()
+	close(stop)
+	for i := 0; i < callers; i++ {
+		<-done
+	}
+	if h.IngressHeld() || h.IngressParkListener() != nil || h.IngressLookupCounts() != nil {
+		t.Fatal("a closed hold still answers as held")
+	}
+	if _, ok := h.MovedPort(orig); ok {
+		t.Fatal("a closed hold still reads the moved port")
+	}
+}

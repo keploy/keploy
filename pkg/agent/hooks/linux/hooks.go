@@ -120,9 +120,12 @@ type Hooks struct {
 	skips *skipWatch
 
 	// ingress holds the application's moved ports from inside their bind
-	// (ingressport.go), under ingressMu; nil when the kernel has no sk_lookup
-	// or a step failed, and keploy forwards as it did before.
-	ingressMu sync.Mutex
+	// (ingressport.go); nil when the kernel has no sk_lookup or a step
+	// failed, and keploy forwards as it did before. A call that uses its
+	// maps or park holds ingressMu's read lock throughout; the hold is set,
+	// cleared and closed under the write lock, so none of its maps is closed
+	// while a call uses it.
+	ingressMu sync.RWMutex
 	ingress   *ingressHold
 }
 
@@ -844,12 +847,7 @@ func (h *Hooks) unLoad(_ context.Context, opts agent.HookCfg) {
 
 	// The ingress hold's program and park go before the objects it shares
 	// app_port_info with (ctx.Done already closes it; this is the backstop).
-	h.ingressMu.Lock()
-	if h.ingress != nil {
-		h.ingress.close()
-		h.ingress = nil
-	}
-	h.ingressMu.Unlock()
+	h.closeIngressHold()
 
 	// Close eBPF objects with proper synchronization
 	h.objectsMutex.Lock()
