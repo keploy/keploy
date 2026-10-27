@@ -100,6 +100,7 @@ func strictPool(db integrations.MockMemDb) (perTest, session, pool []*models.Moc
 	if perTest, err = db.GetPerTestMocksInWindow(); err != nil {
 		return nil, nil, nil, err
 	}
+	//nolint:staticcheck // SA1019: the strict pass's own read (matchCascade), whose pool the index must be.
 	if session, err = db.GetSessionMocks(); err != nil {
 		return nil, nil, nil, err
 	}

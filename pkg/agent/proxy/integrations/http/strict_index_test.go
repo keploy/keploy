@@ -122,7 +122,7 @@ func TestAStrictCallReadsTheIndexOfItsOwnGenerationAndURLNoise(t *testing.T) {
 	if !h.strictIx.has || h.strictIx.last.gen != 1 {
 		t.Fatal("no index was kept for generation 1")
 	}
-	db.learnDb.perTest, db.gen = strictItems("b", 10), 2
+	db.perTest, db.gen = strictItems("b", 10), 2
 	for i := 0; i < 3; i++ {
 		if s := strictMatchOf(t, h, strictCall(i), db, db, nil); s == nil || s.Name != "b-"+strconv.Itoa(i) {
 			t.Fatalf("after a staging: served %v; want b-%d", s, i)
@@ -268,9 +268,9 @@ func TestARefusedClaimOfAnIndexedStrictRecordingRereadsTheStore(t *testing.T) {
 	strictMatchOf(t, h, strictCall(0), db, db, nil)
 	strictMatchOf(t, h, strictCall(1), db, db, nil)
 	// Another call took mock-5 without the store reporting it spent.
-	for i, m := range db.learnDb.perTest {
+	for i, m := range db.perTest {
 		if m.Name == "mock-5" {
-			db.learnDb.perTest = append(db.learnDb.perTest[:i:i], db.learnDb.perTest[i+1:]...)
+			db.perTest = append(db.perTest[:i:i], db.perTest[i+1:]...)
 			break
 		}
 	}
