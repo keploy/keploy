@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1210,8 +1211,24 @@ func TestAMockModeAgentsLearnStepReadsTheAppsZoneAndATestsRecordedBegin(t *testi
 			cfg := config.New()
 			cfg.Agent.MockMode = true
 			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
-			if got := p.learnTracker.Drifts().Zone(); got != time.Local {
-				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, time.Local)
+			// The agent's own zone, with its name where its TZ or
+			// /etc/localtime gives one (learn.ReadZone), so a learning that
+			// depends on it names it; it writes Go's time.Local's offsets.
+			tz, tzSet := os.LookupEnv("TZ")
+			want, err := learn.ReadZone("/", tz, tzSet)
+			if err != nil {
+				want = time.Local
+			}
+			got := p.learnTracker.Drifts().Zone()
+			if got == nil || got.String() != want.String() {
+				t.Fatalf("the learn step's zone %v; want the agent's own, %v", got, want)
+			}
+			for _, at := range []time.Time{time.Now(), time.Now().AddDate(0, 6, 0)} {
+				_, g := at.In(got).Zone()
+				_, l := at.In(time.Local).Zone()
+				if g != l {
+					t.Fatalf("the learn step's zone %v writes offset %d at %s; Go's time.Local %d", got, g, at, l)
+				}
 			}
 			rec := time.Date(2026, 10, 22, 11, 14, 15, 0, time.UTC)
 			paired := &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec.Add(time.Second)}}

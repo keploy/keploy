@@ -691,6 +691,12 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // value of .4 s is checked at 100 ms). An offset whose Res is a cut is
 // never learned (learn's clockOffset), and a value against one is refused
 // as before.
+// The application's zone is the one the learn step named, where it did
+// (models.ClockOffset.AppZone: a wall clock of no zone read in it, a value
+// that names its moment cut coarser than a minute), on any machine, never the replay's own (a recording
+// learned on a laptop in IST is read in IST on a CI machine in UTC), and a
+// name this keploy cannot read refuses the value, naming it; an o of no
+// name (an old file) is read in s.Zone, as before.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they
 // share no offset, or read it in different zones) is refused whatever the
 // call carries, saying so, and so is one of a Zone this keploy does not
@@ -711,9 +717,20 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if !known {
 		return false, learned + ", which a replay checks against its call's window on the application's clock, but keploy cannot tell the application's clock at this call (no time hooks report it, or they could not tell it here), so it refuses the value rather than pass it unchecked"
 	}
+	hint := ""
+	if o.AppZone != "" {
+		// The zone the learn step read the application's in, on any machine
+		// (models.ClockOffset.AppZone), never this replay's own.
+		loc, err := models.ZoneLocation(o.AppZone)
+		hint = appZoneHint(o.AppZone, loc, s)
+		if err != nil {
+			return false, learned + ", which a replay reads in " + o.AppZone + ", the application's zone the learn step read it in, but this keploy cannot read that zone (" + err.Error() + "), so it refuses the value rather than read it in another zone. Record the test again with this keploy"
+		}
+		s.Zone = loc
+	}
 	ats, res, why := clockReadIn(o, live, s)
 	if why != "" {
-		return false, learned + why
+		return false, learned + why + hint
 	}
 	if !o.Plain() && o.CutCoarserThan(res) {
 		return false, learned + ", at a resolution of " + models.ShortDuration(o.Res) + " (both of the learn step's values were whole multiples of it), coarser than the " + models.ShortDuration(res) + " this value's encoding writes: the application cuts its value, and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
@@ -722,7 +739,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, ""
 		}
-		return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed"
+		return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed" + hint
 	}
 	// A cut the value shows is checked at that cut, read in the zone it
 	// shows it in; a value that shows none, at its own resolution.
@@ -743,7 +760,39 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 			return true, ""
 		}
 	}
-	return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed" + cut
+	return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed" + cut + hint
+}
+
+// appZoneHint is what a refusal of a value at a place learned with the
+// application's zone named as name (models.ClockOffset.AppZone), learned,
+// adds where this replay's own zone (s.Zone, as its tracker knows it) is
+// another, by its rules (its offset at the span's end and its next change,
+// never its name): the application may now write its clock there, and how
+// to replay it in the zone it was recorded in. "" where the two agree, or
+// either is not known.
+func appZoneHint(name string, learned *time.Location, s Span) string {
+	if s.Zone == nil || learned == nil {
+		return ""
+	}
+	a, b := s.To.In(s.Zone), s.To.In(learned)
+	_, oa := a.Zone()
+	_, ob := b.Zone()
+	_, ea := a.ZoneBounds()
+	_, eb := b.ZoneBounds()
+	if oa == ob && ea.Equal(eb) {
+		return ""
+	}
+	own := s.Zone.String()
+	if own == "" || own == "Local" || own[0] == '+' || own[0] == '-' {
+		own = "a zone at UTC" + a.Format("-07:00")
+	}
+	run := "with TZ=" + name
+	if name[0] == '+' || name[0] == '-' {
+		// A fixed offset is no TZ value: the zone the application ran in
+		// (Asia/Kolkata at +05:30) is.
+		run = "in a zone at UTC" + name
+	}
+	return ". This replay runs in " + own + ", not " + name + ", the zone the test was recorded in: if the application now writes its clock in " + own + ", run it " + run + " as it was recorded, or record the test again"
 }
 
 // cutZones are the zones a replay reads the cut of at, a reading of its
@@ -786,7 +835,7 @@ func zoneName(at time.Time) string {
 	if at.Location() == time.UTC {
 		return ""
 	}
-	if n := at.Location().String(); n != "" && n != "Local" && n != "UTC" {
+	if n := at.Location().String(); n != "" && n != "Local" && n != "UTC" && n[0] != '+' && n[0] != '-' {
 		return " in " + n
 	}
 	return " in UTC" + at.Format("-07:00")

@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -746,4 +747,135 @@ func TestAClockReadsLayoutMeetsAsOneOrHoldsNothing(t *testing.T) {
 	if f, ok := reflect.TypeOf(ClockOffset{}).FieldByName("Layout"); !ok || f.Tag.Get("bson") != "layout,omitempty" {
 		t.Errorf("Layout's bson tag = %q; want layout,omitempty", f.Tag.Get("bson"))
 	}
+}
+
+// A clock read whose learning depends on the application's zone names it
+// (ClockOffset.AppZone, coordinator's ruling QE, 2026-10-28 00:30): an IANA
+// name, a fixed offset or UTC, which ZoneLocation reads back on any machine
+// (time/tzdata), legible on disk; an old file without it decodes with none
+// and writes none back. Two learnings in different named zones meet as
+// ZoneApart, which holds nothing; one of no name meets the other's.
+func TestAClockOffsetNamesTheApplicationsZoneItWasLearnedIn(t *testing.T) {
+	ist, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatalf("time/tzdata is built in, yet: %v", err)
+	}
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	at := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	for _, row := range []struct {
+		what string
+		loc  *time.Location
+		want string
+	}{
+		{"UTC", time.UTC, "UTC"},
+		// A zone with no change of offset ahead is named by its offset, so
+		// its aliases are one name.
+		{"an IANA zone of one offset ahead", ist, "+05:30"},
+		{"its alias", zoneOr(t, "Asia/Calcutta"), "+05:30"},
+		{"UTC's alias", zoneOr(t, "Etc/UTC"), "UTC"},
+		{"a zone with summer time", berlin, "Europe/Berlin"},
+		{"a fixed zone of no name", time.FixedZone("", 5*3600+1800), "+05:30"},
+		{"a fixed zone west of UTC", time.FixedZone("", -(3*3600 + 1800)), "-03:30"},
+		{"a fixed zone named as no IANA zone", time.FixedZone("IST", 5*3600+1800), "+05:30"},
+		// The IANA CET has summer time; a fixed UTC+01:00 named CET is not it.
+		{"a fixed zone named as an IANA zone with summer time", time.FixedZone("CET", 3600), "+01:00"},
+		{"a fixed zone of no offset", time.FixedZone("", 0), "UTC"},
+		{"no zone", nil, ""},
+	} {
+		got := ZoneNameOf(row.loc, at)
+		if got != row.want {
+			t.Errorf("%s: ZoneNameOf %q; want %q", row.what, got, row.want)
+			continue
+		}
+		if got == "" {
+			continue
+		}
+		back, err := ZoneLocation(got)
+		if err != nil {
+			t.Errorf("%s: ZoneLocation(%q): %v", row.what, got, err)
+			continue
+		}
+		for _, when := range []time.Time{at, at.AddDate(0, 6, 0)} {
+			if _, a := when.In(back).Zone(); true {
+				if _, b := when.In(row.loc).Zone(); a != b && row.what != "a fixed zone named as an IANA zone with summer time" {
+					t.Errorf("%s at %s: %q reads back at offset %d, the zone writes %d", row.what, when, got, a, b)
+				}
+			}
+		}
+	}
+	// A zone file of no name whose offset changes ahead cannot be named.
+	if data, err := os.ReadFile("/usr/share/zoneinfo/Europe/Berlin"); err == nil {
+		if loc, err := time.LoadLocationFromTZData("", data); err == nil {
+			if got := ZoneNameOf(loc, at); got != "" {
+				t.Errorf("an unnamed Berlin zone file: ZoneNameOf %q; want none", got)
+			}
+		}
+	}
+	for _, bad := range []string{"", "Local", "Mars/Olympus", "+5:30", "+05:3x", "+15:00", "+-5:30", "05:30"} {
+		if loc, err := ZoneLocation(bad); err == nil {
+			t.Errorf("ZoneLocation(%q) = %v; want an error", bad, loc)
+		}
+	}
+
+	o := ClockOffset{Res: time.Hour, Zone: ZoneApp, AppZone: "Asia/Kolkata"}
+	if !o.AppZoneMatters() || !(ClockOffset{Res: 24 * time.Hour}).AppZoneMatters() || !(ClockOffset{Res: time.Millisecond, Zone: ZoneEither}).AppZoneMatters() {
+		t.Errorf("AppZoneMatters is false for a wall clock in the application's zone, or a day's cut")
+	}
+	if (ClockOffset{Res: time.Minute}).AppZoneMatters() || (ClockOffset{Res: time.Hour, Zone: ZoneUTC}).AppZoneMatters() || (ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: 24 * time.Hour}).AppZoneMatters() {
+		t.Errorf("AppZoneMatters is true of a minute's cut, a wall clock in UTC, or an offset")
+	}
+	if s := o.String(); !strings.HasSuffix(s, ", read with the application's zone as Asia/Kolkata") {
+		t.Errorf("String %q; want it to name the zone", s)
+	}
+	y, err := yaml.Marshal(map[string]ClockOffset{"body.at": o})
+	if err != nil || !strings.Contains(string(y), "app_zone: Asia/Kolkata") {
+		t.Errorf("on disk %q (%v); want app_zone: Asia/Kolkata", y, err)
+	}
+	var old map[string]ClockOffset
+	if err := yaml.Unmarshal([]byte("body.at:\n    min: 0s\n    max: 0s\n    res: 1h0m0s\n    zone: app\n"), &old); err != nil || old["body.at"].AppZone != "" || old["body.at"].Res != time.Hour {
+		t.Errorf("an old file: %+v (%v); want its offset with no AppZone", old, err)
+	}
+	if y, _ := yaml.Marshal(old); strings.Contains(string(y), "app_zone") {
+		t.Errorf("an old file written back: %q; want no app_zone", y)
+	}
+	j, _ := json.Marshal(o)
+	if !strings.Contains(string(j), `"app_zone":"Asia/Kolkata"`) {
+		t.Errorf("JSON %s; want app_zone", j)
+	}
+
+	unnamed := o
+	unnamed.AppZone = ""
+	if m := unnamed.Meet(o); m.AppZone != "Asia/Kolkata" || m.Empty() {
+		t.Errorf("an old learning meets a named one: %+v; want the named zone", m)
+	}
+	if m := o.Meet(unnamed); m.AppZone != "Asia/Kolkata" || m.Empty() {
+		t.Errorf("a named learning meets an old one: %+v; want the named zone", m)
+	}
+	utc := o
+	utc.AppZone = "UTC"
+	if m := o.Meet(utc); !m.Empty() || m.Zone != ZoneApart {
+		t.Errorf("learnings in IST and UTC meet as %+v; want ZoneApart", m)
+	}
+	if m := MergeClocks(map[string]ClockOffset{"body.at": o}, map[string]ClockOffset{"body.at": utc})["body.at"]; !m.Empty() {
+		t.Errorf("merged learnings in IST and UTC: %+v; want one that holds nothing", m)
+	}
+	if m := o.Meet(o); m != o {
+		t.Errorf("a learning meets itself as %+v", m)
+	}
+	// A meet that reads no zone of the application's names none: a name
+	// this keploy cannot read would refuse a value it never reads there.
+	either := ClockOffset{Res: time.Millisecond, Zone: ZoneEither, AppZone: "Mars/Olympus"}
+	if m := either.Meet(ClockOffset{Res: time.Millisecond, Zone: ZoneUTC}); m.Zone != ZoneUTC || m.AppZone != "" {
+		t.Errorf("either zone meets UTC as %+v; want UTC, naming no zone", m)
+	}
+}
+
+// zoneOr is the IANA zone name, built into keploy (time/tzdata).
+func zoneOr(t *testing.T, name string) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		t.Fatalf("%s: %v", name, err)
+	}
+	return loc
 }

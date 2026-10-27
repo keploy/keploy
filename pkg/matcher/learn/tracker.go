@@ -348,6 +348,7 @@ func (t *Tracker) AwaitRequest(ctx context.Context) error {
 func (t *Tracker) newDrifts() *DriftCache {
 	dc := NewDriftCache()
 	dc.clientTests, dc.zone, dc.appClock = t.clientTests, t.appZone, t.appClock != nil
+	dc.zoneName, dc.zoneNoName = t.drifts.zoneName, t.drifts.zoneNoName
 	return dc
 }
 
@@ -404,14 +405,27 @@ func MockID(m *models.Mock) string {
 // such a value refused, a false red that fails closed. A wall clock of no
 // zone its protocol types (WallClockLeaf) is read in those two zones too
 // where the learn step looks for a read of the clock (instantClock), as a
-// text's is. The agent sets it once, before any test.
-func (t *Tracker) SetAppZone(loc *time.Location) {
+// text's is. The agent sets it once, before any test. A learning that
+// depends on it names it (models.ClockOffset.AppZone, models.ZoneNameOf).
+func (t *Tracker) SetAppZone(loc *time.Location) { t.setAppZone(loc, true) }
+
+// SetAppZoneUnnamed is SetAppZone of a zone keploy could not read by name
+// (Go's own reading of a TZ it cannot read, which Go reads as UTC): no
+// learning names it, so a replay reads the zone its own tracker knows, as
+// before the name was stored, never a name the application's zone is not.
+func (t *Tracker) SetAppZoneUnnamed(loc *time.Location) { t.setAppZone(loc, false) }
+
+func (t *Tracker) setAppZone(loc *time.Location, named bool) {
 	if t == nil {
 		return
 	}
+	name := ""
+	if named {
+		name = models.ZoneNameOf(loc, time.Now())
+	}
 	t.mu.Lock()
 	t.appZone = loc
-	t.drifts.zone = loc
+	t.drifts.zone, t.drifts.zoneName, t.drifts.zoneNoName = loc, name, !named
 	t.mu.Unlock()
 }
 
