@@ -719,12 +719,12 @@ type PoolNamesSetter interface {
 }
 
 // UnrequiredSetter is an optional ExactServer capability: SetUnrequired hands
-// the proxy the recordings of the staged set that judging marked as the
-// application's own background work (models.MockEntry.Background), each with
-// why: a test is served one in its window when it makes the call, and is
-// never failed for not making it.
+// the proxy, per test of the staged set, the recordings of its own list that
+// judging marked as the application's own background work
+// (models.MockEntry.Background), each with why: the test is served one in its
+// window when it makes the call, and is never failed for not making it.
 type UnrequiredSetter interface {
-	SetUnrequired(names map[string]string) error
+	SetUnrequired(marks models.BackgroundMarks) error
 }
 
 // UnusedBackgroundReader is an optional ExactServer capability:

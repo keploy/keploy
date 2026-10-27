@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -83,13 +84,13 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, map[string]string{"mock-3": "a timer"}); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, models.BackgroundMarks{"o::TestA": {"mock-3": "a timer"}}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`,
 		`{"mappings":{"o::TestA":[]},"pool":{}}`,
-		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"background":{"mock-3":"a timer"}}`,
+		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"background_by_test":{"o::TestA":{"mock-3":"a timer"}}}`,
 	}
 	if len(bodies) != len(want) {
 		t.Fatalf("posted %q, want %q", bodies, want)
