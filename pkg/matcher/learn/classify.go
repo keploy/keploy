@@ -704,7 +704,7 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 	}
 	lateEarlier, leafedLate := leafedAtCall(earlier, at)
 	if !ok && len(leafedLate) == 0 {
-		return out
+		return dc.withAppZone(out, at)
 	}
 	if len(leafedLate) > 0 {
 		late = append(append([]Raw(nil), late...), leafedLate...)
@@ -712,6 +712,39 @@ func classifyGiven(dc *DriftCache, drift []string, live, rec Shape, at time.Time
 	alone := classifyRead(dc, drift, live, rec, at, lateEarlier, late, resp, w, given, follow)
 	for i := range out {
 		out[i] = stricterOf(out[i], alone[i])
+	}
+	return dc.withAppZone(out, at)
+}
+
+// withAppZone is out with each clock read whose learning depends on the
+// application's zone (models.ClockOffset.AppZoneMatters: a wall clock of no
+// zone read in it, a value that names its moment cut coarser than a
+// minute) naming the zone dc read it in (DriftCache.zone, zoneName;
+// models.ClockOffset.AppZone), which a replay then reads it in on any
+// machine (CheckClockRead). One keploy cannot name keeps no name, and a
+// replay reads it in the zone its own tracker knows, as before.
+func (dc *DriftCache) withAppZone(out []Learned, at time.Time) []Learned {
+	if dc.zone == nil || dc.zoneNoName {
+		return out
+	}
+	name := dc.zoneName
+	if name == "" {
+		if at.IsZero() {
+			at = time.Now()
+		}
+		name = models.ZoneNameOf(dc.zone, at)
+	}
+	if name == "" {
+		return out
+	}
+	for i := range out {
+		for _, p := range []**models.ClockOffset{&out[i].Offset, &out[i].Read} {
+			if *p != nil && (*p).AppZone == "" && (*p).AppZoneMatters() {
+				o := **p
+				o.AppZone = name
+				*p = &o
+			}
+		}
 	}
 	return out
 }
@@ -1730,6 +1763,12 @@ type DriftCache struct {
 	// window reads such a wall clock in those two only (Window.holdsRead),
 	// and so does the clock rule of one its protocol types (instantClock).
 	zone *time.Location
+	// zoneName is zone's name, as a learning that depends on it names it
+	// (withAppZone; models.ZoneNameOf, read once as the tracker sets it);
+	// zoneNoName: keploy could not read the zone by name (Go's own reading
+	// of a TZ it cannot read), so no learning names it.
+	zoneName   string
+	zoneNoName bool
 	// appClock: the tracker knows which clock the application reads
 	// (Tracker.SetAppClock), set as the tracker makes the cache and as the
 	// agent sets the clock. false (a cache made otherwise, NewDriftCache)
