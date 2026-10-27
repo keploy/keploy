@@ -6,6 +6,7 @@ package proxy
 import (
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emirpasic/gods/trees/redblacktree"
@@ -298,6 +299,9 @@ func (db *TreeDb) size() int {
 
 // rangeValues iterates without allocating a []interface{} snapshot.
 func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
+	if w := rangeValuesWatch.Load(); w != nil {
+		(*w)(db)
+	}
 	db.mu.RLock()
 	it := db.rbt.Iterator()
 	for it.Next() {
@@ -307,6 +311,10 @@ func (db *TreeDb) rangeValues(fn func(v interface{}) bool) {
 	}
 	db.mu.RUnlock()
 }
+
+// rangeValuesWatch, set only by this package's rows, is told of each walk of
+// a tree's values (rangeValues): what a row counts the walks of one tree by.
+var rangeValuesWatch atomic.Pointer[func(*TreeDb)]
 
 // dropWindowUnlessFiled drops the window index unless it stays right once
 // newObj is stored under newID in place of the entry under oldID: the ID does
