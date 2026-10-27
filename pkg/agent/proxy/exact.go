@@ -810,10 +810,28 @@ func (m *MockManager) FindStagedNotOwnedByKeys(kind models.Kind, call integratio
 
 var _ integrations.StagedKeyFinder = (*MockManager)(nil)
 
+// requestKeyIndex files staged mocks under their request keys
+// (models.RequestKeys), for a miss's diagnosis by keys (findNotOwned). A
+// recording's keys are its parser's, of what it recorded.
+var requestKeyIndex = &integrations.MockIndex{Keys: models.RequestKeys}
+
+// notOwnedTried counts the staged mocks a miss's diagnosis took up
+// (findNotOwned's try), each checked by name and then by the parser's match:
+// what one costs, read by the rows that pin it.
+var notOwnedTried atomic.Uint64
+
 // findNotOwned is FindStagedNotOwned, and with keys FindStagedNotOwnedByKeys.
 // The staging only moves on, and moves before the trees change (a staging
 // bumps it first, holding swapMu), so a recording read from the trees while
 // the staging is still call's is of call's set.
+//
+// With keys, of a kind whose parser files its recordings under request keys
+// (models.HasRequestKeys), each tree hands only its recordings filed under
+// one of keys (TreeDb.keyedValues), in tree order: a parser declares its keys
+// so that every call its match accepts asks by a key the recording is under
+// (models.RegisterRequestKeys), so the others are recordings match refuses.
+// The tree's index is built once, on the first such miss after it is staged,
+// so a miss costs what the call's keys file, not every recording of kind.
 func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound, keys []string, match func(*models.Mock) bool) (string, bool) {
 	v := m.exactView()
 	if v == nil || match == nil || !call.Read() {
@@ -830,6 +848,7 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 	found, restaged := "", false
 	seen := map[string]bool{}
 	try := func(mk *models.Mock) bool {
+		notOwnedTried.Add(1)
 		if mk == nil || mk.Kind != kind || seen[mk.Name] {
 			return false
 		}
@@ -864,8 +883,15 @@ func (m *MockManager) findNotOwned(kind models.Kind, call integrations.CallRound
 	}
 	// Each tree's values are read first, and tried with no tree's lock held:
 	// match is the parser's.
+	narrow := len(keys) > 0 && models.HasRequestKeys(kind)
 	for _, t := range trees {
-		for _, mk := range m.treeValues(t, kind) {
+		var values []*models.Mock
+		if narrow {
+			values = t.keyedValues(requestKeyIndex, keys, kind)
+		} else {
+			values = m.treeValues(t, kind)
+		}
+		for _, mk := range values {
 			if found != "" || restaged {
 				break
 			}
