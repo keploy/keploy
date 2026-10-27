@@ -1553,7 +1553,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				// a value the recorded answer cannot hold may be the app's,
 				// so it gets no cause.
 				res.Outcome, res.Reason, res.Why = learn.Miss, models.MissRequestChanged, why
-				if limit {
+				if limit && !plan.doubted {
 					res.Cause = learn.CauseNotFollowed
 				}
 				return nil, &learnMiss{res: res, closest: m, pool: sc.http}, nil
@@ -1891,6 +1891,10 @@ type pairing struct {
 	vars   models.MockVariables
 	binds  map[string]models.MockVariables
 	values map[string]variables.Binding
+	// doubted: a leaf of the call was read two ways that disagree
+	// (learn.Learned.Doubted), refused or bound: keploy's doubt, so a
+	// refusal of the call for keploy's limit carries no cause.
+	doubted bool
 }
 
 // learnPlan turns what Classify learned about mock m (paired as rec; own: one
@@ -1938,7 +1942,8 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	// doubted is the first leaf refused where keploy read the call two
 	// ways and the readings disagree (learn.Learned.Doubted): keploy's
 	// doubt, which, as the app's change does, takes the cause away from the
-	// call. doubt says the leaf read now is one.
+	// call, as one such leaf bound does (pairing.doubted). doubt says the
+	// leaf read now is one.
 	var doubted string
 	doubt := false
 	limit := func(why string) {
@@ -1976,6 +1981,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 
 		case learn.KindVariable:
 			doubt = l.Doubted
+			p.doubted = p.doubted || doubt
 			from := l.From
 			switch {
 			case from.Given:
@@ -2083,6 +2089,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 
 		case learn.KindEcho:
 			doubt = l.Doubted
+			p.doubted = p.doubted || doubt
 			// noted keeps an echo refused for keploy's limit as a value of
 			// the call, under a key no variable is named, so a later leaf
 			// that held the same recorded value and holds another now is
@@ -2157,10 +2164,10 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	if doubted != "" {
 		return p, doubted, ""
 	}
-	if limited != "" {
+	if limited != "" && !p.doubted {
 		return p, limited, learn.CauseNotFollowed
 	}
-	return p, "", ""
+	return p, limited, ""
 }
 
 // givenBindings are the values the running test case's request gave
