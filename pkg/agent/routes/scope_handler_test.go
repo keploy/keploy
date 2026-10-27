@@ -410,6 +410,44 @@ func (s *poolSvc) SetScopePool(_ context.Context, p map[string][]string) error {
 	return nil
 }
 
+// backgroundSvc is a poolSvc that also takes the tests' background marks.
+type backgroundSvc struct {
+	poolSvc
+	marks map[string]string
+	calls int
+}
+
+func (s *backgroundSvc) SetScopeBackground(_ context.Context, m map[string]string) error {
+	s.marks, s.calls = m, s.calls+1
+	return nil
+}
+
+// Under the switch the scope table's background marks reach the agent (a
+// table without marks clears them); with the switch off they are not read.
+func TestScopeTableCarriesTheBackgroundMarks(t *testing.T) {
+	post := func(svc agent.Service, body string) int {
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec.Code
+	}
+	t.Setenv(provenswitch.Env, "1")
+	svc := &backgroundSvc{}
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{},"background":{"mock-3":"a timer's call"}}`); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if svc.calls != 1 || len(svc.marks) != 1 || svc.marks["mock-3"] != "a timer's call" {
+		t.Fatalf("marks %v after %d calls", svc.marks, svc.calls)
+	}
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{}}`); code != http.StatusOK || svc.calls != 2 || svc.marks != nil {
+		t.Fatalf("a table without marks: status %d, marks %v after %d calls, want them cleared", code, svc.marks, svc.calls)
+	}
+	t.Setenv(provenswitch.Env, "")
+	svc = &backgroundSvc{}
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"]},"background":{"mock-3":"a timer's call"}}`); code != http.StatusOK || svc.calls != 0 {
+		t.Fatalf("switch off: status %d, %d calls", code, svc.calls)
+	}
+}
+
 // tableOnlySvc takes the per-test table and no pool slices.
 type tableOnlySvc struct{ agent.Service }
 
