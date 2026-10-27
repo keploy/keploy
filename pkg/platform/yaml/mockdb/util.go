@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,13 +47,14 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// parser implements the schema-noise adapter and learned drift (HTTP, plus
 		// Pulsar in enterprise). NewDocNoise returns nil when there is nothing to
 		// write, so omitempty keeps the noise key out of the doc entirely.
-		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Noise: yaml.NewDocNoiseAbout(mock.Noise, mock.Spec.ReqBodyNoise, mock.Spec.NoiseAbout, mock.Spec.NoiseOther),
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
 		// The places the learn step learned as a read of the application's
-		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
-		Clocks: maps.Clone(mock.Spec.Clocks),
+		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block,
+		// each with where it came from (models.MockSpec.ClockAbout).
+		Clocks: yaml.NewDocClocks(mock.Spec.Clocks, mock.Spec.ClockAbout, mock.Spec.ClockOther),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -324,13 +324,14 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// regex values dropped). Set before the mapper/per-kind projection runs so it
 		// survives regardless of the spec envelope. NewDocNoise returns nil when
 		// empty, so omitempty drops the key.
-		Noise: yaml.NewDocNoise(mock.Noise, mock.Spec.ReqBodyNoise),
+		Noise: yaml.NewDocNoiseAbout(mock.Noise, mock.Spec.ReqBodyNoise, mock.Spec.NoiseAbout, mock.Spec.NoiseOther),
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
 		// The places the learn step learned as a read of the application's
-		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block.
-		Clocks: maps.Clone(mock.Spec.Clocks),
+		// clock (models.MockSpec.Clocks), a kind-agnostic top-level block,
+		// each with where it came from (models.MockSpec.ClockAbout).
+		Clocks: yaml.NewDocClocks(mock.Spec.Clocks, mock.Spec.ClockAbout, mock.Spec.ClockOther),
 		// Where the call came from (models.Mock.Origin): written whenever
 		// the mock has one, whatever the switch, so a rewrite keeps what
 		// the decoders read (nil, so omitted, for a mock without one).
@@ -700,17 +701,15 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			// Restore kind-agnostic schema-noise carried on the doc envelope
 			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
 			// Sourced from the unified noise.req block.
-			if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
-				mock.Spec.ReqBodyNoise = rb
-			}
+			// With it, the variables, the clock reads, and where each
+			// learned decision came from (yaml.SetLearned).
+			yaml.SetLearned(&mock.Spec, m.Noise, m.Variables, m.Clocks)
 			// Restore the kind-agnostic async block off the doc envelope
 			// (the per-kind mapper rebuilt mock.Spec and can't know about it).
 			// No in-tree kind is both mapper-registered AND async-capable today
 			// (only HTTP sets Async, and HTTP is a builtin that never takes this
 			// mapped branch) — this guards a future mapper-registered AsyncParser.
 			mock.Spec.Async = m.Async
-			mock.Spec.Variables = m.Variables.Clone()
-			mock.Spec.Clocks = maps.Clone(m.Clocks)
 			mock.Origin = m.Origin // the mapper may have rebuilt the mock whole
 			mocks = append(mocks, &mock)
 			continue
@@ -893,12 +892,10 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 		// freshly-built spec (the per-kind switch above replaced mock.Spec
 		// wholesale). Uniform across parsers — HTTP included. Sourced from the
 		// unified noise.req block.
-		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
-			mock.Spec.ReqBodyNoise = rb
-		}
-		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
-		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
-		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
+		// With it, the variables, the clock reads, and where each learned
+		// decision came from (yaml.SetLearned), kind-agnostic like async.
+		yaml.SetLearned(&mock.Spec, m.Noise, m.Variables, m.Clocks)
+		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
 		mocks = append(mocks, &mock)
 	}
 
@@ -1941,12 +1938,10 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 		// Restore kind-agnostic schema-noise carried on the doc envelope (the
 		// per-kind switch above replaced mock.Spec wholesale). Uniform across
 		// parsers — HTTP included. Sourced from the unified noise.req block.
-		if rb := yaml.ResolveReqBodyNoise(m.Noise); len(rb) > 0 {
-			mock.Spec.ReqBodyNoise = rb
-		}
-		mock.Spec.Async = m.Async                 // kind-agnostic async block off the doc envelope
-		mock.Spec.Variables = m.Variables.Clone() // kind-agnostic, like async
-		mock.Spec.Clocks = maps.Clone(m.Clocks)   // kind-agnostic, like variables
+		// With it, the variables, the clock reads, and where each learned
+		// decision came from (yaml.SetLearned), kind-agnostic like async.
+		yaml.SetLearned(&mock.Spec, m.Noise, m.Variables, m.Clocks)
+		mock.Spec.Async = m.Async // kind-agnostic async block off the doc envelope
 		mocks = append(mocks, &mock)
 	}
 	return mocks, nil

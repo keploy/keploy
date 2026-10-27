@@ -112,3 +112,27 @@ func TestKeptLearningPutsAClockReadOnTheRecordingAndNoNoiseThere(t *testing.T) {
 }
 
 func hasKey(m map[string][]string, k string) bool { _, ok := m[k]; return ok }
+
+// Where a variable came from goes with its first declaration: merged into
+// nothing, it keeps the declaration's about and kept keys; merged into a
+// declaration already there, the one there keeps its own (the first learner
+// wins), and one with none stays of unknown origin.
+func TestMergeVariableKeepsTheFirstDeclarationsAbout(t *testing.T) {
+	learned := &models.About{By: models.AboutByLearned, Why: "first"}
+	b := models.MockVariable{Recorded: "1", Bind: "body.id", About: learned, Other: models.UnknownKeys{"x": {YAML: "1\n"}}}
+	got := MergeVariable(models.MockVariable{}, b)
+	if !reflect.DeepEqual(got.About, learned) || len(got.Other) != 1 {
+		t.Fatalf("merged into nothing: %+v", got)
+	}
+	got.About.Why = "changed"
+	if learned.Why != "first" {
+		t.Fatal("the merge shares the declaration's about")
+	}
+	hand := &models.About{By: models.AboutByHand}
+	if got := MergeVariable(models.MockVariable{Recorded: "1", About: hand}, b); got.About != hand {
+		t.Fatalf("merged into a hand entry: %+v", got.About)
+	}
+	if got := MergeVariable(models.MockVariable{Recorded: "1"}, b); got.About != nil {
+		t.Fatalf("an entry of unknown origin took an about: %+v", got.About)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -73,7 +74,7 @@ type NetworkTrafficDoc struct {
 	// step learned as a read of the application's clock, plain or plus a
 	// constant offset (models.MockSpec.Clocks): a kind-agnostic top-level
 	// block, like variables, kept off the per-kind spec.
-	Clocks map[string]models.ClockOffset `json:"clocks,omitempty" yaml:"clocks,omitempty"`
+	Clocks map[string]DocClock `json:"clocks,omitempty" yaml:"clocks,omitempty"`
 
 	// Real, on a test case, is the mock.real destinations its request used in
 	// its recording (models.TestCase.Real); written and read only under the
@@ -100,9 +101,117 @@ type NetworkTrafficDoc struct {
 // For backward compatibility the custom unmarshalers also accept the OLD shape
 // where `noise:` was a bare string list — that decodes into Value. New writes
 // only emit this unified mapping.
+//   - About — by path, where each ignored field came from (models.About,
+//     models.MockSpec.NoiseAbout). An entry whose path is not in Req is an
+//     orphan, kept as written.
+//
+// The keys of the block this keploy does not know are kept (Other), so a
+// rewrite keeps a newer keploy's keys.
 type DocNoise struct {
-	Req   []string `json:"req,omitempty" yaml:"req,omitempty"`
-	Value []string `json:"value,omitempty" yaml:"value,omitempty"`
+	Req   []string                `json:"req,omitempty" yaml:"req,omitempty"`
+	Value []string                `json:"value,omitempty" yaml:"value,omitempty"`
+	About map[string]models.About `json:"about,omitempty" yaml:"about,omitempty"`
+	Other models.UnknownKeys      `json:"-" yaml:",inline"`
+}
+
+// NewDocNoiseAbout is NewDocNoise with where each path came from (about,
+// orphans included) and the keys of the block this keploy does not know
+// (other): a block that holds only those is still written, so they are
+// never dropped.
+func NewDocNoiseAbout(value []string, reqBodyNoise map[string][]string, about map[string]models.About, other models.UnknownKeys) *DocNoise {
+	n := NewDocNoise(value, reqBodyNoise)
+	if len(about) == 0 && len(other) == 0 {
+		return n
+	}
+	if n == nil {
+		n = &DocNoise{}
+	}
+	n.About = models.CloneAbouts(about)
+	n.Other = maps.Clone(other)
+	return n
+}
+
+// DocClock is one entry of the envelope's clocks block: the clock read the
+// learn step learned at the path (models.ClockOffset), where it came from
+// (models.MockSpec.ClockAbout), and the keys of the entry this keploy does
+// not know, kept as written.
+type DocClock struct {
+	models.ClockOffset `yaml:",inline"`
+	About              *models.About      `json:"about,omitempty" yaml:"about,omitempty"`
+	Other              models.UnknownKeys `json:"-" yaml:",inline"`
+}
+
+type docClockJSON DocClock
+
+// MarshalJSON writes c with the keys it does not know (Other) beside its own.
+func (c DocClock) MarshalJSON() ([]byte, error) {
+	return models.MarshalJSONWithOther(docClockJSON(c), c.Other)
+}
+
+// UnmarshalJSON reads c, keeping the keys it does not know in Other.
+func (c *DocClock) UnmarshalJSON(data []byte) error {
+	var v docClockJSON
+	other, err := models.UnmarshalJSONWithOther(data, &v)
+	if err != nil {
+		return err
+	}
+	v.Other = other
+	*c = DocClock(v)
+	return nil
+}
+
+// NewDocClocks builds the envelope's clocks block from a mock spec's clock
+// reads (models.MockSpec.Clocks), where each came from (ClockAbout) and the
+// keys of each entry this keploy does not know (ClockOther). An entry is
+// written for each clock read and only for one: an entry in the block is a
+// clock read to the next keploy that reads it. nil when there is none.
+func NewDocClocks(clocks map[string]models.ClockOffset, about map[string]models.About, other map[string]models.UnknownKeys) map[string]DocClock {
+	if len(clocks) == 0 {
+		return nil
+	}
+	out := make(map[string]DocClock, len(clocks))
+	for path, o := range clocks {
+		c := DocClock{ClockOffset: o, Other: maps.Clone(other[path])}
+		if a, ok := about[path]; ok {
+			c.About = models.CloneAbout(&a)
+		}
+		out[path] = c
+	}
+	return out
+}
+
+// SetLearned puts a decoded envelope's learned blocks on spec: the
+// request-body noise paths and where each came from, the variables, the
+// clock reads and where each came from, and the keys of those blocks this
+// keploy does not know.
+func SetLearned(spec *models.MockSpec, noise *DocNoise, vars models.MockVariables, clocks map[string]DocClock) {
+	if rb := ResolveReqBodyNoise(noise); len(rb) > 0 {
+		spec.ReqBodyNoise = rb
+	}
+	if noise != nil {
+		spec.NoiseAbout = models.CloneAbouts(noise.About)
+		spec.NoiseOther = maps.Clone(noise.Other)
+	}
+	spec.Variables = vars.Clone()
+	spec.Clocks, spec.ClockAbout, spec.ClockOther = nil, nil, nil
+	for path, c := range clocks {
+		if spec.Clocks == nil {
+			spec.Clocks = make(map[string]models.ClockOffset, len(clocks))
+		}
+		spec.Clocks[path] = c.ClockOffset
+		if c.About != nil {
+			if spec.ClockAbout == nil {
+				spec.ClockAbout = map[string]models.About{}
+			}
+			spec.ClockAbout[path] = c.About.Clone()
+		}
+		if len(c.Other) > 0 {
+			if spec.ClockOther == nil {
+				spec.ClockOther = map[string]models.UnknownKeys{}
+			}
+			spec.ClockOther[path] = maps.Clone(c.Other)
+		}
+	}
 }
 
 // NewDocNoise builds the unified noise block for encoding from the in-memory
@@ -199,11 +308,20 @@ func (n *DocNoise) UnmarshalJSON(data []byte) error {
 	}
 	type rawDocNoise DocNoise
 	var raw rawDocNoise
-	if err := json.Unmarshal(trimmed, &raw); err != nil {
+	other, err := models.UnmarshalJSONWithOther(trimmed, &raw)
+	if err != nil {
 		return err
 	}
+	raw.Other = other
 	*n = DocNoise(raw)
 	return nil
+}
+
+type docNoiseJSON DocNoise
+
+// MarshalJSON writes n with the keys it does not know (Other) beside its own.
+func (n DocNoise) MarshalJSON() ([]byte, error) {
+	return models.MarshalJSONWithOther(docNoiseJSON(n), n.Other)
 }
 
 // ctxReader wraps an io.Reader with a context for cancellation support

@@ -65,7 +65,7 @@ type NetworkTrafficDocJSON struct {
 	Variables models.MockVariables `json:"variables,omitempty"`
 
 	// Clocks is NetworkTrafficDoc.Clocks.
-	Clocks map[string]models.ClockOffset `json:"clocks,omitempty"`
+	Clocks map[string]DocClock `json:"clocks,omitempty"`
 
 	// Real is NetworkTrafficDoc.Real.
 	Real []string `json:"real,omitempty"`

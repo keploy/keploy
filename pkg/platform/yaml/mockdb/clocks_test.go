@@ -274,7 +274,7 @@ func TestAMappedKindsClockReadsSurviveItsDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(doc.Clocks, clocks) {
+	if !reflect.DeepEqual(doc.Clocks, yaml.NewDocClocks(clocks, nil, nil)) {
 		t.Fatalf("precondition: the mapped kind's document holds clock reads %+v, want %+v", doc.Clocks, clocks)
 	}
 	back, err := decodeMocks([]*yaml.NetworkTrafficDoc{doc}, zap.NewNop(), false)

@@ -6,6 +6,7 @@ package learn
 // those cycles are served the recordings as the next keploy test reads them.
 
 import (
+	"maps"
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -164,7 +165,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // both say so (models.MergeVariables).
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
+		// a declares nothing yet: b is the first declaration, and where it
+		// came from goes with it.
 		a.Recorded, a.Echo = b.Recorded, b.Echo
+		a.About, a.Other = models.CloneAbout(b.About), maps.Clone(b.Other)
 	} else {
 		a.Echo = a.Echo && b.Echo
 	}

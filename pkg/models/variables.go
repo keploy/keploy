@@ -1,6 +1,7 @@
 package models
 
 import (
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,31 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// About is where the variable came from (About); nil for one of
+	// unknown origin. Replay never reads it.
+	About *About `json:"about,omitempty" yaml:"about,omitempty" bson:"about,omitempty"`
+	// Other is the keys of the entry this keploy does not know, as written,
+	// so a rewrite keeps them.
+	Other UnknownKeys `json:"-" yaml:",inline" bson:"other,omitempty"`
+}
+
+type mockVariableJSON MockVariable
+
+// MarshalJSON writes v with the keys it does not know (Other) beside its own.
+func (v MockVariable) MarshalJSON() ([]byte, error) {
+	return MarshalJSONWithOther(mockVariableJSON(v), v.Other)
+}
+
+// UnmarshalJSON reads v, keeping the keys it does not know in Other.
+func (v *MockVariable) UnmarshalJSON(data []byte) error {
+	var w mockVariableJSON
+	other, err := UnmarshalJSONWithOther(data, &w)
+	if err != nil {
+		return err
+	}
+	w.Other = other
+	*v = MockVariable(w)
+	return nil
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -672,6 +698,8 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.About = CloneAbout(mv.About)
+		mv.Other = maps.Clone(mv.Other)
 		out[name] = mv
 	}
 	return out
