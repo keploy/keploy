@@ -264,8 +264,8 @@ type exactState struct {
 	// (teardownAfter). nil until a replay sent one.
 	poolOwners atomic.Pointer[map[string]string]
 	// teardownLast is keploy mock replay's teardown bound (teardownAfter),
-	// cached for one revision of the trees (each exact serve bumps it), one
-	// scope table and one key.
+	// cached for one staging generation of the trees (StagingGeneration: an
+	// exact serve does not move it), one scope table and one key.
 	teardownLast atomic.Pointer[teardownBound]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
@@ -1816,6 +1816,23 @@ func (v *exactView) spentOutside(name string) bool {
 	return v.outside != nil && v.outside.hidden(name, v.epoch.Load())
 }
 
+var _ integrations.StagingGenerations = (*MockManager)(nil)
+
+// spentNow reports whether name has answered in a way that drops it from the
+// reads while v is in force (MockManager.MockSpent): one of v's own (the open
+// test's, or a pool view's ahead) consumed or taken by another test, as
+// unanswered drops it; a staged mock spent in v, or consumed outside every
+// test in the staging, as shows and unspent drop it.
+func (v *exactView) spentNow(name string) bool {
+	v.mu.Lock()
+	gone := v.spent[name]
+	if i, own := v.index[name]; own && !gone {
+		gone = v.consumed[i] || v.takenByOther(i)
+	}
+	v.mu.Unlock()
+	return gone || v.spentOutside(name)
+}
+
 // unspent is in less the mocks a parser consumed through a delete door in
 // this view, or outside every test in the staging; in itself when there are
 // none.
@@ -1983,10 +2000,14 @@ func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
 		return nil
 	}
 	owners := m.exact.poolOwners.Load()
-	// The revision first, then the trees (the revision's sample-read-install
+	// The generation first, then the trees (the revision's sample-read-install
 	// idiom): a bound read from trees a staging swaps meanwhile is cached
-	// under a revision that is already old.
-	rev := m.Revision()
+	// under a generation that is already old. The staging generation, not
+	// Revision: the bound reads the trees, the pool's names and its owners
+	// alone, which no consume under exact serving changes, so a read between
+	// tests after each call's consume does not walk the whole staged set
+	// again.
+	rev := m.StagingGeneration()
 	if c := m.exact.teardownLast.Load(); c != nil && c.rev == rev && c.pool == pool && c.owners == owners && c.key == key {
 		return c.after()
 	}
@@ -2018,12 +2039,12 @@ func (m *MockManager) teardownAfter(key string) func(time.Time) bool {
 
 // teardownBound is teardownAfter's bound for keploy mock replay (last: the
 // latest request or answer of a staged data-plane recording outside the
-// pool that bounds key's process), as the trees stood at revision rev
-// (MockManager.Revision) under the scope table pool and owners: the per-test
-// reads after the tests read it once per revision, not every staged
-// recording at every read. Each exact serve bumps the revision, so it is
-// read again once per served call, to the same bound: exact serving hides
-// what it serves rather than deleting it from the trees.
+// pool that bounds key's process), as the trees stood at generation rev
+// (MockManager.StagingGeneration) under the scope table pool and owners: the
+// per-test reads after the tests read it once per staging generation, not
+// every staged recording at every read. An exact serve moves Revision but
+// not the staging generation: exact serving hides what it serves rather
+// than deleting it from the trees, so the bound stands.
 type teardownBound struct {
 	rev    uint64
 	pool   *map[string]struct{}
@@ -2237,10 +2258,7 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 				v.served[i] = mk.ShallowCopy()
 				v.mu.Unlock()
 				m.takeLocked(integrations.Take{Mock: owned, How: integrations.TakeConsumed, Gen: v.round, Ahead: true})
-				return exactServed, nil, func() {
-					m.bumpRevisionKind(owned.Kind)
-					m.bumpRevisionAll()
-				}
+				return exactServed, nil, func() { m.bumpConsumed(owned.Kind) }
 			}
 			v.mu.Unlock()
 			m.takeLocked(integrations.Take{Mock: owned, How: integrations.TakeConsumed, Gen: v.round, Test: v.test})
@@ -2400,8 +2418,7 @@ func (m *MockManager) noteExactSpent(mk *models.Mock) {
 	}, 0); err != nil && m.logger != nil {
 		m.logger.Error("failed to flag mock as used", zap.Error(err))
 	}
-	m.bumpRevisionKind(mk.Kind)
-	m.bumpRevisionAll()
+	m.bumpConsumed(mk.Kind)
 }
 
 // noteExactServed records that test mock owned answered (consumed, served
@@ -2435,8 +2452,7 @@ func (m *MockManager) noteExactServed(owned, served *models.Mock) {
 	// Whichever door the parser consumed it through, the test's recording
 	// answered a call of the set (FindAnsweredEarlier).
 	m.noteAnswered(*owned)
-	m.bumpRevisionKind(owned.Kind)
-	m.bumpRevisionAll()
+	m.bumpConsumed(owned.Kind)
 }
 
 // cursorSlot is where a stateful cursor key is kept (cursorSlotIn): in the

@@ -79,3 +79,40 @@ type ExactConcurrentReader interface {
 	// manager's copies, in recorded order; read-only.
 	ExactTakenCandidates(kind models.Kind) []*models.Mock
 }
+
+// StagingGenerations is what a store that serves exactly offers a parser that
+// keeps an index of what it reads, so the index is built once per staging
+// generation instead of on every consume (MockManager.StagingGeneration):
+//
+//   - StagingGeneration (StagingGenerationByKind for one kind's reads) moves
+//     whenever Revision (RevisionByKind) does, except for a consume or a spend
+//     under exact serving.
+//   - MockSpent reports the mocks such a consume or spend dropped from the
+//     reads since the generation began: while one generation holds, a read
+//     gives what it gave when the generation began, less those.
+//
+// So a parser samples the generation, reads, builds its index, and samples it
+// again (keeping the index only when both samples agree, as with Revision);
+// at lookup it skips any candidate MockSpent reports. The consume it then
+// makes is still settled against the view in force, and refused when the mock
+// may not answer (ConsumeRefused), so the skip saves a refused consume and
+// never decides alone whether a mock answers.
+type StagingGenerations interface {
+	StagingGeneration() uint64
+	StagingGenerationByKind(kind models.Kind) uint64
+	MockSpent(name string) bool
+}
+
+// StagingGenerationOf returns db's staging generation for kind's reads (every
+// kind's for ""), and false when db keeps none: the parser then keys its index
+// on Revision as before.
+func StagingGenerationOf(db MockMemDb, kind models.Kind) (uint64, bool) {
+	sg, ok := db.(StagingGenerations)
+	if !ok {
+		return 0, false
+	}
+	if kind == "" {
+		return sg.StagingGeneration(), true
+	}
+	return sg.StagingGenerationByKind(kind), true
+}

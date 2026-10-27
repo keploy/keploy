@@ -707,6 +707,45 @@ func (s *scopedMockDb) RevisionByKind(kind models.Kind) uint64 {
 	return rev + s.viewVersion()
 }
 
+// StagingGeneration and StagingGenerationByKind are the store's
+// (integrations.StagingGenerations) plus the view's version, as Revision is:
+// a worker beginning or ending a test changes what this view shows.
+func (s *scopedMockDb) StagingGeneration() uint64 {
+	var gen uint64
+	if g, ok := s.MockMemDb.(integrations.StagingGenerations); ok {
+		gen = g.StagingGeneration()
+	} else if r, ok := s.MockMemDb.(interface{ Revision() uint64 }); ok {
+		gen = r.Revision()
+	}
+	return gen + s.viewVersion()
+}
+
+func (s *scopedMockDb) StagingGenerationByKind(kind models.Kind) uint64 {
+	var gen uint64
+	if g, ok := s.MockMemDb.(integrations.StagingGenerations); ok {
+		gen = g.StagingGenerationByKind(kind)
+	} else if r, ok := s.MockMemDb.(interface {
+		RevisionByKind(models.Kind) uint64
+	}); ok {
+		gen = r.RevisionByKind(kind)
+	}
+	return gen + s.viewVersion()
+}
+
+// MockSpent is the store's while this view passes through to it (exact
+// serving). A view that narrows the reads itself drops a consumed recording
+// through a consume that moves the store's revisions, and with them its
+// staging generations (holdUsedUp, Spend), so it reports none.
+func (s *scopedMockDb) MockSpent(name string) bool {
+	if !s.passThrough() {
+		return false
+	}
+	g, ok := s.MockMemDb.(integrations.StagingGenerations)
+	return ok && g.MockSpent(name)
+}
+
+var _ integrations.StagingGenerations = (*scopedMockDb)(nil)
+
 func (s *scopedMockDb) viewVersion() uint64 {
 	if s.src == nil {
 		return 0

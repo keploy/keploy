@@ -120,10 +120,15 @@ type MockManager struct {
 
 	// global revision (legacy)
 	rev uint64
+	// staged is rev less the moves a consume under exact serving makes
+	// (StagingGeneration).
+	staged uint64
 
-	// NEW: per-kind revisions
-	revMu     sync.RWMutex
-	revByKind map[models.Kind]*uint64
+	// NEW: per-kind revisions; stagedByKind is revByKind less the moves a
+	// consume under exact serving makes (StagingGenerationByKind).
+	revMu        sync.RWMutex
+	revByKind    map[models.Kind]*uint64
+	stagedByKind map[models.Kind]*uint64
 
 	// NEW: per-kind trees (guarded by treesMu)
 	treesMu          sync.RWMutex
@@ -529,6 +534,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		statelessFiltered:   make(map[models.Kind]map[string][]*models.Mock),
 		statelessUnfiltered: make(map[models.Kind]map[string][]*models.Mock),
 		revByKind:           make(map[models.Kind]*uint64),
+		stagedByKind:        make(map[models.Kind]*uint64),
 		consumedIndex:       make(map[string]int),
 		consumedPersistent:  make(map[string]models.MockState),
 		servedCount:         make(map[string]uint64),
@@ -842,6 +848,7 @@ func (m *MockManager) Revision() uint64 {
 }
 
 func (m *MockManager) bumpRevisionAll() {
+	atomic.AddUint64(&m.staged, 1)
 	atomic.AddUint64(&m.rev, 1)
 }
 
@@ -856,16 +863,88 @@ func (m *MockManager) RevisionByKind(kind models.Kind) uint64 {
 }
 
 func (m *MockManager) bumpRevisionKind(kind models.Kind) {
+	rev, staged := m.kindRevisions(kind)
+	atomic.AddUint64(staged, 1)
+	atomic.AddUint64(rev, 1)
+}
+
+// kindRevisions returns kind's revision and staging generation counters,
+// made on first use. The pointers stay valid after the lock is let go: the
+// counters move by atomics.
+func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged *uint64) {
 	m.revMu.Lock()
-	ptr := m.revByKind[kind]
-	if ptr == nil {
-		var v uint64
-		// Store pointer in map; safe to use after unlocking as we mutate via atomics.
-		ptr = &v
-		m.revByKind[kind] = ptr
+	defer m.revMu.Unlock()
+	if m.revByKind == nil {
+		m.revByKind = make(map[models.Kind]*uint64)
 	}
-	m.revMu.Unlock()
-	atomic.AddUint64(ptr, 1)
+	if m.stagedByKind == nil {
+		m.stagedByKind = make(map[models.Kind]*uint64)
+	}
+	rev, staged = m.revByKind[kind], m.stagedByKind[kind]
+	if rev == nil {
+		rev = new(uint64)
+		m.revByKind[kind] = rev
+	}
+	if staged == nil {
+		staged = new(uint64)
+		m.stagedByKind[kind] = staged
+	}
+	return rev, staged
+}
+
+// bumpConsumed moves the revisions for a consume or a spend under exact
+// serving of a mock of kind: Revision and RevisionByKind move, so a parser
+// that keys what it read on them reads again, as before; the staging
+// generations do not, since what every read gives changes then only by the
+// mock MockSpent now reports.
+func (m *MockManager) bumpConsumed(kind models.Kind) {
+	rev, _ := m.kindRevisions(kind)
+	atomic.AddUint64(rev, 1)
+	atomic.AddUint64(&m.rev, 1)
+}
+
+// StagingGeneration is Revision less the moves a consume under exact serving
+// makes. It moves when the staged set changes (a staging, a store into a
+// tree, a delete; outside exact serving a consume deletes the mock from its
+// tree, so it moves then too) and when exact serving installs a view (a test
+// opens or ends, a key restarts), never when a parser consumes or spends a
+// mock the view in force shows. So what a read gives (GetPerTestMocksInWindow,
+// GetSessionMocks, GetUnFilteredMocks, GetStartupMocks, ...) while one
+// generation holds is what it gave when the generation began, less the mocks
+// MockSpent reports: a parser can build its index once per generation and
+// skip at lookup what MockSpent reports, rather than build it again on each
+// consume as Revision has it do (integrations.StagingGenerations).
+func (m *MockManager) StagingGeneration() uint64 {
+	return atomic.LoadUint64(&m.staged)
+}
+
+// StagingGenerationByKind is StagingGeneration for the reads of kind's mocks:
+// RevisionByKind less the moves a consume under exact serving makes.
+func (m *MockManager) StagingGenerationByKind(kind models.Kind) uint64 {
+	m.revMu.RLock()
+	ptr := m.stagedByKind[kind]
+	m.revMu.RUnlock()
+	if ptr == nil {
+		return 0
+	}
+	return atomic.LoadUint64(ptr)
+}
+
+// MockSpent reports whether the staged mock named name has answered in a way
+// that drops it from the reads while the view in force holds: under exact
+// serving, an open test's own recording (or a pool view's ahead) consumed, or
+// another test took (a shared recording), a staged mock spent through a
+// delete door in the view, a data-plane recording consumed outside every test
+// in the staging. Those are the only changes a consume or a spend makes to
+// what the reads give, and none of them moves StagingGeneration. False with
+// no view in force: outside exact serving a consume deletes the mock from its
+// tree, which moves the staging generations.
+func (m *MockManager) MockSpent(name string) bool {
+	v := m.exactView()
+	if v == nil {
+		return false
+	}
+	return v.spentNow(name)
 }
 
 // ensureKindTrees returns per-kind trees, creating them if missing.
