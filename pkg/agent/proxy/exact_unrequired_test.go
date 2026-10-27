@@ -296,4 +296,16 @@ func TestACandidateMarkedOnItsOwnerIsNotTheOpenTestsUnusedBackground(t *testing.
 	if !ok || bt != "T" || !slices.Equal(unused, []string{"own"}) {
 		t.Fatalf("unused background %q %v %v: only T's own marked entry", bt, unused, ok)
 	}
+
+	// Marks that name the candidate on T's entry too (a mappings file T does
+	// not list it in, edited by hand or out of date): a recording served to T
+	// only as a candidate is still never T's unused background, so judging
+	// never takes it off T's entry or out of the recording on T's account.
+	own, shared = exactMock("own", 0, models.LifetimeSession), exactMock("shared", time.Second, models.LifetimeSession)
+	mm = stagedManager(t, nil, []*models.Mock{own, shared})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"own": "a timer's call", "shared": "a timer's call"}})
+	mm.ServeExactTestConcurrent("T", []*models.Mock{own}, []*models.Mock{shared})
+	if bt, unused, ok = mm.ExactTestUnusedBackground(); !ok || bt != "T" || !slices.Equal(unused, []string{"own"}) {
+		t.Fatalf("unused background %q %v %v: a candidate is never T's own unused background", bt, unused, ok)
+	}
 }
