@@ -268,6 +268,14 @@ func noiseOrRead(ln Learned) bool {
 	return ln.Kind == KindNoise && ln.Read == nil || plainRead(ln)
 }
 
+// todRead reports whether ln is learned as a plain read of the clock that
+// wrote a time of day (models.LayoutTimeOfDay), which a replay checks
+// modulo a day in its call's span, in zone ("": any zone).
+func todRead(ln Learned, zone string) bool {
+	o, ok := ln.Clock()
+	return plainRead(ln) && ok && models.LayoutTimeOfDay(o.Layout) && (zone == "" || o.Zone == zone)
+}
+
 // zonedRead reports whether ln is a plain read of the clock (plainRead) that
 // a replay reads in zone (models.ClockOffset.Zone).
 func zonedRead(ln Learned, zone string) bool {
@@ -535,18 +543,110 @@ func TestALiveSpanCarriesTheApplicationsZone(t *testing.T) {
 	}
 }
 
-// A time of day its protocol types (a Postgres time) that moved by the lead
-// stays noise with no read of the clock: it names no day, so no call's span
-// holds it and no replay check reads one (clockReadOf). A stated limit,
-// never a read a replay refuses whatever it carries.
-func TestATimeOfDayTheLeadMovedIsNoClockReadAReplayChecks(t *testing.T) {
-	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
-	read := call.Add(-5 * time.Millisecond)
+// A time of day the lead moved (a Postgres time its protocol types, or a
+// text "10:00:41" whole) names no day, so no window holds it: it is a read of
+// the clock all the same, in the zone its recording read it in (UTC, the
+// application's, or either where the application's zone is UTC there),
+// which every replay checks modulo a day in its call's span, the midnight
+// it crosses too: a value of the replay's own clock passes, one moved by a
+// minute is refused, naming the place. A replay that cannot tell the
+// application's zone refuses one read in it; a value in another layout, or
+// a time of day where the place was learned as an instant that names its
+// day (and the reverse), is refused. Never noise that lets any value pass.
+// One the lead did not move, with no window, stays refused at learn (a
+// plain read needs a day: noWindowRead).
+func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 	const p = "body.cmd.filter.at"
-	tod := func(at time.Time) Leaf { return TimeOfDayLeaf(p, p, time.Duration(clockOfDay(at)), time.Microsecond) }
-	ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil)
-	if _, ok := ln.Clock(); ln.Kind != KindNoise || ok {
-		t.Errorf("a time of day the lead moved: %s Read=%+v (%s); want noise with no read of the clock", ln.Kind, ln.Read, ln.Why)
+	ist := time.FixedZone("IST", 5*3600+1800)
+	typed := func(tod time.Duration) Leaf { return TimeOfDayLeaf(p, p, tod, time.Microsecond) }
+	text := func(tod time.Duration) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: timeOfDayDay.Add(tod).Format("15:04:05.000")}
+	}
+	todIn := func(at time.Time, loc *time.Location) time.Duration {
+		at = at.In(loc)
+		return at.Sub(time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, loc))
+	}
+	forms := map[string]func(time.Duration) Leaf{"typed": typed, "text": text}
+	for name, leaf := range forms {
+		for _, tc := range []struct {
+			zone     string
+			app, loc *time.Location
+			call     time.Time
+		}{
+			{models.ZoneUTC, nil, time.UTC, time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)},
+			{models.ZoneUTC, ist, time.UTC, time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)},
+			{models.ZoneApp, ist, ist, time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)},
+			// Read just before midnight in the zone, the full round just after.
+			{models.ZoneUTC, ist, time.UTC, time.Date(2026, 10, 27, 23, 59, 30, 0, time.UTC)},
+			{models.ZoneApp, ist, ist, time.Date(2026, 10, 27, 18, 29, 30, 0, time.UTC)},
+			{models.ZoneEither, time.UTC, time.UTC, time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)},
+		} {
+			at := fmt.Sprintf("%s, read in %s, called at %s", name, tc.zone, tc.call.Format(time.RFC3339Nano))
+			read := tc.call.Add(-5*time.Millisecond - 123*time.Microsecond)
+			ln := classifyZoned(tc.app, false, p, leaf(todIn(read, tc.loc)), leaf(todIn(read.Add(FullRoundLead+37*time.Millisecond+411*time.Microsecond), tc.loc)), tc.call, nil)
+			o, ok := ln.Clock()
+			if !todRead(ln, tc.zone) || !ok {
+				t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock modulo a day, in %s", at, ln.Kind, ln.Read, ln.Why, tc.zone)
+				continue
+			}
+			// A replay 3 days later, its call a second long, ending 20 ms
+			// past midnight in the zone where the recording's was.
+			replay := tc.call.Add(72*time.Hour + 2*time.Second)
+			s := Span{From: replay.Add(-time.Second), To: replay, Zone: tc.app}
+			for _, held := range []time.Time{s.From, s.From.Add(400 * time.Millisecond), s.To} {
+				if ok, why := CheckClockRead(p, o, leaf(todIn(held, tc.loc)), s, true); !ok {
+					t.Errorf("%s: the replay's own time of day %s refused: %s", at, held.In(tc.loc).Format("15:04:05.000"), why)
+				}
+			}
+			for _, moved := range []time.Duration{-time.Minute, time.Minute, 12 * time.Hour, -5*time.Hour - 30*time.Minute, 5*time.Hour + 30*time.Minute} {
+				v := leaf(todIn(s.From.Add(400*time.Millisecond+moved), tc.loc))
+				if ok, why := CheckClockRead(p, o, v, s, true); ok || !strings.HasPrefix(why, p+" was learned as") {
+					t.Errorf("%s: the replay's time of day moved by %s: %v (%s); want refused, naming the place", at, moved, ok, why)
+				}
+			}
+			if tc.zone != models.ZoneUTC {
+				if ok, why := CheckClockRead(p, o, leaf(todIn(s.To, tc.loc)), Span{From: s.From, To: s.To}, true); ok || !strings.Contains(why, "cannot tell the application's zone") {
+					t.Errorf("%s: the zone unknown at replay: %v (%s); want refused, saying so", at, ok, why)
+				}
+			}
+			other := forms["text"]
+			if name == "text" {
+				other = forms["typed"]
+			}
+			if ok, why := CheckClockRead(p, o, other(todIn(s.To, tc.loc)), s, true); ok || !strings.Contains(why, "in another form") {
+				t.Errorf("%s: the replay's value in the other form: %v (%s); want refused, saying so", at, ok, why)
+			}
+			if ok, _ := CheckClockRead(p, o, InstantLeaf(p, p, s.To, time.Millisecond), s, true); ok {
+				t.Errorf("%s: an instant naming its day where a time of day was learned passed", at)
+			}
+		}
+	}
+	// A time of day where the place was learned as an instant: none.
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	s := Span{From: call.Add(-time.Second), To: call}
+	for _, lay := range []string{models.LayoutTyped, "iso-second", ""} {
+		if ok, _ := CheckClockRead(p, models.ClockOffset{Res: time.Millisecond, Layout: lay}, typed(todIn(call, time.UTC)), s, true); ok {
+			t.Errorf("a time of day at a place learned as an instant (layout %q) passed", lay)
+		}
+	}
+	// Not one the lead moved: refused at learn, with no window (R04).
+	read := call.Add(-5 * time.Millisecond)
+	if ln := classifyZoned(nil, false, p, typed(todIn(read, time.UTC)), typed(todIn(read.Add(time.Hour), time.UTC)), call, nil); ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != instantNotClock {
+		t.Errorf("a typed time of day moved by an hour, no window: %s Read=%+v (%s); want refused: %s", ln.Kind, ln.Read, ln.Why, instantNotClock)
+	}
+	// Two layouts in its two runs (to the minute, then the second): refused.
+	if ln := classifyZoned(nil, false, p, Leaf{Path: p, Noise: p, Type: String, Value: "03:29"}, Leaf{Path: p, Noise: p, Type: String, Value: "03:31:01"}, call, nil); ln.Kind != KindUnaccounted || ln.Read != nil || !strings.Contains(ln.Why, "a time of day to the minute") {
+		t.Errorf("a text time of day in two layouts: %s Read=%+v (%s); want refused, naming both", ln.Kind, ln.Read, ln.Why)
+	}
+	// One learned with an offset, or in no zone, which no learn step
+	// writes, holds nothing.
+	for _, o := range []models.ClockOffset{
+		{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Microsecond, Zone: models.ZoneUTC, Layout: models.LayoutTypedTimeOfDay},
+		{Res: time.Microsecond, Layout: models.LayoutTypedTimeOfDay},
+	} {
+		if ok, _ := CheckClockRead(p, o, typed(todIn(call, time.UTC)), s, true); ok {
+			t.Errorf("a time of day learned as %+v passed", o)
+		}
 	}
 }
 

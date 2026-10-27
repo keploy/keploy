@@ -184,7 +184,11 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // type of its protocol (a BSON datetime, a Postgres timestamp), or the
 // layout of a text or a number, which names the resolution its form writes
 // (an ISO 8601 date, its time to the minute or to the second, an epoch in
-// seconds or in milliseconds: ClockLayoutNames). A fraction of a second is
+// seconds or in milliseconds, a time of day: ClockLayoutNames), or
+// LayoutTypedTimeOfDay for a type of its protocol that writes a time of day.
+// A time of day names no day (LayoutTimeOfDay): a replay reads it modulo a
+// day, in the zone Zone names (never "": the learn step reads the zone a
+// time of day was read in, as it does a wall clock's). A fraction of a second is
 // no part of it: a writer that drops a fraction's trailing zeros (Go's
 // RFC3339Nano) writes a value to the second, or with fewer digits, where
 // its clock read fell on a whole second, which a layout that held the
@@ -210,7 +214,23 @@ const (
 	// LayoutApart: two learnings of one place saw it in different
 	// layouts (Meet); it holds nothing.
 	LayoutApart = "apart"
+	// LayoutTypedTimeOfDay: a type of the value's protocol that writes a
+	// time of day (a Postgres time), which names no day: a replay reads it
+	// modulo a day (LayoutTimeOfDay).
+	LayoutTypedTimeOfDay = "typed-time-of-day"
 )
+
+// LayoutTimeOfDay reports whether layout, a Layout, writes a time of day,
+// which names no day: LayoutTypedTimeOfDay, or a text's "time-minute" or
+// "time-second" (ClockLayoutNames). A replay reads a value at a place
+// learned so as its time into its day, in the zone Zone names, against its
+// call's span read modulo a day (the day it begins on and the one it ends
+// on), and reads a value of any other layout there as none; nor does it
+// read a time of day where the place was learned in a layout that names a
+// day.
+func LayoutTimeOfDay(layout string) bool {
+	return layout == LayoutTypedTimeOfDay || layout == "time-minute" || layout == "time-second"
+}
 
 // ClockLayoutNames are, by Layout, the forms of a text or a number a read of
 // the clock is learned in, as a person reads them; LayoutTyped and
@@ -231,15 +251,17 @@ var ClockLayoutNames = map[string]string{
 	"epoch-ms":         "a number of milliseconds since the epoch",
 	"epoch-us":         "a number of microseconds since the epoch",
 	"epoch-ns":         "a number of nanoseconds since the epoch",
+	"time-minute":      "a time of day to the minute",
+	"time-second":      "a time of day to the second or a fraction of it",
 }
 
 // LayoutKnown reports whether o's Layout is one a replay reads a value's
-// form against: "" (any form, as learned before Layout was), LayoutTyped or
-// one of ClockLayoutNames. Holds holds nothing for any other (LayoutApart,
+// form against: "" (any form, as learned before Layout was), LayoutTyped,
+// LayoutTypedTimeOfDay or one of ClockLayoutNames. Holds holds nothing for any other (LayoutApart,
 // or a Layout this keploy does not name), which it never checks in some
 // other form.
 func (o ClockOffset) LayoutKnown() bool {
-	if o.Layout == "" || o.Layout == LayoutTyped {
+	if o.Layout == "" || o.Layout == LayoutTyped || o.Layout == LayoutTypedTimeOfDay {
 		return true
 	}
 	_, ok := ClockLayoutNames[o.Layout]
@@ -250,8 +272,11 @@ func (o ClockOffset) LayoutKnown() bool {
 // replay's value: "a type of its protocol" for LayoutTyped, a name of
 // ClockLayoutNames, or the layout quoted where keploy names none.
 func LayoutName(layout string) string {
-	if layout == LayoutTyped {
+	switch layout {
+	case LayoutTyped:
 		return "a type of its protocol"
+	case LayoutTypedTimeOfDay:
+		return "a time of day its protocol types"
 	}
 	if n, ok := ClockLayoutNames[layout]; ok {
 		return n
@@ -546,17 +571,30 @@ func (o ClockOffset) String() string {
 
 // layoutString is the form o's Layout says a replay's value is written in,
 // as String writes it after the zone: "" for a Layout of "" (any form), and
-// for LayoutTyped, whose type its protocol's place already says.
+// for LayoutTyped and LayoutTypedTimeOfDay, whose type its protocol's place
+// already says (and zoneString that it is a time of day).
 func (o ClockOffset) layoutString() string {
-	if o.Layout == "" || o.Layout == LayoutTyped {
+	if o.Layout == "" || o.Layout == LayoutTyped || o.Layout == LayoutTypedTimeOfDay {
 		return ""
 	}
 	return ", written as " + LayoutName(o.Layout)
 }
 
 // zoneString is where o's Zone says a replay reads a wall clock of no zone,
-// as String writes it after the offset: "" for a value that names its zone.
+// or a time of day (LayoutTimeOfDay), as String writes it after the offset:
+// "" for a value that names its zone.
 func (o ClockOffset) zoneString() string {
+	if LayoutTimeOfDay(o.Layout) {
+		switch o.Zone {
+		case ZoneUTC:
+			return ", a time of day in UTC"
+		case ZoneApp:
+			return ", a time of day in the application's zone"
+		case ZoneEither:
+			return ", a time of day in UTC or in the application's zone"
+		}
+		return ""
+	}
 	switch o.Zone {
 	case ZoneUTC:
 		return ", a wall clock of no zone in UTC"
