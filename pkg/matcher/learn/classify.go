@@ -1264,12 +1264,17 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// an epoch number; a time to the second, then to the minute), or in
 		// one layout that names its zone in one run and none in the other
 		// ("…Z", then a wall clock of no zone), is refused: a replay checks
-		// the form its learn step saw, and this one saw two.
+		// the form its learn step saw, and this one saw two. So is one whose
+		// two values show a cut coarser than a millisecond (textCutWhy).
 		switch {
 		case ln.Read != nil && ln.Read.Layout == models.LayoutApart:
 			ln.Kind, ln.Why, ln.Read = KindUnaccounted, textLayoutChangedWhy(r.Value, l.Value), nil
 		case ln.Read != nil:
 			if why := textFormChangedWhy(r.Value, l.Value); why != "" {
+				ln.Kind, ln.Why, ln.Read = KindUnaccounted, why, nil
+				break
+			}
+			if why := textCutWhy(r.Value, l.Value, *ln.Read); why != "" {
 				ln.Kind, ln.Why, ln.Read = KindUnaccounted, why, nil
 				break
 			}
