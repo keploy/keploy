@@ -178,11 +178,102 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // ZoneApart is the Meet of two learnings that read the place in zones no
 // one zone holds, which holds nothing (Empty), and so does a Zone this
 // keploy does not read (ZoneKnown).
+//
+// Layout is the form the learn step saw the value written in, in both of
+// its runs, which a replay's value must be written in too: LayoutTyped for a
+// type of its protocol (a BSON datetime, a Postgres timestamp), or the
+// layout of a text or a number, which names the resolution its form writes
+// (an ISO 8601 date, its time to the minute or to the second, an epoch in
+// seconds or in milliseconds: ClockLayoutNames). A fraction of a second is
+// no part of it: a writer that drops a fraction's trailing zeros (Go's
+// RFC3339Nano) writes a value to the second, or with fewer digits, where
+// its clock read fell on a whole second, which a layout that held the
+// fraction would refuse by where the read fell. So is no zone a value
+// names part of it (Zone reads that). "" for a read learned before Layout
+// was, which a replay reads in any layout, as it did then. LayoutApart is
+// the Meet of two learnings that saw the place in different layouts, which
+// holds nothing (Empty).
 type ClockOffset struct {
-	Min  time.Duration `json:"min" yaml:"min" bson:"min"`
-	Max  time.Duration `json:"max" yaml:"max" bson:"max"`
-	Res  time.Duration `json:"res" yaml:"res" bson:"res"`
-	Zone string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
+	Min    time.Duration `json:"min" yaml:"min" bson:"min"`
+	Max    time.Duration `json:"max" yaml:"max" bson:"max"`
+	Res    time.Duration `json:"res" yaml:"res" bson:"res"`
+	Zone   string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
+	Layout string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
+}
+
+// The layouts a ClockOffset's Layout names beside those of a text or a
+// number (ClockLayoutNames).
+const (
+	// LayoutTyped: a type of the value's protocol, which writes its own
+	// resolution.
+	LayoutTyped = "typed"
+	// LayoutApart: two learnings of one place saw it in different
+	// layouts (Meet); it holds nothing.
+	LayoutApart = "apart"
+)
+
+// ClockLayoutNames are, by Layout, the forms of a text or a number a read of
+// the clock is learned in, as a person reads them; LayoutTyped and
+// LayoutApart are not among them. A Layout this keploy does not name holds
+// nothing (LayoutKnown).
+var ClockLayoutNames = map[string]string{
+	"rfc1123":          "an HTTP date (RFC 1123), to the second",
+	"iso-date":         "an ISO 8601 date",
+	"iso-hour":         "an ISO 8601 date and hour",
+	"iso-minute":       "an ISO 8601 date and time to the minute",
+	"iso-second":       "an ISO 8601 date and time to the second or a fraction of it",
+	"iso-minute-space": "an ISO 8601 date and time to the minute, with a space before the time",
+	"iso-second-space": "an ISO 8601 date and time to the second or a fraction of it, with a space before the time",
+	"compact":          "a compact date and time (yyyymmddThhmmss), to the second",
+	"uuid1":            "a version 1 UUID's time",
+	"uuid7":            "a version 7 UUID's time",
+	"epoch-s":          "a number of seconds since the epoch, whole or with a fraction",
+	"epoch-ms":         "a number of milliseconds since the epoch",
+	"epoch-us":         "a number of microseconds since the epoch",
+	"epoch-ns":         "a number of nanoseconds since the epoch",
+}
+
+// LayoutKnown reports whether o's Layout is one a replay reads a value's
+// form against: "" (any form, as learned before Layout was), LayoutTyped or
+// one of ClockLayoutNames. Holds holds nothing for any other (LayoutApart,
+// or a Layout this keploy does not name), which it never checks in some
+// other form.
+func (o ClockOffset) LayoutKnown() bool {
+	if o.Layout == "" || o.Layout == LayoutTyped {
+		return true
+	}
+	_, ok := ClockLayoutNames[o.Layout]
+	return ok
+}
+
+// LayoutName is how a person reads layout, a Layout or the layout of a
+// replay's value: "a type of its protocol" for LayoutTyped, a name of
+// ClockLayoutNames, or the layout quoted where keploy names none.
+func LayoutName(layout string) string {
+	if layout == LayoutTyped {
+		return "a type of its protocol"
+	}
+	if n, ok := ClockLayoutNames[layout]; ok {
+		return n
+	}
+	return strconv.Quote(layout)
+}
+
+// MeetLayout is the Layout two learnings of one place saw it in, o's and
+// layout (meetLayouts), as Meet reads it.
+func (o ClockOffset) MeetLayout(layout string) string { return meetLayouts(o.Layout, layout) }
+
+// meetLayouts is the Layout a replay reads a place's form against that two
+// learnings saw it in, a and b: the one both saw, the other where one is ""
+// (learned before Layout was: any form), LayoutApart where they differ.
+func meetLayouts(a, b string) string {
+	switch {
+	case a == b || b == "":
+		return a
+	case a == "":
+		return b
+	}
+	return LayoutApart
 }
 
 // The zones a ClockOffset's Zone names (ClockOffset).
@@ -339,7 +430,7 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // have its sums read finer than the application cuts its value), whose
 // width could overflow or whose Unit could swallow the sign of the offset.
 func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
-	if !o.ZoneKnown() {
+	if !o.ZoneKnown() || !o.LayoutKnown() {
 		return false
 	}
 	if o.Plain() {
@@ -369,19 +460,23 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // two offsets apart), or that read it in zones no one zone holds (UTC and
 // the application's: ZoneApart, meetZones), meet as an Empty one, which
 // holds nothing; ZoneEither meets UTC or the application's zone as that
-// one, the zone both hold. Meet is the
+// one, the zone both hold. So do two that saw it written in different
+// layouts (LayoutApart, meetLayouts); a Layout of "" (learned before Layout
+// was) meets another as that one. Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone)}
+	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout)}
 }
 
 // Empty reports whether o is the Meet of learnings of one place that share
 // no offset: a Min above zero and a Max not above it; or that read it in
 // zones no one zone holds (ZoneApart). Holds holds nothing for it, and String says
 // why.
-func (o ClockOffset) Empty() bool { return o.Min > 0 && o.Max <= o.Min || o.Zone == ZoneApart }
+func (o ClockOffset) Empty() bool {
+	return o.Min > 0 && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart
+}
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
 // learned as clock reads (MockSpec.Clocks), as one fresh map: every place
@@ -441,8 +536,22 @@ func (o ClockOffset) String() string {
 		return "clock reads in no one zone (one place learned as a wall clock of no zone in UTC, in the application's zone, or as a value that names its zone, at different calls)"
 	case !o.ZoneKnown():
 		return "clock read in a zone this keploy does not read (" + strconv.Quote(o.Zone) + ")"
+	case o.Layout == LayoutApart:
+		return "clock reads in no one form (one place learned written in different layouts at different calls)"
+	case !o.LayoutKnown():
+		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
 	}
-	return o.offsetString() + o.zoneString()
+	return o.offsetString() + o.zoneString() + o.layoutString()
+}
+
+// layoutString is the form o's Layout says a replay's value is written in,
+// as String writes it after the zone: "" for a Layout of "" (any form), and
+// for LayoutTyped, whose type its protocol's place already says.
+func (o ClockOffset) layoutString() string {
+	if o.Layout == "" || o.Layout == LayoutTyped {
+		return ""
+	}
+	return ", written as " + LayoutName(o.Layout)
 }
 
 // zoneString is where o's Zone says a replay reads a wall clock of no zone,
