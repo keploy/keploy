@@ -1905,18 +1905,18 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 // so the windows serve the learn step and a test's stateful sequence only:
 // another process's tests' windows never move this process's bound.
 //
-// So of a suite whose test processes ran one after another (go test ./...,
-// one test binary per package), each process's teardown is its own: the
-// calls a binary makes after its own last test (a Go mongo-driver's
-// endSessions at client.Disconnect) are answered by its pool slice's
-// recordings of them, which only the process of that key is served, while
-// it holds the run. A recording another process's tests list is no bound of
-// this one's: that process never ran while this one did, and none of its
-// answers reached this one. Where a test's key is not known (its ID's path
-// names its test file, not a pool slice's key; or its process recorded no
-// pool call), its recordings bound every process, as the whole recording's
-// bound did; two processes of one key share one bound, the later's, so the
-// earlier's call after its last test misses.
+// So of a suite of several test processes (go test ./..., one test binary
+// per package, run at once by go test's default -p, or one after another),
+// each process's teardown is its own: the calls a binary makes after its
+// own last test (a Go mongo-driver's endSessions at client.Disconnect) are
+// answered by its pool slice's recordings of them, which only the process
+// of that key is served. A recording another process's tests list is no bound of this
+// one's: whether or not that process ran at the same time, none of its
+// answers ever reached this one. Where a test's key is not known (its ID's
+// path names its test file, not a pool slice's key; or its process recorded
+// no pool call), its recordings bound every process, as the whole
+// recording's bound did; two processes of one key share one bound, the
+// later's, so the earlier's call after its last test misses.
 //
 // Once the first test fired, the teardown is shown in every gap, not only
 // after the last test, and in a later process's start-up: a call made there
