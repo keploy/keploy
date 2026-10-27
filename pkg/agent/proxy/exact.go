@@ -189,6 +189,13 @@ type exactView struct {
 	// without the lock.
 	keyedMu sync.Mutex
 	keyed   map[*integrations.MockIndex]map[string][]int
+	// shown is, for each tree, MockIndex and key a keyed read walked
+	// (rangeShownKeyed), the entries of the tree's split under the key
+	// (keyPart.rest) the view shows, at the tree's generation they were
+	// filed at: rebuilt only when that moves, never on a call. Under
+	// shownMu.
+	shownMu sync.Mutex
+	shown   map[shownAt]*shownExtra
 	// stamp is the learn tracker's open test (learn.Tracker.OpenEpoch) as
 	// the test's view was installed (exactState.stampTest), set before the
 	// view is published and never changed: 0 for a pool view, with no
@@ -1787,26 +1794,7 @@ func (v *exactView) shows(mk *models.Mock) bool {
 	if mk == nil {
 		return false
 	}
-	v.mu.Lock()
-	spent := v.spent[mk.Name]
-	v.mu.Unlock()
-	if spent || v.spentOutside(mk.Name) {
-		return false
-	}
-	if mk.IsProtocolPhase() {
-		return true
-	}
-	if v.isWorker(mk.Name) {
-		return true
-	}
-	if v.test != "" {
-		// Under the background rules the pool answers in a test too,
-		// after the test's own and the worker scope (keep); an async
-		// lane's recording keeps today's rules.
-		return v.bg.inPool(mk.Name) && !mk.IsAsync()
-	}
-	_, ok := v.pool[mk.Name]
-	return ok
+	return v.unspentNow(mk) && v.showsStatic(mk)
 }
 
 // inBackgroundPool reports whether mk, consumed in an open test, is one of
