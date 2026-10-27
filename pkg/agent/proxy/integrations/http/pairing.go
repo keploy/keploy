@@ -259,16 +259,7 @@ func sqsPoll(input *req) bool {
 // earlier test and measures the gaps at the set's end (markRepeatOf), as it
 // does a miss's.
 func reportPairing(ctx context.Context, input *req, x *models.Mock, a integrations.AnsweredCall, repeat bool) {
-	path, dest := "/", input.header.Get("Host")
-	if input.url != nil {
-		if input.url.Path != "" {
-			path = input.url.Path
-		}
-		if dest == "" {
-			dest = input.url.Host
-		}
-	}
-	r := mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+	r := answerReport(input)
 	r.Answer, r.ClosestMock, r.NotOwned = models.AnswerProvisional, x.Name, true
 	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
 	if repeat {
@@ -293,4 +284,31 @@ func reportPairing(ctx context.Context, input *req, x *models.Mock, a integratio
 		view, key := servedLiveView(x, input)
 		t.ServedMockLive(x, key, view)
 	}
+}
+
+// answerReport is the report an answered call of input starts from
+// (models.ReportAnswer): its method and path, and its destination.
+func answerReport(input *req) *models.MockMismatchReport {
+	path, dest := "/", input.header.Get("Host")
+	if input.url != nil {
+		if input.url.Path != "" {
+			path = input.url.Path
+		}
+		if dest == "" {
+			dest = input.url.Host
+		}
+	}
+	return mismatch.NewReport(mismatch.ProtocolHTTP, input.method+" "+path).WithDestination(dest).Build()
+}
+
+// reportBackgroundAgain reports a background call answered again
+// (models.AnswerBackgroundAgain): the call repeats x, a recording of the open
+// test that judging marked as the application's background work and that
+// already answered in its window (backgroundAgain). It counts against no
+// test; the replay lists it under the test's answered calls, naming x.
+func reportBackgroundAgain(ctx context.Context, input *req, x *models.Mock) {
+	r := answerReport(input)
+	r.Answer, r.ClosestMock = models.AnswerBackgroundAgain, x.Name
+	r.ClosestMockReq = renderMockRequest(x.Spec.HTTPReq, x.Noise)
+	models.ReportAnswer(ctx, r)
 }
