@@ -257,6 +257,23 @@ func (db *MappingDb) Upsert(ctx context.Context, testSetID string, testID string
 	return db.UpsertBatch(ctx, testSetID, map[string][]models.MockEntry{testID: mockEntries})
 }
 
+// unlistedRemoved is removed less each note whose recording mocks lists
+// again: a record that lists it on the test again brought it back, so the
+// note that it was taken out no longer holds (models.MappedTestCase.Removed).
+// nil when none is left.
+func unlistedRemoved(removed []models.RemovedMock, mocks []models.MockEntry) []models.RemovedMock {
+	if len(removed) == 0 {
+		return removed
+	}
+	out := slices.DeleteFunc(slices.Clone(removed), func(r models.RemovedMock) bool {
+		return slices.ContainsFunc(mocks, func(e models.MockEntry) bool { return e.Name == r.Name })
+	})
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // mergeMockEntries unions new entries into existing ones, keyed by mock name and
 // preserving recorded order (existing first, then genuinely new arrivals).
 //
@@ -358,7 +375,9 @@ func (db *MappingDb) UpsertBatch(ctx context.Context, testSetID string, byTest m
 	newIDs := make([]string, 0, len(byTest))
 	for testID := range byTest {
 		if i, ok := at[testID]; ok {
-			mapping.TestCases[i].Mocks = mergeMockEntries(mapping.TestCases[i].Mocks, byTest[testID])
+			tc := &mapping.TestCases[i]
+			tc.Mocks = mergeMockEntries(tc.Mocks, byTest[testID])
+			tc.Removed = unlistedRemoved(tc.Removed, tc.Mocks)
 			continue
 		}
 		newIDs = append(newIDs, testID)
@@ -631,14 +650,18 @@ func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks
 // in the set's mappings.yaml, each only while its entry there still carries
 // a background mark (models.MockEntry.Background): an entry whose mark was
 // taken off is required again and stays, and another test listing the same
-// recording keeps its entry. Every other section and entry is kept as it is,
-// and a file it does not change is not written. It returns, by test, the
+// recording keeps its entry. byTest holds, by test, the reason each
+// recording is taken out, by recording name. Each one taken off is noted on
+// its test's entry, in the same write (models.MappedTestCase.Removed): its
+// name and kind, the mark it carried, and the reason, so what went and how
+// to bring it back stays in mappings.yaml. Every other section and entry is
+// kept as it is, and a file it does not change is not written. It returns, by test, the
 // recordings it took off that test's list, sorted, and, sorted, those of them
 // no list of the file names any more (a test's, the startup, runner, worker
 // or shared list, or a boot's): only those may leave the set's mock file,
 // whose every other recording a list still serves. A set with no mapping file
 // is an error.
-func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byTest map[string][]string) (removed map[string][]string, unlisted []string, err error) {
+func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byTest map[string]map[string]string) (removed map[string][]string, unlisted []string, err error) {
 	if len(byTest) == 0 {
 		return nil, nil, nil
 	}
@@ -649,20 +672,27 @@ func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byT
 			if len(names) == 0 {
 				continue
 			}
-			kept := m.TestCases[i].Mocks[:0:0]
-			for _, e := range m.TestCases[i].Mocks {
-				if e.Background != "" && slices.Contains(names, e.Name) {
+			tc := &m.TestCases[i]
+			kept := tc.Mocks[:0:0]
+			for _, e := range tc.Mocks {
+				reason, named := names[e.Name]
+				if e.Background != "" && named {
 					took[e.Name] = true
 					if removed == nil {
 						removed = map[string][]string{}
 					}
-					test := m.TestCases[i].ID
-					removed[test] = append(removed[test], e.Name)
+					removed[tc.ID] = append(removed[tc.ID], e.Name)
+					note := models.RemovedMock{Name: e.Name, Kind: e.Kind, Background: e.Background, Reason: reason}
+					if at := slices.IndexFunc(tc.Removed, func(r models.RemovedMock) bool { return r.Name == e.Name }); at >= 0 {
+						tc.Removed[at] = note
+					} else {
+						tc.Removed = append(tc.Removed, note)
+					}
 					continue
 				}
 				kept = append(kept, e)
 			}
-			m.TestCases[i].Mocks = kept
+			tc.Mocks = kept
 		}
 		if len(took) == 0 {
 			return false
