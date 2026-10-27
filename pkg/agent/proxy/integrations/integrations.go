@@ -425,6 +425,22 @@ type ExactConsumedReader interface {
 	ConsumedTestMocks() []*models.Mock
 }
 
+// AnsweredBackgroundReader is an optional MockMemDb extension of a store
+// that serves each test its own mocks exactly (the proven switch).
+// AnsweredBackground returns the open test's own recordings that judging
+// marked as the application's background work (models.MockEntry.Background)
+// and that have answered in its window, in the order they did; none while no
+// test is open and when nothing is marked. A timer or a start-up job may make
+// such a call more often at replay than it recorded: a parser that finds no
+// mock for a call matches it against these, as it matches the live pool, and
+// answers a call identical to one of them again with that recording,
+// unchecked (models.AnswerBackgroundAgain), instead of missing it as one call
+// more than the test recorded. A parser must only read them: they answer no
+// other call, and each still answered once in the test's own count.
+type AnsweredBackgroundReader interface {
+	AnsweredBackground() []*models.Mock
+}
+
 // ExactServedReader is an optional MockMemDb extension of a store that
 // serves each test its own mocks exactly (the proven switch), with a served
 // observer (the learn tracker's ServedMock). ServedInOpenTest returns, of one
