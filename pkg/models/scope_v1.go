@@ -133,6 +133,11 @@ const (
 type ScopeEvidence struct {
 	Misses     []UnmatchedCall `json:"misses,omitempty" yaml:"misses,omitempty"`
 	Unconsumed []string        `json:"unconsumed,omitempty" yaml:"unconsumed,omitempty"`
+	// Background lists, in recorded order, the test's own recordings judging
+	// marked as the application's background work (MockEntry.Background) that
+	// it did not call while it was open. Never a failure, and never in
+	// Unconsumed: it tells judging which ones a replay did not use.
+	Background []string `json:"background,omitempty" yaml:"background,omitempty"`
 	// CaptureIncomplete is what the agent could not capture since the run
 	// began, when the test ended (design v14 §3.2): it taints the test open
 	// when it happened and every later one, which therefore fail in a replay.
