@@ -3,89 +3,46 @@
 package agent
 
 import (
-	"encoding/binary"
-	"syscall"
-	"unsafe"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-// kinfoProc is the subset of Darwin's struct kinfo_proc (sys/sysctl.h) that
-// the claimer reads: the process state, its parent pid, and its start time.
-// The full struct is 648 bytes on arm64; only the offsets of the fields we
-// read matter, and those are stable across macOS versions.
-type kinfoProc struct {
-	_        [16]byte   // kp_proc up to p_stat
-	Stat     int8       // kp_proc.p_stat (offset 16)
-	_        [239]byte  // rest of kp_proc (256 total for extern_proc)
-	Ppid     int32      // kp_eproc.e_ppid (offset 256..259)
-	_        [132]byte  // to e_paddr at 392
-	_        [240]byte  // rest of kp_eproc through to the end
-	_        [16]byte   // padding to ki_start
-}
-
-// sysctl CTL_KERN / KERN_PROC / KERN_PROC_PID constants.
-const (
-	ctlKern        = 1
-	kernProc       = 14
-	kernProcPID    = 1
-	kinfoSize      = 648 // sizeof(struct kinfo_proc) on arm64 and amd64
-	szpStatRunning = 2   // SRUN
-	szpStatZombie  = 5   // SZOMB
-)
-
-// getKinfoProc returns the kinfo_proc for pid via sysctl, or false if the
-// process does not exist.
-func getKinfoProc(pid int) (ppid int, startSec int64, startUsec int32, alive bool) {
-	mib := [4]int32{ctlKern, kernProc, kernProcPID, int32(pid)}
-	buf := make([]byte, kinfoSize)
-	n := uintptr(kinfoSize)
-
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS___SYSCTL,
-		uintptr(unsafe.Pointer(&mib[0])),
-		4,
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(unsafe.Pointer(&n)),
-		0, 0,
-	)
-	if errno != 0 || n == 0 {
-		return 0, 0, 0, false
+// getProc returns the parent PID and start time for pid via sysctl, or false
+// if the process does not exist. It uses golang.org/x/sys/unix's typed struct
+// so the field layout is correct on every macOS architecture.
+func getProc(pid int) (ppid int, startTime time.Time, alive bool) {
+	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || kp == nil || kp.Proc.P_pid == 0 {
+		return 0, time.Time{}, false
 	}
-
-	// extern_proc.p_starttime is a struct timeval at offset 136 in extern_proc
-	// (which starts at offset 0 of kinfo_proc).
-	// timeval: tv_sec (int64 on 64-bit), tv_usec (int32).
-	sec := int64(binary.LittleEndian.Uint64(buf[136:144]))
-	usec := int32(binary.LittleEndian.Uint32(buf[144:148]))
-
-	// e_ppid is at offset 256 (start of kp_eproc) + 0 = 256.
-	pp := int32(binary.LittleEndian.Uint32(buf[256:260]))
-
-	return int(pp), sec, usec, true
+	tv := kp.Proc.P_starttime
+	return int(kp.Eproc.Ppid), time.Unix(int64(tv.Sec), int64(tv.Usec)*1000), true
 }
 
 // startTimeKey packs a start time into a uint64 for comparison, the same way
 // the Linux claimer uses clock ticks: we use seconds * 1_000_000 + microseconds.
-func startTimeKey(sec int64, usec int32) uint64 {
-	return uint64(sec)*1_000_000 + uint64(usec)
+func startTimeKey(t time.Time) uint64 {
+	return uint64(t.Unix())*1_000_000 + uint64(t.Nanosecond()/1000)
 }
 
 // procAlive reports whether process pid is the one that started at start and
 // has not exited.
 func procAlive(pid int, start uint64) bool {
-	_, sec, usec, ok := getKinfoProc(pid)
+	_, t, ok := getProc(pid)
 	if !ok {
 		return false
 	}
-	return startTimeKey(sec, usec) == start
+	return startTimeKey(t) == start
 }
 
 // procStart is process pid's start time, false when it does not exist.
 func procStart(pid int) (uint64, bool) {
-	_, sec, usec, ok := getKinfoProc(pid)
+	_, t, ok := getProc(pid)
 	if !ok {
 		return 0, false
 	}
-	return startTimeKey(sec, usec), true
+	return startTimeKey(t), true
 }
 
 // procDescends reports whether pid is ancestor or one of its descendants.
@@ -94,7 +51,7 @@ func procDescends(pid, ancestor int) bool {
 		if pid == ancestor {
 			return true
 		}
-		ppid, _, _, ok := getKinfoProc(pid)
+		ppid, _, ok := getProc(pid)
 		if !ok {
 			return false
 		}
