@@ -515,7 +515,7 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 			// The bind hooks now move the app's bind inside bind(2) and write
 			// app_port_info. Hold the moved ports from that moment, so a call
 			// to one before keploy's forwarder listens is served, not refused.
-			h.startIngressHold(ctx)
+			h.startIngressHold(ctx, cGroupPath)
 		}
 	}
 
@@ -666,6 +666,9 @@ func (h *Hooks) load(ctx context.Context, opts agent.HookCfg, setupOpts config.A
 		agentInfo.Flags |= structs.FlagKernelPortAlloc
 	}
 	agentInfo.Flags = classifyFlag(agentInfo.Flags, h.socket != nil)
+	// The bind hooks note what the app binds for the ingress hold only
+	// once both its programs are attached (ingressport.go).
+	agentInfo.Flags = ingressHoldFlag(agentInfo.Flags, h.IngressHeld())
 	// Under the proven switch, the application's non-DNS UDP is watched for
 	// replies, and QUIC refused (udpwatch.go).
 	udpFlags, err := h.startProvenUDP(cGroupPath)
