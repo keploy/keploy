@@ -223,7 +223,8 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 		// unanswered mocks first, then the staged ones the view shows. The
 		// open test's are found through the view's own key index
 		// (ownedKeyed), so a lookup reads only the mocks filed under key,
-		// and computes no mock's keys after the view's first lookup.
+		// and computes no mock's keys after the view's first lookup. An
+		// index with OwnedKeys files them by OwnedKeys.
 		for _, mk := range unansweredAt(v, ownedKeyed(v, ix).byKey[key]) {
 			if !fn(mk) {
 				return nil
@@ -274,7 +275,11 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 // recorded and how replay classified it, so the index is built once per view
 // and MockIndex. Under keploy mock replay one test can own a whole set: a
 // lookup that computed every owned mock's keys walked thousands of mocks per
-// command, more than a scan of the whole pool costs.
+// command, more than a scan of the whole pool costs. The build gives each
+// owned mock the keys of the MockIndex's OwnedKeys when it has one: the MySQL
+// parser's files under one key only the mocks that hold an EXECUTE recorded
+// without its query, and computes no statement's identity, as each mock's
+// Keys would.
 type ownedIndex struct {
 	once  sync.Once
 	byKey map[string][]int
@@ -326,10 +331,14 @@ func ownedKeyed(v *exactView, ix *integrations.MockIndex) *ownedIndex {
 	ownedIndexes.mu.Unlock()
 	oi.once.Do(func() {
 		oi.byKey = map[string][]int{}
+		keys := ix.Keys
+		if ix.OwnedKeys != nil {
+			keys = ix.OwnedKeys
+		}
 		// owned is fixed once the view is installed: read it without v.mu,
 		// as unanswered's callers read the mocks it returns.
 		for i, mk := range v.owned {
-			for _, k := range ix.Keys(mk) {
+			for _, k := range keys(mk) {
 				if l := oi.byKey[k]; len(l) == 0 || l[len(l)-1] != i {
 					oi.byKey[k] = append(l, i)
 				}
