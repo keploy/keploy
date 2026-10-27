@@ -659,6 +659,19 @@ func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 			t.Errorf("a text time of day the lead moved, no app clock: %s Read=%+v (%s); want a plain read modulo a day, in UTC", ln.Kind, ln.Read, ln.Why)
 		}
 	}
+	// Recorded at midnight to the second, "00:00:00" then "00:01:01": the
+	// two share the second, never more than a day's grain (todGrain), so a
+	// replay's value of its own second passes.
+	{
+		rec := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+		sec := func(v string) Shape { return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}} }
+		ln := ClassifyIn(clockedDrifts(), []string{p}, sec("00:01:01"), sec("00:00:00"), rec.Add(400*time.Millisecond), nil, nil, nil, nil)[0]
+		o, _ := ln.Clock()
+		rs := Span{From: rec.Add(48*time.Hour + 7*time.Second), To: rec.Add(48*time.Hour + 7*time.Second + 300*time.Millisecond)}
+		if ok, why := CheckClockRead(p, o, Leaf{Path: p, Noise: p, Type: String, Value: "00:00:07"}, rs, true); !todRead(ln, models.ZoneUTC) || !ok {
+			t.Errorf("recorded at midnight: %s Read=%+v (%s); the replay's own second: %v (%s); want a read to the second that passes it", ln.Kind, ln.Read, ln.Why, ok, why)
+		}
+	}
 	// A time of day where the place was learned as an instant: none.
 	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
 	s := Span{From: call.Add(-time.Second), To: call}
