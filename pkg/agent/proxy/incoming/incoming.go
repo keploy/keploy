@@ -3,12 +3,14 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/config"
@@ -85,9 +87,10 @@ type IngressProxyManager struct {
 	// forwarder covers the window as it did before (shrunk by binding the
 	// port as soon as the bind event arrives).
 	portHolder IngressPortHolder
-	// parkedServed counts the parked connections the manager forwarded
-	// (serveParked), for the run's summary.
-	parkedServed atomic.Uint64
+	// parkedServed and parkedServedV6 count the parked IPv4 and IPv6
+	// connections the manager forwarded (serveParked), for the run's summary.
+	parkedServed   atomic.Uint64
+	parkedServedV6 atomic.Uint64
 	// portSems are the synchronous mode's per-port semaphores, which a
 	// port's forwarder and the park share (portSem). Guarded by semMu.
 	semMu    sync.Mutex
@@ -357,21 +360,28 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	newAppAddr := "127.0.0.1:" + strconv.Itoa(int(newPort))
 	logger := h.pm.logger
 
-	// When keploy holds the moved port from inside the app's bind (BPF
-	// sk_lookup), its park serves a call to it until this forwarder listens,
-	// so the order below (wait for the target, then bind) leaves no window.
-	// When it does not, nothing holds the port during that wait and a call is
-	// refused; bind it first, so the window a call is refused in is only this
-	// bind, not the whole target wait. Binding early is safe: the accept loop
-	// starts below either way, and a call that arrives before it does waits in
-	// the listen backlog.
+	// Bind the app's port first, then wait for the app to listen on its moved
+	// one. When nothing holds the port during that wait (no hold: a kernel
+	// without sk_lookup), a call is refused; binding first leaves only this
+	// bind as that window, not the whole wait. When keploy holds the port from
+	// inside the app's bind (BPF sk_lookup), its park serves the port until
+	// this forwarder is registered below, after the wait; binding first then
+	// finds at once a port another listener holds already (not keploy's), and
+	// the hold yields it to that listener. Binding early is safe: the accept
+	// loop starts below either way, and a call that arrives before it does
+	// waits in the listen backlog.
 	held := h.pm.ingressHeld()
-	var listener net.Listener
-	var err error
-	if !held {
-		if listener, err = h.bindIngress(ctx, origAppAddr); err != nil {
-			return err
+	listener, err := h.bindIngress(ctx, origAppAddr)
+	if err != nil {
+		if held && errors.Is(err, syscall.EADDRINUSE) {
+			// Another listener has the app's port: the app's own bind of it
+			// was moved, so the app started anyway. Its calls are that
+			// listener's, as without keploy: stop holding the port.
+			h.pm.yieldIngressPort(origPort)
+			logger.Warn("another listener, not keploy's, holds the application's port, so keploy leaves the port's calls to it and records none of them; stop that listener to record this port",
+				zap.Uint16("port", origPort), zap.Uint16("application_listens_on", newPort), zap.Error(err))
 		}
+		return err
 	}
 
 	if waited, err := ingressTargetWait(ctx, newPort, newAppAddr, ingressTargetListenTimeout); waited {
@@ -389,23 +399,19 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 			zap.Uint16("orig_port", origPort))
 	}
 
-	if held {
-		// If the agent is already shutting down, do NOT bind the ingress listener.
-		// A forwarder bound during teardown (e.g. from a late/stale bind event whose
-		// target wait above returned context.Canceled) can outlive StopAll's snapshot
-		// and linger holding the app's port (commonly 8000), so the next record run's
-		// application fails to bind it with "address already in use" — the flaky
-		// port-8000 reuse failure. Aborting here is safe: a canceled context means no
-		// ingress traffic will be served anyway. (When not held the bind already
-		// happened above, before the wait, and its own ctx checks covered this.)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			logger.Debug("Skipping ingress forwarder bind; agent context canceled (shutting down)",
-				zap.String("target", newAppAddr), zap.Error(ctxErr))
-			return ctxErr
-		}
-		if listener, err = h.bindIngress(ctx, origAppAddr); err != nil {
-			return err
-		}
+	// If the agent is shutting down (the context was canceled during the
+	// wait), release the port instead of starting the forwarder. A forwarder
+	// started during teardown (e.g. from a late/stale bind event whose target
+	// wait above returned context.Canceled) can outlive StopAll's snapshot and
+	// linger holding the app's port (commonly 8000), so the next record run's
+	// application fails to bind it with "address already in use" — the flaky
+	// port-8000 reuse failure. A canceled context means no ingress traffic
+	// will be served anyway.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		_ = listener.Close()
+		logger.Debug("Skipping ingress forwarder start; agent context canceled (shutting down)",
+			zap.String("target", newAppAddr), zap.Error(ctxErr))
+		return ctxErr
 	}
 	tcpListener := listener.(*net.TCPListener)
 
