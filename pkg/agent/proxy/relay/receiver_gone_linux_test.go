@@ -53,75 +53,12 @@ func (e *receiverEvents) waitFor(t *testing.T, what string, ok func([]string) bo
 	return nil
 }
 
-// A browser that navigates away closes its connection in the middle of a
-// streamed response. The server goes on streaming, and keploy's write of its
-// next bytes to the client fails. The server's stream ends there, and the
-// relay says so first (OnReceiverGone, for the server's direction, with the
-// bytes of that write the client never took), and then marks the write error.
-func TestReceiverGone_AClientThatClosedMidStream(t *testing.T) {
-	var ev receiverEvents
-	h := newHalfCloseHarness(t, ev.config())
-
-	if _, err := h.clientApp.Write([]byte("GET /progress HTTP/1.1\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
-	got := make([]byte, 5)
-	if _, err := io.ReadFull(h.destSvc, got); err != nil {
-		t.Fatalf("the server never got the request: %v", err)
-	}
-	head := []byte("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-	if _, err := h.destSvc.Write(head); err != nil {
-		t.Fatal(err)
-	}
-	_ = h.clientApp.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := io.ReadFull(h.clientApp, make([]byte, len(head))); err != nil {
-		t.Fatalf("the client never got the response's head: %v", err)
-	}
-	// The browser navigates away, having read all it was sent: a close,
-	// not a reset.
-	_ = h.clientApp.Close()
-
-	// The server streams on; once the client's side refuses, keploy's
-	// write fails.
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			case <-time.After(20 * time.Millisecond):
-			}
-			line := fmt.Sprintf("{\"progress\":%d}\n", i)
-			if _, err := fmt.Fprintf(h.destSvc, "%x\r\n%s\r\n", len(line), line); err != nil {
-				return
-			}
-		}
-	}()
-
-	events := ev.waitFor(t, "the relay never said the client left", func(ev []string) bool {
-		for _, e := range ev {
-			if e == "mark "+MarkWriteError {
-				return true
-			}
-		}
-		return false
-	})
-	var gone, undelivered int
-	if _, err := fmt.Sscanf(events[0], "gone dest %d", &undelivered); err != nil || undelivered <= 0 {
-		t.Fatalf("events %v: want the client's leaving first, for the server's stream, with the failed write's bytes", events)
-	}
-	for _, e := range events {
-		if len(e) > 4 && e[:4] == "gone" {
-			gone++
-		}
-	}
-	if gone != 1 {
-		t.Fatalf("events %v: the client's leaving told %d times, want once", events, gone)
-	}
-}
-
-// A client that resets its connection leaves too: the relay stops reading
+// A client that closes its socket cleanly (a FIN) partway through a response
+// tells the relay nothing here: what the server sends after the FIN is the
+// client's to take or refuse (client_took.go), and a refused chunk ends the
+// parser's stream where the client stopped (Config.ClientStopped), not here.
+//
+// A client that resets its connection leaves: the relay stops reading
 // the server, and its stream ends there, with nothing written that failed.
 func TestReceiverGone_AClientThatResetTheConnection(t *testing.T) {
 	var ev receiverEvents

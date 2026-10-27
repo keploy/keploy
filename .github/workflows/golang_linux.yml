@@ -175,6 +175,52 @@ jobs:
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
+  # A reply MongoDB sends after the app closed its connection is not recorded
+  # as a mock the app read. The app stops while its driver's streaming monitor
+  # has its first awaitable hello waiting (the sample's URI sets
+  # heartbeatFrequencyMS=60000, so it waits 60 s); mongod answers the app's FIN
+  # with ok:0, code 279 ClientDisconnect, which the closed client refuses.
+  # Recorded, replay served it to the app's monitor hello and the driver
+  # cleared its pool. The stock gin-mongo lane stops after the first hello was
+  # answered and passes either way; this one fails a run that stopped too late
+  # to check anything (a recorded awaitable hello). Private parsers (the Mongo
+  # recorder), so not on forks; build binaries only: the released keploy
+  # records the reply.
+  gin_mongo_after_client_close:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    name: gin-mongo reply after the app closed (record_build_replay_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: native-linux
+      - name: Record gin-mongo stopped while its monitor's hello waits, and replay
+        env:
+          RECORD_BIN: ${{ steps.build.outputs.path }}
+          REPLAY_BIN: ${{ steps.build.outputs.path }}
+        run: |
+          cd samples-go/gin-mongo
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/gin_mongo_after_client_close/golang-linux.sh"
+
   dns_dedup_test:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
@@ -299,6 +345,65 @@ jobs:
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_prune_prepared/golang-linux.sh"
+
+  # keploy test does not hold a test set's mocks in memory: it reads the set's
+  # mocks.yaml into a small entry per mock and reads each payload back only to
+  # send it to the agent. A keploy that loads the set whole held about twice
+  # the file, and recordings of a few GB were Killed (exit 137). The lane
+  # records http-pokeapi, adds 600 unused 1 MiB mocks to each test set's
+  # mocks.yaml, and replays: every set must pass, the agent must be sent every
+  # mock, and keploy test's peak RSS must stay under 300 MiB. Against
+  # build-no-race, whose memory is the one shipped (the race build's is
+  # several times it). Not replay_latest: the released replay is the bug.
+  client_mock_memory:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+    name: keploy test holds no test set in memory (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Record, inflate, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/http-pokeapi
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/client_mock_memory/golang-linux.sh
 
   # Decision 27: keploy test --remove-unused-mocks keeps a stateful dependency's
   # recordings whole. The app (test_workflow_scripts/golang/stateful_prune)
@@ -550,7 +655,9 @@ jobs:
   # lifetimes, a later test misses them, the miss names keploy.yaml's
   # sessionCalls, and declaring the token call there serves it; a recording
   # made before replays as it always did; a connection's setup and the
-  # startup traffic stay shared. The app is in this repo
+  # startup traffic stay shared. Under the proven switch, a pool of eight
+  # connections runs one prepared statement at once, and the app checks that
+  # each call read its own row. The app is in this repo
   # (test_workflow_scripts/golang/lifetime_tags). The script judges a release
   # replayer's outcome only where it holds for every replayer.
   lifetime_tags:

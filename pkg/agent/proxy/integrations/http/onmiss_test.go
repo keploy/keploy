@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,5 +148,57 @@ func TestServeOnMissCapturesTheContainerKey(t *testing.T) {
 		if inst := mocks[0].Spec.Metadata[containerkey.InstanceKey]; (conn.want != "") != (inst != "") {
 			t.Fatalf("captured instance %q for key %q", inst, conn.want)
 		}
+	}
+}
+
+// A call served on a miss from the real dependency ends with the replay's
+// context though the dependency never answers it. serveOnMiss reads the
+// dependency's answer with no deadline, and decodeHTTP, which returns only
+// once its goroutine has, waited as long: the context's end now ends that
+// read as it ends the reads of the client. A call the end cut short is no
+// miss: none is reported.
+func TestAnOnMissCallTheDependencyNeverAnswersEndsWithTheContext(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	asked := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Read(make([]byte, 4096)) // the request, never answered
+		asked <- c
+	}()
+	_, proxy := tcpPair(t)
+	var reported atomic.Int32
+	ctx, cancel := context.WithCancel(models.WithMockMismatchReporter(context.Background(), func(error) { reported.Add(1) }))
+	defer cancel()
+	h := &HTTP{Logger: zap.NewNop()}
+	returned := make(chan error, 1)
+	go func() {
+		returned <- h.decodeHTTP(ctx, []byte("GET /u HTTP/1.1\r\nHost: dep.local\r\n\r\n"), proxy,
+			&models.ConditionalDstCfg{Addr: ln.Addr().String()}, &mockMemDb{}, models.OutgoingOptions{OnMiss: models.MissPassthrough})
+	}()
+	// The bounds below only turn a hang into a failure.
+	select {
+	case c := <-asked:
+		t.Cleanup(func() { _ = c.Close() })
+	case <-time.After(time.Minute):
+		t.Fatal("the miss was not passed to the dependency")
+	}
+	cancel()
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("decodeHTTP = %v, want the context's error", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("decodeHTTP did not return once its context was cancelled: it waits for the dependency's answer")
+	}
+	if n := reported.Load(); n != 0 {
+		t.Fatalf("the call the context's end cut short was reported as %d miss(es)", n)
 	}
 }

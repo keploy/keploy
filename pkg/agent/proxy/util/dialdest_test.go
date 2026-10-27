@@ -11,12 +11,14 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/neterr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -37,11 +39,20 @@ func requireIPv6(t *testing.T, reason string) {
 	t.Skip(reason)
 }
 
+// listenLoopback listens at addr's loopback host, at a port held for the
+// test's life at every address (testnet.SharedPort), and returns the same
+// port at the other loopback family, where a dial is refused: on Linux no
+// listener of another test can take the port there while the test runs.
 func listenLoopback(t *testing.T, addr string) (ln net.Listener, otherFamily string) {
 	t.Helper()
-	ln, err := net.Listen("tcp", addr)
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		requireIPv6(t, "cannot listen on "+addr+": "+err.Error())
+		t.Fatalf("split %s: %v", addr, err)
+	}
+	at := net.JoinHostPort(host, strconv.Itoa(testnet.SharedPort(t)))
+	ln, err = testnet.OpenShared("tcp", at)
+	if err != nil {
+		requireIPv6(t, "cannot listen on "+at+": "+err.Error())
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
@@ -219,15 +230,9 @@ func TestLoopbackCounterpart_OnlyTheExactLoopbackAddresses(t *testing.T) {
 // When both families fail, the operator must be given the address their
 // application actually used, not this proxy's inference about it.
 func TestDialDestination_ReportsTheRequestedAddressWhenBothFail(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("cannot listen: %v", err)
-	}
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	_ = ln.Close()
-
-	requested := net.JoinHostPort("127.0.0.1", port)
-	_, err = DialDestination(context.Background(), zap.NewNop(), "tcp", DialTarget{Addr: requested})
+	// Refused at both loopback families for the test's life.
+	requested := testnet.RefusedAddr(t, "tcp")
+	_, err := DialDestination(context.Background(), zap.NewNop(), "tcp", DialTarget{Addr: requested})
 	if err == nil {
 		t.Fatal("dial succeeded with nothing listening")
 	}
@@ -282,10 +287,13 @@ func TestDialDestination_NilLoggerDoesNotPanic(t *testing.T) {
 func TestDialDestinationTLS_FallsBackAndRepointsServerName(t *testing.T) {
 	cert, host := selfSignedFor(t, "127.0.0.1")
 
-	ln, err := tls.Listen("tcp4", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	// The port is held at every address for the test's life
+	// (testnet.SharedPort), so a dial to it at [::1] is refused.
+	tcpLn, err := testnet.OpenShared("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(testnet.SharedPort(t))))
 	if err != nil {
 		t.Skipf("cannot listen: %v", err)
 	}
+	ln := tls.NewListener(tcpLn, &tls.Config{Certificates: []tls.Certificate{cert}})
 	defer func() { _ = ln.Close() }()
 	go func() {
 		for {

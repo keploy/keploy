@@ -169,6 +169,10 @@ type Config struct {
 	// stallClock measures ConsumerStallGrace (stall.Meter); nil is the
 	// process's own runnable clock. Tests set it to drive the window.
 	stallClock stall.Clock
+	// readClock is the clock a forwarder takes a chunk's read stamp from
+	// when its socket reports none (nil: time.Now). Tests set it to see the
+	// forwarder's hand at the moment the stamp is taken.
+	readClock func() time.Time
 	// beforeTee, when set, runs on a forwarder after it has written a chunk
 	// on and before it tees it. Tests set it to hold one direction's tee
 	// back, so the other direction's later capture is teed first.
@@ -256,7 +260,10 @@ type Config struct {
 	BumpActivity func()
 
 	// OnCarried is told of each chunk the forwarder hands to the tee, on
-	// that forwarder: its direction, when it was read (Chunk.ReadAt), and
+	// that forwarder, or, for destination chunks written to a client after
+	// its FIN, which wait for the client's answer (client_took.go), on the
+	// goroutine that settles them, in order and before any later chunk of
+	// that direction: its direction, when it was read (Chunk.ReadAt), and
 	// whether the tee took it. through is the position just past the chunk
 	// in its direction's stream, in the offsets fakeconn.FakeConn counts
 	// what its reader is done with in (Consumed, ReadThrough): the reader
@@ -266,9 +273,11 @@ type Config struct {
 	// did, once the parser has stopped reading; the order in which the relay
 	// and the parser get to a chunk does not (the parser can read a chunk
 	// before the relay is done with it). A chunk the forwarder only stashes
-	// across a pause, with no push, is not told of. It runs on the
-	// forwarder, under the client hold's lock on that path, so it must not
-	// block or call back into the relay. Nil is safe.
+	// across a pause, with no push, is not told of, nor is a destination
+	// chunk the client refused (ClientStopped). It runs under the client
+	// hold's lock on that path, and under the relay's own lock as it settles
+	// chunks that waited, so it must not block or call back into the relay.
+	// Nil is safe.
 	OnCarried func(dir fakeconn.Direction, at time.Time, teed bool, through int64)
 
 	// OnMarkMockIncomplete is invoked whenever the relay drops a
@@ -525,6 +534,20 @@ type Config struct {
 	// had closed there. The forward path is untouched either way, and so is
 	// the relay when the parser returns: a parser's return never ends it.
 	EndAtHole func(dir fakeconn.Direction, reason string)
+
+	// ClientStopped, when set, is told once, at the first destination chunk
+	// the client did not take (client_took.go): the chunk was written once a
+	// look found the client's FIN at the proxy's socket, and the connection
+	// then closed with nothing acknowledged since that look, as it does for a
+	// client that closed its socket. The destination's stream ends there:
+	// that chunk and every one after it is forwarded but not teed. It is
+	// told on the goroutine that waited for the client's answer. The caller
+	// wires it to supervisor.Session.MarkEndedWhereClientStopped, so a parser
+	// that reaches the end of the stream in the middle of a message knows the
+	// client stopped taking it there, and the destination did not cut it
+	// short. It is called before the stream ends, and must not block. Nil is
+	// safe.
+	ClientStopped func()
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields

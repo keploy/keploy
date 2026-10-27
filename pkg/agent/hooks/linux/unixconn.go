@@ -171,7 +171,7 @@ var (
 // fexit programs; where those cannot load or attach (arm64 before 6.0 has no
 // BPF trampoline), it loads unixconn again without them and attaches its
 // syscall tracepoints instead. A kernel whose verifier refuses those too
-// (arm64 5.19) loads neither: startUnixConn says so, and starts no report.
+// loads neither: startUnixConn says so, and starts no report.
 func loadUnixConn(logger *zap.Logger, objs *bpfObjects) (*unixConn, error) {
 	if unixFallbackOnly {
 		u, err := loadUnixConnWith(logger, objs, true)

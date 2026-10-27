@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -472,7 +472,7 @@ func halfClosingServer(t *testing.T) (addr string, closed <-chan struct{}) {
 // it is not the application's own connection, so generic dispatch dials
 // afresh once the client speaks.
 func TestProbeClosesItsUpstreamTheDestinationEnded(t *testing.T) {
-	noCollector(t)
+	testnet.HoldFinalizers(t)
 	addr, closed := halfClosingServer(t)
 	p := testProxy(t)
 	app, srcConn := clientPair(t)
@@ -504,7 +504,7 @@ func TestProbeClosesItsUpstreamTheDestinationEnded(t *testing.T) {
 // bytes and leaves before generic dispatch dials closes the upstream the probe
 // handed on — the destination sees the close — instead of leaving it open.
 func TestHandleConnectionClosesTheProbesUpstreamNothingTook(t *testing.T) {
-	noCollector(t)
+	testnet.HoldFinalizers(t)
 	t.Setenv(provenswitch.Env, "")
 	closed := make(chan struct{}, 1)
 	addr, conns, accepted := acceptingServer(t, func(c net.Conn) {
@@ -538,15 +538,6 @@ func TestHandleConnectionClosesTheProbesUpstreamNothingTook(t *testing.T) {
 	if n := conns.Load(); n != 1 {
 		t.Fatalf("the destination saw %d connections", n)
 	}
-}
-
-// noCollector turns the garbage collector off for the test: it closes an
-// unreferenced connection by itself (the runtime collects at least every two
-// minutes), which would hide a connection the code under test left open.
-func noCollector(t *testing.T) {
-	t.Helper()
-	old := debug.SetGCPercent(-1)
-	t.Cleanup(func() { debug.SetGCPercent(old) })
 }
 
 // A client that leaves before speaking needs no upstream: a dial still in
@@ -598,7 +589,7 @@ func TestProbeEndsTheConnectionWhenAReadPanics(t *testing.T) {
 		}
 	})
 	t.Run("the destination's, record", func(t *testing.T) {
-		noCollector(t)
+		testnet.HoldFinalizers(t)
 		closed := make(chan struct{}, 1)
 		dst, _, _ := acceptingServer(t, func(c net.Conn) { _, _ = io.Copy(io.Discard, c); closed <- struct{}{} })
 		up, err := net.Dial("tcp4", dst)

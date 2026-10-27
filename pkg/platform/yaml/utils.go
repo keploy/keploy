@@ -259,14 +259,22 @@ func FindLastIndexF(path string, logger *zap.Logger, format Format) (int, error)
 // FindLastIndexAny scans `path` for both test-N.yaml and test-N.json (and
 // report-N.*) and returns the next index, ensuring newly-created files never
 // collide with pre-existing files of the other format.
+//
+// A folder that does not exist yet starts at 1. Any other failure to open or
+// list it is returned: it may hold test-N files, and reading it as empty
+// would hand out an index that is already taken.
 func FindLastIndexAny(path string, _ *zap.Logger) (int, error) {
 	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return 1, nil
 	}
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = dir.Close() }()
 	files, err := dir.ReadDir(0)
 	if err != nil {
-		return 1, nil
+		return 0, err
 	}
 
 	lastIndex := 0

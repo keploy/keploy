@@ -295,13 +295,25 @@ func TestHoldKeepsWithinItsBudgetForAYoungRequest(t *testing.T) {
 	for _, c := range sizedMocks {
 		// A duplicate's leftovers, a second old, held for a request two
 		// seconds in flight: none of it is beyond the horizon.
+		//
+		// Those ages are on the fixture's clock, now, which moves on a
+		// microsecond with each mock, not on the wall clock. On this path
+		// the manager goes by the times it is handed, the prune's instant
+		// and the mocks' own, and its hold and budget by bytes; the wall
+		// clock moves with the machine's speed. Under -race on a busy
+		// machine one fill outlasted the horizon on the wall clock: the
+		// mocks it stamped first were older than the horizon by the check
+		// below, and the test failed on its own fixture.
+		var now time.Time
 		fill := func(limit int) (mgr *SyncMockManager, added int, gaveUp bool) {
+			now = time.Now()
 			mgr = openWindowManager(make(chan *models.Mock, 16), make(chan models.TestMockMapping, 16))
-			young := mgr.OpenWindow(time.Now().Add(-2*time.Second), nil)
+			young := mgr.OpenWindow(now.Add(-2*time.Second), nil)
 			for added < limit && !gaveUp {
-				mgr.AddMock(c.mk(time.Now().Add(-time.Second), added))
+				now = now.Add(time.Microsecond)
+				mgr.AddMock(c.mk(now.Add(-time.Second), added))
 				added++
-				mgr.DeleteMocksStrictlyBefore(time.Now())
+				mgr.DeleteMocksStrictlyBefore(now)
 				mgr.mu.Lock()
 				gaveUp = young.givenUp
 				mgr.mu.Unlock()
@@ -319,7 +331,7 @@ func TestHoldKeepsWithinItsBudgetForAYoungRequest(t *testing.T) {
 		held, counted := len(mgr.held), mgr.heldBytes
 		young := 0
 		for _, h := range mgr.held {
-			if !h.mock.Spec.ReqTimestampMock.Before(time.Now().Add(-StaleHorizon)) {
+			if !h.mock.Spec.ReqTimestampMock.Before(now.Add(-StaleHorizon)) {
 				young++
 			}
 		}

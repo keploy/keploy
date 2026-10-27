@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -670,5 +671,46 @@ func TestAVariableIsNamedAboveADollarKey(t *testing.T) {
 		if got := varName(place); got != want {
 			t.Errorf("varName(%q) = %q, want %q", place, got, want)
 		}
+	}
+}
+
+// A call made at the start-up, before the set's first test began, has no
+// test: a word of what changed that an exchange of the start-up holds is
+// named as earlier in the recording, never earlier in the test. In a test,
+// and between tests (the previous test's), it is earlier in the test.
+func TestAStartUpCallNamesItsEarlierPlacesEarlierInTheRecording(t *testing.T) {
+	t0 := time.Unix(1_792_000_000, 0)
+	const path = "body.count"
+	classify := func(tr *Tracker) string {
+		t.Helper()
+		_, earlier, _, _ := tr.Test()
+		got := Classify(NewDriftCache(), []string{path},
+			Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "7"}}},
+			Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}},
+			t0.Add(time.Second), earlier, nil, nil)
+		if len(got) != 1 || got[0].Kind != KindUnaccounted {
+			t.Fatalf("FALSE GREEN? 82 recorded, 7 live, 7 sent earlier: %+v, want refused", got)
+		}
+		return got[0].Why
+	}
+	tr := NewTracker()
+	tr.Served(0, sent("mock-1", t0, "body.retries", "body.retries", "7", "7"))
+	if why := classify(tr); !strings.Contains(why, "appears earlier in the recording, in mock-1 at body.retries") {
+		t.Errorf("a start-up call: %q, want the start-up's exchange named earlier in the recording", why)
+	}
+	tr.Begin()
+	n, _, _, _ := tr.Test()
+	tr.Served(n, sent("mock-2", t0, "body.retries", "body.retries", "7", "7"))
+	if why := classify(tr); !strings.Contains(why, "appears earlier in the test, in mock-2 at body.retries") {
+		t.Errorf("a call in a test: %q, want the test's exchange named earlier in the test", why)
+	}
+	tr.End()
+	between := NewTracker()
+	between.Begin()
+	between.End()
+	n, _, _, _ = between.Test()
+	between.Served(n, sent("mock-3", t0, "body.retries", "body.retries", "7", "7"))
+	if why := classify(between); !strings.Contains(why, "appears earlier in the test, in mock-3 at body.retries") {
+		t.Errorf("a call between tests: %q, want the previous test's exchange named earlier in the test", why)
 	}
 }

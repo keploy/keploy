@@ -1,6 +1,6 @@
 package models
 
-// Idle answers (design v14 S12, the founder's D4). A dependency a worker polls
+// Idle answers (design v14, the founder's D4). A dependency a worker polls
 // answers "nothing yet" for as long as it has nothing: an SQS long poll that
 // found no message, a Kafka fetch that returned no record. How many such
 // answers a run sees is a matter of timing, not of what the application does,

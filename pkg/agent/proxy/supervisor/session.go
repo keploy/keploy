@@ -143,6 +143,10 @@ type Session struct {
 	// / monotonic-timestamp normalisation — they only differ on the
 	// final handoff.
 	RouteMocksViaSyncMock bool
+	// endedWhereClientStopped: the destination's stream ended where the
+	// client stopped taking it (MarkEndedWhereClientStopped). Internal; here,
+	// in the padding after the bools, so a Session stays in its size class.
+	endedWhereClientStopped atomic.Bool
 
 	// --- Backward-compatibility (populated by the migration shim) ---
 
@@ -416,6 +420,32 @@ func (s *Session) ReceiverGone(dir fakeconn.Direction) (undelivered int, ok bool
 		return 0, false
 	}
 	return int(v - 1), true
+}
+
+// MarkEndedWhereClientStopped says the destination's stream ended where the
+// client stopped taking it: a chunk was written to the client once a look had
+// found its FIN at the proxy's socket, and the connection then closed with
+// nothing acknowledged since that look, as it does for a client that closed
+// its socket, so the capture gives the parser nothing from there on
+// (relay.Config.ClientStopped). A message the stream ends in the middle of was
+// cut there by the client's close, not by the destination. It says nothing
+// exact of how much of the stream the application read: the stream before the
+// cut can hold bytes the client's stack never took (written while its FIN was
+// still on its way to the proxy) and bytes its stack took that the application
+// never read, and a half-closed client that reset before its acknowledgement
+// went out may have read some of what was cut. The caller calls it before the
+// stream ends, so a parser that reaches the end sees it. Nil-safe.
+func (s *Session) MarkEndedWhereClientStopped() {
+	if s == nil {
+		return
+	}
+	s.endedWhereClientStopped.Store(true)
+}
+
+// EndedWhereClientStopped reports whether the destination's stream ended where
+// the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
+func (s *Session) EndedWhereClientStopped() bool {
+	return s != nil && s.endedWhereClientStopped.Load()
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was
@@ -1144,6 +1174,18 @@ const (
 	LeftOutResetByServer = "http2 stream reset by the server"
 )
 
+// LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
+// exchange out for when the client closed the connection partway through its
+// response: the relay ended the response's stream where the client stopped
+// taking it (EndedWhereClientStopped), and the response had not ended there.
+// The client gave up on the call (its timeout, a cancelled call) or wanted no
+// more of it, and the capture cannot tell which. Recorded as far as the client
+// had it, replay would serve a complete-looking shorter response to a call
+// that saw a timeout at record. Neither is a capture loss: the call itself did
+// not complete, so there is no whole exchange to record. Of class
+// leftOutClientClosed.
+const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
+
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
 
@@ -1174,8 +1216,10 @@ func leftOutCause(reason string) string {
 // (relay.DropMemoryPressure, relay.DropPerConnCap, relay.DropDesynced), which
 // it hands MarkMockIncomplete verbatim; the fourth is NextRequest's.
 // leftOutReset is an HTTP/2 stream's reset (LeftOutResetByClient,
-// LeftOutResetByServer). A class also keys the WARN limit for a cause past the
-// first maxOpenKinds (WarnLimiters.AllowOr).
+// LeftOutResetByServer), and leftOutClientClosed an HTTP/1 response its client
+// closed the connection partway through (LeftOutClientClosedPartway). A class
+// also keys the WARN limit for a cause past the first maxOpenKinds
+// (WarnLimiters.AllowOr).
 const (
 	leftOutMemoryPressure = "memory_pressure"
 	leftOutPerConnCap     = "per_conn_cap"
@@ -1194,7 +1238,10 @@ const (
 	// recording's settings caused it.
 	leftOutUnansweredCause = "server bytes that answer no captured request"
 	leftOutReset           = "reset"
-	leftOutOther           = "other"
+	// leftOutClientClosed is an exchange whose client closed the connection
+	// partway through the response (LeftOutClientClosedPartway).
+	leftOutClientClosed = "client_closed"
+	leftOutOther        = "other"
 )
 
 // leftOutClass is the class of a cause (leftOutCause) a mock was left out
@@ -1205,6 +1252,8 @@ func leftOutClass(cause string) string {
 		return cause
 	case LeftOutResetByClient, LeftOutResetByServer:
 		return leftOutReset
+	case LeftOutClientClosedPartway:
+		return leftOutClientClosed
 	}
 	return leftOutOther
 }
@@ -1254,6 +1303,11 @@ func leftOutNextStep(class string, spanned bool) string {
 			"whole exchange to record, and a replay cannot reproduce the reset; the capture lost nothing. The reason " +
 			"says who reset the call, with the code, and which half of it had not ended. A client's CANCEL is usually " +
 			"its deadline: raise it and re-record. A server's reset is a call it failed or abandoned: its logs say why"
+	case leftOutClientClosed:
+		return next + "reason=the client closed partway: the app closed the connection before it had read the whole " +
+			"response (its timeout, a cancelled call, or it wanted only the start), so there is no whole exchange to " +
+			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
+			"app's timeout for it and re-record"
 	}
 	return next + "Re-run with --debug to see each mock left out and why it could not be recorded"
 }

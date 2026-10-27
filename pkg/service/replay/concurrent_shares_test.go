@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"reflect"
 	"slices"
 	"sort"
@@ -97,7 +98,7 @@ func newShareSet(t *testing.T, groups []models.ConcurrencyGroup, mappings map[st
 	t.Helper()
 	conc := concurrencyOf(groups, mappings, shared)
 	p := newExactPlan(mappings, worker, mocks)
-	p.share = newSharePlan(conc, worker, mocks)
+	p.share = sharePlanOf(conc, worker, mocks)
 	narrowed := p.shareConcurrent(mappings)
 	return &shareSet{p: p, mappings: narrowed, cons: map[string][]string{}}
 }
@@ -690,7 +691,7 @@ func TestSettleSharesIsANoOpWithoutSharing(t *testing.T) {
 	c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
 	mappings := map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {}}
 	p := newExactPlan(mappings, nil, []*models.Mock{c})
-	p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, mappings, nil), nil, []*models.Mock{c})
+	p.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, mappings, nil), nil, []*models.Mock{c})
 	results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusPassed}}
 	if charged := p.settleShares(results, nil, true, nil); charged != nil || results[0].Status != models.TestStatusPassed {
 		t.Fatalf("switch off: charged %v", charged)
@@ -729,7 +730,7 @@ func TestPlanSharesOnlyInTheFullRoundWithAnAgentThatServesThem(t *testing.T) {
 			core, logs := observer.New(zap.WarnLevel)
 			r := &Replayer{logger: zap.New(core), config: &config.Config{Test: config.Test{Learn: tc.learn, ShareConcurrent: tc.share}}, instrumentation: servesConcurrent(tc.serves)}
 			r.exact = newExactPlan(mappings, nil, []*models.Mock{c})
-			r.exact.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{c})
+			r.exact.share = sharePlanOf(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{c})
 			got := r.planShares("test-set-0", mappings)
 			narrowed := len(got["a"]) == 0
 			if narrowed != tc.wants || r.exact.share.sharing != tc.wants {
@@ -771,7 +772,7 @@ func TestAnnotateConcurrentSaysWhatKeployKnows(t *testing.T) {
 	e.Unresolved = models.MockEntryUnresolvedAmbiguous
 	mappings := map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {e}, "solo": {}}
 	p := newExactPlan(mappings, nil, []*models.Mock{c, twin})
-	p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, mappings, nil), nil, []*models.Mock{c, twin})
+	p.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}}}, mappings, nil), nil, []*models.Mock{c, twin})
 	results := []models.TestResult{
 		{TestCaseID: "b", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "PostgreSQL", Kind: models.MissInTest, ClosestMock: "c"}}}},
 		{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}}}},
@@ -907,7 +908,7 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 	strict := func(mocks []*models.Mock, entries ...models.MockEntry) *exactPlan {
 		mappings := map[string][]models.MockEntry{"a": entries, "b": {}}
 		p := newExactPlan(mappings, nil, mocks)
-		p.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, mocks)
+		p.share = sharePlanOf(concurrencyOf(groups, mappings, nil), nil, mocks)
 		return p
 	}
 	c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
@@ -950,7 +951,7 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 		mappings := map[string][]models.MockEntry{"a": {shEntry(c, "g1")}, "b": {}}
 		r := &Replayer{logger: zap.NewNop(), config: &config.Config{Test: config.Test{Learn: true, ShareConcurrent: true}}, instrumentation: servesConcurrent(false)}
 		r.exact = newExactPlan(mappings, nil, []*models.Mock{c})
-		r.exact.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{c})
+		r.exact.share = sharePlanOf(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{c})
 		r.planShares("test-set-0", mappings)
 		u, n := annotate(r.exact, "c")
 		want(t, u, n, models.ConcurrentNotSharedAgent, "")
@@ -961,7 +962,7 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 		mappings := map[string][]models.MockEntry{"a": {entry}, "b": {}}
 		r := &Replayer{logger: zap.NewNop(), config: &config.Config{Test: config.Test{Learn: true, ShareConcurrent: true}}, instrumentation: servesConcurrent(false)}
 		r.exact = newExactPlan(mappings, nil, []*models.Mock{m})
-		r.exact.share = newSharePlan(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{m})
+		r.exact.share = sharePlanOf(concurrencyOf(groups, mappings, nil), nil, []*models.Mock{m})
 		r.planShares("test-set-0", mappings)
 		return r.exact
 	}
@@ -987,7 +988,7 @@ func TestAnnotateConcurrentSaysTrulyWhyARecordingWasNotShared(t *testing.T) {
 		s := shMock("s", 100, "INSERT", "bind.$1=v", "ok")
 		mappings := map[string][]models.MockEntry{"a": {}, "b": {}}
 		p := newExactPlan(mappings, nil, []*models.Mock{s})
-		p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}, Unkept: 1}}, mappings, []models.MockEntry{shEntry(s, "g1")}), nil, []*models.Mock{s})
+		p.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a", "b"}, Unkept: 1}}, mappings, []models.MockEntry{shEntry(s, "g1")}), nil, []*models.Mock{s})
 		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "s"}}}}}
 		if charged := p.annotateConcurrent(results, nil); len(charged) != 0 {
 			t.Fatalf("charged %v", charged)
@@ -1115,7 +1116,7 @@ func TestAnnotateConcurrentSaysOnlyWhatIsTrueOfTheCall(t *testing.T) {
 	groups := []models.ConcurrencyGroup{g1, g2}
 	strict := func() *exactPlan {
 		p := newExactPlan(mappings, nil, mocks)
-		p.share = newSharePlan(concurrencyOf(groups, mappings, shared), nil, mocks)
+		p.share = sharePlanOf(concurrencyOf(groups, mappings, shared), nil, mocks)
 		return p
 	}
 	miss := func(p *exactPlan, protocol, closest string) *models.ConcurrentNote {
@@ -1194,7 +1195,7 @@ func TestAnnotateConcurrentSaysOnlyWhatIsTrueOfTheCall(t *testing.T) {
 		m := map[string][]models.MockEntry{"a": mappings["a"], "b": mappings["b"], "e": {e}}
 		gs := []models.ConcurrencyGroup{g1, {ID: "g3", Tests: []string{"a", "e"}}}
 		p := newExactPlan(m, nil, append(mocks, h2))
-		p.share = newSharePlan(concurrencyOf(gs, m, nil), nil, append(mocks, h2))
+		p.share = sharePlanOf(concurrencyOf(gs, m, nil), nil, append(mocks, h2))
 		results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{{Protocol: "HTTP", Kind: models.MissInTest}}}}}
 		p.annotateConcurrent(results, nil)
 		n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent
@@ -1213,7 +1214,7 @@ func TestAnnotateConcurrentCountsTheTestsTheRecordingDidNotKeep(t *testing.T) {
 	c := shMock("c", 100, "INSERT", "bind.$1=v", "ok")
 	mappings := map[string][]models.MockEntry{"a": {shEntry(c, "g1")}}
 	p := newExactPlan(mappings, nil, []*models.Mock{c})
-	p.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}, Unkept: 1}}, mappings, nil), nil, []*models.Mock{c})
+	p.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}, Unkept: 1}}, mappings, nil), nil, []*models.Mock{c})
 	parsed := &models.ConcurrentNote{Class: []string{"c"}, Case: models.ConcurrentCaseNotOwn, Places: []string{"bind.$1"}}
 	results := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{
 		UnmatchedCalls: []models.UnmatchedCall{
@@ -1236,7 +1237,7 @@ func TestAnnotateConcurrentCountsTheTestsTheRecordingDidNotKeep(t *testing.T) {
 	// A group that names a alone, and no test it did not keep, puts no test
 	// beside a: a's miss and leftover are its own.
 	alone := newExactPlan(mappings, nil, []*models.Mock{c})
-	alone.share = newSharePlan(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}}}, mappings, nil), nil, []*models.Mock{c})
+	alone.share = sharePlanOf(concurrencyOf([]models.ConcurrencyGroup{{ID: "g1", Tests: []string{"a"}}}, mappings, nil), nil, []*models.Mock{c})
 	solo := []models.TestResult{{TestCaseID: "a", Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{
 		UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "ShareTest", Kind: models.MissInTest, ClosestMock: "c"}},
 		UnconsumedMocks: []models.UnconsumedMock{{Name: "c"}},
@@ -1274,4 +1275,13 @@ func TestAnnotateConcurrentNamesTheHeldKindOfAnEntryThatNamesNone(t *testing.T) 
 	if n := results[0].FailureInfo.UnmatchedCalls[0].Concurrent; n == nil || n.WhyNot != models.ConcurrentNotSharedCall || n.Kind != string(shareKind) || n.AttributedTo != "a" {
 		t.Fatalf("b's miss says %+v; want attributed to a, a %s recording keploy does not key", n, shareKind)
 	}
+}
+
+// sharePlanOf is newSharePlan of whole mocks, which it never fails to read.
+func sharePlanOf(conc *setConcurrency, worker []models.MockEntry, stored ...[]*models.Mock) *sharePlan {
+	sp, err := newSharePlan(context.Background(), conc, worker, stored...)
+	if err != nil {
+		panic(err)
+	}
+	return sp
 }

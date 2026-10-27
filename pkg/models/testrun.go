@@ -62,6 +62,11 @@ type TestReport struct {
 	// every report a set run under the switch writes; absent for a set run
 	// without it.
 	Proven bool `json:"proven,omitempty" yaml:"proven,omitempty"`
+	// SetAnswers are, under the proven switch, the answered calls
+	// (UnmatchedCall.Answer) the set's end charged to the set, no test: made
+	// before its first test or after its last. They never fail
+	// the set, nor land in UnclaimedCalls. Absent when there is none.
+	SetAnswers []UnmatchedCall `json:"setAnswers,omitempty" yaml:"set_answers,omitempty"`
 }
 
 // CaptureVerificationStatus is the outcome of checking that the agent tracked
@@ -169,6 +174,13 @@ type TestResult struct {
 	// A later call that sent another value failed the test case as a miss.
 	// Absent when none was bound.
 	Variables []VariableBinding `json:"variables,omitempty" yaml:"variables,omitempty"`
+	// Answers are, under the proven switch, the answered calls
+	// (UnmatchedCall.Answer) charged to this test's window, or to the gap
+	// before it, as misses are: a pairing record's full round
+	// made, a background write answered by its kind. They never fail the
+	// test, nor land in FailureInfo.UnmatchedCalls. Absent when there is
+	// none.
+	Answers []UnmatchedCall `json:"answers,omitempty" yaml:"answers,omitempty"`
 }
 
 // TemplateFailure is one template variable place a test case failed on, or
@@ -246,9 +258,19 @@ type FailureInfo struct {
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
-	//   - every kind but real_uncaptured: what the agent lost since the test
-	//     set began, as this test ended. A loss taints the test running when
-	//     it happened and every later test of the set (design v14 §3.2).
+	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
+	//     other kind): what the agent lost since the test set began, as this
+	//     test ended. Such a loss taints the test running when it happened
+	//     and every later test of the set (design v14 §3.2); a process of the
+	//     application's that keploy could not place (AppLife) taints every
+	//     test since that application started, in this set or an earlier one
+	//     it served (--keep-app-alive), and one that outlives the application
+	//     every test since the run began.
+	//   - a test's own kind that is judged (CaptureLossKind.PerTest:
+	//     tls_handshake_failed, capture_unread, connection_unrecorded; the
+	//     other test's own kinds are not judged, CannotCapture, or evidence):
+	//     what the agent lost while this test ran, since the previous test
+	//     ended, for this test alone.
 	//   - real_uncaptured (class e, mock.real): the connections keploy could
 	//     neither capture nor relay as real that were undecided or used while
 	//     this test ran, counted for this test alone. One undecided across
@@ -265,8 +287,10 @@ type FailureInfo struct {
 	// CannotCapture is, under KEPLOY_PROVEN=1, what keploy cannot capture at
 	// all that the application did while this test or one before it ran
 	// (decision 20: a call over a Unix socket, or Unix sockets keploy cannot
-	// see): the test has no verdict (NotJudged), and its set is not judged.
-	// Never a failure.
+	// see), and every other loss that leaves a test without a verdict
+	// (CaptureLossKind.NotJudged: an agent started again while the
+	// application ran on, agent_started_again, among them): the test has no
+	// verdict, and its set is not judged. Never a failure.
 	CannotCapture CaptureLosses `json:"cannot_capture,omitempty" yaml:"cannot_capture,omitempty"`
 	// StreamHeldOpen says, under KEPLOY_PROVEN=1, why the app's stream was
 	// not read to its end: the app kept it open on keepalives, past its
@@ -294,6 +318,15 @@ type FailureInfo struct {
 	// was (false-pass row 0). Set with the proven switch off, the only place
 	// a wrong answer is demoted.
 	MappingStale string `json:"mapping_stale,omitempty" yaml:"mapping_stale,omitempty"`
+	// LearningNotKept says, under KEPLOY_PROVEN=1 in record's full round, why
+	// keploy did not keep what its agent learned on the mocks this test
+	// consumed, and what it did not keep: the agent did not say it read the
+	// test case's request (an agent older than keploy), so a value the
+	// application took from the request may have been learned as noise, or
+	// as a variable that takes any value. A test that passed may have passed
+	// on it alone, so the test has no verdict, and its test set is not
+	// judged.
+	LearningNotKept string `json:"learning_not_kept,omitempty" yaml:"learning_not_kept,omitempty"`
 }
 
 // MappingStaleRemedy is what to do about a test whose recorded mapping
@@ -302,8 +335,9 @@ const MappingStaleRemedy = "re-record the test-set, or run keploy test with --di
 
 // NotJudged is why the test has no verdict, whatever its status says: what
 // keploy could not read or check of it (UnmatchedCallsUnread,
-// TestMocksUnread, VariablesUnchecked, CaptureUnread), or what it cannot
-// capture at all (CannotCapture, decision 20), one reason each.
+// TestMocksUnread, VariablesUnchecked, CaptureUnread, LearningNotKept), or
+// what it cannot capture at all (CannotCapture, decision 20), one reason
+// each.
 // Empty for a judged test. Each is set only under the proven switch, so a
 // result written without it is never unjudged, but for MappingStale, which is
 // set with it off, the only place a wrong answer is demoted to OBSOLETE.
@@ -332,6 +366,9 @@ func (fi FailureInfo) NotJudged() []string {
 	}
 	if fi.MappingStale != "" {
 		why = append(why, fi.MappingStale)
+	}
+	if fi.LearningNotKept != "" {
+		why = append(why, fi.LearningNotKept)
 	}
 	return why
 }
@@ -392,6 +429,15 @@ type UnconsumedMock struct {
 	Stated  string `json:"stated,omitempty" yaml:"stated,omitempty"`
 	Closest string `json:"closest,omitempty" yaml:"closest,omitempty"`
 	Unkept  int    `json:"unkept,omitempty" yaml:"unkept,omitempty"`
+	// RepeatOf says that this recorded call, which this replay never made, is
+	// identical to a recording an earlier test of the set made, which
+	// answered that test's call at this replay: an application that keeps an
+	// answer for a span of elapsed time asked again at record, where the
+	// recording ran past the span, and not at a faster replay
+	// (models.RepeatNote). NextSteps is its sentence (ExplainUnmade). Both are
+	// empty when no such recording is known.
+	RepeatOf  *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
+	NextSteps string      `json:"next_steps,omitempty" yaml:"next_steps,omitempty"`
 }
 
 // MockMismatchMock identifies a mock in the expected/actual mock sets carried by
@@ -486,14 +532,43 @@ type UnmatchedCall struct {
 	// Reason is why the call missed, in judging's words (design v14 §5.3,
 	// §7.3): MissRequestChanged, MissUnstableOrder or MissUnmockedCall. Only
 	// record's full round, where the learn step runs, gives one; empty
-	// everywhere else, and for a call of that round keploy could not judge
-	// because its own store could not read a recorded answer back.
+	// everywhere else, and for a call of that round no reason of judging's
+	// names: one keploy could not judge because its own store could not read
+	// a recorded answer back, one a parser's pairing found tied between
+	// recordings whose replies differ, or one call more than the test
+	// recorded (Kind and Recorded say so).
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Concurrent is, under the proven switch, what keploy knows of the call
 	// when the test was recorded while other tests' requests were open
 	// (Mapping.Groups): with whom, and which of them its recording was
 	// attributed to or taken by. nil for a call of a test recorded alone.
 	Concurrent *ConcurrentNote `json:"concurrent,omitempty" yaml:"concurrent,omitempty"`
+	// Answer, under the proven switch, says the call WAS answered, and how;
+	// "" for a miss. AnswerProvisional: record's full round answered it with
+	// ClosestMock, a recording another test owns (a pairing),
+	// which judging then moves to the set's background; RecordedIn stays
+	// empty on an answer (the parser's store names no recording's test), and
+	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
+	// drifted, Differs naming the leaves learned as noise.
+	// AnswerByKind: a background write answered by its kind, unchecked;
+	// Reused says the kind's recordings were used up. An answer never counts
+	// against a test and never lands in a miss list.
+	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
+	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
+	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
+	WriteKind string `json:"write_kind,omitempty" yaml:"write_kind,omitempty"`
+	// Source is the process that made the call (Origin's Comm and Exe; Clock
+	// unused), which the proxy's sink fills from the connection's pid, for a
+	// miss and an answer alike.
+	Source *Origin `json:"source,omitempty" yaml:"source,omitempty"`
+	// Repeat mirrors MockMismatchReport.Repeat: the call is identical to a
+	// recording an earlier test of the set made (ClosestMock, or
+	// RepeatNote.Mock for a NotOwned call, whose ClosestMock stays the
+	// recording made elsewhere), which already answered that test's call at
+	// this replay; the replay names that test (RepeatNote.Test). A call a
+	// pairing answered (Answer) carries it by a NotOwned miss's rule. nil
+	// otherwise.
+	Repeat *RepeatNote `json:"repeat_of,omitempty" yaml:"repeat_of,omitempty"`
 }
 
 // ConcurrentNote is what keploy knows of a call made by a test that was
@@ -625,6 +700,16 @@ const (
 	MissConcurrentConflict = "concurrent_conflict"
 )
 
+// The answers an answered call reports (UnmatchedCall.Answer,
+// MockMismatchReport.Answer, ReportAnswer), under the proven switch.
+const (
+	// AnswerProvisional: record's full round paired the call with a recording
+	// another test owns and answered it with that recording.
+	AnswerProvisional = "provisional"
+	// AnswerByKind: a background write answered by its write kind, unchecked.
+	AnswerByKind = "by_kind"
+)
+
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),
 // as the learn step decides them (package matcher/learn).
 const (
@@ -679,6 +764,12 @@ type MockOutcome struct {
 
 // MockSummaryFromSpec builds a protocol-generic summary string from a mock's spec.
 func MockSummaryFromSpec(mock *Mock) string {
+	if d := mock.onDisk; d != nil {
+		if d.longSummary {
+			return d.display(mock, MockSummaryFromSpec, string(mock.Kind))
+		}
+		return d.summary
+	}
 	if mock.Spec.HTTPReq != nil {
 		return string(mock.Spec.HTTPReq.Method) + " " + mock.Spec.HTTPReq.URL
 	}

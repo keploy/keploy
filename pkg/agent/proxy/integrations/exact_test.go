@@ -10,9 +10,23 @@ type exactStore struct {
 
 func (s exactStore) ExactServing() bool { return s.exact }
 
-// MarkMockAsUsed's false is a refusal only from a store that serves exactly
-// now, and only for a named mock.
+// unheldView is a view over a store HoldToRound returned that forwards why
+// it reads nothing (UnheldTeller) and no exact serving.
+type unheldView struct{ MockMemDb }
+
+func (v unheldView) Unheld() string { return UnheldWhy(v.MockMemDb) }
+
+// MarkMockAsUsed's false is a refusal from a store that serves exactly now,
+// for a named mock; and, for any mock, from a store HoldToRound returned that
+// could not hold its call to its round (UnheldWhy), or a view over one,
+// though neither offers exact serving: read as bookkeeping, it would have the
+// parser answer with a recording the hold never let it read.
 func TestConsumeRefusedOnlyUnderExactServingForANamedMock(t *testing.T) {
+	// A store that marks a call's round and cannot hold the call to it.
+	unheld, _ := HoldToRound(exactStore{exact: true}, NewCallRound(1, nil))
+	if UnheldWhy(unheld) == "" {
+		t.Fatal("HoldToRound held a call to its round in a store that cannot hold one")
+	}
 	for _, tc := range []struct {
 		name    string
 		db      MockMemDb
@@ -25,6 +39,10 @@ func TestConsumeRefusedOnlyUnderExactServingForANamedMock(t *testing.T) {
 		{"exact serving on", exactStore{exact: true}, "m", true, true},
 		{"exact serving on, a mock with no name", exactStore{exact: true}, "", true, false},
 		{"no store", nil, "m", false, false},
+		{"a store held to no round", unheld, "m", false, true},
+		{"a store held to no round, a mock with no name", unheld, "", false, true},
+		{"a view over a store held to no round", unheldView{unheld}, "m", false, true},
+		{"a view that tells nothing held", unheldView{exactStore{exact: false}}, "m", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ExactServing(tc.db); got != tc.exact {

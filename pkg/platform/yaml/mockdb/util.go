@@ -51,6 +51,10 @@ func EncodeMockJSON(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTraffic
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
+		// Where the call came from (models.Mock.Origin): written whenever
+		// the mock has one, whatever the switch, so a rewrite keeps what
+		// the decoders read (nil, so omitted, for a mock without one).
+		Origin: mock.Origin.Persisted(),
 	}
 
 	var spec any
@@ -320,6 +324,10 @@ func EncodeMock(mock *models.Mock, logger *zap.Logger) (*yaml.NetworkTrafficDoc,
 		// The places of the call that hold a test variable's value, as a
 		// kind-agnostic top-level block (nil, so omitted, for most mocks).
 		Variables: mock.Spec.Variables.Clone(),
+		// Where the call came from (models.Mock.Origin): written whenever
+		// the mock has one, whatever the switch, so a rewrite keeps what
+		// the decoders read (nil, so omitted, for a mock without one).
+		Origin: mock.Origin.Persisted(),
 	}
 	mapped, err := encodeWithMapper(mock, &yamlDoc)
 	if err != nil {
@@ -673,6 +681,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 			Start:        m.Start,
+			Origin:       m.Origin,
 		}
 		mapped, err := decodeWithMapper(m, &mock)
 		if err != nil {
@@ -694,6 +703,7 @@ func decodeMocks(yamlMocks []*yaml.NetworkTrafficDoc, logger *zap.Logger, rewrit
 			// mapped branch) — this guards a future mapper-registered AsyncParser.
 			mock.Spec.Async = m.Async
 			mock.Spec.Variables = m.Variables.Clone()
+			mock.Origin = m.Origin // the mapper may have rebuilt the mock whole
 			mocks = append(mocks, &mock)
 			continue
 		}
@@ -1657,6 +1667,7 @@ func decodeMocksJSON(docs []*yaml.NetworkTrafficDocJSON, logger *zap.Logger, rew
 			Noise:        m.Noise.ValueNoise(),
 			ConnectionID: m.ConnectionID,
 			Start:        m.Start,
+			Origin:       m.Origin,
 		}
 
 		switch m.Kind {

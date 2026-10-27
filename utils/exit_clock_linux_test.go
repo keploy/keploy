@@ -1541,21 +1541,23 @@ func fakeProc(t *testing.T, procs map[int]struct {
 			t.Fatal(err)
 		}
 	}
-	stat := func(pid int, state byte, start uint64) string {
-		// pid (comm) state, then fields 4..52: starttime is field 22.
+	stat := func(pid int, state byte, start uint64, threads int) string {
+		// pid (comm) state, then fields 4..52: num_threads is field 20,
+		// starttime field 22.
 		f := make([]string, 49)
 		for i := range f {
 			f[i] = "0"
 		}
+		f[20-4] = strconv.Itoa(threads)
 		f[22-4] = strconv.FormatUint(start, 10)
 		return fmt.Sprintf("%d (app) %c %s\n", pid, state, strings.Join(f, " "))
 	}
 	for pid, p := range procs {
 		dir := filepath.Join(root, strconv.Itoa(pid))
-		write(filepath.Join(dir, "stat"), stat(pid, p.state, p.start))
+		write(filepath.Join(dir, "stat"), stat(pid, p.state, p.start, len(p.threads)))
 		for _, th := range p.threads {
 			tdir := filepath.Join(dir, "task", strconv.Itoa(th.tid))
-			write(filepath.Join(tdir, "stat"), stat(th.tid, th.state, p.start))
+			write(filepath.Join(tdir, "stat"), stat(th.tid, th.state, p.start, len(p.threads)))
 			write(filepath.Join(tdir, "schedstat"), fmt.Sprintf("%d %d %d\n", th.ran, th.wait, th.slice))
 			write(filepath.Join(tdir, "children"), th.children)
 			if th.mounts != "" {
@@ -1634,6 +1636,140 @@ func TestTheExitClockReadsEveryThreadOfItsProcesses(t *testing.T) {
 	}
 	if _, ok := readTaskTimesIn(root, []Reached{{PID: 200, Start: 8}}, boot, mountsSeen); ok {
 		t.Fatal("a process another now has the pid of was read")
+	}
+}
+
+// The exit clock reads every thread its processes have: a listing of a
+// process's threads taken while others exit can leave out one that is there
+// throughout, so listings that hold fewer threads than the process counts
+// are taken again. Where none make up the count, the threads of all of them
+// are read, after a bounded number of counts, and the look counts only what
+// they ran: a thread it missed cannot make the processes seem able to run
+// for longer than they could.
+func TestTheExitClockReadsEveryThreadItsProcessCounts(t *testing.T) {
+	type proc = struct {
+		state   byte
+		start   uint64
+		threads []fakeThread
+	}
+	root := fakeProc(t, map[int]proc{
+		600: {state: 'S', start: 7, threads: []fakeThread{{600, 'S', 1, 1, 1, "", "", ""}, {601, 'S', 2, 2, 2, "", "", ""}}},
+	})
+	stat, err := os.ReadFile(filepath.Join(root, "600", "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCount := func(n int) string {
+		f := strings.Fields(string(stat))
+		f[19] = strconv.Itoa(n)
+		return strings.Join(f, " ") + "\n"
+	}
+	// The process's stat is read first to tell it is the one named; as it
+	// is read again, for its count, thread 602 is put in the listing: one
+	// the listing before left out.
+	serveStat(t, filepath.Join(root, "600", "stat"), func(n int) string {
+		if n == 2 {
+			dir := filepath.Join(root, "600", "task", "602")
+			for name, body := range map[string]string{"stat": strings.Replace(string(stat), "600 (app) S", "602 (app) R", 1), "schedstat": "3 3 3\n", "children": ""} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Error(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		if n == 1 {
+			return string(stat)
+		}
+		return withCount(3)
+	})
+	never := func(string) bool { return true }
+	got, ok := readTaskTimesIn(root, []Reached{{PID: 600, Start: 7}}, func() time.Duration { return 0 }, never)
+	if !ok {
+		t.Fatal("the process was not read")
+	}
+	if ids := slices.Sorted(maps.Keys(got)); !slices.Equal(ids, []int{600, 601, 602}) {
+		t.Fatalf("read threads %v; want 600, 601 and 602, the one the first listing left out (and no mark of a listing not shown whole)", ids)
+	}
+	// A count no listing makes up: after taskListings counts, the threads
+	// of every listing, and the process marked as read from listings not
+	// shown whole; not a listing taken for ever, nor only the last one. 701
+	// is in the first listing alone: the first count's read moves it out.
+	root = fakeProc(t, map[int]proc{
+		700: {state: 'S', start: 7, threads: []fakeThread{{700, 'S', 1, 1, 1, "", "", ""}, {701, 'S', 2, 2, 2, "", "", ""}}},
+	})
+	stat, err = os.ReadFile(filepath.Join(root, "700", "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := 0
+	serveStat(t, filepath.Join(root, "700", "stat"), func(int) string {
+		counts++
+		if counts == 1 {
+			if err := os.Rename(filepath.Join(root, "700", "task", "701"), filepath.Join(root, "701-hidden")); err != nil {
+				t.Error(err)
+			}
+		}
+		return withCount(5)
+	})
+	ids, whole, gone, err := taskIDs(root, 700)
+	if err != nil || gone || whole || !slices.Equal(ids, []string{"700", "701"}) {
+		t.Fatalf("taskIDs = %v, whole %v, gone %v, %v; want 700 and 701, every thread the listings held, not whole", ids, whole, gone, err)
+	}
+	if counts != taskListings {
+		t.Fatalf("%d counts read; want %d", counts, taskListings)
+	}
+	// Read by the exit clock, the same process is marked: its look counts
+	// only what its threads ran.
+	if err := os.Rename(filepath.Join(root, "701-hidden"), filepath.Join(root, "700", "task", "701")); err != nil {
+		t.Fatal(err)
+	}
+	got, ok = readTaskTimesIn(root, []Reached{{PID: 700, Start: 7}}, func() time.Duration { return 0 }, never)
+	if !ok {
+		t.Fatal("the process was not read")
+	}
+	if mark, marked := got[-700]; !marked || !mark.partial {
+		t.Fatalf("read %v; want process 700 marked as read from listings not shown whole", got)
+	}
+	// A thread started between the first listing and the count (803) is
+	// held by the count and not by that listing: that pair falls short, and
+	// the next pair (the second listing, which holds it, and a new count)
+	// is whole.
+	root = fakeProc(t, map[int]proc{
+		800: {state: 'S', start: 7, threads: []fakeThread{{800, 'S', 1, 1, 1, "", "", ""}, {801, 'S', 2, 2, 2, "", "", ""}}},
+	})
+	stat, err = os.ReadFile(filepath.Join(root, "800", "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts = 0
+	serveStat(t, filepath.Join(root, "800", "stat"), func(int) string {
+		counts++
+		if counts == 1 {
+			dir := filepath.Join(root, "800", "task", "803")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Error(err)
+			}
+		}
+		return withCount(3)
+	})
+	ids, whole, gone, err = taskIDs(root, 800)
+	if err != nil || gone || !whole || !slices.Equal(ids, []string{"800", "801", "803"}) || counts != 2 {
+		t.Fatalf("a thread started as the count was read: taskIDs = %v, whole %v, gone %v, %v, after %d counts; want 800, 801 and 803, whole, after 2", ids, whole, gone, err, counts)
+	}
+	// A look with such a thread counts only what the threads ran: here
+	// one waited for a CPU all the look, which, missed by a listing, would
+	// leave the look seeming all runnable.
+	ms := time.Millisecond
+	before := map[int]taskTime{1: {ran: 10 * ms, waited: 0}}
+	now := map[int]taskTime{1: {ran: 30 * ms, waited: 0, partial: true}}
+	if could := lookAt(100*ms, before, now, map[int]time.Duration{}).could(0); could != 20*ms {
+		t.Fatalf("a look with a thread from a listing not shown whole could run %v; want 20ms, what it ran", could)
+	}
+	now[1] = taskTime{ran: 30 * ms, waited: 0}
+	if could := lookAt(100*ms, before, now, map[int]time.Duration{}).could(0); could != 100*ms {
+		t.Fatalf("a whole look of a thread that ran 20ms of 100ms, runnable for none of the rest and waiting none: could %v; want 100ms", could)
 	}
 }
 

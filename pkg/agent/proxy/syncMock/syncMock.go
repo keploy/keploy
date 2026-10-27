@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils/stall"
@@ -1740,7 +1741,12 @@ func (m *SyncMockManager) AddMock(mock *models.Mock) {
 		// over, while its connection is still open.
 		if provenswitch.On() {
 			containerkey.Default.Stamp(mock)
+			// And the process its call came from.
+			starts.Default.StampOrigin(mock)
 		}
+		// The address its connection reached, in every mode, stamped while
+		// its connection is open (starts.Registry.StampDest).
+		starts.Default.StampDest(mock)
 	}
 	m.mu.Lock()
 	if m.memoryPause {

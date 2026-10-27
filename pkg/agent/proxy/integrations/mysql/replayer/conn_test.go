@@ -174,11 +174,17 @@ func (c mysqlClient) greetAndAnswer(user string, plugin mysql.AuthPluginName) {
 // Replay returns, as the proxy closes it then.
 func replay(t *testing.T, db integrations.MockMemDb) (mysqlClient, <-chan error) {
 	t.Helper()
+	return replayLogged(t, db, zap.NewNop())
+}
+
+// replayLogged is replay, logging to logger.
+func replayLogged(t *testing.T, db integrations.MockMemDb, logger *zap.Logger) (mysqlClient, <-chan error) {
+	t.Helper()
 	client, agentEnd := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = agentEnd.Close() })
 	ret := make(chan error, 1)
 	go func() {
-		ret <- Replay(context.Background(), zap.NewNop(), agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, db, models.OutgoingOptions{})
+		ret <- Replay(context.Background(), logger, agentEnd, &models.ConditionalDstCfg{Addr: testDBAddr}, db, models.OutgoingOptions{})
 		_ = agentEnd.Close()
 	}()
 	return mysqlClient{t: t, c: client}, ret

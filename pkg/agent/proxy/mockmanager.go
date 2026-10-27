@@ -12,6 +12,7 @@ import (
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/variables"
@@ -70,6 +71,18 @@ type MockManager struct {
 	// outside the manager's own locks: under the proven switch, the learn
 	// step's earlier places of the test's recording (learn.Tracker.ServedMock).
 	servedObserver atomic.Pointer[func(*models.Mock)]
+	// servedInObserver, when set, is told instead of a mock a consume door
+	// serves in a request its parser said (integrations.ServingIn,
+	// learn.Tracker.ServedMockIn).
+	servedInObserver atomic.Pointer[func(*models.Mock, *learn.Flight)]
+	// openTestEpoch, when set, says the learn tracker's open test
+	// (learn.Tracker.OpenEpoch) as a test's view is installed: the view's
+	// stamp (exactView.stamp, ServedInOpenTest).
+	openTestEpoch atomic.Pointer[func() uint64]
+	// trackerSetAt, when set, says the learn tracker's running set
+	// (learn.Tracker.SetAt) as a staging is made: the set it stages
+	// (roundState.stagedSet).
+	trackerSetAt atomic.Pointer[func() uint64]
 
 	// legacy "all" trees (kept for compatibility with existing callers)
 	filtered   *TreeDb
@@ -143,6 +156,11 @@ type MockManager struct {
 	// staging that ends such a test leaves them out, so a test's recording
 	// answers no call after its test ended. Reset with consumedPersistent.
 	scopeConsumed map[string]struct{}
+	// answered keeps, of the per-test recordings that answered a call in this
+	// test set, the request side, by request key and bounded by bytes, for a
+	// miss's diagnosis (FindAnsweredEarlier).
+	// Reset with consumedPersistent.
+	answered answeredLog
 
 	// cursorMu guards cursors: the per-request-key cursor used to serve
 	// successive recorded responses for a stateful data-plane dependency
@@ -150,6 +168,18 @@ type MockManager struct {
 	// replaced (per test-set) so cursors don't bleed across test-sets.
 	cursorMu sync.Mutex
 	cursors  map[string]int
+	// testCursors are, under exact serving, each test view's own cursors by
+	// its number (cursorSlotIn): one is made as its view is installed, so a
+	// test's sequences start empty. Once another view replaced it, it is
+	// closed (closedTests) and kept: only a call read in that test reaches
+	// it, and such a call walked after the test ended reads and moves the
+	// test's sequence where the test left it. Closed ones are dropped at the
+	// next staging (ResetStatefulCursors). Guarded by cursorMu.
+	testCursors map[uint64]map[string]int
+	// closedTests are the numbers of the test views another view replaced
+	// (closeTestCursors), whose cursors the next staging drops. Guarded by
+	// cursorMu.
+	closedTests map[uint64]struct{}
 	// kept are the per-test recordings an exact match kept for its test's
 	// byte-identical repeats (integrations.RepeatKeeper), by key (a worker's
 	// view prefixes its scope). Guarded by cursorMu, and dropped with the
@@ -511,6 +541,7 @@ func NewMockManager(filtered, unfiltered *TreeDb, logger *zap.Logger) *MockManag
 		logger:              logger,
 	}
 	mm.setGen.Store(1)
+	mm.answered.fence(1)
 	// Start the per-connection idle sweeper. Reclaims
 	// connection-scoped pools whose last activity exceeded
 	// connectionIdleRetention so long-running agents don't accumulate
@@ -541,6 +572,9 @@ func (m *MockManager) Close() {
 	m.closeOnce.Do(func() {
 		m.closed.Store(true)
 		close(m.sweeperStop)
+		// A learn step waiting for this manager's round to move
+		// (AwaitRoundMove) is told it never will.
+		m.closeRound()
 		// Wake anything waiting on a window change so it can see IsClosed and
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
@@ -620,14 +654,23 @@ func (m *MockManager) ResetForReplaySession() {
 	// goes on serving, until the agent serves the next session, only the
 	// protocol-phase mocks of what is staged: no data-plane mock of the
 	// previous session answers an application kept alive across them.
+	m.lockRound()
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
+	m.exact.round.bound = nil
+	m.exact.round.mu.Unlock()
 	// Nor any of its worker scope (models.Mapping.Worker), or its recording
 	// source: names are unique only within a set, and the next set names its
 	// own.
 	m.exact.worker.Store(nil)
+	// And so do the rules its set's background is served by: the next
+	// session's staging names its own (ServeExactBackground), and until it
+	// does, today's serve.
+	m.exact.bg.Store(nil)
+	m.exact.poolCursor.Store(nil)
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
+	m.SetRecordedOfKind(nil)
 	// Nor its scope table's pool names (SetPoolNames): until the next
 	// session sends its own, whose mock is the pool's is not known.
 	m.exact.poolNames.Store(nil)
@@ -683,6 +726,7 @@ func (m *MockManager) ResetForReplaySession() {
 	// A reset that starts another test set says so (ArmSetFence), and its
 	// boundary staging drops them instead: they were consumed of the previous
 	// set's pool.
+	m.answered.reset()
 	m.consumedMu.Lock()
 	if m.consumedPersistent != nil {
 		m.consumedPersistent = make(map[string]models.MockState)
@@ -764,7 +808,7 @@ func (m *MockManager) GetStatelessMocks(kind models.Kind, key string) (filtered,
 	// other read: until the next begin or end, or for a data-plane recording
 	// consumed outside every test, until the next staging.
 	if v := m.exactView(); v != nil {
-		filtered, unfiltered = v.unspent(filtered), v.unspent(unfiltered)
+		filtered, unfiltered = v.withLearned(v.unspent(filtered)), v.withLearned(v.unspent(unfiltered))
 	}
 	return filtered, unfiltered
 }
@@ -1206,7 +1250,7 @@ func (m *MockManager) SetScopeMocks(filtered, unfiltered []*models.Mock, open bo
 	ownForStaging(&filtered, &unfiltered)
 	// The epoch and carry-over bookkeeping a BaseTime staging resets, which
 	// the zero-window staging below leaves alone.
-	m.stagingEpoch.Add(1)
+	m.bumpStagingEpoch()
 	m.carry.reset()
 	m.carryLastStart, m.carryLoadedTo = time.Time{}, time.Time{}
 	// A zero window is no time window: the per-test tier takes filtered as
@@ -1405,7 +1449,7 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 	if isInitialStaging {
 		// Every staging call starts a new epoch, boundary or not: whatever a
 		// consumer built from the previous staging snapshot is stale now.
-		m.stagingEpoch.Add(1)
+		m.bumpStagingEpoch()
 		// The carry-over tier and its lookahead bookkeeping belong to that
 		// snapshot too.
 		m.carry.reset()
@@ -1975,20 +2019,33 @@ func (m *MockManager) GetSessionMocks() ([]*models.Mock, error) {
 // caller advances via AdvanceMockCursor only once the response is actually
 // served (a successful claim), so a failed/retried match does not skip a
 // recorded response. Session-scoped: the cursor map is cleared per test-set
-// (ResetStatefulCursors). The map also keeps the HTTP variable pass's served
-// marks, one per reusable recording under a key of its own (n = 2: served or
-// not), which reset with the cursors. Satisfies the matcher's optional cursor
+// (ResetStatefulCursors). Under exact serving a key's cursor is the pool
+// slice's between tests and the open test's own in a test (cursorSlotIn). The
+// map also keeps the HTTP walks' served marks, one per reusable recording
+// under a key of its own (n = 2: served or not), which reset with the
+// cursors. Satisfies the matcher's optional cursor
 // interface; parsers that do not type-assert it are unaffected.
 func (m *MockManager) MockCursorIndex(key string, n int) int {
-	key, cursored := m.exactCursorKey(key)
-	if n <= 1 || !cursored {
+	return m.cursorIndexAt(cursorSlotIn(m.exactView(), key), n)
+}
+
+// cursorIndexAt is MockCursorIndex at a cursor slot already resolved
+// (cursorSlotIn, backgroundCursorKey). A slot of a test view no longer in
+// force reads where its test's calls left it (closeTestCursors), so a call
+// read in the test and walked after it ended answers what it would have
+// answered before; once the next set is staged, 0.
+func (m *MockManager) cursorIndexAt(slot cursorSlot, n int) int {
+	if n <= 1 {
 		// Zero or one recorded response: always the first (only) one — identical
 		// to the legacy reuse behaviour, no cursor state needed.
 		return 0
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
-	return clampCursor(m.cursors[key], n)
+	if slot.gen != 0 {
+		return clampCursor(m.testCursors[slot.gen][slot.key], n)
+	}
+	return clampCursor(m.cursors[slot.key], n)
 }
 
 // AdvanceMockCursor moves the cursor for key one past servedIdx — the index the
@@ -1998,25 +2055,43 @@ func (m *MockManager) MockCursorIndex(key string, n int) int {
 // both served it settle the cursor to servedIdx+1 rather than jumping two,
 // which would skip a recorded response. Stored value tops out at n (reads clamp
 // to n-1), so a hot repeated request never grows it unbounded. Call it only
-// after the chosen response was actually served.
+// after the chosen response was actually served. Under exact serving it
+// resolves the view again: a caller that peeks and commits across a view
+// install reads one view for both (SequenceView).
 func (m *MockManager) AdvanceMockCursor(key string, servedIdx, n int) {
-	key, cursored := m.exactCursorKey(key)
-	if n <= 1 || !cursored {
+	m.advanceCursorAt(cursorSlotIn(m.exactView(), key), servedIdx, n)
+}
+
+// advanceCursorAt is AdvanceMockCursor at a cursor slot already resolved
+// (cursorSlotIn, backgroundCursorKey). A commit to a test view no longer in
+// force moves that test's own sequence, which only calls read in the test
+// walk (closeTestCursors): two calls read in the test and walked after its
+// end answer in record order, wherever the end lands between them. Once the
+// next set is staged it moves nothing.
+func (m *MockManager) advanceCursorAt(slot cursorSlot, servedIdx, n int) {
+	if n <= 1 {
 		return
 	}
 	m.cursorMu.Lock()
 	defer m.cursorMu.Unlock()
-	if m.cursors == nil {
+	cursors := m.cursors
+	if slot.gen != 0 {
+		var open bool
+		if cursors, open = m.testCursors[slot.gen]; !open {
+			return
+		}
+	} else if cursors == nil {
 		m.cursors = make(map[string]int)
+		cursors = m.cursors
 	}
 	next := servedIdx + 1
-	if cur := m.cursors[key]; cur > next {
+	if cur := cursors[slot.key]; cur > next {
 		next = cur
 	}
 	if next > n {
 		next = n
 	}
-	m.cursors[key] = next
+	cursors[slot.key] = next
 }
 
 // Spend records that the test which kept the named per-test recordings of
@@ -2238,10 +2313,18 @@ func clampCursor(cur, n int) int {
 // stateful sequence starts from its first recorded response. The agent calls it
 // once per test-set (on the staging call) via the StatefulCursorResetter
 // capability, so a sequence spans a whole test-set but does not carry across
-// sets. Safe to call when no cursors exist.
+// sets. An ended test's frozen cursors (closeTestCursors) are dropped. Safe
+// to call when no cursors exist.
 func (m *MockManager) ResetStatefulCursors() {
 	m.cursorMu.Lock()
 	m.cursors = nil
+	for gen := range m.closedTests {
+		delete(m.testCursors, gen)
+	}
+	m.closedTests = nil
+	for gen := range m.testCursors {
+		m.testCursors[gen] = make(map[string]int)
+	}
 	m.cursorMu.Unlock()
 }
 
@@ -2691,7 +2774,7 @@ func (m *MockManager) GetConnectionMocks(connID string) ([]*models.Mock, error) 
 	// Under exact serving a connection mock a parser evicted is gone, as from
 	// every other read (unspent).
 	if v := m.exactView(); v != nil && err == nil {
-		mocks = v.unspent(mocks)
+		mocks = v.withLearned(v.unspent(mocks))
 	}
 	return mocks, err
 }
@@ -3252,7 +3335,12 @@ func (m *MockManager) mirrorStartupDelete(removed *models.Mock) {
 }
 
 func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) bool {
-	m.observeServed(new)
+	return m.updateUnFilteredMock(old, new, nil)
+}
+
+// updateUnFilteredMock is UpdateUnFilteredMock, settled under exact serving
+// only while the store is at g's round when g is set (WithinRound).
+func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g *roundGuard) bool {
 	// The copy the parser reports carries what it detected and what the
 	// learn step learned onto the recording; the exact view knows it by
 	// name, as it knows old.
@@ -3260,11 +3348,21 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	if served == nil {
 		served = old
 	}
-	switch m.exactConsume(served, false) {
-	case exactServed:
-		return true
-	case exactRefused:
-		return false
+	if m.exactView() == nil {
+		if g.checks() {
+			g.refuse("exact serving is off")
+			return false
+		}
+		m.observeServed(new, g.flight())
+	} else {
+		// Under exact serving the served observer is told in the step that
+		// settles the consume, holding the round lock (exactConsumeAt).
+		switch m.exactConsumeAt(served, false, g, func() { m.observeServed(new, g.flight()) }) {
+		case exactServed:
+			return true
+		case exactRefused:
+			return false
+		}
 	}
 	if old != nil && m.stalePooled(old) {
 		return false
@@ -3281,6 +3379,12 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 	// Update legacy/global tree first (it keeps its window index right; see
 	// TreeDb.update)
 	updatedGlobal, replaced := globalTree.updateReplacing(old.TestModeInfo, new.TestModeInfo, new, *old)
+	if updatedGlobal && replaced != nil && provenswitch.On() && m.exactView() != nil {
+		// What the staging put in the trees, before this staging's first
+		// filing of a copy of it: the base its retry cycles are served
+		// (keptOverlay.onto).
+		m.exact.kept.filed.note(m.stagingEpoch.Load(), replaced)
+	}
 	if shared {
 		if updatedGlobal && replaced != nil {
 			// The copy the tree held, which is not always the caller's old: a
@@ -3362,6 +3466,7 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
+			LearnedAfterEnd:  m.learnedAfterEnd(old, new),
 		}, old.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				// The previous set's pool: not this set's consume.
@@ -3392,8 +3497,13 @@ func (m *MockManager) UpdateUnFilteredMock(old *models.Mock, new *models.Mock) b
 }
 
 func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
-	m.observeServedCopy(mock)
-	switch m.exactConsumeValue(mock, true) {
+	return m.deleteFilteredMock(mock, nil)
+}
+
+// deleteFilteredMock is DeleteFilteredMock, settled under exact serving only
+// while the store is at g's round when g is set (WithinRound).
+func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
+	switch m.exactConsumeValueAt(mock, true, g, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3407,7 +3517,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	m.treesMu.RUnlock()
 	// Identity-checked: the key is tier-local, so a mock taken from another
 	// tier addresses a DIFFERENT mock here. See TreeDb.sameMock.
-	deletedGlobal := globalTree.deleteMock(mock.TestModeInfo, mock)
+	deletedGlobal, removed := globalTree.deleteMockReturning(mock.TestModeInfo, mock)
 
 	// per-kind
 	k := mock.Kind
@@ -3442,6 +3552,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				consumed = false
@@ -3449,6 +3560,9 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				m.logger.Error("failed to flag mock as used", zap.Error(err))
 			}
 		}
+		// The log refuses a mock an earlier set pooled itself, as the flag
+		// does (answeredLog.note).
+		m.noteAnswered(mock)
 	}
 
 	// Bump per-kind only if that tree changed; global only if global changed
@@ -3480,7 +3594,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 	// Returning true here keeps the caller contract ("consumed, stop looping")
 	// exactly as it was, while the mock that actually gets consumed is now the
 	// one the caller matched instead of whatever shared its key.
-	if m.deleteStartupMock(mock) {
+	if m.deleteStartupMock(mock, nil, false) {
 		return true
 	}
 	// Last, the carry-over tier (models.CarryOverKind kinds only): a mock
@@ -3512,6 +3626,7 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 				Variables:        variablesOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
+				LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 				CarryOver:        true,
 			}, mk.TestModeInfo.StagedSet); err != nil {
 				if errors.Is(err, errPreviousSet) {
@@ -3530,8 +3645,13 @@ func (m *MockManager) DeleteFilteredMock(mock models.Mock) bool {
 }
 
 func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
-	m.observeServedCopy(mock)
-	switch m.exactConsumeValue(mock, true) {
+	return m.deleteUnFilteredMock(mock, nil)
+}
+
+// deleteUnFilteredMock is DeleteUnFilteredMock, settled under exact serving
+// only while the store is at g's round when g is set (WithinRound).
+func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool {
+	switch m.exactConsumeValueAt(mock, true, g, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3580,6 +3700,7 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
 			if errors.Is(err, errPreviousSet) {
 				// The previous set's pool: not this set's consume. The
@@ -3631,17 +3752,19 @@ func (m *MockManager) DeleteUnFilteredMock(mock models.Mock) bool {
 // connection-tier mock, or a prior DeleteStartupMock already consumed
 // it).
 func (m *MockManager) DeleteStartupMock(mock models.Mock) bool {
-	m.observeServedCopy(mock)
-	return m.deleteStartupMock(mock)
+	return m.deleteStartupMock(mock, nil, true)
 }
 
-// deleteStartupMock is DeleteStartupMock without telling the served
-// observer: for a caller that told it already.
-func (m *MockManager) deleteStartupMock(mock models.Mock) bool {
+// deleteStartupMock is DeleteStartupMock, telling the served observer only
+// with observe (a caller that told it already does not), and settled under
+// exact serving only while the store is at g's round when g is set
+// (WithinRound).
+func (m *MockManager) deleteStartupMock(mock models.Mock, g *roundGuard, observe bool) bool {
 	if mock.Name == "" {
+		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValue(mock, true) {
+	switch m.exactConsumeValueAt(mock, true, g, observe) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3743,6 +3866,7 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
+			LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 			// A registered kind's startup-band mock first consumed after a
 			// test fired (a startup push to a consumer created lazily, or
 			// held back by its permits) is consumed outside its own window,
@@ -3939,11 +4063,17 @@ func (m *MockManager) signalWindowChange() {
 // stays at 0 or 1 since they're consumed on match so the bump has no
 // semantic meaning but is harmless.
 func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
-	m.observeServedCopy(mock)
+	return m.markMockAsUsed(mock, nil)
+}
+
+// markMockAsUsed is MarkMockAsUsed, settled under exact serving only while
+// the store is at g's round when g is set (WithinRound).
+func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 	if mock.Name == "" {
+		// The observer is told of no unnamed mock.
 		return false
 	}
-	switch m.exactConsumeValue(mock, false) {
+	switch m.exactConsumeValueAt(mock, false, g, true) {
 	case exactServed:
 		return true
 	case exactRefused:
@@ -3974,6 +4104,9 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 		// the other doors carry it (nil with the switch off).
 		Variables: variablesOf(mock.Spec),
 		Binds:     bindsOf(mock.Spec),
+		// Learning the consume carries beyond what exact serving handed
+		// the parser out, once the set's learn step ended.
+		LearnedAfterEnd: m.learnedAfterEndNamed(&mock),
 		// A registered kind's per-test mock consumed outside the current
 		// window (a server push delivered late) belongs to its own window.
 		CarryOver: m.consumedOutOfWindow(mock),
@@ -3982,6 +4115,11 @@ func (m *MockManager) MarkMockAsUsed(mock models.Mock) bool {
 			m.logger.Error("failed to flag mock as used", zap.Error(err))
 		}
 		return false
+	}
+	// A per-test recording this door keeps (HTTP's stateful one, kept for
+	// its test's repeats) answered a call too (FindAnsweredEarlier).
+	if mock.TestModeInfo.Lifetime == models.LifetimePerTest {
+		m.noteAnswered(mock)
 	}
 	return true
 }
@@ -4143,7 +4281,12 @@ func (m *MockManager) rebuildHitIndex(setBoundary bool, slices ...[]*models.Mock
 // ---------- bookkeeping ----------
 
 // SetServedObserver makes f told of every mock a parser is served, from now
-// on (nil: none).
+// on (nil: none). Under exact serving f runs in the step that settles the
+// consume, holding the round lock (exact_round.go), so a snapshot of the
+// round reads the consume and f's account of it together: f must not call
+// back into the manager (a consume door, a snapshot, a claim or a spend,
+// LearnBoundary), or it waits on the lock it runs under. The learn
+// tracker's ServedMock takes only its own lock.
 func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	if f == nil {
 		m.servedObserver.Store(nil)
@@ -4152,30 +4295,119 @@ func (m *MockManager) SetServedObserver(f func(*models.Mock)) {
 	m.servedObserver.Store(&f)
 }
 
+// SetServedInObserver sets the observer told, instead of the served
+// observer, of a mock served in a request its parser said (ServingFor);
+// nil clears it. The same rules as SetServedObserver's hold.
+func (m *MockManager) SetServedInObserver(f func(*models.Mock, *learn.Flight)) {
+	if f == nil {
+		m.servedInObserver.Store(nil)
+		return
+	}
+	m.servedInObserver.Store(&f)
+}
+
+// SetOpenTestEpoch makes f say the learn tracker's open test
+// (learn.Tracker.OpenEpoch) as each test's view is installed, from now on
+// (nil: none). The view carries what it said (exactView.stamp), and
+// ServedInOpenTest returns it with the view's account, so a reader compares
+// test numbers, not what the two accounts hold. Without it every view
+// carries 0. f runs as the view is installed, holding the install lock and
+// the round lock (exact_round.go), so no snapshot reads the tracker between
+// the stamp and the view's start: f must not call back into the manager (an
+// install, a consume door, a snapshot, a claim or a spend, LearnBoundary), or
+// it waits on a lock it runs under. learn.Tracker.OpenEpoch takes only the
+// tracker's own lock.
+func (m *MockManager) SetOpenTestEpoch(f func() uint64) {
+	if f == nil {
+		m.openTestEpoch.Store(nil)
+		return
+	}
+	m.openTestEpoch.Store(&f)
+}
+
+// SetTrackerSetAt makes f say the learn tracker's running set
+// (learn.Tracker.SetAt) as each staging is made, from now on (nil: none):
+// the set the staging stages is the tracker's own, whether or not the
+// boundary that began it reached this manager. keploy test's Mock begins
+// a fresh agent's first set on the tracker before the proxy holds a
+// manager (Proxy.learnBoundary then runs on the tracker alone), so this
+// manager's account of the tracker's boundaries (LearnBoundary) does not
+// hold it. Without f a staging stages the set that account last held. f
+// runs holding swapMu (written) and the round lock (bumpStagingEpoch):
+// it must not call back into the manager (a staging, an install, a consume
+// door, a snapshot, a claim or a spend, LearnBoundary), or it waits on a
+// lock it runs under. learn.Tracker.SetAt takes only the tracker's own lock.
+func (m *MockManager) SetTrackerSetAt(f func() uint64) {
+	if f == nil {
+		m.trackerSetAt.Store(nil)
+		return
+	}
+	m.trackerSetAt.Store(&f)
+}
+
 // observeServed tells the served observer of mock before a parser's claim
 // takes it out of the pool, so a request reading the pool and then the
 // observer's record never finds it in neither (the learn step's earlier
 // places). A claim that then fails was another connection's serve of the
 // same mock: the observer is told of a mock that was served either way.
-func (m *MockManager) observeServed(mock *models.Mock) {
+// Under exact serving it is told once the view settled the consume as a
+// serve, in the step that takes it and holding the round lock
+// (exactConsumeAt), and never of a consume the view refused: nothing served
+// that one. There the take comes first, so only a reader that reads both
+// under that lock (RoundSnapshot) never finds the mock in neither; no reader
+// reads them without it, and none may. in is the request it is served in, as
+// its parser said (nil: not said).
+//
+// With an observer (the served-in observer for a said request, else the
+// served observer), the serve is then filed in the open test's view
+// (exactView.hear, ServedInOpenTest), the view read before the observer is
+// told: the replay (keploy test's loops, the agent's scope begin) begins the
+// learn tracker's test before it installs the test's view, and serves the
+// pool before the next test begins, so a mock a test view holds is one the
+// tracker heard of in that test, and a reader that reads the view's account
+// before the tracker's never finds there a serve the tracker has not heard
+// of. The view's stamp (SetOpenTestEpoch) says which tracker test that is.
+// Without one (the switch off) nothing is filed.
+func (m *MockManager) observeServed(mock *models.Mock, in *learn.Flight) {
 	if mock == nil || mock.Name == "" {
 		return
 	}
+	if in != nil {
+		if f := m.servedInObserver.Load(); f != nil {
+			v := m.exactView()
+			(*f)(mock, in)
+			v.hear(mock)
+			return
+		}
+	}
 	if f := m.servedObserver.Load(); f != nil {
+		v := m.exactView()
 		(*f)(mock)
+		v.hear(mock)
 	}
 }
 
 // observeServedCopy is observeServed of a mock a door took by value: the
 // observer keeps a copy of its own, made only when there is an observer (the
 // proven switch), so the door's mock does not move to the heap without one.
-func (m *MockManager) observeServedCopy(mock models.Mock) {
+func (m *MockManager) observeServedCopy(mock models.Mock, in *learn.Flight) {
 	if mock.Name == "" {
 		return
 	}
+	if in != nil {
+		if f := m.servedInObserver.Load(); f != nil {
+			c := mock
+			v := m.exactView()
+			(*f)(&c, in)
+			v.hear(&c)
+			return
+		}
+	}
 	if f := m.servedObserver.Load(); f != nil {
 		c := mock
+		v := m.exactView()
 		(*f)(&c)
+		v.hear(&c)
 	}
 }
 
@@ -4285,6 +4517,11 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 	}
 	if idx, exists := m.consumedIndex[mock.Name]; exists {
 		mock.Timestamp = m.consumedList[idx].Timestamp
+		// A consume in this drain that learned after the learn step ended
+		// is not hidden by a later one that did not: the drain's consumers
+		// were served through it. Only the drain's: another drain's
+		// consumers were not.
+		mock.LearnedAfterEnd = mock.LearnedAfterEnd || m.consumedList[idx].LearnedAfterEnd
 		m.consumedList[idx] = mock // update state, preserve position and first use
 	} else {
 		m.consumedIndex[mock.Name] = len(m.consumedList)
@@ -4530,7 +4767,11 @@ func (m *MockManager) ArmSetFence() {
 // swapMu; consumedMu and bootTakenMu are leaves.
 func (m *MockManager) dropPreviousSetConsumes() {
 	m.consumedMu.Lock()
-	m.setGen.Add(1)
+	// The answered log follows the generation (answeredLog.fence); its
+	// lock is a leaf.
+	m.answered.fence(m.setGen.Add(1))
+	// What was kept of the previous set's learning is not this set's.
+	m.exact.kept.set(nil, false)
 	dropped := len(m.consumedList)
 	m.consumedList = m.consumedList[:0]
 	m.consumedIndex = make(map[string]int)

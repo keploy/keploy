@@ -351,14 +351,16 @@ func TestTheExactStagingStagesTheWorkerScopesMocksFromDisk(t *testing.T) {
 	}
 	// The learn step's earlier places of a pool recording are read through
 	// the reader the staging set: test-a's own recording, on disk, is a
-	// recording before the instant after it, and not before itself.
+	// recording before the instant after it, and one at its own instant (a
+	// fixture's whole second may have made it before a call made then: the
+	// caller tells the paired recording apart), and none before it.
 	if p.before == nil {
 		t.Fatal("the staging set no reader of the recordings before an instant")
 	}
 	for _, tc := range []struct {
 		at   time.Time
 		want bool
-	}{{stageT0.Add(2 * time.Second), true}, {stageT0.Add(time.Second), false}} {
+	}{{stageT0.Add(2 * time.Second), true}, {stageT0.Add(time.Second), true}, {stageT0.Add(time.Second - time.Nanosecond), false}} {
 		has := false
 		if err := p.before(tc.at, func(m *models.Mock) bool { has = has || m.Name == "test-a"; return true }); err != nil {
 			t.Fatal(err)

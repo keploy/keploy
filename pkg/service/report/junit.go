@@ -714,6 +714,9 @@ func provenEvidenceLines(fi models.FailureInfo) []string {
 		if c.Destination != "" {
 			line += " (to " + c.Destination + ")"
 		}
+		if c.Repeat != nil {
+			line += "; " + c.Repeat.Brief(false)
+		}
 		lines = append(lines, line)
 	}
 	for _, m := range fi.UnconsumedMocks {
@@ -723,6 +726,9 @@ func provenEvidenceLines(fi models.FailureInfo) []string {
 		}
 		if m.ConsumedBy != "" {
 			line += "; " + m.ConsumedBy + " consumed it, and the order the shared mock pool served the two in can decide which test it counts for"
+		}
+		if m.RepeatOf != nil {
+			line += "; " + m.RepeatOf.Brief(true)
 		}
 		lines = append(lines, line)
 	}

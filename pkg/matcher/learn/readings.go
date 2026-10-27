@@ -761,97 +761,229 @@ func nonASCIIRuns(s string) []string {
 // (v) cannot be learned as noise either, "" when it can: what its readings
 // cannot read (unparsed), or a word of what changed, in a declared form and
 // reading, that is no part of a clock read the lead moved and that appears
-// earlier in the test (at an earlier place: in its recorded value for a word
-// v held when recorded, its live value for one v holds now; in any payload
-// served or recorded earlier, either way). The words of what changed are
+// earlier in the test (at an earlier place, the test case's own request
+// among them: in its recorded value for a word v held when recorded, its
+// live value for one v holds now; in any payload served or recorded earlier,
+// either way). The words of what changed are
 // those v lost and gained, and every word of its runs (runsBy) in that
 // reading: ids it holds in another order, or once more, are words of what
 // changed too; a word at its own place on both sides is not. keploy cannot
 // tell whether such a word came from there, and refuses rather than learn
-// it as noise.
-func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw) string {
+// it as noise. In a test case's request body that declares no media type,
+// read as text by its bytes (Seen.Undeclared), such a word glued to the
+// bytes around it ("s17" of "BAs17") is refused too: keploy cannot tell a
+// protobuf's printable tag and length from a word, and never reads such a
+// body more loosely than the same bytes declared, which it cannot read.
+//
+// And an instant of what changed whose moment F saw is one an earlier place
+// holds (echoedIn: a pick from served data, by the clock), while no earlier
+// place holds the moment it was recorded with (else it is a variable of that
+// place, appearedIn), is refused before any lead or window excuses its words:
+// what F saw came from what F served, whatever moved it.
+func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, fol *follows) string {
 	if v.unparsed != "" {
 		return v.unparsed
 	}
-	check := func(i int, t string, recorded, moved bool) string {
-		// A word of a run counts unless it is a clock word itself; a word
-		// lost or gained, unless it only regrouped words the other side
-		// holds (clockWord).
-		if moved && allClock(t, recorded, v.clock) || !moved && clockWord(t, recorded, v, v.clock) {
-			return ""
+	if echoed := dc.echoedIn(v, at, served, raw); len(echoed) > 0 {
+		where := dc.heldAt(echoed, at, served, raw)
+		if where == "" {
+			where = "earlier in the test"
 		}
+		return pickUnaccounted(where)
+	}
+	keep := dc.stampsEchoed(v, served, raw)
+	word := v.wordOf
+	return v.eachChanged(func(i int, t string, recorded bool) string {
 		for _, e := range served {
 			// The run's exchange (Earlier.Run) is an earlier place of every
-			// test of the set: the set's start-up's.
+			// test of the set: the set's start-up's. The test case's own
+			// request (Earlier.Given) is the test's earliest place. Another
+			// exchange of the start-up (Earlier.StartUp) is an earlier place
+			// of a call made at the start-up too, when no test runs.
 			where := "earlier in the test"
-			if e.Run {
+			switch {
+			case e.Run:
 				where = "in the test set's start-up"
+			case e.Given:
+				where = "in what the test case gave the application"
+			case e.StartUp:
+				where = "earlier in the recording"
 			}
 			for _, s := range e.Seen {
+				// An answer's own clock stamp is no place a value came
+				// from (Seen.Stamp), unless a stamp F served holds a word
+				// the value took in F (stampsEchoed).
+				if stamped(s) && !keep {
+					continue
+				}
+				// An instant its protocol types has no words: its moments
+				// are the echo's and appearedIn's to read.
+				if s.Leaf.Type == Instant {
+					continue
+				}
 				ed := dc.of(s.Leaf.Value, s.Live)
-				if recorded && ed.recTok[i][t] && !pieceNotIn(v.rec, t, v.instRec, s.Leaf.Value) ||
-					!recorded && ed.liveTok[i][t] && !pieceNotIn(v.live, t, v.instLive, s.Live) && !liveOnly(i, v, ed) {
-					return "a word of it appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there"
+				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
+					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
+					if fol.excusedSeen(e, ed, i, t, at, why) {
+						continue
+					}
+					return why
+				}
+				if s.Undeclared && gluedIn(ed, t, recorded) {
+					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
 				}
 			}
 		}
-		side, ins := v.rec, v.instRec
-		if !recorded {
-			side, ins = v.live, v.instLive
-		}
 		for _, x := range raw {
-			if !x.Served && !x.At.Before(at) {
+			if !x.earlierThan(at) {
 				continue
 			}
-			if dc.rawTokens(x.Text)[i][t] && !pieceNotIn(side, t, ins, x.Text, dc.rawExtra(x.Text)) {
-				return "a word of it appears earlier in the test, in " + x.Mock + "'s payload: keploy cannot tell whether it came from there"
+			// A protocol-phase answer's own clock reads blanked
+			// (instants.go, rule 2).
+			if dc.searchedTokens(x, keep)[i][t] {
+				note := x.atNote(at)
+				place := x.mock + "'s payload"
+				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
+					place = x.mock + " at " + f
+				}
+				place += note
+				why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				if fol.excusedRaw(x, i, t, at, why) {
+					continue
+				}
+				return why
 			}
 		}
 		return ""
+	})
+}
+
+// givenWhy says why a drifted value (v) that no earlier place of the call's
+// own test accounts for (unaccounted) cannot be learned as noise either, ""
+// when it can: a word of what it changed (eachChanged) stands in the answer
+// of a recording F gave the application before the call that no earlier
+// place of its own test is (another recorded test's, or one F gave earlier
+// in the running set: places().words, read only where a word of what
+// changed asks): a word v holds now in any of them; a word it held when
+// recorded in one recorded before the call (at), which the recording gave
+// the application before it too. keploy follows no value of another test's
+// (only a test's own calls carry its variables), nor of a recording made
+// after the call that F gave the application before it (the recording
+// could not have read it there), so a value copied word for word from what
+// F gave there is refused, never noise, naming where and which of the two
+// it is; and so is every such word where one of them could not be read
+// (unread). Stamps are searched as any text where the call's own places say
+// so (stampsEchoed).
+func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
+	keep, kept := false, false
+	return v.eachChanged(func(i int, t string, recorded bool) string {
+		op := places()
+		if op.unread != "" {
+			return op.unread
+		}
+		for _, g := range op.words {
+			// A word the value was recorded with, in a recording made
+			// after the call, came from none: the recording could not have
+			// read it there. One made at the call's own instant may have
+			// been made before it, the fail-closed side.
+			if recorded && g.at.After(at) {
+				continue
+			}
+			if !kept {
+				keep, kept = dc.stampsEchoed(v, served, raw), true
+			}
+			if g.holds(i, t, keep) {
+				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+			}
+		}
+		return ""
+	})
+}
+
+// givenWhose says whose a recording F gave the application before a call
+// recorded at at is, that no earlier place of the call's own test is
+// (givenWhy, echoedElsewhere), its request recorded at gat: another test's;
+// recorded after the call, no earlier place of any test's call; recorded at
+// the call's own instant, one keploy reads as given to the application
+// before the call (the fail-closed side: it may have been made before it,
+// or after it), yet no earlier place of the call's own test. late, an
+// earlier place of the call's own test made at the call's own instant that
+// is read as one made after the call too (Raw.late, classifyGiven): it may
+// as well have been made after the call, so keploy reads it both ways, and
+// as one made after the call follows no value of it but what record's full
+// round served there.
+func givenWhose(gat, at time.Time, late, noTime bool) string {
+	switch {
+	case late && noTime:
+		return "was " + noTimeWords + ", yet may as well have been made after the call, so keploy reads it both ways: as one made after the call, keploy follows no value of it but what record's full round served there"
+	case late:
+		return "was " + atCallWords + ", yet may as well have been made after the call, so keploy reads it both ways: as one made after the call, keploy follows no value of it but what record's full round served there"
+	case gat.Equal(at):
+		return "was " + atCallWords + ", yet as no earlier place of the call's own test: keploy follows no value of it"
+	case gat.After(at):
+		return "was recorded after the call, so it is no earlier place of the call's own test: keploy follows no value of a recording made after the call"
 	}
+	return "is another test's (another recorded test's, or one of an earlier test of the set): keploy follows no value of another test's"
+}
+
+// wordOf names t, a word of v's recorded value (recorded) or of what F saw,
+// by where it stands, never by its text.
+func (v *valueDrift) wordOf(t string, recorded bool) string {
+	if recorded {
+		return "a word of its recorded value (" + partOf(v.rec, t) + ")"
+	}
+	return "a word of what record's full round saw in it (" + partOf(v.live, t) + ")"
+}
+
+// eachChanged hands find each word of what v changed, in each reading (i),
+// as recorded or as F saw it (recorded), until find says why one cannot be
+// noise, and says that ("" when it says so of none): the words it lost,
+// those it gained, then every word of its runs (runsBy) as recorded and as
+// F saw them. A word of a run counts unless it is a clock word itself; a
+// word lost or gained, unless it only regrouped words the other side holds
+// (clockWord). Each set of words is handed in the order its words stand in
+// the value (inOrder), never in a set's: the first one found names the
+// place and the reason.
+func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) string) string {
 	for i := range readings {
-		for t := range v.lost[i] {
-			if why := check(i, t, true, false); why != "" {
-				return why
-			}
-		}
-		for t := range v.gained[i] {
-			if why := check(i, t, false, false); why != "" {
-				return why
-			}
-		}
-		for t := range v.movedRec[i] {
-			if why := check(i, t, true, true); why != "" {
-				return why
-			}
-		}
-		for t := range v.movedLive[i] {
-			if why := check(i, t, false, true); why != "" {
-				return why
+		for _, set := range []struct {
+			words           map[string]bool
+			recorded, moved bool
+		}{{v.lost[i], true, false}, {v.gained[i], false, false}, {v.movedRec[i], true, true}, {v.movedLive[i], false, true}} {
+			for _, t := range v.inOrder(set.words, set.recorded) {
+				if set.moved && allClock(t, set.recorded, v.clock) || !set.moved && clockWord(t, set.recorded, v, v.clock) {
+					continue
+				}
+				if why := find(i, t, set.recorded); why != "" {
+					return why
+				}
 			}
 		}
 	}
 	return ""
 }
 
-// liveOnly reports whether a live word of v that an earlier place (ed) holds
-// live is a link F alone made: v's recorded value was another one (it lost
-// words in reading i), and no word it lost stood in ed's recorded value.
-// Two values the app made apart when recorded (a role and an app named in
-// two milliseconds) that F made equal (in one) did not come one from the
-// other: the recording says so. A recorded word ed held is a link that held
-// when recorded, and keploy still cannot tell.
-func liveOnly(i int, v, ed *valueDrift) bool {
-	lost := false
-	for _, set := range []map[string]bool{v.lost[i], v.movedRec[i]} {
-		for w := range set {
-			lost = true
-			if ed.recTok[i][w] && !pieceNotIn(v.rec, w, v.instRec, ed.rec) {
-				return false
-			}
+// gluedIn reports whether a declared form of a place's value (ed), as
+// recorded or as it stands now, holds t anywhere: inside a longer word too,
+// glued to the bytes around it.
+func gluedIn(ed *valueDrift, t string, recorded bool) bool {
+	side := 1
+	if recorded {
+		side = 0
+	}
+	for _, f := range ed.forms {
+		if strings.Contains(f[side], t) {
+			return true
 		}
 	}
-	return lost
+	return false
+}
+
+// pickUnaccounted is why a drifted value whose moment in record's full round
+// stands at where (earlier in the test), and whose recorded moment no earlier
+// place holds, is refused (unaccounted).
+func pickUnaccounted(where string) string {
+	return "the moment record's full round saw in it stands " + where + ", while no earlier place holds the moment it was recorded with: it may be a pick from what the application was given, by its clock, and keploy cannot tell it is a read of the clock. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // allClock reports whether every ASCII word of t is a clock word of c, on

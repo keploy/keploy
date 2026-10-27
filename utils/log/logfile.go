@@ -17,7 +17,9 @@ import (
 // root: a keploy-logs.txt linked to /etc/passwd used to be opened, appended to
 // and chmod-ed 0777 by path, which left the link's target world-writable.
 // Anything else at that name is left alone, and the run logs to the console
-// only, saying why.
+// only, saying why. A directory the run cannot write its log in (a read-only
+// mount) keeps no log either: the run logs to the console only and says so at
+// debug level.
 const LogFileName = "keploy-logs.txt"
 
 // logFileMode is what a new log file is created with: its owner writes it,

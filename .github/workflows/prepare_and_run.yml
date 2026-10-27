@@ -732,6 +732,16 @@ jobs:
   # Linux test jobs
   # -------------------------------------------------------------------
 
+  # The hooks' eBPF objects are one tested keploy/ebpf main commit's
+  # (ebpf-objects.yml). Needs no build: seconds, beside the builds. It reads
+  # the private keploy/ebpf with PRO_ACCESS_TOKEN; a pull request from a fork
+  # gets no secrets, and from-fork tells the check so.
+  run_ebpf_objects:
+    uses: ./.github/workflows/ebpf-objects.yml
+    with:
+      from-fork: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+    secrets:
+      PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
@@ -817,7 +827,8 @@ jobs:
     uses: ./.github/workflows/startup-mock-capture-linux.yml
   run_repeated_headers_linux:
     # Guard: replay sends a recorded header on the lines it arrived on
-    # (a tenant header sent twice; a mock's two Set-Cookie lines).
+    # (a tenant header sent twice; a mock's two Set-Cookie lines), and an
+    # HTTP dependency on 4000, a MySQL default port, records and replays.
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/repeated-headers-linux.yml
   run_interim_responses_linux:
@@ -1482,6 +1493,7 @@ jobs:
       - run_grpc_linux
       - run_schema_match_linux
       - run_sample_tls_pcap
+      - run_ebpf_objects
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1513,6 +1525,7 @@ jobs:
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
             "${{ needs.run_sample_tls_pcap.result }}" \
+            "${{ needs.run_ebpf_objects.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

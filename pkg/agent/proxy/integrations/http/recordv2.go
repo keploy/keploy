@@ -137,9 +137,12 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// no mock to lose and nothing is reported. The server
 				// closed without answering: the keep-alive idle-close race,
 				// in which the app's HTTP client retries the request on a
-				// new connection, where it is recorded. Or, in an
-				// observe-only capture, the client gave up and closed. Or
-				// the session closed the stream: the supervisor's abort,
+				// new connection, where it is recorded. Or the client gave
+				// up and closed: in an observe-only capture, or where the
+				// relay kept from the parser an answer the closed client
+				// refused (Session.EndedWhereClientStopped; a call a Go
+				// http.Client timed out ends so). Or the session closed
+				// the stream: the supervisor's abort,
 				// whose fallthrough leaves out the rest of the connection,
 				// or the recording's stop.
 				//
@@ -152,6 +155,15 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// make (write_error) is a request the server never got:
 				// the same race, when the app writes its request in more
 				// than one piece.
+				if sess.EndedWhereClientStopped() {
+					// Said apart, as the one way this ends that can hide a
+					// response the application read: a half-closed client
+					// that reset before its acknowledgement went out
+					// (relay/client_took.go).
+					logger.Debug("V2 HTTP record: the client closed the connection before its stack acknowledged any of the response; "+
+						"nothing is recorded for the call", zap.Error(err))
+					return nil
+				}
 				logger.Debug("V2 HTTP record: dest stream ended before response", zap.Error(err))
 				return nil
 			}
@@ -168,11 +180,21 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 		gotLastWritten, err := h.readResponseV2(ctx, sess.DestStream, &finalResp, requestMethod(finalReq))
 		// The stream ended before readResponseV2 found the response's end.
 		// Where keploy relays the connection it has read all the server sent,
-		// so that is the server's doing, unless the client went away first
-		// (clientLeft, below). An observe-only capture carries only what the
+		// so that is the server's doing, unless the relay ended the stream
+		// where the client stopped taking it (EndedWhereClientStopped): the
+		// client closed its socket partway through the response, and refused
+		// the rest. That exchange is left out, and said so
+		// (LeftOutClientClosedPartway): the client gave up on the call (its
+		// timeout) or wanted no more of it, and nothing tells which. Recorded
+		// as far as the client had it, a call that timed out at record would
+		// be served a complete-looking shorter response at replay. Nor is it
+		// the server's doing when the client went away where the relay had
+		// not ended the stream so (clientLeft, below: the client reset the
+		// connection, or keploy's write of a chunk it gave the parser
+		// failed). An observe-only capture carries only what the
 		// client read, so when its stream ended with the connection
 		// (EndedWithConnection) it is the client that stopped reading and
-		// closed: the response is recorded as the client read it
+		// closed, and the response is recorded as the client had it
 		// (FinalHTTP.RespReadInPart).
 		streamEnded := false
 		if err != nil {
@@ -180,8 +202,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 				// Legacy encodeHTTP treats EOF after some bytes as
 				// end-of-response. Respect that shape: emit what we have.
 				// Only a stream that ran out (io.EOF) ended where its capture
-				// did: ErrClosed is its reader being closed, possibly with
-				// chunks still on their way.
+				// did: ErrClosed is its reader being closed while the capture
+				// could still send. A capture that dropped chunks before it
+				// ended the stream (its tee gave up on a consumer) marked the
+				// mock incomplete for them.
 				streamEnded = errors.Is(err, io.EOF)
 				if !gotLastWritten.IsZero() {
 					resTs = gotLastWritten
@@ -196,6 +220,23 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			}
 		} else if !gotLastWritten.IsZero() {
 			resTs = gotLastWritten
+		}
+		if streamEnded && sess.EndedWhereClientStopped() {
+			// The client closed the connection partway through the
+			// response: no whole exchange to record. Its stream has ended,
+			// and so has every answer after it. A mark on the
+			// incomplete-mock flag is a chunk the capture lost, the
+			// likelier cause, so the exchange is reported under it.
+			reason := supervisor.LeftOutClientClosedPartway
+			if mark, ok := sess.TakeMockIncomplete(); ok {
+				reason = mark + ": " + reason
+			}
+			logger.Debug("V2 HTTP record: the client closed the connection partway through the response; the exchange is left out")
+			sess.ReportLeftOut(&models.Mock{
+				Kind: models.HTTP,
+				Spec: models.MockSpec{ReqTimestampMock: reqTs, ResTimestampMock: resTs},
+			}, reason)
+			return nil
 		}
 
 		// Where keploy relays the connection, a stream that ended in the

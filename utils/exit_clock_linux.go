@@ -43,6 +43,15 @@ import (
 // timer, a lock, a peer: its own wait) could run all of w; one held off the
 // CPU throughout, none of it; one that spins on a share of a CPU, that share.
 //
+// That needs every thread of the processes. A listing of a process's threads
+// taken while some exit can leave out one that is there throughout, and one
+// left out waiting for a CPU would make the processes seem able to run for
+// longer than they could. So a process's threads are read from listings
+// shown to hold every thread its count held (taskIDs). Where a look cannot
+// show that for a process, it counts only what the processes ran: never
+// faster, slower while it lasts. A process that keeps that up starts and
+// ends threads, which takes CPU, so the clock still moves.
+//
 // The kernel adds a wait to a thread's account only once it ends, as the
 // thread is given the CPU: a thread waiting still shows none of its wait, and
 // when it began is not known. A thread runnable at a look may have waited
@@ -266,7 +275,9 @@ type ExitClock struct {
 // where that moved (0: it did not), which the next look sets its run
 // against: the run the first read lacked, which this look counted, and what
 // it ran up to the second, which so counts in no look (slower, never
-// faster).
+// faster). partial marks, under the negative of a process's pid and with no
+// account, a process whose listing of its threads could not be shown to hold
+// them all (taskIDs).
 type taskTime struct {
 	ran, waited time.Duration
 	slices      uint64
@@ -278,6 +289,7 @@ type taskTime struct {
 	missed      time.Duration
 	turned      bool
 	ranAgain    time.Duration
+	partial     bool
 }
 
 // NewExitClock is the ExitClock of procs, each named by its pid and start
@@ -533,10 +545,13 @@ func (c *ExitClock) Said(d time.Duration) string {
 // lookTimes is a look's account of the processes' threads (lookAt): of its w
 // of wall time, how long they ran and how long they waited for a CPU, summed
 // over their threads, and each thread held in the kernel (D) whose
-// filesystems are all on the host's block devices.
+// filesystems are all on the host's block devices. partial says a thread of
+// theirs may be missing from it: one read from a listing of its process's
+// threads that could not be shown to hold them all (taskIDs).
 type lookTimes struct {
 	w, ran, waited time.Duration
 	held           []heldTime
+	partial        bool
 }
 
 // heldTime is a thread held in the kernel at a look (lookTimes): of the look,
@@ -553,8 +568,14 @@ type heldTime struct {
 // could is how long, of the look, the processes could run with storage
 // serving for served of it: max(w - waited, ran), at most w (see ExitClock),
 // a thread held in the kernel and not taken for wedged having waited too for
-// what of its time there storage served.
+// what of its time there storage served. A look that may miss a thread
+// (partial) cannot count that thread's waits for a CPU, which would make
+// the processes seem able to run for longer than they could: it counts only
+// what they ran (slower, never faster).
 func (l lookTimes) could(served time.Duration) time.Duration {
+	if l.partial {
+		return min(max(l.ran, 0), l.w)
+	}
 	waited := l.waited
 	for _, h := range l.held {
 		if !h.wedged {
@@ -589,6 +610,7 @@ func lookAt(w time.Duration, before, now map[int]taskTime, unbooked map[int]time
 		}
 	}
 	for tid, t := range now {
+		l.partial = l.partial || t.partial
 		b, ok := before[tid]
 		fresh := !ok || renewed(b, t)
 		if fresh {
@@ -742,18 +764,21 @@ func readTaskTimesIn(proc string, procs []Reached, boot func() time.Duration, se
 		}
 		walked[pid] = true
 		dir := proc + "/" + strconv.Itoa(pid) + "/task"
-		ents, err := os.ReadDir(dir)
-		if err != nil {
+		// A bare listing taken while threads exit can leave out one that
+		// is there throughout (taskIDs): one that could not be shown
+		// whole makes the look count only what the threads ran.
+		ids, whole, gone, err := taskIDs(proc, pid)
+		if err != nil || gone {
 			return false
 		}
 		var children []int
 		listed := false
-		for _, e := range ents {
-			tid, err := strconv.Atoi(e.Name())
+		for _, name := range ids {
+			tid, err := strconv.Atoi(name)
 			if err != nil {
 				continue
 			}
-			task := dir + "/" + e.Name()
+			task := dir + "/" + name
 			if b, err := os.ReadFile(task + "/children"); err == nil {
 				listed = true
 				children = append(children, parsePids(b)...)
@@ -791,6 +816,11 @@ func readTaskTimesIn(proc string, procs []Reached, boot func() time.Duration, se
 				t.seen = seenBy(task)
 			}
 			tasks[tid] = t
+		}
+		if !whole {
+			// The look may miss a thread of it: marked by an entry no
+			// thread has (a negative tid), with no account of its own.
+			tasks[-pid] = taskTime{partial: true}
 		}
 		if !listed && proc == "/proc" && !childrenFiles() {
 			children = childrenByParent(pid)

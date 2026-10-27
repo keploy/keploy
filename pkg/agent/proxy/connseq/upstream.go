@@ -48,6 +48,19 @@ import (
 // destination is wholly before or wholly after each client chunk; with TLS
 // above, a chunk is a record's plaintext, and a record is after a client chunk
 // if any of its bytes reached the proxy after it.
+//
+// The client's FIN is numbered by the same rule, as the relay reads it
+// (ClientClosed), before it forwards it to the destination: after every byte
+// the destination had sent the proxy by then. A chunk read from the
+// destination that is numbered after it holds bytes that reached the proxy
+// once the client had closed its side (FromDest says so): among them always
+// the destination's answer to the FIN itself, which it can send only once the
+// relay has forwarded it. Where the socket's count says what had reached the
+// proxy (a TCP socket on Linux), bytes already waiting in the socket when the
+// FIN was read are numbered before it, however late they are read; where what
+// was read says it (off Linux, or a conn that is not a socket), they are
+// numbered after it, as bytes the relay had not read yet, and so had not
+// forwarded to the client either.
 type Upstream struct {
 	net.Conn
 	// socket asks the TCP socket under Conn for its count of the bytes it has
@@ -64,6 +77,9 @@ type Upstream struct {
 	// ascending; last is the highest placed.
 	cuts []cut
 	last uint64
+	// closed is the number (as n counts them) the client's FIN was given
+	// (ClientClosed); 0 while the client has not closed its side.
+	closed uint64
 	// rest is what the conn returned past a cut, which the next Reads return
 	// first, and restErr the error that came with it.
 	rest    []byte
@@ -111,20 +127,47 @@ func Of(c net.Conn) *Upstream {
 func (u *Upstream) FromClient() uint32 {
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	return fakeconn.ConnSeqOf(u.clientLocked())
+}
+
+// clientLocked takes the next number for what was just read from the client:
+// it places a cut at what the destination has sent, when that is past the last
+// cut, so the bytes it has sent so far are numbered below it, and returns the
+// count of numbers given, the new one's. Caller holds mu.
+func (u *Upstream) clientLocked() uint64 {
 	if sent := u.sentLocked(); sent > u.last {
 		u.n++
 		u.cuts = append(u.cuts, cut{at: sent, n: u.n})
 		u.last = sent
 	}
 	u.n++
-	return fakeconn.ConnSeqOf(u.n)
+	return u.n
+}
+
+// ClientClosed numbers the client's FIN as the relay reads it (its Read on the
+// client returned io.EOF), before the relay forwards it: as a chunk read from
+// the client is numbered (FromClient), after every byte the destination had
+// sent the proxy by then, read or not. It is numbered once: a later call
+// returns the first one's number.
+func (u *Upstream) ClientClosed() uint32 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.closed == 0 {
+		u.closed = u.clientLocked()
+	}
+	return fakeconn.ConnSeqOf(u.closed)
 }
 
 // FromDest numbers a chunk read from the destination, through u, as its Read
 // returns: with the first cut its bytes do not pass (the number reserved below
 // the client chunk numbered when they were already sent), or, past every cut,
-// after every chunk numbered so far.
-func (u *Upstream) FromDest() uint32 {
+// after every chunk numbered so far. afterClientClose says the number is after
+// the client's FIN (ClientClosed), by the rule every number here follows: the
+// chunk's bytes had not reached the proxy, or, where nothing counts what the
+// socket received, had not been read, when the FIN was numbered. It is decided
+// with the number, under the same lock, so a chunk numbered after the FIN
+// always knows it.
+func (u *Upstream) FromDest() (seq uint32, afterClientClose bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	passed := 0
@@ -132,11 +175,13 @@ func (u *Upstream) FromDest() uint32 {
 		passed++
 	}
 	u.cuts = append(u.cuts[:0], u.cuts[passed:]...)
+	n := u.n + 1
 	if len(u.cuts) > 0 {
-		return fakeconn.ConnSeqOf(u.cuts[0].n)
+		n = u.cuts[0].n
+	} else {
+		u.n = n
 	}
-	u.n++
-	return fakeconn.ConnSeqOf(u.n)
+	return fakeconn.ConnSeqOf(n), u.closed != 0 && n > u.closed
 }
 
 // Read reads what the destination sent, up to the next cut: bytes past it are

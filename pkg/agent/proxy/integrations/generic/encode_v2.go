@@ -100,9 +100,20 @@ func encodeGenericV2(sess *supervisor.Session, logger *zap.Logger) error {
 	// pattern (two reads off readerDone) and close the events channel
 	// only after both have exited so the main loop never observes a
 	// "close before drain" race.
+	//
+	// stop is closed when this function returns, on a panic of the main
+	// loop too: nothing drains events after that, so a reader with an event
+	// to send (a chunk, or the error that ends its stream) would block on
+	// the send for good, and the closer below with it: up to three
+	// goroutines kept for the agent's life, with both FakeConns, every chunk
+	// still queued on them and the events buffered. Every send of the
+	// readers to events selects on it. On a normal return the loop has
+	// drained events to its close, so both readers have returned already.
+	stop := make(chan struct{})
+	defer close(stop)
 	readerDone := make(chan struct{}, 2)
-	go readStream(sess.ClientStream, fakeconn.FromClient, events, readerDone)
-	go readStream(sess.DestStream, fakeconn.FromDest, events, readerDone)
+	go readStream(sess.ClientStream, fakeconn.FromClient, events, stop, readerDone)
+	go readStream(sess.DestStream, fakeconn.FromDest, events, stop, readerDone)
 
 	// closer goroutine: waits for both readers to return, then closes
 	// events so the main-loop range exits exactly once. Without this,
@@ -643,20 +654,44 @@ func order(x, y stamp) (first, known bool) {
 }
 
 // readStream pumps Chunks from one FakeConn onto the shared events
-// channel. It returns on EOF / ErrClosed / deadline-exceeded; the
-// supervisor.Session's ctx is observed indirectly: when the ctx is
-// cancelled the relay closes the FakeConn streams, which surfaces
-// here as ErrClosed.
-func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkEvent, done chan<- struct{}) {
+// channel. It returns on EOF / ErrClosed / deadline-exceeded, or at its
+// first send once stop has closed. The supervisor.Session's ctx is observed
+// indirectly: when the ctx is cancelled the relay ends the FakeConn streams
+// and closes them, which surfaces here as EOF (ErrClosed when the session's
+// abort closes them while the relay still captures). A panic of the main
+// loop aborts the session too, and closes stop, and nothing drains events
+// after it, so every send to out, the end-of-stream error's included,
+// selects on stop: a reader waiting on a read with nothing queued reads the
+// abort's ErrClosed, and its error send may find out full. A send looks at
+// stop before it tries out, so a reader takes at most one more chunk off its
+// stream once stop has closed: each chunk it takes can count as read
+// (FakeConn.ReadThrough) when the proxy decides which requests the parser
+// left unread, and nothing records it.
+func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkEvent, stop <-chan struct{}, done chan<- struct{}) {
 	defer func() { done <- struct{}{} }()
+	send := func(ev chunkEvent) bool {
+		// A select with out's room and stop both ready picks either: on
+		// its own it would let a reader go on reading after stop.
+		select {
+		case <-stop:
+			return false
+		default:
+		}
+		select {
+		case out <- ev:
+			return true
+		case <-stop:
+			return false
+		}
+	}
 	if fc == nil {
-		out <- chunkEvent{dir: dir, err: io.EOF}
+		send(chunkEvent{dir: dir, err: io.EOF})
 		return
 	}
 	for {
 		c, err := fc.ReadChunk()
 		if err != nil {
-			out <- chunkEvent{dir: dir, err: err}
+			send(chunkEvent{dir: dir, err: err})
 			return
 		}
 		// Empty chunk with no error shouldn't happen on a real stream
@@ -664,12 +699,14 @@ func readStream(fc *fakeconn.FakeConn, dir fakeconn.Direction, out chan<- chunkE
 		if len(c.Bytes) == 0 {
 			continue
 		}
-		out <- chunkEvent{
+		if !send(chunkEvent{
 			dir:       dir,
 			bytes:     c.Bytes,
 			connSeq:   c.ConnSeq,
 			readAt:    c.ReadAt,
 			writtenAt: c.WrittenAt,
+		}) {
+			return
 		}
 	}
 }

@@ -154,6 +154,23 @@ func sanitizeReportForYAML(report models.TestReport) models.TestReport {
 	report.AppLogs = normalizeReportYAMLText(report.AppLogs)
 	report.FailureReason = normalizeReportYAMLText(report.FailureReason)
 	report.CmdUsed = normalizeReportYAMLText(report.CmdUsed)
+	// Each call's process as a file holds it (models.PersistedCalls): why
+	// keploy named none, and the kernel pid, travel to the replay and are
+	// never written, so the report is the same, whatever pid the process had.
+	report.UnclaimedCalls, _ = models.PersistedCalls(report.UnclaimedCalls)
+	report.SetAnswers, _ = models.PersistedCalls(report.SetAnswers)
+	copied := false
+	for i := range report.Tests {
+		answers, a := models.PersistedCalls(report.Tests[i].Answers)
+		misses, m := models.PersistedCalls(report.Tests[i].FailureInfo.UnmatchedCalls)
+		if !a && !m {
+			continue
+		}
+		if !copied {
+			report.Tests, copied = append([]models.TestResult(nil), report.Tests...), true
+		}
+		report.Tests[i].Answers, report.Tests[i].FailureInfo.UnmatchedCalls = answers, misses
+	}
 	return report
 }
 
