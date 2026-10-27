@@ -94,7 +94,9 @@ func liveMock(name string, kind models.Kind, at time.Time, session bool) *models
 // shares), claims of shared recordings by another test, and stagings that
 // give those claims back, every per-test read of every kind and tier
 // (unanswered, rangeUnanswered whole and stopped early, the manager's walk)
-// gives what a walk of every owned position gives, with the verify mode on.
+// gives what a walk of every owned position gives, with the verify mode on;
+// and the manager's walk, which reads the staged tier after the test's own,
+// gives what its whole read gives.
 func TestPerTestReadsGiveTheWalksAnswerOverRandomConsumesAndClaims(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	defer exactViewVerify.Store(exactViewVerify.Load())
@@ -110,11 +112,22 @@ func TestPerTestReadsGiveTheWalksAnswerOverRandomConsumesAndClaims(t *testing.T)
 		for i := 0; i < 20; i++ {
 			cands = append(cands, liveMock(fmt.Sprintf("shared-%d", i), kinds[rng.Intn(len(kinds))], now.Add(time.Duration(40+i)*time.Millisecond), rng.Intn(3) == 0))
 		}
+		// Protocol-phase recordings (DNS) staged in the per-test tier:
+		// every view shows them, after the test's own, so the manager's
+		// walk must read the tier once the test's own run out.
+		var phase []*models.Mock
+		for i := 0; i < 4; i++ {
+			phase = append(phase, liveMock(fmt.Sprintf("phase-%d", i), models.DNS, now.Add(time.Duration(60+i)*time.Millisecond), false))
+		}
 		mm := NewMockManager(nil, nil, zap.NewNop())
+		mm.SetMocksWithWindow(phase, nil, now.Add(-time.Hour), now.Add(time.Hour))
 		mm.ServeExactTestConcurrent("T", owned, cands)
 		v := mm.exactView()
 		if v == nil {
 			t.Fatal("no exact view after ServeExactTestConcurrent")
+		}
+		if all, err := mm.GetPerTestMocksInWindow(); err != nil || !slices.Equal(all[len(all)-len(phase):], phase) {
+			t.Fatalf("round %d: precondition: the per-test read ends [%s], want the staged tier [%s] (err %v)", round, verifyNames(all), verifyNames(phase), err)
 		}
 		for step := 0; step < 120; step++ {
 			switch op := rng.Intn(10); {
@@ -231,7 +244,9 @@ func TestRacingCallsOfOneTestAnswerEachOfItsRecordingsOnce(t *testing.T) {
 
 // A scoped worker's per-test walk sees what its GetPerTestMocksInWindow sees,
 // through the manager's walk or, when the wrapped store has none, through a
-// walk of that read.
+// walk of that read. A recording the worker's open test consumed is in
+// neither: the consume holds it for the scope and leaves it in the store, so
+// only the walk's filter hides it.
 func TestScopedMockDb_PerTestWalkIsScopedToTheWorker(t *testing.T) {
 	base := time.Date(2026, 9, 30, 11, 0, 0, 0, time.UTC)
 	var perTest []*models.Mock
@@ -266,6 +281,25 @@ func TestScopedMockDb_PerTestWalkIsScopedToTheWorker(t *testing.T) {
 		if got := walk(db); !slices.Equal(got, want) || !slices.Equal(names, want) {
 			t.Fatalf("the scoped per-test walk gave %v and the read %v; want %v", got, names, want)
 		}
+	}
+	db := workerScoped(t, mm, allow, universe)
+	if !db.DeleteFilteredMock(*perTest[0]) {
+		t.Fatal("precondition: the worker's open test could not consume its own recording")
+	}
+	if got, _ := mm.GetPerTestMocksInWindow(); len(got) != len(perTest) {
+		t.Fatalf("precondition: the store holds %d per-test recordings after the scoped consume, want all %d (the consume holds, it does not delete)", len(got), len(perTest))
+	}
+	read, err := db.GetPerTestMocksInWindow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, mk := range read {
+		names = append(names, mk.Name)
+	}
+	want = []string{"shared", "mine-too"}
+	if got := walk(db); !slices.Equal(got, want) || !slices.Equal(names, want) {
+		t.Fatalf("after the worker's test consumed %q the scoped per-test walk gave %v and the read %v; want %v", perTest[0].Name, got, names, want)
 	}
 }
 
