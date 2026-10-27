@@ -4659,17 +4659,17 @@ func (a *AgentClient) PushSetTable(ctx context.Context, root string, sets map[st
 }
 
 // PushProvenTable hands the agent, under the proven switch, the per-test
-// table, each key's pool slice (models.ScopeTableReq.Pool) and the tests'
-// recordings judging marked as background work (models.ScopeTableReq.Background)
-// in one request. Every answer but 200 is an error: a replay judged per test
+// table, each key's pool slice (models.ScopeTableReq.Pool) and, per test, the
+// recordings of its own list judging marked as background work
+// (models.ScopeTableReq.Background) in one request. Every answer but 200 is an error: a replay judged per test
 // must not run on an agent that serves its tests and pool otherwise.
-func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, background map[string]string) (retErr error) {
+func (a *AgentClient) PushProvenTable(ctx context.Context, table, pool map[string][]string, background models.BackgroundMarks) (retErr error) {
 	if pool == nil {
 		pool = map[string][]string{}
 	}
 	defer func() {
 		if retErr == nil && a.session().recording() {
-			t, p, b := maps.Clone(table), maps.Clone(pool), maps.Clone(background)
+			t, p, b := maps.Clone(table), maps.Clone(pool), background.Clone()
 			a.session().record(stepScopeTable, func(c context.Context) error { return a.PushProvenTable(c, t, p, b) })
 		}
 	}()

@@ -4744,15 +4744,15 @@ func (p *Proxy) SetPoolNames(names []string) error {
 	return nil
 }
 
-// SetUnrequired implements agent.UnrequiredSetter: the recordings of the
-// staged set a test is served but never required to make
+// SetUnrequired implements agent.UnrequiredSetter: per test of the staged
+// set, the recordings of its own list it is served but never required to make
 // (MockManager.SetUnrequired).
-func (p *Proxy) SetUnrequired(names map[string]string) error {
+func (p *Proxy) SetUnrequired(marks models.BackgroundMarks) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
-	m.SetUnrequired(names)
+	m.SetUnrequired(marks)
 	return nil
 }
 

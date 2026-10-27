@@ -16,7 +16,7 @@ func TestABackgroundRecordingIsServedInItsTestsWindow(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimeSession)
 	bg := exactMock("bg", time.Second, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{own, bg})
-	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	mm.ServeExactTest("T", []*models.Mock{own, bg})
 	pt, _ := mm.GetPerTestMocksInWindow()
 	equalNames(t, "per-test", pt, "own", "bg")
@@ -46,7 +46,7 @@ func TestABackgroundRecordingTheTestDidNotCallIsNotRequired(t *testing.T) {
 	own := exactMock("own", 0, models.LifetimeSession)
 	bg := exactMock("bg", time.Second, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{own, bg})
-	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	mm.ServeExactTest("T", []*models.Mock{own, bg})
 	test, _, unconsumed, ok := mm.ExactTestOutcome()
 	if !ok || test != "T" || !slices.Equal(unconsumed, []string{"own"}) {
@@ -65,7 +65,12 @@ func TestWithoutAMarkEveryTestMockIsRequired(t *testing.T) {
 		"none sent": func(*MockManager) {},
 		"empty set": func(mm *MockManager) { mm.SetUnrequired(nil) },
 		"another recording marked": func(mm *MockManager) {
-			mm.SetUnrequired(map[string]string{"elsewhere": "a timer's call"})
+			mm.SetUnrequired(models.BackgroundMarks{"T": {"elsewhere": "a timer's call"}})
+		},
+		// The mark is another test's entry of the same recording: T's own
+		// entry has none, so T must still make the call.
+		"another test's entry marked": func(mm *MockManager) {
+			mm.SetUnrequired(models.BackgroundMarks{"A": {"bg": "a timer's call"}})
 		},
 	}
 	for name, setup := range cases {
@@ -89,9 +94,9 @@ func TestWithoutAMarkEveryTestMockIsRequired(t *testing.T) {
 func TestASessionResetForgetsTheMarks(t *testing.T) {
 	bg := exactMock("bg", 0, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{bg})
-	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	mm.ResetForReplaySession()
-	if got := mm.unrequiredNames(); got != nil {
+	if got := mm.exact.unrequired.Load(); got != nil {
 		t.Fatalf("the reset kept the previous set's marks: %v", got)
 	}
 }
@@ -99,7 +104,7 @@ func TestASessionResetForgetsTheMarks(t *testing.T) {
 // With exact serving off nothing is said.
 func TestUnusedBackgroundNeedsExactServing(t *testing.T) {
 	plain := stagedManager(t, nil, []*models.Mock{exactMock("bg", 0, models.LifetimeSession)})
-	plain.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	plain.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	if _, _, ok := plain.ExactTestUnusedBackground(); ok {
 		t.Fatal("unused background said with exact serving off")
 	}
@@ -131,7 +136,7 @@ func TestAnsweredBackgroundIsTheMarkedRecordingsThatAnswered(t *testing.T) {
 	bg2 := exactMock("bg2", 2*time.Second, models.LifetimeSession)
 	shared := exactMock("shared", 3*time.Second, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{own, bg1, bg2, shared})
-	mm.SetUnrequired(map[string]string{"bg1": "a timer's call", "bg2": "a timer's call", "shared": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg1": "a timer's call", "bg2": "a timer's call", "shared": "a timer's call"}})
 	mm.ServeExactTestConcurrent("T", []*models.Mock{own, bg1, bg2}, []*models.Mock{shared})
 	if got := mm.AnsweredBackground(); len(got) != 0 {
 		t.Fatalf("a marked recording that has not answered is answered again: %v", got)
@@ -149,10 +154,13 @@ func TestAnsweredBackgroundNeedsAMarkAndAnOpenTest(t *testing.T) {
 	cases := map[string]func(mm *MockManager){
 		"none sent": func(*MockManager) {},
 		"another recording marked": func(mm *MockManager) {
-			mm.SetUnrequired(map[string]string{"elsewhere": "a timer's call"})
+			mm.SetUnrequired(models.BackgroundMarks{"T": {"elsewhere": "a timer's call"}})
+		},
+		"another test's entry marked": func(mm *MockManager) {
+			mm.SetUnrequired(models.BackgroundMarks{"A": {"bg": "a timer's call"}})
 		},
 		"test ended": func(mm *MockManager) {
-			mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+			mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 			mm.ServeExactPool(models.PoolKeyNone, nil)
 		},
 	}
@@ -169,7 +177,7 @@ func TestAnsweredBackgroundNeedsAMarkAndAnOpenTest(t *testing.T) {
 		})
 	}
 	plain := stagedManager(t, nil, []*models.Mock{exactMock("bg", 0, models.LifetimeSession)})
-	plain.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	plain.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	if got := plain.AnsweredBackground(); got != nil {
 		t.Fatalf("answered again with exact serving off: %v", got)
 	}
@@ -183,7 +191,7 @@ func TestAnsweredBackgroundNeedsAMarkAndAnOpenTest(t *testing.T) {
 func TestAHeldCallIsAnsweredAgainOnlyInItsOwnStaging(t *testing.T) {
 	bg := exactMock("bg", 0, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{bg})
-	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	mm.ServeExactTest("T", []*models.Mock{bg})
 	consumeByName(t, mm, "bg")
 	held, restaged := mm.HoldToRound(integrations.NewCallRound(mm.stagingEpoch.Load(), nil))
@@ -205,7 +213,7 @@ func TestAHeldCallIsAnsweredAgainOnlyInItsOwnStaging(t *testing.T) {
 func TestAScopedViewForwardsTheAnsweredBackground(t *testing.T) {
 	bg := exactMock("bg", 0, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{bg})
-	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	mm.ServeExactTest("T", []*models.Mock{bg})
 	consumeByName(t, mm, "bg")
 	var view integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
@@ -228,10 +236,64 @@ func TestAScopedViewForwardsTheAnsweredBackground(t *testing.T) {
 func TestAMarkedRecordingAnsweredInTheGapIsNotAnsweredAgainThere(t *testing.T) {
 	bg := exactMock("bg", 0, models.LifetimeSession)
 	mm := stagedManager(t, nil, []*models.Mock{bg})
-	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.SetUnrequired(models.BackgroundMarks{"T": {"bg": "a timer's call"}})
 	mm.ServeExactPool("k", nil, bg)
 	consumeByName(t, mm, "bg")
 	if got := mm.AnsweredBackground(); len(got) != 0 {
 		t.Fatalf("in the gap before its test a marked recording is answered again: %v", got)
+	}
+}
+
+// MARKS ARE PER TEST: one recording listed by test A, whose entry judging
+// marked as background work, and by test B, whose entry has no mark. B must
+// still make the call: it is among B's unconsumed recordings and never listed
+// as B's unused background; and once B's own call answered, B's second
+// identical call is not answered again: it is an extra-call miss, on both
+// replay paths (each hands the agent per-test marks).
+func TestAnotherTestsMarkLeavesThisTestsEntryRequired(t *testing.T) {
+	shared := exactMock("shared", 0, models.LifetimeSession)
+	marks := models.BackgroundMarks{"A": {"shared": "count_varied: A"}}
+
+	mm := stagedManager(t, nil, []*models.Mock{shared})
+	mm.SetUnrequired(marks)
+	mm.ServeExactTest("B", []*models.Mock{shared})
+	if _, _, unconsumed, _ := mm.ExactTestOutcome(); !slices.Equal(unconsumed, []string{"shared"}) {
+		t.Fatalf("B's unmarked entry is not required (A's mark reached it): unconsumed %v", unconsumed)
+	}
+	if _, unused, _ := mm.ExactTestUnusedBackground(); len(unused) != 0 {
+		t.Fatalf("B's unmarked entry is listed as B's unused background: %v", unused)
+	}
+
+	mm = stagedManager(t, nil, []*models.Mock{shared})
+	mm.SetUnrequired(marks)
+	mm.ServeExactTest("B", []*models.Mock{shared})
+	consumeByName(t, mm, "shared")
+	if got := mm.AnsweredBackground(); len(got) != 0 {
+		t.Fatalf("B's own unmarked recording answers B's extra copy unchecked: %v", got[0].Name)
+	}
+
+	// A, whose entry is marked, is served it unrequired and answered again.
+	mm = stagedManager(t, nil, []*models.Mock{shared})
+	mm.SetUnrequired(marks)
+	mm.ServeExactTest("A", []*models.Mock{shared})
+	if _, _, unconsumed, _ := mm.ExactTestOutcome(); len(unconsumed) != 0 {
+		t.Fatalf("A's marked entry is required: unconsumed %v", unconsumed)
+	}
+	consumeByName(t, mm, "shared")
+	equalNames(t, "A's answered background", mm.AnsweredBackground(), "shared")
+}
+
+// A recording another test shares with the open one (a concurrency
+// candidate), marked on its owner's entry, is never the open test's unused
+// background: the open test does not list it.
+func TestACandidateMarkedOnItsOwnerIsNotTheOpenTestsUnusedBackground(t *testing.T) {
+	own := exactMock("own", 0, models.LifetimeSession)
+	shared := exactMock("shared", time.Second, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{own, shared})
+	mm.SetUnrequired(models.BackgroundMarks{"B": {"shared": "a timer's call"}, "T": {"own": "a timer's call"}})
+	mm.ServeExactTestConcurrent("T", []*models.Mock{own}, []*models.Mock{shared})
+	bt, unused, ok := mm.ExactTestUnusedBackground()
+	if !ok || bt != "T" || !slices.Equal(unused, []string{"own"}) {
+		t.Fatalf("unused background %q %v %v: only T's own marked entry", bt, unused, ok)
 	}
 }
