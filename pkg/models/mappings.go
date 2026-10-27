@@ -355,6 +355,29 @@ type MappedTestCase struct {
 	// the verdict fails when CI never reaches one. Written and read only
 	// under the proven switch; empty in recordings made without it.
 	Real []string `json:"real,omitempty" yaml:"real,omitempty" bson:"real,omitempty"`
+	// Removed are the recordings keploy's judging took out of this test's
+	// recording (MappingDb.RemoveBackground): each was marked as the
+	// application's background work on this test's list, and no round of
+	// the judging called it. They are no longer served: Removed says what
+	// went, why, and how to bring it back, and nothing reads it to serve a
+	// call. Written by judging under the proven switch only; read and kept
+	// by each rewrite of mappings.yaml, whatever the switch. A record that
+	// lists one of them on the test again takes its note off.
+	Removed []RemovedMock `json:"removed,omitempty" yaml:"removed,omitempty" bson:"removed,omitempty"`
+}
+
+// RemovedMock is one recording keploy's judging took out of a test's
+// recording (MappedTestCase.Removed), in words: the mark it carried and why
+// it was taken out, with its undo.
+type RemovedMock struct {
+	Name string `json:"name" yaml:"name" bson:"name"`
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty" bson:"kind,omitempty"`
+	// Background is the mark its entry carried (MockEntry.Background): why
+	// judging found its call to be the application's background work.
+	Background string `json:"background,omitempty" yaml:"background,omitempty" bson:"background,omitempty"`
+	// Reason is why judging took it out of the recording, with the
+	// evidence of the round that confirmed it and how to bring it back.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
 }
 
 type persistedTestFormat struct {
@@ -373,8 +396,9 @@ type persistedTestFormat struct {
 // persistedTestFormat, which also picks the shape an entry is read in.
 type writtenTestFormat struct {
 	persistedTestFormat `yaml:",inline"`
-	At                  time.Time `json:"at,omitzero" yaml:"at,omitempty"`
-	Real                []string  `json:"real,omitempty" yaml:"real,omitempty"`
+	At                  time.Time     `json:"at,omitzero" yaml:"at,omitempty"`
+	Real                []string      `json:"real,omitempty" yaml:"real,omitempty"`
+	Removed             []RemovedMock `json:"removed,omitempty" yaml:"removed,omitempty"`
 }
 
 type structuredTestFormat struct {
@@ -389,11 +413,11 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, nil
+	return writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Removed: tc.Removed}, nil
 }
 
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
+	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real, Removed: tc.Removed})
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -450,6 +474,40 @@ func recordedRealJSON(data []byte) ([]string, error) {
 	return r.Real, nil
 }
 
+// errRemoved is a test entry whose removed: is not a list of removed
+// recordings.
+const errRemoved = "a test's removed recordings (removed) are not a list of name, kind, background and reason: %w"
+
+// removedYAML is a test entry's removed: (MappedTestCase.Removed), whatever
+// the switch, as every rewrite keeps it. One that is not a list of removed
+// recordings is an error, never dropped by the next rewrite unsaid.
+func removedYAML(node *yaml.Node) ([]RemovedMock, error) {
+	if !nodeHasField(node, "removed") {
+		return nil, nil
+	}
+	var r struct {
+		Removed []RemovedMock `yaml:"removed"`
+	}
+	if err := node.Decode(&r); err != nil {
+		return nil, fmt.Errorf(errRemoved, err)
+	}
+	return r.Removed, nil
+}
+
+// removedJSON is removedYAML for a JSON entry.
+func removedJSON(data []byte) ([]RemovedMock, error) {
+	if !jsonContainsField(data, "removed") {
+		return nil, nil
+	}
+	var r struct {
+		Removed []RemovedMock `json:"removed"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf(errRemoved, err)
+	}
+	return r.Removed, nil
+}
+
 // recordedBeginJSON is recordedBeginYAML for a JSON entry.
 func recordedBeginJSON(data []byte) (time.Time, error) {
 	if !provenswitch.On() || !jsonContainsField(data, "at") {
@@ -491,10 +549,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	rm, err := removedYAML(node)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalYAMLEntry(node); err != nil {
 		return err
 	}
-	tc.At, tc.Real = at, rl
+	tc.At, tc.Real, tc.Removed = at, rl, rm
 	return nil
 }
 
@@ -553,10 +615,14 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return err
 	}
+	rm, err := removedJSON(data)
+	if err != nil {
+		return err
+	}
 	if err := tc.unmarshalJSONEntry(data); err != nil {
 		return err
 	}
-	tc.At, tc.Real = at, rl
+	tc.At, tc.Real, tc.Removed = at, rl, rm
 	return nil
 }
 
