@@ -168,6 +168,11 @@ type exactView struct {
 	round       uint64
 	learnNumber uint64
 	learnBound  bool
+	// shared is the view's SharedGen's View, which a test's view reports:
+	// what it shows of the trees beyond the protocol-phase recordings, the
+	// last view's number when that view's was the same (sharedViews.of).
+	// Set holding the round lock before the view is visible.
+	shared uint64
 
 	// heard is every mock a parser was served while the view was installed,
 	// as the served observer was told of it (observeServed): of any lifetime
@@ -293,6 +298,9 @@ type exactState struct {
 	// bg is the staged set's background under the background rules
 	// (ServeExactBackground), nil for today's (exact_background.go).
 	bg atomic.Pointer[backgroundState]
+	// shared numbers the test views' shared parts (exactView.shared); held
+	// under the round lock.
+	shared sharedViews
 	// staging is set while a set's mocks are staged: from its staging's
 	// StageExactBackground to its ServeExactBackground (exact_background.go).
 	// A view installed meanwhile is a staging view (exactView.staging).
@@ -1509,6 +1517,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	r := &m.exact.round
 	r.boundary("a view was installed")
 	v.round = r.gen
+	m.exact.shared.of(v, w)
 	if v.test != "" {
 		r.bindLocked(v)
 	}
@@ -1542,10 +1551,11 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 			kinds[mk.Kind] = struct{}{}
 		}
 	}
+	// The trees did not change: the stored generations stay (SharedGen).
 	for k := range kinds {
-		m.bumpRevisionKind(k)
+		m.bumpViewKind(k)
 	}
-	m.bumpRevisionAll()
+	m.bumpViewAll()
 	m.signalWindowChange()
 	// Only now, with v in force and the revisions moved, do the consumes
 	// and spends that found prev closed go on, against v.
@@ -2041,13 +2051,19 @@ func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
 // keep narrows staged mocks to those the view shows, in their order, each
 // as the view hands it out (learned).
 func (v *exactView) keep(in []*models.Mock) []*models.Mock {
+	return v.keepWith(in, v.shows)
+}
+
+// keepWith is keep with show in place of shows: showsStatic gives what the
+// view shows of in whatever it spent (SharedMocks).
+func (v *exactView) keepWith(in []*models.Mock, show func(*models.Mock) bool) []*models.Mock {
 	viewNarrowed.Add(uint64(len(in)))
 	out := make([]*models.Mock, 0, len(in))
 	if v.bg != nil {
-		return v.backgroundOrder(out, in)
+		return v.backgroundOrder(out, in, show)
 	}
 	for _, mk := range in {
-		if v.shows(mk) {
+		if show(mk) {
 			out = append(out, v.learned(mk))
 		}
 	}
@@ -2060,10 +2076,10 @@ func (v *exactView) keep(in []*models.Mock) []*models.Mock {
 // place first, delivering before idle, then recorded order (workerOrder);
 // then the pool, in recorded order, whichever trees in came from. Each is
 // as the view hands it out (learned).
-func (v *exactView) backgroundOrder(out, in []*models.Mock) []*models.Mock {
+func (v *exactView) backgroundOrder(out, in []*models.Mock, show func(*models.Mock) bool) []*models.Mock {
 	var worker, pool []*models.Mock
 	for _, mk := range in {
-		if !v.shows(mk) {
+		if !show(mk) {
 			continue
 		}
 		l := v.learned(mk)
@@ -2292,7 +2308,12 @@ func (v *exactView) reusable(kind models.Kind, staged ...[]*models.Mock) []*mode
 	// Between tests a pool view's ahead (per-test mocks, in flight when the
 	// next test began) is in every reusable read too: a tier-routing parser
 	// reads only the reusable tiers while no test is open.
-	out := v.unanswered(kind, v.test != "")
+	return v.reusableWith(kind, v.unanswered(kind, v.test != ""), v.shows, staged...)
+}
+
+// reusableWith is reusable led by out, with show in place of shows
+// (keepWith): SharedMocks reads it led by nothing, with showsStatic.
+func (v *exactView) reusableWith(kind models.Kind, out []*models.Mock, show func(*models.Mock) bool, staged ...[]*models.Mock) []*models.Mock {
 	seen := make(map[*models.Mock]struct{}, len(out))
 	if v.bg != nil {
 		// One order across the tiers (backgroundOrder), each mock once.
@@ -2307,10 +2328,10 @@ func (v *exactView) reusable(kind models.Kind, staged ...[]*models.Mock) []*mode
 				all = append(all, mk)
 			}
 		}
-		return v.backgroundOrder(out, all)
+		return v.backgroundOrder(out, all, show)
 	}
 	for _, list := range staged {
-		for _, mk := range v.keep(list) {
+		for _, mk := range v.keepWith(list, show) {
 			if _, dup := seen[mk]; dup || (kind != "" && mk.Kind != kind) {
 				continue
 			}

@@ -131,3 +131,48 @@ func StagingGenerationOf(db MockMemDb, kind models.Kind) (uint64, bool) {
 	}
 	return sg.StagingGenerationByKind(kind), true
 }
+
+// SharedGen is the generation of the shared part of an open test's reads
+// (SharedReads): View names what the test's view shows beyond the trees and
+// its own recordings, the same for every test view that shows the same (the
+// reached worker scope, the background rules, the kept learning), and Store
+// moves on each staging, store into a tree or delete of the kind, never on a
+// test's open or close.
+type SharedGen struct {
+	View, Store uint64
+}
+
+// SharedReads is what a store that serves exactly offers a parser whose index
+// of the reads would otherwise be built again at each test's open or close,
+// which moves the staging generation (StagingGenerations): while a test is
+// open its per-test and session reads are the open test's unanswered
+// recordings (OwnedUnanswered), which lead each read, then a shared part
+// (SharedMocks), which every test's view with the same SharedGen shows alike.
+//
+//   - GetPerTestMocksInWindow is OwnedUnanswered then perTest less what
+//     MockSpent reports.
+//   - GetSessionMocks is OwnedUnanswered then session less what MockSpent
+//     reports, each recording once (the first place kept).
+//
+// The shared part is static: it holds what a view spent too, since a spend
+// lasts only as long as its view, so a parser keeps one index of it per
+// SharedGen and skips at lookup what MockSpent reports. Every method reports
+// false (or nothing) while no test is open, and for a store held to a call
+// once the staging moved from the call's (RoundHolder): such a parser keys on
+// the staging generation then.
+type SharedReads interface {
+	StagingGenerations
+	SharedGeneration(kind models.Kind) (SharedGen, bool)
+	SharedMocks() (perTest, session []*models.Mock, ok bool)
+	OwnedUnanswered() ([]*models.Mock, bool)
+}
+
+// SharedGenerationOf returns db's SharedGen for kind's reads, and false where
+// db offers none now (SharedReads).
+func SharedGenerationOf(db MockMemDb, kind models.Kind) (SharedGen, bool) {
+	sr, ok := db.(SharedReads)
+	if !ok {
+		return SharedGen{}, false
+	}
+	return sr.SharedGeneration(kind)
+}

@@ -123,12 +123,17 @@ type MockManager struct {
 	// staged is rev less the moves a consume under exact serving makes
 	// (StagingGeneration).
 	staged uint64
+	// stored is staged less the moves an exact view's install makes: it
+	// moves on a staging, a store into a tree or a delete (SharedGeneration).
+	stored uint64
 
 	// NEW: per-kind revisions; stagedByKind is revByKind less the moves a
-	// consume under exact serving makes (StagingGenerationByKind).
+	// consume under exact serving makes (StagingGenerationByKind), and
+	// storedByKind stagedByKind less the moves an exact view's install makes.
 	revMu        sync.RWMutex
 	revByKind    map[models.Kind]*uint64
 	stagedByKind map[models.Kind]*uint64
+	storedByKind map[models.Kind]*uint64
 
 	// NEW: per-kind trees (guarded by treesMu)
 	treesMu          sync.RWMutex
@@ -848,6 +853,13 @@ func (m *MockManager) Revision() uint64 {
 }
 
 func (m *MockManager) bumpRevisionAll() {
+	atomic.AddUint64(&m.stored, 1)
+	m.bumpViewAll()
+}
+
+// bumpViewAll is bumpRevisionAll for an exact view's install: the stored
+// generation does not move, since what the trees hold did not change.
+func (m *MockManager) bumpViewAll() {
 	atomic.AddUint64(&m.staged, 1)
 	atomic.AddUint64(&m.rev, 1)
 }
@@ -863,15 +875,22 @@ func (m *MockManager) RevisionByKind(kind models.Kind) uint64 {
 }
 
 func (m *MockManager) bumpRevisionKind(kind models.Kind) {
-	rev, staged := m.kindRevisions(kind)
+	_, _, stored := m.kindRevisions(kind)
+	atomic.AddUint64(stored, 1)
+	m.bumpViewKind(kind)
+}
+
+// bumpViewKind is bumpRevisionKind for an exact view's install (bumpViewAll).
+func (m *MockManager) bumpViewKind(kind models.Kind) {
+	rev, staged, _ := m.kindRevisions(kind)
 	atomic.AddUint64(staged, 1)
 	atomic.AddUint64(rev, 1)
 }
 
-// kindRevisions returns kind's revision and staging generation counters,
-// made on first use. The pointers stay valid after the lock is let go: the
-// counters move by atomics.
-func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged *uint64) {
+// kindRevisions returns kind's revision, staging generation and stored
+// generation counters, made on first use. The pointers stay valid after the
+// lock is let go: the counters move by atomics.
+func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged, stored *uint64) {
 	m.revMu.Lock()
 	defer m.revMu.Unlock()
 	if m.revByKind == nil {
@@ -880,7 +899,10 @@ func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged *uint64) {
 	if m.stagedByKind == nil {
 		m.stagedByKind = make(map[models.Kind]*uint64)
 	}
-	rev, staged = m.revByKind[kind], m.stagedByKind[kind]
+	if m.storedByKind == nil {
+		m.storedByKind = make(map[models.Kind]*uint64)
+	}
+	rev, staged, stored = m.revByKind[kind], m.stagedByKind[kind], m.storedByKind[kind]
 	if rev == nil {
 		rev = new(uint64)
 		m.revByKind[kind] = rev
@@ -889,7 +911,11 @@ func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged *uint64) {
 		staged = new(uint64)
 		m.stagedByKind[kind] = staged
 	}
-	return rev, staged
+	if stored == nil {
+		stored = new(uint64)
+		m.storedByKind[kind] = stored
+	}
+	return rev, staged, stored
 }
 
 // bumpConsumed moves the revisions for a consume or a spend under exact
@@ -898,7 +924,7 @@ func (m *MockManager) kindRevisions(kind models.Kind) (rev, staged *uint64) {
 // generations do not, since what every read gives changes then only by the
 // mock MockSpent now reports.
 func (m *MockManager) bumpConsumed(kind models.Kind) {
-	rev, _ := m.kindRevisions(kind)
+	rev, _, _ := m.kindRevisions(kind)
 	atomic.AddUint64(rev, 1)
 	atomic.AddUint64(&m.rev, 1)
 }
