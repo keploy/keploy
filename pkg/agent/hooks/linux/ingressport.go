@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 
 	"github.com/cilium/ebpf"
@@ -44,8 +45,46 @@ type ingressHold struct {
 	forwarders *ebpf.Map    // ingress_forwarders, a sockhash by port
 	parkMap    *ebpf.Map    // ingress_park, the park's sockmap
 	yielded    *ebpf.Map    // ingress_yielded, the ports the agent yields
-	appPort    *ebpf.Map    // the main object's app_port_info (P -> P')
+	appPort    *ebpf.Map    // app_port_info (P -> P'), the hold's own copy
+	appBinds   *ebpf.Map    // app_port_binds, the bind hooks' notes, the hold's own copy
 	stats      *ebpf.Map    // ingress_lookup_stats
+}
+
+// appBindKey and appBindCount mirror struct app_bind_key and struct
+// app_bind_count (keploy/ebpf headers/k_ingress_hold.h): the bind hooks'
+// note of what one of the app's moved sockets bound, and how many of its
+// sockets hold that note now.
+type appBindKey struct {
+	Port uint16   // the port the app asked for, P
+	Kind uint16   // appBind*
+	Addr [16]byte // network order; appBindV4's in the first 4 bytes; all zero: any address
+}
+
+type appBindCount struct {
+	Lock uint32
+	N    uint32
+}
+
+// The kinds of note (APP_BIND_*), by what the socket takes calls on.
+const (
+	appBindV4     = 4  // an IPv4 socket, or an IPv6 one on a v4-mapped address: IPv4 only
+	appBindV6     = 6  // an IPv6 socket on Addr (::, any, with IPV6_V6ONLY): IPv6 only
+	appBindV6Dual = 46 // an IPv6 socket on :: without IPV6_V6ONLY: IPv4 and IPv6, any address
+)
+
+// ipv6Taken is the IPv6 address a note's socket takes calls on, as the
+// lookup matches it (ingress_bound_here), and whether it takes any: an IPv6
+// note's address (:: for any), :: for a dual-stack one, and none for an IPv4
+// note, which is an IPv4 socket's or an IPv6 socket's on a v4-mapped
+// address (Java's bind of 127.0.0.1 on a dual-stack host).
+func ipv6Taken(k appBindKey) (netip.Addr, bool) {
+	switch k.Kind {
+	case appBindV6:
+		return netip.AddrFrom16(k.Addr), true
+	case appBindV6Dual:
+		return netip.IPv6Unspecified(), true
+	}
+	return netip.Addr{}, false
 }
 
 // ingressLookupStats indices (ingress_lookup.c, INGRESS_LOOKUP_*). They
@@ -135,7 +174,6 @@ func (h *Hooks) loadIngressHold(cgroupPath string) (*ingressHold, error) {
 			return nil, fmt.Errorf("the main object's %s is not loaded", name)
 		}
 	}
-	appPort := shared["app_port_info"]
 
 	spec, err := loadIngress()
 	if err != nil {
@@ -150,8 +188,13 @@ func (h *Hooks) loadIngressHold(cgroupPath string) (*ingressHold, error) {
 		forwarders: coll.Maps["ingress_forwarders"],
 		parkMap:    coll.Maps["ingress_park"],
 		yielded:    coll.Maps["ingress_yielded"],
-		appPort:    appPort,
-		stats:      coll.Maps["ingress_lookup_stats"],
+		// The collection's own copies of the shared maps (it dups their
+		// descriptors, and closes its copies with itself): every map the
+		// hold reads is then closed under the hold's write lock, never by
+		// unLoad's closing of the main objects during an accessor's read.
+		appPort:  coll.Maps["app_port_info"],
+		appBinds: coll.Maps["app_port_binds"],
+		stats:    coll.Maps["ingress_lookup_stats"],
 	}
 
 	// The park listener: plain TCP (a Go listener is MPTCP by default on a
@@ -364,6 +407,41 @@ func (h *Hooks) UnregisterIngressForwarder(origPort uint16) {
 	if err := hold.forwarders.Delete(uint32(origPort)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
 		h.logger.Debug("could not unregister keploy's ingress forwarder", zap.Uint16("port", origPort), zap.Error(err))
 	}
+}
+
+// AppIPv6Binds is the IPv6 addresses the app's moved sockets of orig take
+// calls on now, by the bind hooks' notes (app_port_binds), one per note: an
+// IPv6 socket's address (:: for any, with IPV6_V6ONLY or without); none for
+// an IPv4 socket, or an IPv6 one on a v4-mapped address, which takes IPv4
+// only. The lookup holds the port's IPv6 calls only for these, so the
+// ingress manager checks only these for a listener keploy does not own.
+// Nothing when nothing is held; on an error (the notes cannot be read), what
+// it read with the error.
+func (h *Hooks) AppIPv6Binds(orig uint16) ([]netip.Addr, error) {
+	h.ingressMu.RLock()
+	defer h.ingressMu.RUnlock()
+	hold := h.ingress
+	if hold == nil {
+		return nil, nil
+	}
+	if hold.appBinds == nil {
+		return nil, errors.New("the ingress hold's notes map is not loaded")
+	}
+	var (
+		addrs []netip.Addr
+		k     appBindKey
+		c     appBindCount
+	)
+	it := hold.appBinds.Iterate()
+	for it.Next(&k, &c) {
+		if k.Port != orig || c.N == 0 {
+			continue
+		}
+		if a, ok := ipv6Taken(k); ok {
+			addrs = append(addrs, a)
+		}
+	}
+	return addrs, it.Err()
 }
 
 // IngressHeld reports whether keploy holds the application's moved ports from

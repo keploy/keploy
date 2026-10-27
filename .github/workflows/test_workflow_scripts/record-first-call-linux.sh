@@ -17,8 +17,14 @@
 # keploy must write its test case. RUNS runs each, natively and under
 # compose. Every wait is on an event: a line in the log, or keploy's exit.
 #
+# A third mode, v4mapped, runs natively an app whose IPv6 socket is bound to
+# ::ffff:127.0.0.1 (how Java binds 127.0.0.1 on a dual-stack host), with
+# another listener X already on [::1]:P. The two binds do not conflict, so as
+# without keploy the app's IPv4 call must be answered and recorded, X must
+# keep its ::1 call, and keploy must not yield the port to X.
+#
 # Env: RECORD_BIN (the keploy binary under test; its agent image loaded for
-# the compose runs), RUNS (default 5).
+# the compose runs), RUNS (default 5), MODES (default "native compose v4mapped").
 set -uo pipefail
 
 source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/test-iid.sh" 2>/dev/null || true
@@ -26,6 +32,7 @@ sudo mkdir -p /root/.keploy && echo "ObjectID('123456789')" | sudo tee /root/.ke
 
 RECORD_BIN="${RECORD_BIN:-keploy}"
 RUNS="${RUNS:-5}"
+MODES="${MODES:-native compose v4mapped}"
 IMAGE=python:3.11-slim
 WORK="$(mktemp -d)"
 cd "$WORK" || exit 1
@@ -49,14 +56,17 @@ source "${GITHUB_WORKSPACE:-.}/.github/workflows/test_workflow_scripts/docker-bu
 docker_pull_retry "$IMAGE"
 
 cat > app.py <<'PY'
-import http.server, json, os
+import http.server, json, os, socket
+host = os.environ.get("APP_HOST", "0.0.0.0")
+class S(http.server.HTTPServer):
+    address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         b = json.dumps({"path": self.path}).encode()
         self.send_response(200); self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
-s = http.server.HTTPServer(("0.0.0.0", int(os.environ.get("APP_PORT", "8080"))), H)
+s = S((host, int(os.environ.get("APP_PORT", "8080"))), H)
 print("APP LISTENING", flush=True)
 s.serve_forever()
 PY
@@ -108,12 +118,34 @@ while True:
 PY
 }
 
+# x.py PORT: the other listener, on [::1]:PORT over IPv6 only; answers "X".
+cat > x.py <<'PY'
+import http.server, socket, sys
+class S(http.server.HTTPServer):
+    address_family = socket.AF_INET6
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.send_header("Content-Length", "1"); self.end_headers(); self.wfile.write(b"X")
+    def log_message(self, *a): pass
+s = S(("::1", int(sys.argv[1])), H)
+print("X LISTENING", flush=True)
+s.serve_forever()
+PY
+
 # run MODE N: one record run; the first call must answer, and be recorded.
 run() {
-  local mode=$1 n=$2 log="$1-$2.log" pid url got port
+  local mode=$1 n=$2 log="$1-$2.log" pid url got port xpid=
   sudo rm -rf keploy
   : > "$log"
   port=$(free_port)
+  if [ "$mode" = v4mapped ]; then
+    python3 -u x.py "$port" > "x-$n.log" 2>&1 &
+    xpid=$!
+    if ! await "x-$n.log" "$xpid" "X LISTENING"; then
+      echo "FAIL: $mode run $n: the other listener could not listen on [::1]:$port"; cat "x-$n.log"; FAIL=1
+      return
+    fi
+  fi
   if [ "$mode" = compose ]; then
     cat > docker-compose.yml <<YML
 services:
@@ -129,7 +161,9 @@ YML
       --disable-tele --disable-ansi > "$log" 2>&1 &
   else
     rm -f docker-compose.yml
-    sudo -E env PATH="$PATH" APP_PORT="$port" "$RECORD_BIN" record -c "python3 -u app.py" \
+    local host=0.0.0.0
+    [ "$mode" = v4mapped ] && host=::ffff:127.0.0.1
+    sudo -E env PATH="$PATH" APP_PORT="$port" APP_HOST="$host" "$RECORD_BIN" record -c "python3 -u app.py" \
       --disable-tele --disable-ansi > "$log" 2>&1 &
   fi
   pid=$!
@@ -142,8 +176,16 @@ YML
   else
     echo "$mode run $n: the call made as the app listened was answered and recorded"
   fi
+  if [ -n "$xpid" ]; then
+    got=$(curl -gs --max-time 10 "http://[::1]:$port/x" || echo refused)
+    [ "$got" = X ] || { echo "FAIL: $mode run $n: the other listener on [::1]:$port did not get its call: $got"; FAIL=1; }
+    if grep -aq "another listener, not keploy's, holds the application's port" "$log"; then
+      echo "FAIL: $mode run $n: keploy yielded the app's port to a listener its bind does not conflict with"; FAIL=1
+    fi
+  fi
   sudo kill -INT "$pid" 2>/dev/null
   wait "$pid"
+  [ -n "$xpid" ] && { kill "$xpid" 2>/dev/null; wait "$xpid" 2>/dev/null; }
   grep -a "served calls to the application's port that arrived before its forwarder listened" "$log" | head -n 1
   if grep -aq "keploy cannot hold the application's port from its bind" "$log"; then
     echo "FAIL: $mode run $n: keploy could not hold the app's port on this runner's kernel ($(uname -r))"
@@ -153,7 +195,7 @@ YML
   cleanup
 }
 
-for mode in native compose; do
+for mode in $MODES; do
   for n in $(seq 1 "$RUNS"); do
     run "$mode" "$n"
   done

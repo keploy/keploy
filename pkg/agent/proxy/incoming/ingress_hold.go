@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"strconv"
 	"syscall"
 	"time"
@@ -43,6 +44,12 @@ type IngressPortHolder interface {
 	// to a moved port that no forwarder takes is then the kernel's (refused),
 	// as without the hold.
 	StopIngressPark()
+	// AppIPv6Binds is the IPv6 addresses the app's moved sockets of orig
+	// take calls on, one per note of what a socket bound: an IPv6 socket's
+	// address (:: for any, with IPV6_V6ONLY or without); none for an IPv4
+	// socket, or an IPv6 one on a v4-mapped address, which takes IPv4 only.
+	// The hold takes the port's IPv6 calls only on these.
+	AppIPv6Binds(orig uint16) ([]netip.Addr, error)
 	// IngressHeld reports whether the moved ports are held.
 	IngressHeld() bool
 	// IngressLookupCounts is what the lookup did with the listener lookups

@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -152,5 +153,47 @@ func TestTheParkListenerGoesInOnlyAsATCPListenerIntoALoadedMap(t *testing.T) {
 	defer func() { _ = unix.Close() }()
 	if err := putListener(&ebpf.Map{}, 0, unix); err == nil || !strings.Contains(err.Error(), "*net.UnixListener, not a *net.TCPListener") {
 		t.Fatalf("a unix listener: %v", err)
+	}
+}
+
+// Each shape of the app's bind takes the IPv6 calls its note says, as the
+// lookup matches them (ingress_bound_here), so the manager checks IPv6 only
+// where the hold takes IPv6 calls: none for an IPv4 socket or an IPv6 one on
+// a v4-mapped address (the bind hooks note both as IPv4), :: for an IPv6
+// socket on ::, dual-stack or IPV6_V6ONLY, and the address for one on ::1.
+func TestEachBindShapeTakesTheIPv6ItsNoteSays(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		key  appBindKey
+		want string
+	}{
+		{"0.0.0.0", appBindKey{Kind: appBindV4}, ""},
+		{"::ffff:127.0.0.1", appBindKey{Kind: appBindV4, Addr: [16]byte{127, 0, 0, 1}}, ""},
+		{":: without IPV6_V6ONLY", appBindKey{Kind: appBindV6Dual}, "::"},
+		{":: with IPV6_V6ONLY", appBindKey{Kind: appBindV6}, "::"},
+		{"::1", appBindKey{Kind: appBindV6, Addr: netip.IPv6Loopback().As16()}, "::1"},
+		{"an unknown kind", appBindKey{Kind: 7}, ""},
+	} {
+		a, ok := ipv6Taken(c.key)
+		got := ""
+		if ok {
+			got = a.String()
+		}
+		if got != c.want || ok != (c.want != "") {
+			t.Errorf("a bind of %s: takes IPv6 %q (%v), want %q", c.name, got, ok, c.want)
+		}
+	}
+}
+
+// A hold that cannot read the notes says so, so the manager checks all of
+// IPv6 rather than none; with no hold there is nothing to check.
+func TestAHoldWithoutItsNotesSaysSo(t *testing.T) {
+	h := NewHooks(zap.NewNop(), &config.Config{})
+	if a, err := h.AppIPv6Binds(8080); a != nil || err != nil {
+		t.Fatalf("no hold: %v, %v; want nothing", a, err)
+	}
+	h.ingress = &ingressHold{}
+	if _, err := h.AppIPv6Binds(8080); err == nil {
+		t.Fatal("a hold without its notes map read them")
 	}
 }

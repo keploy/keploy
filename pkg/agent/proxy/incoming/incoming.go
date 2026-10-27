@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -99,12 +100,6 @@ type IngressProxyManager struct {
 	// ingress forwarder then holds the port) to the port the app was moved
 	// to, for each forwarder that started with a known one. Guarded by mu.
 	relocated map[uint16]uint16
-
-	// ipv6Binds marks an app port whose bind event was an IPv6 socket's
-	// (bound to ::, dual-stack or not, or to an IPv6 address): the hold then
-	// takes that port's IPv6 calls too, so its forwarder checks IPv6 for a
-	// listener keploy does not own. Guarded by mu.
-	ipv6Binds map[uint16]bool
 
 	// startOnce gates the ListenForIngressEvents goroutine so that
 	// repeated Start() calls (a reconnecting recorder opening a new
@@ -301,7 +296,6 @@ func (pm *IngressProxyManager) StopAll() {
 	}
 	pm.active = make(map[uint16]proxyStop)
 	pm.relocated = nil
-	pm.ipv6Binds = nil
 	pm.mu.Unlock()
 
 	for p, s := range stops {
@@ -332,14 +326,6 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 			zap.Uint16("Orig_App_Port", e.OrigAppPort),
 			zap.Uint16("New_App_Port", e.NewAppPort))
 
-		if e.Family == linuxAFInet6 {
-			pm.mu.Lock()
-			if pm.ipv6Binds == nil {
-				pm.ipv6Binds = make(map[uint16]bool)
-			}
-			pm.ipv6Binds[e.OrigAppPort] = true
-			pm.mu.Unlock()
-		}
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
 	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
@@ -399,15 +385,19 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 	}
 	// The forwarder listens on IPv4 only, so its bind does not find a
 	// listener that holds the port on IPv6 alone ([::1]:P, or [::]:P with
-	// IPV6_V6ONLY). The hold takes an IPv6 app's IPv6 calls for the whole
-	// run, so for one, check IPv6 too: the app's own bind would have failed
-	// there without keploy.
-	if held && h.pm.appBoundIPv6(origPort) {
-		if perr := ingressIPv6Probe(origPort); errors.Is(perr, syscall.EADDRINUSE) {
-			_ = listener.Close()
-			return h.yieldIngressPort(origPort, newPort, "IPv6", perr)
-		} else if perr != nil {
-			logger.Debug("could not check the application's port for an IPv6 listener; holding it", zap.Uint16("port", origPort), zap.Error(perr))
+	// IPV6_V6ONLY). The hold takes the port's IPv6 calls for the whole run
+	// where the app's sockets take IPv6 (an IPv6 socket on :: or on an IPv6
+	// address; not one on a v4-mapped address, which takes IPv4 only), so
+	// check each of those addresses as the app's own bind did: without
+	// keploy, that bind would have failed there.
+	if held {
+		for _, addr := range h.pm.appIPv6Binds(origPort) {
+			if perr := ingressIPv6Probe(addr, origPort); errors.Is(perr, syscall.EADDRINUSE) {
+				_ = listener.Close()
+				return h.yieldIngressPort(origPort, newPort, "IPv6", fmt.Errorf("bind [%s]:%d: %w", addr, origPort, perr))
+			} else if perr != nil {
+				logger.Debug("could not check the application's port for an IPv6 listener; holding it", zap.Uint16("port", origPort), zap.Stringer("address", addr), zap.Error(perr))
+			}
 		}
 	}
 
@@ -508,9 +498,6 @@ var errIngressPortYielded = errors.New("another listener holds the application's
 // without IPv6.
 var ingressIPv6Probe = probeIPv6Port
 
-// linuxAFInet6 is AF_INET6 as the Linux bind events carry it.
-const linuxAFInet6 = 10
-
 // yieldIngressPort leaves the whole of the app's port orig to the listener
 // that holds it on family (keploy's bind there failed with err): the hold
 // stops taking any of the port's calls, which are then the kernel's, as
@@ -523,12 +510,20 @@ func (h *goTCPIngressHook) yieldIngressPort(orig, newPort uint16, family string,
 	return fmt.Errorf("%w: %w", errIngressPortYielded, err)
 }
 
-// appBoundIPv6 is whether the app's bind of orig, as its bind event said,
-// was an IPv6 socket's.
-func (pm *IngressProxyManager) appBoundIPv6(orig uint16) bool {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	return pm.ipv6Binds[orig]
+// appIPv6Binds is the IPv6 addresses the app's binds of orig take calls on,
+// which the hold takes the port's IPv6 calls on (IngressPortHolder's
+// AppIPv6Binds). When the hooks cannot say, it is :: (all of IPv6): a hold
+// must never take calls from a listener keploy does not own.
+func (pm *IngressProxyManager) appIPv6Binds(orig uint16) []netip.Addr {
+	if pm.portHolder == nil {
+		return nil
+	}
+	addrs, err := pm.portHolder.AppIPv6Binds(orig)
+	if err != nil {
+		pm.logger.Debug("could not read which IPv6 addresses the application's binds of the port take; checking all of IPv6", zap.Uint16("port", orig), zap.Error(err))
+		return []netip.Addr{netip.IPv6Unspecified()}
+	}
+	return addrs
 }
 
 // ingressTargetWait is StartIngress's wait for the app to listen on its moved
