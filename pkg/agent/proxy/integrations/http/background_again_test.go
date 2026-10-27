@@ -13,6 +13,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/variables"
 )
 
 // againDb is gateDb whose open test's marked background recordings that
@@ -111,5 +112,48 @@ func TestABackgroundCallMadeAgainInItsWindowIsAnsweredAgain(t *testing.T) {
 	status, _, r = answerOf(t, store([]*models.Mock{tick}, tick), addr, raw)
 	if status != 502 || r.Answer != "" {
 		t.Fatalf("with the switch off a background call made again got %d, reported %+v; want the miss main makes", status, r)
+	}
+}
+
+// againVarDb is a store whose open test keeps a variable table and whose
+// marked background recordings answered (integrations.AnsweredBackgroundReader).
+type againVarDb struct {
+	mockMemDb
+	marked []*models.Mock
+	table  variables.Table
+}
+
+func (d *againVarDb) AnsweredBackground() []*models.Mock { return d.marked }
+func (d *againVarDb) Variables() *variables.Table        { return &d.table }
+
+// A marked recording that declares a variable is answered again on a copy of
+// the test's bindings: the background work's answer is not the test's, so
+// the test's table is as it was (nothing bound, its generation unchanged),
+// and a later call of the test that uses the variable is checked against the
+// test's own binding, never the timer's value.
+func TestABackgroundCallAnsweredAgainBindsNothingInTheTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	tick := at(varMock("mock-bg", "POST", "http://jobs/jobs/sweep", `{"runId":"run-rec-1"}`, 200, `{"runId":"run-rec-1"}`,
+		models.MockVariables{"runId": bindV("run-rec-1", "body.runId", "body.runId")}), 1)
+	db := &againVarDb{marked: []*models.Mock{tick}}
+	gen := db.table.Gen()
+
+	got := newHTTP().backgroundAgain(context.Background(), liveReq("POST", "/jobs/sweep", `{"runId":"run-live-7"}`), db, nil, nil, nil, true, false)
+	if got == nil || got.Name != "mock-bg" {
+		t.Fatalf("the timer's call made again was answered by %v; want mock-bg", got)
+	}
+	if b, bound := db.table.Lookup("runId"); bound || db.table.Gen() != gen {
+		t.Fatalf("answering the background call again bound %+v in the test's table (gen %d, was %d); want it unchanged", b, db.table.Gen(), gen)
+	}
+
+	// The same recording as the test's own call binds: the row's fixture is
+	// one whose answer would bind.
+	own := &varDb{perTest: []*models.Mock{at(varMock("mock-own", "POST", "http://jobs/jobs/sweep", `{"runId":"run-rec-1"}`, 200, `{"runId":"run-rec-1"}`,
+		models.MockVariables{"runId": bindV("run-rec-1", "body.runId", "body.runId")}), 1)}}
+	if ok, _, _ := matchVar(t, newHTTP(), own, liveReq("POST", "/jobs/sweep", `{"runId":"run-live-7"}`)); !ok {
+		t.Fatal("the test's own recording did not answer the call")
+	}
+	if b, bound := own.table.Lookup("runId"); !bound || b.Value != "run-live-7" {
+		t.Fatalf("the test's own call bound %+v (%v); want runId = run-live-7", b, bound)
 	}
 }
