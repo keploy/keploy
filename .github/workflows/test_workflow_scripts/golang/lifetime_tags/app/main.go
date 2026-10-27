@@ -21,6 +21,19 @@
 //	GET  /quote?qty=N   the rate, a count of the orders
 //	GET  /orders/count  a count of the orders
 //	GET  /healthz       nothing
+//
+// With SHOP_SETTINGS_BY_KEY=1 settings are read with one prepared statement,
+// SELECT k, v FROM settings WHERE k = ?: at startup, before any request, the
+// boot limit and then the boot retries, and on first use the tax rate. Each
+// read checks that the row it got is its key's. Between post-orders-1 and the
+// next request it reads the boot retries again: the recording lane signals
+// it (SIGUSR1, to the pid the app writes to SHOP_PIDFILE) once post-orders-1
+// is answered, and waits for the read before it sends the next request; with
+// no signal (a replay) GET /profile makes the read first, before it checks the
+// reads made so far, so a wrong startup read does not hide it. With
+// SHOP_BETWEEN_ON_SIGNAL_ONLY=1 the read is made on the signal alone. A read
+// that got another key's row is logged, and every request but GET /healthz is
+// then answered 500, naming it.
 package main
 
 import (
@@ -32,9 +45,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -42,6 +57,16 @@ import (
 type app struct {
 	db       *sql.DB
 	upstream string
+	byKey    bool // SHOP_SETTINGS_BY_KEY=1: settings read by settingByKey
+	// SHOP_BETWEEN_ON_SIGNAL_ONLY=1: the between-tests read is made on
+	// SIGUSR1 alone, never by GET /profile.
+	betweenOnSignalOnly bool
+
+	// wrongRead is the first settings read, by key, that got another key's
+	// row (or failed); between is the read made between two tests.
+	wrongMu   sync.Mutex
+	wrongRead error
+	between   sync.Once
 
 	mu    sync.Mutex
 	token string
@@ -51,6 +76,7 @@ type app struct {
 func main() {
 	dsn := getenv("SHOP_DSN", "root:password@tcp(127.0.0.1:3306)/shop")
 	upstream := getenv("SHOP_UPSTREAM", "http://127.0.0.1:9096")
+	byKey := os.Getenv("SHOP_SETTINGS_BY_KEY") == "1"
 
 	// Startup: the configuration the app runs with, from the auth service.
 	var boot struct {
@@ -65,13 +91,30 @@ func main() {
 	if err != nil {
 		log.Fatalf("open: %v", err)
 	}
-	for _, stmt := range []string{
+	schema := []string{
 		`CREATE TABLE IF NOT EXISTS orders (id BIGINT AUTO_INCREMENT PRIMARY KEY, qty INT NOT NULL, total INT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS settings (k VARCHAR(32) PRIMARY KEY, v INT NOT NULL)`,
 		`INSERT IGNORE INTO settings (k, v) VALUES ('tax_rate', 3)`,
-	} {
+	}
+	if byKey {
+		schema = append(schema, `INSERT IGNORE INTO settings (k, v) VALUES ('boot_limit', 7), ('boot_retries', 5)`)
+	}
+	for _, stmt := range schema {
 		if _, err := setup.Exec(stmt); err != nil {
 			log.Fatalf("schema: %v", err)
+		}
+	}
+	a := &app{upstream: upstream, byKey: byKey, betweenOnSignalOnly: os.Getenv("SHOP_BETWEEN_ON_SIGNAL_ONLY") == "1"}
+	if byKey {
+		// Startup, before any request: two settings, by the statement the
+		// tax rate is read with later.
+		for _, key := range []string{"boot_limit", "boot_retries"} {
+			v, err := setting(context.Background(), setup, key)
+			if err != nil {
+				a.wrong(fmt.Errorf("startup: %w", err))
+				continue
+			}
+			log.Printf("startup setting %s = %d", key, v)
 		}
 	}
 	_ = setup.Close()
@@ -85,16 +128,30 @@ func main() {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-	a := &app{db: db, upstream: upstream}
+	a.db = db
+	if byKey {
+		if f := os.Getenv("SHOP_PIDFILE"); f != "" {
+			if err := os.WriteFile(f, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+				log.Fatalf("pid file: %v", err)
+			}
+		}
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGUSR1)
+		go func() {
+			for range sig {
+				a.between.Do(a.betweenRead)
+			}
+		}()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("POST /orders", a.createOrder)
-	mux.HandleFunc("GET /profile", a.profile)
-	mux.HandleFunc("GET /quote", a.quote)
-	mux.HandleFunc("GET /orders/count", a.count)
+	mux.HandleFunc("POST /orders", a.checked(a.createOrder))
+	mux.HandleFunc("GET /profile", a.betweenFirst(a.checked(a.profile)))
+	mux.HandleFunc("GET /quote", a.checked(a.quote))
+	mux.HandleFunc("GET /orders/count", a.checked(a.count))
 	mux.HandleFunc("GET /pool", pool(dsn))
 
 	addr := getenv("SHOP_ADDR", "127.0.0.1:8096")
@@ -129,10 +186,87 @@ func (a *app) getRate(r *http.Request) (int, error) {
 	if a.rate != 0 {
 		return a.rate, nil
 	}
+	if a.byKey {
+		rate, err := setting(r.Context(), a.db, "tax_rate")
+		if err != nil {
+			return 0, err
+		}
+		a.rate = rate
+		return a.rate, nil
+	}
 	if err := a.db.QueryRowContext(r.Context(), `SELECT v FROM settings WHERE k = 'tax_rate'`).Scan(&a.rate); err != nil {
 		return 0, fmt.Errorf("read the tax rate: %w", err)
 	}
 	return a.rate, nil
+}
+
+// wrong records a settings read that got another key's row, or failed.
+func (a *app) wrong(err error) {
+	log.Printf("%v", err)
+	a.wrongMu.Lock()
+	defer a.wrongMu.Unlock()
+	if a.wrongRead == nil {
+		a.wrongRead = err
+	}
+}
+
+func (a *app) wrongErr() error {
+	a.wrongMu.Lock()
+	defer a.wrongMu.Unlock()
+	return a.wrongRead
+}
+
+// checked answers 500, naming it, once a settings read got another key's row.
+func (a *app) checked(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := a.wrongErr(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		h(w, r)
+	}
+}
+
+// betweenFirst makes the between-tests read, if no signal made it (a replay),
+// before h: before checked looks at the reads made so far, so the read is made,
+// and logged, even after a wrong startup read.
+func (a *app) betweenFirst(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a.byKey && !a.betweenOnSignalOnly {
+			a.between.Do(a.betweenRead)
+		}
+		h(w, r)
+	}
+}
+
+// betweenRead reads the boot retries again, between two tests.
+func (a *app) betweenRead() {
+	v, err := setting(context.Background(), a.db, "boot_retries")
+	if err != nil {
+		a.wrong(fmt.Errorf("between tests: %w", err))
+		return
+	}
+	log.Printf("between-tests setting boot_retries = %d", v)
+}
+
+// settingByKey reads one setting. With arguments the driver prepares it
+// (COM_STMT_PREPARE, then COM_STMT_EXECUTE with the key, COM_STMT_CLOSE).
+const settingByKey = `SELECT k, v FROM settings WHERE k = ?`
+
+// setting is key's value, read by settingByKey on db: a row of another key
+// is another read's answer, and an error.
+func setting(ctx context.Context, db *sql.DB, key string) (int, error) {
+	var (
+		k string
+		v int
+	)
+	if err := db.QueryRowContext(ctx, settingByKey, key).Scan(&k, &v); err != nil {
+		return 0, fmt.Errorf("read the setting %s: %w", key, err)
+	}
+	if k != key {
+		return 0, fmt.Errorf("read the setting %s: got the row of %s (value %d)", key, k, v)
+	}
+	return v, nil
 }
 
 func (a *app) userOf(token string) (string, error) {

@@ -964,6 +964,18 @@ func (m *MockManager) InRecordedTestWindow(t time.Time) (inside, known bool) {
 	return s.Contains(t), true
 }
 
+// RecordedWindowIndex is the index of the last recorded test window
+// (SeedRecordedWindows) that starts at or before t, -1 before the first or
+// for a zero t; known is false when the replay seeded none
+// (integrations.RecordedWindowIndex).
+func (m *MockManager) RecordedWindowIndex(t time.Time) (index int, known bool) {
+	s := m.testWindows.Load()
+	if s.Len() == 0 {
+		return -1, false
+	}
+	return s.CurrentIndex(t), true
+}
+
 // SameRecordedTestWindow reports whether a and b were recorded inside one
 // recorded test's window; known is false when the replay seeded none.
 func (m *MockManager) SameRecordedTestWindow(a, b time.Time) (same, known bool) {
