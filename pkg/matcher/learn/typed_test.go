@@ -2,6 +2,8 @@ package learn
 
 import (
 	"fmt"
+	"math/rand"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -1999,9 +2001,8 @@ func TestATypedInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 // window is the same whichever value the full round read, and a stamp
 // 400 ms before its call's span is refused under each. A text one and a
 // time of day the same. A value the application cut to the second (both
-// whole seconds) is learned at the second, the unit above its encoding,
-// whatever more the two share (7 s, or 2 s), and every replay refuses it,
-// naming the cut.
+// whole seconds) is refused at learn, naming the second's cut, whatever
+// more the two share (7 s, or 2 s).
 func TestAPlainClockReadsResolutionIsItsEncodingsNotAChanceGrain(t *testing.T) {
 	const p = "body.u.processed_at"
 	ms := time.Millisecond
@@ -2059,16 +2060,13 @@ func TestAPlainClockReadsResolutionIsItsEncodingsNotAChanceGrain(t *testing.T) {
 	if got := readRes(24*time.Hour, 48*time.Hour); got != 24*time.Hour {
 		t.Errorf("readRes of a day's encoding sharing two days = %v; want the day", got)
 	}
-	// Cut to the second: 7 s shared, or 2 s, learned at the second alike,
-	// and refused at replay naming the cut.
+	// Cut to the second: 7 s shared, or 2 s, refused at learn alike, naming
+	// the second's cut (cutWhy), so no replay of the recording passes.
 	sec := time.Unix(base.Unix()/7*7+7, 0).UTC()
 	for _, l := range []time.Time{sec.Add(63 * time.Second), sec.Add(62 * time.Second)} {
-		o := learn(sec, l)
-		if o.Res != time.Second {
-			t.Errorf("cut to the second, %v then %v (sharing %v): Res = %v; want 1s", sec, l, sharedGrain(sec, l), o.Res)
-		}
-		if ok, why := CheckClockRead(p, o, typed(now.Add(time.Second)), Span{From: now.Add(time.Second - 5*ms), To: now.Add(time.Second + 5*ms)}, true); ok || !strings.Contains(why, "the application cuts its value") {
-			t.Errorf("cut to the second, at replay: %v (%s); want refused naming the cut", ok, why)
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(typed(l)), shape(typed(sec)), sec.Add(ms), nil, nil, nil, nil)[0]
+		if ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != cutWhy(time.Second, ms) {
+			t.Errorf("cut to the second, %v then %v (sharing %v): %s Read=%+v (%s); want refused naming the 1s cut", sec, l, sharedGrain(sec, l), ln.Kind, ln.Read, ln.Why)
 		}
 	}
 }
@@ -2080,14 +2078,14 @@ func TestAPlainClockReadsResolutionIsItsEncodingsNotAChanceGrain(t *testing.T) {
 // never coarser because one of them happened to end in zeros, and a
 // nine-digit replay value passes. A replay's value with fewer digits passes
 // where it is the same instant at its own precision (the writer dropped its
-// zeros; ruled 2026-10-27). Two values that both end in zeros at a unit are
-// read at it, and a replay value with more digits is refused as a cut (a
-// stated limit: the same at every replay of that recording). A value the
-// application does cut is still refused naming the cut: written with nine
-// digits on both sides, with three and six, or as an epoch in seconds with
-// a fraction (read exactly, never through a float); and so is a cut value
-// of a form whose layout fixes its resolution (an epoch in nanoseconds, a
-// $date), wherever its replay value falls.
+// zeros, 2026-10-27). Two values that both end in zeros at a step of a
+// millisecond or finer are read at it, and a replay reads the cut by its
+// own value: one that shows none is checked at its own resolution, one that
+// shows a cut of a millisecond or finer at that cut. A value the
+// application cuts to the second is refused at learn naming the cut:
+// written with nine digits on both sides, with three and six, as a time of
+// day, or as a $date; and an epoch in seconds with a fraction is read
+// exactly, never through a float.
 func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T) {
 	const p = "body.at"
 	str := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
@@ -2100,6 +2098,15 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 			t.Fatalf("%s then %s: %s Read=%+v (%s); want a plain read of the clock", rec, live, ln.Kind, ln.Read, ln.Why)
 		}
 		return o
+	}
+	// refused asserts the learn step refuses rec then live, naming cut, the
+	// coarse cut both show above enc, the finer of their encodings (cutWhy).
+	refused := func(what, rec, live string, cut, enc time.Duration) {
+		t.Helper()
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: str(live)}}, Shape{Leaves: map[string]Leaf{p: str(rec)}}, call, nil, nil, nil, nil)[0]
+		if want := cutWhy(cut, enc); ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != want || want == "" {
+			t.Errorf("%s, %s then %s: %s Read=%+v (%s); want refused at learn naming the %v cut above %v", what, rec, live, ln.Kind, ln.Read, ln.Why, cut, enc)
+		}
 	}
 	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
 	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
@@ -2123,41 +2130,90 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 		check(what+", before the span", o, "2026-10-28T07:29:59.995123456Z", false, "it changed")
 	}
 	// Both values happened to end in zeros: learned at the microsecond
-	// their digits show; a six-digit replay value passes, a nine-digit one
-	// is refused as a cut (the stated limit), never passed.
+	// their digits show. A replay reads the cut by its own value: a
+	// nine-digit value that is no whole microsecond shows none and is
+	// checked at its own nanosecond, one that is one is checked at the
+	// microsecond; neither is refused as a cut, and one before the span is
+	// refused as changed.
 	both := learn(six, "2026-10-27T03:31:02.032456Z")
 	if both.Res != time.Microsecond {
 		t.Errorf("both values with six digits: Res = %v; want 1µs", both.Res)
 	}
 	check("both values ending in 000ns", both, "2026-10-28T07:30:00.005123Z", true, "")
-	check("both values ending in 000ns, nine digits", both, "2026-10-28T07:30:00.005123456Z", false, "the application cuts its value")
-	// Cut to the second, nine digits on both sides: the cut is learned (the
-	// microsecond above the nanosecond) and a replay value that is cut so
-	// too is refused naming it, wherever in the span its read fell.
-	cut := learn("2026-10-27T03:30:00.000000000Z", "2026-10-27T03:31:02.000000000Z")
-	if cut.Res != time.Microsecond {
-		t.Errorf("cut to the second with nine digits: Res = %v; want the 1µs cut", cut.Res)
+	check("both values ending in 000ns, nine digits", both, "2026-10-28T07:30:00.005123456Z", true, "")
+	check("both values ending in 000ns, nine digits ending in 000ns", both, "2026-10-28T07:30:00.005123000Z", true, "")
+	check("both values ending in 000ns, nine digits, before the span", both, "2026-10-28T07:29:59.999999999Z", false, "it changed")
+	// Cut to the second, nine digits on both sides: the cut (the coarsest
+	// step both values are whole multiples of) is coarser than a
+	// millisecond, so the learn step refuses it, naming it, and no replay of
+	// the recording passes, wherever its read fell.
+	refused("cut to the second with nine digits", "2026-10-27T03:30:00.000000000Z", "2026-10-27T03:31:02.000000000Z", time.Second, time.Nanosecond)
+	// Cut to the second, written with three digits, then six: the same,
+	// above the finer of the two encodings.
+	refused("cut to the second with three digits, then six", "2026-10-27T03:30:00.000Z", "2026-10-27T03:31:02.000000Z", time.Second, time.Microsecond)
+	// Cut to the minute, written to the second: refused naming the minute.
+	refused("cut to the minute, written to the second", "2026-10-27T03:30:00Z", "2026-10-27T03:32:00Z", time.Minute, time.Second)
+	// A replay reads a Res coarser than its value's encoding by the cut its
+	// own value shows, no coarser than Res (learned at an encoding coarser
+	// than the replay's, or by a keploy that kept coarse cuts): at a Res of
+	// an hour and a second's encoding, a value on a whole minute is refused
+	// naming the minute, one on a whole hour naming the hour, and one that
+	// is no whole minute shows no cut above its second and is checked at it.
+	hour := models.ClockOffset{Res: time.Hour, Layout: "iso-second"}
+	check("a Res of 1h, a replay value on a whole minute", hour, "2026-10-28T07:30:00Z", false, "the application cuts its value to 1m,")
+	check("a Res of 1h, a replay value on a whole hour", hour, "2026-10-28T07:00:00Z", false, "the application cuts its value to 1h,")
+	late := Span{From: now.Add(time.Second + 5*time.Millisecond), To: now.Add(time.Second + 25*time.Millisecond)}
+	if ok, why := CheckClockRead(p, hour, str("2026-10-28T07:30:01Z"), late, true); !ok {
+		t.Errorf("a Res of 1h, a replay value no whole minute: refused (%s); want it checked at its second, and passed", why)
 	}
-	check("cut to the second", cut, "2026-10-28T07:30:00.000000000Z", false, "the application cuts its value")
-	// Cut to the second, written with three digits, then six: the cut is
-	// the second above the coarser's millisecond, so a three-digit replay
-	// value cut so is refused too, not checked at its millisecond.
-	mixed := learn("2026-10-27T03:30:00.000Z", "2026-10-27T03:31:02.000000Z")
-	if mixed.Res != time.Second {
-		t.Errorf("cut to the second with three digits, then six: Res = %v; want the 1s cut", mixed.Res)
-	}
-	check("cut to the second, three digits", mixed, "2026-10-28T07:30:00.000Z", false, "the application cuts its value")
-	check("cut to the second, six digits", mixed, "2026-10-28T07:30:00.000000Z", false, "the application cuts its value")
 	// An epoch in seconds cut to the millisecond, with six digits: read
-	// exactly, both values are whole milliseconds, a cut.
+	// exactly, both values are whole milliseconds, a cut, which a replay
+	// checks at the cut: a value cut so passes in the millisecond its read
+	// fell in, and not in the one before.
 	if r := textClockRead("1793158200.123000", "1793158262.456000"); r == nil || r.Res != time.Millisecond {
 		t.Errorf("an epoch in seconds cut to the millisecond: %+v; want a Res of the 1ms cut", r)
 	} else {
-		check("an epoch in seconds cut to the millisecond", *r, "1793172600.005000", false, "the application cuts its value")
+		check("an epoch in seconds cut to the millisecond, checked at the cut", *r, "1793172600.005000", true, "")
+		check("an epoch in seconds cut to the millisecond, the one before the span", *r, "1793172599.999000", false, "it changed")
 	}
 	// A time of day and an epoch in seconds read their fraction the same.
 	if r := clockedDrifts().todRead(3*time.Hour+30*time.Minute+495123*time.Microsecond, 3*time.Hour+31*time.Minute+2032456789, time.Microsecond, time.Nanosecond, "time-second", "time-second", nil, call); r.Res != time.Nanosecond {
 		t.Errorf("a time of day with six digits, then nine: Res = %v; want 1ns", r.Res)
+	}
+	if r := clockedDrifts().todRead(3*time.Hour+30*time.Minute+2032456789, 3*time.Hour+31*time.Minute+495123*time.Microsecond, time.Nanosecond, time.Microsecond, "time-second", "time-second", nil, call); r.Res != time.Nanosecond {
+		t.Errorf("a time of day with nine digits, then six: Res = %v; want 1ns", r.Res)
+	}
+	// A time of day cut to the second, written with three digits and with
+	// six, in either order: its cut is the second, which the learn step
+	// refuses, naming it; a replay value at a Res of a second cut so is
+	// refused naming the cut in either form; one that is no whole second is
+	// checked at its own millisecond.
+	refused("a time of day cut to the second, three digits then six", "03:30:00.000", "03:31:02.000000", time.Second, time.Microsecond)
+	refused("a time of day cut to the second, six digits then three", "03:30:00.000000", "03:31:02.000", time.Second, time.Microsecond)
+	tods := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: time.UTC}
+	for _, pr := range [][2]time.Duration{{time.Millisecond, time.Microsecond}, {time.Microsecond, time.Millisecond}} {
+		r := clockedDrifts().todRead(3*time.Hour+30*time.Minute, 3*time.Hour+31*time.Minute+2*time.Second, pr[0], pr[1], "time-second", "time-second", nil, call)
+		if r.Res != time.Second {
+			t.Errorf("a time of day cut to the second, written at %v then %v: Res = %v; want the 1s cut", pr[0], pr[1], r.Res)
+			continue
+		}
+		for _, v := range []string{"07:30:00.000", "07:30:00.000000"} {
+			if ok, why := CheckClockRead(p, *r, str(v), tods, true); ok || !strings.Contains(why, "the application cuts its value to 1s") {
+				t.Errorf("a time of day cut to the second, written at %v then %v, replay %s: %v (%s); want refused naming the cut", pr[0], pr[1], v, ok, why)
+			}
+		}
+		if ok, why := CheckClockRead(p, *r, str("07:30:00.005"), tods, true); !ok {
+			t.Errorf("a time of day cut to the second, written at %v then %v, replay 07:30:00.005: refused (%s); want it checked at its millisecond, and passed", pr[0], pr[1], why)
+		}
+	}
+	// An epoch in seconds with nine digits on both sides is read exactly, to
+	// the nanosecond: no cut, and a nine-digit replay value in the span
+	// passes, one a nanosecond before it is refused.
+	if r := textClockRead("1793158200.495123456", "1793158262.032456789"); r == nil || r.Res != time.Nanosecond {
+		t.Errorf("an epoch in seconds with nine digits: %+v; want a Res of 1ns", r)
+	} else {
+		check("an epoch in seconds with nine digits", *r, "1793172600.005123456", true, "")
+		check("an epoch in seconds with nine digits, before the span", *r, "1793172599.999999999", false, "it changed")
 	}
 	if r := textClockRead("1793158200.495", "1793158262.032456"); r == nil || r.Res != time.Microsecond {
 		t.Errorf("an epoch in seconds with three digits, then six: %+v; want a Res of 1µs", r)
@@ -2172,22 +2228,311 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 		check("an epoch in seconds with one digit, after the span", *r, "1793172600.1", false, "it changed")
 	}
 	// A layout that fixes its resolution reads no fraction: a cut epoch in
-	// nanoseconds, and a cut $date, are refused at replay even where the
-	// replay's value is no whole number of the cut.
+	// nanoseconds is learned at its cut of a millisecond. A replay value
+	// that is no whole number of the cut shows none: it is checked at its
+	// own resolution and passes in the span; one cut to the millisecond is
+	// checked at it. A $date cut to the second is refused at learn, naming
+	// the cut.
 	ns := func(at time.Time) string { return strconv.FormatInt(at.UnixNano(), 10) }
 	sec := time.Date(2026, 10, 26, 9, 0, 0, 123000000, time.UTC)
-	if r := textClockRead(ns(sec), ns(sec.Add(FullRoundLead+7*time.Millisecond))); r == nil || r.Res != time.Microsecond {
-		t.Fatalf("a cut epoch in nanoseconds: %+v; want a Res of 1µs, a cut", r)
-	} else if ok, why := CheckClockRead(p, *r, str(ns(now.Add(5*time.Millisecond+7))), span, true); ok || !strings.Contains(why, "the application cuts its value") {
-		t.Errorf("a cut epoch in nanoseconds, a replay value no whole microsecond: %v (%s); want refused naming the cut", ok, why)
+	if r := textClockRead(ns(sec), ns(sec.Add(FullRoundLead+7*time.Millisecond))); r == nil || r.Res != time.Millisecond {
+		t.Fatalf("a cut epoch in nanoseconds: %+v; want a Res of the 1ms cut", r)
+	} else {
+		check("a cut epoch in nanoseconds, a replay value no whole microsecond", *r, ns(now.Add(5*time.Millisecond+7)), true, "")
+		check("a cut epoch in nanoseconds, a replay value cut so", *r, ns(now.Add(5*time.Millisecond)), true, "")
 	}
 	const tp = "body.at.$date.$numberLong"
 	typed := func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at, time.Millisecond) }
 	whole := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
 	ln := ClassifyIn(clockedDrifts(), []string{tp}, Shape{Leaves: map[string]Leaf{tp: typed(whole.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{tp: typed(whole)}}, whole.Add(time.Millisecond), nil, nil, nil, nil)[0]
-	if o, ok := ln.Clock(); !ok || o.Res != time.Second {
-		t.Fatalf("a cut $date: %s %+v,%v (%s); want a read at the second's cut", ln.Kind, o, ok, ln.Why)
-	} else if ok, why := CheckClockRead("at", o, typed(now.Add(5*time.Millisecond)), span, true); ok || !strings.Contains(why, "the application cuts its value") {
-		t.Errorf("a cut $date, a replay value no whole second: %v (%s); want refused naming the cut", ok, why)
+	if ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != cutWhy(time.Second, time.Millisecond) {
+		t.Errorf("a cut $date: %s Read=%+v (%s); want refused at learn naming the 1s cut", ln.Kind, ln.Read, ln.Why)
+	}
+}
+
+// clockWriters are the ways applications write a read of their clock as a
+// text or a number, each from the clock its runtime reads (the resolution
+// it truncates a read to), as recorded, in record's full round and at a
+// replay alike.
+var clockWriters = []struct {
+	name string
+	// cut is the cut the application makes coarser than a millisecond
+	// (to the second, to 10 ms), which the learn step refuses at every
+	// recording; 0 for none.
+	cut time.Duration
+	// chance: the two values of some recordings are whole microseconds by
+	// chance, a cut a replay reads by its own value.
+	chance bool
+	// msClock: a clock of milliseconds written with six or nine fixed
+	// digits, whose two values both fall on a whole 10 ms by chance in about
+	// one recording in a hundred: refused at learn, naming that cut.
+	msClock bool
+	// limit: a cut of 10 or 100 ms written at a resolution less than 1,000
+	// times finer (milliseconds), which the learn step cannot tell from a
+	// writer of milliseconds: a stated limit, whose verdict may turn on
+	// where its read fell. The row asserts only that no moved value passes.
+	limit bool
+	w     func(t time.Time) string
+}{
+	{name: "Go RFC3339Nano, a clock of nanoseconds", w: func(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }},
+	{name: "Java Instant.toString, a clock of microseconds", w: func(t time.Time) string { return javaInstant(t.Truncate(time.Microsecond)) }},
+	{name: "Java Instant.toString, a clock of nanoseconds", w: javaInstant},
+	{name: "Python json.dumps(time.time())", chance: true, w: pythonFloat},
+	{name: ".NET trimmed ticks (FFFFFFF)", chance: true, w: func(t time.Time) string { return t.Truncate(100).UTC().Format("2006-01-02T15:04:05.9999999Z07:00") }},
+	{name: `.NET DateTime.ToString("o"), seven digits`, chance: true, w: func(t time.Time) string { return t.Truncate(100).UTC().Format("2006-01-02T15:04:05.0000000Z07:00") }},
+	{name: "Jackson's numeric Instant, JDK 9-14 (a clock of microseconds)", w: func(t time.Time) string { return jacksonInstant(t.Truncate(time.Microsecond)) }},
+	{name: "Jackson's numeric Instant, JDK 8 (a clock of milliseconds)", msClock: true, w: func(t time.Time) string { return jacksonInstant(t.Truncate(time.Millisecond)) }},
+	{name: "nine digits, a clock of microseconds", w: func(t time.Time) string {
+		return t.Truncate(time.Microsecond).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	}},
+	{name: "nine digits, a clock of milliseconds", msClock: true, w: func(t time.Time) string {
+		return t.Truncate(time.Millisecond).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	}},
+	{name: "JavaScript Date.now()/1000", w: func(t time.Time) string {
+		return strconv.FormatFloat(float64(t.UnixMilli())/1000, 'f', -1, 64)
+	}},
+	{name: "JavaScript toISOString", w: func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }},
+	{name: "epoch seconds", w: func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }},
+	{name: "RFC 3339 to the second", w: func(t time.Time) string { return t.UTC().Format(time.RFC3339) }},
+	{name: "nine digits, cut to the second", cut: time.Second, w: func(t time.Time) string {
+		return t.Truncate(time.Second).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	}},
+	{name: "three digits, cut to the second", cut: time.Second, w: func(t time.Time) string { return t.Truncate(time.Second).UTC().Format("2006-01-02T15:04:05.000Z07:00") }},
+	{name: "Jackson's numeric Instant, cut to the second", cut: time.Second, w: func(t time.Time) string { return jacksonInstant(t.Truncate(time.Second)) }},
+	{name: "Python datetime.now().replace(microsecond=0).timestamp()", cut: time.Second, w: func(t time.Time) string { return pythonFloat(t.Truncate(time.Second)) }},
+	{name: "nine digits over a column of two fraction digits (cut to 10 ms)", cut: 10 * time.Millisecond, w: func(t time.Time) string {
+		return t.Truncate(10 * time.Millisecond).UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	}},
+	{name: "Python isoformat over a column of two fraction digits (cut to 10 ms)", cut: 10 * time.Millisecond, w: func(t time.Time) string { return pythonIsoformat(t.Truncate(10 * time.Millisecond)) }},
+	{name: "Python isoformat over a column of one fraction digit (cut to 100 ms)", cut: 100 * time.Millisecond, w: func(t time.Time) string { return pythonIsoformat(t.Truncate(100 * time.Millisecond)) }},
+	{name: `.NET DateTime.ToString("o") over a column of two fraction digits (cut to 10 ms)`, cut: 10 * time.Millisecond, w: func(t time.Time) string {
+		return t.Truncate(10 * time.Millisecond).UTC().Format("2006-01-02T15:04:05.0000000Z07:00")
+	}},
+	{name: "six digits over a column of four fraction digits (cut to 100 µs)", w: func(t time.Time) string {
+		return t.Truncate(100 * time.Microsecond).UTC().Format("2006-01-02T15:04:05.000000Z07:00")
+	}},
+	{name: "three digits over a column of two fraction digits (cut to 10 ms)", limit: true, w: func(t time.Time) string {
+		return t.Truncate(10 * time.Millisecond).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	}},
+}
+
+// pythonIsoformat is Python's datetime.isoformat of an aware UTC datetime:
+// six fraction digits, none on a whole second.
+func pythonIsoformat(t time.Time) string {
+	t = t.Truncate(time.Microsecond).UTC()
+	if t.Nanosecond() == 0 {
+		return t.Format("2006-01-02T15:04:05+00:00")
+	}
+	return t.Format("2006-01-02T15:04:05.000000+00:00")
+}
+
+// javaInstant is Java's Instant.toString: a fraction in groups of three
+// digits, as few as the value needs.
+func javaInstant(t time.Time) string {
+	ns, base := t.Nanosecond(), t.UTC().Format("2006-01-02T15:04:05")
+	switch {
+	case ns == 0:
+		return base + "Z"
+	case ns%1e6 == 0:
+		return base + fmt.Sprintf(".%03dZ", ns/1e6)
+	case ns%1e3 == 0:
+		return base + fmt.Sprintf(".%06dZ", ns/1e3)
+	}
+	return base + fmt.Sprintf(".%09dZ", ns)
+}
+
+// pythonFloat is an epoch in seconds as the shortest decimal that reads
+// back as its float64 (Python's repr, JavaScript's Number toString), with
+// ".0" on a whole second, as Python writes it.
+func pythonFloat(t time.Time) string {
+	s := strconv.FormatFloat(float64(t.UnixNano())/1e9, 'f', -1, 64)
+	if t.Nanosecond() == 0 {
+		s = strconv.FormatInt(t.Unix(), 10)
+	}
+	if !strings.Contains(s, ".") {
+		s += ".0"
+	}
+	return s
+}
+
+// jacksonInstant is Jackson's numeric Instant (WRITE_DATES_AS_TIMESTAMPS
+// with WRITE_DATE_TIMESTAMPS_AS_NANOSECONDS): seconds, and nine digits.
+func jacksonInstant(t time.Time) string { return fmt.Sprintf("%d.%09d", t.Unix(), t.Nanosecond()) }
+
+// A replay's verdict on a plain read of the clock never turns on where the
+// replay's own read fell: for each writer, 1,000 recordings (their two
+// values one lead apart, at times a seeded generator picks) are learned as
+// record's learn step learns them (ClassifyIn, no call window), and each
+// one learned is replayed five times with the same writer's value of a read
+// in the replay's span. Every writer that does not cut its value coarser
+// than a millisecond passes every replay: a Python float epoch and .NET's
+// trimmed and fixed ticks, whose two values are both whole microseconds in
+// a few recordings in a hundred (the row counts them), are checked at the
+// replay's own value (a value that shows no cut at its own resolution, one
+// that shows a cut of a microsecond at it); Jackson's nine digits from a
+// clock of microseconds or milliseconds, which shows that cut in every
+// value, at the cut. A value cut coarser than a millisecond (to the second,
+// or to 10 or 100 ms written with six, seven or nine digits) is refused at
+// learn at every recording, naming the cut its two values show, so no
+// replay of it passes and none flips. A writer of milliseconds with nine
+// fixed digits has both values on a whole 10 ms in about one recording in
+// a hundred, refused the same (a stated limit), and every learn refusal
+// names a cut both values show. A value moved a second either way, or
+// 50 ms, is refused at every replay, but where its own form is coarse
+// enough to reach the span (a writer that drops trailing zeros wrote a
+// whole second or tenth: the exception of 2026-10-27, it stands for its
+// whole second or tenth). A cut of 10 ms written in milliseconds (a stated
+// limit) passes no moved value either.
+func TestAPlainClockReadsVerdictIsTheSameAtEveryReplayWhateverItsWriter(t *testing.T) {
+	const recordings, replays = 1000, 5
+	p := "body.at"
+	str := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
+	shape := func(v string) Shape { return Shape{Leaves: map[string]Leaf{p: str(v)}} }
+	base := time.Date(2026, 10, 27, 3, 0, 0, 0, time.UTC)
+	for _, wr := range clockWriters {
+		rng := rand.New(rand.NewSource(37))
+		var passed, refused, learnRefused, movedPassed, byChance int
+		var ex []string
+		for i := 0; i < recordings; i++ {
+			t0 := base.Add(time.Duration(rng.Int63n(int64(24 * time.Hour))))
+			t1 := t0.Add(FullRoundLead + time.Duration(rng.Int63n(int64(200*time.Millisecond))))
+			rec, live := wr.w(t0), wr.w(t1)
+			ln := ClassifyIn(clockedDrifts(), []string{p}, shape(live), shape(rec), t0.Add(time.Millisecond), nil, nil, nil, nil)[0]
+			r := textClockRead(rec, live)
+			if r == nil {
+				t.Fatalf("%s: %s then %s read as no clock read", wr.name, rec, live)
+			}
+			if ln.Kind == KindUnaccounted {
+				// Refused at learn: only naming a cut coarser than a
+				// millisecond that both values show (and, of a writer that
+				// cuts, at least its cut).
+				rt, _, _ := readClockText(rec)
+				lt, _, _ := readClockText(live)
+				if why := textCutWhy(rec, live, *r); why == "" || ln.Why != why || rt.UnixNano()%int64(r.Res) != 0 || lt.UnixNano()%int64(r.Res) != 0 || r.Res < wr.cut {
+					t.Fatalf("%s: %s then %s refused at learn (%s); want only a cut both values show, of at least %v", wr.name, rec, live, ln.Why, wr.cut)
+				}
+				learnRefused++
+				continue
+			}
+			o, ok := ln.Clock()
+			if !plainRead(ln) || !ok {
+				t.Fatalf("%s: %s then %s: %s Read=%+v (%s); want a plain read of the clock", wr.name, rec, live, ln.Kind, ln.Read, ln.Why)
+			}
+			if o.Res >= time.Microsecond {
+				byChance++
+			}
+			for j := 0; j < replays; j++ {
+				now := base.Add(48*time.Hour + time.Duration(rng.Int63n(int64(24*time.Hour))))
+				span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+				v := wr.w(now.Add(time.Duration(rng.Int63n(int64(20 * time.Millisecond)))))
+				ok, why := CheckClockRead(p, o, str(v), span, true)
+				if ClockReadHolds(o, str(v), span) != ok {
+					t.Fatalf("%s: ClockReadHolds and CheckClockRead disagree on %s (Res %v), replay %s", wr.name, rec, o.Res, v)
+				}
+				if ok {
+					passed++
+				} else {
+					refused++
+					if len(ex) < 3 {
+						ex = append(ex, fmt.Sprintf("%s then %s (Res %v), replay %s: %s", rec, live, o.Res, v, why))
+					}
+				}
+				for _, d := range []time.Duration{-time.Second, -50 * time.Millisecond, 50*time.Millisecond + 20*time.Millisecond, time.Second + 20*time.Millisecond} {
+					mv := wr.w(now.Add(d + time.Duration(rng.Int63n(int64(20*time.Millisecond)))))
+					at, res, _ := readClockText(mv)
+					if ok, _ := CheckClockRead(p, o, str(mv), span, true); ok && (!span.From.Before(at.Add(res)) || at.After(span.To)) {
+						movedPassed++
+						if len(ex) < 3 {
+							ex = append(ex, fmt.Sprintf("%s then %s (Res %v), a value moved %v, %s, passed", rec, live, o.Res, d, mv))
+						}
+					}
+				}
+			}
+		}
+		switch {
+		case movedPassed != 0:
+			t.Errorf("%s: %d moved values passed; want none: %q", wr.name, movedPassed, ex)
+		case wr.limit:
+		case wr.cut > 0 && learnRefused != recordings:
+			t.Errorf("%s: %d of %d recordings refused at learn, %d replays passed; want every recording refused, naming its cut: %q", wr.name, learnRefused, recordings, passed, ex)
+		case wr.cut == 0 && refused != 0:
+			t.Errorf("%s: %d of %d replays refused; want none: %q", wr.name, refused, passed+refused, ex)
+		case wr.msClock && (learnRefused == 0 || learnRefused > recordings/25):
+			t.Errorf("%s: %d of %d recordings refused at learn; want about one in a hundred (both values on a whole 10 ms)", wr.name, learnRefused, recordings)
+		case wr.cut == 0 && !wr.msClock && learnRefused != 0:
+			t.Errorf("%s: %d of %d recordings refused at learn; want none", wr.name, learnRefused, recordings)
+		case wr.chance && byChance == 0:
+			t.Errorf("%s: no recording's two values fell on a unit by chance; the row drives no such read", wr.name)
+		}
+	}
+}
+
+// Two values of a writer that does not cut its value can both fall on a
+// step above their encoding by chance: a writer of seconds on a whole
+// minute (one recording in 3,600), of minutes on a whole hour, of
+// milliseconds on a whole second (about one in a million). The learn step
+// refuses each such recording, naming the cut both values show, so its
+// verdict is that one refusal, the confirming round's first, never one a
+// replay's own read turns: a recording whose values show no such cut is
+// learned at its encoding, and every replay of it passes, its value on a
+// whole minute (or hour, or second) or not. A time of day its protocol
+// types, cut to the second, is refused the same.
+func TestAChanceCutIsOneVerdictPerRecordingNeverPerReplay(t *testing.T) {
+	const p = "body.at"
+	str := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
+	shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{p: l}} }
+	t0 := time.Date(2026, 10, 27, 3, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 10, 28, 7, 0, 0, 0, time.UTC)
+	for _, f := range []struct {
+		name     string
+		w        func(time.Time) string
+		enc, cut time.Duration
+	}{
+		{"epoch seconds", func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }, time.Second, time.Minute},
+		{"RFC 3339 to the second", func(t time.Time) string { return t.UTC().Format(time.RFC3339) }, time.Second, time.Minute},
+		{"an HTTP date", func(t time.Time) string { return t.UTC().Format(http.TimeFormat) }, time.Second, time.Minute},
+		{"a time of day to the second", func(t time.Time) string { return t.UTC().Format("15:04:05") }, time.Second, time.Minute},
+		{"an ISO date and time to the minute", func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04Z07:00") }, time.Minute, time.Hour},
+		{"epoch milliseconds", func(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }, time.Millisecond, time.Second},
+		{"JavaScript toISOString", func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }, time.Millisecond, time.Second},
+	} {
+		at := func(units int64) time.Time { return t0.Add(time.Duration(units) * f.enc) }
+		per := int64(f.cut / f.enc)
+		learn := func(r, l time.Time) Learned {
+			return ClassifyIn(clockedDrifts(), []string{p}, shape(str(f.w(l))), shape(str(f.w(r))), r.Add(f.enc), nil, nil, nil, nil)[0]
+		}
+		// Both on the cut: refused at learn, naming it.
+		if ln := learn(at(30*per), at(32*per)); ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != cutWhy(f.cut, f.enc) {
+			t.Errorf("%s, both values on a whole %v: %s Read=%+v (%s); want refused at learn naming the cut", f.name, f.cut, ln.Kind, ln.Read, ln.Why)
+		}
+		// One off it: learned at the encoding, and every replay passes,
+		// on the step or off it.
+		ln := learn(at(30*per), at(31*per+2))
+		o, ok := ln.Clock()
+		if !plainRead(ln) || !ok || o.Res != f.enc {
+			t.Errorf("%s, one value off a whole %v: %s Read=%+v (%s); want a plain read at %v", f.name, f.cut, ln.Kind, ln.Read, ln.Why, f.enc)
+			continue
+		}
+		for k := int64(0); k < 3*per && k < 5000; k++ {
+			v := now.Add(time.Duration(k) * f.enc)
+			span := Span{From: v.Add(-f.enc / 2), To: v.Add(f.enc / 2), Zone: time.UTC}
+			if ok, why := CheckClockRead(p, o, str(f.w(v)), span, true); !ok {
+				t.Errorf("%s, learned at %v, replay %s: refused (%s); want every replay passed", f.name, f.enc, f.w(v), why)
+				break
+			}
+		}
+	}
+	// A time of day its protocol types (a Postgres time of microseconds),
+	// cut to the second in both runs: refused naming the cut; one that is
+	// no whole second is learned.
+	const tp = "args.0"
+	tod := func(at time.Time) Leaf { return TimeOfDayLeaf(tp, tp, time.Duration(clockOfDay(at)), time.Microsecond) }
+	read := time.Date(2026, 10, 22, 11, 59, 30, 0, time.UTC)
+	call := read.Add(115 * time.Millisecond)
+	if ln := classifyZoned(nil, false, tp, tod(read), tod(read.Add(FullRoundLead).Truncate(time.Second)), call, nil); ln.Kind != KindUnaccounted || ln.Read != nil || ln.Why != cutWhy(time.Second, time.Microsecond) {
+		t.Errorf("a typed time of day cut to the second: %s Read=%+v (%s); want refused naming the 1s cut", ln.Kind, ln.Read, ln.Why)
+	}
+	if ln := classifyZoned(nil, false, tp, tod(read.Add(37123*time.Microsecond)), tod(read.Add(FullRoundLead+37123*time.Microsecond)), call, nil); !todRead(ln, "") || ln.Read.Res != time.Microsecond {
+		t.Errorf("a typed time of day of microseconds: %s Read=%+v (%s); want a read modulo a day at 1µs", ln.Kind, ln.Read, ln.Why)
 	}
 }

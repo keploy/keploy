@@ -283,24 +283,35 @@ func textClockRead(rec, live string) *models.ClockOffset {
 // textReadRes is the resolution a plain read of the clock written as a text
 // or a number (textClockRead, todRead) is learned at, from rres and lres,
 // the resolutions its two values' forms write, and grain, the granularity
-// the two share: the finer of rres and lres (readRes), never the coarser. A
-// fraction's digits bound the resolution its writer writes from above only:
-// a writer that drops a fraction's trailing zeros (Go's RFC3339Nano, Java's
-// Instant) writes ".495123" where its read fell on a whole microsecond, so
-// one value that happens to end in zeros must not coarsen it (a replay's
-// value written finer than it is refused as a cut, CheckClockRead). Two
-// values of a layout that fixes its resolution share it. Where the two are
-// a cut the application made (whole multiples of the unit above the finer),
-// the unit above the coarser (the finer's, where no unit is above the
-// coarser): a cut every replay refuses at either value's form
-// (CutCoarserThan), as one learned from two values of one form is.
+// the two share: readRes of the finer of rres and lres, never the coarser.
+// A fraction's digits bound the resolution its writer writes from above
+// only: a writer that drops a fraction's trailing zeros (Go's RFC3339Nano,
+// Java's Instant, a Python float) writes ".495123" where its read fell on a
+// whole microsecond, so one value that happens to end in zeros must not
+// coarsen it. Two values of a layout that fixes its resolution share it.
+// Where the two are both whole multiples of a unit above the finer, the
+// coarsest such unit (readRes): a cut every replay reads by its own value
+// (CheckClockRead), in either value's form.
 func textReadRes(rres, lres, grain time.Duration) time.Duration {
-	fine := min(rres, lres)
-	r := readRes(fine, grain)
-	if r == fine {
-		return r
+	return readRes(min(rres, lres), grain)
+}
+
+// textCutWhy is cutWhy of read, the plain read of a text or a number
+// recorded as rec and seen in record's full round as live (textClockRead,
+// or textTodRead where read's Layout writes a time of day), at the finer of
+// its two values' encodings (textReadRes): why the learn step refuses a
+// read whose two values show a cut coarser than a millisecond, "" where
+// they show none.
+func textCutWhy(rec, live string, read models.ClockOffset) string {
+	var rres, lres time.Duration
+	if models.LayoutTimeOfDay(read.Layout) {
+		_, rres, _, _ = textTimeOfDay(rec)
+		_, lres, _, _ = textTimeOfDay(live)
+	} else {
+		_, rres, _ = readClockText(rec)
+		_, lres, _ = readClockText(live)
 	}
-	return max(r, models.UnitAbove(max(rres, lres)))
+	return cutWhy(read.Res, min(rres, lres))
 }
 
 // textLayoutChangedWhy is why the learn step refuses a text or a number
@@ -636,16 +647,15 @@ func holdsAny(o models.ClockOffset, ats []time.Time, res time.Duration, from, to
 // the call's span on the application's clock (ClockSpanFrom), plus o's
 // offset, read at the resolution its own form writes and in the zone o's
 // Zone says, or in either of the two it names (clockReadIn;
-// models.ClockOffset.Holds; of a plain read, a read in s itself). False for
+// models.ClockOffset.Holds; of a plain read, a read in s itself, at the cut
+// of a millisecond or finer the value shows where o.Res is coarser than its
+// form: CheckClockRead). False for
 // a live value that reads as no instant (another type, a text that is not
 // one instant whole), one clockReadIn reads in no zone, and for every value
 // where s is no span (its From is zero): it fails closed.
 func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
-	ats, res, why := clockReadIn(o, live, s)
-	if why != "" {
-		return false
-	}
-	return holdsAny(o, ats, res, s.From, s.To)
+	ok, _ := CheckClockRead("", o, live, s, true)
+	return ok
 }
 
 // CheckClockRead is a replay's check of live, the leaf its call carries at
@@ -657,9 +667,30 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // application's clock at the call; the value is no instant keploy reads in
 // o's zone (clockReadIn: one that names its zone where the learn step read a
 // wall clock of no zone, or one of the application's zone, which s does not
-// carry); it is cut coarser than the learn step read it (o.Res a cut coarser than the
-// value's encoding, models.ClockOffset.CutCoarserThan), so it would pass or
-// fail by where its read fell in the cut; or it is no such read: it changed.
+// carry); it shows a cut coarser than a millisecond; or it is no such read:
+// it changed. Where o is a plain read whose Res is above the resolution the
+// value's encoding writes (a cut the learn step's two values showed, of a
+// millisecond or finer, or an encoding coarser than this value's), the cut
+// is the value's own: the coarsest step above its encoding, no coarser than
+// o.Res, it is a whole multiple of (models.CutOf, ownReading). A value that
+// shows none is checked at its own resolution: the learn step's two values
+// fell on a step by chance (a Python float epoch's, or .NET's trimmed
+// ticks, both whole microseconds), and its own resolution is the stricter
+// check. One that shows a cut of a millisecond or finer is checked at that
+// cut, as standing for its whole cut: a read it holds may lie up to one cut
+// before the call's span (a Java Instant written with nine digits from a
+// clock of microseconds or milliseconds). One that shows a coarser cut is
+// refused, naming it: checked at its encoding's resolution, a value the
+// application cuts so would pass or fail by where its read fell in the cut.
+// The learn step learns no cut coarser than a millisecond (cutWhy, which
+// refuses the recording), so a Res above a millisecond is an encoding's
+// (epoch seconds, a time to the second), and a value written finer than it
+// shows a coarser cut only where it falls on one: a writer that drops
+// trailing zeros, whose two learned values both fell on a whole second
+// (about one recording in a million at a millisecond's encoding, fewer at a
+// finer one), then has one replay in a thousand refused. An offset's Res is
+// never a cut (the learn step refuses one), and a value against one is
+// refused as before.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they
 // share no offset, or read it in different zones) is refused whatever the
 // call carries, saying so, and so is one of a Zone this keploy does not
@@ -684,13 +715,37 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if why != "" {
 		return false, learned + why
 	}
-	if o.CutCoarserThan(res) {
+	if !o.Plain() && o.CutCoarserThan(res) {
 		return false, learned + ", at a resolution of " + models.ShortDuration(o.Res) + " (both of the learn step's values were whole multiples of it), coarser than the " + models.ShortDuration(res) + " this value's encoding writes: the application cuts its value, and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+	}
+	if o.Plain() && o.Res > res {
+		c := models.CutOf(ownReading(o, live), res, o.Res)
+		if c > time.Millisecond {
+			return false, learned + ", and the value this call carries is a whole multiple of " + models.ShortDuration(c) + ", as both of the learn step's values were, coarser than the " + models.ShortDuration(res) + " its encoding writes: the application cuts its value to " + models.ShortDuration(c) + ", and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
+		}
+		// A cut of a millisecond or finer the value shares is checked at
+		// that cut; a value that shares none, at its own resolution.
+		res = max(res, c)
+		o.Res = res
 	}
 	if holdsAny(o, ats, res, s.From, s.To) {
 		return true, ""
 	}
 	return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed"
+}
+
+// ownReading is live, a replay's value at a place the learn step learned a
+// plain read of the clock at as o, read as the learn step reads two values'
+// grain (readRes): a time of day in nanoseconds into its day (todGrain), any
+// other instant in nanoseconds from the Unix epoch (sharedGrain), a wall
+// clock of no zone read in UTC. Only for a value clockReadIn read.
+func ownReading(o models.ClockOffset, live Leaf) int64 {
+	if models.LayoutTimeOfDay(o.Layout) {
+		tod, _, _, _ := timeOfDayOf(live)
+		return int64(tod)
+	}
+	at, _, _, _ := clockReadOf(live)
+	return at.UnixNano()
 }
 
 // ClockSpanFrom is the span on the application's clock in which the call
