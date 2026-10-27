@@ -63,6 +63,7 @@ func (h *countHooks) WaitAppConnsSettled(ctx context.Context, n uint64) error {
 		if settled >= n {
 			return nil
 		}
+		blockedHere()
 		select {
 		case <-changed:
 		case <-ctx.Done():
@@ -148,6 +149,7 @@ func (s *settledProxy) WaitAccepted(ctx context.Context, n uint64) error {
 		if acc, _ := s.Accepted(); acc >= n {
 			return nil
 		}
+		blockedHere()
 		select {
 		case <-changed:
 		case <-ctx.Done():
@@ -173,6 +175,9 @@ func (s *settledProxy) InFlightPending(bool) int {
 	defer s.smu.Unlock()
 	if s.inWork != nil {
 		s.workOnce.Do(func() { close(s.inWork) })
+	}
+	if s.pending > 0 {
+		blockedHere()
 	}
 	return s.pending
 }
@@ -594,9 +599,6 @@ type scopedProxy struct {
 	gaveUp       []uint64
 	behind       []string
 	charged      int
-	// working, when set, is closed at the first look at a scope's state.
-	working chan struct{}
-	wonce   sync.Once
 }
 
 func (s *scopedProxy) InFlightScope() coreAgent.InFlightScope {
@@ -609,10 +611,11 @@ func (s *scopedProxy) InFlightScope() coreAgent.InFlightScope {
 type proxyScope struct{ s *scopedProxy }
 
 func (f proxyScope) State(bool) (int, []string) {
-	if f.s.working != nil {
-		f.s.wonce.Do(func() { close(f.s.working) })
+	n := int(f.s.scopePending.Load())
+	if n > 0 {
+		blockedHere()
 	}
-	return int(f.s.scopePending.Load()), nil
+	return n, nil
 }
 
 func (f proxyScope) PendingProgress(bool) map[uint64]uint64 {
@@ -714,40 +717,24 @@ func TestWithTheSwitchOffASettleWaitsForEveryConnection(t *testing.T) {
 // it held, and the next test's begin does not wait for it again.
 func TestAnEndThatGivesUpOnAConnectionCarriesItAndTheNextBeginGoesOn(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	wake, woken := make(chan struct{}), make(chan struct{})
-	prevWake, prevWoken, prevLimit := settleWake, settleWoken, settleStallLimit
-	settleWake = func(context.Context) (<-chan struct{}, func()) { return wake, func() {} }
-	settleWoken = func() { woken <- struct{}{} }
-	settleStallLimit = 3
-	t.Cleanup(func() { settleWake, settleWoken, settleStallLimit = prevWake, prevWoken, prevLimit })
+	w := stallWake(t)
 	a, h, p := settleAgent()
-	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}, working: make(chan struct{})}
+	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}}
 	sp.scopePending.Store(1)
 	a.Proxy = sp
 	h.established = 1
 	p.set(1, 0)
-	done := make(chan error, 1)
-	go func() { done <- a.settledSince(context.Background(), true, "TestEnd") }()
-	<-sp.working
-	var err error
-	for i := 0; ; i++ {
-		require.LessOrEqual(t, i, settleStallLimit+1, "the end still waited for a connection that did not move")
-		select {
-		case err = <-done:
-		case wake <- struct{}{}:
-			<-woken
-			continue
-		}
-		break
-	}
+	wakes, err := w.run(func() error { return a.settledSince(context.Background(), true, "TestEnd") }, nil)
 	require.ErrorIs(t, err, errNoProgress)
+	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
 	require.Contains(t, err.Error(), "connection 7 held 1 request(s) its parser had read and not answered", "the test's reason names the connection and what it held")
 	sp.fmu.Lock()
 	require.Equal(t, []uint64{7}, sp.gaveUp, "the watchdog gave up on the connection it found stuck")
 	sp.fmu.Unlock()
 	// The next test's begin: the connection given up on holds nothing.
-	_, err = a.settle(context.Background(), true)
+	wakes, err = w.run(func() error { _, err := a.settle(context.Background(), true); return err }, nil)
 	require.NoError(t, err)
+	require.Zero(t, wakes, "a begin with nothing to wait for needs no wake-up")
 }
 
 // Calls the application queued behind work a settle gave up on cannot be
@@ -775,28 +762,75 @@ func TestCallsQueuedBehindLostWorkAreTheNextEndsLoss(t *testing.T) {
 	require.NoError(t, a.settledSince(context.Background(), true, "TestAfter"), "charged once")
 }
 
-// stallWake has the settle watchdog wake only when untilDone says, with
-// settleStallLimit 3; untilDone wakes it until fn's settle returns, failing
-// the test if that takes more wake-ups than the watchdog's limit.
-func stallWake(t *testing.T) (untilDone func(fn func() error) error) {
+// settleBlocked, when set, is told by the doubles that a settle is blocked
+// at a step only an event or its watchdog can end (blockedHere).
+var settleBlocked func()
+
+// blockedHere is a double's wait saying, as it begins to block, that the
+// settle cannot return until something moves: an application connection
+// not yet paired, an accept not yet made, or work still held.
+func blockedHere() {
+	if settleBlocked != nil {
+		settleBlocked()
+	}
+}
+
+// settleWaker drives the settle watchdog by hand (stallWake).
+type settleWaker struct {
+	t                    *testing.T
+	wake, woken, blocked chan struct{}
+}
+
+// stallWake has the settle watchdog wake only when a run says
+// (settleWaker.run), with settleStallLimit 3.
+func stallWake(t *testing.T) *settleWaker {
 	t.Helper()
-	wake, woken := make(chan struct{}), make(chan struct{})
-	prevWake, prevWoken, prevLimit := settleWake, settleWoken, settleStallLimit
-	settleWake = func(context.Context) (<-chan struct{}, func()) { return wake, func() {} }
-	settleWoken = func() { woken <- struct{}{} }
+	w := &settleWaker{t: t, wake: make(chan struct{}), woken: make(chan struct{}), blocked: make(chan struct{}, 1)}
+	prevWake, prevWoken, prevLimit, prevBlocked := settleWake, settleWoken, settleStallLimit, settleBlocked
+	settleWake = func(context.Context) (<-chan struct{}, func()) { return w.wake, func() {} }
+	settleWoken = func() { w.woken <- struct{}{} }
 	settleStallLimit = 3
-	t.Cleanup(func() { settleWake, settleWoken, settleStallLimit = prevWake, prevWoken, prevLimit })
-	return func(fn func() error) error {
-		done := make(chan error, 1)
-		go func() { done <- fn() }()
-		for i := 0; ; i++ {
-			require.LessOrEqual(t, i, settleStallLimit+1, "the settle outlived its watchdog")
-			select {
-			case err := <-done:
-				return err
-			case wake <- struct{}{}:
-				<-woken
-			}
+	settleBlocked = func() {
+		select {
+		case w.blocked <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(func() {
+		settleWake, settleWoken, settleStallLimit, settleBlocked = prevWake, prevWoken, prevLimit, prevBlocked
+	})
+	return w
+}
+
+// run runs fn's settle and returns its error and the wake-ups it sent. It
+// sends none until the settle is blocked (blockedHere), so a settle that
+// needs none gets none; from then on, until the settle returns, it runs
+// moved, when set (what moves between wake-ups), and wakes the watchdog,
+// failing the test if the settle outlives the watchdog's limit.
+func (w *settleWaker) run(fn func() error, moved func()) (wakes int, err error) {
+	w.t.Helper()
+	select {
+	case <-w.blocked: // the last run's
+	default:
+	}
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		return 0, err
+	case <-w.blocked:
+	}
+	for {
+		if moved != nil {
+			moved()
+		}
+		select {
+		case err := <-done:
+			return wakes, err
+		case w.wake <- struct{}{}:
+			<-w.woken
+			wakes++
+			require.LessOrEqual(w.t, wakes, settleStallLimit+1, "the settle outlived its watchdog")
 		}
 	}
 }
@@ -807,22 +841,24 @@ func stallWake(t *testing.T) (untilDone func(fn func() error) error) {
 // wait for it again.
 func TestABeginThatGivesUpOnAConnectionFailsItAndTheEndGoesOn(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	untilDone := stallWake(t)
+	w := stallWake(t)
 	a, h, p := settleAgent()
 	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}}
 	sp.scopePending.Store(1)
 	a.Proxy = sp
 	h.established = 1
 	p.set(1, 0)
-	err := untilDone(func() error { _, err := a.settle(context.Background(), true); return err })
+	wakes, err := w.run(func() error { _, err := a.settle(context.Background(), true); return err }, nil)
 	require.ErrorIs(t, err, errNoProgress)
+	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
 	require.False(t, errors.Is(err, errHoldsUnknown), "a begin goes on only past connections whose requests cannot be told: %v", err)
 	require.Contains(t, err.Error(), "connection 7 held 1 request(s) its parser had read and not answered")
 	sp.fmu.Lock()
 	require.Equal(t, []uint64{7}, sp.gaveUp, "the begin's watchdog gave up on the connection it found stuck")
 	sp.fmu.Unlock()
-	require.NoError(t, untilDone(func() error { return a.settledSince(context.Background(), true, "TestEnd") }),
-		"the end does not wait for what the begin gave up on")
+	wakes, err = w.run(func() error { return a.settledSince(context.Background(), true, "TestEnd") }, nil)
+	require.NoError(t, err, "the end does not wait for what the begin gave up on")
+	require.Zero(t, wakes, "an end with nothing to wait for needs no wake-up")
 }
 
 // A wait still in its first part (an application connection the kernel
@@ -832,7 +868,7 @@ func TestABeginThatGivesUpOnAConnectionFailsItAndTheEndGoesOn(t *testing.T) {
 // limit) until it is paired.
 func TestAGiveUpBeforeTheCountsSettleIsNotPerConnection(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	untilDone := stallWake(t)
+	w := stallWake(t)
 	a, h, p := settleAgent()
 	sp := &scopedProxy{settleProxy: p}
 	a.Proxy = sp
@@ -840,14 +876,45 @@ func TestAGiveUpBeforeTheCountsSettleIsNotPerConnection(t *testing.T) {
 	h.setApp(2, 1)
 	p.set(1, 0)
 	end := func() error { return a.settledSince(context.Background(), true, "TestEnd") }
-	err := untilDone(end)
+	wakes, err := w.run(end, nil)
 	require.ErrorIs(t, err, errNoProgress)
+	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
 	require.NotContains(t, err.Error(), "gave up on", "no connection to give up on before the counts settle")
-	err = untilDone(func() error { _, err := a.settle(context.Background(), true); return err })
+	wakes, err = w.run(func() error { _, err := a.settle(context.Background(), true); return err }, nil)
 	require.ErrorIs(t, err, errNoProgress, "the next begin waits for the unpaired connection again")
+	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
 	sp.fmu.Lock()
 	require.Zero(t, sp.scopes, "neither wait got to the connections' work")
 	sp.fmu.Unlock()
 	h.setApp(2, 2)
-	require.NoError(t, untilDone(end), "once paired, the next settle goes on")
+	wakes, err = w.run(end, nil)
+	require.NoError(t, err, "once paired, the next settle goes on")
+	require.Zero(t, wakes, "a settle with nothing to wait for needs no wake-up")
+}
+
+// A settle's watchdog gives up only on the connections that did not move:
+// one that moved at every wake-up is kept (the end's reason does not name
+// it, and later waits still wait for it).
+func TestAGiveUpKeepsTheConnectionsThatMoved(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1, 8: 1}}
+	sp.scopePending.Store(2)
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 0)
+	wakes, err := w.run(func() error { return a.settledSince(context.Background(), true, "TestEnd") }, func() {
+		sp.fmu.Lock()
+		sp.stuck[8]++
+		sp.fmu.Unlock()
+	})
+	require.ErrorIs(t, err, errNoProgress)
+	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
+	require.Contains(t, err.Error(), "connection 7 held")
+	require.NotContains(t, err.Error(), "connection 8", "the connection that moved is not given up on")
+	sp.fmu.Lock()
+	defer sp.fmu.Unlock()
+	require.Equal(t, []uint64{7}, sp.gaveUp, "the watchdog gave up on the connection that did not move only")
+	require.Contains(t, sp.stuck, uint64(8), "the connection that moved is kept")
 }

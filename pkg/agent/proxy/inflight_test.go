@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"golang.org/x/sys/unix"
 )
 
@@ -488,5 +489,138 @@ func TestAMultiplexedConnectionHoldsTheScopeWhileItHoldsAnyRequest(t *testing.T)
 	release()
 	if n, _ := sc.State(true); n != 0 {
 		t.Fatalf("no request held, the frame reader reading: scope pending %d, want 0", n)
+	}
+}
+
+// A scope names, in a replay, each connection it sees done while keploy
+// cannot tell whether its parser still holds a request, so the test's end is
+// not verified with it: one served by a parser that reads ahead and does not
+// say what it holds (servedBy), and one whose parser's mark that it cannot
+// tell for now (MarkUnknown) stood when its handler was found holding none,
+// whether that was noted as its handler went back to reading past the cut
+// (settled) or is read from its view now (a handler waiting out an idle
+// answer, whose read past the cut no change has noted since). It stays named
+// once the connection is dropped as done. A record names none.
+func TestAScopeNamesTheConnectionsWhoseHeldRequestsCannotBeTold(t *testing.T) {
+	const call = "GET /test HTTP/1.1\r\n\r\n"
+	got := make(chan string, 8)
+	named := func(sc *scope, what, want string) {
+		t.Helper()
+		for i := 0; i < 2; i++ {
+			n, u := sc.State(true)
+			if n != 0 || len(u) != 1 || u[0] != want {
+				t.Fatalf("%s (look %d): scope pending %d, unknown %q; want 0 and %q", what, i+1, n, u, want)
+			}
+		}
+	}
+
+	tr := &inflight{}
+	_, ahead := acceptedPair(t, tr)
+	ahead.servedBy(integrations.MONGO_V2, readAheadParser{holds: false})
+	go readOnce(ahead, got)
+	waitSettled(t, tr, func() bool { return ahead.reading.Load() == 1 })
+	named(tr.scope(), "a read-ahead parser that does not say what it holds", string(integrations.MONGO_V2))
+	if _, u := tr.scope().State(false); len(u) != 0 {
+		t.Fatalf("a record: unknown %q, want none", u)
+	}
+
+	// Marked while its handler answered the test's call, then back to
+	// reading past the cut: the note it went back with says so.
+	tr = &inflight{}
+	app, marked := acceptedPair(t, tr)
+	go readOnce(marked, got)
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	sc := tr.scope()
+	release := marked.MarkUnknown("mysql (a statement's result sets open)")
+	go readOnce(marked, got)
+	waitSettled(t, tr, func() bool { return marked.reading.Load() == 1 })
+	named(sc, "a mark standing as its handler went back to reading", "mysql (a statement's result sets open)")
+	release()
+
+	// Marked and waiting out an idle answer, then a read past the cut while
+	// both stand: its view now says so.
+	tr = &inflight{}
+	app, idle := acceptedPair(t, tr)
+	releaseIdle := idle.MarkIdle()
+	releaseMark := idle.MarkUnknown("mongo_v2 (a moreToCome group open)")
+	go readOnce(idle, got)
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	named(tr.scope(), "a mark standing while its handler waits out an idle answer", "mongo_v2 (a moreToCome group open)")
+	releaseMark()
+	releaseIdle()
+}
+
+// A parser that holds, marks, or releases a hold or a mark while its handler
+// answers the test's call (neither reading nor waiting out an idle answer)
+// has not answered it: the scope holds the call until the handler goes back
+// to reading.
+func TestAHoldOrMarkChangeWhileTheHandlerAnswersDoesNotSettleTheScope(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	const call = "GET /test HTTP/1.1\r\n\r\n"
+	got := make(chan string, 2)
+	go readOnce(proxy, got)
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	sc := tr.scope()
+	proxy.Hold()()
+	proxy.MarkUnknown("mongo_v2 (a moreToCome group open)")()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("a hold and a mark changed while the handler answers: scope pending %d, want 1", n)
+	}
+	go readOnce(proxy, got)
+	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
+	if n, u := sc.State(true); n != 0 || len(u) != 0 {
+		t.Fatalf("its handler back reading: scope pending %d, unknown %q; want 0 and none", n, u)
+	}
+}
+
+// A settle's watchdog gives up only on the connections it names (those that
+// did not move): another that still holds the scope's work is kept, and the
+// scope waits for it until its handler has answered.
+func TestAGiveUpKeepsTheConnectionsItDoesNotName(t *testing.T) {
+	tr := &inflight{}
+	const call = "GET /test HTTP/1.1\r\n\r\n"
+	got := make(chan string, 4)
+	app1, stuck := acceptedPair(t, tr)
+	app2, moved := acceptedPair(t, tr)
+	for _, c := range []struct {
+		app   net.Conn
+		proxy *trackedConn
+	}{{app1, stuck}, {app2, moved}} {
+		go readOnce(c.proxy, got)
+		if _, err := io.WriteString(c.app, call); err != nil {
+			t.Fatal(err)
+		}
+		<-got
+	}
+	sc := tr.scope()
+	if n, _ := sc.State(true); n != 2 {
+		t.Fatalf("two calls read and not answered: scope pending %d, want 2", n)
+	}
+	words := sc.GiveUp([]uint64{stuck.id}, true)
+	if len(words) != 1 || !strings.Contains(words[0], fmt.Sprintf("connection %d from ", stuck.id)) {
+		t.Fatalf("give-up words %q: want the named connection only", words)
+	}
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the connection not named still holds its call: scope pending %d, want 1", n)
+	}
+	if p := sc.PendingProgress(true); len(p) != 1 {
+		t.Fatalf("scope progress %v, want connection %d only", p, moved.id)
+	} else if _, ok := p[moved.id]; !ok {
+		t.Fatalf("scope progress %v, want connection %d only", p, moved.id)
+	}
+	go readOnce(moved, got)
+	waitSettled(t, tr, func() bool { return moved.reading.Load() == 1 })
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("its handler back reading: scope pending %d, want 0", n)
 	}
 }
