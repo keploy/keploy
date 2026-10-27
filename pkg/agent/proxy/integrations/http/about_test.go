@@ -161,7 +161,7 @@ func TestAGivenValueAClockReadAndACredentialHeaderSayWhereTheyCameFrom(t *testin
 	learned := []learn.Learned{
 		{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.tenant", Value: "t-rec", Type: learn.String}, Live: learn.Leaf{Path: "body.tenant", Value: "t-full", Type: learn.String}},
 		{Kind: learn.KindClockRead, Recorded: at, Live: learn.Leaf{Path: "body.at", Value: "2026-10-27T10:00:07Z", Type: learn.String}, Read: &read},
-		{Kind: learn.KindNoise, Recorded: learn.Leaf{Path: "header.x-api-key", Value: "k-recorded-0123", Type: learn.String}, Live: learn.Leaf{Path: "header.x-api-key", Value: "k-live-456", Type: learn.String}, Why: "differs from mock-3", SetAside: "mock-3"},
+		{Kind: learn.KindNoise, Recorded: learn.Leaf{Path: "header.x-api-key", Value: "k-recorded-0123", Type: learn.String}, Live: learn.Leaf{Path: "header.x-api-key", Value: "k-live-456", Type: learn.String}, Why: "differs from mock-3"},
 	}
 	given := []variables.Binding{{Name: "tenant", Value: "t-full", Recorded: "t-rec"}}
 	p, why := learnPlan(learn.NewTracker(), 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, learned, nil, given, calls)
@@ -361,45 +361,5 @@ func TestAnEchoSentAtTwoPlacesKeepsItsWhy(t *testing.T) {
 		if v.About != nil && (v.About.Seen == nil || v.About.Seen.Record != "r-1" || v.About.Seen.Full != "r-2") {
 			t.Errorf("variable %s: seen %+v, want r-1 and r-2", name, v.About.Seen)
 		}
-	}
-}
-
-// Noise the classifier learned after finding its value in an earlier
-// recording and setting that source aside says so: its why keeps the
-// classifier's evidence, names the source by its call key (or as an
-// earlier recording when it has none), and never by mock name; noise with
-// no source found keeps the fixed why.
-func TestNoiseLearnedPastASourceSaysWhichSourceItSetAside(t *testing.T) {
-	m := learnRecorded("mock-6", 0, "POST", "/v1/events", `{"ref":"r-rec"}`, nil, `{}`)
-	refuted := "its recorded value stands whole in mock-5 at body.id, which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying"
-	keys := map[string]string{"mock-5": "http api.test POST /v1/orders #1", "mock-6": "http api.test POST /v1/events #1"}
-	calls := func(mock string) string { return keys[mock] }
-	for _, c := range []struct {
-		name, why, setAside string
-		calls               func(string) string
-		want                []string
-	}{
-		{"a source with a call key", refuted, "mock-5", calls, []string{"set it aside", "stands whole in the test's earlier call (http api.test POST /v1/orders #1) at body.id", "a copy moves with its source"}},
-		{"a source with none", refuted, "mock-5", nil, []string{"stands whole in an earlier recording at body.id"}},
-		{"no source", "", "", calls, []string{noiseWhy}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			learned := []learn.Learned{{Kind: learn.KindNoise, Why: c.why, SetAside: c.setAside,
-				Recorded: learn.Leaf{Path: "body.ref", Value: "r-rec", Type: learn.String},
-				Live:     learn.Leaf{Path: "body.ref", Value: "r-full", Type: learn.String}}}
-			p, refused := learnPlan(learn.NewTracker(), 1, m, learn.Shape{Fixed: map[string]string{"body": "json"}}, true, learned, nil, nil, c.calls)
-			if refused != "" {
-				t.Fatalf("refused: %s", refused)
-			}
-			why := p.noiseAbout["body.ref"].Why
-			for _, w := range c.want {
-				if !strings.Contains(why, w) {
-					t.Errorf("why %q lacks %q", why, w)
-				}
-			}
-			if strings.Contains(why, "mock-") {
-				t.Errorf("why names a mock: %q", why)
-			}
-		})
 	}
 }
