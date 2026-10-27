@@ -83,17 +83,24 @@ func configureForcedPause(v string, logger *zap.Logger) {
 		zap.Uint64("from_request", from), zap.Uint64("to_request", to))
 }
 
-// IngressRequest counts one ingress request the agent has read, and starts or
-// ends the forced pause (ForcePauseEnv) when it is the one that does. The
-// ingress calls it as it has read a request, before it reads the pause for
-// it (IsRecordingPaused). A no-op unless the knob is set.
+// IngressRequest counts one ingress request the agent has read, for each
+// session's count of the requests that come during a pause (PauseTally), and
+// starts or ends the forced pause (ForcePauseEnv) when it is the one that
+// does. The ingress calls it as it has read a request, before it reads the
+// pause for it (IsRecordingPaused). Unless the knob is set, it costs one
+// atomic add and one atomic load.
 func IngressRequest() {
 	k := forcedPause.Load()
 	if k == nil {
+		ingressRequests.Add(1)
 		return
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	// Counted after the pause it starts or ends, as a request counted after
+	// any pause's edge is: it reads the pause as that edge left it, so the
+	// forced pause's requests during it are from to to-1, those that read it.
+	defer ingressRequests.Add(1)
 	k.seen++
 	switch k.seen {
 	case k.from:

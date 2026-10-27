@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -539,6 +540,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// The requests the ingress did not record because the memory guard had
 	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
 	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
+	// The ingress requests that come during the memory guard's pauses, from
+	// here: counted by the order of events (the request count read at each
+	// pause's start and end), apart from what the capture then decided, so
+	// the summary can be held to it.
+	pauseTally := memoryguard.OpenPauseTally()
+	defer pauseTally.Close()
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
@@ -800,12 +807,14 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		}
 		// Read once: the warning and the summary say the same.
 		notRecorded := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
+		duringPauses := pauseTally.Read()
 		if notRecorded.Total > 0 {
 			// Each came while the memory guard had paused recording, so it
 			// was forwarded and not recorded. The pause cost these and no
 			// more: each connection's requests after it are recorded.
 			a.logger.Warn("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded",
 				zap.Uint64("requests", notRecorded.Total),
+				zap.Uint64("requests_during_pauses", duringPauses.DuringPauses),
 				zap.Int("connections", notRecorded.Connections()),
 				zap.Strings("connections_most", notRecorded.Most(maxNamedPressureConns)))
 		}
@@ -837,6 +846,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			// had paused recording when they came (the WARN above names
 			// their connections).
 			zap.Uint64("tcs_not_recorded_under_pressure", notRecorded.Total),
+			// The HTTP/1 ingress requests that came while recording was
+			// paused (memoryguard.PauseTally), whatever their capture
+			// did: a pause costs these and those in flight at its edges,
+			// so tcs_not_recorded_under_pressure far above them says a
+			// pause did not end for some connection. And those that came
+			// before the first pause: all a recording would hold whose
+			// capture never came back after it.
+			zap.Uint64("requests_during_pauses", duringPauses.DuringPauses),
+			zap.Uint64("requests_before_first_pause", duringPauses.BeforeFirstPause),
 			// Every mock a parser left out, the exchange it stopped
 			// on included, each reported with Session.ReportLeftOut
 			// (Session.ReportStoppedOn for the one it stopped on):

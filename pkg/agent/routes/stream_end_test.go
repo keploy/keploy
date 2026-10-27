@@ -14,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // openHeldStream opens one of the agent's frame streams the way a recording's
@@ -112,10 +115,15 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 	t.Run("test cases", func(t *testing.T) {
 		syncmgr.Get().SetWatermark(nil) // no hold: test cases go at once
 		svc := streamsSvc{tc: make(chan *models.TestCase, 4), mocks: make(chan *models.Mock), maps: make(chan models.TestMockMapping)}
-		a := &Agent{logger: zap.NewNop(), svc: svc}
+		core, logs := observer.New(zapcore.InfoLevel)
+		a := &Agent{logger: zap.New(core), svc: svc}
 		tok := rand.Text() // its own each run: a token ended stays ended
-		// A request a pause cost before this session: not its own.
+		// A request a pause cost before this session, and one the ingress
+		// read during a pause before it: not its own.
 		syncmgr.Get().NoteNotRecordedUnderPressure("10.0.0.9:5009 -> 127.0.0.1:8080")
+		endPause := memoryguard.SetRecordingPausedForTest(true)
+		memoryguard.IngressRequest()
+		endPause()
 		resp, done := openHeldStream(t, a.HandleIncoming, models.IncomingReq{}, tok)
 		defer done()
 		for _, n := range []string{"test-1", "test-2"} {
@@ -127,6 +135,14 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		for _, c := range []string{"10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.1:5000 -> 127.0.0.1:8080", "10.0.0.2:5001 -> 127.0.0.1:8080"} {
 			syncmgr.Get().NoteNotRecordedUnderPressure(c)
 		}
+		// The ingress requests of this session: one before its pause, two
+		// during it, one after.
+		memoryguard.IngressRequest()
+		endPause = memoryguard.SetRecordingPausedForTest(true)
+		memoryguard.IngressRequest()
+		memoryguard.IngressRequest()
+		endPause()
+		memoryguard.IngressRequest()
 		endRecordingStreams(tok)
 		_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 		if err != nil {
@@ -167,6 +183,35 @@ func TestFrameStreamsEndWithTheirMarkerOnRequest(t *testing.T) {
 		}
 		if _, err := mr.NextPart(); err != io.EOF {
 			t.Fatalf("the stream did not end after its marker: %v", err)
+		}
+		// The agent's own summary, which a lane reads, says the session's
+		// counts; its warning names the connections the requests were lost
+		// on, most first.
+		fields := func(msg string) map[string]any {
+			t.Helper()
+			got := logs.FilterMessage(msg).All()
+			if len(got) != 1 {
+				t.Fatalf("the agent logged %q %d times, want once", msg, len(got))
+			}
+			return got[0].ContextMap()
+		}
+		done() // the handler has returned, its summary said
+		sumLine := fields("agent: recording complete")
+		for name, want := range map[string]uint64{
+			"tcs_not_recorded_under_pressure": 3,
+			"requests_during_pauses":          2,
+			"requests_before_first_pause":     1,
+		} {
+			if got := sumLine[name]; got != want {
+				t.Errorf("the summary says %s=%v, want %d", name, got, want)
+			}
+		}
+		warn := fields("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded")
+		if got := fmt.Sprint(warn["requests"], " ", warn["requests_during_pauses"], " ", warn["connections"]); got != "3 2 2" {
+			t.Errorf("the warning says requests, requests_during_pauses, connections = %s, want 3 2 2", got)
+		}
+		if got, want := fmt.Sprint(warn["connections_most"]), "[10.0.0.1:5000 -> 127.0.0.1:8080 (2) 10.0.0.2:5001 -> 127.0.0.1:8080 (1)]"; got != want {
+			t.Errorf("the warning names the connections %s, want %s", got, want)
 		}
 	})
 }
