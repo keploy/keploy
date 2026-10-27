@@ -978,17 +978,17 @@ func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.
 func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
 	a, b := RawOf(eLaneSession("mock-hs-81", 900*time.Millisecond, 81), false), RawOf(eLaneSession("mock-hs-82", 850*time.Millisecond, 82), false)
 	raw := []Raw{a, b}
-	if !a.swapHolds(a.text, raw, func(string) bool { return false }) {
+	if !a.swapHolds(a.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a start-up's match in no one field is not read as a swap's word; want refused")
 	}
-	if a.swapHolds(a.text, raw, func(own string) bool { return own == "UTF8" }) {
+	if a.swapHolds(a.payload().text, raw, func(own string) bool { return own == "UTF8" }) {
 		t.Error("a start-up's match in a field every start-up carries alike is read as a swap's word")
 	}
-	if !a.swapHolds(a.text, raw, func(own string) bool { return own == "81" }) {
+	if !a.swapHolds(a.payload().text, raw, func(own string) bool { return own == "81" }) {
 		t.Error("a start-up's backend pid is not read as a swap's word")
 	}
 	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
-	if other.swapHolds(other.text, raw, func(string) bool { return false }) {
+	if other.swapHolds(other.payload().text, raw, func(string) bool { return false }) {
 		t.Error("a recording that is no start-up is read as one")
 	}
 }

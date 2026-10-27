@@ -29,10 +29,10 @@ func TestAWholeClockReadIsLookedForInOnlyThePayloadsThatHoldIt(t *testing.T) {
 	for _, n := range []int{100, 2000} {
 		var raw []Raw
 		for i := 0; i < n; i++ {
-			raw = append(raw, Raw{read: true, mock: fmt.Sprintf("mock-%d", i), at: at.Add(-2 * time.Second), served: true,
-				text: fmt.Sprintf(`{"rows":[["%d","2026-09-01 08:00:%02d"]]}`, i, i%60)})
+			raw = append(raw, Raw{rRead: true, mock: fmt.Sprintf("mock-%d", i), at: at.Add(-2 * time.Second), served: true,
+				rText: fmt.Sprintf(`{"rows":[["%d","2026-09-01 08:00:%02d"]]}`, i, i%60)})
 		}
-		raw = append(raw, Raw{read: true, mock: "mock-holds", at: at.Add(-time.Second), served: true, text: holds})
+		raw = append(raw, Raw{rRead: true, mock: "mock-holds", at: at.Add(-time.Second), served: true, rText: holds})
 		scanned = nil
 		p, ok := appeared(clockedDrifts(), "2026-10-14 10:00:41", "2026-10-14 10:01:42", at, nil, raw)
 		if !ok || p.Mock != "mock-holds" {

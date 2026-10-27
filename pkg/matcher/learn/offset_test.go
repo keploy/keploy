@@ -772,7 +772,7 @@ func TestAnotherTestsRecordingIsAPlaceOfTheOffsetAndWordRulesAlone(t *testing.T)
 		t.Errorf("an offset from another test's recordings: %s (%s); want it refused, naming the receive and the offset", ln.Kind, ln.Why)
 	}
 	const q = "body.user"
-	row := Raw{read: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
+	row := Raw{rRead: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), rText: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
 	for _, another := range []bool{false, true} {
 		x := row
 		if another {
@@ -1026,7 +1026,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	for _, m := range []*models.Mock{receive, delivered} {
 		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 10:02:51 GMT"
 	}
-	row := Raw{read: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
+	row := Raw{rRead: true, mock: "pg-3", at: r1Insert.Add(-2 * time.Second), rText: `{"query":"INSERT INTO users VALUES ($1)","params":["u-12"]}`}
 	reads := 0
 	set := func(raw []Raw, err error) GivenEarlier {
 		return func() ([]GivenPlaces, error) {
@@ -1053,7 +1053,7 @@ func TestClassifyGivenReadsTheSetOnlyForTheOffsetAndWordRules(t *testing.T) {
 	// A value a place of the call's own test refuses (a word of it there):
 	// the set is not read.
 	dc = clockedDrifts()
-	own := Raw{read: true, mock: "pg-5", at: r1Insert.Add(-time.Second), text: `{"params":["77"]}`}
+	own := Raw{rRead: true, mock: "pg-5", at: r1Insert.Add(-time.Second), rText: `{"params":["77"]}`}
 	if ln := ClassifyGiven(dc, []string{q}, strLeaf(q, "u-77"), strLeaf(q, "u-12"), r1Insert, nil, []Raw{own}, nil, nil, set(both(dc), nil))[0]; ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "pg-5") || reads != 0 {
 		t.Errorf("refused by a place of the test's own: %s (%s), the set read %d times; want it refused, naming pg-5, the set unread", ln.Kind, ln.Why, reads)
 	}

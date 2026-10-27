@@ -1433,8 +1433,8 @@ func TestAnHTTPDateIsItsAnswersStampWithinItsSpan(t *testing.T) {
 	stamps := func(m *models.Mock) []string {
 		var out []string
 		r := RawOf(m, true)
-		for _, f := range r.stamps {
-			out = append(out, f.path+"="+r.text[f.start:f.end])
+		for _, f := range r.payload().stamps {
+			out = append(out, f.path+"="+r.payload().text[f.start:f.end])
 		}
 		return out
 	}
@@ -1477,20 +1477,20 @@ func TestARawsFieldsIndexItsText(t *testing.T) {
 		var sb strings.Builder
 		textOf(dropKeys(v, 0), &sb)
 		r := RawOf(m, true)
-		if r.text != sb.String() {
+		if r.payload().text != sb.String() {
 			t.Fatalf("%s: RawOf's text differs from textOf's", m.Name)
 		}
-		for _, f := range r.fields {
-			if f.start > f.end || f.end > len(r.text) || f.end < len(r.text) && r.text[f.end] != '\n' {
+		for _, f := range r.payload().fields {
+			if f.start > f.end || f.end > len(r.payload().text) || f.end < len(r.payload().text) && r.payload().text[f.end] != '\n' {
 				t.Fatalf("%s: field %s spans [%d, %d), no line of the text", m.Name, f.path, f.start, f.end)
 			}
 		}
 	}
 	r := RawOf(r1Receive(""), true)
 	var dates []string
-	for _, f := range r.fields {
+	for _, f := range r.payload().fields {
 		if strings.HasSuffix(f.path, ".Date") {
-			dates = append(dates, fmt.Sprintf("%s %v %s", f.path, f.key, r.text[f.start:f.end]))
+			dates = append(dates, fmt.Sprintf("%s %v %s", f.path, f.key, r.payload().text[f.start:f.end]))
 		}
 	}
 	if !reflect.DeepEqual(dates, []string{"Res.header.Date true Date", "Res.header.Date false Thu, 22 Oct 2026 11:14:16 GMT"}) {

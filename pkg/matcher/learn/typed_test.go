@@ -1190,7 +1190,7 @@ func TestATimeOfDayInTheOtherFormIsTheSameMoment(t *testing.T) {
 		}
 	}
 	// A payload holding the recorded moment as a text (instantRawFrom).
-	raw := []Raw{{read: true, mock: "mock-db", at: call.Add(-time.Second), served: true, text: `{"rows":[["42","` + read.Format("15:04:05.000000") + `"]]}`}}
+	raw := []Raw{{rRead: true, mock: "mock-db", at: call.Add(-time.Second), served: true, rText: `{"rows":[["42","` + read.Format("15:04:05.000000") + `"]]}`}}
 	if ln := classify("typed", nil, raw, nil); ln.Kind != KindVariable || ln.From.Mock != "mock-db" || ln.Why != instantEvidence(ln.From) {
 		t.Errorf("typed, its recorded moment a text in a payload: %s (from %+v, %q); want a variable of mock-db, with its evidence", ln.Kind, ln.From, ln.Why)
 	}

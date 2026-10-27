@@ -1445,12 +1445,13 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		if !x.earlierThan(at) {
 			continue
 		}
-		for _, f := range x.fields {
-			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
+		xb := x.payload()
+		for _, f := range xb.fields {
+			if !f.key && dc.holdsRecorded(xb.text[f.start:f.end], echoed) {
 				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served}, true
 			}
 		}
-		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
+		if dc.holdsRecorded(xb.text, echoed) || dc.holdsRecorded(dc.rawExtra(xb.text), echoed) {
 			return Place{Mock: x.mock, Echo: true, unserved: !x.served}, true
 		}
 	}
@@ -1512,7 +1513,7 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 		}
 		field, given, found := "", false, false
 		in := func(own string) bool { return dc.holdsExact(own, live) }
-		for _, f := range x.fields {
+		for _, f := range x.payload().fields {
 			if f.key || f.end > len(texts[0]) {
 				continue
 			}

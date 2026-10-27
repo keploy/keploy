@@ -173,8 +173,18 @@ type Raw struct {
 	// made at the call's own instant (timedEarlier): a reason naming it says
 	// so (atNote, givenWhose).
 	noTime bool
-	// read: the text was read from the mock (RawOf).
-	read bool
+	// rRead: the text was read from the mock (RawOf). It, rText, rClock,
+	// rFields and rStamps are the payload of a Raw read when it was made;
+	// a lazy Raw (DriftCache.LazyRawOf) has src instead and holds none of
+	// them. Every rule reads them through payload() (or isRead), never
+	// directly, so that a lazy Raw reads its recording only where a rule
+	// does.
+	rRead bool
+	// src, of a lazy Raw, is where its payload is read when a rule first
+	// reads it (rawSource): its recording, loaded by its loader into the
+	// set's bounded store of payloads (bodyStore). nil for a Raw read
+	// when made.
+	src *rawSource
 	// startUp: the mock is a connection's recorded start-up (isStartUp).
 	// A word it carries in a field a swap of start-ups can change
 	// (swapHolds: its backend pid, its secret key, a field another
@@ -196,22 +206,22 @@ type Raw struct {
 	// unread, of a Raw that was not read, says why where the place it stands
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
-	// text is Text; answerClock is AnswerClock.
-	text string
+	// rText is Text; rClock is AnswerClock.
+	rText string
 	// id is the recording's identity (MockID) where text is all of its
 	// payload, as RawOf read it; "" otherwise. What is read of text alone
 	// is kept by it for the set (setDerived).
-	id          string
-	answerClock []time.Time
+	id     string
+	rClock []time.Time
 	// fields are where each scalar and key of text stands in it, and the
 	// field of the mock's spec it is (rawField): what a reason names where a
 	// value is found.
-	fields []rawField
+	rFields []rawField
 	// stamps are the fields of text that are its answer's own clock stamp
 	// by its protocol (instants.go, rule 3: an HTTP answer's Date header
 	// within the span keploy stamped the exchange in): no value came from
 	// one, and only the echo reads them.
-	stamps []rawField
+	rStamps []rawField
 	// moves are, of what F served at the leaves of an exchange's answer
 	// (servedAnswer), the leaves F served with another value than recorded
 	// (a template value), each where the exchange's payload holds it
@@ -278,7 +288,7 @@ func (r Raw) Served() bool { return r.served }
 
 // Read reports whether r was read from its mock (RawOf): a Raw that was not
 // holds no text, and the classifier refuses it.
-func (r Raw) Read() bool { return r.read }
+func (r Raw) Read() bool { return r.isRead() }
 
 // rawField is one scalar or key of a Raw's text: [start, end) of it in the
 // text, and its field of the mock's spec, by the spec's JSON names
@@ -295,7 +305,7 @@ type rawField struct {
 }
 
 // Text is r's recorded request and answer, the payload only, as one text.
-func (r Raw) Text() string { return r.text }
+func (r Raw) Text() string { return r.payload().text }
 
 // AnswerClock are, of a protocol-phase mock (a driver's handshake, heartbeat
 // or auth), the moments of its answer's own clock reads (RawOf, answerClock):
@@ -305,7 +315,7 @@ func (r Raw) Text() string { return r.text }
 // (instants.go, rule 2). nil for a data-plane mock, or one whose answer or
 // span is not known: then every instant of it is a place a value may have
 // come from. A copy; r keeps its own.
-func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.answerClock...) }
+func (r Raw) AnswerClock() []time.Time { return append([]time.Time(nil), r.payload().answerClock...) }
 
 // WithServed is r as served, or not, earlier in the test: the same text,
 // fields and answer clock reads.
@@ -351,7 +361,7 @@ func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
 // view: keploy then reads that F gave nothing there (fail closed).
 // ServedAsRecorded, where an adapter also says it, reads first.
 func (r Raw) ServedLive(live Raw) Raw {
-	if !r.served || !live.read || live.mock != r.mock || live.call != r.call {
+	if !r.served || !live.isRead() || live.mock != r.mock || live.call != r.call {
 		r.live = nil
 		return r
 	}
@@ -387,7 +397,7 @@ func (r Raw) ServedIn(first, last int) Raw {
 // its text could be read or not: the zero Raw, an exchange's payload its
 // adapter gave none of, was not.
 func (r Raw) fromMock() bool {
-	return r.read || r.mock != "" || r.served || r.call != "" || !r.at.IsZero()
+	return r.isRead() || r.mock != "" || r.served || r.call != "" || !r.at.IsZero()
 }
 
 // SentOn is r as its recording carried its request: on connection conn, the
@@ -907,7 +917,7 @@ func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) 
 // strength of its absence.
 func (e Earlier) lateOf(late bool) []Raw {
 	x := e.Payload
-	if !x.read {
+	if !x.isRead() {
 		x = Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, noTime: e.noTime, unread: payloadUnread(e)}
 	}
 	x.served = true
@@ -934,7 +944,7 @@ func (e Earlier) lateOf(late bool) []Raw {
 // answer.
 func (e Earlier) servedAnswer() (Raw, bool) {
 	root := e.answerRoot()
-	x := Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, served: true, read: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call, noTime: e.noTime, moves: e.servedMoves()}
+	x := Raw{mock: e.Mock, at: e.At, answered: e.Payload.answered, conn: e.Payload.conn, pos: e.Payload.pos, served: true, rRead: true, first: e.Payload.first, last: e.Payload.last, call: e.Payload.call, noTime: e.noTime, moves: e.servedMoves()}
 	var sb strings.Builder
 	for _, s := range e.Seen {
 		if s.Side != Response || s.Stamp {
@@ -942,20 +952,20 @@ func (e Earlier) servedAnswer() (Raw, bool) {
 		}
 		start := sb.Len()
 		sb.WriteString(s.Live)
-		x.fields = append(x.fields, rawField{start: start, end: sb.Len(), path: root + "." + s.Leaf.Path})
+		x.rFields = append(x.rFields, rawField{start: start, end: sb.Len(), path: root + "." + s.Leaf.Path})
 		sb.WriteByte('\n')
 	}
-	if len(x.fields) == 0 {
+	if len(x.rFields) == 0 {
 		return Raw{}, false
 	}
-	x.text = sb.String()
+	x.rText = sb.String()
 	return x, true
 }
 
 // answerRoot is the field of e's payload that holds its answer (answerFields:
 // "Res" of an HTTP exchange), "Res" where the payload names none.
 func (e Earlier) answerRoot() string {
-	for _, f := range e.Payload.fields {
+	for _, f := range e.Payload.payload().fields {
 		if r := fieldRoot(f.path); answerFields[r] {
 			return r
 		}
@@ -978,7 +988,7 @@ func (e Earlier) servedMoves() []servedMove {
 		}
 		full := root + "." + s.Leaf.Path
 		in := ""
-		for _, f := range e.Payload.fields {
+		for _, f := range e.Payload.payload().fields {
 			if f.key || len(f.path) <= len(in) {
 				continue
 			}
@@ -1550,11 +1560,11 @@ func sinceTestBegin(ln Learned) (Learned, bool) {
 // RawOf), so what it held cannot be told; "" when every one was.
 func rawUnread(raw []Raw) string {
 	for _, x := range raw {
-		if x.read {
+		if x.isRead() {
 			continue
 		}
-		if x.unread != "" {
-			return x.unread
+		if why := x.unreadWhy(); why != "" {
+			return why
 		}
 		name := "a recording of the test"
 		if x.mock != "" {
@@ -2672,7 +2682,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		atCall := x.at.Equal(at)
 		if from, ok := dc.echoRaw(x, echoed); ok {
 			from.AtCall, from.noTime, from.unserved = atCall, x.noTime, !x.served
-			from.startUp = x.swapHolds(x.text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
+			from.startUp = x.swapHolds(x.payload().text, raw, func(own string) bool { return dc.holdsRecorded(own, echoed) })
 			return from, true
 		}
 		if words, ok := dc.searchWords(x, keep); ok {
@@ -2775,8 +2785,9 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
+	xb := x.payload()
 	if fields, ok := dc.fieldMoments(x); ok {
-		for i, f := range x.fields {
+		for i, f := range xb.fields {
 			if !f.key && holdsRecordedIn(fields[i], echoed) {
 				return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
 			}
@@ -2786,12 +2797,12 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 		}
 		return Place{}, false
 	}
-	for _, f := range x.fields {
-		if own := x.text[f.start:f.end]; !f.key && (dc.holdsRecorded(own, echoed) || dc.holdsRecorded(dc.rawExtra(own), echoed)) {
+	for _, f := range xb.fields {
+		if own := xb.text[f.start:f.end]; !f.key && (dc.holdsRecorded(own, echoed) || dc.holdsRecorded(dc.rawExtra(own), echoed)) {
 			return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
 		}
 	}
-	if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
+	if dc.holdsRecorded(xb.text, echoed) || dc.holdsRecorded(dc.rawExtra(xb.text), echoed) {
 		return Place{Mock: x.mock, Echo: true}, true
 	}
 	return Place{}, false
@@ -2821,12 +2832,13 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 			continue
 		}
 		note := x.atNote(at)
-		for _, f := range x.fields {
-			if !f.key && holds(x.text[f.start:f.end]) {
+		xb := x.payload()
+		for _, f := range xb.fields {
+			if !f.key && holds(xb.text[f.start:f.end]) {
 				return "in " + x.mock + " at " + f.describe() + note
 			}
 		}
-		if holds(x.text) {
+		if holds(xb.text) {
 			return "in " + x.mock + "'s payload" + note
 		}
 	}
@@ -3100,6 +3112,14 @@ var payloadKeys = map[string]bool{
 // RawOf is a mock as Classify reads it when no leaf names its values: its
 // recorded request and answer, the payload only, as one text.
 func RawOf(m *models.Mock, served bool) Raw {
+	if everyRawLazy != nil {
+		return everyRawLazy(m, served)
+	}
+	return rawOfNow(m, served)
+}
+
+// rawOfNow is RawOf: m's payload read now.
+func rawOfNow(m *models.Mock, served bool) Raw {
 	r := Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: served, call: callOf(m)}
 	b, err := json.Marshal(payloadSpec(m.Spec))
 	if err != nil {
@@ -3109,7 +3129,7 @@ func RawOf(m *models.Mock, served bool) Raw {
 	if !ok {
 		return r
 	}
-	r.read, r.startUp = true, isStartUp(m)
+	r.rRead, r.startUp = true, isStartUp(m)
 	if !m.HasSpilledResponse() {
 		r.id = MockID(m)
 	}
@@ -3117,16 +3137,16 @@ func RawOf(m *models.Mock, served bool) Raw {
 	// separates a value from its neighbours ("\r\n" of a RESP frame), and a
 	// value after an escape would be no token there.
 	payload := dropKeys(v, 0)
-	r.text, r.fields = textFields(payload)
+	r.rText, r.rFields = textFields(payload)
 	if r.startUp {
-		for i, f := range r.fields {
-			r.fields[i].conn = !f.key && connFields[f.path]
+		for i, f := range r.rFields {
+			r.rFields[i].conn = !f.key && connFields[f.path]
 		}
 	}
 	if m.IsProtocolPhase() {
-		r.answerClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+		r.rClock = answerClock(payload, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	}
-	r.stamps = answerStamps(r.text, r.fields, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
+	r.rStamps = answerStamps(r.rText, r.rFields, m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock)
 	return r
 }
 
@@ -3297,7 +3317,8 @@ func fieldWith(x Raw, texts [2]string, w string) (f rawField, ok bool) {
 // come in both), each in x's order, until yield returns false. fieldWith is
 // the first.
 func eachFieldWith(x Raw, texts [2]string, w string, yield func(rawField) bool) {
-	for _, f := range x.fields {
+	xb := x.payload()
+	for _, f := range xb.fields {
 		if f.end > len(texts[0]) {
 			break
 		}
@@ -3305,7 +3326,7 @@ func eachFieldWith(x Raw, texts [2]string, w string, yield func(rawField) bool) 
 			return
 		}
 	}
-	for _, f := range x.fields {
+	for _, f := range xb.fields {
 		if f.end > len(texts[0]) {
 			break
 		}
@@ -3359,17 +3380,18 @@ func (dc *DriftCache) wholeFieldOf(x Raw, texts [2]string, rec, live string) (fi
 // copy moves with its source), and the copy rule learns the read of the
 // clock since the test began that both runs hold (classify).
 func (dc *DriftCache) copiedInBoth(x Raw, f rawField, in func(own string) bool) bool {
-	text, fields := x.text, x.fields
+	var view rawBody
 	switch {
 	case x.AsRecorded():
+		view = x.payload()
 	case x.Live():
-		text, fields = x.live.text, x.live.fields
+		view = x.live.payload()
 	default:
 		return true
 	}
-	for _, g := range fields {
-		if g.path == f.path && g.key == f.key && g.end <= len(text) {
-			own := text[g.start:g.end]
+	for _, g := range view.fields {
+		if g.path == f.path && g.key == f.key && g.end <= len(view.text) {
+			own := view.text[g.start:g.end]
 			return in(own) || in(dc.rawExtra(own))
 		}
 	}
@@ -3406,7 +3428,7 @@ func (x Raw) swapHolds(text string, raw []Raw, in func(own string) bool) bool {
 		return false
 	}
 	held := false
-	for _, f := range x.fields {
+	for _, f := range x.payload().fields {
 		if f.end > len(text) || !in(text[f.start:f.end]) {
 			continue
 		}
@@ -3422,15 +3444,15 @@ func (x Raw) swapHolds(text string, raw []Raw, in func(own string) bool) bool {
 // it otherwise: a swap of start-ups can change the word there. x itself,
 // in raw too, never differs.
 func (x Raw) differs(f rawField, raw []Raw) bool {
-	own := x.text[f.start:f.end]
+	own := x.payload().text[f.start:f.end]
 	for _, y := range raw {
 		if !y.startUp {
 			continue
 		}
 		same := false
-		for _, g := range y.fields {
+		for _, g := range y.payload().fields {
 			if g.path == f.path && g.key == f.key {
-				same = y.text[g.start:g.end] == own
+				same = y.payload().text[g.start:g.end] == own
 				break
 			}
 		}
