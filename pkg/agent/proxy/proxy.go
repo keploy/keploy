@@ -5686,13 +5686,9 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ActualSummary: parserErr.MismatchReport.ActualSummary,
 					Destination:   parserErr.MismatchReport.Destination,
 					ClosestMock:   parserErr.MismatchReport.ClosestMock,
-					// No parser sets it; copied so the miss holds every field of
-					// its report. The agent sets LiveDestination on the miss
-					// (asRecorded), where it renames Destination.
-					LiveDestination: parserErr.MismatchReport.LiveDestination,
-					Diff:            parserErr.MismatchReport.Diff,
-					NextSteps:       withStagingNote(parserErr, parserErr.MismatchReport.NextSteps),
-					MatchPhase:      parserErr.MismatchReport.MatchPhase,
+					Diff:          parserErr.MismatchReport.Diff,
+					NextSteps:     withStagingNote(parserErr, parserErr.MismatchReport.NextSteps),
+					MatchPhase:    parserErr.MismatchReport.MatchPhase,
 					// Separate axis from MatchPhase: the phase still reports
 					// where the cascade stopped, the scope says whether any
 					// mock this miss was compared against targeted that

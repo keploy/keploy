@@ -175,18 +175,3 @@ func TestPrintMismatchReport_AVariableThatDidNotHold(t *testing.T) {
 		t.Errorf("printed:\n%s", out)
 	}
 }
-
-// A miss named by the recording's spelling of its destination keeps the
-// address the call was made to in the heading, labelled live (audit item
-// 22): the report never loses the address the app dialed.
-func TestTheHeadingSaysTheLiveAddressBesideTheRecordedOne(t *testing.T) {
-	r := &models.MockMismatchReport{Protocol: "MongoDB", ActualSummary: "find users", Destination: "127.0.0.1:27017", LiveDestination: "[::1]:27017"}
-	out := captureStdout(t, func() { printMismatchReport(r) })
-	if !strings.Contains(out, "→  127.0.0.1:27017 (live [::1]:27017)") {
-		t.Fatalf("heading does not name the live address beside the recorded one:\n%s", out)
-	}
-	r.LiveDestination = ""
-	if out := captureStdout(t, func() { printMismatchReport(r) }); strings.Contains(out, "live") {
-		t.Fatalf("heading names a live address the miss does not have:\n%s", out)
-	}
-}

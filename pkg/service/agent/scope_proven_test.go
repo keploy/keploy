@@ -1688,9 +1688,12 @@ func TestABeginWhoseClockCannotMoveOpensNoWindow(t *testing.T) {
 // the app reached [::1]:27017 where the recording has 127.0.0.1:27017, the
 // same loopback port, so the evidence says 127.0.0.1:27017 and adds the live
 // address, labelled. A destination the recording names as reached, one that
-// is not loopback, one named by its host's name (localhost: the name the app
-// gave, which an HTTP recording keeps in its Host header), or a loopback port
-// the recording names two ways, is kept as it was.
+// is not loopback, another address of 127.0.0.0/8 (another listener's), one
+// named by its host's name (localhost: the name the app gave, which an HTTP
+// recording keeps in its Host header), or a loopback port the recording
+// names two ways, is kept as it was. Only the evidence a test is charged
+// with renames it: the run's misses (GetMockErrors) report the address the
+// app dialled.
 func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
 	a, _ := wireAgent(t, models.MODE_TEST)
 	mongo := &models.Mock{Name: "mock-1", Kind: models.Mongo, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:27017"}}}
@@ -1704,6 +1707,7 @@ func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
 		{"127.0.0.1:27017", "127.0.0.1:27017", ""},
 		{"10.0.0.7:27017", "10.0.0.7:27017", ""},
 		{"127.0.0.2:5432", "127.0.0.2:5432", ""},
+		{"127.0.0.2:27017", "127.0.0.2:27017", ""},
 		{"api.internal", "api.internal", ""},
 	} {
 		got := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: c.live}))
@@ -1713,13 +1717,12 @@ func TestAMissNamesItsDestinationAsTheRecordingDoes(t *testing.T) {
 	m := sanitizedMiss(a.asRecorded(models.UnmatchedCall{Protocol: "MongoDB", Destination: "[::1]:27017"}))
 	require.Equal(t, "a MongoDB call to 127.0.0.1:27017 (live [::1]:27017)", missText(m))
 
-	// A miss no test was charged with, read from the run's misses, names it
-	// the same way: one upstream reads the same in every line of the run.
+	// The run's misses report the address the app dialled, unrenamed.
 	p := a.Proxy.(*wireProxy)
 	p.misses = []models.UnmatchedCall{{Protocol: "MongoDB", Destination: "[::1]:27017"}}
 	all, err := a.GetMockErrors(context.Background())
 	require.NoError(t, err)
 	require.Len(t, all, 1)
-	require.Equal(t, "127.0.0.1:27017", all[0].Destination)
-	require.Equal(t, "[::1]:27017", all[0].LiveDestination)
+	require.Equal(t, "[::1]:27017", all[0].Destination)
+	require.Empty(t, all[0].LiveDestination)
 }

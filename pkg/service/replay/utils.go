@@ -1680,15 +1680,14 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 		ActualMocks:   []string{},
 		FailureReason: models.ErrMockNotFound,
 		MismatchReport: &models.MockMismatchReport{
-			At:              call.At,
-			Protocol:        call.Protocol,
-			ActualSummary:   call.ActualSummary,
-			Destination:     call.Destination,
-			LiveDestination: call.LiveDestination,
-			ClosestMock:     call.ClosestMock,
-			Diff:            call.Diff,
-			NextSteps:       call.NextSteps,
-			MatchPhase:      call.MatchPhase,
+			At:            call.At,
+			Protocol:      call.Protocol,
+			ActualSummary: call.ActualSummary,
+			Destination:   call.Destination,
+			ClosestMock:   call.ClosestMock,
+			Diff:          call.Diff,
+			NextSteps:     call.NextSteps,
+			MatchPhase:    call.MatchPhase,
 			// Carried across so the CLI rendering can tell an out-of-scope
 			// destination from a drifted request; the two need different
 			// artifacts, not just different hints.
@@ -1894,9 +1893,6 @@ func printMismatchReport(r *models.MockMismatchReport) {
 	heading := fmt.Sprintf("  Mock mismatch: [%s] %s", r.Protocol, r.ActualSummary)
 	if r.Destination != "" {
 		heading += fmt.Sprintf("  →  %s", r.Destination)
-		if r.LiveDestination != "" {
-			heading += fmt.Sprintf(" (live %s)", r.LiveDestination)
-		}
 	}
 	if r.ClosestMock != "" && !outOfScope {
 		heading += fmt.Sprintf("   (closest mock: %s)", r.ClosestMock)

@@ -27,8 +27,9 @@ func (d recordedDests) add(m *models.Mock) {
 
 // spelling is live as the recording spells it, and live itself when that
 // differs ("" when it does not): live when the recording names it exactly;
-// for a loopback IP address (127.0.0.0/8, ::1), the one loopback IP address
-// the recording names on live's port. live is kept as it is when it has no
+// for the loopback address (127.0.0.1 or ::1, two spellings of one
+// listener's address), the one loopback address the recording names on
+// live's port. live is kept as it is when it has no
 // port, when it names its host by name (localhost: the name the app gave,
 // which an HTTP recording keeps in its Host header, so a search finds it as
 // it is), when the recording names no loopback address on its port, or names
@@ -51,11 +52,13 @@ func (d recordedDests) spelling(live string) (string, string) {
 	return found[0], live
 }
 
-// loopback reports whether host is a loopback IP address. A name is never
-// one: keploy keeps the name the app gave.
+// loopback reports whether host is the loopback address, 127.0.0.1 or ::1
+// (or ::ffff:127.0.0.1). Another address of 127.0.0.0/8 is another listener's,
+// never a spelling of this one, and a name is never one: keploy keeps the
+// name the app gave.
 func loopback(host string) bool {
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return ip != nil && (ip.Equal(net.IPv6loopback) || ip.Equal(net.IPv4(127, 0, 0, 1)))
 }
 
 // recordedDests is the loaded recording's destinations (StoreMocks and
