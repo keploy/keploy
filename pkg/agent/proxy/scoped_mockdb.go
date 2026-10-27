@@ -1373,3 +1373,12 @@ var (
 func (s *scopedMockDb) StatesLifetimes(kind models.Kind) bool {
 	return integrations.StatesLifetimes(s.MockMemDb, kind)
 }
+
+// WhenRestaged implements integrations.Restaged: the store's, so a parser's
+// index of the reads through a view made before exact serving began goes
+// with the store's recordings too. Over a store that does not tell, the
+// parser's data goes at its next call that reads another generation, as
+// over that store itself.
+func (s *scopedMockDb) WhenRestaged(slot any, release func()) {
+	integrations.WhenRestaged(s.MockMemDb, slot, release)
+}

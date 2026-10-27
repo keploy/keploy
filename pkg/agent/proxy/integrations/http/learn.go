@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -116,10 +117,13 @@ func liveParts(ctx context.Context, in *req) httpParts {
 
 // parseRecordedParts parses a recorded request into its parts, the
 // recording's side of the learn step's comparison. Read through
-// recordedParts, which parses each recording once.
+// recordedParts, which parses each recording once and keeps the parts as
+// long as the recording: the body is the recorded body's own bytes, not a
+// copy (a copy kept beside each recording doubled what a set's request
+// bodies hold), so it is read only, as the parts are.
 func parseRecordedParts(m *models.Mock) httpParts {
 	r := m.Spec.HTTPReq
-	p := httpParts{method: string(r.Method), path: r.URL, header: make(map[string]string, len(r.Header)), body: []byte(r.Body),
+	p := httpParts{method: string(r.Method), path: r.URL, header: make(map[string]string, len(r.Header)), body: unsafe.Slice(unsafe.StringData(r.Body), len(r.Body)),
 		dest: recordedDestination(m)}
 	u, err := url.Parse(r.URL)
 	if err == nil {

@@ -132,3 +132,40 @@ func TestAParsedRecordingsEntryGoesWithTheRecording(t *testing.T) {
 		t.Fatal("the entry of a recording the collector freed is still held")
 	}
 }
+
+// A recording's parts are kept as long as the recording (recordedParts), so
+// they must hold no copy of what the recording already holds: a request body
+// copied into each recording's parts doubles what a set's request bodies hold
+// in the agent. Over 1.25 GiB of recorded request bodies (80 recordings of a
+// 16 MiB body), parsing every recording's parts allocates under a fixed
+// 8 MiB, whatever the bodies' size, and each part's body is the recording's.
+// It allocates the bodies' size where the parts copy them: run it on a box.
+func TestARecordingsPartsHoldNoCopyOfItsBody(t *testing.T) {
+	const recordings, bodySize, limit = 80, 16 << 20, 8 << 20
+	body := strings.Repeat("b", bodySize)
+	mocks := make([]*models.Mock, recordings)
+	for i := range mocks {
+		mocks[i] = &models.Mock{Name: fmt.Sprintf("mock-%d", i), Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{
+			Method: "POST", URL: fmt.Sprintf("http://deps.example/upload/%d", i),
+			Header: map[string]string{"Host": "deps.example", "Content-Type": "application/octet-stream"}, Body: body,
+		}}}
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for _, m := range mocks {
+		if p := recordedParts(m); len(p.body) != bodySize {
+			t.Fatalf("%s's parts hold a body of %d bytes, recorded %d", m.Name, len(p.body), bodySize)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got > limit {
+		t.Fatalf("parsing %d recordings of a %d MiB body allocated %d MiB (limit %d MiB): their parts copy the body", recordings, bodySize>>20, got>>20, limit>>20)
+	}
+	for _, m := range mocks {
+		if p := recordedParts(m); unsafe.SliceData(p.body) != unsafe.StringData(body) {
+			t.Fatalf("%s's parts hold a body that is not the recording's", m.Name)
+		}
+	}
+	runtime.KeepAlive(mocks)
+}

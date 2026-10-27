@@ -163,6 +163,10 @@ func (x *genIndexes[T]) keyed(base, db integrations.MockMemDb, url string, sampl
 	// build.
 	x.last, x.key, x.has = none, learnIndexKey{}, false
 	x.mu.Unlock()
+	// And when base lets its recordings go (a staging, a store into a tree,
+	// a delete, its Close), let go of what is kept of base then, rather than
+	// at the next call, which may come only in a later set, or never.
+	integrations.WhenRestaged(base, x, func() { x.release(base) })
 	if !second && !eager {
 		return none, learnIndexKey{}, false
 	}
@@ -178,7 +182,27 @@ func (x *genIndexes[T]) keyed(base, db integrations.MockMemDb, url string, sampl
 	x.mu.Lock()
 	x.last, x.key, x.has = ix, key, true
 	x.mu.Unlock()
+	if again, ok := sample(db); !ok || again.gen != key.gen || again.shared != key.shared {
+		// base let its recordings go between the read and the keep: its
+		// release ran before this index was kept (the store moves its
+		// generation before it runs them).
+		x.release(base)
+	}
 	return ix, key, true
+}
+
+// release lets go of what x keeps of store: its index, and the key of its
+// last call, which names the store.
+func (x *genIndexes[T]) release(store integrations.MockMemDb) {
+	var none T
+	x.mu.Lock()
+	if x.has && x.key.store == store {
+		x.last, x.key, x.has = none, learnIndexKey{}, false
+	}
+	if x.seen.store == store {
+		x.seen = learnIndexKey{}
+	}
+	x.mu.Unlock()
 }
 
 // learnIndexBuilds counts the indexes built: what the rows count to see that
