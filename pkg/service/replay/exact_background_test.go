@@ -454,10 +454,10 @@ func TestUnderTheSwitchAMarkedBackgroundRecordingIsNotRequired(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		background string
-		unrequired map[string]string
+		unrequired models.BackgroundMarks
 		want       models.TestSetStatus
 	}{
-		{"marked", "a timer's call landed in this test", map[string]string{"mock-tick": "a timer's call landed in this test"}, models.TestSetStatusPassed},
+		{"marked", "a timer's call landed in this test", models.BackgroundMarks{"test-1": {"mock-tick": "a timer's call landed in this test"}}, models.TestSetStatusPassed},
 		{"unmarked", "", nil, models.TestSetStatusFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -479,6 +479,22 @@ func TestUnderTheSwitchAMarkedBackgroundRecordingIsNotRequired(t *testing.T) {
 				t.Fatalf("the staging named unrequired %v (staged %v); want %v", ex.Unrequired, ok, tc.unrequired)
 			}
 		})
+	}
+}
+
+// The staging's marks are per test case (models.BackgroundMarks): a recording
+// listed by test-1, whose entry is marked, and by test-2, whose entry is not,
+// is unrequired of test-1 only. The agent reads the open test case's own, so
+// test-2 still owes the call and its second copy is an extra-call miss.
+func TestTheStagingsMarksAreTheMarkedTestCasesOwn(t *testing.T) {
+	tick := httpAt("mock-tick", 1020)
+	p := newExactPlan(map[string][]models.MockEntry{
+		"test-1": {{Name: "mock-tick", Kind: string(models.HTTP), Background: "a timer's call landed in this test"}},
+		"test-2": {{Name: "mock-tick", Kind: string(models.HTTP)}},
+	}, nil, []*models.Mock{tick})
+	want := models.BackgroundMarks{"test-1": {"mock-tick": "a timer's call landed in this test"}}
+	if !reflect.DeepEqual(p.unrequired, want) {
+		t.Fatalf("the staging marks %v; want %v", p.unrequired, want)
 	}
 }
 
