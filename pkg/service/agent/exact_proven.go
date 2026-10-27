@@ -426,6 +426,16 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if err := a.stageMocks(ctx, staging, append(append([]string(nil), ex.Pool...), entryNames(ex.Worker)...), nil); err != nil {
 			return fmt.Errorf("stage the test set's mocks: %w", err)
 		}
+		// The set's recordings judging marked as the application's own
+		// background work: each test case is served its own in its window,
+		// and never required to make them. A staging without marks clears the
+		// previous set's (names are unique only within a set). A proxy that
+		// cannot take them requires every test mock: never looser.
+		if us, ok := a.Proxy.(coreAgent.UnrequiredSetter); ok {
+			if err := us.SetUnrequired(ex.Unrequired); err != nil {
+				return fmt.Errorf("set the test set's background recordings: %w", err)
+			}
+		}
 		// A test's own are staged only as it opens: what reads them before
 		// reads the on-disk store.
 		if err := a.readUnstagedFromDisk(); err != nil {

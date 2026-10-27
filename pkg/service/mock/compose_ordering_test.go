@@ -71,10 +71,11 @@ type composeInstr struct {
 	// compose it is routinely asked after it has already been stopped, so both
 	// reads failing is the normal case there, not an exotic one.
 	// table and pool are the per-test table and the pool slices the last
-	// proven table push sent.
+	// proven table push sent, and background its background marks.
 	table, pool map[string][]string
 	// recordedWindows are the recorded test windows that push sent.
 	recordedWindows []models.TestWindow
+	background      map[string]string
 	// begins is what the last push of the tests' recorded begins sent, and
 	// beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -218,10 +219,10 @@ func (f *composeInstr) GetScopeWindows(context.Context) ([]models.ScopeWindow, e
 // PushScopeTable takes the per-test table (ScopePusher).
 func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) error { return nil }
 
-// PushProvenTable takes the per-test table and the pool slices
-// (ProvenTablePusher), and keeps the slices.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, windows []models.TestWindow) error {
-	f.table, f.pool, f.recordedWindows = table, pool, windows
+// PushProvenTable takes the per-test table, the pool slices, the recorded
+// windows and the background marks (ProvenTablePusher), and keeps them.
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, windows []models.TestWindow, background map[string]string) error {
+	f.table, f.pool, f.recordedWindows, f.background = table, pool, windows, background
 	return nil
 }
 
