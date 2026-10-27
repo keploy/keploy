@@ -169,7 +169,7 @@ func TestPair(t *testing.T) {
 	})
 	// The golden of design v14 §7.2: a map-ordered list that came back in
 	// another order, with one leaf of each element drifting (expires_in moved
-	// at F's +61.5 s). No element equals any recorded one, so a permutation
+	// at F's lead). No element equals any recorded one, so a permutation
 	// test sees no reorder; the order rule does, and the request is refused.
 	t.Run("golden: reorder plus one drifting leaf per element is unstable_order", func(t *testing.T) {
 		rec := body(t, "k", `{"tokens":[{"id":"a","expires_in":100},{"id":"b","expires_in":200}]}`)

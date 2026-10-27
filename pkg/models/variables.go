@@ -387,15 +387,17 @@ func (o ClockOffset) Unit() time.Duration {
 // millisecond above a microsecond, a minute above a second, an hour above a
 // minute), or above an enc no unit is above. Both runs' values cut to the
 // second and stored at the millisecond share a whole number of seconds;
-// two values the application does not cut share one by chance, one time in
-// about a million at a millisecond's or a microsecond's encoding and one in
-// 3,600 at a second's, and an offset's are refused the same (learn's
-// clockOffset). A Res above enc that is no whole number of the next unit
-// (half a second two millisecond values share by chance, or 2 s two second
-// values do) is none: the sums count it, and the replay's value is read at
-// its own resolution. A Res of enc itself (an hour's time to live at a
-// minute's encoding) is none either. A Plain read's Res is read by its
-// steps (CutOf), not by this (learn's CheckClockRead).
+// two values the application does not cut share one by chance only where
+// record's full round read its clock about half a second or more off the
+// recording's read against its call (learn's FullRoundLead is 545 ms past
+// a whole second and 1.545 s past a whole minute), and an offset's are
+// refused the same (learn's clockOffset). A Res above enc that is no whole
+// number of the next unit (half a second two millisecond values share by
+// chance, or 2 s two second values do) is none: the sums count it, and the
+// replay's value is read at its own resolution. A Res of enc itself (an
+// hour's time to live at a minute's encoding) is none either. A Plain
+// read's Res is read by its steps (CutOf), not by this (learn's
+// CheckClockRead).
 func (o ClockOffset) CutCoarserThan(enc time.Duration) bool {
 	if o.Res <= enc {
 		return false
@@ -430,12 +432,14 @@ var cutSteps = []time.Duration{24 * time.Hour, time.Hour, time.Minute, time.Seco
 // multiple of: the cut a value written at enc shows, whose encoding cannot
 // show one at enc or finer. 0 where n shows none. A decimal step coarser
 // than a millisecond (10 ms, 100 ms) counts only where it is at least 1,000
-// times enc: a millisecond's value falls on a whole 100 ms one time in ten
-// by chance, and the learn step refuses a cut coarser than a millisecond
-// (learn's cutWhy), so two values of a writer of milliseconds would be
-// refused one recording in a hundred. A unit (a second, a minute, an hour,
-// a day) counts at any ratio: applications cut to units, and two values of
-// a writer of seconds both fall on a whole minute one recording in 3,600.
+// times enc: a millisecond's value falls on a whole 10 ms one time in ten
+// by chance (on a whole 100 ms one in a hundred), and the learn step
+// refuses a cut coarser than a millisecond (learn's cutWhy), so two values
+// of a writer of milliseconds would be refused about one recording in ten
+// to a hundred. A unit (a second, a minute, an hour, a day) counts at any
+// ratio: applications cut to units, and two values of a writer of seconds
+// both fall on a whole minute only where record's full round read its clock
+// half a second or more off the recording's read (learn's FullRoundLead).
 // Steps nest, so a value a whole multiple of a step is one of every finer
 // step, and CutOf is the one cut all values that are whole multiples of it
 // share.
