@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -19,8 +20,8 @@ import (
 // of it. Everywhere else the word stays refused, naming why: a word the
 // application sent there itself (its request), a view giving the word at a
 // field the recording lacks, a recorded value that took a word of what the
-// recording gave there or holds the word too, a place that lost no word,
-// one answered at the call or with no answer time. keploy test
+// recording gave there (in any case) or holds the word too, a place that
+// lost no word, one answered at the call or with no answer time. keploy test
 // (ClassifyGiven) refuses it as before. Nothing reads the id's shape.
 func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 	const p = "body.appId"
@@ -81,6 +82,7 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsLearnedAsVarying(t *testing.T) {
 		{"the word at a field the recording lacks", okSrc, viewOf(newField), other, chance, "which the recording lacks"},
 		{"the word at the id's field and at a field the recording lacks", okSrc, viewOf(twoFields), other, chance, "which the recording lacks"},
 		{"the recorded value took a word of what the recording gave there", okSrc, viewOf(okView), sharing, "bb7ed9ee-1f2d-48d1-9a3b-c4d5e6f70812", "and the recorded value took a word of it"},
+		{"the recorded value took a word of what the recording gave there, in another case", okSrc, viewOf(okView), strings.ToUpper(sharing[:8]) + sharing[8:], "BB7ED9EE-1f2d-48d1-9a3b-c4d5e6f70812", "and the recorded value took a word of it"},
 		{"what the recording gave there holds a word the recorded value lost", okSrc, viewOf(okView), inside, chance, "and it holds a word the recorded value lost"},
 		{"the place lost no word", okSrc, viewOf(added), other, chance, "which holds no word record's full round's lacks"},
 		{"the recorded value holds the word too, in another order", okSrc, viewOf(okView), "48d1-0c1d2e3f-4a5b", "0c1d2e3f-4a5b-48d1", "the recorded value holds that word too"},
@@ -190,6 +192,80 @@ func TestAChanceWordOfWhatTheFullRoundGaveIsOrderedWithTheOtherSources(t *testin
 			t.Errorf("%s: %s (%s); want noise", row.name, ln.Kind, ln.Why)
 		case row.want != "" && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.want)):
 			t.Errorf("%s: %s (%s); want it refused for the order: %s", row.name, ln.Kind, ln.Why, row.want)
+		}
+	}
+}
+
+// A recorded value that took a word of the payload whose view gives the
+// chance word, at a field the search of that payload otherwise blanks (its
+// answer's own clock stamp, the Date header: rules 2 and 3), stays refused
+// under the rule a copy follows its source, naming that field: the value may
+// have followed the payload's words wherever F gave them (recordedTook reads
+// stamps as any text). keploy test refuses it as before.
+func TestAChanceWordStaysRefusedWhereTheRecordedValueTookAWordOfThePayloadsStamp(t *testing.T) {
+	const p = "body.appId"
+	const (
+		recID  = "bb7ed9ee-670e-4aa1-982f-b54b2b73982f"
+		liveID = "e1f2a3b4-c5d6-48d1-8a9b-0c1d2e3f4a5b"
+		chance = "5c0e9a7b-1f2d-48d1-9a3b-c4d5e6f70812"
+		other  = "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"
+	)
+	before := r1Insert.Add(-time.Minute)
+	src, view := receiveOf("mock-31", recID, before), receiveOf("mock-31", liveID, before)
+	// The answer's own stamp: its Date header, in the span it was asked and
+	// answered in, as both runs gave it.
+	for _, m := range []*models.Mock{src, view} {
+		m.Spec.HTTPResp.Header["Date"] = m.Spec.ResTimestampMock.Format(http.TimeFormat)
+	}
+	if x := RawOf(src, true); len(x.stamps) != 1 || !strings.HasPrefix(src.Spec.HTTPResp.Header["Date"], "Thu, ") || strings.Contains(src.Spec.HTTPResp.Body, "Thu") {
+		t.Fatalf("the answer's Date header %q is not its one stamp, or not the only text holding Thu", src.Spec.HTTPResp.Header["Date"])
+	}
+	for _, row := range []struct {
+		name, rec, want string
+	}{
+		{"after the id", other + "-Thu", "(its characters 38 to 40) stands in mock-31 at spec.resp.header.Date, as the recording gave it, so the value may have followed that payload's words"},
+		{"before the id", "Thu-" + other, "(its characters 1 to 3) stands in mock-31 at spec.resp.header.Date, as the recording gave it, so the value may have followed that payload's words"},
+	} {
+		for _, follow := range []bool{false, true} {
+			dc := clockedDrifts()
+			x := dc.RawOf(src, true).ServedAs(3).ServedLive(dc.RawOf(view, true))
+			classify := ClassifyGiven
+			if follow {
+				classify = ClassifyFollowing
+			}
+			ln := classify(dc, []string{p}, strLeaf(p, chance), strLeaf(p, row.rec), r1Insert, nil, []Raw{x}, nil, nil, nil)[0]
+			switch {
+			case follow && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, row.want)):
+				t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.want)
+			case !follow && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "where the recording did not give the application that word")):
+				t.Errorf("%s, keploy test: %s (%s); want it refused as before", row.name, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
+// A place whose recorded value holds the drifted value's recorded moment in
+// another layout (epoch seconds or milliseconds against an RFC 3339 instant),
+// and whose value in F holds the moment F saw, drifted with the value
+// (sources: holdsMomentOf), so it stays where the value may have come from
+// (movedFrom), though it lost no word the value holds and holds none the
+// value lost. A place holding other moments shows the value no copy. The
+// classifier's moment echo reads such an instant before any word is let go
+// the other way about, so movedFrom's own check is pinned here, as
+// recordedThere's are above.
+func TestAPlaceHoldingTheValuesMomentInAnotherLayoutStaysWhereItMayHaveComeFrom(t *testing.T) {
+	const rec, live = "2026-10-22T11:14:16Z", "2026-10-23T09:05:47Z"
+	for _, row := range []struct {
+		name, edRec, edLive, want string
+	}{
+		{"epoch seconds", "1792667656", "1792746347", "and the value drifted with it"},
+		{"epoch milliseconds", "1792667656000", "1792746347000", "and the value drifted with it"},
+		{"other moments", "1792600000", "1792700000", ""},
+		{"the recorded moment at record only", "1792667656", "1792700000", ""},
+	} {
+		dc := clockedDrifts()
+		if got := movedFrom(dc.of(row.edRec, row.edLive), dc.of(rec, live)); got != row.want {
+			t.Errorf("%s: %q; want %q", row.name, got, row.want)
 		}
 	}
 }
