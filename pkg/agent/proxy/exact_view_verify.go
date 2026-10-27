@@ -2,10 +2,9 @@ package proxy
 
 import (
 	"fmt"
-	"os"
 	"strings"
-	"sync/atomic"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -17,9 +16,10 @@ import (
 // false green. On in this package's rows (TestMain) and wherever
 // KEPLOY_EXACT_VIEW_VERIFY=1 (CI's lanes); off in a user's run, where the
 // recomputation is the cost the index saves.
-var exactViewVerify atomic.Bool
-
-func init() { exactViewVerify.Store(os.Getenv("KEPLOY_EXACT_VIEW_VERIFY") == "1") }
+//
+// The switch itself is integrations.ExactViewVerify, so the parsers' kept
+// reads are checked under the same one.
+var exactViewVerify = &integrations.ExactViewVerify
 
 // SetExactViewVerify turns the verify mode on or off for this process. The
 // agent calls it from its --exact-view-verify flag (provenswitch.VerifyFlag):

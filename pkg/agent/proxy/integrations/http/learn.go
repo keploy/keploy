@@ -112,7 +112,10 @@ func liveParts(ctx context.Context, in *req) httpParts {
 	return p
 }
 
-func recordedParts(m *models.Mock) httpParts {
+// parseRecordedParts parses a recorded request into its parts, the
+// recording's side of the learn step's comparison. Read through
+// recordedParts, which parses each recording once.
+func parseRecordedParts(m *models.Mock) httpParts {
 	r := m.Spec.HTTPReq
 	p := httpParts{method: string(r.Method), path: r.URL, header: make(map[string]string, len(r.Header)), body: []byte(r.Body),
 		dest: recordedDestination(m)}
