@@ -85,6 +85,37 @@ func ClockOf(recorded, live string) bool {
 	return clockOf(recorded, live).whole
 }
 
+// ClockWordsOf is that evidence word by word: the ASCII words that changed
+// between a value's recording (recorded) and record's full round (live) and
+// are parts of a clock read that moved by FullRoundLead, those it lost (of
+// the recorded value), then those it gained (of the live one), each in the
+// order it stands in its value, as often as it stands there; nil where none
+// did. A value that holds
+// such a read beside words that changed otherwise (an event id built on the
+// time and a random suffix, a UUID v7's random groups) has some, though
+// ClockOf is false for it; one whose changed words are no such read (a
+// counter, a value moved by another amount) has none. Its words need not
+// line up between the two values, and no count of them bounds the search. An
+// adapter that refuses a value holding a read of the clock, whole or beside
+// other words, asks it, and needs no clock search of its own. Like ClockOf,
+// it reads the lead alone, never a call's window.
+func ClockWordsOf(recorded, live string) []string {
+	c := clockOf(recorded, live)
+	r, l := tokensBy(recorded, isWord), tokensBy(live, isWord)
+	var out []string
+	for _, side := range []struct {
+		text         string
+		clock, other map[string]bool
+	}{{recorded, c.rec, l}, {live, c.live, r}} {
+		for _, w := range wordsBy(side.text, isWord) {
+			if side.clock[w] && !side.other[w] {
+				out = append(out, w)
+			}
+		}
+	}
+	return out
+}
+
 // ClockReads is that evidence as the learn step records it on a variable it
 // binds (models.MockVariable.Clock): for a value ClockOf says drifted only
 // with F's clock, each clock read it held when recorded that moved by the

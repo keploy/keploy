@@ -116,9 +116,11 @@ func TestALeafIsAValuesSourceOnlyWhereItHeldTheValueInBothRuns(t *testing.T) {
 // record's full round read them a second apart. auditedAt is a read of the
 // clock in its call's window, learned and checked as one, not a copy of the
 // insert's createdAt, which F saw hold another value. A copy of it (F's
-// auditedAt the insert's createdAt) stays a variable of the insert; a value
-// no read in its call's window gives (an hour past it, the epoch) is refused;
-// the rule's absence (ClassifyGiven) keeps the insert its source.
+// auditedAt the insert's createdAt), which its call's window holds as a read
+// too, is a read since its test began (both explanations hold:
+// TestAClientTestLearnsACopyOfAnEarlierReadItsOwnWindowHoldsAsAReadSinceItsTestBegan);
+// a value no read in its call's window gives (an hour past it, the epoch) is
+// refused; the rule's absence (ClassifyGiven) keeps the insert its source.
 func TestAClientTestsClockReadRecordedWithAnEarlierStampIsNoCopyOfItWhereTheFullRoundReadThemApart(t *testing.T) {
 	const p = "body.cmd.documents.0.auditedAt"
 	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
@@ -142,14 +144,15 @@ func TestAClientTestsClockReadRecordedWithAnEarlierStampIsNoCopyOfItWhereTheFull
 	}
 	at := r0.Add(4 * time.Millisecond)
 	for _, tc := range []struct {
-		name string
-		live string
-		want Kind
+		name  string
+		live  string
+		want  Kind
+		since string
 	}{
-		{"auditedAt read in its call's window, a second past the insert's createdAt", fAudited, KindClockRead},
-		{"auditedAt the insert's createdAt in both runs (a copy)", fCreated, KindVariable},
-		{"auditedAt an hour past its call's window", secs(f0.Add(time.Hour)), KindUnaccounted},
-		{"auditedAt at the epoch", "0", KindUnaccounted},
+		{"auditedAt read in its call's window, a second past the insert's createdAt", fAudited, KindClockRead, ""},
+		{"auditedAt the insert's createdAt in both runs (a copy its call's window holds)", fCreated, KindClockRead, models.SinceTestBegin},
+		{"auditedAt an hour past its call's window", secs(f0.Add(time.Hour)), KindUnaccounted, ""},
+		{"auditedAt at the epoch", "0", KindUnaccounted, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ln := ClassifyFollowing(clientTestCache(), []string{p}, num(tc.live), num(recCreated), at, earlier, nil, nil, w, nil)[0]
@@ -158,12 +161,8 @@ func TestAClientTestsClockReadRecordedWithAnEarlierStampIsNoCopyOfItWhereTheFull
 			}
 			switch tc.want {
 			case KindClockRead:
-				if o, ok := ln.Clock(); !ok || !o.Plain() || o.Since != "" {
-					t.Fatalf("Read=%+v; want a plain read checked in its call's window", ln.Read)
-				}
-			case KindVariable:
-				if ln.From.Mock != "mock-app" {
-					t.Fatalf("a variable of %+v; want one of mock-app", ln.From)
+				if o, ok := ln.Clock(); !ok || !o.Plain() || o.Since != tc.since {
+					t.Fatalf("Read=%+v; want a plain read checked since %q", ln.Read, tc.since)
 				}
 			}
 		})

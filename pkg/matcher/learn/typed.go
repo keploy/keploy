@@ -476,7 +476,7 @@ func instantUnread(r, l Leaf) string {
 // its words. unread says why the test case's own request could not be read
 // (requestUnread; "" when it was, or no test case's request applies): then
 // the echo could not read it, and the instant is never noise or an echo.
-func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces) Learned {
+func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier, raw []Raw, resp []Leaf, w *Window, unread string, places func() *offsetPlaces, noSource bool) Learned {
 	ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 	rt, okR := readTyped(r)
 	lt, okL := readTyped(l)
@@ -485,7 +485,13 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		return ln
 	}
 	rec, live := rt.moment(rt.res), lt.moment(lt.res)
-	if from, ok := dc.instantServedFrom(r, rec, live, served); ok {
+	// noSource: read as an instant no earlier place is the source of (no
+	// variable's search of the places that held the moment it was recorded
+	// with), every other rule as it stands (classifyRead's copy of a read its
+	// own window holds). The echo of a pick still reads it: a moment F saw
+	// that an earlier place holds, with the recorded one held nowhere, is no
+	// copy the recording shows.
+	if from, ok := dc.instantServedFrom(r, rec, live, served); ok && !noSource {
 		ln.Kind, ln.From = KindVariable, from
 		return ln
 	}
@@ -502,11 +508,11 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, pickUnaccounted(where)
 		return ln
 	}
-	if from, ok := dc.instantLeafFrom(r, rec, served); ok {
+	if from, ok := dc.instantLeafFrom(r, rec, served); ok && !noSource {
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 		return ln
 	}
-	if from, ok := dc.instantRawFrom(r, rec, at, raw); ok {
+	if from, ok := dc.instantRawFrom(r, rec, at, raw); ok && !noSource {
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 		return ln
 	}
