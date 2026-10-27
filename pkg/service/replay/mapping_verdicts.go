@@ -64,6 +64,10 @@ import (
 // file that exists as it is; only a run that creates the file can leave such a
 // test without an entry.
 //
+// A passing test that consumed no mock of its own gets an entry with none
+// (addConsumedNothingEntries), so a test with no entry is one the run gave no
+// verdict on.
+//
 //   - PASSED: passing. A pass that left a recorded mock unconsumed is a pass
 //     when its answer matched (it stays PASSED only while --assert-dependencies
 //     and the proven switch are both off; either fails it): its consumption
@@ -214,6 +218,55 @@ func markWrittenByKeployTest(doc *models.Mapping) {
 	if doc != nil && len(doc.TestCases) > 0 {
 		doc.Source = models.MappingSourceKeployTest
 	}
+}
+
+// addConsumedNothingEntries gives every passing test that has no entry in doc
+// an entry with no mock: it passed, and consumed no mock at all. none names the
+// tests whose consumption the run read and found empty
+// (carryOverAttribution.consumedNothing); a test outside it gets nothing, and
+// none does when the run read no test's consumption (none nil: not
+// instrumented, so the agent was never asked). The entries are added in the
+// order of results; the write sorts them by test (mapdb).
+//
+// Without this "no entry" meant two things: the test needs no mock, or the run
+// gave no verdict on it (it failed, was held, or got none). A replay that
+// downloads only the mocks a mapping names, and skips a test with no entry,
+// could not tell them apart, and would skip for good every test that needs no
+// mock: its next auto-replay gives it no entry again. With it, no entry means
+// only "no verdict". A local replay serves an empty entry as it serves no
+// entry (models.MergeStartupMockNames hands it no names: its recorded window).
+//
+// It changes what a write holds, not whether one happens: the holds that keep
+// a run from creating a file that maps no mock decide on mapsAMock.
+func addConsumedNothingEntries(doc *models.Mapping, results []models.TestResult, passing map[string]bool, none map[string]struct{}) {
+	if doc == nil || len(none) == 0 {
+		return
+	}
+	has := make(map[string]bool, len(doc.TestCases))
+	for _, tc := range doc.TestCases {
+		has[tc.ID] = true
+	}
+	for _, r := range results {
+		id := r.TestCaseID
+		if _, ok := none[id]; !ok || has[id] || !passing[id] {
+			continue
+		}
+		has[id] = true
+		doc.TestCases = append(doc.TestCases, models.MappedTestCase{ID: id})
+	}
+}
+
+// mapsAMock reports whether doc maps at least one mock to a test.
+func mapsAMock(doc *models.Mapping) bool {
+	if doc == nil {
+		return false
+	}
+	for _, tc := range doc.TestCases {
+		if len(tc.Mocks) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // passingEntriesOf is the mapping document a run may write: doc with the entries

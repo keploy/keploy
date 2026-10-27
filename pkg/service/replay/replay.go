@@ -6535,6 +6535,13 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	// for one).
 	passing := passingTests(testCaseResults, consumptionUnread, obsoleteShaped, passedMissShaped(testCaseResults, leftRecordedUnconsumed))
 	mappingDoc, keptRecorded := passingEntriesOf(actualTestMockMappings, passing)
+	// Read only when instrumented: otherwise the agent was never asked what a
+	// test consumed, and an empty list would claim what nobody read.
+	var consumedNothing map[string]struct{}
+	if r.instrument {
+		consumedNothing = carryAttr.consumedNothing()
+	}
+	addConsumedNothingEntries(mappingDoc, testCaseResults, passing, consumedNothing)
 	markWrittenByKeployTest(mappingDoc)
 	// Whether a boot consumer's fetch was caught by the set's setup drain or
 	// by a test's drain is timing: a startup section holding the app's
@@ -6591,13 +6598,15 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			holdMappings = "a test got no answer, was refused or lost its result, and a new file would lack it for good"
 		}
-	case len(mappingDoc.TestCases) == 0 && (len(keptRecorded) > 0 || len(passing) == 0 || !r.config.Test.UpdateTestMapping):
-		// A new file would map no test, and, existing, would stop every later
-		// default run from creating the one that does. Into a file that exists
-		// the run goes on: the startup backfill, or the flag's write, which
-		// leaves every entry on disk as it is (with nothing to write, it does
-		// not touch the file). (A flag run where tests passed and none consumed
-		// anything writes as it always has.)
+	case !mapsAMock(mappingDoc) && (len(keptRecorded) > 0 || len(passing) == 0 || !r.config.Test.UpdateTestMapping):
+		// A new file would map no mock to any test (its entries, if any, are
+		// passing tests that consumed nothing), and, existing, would stop
+		// every later default run from creating the one that does. Into a
+		// file that exists the run goes on: the startup backfill, or the
+		// flag's write, which puts the passing tests' empty entries in and
+		// leaves every other entry on disk as it is (with nothing to write,
+		// it does not touch the file). (A flag run where tests passed and
+		// none consumed anything writes their empty entries.)
 		if exists, existsErr := mappingExists(); existsErr != nil || !exists {
 			switch {
 			case len(keptRecorded) > 0:
@@ -6677,7 +6686,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		// A document with no entry and no startup section has nothing to put
 		// into a file that exists: it is left as it is, not rewritten. (Into
 		// none, a flag run where tests passed and none consumed anything
-		// writes an empty file, as it always has.)
+		// writes a file of their empty entries.)
 		nothingToWrite := false
 		if len(mappingDoc.TestCases) == 0 && len(mappingDoc.Startup) == 0 {
 			if exists, existsErr := mappingExists(); existsErr == nil && exists {

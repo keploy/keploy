@@ -1105,3 +1105,141 @@ func TestMarkWrittenByKeployTestOnlyWithTestEntries(t *testing.T) {
 	}
 	markWrittenByKeployTest(nil)
 }
+
+// entriesOnDisk is mappedOnDisk with an entry that names no mock kept, as an
+// empty list; nil when there is no file.
+func entriesOnDisk(t *testing.T, db *mapdb.MappingDb) map[string][]string {
+	t.Helper()
+	if exists, err := db.Exists(context.Background(), "test-set-0"); err != nil || !exists {
+		if err != nil {
+			t.Fatalf("checking for mappings.yaml: %v", err)
+		}
+		return nil
+	}
+	byTest, _, err := db.Get(context.Background(), "test-set-0")
+	if err != nil {
+		t.Fatalf("reading mappings.yaml back: %v", err)
+	}
+	out := make(map[string][]string, len(byTest))
+	for id, entries := range byTest {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name)
+		}
+		out[id] = names
+	}
+	return out
+}
+
+// A passing test that consumed no mock at all gets an entry with none, in the
+// file the run writes, so that a test with no entry is only one the run gave
+// no verdict on (a replay that downloads only the mapped mocks skips those).
+// Before, it got no entry, which kept its recorded one or, with none, left it
+// unmapped for good. A failed test, a test whose consumed mocks all went to
+// other windows, and every test of a run that read no consumption (not
+// instrumented) get no new entry.
+func TestRunTestSetGivesAPassingTestThatConsumedNothingAnEmptyEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		updateMapping   bool
+		fileExists      bool
+		notInstrumented bool
+		wrongBody       map[string]bool
+		test2Consumed   []models.MockState
+		// want is each test's entry after the run; nil: no file.
+		want map[string][]string
+	}{
+		{
+			name: "--update-test-mapping, file exists", updateMapping: true, fileExists: true,
+			want: map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
+		},
+		{
+			name: "--update-test-mapping, no file", updateMapping: true,
+			want: map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
+		},
+		{
+			name: "default flag, no file",
+			want: map[string][]string{"test-1": {"mock-a"}, "test-2": {}},
+		},
+		{
+			name: "test-2 failed: no entry", updateMapping: true, wrongBody: map[string]bool{"test-2": true},
+			want: map[string][]string{"test-1": {"mock-a"}},
+		},
+		{
+			// It consumed a mock, recorded in no window of its own: the window
+			// filter drops it, and the test keeps its recorded entry.
+			name: "test-2 consumed only another window's mock", updateMapping: true, fileExists: true,
+			test2Consumed: []models.MockState{mongoAt("mock-x", 1500)},
+			want:          map[string][]string{"test-1": {"mock-a"}, "test-2": {"mock-old-c"}},
+		},
+		{
+			name: "not instrumented: no consumption read, the file stays", updateMapping: true, fileExists: true, notInstrumented: true,
+			want: map[string][]string{"test-1": {"mock-a", "mock-b"}, "test-2": {"mock-old-c"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPartialRunHarness(t, 2, 0)
+			pinWindows(h)
+			h.replayer.config.Test.UpdateTestMapping = tc.updateMapping
+			h.replayer.instrument = !tc.notInstrumented
+			db := mappingFile(t, h, nil)
+			if tc.fileExists {
+				if err := db.Insert(context.Background(), &models.Mapping{
+					Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
+					TestCases: []models.MappedTestCase{
+						{ID: "test-1", Mocks: mongoEntries("mock-a", "mock-b")},
+						{ID: "test-2", Mocks: mongoEntries("mock-old-c")},
+					},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			consumed := map[string][]models.MockState{
+				"test-1": {mongoAt("mock-a", 1010)},
+				"test-2": tc.test2Consumed,
+			}
+			h.replayer.hookImpl = prHooks{wrongBody: tc.wrongBody, consumedFor: consumedByWindow(h, consumed)}
+			_ = h.run(t)
+
+			if got := entriesOnDisk(t, db); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("mappings.yaml holds %v; want %v (nil: no file)", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAddConsumedNothingEntries(t *testing.T) {
+	results := []models.TestResult{
+		{TestCaseID: "c", Status: models.TestStatusPassed},
+		{TestCaseID: "a", Status: models.TestStatusPassed},
+		{TestCaseID: "b", Status: models.TestStatusPassed},
+		{TestCaseID: "a", Status: models.TestStatusPassed},
+		{TestCaseID: "d", Status: models.TestStatusFailed},
+		{TestCaseID: "e", Status: models.TestStatusPassed},
+	}
+	passing := map[string]bool{"a": true, "b": true, "c": true, "e": true}
+	none := map[string]struct{}{"a": {}, "b": {}, "c": {}, "d": {}}
+	doc := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "b", Mocks: mongoEntries("m1")}}}
+	addConsumedNothingEntries(doc, results, passing, none)
+	var ids []string
+	for _, tc := range doc.TestCases {
+		ids = append(ids, tc.ID)
+		if tc.ID != "b" && len(tc.Mocks) != 0 {
+			t.Fatalf("entry %s names mocks %+v; want none", tc.ID, tc.Mocks)
+		}
+	}
+	// b keeps its own entry; d did not pass; e's consumption was not read
+	// empty; a is added once, though it has two rows.
+	if !reflect.DeepEqual(ids, []string{"b", "c", "a"}) {
+		t.Fatalf("entries = %v, want [b c a]", ids)
+	}
+	if !mapsAMock(doc) {
+		t.Fatal("mapsAMock: the document maps m1 to b")
+	}
+	empty := &models.Mapping{TestCases: []models.MappedTestCase{{ID: "x"}}}
+	addConsumedNothingEntries(empty, results, passing, nil)
+	if len(empty.TestCases) != 1 || mapsAMock(empty) || mapsAMock(nil) {
+		t.Fatalf("no consumption read must add nothing, and an entry with no mock maps none: %+v", empty.TestCases)
+	}
+	addConsumedNothingEntries(nil, results, passing, none) // must not panic
+}

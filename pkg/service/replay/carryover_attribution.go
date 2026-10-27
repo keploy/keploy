@@ -43,6 +43,10 @@ type carryOverAttribution struct {
 	// them: an entry for a test this run did not map would replace that test's
 	// recorded mapping with this one mock.
 	mapped map[string]struct{}
+	// consumedSome holds the tests mapConsumed was given at least one
+	// consumed mock for, in any call (a RetryPassing cycle calls it again).
+	// A mapped test outside it consumed nothing at all (consumedNothing).
+	consumedSome map[string]struct{}
 	// early holds, by owning test, the flagged mocks consumed while that test
 	// was not mapped yet: a carry-over SEND the app published before its own
 	// test ran (the lookahead lets it land up to a few windows early). They
@@ -62,11 +66,27 @@ type carryOverAttribution struct {
 
 func newCarryOverAttribution(testCases []*models.TestCase) *carryOverAttribution {
 	return &carryOverAttribution{
-		sched:   models.NewWindowSchedule(recordedTestWindows(testCases)),
-		mapped:  make(map[string]struct{}),
-		early:   make(map[string][]models.MockState),
-		bootEnd: firstRecordedTestStart(testCases),
+		sched:        models.NewWindowSchedule(recordedTestWindows(testCases)),
+		mapped:       make(map[string]struct{}),
+		consumedSome: make(map[string]struct{}),
+		early:        make(map[string][]models.MockState),
+		bootEnd:      firstRecordedTestStart(testCases),
 	}
+}
+
+// consumedNothing names the tests whose consumption mapConsumed was given and
+// that consumed no mock at all: not one their window filter dropped, not one
+// another test owns. Only these may get an entry with no mock
+// (addConsumedNothingEntries). A test whose every consumed mock went elsewhere
+// keeps what record gave it, as before.
+func (a *carryOverAttribution) consumedNothing() map[string]struct{} {
+	out := make(map[string]struct{}, len(a.mapped))
+	for id := range a.mapped {
+		if _, some := a.consumedSome[id]; !some {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // bootBand is the per-test mocks of consumed, caught by the drain of the
@@ -241,6 +261,9 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		return
 	}
 	a.mapped[running] = struct{}{}
+	if len(consumed) > 0 {
+		a.consumedSome[running] = struct{}{}
+	}
 	own := make([]models.MockState, 0, len(consumed))
 	var startup []models.MockState
 	byOwner := map[int][]models.MockState{}
