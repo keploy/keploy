@@ -146,7 +146,7 @@ func TestClassifyInTheStartUpInsertsInstantIsNoiseInItsWindow(t *testing.T) {
 	// differ in F's span alone read it apart, and so does none.
 	shifted := &Window{Rec: w.Rec, F: Span{From: w.F.From.Add(time.Hour), To: w.F.To.Add(time.Hour)}}
 	{
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		r := body(t, "k", `{"processed_at":"`+inText(recRead)+`"}`)
 		l := body(t, "k", `{"processed_at":"`+inText(live)+`"}`)
 		if ln := ClassifyIn(dc, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, w)[0]; ln.Kind != KindNoise {
@@ -156,7 +156,7 @@ func TestClassifyInTheStartUpInsertsInstantIsNoiseInItsWindow(t *testing.T) {
 			t.Fatal("a window whose F span misses the read was answered from another window's cached reading")
 		}
 	}
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	r := body(t, "k", `{"processed_at":"`+inText(recRead)+`"}`)
 	l := body(t, "k", `{"processed_at":"`+inText(live)+`"}`)
 	if ln := ClassifyIn(dc, []string{"body.processed_at"}, l, r, recInsert, nil, raw, nil, w)[0]; ln.Kind != KindNoise {

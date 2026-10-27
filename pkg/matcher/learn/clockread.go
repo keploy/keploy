@@ -39,6 +39,15 @@ func (ln Learned) Clock() (models.ClockOffset, bool) {
 // learned it as a read keeps that refusal's reason instead (classifyInstant).
 const clockReadUncheckedWhy = "keploy learns it as a read of the application's clock, which a replay must check is a read made in its call's own span, and the replay of this call's protocol checks no such read: learned as noise it would let any value pass at every replay, so keploy refuses it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 
+// noAppClockWhy is why an instant whole in both runs that neither the lead
+// nor a window shows a read of the application's clock is refused, in a
+// call with no window, where keploy cannot tell which clock the application
+// reads (DriftCache.appClock): it would be a plain read of the clock
+// (noWindowRead, classifyRead), but no replay can check one there
+// (Tracker.LiveSpan), so it is refused at learn, by one rule wherever the
+// recording fell in its second.
+const noAppClockWhy = "nothing shows it is a read of the application's clock: keploy cannot tell which clock the application reads in this run (the agent's time hooks report none), so its call has no window on that clock, and no replay can check a read of it there. Learned as noise it would let any value pass at every replay, so keploy refuses it. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+
 // outsideWindowWhy is why a value that is one instant whole in both runs is
 // refused where its call had a window on the application's clock that does
 // not hold it in both runs, and the lead did not show it a read of the clock
