@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"syscall"
 	"testing"
@@ -69,23 +71,6 @@ func unusedPort(t *testing.T) uint16 {
 func dialPort(port uint16) (net.Conn, error) {
 	return net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port))), 10*time.Second)
 }
-
-// appBindKey and appBindCount mirror struct app_bind_key and struct
-// app_bind_count (keploy/ebpf headers/k_ingress_hold.h): the bind hooks'
-// note of what a moved socket bound, and how many hold it.
-type appBindKey struct {
-	Port uint16
-	Kind uint16
-	Addr [4]uint32
-}
-
-type appBindCount struct {
-	Lock uint32
-	N    uint32
-}
-
-// appBindV4 is APP_BIND_V4: an IPv4 socket, here on any address.
-const appBindV4 = 4
 
 // movedAndNoted writes what the bind hooks write for an app socket that
 // bound port orig on 0.0.0.0 and was moved: app_port_info[orig], and, with
@@ -318,7 +303,7 @@ func TestAPortWhoseSocketWentIsNotHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cgf.Close()
+	defer func() { _ = cgf.Close() }()
 	cmd := exec.Command("/proc/self/exe", "-test.run=^$")
 	cmd.Env = append(os.Environ(), ingressSockHelperEnv+"=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(cgf.Fd()), Pdeathsig: syscall.SIGKILL}
@@ -464,7 +449,9 @@ func TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing(t *testing.T) {
 // ends: every call either runs before the close, on maps still open, or
 // finds no hold. Under the race detector (the root job builds these rows
 // with -race) a call that used a map after letting go of the hold's lock is
-// a race with the close. Once closed, the calls answer as with no hold.
+// a race with the close. Each accessor loops in a goroutine of its own, so
+// each is the last call a goroutine makes before the close, whichever runs
+// then. Once closed, the calls answer as with no hold.
 func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
 	h := ingressHoldAgent(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -483,11 +470,20 @@ func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = fwd.Close() })
 
-	const callers = 4
+	calls := []func(){
+		func() { h.RegisterIngressForwarder(orig, fwd) },
+		func() { h.MovedPort(orig) },
+		func() { _, _ = h.AppIPv6Binds(orig) },
+		func() { h.UnregisterIngressForwarder(orig) },
+		func() { h.YieldIngressPort(orig) },
+		func() { h.IngressLookupCounts() },
+		func() { h.StopIngressPark() },
+	}
+	callers := len(calls)
 	stop := make(chan struct{})
 	started := make(chan struct{}, callers)
 	done := make(chan struct{}, callers)
-	for i := 0; i < callers; i++ {
+	for _, call := range calls {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for n := 0; ; n++ {
@@ -496,11 +492,7 @@ func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
 					return
 				default:
 				}
-				h.RegisterIngressForwarder(orig, fwd)
-				h.MovedPort(orig)
-				h.UnregisterIngressForwarder(orig)
-				h.YieldIngressPort(orig)
-				h.IngressLookupCounts()
+				call()
 				if n == 50 {
 					started <- struct{}{}
 				}
@@ -520,5 +512,55 @@ func TestTheHoldClosesOnlyBetweenItsCalls(t *testing.T) {
 	}
 	if _, ok := h.MovedPort(orig); ok {
 		t.Fatal("a closed hold still reads the moved port")
+	}
+	if a, err := h.AppIPv6Binds(orig); a != nil || err != nil {
+		t.Fatalf("a closed hold still reads the app's binds: %v, %v", a, err)
+	}
+}
+
+// The hold reads which IPv6 addresses the app's sockets on a port take
+// calls on from the bind hooks' notes, as the lookup matches them: an IPv6
+// socket on ::1 takes ::1; one on :: takes ::, with IPV6_V6ONLY or without;
+// an IPv4 socket, or an IPv6 one on a v4-mapped address (::ffff:127.0.0.1,
+// how Java binds 127.0.0.1), takes no IPv6. A note no socket holds now, or
+// another port's, takes nothing.
+func TestTheHoldReadsTheIPv6AddressesTheAppsBindsTake(t *testing.T) {
+	h := ingressHoldAgent(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.startIngressHold(ctx, holdCgroup(t))
+	if !h.IngressHeld() {
+		t.Fatal("the hold did not start")
+	}
+	loop6 := netip.IPv6Loopback().As16()
+	loop4 := [16]byte{127, 0, 0, 1}
+	note := func(orig uint16, kind uint16, addr [16]byte, n uint32) {
+		t.Helper()
+		if err := h.objects.AppPortBinds.Update(appBindKey{Port: orig, Kind: kind, Addr: addr}, appBindCount{N: n}, ebpf.UpdateAny); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		kind  uint16
+		addr  [16]byte
+		wantA []netip.Addr
+	}{
+		{"an IPv4 socket on 0.0.0.0", appBindV4, [16]byte{}, nil},
+		{"an IPv6 socket on ::ffff:127.0.0.1", appBindV4, loop4, nil},
+		{"an IPv6 socket on :: without IPV6_V6ONLY", appBindV6Dual, [16]byte{}, []netip.Addr{netip.IPv6Unspecified()}},
+		{"an IPv6 socket on :: with IPV6_V6ONLY", appBindV6, [16]byte{}, []netip.Addr{netip.IPv6Unspecified()}},
+		{"an IPv6 socket on ::1", appBindV6, loop6, []netip.Addr{netip.IPv6Loopback()}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			orig := unusedPort(t)
+			note(orig, c.kind, c.addr, 1)
+			note(orig, appBindV6, [16]byte{0xfd, 15: 5}, 0) // a socket on [fd00::5] that went
+			note(orig+1, appBindV6, [16]byte{0xfd, 15: 6}, 1)
+			got, err := h.AppIPv6Binds(orig)
+			if err != nil || !slices.Equal(got, c.wantA) {
+				t.Fatalf("the IPv6 addresses taken on port %d: %v, %v; want %v", orig, got, err, c.wantA)
+			}
+		})
 	}
 }

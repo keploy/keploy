@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"sync"
@@ -37,6 +38,9 @@ type fakePortHolder struct {
 	yielded      []uint16
 	parkStopped  int
 	lookups      map[string]uint64
+
+	ipv6    map[uint16][]netip.Addr // AppIPv6Binds's answer, by port
+	ipv6Err error
 }
 
 func (f *fakePortHolder) IngressParkListener() net.Listener { return f.park }
@@ -66,6 +70,9 @@ func (f *fakePortHolder) StopIngressPark() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.parkStopped++
+}
+func (f *fakePortHolder) AppIPv6Binds(orig uint16) ([]netip.Addr, error) {
+	return f.ipv6[orig], f.ipv6Err
 }
 func (f *fakePortHolder) IngressHeld() bool                      { return f.held }
 func (f *fakePortHolder) IngressLookupCounts() map[string]uint64 { return f.lookups }
@@ -550,8 +557,16 @@ func TestARecordingThatEndsLeavesTheParkUnstoppedAndSaysNothing(t *testing.T) {
 // The park's retry wait passes its pause, and ends at once, false, with the
 // recording's context: a canceled one never waits out even an hour's pause.
 func TestTheParksRetryWaitEndsWithTheRecording(t *testing.T) {
-	if !parkRetryWait(context.Background(), time.Millisecond) {
+	// It waits the whole pause, at least (a lower bound, which any timer
+	// meets: not a budget): the pause is what keeps a park out of file
+	// descriptors from spinning on Accept.
+	const pause = 20 * time.Millisecond
+	began := time.Now()
+	if !parkRetryWait(context.Background(), pause) {
 		t.Fatal("the retry wait did not pass its pause")
+	}
+	if waited := time.Since(began); waited < pause {
+		t.Fatalf("the retry wait passed after %v, before its pause of %v", waited, pause)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

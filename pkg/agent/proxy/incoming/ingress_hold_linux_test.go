@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"strconv"
 	"syscall"
 	"testing"
@@ -112,7 +113,7 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 		core, logs := observer.New(zapcore.WarnLevel)
 		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
 		if ipv6 {
-			pm.ipv6Binds = map[uint16]bool{orig: true}
+			holder.ipv6 = map[uint16][]netip.Addr{orig: {netip.IPv6Unspecified()}}
 		}
 		g := newGoTCPIngressHook(pm)
 		err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t)))
@@ -164,7 +165,7 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 	t.Run("no IPv6 here", func(t *testing.T) {
 		savedProbe := ingressIPv6Probe
 		t.Cleanup(func() { ingressIPv6Probe = savedProbe })
-		ingressIPv6Probe = func(uint16) error { return syscall.EAFNOSUPPORT }
+		ingressIPv6Probe = func(netip.Addr, uint16) error { return syscall.EAFNOSUPPORT }
 		orig := portOf(t, freeAddr(t))
 		holder, logs, err := start(t, orig, true, true)
 		if err != nil || len(holder.yielded) != 0 || logs.Len() != 0 {
@@ -181,27 +182,59 @@ func TestAForwarderYieldsAPortAListenerHoldsOnIPv6(t *testing.T) {
 	})
 }
 
-// The bind events say which of the app's ports it bound over IPv6, for the
-// forwarder's IPv6 check; recording's end forgets them.
-func TestTheBindEventsMarkTheIPv6Ports(t *testing.T) {
-	events := make(chan models.IngressEvent, 2)
-	events <- models.IngressEvent{Family: unix.AF_INET6, OrigAppPort: 8106, NewAppPort: 41006}
-	events <- models.IngressEvent{Family: unix.AF_INET, OrigAppPort: 8104, NewAppPort: 41004}
-	hook := gatedIngressHook{entered: make(chan uint16, 2), release: make(chan struct{})}
-	close(hook.release)
-	pm := &IngressProxyManager{logger: zap.NewNop(), active: make(map[uint16]proxyStop), ingressHook: hook,
-		hooks: holdingHooks{fakePortHolder: &fakePortHolder{}, events: events}}
-	done := make(chan struct{})
-	go func() { pm.ListenForIngressEvents(context.Background()); close(done) }()
-	<-hook.entered
-	<-hook.entered
-	if !pm.appBoundIPv6(8106) || pm.appBoundIPv6(8104) {
-		t.Fatalf("IPv6 marks: 8106 %v, 8104 %v; want only the IPv6 bind's port", pm.appBoundIPv6(8106), pm.appBoundIPv6(8104))
-	}
-	close(events)
-	<-done
-	if pm.appBoundIPv6(8106) {
-		t.Fatal("the IPv6 mark outlived recording's end")
+// The forwarder checks IPv6 exactly where the app's binds take IPv6 calls
+// (the hold's notes), as the app's own bind would have conflicted without
+// keploy, never by the socket's family alone. An app on ::ffff:127.0.0.1
+// (Java's bind of 127.0.0.1 on a dual-stack host) takes IPv4 only, so a
+// listener on [::1]:P keeps ::1 and the app's port is held, as on main. An
+// app on :: (dual-stack or IPV6_V6ONLY) conflicts with that listener, and
+// the port is yielded. An app on ::1 conflicts with it too, but not with a
+// listener on another IPv6 address ([fd00::5]:P), which a check of [::]
+// would find. When the hooks cannot say what the binds take, the whole of
+// IPv6 is checked: a hold must never take calls from a listener keploy does
+// not own.
+func TestTheIPv6CheckMirrorsWhatTheAppsBindsTake(t *testing.T) {
+	saved := ingressTargetWait
+	t.Cleanup(func() { ingressTargetWait = saved })
+	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
+	any6, loop6 := netip.IPv6Unspecified(), netip.IPv6Loopback()
+	for _, c := range []struct {
+		name, x string
+		binds   []netip.Addr
+		err     error
+		yield   bool
+	}{
+		{"an app on ::ffff:127.0.0.1, a listener on [::1]", "[::1]:0", nil, nil, false},
+		{"an app on :: (dual-stack or IPV6_V6ONLY), a listener on [::1]", "[::1]:0", []netip.Addr{any6}, nil, true},
+		{"an app on ::1, a listener on [::1]", "[::1]:0", []netip.Addr{loop6}, nil, true},
+		{"an app on ::1, a listener on [fd00::5]", "[fd00::5]:0", []netip.Addr{loop6}, nil, false},
+		{"an app on ::1 and ::, a listener on [fd00::5]", "[fd00::5]:0", []netip.Addr{loop6, any6}, nil, true},
+		{"binds the hooks cannot read, a listener on [fd00::5]", "[fd00::5]:0", nil, errors.New("iteration aborted"), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			other := v6Listener(t, c.x)
+			orig := portOf(t, other.Addr().String())
+			holder := &fakePortHolder{held: true, ipv6: map[uint16][]netip.Addr{orig: c.binds}, ipv6Err: c.err}
+			core, logs := observer.New(zapcore.WarnLevel)
+			pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
+			g := newGoTCPIngressHook(pm)
+			err := g.StartIngress(context.Background(), orig, portOf(t, freeAddr(t)))
+			if err == nil {
+				_ = g.StopIngress(orig)
+			}
+			holder.mu.Lock()
+			yielded, registered := holder.yielded, len(holder.registered)
+			holder.mu.Unlock()
+			if c.yield {
+				if !errors.Is(err, errIngressPortYielded) || !errors.Is(err, syscall.EADDRINUSE) || len(yielded) != 1 || registered != 0 || logs.Len() != 1 {
+					t.Fatalf("%v; yielded %v, registered %d, logged %v; want the port yielded with one WARN", err, yielded, registered, logs.All())
+				}
+				return
+			}
+			if err != nil || len(yielded) != 0 || registered != 1 || logs.Len() != 0 {
+				t.Fatalf("%v; yielded %v, registered %d, logged %v; want the forwarder started, the port held", err, yielded, registered, logs.All())
+			}
+		})
 	}
 }
 
@@ -213,7 +246,7 @@ func TestTheBindEventsMarkTheIPv6Ports(t *testing.T) {
 func TestTheIPv6ProbeFindsAListenerNotAConnection(t *testing.T) {
 	ln := v6Listener(t, "[::1]:0")
 	port := portOf(t, ln.Addr().String())
-	if err := probeIPv6Port(port); !errors.Is(err, syscall.EADDRINUSE) {
+	if err := probeIPv6Port(netip.IPv6Unspecified(), port); !errors.Is(err, syscall.EADDRINUSE) {
 		t.Fatalf("the probe, with a listener on [::1]:%d: %v, want EADDRINUSE", port, err)
 	}
 	c, err := net.Dial("tcp6", ln.Addr().String())
@@ -227,7 +260,7 @@ func TestTheIPv6ProbeFindsAListenerNotAConnection(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	_ = ln.Close()
-	if err := probeIPv6Port(port); err != nil {
+	if err := probeIPv6Port(netip.IPv6Unspecified(), port); err != nil {
 		t.Fatalf("the probe, with only an accepted connection on [::1]:%d: %v, want it to bind", port, err)
 	}
 }
