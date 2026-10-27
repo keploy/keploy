@@ -412,3 +412,61 @@ func TestTheWordSearchFindsWhatReadingEveryPayloadFinds(t *testing.T) {
 		}
 	}
 }
+
+// What a set keeps derived of its payloads is within derivedBudget: a
+// payload's words take more memory than its text, so a set that kept every
+// recording's words whole grew with its payloads (api-server's agent: 1.8 GB
+// over 256 recordings of 1 MiB, integrations' pool-call bound row). Past the
+// budget the recording read least recently is let go and derived again
+// where a rule next reads it, and the learn step learns what it learns with
+// every part kept, with none kept (budget 0), and with a cache of no
+// tracker's.
+func TestTheSetsDerivedDataIsKeptWithinABudget(t *testing.T) {
+	defer func(b int64) { derivedBudget = b }(derivedBudget)
+	at := eRecAt
+	mocks := fillers(60, at)
+	for i, m := range mocks {
+		words := make([]string, 400)
+		for j := range words {
+			words[j] = fmt.Sprintf("w%dx%d", i, j)
+		}
+		m.Spec.PostgresV3.Query.Response.Rows[0][0].Value = strings.Join(words, " ")
+	}
+	rawOf := func() []Raw {
+		raw := make([]Raw, len(mocks))
+		for i, m := range mocks {
+			raw[i] = RawOf(m, true).ServedAs(i + 1).ServedAsRecorded()
+		}
+		return raw
+	}
+	const word = "Req.query.bind[0]"
+	rec := Shape{Leaves: map[string]Leaf{word: {Path: word, Type: String, Value: "a1b2c3d4"}}}
+	live := Shape{Leaves: map[string]Leaf{word: {Path: word, Type: String, Value: "z9y8x7w6"}}}
+	classify := func(dc *DriftCache) []Learned {
+		return ClassifyFollowing(dc, []string{word}, live, rec, at, nil, rawOf(), nil, nil, nil)
+	}
+	want := classify(NewDriftCache())
+	var whole int64
+	for _, budget := range []int64{1 << 40, 64 << 10, 0} {
+		derivedBudget = budget
+		tr := NewTracker()
+		tr.NewSet()
+		for test := 1; test <= 2; test++ {
+			tr.Begin()
+			got := classify(tr.Drifts())
+			kept := tr.derived.keptBytes()
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("budget %d, test %d: learned %v, want %v (a cache of no tracker's)", budget, test, got, want)
+			}
+			if budget == 1<<40 {
+				whole = kept
+			} else if kept > budget {
+				t.Errorf("budget %d, test %d: the set keeps %d bytes derived of its payloads, past its budget", budget, test, kept)
+			}
+			tr.End()
+		}
+	}
+	if whole <= 64<<10 {
+		t.Fatalf("the set's derived data kept whole is %d bytes: the row's payloads do not pass the 64 KiB budget, so it lets none go", whole)
+	}
+}
