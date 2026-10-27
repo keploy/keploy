@@ -17,6 +17,7 @@ import (
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // CaptureLosses counts, by kind, the calls the proxy intercepted and could not
@@ -122,10 +123,21 @@ func (p *Proxy) teeDropped(mark func(reason string), dst func() string, stopping
 // what the test lost and closes its scope. A handler the host had not run
 // since the client hung up used to be outrun by the end, and dropped the
 // abandon as one after the test.
+//
+// Under the proven switch, a client process that sent a call through
+// keploy's certificate in this run (caTrust) trusts keploy's CA: it gave a
+// handshake up, or hung up silent after one, of its own accord, as a browser
+// does with the connections it opens ahead of a call and with those of a page
+// it closes, and its hang-up is a cancel, not a loss. Only its hang-ups: a
+// handshake it failed in another way (tls_handshake_failed) is charged as
+// before. A hang-up before its first such call is charged.
 type clientTLS struct {
 	p   *Proxy
 	ctx context.Context
 	dst string
+	// tgid is the client's process (its kernel tgid, the eBPF redirect's);
+	// 0 when unknown, which no call ever makes trusted.
+	tgid uint32
 
 	mu sync.Mutex
 	// began is the scope the handshake began in.
@@ -154,9 +166,50 @@ func (c *clientTLS) inScope() bool {
 }
 
 // withClientTLS is ctx carrying the events of the client-side handshakes made
-// under it, charged to dst (clientTLS).
-func (p *Proxy) withClientTLS(ctx context.Context, dst string) context.Context {
-	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst})
+// under it by the process tgid (0: unknown), charged to dst (clientTLS).
+func (p *Proxy) withClientTLS(ctx context.Context, dst string, tgid uint32) context.Context {
+	return pTls.WithClientEvents(ctx, &clientTLS{p: p, ctx: ctx, dst: dst, tgid: tgid})
+}
+
+// caTrust is the set of client processes, by kernel tgid, that sent a call
+// through keploy's TLS server in this run: each sent an application byte the
+// server decrypted, so it accepted keploy's certificate against the trust
+// store keploy put its CA in for the whole run. A client that does not trust
+// it sends none: it fails the handshake, or hangs up silent once it is done
+// (Node.js, curl, libcurl). The set only grows. The limits: a process that
+// checks some connections against a store of its own without keploy's CA (a
+// Node.js agent given its own ca) and rejects one silently after a call on
+// another; and a tgid the kernel gives again, within the run, to a process
+// that does not trust keploy's CA. Their silent hang-ups are cancels.
+type caTrust struct {
+	m sync.Map // tgid -> struct{}
+}
+
+// noteCall marks tgid as a process that sent a call through keploy's
+// certificate, under the proven switch only: without it nothing is marked,
+// and every hang-up is charged as before. 0 is no process.
+func (t *caTrust) noteCall(tgid uint32) {
+	if tgid != 0 && provenswitch.On() {
+		t.m.Store(tgid, struct{}{})
+	}
+}
+
+// trusts says tgid sent a call through keploy's certificate (noteCall).
+func (t *caTrust) trusts(tgid uint32) bool {
+	_, ok := t.m.Load(tgid)
+	return ok
+}
+
+// cancelled says c's client hung up of its own accord rather than out of
+// distrust: its process trusts keploy's CA (caTrust). It logs the hang-up it
+// does not charge.
+func (c *clientTLS) cancelled(how string) bool {
+	if !c.p.caTrust.trusts(c.tgid) {
+		return false
+	}
+	c.p.logger.Debug("a client process that sent a call through keploy's certificate in this run "+how+": a cancel, not a capture loss",
+		zap.Uint32("tgid", c.tgid), zap.String("destination", c.dst))
+	return true
 }
 
 func (c *clientTLS) HandshakeBegin() {
@@ -173,13 +226,14 @@ func (c *clientTLS) HandshakeFailed(err error) {
 		// keploy closed its own end: the client gave nothing up.
 	case !pTls.IsClientGiveUp(err):
 		c.p.losses.Add(models.CaptureLossTLSAbort, "to "+c.dst)
-	case pTls.CertificateSent(err) && c.inScope():
+	case pTls.CertificateSent(err) && c.inScope() && !c.cancelled("gave a TLS handshake up"):
 		c.p.losses.Add(models.CaptureLossTLSAbandoned, "to "+c.dst)
 	}
 }
 
 func (c *clientTLS) SilentHangUp(err error) {
-	if c.ctx.Err() != nil || errors.Is(err, net.ErrClosed) || !pTls.IsClientGiveUp(err) || !c.inScope() {
+	if c.ctx.Err() != nil || errors.Is(err, net.ErrClosed) || !pTls.IsClientGiveUp(err) || !c.inScope() ||
+		c.cancelled("hung up silent after its TLS handshake") {
 		return
 	}
 	c.p.losses.Add(models.CaptureLossTLSAbandoned, "to "+c.dst)
@@ -187,13 +241,13 @@ func (c *clientTLS) SilentHangUp(err error) {
 
 // clientTLSHandler is pTls.HandleTLSConnection for a parser's TLS upgrader
 // on the record path (util.ConnTLSUpgrader: MySQL's SSLRequest, Postgres's)
-// on a connection to dstAddr: its handshake is charged as every client-side
-// handshake is (clientTLS), and its own error (pTls.HandshakeCause) is
-// returned, which the parsers above it tell a client's EOF apart by identity
-// with.
-func (p *Proxy) clientTLSHandler(dstAddr string) util.ClientTLSHandlerFunc {
+// on a connection to dstAddr from the process tgid: its handshake is charged
+// as every client-side handshake is (clientTLS), and its own error
+// (pTls.HandshakeCause) is returned, which the parsers above it tell a
+// client's EOF apart by identity with.
+func (p *Proxy) clientTLSHandler(dstAddr string, tgid uint32) util.ClientTLSHandlerFunc {
 	return func(ctx context.Context, logger *zap.Logger, conn net.Conn, backdate time.Time) (net.Conn, bool, error) {
-		c, isMTLS, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr), logger, conn, backdate)
+		c, isMTLS, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr, tgid), logger, conn, backdate)
 		return c, isMTLS, pTls.HandshakeCause(err)
 	}
 }

@@ -340,6 +340,10 @@ type Proxy struct {
 	// losses counts the calls the proxy intercepted and could not record or
 	// mock (CaptureLosses).
 	losses captureloss.Counter
+	// caTrust is the client processes that sent a call through keploy's
+	// certificate in this run: their TLS hang-ups are cancels, not losses
+	// (clientTLS).
+	caTrust caTrust
 	// accepts counts every connection the listener has accepted
 	// (Accepted). They are the connections the kernel counts only when the
 	// listener is the one the hooks marked: acceptsLn, set by listen while
@@ -1358,7 +1362,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
-	reportCtx := p.withClientTLS(parserCtx, dstAddr)
+	reportCtx := p.withClientTLS(parserCtx, dstAddr, outgoingOpts.SrcPid)
 	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
@@ -2974,7 +2978,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// Built HERE, in handleConnection scope, so it holds pointers to
 			// the real srcConn/dstConn variables the deferred close uses —
 			// not to copies. See recordMySQLOutgoing's doc comment.
-			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
+			mysqlUpgrader := util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
 			return p.recordMySQLOutgoing(parserCtx, srcConn, dstConn, rule.MC,
 				parserErrGrp, mysqlLogger, clientConnID, destConnID, outgoingOpts, mysqlUpgrader)
 		}
@@ -3247,7 +3251,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		var tlsSrcConn net.Conn
 		// What the handshake, and the client just after it, lose is charged
 		// to the destination (clientTLS).
-		hsCtx = p.withClientTLS(hsCtx, dstAddr)
+		hsCtx = p.withClientTLS(hsCtx, dstAddr, outgoingOpts.SrcPid)
 		tlsSrcConn, isMTLS, err = pTls.HandleTLSConnection(hsCtx, p.logger, srcConn, rule.Backdate)
 		probeProxy(p.logger, "tls-handshake-done", clientConnID,
 			zap.Int("srcPort", sourcePort),
@@ -3293,6 +3297,11 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	if err != nil {
 		utils.LogError(logger, err, "failed to read the initial buffer")
 		return err
+	}
+	if isTLS && len(initialBuf) > 0 {
+		// The client sent a call through keploy's certificate: its
+		// process trusts keploy's CA (caTrust).
+		p.caTrust.noteCall(outgoingOpts.SrcPid)
 	}
 
 	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {
@@ -3626,7 +3635,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			if parserType == integrations.MYSQL ||
 				parserType == integrations.POSTGRES_V2 ||
 				parserType == integrations.POSTGRES_V3 {
-				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr))
+				upgrader = util.NewConnTLSUpgrader(&srcConn, &dstConn, p.logger, p.clientTLSHandler(dstAddr, outgoingOpts.SrcPid))
 			}
 			session := p.buildRecordSession(srcConn, dstConn, rule.MC, parserErrGrp, logger, clientConnID, destConnID, outgoingOpts, upgrader)
 			err := matchedParser.RecordOutgoing(parserCtx, session)
