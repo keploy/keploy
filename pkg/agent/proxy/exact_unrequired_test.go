@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
 )
 
@@ -101,5 +102,136 @@ func TestUnusedBackgroundNeedsExactServing(t *testing.T) {
 	plain.SetUnrequired(map[string]string{"bg": "a timer's call"})
 	if _, _, ok := plain.ExactTestUnusedBackground(); ok {
 		t.Fatal("unused background said with exact serving off")
+	}
+}
+
+// consumeByName answers a call with the open test's recording name, as a
+// parser's consume door does; it fails the test when it cannot.
+func consumeByName(t *testing.T, mm *MockManager, name string) {
+	t.Helper()
+	pt, _ := mm.GetPerTestMocksInWindow()
+	for _, mk := range pt {
+		if mk.Name == name {
+			if !mm.MarkMockAsUsed(*mk) {
+				t.Fatalf("%s did not answer", name)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s is not in the open test's read", name)
+}
+
+// A marked recording that answered in its test's window is what a call made
+// again is answered with (AnsweredBackground): only marked ones, only once
+// they answered, in the order they did, and never a recording another test
+// shares (a candidate), which is no recording of the test's own.
+func TestAnsweredBackgroundIsTheMarkedRecordingsThatAnswered(t *testing.T) {
+	own := exactMock("own", 0, models.LifetimeSession)
+	bg1 := exactMock("bg1", time.Second, models.LifetimeSession)
+	bg2 := exactMock("bg2", 2*time.Second, models.LifetimeSession)
+	shared := exactMock("shared", 3*time.Second, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{own, bg1, bg2, shared})
+	mm.SetUnrequired(map[string]string{"bg1": "a timer's call", "bg2": "a timer's call", "shared": "a timer's call"})
+	mm.ServeExactTestConcurrent("T", []*models.Mock{own, bg1, bg2}, []*models.Mock{shared})
+	if got := mm.AnsweredBackground(); len(got) != 0 {
+		t.Fatalf("a marked recording that has not answered is answered again: %v", got)
+	}
+	consumeByName(t, mm, "own")
+	consumeByName(t, mm, "bg2")
+	consumeByName(t, mm, "shared")
+	consumeByName(t, mm, "bg1")
+	equalNames(t, "answered background", mm.AnsweredBackground(), "bg2", "bg1")
+}
+
+// Without a mark, or with no test open, nothing is answered again: an
+// unmarked recording's second call is one call more than its test recorded.
+func TestAnsweredBackgroundNeedsAMarkAndAnOpenTest(t *testing.T) {
+	cases := map[string]func(mm *MockManager){
+		"none sent": func(*MockManager) {},
+		"another recording marked": func(mm *MockManager) {
+			mm.SetUnrequired(map[string]string{"elsewhere": "a timer's call"})
+		},
+		"test ended": func(mm *MockManager) {
+			mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			bg := exactMock("bg", 0, models.LifetimeSession)
+			mm := stagedManager(t, nil, []*models.Mock{bg})
+			mm.ServeExactTest("T", []*models.Mock{bg})
+			consumeByName(t, mm, "bg")
+			setup(mm)
+			if got := mm.AnsweredBackground(); len(got) != 0 {
+				t.Fatalf("answered again: %v", got)
+			}
+		})
+	}
+	plain := stagedManager(t, nil, []*models.Mock{exactMock("bg", 0, models.LifetimeSession)})
+	plain.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	if got := plain.AnsweredBackground(); got != nil {
+		t.Fatalf("answered again with exact serving off: %v", got)
+	}
+}
+
+// A store held to a call's staging (HoldToRound) answers a call again only
+// while the staging is still the call's: the marks and the recordings are
+// the staged set's, and recordings' names restart in each set, so a call
+// read before the replay staged another set is never answered with that
+// set's recording, and its store says it was restaged.
+func TestAHeldCallIsAnsweredAgainOnlyInItsOwnStaging(t *testing.T) {
+	bg := exactMock("bg", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{bg})
+	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.ServeExactTest("T", []*models.Mock{bg})
+	consumeByName(t, mm, "bg")
+	held, restaged := mm.HoldToRound(integrations.NewCallRound(mm.stagingEpoch.Load(), nil))
+	br, ok := held.(integrations.AnsweredBackgroundReader)
+	if !ok {
+		t.Fatal("the held store offers no answered background recordings")
+	}
+	equalNames(t, "held, own staging", br.AnsweredBackground(), "bg")
+	mm.bumpStagingEpoch()
+	if got := br.AnsweredBackground(); len(got) != 0 || !restaged() {
+		t.Fatalf("once another set was staged the held call is answered again with %v (restaged %v); want none, restaged", got, restaged())
+	}
+	equalNames(t, "precondition: the manager, no hold", mm.AnsweredBackground(), "bg")
+}
+
+// A view made before exact serving began (scopedMockDb) reads the store's
+// answered background recordings, so a parser on it still answers a
+// background call made again; one over a store that keeps none reads none.
+func TestAScopedViewForwardsTheAnsweredBackground(t *testing.T) {
+	bg := exactMock("bg", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{bg})
+	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.ServeExactTest("T", []*models.Mock{bg})
+	consumeByName(t, mm, "bg")
+	var view integrations.MockMemDb = &scopedMockDb{MockMemDb: mm}
+	br, ok := view.(integrations.AnsweredBackgroundReader)
+	if !ok {
+		t.Fatal("a scoped view offers no answered background recordings")
+	}
+	equalNames(t, "scoped view", br.AnsweredBackground(), "bg")
+	type keepsNone struct{ integrations.MockMemDb }
+	var bare integrations.AnsweredBackgroundReader = &scopedMockDb{MockMemDb: keepsNone{mm}}
+	if got := bare.AnsweredBackground(); got != nil {
+		t.Fatalf("a scoped view over a store that keeps none read %v", got)
+	}
+}
+
+// In the gap before a test, the store may already serve that test's
+// recordings (ServeExactPool's ahead): one of them marked as background work
+// that answered there is not answered again until its test's window opens,
+// as a call in the gap is no test's.
+func TestAMarkedRecordingAnsweredInTheGapIsNotAnsweredAgainThere(t *testing.T) {
+	bg := exactMock("bg", 0, models.LifetimeSession)
+	mm := stagedManager(t, nil, []*models.Mock{bg})
+	mm.SetUnrequired(map[string]string{"bg": "a timer's call"})
+	mm.ServeExactPool("k", nil, bg)
+	consumeByName(t, mm, "bg")
+	if got := mm.AnsweredBackground(); len(got) != 0 {
+		t.Fatalf("in the gap before its test a marked recording is answered again: %v", got)
 	}
 }

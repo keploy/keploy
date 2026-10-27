@@ -481,6 +481,19 @@ func (s *scopedMockDb) ConsumedTestMocks() []*models.Mock {
 	return nil
 }
 
+// AnsweredBackground forwards the store's answered background recordings of
+// its open test (integrations.AnsweredBackgroundReader), none when it keeps
+// none, so a parser on a view made before exact serving began still answers a
+// background call made again in its test's window.
+func (s *scopedMockDb) AnsweredBackground() []*models.Mock {
+	if br, ok := s.MockMemDb.(integrations.AnsweredBackgroundReader); ok {
+		return br.AnsweredBackground()
+	}
+	return nil
+}
+
+var _ integrations.AnsweredBackgroundReader = (*scopedMockDb)(nil)
+
 // ServedInOpenTest forwards the store's stamp of its open test and account of
 // what it was served (integrations.ExactServedReader), 0 and none when it
 // keeps none, so a learn step on a scoped view reads the store's account as
