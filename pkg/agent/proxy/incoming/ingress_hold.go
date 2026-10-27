@@ -82,13 +82,6 @@ func (pm *IngressProxyManager) yieldIngressPort(orig uint16) {
 	}
 }
 
-// IngressParked is how many calls the hold's park served: the manager's own
-// count of the parked connections it forwarded (the lookup's counts are of
-// lookups, which a retransmitted SYN repeats); 0 when nothing is held.
-func (pm *IngressProxyManager) IngressParked() uint64 {
-	return pm.parkedServed.Load() + pm.parkedServedV6.Load()
-}
-
 // logIngressHoldEnd says, when recording ends, how many calls the hold
 // served (Info, when any), and what the lookup did (Debug). IPv4 calls reach
 // the park only before the port's forwarder listens (it then takes them);
@@ -158,23 +151,13 @@ func (pm *IngressProxyManager) serveParkedConnections(ctx context.Context, park 
 				return
 			}
 			if parkAcceptCanRecover(err) {
-				pause *= 2
-				if pause == 0 {
-					pause = 5 * time.Millisecond
-				}
-				if pause > time.Second {
-					pause = time.Second
-				}
+				pause = parkRetryPause(pause)
 				if !warned {
 					warned = true
 					pm.logger.Warn("keploy's ingress hold could not accept a call to the application's port for want of a resource; it retries, and the call waits until then",
 						zap.Error(err))
 				}
-				t := time.NewTimer(pause)
-				select {
-				case <-t.C:
-				case <-ctx.Done():
-					t.Stop()
+				if !parkRetryWait(ctx, pause) {
 					return
 				}
 				continue
@@ -187,6 +170,33 @@ func (pm *IngressProxyManager) serveParkedConnections(ctx context.Context, park 
 		}
 		pause = 0
 		go pm.serveParked(ctx, conn)
+	}
+}
+
+// parkRetryPause is the pause before the park's next Accept after one more
+// that failed for want of a resource, given the last pause (0 after a good
+// Accept): 5 ms, doubled each time, at most 1 s, as net/http's server does.
+func parkRetryPause(last time.Duration) time.Duration {
+	if last == 0 {
+		return 5 * time.Millisecond
+	}
+	if last *= 2; last > time.Second {
+		return time.Second
+	}
+	return last
+}
+
+// parkRetryWait waits out the park's pause d before its next Accept, and
+// reports false, at once, when ctx ends first (recording ended: no Accept
+// follows). A variable so a test sees each pause without waiting it.
+var parkRetryWait = func(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

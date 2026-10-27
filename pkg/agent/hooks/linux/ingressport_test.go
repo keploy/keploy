@@ -141,7 +141,7 @@ func TestTheParkListenerGoesInOnlyAsATCPListenerIntoALoadedMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tcp.Close()
+	defer func() { _ = tcp.Close() }()
 	if err := putListener(nil, 0, tcp); err == nil || !strings.Contains(err.Error(), "the map is not loaded") {
 		t.Fatalf("no map: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestTheParkListenerGoesInOnlyAsATCPListenerIntoALoadedMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close()
+	defer func() { _ = unix.Close() }()
 	if err := putListener(&ebpf.Map{}, 0, unix); err == nil || !strings.Contains(err.Error(), "*net.UnixListener, not a *net.TCPListener") {
 		t.Fatalf("a unix listener: %v", err)
 	}
