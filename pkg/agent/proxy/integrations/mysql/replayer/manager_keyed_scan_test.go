@@ -377,10 +377,16 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 //     the full scan does not run on top;
 //   - once the staged trees' indexes are built, no command computes a mock's
 //     preparedIndex keys, the test's first command included: the test's view
-//     files each mock it owns once, by OwnedKeys. The view's index of every
-//     key of every mock the test owned made its first EXECUTE cost two to
-//     four times main's call; before that index, each EXECUTE computed the
-//     keys of every mock the test had not consumed, twice.
+//     files each mock it owns once, by unnamedExecIndex alone. The view's
+//     index of every key of every mock the test owned made its first EXECUTE
+//     cost two to four times main's call; before that index, each EXECUTE
+//     computed the keys of every mock the test had not consumed, twice;
+//   - the first command of a fresh staging, an EXECUTE its own recording
+//     settles in the per-test tier, computes no mock's preparedIndex keys
+//     either: its look-up of an EXECUTE recorded without its query reads
+//     unnamedExecIndex, and builds no index of every key of every staged mock.
+//     It computes each mock's unnamedExecIndex keys at most once in the
+//     staged trees and once in the test's view.
 func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 	sizes := []int{1000, 10000}
 	if testing.Short() || raceEnabled {
@@ -432,7 +438,7 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		match(executeReq(8, "k1"))
 		s.ownWholeSet()
 		computed := 0
-		filed := replayer.CountOwnedPreparedKeysForTest(func() {
+		filed := replayer.CountUnnamedExecKeysForTest(func() {
 			computed = replayer.CountPreparedKeysForTest(func() {
 				match(executeReq(8, "no-such-key")) // the test's first command
 				for i := 0; i < 6; i++ {
@@ -449,6 +455,26 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 			t.Errorf("n=%d: the test's commands filed its mocks %d times, want %d (each once)", n, filed, n)
 		}
 		s.mm.Close()
+
+		// A fresh staging whose test opens before any keyed read.
+		cold := newDiffSide(keyedSet(n, models.LifetimePerTest))
+		cold.stageNoWindow()
+		cold.ownWholeSet()
+		computed = 0
+		probed := replayer.CountUnnamedExecKeysForTest(func() {
+			computed = replayer.CountPreparedKeysForTest(func() {
+				if _, ok, examined, err := replayer.MatchCommandExaminedForTest(context.Background(), executeReq(8, "k3"), cold.mm, cold.dctx, nil, false); err != nil || !ok || examined > 4 {
+					t.Fatalf("n=%d: a fresh staging's first EXECUTE: ok=%v visited=%d err=%v, want it served from the first 4", n, ok, examined, err)
+				}
+			})
+		})
+		if computed != 0 {
+			t.Errorf("n=%d: a fresh staging's first EXECUTE, settled by its own recording, computed %d mocks' preparedIndex keys, want 0", n, computed)
+		}
+		if probed > 2*n {
+			t.Errorf("n=%d: a fresh staging's first EXECUTE computed %d mocks' unnamedExecIndex keys, want at most %d (each mock once staged, once owned)", n, probed, 2*n)
+		}
+		cold.mm.Close()
 	}
 }
 
