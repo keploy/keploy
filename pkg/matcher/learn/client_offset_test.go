@@ -123,6 +123,21 @@ func TestAClientTestsOffsetIsRefusedWhereNoComparedOffsetReads(t *testing.T) {
 	if ln := c.classifyClient(p, millisText(p, rec), iso, c.w.ComparesOffsets()); ln.Kind != KindUnaccounted || ln.Offset != nil {
 		t.Errorf("two layouts: %s %+v (%s); want refused", ln.Kind, ln.Offset, ln.Why)
 	}
+	// Two layouts the instant reading pairs, as one form of time: a moment
+	// with a T and with a space, and epoch milliseconds and seconds. Each is
+	// read as a read of the clock plus the same offset, but no layout holds
+	// both, so no replay could read the value in its form: refused.
+	for _, two := range []struct {
+		name string
+		r, l Leaf
+	}{
+		{"a T and a space", Leaf{Path: p, Noise: p, Type: String, Value: rec.Truncate(ms).Format("2006-01-02T15:04:05.000Z07:00")}, Leaf{Path: p, Noise: p, Type: String, Value: live.Truncate(ms).Format("2006-01-02 15:04:05.000Z07:00")}},
+		{"epoch milliseconds and seconds", millisText(p, rec), Leaf{Path: p, Noise: p, Type: String, Value: strconv.FormatInt(live.Unix(), 10)}},
+	} {
+		if ln := c.classifyClient(p, two.r, two.l, c.w.ComparesOffsets()); ln.Kind != KindUnaccounted || ln.Offset != nil {
+			t.Errorf("two layouts, %s: %s %+v (%s); want refused", two.name, ln.Kind, ln.Offset, ln.Why)
+		}
+	}
 
 	answer := millisText("body.cursor.firstBatch[].expires_at", rec)
 	refused("the call's answer holds it", c.classifyClient(p, millisText(p, rec), millisText(p, live), c.w.ComparesOffsets(), answer), millis)
