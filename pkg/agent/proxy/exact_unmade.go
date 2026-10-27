@@ -3,6 +3,7 @@ package proxy
 import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
 )
 
 // UnmadeWriteBefore implements integrations.UnmadeWriteReader: the first of
@@ -79,3 +80,68 @@ func (s *scopedMockDb) UnmadeWriteBefore(mk *models.Mock, gates func(*models.Moc
 }
 
 var _ integrations.UnmadeWriteReader = (*scopedMockDb)(nil)
+
+// StandIn implements integrations.OwnRecordingStandIn: mk, the copy of one
+// of the open test's own recordings that this view served, is filed as one
+// a read answered from before an unmade write stood in for (exactView.stood).
+// A copy an earlier view served (a previous attempt's, or a test's that
+// ended: the view in force is another), and any other recording (another
+// test's, the background's, a shared one), file nothing. One that answered
+// already, or that a call takes after, is settled as answered by that call
+// (standInsLocked).
+func (m *MockManager) StandIn(mk *models.Mock) {
+	v := m.exactView()
+	if v == nil || mk == nil {
+		return
+	}
+	i, own := v.index[mk.Name]
+	if !own || v.isCand(i) || mk.TestModeInfo.ServedIn != v.gen {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.stood == nil {
+		v.stood = make([]bool, len(v.owned))
+	}
+	v.stood[i] = true
+}
+
+var _ integrations.OwnRecordingStandIn = (*MockManager)(nil)
+
+// standInsLocked, with v.mu held as v closes, files as answered each of its
+// test's own recordings a read stood in for (StandIn) that no call took
+// after, in recorded order after those that answered: the read was the
+// recording's call, made before a write the recording followed. It returns
+// them, for the manager to flag as used (noteExactStoodIn).
+func (v *exactView) standInsLocked() []*models.Mock {
+	var out []*models.Mock
+	for i, stood := range v.stood {
+		if stood && !v.consumed[i] {
+			v.consumed[i] = true
+			v.order = append(v.order, i)
+			out = append(out, v.owned[i])
+		}
+	}
+	return out
+}
+
+// noteExactStoodIn flags owned, a recording of a test that ended with a read
+// having stood in for it and no call having taken it (standInsLocked), as
+// used: the test's mock accounting counts it as the call it recorded. It
+// answered nothing: nothing it learned is flagged (no noise, variables or
+// binds), and it is no call of the set answered earlier (noteAnswered).
+func (m *MockManager) noteExactStoodIn(owned *models.Mock) {
+	if err := m.flagMockAsUsed(exactUsedState(owned), 0); err != nil && m.logger != nil {
+		m.logger.Error("failed to flag mock as used", zap.Error(err))
+	}
+}
+
+// StandIn forwards to the store's (integrations.OwnRecordingStandIn), when
+// it keeps one.
+func (s *scopedMockDb) StandIn(mk *models.Mock) {
+	if si, ok := s.MockMemDb.(integrations.OwnRecordingStandIn); ok {
+		si.StandIn(mk)
+	}
+}
+
+var _ integrations.OwnRecordingStandIn = (*scopedMockDb)(nil)
