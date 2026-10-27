@@ -23,11 +23,13 @@ import (
 )
 
 // In proxy mode a capture hole is a chunk the relay forwarded but did not tee
-// (here the per-connection cap refuses one COM_QUERY). MySQL re-aligns across
-// it (MySQL.CanResyncAfterGap), so the relay keeps feeding it, and the
-// connection's recording goes on at the client's next command: every exchange
-// but the one the hole cut is recorded, each with its own answer, and the cut
-// one has no mock.
+// (here the per-connection cap refuses one COM_QUERY, or the answer to one).
+// MySQL re-aligns across it (MySQL.CanResyncAfterGap), so the relay keeps
+// feeding it, and the connection's recording goes on at the client's next
+// command: every exchange but the one the hole cut is recorded, each with its
+// own answer, and the cut one has no mock. The dropped chunk marks no mock
+// incomplete (teeDropMark), whichever tee dropped it: a mark would void the
+// next exchange's mock, which MySQL captured whole.
 //
 // Before, the relay fed MySQL no more after the hole, and the connection
 // recorded nothing more for the rest of its life. What the relay does with the
@@ -36,15 +38,33 @@ import (
 // traffic after the hole are still left out, as for Mongo, which re-aligns too.
 func TestRecordViaSupervisorKeepsRecordingMySQLAcrossACaptureHole(t *testing.T) {
 	t.Parallel()
+	// The client's query over the cap: the client-to-server tee drops it.
+	t.Run("the query lost", func(t *testing.T) {
+		t.Parallel()
+		recordMySQLAcrossACaptureHole(t, false)
+	})
+	// The server's answer over the cap (a big result, proxy mode's usual
+	// drop): the server-to-client tee drops it.
+	t.Run("the answer lost", func(t *testing.T) {
+		t.Parallel()
+		recordMySQLAcrossACaptureHole(t, true)
+	})
+}
+
+// recordMySQLAcrossACaptureHole drives one pooled MySQL connection through
+// recordViaSupervisor with one chunk over the capture cap: the query it cuts
+// (answerLost false) or that query's answer (answerLost true).
+func recordMySQLAcrossACaptureHole(t *testing.T, answerLost bool) {
 	const (
 		queries = 8
-		lost    = 4    // the query the cap refuses
+		lost    = 4    // the exchange the cap cuts
 		capB    = 1024 // the connection's capture buffer, recordBufferCap
 	)
+	// Longer than the whole buffer: refused whatever the parser has read.
+	big := strings.Repeat("x", 2*capB)
 	query := func(i int) string {
-		if i == lost {
-			// Longer than the whole buffer: refused whatever the parser has read.
-			return fmt.Sprintf("DO %d, '%s'", i, strings.Repeat("x", 2*capB))
+		if i == lost && !answerLost {
+			return fmt.Sprintf("DO %d, '%s'", i, big)
 		}
 		return fmt.Sprintf("DO %d", i)
 	}
@@ -87,7 +107,8 @@ func TestRecordViaSupervisorKeepsRecordingMySQLAcrossACaptureHole(t *testing.T) 
 
 	// The server: a greeting, OK to the handshake response, and to query i an
 	// OK whose affected-rows count is i, so a mock that pairs a query with
-	// another query's answer shows.
+	// another query's answer shows. With answerLost, the OK to the cut query
+	// carries an info text over the cap.
 	serverCaps := uint32(mysql.CLIENT_PROTOCOL_41 | mysql.CLIENT_PLUGIN_AUTH | mysql.CLIENT_SECURE_CONNECTION)
 	served := make(chan error, 1)
 	go func() {
@@ -112,7 +133,11 @@ func TestRecordViaSupervisorKeepsRecordingMySQLAcrossACaptureHole(t *testing.T) 
 				return fmt.Errorf("handshake response: %w", err)
 			}
 			ok := func(rows uint64, seq byte) error {
-				b, err := phase.EncodeOk(context.Background(), &mysql.OKPacket{Header: mysql.OK, AffectedRows: rows, StatusFlags: 2}, serverCaps)
+				var info string
+				if answerLost && rows == lost {
+					info = big
+				}
+				b, err := phase.EncodeOk(context.Background(), &mysql.OKPacket{Header: mysql.OK, AffectedRows: rows, StatusFlags: 2, Info: info}, serverCaps)
 				if err != nil {
 					return err
 				}
@@ -210,7 +235,7 @@ func TestRecordViaSupervisorKeepsRecordingMySQLAcrossACaptureHole(t *testing.T) 
 		t.Fatalf("%d wrong mock(s); the first: %s", len(wrong), wrong[0])
 	}
 	if got[lost] {
-		t.Fatalf("query %d, which the cap refused, was recorded", lost)
+		t.Fatalf("query %d, whose exchange the cap cut, was recorded", lost)
 	}
 	for i := 1; i <= queries; i++ {
 		if i != lost && !got[i] {
