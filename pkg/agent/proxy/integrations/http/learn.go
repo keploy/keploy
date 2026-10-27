@@ -2342,14 +2342,18 @@ func (h *HTTP) claimLearned(ctx context.Context, m *models.Mock, mockDb integrat
 // inRecordedOrder is mocks in the order they were recorded.
 func inRecordedOrder(mocks []*models.Mock) []*models.Mock {
 	out := append([]*models.Mock(nil), mocks...)
-	sort.SliceStable(out, func(i, j int) bool {
-		ti, tj := out[i].Spec.ReqTimestampMock, out[j].Spec.ReqTimestampMock
-		if !ti.Equal(tj) {
-			return ti.Before(tj)
-		}
-		return out[i].Name < out[j].Name
-	})
+	sort.SliceStable(out, func(i, j int) bool { return recordedFirst(out[i], out[j]) })
 	return out
+}
+
+// recordedFirst is inRecordedOrder's order: a before b when a was recorded
+// first, or at the same instant with a name that sorts first.
+func recordedFirst(a, b *models.Mock) bool {
+	ta, tb := a.Spec.ReqTimestampMock, b.Spec.ReqTimestampMock
+	if !ta.Equal(tb) {
+		return ta.Before(tb)
+	}
+	return a.Name < b.Name
 }
 
 // leafPaths are leaves' exact paths, sorted, without repeats.

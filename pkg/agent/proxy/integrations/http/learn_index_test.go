@@ -155,20 +155,20 @@ func TestALearnedCallReadsTheIndexOfItsOwnGeneration(t *testing.T) {
 	// neither.
 	db.gen = 3
 	for i := 0; i < 2; i++ {
-		ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) {
+		_, ok := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) {
 			db.gen = 4
 			return db.perTest, nil, nil
 		})
-		if ix != nil || h.learnIx.last != nil && h.learnIx.last.gen != 2 {
+		if ok || h.learnIx.last != nil && h.learnIx.last.gen != 2 {
 			t.Fatal("an index was kept from a read the generation moved under")
 		}
 		db.gen = 3
 	}
 	db.gen = integrations.RestagedGeneration
-	if ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ix != nil {
+	if _, ok := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ok {
 		t.Fatal("a store held to a staging that moved was read through an index")
 	}
-	if ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ix != nil {
+	if _, ok := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ok {
 		t.Fatal("a store held to a staging that moved built an index")
 	}
 }
