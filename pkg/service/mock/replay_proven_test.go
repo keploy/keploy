@@ -519,6 +519,47 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
 }
 
+// Under the switch the replay hands the agent, with the per-test table, the
+// test entries judging marked as the application's background work, each
+// with why (models.MockEntry.Background): only those the agent holds, and
+// none of an unmarked entry. A set with no mark sends none.
+func TestTheReplayHandsTheAgentTheBackgroundMarks(t *testing.T) {
+	provenOn(t)
+	for _, tc := range []struct {
+		name    string
+		entries string
+		want    map[string]string
+	}{
+		{
+			name:    "marked",
+			entries: "        - name: mock-0\n        - name: mock-1\n          background: a timer's call landed here\n        - name: mock-9\n          background: a connection failure the agent never holds\n",
+			want:    map[string]string{"mock-1": "a timer's call landed here"},
+		},
+		{name: "unmarked", entries: "        - name: mock-0\n        - name: mock-1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n"+tc.entries), 0o644))
+			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+			cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			// mock-9 is a connection failure: decoded, never handed to the agent.
+			db := named("mock-0", "mock-1", "mock-9")
+			db.mocks[2].Kind = models.ConnectionFailure
+			_ = New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+			require.Equal(t, map[string][]string{"o::TestA": {"mock-0", "mock-1"}}, instr.table)
+			require.Equal(t, tc.want, instr.background)
+		})
+	}
+}
+
 // Under the switch the replay never arms the whole pool before its run: the
 // table push armed the slice of calls made before any claim, and arming the
 // whole pool would let any test's mock answer them. With the switch off it

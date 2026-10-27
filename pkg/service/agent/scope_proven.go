@@ -423,6 +423,29 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	return a.applyPool(ctx)
 }
 
+// SetScopeBackground installs, for a replay, the tests' recordings judging
+// marked as the application's own background work (models.MockEntry.Background),
+// each with why: a test is served one in its window when it makes the call,
+// and is never failed for not making it (coreAgent.UnrequiredSetter). nil
+// clears the previous table's marks. A proxy that cannot take them requires
+// every test mock, which is never looser.
+func (a *Agent) SetScopeBackground(ctx context.Context, names map[string]string) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	us, ok := a.Proxy.(coreAgent.UnrequiredSetter)
+	if !ok {
+		if len(names) > 0 {
+			a.logger.Info("this keploy agent's proxy cannot serve a test's background recordings without requiring them: each test is required to make them",
+				zap.Int("background recordings", len(names)),
+				zap.String("next_step", "replay with a keploy agent of the same release as this keploy"))
+		}
+		return nil
+	}
+	return us.SetUnrequired(names)
+}
+
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
 // unless a test is open: its end serves it.
 func (a *Agent) applyPool(ctx context.Context) error {
@@ -851,7 +874,10 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
-	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
+	// A test that passed keeps the background recordings it did not call on
+	// its window too: never a failure, they tell judging which ones a replay
+	// did not use.
+	if ev != nil && (ev.Reason != "" || !ev.Empty() || len(ev.Background) > 0) {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
