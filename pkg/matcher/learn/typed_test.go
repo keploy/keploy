@@ -2072,3 +2072,113 @@ func TestAPlainClockReadsResolutionIsItsEncodingsNotAChanceGrain(t *testing.T) {
 		}
 	}
 }
+
+// A text's fraction digits are no evidence of the resolution its writer
+// writes: a writer that drops trailing zeros (Go's RFC3339Nano, Java's
+// Instant) writes ".495123" where its read fell on a whole microsecond. So a
+// text read is learned at the finer of its two values' digits (textReadRes),
+// never coarser because one of them happened to end in zeros, and a
+// nine-digit replay value passes. A replay's value with fewer digits passes
+// where it is the same instant at its own precision (the writer dropped its
+// zeros; ruled 2026-10-27). Two values that both end in zeros at a unit are
+// read at it, and a replay value with more digits is refused as a cut (a
+// stated limit: the same at every replay of that recording). A value the
+// application does cut is still refused naming the cut: written with nine
+// digits on both sides, with three and six, or as an epoch in seconds with
+// a fraction (read exactly, never through a float); and so is a cut value
+// of a form whose layout fixes its resolution (an epoch in nanoseconds, a
+// $date), wherever its replay value falls.
+func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T) {
+	const p = "body.at"
+	str := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	learn := func(rec, live string) models.ClockOffset {
+		t.Helper()
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: str(live)}}, Shape{Leaves: map[string]Leaf{p: str(rec)}}, call, nil, nil, nil, nil)[0]
+		o, ok := ln.Clock()
+		if !plainRead(ln) || !ok {
+			t.Fatalf("%s then %s: %s Read=%+v (%s); want a plain read of the clock", rec, live, ln.Kind, ln.Read, ln.Why)
+		}
+		return o
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+	check := func(what string, o models.ClockOffset, v string, want bool, whyHas string) {
+		t.Helper()
+		ok, why := CheckClockRead(p, o, str(v), span, true)
+		if ok != want || !want && !strings.Contains(why, whyHas) {
+			t.Errorf("%s, replay %s: %v (%s); want %v %q", what, v, ok, why, want, whyHas)
+		}
+	}
+	six, nine := "2026-10-27T03:30:00.495123Z", "2026-10-27T03:31:02.032456789Z"
+	for _, pr := range [][2]string{{six, nine}, {nine, six}} {
+		o := learn(pr[0], pr[1])
+		if o.Res != time.Nanosecond {
+			t.Errorf("%s then %s: Res = %v; want the 1ns of the value with nine digits", pr[0], pr[1], o.Res)
+		}
+		what := "one value ending in 000ns"
+		check(what, o, "2026-10-28T07:30:00.005123456Z", true, "")
+		check(what, o, "2026-10-28T07:30:00.00512345Z", true, "")
+		check(what+", fewer digits", o, "2026-10-28T07:30:00.005123Z", true, "")
+		check(what+", before the span", o, "2026-10-28T07:29:59.995123456Z", false, "it changed")
+	}
+	// Both values happened to end in zeros: learned at the microsecond
+	// their digits show; a six-digit replay value passes, a nine-digit one
+	// is refused as a cut (the stated limit), never passed.
+	both := learn(six, "2026-10-27T03:31:02.032456Z")
+	if both.Res != time.Microsecond {
+		t.Errorf("both values with six digits: Res = %v; want 1µs", both.Res)
+	}
+	check("both values ending in 000ns", both, "2026-10-28T07:30:00.005123Z", true, "")
+	check("both values ending in 000ns, nine digits", both, "2026-10-28T07:30:00.005123456Z", false, "the application cuts its value")
+	// Cut to the second, nine digits on both sides: the cut is learned (the
+	// microsecond above the nanosecond) and a replay value that is cut so
+	// too is refused naming it, wherever in the span its read fell.
+	cut := learn("2026-10-27T03:30:00.000000000Z", "2026-10-27T03:31:02.000000000Z")
+	if cut.Res != time.Microsecond {
+		t.Errorf("cut to the second with nine digits: Res = %v; want the 1µs cut", cut.Res)
+	}
+	check("cut to the second", cut, "2026-10-28T07:30:00.000000000Z", false, "the application cuts its value")
+	// Cut to the second, written with three digits, then six: the cut is
+	// the second above the coarser's millisecond, so a three-digit replay
+	// value cut so is refused too, not checked at its millisecond.
+	mixed := learn("2026-10-27T03:30:00.000Z", "2026-10-27T03:31:02.000000Z")
+	if mixed.Res != time.Second {
+		t.Errorf("cut to the second with three digits, then six: Res = %v; want the 1s cut", mixed.Res)
+	}
+	check("cut to the second, three digits", mixed, "2026-10-28T07:30:00.000Z", false, "the application cuts its value")
+	check("cut to the second, six digits", mixed, "2026-10-28T07:30:00.000000Z", false, "the application cuts its value")
+	// An epoch in seconds cut to the millisecond, with six digits: read
+	// exactly, both values are whole milliseconds, a cut.
+	if r := textClockRead("1793158200.123000", "1793158262.456000"); r == nil || r.Res != time.Millisecond {
+		t.Errorf("an epoch in seconds cut to the millisecond: %+v; want a Res of the 1ms cut", r)
+	} else {
+		check("an epoch in seconds cut to the millisecond", *r, "1793176200.005000", false, "the application cuts its value")
+	}
+	// A time of day and an epoch in seconds read their fraction the same.
+	if r := clockedDrifts().todRead(3*time.Hour+30*time.Minute+495123*time.Microsecond, 3*time.Hour+31*time.Minute+2032456789, time.Microsecond, time.Nanosecond, "time-second", "time-second", nil, call); r.Res != time.Nanosecond {
+		t.Errorf("a time of day with six digits, then nine: Res = %v; want 1ns", r.Res)
+	}
+	if r := textClockRead("1793158200.495", "1793158262.032456"); r == nil || r.Res != time.Microsecond {
+		t.Errorf("an epoch in seconds with three digits, then six: %+v; want a Res of 1µs", r)
+	}
+	// A layout that fixes its resolution reads no fraction: a cut epoch in
+	// nanoseconds, and a cut $date, are refused at replay even where the
+	// replay's value is no whole number of the cut.
+	ns := func(at time.Time) string { return strconv.FormatInt(at.UnixNano(), 10) }
+	sec := time.Date(2026, 10, 26, 9, 0, 0, 123000000, time.UTC)
+	if r := textClockRead(ns(sec), ns(sec.Add(FullRoundLead+7*time.Millisecond))); r == nil || r.Res != time.Microsecond {
+		t.Fatalf("a cut epoch in nanoseconds: %+v; want a Res of 1µs, a cut", r)
+	} else if ok, why := CheckClockRead(p, *r, str(ns(now.Add(5*time.Millisecond+7))), span, true); ok || !strings.Contains(why, "the application cuts its value") {
+		t.Errorf("a cut epoch in nanoseconds, a replay value no whole microsecond: %v (%s); want refused naming the cut", ok, why)
+	}
+	const tp = "body.at.$date.$numberLong"
+	typed := func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at, time.Millisecond) }
+	whole := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	ln := ClassifyIn(clockedDrifts(), []string{tp}, Shape{Leaves: map[string]Leaf{tp: typed(whole.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{tp: typed(whole)}}, whole.Add(time.Millisecond), nil, nil, nil, nil)[0]
+	if o, ok := ln.Clock(); !ok || o.Res != time.Second {
+		t.Fatalf("a cut $date: %s %+v,%v (%s); want a read at the second's cut", ln.Kind, o, ok, ln.Why)
+	} else if ok, why := CheckClockRead("at", o, typed(now.Add(5*time.Millisecond)), span, true); ok || !strings.Contains(why, "the application cuts its value") {
+		t.Errorf("a cut $date, a replay value no whole second: %v (%s); want refused naming the cut", ok, why)
+	}
+}
