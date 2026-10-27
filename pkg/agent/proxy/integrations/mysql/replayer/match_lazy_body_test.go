@@ -74,7 +74,7 @@ func (s *diffSide) matchBody(ctx context.Context, req mysql.Request, eng *schema
 func TestLazyBodyServesReportsAndLearnsWhatTheEagerBodyDoes(t *testing.T) {
 	seeds := int64(30)
 	sizes := []int{100, 1000, 10000}
-	if testing.Short() {
+	if testing.Short() || raceEnabled {
 		seeds, sizes = 6, sizes[:2]
 	}
 	for _, ne := range noiseEngines {
