@@ -228,11 +228,11 @@ recording_counter() {
 }
 
 # check_capture_accounted fails when the recording loses requests without
-# saying so, or when a pause did not end. Each k6 request must be a recorded
-# test or a loss the agent's summary counts: suppressed, not recorded under
-# memory pressure, left out in flight, dropped at capacity, or held at the end.
-# Requests k6 saw fail may have reached no one, so they are allowed for, with
-# 1% of the requests (at least 10) on top.
+# saying so, or when a pause did not end for the app's ingress. Each k6
+# request must be a recorded test or a loss the agent's summary counts:
+# suppressed, not recorded under memory pressure, left out in flight, dropped
+# at capacity, or held at the end. Requests k6 saw fail may have reached no
+# one, so they are allowed for, with 1% of the requests (at least 10) on top.
 #
 # Every pause must also be temporary, the forced one (FORCE_PAUSE) and each one
 # real memory pressure made. The agent counts the ingress requests that came
@@ -246,8 +246,8 @@ recording_counter() {
 #   connection after it ended, and the agent counted its later requests;
 # - the recording holds at least
 #   reqs - failed - requests_during_pauses - N * 2 * VUs - slack tests (a
-#   suppressed test does not count towards that): fewer says capture did not
-#   come back after a pause, on a connection to the app or to MySQL.
+#   suppressed test does not count towards that): fewer says that, after a
+#   pause, the app's requests did not become tests again.
 # The second check can judge only when a recording that captured nothing after
 # its first pause would fall below that floor: when the floor is above the
 # requests that came before the first pause (requests_before_first_pause).
@@ -259,6 +259,14 @@ recording_counter() {
 # 3,836 not counted. A build whose pause stayed on for each keep-alive
 # connection, counting each later request as not recorded, recorded 3,421 tests
 # of 7,051 requests through a forced pause of 30.
+#
+# These checks judge the ingress side: whether the app's requests became
+# tests. A build that went on recording tests after a pause, but not their
+# MySQL calls, would pass them: those mocks are counted only in
+# mocks_dropped_by_pressure, which no bound here reads. Whether MySQL capture
+# came back after a pause is judged by the replay (check_test_report): a test
+# whose MySQL calls were not recorded finds no mock and fails, and the lane
+# fails when more than MAX_FAIL_PERCENT of the tests do.
 #
 # Only a recorder built from this tree is checked: a released agent predates
 # these counts, and does not know the forced pause.
@@ -342,13 +350,13 @@ check_capture_accounted() {
         judged=1
         echo "The recording must hold at least ${floor} tests (more than the ${before} before the first pause)."
         if [ "$tests" -lt "$floor" ]; then
-            echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pauses cost more than the requests during them and at their edges, so capture did not resume after a pause."
+            echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pauses cost more than the requests during them and at their edges, so after a pause the app's requests did not become tests again."
             rc=1
         fi
     fi
     if [ "$rc" -eq 0 ]; then
         if [ "$judged" -eq 1 ]; then
-            echo "The recording accounts for every request, and capture resumed after every pause."
+            echo "The recording accounts for every request, and after every pause the app's requests became tests again; the replay judges whether MySQL capture came back."
         else
             echo "The recording accounts for every request."
         fi
