@@ -656,8 +656,9 @@ type givenWords struct {
 	// round gave the application them where F served it changed and gave
 	// its view (ServedLive), stamps read as any text; none otherwise (served
 	// as recorded, F gave words and stamped). Where the value that lacks a
-	// word both runs gave holds another word of the payload, as either run
-	// gave it (inAnswer), the word shows nothing (follows.givenTook).
+	// word both runs gave holds a word of the payload, or of any other place
+	// the word rule reads, as either run gave it (inAnswer), the word shows
+	// nothing (follows.tookElsewhere).
 	gave [][]string
 	// answered, conn and pos are the recording's (Raw), first and last F's
 	// serves of it: where the rule lets a word of it go, they place it in
