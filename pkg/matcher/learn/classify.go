@@ -1244,7 +1244,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 		}
 		if ln.Read != nil {
-			ln.Read.Zone = dc.textReadZone(r.Value, l.Value, at)
+			ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
 			ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
 		}
 		out = append(out, ln)

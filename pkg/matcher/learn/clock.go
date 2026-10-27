@@ -129,8 +129,9 @@ func (w *Window) ComparesOffsets() *Window {
 // Zone is the zone the application writes a wall clock of no zone in
 // (Tracker.SetAppZone), as a replay's span carries it (Tracker.LiveSpan),
 // which a replay reads a learned read of the clock in the application's
-// zone in (models.ZoneApp, CheckClockRead); nil where the tracker was told
-// none: such a read is then refused. A Window's spans carry none: the learn
+// zone in (models.ZoneApp, and models.ZoneEither as one of its two
+// readings: CheckClockRead); nil where the tracker was told none: such a
+// read is then refused. A Window's spans carry none: the learn
 // step reads the zone of its DriftCache.
 type Span struct {
 	From, To time.Time
@@ -138,13 +139,20 @@ type Span struct {
 }
 
 // holds reports whether t, an instant read at resolution res, is a read of
-// the clock within s: each bound is read at the instant's own resolution (a
-// value in seconds is the second its read was made in).
+// the clock within s: t stands for the unit [t, t+res) its read was made in
+// (a value in seconds is the second its read was made in), and some instant
+// of s lies in it. A unit that starts off UTC's grid of res (a wall clock of
+// no zone read in the application's zone: the day of a date in IST starts at
+// 18:30 UTC) is read so too, never by cutting s's bounds to that grid. A
+// res of none is a nanosecond's: t itself lies in s.
 func (s Span) holds(t time.Time, res time.Duration) bool {
 	if s.From.IsZero() || s.To.IsZero() {
 		return false
 	}
-	return !t.Before(s.From.Truncate(res)) && !t.After(s.To.Truncate(res))
+	if res <= 0 {
+		res = time.Nanosecond
+	}
+	return !t.After(s.To) && t.Add(res).After(s.From)
 }
 
 // holds reports whether recorded and live, an instant in layout lay each,

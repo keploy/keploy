@@ -478,7 +478,8 @@ func TestAWallClockOfNoZoneIsCheckedAtReplayInTheZoneItWasLearnedIn(t *testing.T
 // (nearestZone): an application east of UTC (IST) or west of it (New
 // York's -4h) writing its own zone's wall clock is read in the
 // application's zone; one writing UTC's, in UTC; a recorded reading that is
-// one instant in both zones (the application's zone is UTC), in UTC.
+// one instant in both zones (the application's zone is UTC), in either
+// (models.ZoneEither), as the recording cannot tell the two apart.
 func TestAWallClockWithNoWindowIsReadInTheZoneOfItsReadingNearestItsCall(t *testing.T) {
 	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
 	read := call.Add(-5 * time.Millisecond)
@@ -499,7 +500,7 @@ func TestAWallClockWithNoWindowIsReadInTheZoneOfItsReadingNearestItsCall(t *test
 		{"east of UTC, UTC's", east, time.UTC, models.ZoneUTC},
 		{"west of UTC, its own zone's", west, west, models.ZoneApp},
 		{"west of UTC, UTC's", west, time.UTC, models.ZoneUTC},
-		{"the application's zone UTC", time.UTC, time.UTC, models.ZoneUTC},
+		{"the application's zone UTC", time.UTC, time.UTC, models.ZoneEither},
 	} {
 		if ln := classifyZoned(row.zone, false, p, text(row.write)(read), text(row.write)(fRead), call, nil); !zonedRead(ln, row.want) {
 			t.Errorf("%s: %s Read=%+v (%s); want a plain read in %q", row.what, ln.Kind, ln.Read, ln.Why, row.want)
@@ -680,6 +681,169 @@ func TestACallerThatChecksNoClockReadNeverReceivesOneAsNoise(t *testing.T) {
 		}
 		if noise, why := unaware(ln); noise || why != p+" changed, and "+want {
 			t.Errorf("FALSE GREEN? %s, to a caller that checks no read: noise %v (%s); want refused: %s", row.what, noise, why, want)
+		}
+	}
+}
+
+// A date of no zone (a day's resolution) is read in the zone its recording
+// tells, and where the recording cannot tell UTC's from the application's
+// (its call falls in one day in both zones, or the application's zone is
+// UTC there), in either (models.ZoneEither): a replay passes the value read
+// in UTC or in the application's zone. The replay's verdict on the
+// application's own value is then one at every hour of the day, whichever
+// zone the application writes and whatever hour it was recorded at, never a
+// pass at one hour and a refusal at another; a date two days off is refused
+// at every hour, and one a day off passes only where it is the other zone's
+// date (the stated limit). For UTC, IST and EDT applications, writing their
+// own zone's date or UTC's, a text and a typed date, in a call with no
+// window and in one whose window holds the call, recorded at every hour.
+func TestADateOfNoZoneIsCheckedAtEveryHourWhicheverZoneItIsWrittenIn(t *testing.T) {
+	const p = "body.day"
+	day := func(at time.Time, in *time.Location) time.Time {
+		a := at.In(in)
+		return time.Date(a.Year(), a.Month(), a.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	text := func(at time.Time, in *time.Location) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: day(at, in).Format("2006-01-02")}
+	}
+	typed := func(at time.Time, in *time.Location) Leaf { return WallClockLeaf(p, p, day(at, in), 24*time.Hour) }
+	ist, edt := time.FixedZone("IST", 5*3600+1800), time.FixedZone("EDT", -4*3600)
+	for _, app := range []struct {
+		what string
+		zone *time.Location
+	}{{"UTC", time.UTC}, {"IST", ist}, {"EDT", edt}} {
+		for _, write := range []*time.Location{app.zone, time.UTC} {
+			for _, form := range []struct {
+				what string
+				leaf func(time.Time, *time.Location) Leaf
+			}{{"text", text}, {"typed", typed}} {
+				for _, windowed := range []bool{false, true} {
+					for h := 0; h < 24; h++ {
+						call := time.Date(2026, 10, 27, h, 30, 0, 500e6, time.UTC)
+						read := call.Add(-5 * time.Millisecond)
+						// record's full round a day later: the date moved.
+						fRead, fCall := read.Add(24*time.Hour), call.Add(24*time.Hour)
+						var w *Window
+						if windowed {
+							w = &Window{Rec: Span{From: read.Add(-5 * time.Millisecond), To: call}, F: Span{From: fRead.Add(-5 * time.Millisecond), To: fCall}}
+						}
+						what := fmt.Sprintf("%s app writing %s's date, %s, window %v, recorded at %02d:30Z", app.what, write, form.what, windowed, h)
+						ln := classifyZoned(app.zone, false, p, form.leaf(read, write), form.leaf(fRead, write), call, w)
+						o, ok := ln.Clock()
+						if !plainRead(ln) || !ok {
+							t.Fatalf("%s: %s Read=%+v (%s); want a plain read of the clock", what, ln.Kind, ln.Read, ln.Why)
+						}
+						want := models.ZoneApp
+						switch {
+						case day(call, time.UTC).Equal(day(call, app.zone)):
+							want = models.ZoneEither
+						case write == time.UTC:
+							want = models.ZoneUTC
+						}
+						if o.Zone != want {
+							t.Errorf("%s: learned in %q; want %q", what, o.Zone, want)
+						}
+						for rh := 0; rh < 24; rh++ {
+							now := time.Date(2026, 11, 3, rh, 10, 0, 0, time.UTC)
+							s := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: app.zone}
+							at := now.Add(5 * time.Millisecond)
+							if ok, why := CheckClockRead(p, o, form.leaf(at, write), s, true); !ok {
+								t.Errorf("%s: the application's own date at %02d:10Z refused (%s)", what, rh, why)
+							}
+							if ok, _ := CheckClockRead(p, o, form.leaf(at.Add(48*time.Hour), write), s, true); ok {
+								t.Errorf("%s: a date two days off at %02d:10Z passed", what, rh)
+							}
+							other := day(at, app.zone)
+							if write == app.zone {
+								other = day(at, time.UTC)
+							}
+							off := form.leaf(at.Add(24*time.Hour), write)
+							passes := o.Zone == models.ZoneEither && day(at.Add(24*time.Hour), write).Equal(other)
+							if ok, _ := CheckClockRead(p, o, off, s, true); ok != passes {
+								t.Errorf("%s: a date a day off at %02d:10Z: passed %v; want %v (only where it is the other zone's date, under either zone)", what, rh, ok, passes)
+							}
+						}
+						if o.Zone == models.ZoneEither {
+							now := time.Date(2026, 11, 3, 12, 10, 0, 0, time.UTC)
+							if ok, why := CheckClockRead(p, o, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy cannot tell the application's zone") {
+								t.Errorf("%s: the application's zone not told at replay: %v %q; want refused, saying so", what, ok, why)
+							}
+							if !strings.HasPrefix(o.String(), "clock, a wall clock of no zone in UTC or in the application's zone") {
+								t.Errorf("%s: String %q", what, o.String())
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// Where the recording's window holds a date in both zones but record's full
+// round's holds it in one alone (the full round ran a day and eight hours
+// later, past the hour the two zones' dates part), the zone is the one both
+// runs hold, never either: an IST application writing its own date is read
+// in its zone, one writing UTC's in UTC. A text and a typed date.
+func TestADateTheFullRoundTellsTheZoneOfIsReadInThatZoneAlone(t *testing.T) {
+	const p = "body.day"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	day := func(at time.Time, in *time.Location) time.Time {
+		a := at.In(in)
+		return time.Date(a.Year(), a.Month(), a.Day(), 0, 0, 0, 0, time.UTC)
+	}
+	text := func(at time.Time, in *time.Location) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: day(at, in).Format("2006-01-02")}
+	}
+	typed := func(at time.Time, in *time.Location) Leaf { return WallClockLeaf(p, p, day(at, in), 24*time.Hour) }
+	call := time.Date(2026, 10, 27, 12, 0, 0, 500e6, time.UTC)
+	read := call.Add(-5 * time.Millisecond)
+	fCall := call.Add(32 * time.Hour)
+	fRead := fCall.Add(-5 * time.Millisecond)
+	w := &Window{Rec: Span{From: read.Add(-5 * time.Millisecond), To: call}, F: Span{From: fRead.Add(-5 * time.Millisecond), To: fCall}}
+	for _, form := range []struct {
+		what string
+		leaf func(time.Time, *time.Location) Leaf
+	}{{"text", text}, {"typed", typed}} {
+		for _, row := range []struct {
+			write *time.Location
+			want  string
+		}{{ist, models.ZoneApp}, {time.UTC, models.ZoneUTC}} {
+			ln := classifyZoned(ist, false, p, form.leaf(read, row.write), form.leaf(fRead, row.write), call, w)
+			if !zonedRead(ln, row.want) {
+				t.Errorf("%s written in %s: %s Read=%+v (%s); want a plain read in %q", form.what, row.write, ln.Kind, ln.Read, ln.Why, row.want)
+			}
+		}
+	}
+}
+
+// A span holds an instant read at resolution res where some instant of the
+// span lies in its unit [t, t+res), on UTC's grid of res or off it: the day
+// of a date read in IST starts at 18:30 UTC, and a span at 20:00 UTC holds
+// that day, never the one before or after it. An instant of no resolution is
+// held where it lies in the span, its start and its end too.
+func TestASpanHoldsTheUnitOfAnInstantOnOrOffUTCsGrid(t *testing.T) {
+	from := time.Date(2026, 10, 27, 20, 0, 0, 0, time.UTC)
+	s := Span{From: from, To: from.Add(20 * time.Millisecond)}
+	istDay := time.Date(2026, 10, 27, 18, 30, 0, 0, time.UTC)
+	for _, row := range []struct {
+		what string
+		at   time.Time
+		res  time.Duration
+		want bool
+	}{
+		{"IST's day of the span", istDay, 24 * time.Hour, true},
+		{"IST's day after it", istDay.Add(24 * time.Hour), 24 * time.Hour, false},
+		{"IST's day before it", istDay.Add(-24 * time.Hour), 24 * time.Hour, false},
+		{"UTC's day of the span", time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC), 24 * time.Hour, true},
+		{"UTC's next day", time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC), 24 * time.Hour, false},
+		{"the second before the span", from.Add(-time.Second), time.Second, false},
+		{"no resolution, at the span's start", from, 0, true},
+		{"no resolution, at its end", s.To, 0, true},
+		{"no resolution, a nanosecond before it", from.Add(-time.Nanosecond), 0, false},
+		{"no resolution, a nanosecond after it", s.To.Add(time.Nanosecond), 0, false},
+	} {
+		if got := s.holds(row.at, row.res); got != row.want {
+			t.Errorf("%s: %v; want %v", row.what, got, row.want)
 		}
 	}
 }

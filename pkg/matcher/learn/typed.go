@@ -602,7 +602,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		}
 		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
 		if rt.names == namesWall {
-			ln.Read.Zone = dc.wallZone(rt.at, at)
+			ln.Read.Zone = dc.wallZone(rt.at, lt.at, rt.res, lt.res, w, at)
 		}
 	}
 	return ln
@@ -623,8 +623,9 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 // clock, and the verdict must not. Not in keploy mock's client tests, whose
 // harness gives the application inputs keploy does not see (clientTestWhy),
 // nor for a time of day, which names no day. A wall clock of no zone in both
-// runs is one too, read in the zone of its recorded reading nearest its
-// call (wallZone), which a replay checks it in alone. An echo of it
+// runs is one too, read in the zone its recording tells (wallZone), which a
+// replay checks it in alone, or in UTC and the application's zone both
+// where the recording cannot tell the two apart (models.ZoneEither). An echo of it
 // in its call's own answer stays refused (classifyInstant): an echo is
 // answered with this run's value, never checked as a read.
 func (dc *DriftCache) noWindowRead(r, l typedInstant, w *Window, at time.Time) bool {
