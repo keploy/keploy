@@ -517,6 +517,26 @@ func TestAClockReadsZoneMeetsAsOneOrHoldsNothing(t *testing.T) {
 	if a, b := app.Meet(utc).Meet(app), app.Meet(utc.Meet(app)); a != b {
 		t.Errorf("Meet grouped two ways: %+v and %+v", a, b)
 	}
+	// A read in either zone meets one in UTC or in the application's zone as
+	// that one, the zone both hold, in either order; another of either as
+	// either; one that names its zone as no zone at all. Grouped any way,
+	// either, UTC and the application's meet as ZoneApart.
+	either := ClockOffset{Res: ms, Zone: ZoneEither}
+	for _, row := range []struct {
+		with ClockOffset
+		want string
+	}{{utc, ZoneUTC}, {app, ZoneApp}, {either, ZoneEither}, {named, ZoneApart}, {ClockOffset{Res: ms, Zone: "pst"}, ZoneApart}} {
+		for _, got := range []ClockOffset{either.Meet(row.with), row.with.Meet(either)} {
+			if got.Zone != row.want || got.Empty() != (row.want == ZoneApart) {
+				t.Errorf("either meet %+v = %+v (Empty %v); want zone %q", row.with, got, got.Empty(), row.want)
+			}
+		}
+	}
+	for _, got := range []ClockOffset{either.Meet(utc).Meet(app), either.Meet(utc.Meet(app)), app.Meet(either).Meet(utc), utc.Meet(app.Meet(either))} {
+		if got.Zone != ZoneApart || !got.Empty() {
+			t.Errorf("either, UTC and the application's zone met as %+v; want ZoneApart", got)
+		}
+	}
 	for _, row := range []struct {
 		o    ClockOffset
 		want string
@@ -524,13 +544,14 @@ func TestAClockReadsZoneMeetsAsOneOrHoldsNothing(t *testing.T) {
 		{named, "clock"},
 		{app, "clock, a wall clock of no zone in the application's zone"},
 		{utc, "clock, a wall clock of no zone in UTC"},
+		{either, "clock, a wall clock of no zone in UTC or in the application's zone"},
 		{ClockOffset{Res: ms, Zone: "pst"}, `clock read in a zone this keploy does not read ("pst")`},
 	} {
 		if got := row.o.String(); got != row.want {
 			t.Errorf("String of %+v = %q; want %q", row.o, got, row.want)
 		}
 	}
-	for zone, want := range map[string]bool{"": true, ZoneUTC: true, ZoneApp: true, ZoneApart: false, "pst": false} {
+	for zone, want := range map[string]bool{"": true, ZoneUTC: true, ZoneApp: true, ZoneEither: true, ZoneApart: false, "pst": false} {
 		if got := (ClockOffset{Res: ms, Zone: zone}).ZoneKnown(); got != want {
 			t.Errorf("ZoneKnown of %q = %v; want %v", zone, got, want)
 		}
