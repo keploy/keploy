@@ -33,9 +33,10 @@ type IngressPortHolder interface {
 	UnregisterIngressForwarder(orig uint16)
 	// IngressHeld reports whether the moved ports are held.
 	IngressHeld() bool
-	// IngressParked is how many calls the park has served: the window the
-	// hold covered.
-	IngressParked() uint64
+	// IngressLookupCounts is what the lookup did with the listener lookups
+	// for a moved port, by name, or nil when nothing is held: lookups, not
+	// connections (a retransmitted SYN is looked up again), for Debug.
+	IngressLookupCounts() map[string]uint64
 }
 
 // ingressPark is the hold's park listener, or nil when the hooks hold nothing.
@@ -64,12 +65,44 @@ func (pm *IngressProxyManager) unregisterIngressForwarder(orig uint16) {
 }
 
 // IngressParked is how many calls the hold's park served before a forwarder
-// took over, for the run's capture summary; 0 when nothing is held.
+// took over, for the run's capture summary: the manager's own count of the
+// parked connections it forwarded (the lookup's counts are of lookups, which
+// a retransmitted SYN repeats); 0 when nothing is held.
 func (pm *IngressProxyManager) IngressParked() uint64 {
-	if pm.portHolder == nil {
-		return 0
+	return pm.parkedServed.Load()
+}
+
+// logIngressHoldEnd says, when recording ends, how many calls the hold
+// served (Info, when any), and what the lookup did (Debug).
+func (pm *IngressProxyManager) logIngressHoldEnd() {
+	if parked := pm.IngressParked(); parked > 0 {
+		pm.logger.Info("keploy served calls to the application's port that arrived before its forwarder listened, by holding the port from the application's bind",
+			zap.Uint64("count", parked))
 	}
-	return pm.portHolder.IngressParked()
+	if pm.portHolder == nil {
+		return
+	}
+	if counts := pm.portHolder.IngressLookupCounts(); counts != nil {
+		pm.logger.Debug("the ingress hold's listener lookups for the application's moved ports", zap.Any("lookups", counts))
+	}
+}
+
+// portSem is the synchronous mode's one-call-at-a-time semaphore of the
+// application's port orig, which its forwarder and the park share: a call
+// the park serves and one the forwarder accepts for the same port are taken
+// in turn, as two of the forwarder's own are.
+func (pm *IngressProxyManager) portSem(orig uint16) chan struct{} {
+	pm.semMu.Lock()
+	defer pm.semMu.Unlock()
+	if pm.portSems == nil {
+		pm.portSems = map[uint16]chan struct{}{}
+	}
+	sem, ok := pm.portSems[orig]
+	if !ok {
+		sem = make(chan struct{}, 1)
+		pm.portSems[orig] = sem
+	}
+	return sem
 }
 
 // serveParkedConnections serves what the hold's park accepts: a call to a
@@ -82,7 +115,6 @@ func (pm *IngressProxyManager) serveParkedConnections(ctx context.Context, park 
 		<-ctx.Done()
 		_ = park.Close()
 	}()
-	sem := make(chan struct{}, 1)
 	for {
 		conn, err := park.Accept()
 		if err != nil {
@@ -93,11 +125,11 @@ func (pm *IngressProxyManager) serveParkedConnections(ctx context.Context, park 
 			}
 			return
 		}
-		go pm.serveParked(ctx, conn, sem)
+		go pm.serveParked(ctx, conn)
 	}
 }
 
-func (pm *IngressProxyManager) serveParked(ctx context.Context, conn net.Conn, sem chan struct{}) {
+func (pm *IngressProxyManager) serveParked(ctx context.Context, conn net.Conn) {
 	ta, ok := conn.LocalAddr().(*net.TCPAddr)
 	if !ok {
 		_ = conn.Close()
@@ -112,7 +144,8 @@ func (pm *IngressProxyManager) serveParked(ctx context.Context, conn net.Conn, s
 		_ = conn.Close()
 		return
 	}
+	pm.parkedServed.Add(1)
 	pm.logger.Debug("serving a call to the app's port before keploy's forwarder listened (held from the app's bind)",
 		zap.Uint16("orig_port", orig), zap.Uint16("new_port", moved))
-	pm.handleConnection(ctx, conn, "127.0.0.1:"+strconv.Itoa(int(moved)), pm.logger, pm.tcChan, sem, orig)
+	pm.handleConnection(ctx, conn, "127.0.0.1:"+strconv.Itoa(int(moved)), pm.logger, pm.tcChan, pm.portSem(orig), orig)
 }

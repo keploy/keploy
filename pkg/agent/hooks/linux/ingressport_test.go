@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 )
 
 // Where the hold cannot start (here the main object is not loaded; on a
@@ -24,8 +25,8 @@ func TestAHoldThatCannotStartSaysTheWindowItLeaves(t *testing.T) {
 	h := NewHooks(zap.New(core), &config.Config{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h.startIngressHold(ctx)
-	if h.IngressHeld() || h.IngressParkListener() != nil || h.IngressParked() != 0 {
+	h.startIngressHold(ctx, t.TempDir())
+	if h.IngressHeld() || h.IngressParkListener() != nil || h.IngressLookupCounts() != nil {
 		t.Fatal("a hold that could not start reports one")
 	}
 	if _, ok := h.MovedPort(8080); ok {
@@ -44,5 +45,21 @@ func TestAHoldThatCannotStartSaysTheWindowItLeaves(t *testing.T) {
 	fields := w.ContextMap()
 	if fields["next_step"] == nil || fields["kernel"] == nil || fields["error"] == nil {
 		t.Fatalf("the warning lacks its kernel, error or next_step: %v", fields)
+	}
+}
+
+// The bind hooks note what the app binds (structs.FlagIngressHold) only for
+// a hold that is on: set when it is, cleared when it is not, even if a
+// downstream build's customizer set it, and no other bit is touched.
+func TestTheHoldFlagIsSetOnlyForAHoldThatIsOn(t *testing.T) {
+	others := structs.FlagKernelPortAlloc | structs.FlagClassifies
+	if got := ingressHoldFlag(others, true); got != others|structs.FlagIngressHold {
+		t.Fatalf("held: flags %#x, want %#x", got, others|structs.FlagIngressHold)
+	}
+	if got := ingressHoldFlag(others|structs.FlagIngressHold, false); got != others {
+		t.Fatalf("not held: flags %#x, want %#x", got, others)
+	}
+	if structs.FlagIngressHold != 1<<5 {
+		t.Fatalf("FlagIngressHold is %#x; KEPLOY_FLAG_INGRESS_HOLD is bit 5", structs.FlagIngressHold)
 	}
 }

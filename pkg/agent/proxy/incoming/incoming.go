@@ -84,6 +84,13 @@ type IngressProxyManager struct {
 	// forwarder covers the window as it did before (shrunk by binding the
 	// port as soon as the bind event arrives).
 	portHolder IngressPortHolder
+	// parkedServed counts the parked connections the manager forwarded
+	// (serveParked), for the run's summary.
+	parkedServed atomic.Uint64
+	// portSems are the synchronous mode's per-port semaphores, which a
+	// port's forwarder and the park share (portSem). Guarded by semMu.
+	semMu    sync.Mutex
+	portSems map[uint16]chan struct{}
 
 	// relocated maps an app port whose bind the record hooks moved (keploy's
 	// ingress forwarder then holds the port) to the port the app was moved
@@ -300,10 +307,7 @@ func (pm *IngressProxyManager) ListenForIngressEvents(ctx context.Context) {
 		pm.StartIngressProxy(ctx, e.OrigAppPort, e.NewAppPort)
 	}
 	pm.logger.Debug("Stopping ingress event listener as the event channel was closed.")
-	if parked := pm.IngressParked(); parked > 0 {
-		pm.logger.Info("keploy served calls to the application's port that arrived before its forwarder listened, by holding the port from the application's bind",
-			zap.Uint64("count", parked))
-	}
+	pm.logIngressHoldEnd()
 	pm.StopAll()
 }
 
@@ -408,7 +412,8 @@ func (h *goTCPIngressHook) StartIngress(ctx context.Context, origPort, newPort u
 		// may also close it — and this runs before close(done) so a StopIngress
 		// waiter observes the port freed. Prevents the port from lingering post-exit.
 		defer func() { _ = listener.Close() }()
-		sem := make(chan struct{}, 1)
+		// Shared with the park's calls to this port (portSem).
+		sem := h.pm.portSem(origPort)
 		for {
 			select {
 			case <-ctx.Done():

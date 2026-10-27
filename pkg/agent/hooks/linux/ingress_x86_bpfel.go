@@ -16,11 +16,15 @@ import (
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	ingressMapAppBindSocks       = "app_bind_socks"
+	ingressMapAppPortBinds       = "app_port_binds"
 	ingressMapAppPortInfo        = "app_port_info"
 	ingressMapIngressForwarders  = "ingress_forwarders"
 	ingressMapIngressLookupStats = "ingress_lookup_stats"
 	ingressMapIngressPark        = "ingress_park"
+	ingressMapPendingHolds       = "pending_holds"
 	ingressProgK_ingressLookup   = "k_ingress_lookup"
+	ingressProgK_ingressRelease  = "k_ingress_release"
 )
 
 // loadIngress returns the embedded CollectionSpec for ingress.
@@ -65,17 +69,21 @@ type ingressSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ingressProgramSpecs struct {
-	K_ingressLookup *ebpf.ProgramSpec `ebpf:"k_ingress_lookup"`
+	K_ingressLookup  *ebpf.ProgramSpec `ebpf:"k_ingress_lookup"`
+	K_ingressRelease *ebpf.ProgramSpec `ebpf:"k_ingress_release"`
 }
 
 // ingressMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ingressMapSpecs struct {
+	AppBindSocks       *ebpf.MapSpec `ebpf:"app_bind_socks"`
+	AppPortBinds       *ebpf.MapSpec `ebpf:"app_port_binds"`
 	AppPortInfo        *ebpf.MapSpec `ebpf:"app_port_info"`
 	IngressForwarders  *ebpf.MapSpec `ebpf:"ingress_forwarders"`
 	IngressLookupStats *ebpf.MapSpec `ebpf:"ingress_lookup_stats"`
 	IngressPark        *ebpf.MapSpec `ebpf:"ingress_park"`
+	PendingHolds       *ebpf.MapSpec `ebpf:"pending_holds"`
 }
 
 // ingressVariableSpecs contains global variables before they are loaded into the kernel.
@@ -104,18 +112,24 @@ func (o *ingressObjects) Close() error {
 //
 // It can be passed to loadIngressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ingressMaps struct {
+	AppBindSocks       *ebpf.Map `ebpf:"app_bind_socks"`
+	AppPortBinds       *ebpf.Map `ebpf:"app_port_binds"`
 	AppPortInfo        *ebpf.Map `ebpf:"app_port_info"`
 	IngressForwarders  *ebpf.Map `ebpf:"ingress_forwarders"`
 	IngressLookupStats *ebpf.Map `ebpf:"ingress_lookup_stats"`
 	IngressPark        *ebpf.Map `ebpf:"ingress_park"`
+	PendingHolds       *ebpf.Map `ebpf:"pending_holds"`
 }
 
 func (m *ingressMaps) Close() error {
 	return _IngressClose(
+		m.AppBindSocks,
+		m.AppPortBinds,
 		m.AppPortInfo,
 		m.IngressForwarders,
 		m.IngressLookupStats,
 		m.IngressPark,
+		m.PendingHolds,
 	)
 }
 
@@ -129,12 +143,14 @@ type ingressVariables struct {
 //
 // It can be passed to loadIngressObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ingressPrograms struct {
-	K_ingressLookup *ebpf.Program `ebpf:"k_ingress_lookup"`
+	K_ingressLookup  *ebpf.Program `ebpf:"k_ingress_lookup"`
+	K_ingressRelease *ebpf.Program `ebpf:"k_ingress_release"`
 }
 
 func (p *ingressPrograms) Close() error {
 	return _IngressClose(
 		p.K_ingressLookup,
+		p.K_ingressRelease,
 	)
 }
 
