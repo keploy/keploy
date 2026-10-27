@@ -253,7 +253,7 @@ func TestClassify(t *testing.T) {
 		respLeaves = append(respLeaves, l)
 	}
 	earlier := []Earlier{
-		{Mock: "mock-1", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		{Mock: "mock-1", At: at.Add(-time.Second), Payload: payloadOf("mock-1", at.Add(-time.Second)), Own: true, Seen: []Seen{
 			// A string here, a number at the drifted leaf: the value flowed
 			// whatever its type.
 			{Side: Request, Leaf: Leaf{Path: "body.ref", Noise: "body.ref", Type: String, Value: "12345"}, Live: "54321", Place: "body.ref"},
@@ -274,17 +274,21 @@ func TestClassify(t *testing.T) {
 	}
 	raw := []Raw{
 		// A database row the test inserted before: the id came from there.
-		{Mock: "pg-3", At: at.Add(-2 * time.Second), Text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
+		{read: true, mock: "pg-3", at: at.Add(-2 * time.Second), text: `{"query":"INSERT INTO users VALUES ($1)","params":["u-77"]}`},
 		// Recorded after the paired call, and not served before it: not
 		// earlier.
-		{Mock: "pg-9", At: at.Add(time.Second), Text: `{"params":["t-5"]}`},
+		{read: true, mock: "pg-9", at: at.Add(time.Second), text: `{"params":["t-5"]}`},
 		// A run of a drifted value that drifted counts in a payload as a
 		// token there: "71a" of "sess s-71a" is one, a row's minutes are
 		// not body.at's run.
 		RawOf(&models.Mock{Name: "redis-2", Spec: models.MockSpec{ReqTimestampMock: at.Add(-3 * time.Second), Metadata: map[string]string{"args": "SET sid s-71a"}, GenericRequests: []models.Payload{{Message: []models.OutputBinary{{Data: "s-71a"}}}}}}, false),
 		RawOf(&models.Mock{Name: "pg-4", Spec: models.MockSpec{ReqTimestampMock: at.Add(-3 * time.Second), Metadata: map[string]string{"row": "2026-10-14 09:59"}}}, false),
 	}
-	got := Classify(nil, []string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts", "body.sess", "body.at", "body.seq", "body.file"}, live, rec, at, earlier, raw, respLeaves)
+	// The application writes its wall clock of no zone in UTC+10, where the
+	// call at midnight UTC is 10:00 and body.at's read just before it.
+	dc := NewDriftCache()
+	dc.zone = time.FixedZone("AEST", 10*3600)
+	got := Classify(dc, []string{"body.db", "body.empty", "body.n", "body.nonce", "body.order", "body.tags[0]", "body.tok", "body.ts", "body.sess", "body.at", "body.seq", "body.file"}, live, rec, at, earlier, raw, respLeaves)
 	kinds := map[string]Kind{}
 	from := map[string]Place{}
 	for _, l := range got {
@@ -326,10 +330,16 @@ func TestClassify(t *testing.T) {
 	if f := from["body.file"]; f.Whole || f.Path != "body.doc" {
 		t.Fatalf("body.file from %+v: a part of a longer value, found where it drifted together", f)
 	}
-	if from["body.sess"] != (Place{Mock: "redis-2"}) || from["body.seq"] != (Place{Mock: "pg-3"}) {
+	// A raw mock's place has no leaf: it names the mock, and what was found
+	// in which field of its payload.
+	leafless := func(p Place) Place { p.Field, p.Held = "", ""; return p }
+	if leafless(from["body.sess"]) != (Place{Mock: "redis-2"}) || leafless(from["body.seq"]) != (Place{Mock: "pg-3"}) {
 		t.Fatalf("body.sess from %+v, body.seq from %+v", from["body.sess"], from["body.seq"])
 	}
-	if from["body.db"] != (Place{Mock: "pg-3"}) {
+	if f := from["body.sess"]; f.Field != "spec.genericrequests[0].message[0].data" || f.Held != "71a" {
+		t.Fatalf("body.sess from %+v: want its word 71a found in spec.genericrequests[0].message[0].data", f)
+	}
+	if leafless(from["body.db"]) != (Place{Mock: "pg-3"}) {
 		t.Fatalf("body.db from %+v: a raw mock's place has no leaf", from["body.db"])
 	}
 }
@@ -342,10 +352,10 @@ func TestRawOfLeavesOutWhereAndWhen(t *testing.T) {
 		ReqTimestampMock: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 	}}
 	r := RawOf(m, true)
-	if !ContainsToken(r.Text, "4242") || ContainsToken(r.Text, "77777") || strings.Contains(r.Text, "2026") {
-		t.Fatalf("raw text %s: it holds the payload only", r.Text)
+	if !ContainsToken(r.Text(), "4242") || ContainsToken(r.Text(), "77777") || strings.Contains(r.Text(), "2026") {
+		t.Fatalf("raw text %s: it holds the payload only", r.Text())
 	}
-	if !r.Served || r.Mock != "m" {
+	if !r.Served() || r.Mock() != "m" {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -364,8 +374,8 @@ func TestRawOfLeavesOutAPostgresInvocationsWhereAndWhen(t *testing.T) {
 		},
 	}}}
 	r := RawOf(m, false)
-	if strings.Contains(r.Text, "2026") || strings.Contains(r.Text, "71318920f30e") || !strings.Contains(r.Text, "CREATE TABLE IF NOT EXISTS twins") {
-		t.Fatalf("raw text %q: it holds the payload only", r.Text)
+	if strings.Contains(r.Text(), "2026") || strings.Contains(r.Text(), "71318920f30e") || !strings.Contains(r.Text(), "CREATE TABLE IF NOT EXISTS twins") {
+		t.Fatalf("raw text %q: it holds the payload only", r.Text())
 	}
 	if m.Spec.PostgresV3.Query.InvocationID != inv {
 		t.Fatalf("RawOf changed the recording's invocation id to %q", m.Spec.PostgresV3.Query.InvocationID)
@@ -652,6 +662,32 @@ func TestSources(t *testing.T) {
 		// drift F's clock explains: a shared word is a value that flowed.
 		{"clock reads moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, false},
 		{"UUID v7s whose time moved by another amount", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), uuid7(at.Add(200*time.Millisecond), "123456789abcdef012"), uuid7(at.Add(81*time.Second+200*time.Millisecond), "fedcba987654321012"), true, false},
+		// At an earlier leaf F saw drift, a value that is one instant whole
+		// co-drifts by its words as any value does (both lost the minute,
+		// both gained the next), and also as the moment it names, both
+		// ways, in another layout, or as its whole text (instants.go, rules
+		// 1 and 3), but not one way only.
+		{"instants of one minute moved by another amount", at.Format(time.RFC1123), at.Add(5 * time.Minute).Format(time.RFC1123), at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute + 7*time.Second).Format(time.RFC3339), true, false},
+		{"one instant moved by another amount, whole", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, true},
+		{"one instant moved by another amount, inside a longer value", "at " + at.Format(time.RFC3339) + " ok", "at " + at.Add(5*time.Minute).Format(time.RFC3339) + " ok", at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), true, false},
+		{"one instant moved by another amount, its milliseconds", strconv.FormatInt(at.UnixMilli(), 10), strconv.FormatInt(at.Add(5*time.Minute).UnixMilli(), 10), at.Format("2006-01-02T15:04:05.000Z"), at.Add(5 * time.Minute).Format("2006-01-02T15:04:05.000Z"), true, false},
+		// The same moment both ways in another layout, the instant inside
+		// a longer value: rule 1 reads every value, not only one that is an
+		// instant whole.
+		{"one instant moved by another amount, its milliseconds, inside a longer value", strconv.FormatInt(at.UnixMilli(), 10), strconv.FormatInt(at.Add(5*time.Minute).UnixMilli(), 10), "booked at " + at.Format("2006-01-02T15:04:05.000Z") + " by w-1", "booked at " + at.Add(5*time.Minute).Format("2006-01-02T15:04:05.000Z") + " by w-1", true, false},
+		{"the moment held one way only", at.Format(time.RFC1123), at.Add(9 * time.Minute).Format(time.RFC1123), at.Format(time.RFC3339), at.Add(5 * time.Minute).Format(time.RFC3339), false, false},
+		{"one instant, its second against its millisecond", strconv.FormatInt(at.Unix(), 10), strconv.FormatInt(at.Add(5*time.Minute).Unix(), 10), at.Add(473 * time.Millisecond).Format("2006-01-02T15:04:05.000Z"), at.Add(5*time.Minute + 473*time.Millisecond).Format("2006-01-02T15:04:05.000Z"), false, false},
+		// What only stands inside a longer value is no unit: read word by
+		// word, as every value is. Both lost the minute's word and both
+		// gained A7K29QXM, a word that flowed.
+		{"instants of one minute, then one word gained in both", at.Format(time.RFC3339), at.Add(5*time.Minute).Format(time.RFC3339) + " A7K29QXM", at.Add(7 * time.Second).Format(time.RFC3339), at.Add(5*time.Minute+7*time.Second).Format(time.RFC3339) + " A7K29QXM", true, false},
+		{"one UUID v7 whose time moved by another amount, inside a longer value", uuid7(at, "abc123456789abcdef"), uuid7(at.Add(81*time.Second), "def0123456789abcde"), "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(at.Add(81*time.Second), "def0123456789abcde"), true, false},
+		// An id whose digits read as a date is no unit, nor is a value it
+		// stands inside of: it is followed wherever it went, whatever its
+		// length (a rand.Int31 id, a Snowflake id).
+		{"a ten-digit id inside a longer value", "1298498081", "1427131847", "user-1298498081", "user-1427131847", true, false},
+		{"a nineteen-digit id inside a longer value", "1541815603606036480", "1541815603606036999", "ref:1541815603606036480", "ref:1541815603606036999", true, false},
+		{"a ten-digit id, whole", "1298498081", "1427131847", "1298498081", "1427131847", true, true},
 		// One UUID v7 next to a fresh part in both: its random groups are
 		// shared, a value that flowed.
 		{"one UUID v7 next to a fresh part in both", uuid7(at, "abc123456789abcdef") + ":n1", uuid7(f, "def0123456789abcde") + ":n2", "x-" + uuid7(at, "abc123456789abcdef"), "y-" + uuid7(f, "def0123456789abcde"), true, false},
@@ -831,7 +867,7 @@ func TestPairSpent(t *testing.T) {
 func TestAppearedInRawPayloads(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
 	raw := func(text string) []Raw {
-		return []Raw{{Mock: "mock-db", At: at.Add(-time.Second), Served: true, Text: text}}
+		return []Raw{{read: true, mock: "mock-db", at: at.Add(-time.Second), served: true, text: text}}
 	}
 	for _, tc := range []struct {
 		name, text, recorded, now string
@@ -894,7 +930,7 @@ func TestUnaccounted(t *testing.T) {
 	earlier := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.kind", Type: String, Value: "batch-7"}, Live: "batch-7"},
 	}}}
-	raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO jobs (shard) VALUES ('s3')"}}
+	raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO jobs (shard) VALUES ('s3')"}}
 	for _, tc := range []struct {
 		name, recorded, now string
 		refused             bool
@@ -909,7 +945,7 @@ func TestUnaccounted(t *testing.T) {
 		{"text of a script with no spaces", "您的订单已创建", "您的订单已发货", true},
 	} {
 		dc := NewDriftCache()
-		why := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw)
+		why := unaccounted(dc, dc.of(tc.recorded, tc.now), at, earlier, raw, nil)
 		if (why != "") != tc.refused {
 			t.Errorf("%s: unaccounted %q, want refused %v", tc.name, why, tc.refused)
 		}
@@ -954,7 +990,7 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 			live:    "Bearer " + b64u(`{"alg":"HS256"}`) + "." + b64u(`{"sub":"svc","iat":1760436103}`) + "." + b64u("\x07\x08\x09\xfa\xfb"),
 			earlier: earlier("1760436042", "1760436103")},
 		{name: "an id after a backslash, from a payload", rec: `{"path":"C:\\b3f2b8c1e9a4d"}`, live: `{"path":"C:\\f1e2d3c4b5a69"}`,
-			raw: []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO jobs (id) VALUES ('b3f2b8c1e9a4d')"}}},
+			raw: []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO jobs (id) VALUES ('b3f2b8c1e9a4d')"}}},
 		{name: "an echoed id picked from an earlier answer", rec: "ord-7Q2K", live: "ord-9MX4",
 			earlier: []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 				{Side: Response, Leaf: Leaf{Path: "body.items[0].id", Type: String, Value: "ord-7Q2K"}, Live: "ord-7Q2K"},
@@ -978,8 +1014,9 @@ func TestClassifyInEveryDeclaredReading(t *testing.T) {
 		{"java, +05:30, milliseconds", "2006-01-02T15:04:05.000Z07:00", ist},
 		{"postgres text, +00, microseconds", "2006-01-02 15:04:05.000000-07", time.UTC},
 	} {
-		rec := at.Add(234567 * time.Microsecond).In(tc.zone).Format(tc.layout)
-		live := at.Add(FullRoundLead).Add(123456 * time.Microsecond).In(tc.zone).Format(tc.layout)
+		// Read in the second before its call, at.
+		rec := at.Add(234567*time.Microsecond - time.Second).In(tc.zone).Format(tc.layout)
+		live := at.Add(FullRoundLead).Add(123456*time.Microsecond - time.Second).In(tc.zone).Format(tc.layout)
 		if got := classifyOne(rec, live, at, nil, nil, nil); got.Kind != KindNoise {
 			t.Errorf("%s: a clock read the lead moved is %s (%q)", tc.name, got.Kind, got.Why)
 		}
@@ -1016,7 +1053,7 @@ func TestClassifyAccountsForWhatFlowedInEveryForm(t *testing.T) {
 	b64u := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
 	b64s := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	payload := func(text string) []Raw {
-		return []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: text}}
+		return []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: text}}
 	}
 	sent := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.user", Noise: "body.user", Type: String, Value: "A7K29QXM"}, Live: "Zq81Lm0X", Place: "body.user"},
@@ -1095,7 +1132,7 @@ func TestClassifyLearnsFreshValuesThatShareWhatDidNotChange(t *testing.T) {
 		return "Bearer " + b64u(`{"alg":"HS256","typ":"JWT"}`) + "." + b64u(`{"jti":"`+jti+`","iat":`+strconv.FormatInt(iat, 10)+`}`) + "." + b64u("\x01\x02"+jti[:3]+"\xfe\xff")
 	}
 	seen := func(rec, live string) []Earlier {
-		return []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+		return []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 			{Side: Request, Leaf: Leaf{Path: "header.authorization", Noise: "header.authorization", Type: String, Value: rec}, Live: live, Place: "header.authorization"},
 		}}}
 	}
@@ -1123,13 +1160,13 @@ func TestClassifyLearnsFreshValuesThatShareWhatDidNotChange(t *testing.T) {
 func TestClassifyAWholeClockValueAnEarlierCallHeldInsideALongerOne(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
 	rec, live := "2026-10-14T10:00:41Z", "2026-10-14T10:01:42Z"
-	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.note", Noise: "body.note", Type: String, Value: "created at " + rec + " by u1"}, Live: "created at " + live + " by u1", Place: "body.note"},
 	}}}
 	if got := classifyOne(rec, live, at, e, nil, nil); got.Kind != KindNoise {
 		t.Errorf("beside an HTTP leaf: %s (%s)", got.Kind, got.Why)
 	}
-	raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
+	raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO n (note) VALUES ('created at " + rec + " by u1')"}}
 	if got := classifyOne(rec, live, at, nil, raw, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 		t.Errorf("beside a payload: %s", got.Kind)
 	}
@@ -1243,7 +1280,7 @@ func TestClassifyReadsWrappedGluedAndPaddedEncodings(t *testing.T) {
 			if got := classifyOne(tc.enc(pad, a), tc.enc(pad, b), at, sent, nil, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 				t.Fatalf("%s (pad %d): an id that flowed into it learned as %s", tc.name, pad, got.Kind)
 			}
-			raw := []Raw{{Mock: "pg-0", At: at.Add(-2 * time.Second), Served: true, Text: "INSERT INTO s (blob) VALUES ('" + tc.enc(pad, a) + "')"}}
+			raw := []Raw{{read: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, text: "INSERT INTO s (blob) VALUES ('" + tc.enc(pad, a) + "')"}}
 			if got := classifyOne(a, b, at, nil, raw, nil); got.Kind == KindNoise || got.Kind == KindEcho {
 				t.Fatalf("%s (pad %d), in a payload: an id that flowed from it learned as %s", tc.name, pad, got.Kind)
 			}
@@ -1275,7 +1312,7 @@ func TestMovedWords(t *testing.T) {
 // words appear earlier in the test.
 func TestClassifyLearnsFreshTokensAroundWordsThatStayed(t *testing.T) {
 	at := time.Date(2026, 10, 14, 10, 0, 42, 0, time.UTC)
-	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Own: true, Seen: []Seen{
+	e := []Earlier{{Mock: "mock-0", At: at.Add(-time.Second), Payload: payloadOf("mock-0", at.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "url.query.user", Noise: "url.query.user", Type: String, Value: "acct_7Q2K9"}, Live: "acct_7Q2K9", Place: "url.query.user"},
 		{Side: Request, Leaf: Leaf{Path: "body.trace", Noise: "body.trace", Type: String, Value: "user42 trace"}, Live: "user42 trace", Place: "body.trace"},
 	}}}
@@ -1556,14 +1593,14 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 		reads++
 		return &models.HTTPResp{StatusCode: 200, Body: `{"token":"tok-7f3a9c"}`}, nil, nil
 	})
-	if r := RawOf(m, true); strings.Contains(r.Text, "tok-7f3a9c") {
+	if r := RawOf(m, true); strings.Contains(r.Text(), "tok-7f3a9c") {
 		t.Fatal("RawOf read the parked answer: the test's premise moved")
 	}
 	dc := NewDriftCache()
 	for i := 0; i < 2; i++ {
 		r, err := dc.ReadRaw(m, true)
-		if err != nil || !strings.Contains(r.Text, "tok-7f3a9c") {
-			t.Fatalf("read %d: err %v, text %q", i, err, r.Text)
+		if err != nil || !strings.Contains(r.Text(), "tok-7f3a9c") {
+			t.Fatalf("read %d: err %v, text %q", i, err, r.Text())
 		}
 	}
 	if reads != 1 {
@@ -1573,8 +1610,8 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 		t.Fatal("the pooled mock was written")
 	}
 	var nilCache *DriftCache
-	if r, err := nilCache.ReadRaw(m, false); err != nil || !strings.Contains(r.Text, "tok-7f3a9c") {
-		t.Fatalf("a nil cache: err %v, text %q", err, r.Text)
+	if r, err := nilCache.ReadRaw(m, false); err != nil || !strings.Contains(r.Text(), "tok-7f3a9c") {
+		t.Fatalf("a nil cache: err %v, text %q", err, r.Text())
 	}
 	broken := &models.Mock{Name: "mock-1", Kind: models.HTTP}
 	broken.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
@@ -1582,5 +1619,138 @@ func TestReadRawReadsAParkedAnswerBack(t *testing.T) {
 	})
 	if _, err := dc.ReadRaw(broken, false); err == nil || !strings.Contains(err.Error(), "store closed") {
 		t.Fatalf("an answer that cannot be read back: err %v; want the store's", err)
+	}
+}
+
+// One input gives one reason and one place, however often it is classified:
+// where two words of a value each stand earlier, the word that stands first
+// in the value is the one a reason names (inOrder), never the one a set's
+// order gives first. Each row runs its input many times and expects one
+// outcome, text for text.
+func TestAReasonIsOneTextForOneInput(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 10, 0, 0, time.UTC)
+	mk := func(name, body string, header map[string]string, off time.Duration) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "/x"},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: header, Body: body},
+			ReqTimestampMock: at.Add(off), ResTimestampMock: at.Add(off + time.Millisecond),
+		}}
+	}
+	const p = "body.ref"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	for _, tc := range []struct {
+		name, rec, live string
+		mocks           []*models.Mock
+		want            string
+	}{
+		// Two words the value lost stand in two fields of one payload: a
+		// variable of the field of the first (appearedIn).
+		{"a variable found in a payload", "x-aaa1-ccc3", "x-bbb2-ddd4",
+			[]*models.Mock{mk("mock-1", `{}`, map[string]string{"X-A": "aaa1", "X-B": "ccc3"}, -3*time.Second)},
+			"variable | mock-1 | spec.resp.header.X-A | a part of its recorded value (its characters 3 to 6)"},
+		// Two words F saw stand in two payloads: refused naming the first
+		// of them, in the payload that holds it (unaccounted).
+		{"an unaccounted word in a payload", "x-aaa1", "x-bbb2-ccc3",
+			[]*models.Mock{mk("mock-1", `{"a":"ccc3"}`, nil, -3*time.Second), mk("mock-2", `{"b":"bbb2"}`, nil, -2*time.Second)},
+			"unaccounted |  |  | a word of what record's full round saw in it (its characters 3 to 6) appears in an earlier recording, in mock-2"},
+	} {
+		seen := map[string]int{}
+		for i := 0; i < 200; i++ {
+			dc := NewDriftCache()
+			var raw []Raw
+			for _, m := range tc.mocks {
+				raw = append(raw, dc.RawOf(m, true))
+			}
+			ln := ClassifyIn(dc, []string{p}, shape(tc.live), shape(tc.rec), at, nil, raw, nil, nil)[0]
+			seen[string(ln.Kind)+" | "+ln.From.Mock+" | "+ln.From.Field+" | "+ln.From.Held+" | "+ln.Why]++
+			if i == 0 {
+				got := string(ln.Kind) + " | " + ln.From.Mock + " | " + ln.From.Field + " | " + ln.Why
+				if !strings.HasPrefix(got, tc.want) {
+					t.Errorf("%s: %q; want it to begin %q", tc.name, got, tc.want)
+				}
+			}
+		}
+		if len(seen) != 1 {
+			t.Errorf("%s: %d outcomes for one input: %v", tc.name, len(seen), seen)
+		}
+	}
+}
+
+// A Raw is read from its mock or not at all: one the classifier is handed
+// that was not (the zero Raw, or ReadRaw's of an answer it could not read
+// back) refuses every drift, naming it, rather than be searched for nothing.
+func TestARawNotReadFromItsMockIsRefused(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 10, 0, 0, time.UTC)
+	const p = "body.ref"
+	shape := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	broken := &models.Mock{Name: "mock-7", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: at.Add(-time.Second)}}
+	broken.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+		return nil, nil, errors.New("disk mocks: store closed")
+	})
+	unread, err := ReadRaw(broken, true)
+	if err == nil || unread.Read() || unread.Mock() != "mock-7" || !unread.Served() || !unread.At().Equal(at.Add(-time.Second)) {
+		t.Fatalf("ReadRaw of an answer it cannot read back: %+v, %v", unread, err)
+	}
+	good := RawOf(&models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "/x"}}}, false)
+	if !good.Read() {
+		t.Fatal("RawOf of a readable mock is not read")
+	}
+	for name, raw := range map[string][]Raw{"the zero Raw": {good, {}}, "ReadRaw's unread Raw": {unread, good}} {
+		for _, live := range []string{"req-a7c4e2d10b3f", "2026-10-22T11:15:00Z"} {
+			ln := ClassifyIn(NewDriftCache(), []string{p}, shape(live), shape("req-3f2b8c1e9a4d"), at, nil, raw, nil, nil)[0]
+			if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "keploy could not read") || name != "the zero Raw" && !strings.Contains(ln.Why, "mock-7") {
+				t.Errorf("%s, -> %q: %s (%s); want every drift refused, naming the recording", name, live, ln.Kind, ln.Why)
+			}
+		}
+	}
+}
+
+// One input gives one reason wherever it is found: at a leaf of an exchange
+// F served, at the test case's own request, and where F's moment of a typed
+// instant stands. Each row runs its input 200 times and expects one text.
+func TestAReasonIsOneTextAtEveryPlace(t *testing.T) {
+	at := time.Date(2026, 10, 22, 11, 13, 40, 0, time.UTC)
+	const p = "body.ref"
+	str := func(v string) Shape {
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	typed := func(t time.Time) Shape {
+		return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, t, time.Second)}}
+	}
+	leaves := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.a", Noise: "body.a", Type: String, Value: "ccc3"}, Live: "ccc3"},
+		{Side: Response, Leaf: Leaf{Path: "body.b", Noise: "body.b", Type: String, Value: "aaa1"}, Live: "aaa1"},
+	}}}
+	request := []Earlier{GivenRequest(slotRequest("11:13", "11:14", "2026-10-22T11:14:00Z"))}
+	slots := []Earlier{{Mock: "mock-2", At: at.Add(-time.Second), Seen: []Seen{
+		{Side: Response, Leaf: Leaf{Path: "body.s[0]", Noise: "body.s", Type: String, Value: "2026-10-22T09:00:00Z"}, Live: "2026-10-22T11:15:00Z"},
+		{Side: Response, Leaf: Leaf{Path: "body.s[1]", Noise: "body.s", Type: String, Value: "2026-10-22T09:30:00Z"}, Live: "2026-10-22T11:15:00Z"},
+	}}}
+	for _, tc := range []struct {
+		name      string
+		rec, live Shape
+		earlier   []Earlier
+		want      string
+	}{
+		{"served leaves", str("x-aaa1-ccc3"), str("x-bbb2-ddd4"), leaves, "in mock-1 at body.b"},
+		{"the test case's request", str("2026-10-22T11:14:00Z"), str("none"), request, "test case test-1 at body.slots[1]"},
+		{"F's moment of a typed instant", typed(time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC)), typed(time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC)), slots, "in mock-2 at body.s[0]"},
+	} {
+		seen := map[string]int{}
+		for i := 0; i < 200; i++ {
+			ln := ClassifyIn(NewDriftCache(), []string{p}, tc.live, tc.rec, at, tc.earlier, nil, nil, nil)[0]
+			seen[string(ln.Kind)+" | "+ln.From.Mock+" | "+ln.From.Path+" | "+ln.Why]++
+			if i == 0 && !strings.Contains(ln.Why, tc.want) {
+				t.Errorf("%s: %s (%s); want it to name %q", tc.name, ln.Kind, ln.Why, tc.want)
+			}
+		}
+		if len(seen) != 1 {
+			t.Errorf("%s: %d outcomes for one input: %v", tc.name, len(seen), seen)
+		}
 	}
 }

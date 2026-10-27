@@ -376,7 +376,7 @@ func writeTestsFile(logger *zap.Logger, dir, file, head, run string, r TestsRece
 		_ = os.Remove(path)
 		return
 	}
-	body, err := yaml.Marshal(r)
+	body, err := yaml.Marshal(persistedTests(r))
 	if err == nil {
 		// The receipt's temporary prefix covers this file's too.
 		err = writeLocalFile(logger, dir, file, receiptTempPrefix+"tests-", append([]byte(head), body...))
@@ -386,6 +386,31 @@ func writeTestsFile(logger *zap.Logger, dir, file, head, run string, r TestsRece
 		logger.Warn("could not write what each test did in "+run, zap.String("dir", dir), zap.Error(err),
 			zap.String("next_step", "check that "+dir+" is writable by the user running keploy"))
 	}
+}
+
+// persistedTests is r as its file holds it: each miss's process as a file
+// holds one (models.PersistedCalls): why keploy named none, and the kernel
+// pid, travel from the agent and are never written, as in a test run's
+// report, so a miss whose process keploy would not name has no source, not
+// an empty one. r's own tests are left as they were.
+func persistedTests(r TestsReceipt) TestsReceipt {
+	copied := false
+	for i, tr := range r.Tests {
+		if tr.Evidence == nil {
+			continue
+		}
+		misses, changed := models.PersistedCalls(tr.Evidence.Misses)
+		if !changed {
+			continue
+		}
+		if !copied {
+			r.Tests, copied = append([]TestReceipt(nil), r.Tests...), true
+		}
+		ev := *tr.Evidence
+		ev.Misses = misses
+		r.Tests[i].Evidence = &ev
+	}
+	return r
 }
 
 // TestsReceiptBytes bounds a TestsReceiptFile read: tens of thousands of tests.

@@ -45,7 +45,15 @@ func holdDrain(t *testing.T, p *Proxy) func() {
 
 func startedDrainProxy(t *testing.T, capacity int) *Proxy {
 	t.Helper()
-	p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, capacity)}
+	return startedDrainProxyLogging(t, capacity, zap.NewNop())
+}
+
+// startedDrainProxyLogging is startedDrainProxy with the logger the test
+// reads. The logger is set before the drain starts, since the drain's
+// goroutine reads it: swapping it afterwards is a data race.
+func startedDrainProxyLogging(t *testing.T, capacity int, logger *zap.Logger) *Proxy {
+	t.Helper()
+	p := &Proxy{logger: logger, errChannel: make(chan error, capacity)}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	p.StartErrorDrain(ctx)

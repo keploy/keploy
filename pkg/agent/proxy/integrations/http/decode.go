@@ -35,11 +35,21 @@ import (
 var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
+//
+// The requests are read and answered on a goroutine, and decodeHTTP returns
+// only once that goroutine has returned, ctx's end included: then its read or
+// write of clientConn is ended (pUtil.InterruptOnDone), and it is waited for
+// (pUtil.JoinParser). decodeHTTP used to return ctx's error at once and leave
+// the goroutine blocked reading clientConn for the next request; once the
+// client closed, it logged its failed read after decodeHTTP had returned (in a
+// parser test, through the test's logger after the test had ended: a DATA RACE
+// under go test -race).
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
-		defer pUtil.RecoverInto(h.Logger, clientConn, nil, errCh)
+		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -251,22 +261,68 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				stub  *models.Mock
 				diag  *matchDiag
 				lmiss *learnMiss
+				// call is where the request's first read of the round
+				// found it made (integrations.CallRound): a miss's lookup
+				// of a recording made elsewhere is asked of that round.
+				call integrations.CallRound
+				// db is the store the request's matcher and its miss read:
+				// under the switch held to call's staging
+				// (integrations.HoldToRound), so a request is never answered
+				// with, nor diagnosed against, a recording of a set the
+				// replay staged after its first read. The miss's lookup of a
+				// recording made elsewhere (notOwnedRecording) checks the
+				// staging last, and says that it moved.
+				db = mockDb
 			)
 			// DIAG (local build only): how long the match took, for KPSLOW.
 			diagStart := time.Now()
 			switch {
-			case provenswitch.On() && opts.Learn:
+			case provenswitch.On() && opts.Learn && !integrations.LearnEnded(mockDb):
 				// Record's full round: the learn step decides every request
-				// (design v14 §7.2).
-				stub, lmiss, err = h.learnMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+				// (design v14 §7.2), and its first pass is the request's
+				// first read of the round. Once the set's learn step ended
+				// (a retry cycle, integrations.LearnEnder) a request is
+				// served as a replay serves it, below: nothing is paired,
+				// nor learned.
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, &call)
 				ok = stub != nil
+				if !ok && err == nil {
+					// Then the pairing, under the background rules:
+					// a call that is exactly another test's recording is
+					// answered with it, reported for judging, not missed.
+					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
+						// Its repeat note is asked as a miss's is: of the
+						// store held to the round the call first read
+						// (HoldToRound), and none for a call one more than
+						// the test recorded (repeatNoteOf).
+						held, _ := integrations.HoldToRound(mockDb, call)
+						extra := h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+						a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
+						reportPairing(reqCtx, input, x, a, repeat)
+						stub, ok, lmiss = answer, true, nil
+					}
+				}
+				if !ok {
+					// The miss is diagnosed in the round the learn step's
+					// first pass read.
+					db, _ = integrations.HoldToRound(mockDb, call)
+				}
 			default:
 				// Under the switch a replay first honours what the learn step
 				// learned onto the recording; anything else goes on to the
 				// matcher as before.
 				proven := provenswitch.On()
 				if proven {
-					stub, err = h.learnedMatch(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					// The request's first read of the round, before any
+					// matcher reads the store: its staging and view, kept
+					// in O(1) for a miss to be asked of.
+					call = integrations.MarkCallRound(mockDb)
+					// Every matcher reads the store held to it: once the
+					// replay stages another set, the request finds nothing
+					// to be answered with, and misses saying so.
+					db, _ = integrations.HoldToRound(mockDb, call)
+					stub, err = h.learnedMatch(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
 				if !ok && err == nil {
@@ -279,7 +335,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if proven {
 						detect, correlate = false, true
 					}
-					ok, stub, diag, err = h.match(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+					ok, stub, diag, err = h.match(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 				}
 			}
 			if err != nil {
@@ -302,7 +358,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				if lmiss == nil && provenswitch.On() {
 					// A call that came with an array in another order is
 					// unstable_order in every round, not only the full one.
-					lmiss = h.orderMiss(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise))
+					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
 				}
 				if lmiss != nil {
 					diag = lmiss.diag()
@@ -313,30 +369,62 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				n := h.extraCall(reqCtx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
-					diag = h.answeredDiag(reqCtx, input, mockDb, diag, headerNoise, bodyNoise, urlNoise)
+					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
-				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
 				if n > 0 && report != nil {
 					report.MissKind, report.Recorded = models.MissExtraCall, n
 					// Whether the extra call is a read, by HTTP's terms
 					// (read_call.go): the test's end counts no read alone.
 					report.Read = readCall(input.method, input.header.Get("Content-Type"), input.body)
 				}
+				// The miss was decided where the request first read the
+				// round: whether that read found a staging is told from it.
+				integrations.StampMark(report, call)
 				// A call that is a recording made elsewhere (another test's,
 				// or a worker-scope one not reached yet) is named as that
 				// recording: it did not change, so no learn-step reason
 				// explains it.
+				// It is asked of the round the request's first read found it
+				// made in (notOwnedRecording): never a recording that read
+				// held as its view's own, nor one of a set the replay staged
+				// under the request, which the miss then says.
 				var elsewhere *models.Mock
+				restaged := false
 				if n == 0 && report != nil && provenswitch.On() {
-					elsewhere = notOwnedRecording(reqCtx, input, mockDb, h.newStrictNoise(headerNoise, bodyNoise, urlNoise))
+					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
 				}
 				if elsewhere != nil {
 					markNotOwned(report, elsewhere)
 				} else if lmiss != nil {
 					lmiss.explain(report)
+				}
+				if restaged {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
+				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
+					// The store marked the request's round but could not
+					// hold it: its matcher read nothing (HoldToRound).
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
+				}
+				// A call identical to one an earlier test made, whose
+				// recording already answered: the application asked again
+				// where its recording did not (models.RepeatNote). In
+				// record's full round the learn step finds no recorded call
+				// of the test for it (unmocked_call), which the note keeps
+				// as judging's code and explains; a learn reason that names
+				// a recorded call of the test the request changed from is
+				// kept as it is. A call made elsewhere keeps that reason and
+				// its closest and gets the note beside it (markRepeat): at
+				// record a test in between refilled the cache with the same
+				// call, which this replay, inside the cache's span there,
+				// never made, so its recording is what the call matches.
+				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
+					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
+						markRepeat(report, a)
+					}
 				}
 				// DIAG (local build only): the reason keploy's own WARN hides (nextStepOf).
 				if report != nil {
@@ -378,6 +466,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// captures it for the CLI to append to the set at end-of-run.
 				if opts.OnMiss.PassesThroughOnMiss() {
 					handled, phErr := h.serveOnMiss(ctx, clientConn, reqBuf, request, input.body, dstCfg, opts)
+					if phErr != nil && ctx.Err() != nil {
+						// The call's end cut the passthrough short (its
+						// dial, the dependency's answer, which
+						// pUtil.InterruptOnDone ends then, or the write to
+						// the client): no answer is owed, and it is no miss.
+						return
+					}
 					if phErr != nil {
 						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
 					} else if handled {
@@ -468,15 +563,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 	}(errCh, reqBuf, opts)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
+	return pUtil.JoinParser(ctx, errCh)
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when

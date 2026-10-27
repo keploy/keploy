@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"golang.org/x/sys/unix"
 )
 
@@ -211,26 +212,19 @@ func newUnanswering(t *testing.T) *unanswering {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Lets two sockets be bound to one port while only one listens.
-		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+		// Binds beside the hold below, which sets it too.
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
 			t.Fatal(err)
 		}
 		return fd
 	}
-	// keep stays bound to the port, and never listens: once the listener is
-	// closed the kernel gives the port to nothing else, which could listen
-	// there and accept the connection that is to be refused.
-	keep := socket()
-	t.Cleanup(func() { _ = unix.Close(keep) })
-	if err := unix.Bind(keep, &unix.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
-		t.Fatal(err)
-	}
-	sa, err := unix.Getsockname(keep)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The port is held for the test's life by a socket that never listens
+	// (testnet.SharedPort): once the listener is closed no other socket can
+	// take the port, listen there and accept the connection that is to be
+	// refused.
 	fd := socket()
-	u := &unanswering{fd: fd, addr: sa.(*unix.SockaddrInet4), close: sync.OnceFunc(func() { _ = unix.Close(fd) })}
+	addr := &unix.SockaddrInet4{Port: testnet.SharedPort(t), Addr: [4]byte{127, 0, 0, 1}}
+	u := &unanswering{fd: fd, addr: addr, close: sync.OnceFunc(func() { _ = unix.Close(fd) })}
 	t.Cleanup(u.close)
 	if err := unix.Bind(fd, u.addr); err != nil {
 		t.Fatal(err)

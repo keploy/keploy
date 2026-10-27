@@ -60,6 +60,11 @@ const (
 	// line (KeysLeaf): an earlier place a value may have come from, and an
 	// answer that echoes one at a key, which keploy cannot answer there.
 	Keys Type = 'k'
+	// Instant is a field its protocol's decoder types as one instant (a
+	// BSON UTC datetime or timestamp), written by InstantLeaf: compared
+	// whole, never word by word (typed.go). Only a decoder makes a leaf
+	// one: a string that reads as a date is a String.
+	Instant Type = 't'
 )
 
 // Leaf is one learnable value of a request or a response.

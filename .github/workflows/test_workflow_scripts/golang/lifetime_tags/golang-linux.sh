@@ -58,7 +58,13 @@
 #      made with --sync: every test passes. The connection's setup (SET) and
 #      post-orders-1's transaction (START TRANSACTION, COMMIT) are stated
 #      session, so no test is required to make them, and every test that uses
-#      the connection is served them.
+#      the connection is served them. This recording adds a fifth test, GET
+#      /pool: one prepared statement on a pool of eight connections, run on
+#      one connection for three ids in turn, then on all eight at once for
+#      eight ids, then on all eight at once for one id. Each call is answered
+#      with its own recorded answer: the app checks every row it reads and
+#      answers 500, naming the call, for a row of another id or a call that
+#      failed, so a recording served to the wrong call fails the test.
 #  10. No data race in any log.
 #
 # Which binary is this build: download-binary's build/keploy or
@@ -193,10 +199,10 @@ send() {
 TESTS=4
 # record [proven]: keploy record of the four requests; proven records under
 # the proven switch with --sync (KEPLOY_PROVEN=1), which maps each test to the
-# mocks it made as it records.
+# mocks it made as it records, and a fifth request, GET /pool.
 record() {
-    local proven="${1:-}" flags=()
-    [ -n "$proven" ] && flags=(--sync)
+    local proven="${1:-}" flags=() want="$TESTS"
+    [ -n "$proven" ] && flags=(--sync) && want=$((TESTS + 1))
     rm -rf keploy keploy.yml
     start_mysql
     start_upstream
@@ -208,7 +214,8 @@ record() {
     send GET /profile 200
     send GET '/quote?qty=4' 200
     send GET /orders/count 200
-    wait_tests "$TESTS" "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want $TESTS"
+    [ -n "$proven" ] && send GET /pool 200
+    wait_tests "$want" "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want $want"
     stop_pid "$REC_PID"
     REC_PID=""
     own
@@ -398,6 +405,20 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
             fail "the --sync recording holds no $q stated session"
     done
     PROVEN_REPLAY=1 replay proven-all mapped && expect_pass "the whole set under the proven switch" proven-all.log
+    # The pool test, by name: keploy names the fifth request test-5.
+    pool_url=$(yq -N '.spec.req.url' keploy/test-set-0/tests/test-5.yaml 2>/dev/null)
+    case "$pool_url" in
+        */pool) ;;
+        *) fail "the --sync recording's test-5 is '$pool_url', want GET /pool" ;;
+    esac
+    if [ "$(test_status test-5)" != PASSED ]; then
+        fail "under the proven switch GET /pool (test-5) must pass: each call of the pool its own recorded answer (status $(test_status test-5))"
+        # What the app answered: the calls that read another id's row or failed.
+        T=test-5 yq -N '.tests[] | select(.test_case_id == strenv(T)) | .result.body_result[].actual' "$(REPORT)" 2>/dev/null | head -c 4000
+        echo
+    fi
+    refused=$(grep -ac 'failed to update matched mock' proven-all.log)
+    [ "$refused" -eq 0 ] || fail "under the proven switch the MySQL matcher failed $refused command(s) with a consume the store refused (failed to update matched mock)"
     cd "$WORK" || exit 1
 fi
 

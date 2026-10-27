@@ -85,7 +85,7 @@ func TestTrackerWarmsTheSetsTextCache(t *testing.T) {
 	}}
 	tr := NewTracker()
 	tr.Warm([]*models.Mock{m}, nil)
-	text := RawOf(m, false).Text
+	text := RawOf(m, false).Text()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		tr.texts.mu.Lock()

@@ -351,7 +351,10 @@ type testCaseFileRef struct {
 
 // testCaseFiles lists the test case files of a test set that GetTestCases
 // reads, in the order it reads them, and the directory they are in. ok is
-// false when the set has no tests directory.
+// false when the set has no tests directory. A tests directory that is there
+// but cannot be looked at (permission denied, I/O error, symlink loop) is an
+// error, not "no tests": reading it as empty would report a recorded set as
+// having nothing to run.
 func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCaseFileRef, ok bool, err error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 
@@ -360,9 +363,13 @@ func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCase
 		return "", nil, false, err
 	}
 	_, err = os.Stat(TestPath)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return TestPath, nil, false, nil
+	}
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to look at the directory containing yaml testcases", zap.String("path", TestPath))
+		return TestPath, nil, false, err
 	}
 	d, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
@@ -1044,7 +1051,11 @@ func (ts *TestYaml) ChangePath(path string) {
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	// The test case file is rewritten where it lies, outside upsert: it is
 	// re-keyed once, after (SetRewrite).
-	rw := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	rw, err := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to update the assertions of the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+		return err
+	}
 	defer rw.Done()
 	return ts.updateAssertions(ctx, testCaseID, testSetID, assertions)
 }

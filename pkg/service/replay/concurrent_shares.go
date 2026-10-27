@@ -1,6 +1,7 @@
 package replay
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sort"
@@ -241,9 +242,14 @@ type sharePlan struct {
 // newSharePlan is the plan's shares for a set whose concurrency is conc,
 // whose test cases' mappings are mappings, whose worker scope is worker, and
 // whose held recordings are stored. nil when the set states no concurrency.
-func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*models.Mock) *sharePlan {
+//
+// The shares key a recording by its payload (its statement, the places its
+// request and answer differ), and read it again as the set runs: a recording
+// whose payload its read left on disk is read back whole, and held, for every
+// recording of a kind the shares key.
+func newSharePlan(ctx context.Context, conc *setConcurrency, worker []models.MockEntry, stored ...[]*models.Mock) (*sharePlan, error) {
 	if conc == nil {
-		return nil
+		return nil, nil
 	}
 	sp := &sharePlan{conc: conc, info: map[string]*shareInfo{}, held: map[string]models.Kind{}, runs: map[string]int{}, served: map[string]bool{}, unread: map[string]bool{}, read: map[string]int{}, uses: map[string][]shareUse{}}
 	for _, list := range stored {
@@ -259,6 +265,11 @@ func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*
 			if !ok {
 				continue
 			}
+			whole, err := mk.WithPayload(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read back recording %q for the set's shares: %w", mk.Name, err)
+			}
+			mk := whole
 			st, ok := keys.Statement(mk)
 			if !ok {
 				continue
@@ -273,7 +284,7 @@ func newSharePlan(conc *setConcurrency, worker []models.MockEntry, stored ...[]*
 			sp.worker = append(sp.worker, e.Name)
 		}
 	}
-	return sp
+	return sp, nil
 }
 
 // candidate reports whether the grouped entry name is shared between its
@@ -540,7 +551,7 @@ func (s *settlement) chargeUnconsumed(test string, u models.UnconsumedMock) {
 // call is the charge of a shared recording mock's call, with reason and note.
 func (s *settlement) call(mock, reason string, note *models.ConcurrentNote, why string) models.UnmatchedCall {
 	info := s.lookup[mock]
-	protocol, summary := info.protocol, info.summary
+	protocol, summary := info.protocol, info.summaryOf()
 	if in := s.sp.info[mock]; in != nil && in.keys.Describe != nil {
 		if p, sum := in.keys.Describe(in.mock); p != "" {
 			protocol, summary = p, sum

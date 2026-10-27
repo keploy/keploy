@@ -1,0 +1,69 @@
+version: api.keploy.io/v1beta1
+name: test-set-0-report
+status: FAILED
+success: 1
+failure: 1
+ignored: 0
+total: 2
+tests:
+    - kind: Http
+      name: test-set-0
+      status: PASSED
+      started: 1792659601
+      completed: 1792659602
+      test_case_path: ""
+      mock_path: ""
+      test_case_id: post-url-0
+      result:
+        status_code:
+            normal: false
+            expected: 0
+            actual: 0
+        headers_result: []
+        body_result: []
+        dep_result: []
+      time_taken: 20ms
+    - kind: Http
+      name: test-set-0
+      status: FAILED
+      started: 1792659602
+      completed: 1792659603
+      test_case_path: ""
+      mock_path: ""
+      test_case_id: post-url-1
+      result:
+        status_code:
+            normal: false
+            expected: 0
+            actual: 0
+        headers_result: []
+        body_result: []
+        dep_result: []
+      time_taken: 21ms
+      failure_info:
+        risk: HIGH
+        unmatched_calls:
+            - protocol: MongoDB
+              actual_summary: insert keploy.events
+              destination: mongo:27017
+              closest_mock: mock-6
+              match_phase: body
+              candidate_count: 2
+              at: 2026-10-22T09:00:02Z
+              kind: in_test
+              differs:
+                - body.documents[0]._id
+              not_owned: true
+              recorded_in: post-url-1
+              reason: request_changed
+test_set: test-set-0
+created_at: 1792659600
+time_taken: 1.5s
+unclaimed_calls:
+    - protocol: HTTP
+      actual_summary: GET /health
+      destination: localhost:9000
+      at: 2026-10-22T09:00:03Z
+      kind: outside_test
+      before_set: true
+proven: true

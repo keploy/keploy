@@ -474,3 +474,94 @@ func TestDeriveWindowMappingsNamesTheConcurrencyGroupOfAMockRecordedWhileSeveral
 		}
 	})
 }
+
+// routedNames is the names of what the derivation routed, each with the test
+// it was in flight into.
+func routedNames(m WindowMappings) []string {
+	out := []string{}
+	for _, r := range m.Routed {
+		out = append(out, r.Mock.Name+"->"+r.Test)
+	}
+	return out
+}
+
+// background routing at record: a by-kind write in flight into a
+// test that is not the first, whose request was stamped on the clock its
+// window start was, was sent before the test began: it is routed to the worker
+// scope at the set's start, and listed. One on an untrusted clock, on another
+// clock, of no write kind (a read, a long poll), one in flight into the
+// first test (the start's already), and every call with routing off, are
+// derived as before.
+func TestDeriveWindowMappingsRoutesAnInFlightWriteOnTheWindowsClock(t *testing.T) {
+	const clock = "proxy:run-1"
+	windows := []TestWindow{wmWindow("P", 1000, 1100), wmWindow("post-url-1", 2000, 2100)}
+	windows[0].Clock, windows[1].Clock = clock, clock
+	inFlight := func(name string, at int, clock, writeKind string) WindowedMock {
+		return WindowedMock{Name: name, Kind: Mongo, At: wmAt(at), Res: wmAt(2050), TestMock: true, InFlight: true,
+			Clock: clock, WriteKind: writeKind, Comm: "sqs", Exe: "./sqs"}
+	}
+	write := inFlight("mock-6", 1500, clock, "Mongo insert keploy.events")
+	untrusted := inFlight("unset-clock", 1510, "", "Mongo insert keploy.events")
+	otherClock := inFlight("other-clock", 1520, "ktime:boot.1", "Mongo insert keploy.events")
+	read := inFlight("read", 1525, clock, "") // a Mongo find: no write kind
+	longPoll := inFlight("long-poll", 1530, clock, "")
+	longPoll.Kind = Kind("SQS")
+	beforeFirst := inFlight("before-first", 500, clock, "Mongo insert keploy.events")
+	beforeFirst.Res = wmAt(1050)
+	mocks := []WindowedMock{beforeFirst, wmMock("own-p", 1050), write, untrusted, otherClock, read, longPoll, wmMock("own-1", 2010)}
+
+	got := DeriveWindowMappingsWith(windows, mocks, DeriveOptions{RouteInFlightWrites: true})
+	want := map[string][]string{
+		"P":          {"own-p"},
+		"post-url-1": {"unset-clock", "other-clock", "read", "long-poll", "own-1"},
+	}
+	if names := mappedNames(got); !reflect.DeepEqual(names, want) {
+		t.Fatalf("mapped %v; want %v", names, want)
+	}
+	if places := workerPlaces(got); !reflect.DeepEqual(places, []string{"before-first@", "mock-6@"}) {
+		t.Fatalf("worker scope %v; want before-first and mock-6, both at the set's start", places)
+	}
+	if routed := routedNames(got); !reflect.DeepEqual(routed, []string{"mock-6->post-url-1"}) {
+		t.Fatalf("routed %v; want mock-6 alone, from post-url-1", routed)
+	}
+	if r := got.Routed[0].Mock; r.Comm != "sqs" || r.Exe != "./sqs" || r.WriteKind != "Mongo insert keploy.events" {
+		t.Fatalf("the routed write lost what its line names: %+v", r)
+	}
+
+	// Routing off (and DeriveWindowMappings): the write is the test's.
+	for name, off := range map[string]WindowMappings{
+		"DeriveWindowMappings":      DeriveWindowMappings(windows, mocks),
+		"RouteInFlightWrites false": DeriveWindowMappingsWith(windows, mocks, DeriveOptions{}),
+	} {
+		want := map[string][]string{
+			"P":          {"own-p"},
+			"post-url-1": {"mock-6", "unset-clock", "other-clock", "read", "long-poll", "own-1"},
+		}
+		if names := mappedNames(off); !reflect.DeepEqual(names, want) {
+			t.Fatalf("%s mapped %v; want %v", name, names, want)
+		}
+		if len(off.Routed) != 0 {
+			t.Fatalf("%s routed %v", name, routedNames(off))
+		}
+	}
+
+	// A window on an untrusted clock routes nothing into it, whatever the
+	// write's clock.
+	windows[1].Clock = ""
+	got = DeriveWindowMappingsWith(windows, mocks, DeriveOptions{RouteInFlightWrites: true})
+	if len(got.Routed) != 0 {
+		t.Fatalf("a window on an untrusted clock had %v routed out of it", routedNames(got))
+	}
+}
+
+// A mock's comm and exe come with its origin, for the line that routes it.
+func TestNewWindowedMockReadsTheOriginsProcess(t *testing.T) {
+	m := &Mock{Kind: Mongo, Name: "mock-6", Spec: MockSpec{ReqTimestampMock: wmAt(1), ResTimestampMock: wmAt(2)}}
+	if w := NewWindowedMock(m); w.Comm != "" || w.Exe != "" {
+		t.Fatalf("a mock without an origin names %q, %q", w.Comm, w.Exe)
+	}
+	m.Origin = &Origin{Clock: "proxy:run-1", Comm: "sqs", Exe: "./sqs"}
+	if w := NewWindowedMock(m); w.Comm != "sqs" || w.Exe != "./sqs" {
+		t.Fatalf("the mock names %q, %q; want sqs, ./sqs", w.Comm, w.Exe)
+	}
+}

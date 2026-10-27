@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -193,7 +194,9 @@ func TestOwnConnectionsKeepsNotingTheAgentProcess(t *testing.T) {
 
 // The agent docker compose started again in its bring-up's retry, set up
 // again before the app ran, holds all a watch keeps to: the watch keeps to
-// it, and is told of a replacement after.
+// it, and is told of a replacement after. It, and only it, is noted as
+// started before the app ran (AgentStartedBeforeApp): not the agent it
+// replaced, nor one that answers after it.
 func TestARestartedAgentSetUpAgainIsTheOneAWatchKeepsTo(t *testing.T) {
 	client, agent := newRestartingClient(t, true)
 	t.Cleanup(func() { instances.Delete(agentHost(client.conf.Agent.AgentURI)) })
@@ -230,12 +233,69 @@ func TestARestartedAgentSetUpAgainIsTheOneAWatchKeepsTo(t *testing.T) {
 	if rep, replaced := w.Replacement(); replaced {
 		t.Fatalf("replaced %+v; the agent compose started again was set up again before the app ran", rep)
 	}
+	if !client.AgentStartedBeforeApp("b") {
+		t.Fatal("the agent the retry started again is not noted as started before the app ran")
+	}
 	agent.mu.Lock()
 	agent.instance = "c"
 	agent.mu.Unlock()
 	answer(t, client.client, client.conf.Agent.AgentURI)
 	if rep, replaced := w.Replacement(); !replaced || rep != (models.AgentReplacement{First: "b", Next: "c"}) {
 		t.Fatalf("replacement %+v (%v), want b, then c", rep, replaced)
+	}
+	for _, instance := range []string{"a", "c", ""} {
+		if client.AgentStartedBeforeApp(instance) {
+			t.Fatalf("agent process %q is noted as started by the retry before the app ran", instance)
+		}
+	}
+	client.session().end()
+}
+
+// The agent docker compose started again in its bring-up's retry is noted as
+// started before the app ran as soon as it answers, whether or not its setup
+// after takes: the app ran against none of the agent it replaced either way.
+// Here the setup fails at its last step (the agent latched a CA setup failure
+// and refuses to release the app). Were the agent noted only once its setup
+// took, the replay would take it for one started again under the running app
+// (its stored-mocks check finds no mocks held and stores them again): every
+// test charged the agent started again, the set left without a verdict.
+func TestARestartedAgentIsTheRetrysWhetherOrNotItsSetUpTakes(t *testing.T) {
+	client, agent := newRestartingClient(t, true)
+	t.Cleanup(func() { instances.Delete(agentHost(client.conf.Agent.AgentURI)) })
+	agent.mu.Lock()
+	agent.instance = "a"
+	agent.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	grp, gctx := errgroup.WithContext(ctx)
+	gctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+
+	outgoing, err := client.GetOutgoing(gctx, models.OutgoingOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MakeAgentReadyForDockerCompose(gctx); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := recv(t, outgoing); m == nil || m.Name != "mock-1" {
+		t.Fatalf("first mock: %+v", m)
+	}
+
+	agent.mu.Lock()
+	agent.instance = "b" // compose started the agent again
+	agent.refuse["/agent/agent/ready"] = 2
+	agent.mu.Unlock()
+	err = client.setUpRestartedAgent(gctx)
+	if err == nil || !strings.Contains(err.Error(), agentCASetupFailed) {
+		t.Fatalf("setting the restarted agent up: %v; want it refused at the agent's readiness (%s)", err, agentCASetupFailed)
+	}
+	if !client.AgentStartedBeforeApp("b") {
+		t.Fatal("the agent the retry started again is not noted as started before the app ran once its setup failed")
+	}
+	for _, instance := range []string{"a", ""} {
+		if client.AgentStartedBeforeApp(instance) {
+			t.Fatalf("agent process %q is noted as started by the retry before the app ran", instance)
+		}
 	}
 	client.session().end()
 }

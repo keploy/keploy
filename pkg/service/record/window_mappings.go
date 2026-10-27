@@ -10,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/pkg/service/replay"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -85,8 +86,21 @@ const lostTestPrefix = "\x00lost-"
 // mappings.yaml from its test windows: one made without --sync under the
 // proven switch, with mapping not disabled. Any other recording gets nil,
 // which collects nothing, so it writes exactly what it wrote before.
+//
+// Such a recording is not marked for the background rules either
+// (models.RecordedWithS12Routing): its set is served by today's. Under a
+// build that enables them it is said, with how to record one that is.
 func (r *Recorder) newWindowMappings() *windowMappings {
-	if !provenswitch.On() || r.config.Record.Synchronous || r.config.DisableMapping {
+	if !provenswitch.On() {
+		return nil
+	}
+	if r.config.Record.Synchronous || r.config.DisableMapping {
+		if replay.S12Serving() && r.logger != nil {
+			r.logger.Info("this recording does not route background writes nor mark its test set for proven routing: a recording made with --sync, or with mapping disabled, derives no test windows, so its set is served as a set recorded without proven routing, every recorded background call answered exactly and required by the set's end ("+provenswitch.Env+"=1)",
+				zap.Bool("sync", r.config.Record.Synchronous),
+				zap.Bool("mappingDisabled", r.config.DisableMapping),
+				zap.String("next_step", "record without --sync, with mapping on, for proven routing"))
+		}
 		return nil
 	}
 	return &windowMappings{}
@@ -173,6 +187,17 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		logger.Info("the keploy agent mapped this recording's tests to their mocks itself, so no mappings are derived from the test windows",
 			zap.String("testSetID", testSetID),
 			zap.Uint64("mappingsFromTheAgent", streamed))
+		// Recorded under background serving all the same, routed writes or not:
+		// record's judging judges what that serving answers.
+		if marker, s12 := s12Record(db); s12 && drained {
+			if err := marker.MarkRecordedWith(ctx, testSetID, models.RecordedWithS12Routing); err != nil {
+				logger.Error("failed to mark the test set as recorded under proven routing (mappings.yaml recordedWith)",
+					zap.String("testSetID", testSetID),
+					zap.Error(err),
+					zap.String("next_step", "fix the error above and re-record this test set"))
+				utils.SetExitCodeOnce(utils.ExitKeployError)
+			}
+		}
 		return
 	}
 	if !drained {
@@ -182,10 +207,14 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 		utils.SetExitCodeOnce(utils.ExitKeployError)
 		return
 	}
+	// A set this build records with proven routing (s12Record) is marked so, and its
+	// in-flight writes are routed: only background serving serves
+	// a routed write by its kind.
+	marker, s12 := s12Record(db)
 	// The drain joined every goroutine that adds to the collector: derive from
 	// it as it is, without a copy.
 	w.mu.Lock()
-	derived := models.DeriveWindowMappings(w.tests, w.mocks)
+	derived := models.DeriveWindowMappingsWith(w.tests, w.mocks, models.DeriveOptions{RouteInFlightWrites: s12})
 	stopAt := w.stopAt
 	placed := make(map[string]time.Time, len(w.mocks))
 	for _, m := range w.mocks {
@@ -236,6 +265,7 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 	// a replay of the kept test cases reaches it.
 	worker := keptPlaces(derived, kept)
 	markAtStop(worker, placed, stopAt)
+	routedReasons(logger, testSetID, worker, derived.Routed, kept)
 	if err := db.UpsertWorker(ctx, testSetID, worker); err != nil {
 		logger.Error("failed to save the test set's worker scope, the calls no test made, derived from the test windows",
 			zap.String("testSetID", testSetID),
@@ -260,6 +290,19 @@ func (w *windowMappings) writeFor(ctx context.Context, logger *zap.Logger, db Ma
 				zap.String("testSetID", testSetID),
 				zap.Error(err),
 				zap.String("next_step", "keploy record's full round cannot tell which of them made each such call without mappings.yaml's groups; fix the error above and re-record this test set"))
+			utils.SetExitCodeOnce(utils.ExitKeployError)
+			return
+		}
+	}
+	// Marked after its worker scope is written: a mark that fails leaves the
+	// set served by today's rules, under which a routed write must still be
+	// answered exactly, never looser.
+	if s12 {
+		if err := marker.MarkRecordedWith(ctx, testSetID, models.RecordedWithS12Routing); err != nil {
+			logger.Error("failed to mark the test set as recorded under proven routing (mappings.yaml recordedWith): its writes routed to the worker scope are served as in a set recorded without proven routing, exactly, and required by the set's end",
+				zap.String("testSetID", testSetID),
+				zap.Error(err),
+				zap.String("next_step", "fix the error above and re-record this test set"))
 			utils.SetExitCodeOnce(utils.ExitKeployError)
 			return
 		}
@@ -379,4 +422,98 @@ func keptPlaces(derived models.WindowMappings, kept func(id string) bool) []mode
 		out = append(out, e)
 	}
 	return out
+}
+
+// recordedWithMarker is a mapping store that marks what keploy record
+// recorded a set with (models.Mapping.RecordedWith): the YAML store's
+// MappingDb.MarkRecordedWith.
+type recordedWithMarker interface {
+	MarkRecordedWith(ctx context.Context, testSetID, feature string) error
+}
+
+// s12Record reports whether this recording is a proven-routing record, routing its
+// in-flight writes and marking its set models.RecordedWithS12Routing, and the
+// store that marks it: under the proven switch, while this build's judging
+// enables background serving (replay.S12Serving: keploy enterprise registers it),
+// into a store that keeps the mark. Any other recording routes and marks
+// nothing, so its set is served by today's rules, as every set recorded before
+// proven routing is: keploy alone records nothing background serving would serve.
+func s12Record(db MappingDb) (recordedWithMarker, bool) {
+	if !provenswitch.On() || !replay.S12Serving() {
+		return nil, false
+	}
+	marker, ok := db.(recordedWithMarker)
+	return marker, ok
+}
+
+// routedReasons writes, on each entry of worker the derivation routed there
+// (routed: in flight into a test, sent before it began, on its window's
+// clock), why, and its undo (MockEntry.Reason), and logs each
+// routing once. A test the recording did not keep (kept) is named as one.
+func routedReasons(logger *zap.Logger, testSetID string, worker []models.MockEntry, routed []models.RoutedWrite, kept func(id string) bool) {
+	if len(routed) == 0 {
+		return
+	}
+	at := make(map[string]int, len(worker))
+	for i, e := range worker {
+		at[e.Name] = i
+	}
+	for _, r := range routed {
+		i, ok := at[r.Mock.Name]
+		if !ok {
+			continue
+		}
+		test, isKept := r.Test, kept(r.Test)
+		if strings.HasPrefix(test, lostTestPrefix) {
+			test = "a test the recording failed to persist"
+		}
+		worker[i].Reason = routedReason(r.Mock, test, isKept)
+		logger.Info("routed a write to the test set's worker scope: it was sent before the test it was in flight into began, so that test did not make it ("+provenswitch.Env+"=1)",
+			zap.String("testSetID", testSetID),
+			zap.String("mock", r.Mock.Name),
+			zap.String("write", r.Mock.WriteKind),
+			zap.String("test", test),
+			zap.String("process", processOf(r.Mock, true)))
+	}
+}
+
+// routedReason is the line a routed write's entry carries: what
+// it is, the process that sent it, why it is no test's, and its undo. A test
+// the recording did not keep (kept false) owns nothing in mappings.yaml, so
+// the undo is to delete the entry: the call is then no test's, as that test's
+// own calls are.
+func routedReason(m models.WindowedMock, test string, kept bool) string {
+	why := fmt.Sprintf("%s (%s) routed to background at record: %s sent it before %s began, and it was answered once %s had begun, both stamped on %s, so %s did not make it.",
+		m.Name, m.WriteKind, processOf(m, false), test, test, clockName(m.Clock), test)
+	if !kept {
+		return why + fmt.Sprintf(" Undo: delete this entry: %s is not in this set (the recording did not keep it), so without the routing the call is no test's, as its own calls are", test)
+	}
+	return why + fmt.Sprintf(" Undo: move this entry under tests[%s].mocks and delete this reason: %s then owns it, as it would without the routing", test, test)
+}
+
+// processOf names the process that made m's call: "`sqs` (`./sqs`)"; one
+// keploy saw but would not name, why (it runs in a PID namespace of its own)
+// and the remedy, with its kernel pid in a log line (log) and without it in
+// the committed reason (models.Origin.FileProcessText); else "a process
+// keploy could not name".
+func processOf(m models.WindowedMock, log bool) string {
+	p := m.FileProcess()
+	if log {
+		p = m.Process()
+	}
+	if p != "" {
+		return p
+	}
+	return "a process keploy could not name"
+}
+
+// clockName says which clock a clock id (fakeconn.ClockID) names.
+func clockName(id string) string {
+	switch {
+	case strings.HasPrefix(id, "proxy:"):
+		return "keploy's proxy clock (" + id + ")"
+	case strings.HasPrefix(id, "ktime:"):
+		return "the kernel's monotonic clock (" + id + ")"
+	}
+	return "one clock (" + id + ")"
 }

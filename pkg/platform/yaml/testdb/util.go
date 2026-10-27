@@ -135,6 +135,7 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
 		Real:        tc.Real,
+		Origin:      tc.Origin.Persisted(),
 	}
 	switch tc.Kind {
 	case models.HTTP:
@@ -170,6 +171,7 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
 		Real:        tc.Real,
+		Origin:      tc.Origin.Persisted(),
 	}
 
 	switch tc.Kind {
@@ -372,6 +374,10 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		LastUpdated: yamlTestcase.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+		// The clock its window start is on: read whatever the
+		// switch, so a rewrite of the case (templatize, normalize, an
+		// update) keeps it; only the proven switch uses it.
+		Origin: yamlTestcase.Origin,
 	}
 	if provenswitch.On() {
 		// The mock.real destinations the case's recording used (design v14
@@ -477,6 +483,7 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		LastUpdated: doc.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+		Origin:      doc.Origin, // as Decode reads it: whatever the switch
 	}
 	if provenswitch.On() {
 		tc.Real = doc.Real

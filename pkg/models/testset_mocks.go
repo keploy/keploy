@@ -31,4 +31,8 @@ type TestSetMocks struct {
 	// its window, a recorded call this keploy cannot serve, and is judged for
 	// it. A store that reads gob files lists none.
 	SkippedWindowed []WindowedMock
+	// Payloads is the mock file the read left the mocks' payloads in
+	// (Mock.LeavePayloadOnDisk), nil when it left none and every mock is
+	// whole. Its mutator changes each payload read back before it is sent.
+	Payloads PayloadSource
 }

@@ -6,23 +6,12 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 )
-
-// refusedAddr is an address nothing listens on: a dial to it is refused.
-func refusedAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
-}
 
 // dialGoneApp has the ingress take a connection for an app that refuses it,
 // and returns the levels it logged the failed dial at.
@@ -49,7 +38,7 @@ func dialGoneApp(t *testing.T, pm *IngressProxyManager, logs *observer.ObservedL
 // a connection the app refuses then is said at DEBUG. Before the stop, and
 // once a new recording has begun, the same refusal is an ERROR.
 func TestIngressSaysARefusedAppAtDebugOnlyWhileStopping(t *testing.T) {
-	app := refusedAddr(t)
+	app := testnet.RefusedAddr(t, "tcp")
 	core, logs := observer.New(zapcore.DebugLevel)
 	pm := New(zap.New(core), nil, &config.Config{})
 
@@ -85,7 +74,7 @@ func TestIngressSaysOtherAppFailuresAtErrorWhileStopping(t *testing.T) {
 // A logger that writes nothing below INFO writes nothing of a refused dial
 // while stopping.
 func TestIngressRefusedAppIsQuietWithoutDebugWhileStopping(t *testing.T) {
-	app := refusedAddr(t)
+	app := testnet.RefusedAddr(t, "tcp")
 	core, logs := observer.New(zapcore.InfoLevel)
 	pm := New(zap.New(core), nil, &config.Config{})
 	pm.SetStopping(true)

@@ -1,8 +1,13 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
@@ -13,7 +18,9 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -58,7 +65,13 @@ func equalNames(t *testing.T, what string, got []*models.Mock, want ...string) {
 // switch: every mock of the set, once, at BaseTime.
 func stagedManager(t *testing.T, perTest, session []*models.Mock) *MockManager {
 	t.Helper()
-	mm := NewMockManager(nil, nil, zap.NewNop())
+	return stagedManagerLogged(t, zap.NewNop(), perTest, session)
+}
+
+// stagedManagerLogged is stagedManager, logging to lg.
+func stagedManagerLogged(t *testing.T, lg *zap.Logger, perTest, session []*models.Mock) *MockManager {
+	t.Helper()
+	mm := NewMockManager(nil, nil, lg)
 	t.Cleanup(mm.Close)
 	mm.SetMocksWithWindow(perTest, session, models.BaseTime, time.Now())
 	return mm
@@ -250,8 +263,9 @@ func TestBetweenTestsThePoolSliceAnswers(t *testing.T) {
 	}
 }
 
-// The pool slice's stateful cursors are its key's own, and none is used in
-// a test.
+// The pool slice's stateful cursors are its key's own, and a test's are its
+// own: a test does not read the pool's, and a cursor moved in a test leaves
+// the pool's where it was.
 func TestPoolCursorsAreEachKeysOwn(t *testing.T) {
 	mm := stagedManager(t, nil, nil)
 	mm.ServeExactPool("a", nil)
@@ -264,14 +278,669 @@ func TestPoolCursorsAreEachKeysOwn(t *testing.T) {
 		t.Fatalf("key b reads key a's cursor: %d", got)
 	}
 	mm.ServeExactTest("T", nil)
-	mm.AdvanceMockCursor("GET /n", 1, 3)
 	if got := mm.MockCursorIndex("GET /n", 3); got != 0 {
-		t.Fatalf("a cursor moved in a test: %d", got)
+		t.Fatalf("a test reads a pool's cursor: %d", got)
+	}
+	mm.AdvanceMockCursor("GET /n", 1, 3)
+	if got := mm.MockCursorIndex("GET /n", 3); got != 2 {
+		t.Fatalf("the test's cursor: %d", got)
 	}
 	mm.ServeExactPool("a", nil)
 	if got := mm.MockCursorIndex("GET /n", 3); got != 1 {
 		t.Fatalf("key a's cursor after the test: %d", got)
 	}
+}
+
+// A reusable request recorded more than once answers in record order inside
+// a test: a parser that walks its recordings with the store's cursor (an HTTP
+// served mark, a Postgres session sequence) is not answered the first
+// recording at every ask, another ask's answer passed for this one's. The
+// test's cursor is its own: the next test, and the same test opened again (a
+// retry), start the sequence over, and an ended test's cursors are kept
+// for its own calls only until the next staging.
+func TestARequestRecordedTwiceInATestAnswersInRecordOrder(t *testing.T) {
+	mm := stagedManager(t, nil, nil)
+	const seq = "postgres-v3/session-sequence\x00probe"
+	// ask is one call a parser answers: it peeks at the sequence's position
+	// and moves it past the recording it served.
+	ask := func(key string) int {
+		i := mm.MockCursorIndex(key, 2)
+		mm.AdvanceMockCursor(key, i, 2)
+		return i
+	}
+	asks := func(key string, n int) []int {
+		var got []int
+		for ; n > 0; n-- {
+			got = append(got, ask(key))
+		}
+		return got
+	}
+	mm.ServeExactPool("-", nil)
+	if got := asks(seq, 1); !reflect.DeepEqual(got, []int{0}) {
+		t.Fatalf("between tests: %v", got)
+	}
+	mm.ServeExactTest("T", nil)
+	if got := asks(seq, 3); !reflect.DeepEqual(got, []int{0, 1, 1}) {
+		t.Fatalf("in a test the recordings answered %v; want 0, 1 and then the last again", got)
+	}
+	if got := asks("perTest\x00GET /n", 2); !reflect.DeepEqual(got, []int{0, 1}) {
+		t.Fatalf("a per-test sequence in a test answered %v; want 0 1, the test's own", got)
+	}
+	mm.ServeExactTest("T", nil)
+	if got := asks(seq, 2); !reflect.DeepEqual(got, []int{0, 1}) {
+		t.Fatalf("the test opened again answered %v; want its sequence started over", got)
+	}
+	// The next test, opened right after: a call of its answered as its view
+	// goes in, before the ended test's cursors are closed, keeps its place.
+	var early []int
+	mm.exact.beforeBump = func(*exactView) { early = append(early, ask(seq)) }
+	mm.ServeExactTest("U", nil)
+	mm.exact.beforeBump = nil
+	if got := append(early, asks(seq, 1)...); !reflect.DeepEqual(got, []int{0, 1}) {
+		t.Fatalf("the next test answered %v; want its own sequence, in record order", got)
+	}
+	mm.ServeExactPool("-", nil)
+	if got := asks(seq, 1); !reflect.DeepEqual(got, []int{1}) {
+		t.Fatalf("between tests after the tests: %v; want the pool's own cursor, moved once", got)
+	}
+	// An ended test's cursors are closed with its view and kept for the
+	// calls read in it, and the next staging drops them: nothing of an
+	// ended test is kept past its set.
+	mm.cursorMu.Lock()
+	if len(mm.testCursors) == 0 || len(mm.closedTests) != len(mm.testCursors) {
+		t.Fatalf("the ended tests' cursors %v, closed %v; want each kept, closed, until the next staging", mm.testCursors, mm.closedTests)
+	}
+	mm.cursorMu.Unlock()
+	mm.ResetStatefulCursors()
+	mm.cursorMu.Lock()
+	defer mm.cursorMu.Unlock()
+	if len(mm.testCursors) != 0 || len(mm.closedTests) != 0 {
+		t.Fatalf("an ended test's cursors are kept past the staging: %v %v", mm.testCursors, mm.closedTests)
+	}
+}
+
+// A call peeks at its sequence and commits after it answers; a view installed
+// between the two (a test opening or ending) does not move the next view's
+// sequence by the peeked one's position. Through one SequenceView the commit
+// moves the sequence it peeked: the pool's own, or the ended test's own,
+// which no other view reads.
+func TestAPeekAndItsCommitMoveOneViewsSequence(t *testing.T) {
+	const key = "postgres-v3/session-sequence\x00probe"
+	view := func(mm *MockManager) integrations.MockCursor {
+		sv, ok := mm.SequenceView()
+		if !ok {
+			t.Fatal("no sequence view under exact serving")
+		}
+		return sv.Cursor
+	}
+	ask := func(mm *MockManager) int {
+		c := view(mm)
+		i := c.MockCursorIndex(key, 3)
+		c.AdvanceMockCursor(key, i, 3)
+		return i
+	}
+	t.Run("pool to test", func(t *testing.T) {
+		mm := stagedManager(t, nil, nil)
+		mm.ServeExactPool("-", nil)
+		ask(mm)
+		ask(mm)
+		c := view(mm)
+		idx := c.MockCursorIndex(key, 3)
+		mm.ServeExactTest("T", nil)
+		c.AdvanceMockCursor(key, idx, 3)
+		if got := view(mm).MockCursorIndex(key, 3); got != 0 {
+			t.Fatalf("the test's first ask reads %d: moved by the pool's peek of %d", got, idx)
+		}
+		mm.ServeExactPool("-", nil)
+		if got := view(mm).MockCursorIndex(key, 3); got != 2 {
+			t.Fatalf("the pool reads %d; want 2: its own commit moved it", got)
+		}
+	})
+	t.Run("test to test", func(t *testing.T) {
+		mm := stagedManager(t, nil, nil)
+		mm.ServeExactPool("-", nil)
+		mm.ServeExactTest("T1", nil)
+		ask(mm)
+		c := view(mm)
+		idx := c.MockCursorIndex(key, 3)
+		mm.ServeExactTest("T2", nil)
+		c.AdvanceMockCursor(key, idx, 3)
+		if got := view(mm).MockCursorIndex(key, 3); got != 0 {
+			t.Fatalf("T2's first ask reads %d: moved by T1's peek of %d", got, idx)
+		}
+	})
+	t.Run("a reset in a test", func(t *testing.T) {
+		mm := stagedManager(t, nil, nil)
+		mm.ServeExactPool("-", nil)
+		mm.ServeExactTest("T", nil)
+		ask(mm)
+		ask(mm)
+		mm.ResetStatefulCursors()
+		if got := view(mm).MockCursorIndex(key, 3); got != 0 {
+			t.Fatalf("the open test reads %d after a reset of the cursors; want 0, the sequence's start", got)
+		}
+	})
+	t.Run("test to pool", func(t *testing.T) {
+		mm := stagedManager(t, nil, nil)
+		mm.ServeExactPool("-", nil)
+		mm.ServeExactTest("T", nil)
+		ask(mm)
+		ask(mm)
+		c := view(mm)
+		idx := c.MockCursorIndex(key, 3)
+		mm.ServeExactPool("-", nil)
+		c.AdvanceMockCursor(key, idx, 3)
+		if got := view(mm).MockCursorIndex(key, 3); got != 0 {
+			t.Fatalf("the pool's first ask reads %d: moved by the test's peek of %d", got, idx)
+		}
+		mm.cursorMu.Lock()
+		defer mm.cursorMu.Unlock()
+		if len(mm.cursors) != 0 {
+			t.Fatalf("a commit after its test ended moved the pool's cursors: %v", mm.cursors)
+		}
+		for gen, cursors := range mm.testCursors {
+			if cursors[key] != 3 {
+				t.Fatalf("a commit after its test ended (test view %d): %v; want the test's own sequence moved past the 2 it peeked", gen, cursors)
+			}
+		}
+	})
+}
+
+// A call read in a test and walked after the test ended (a session query in
+// flight across the test's end, a held store's sequence view) reads the
+// position the test's calls reached, so it is answered what it would have
+// been answered before the end, never the test's first recording again.
+// Its commit moves that test's own sequence, which no other view reads, so
+// two calls read in the test and walked after it answer in record order
+// wherever the end lands between them: neither answer depends on when the
+// end lands. The next test's sequence starts at its own start, and the
+// next staging drops the ended test's cursors.
+func TestACallReadInATestAndWalkedAfterItEndedReadsWhereTheTestLeftIt(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const key, n = "postgres-v3/session-sequence\x00probe", 5
+	for _, endBeforeXCommits := range []bool{false, true} {
+		t.Run(fmt.Sprintf("the end lands before the first late call commits=%v", endBeforeXCommits), func(t *testing.T) {
+			mm := stagedManager(t, nil, nil)
+			mm.ServeExactPool("-", nil)
+			mm.ServeExactTest("T", nil)
+			sv, ok := mm.SequenceView()
+			if !ok {
+				t.Fatal("no sequence view under exact serving")
+			}
+			c := sv.Cursor
+			for i := 0; i < 2; i++ {
+				c.AdvanceMockCursor(key, c.MockCursorIndex(key, n), n)
+			}
+			held, _ := mm.HoldToRound(mm.MarkCallRound())
+			// X, read in T, peeks before T ends; Y, read in T too, is walked
+			// after T ended.
+			x := c.MockCursorIndex(key, n)
+			if !endBeforeXCommits {
+				c.AdvanceMockCursor(key, x, n)
+			}
+			mm.ServeExactPool("-", nil) // T ends
+			if endBeforeXCommits {
+				c.AdvanceMockCursor(key, x, n)
+			}
+			hv, ok := integrations.SequenceViewOf(held)
+			if !ok || hv.Test != "T" {
+				t.Fatalf("the held call's view is test %q (%v); want T's", hv.Test, ok)
+			}
+			if x != 2 {
+				t.Fatalf("X, read in T after two asks, peeked %d; want 2", x)
+			}
+			for name, cur := range map[string]integrations.MockCursor{"the view it read": c, "the held store's view": hv.Cursor} {
+				if got := cur.MockCursorIndex(key, n); got != 3 {
+					t.Fatalf("%s: Y, read in T and walked after T ended, reads %d; want 3, the next of T's sequence (0 re-walks T from its start, 2 answers X's recording again)", name, got)
+				}
+			}
+			if now, _ := mm.SequenceView(); now.Cursor.MockCursorIndex(key, n) != 0 {
+				t.Fatal("a commit of a call read in T moved the pool's sequence")
+			}
+			mm.ServeExactTest("U", nil)
+			if now, _ := mm.SequenceView(); now.Cursor.MockCursorIndex(key, n) != 0 {
+				t.Fatal("the next test's sequence does not start at its own start")
+			}
+			mm.ResetStatefulCursors()
+			if got := c.MockCursorIndex(key, n); got != 0 {
+				t.Fatalf("after the next staging, T's cursor still reads %d; want it dropped", got)
+			}
+			hv.Cursor.AdvanceMockCursor(key, 3, n)
+			if got := c.MockCursorIndex(key, n); got != 0 {
+				t.Fatalf("after the next staging, a commit of a call read in T moved %d; want nothing kept", got)
+			}
+		})
+	}
+}
+
+// openingAt is the manager whose next test opens (open, once) between a
+// call's first read of the store and its first look at a cursor: a call made
+// between tests still in flight as the test begins. Under the proven switch
+// the call is held to its round (HoldToRound) and reads the held store from
+// then on, so the test opens as it is held.
+type openingAt struct {
+	*MockManager
+	open func()
+	done bool
+}
+
+func (s *openingAt) fire() {
+	if !s.done {
+		s.done = true
+		s.open()
+	}
+}
+
+func (s *openingAt) SequenceView() (integrations.SequenceView, bool) {
+	s.fire()
+	return s.MockManager.SequenceView()
+}
+
+func (s *openingAt) MockCursorIndex(key string, n int) int {
+	s.fire()
+	return s.MockManager.MockCursorIndex(key, n)
+}
+
+func (s *openingAt) HoldToRound(call integrations.CallRound) (integrations.MockMemDb, func() bool) {
+	held, restaged := s.MockManager.HoldToRound(call)
+	s.fire()
+	return held, restaged
+}
+
+// A call read in one view is walked in the view it was read in (its call
+// round's), however late it looks at a cursor: a held store's sequence view
+// is the call's view, its test, recorded window and cursor, so a test that
+// opens meanwhile takes a call read between tests into neither its window nor
+// its cursor, and a test that ends meanwhile leaves its call in both. Through
+// the HTTP integration, a request of the set's worker scope recorded at the
+// set's start, read between tests while the test opens, is answered the
+// first recording, and the test's call the next, by placement: the test's
+// answers never depend on goroutine timing.
+func TestACallReadBeforeATestOpensIsWalkedInTheViewItWasReadIn(t *testing.T) {
+	// Exact serving runs under the proven switch alone (the replay's
+	// exactServing), where a call's first read marks its round.
+	t.Setenv("KEPLOY_PROVEN", "1")
+	window := models.TestWindow{TestCase: "A", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}
+	t.Run("the held store's sequence view", func(t *testing.T) {
+		const key = "probe"
+		mm := stagedManager(t, nil, []*models.Mock{seqCall("g0", time.Second, "g0")})
+		mm.SeedRecordedWindows([]models.TestWindow{window})
+		mm.ServeExactWorker([]string{"g0"})
+		mm.ServeExactPool("k", nil)
+		held, _ := mm.HoldToRound(mm.MarkCallRound())
+		mm.ServeExactTest("A", nil)
+		sv, ok := integrations.SequenceViewOf(held)
+		if !ok || sv.Test != "" || !sv.Start.IsZero() || sv.Worker != nil {
+			t.Fatalf("a call read between tests, held, walks test %q from %v (worker scope told %v) once the test opened; want the pool view's: no test, no window, the worker scope one sequence with the pool's", sv.Test, sv.Start, sv.Worker != nil)
+		}
+		sv.Cursor.AdvanceMockCursor(key, sv.Cursor.MockCursorIndex(key, 2), 2)
+		if now, _ := mm.SequenceView(); now.Cursor.MockCursorIndex(key, 2) != 0 {
+			t.Fatal("the gap call's commit moved the open test's sequence")
+		}
+		inTest, _ := mm.HoldToRound(mm.MarkCallRound())
+		mm.ServeExactPool("k", nil)
+		if now, _ := mm.SequenceView(); now.Cursor.MockCursorIndex(key, 2) != 1 {
+			t.Fatal("the gap call's commit did not move the pool's sequence")
+		}
+		if sv, _ := integrations.SequenceViewOf(inTest); sv.Test != "A" || !sv.Start.Equal(window.Start) || !sv.End.Equal(window.End) || sv.Worker == nil || !sv.Worker(seqCall("g0", time.Second, "g0")) {
+			t.Fatalf("a call read in test A, held, walks test %q over [%v, %v] (worker scope told %v) once the test ended; want A's recorded window and its worker scope", sv.Test, sv.Start, sv.End, sv.Worker != nil)
+		}
+	})
+	for _, straddle := range []bool{false, true} {
+		t.Run(fmt.Sprintf("test opens before the call looks at a cursor=%v", straddle), func(t *testing.T) {
+			mm := stagedManager(t, nil, []*models.Mock{seqCall("s0", time.Second, "s0"), seqCall("s1", 2*time.Second, "s1")})
+			mm.SeedRecordedWindows([]models.TestWindow{window})
+			mm.ServeExactWorker([]string{"s0", "s1"})
+			mm.ServeExactPool("k", nil)
+			opened := false
+			open := func() {
+				if !opened {
+					opened = true
+					mm.ServeExactTest("A", nil)
+				}
+			}
+			var db integrations.MockMemDb = mm
+			if straddle {
+				db = &openingAt{MockManager: mm, open: open}
+			}
+			gap := probe(t, db)
+			open()
+			if first := probe(t, mm); gap != "s0" || first != "s1" {
+				t.Fatalf("the call made between tests answered %q and test A's first %q; want s0 and s1, whenever the test opened", gap, first)
+			}
+		})
+	}
+}
+
+// A connection view made before exact serving began passes through to the
+// manager (passThrough), its sequence view too: in a test, a request its
+// worker scope recorded more than once at the set's start is answered by
+// placement, and one the test recorded more than once its own in record
+// order, as through the manager; and a pool peek committed after the test
+// opened moves the pool's sequence, never the test's. Both with the proven
+// switch off and on.
+func TestAConnectionViewMadeBeforeExactServingWalksAsTheManagerDoes(t *testing.T) {
+	for _, sw := range []string{"", "1"} {
+		t.Run("switch="+sw, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", sw)
+			win := func(name string, from, to time.Duration) models.TestWindow {
+				return models.TestWindow{TestCase: name, Start: exactT0.Add(from), End: exactT0.Add(to)}
+			}
+			t.Run("the worker scope by placement", func(t *testing.T) {
+				w := []*models.Mock{seqCall("w0", time.Second, "0"), seqCall("w1", 2*time.Second, "1"), seqCall("w2", 3*time.Second, "2")}
+				mm := stagedManager(t, nil, w)
+				mm.SeedRecordedWindows([]models.TestWindow{win("T", 4*time.Second, 5*time.Second)})
+				mm.ServeExactWorker([]string{"w0", "w1", "w2"})
+				mm.ServeExactPool("k", nil)
+				mm.ServeExactTest("T", nil)
+				db := &scopedMockDb{MockMemDb: mm}
+				if got := []string{probe(t, db), probe(t, db), probe(t, db)}; !reflect.DeepEqual(got, []string{"0", "1", "2"}) {
+					t.Fatalf("in a test, through the view, answered %v; want 0 1 2", got)
+				}
+			})
+			t.Run("a test's own", func(t *testing.T) {
+				a := []*models.Mock{seqCall("a0", time.Second, "a")}
+				b := []*models.Mock{seqCall("b0", 3*time.Second, "b"), seqCall("b1", 4*time.Second, "b2")}
+				mm := stagedManager(t, nil, append(append([]*models.Mock{}, a...), b...))
+				mm.SeedRecordedWindows([]models.TestWindow{win("A", 500*time.Millisecond, 2*time.Second), win("B", 2500*time.Millisecond, 5*time.Second)})
+				mm.ServeExactPool("k", nil)
+				mm.ServeExactTest("B", b)
+				db := &scopedMockDb{MockMemDb: mm}
+				if got := []string{probe(t, db), probe(t, db)}; !reflect.DeepEqual(got, []string{"b", "b2"}) {
+					t.Fatalf("test B, through the view, answered %v; want b b2, its own", got)
+				}
+			})
+			t.Run("a pool peek committed in a test", func(t *testing.T) {
+				const key = "postgres-v3/session-sequence\x00probe"
+				mm := stagedManager(t, nil, nil)
+				db := &scopedMockDb{MockMemDb: mm}
+				view := func() integrations.MockCursor {
+					sv, ok := integrations.SequenceViewOf(db)
+					if !ok {
+						t.Fatal("a view made before exact serving began gives no sequence view under it")
+					}
+					return sv.Cursor
+				}
+				mm.ServeExactPool("-", nil)
+				for i := 0; i < 2; i++ {
+					c := view()
+					j := c.MockCursorIndex(key, 3)
+					c.AdvanceMockCursor(key, j, 3)
+				}
+				c := view()
+				idx := c.MockCursorIndex(key, 3)
+				mm.ServeExactTest("T", nil)
+				c.AdvanceMockCursor(key, idx, 3)
+				if got := view().MockCursorIndex(key, 3); got != 0 {
+					t.Fatalf("the test's first ask reads %d, moved by the pool's peek of %d", got, idx)
+				}
+			})
+		})
+	}
+}
+
+// seqCall is a reusable HTTP recording of GET http://deps/probe at at,
+// answered body, walked by the stateful cursor (as the agent derives an
+// untagged HTTP mock before staging).
+func seqCall(name string, at time.Duration, body string) *models.Mock {
+	m := httpCall(name, at, "http://deps/probe")
+	m.Spec.Metadata = map[string]string{"type": models.HTTPClient}
+	m.Spec.HTTPReq.Header = map[string]string{"Host": "deps"}
+	m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Length": strconv.Itoa(len(body))}, Body: body}
+	m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(time.Millisecond)
+	m.TestModeInfo.Consume = models.ConsumeCursorSaturate
+	return m
+}
+
+// probe asks GET /probe through the real HTTP integration and returns the
+// body answered.
+func probe(t *testing.T, db integrations.MockMemDb) string {
+	t.Helper()
+	resp, got, _ := serveOne(t, httpint.New(zap.NewNop()), db, "GET /probe HTTP/1.1\r\nHost: deps\r\n\r\n")
+	if resp == nil {
+		return "no answer"
+	}
+	return string(got)
+}
+
+// A request a test recorded more than once is answered, in the test, its own
+// recordings in record order, each once (a test view serves them as its own,
+// never through the stateful walk): a test is answered its own, never those
+// of a test before it that this run did not make (a selective replay, the
+// kept set), whichever tests ran before it. Once its own are spent, the set's
+// worker scope answers the request: it belongs to no test, so it is walked by
+// placement from the set's start on, as between tests (a test that recorded
+// none of the request is answered the same). The proxy cannot tell a test's
+// call from the worker's, so a test's call past its own recordings takes the
+// worker scope's next reached recording, as main answers it. Then nothing,
+// never an earlier recording again. Each case runs through every pass that
+// walks the sequence (workerWalkPasses).
+func TestATestsOwnRecordingsAnswerInRecordOrderThenTheWorkerScope(t *testing.T) {
+	win := func(name string, from, to time.Duration) models.TestWindow {
+		return models.TestWindow{TestCase: name, Start: exactT0.Add(from), End: exactT0.Add(to)}
+	}
+	const miss = "no answer"
+	for _, pass := range workerWalkPasses() {
+		t.Run(pass.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", pass.sw)
+			asks := func(mm *MockManager, n int) []string {
+				var got []string
+				for i := 0; i < n; i++ {
+					got = append(got, pass.ask(t, mm))
+				}
+				return got
+			}
+			t.Run("in record order", func(t *testing.T) {
+				own := []*models.Mock{pass.rec("w0", time.Second, "0"), pass.rec("w1", 2*time.Second, "1"), pass.rec("w2", 3*time.Second, "2")}
+				mm := stagedManager(t, nil, own)
+				mm.SeedRecordedWindows([]models.TestWindow{win("T", 500*time.Millisecond, 4*time.Second)})
+				mm.ServeExactPool("k", nil)
+				mm.ServeExactTest("T", own)
+				if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"0", "1", "2", miss}) {
+					t.Fatalf("in a test answered %v; want 0 1 2, then nothing", got)
+				}
+			})
+			t.Run("a test's own, not an earlier test's", func(t *testing.T) {
+				run := func(aFirst bool) []string {
+					a := []*models.Mock{pass.rec("a0", time.Second, "a")}
+					b := []*models.Mock{pass.rec("b0", 3*time.Second, "b"), pass.rec("b1", 4*time.Second, "b2")}
+					mm := stagedManager(t, nil, append(append([]*models.Mock{}, a...), b...))
+					mm.SeedRecordedWindows([]models.TestWindow{win("A", 500*time.Millisecond, 2*time.Second), win("B", 2500*time.Millisecond, 5*time.Second)})
+					mm.ServeExactPool("k", nil)
+					if aFirst {
+						mm.ServeExactTest("A", a)
+						if got := pass.ask(t, mm); got != "a" {
+							t.Fatalf("test A answered %q; want a", got)
+						}
+						mm.ServeExactPool("k", nil)
+					}
+					mm.ServeExactTest("B", b)
+					return asks(mm, 3)
+				}
+				want := []string{"b", "b2", miss}
+				if got := run(false); !reflect.DeepEqual(got, want) {
+					t.Fatalf("test B, run without test A, answered %v; want %v: its own, then nothing", got, want)
+				}
+				if got := run(true); !reflect.DeepEqual(got, want) {
+					t.Fatalf("test B, run after test A, answered %v; want %v, as without A", got, want)
+				}
+			})
+			t.Run("the worker scope after the test's own", func(t *testing.T) {
+				own := pass.rec("a0", 4*time.Second, "mine")
+				mm := stagedManager(t, nil, []*models.Mock{pass.rec("s0", time.Second, "false"), pass.rec("s1", 2*time.Second, "true"), own})
+				mm.SeedRecordedWindows([]models.TestWindow{win("A", 3*time.Second, 5*time.Second)})
+				mm.ServeExactWorker([]string{"s0", "s1"})
+				mm.ServeExactPool("k", nil)
+				mm.ServeExactWorker([]string{"s0", "s1"})
+				mm.ServeExactTest("A", []*models.Mock{own})
+				if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"mine", "false", "true", miss}) {
+					t.Fatalf("test A answered %v; want its own, then the worker scope's by placement, then nothing", got)
+				}
+			})
+			t.Run("a test that recorded none", func(t *testing.T) {
+				// b0 is recorded in the gap after A, so it is reached
+				// once A began.
+				mm := stagedManager(t, nil, []*models.Mock{pass.rec("s0", time.Second, "false"), pass.rec("s1", 2*time.Second, "true"), pass.rec("b0", 6*time.Second, "later")})
+				mm.SeedRecordedWindows([]models.TestWindow{win("A", 3*time.Second, 5*time.Second)})
+				mm.ServeExactWorker([]string{"s0", "s1"})
+				mm.ServeExactPool("k", nil)
+				mm.ServeExactWorker([]string{"s0", "s1", "b0"})
+				mm.ServeExactTest("A", nil)
+				if got := asks(mm, 4); !reflect.DeepEqual(got, []string{"false", "true", "later", miss}) {
+					t.Fatalf("test A, which recorded none, answered %v; want the worker scope's by placement, then nothing: never an earlier one again", got)
+				}
+			})
+		})
+	}
+}
+
+// A worker-scope request (models.Mapping.Worker) belongs to no test: record
+// places each of its recordings in the gap it was made in, so no test's
+// recorded window holds one. Its sequence is the set's, walked by placement
+// on one cursor wherever its calls land: a poll recorded in the gap after a
+// test that replay makes inside that test, or inside the next one, is
+// answered the recording placed there, as when it lands in the gap, and the
+// set's end finds every worker-scope recording it reached answered. A
+// recording whose place the run has not reached answers nothing, in a test
+// or out of one. Each case runs through every pass that walks the sequence,
+// with the proven switch off and on, and the agent's order of calls: the
+// worker set named before each view goes in.
+func TestAWorkerScopeRequestIsWalkedByPlacementWhereverItsCallsLand(t *testing.T) {
+	const miss = "no answer"
+	for _, pass := range workerWalkPasses() {
+		t.Run(pass.name, func(t *testing.T) {
+			t.Setenv("KEPLOY_PROVEN", pass.sw)
+			// g0 is recorded at the set's start, g1 in the gap after
+			// A, g2 in the gap after B: each is reachable once the test
+			// before its gap began (MockEntry.Place).
+			recorded := func() []*models.Mock {
+				return []*models.Mock{pass.rec("g0", time.Second, "0"), pass.rec("g1", 3500*time.Millisecond, "1"), pass.rec("g2", 5500*time.Millisecond, "2")}
+			}
+			wins := []models.TestWindow{
+				{TestCase: "A", Start: exactT0.Add(2 * time.Second), End: exactT0.Add(3 * time.Second)},
+				{TestCase: "B", Start: exactT0.Add(4 * time.Second), End: exactT0.Add(5 * time.Second)},
+			}
+			// run replays the set with each poll made where lands says
+			// (start, inA, gapA, inB or gapB), in order, and returns
+			// what each was answered and the reached recordings the
+			// set's end finds unanswered.
+			run := func(lands ...string) ([]string, []string) {
+				mm := stagedManager(t, nil, recorded())
+				mm.SeedRecordedWindows(wins)
+				var got []string
+				next := 0
+				poll := func(where string) {
+					for next < len(lands) && lands[next] == where {
+						got = append(got, pass.ask(t, mm))
+						next++
+					}
+				}
+				mm.ServeExactWorker([]string{"g0"})
+				mm.ServeExactPool("k", nil)
+				poll("start")
+				mm.ServeExactWorker([]string{"g0", "g1"})
+				mm.ServeExactTest("A", nil)
+				poll("inA")
+				mm.ServeExactWorker([]string{"g0", "g1"})
+				mm.ServeExactPool("k", nil)
+				poll("gapA")
+				mm.ServeExactWorker([]string{"g0", "g1", "g2"})
+				mm.ServeExactTest("B", nil)
+				poll("inB")
+				mm.ServeExactWorker([]string{"g0", "g1", "g2"})
+				mm.ServeExactPool("k", nil)
+				poll("gapB")
+				if next != len(lands) {
+					t.Fatalf("lands %v: poll %d made nowhere", lands, next)
+				}
+				answered := map[string]bool{}
+				for _, n := range consumedNames(mm.GetConsumedMocks()) {
+					answered[n] = true
+				}
+				var unanswered []string
+				for _, n := range []string{"g0", "g1", "g2"} {
+					if !answered[n] {
+						unanswered = append(unanswered, n)
+					}
+				}
+				return got, unanswered
+			}
+			for _, lands := range [][]string{
+				{"start", "gapA", "gapB"},
+				{"start", "inA", "gapB"},
+				{"start", "inB", "gapB"},
+				{"inA", "gapA", "gapB"},
+				{"start", "gapA", "inB"},
+			} {
+				got, unanswered := run(lands...)
+				if !reflect.DeepEqual(got, []string{"0", "1", "2"}) || len(unanswered) != 0 {
+					t.Errorf("polls made %v answered %v, leaving %v unanswered at the set's end; want 0 1 2 and none, as made where recorded", lands, got, unanswered)
+				}
+			}
+			// One poll more than the set recorded is answered nothing,
+			// never an earlier recording again; and a recording whose
+			// place the run has not reached answers nothing in a test.
+			if got, _ := run("start", "inA", "inA"); !reflect.DeepEqual(got, []string{"0", "1", miss}) {
+				t.Errorf("three polls by A's end answered %v; want 0 1, then nothing: g2's place is after B began", got)
+			}
+		})
+	}
+}
+
+// workerWalkPass is one pass of the HTTP matcher a worker-scope request is
+// walked through: with the proven switch off (the exact-body pass), and on:
+// the strict pass, the variable pass (recordings that declare a variable),
+// the replay of learned noise (learnedMatch) and record's learn step (the
+// full round).
+type workerWalkPass struct {
+	name string
+	sw   string
+	// dress makes a recording the pass's; vary sends each call its own
+	// request id, which only learned noise excuses.
+	dress func(*models.Mock)
+	vary  bool
+	opts  models.OutgoingOptions
+	calls int
+}
+
+func workerWalkPasses() []*workerWalkPass {
+	return []*workerWalkPass{
+		{name: "exact-body pass (switch off)"},
+		{name: "strict pass", sw: "1"},
+		{name: "variable pass", sw: "1", dress: func(m *models.Mock) {
+			m.Spec.Variables = models.MockVariables{"rid-" + m.Name: {Recorded: "rec", Bind: "header.X-Req-Id"}}
+		}},
+		{name: "learned noise (learnedMatch)", sw: "1", vary: true, dress: func(m *models.Mock) {
+			m.Spec.ReqBodyNoise = map[string][]string{"header.x-req-id": {}}
+		}},
+		{name: "learn step", sw: "1", opts: models.OutgoingOptions{Learn: true, LearnPool: true}},
+	}
+}
+
+// rec is a recording of GET /probe at at answered body, dressed for the pass.
+func (p *workerWalkPass) rec(name string, at time.Duration, body string) *models.Mock {
+	m := seqCall(name, at, body)
+	m.Spec.HTTPReq.Header["X-Req-Id"] = "rec"
+	if p.dress != nil {
+		p.dress(m)
+	}
+	return m
+}
+
+// ask is one call of GET /probe through the pass, answered body or "no
+// answer".
+func (p *workerWalkPass) ask(t *testing.T, mm *MockManager) string {
+	t.Helper()
+	p.calls++
+	id := "rec"
+	if p.vary {
+		id = "r" + strconv.Itoa(p.calls)
+	}
+	resp, body := learnServe(t, httpint.New(zap.NewNop()), mm, context.Background(), p.opts, "GET /probe HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
+	if resp == nil || resp.StatusCode != http.StatusOK {
+		return "no answer"
+	}
+	return string(body)
 }
 
 // Exact serving belongs to one replay session. A reset ends its test and
@@ -314,9 +983,11 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	equalNames(t, "without exact serving", sess, "a")
 }
 
-// A consume that read a view before another replaced it lands on the view it
-// read: it answers nothing there, so what the replaced view says it
-// consumed is final.
+// A consume that read a view before another replaced it settles nothing in
+// the view it read: that view is closed, and what it says it consumed is
+// final. It is settled against the view in force instead (closedWait), here
+// the pool's, which does not show the test's mock: refused. A view waited on
+// that comes back in force (none replaces it) refuses at once.
 func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	a := exactMock("a", 0, models.LifetimePerTest)
 	mm := stagedManager(t, []*models.Mock{a}, nil)
@@ -327,10 +998,24 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 	mm.ServeExactPool("-", nil)
 	// The race: a consume that loaded v before the swap.
 	mk := *held[0]
+	verdict, wait, _ := mm.exactConsumeIn(v, &mk, true)
+	if verdict != exactRefused || wait == nil {
+		t.Fatalf("a consume in a replaced view: %v, wait %v; want refused, to be settled in the view in force", verdict, wait)
+	}
+	select {
+	case <-wait:
+	default:
+		t.Fatal("the replaced view's replacement is in force, yet a consume of it still waits")
+	}
+	if verdict := mm.exactConsume(&mk, true); verdict != exactRefused {
+		t.Fatalf("a consume of the ended test's mock in the pool's view: %v", verdict)
+	}
+	if _, consumed, _, _ := mm.ExactTestOutcome(); len(consumed) != 0 {
+		t.Fatalf("the replaced view's outcome changed: %v", consumed)
+	}
 	mm.exact.view.Store(v)
-	verdict := mm.exactConsume(&mk, true)
-	if verdict != exactRefused {
-		t.Fatalf("a consume in a replaced view: %v", verdict)
+	if verdict := mm.exactConsume(&mk, true); verdict != exactRefused {
+		t.Fatalf("a consume in a closed view back in force: %v", verdict)
 	}
 	if _, consumed, _, _ := mm.ExactTestOutcome(); len(consumed) != 0 {
 		t.Fatalf("the replaced view's outcome changed: %v", consumed)
@@ -379,6 +1064,286 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 				t.Fatalf("filed %q/%d, want %q/%d", got[0].Kind, got[0].Recorded, tc.wantKind, tc.wantRecorded)
 			}
 		})
+	}
+}
+
+// A miss made while the replay stages a set's mocks, from the staging's
+// opening (StageExactBackground) to its settling (ServeExactBackground), is
+// told so first in its next steps (stagingMissNote), whatever rules the set
+// was recorded under, and whether or not its parser built a report. A miss
+// once the staging is settled, one in a test's view, and an answered call
+// are not.
+func TestAMissMadeWhileASetIsStagedSaysSo(t *testing.T) {
+	provenswitch.Pin(true)
+	t.Cleanup(provenswitch.Unpin)
+	window := func(rules string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			mm.StageExactBackground(rules)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	settled := func(rules string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			window(rules)(mm)
+			mm.ServeExactBackground(rules, nil, nil)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	miss := func() error {
+		return models.NewMockMismatchError(models.ErrNoMockMatched, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", NextSteps: "check the recording."})
+	}
+	bare := func() error { return fmt.Errorf("no recording: %w", models.ErrNoMockMatched) }
+	answered := func() error {
+		return models.NewMockMismatchError(models.ErrAnswered, &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", Answer: models.AnswerByKind})
+	}
+	for _, tc := range []struct {
+		name string
+		arm  func(mm *MockManager)
+		err  func() error
+		told bool
+	}{
+		{"a marked set's staging", window(models.RecordedWithS12Routing), miss, true},
+		{"an unmarked set's staging", window(""), miss, true},
+		{"a staging, a miss with no report", window(models.RecordedWithS12Routing), bare, true},
+		{"a marked set settled", settled(models.RecordedWithS12Routing), miss, false},
+		{"an unmarked set settled", settled(""), miss, false},
+		{"a test's view during a staging", func(mm *MockManager) {
+			mm.StageExactBackground(models.RecordedWithS12Routing)
+			mm.ServeExactTest("T", nil)
+		}, miss, false},
+		{"an answered call in a staging", window(models.RecordedWithS12Routing), answered, false},
+		{"no staging", func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }, miss, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+			mm := NewMockManager(nil, nil, zap.NewNop())
+			defer mm.Close()
+			p.setMockManager(mm)
+			tc.arm(mm)
+			p.BeginTestErrorCapture()
+			p.sendMockNotFoundError(tc.err())
+			got, err := p.GetMockErrors(context.Background())
+			if err != nil || len(got) != 1 {
+				t.Fatalf("want the one call, got %+v (%v)", got, err)
+			}
+			if told := strings.HasPrefix(got[0].NextSteps, stagingMissNote); told != tc.told {
+				t.Fatalf("the call's next steps %q tell the staging %v; want %v", got[0].NextSteps, told, tc.told)
+			}
+			if tc.told && !strings.Contains(got[0].NextSteps, "refused while the test set's mocks were being staged") {
+				t.Fatalf("the staging note %q does not say it plainly", got[0].NextSteps)
+			}
+		})
+	}
+}
+
+// A miss is told it was made while the replay staged a set's mocks only
+// where its call was decided: where the call first read the round, as its
+// parser marked it (integrations.StampMark), never from the view serving
+// when the miss reaches the proxy. A call decided under a staged set's view
+// whose report reaches the proxy once the next set's staging opened is not
+// told so; a call decided in a staging whose report reaches the proxy once
+// the set is staged is. HTTP (replay's matcher and record's full round) and
+// Generic alike. A miss of a parser that marks no round is told from the
+// view serving then (TestAMissMadeWhileASetIsStagedSaysSo).
+func TestAMissIsToldOfAStagingOnlyWhereItsCallWasDecided(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	opening := func(mm *MockManager) {
+		mm.StageExactBackground(models.RecordedWithS12Routing)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	settling := func(mm *MockManager) {
+		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	settled := func(mm *MockManager) { opening(mm); settling(mm) }
+	serve := map[string]func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport{
+		"HTTP replay": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), jobsCall)
+		},
+		"HTTP record's full round": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{Learn: true, LearnPool: true}, learn.NewTracker(), jobsCall)
+		},
+		"Generic": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return genericServeIn(t, context.Background(), db, "AUTH step4")
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		told          bool
+	}{
+		{"decided under a staged set, reported in the next staging", settled, opening, false},
+		{"decided in a staging, reported once the set is staged", opening, settling, true},
+	} {
+		for parser, send := range serve {
+			t.Run(parser+": "+tc.name, func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				p.setMockManager(mm)
+				tc.before(mm)
+				if mm.exactMissStaging() != tc.told {
+					t.Fatalf("precondition: the call's view reads as a staging's: %v", !tc.told)
+				}
+				db := &heldFirstRead{MockManager: mm, moved: func() { tc.under(mm) }}
+				r := send(t, db)
+				if r == nil {
+					t.Fatal("the call was answered")
+				}
+				if !db.fired.Load() {
+					t.Fatal("precondition: the replay never moved under the call")
+				}
+				if mm.exactMissStaging() == tc.told {
+					t.Fatalf("precondition: the view serving as the miss is reported reads as a staging's: %v", tc.told)
+				}
+				p.BeginTestErrorCapture()
+				p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, r))
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil || len(got) != 1 {
+					t.Fatalf("want the one call, got %+v (%v)", got, err)
+				}
+				if told := strings.HasPrefix(got[0].NextSteps, stagingMissNote); told != tc.told {
+					t.Fatalf("WRONG REASON: the call's next steps %q tell the staging %v; want %v", got[0].NextSteps, told, tc.told)
+				}
+			})
+		}
+	}
+}
+
+// A miss is filed where its call was made, in its test or outside every
+// test, as the call's first read of the round found it (its parser marked
+// it: integrations.StampMark), never from the view serving when the miss
+// reaches the proxy: a call made in a test whose miss is reported once the
+// test ended is that test's miss, and one made between tests whose miss is
+// reported once the next test opened is no miss of that test. HTTP
+// (replay's matcher and record's full round) and Generic alike. A miss of a
+// parser that marks no round is filed from the view serving then
+// (TestAMissIsFiledByWhereItWasMade).
+func TestAMissIsFiledWhereItsCallWasMade(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	staged := func(mm *MockManager) {
+		mm.StageExactBackground(models.RecordedWithS12Routing)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactBackground(models.RecordedWithS12Routing, nil, nil)
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+	}
+	inTest := func(mm *MockManager) { mm.ServeExactTest("T1", nil) }
+	between := func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }
+	serve := map[string]func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport{
+		"HTTP replay": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{}, learn.NewTracker(), jobsCall)
+		},
+		"HTTP record's full round": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return sendForMiss(t, db, models.OutgoingOptions{Learn: true, LearnPool: true}, learn.NewTracker(), jobsCall)
+		},
+		"Generic": func(t *testing.T, db integrations.MockMemDb) *models.MockMismatchReport {
+			return genericServeIn(t, context.Background(), db, "AUTH step4")
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		want          string
+	}{
+		{"made in a test, reported once the test ended", inTest, between, models.MissInTest},
+		{"made between tests, reported once the next test opened", between, inTest, models.MissOutsideTest},
+	} {
+		for parser, send := range serve {
+			t.Run(parser+": "+tc.name, func(t *testing.T) {
+				p := &Proxy{logger: zap.NewNop(), errChannel: make(chan error, 4)}
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				p.setMockManager(mm)
+				staged(mm)
+				tc.before(mm)
+				if got := mm.exactMissKind(nil); got != tc.want {
+					t.Fatalf("precondition: the call's view files a miss %q; want %q", got, tc.want)
+				}
+				db := &heldFirstRead{MockManager: mm, moved: func() { tc.under(mm) }}
+				r := send(t, db)
+				if r == nil {
+					t.Fatal("the call was answered")
+				}
+				if !db.fired.Load() {
+					t.Fatal("precondition: the replay never moved under the call")
+				}
+				if got := mm.exactMissKind(nil); got == tc.want {
+					t.Fatalf("precondition: the view serving as the miss is reported files it %q too", got)
+				}
+				p.BeginTestErrorCapture()
+				p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, r))
+				got, err := p.GetMockErrors(context.Background())
+				if err != nil || len(got) != 1 {
+					t.Fatalf("want the one call, got %+v (%v)", got, err)
+				}
+				if got[0].Kind != tc.want {
+					t.Fatalf("WRONG KIND: the miss is filed %q; want %q, where its call was made", got[0].Kind, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// Whether a call's set was served by proven routing is read from the view
+// the call's first read found (integrations.S12BackgroundIn), through the
+// store's mark, a round snapshot and a scoped view alike, never from the
+// view serving when a parser reports the call's miss: a call of a set
+// served by proven routing whose miss is reported once the replay staged a
+// set recorded without it is one of a set whose varying fields record's full
+// round learned, and the reverse. Without a mark (the zero CallRound), the
+// store's now.
+func TestACallsProvenRoutingIsReadFromTheViewItsFirstReadFound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	stage := func(rules string) func(mm *MockManager) {
+		return func(mm *MockManager) {
+			mm.StageExactBackground(rules)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			mm.ServeExactBackground(rules, nil, nil)
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+		}
+	}
+	marks := map[string]func(mm *MockManager) integrations.CallRound{
+		"the store's mark": func(mm *MockManager) integrations.CallRound { return mm.MarkCallRound() },
+		"a scoped view's mark": func(mm *MockManager) integrations.CallRound {
+			return integrations.MarkCallRound(&scopedMockDb{MockMemDb: mm})
+		},
+		"a round snapshot": func(mm *MockManager) integrations.CallRound {
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{})
+			if !ok {
+				t.Fatal("no snapshot")
+			}
+			return snap.CallRound()
+		},
+	}
+	for _, tc := range []struct {
+		name          string
+		before, under func(mm *MockManager)
+		want          bool
+	}{
+		{"marked in a set served by proven routing, read once one recorded without it is staged", stage(models.RecordedWithS12Routing), stage(""), true},
+		{"marked in a set recorded without proven routing, read once one served by it is staged", stage(""), stage(models.RecordedWithS12Routing), false},
+	} {
+		for how, mark := range marks {
+			t.Run(how+": "+tc.name, func(t *testing.T) {
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				t.Cleanup(mm.Close)
+				tc.before(mm)
+				call := mark(mm)
+				if !call.Read() {
+					t.Fatal("precondition: the call was not marked")
+				}
+				tc.under(mm)
+				if integrations.S12Background(mm) == tc.want {
+					t.Fatalf("precondition: the view serving now reads %v too", tc.want)
+				}
+				if got := integrations.S12BackgroundIn(call, mm); got != tc.want {
+					t.Fatalf("WRONG SET: the call's set reads as served by proven routing: %v; want %v, as its first read found it", got, tc.want)
+				}
+				if got := integrations.S12BackgroundIn(integrations.CallRound{}, mm); got != integrations.S12Background(mm) {
+					t.Fatalf("an unmarked call reads %v; want the store's now", got)
+				}
+			})
+		}
 	}
 }
 
@@ -899,10 +1864,10 @@ func TestAGenericTestMockIsReportedAsATestMock(t *testing.T) {
 	mm.ServeExactTest("T", []*models.Mock{own})
 	// A miss's diagnosis finds a staged mock the open test does not own, by
 	// name: another test's, which no read shows; never the test's own.
-	if got := mm.FindStagedNotOwned(models.GENERIC, func(m *models.Mock) bool { return m.Name == "other" }); got != "other" {
+	if got := stagedNotOwnedNow(mm, models.GENERIC, func(m *models.Mock) bool { return m.Name == "other" }); got != "other" {
 		t.Fatalf("found %q, want another test's staged exchange", got)
 	}
-	if got := mm.FindStagedNotOwned(models.GENERIC, func(m *models.Mock) bool { return m.Name == "own" }); got != "" {
+	if got := stagedNotOwnedNow(mm, models.GENERIC, func(m *models.Mock) bool { return m.Name == "own" }); got != "" {
 		t.Fatalf("found the test's own exchange %q", got)
 	}
 	var served *models.Mock
@@ -1503,6 +2468,19 @@ func TestATimersStretchOpensOnceARecordingOfItsRunAnswered(t *testing.T) {
 	shown("after the write recorded after the run", false)
 }
 
+// stagedNotOwnedNow is mm's lookup of a recording made elsewhere for a call
+// whose first read is now (MarkCallRound).
+func stagedNotOwnedNow(mm *MockManager, kind models.Kind, match func(*models.Mock) bool) string {
+	name, _ := mm.FindStagedNotOwned(kind, mm.MarkCallRound(), match)
+	return name
+}
+
+// stagedNotOwnedByKeysNow is stagedNotOwnedNow, by keys.
+func stagedNotOwnedByKeysNow(mm *MockManager, kind models.Kind, keys []string, match func(*models.Mock) bool) string {
+	name, _ := mm.FindStagedNotOwnedByKeys(kind, mm.MarkCallRound(), keys, match)
+	return name
+}
+
 // A miss's diagnosis (FindStagedNotOwned) names a staged recording the open
 // view does not show and no call of the set consumed: another test's, in a
 // test or between tests, and a worker-scope one whose place the run has not
@@ -1524,10 +2502,10 @@ func TestFindStagedNotOwnedNamesARecordingTheViewDoesNotShow(t *testing.T) {
 	all := []*models.Mock{own, other, inT1, consumed, boot, later, pool, pollA, pollB}
 	mm := stagedManager(t, nil, all)
 	find := func(name string) string {
-		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == name })
+		return stagedNotOwnedNow(mm, models.HTTP, func(m *models.Mock) bool { return m.Name == name })
 	}
 	jobs := func() string {
-		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
+		return stagedNotOwnedNow(mm, models.HTTP, func(m *models.Mock) bool { return m.Spec.HTTPReq.URL == "/jobs" })
 	}
 
 	// The set's start, no test open: any test's recording is named, and the
@@ -1625,7 +2603,7 @@ func TestFindStagedNotOwnedByKeysReadsTheRecordingSource(t *testing.T) {
 		if key != "" {
 			keys = []string{key}
 		}
-		return mm.FindStagedNotOwnedByKeys(models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
+		return stagedNotOwnedByKeysNow(mm, models.HTTP, keys, func(m *models.Mock) bool { return m.Name == name })
 	}
 	mm.ServeExactPool("k", []string{"pool"})
 	if got := find("", "t2-delete"); got != "" || len(asked) != 0 {
@@ -1666,7 +2644,7 @@ func TestFindStagedNotOwnedSkipsTheNextTestsCallsInFlight(t *testing.T) {
 	mm := stagedManager(t, nil, []*models.Mock{ahead})
 	mm.ServeExactPool("k", nil, ahead)
 	named := func() string {
-		return mm.FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
+		return stagedNotOwnedNow(mm, models.HTTP, func(m *models.Mock) bool { return m.Name == "t2-fetch" })
 	}
 	if got := named(); got != "" {
 		t.Fatalf("before it answered, the next test's call in flight was named as made elsewhere: %q", got)
@@ -1736,7 +2714,11 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	pool := exactMock("pool-1", time.Second, models.LifetimeSession)
 	own := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
 	later := exactMock("pool-9", 9*time.Second, models.LifetimeSession)
-	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later}, models.BaseTime, time.Now())
+	// Recorded at the instant itself: a fixture's whole second may have made
+	// it before the call, so it is visited (the learn step reads it as an
+	// earlier place unless F served it).
+	same := exactMock("pool-5", 5*time.Second, models.LifetimeSession)
+	mm.SetMocksWithWindow([]*models.Mock{own}, []*models.Mock{pool, later, same}, models.BaseTime, time.Now())
 	at := exactT0.Add(5 * time.Second)
 	visit := func(db integrations.RecordedBeforeReader) (string, []*models.Mock, error) {
 		var names []string
@@ -1749,16 +2731,18 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 		sort.Strings(names)
 		return strings.Join(names, ","), got, err
 	}
-	if names, _, err := visit(mm); err != nil || names != "own-2,pool-1" {
-		t.Fatalf("with no disk: %s %v; want own-2,pool-1", names, err)
+	if names, _, err := visit(mm); err != nil || names != "own-2,pool-1,pool-5" {
+		t.Fatalf("with no disk: %s %v; want own-2,pool-1,pool-5", names, err)
 	}
 	onDisk := exactMock("other-test-3", 3*time.Second, models.LifetimePerTest)
 	ownCopy := exactMock("own-2", 2*time.Second, models.LifetimePerTest)
+	onDiskSame := exactMock("other-test-5", 5*time.Second, models.LifetimePerTest)
+	onDiskLater := exactMock("other-test-6", 6*time.Second, models.LifetimePerTest)
 	mm.SetRecordedBefore(func(t2 time.Time, v func(*models.Mock) bool) error {
 		if !t2.Equal(at) {
 			t.Fatalf("the disk read before %v", t2)
 		}
-		for _, m := range []*models.Mock{ownCopy, onDisk} {
+		for _, m := range []*models.Mock{ownCopy, onDisk, onDiskSame, onDiskLater} {
 			if !v(m) {
 				return nil
 			}
@@ -1770,10 +2754,10 @@ func TestRangeRecordedBeforeVisitsTheTreesAndTheDisk(t *testing.T) {
 	for _, m := range got {
 		treeCopy = treeCopy || m == own
 	}
-	if err != nil || names != "other-test-3,own-2,pool-1" || !treeCopy {
-		t.Fatalf("with the disk: %s %v (own-2 the tree's: %v); want other-test-3, own-2 (the tree's), pool-1", names, err, treeCopy)
+	if err != nil || names != "other-test-3,other-test-5,own-2,pool-1,pool-5" || !treeCopy {
+		t.Fatalf("with the disk: %s %v (own-2 the tree's: %v); want other-test-3, other-test-5, own-2 (the tree's), pool-1, pool-5 (not other-test-6, a source that hands more)", names, err, treeCopy)
 	}
-	if names, _, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "other-test-3,own-2,pool-1" {
+	if names, _, err := visit(&scopedMockDb{MockMemDb: mm}); err != nil || names != "other-test-3,other-test-5,own-2,pool-1,pool-5" {
 		t.Fatalf("through the scoped view: %s %v", names, err)
 	}
 	type noReader struct{ integrations.MockMemDb }
@@ -1852,4 +2836,796 @@ func TestATestsReadThatWaitsForAWriteShowsOnlyAfterIt(t *testing.T) {
 		t.Fatal("the commit was refused")
 	}
 	shown("after the commit", "page-before", "page-after")
+}
+
+// A call marked where keploy's store no longer shows the view of the test
+// its learn tracker still has open (the store's pool view after that test's
+// end, or the next test's view after it), may be that test's late call: its
+// mark (MarkCallRound, which the Generic, MySQL and Postgres parsers read)
+// holds that test's recordings as its own, as a round snapshot's call round
+// does, so no lookup names one as made elsewhere, and record's judging
+// never bakes a test's own recording into the worker scope. The Generic
+// parser's miss there names none. Once the tracker ends the test, a call
+// marked then names it.
+func TestACallMarkedWhereTheStoreEndedATestTheTrackerHasOpenNamesNoneOfItsOwn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name  string
+		after func(mm *MockManager, next *models.Mock)
+	}{
+		{"the store's pool view", func(mm *MockManager, next *models.Mock) { mm.ServeExactPool(models.PoolKeyNone, nil) }},
+		{"the next test's view", func(mm *MockManager, next *models.Mock) {
+			mm.ServeExactPool(models.PoolKeyNone, nil)
+			mm.ServeExactTest("T2", []*models.Mock{next})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			own := genericExchange("ex-own", 0, "AUTH step2")
+			next := genericExchange("ex-next", time.Second, "PING")
+			mm := stagedManager(t, nil, []*models.Mock{own, next})
+			tr := learn.NewTracker()
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+			mm.ServeExactTest("T1", []*models.Mock{own})
+			tc.after(mm, next)
+			find := func(call integrations.CallRound) string {
+				name, _ := mm.FindStagedNotOwned(models.GENERIC, call, func(m *models.Mock) bool { return m.Name == own.Name })
+				return name
+			}
+			if got := find(mm.MarkCallRound()); got != "" {
+				t.Fatalf("a call marked with T1 ended on the store alone named T1's own %q as made elsewhere", got)
+			}
+			if snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr}); !ok || snap.Ended != "T1" {
+				t.Fatalf("precondition: the round reads %v (%s), ended %q; want T1 ended on the store alone", snap.Phase, snap.Boundary, snap.Ended)
+			} else if got := find(snap.CallRound()); got != "" {
+				t.Fatalf("a snapshot's call round with T1 ended on the store alone named T1's own %q as made elsewhere", got)
+			}
+			if r := genericMiss(t, mm, "AUTH step2"); r.NotOwned || r.ClosestMock == own.Name {
+				t.Fatalf("a Generic request with T1 ended on the store alone was diagnosed as T1's own recording made elsewhere: %+v", r)
+			}
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+			if got := find(mm.MarkCallRound()); got != own.Name {
+				t.Fatalf("a call marked once the tracker ended T1 too named %q; want T1's own %s, made elsewhere", got, own.Name)
+			}
+		})
+	}
+}
+
+// A call marked where keploy's learn tracker began a test whose view the
+// store has not installed (integrations.RoundSnapshot.TrackerAhead) is the
+// pool's on the store's pool view after the test before
+// (integrations.RoundSnapshot.PoolsCall) and the tracker's test's on that
+// test's view still in force, and in neither does anything tell which
+// recordings are the tracker's test's own: its mark (MarkCallRound, which
+// the Generic, MySQL and Postgres parsers
+// read) holds every recording, as a round snapshot's call round does, so no
+// lookup names the test's own recording as made elsewhere, and the Generic
+// parser's miss there names none. Once the store opens the test, a call
+// marked then names the test before's recording.
+func TestACallMarkedWhereTheTrackerIsAheadOfTheStoreNamesNoRecordingMadeElsewhere(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name  string
+		after func(mm *MockManager)
+	}{
+		{"the store's pool view after T1", func(mm *MockManager) { mm.ServeExactPool(models.PoolKeyNone, nil) }},
+		{"the store still showing T1's view", func(mm *MockManager) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := genericExchange("ex-before", 0, "AUTH step2")
+			own := genericExchange("ex-own", time.Second, "PING")
+			mm := stagedManager(t, nil, []*models.Mock{before, own})
+			tr := learn.NewTracker()
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+			mm.ServeExactTest("T1", []*models.Mock{before})
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+			tc.after(mm)
+			mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+			find := func(call integrations.CallRound, name string) string {
+				got, _ := mm.FindStagedNotOwned(models.GENERIC, call, func(m *models.Mock) bool { return m.Name == name })
+				return got
+			}
+			snap, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+			if !ok || !snap.TrackerAhead() {
+				t.Fatalf("precondition: the round reads %v (%s), ended %q; want the tracker ahead of the store", snap.Phase, snap.Boundary, snap.Ended)
+			}
+			if got := find(mm.MarkCallRound(), own.Name); got != "" {
+				t.Fatalf("a call marked with the tracker ahead of the store named %q as made elsewhere; want none", got)
+			}
+			if got := find(snap.CallRound(), own.Name); got != "" {
+				t.Fatalf("a snapshot's call round with the tracker ahead of the store named %q as made elsewhere; want none", got)
+			}
+			if r := genericMiss(t, mm, "PING"); r.NotOwned || r.ClosestMock == own.Name {
+				t.Fatalf("a Generic request with the tracker ahead of the store was diagnosed as a recording made elsewhere: %+v", r)
+			}
+			mm.ServeExactTest("T2", []*models.Mock{own})
+			if got := find(mm.MarkCallRound(), before.Name); got != before.Name {
+				t.Fatalf("a call marked once the store opened T2 named %q; want T1's %s, made elsewhere", got, before.Name)
+			}
+		})
+	}
+}
+
+// A lookup of a recording made elsewhere is asked of the round the call was
+// made in (integrations.CallRound, marked as its first read): asked of no
+// read it names nothing; a recording the call's first read's view held as
+// its own is never named once the replay ended that test under the call,
+// nor spent; and none is named once the replay staged another set, whether
+// it staged before the lookup or right before a name is spent, and the
+// next set's recording keeps its one miss for a call of its own.
+func TestALookupOfARecordingMadeElsewhereIsAskedOfTheCallsRound(t *testing.T) {
+	own := httpCall("own", 0, "/orders")
+	other := httpCall("other", time.Second, "/delete")
+	mm := stagedManager(t, nil, []*models.Mock{own, other})
+	find := func(call integrations.CallRound, name string) (string, bool) {
+		return mm.FindStagedNotOwned(models.HTTP, call, func(m *models.Mock) bool { return m.Name == name })
+	}
+	mm.ServeExactTest("T1", []*models.Mock{own})
+	if got, moved := find(integrations.CallRound{}, "other"); got != "" || moved {
+		t.Fatalf("asked of no read: named %q (restaged %v)", got, moved)
+	}
+
+	// A call T1's view read, decided after T1 ended under it.
+	call := mm.MarkCallRound()
+	mm.ServeExactTest("T2", []*models.Mock{other})
+	if got, moved := find(call, "own"); got != "" || moved {
+		t.Fatalf("a call made in T1 named T1's own once T1 ended under it: %q (restaged %v)", got, moved)
+	}
+	if got, _ := find(mm.MarkCallRound(), "own"); got != "own" {
+		t.Fatalf("a call made in T2 did not name T1's own (%q): the lookup that refused it spent it", got)
+	}
+
+	// The next set staged after the call's first read: none of its
+	// recordings is even offered to the parser's comparison.
+	call = mm.MarkCallRound()
+	next := func(name string) *models.Mock { return httpCall(name, 2*time.Second, "/next") }
+	mm.SetMocksWithWindow(nil, []*models.Mock{next("next")}, models.BaseTime, time.Now())
+	mm.ServeExactTest("S2-T1", nil)
+	offered := 0
+	got, moved := mm.FindStagedNotOwned(models.HTTP, call, func(*models.Mock) bool { offered++; return true })
+	if got != "" || !moved || offered != 0 {
+		t.Fatalf("a call of the set before named %q of the next set (restaged %v, %d offered), want none, restaged, none offered", got, moved, offered)
+	}
+	if got, _ := find(mm.MarkCallRound(), "next"); got != "next" {
+		t.Fatalf("the next set's recording lost its one miss to a call of the set before: %q", got)
+	}
+
+	// The next set staged right before the lookup spends a name, and a
+	// call of that set named its recording at once: the lookup of the set
+	// before spends nothing, in neither set, so the recording is named
+	// for that one call only.
+	mm.SetMocksWithWindow(nil, []*models.Mock{next("again")}, models.BaseTime, time.Now())
+	mm.ServeExactTest("S3-T1", nil)
+	call = mm.MarkCallRound()
+	staged, inForce := false, ""
+	mm.exact.onNaming = func() {
+		if !staged {
+			staged = true
+			mm.SetMocksWithWindow(nil, []*models.Mock{next("again")}, models.BaseTime, time.Now())
+			mm.ServeExactTest("S4-T1", nil)
+			inForce, _ = find(mm.MarkCallRound(), "again")
+		}
+	}
+	got, moved = find(call, "again")
+	mm.exact.onNaming = nil
+	if !staged || got != "" || !moved {
+		t.Fatalf("staged right before the name was spent (%v): named %q (restaged %v), want none, restaged", staged, got, moved)
+	}
+	if inForce != "again" {
+		t.Fatalf("the set staged in force's own call did not name its recording: %q", inForce)
+	}
+	if got, _ := find(mm.MarkCallRound(), "again"); got != "" {
+		t.Fatalf("the set in force's recording was named for a second call (%q): the lookup of the set before emptied what that set spent", got)
+	}
+
+	// The next set staged right after the lookup spent a name in the
+	// call's staging: the name is not told, and the lookup says the set
+	// moved.
+	mm.SetMocksWithWindow(nil, []*models.Mock{next("late")}, models.BaseTime, time.Now())
+	mm.ServeExactTest("S5-T1", nil)
+	call = mm.MarkCallRound()
+	mm.exact.onNamed = func() {
+		mm.exact.onNamed = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{next("late")}, models.BaseTime, time.Now())
+		mm.ServeExactTest("S6-T1", nil)
+	}
+	if got, moved := find(call, "late"); got != "" || !moved {
+		t.Fatalf("staged right after a name was spent: named %q (restaged %v), want none, restaged", got, moved)
+	}
+	if got, _ := find(mm.MarkCallRound(), "late"); got != "late" {
+		t.Fatalf("the set in force's recording lost its one miss to a call of the set before: %q", got)
+	}
+}
+
+// A call a parser marks (MarkCallRound) before its learn step's first read
+// of the round carries the round's boundary count, so that first read tells
+// whether the round moved between the two (integrations.CallRound
+// .MovedSince): a test's end (the store's pool view, the learn tracker's
+// end), or that end and the next test's begin, landing between them moved
+// it, and so does a staging; the tracker's end alone moves it where the
+// tracker's boundaries reach the store. Where nothing moved, or only a
+// consume of the test's own, or a test process claimed its key again (the
+// generation moves, no boundary does), the first read is of the mark's
+// round. The staging epoch, all a mark carried before, tells none of a
+// test's boundaries: the learn step decided such a call in the round its
+// first read showed, the pool's or the next test's, its mark holding the
+// ended test's recordings as its own, and learned what the call differs in
+// onto the pool view's in-flight recording of the next test as noise. A
+// mark read through a connection's view, and a round snapshot's call round,
+// carry the count too. A boundary that lands as the mark lets the round
+// lock go is after the mark, which then reads the view and the count of
+// before it; and a mark in a test set the store has not staged carries the
+// count as every other does.
+func TestACallMarkedBeforeItsTestMovesIsMovedAtItsFirstReadOfTheRound(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	type land func(t *testing.T, mm *MockManager, step func(func(*learn.Tracker)), own, ahead, next *models.Mock)
+	end := func(t *testing.T, mm *MockManager, step func(func(*learn.Tracker)), _, ahead, _ *models.Mock) {
+		mm.ServeExactPool(models.PoolKeyNone, nil, ahead)
+		step(func(t *learn.Tracker) { t.End() })
+	}
+	for _, routed := range []bool{false, true} {
+		for _, tc := range []struct {
+			name  string
+			moved bool
+			land  land
+			// asMarked lands the move in the mark itself, as it lets the
+			// round lock go (MockManager.exact.onMarked).
+			asMarked bool
+		}{
+			{name: "nothing (control)", land: func(*testing.T, *MockManager, func(func(*learn.Tracker)), *models.Mock, *models.Mock, *models.Mock) {}},
+			{name: "a consume of the test's own", land: func(t *testing.T, mm *MockManager, _ func(func(*learn.Tracker)), own, _, _ *models.Mock) {
+				if !mm.DeleteFilteredMock(*own) {
+					t.Fatal("precondition: T1's own recording was not consumed")
+				}
+			}},
+			{name: "a test process's claim of its key again", land: func(t *testing.T, mm *MockManager, _ func(func(*learn.Tracker)), _, ahead, _ *models.Mock) {
+				mm.RestartExactKey(models.PoolKeyNone, []string{ahead.Name})
+			}},
+			{name: "the tracker's end alone", moved: routed, land: func(t *testing.T, _ *MockManager, step func(func(*learn.Tracker)), _, _, _ *models.Mock) {
+				step(func(t *learn.Tracker) { t.End() })
+			}},
+			{name: "the test's end", moved: true, land: end},
+			{name: "the test's end, as the mark lets the round lock go", moved: true, land: end, asMarked: true},
+			{name: "the test's end and the next test's begin", moved: true, land: func(t *testing.T, mm *MockManager, step func(func(*learn.Tracker)), own, ahead, next *models.Mock) {
+				end(t, mm, step, own, ahead, next)
+				step(func(t *learn.Tracker) { t.Begin() })
+				mm.ServeExactTest("T2", []*models.Mock{ahead, next})
+			}},
+			{name: "a staging of the set again", moved: true, land: func(t *testing.T, mm *MockManager, _ func(func(*learn.Tracker)), own, ahead, next *models.Mock) {
+				mm.SetMocksWithWindow(nil, []*models.Mock{own, ahead, next}, models.BaseTime, time.Now())
+			}},
+		} {
+			t.Run(fmt.Sprintf("%s, routed=%v", tc.name, routed), func(t *testing.T) {
+				own := genericExchange("ex-own", 0, "AUTH step2")
+				ahead := genericExchange("ex-ahead", time.Second, "PING")
+				next := genericExchange("ex-next", 2*time.Second, "PING")
+				mm := stagedManager(t, nil, []*models.Mock{own, ahead, next})
+				tr := learn.NewTracker()
+				step := func(f func(*learn.Tracker)) { f(tr) }
+				if routed {
+					step = func(f func(*learn.Tracker)) { mm.LearnBoundary(tr, f) }
+				}
+				step(func(t *learn.Tracker) { t.Begin() })
+				mm.ServeExactTest("T1", []*models.Mock{own})
+				at, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+				if !ok || at.Test != "T1" || at.Phase != integrations.RoundInTest && routed {
+					t.Fatalf("precondition: the round reads %q's view (%v, %v); want T1's", at.Test, at.Phase, ok)
+				}
+				if tc.asMarked {
+					mm.exact.onMarked = func() {
+						mm.exact.onMarked = nil
+						tc.land(t, mm, step, own, ahead, next)
+					}
+				}
+				marks := map[string]integrations.CallRound{"the store's mark": mm.MarkCallRound()}
+				if !tc.asMarked {
+					marks["a scoped view's mark"] = integrations.MarkCallRound(&scopedMockDb{MockMemDb: mm})
+					marks["a round snapshot's own"] = at.CallRound()
+					for name, mark := range marks {
+						if got, known := mark.Round(); !known || got.Gen != at.At.Gen || got.Bounds != at.At.Bounds || got.Epoch != at.At.Epoch {
+							t.Fatalf("%s reads the round at %+v (known %v); want the round's %+v", name, got, known, at.At)
+						}
+					}
+					tc.land(t, mm, step, own, ahead, next)
+				}
+				first, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+				if !ok {
+					t.Fatal("no first read of the round")
+				}
+				for name, mark := range marks {
+					if got := mark.MovedSince(first.At); got != tc.moved {
+						r, _ := mark.Round()
+						t.Errorf("%s of T1 read again after %s: moved %v, want %v (mark at %+v, first read at %+v)", name, tc.name, got, tc.moved, r, first.At)
+					}
+				}
+				if first.CallRound().MovedSince(first.At) {
+					t.Error("a round snapshot's call round is moved by its own read")
+				}
+			})
+		}
+	}
+	t.Run("a mark between tests, the tracker's next begin", func(t *testing.T) {
+		own := genericExchange("ex-own", 0, "AUTH step2")
+		mm := stagedManager(t, nil, []*models.Mock{own})
+		tr := learn.NewTracker()
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+		mm.ServeExactTest("T1", []*models.Mock{own})
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		at, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !ok || at.Phase != integrations.RoundBetween {
+			t.Fatalf("precondition: the round reads %v (%s); want between tests", at.Phase, at.Boundary)
+		}
+		mark := mm.MarkCallRound()
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+		first, _ := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !first.PoolsCall() || !mark.MovedSince(first.At) {
+			r, _ := mark.Round()
+			t.Fatalf("a call marked between tests, read once the tracker began the next test (pool's call %v), is not moved (mark at %+v, read at %+v)", first.PoolsCall(), r, first.At)
+		}
+	})
+	t.Run("a mark in a test set the store has not staged", func(t *testing.T) {
+		own := genericExchange("ex-own", 0, "AUTH step2")
+		mm := stagedManager(t, nil, []*models.Mock{own})
+		tr := learn.NewTracker()
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.Begin() })
+		mm.ServeExactTest("T1", []*models.Mock{own})
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.End() })
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.LearnBoundary(tr, func(t *learn.Tracker) { t.NewSet() })
+		at, ok := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !ok || !at.SetUnstaged() {
+			t.Fatalf("precondition: the round reads %v (%s); want a test set the store has not staged", at.Phase, at.Boundary)
+		}
+		mark := mm.MarkCallRound()
+		if !mark.Staging() || mark.InTest() {
+			t.Fatalf("precondition: the mark is not a staging's outside every test: staging %v, in a test %v", mark.Staging(), mark.InTest())
+		}
+		if mark.MovedSince(at.At) {
+			r, _ := mark.Round()
+			t.Fatalf("a call marked in a test set the store has not staged is moved where nothing moved (mark at %+v, read at %+v)", r, at.At)
+		}
+		mm.SetMocksWithWindow(nil, []*models.Mock{own}, models.BaseTime, time.Now())
+		staged, _ := mm.RoundSnapshot(integrations.RoundQuery{Tracker: tr})
+		if !mark.MovedSince(staged.At) {
+			t.Fatal("a call marked in a test set the store had not staged is not moved by its staging")
+		}
+	})
+}
+
+// genericExchange is a Generic exchange the recorder stated per-test,
+// answering OK.
+func genericExchange(name string, at time.Duration, req string) *models.Mock {
+	m := exactMock(name, at, models.LifetimeSession)
+	m.Kind = models.GENERIC
+	m.Spec.Metadata = map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest}
+	m.Spec.GenericRequests = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: req}}}}
+	m.Spec.GenericResponses = []models.Payload{{Message: []models.OutputBinary{{Type: models.String, Data: "OK"}}}}
+	return m
+}
+
+// genericMiss is the miss report the Generic parser files for req, sent on
+// a connection served from mm. A request the parser answers fails the test.
+func genericMiss(t *testing.T, mm *MockManager, req string) *models.MockMismatchReport {
+	t.Helper()
+	r := genericServe(t, mm, req)
+	if r == nil {
+		t.Fatalf("%q: no miss with a report: the parser answered it", req)
+	}
+	return r
+}
+
+// genericServe is the miss report the Generic parser files for req, sent on
+// a connection served from mm, or nil when the parser answered it: the
+// application reads the answer and closes the connection, which ends the
+// parser with no miss.
+func genericServe(t *testing.T, mm *MockManager, req string) *models.MockMismatchReport {
+	t.Helper()
+	return genericServeIn(t, context.Background(), mm, req)
+}
+
+// genericServeIn is genericServe with the parser's ctx made from ctx.
+func genericServeIn(t *testing.T, ctx context.Context, mm integrations.MockMemDb, req string) *models.MockMismatchReport {
+	t.Helper()
+	answered := make(chan bool, 1)
+	app, proxySide := net.Pipe()
+	t.Cleanup(func() { app.Close(); proxySide.Close() })
+	go func() {
+		if _, err := app.Write([]byte(req)); err != nil {
+			return
+		}
+		n, _ := app.Read(make([]byte, 64))
+		answered <- n > 0
+		if n > 0 {
+			app.Close()
+		}
+	}()
+	ctx = context.WithValue(ctx, models.ClientConnectionIDKey, "1")
+	ctx = context.WithValue(ctx, models.DestConnectionIDKey, "2")
+	err := generic.New(zap.NewNop()).MockOutgoing(ctx, proxySide, nil, mm, models.OutgoingOptions{})
+	var r interface {
+		MismatchReport() *models.MockMismatchReport
+	}
+	if errors.As(err, &r) && r.MismatchReport() != nil {
+		return r.MismatchReport()
+	}
+	// No miss: the parser answered the request, or failed it with no report.
+	proxySide.Close()
+	if !<-answered {
+		t.Fatalf("%q: neither answered nor a miss with a report: %v", req, err)
+	}
+	return nil
+}
+
+// The Generic parser asks its lookup of an exchange made elsewhere of the
+// round the request's first read found it made in (MarkCallRound, before
+// its matcher reads the store): another test's exchange is named; one the
+// call's test owned when the call was read is not once the replay ended
+// that test under the call; and none is once the replay staged the next set
+// under it.
+func TestAGenericMissIsAskedOfTheRoundItsRequestWasReadIn(t *testing.T) {
+	mine := genericExchange("ex-mine", 0, "AUTH step2")
+	theirs := genericExchange("ex-theirs", time.Second, "AUTH step3")
+	mm := stagedManager(t, nil, []*models.Mock{mine, theirs})
+	mm.ServeExactTest("T1", []*models.Mock{mine})
+	if r := genericMiss(t, mm, "AUTH step3"); !r.NotOwned || r.ClosestMock != "ex-theirs" {
+		t.Fatalf("another test's exchange was not named: %+v", r)
+	}
+
+	// T1 ends between the request's first read and the matcher's.
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.ServeExactTest("T2", nil)
+	}
+	if r := genericMiss(t, mm, "AUTH step2"); r.NotOwned {
+		t.Fatalf("the exchange the call's test owned when its request was read was named as made elsewhere: %+v", r)
+	}
+
+	// The next set is staged between the request's first read and the
+	// matcher's.
+	mm.ServeExactTest("T3", nil)
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{genericExchange("s2-ex", 2*time.Second, "AUTH step4")}, models.BaseTime, time.Now())
+		mm.ServeExactTest("S2-T1", nil)
+	}
+	if r := genericMiss(t, mm, "AUTH step4"); r.NotOwned {
+		t.Fatalf("a request of the set before was named as the next set's exchange: %+v", r)
+	}
+	if r := genericMiss(t, mm, "AUTH step4"); !r.NotOwned || r.ClosestMock != "s2-ex" {
+		t.Fatalf("the next set's exchange lost its one miss to a request of the set before: %+v", r)
+	}
+}
+
+// A Generic request held after its first read of the round while the
+// replay stages the next set, whose open test owns an exchange that is the
+// request byte for byte, is never answered with that exchange, nor
+// diagnosed against it: the matcher and the miss read the store held to the
+// request's first read (integrations.HoldToRound), which finds nothing once
+// the staging moved. The request misses, saying the set was staged again
+// under it, and the exchange, never spent, answers the next set's own
+// request.
+func TestAGenericRequestHeldWhileTheNextSetIsStagedIsNeverAnsweredFromIt(t *testing.T) {
+	mine := genericExchange("ex-mine", 0, "AUTH step2")
+	next := genericExchange("s2-ex", 2*time.Second, "AUTH step4")
+	mm := stagedManager(t, nil, []*models.Mock{mine})
+	mm.ServeExactTest("T1", []*models.Mock{mine})
+	staged := false
+	mm.exact.onMarked = func() {
+		mm.exact.onMarked = nil
+		mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now())
+		mm.ServeExactTest("S2-T1", []*models.Mock{next})
+		staged = true
+	}
+	r := genericServe(t, mm, "AUTH step4")
+	if !staged {
+		t.Fatal("precondition: the replay never staged the next set under the request")
+	}
+	if r == nil {
+		t.Fatalf("a request of the set before was answered with the next set's %s", next.Name)
+	}
+	if r.NotOwned || r.ClosestMock == next.Name {
+		t.Fatalf("a request of the set before was diagnosed against the next set's %s: %+v", next.Name, r)
+	}
+	if !strings.Contains(r.NextSteps, "staged a test set again while it decided this request, so keploy answered it with no recorded exchange") {
+		t.Fatalf("the miss does not say the set was staged again under the request: %q", r.NextSteps)
+	}
+
+	// Never spent on the request before, it answers the next set's own.
+	if r := genericServe(t, mm, "AUTH step4"); r != nil {
+		t.Fatalf("the next set's own request missed after a request of the set before: %+v", r)
+	}
+}
+
+// A Generic request held after its first read of the round while the
+// replay stages the next set, whose open test has already answered an
+// exchange, is never told as one exchange more than that test recorded
+// (extraCall), nor diagnosed against that exchange (answeredExchanges):
+// both read the store held to the request's first read, which shows nothing
+// of the next set's test once the staging moved. The next set's own request
+// is told and diagnosed against it.
+func TestAGenericRequestHeldWhileTheNextSetIsStagedIsNoExtraCallOfItsTest(t *testing.T) {
+	for _, tc := range []struct{ name, answered, req string }{
+		{"the exchange it is", "AUTH step4", "AUTH step4"},
+		{"an exchange it resembles", "AUTH step4 user=b", "AUTH step4 user=a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mine := genericExchange("ex-mine", 0, "PING")
+			next := genericExchange("s2-ex", 2*time.Second, tc.answered)
+			mm := stagedManager(t, nil, []*models.Mock{mine})
+			mm.ServeExactTest("T1", []*models.Mock{mine})
+			answered := false
+			mm.exact.onMarked = func() {
+				mm.exact.onMarked = nil
+				mm.SetMocksWithWindow(nil, []*models.Mock{next}, models.BaseTime, time.Now())
+				mm.ServeExactTest("S2-T1", []*models.Mock{next})
+				// S2-T1's own request, answered with its exchange.
+				mocks, _ := mm.GetPerTestMocksInWindow()
+				session, _ := mm.GetSessionMocks()
+				for _, mk := range append(mocks, session...) {
+					if mk.Name == next.Name && !answered {
+						c := *mk
+						answered = mm.DeleteFilteredMock(c) || mm.UpdateUnFilteredMock(mk, &c)
+					}
+				}
+			}
+			r := genericServe(t, mm, tc.req)
+			if !answered {
+				t.Fatal("precondition: the replay staged the next set under the request and its test answered its own")
+			}
+			if r == nil {
+				t.Fatalf("a request of the set before was answered with the next set's %s", next.Name)
+			}
+			if r.MissKind == models.MissExtraCall {
+				t.Fatalf("a request of the set before was told as one exchange more than the next set's test recorded: %+v", r)
+			}
+			if r.NotOwned || r.ClosestMock == next.Name {
+				t.Fatalf("a request of the set before was diagnosed against the next set's %s: %+v", next.Name, r)
+			}
+
+			// The next set's own request: told, or diagnosed, against it.
+			r = genericServe(t, mm, tc.req)
+			if r == nil || r.ClosestMock != next.Name && r.MissKind != models.MissExtraCall {
+				t.Fatalf("the next set's own request is %+v; want it told against %s", r, next.Name)
+			}
+		})
+	}
+}
+
+// aloftHolder is a connection with one request aloft (learn.Flight): the
+// parser's ctx carries it as the proxy's kept connection does.
+type aloftHolder struct{ f *learn.Flight }
+
+func (aloftHolder) Hold() func()              { return func() {} }
+func (a aloftHolder) InFlight() *learn.Flight { return a.f }
+
+// The Generic parser's consume says whose request it serves
+// (integrations.ServingIn): the mock manager tells the learn step the serve
+// is the request's connection's, so a request aloft on a parallel
+// connection that reads no recording (a health check) never makes the serve
+// one keploy cannot place. From the session tier and from an open test's own
+// exchanges alike.
+func TestAGenericServeIsToldInItsRequest(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		t.Run("exact serving "+strconv.FormatBool(exact), func(t *testing.T) {
+			ex := genericExchange("ex", 0, "AUTH step2")
+			mm := stagedManager(t, nil, []*models.Mock{ex})
+			if exact {
+				mm.ServeExactTest("T1", []*models.Mock{ex})
+			}
+			var told []*learn.Flight
+			mm.SetServedObserver(func(m *models.Mock) {
+				if m.Name == ex.Name {
+					told = append(told, nil)
+				}
+			})
+			mm.SetServedInObserver(func(m *models.Mock, f *learn.Flight) {
+				if m.Name == ex.Name {
+					told = append(told, f)
+				}
+			})
+			in := learn.NewTracker().Lift()
+			if r := genericServeIn(t, integrations.WithRequestHolder(context.Background(), aloftHolder{in}), mm, "AUTH step2"); r != nil {
+				t.Fatalf("the request missed: %+v", r)
+			}
+			if len(told) != 1 || told[0] != in {
+				t.Fatalf("the serve of %s was told %d time(s), in %v; want once, in the request's", ex.Name, len(told), told)
+			}
+		})
+	}
+}
+
+// BenchmarkACallsRoundIsMarked is what each request's first read of the
+// round costs replay under the switch (MarkCallRound), by the set's size:
+// the staging and the view in force, read in O(1), whatever the set holds.
+func BenchmarkACallsRoundIsMarked(b *testing.B) {
+	for _, n := range []int{100, 1000, 5000} {
+		for _, par := range []bool{false, true} {
+			b.Run(strconv.Itoa(n)+"/parallel="+strconv.FormatBool(par), func(b *testing.B) {
+				mm := NewMockManager(nil, nil, zap.NewNop())
+				b.Cleanup(mm.Close)
+				ms := make([]*models.Mock, n)
+				for i := range ms {
+					ms[i] = httpCall(fmt.Sprintf("mock-%d", i), time.Duration(i)*time.Millisecond, "/x/"+strconv.Itoa(i))
+				}
+				mm.SetMocksWithWindow(nil, ms, models.BaseTime, time.Now())
+				mm.ServeExactTest("test-1", ms[:1])
+				if !integrations.MarkCallRound(mm).Read() {
+					b.Fatal("no round marked")
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				if par {
+					b.RunParallel(func(pb *testing.PB) {
+						for pb.Next() {
+							integrations.MarkCallRound(mm)
+						}
+					})
+					return
+				}
+				for i := 0; i < b.N; i++ {
+					integrations.MarkCallRound(mm)
+				}
+			})
+		}
+	}
+}
+
+// The cost of a stateful HTTP call under exact serving: each reads every
+// mock the store stages (stagedGroup) and the strict pass diffs the
+// recordings of the call's method. This row measures it with 1,000 other
+// stateful recordings staged against none, and checks the answers are the
+// same at both sizes. It times, never bounds: load varies, so the number it
+// logs (go test -v -run TestAStatefulCallsCostAtAThousandStagedMocks) is for
+// the PR text, not an assertion.
+func TestAStatefulCallsCostAtAThousandStagedMocks(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	const rounds = 15
+	measure := func(others int) (time.Duration, []string) {
+		var per []time.Duration
+		var answers []string
+		for r := 0; r < rounds; r++ {
+			staged := []*models.Mock{seqCall("w0", time.Second, "0"), seqCall("w1", 2*time.Second, "1"), seqCall("w2", 3*time.Second, "2")}
+			for i := 0; i < others; i++ {
+				m := seqCall(fmt.Sprintf("o%04d", i), 4*time.Second+time.Duration(i)*time.Millisecond, "o")
+				m.Spec.HTTPReq.URL = fmt.Sprintf("http://deps/other/%d", i)
+				staged = append(staged, m)
+			}
+			mm := stagedManager(t, nil, staged)
+			mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "T", Start: exactT0.Add(500 * time.Millisecond), End: exactT0.Add(10 * time.Second)}})
+			mm.ServeExactWorker([]string{"w0", "w1", "w2"})
+			mm.ServeExactPool("k", nil)
+			mm.ServeExactTest("T", nil)
+			var got []string
+			var took time.Duration
+			for i := 0; i < 4; i++ {
+				body, d := timedServe(t, mm)
+				if body == "" {
+					got = append(got, "no answer")
+					continue // a miss's report is not the walk's cost
+				}
+				took += d
+				got = append(got, body)
+			}
+			per = append(per, took/3)
+			answers = got
+		}
+		sort.Slice(per, func(i, j int) bool { return per[i] < per[j] })
+		return per[len(per)/2], answers
+	}
+	want := []string{"0", "1", "2", "no answer"}
+	few, fewGot := measure(0)
+	many, manyGot := measure(1000)
+	if !reflect.DeepEqual(fewGot, want) || !reflect.DeepEqual(manyGot, want) {
+		t.Fatalf("answered %v with 3 staged and %v with 1,003; want %v at both", fewGot, manyGot, want)
+	}
+	t.Logf("an answered stateful call under exact serving (strict pass, median of %d): %v per call with 3 mocks staged, %v with 1,003", rounds, few, many)
+}
+
+// timedServe asks GET /probe through the real HTTP integration on one
+// connection and returns the body answered ("" for none) and the time from
+// the request's write to its answer's last byte: the serve, without the
+// connection's teardown.
+func timedServe(t *testing.T, mm integrations.MockMemDb) (string, time.Duration) {
+	t.Helper()
+	app, agent := net.Pipe()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- httpint.New(zap.NewNop()).MockOutgoing(ctx, agent, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		agent.Close()
+	}()
+	defer func() { app.Close(); <-served }()
+	start := time.Now()
+	if _, err := app.Write([]byte("GET /probe HTTP/1.1\r\nHost: deps\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return "", 0
+	}
+	body := make([]byte, resp.ContentLength)
+	if _, err := io.ReadFull(resp.Body, body); err != nil {
+		return "", 0
+	}
+	return string(body), time.Since(start)
+}
+
+// In the variable pass, with a request id bound per call (each call sends a
+// new one) or one id, a test's call is answered the test's own recording,
+// then the worker scope's (by placement: it belongs to no test), then
+// nothing, never a spent recording again though its variable no longer holds
+// for the next call.
+func TestAVariableCallWithANewIdEachCallIsAnsweredItsOwnThenTheWorkerScope(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	rec := func(name string, at time.Duration, body string) *models.Mock {
+		m := seqCall(name, at, body)
+		m.Spec.HTTPReq.Header["X-Req-Id"] = "rec"
+		m.Spec.Variables = models.MockVariables{"rid-" + m.Name: {Recorded: "rec", Bind: "header.X-Req-Id"}}
+		return m
+	}
+	for _, c := range []struct {
+		name string
+		ids  []string
+	}{
+		{"a new id each call", []string{"r1", "r2", "r3"}},
+		{"one id", []string{"rec", "rec", "rec"}},
+	} {
+		own := rec("a0", 3500*time.Millisecond, "mine")
+		mm := stagedManager(t, nil, []*models.Mock{rec("s1", 2*time.Second, "start"), own})
+		mm.SeedRecordedWindows([]models.TestWindow{{TestCase: "A", Start: exactT0.Add(3 * time.Second), End: exactT0.Add(5 * time.Second)}})
+		mm.ServeExactWorker([]string{"s1"})
+		mm.ServeExactPool("k", nil)
+		mm.ServeExactWorker([]string{"s1"})
+		mm.ServeExactTest("A", []*models.Mock{own})
+		var got []string
+		for _, id := range c.ids {
+			resp, body := learnServe(t, httpint.New(zap.NewNop()), mm, context.Background(), models.OutgoingOptions{}, "GET /probe HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
+			if resp == nil || resp.StatusCode != http.StatusOK {
+				got = append(got, "no answer")
+				continue
+			}
+			got = append(got, string(body))
+		}
+		if want := []string{"mine", "start", "no answer"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: test A answered %v; want %v (its own recording, then the worker scope's, then nothing)", c.name, got, want)
+		}
+	}
+}
+
+// Between tests a variable request's sequence is fixed by every recording of
+// it the store stages, the ones whose variable no longer holds for this call
+// too (a member through the variable fit's problem, not its hit): two pool
+// recordings that each bind their own request id answered r1 then r2, so a
+// call past them is answered nothing, never the first again because its id
+// came back. The same for two of the worker scope's.
+func TestAVariableCallPastItsRecordingsIsAnsweredNothingBetweenTests(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	rec := func(name string, at time.Duration) *models.Mock {
+		m := seqCall(name, at, name)
+		m.Spec.HTTPReq.Header["X-Req-Id"] = "rec"
+		m.Spec.Variables = models.MockVariables{"rid-" + name: {Recorded: "rec", Bind: "header.X-Req-Id"}}
+		return m
+	}
+	for _, worker := range []bool{false, true} {
+		mm := stagedManager(t, nil, []*models.Mock{rec("p0", time.Second), rec("p1", 2*time.Second)})
+		if worker {
+			mm.ServeExactWorker([]string{"p0", "p1"})
+			mm.ServeExactPool("k", nil)
+		} else {
+			mm.ServeExactPool("k", []string{"p0", "p1"})
+		}
+		var got []string
+		for _, id := range []string{"r1", "r2", "r1", "r1"} {
+			resp, body := learnServe(t, httpint.New(zap.NewNop()), mm, context.Background(), models.OutgoingOptions{}, "GET /probe HTTP/1.1\r\nHost: deps\r\nX-Req-Id: "+id+"\r\n\r\n")
+			if resp == nil || resp.StatusCode != http.StatusOK {
+				got = append(got, "no answer")
+				continue
+			}
+			got = append(got, string(body))
+		}
+		if want := []string{"p0", "p1", "no answer", "no answer"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("worker scope %v: ids r1 r2 r1 r1 answered %v; want %v: past its recordings, nothing", worker, got, want)
+		}
+	}
 }

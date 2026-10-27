@@ -412,6 +412,10 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Bool("is-docker", c.cfg.Agent.IsDocker, "Flag to check if the application is running in docker")
 		cmd.Flags().Uint32("port", c.cfg.Agent.AgentPort, "Port used by the Keploy agent to communicate with Keploy's clients")
 		cmd.Flags().Uint32("client-pid", 0, "must be provided (pid of the keploy client process; the launcher passes os.Getpid())")
+		cmd.Flags().String("client-pid-ns", "", "The pid namespace the keploy client runs in, beside --client-pid (set by keploy itself)")
+		if err := cmd.Flags().MarkHidden("client-pid-ns"); err != nil {
+			c.logger.Debug("failed to hide the client-pid-ns flag", zap.Error(err))
+		}
 		// Only the PATH travels here. The token itself stays in a 0600 file,
 		// because argv is world-readable through /proc/<pid>/cmdline and `ps`,
 		// and the local users that would read it there are the ones this token
@@ -2341,6 +2345,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return nil
 		}
 		c.cfg.Agent.ClientNSPID = clientNSPid
+		clientPIDNS, err := cmd.Flags().GetString("client-pid-ns")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to get the client-pid-ns flag")
+			return nil
+		}
+		c.cfg.Agent.ClientPIDNS = clientPIDNS
+		// Said once: what reads the CLI's pid in this agent's /proc reads it
+		// through utils.ClientPIDHere, and each takes it, or not, alike. A
+		// docker agent runs in a pid namespace of its own, so there the CLI's
+		// pid is expected to be another namespace's.
+		if here := utils.ClientPIDHere(clientNSPid, clientPIDNS); here.Why != "" {
+			say := c.logger.Warn
+			if isdocker {
+				say = c.logger.Debug
+			}
+			say("keploy's agent does not take the CLI's pid as said, or takes it by its number alone", zap.Uint32("clientPID", clientNSPid), zap.String("clientPIDNS", clientPIDNS), zap.Uint32("takenPID", here.PID), zap.String("why", here.Why))
+		}
 
 		caJavaHome, err := cmd.Flags().GetString("ca-java-home")
 		if err != nil {

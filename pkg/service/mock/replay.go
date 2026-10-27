@@ -979,7 +979,7 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 }
 
 // statefulMocksDisabled is test.disableStatefulMocks, ignored under the proven
-// switch (design v14 §10, a U18 row of S12): a test's own mocks answer once
+// switch (design v14 §10, a U18 row): a test's own mocks answer once
 // each in recorded order, and the pool keeps its cursors. The flip deletes it.
 func (m *mockService) statefulMocksDisabled() bool {
 	if !m.config.Test.DisableStatefulMocks {
@@ -1947,11 +1947,7 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	var learnedPool []string
 	var learnErr error
 	if m.learning() {
-		if consumedErr != nil {
-			learnErr = fmt.Errorf("what the learn step learned could not be read from keploy's agent: %w", consumedErr)
-		} else {
-			learned, learnedPool, learnErr = m.persistLearned(ctx, detail.set, consumed, flows, detail.expected)
-		}
+		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, flows, detail.expected)
 	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what

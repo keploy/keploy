@@ -68,6 +68,16 @@ type scopeKey struct {
 // stomping each other (Design A); pid == 0 falls back to the single global
 // scope (sequential single-worker runs, and the suite-level default).
 func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.Time) error {
+	return a.beginScopeAt(ctx, name, pid, at, nil)
+}
+
+// beginScopeAt is BeginScopeAt, calling onClock (when not nil) once the
+// test's begin has moved the app's clock to when the test began in its
+// recording and before the test's view is installed: the proven wire opens
+// the test's capture window there (ProvenBegin), so the learn tracker begins
+// the test on the clock the test's calls read. A begin whose clock cannot be
+// moved fails before it calls onClock.
+func (a *Agent) beginScopeAt(ctx context.Context, name string, pid int, at time.Time, onClock func()) error {
 	if name == "" {
 		return nil
 	}
@@ -81,6 +91,9 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 			// cannot run on its recording's clock.
 			a.noteScopeFailed(name, pid, at)
 			return fmt.Errorf("keploy could not move the clock to when %s began in its recording: %w", name, err)
+		}
+		if onClock != nil {
+			onClock()
 		}
 		a.openWindow(name, pid, at)
 		// Under the proven switch a test is the scope of the variables
@@ -163,6 +176,9 @@ func (a *Agent) BeginScopeAt(ctx context.Context, name string, pid int, at time.
 		return nil
 	}
 
+	if onClock != nil {
+		onClock()
+	}
 	a.openWindow(name, pid, at)
 	a.logger.Debug("scope begin (record)", zap.String("test", name), zap.Int("worker", pid))
 	return nil

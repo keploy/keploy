@@ -67,6 +67,13 @@ type TestCase struct {
 	// verdict asks that the run reach them. Written and read only under the
 	// proven switch.
 	Real []string `json:"real,omitempty" bson:"real,omitempty" yaml:"real,omitempty"`
+	// Origin is, under the proven switch, the clock the test case's window
+	// start (HTTPReq/GrpcReq.Timestamp) is on; its Comm and Exe
+	// are unused. Only a record under the switch sets it; a file's is read and
+	// carried whatever the switch (models.Origin). Its file holds it as the
+	// document's origin block (yaml.NetworkTrafficDoc.Origin), so it is yaml
+	// "-" here.
+	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
 	// SourcePod is a transient, never-persisted routing tag: the name of the
 	// pod whose traffic produced this test case. Reentrancy seam for the
 	// enterprise DaemonSet agent's per-pod attribution — it stamps this from

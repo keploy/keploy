@@ -3,6 +3,8 @@
 package linux
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // fakeProc writes a /proc of stat files: pid -> (ppid, utime, stime,
@@ -74,12 +80,73 @@ func TestTheApplicationsCPUTimeIsTheClientsDescendants(t *testing.T) {
 		30:  {1, 800, 0, 0, 0},           // another process
 		300: {30, 1, 0, 0, 0},
 	}, nil)
-	ms, ok := memberCPU(root, 12, false, 10)
+	ms, ok := memberCPU(root, 12, false, 10, "")
 	if got := ownCPU(ms); !ok || got != (4+1+5)*clockTick || len(ms) != 2 {
 		t.Fatalf("memberCPU = %v (%v), %v; want %v of the app and its worker, each its own (not its reaped children's); not sudo, the agent, the client or another process", got, ms, ok, 10*clockTick)
 	}
-	if _, ok := memberCPU(root, 12, false, 0); ok {
+	if _, ok := memberCPU(root, 12, false, 0, ""); ok {
 		t.Fatal("memberCPU with no client known: want unknown")
+	}
+}
+
+// The keploy client's pid is read in the agent's pid namespace: a pid the
+// client said in another namespace (a CI step container's) names another
+// process here, whose descendants are not the application, so the CPU time
+// is unknown; said in the agent's own namespace, it is its descendants'.
+func TestTheApplicationsCPUTimeIsNeverAnotherNamespacesClients(t *testing.T) {
+	root := fakeProc(t, map[int][5]int{
+		1:  {0, 1000, 1000, 1000, 1000},
+		10: {1, 500, 0, 0, 0},  // the process at the client's pid
+		11: {10, 7, 3, 0, 0},   // sudo, the agent's parent
+		12: {11, 900, 0, 0, 0}, // the agent
+		20: {10, 4, 1, 2, 3},
+		21: {20, 5, 0, 0, 0},
+	}, nil)
+	for _, f := range []struct{ link, path string }{{"pid:[100]", "self/ns/pid"}, {"pid:[100]", "10/ns/pid"}} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, f.path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(f.link, filepath.Join(root, f.path)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(root, "sys", "kernel", "random"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sys", "kernel", "random", "boot_id"), []byte("b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "10", "status"), []byte("NSpid:\t10\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ms, ok := memberCPU(root, 12, false, 10, "999@b"); ok {
+		t.Fatalf("memberCPU of a client said in another pid namespace = %v; want unknown, not the descendants of the process at its pid here", ms)
+	}
+	ms, ok := memberCPU(root, 12, false, 10, "100@b")
+	if got := ownCPU(ms); !ok || got != (4+1+5)*clockTick || len(ms) != 2 {
+		t.Fatalf("memberCPU of a client said in the agent's namespace = %v (%v), %v; want the app and its worker", got, ms, ok)
+	}
+}
+
+// The client's registration keeps the pid namespace it said beside its pid,
+// which the readiness watch reads the registered pid through (as root: the
+// registration is a kernel map's).
+func TestTheClientsRegistrationKeepsItsPIDNamespace(t *testing.T) {
+	m, err := ebpf.NewMap(&ebpf.MapSpec{Type: ebpf.Hash, KeySize: 8, ValueSize: uint32(binary.Size(structs.ClientInfo{})), MaxEntries: 1})
+	if err != nil {
+		t.Skipf("no kernel map to register in (needs root): %v", err)
+	}
+	defer m.Close()
+	h := &Hooks{logger: zap.NewNop(), clientRegistrationMap: m}
+	var opts config.Agent
+	opts.ClientNSPID, opts.ClientPIDNS = 10, "100@b"
+	if err := h.RegisterClient(context.Background(), opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.clientMu.Lock()
+	defer h.clientMu.Unlock()
+	if h.clientPIDNS != "100@b" {
+		t.Fatalf("the registration keeps pid namespace %q, want the client's %q", h.clientPIDNS, "100@b")
 	}
 }
 
@@ -102,11 +169,11 @@ func TestADockerAppsCPUTimeIsEachContainersMainAndItsDescendants(t *testing.T) {
 		35: {1, 99, 0, 0, 0},  // older than the app's main, in its container, its parent the agent's init: no main
 		60: {1, 80, 0, 0, 0},  // a daemon the app's reparented to the agent's init
 	}, []int{1, 7, 9}, 50)
-	ms, ok := memberCPU(root, 7, true, 0)
+	ms, ok := memberCPU(root, 7, true, 0, "")
 	if got := ownCPU(ms); !ok || got != 62*clockTick {
 		t.Fatalf("memberCPU = %v (%v), %v; want %v (the app and its child, and the sidecar; not the agent's container, an exec into the app's, or a daemon)", got, ms, ok, 62*clockTick)
 	}
-	if _, ok := memberCPU(root, 99, true, 0); ok {
+	if _, ok := memberCPU(root, 99, true, 0, ""); ok {
 		t.Fatal("an agent its /proc does not show: want unknown")
 	}
 }

@@ -182,7 +182,7 @@ func TestLoadAsyncMocksFlushesTheVerdictAtTheBoundary(t *testing.T) {
 	}
 }
 
-// Under exact serving (KEPLOY_PROVEN, S12) keploy test opens each test case
+// Under exact serving (KEPLOY_PROVEN) keploy test opens each test case
 // with ServeExactTest instead of a per-test SetMocksWithWindow: the async
 // lanes advance just as they did, so an epoch recorded as effective after
 // test 1 is served once test 1 completed (round-3 review).

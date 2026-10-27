@@ -18,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -80,6 +82,7 @@ func (p *servingProxy) ExactTestOutcome() (string, []string, []string, bool) {
 }
 func (p *servingProxy) ResetStatefulCursors()      { p.mm.ResetStatefulCursors() }
 func (p *servingProxy) ContinueTestErrorCapture()  {}
+func (p *servingProxy) WithdrawTestErrorCapture()  {}
 func (p *servingProxy) SetMappedUniverse([]string) {}
 func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
 	p.mu.Lock()
@@ -1627,4 +1630,297 @@ func TestKeployMockReplayHoldsATestsReadBackUntilItsWrite(t *testing.T) {
 	got, e := runTest(t, a, p, "TestA", "/page", "/page", "/commit", "/page")
 	require.Equal(t, []string{"200 dirty", "200 dirty", "200 ok", "200 clean"}, got, "the test's own read answered before its write")
 	require.Empty(t, e.Action, "TestA failed: %s", e.Reason)
+}
+
+// requestServingProxy is a servingProxy whose learn step reads a test case's
+// own request (coreAgent.TestRequestTaker): it notes each request it is
+// given, and whose view the store showed as it was.
+type requestServingProxy struct {
+	*servingProxy
+	given []string
+}
+
+func (p *requestServingProxy) BeginTestCaseCapture()    {}
+func (p *requestServingProxy) ContinueTestCaseCapture() {}
+
+func (p *requestServingProxy) TakeTestRequest(req *models.TestRequest) {
+	name := "none"
+	if req != nil {
+		name = req.Test
+	}
+	view := "the pool's"
+	if snap, ok := p.mm.RoundSnapshot(integrations.RoundQuery{}); ok && snap.Test != "" {
+		view = snap.Test + "'s"
+	}
+	p.given = append(p.given, "request "+name+" while the store showed "+view+" view")
+}
+
+var _ coreAgent.TestRequestTaker = (*requestServingProxy)(nil)
+
+// Under exact serving a keploy test case's opening hands its request to the
+// learn step before the store installs the test's view, whatever the
+// opening's outcome: the calls that waited for it in the gap since its
+// capture window opened (learn.Tracker.AwaitRequest) are released, and read
+// as calls made after the request. One the replay sends without a request
+// (a keploy older than its agent) is handed as none, which the learn step
+// reads as a request it could not read. An opening that never handed it
+// left every call in the gap waiting until the window closed, then refused.
+// The test's end hands nothing.
+func TestAnExactOpeningGivesTheLearnStepItsRequestBeforeTheTestsView(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  *models.TestRequest
+		want string
+	}{
+		{"with its request", &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "/own-1", Sent: "/own-1"}}},
+			"request test-1 while the store showed the pool's view"},
+		{"from a keploy older than its agent", nil, "request none while the store showed the pool's view"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := wireAgent(t, models.MODE_TEST)
+			p := &requestServingProxy{servingProxy: newServingProxy()}
+			a.Proxy = p
+			ctx := context.Background()
+			require.NoError(t, a.StoreMocks(ctx, nil, []*models.Mock{keyMock("own-1", "/own-1", false, t0)}))
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{
+				AfterTime: models.BaseTime, BeforeTime: time.Now(),
+				Exact: &models.ExactServing{Stage: true},
+			}))
+			require.Empty(t, p.given, "the set's staging handed the learn step a request")
+			require.NoError(t, a.OpenTestCase(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"own-1"}}, TestRequest: tc.req}))
+			require.Equal(t, []string{tc.want}, p.given, "the exact opening's request, handed to the learn step before the test's view")
+			snap, ok := p.mm.RoundSnapshot(integrations.RoundQuery{})
+			require.True(t, ok)
+			require.Equal(t, "test-1", snap.Test, "the opening installed test-1's view")
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}))
+			require.Equal(t, []string{tc.want}, p.given, "the test's end handed the learn step a request")
+		})
+	}
+}
+
+// servesLogProxy is servingProxy that logs, in order, each settle's first
+// read (Accepted), each test case it serves and each pool.
+type servesLogProxy struct {
+	*servingProxy
+	lmu    sync.Mutex
+	events []string
+}
+
+func (p *servesLogProxy) log(e string) { p.lmu.Lock(); p.events = append(p.events, e); p.lmu.Unlock() }
+func (p *servesLogProxy) logged() []string {
+	p.lmu.Lock()
+	defer p.lmu.Unlock()
+	return append([]string(nil), p.events...)
+}
+func (p *servesLogProxy) Accepted() (uint64, error) {
+	p.log("settle")
+	return p.servingProxy.Accepted()
+}
+func (p *servesLogProxy) ServeExactTest(test string, owned []*models.Mock) error {
+	p.log("serve " + test)
+	return p.servingProxy.ServeExactTest(test, owned)
+}
+func (p *servesLogProxy) ServeExactPool(key string, names []string) error {
+	p.log("pool")
+	return p.servingProxy.ServeExactPool(key, names)
+}
+
+// learnEndProxy is servesLogProxy whose learn step a filter can end
+// (coreAgent.LearnEndSetter), on its mock manager, logged.
+type learnEndProxy struct{ servesLogProxy }
+
+func (p *learnEndProxy) SetLearnEnded(ended bool) error {
+	p.log(fmt.Sprintf("learn-ended=%v", ended))
+	p.mm.SetLearnEnded(ended)
+	return nil
+}
+
+// A keploy test filter says whether the set's learn step has ended (a retry
+// cycle of record's full round, models.MockFilterParams.LearnEnded), and the
+// agent sets it on its proxy first: before the filter settles anything or
+// serves anything, so no call read after the filter is paired or learned. It
+// stays ended for the set, whatever a later filter says: only the next set's
+// staging takes it back up. A proxy that cannot end its learn step
+// refuses a filter that asks it to, and serves nothing of it.
+func TestAKeployTestFilterEndsTheLearnStepBeforeItSettlesOrServes(t *testing.T) {
+	ctx := context.Background()
+	mocks := []*models.Mock{pingMock("mock-1", "/ping", "ok", t0)}
+	stage := models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: time.Now(), Exact: &models.ExactServing{Stage: true}}
+
+	a, _ := wireAgent(t, models.MODE_TEST)
+	p := &learnEndProxy{servesLogProxy{servingProxy: newServingProxy()}}
+	a.Proxy = p
+	require.NoError(t, a.StoreMocks(ctx, nil, mocks))
+	require.NoError(t, a.UpdateMockParams(ctx, stage))
+	require.False(t, p.mm.LearnEnded(), "the set's staging leaves the learn step on")
+	for _, f := range []struct {
+		params models.MockFilterParams
+		served string
+	}{
+		{models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}, LearnEnded: true}, "serve test-1"},
+		{models.MockFilterParams{Exact: &models.ExactServing{}, LearnEnded: true}, "pool"},
+	} {
+		from := len(p.logged())
+		require.NoError(t, a.UpdateMockParams(ctx, f.params))
+		got := p.logged()[from:]
+		require.NotEmpty(t, got)
+		require.Equal(t, "learn-ended=true", got[0], "the learn step ends before the filter settles or serves: %v", got)
+		require.Contains(t, got, "settle", "the filter settles the calls made before it: %v", got)
+		require.Contains(t, got, f.served, "the filter is served: %v", got)
+		require.True(t, p.mm.LearnEnded(), "the learn step stays ended for the rest of the set")
+	}
+	// A later filter that does not say it (an older or another client)
+	// leaves it ended: only a staging takes it back up.
+	require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}))
+	require.True(t, p.mm.LearnEnded(), "a filter that does not say the learn step ended takes it back up mid-set")
+	require.NoError(t, a.UpdateMockParams(ctx, stage))
+	require.False(t, p.mm.LearnEnded(), "the next set's staging takes the learn step back up")
+
+	b, _ := wireAgent(t, models.MODE_TEST)
+	q := &servesLogProxy{servingProxy: newServingProxy()}
+	b.Proxy = q
+	require.NoError(t, b.StoreMocks(ctx, nil, mocks))
+	require.NoError(t, b.UpdateMockParams(ctx, stage))
+	from := len(q.logged())
+	err := b.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}, LearnEnded: true})
+	require.ErrorContains(t, err, "cannot stop its learn step")
+	require.Empty(t, q.logged()[from:], "a refused filter settles and serves nothing")
+	require.NoError(t, b.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}),
+		"a filter that does not ask to end it is served as before")
+}
+
+// keptOwnedProxy is learnEndProxy that keeps, by test, the own mocks each
+// test it serves is served.
+type keptOwnedProxy struct {
+	learnEndProxy
+	owned map[string][][]*models.Mock
+}
+
+func (p *keptOwnedProxy) ServeExactTest(test string, owned []*models.Mock) error {
+	p.lmu.Lock()
+	p.owned[test] = append(p.owned[test], owned)
+	p.lmu.Unlock()
+	return p.learnEndProxy.ServeExactTest(test, owned)
+}
+
+// SetKeptLearning implements coreAgent.KeptLearningSetter on the real mock
+// manager, as the proxy does.
+func (p *keptOwnedProxy) SetKeptLearning(l *learn.KeptLearning) error {
+	p.log("kept-learning")
+	p.mm.SetKeptLearning(l)
+	return nil
+}
+
+// stagedNamed is the recording named name the manager's reads hand out, of
+// every tier; nil when none shows it.
+func stagedNamed(t *testing.T, mm *proxyPkg.MockManager, name string) *models.Mock {
+	t.Helper()
+	f, err := mm.GetFilteredMocks()
+	require.NoError(t, err)
+	u, err := mm.GetUnFilteredMocks()
+	require.NoError(t, err)
+	for _, mk := range append(f, u...) {
+		if mk.Name == name {
+			return mk
+		}
+	}
+	return nil
+}
+
+// A test set's retry cycles are served its recordings with what its first
+// cycle learned on them (models.MockFilterParams.Learned), as the next
+// keploy test reads them once it is persisted: a test that passed in the
+// first cycle only through learned drift is judged with it again, never
+// failed (a false red) for learning the retry cycles do not take. That holds
+// for a test's own recordings whether the agent holds them resident or on
+// disk, and on a copy: the store's recording is not changed. It holds for
+// the recordings the proxy staged at the set's start too, the pool's: the
+// pool the retry cycles are served between tests carries it, through every
+// later filter of the set, each of which says the learn step ended and
+// carries none: the retry cycle's test cases, or the deferred streaming
+// pass's, and the pool between them. The learning comes only with the learn
+// step ended: on a filter that does not end it, it is refused, and nothing
+// is served. A proxy that cannot put it on its staged recordings is refused
+// before anything is loaded.
+func TestARetryCycleIsServedTheRecordingsWithWhatTheFirstCycleLearned(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	ctx := context.Background()
+	learned := []models.MockState{
+		{Name: "mock-1", ReqBodyNoise: map[string][]string{"body.at": {}}},
+		{Name: "mock-pool", ReqBodyNoise: map[string][]string{"body.beat": {}}},
+	}
+	for _, onDisk := range []bool{false, true} {
+		t.Run(fmt.Sprintf("onDisk=%v", onDisk), func(t *testing.T) {
+			p := &keptOwnedProxy{learnEndProxy: learnEndProxy{servesLogProxy{servingProxy: newServingProxy()}}, owned: map[string][][]*models.Mock{}}
+			mock := pingMock("mock-1", "/ping", "ok", t0)
+			pool := pingMock("mock-pool", "/beat", "ok", t0.Add(-time.Minute))
+			stage := models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: t0.Add(2 * time.Hour), FirstRecordedTestStart: t0, StrictMockWindow: true, Exact: &models.ExactServing{Stage: true, Pool: []string{"mock-pool"}}}
+			a, _ := wireAgent(t, models.MODE_TEST)
+			a.Proxy = p
+			if onDisk {
+				a.clientMocks.Store(uint64(0), diskAgent(t, p, mock, pool).storage())
+			} else {
+				require.NoError(t, a.StoreMocks(ctx, []*models.Mock{mock, pool}, nil))
+			}
+			require.NoError(t, a.UpdateMockParams(ctx, stage))
+			first := stagedNamed(t, p.mm, "mock-pool")
+			require.NotNil(t, first, "the set's pool is served between tests")
+			require.NotContains(t, first.Spec.ReqBodyNoise, "body.beat", "the first cycle is served the pool's recording as recorded")
+			open := models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}
+			require.NoError(t, a.UpdateMockParams(ctx, open))
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}))
+
+			from := len(p.logged())
+			err := a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}, Learned: learned})
+			require.ErrorContains(t, err, "does not end its learn step")
+			require.Empty(t, p.logged()[from:], "a refused filter settles and serves nothing")
+
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}, LearnEnded: true, Learned: learned}))
+			retry := stagedNamed(t, p.mm, "mock-pool")
+			require.NotNil(t, retry, "the retry cycle is served the set's pool between tests")
+			require.Contains(t, retry.Spec.ReqBodyNoise, "body.beat", "the retry cycle is served the pool's recording without what the first cycle learned on it")
+			require.Same(t, retry, stagedNamed(t, p.mm, "mock-pool"), "a staged recording read again is not the same learned copy")
+			require.NotContains(t, first.Spec.ReqBodyNoise, "body.beat", "the staged recording itself was changed")
+			open.LearnEnded = true
+			require.NoError(t, a.UpdateMockParams(ctx, open))
+			// Every filter after says the learn step ended, and carries no
+			// learning: the test case it opens (above) and the pool after it,
+			// a retry cycle's or the deferred streaming pass's, are served
+			// the kept learning all the same, until the next staging.
+			require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}, LearnEnded: true}))
+			after := stagedNamed(t, p.mm, "mock-pool")
+			require.NotNil(t, after, "the pool is served between test cases")
+			require.Contains(t, after.Spec.ReqBodyNoise, "body.beat", "the pool after a test case opened with the learn step ended is served its recording without what the first cycle learned on it")
+			served := p.owned["test-1"]
+			require.Len(t, served, 2, "test-1 opened twice")
+			require.Len(t, served[0], 1)
+			require.NotContains(t, served[0][0].Spec.ReqBodyNoise, "body.at", "the first cycle is served the recording as recorded")
+			require.Len(t, served[1], 1)
+			require.Contains(t, served[1][0].Spec.ReqBodyNoise, "body.at", "the retry cycle is served test-1's own recording without what the first cycle learned on it")
+			require.Nil(t, mock.Spec.ReqBodyNoise, "the store's recording itself was changed")
+		})
+	}
+	t.Run("a proxy that cannot carry it on its staged recordings", func(t *testing.T) {
+		p := &learnEndProxy{servesLogProxy{servingProxy: newServingProxy()}}
+		mock := pingMock("mock-1", "/ping", "ok", t0)
+		a, _ := wireAgent(t, models.MODE_TEST)
+		a.Proxy = p
+		require.NoError(t, a.StoreMocks(ctx, []*models.Mock{mock}, nil))
+		require.NoError(t, a.UpdateMockParams(ctx, models.MockFilterParams{AfterTime: models.BaseTime, BeforeTime: t0.Add(2 * time.Hour), FirstRecordedTestStart: t0, StrictMockWindow: true, Exact: &models.ExactServing{Stage: true}}))
+		err := a.UpdateMockParams(ctx, models.MockFilterParams{Exact: &models.ExactServing{}, LearnEnded: true, Learned: learned})
+		require.ErrorContains(t, err, "cannot serve the staged recordings")
+		s := a.storage()
+		for _, tier := range [][]*models.Mock{s.filtered, s.unfiltered} {
+			for _, mk := range tier {
+				require.Same(t, mock, mk, "a refused filter loaded the learning on the agent's store")
+			}
+		}
+	})
+}
+
+// storage is the agent's stored mocks.
+func (a *Agent) storage() *ClientMockStorage {
+	v, _ := a.clientMocks.Load(uint64(0))
+	s, _ := v.(*ClientMockStorage)
+	return s
 }

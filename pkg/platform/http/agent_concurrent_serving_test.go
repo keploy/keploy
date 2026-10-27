@@ -8,6 +8,7 @@ package http_test
 import (
 	"context"
 	"encoding/gob"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -73,16 +74,11 @@ func TestTheConcurrentServingCapabilityComesFromStoreMocks(t *testing.T) {
 			t.Fatal("believed with the switch off")
 		}
 	})
-	t.Run("each store starts afresh, the legacy framing included", func(t *testing.T) {
+	t.Run("each store starts afresh", func(t *testing.T) {
 		send, fail := true, false
 		mux := http.NewServeMux()
 		mux.HandleFunc("/agent/storemocks", func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Content-Type") == models.StoreMocksStreamContentType {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			var req models.StoreMocksReq
-			_ = gob.NewDecoder(r.Body).Decode(&req)
+			_, _ = io.Copy(io.Discard, r.Body)
 			if fail {
 				// An agent started again in its place, which holds nothing
 				// yet: the store fails, and what the agent before said is
@@ -104,7 +100,7 @@ func TestTheConcurrentServingCapabilityComesFromStoreMocks(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !c.ServesConcurrent() {
-			t.Fatal("the legacy answer's header was not read")
+			t.Fatal("the answer's header was not read")
 		}
 		send = false
 		if err := c.StoreMocks(ctx, f, u); err != nil {

@@ -67,6 +67,58 @@ type MockEntry struct {
 	// MockEntryUnresolvedAmbiguous, which every replay charges a test that
 	// lists it with, or MockEntryUnresolvedUnproven.
 	Unresolved string `json:"unresolved,omitempty" yaml:"unresolved,omitempty" bson:"unresolved,omitempty"`
+	// Reason says why keploy placed this entry where it is (a routing at
+	// record, a move by record's judging), in words with its undo; written
+	// under the proven switch only. Like every field of an
+	// entry, it is read and kept by each rewrite of mappings.yaml, whatever
+	// the switch.
+	Reason string `json:"reason,omitempty" yaml:"reason,omitempty" bson:"reason,omitempty"`
+	// Owner is, on a worker-scope entry record's judging moved out of a
+	// test's list (MappingDb.MoveToWorker, under the proven switch), the test
+	// it was moved from: the test whose window recorded it (the
+	// compatibility audit's B4). Empty on every other entry. Read and kept by
+	// each rewrite of mappings.yaml, whatever the switch.
+	Owner string `json:"owner,omitempty" yaml:"owner,omitempty" bson:"owner,omitempty"`
+	// Drift says, on a moved entry, that the move rests on its Owner's
+	// quarantine: the pairing that moved it drifted, which holds the
+	// recording against its Owner, so the move is kept only while the Owner
+	// does not run. Judging quarantines such an Owner as
+	// keploy/unseparable_write (keploy cannot tell the Owner's own write
+	// from the call), or for a failure of its own; a confirming round that
+	// does not confirm the move undoes it. record's judging sets Drift on the
+	// moves it passes MoveToWorker. A replay under the switch that runs the
+	// Owner (its quarantine no longer applies: its test was edited, or
+	// verdicts.yaml lost its entry) gives the entry back to the Owner's own
+	// list: today's rule, failing closed. An exact move (no Drift) keeps its
+	// Owner running beside it, as judging kept it. Read and kept by each
+	// rewrite, whatever the switch.
+	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+}
+
+// RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
+// record recorded under proven routing: only such a set
+// is served by the looser background rules (no worker-scope check at the set's end, the
+// pool inside tests, background writes answered by kind), and only by a build
+// whose judging enables them (replay.RegisterS12Serving), under the proven
+// switch. Every other set keeps today's rules (the compatibility audit's B3).
+const RecordedWithS12Routing = "s12-routing"
+
+// MappingDoc is mappings.yaml's document, Mapping, by the name the proven-routing
+// contract gives it (MappingDoc.RecordedWith).
+type MappingDoc = Mapping
+
+// WasRecordedWith reports whether m's set carries feature among the marks
+// keploy record wrote it with (Mapping.RecordedWith). A nil m carries none.
+func (m *Mapping) WasRecordedWith(feature string) bool {
+	if m == nil {
+		return false
+	}
+	for _, f := range m.RecordedWith {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // The MockEntry.Unresolved of a recording keploy record's full round could not
@@ -92,6 +144,15 @@ type ConcurrencyGroup struct {
 	// Unkept counts the group's tests the recording did not keep (deleted,
 	// or lost): one of them may have made the call.
 	Unkept int `json:"unkept,omitempty" yaml:"unkept,omitempty" bson:"unkept,omitempty"`
+}
+
+// RecordedAt is when the entry's request was recorded: its recorded time
+// (ReqTimestampMock), else its timestamp in seconds.
+func (e MockEntry) RecordedAt() time.Time {
+	if t, err := ParseMockTimestamp(e.ReqTimestampMock); err == nil && !t.IsZero() {
+		return t
+	}
+	return time.Unix(e.Timestamp, 0)
 }
 
 // FormatMockTimestamp stores mock timings as stable RFC3339 strings so
@@ -147,7 +208,7 @@ type Mapping struct {
 	Suites  []SuiteSpan `json:"suites,omitempty" yaml:"suites,omitempty" bson:"suites,omitempty"`
 	Boots   []BootSpec  `json:"boots,omitempty" yaml:"boots,omitempty" bson:"boots,omitempty"`
 	Runner  []MockEntry `json:"runner,omitempty" yaml:"runner,omitempty" bson:"runner,omitempty"`
-	// Worker is the set's worker scope (design v14 S12, the founder's D1 to
+	// Worker is the set's worker scope (design v14, the founder's D1 to
 	// D4): the data-plane mocks no test case owns, which the application made
 	// on its own rather than for a test's request (a queue consumer, a timer,
 	// work a test left running), in recorded order, each with its Place.
@@ -189,6 +250,14 @@ type Mapping struct {
 	// (MockEntry.Group). Every other replay leaves them unowned, as it does
 	// a mock no test lists.
 	Shared []MockEntry `json:"shared,omitempty" yaml:"shared,omitempty" bson:"shared,omitempty"`
+	// RecordedWith names, set-wide, what keploy record recorded the set with
+	// that changes how it is served: RecordedWithS12Routing for a set a
+	// proven-routing record wrote (routed at record, its background served by the background rules).
+	// keploy record writes it under the proven switch. Read and kept by each
+	// rewrite of mappings.yaml, whatever the switch, and by a writer that
+	// names none; omitted when empty, so a file without it is written as
+	// before. Only its use is under the switch.
+	RecordedWith []string `json:"recordedWith,omitempty" yaml:"recordedWith,omitempty" bson:"recorded_with,omitempty"`
 }
 
 // Group is the concurrency group id names, nil when there is none.

@@ -513,7 +513,11 @@ func TestAWorkersViewPassesStraightThroughUnderExactServing(t *testing.T) {
 	mm.ServeExactTest("T", []*models.Mock{b})
 	pt, _ := view.GetPerTestMocksInWindow()
 	equalNames(t, "the open test's mocks on the old view", pt, "b")
-	if got := view.(integrations.StagedFinder).FindStagedNotOwned(models.HTTP, func(m *models.Mock) bool { return true }); got != "a" {
+	if got := func() string {
+		f := view.(integrations.StagedFinder)
+		n, _ := f.FindStagedNotOwned(models.HTTP, f.MarkCallRound(), func(m *models.Mock) bool { return true })
+		return n
+	}(); got != "a" {
 		t.Fatalf("a miss's diagnosis on the old view found %q, want a, staged and not the open test's", got)
 	}
 

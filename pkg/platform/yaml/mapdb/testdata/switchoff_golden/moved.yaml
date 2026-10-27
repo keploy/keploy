@@ -1,0 +1,40 @@
+version: api.keploy.io/v1beta1
+kind: TestMocksMapping
+test_set_id: test-set-0
+tests:
+    - id: post-url-0
+      mock_entries:
+        - name: mock-3
+          kind: Mongo
+          timestamp: 1792659601
+          reqTimestampMock: "2026-10-22T09:00:01.133456Z"
+          resTimestampMock: "2026-10-22T09:00:01.134456Z"
+    - id: post-url-1
+      mock_entries:
+        - name: mock-7
+          kind: Mongo
+          timestamp: 1792659602
+          reqTimestampMock: "2026-10-22T09:00:02.143456Z"
+          resTimestampMock: "2026-10-22T09:00:02.144456Z"
+startup:
+    - name: mock-0
+      kind: Mongo
+      timestamp: 1792659600
+      reqTimestampMock: "2026-10-22T09:00:00.124456Z"
+      resTimestampMock: "2026-10-22T09:00:00.125456Z"
+worker:
+    - name: mock-2
+      kind: SQS
+      timestamp: 1792659600
+      reqTimestampMock: "2026-10-22T09:00:00.133456Z"
+      resTimestampMock: "2026-10-22T09:00:00.134456Z"
+    - name: mock-6
+      kind: Mongo
+      timestamp: 1792659602
+      reqTimestampMock: "2026-10-22T09:00:02.133456Z"
+      resTimestampMock: "2026-10-22T09:00:02.134456Z"
+    - name: mock-5
+      kind: SQS
+      timestamp: 1792659602
+      reqTimestampMock: "2026-10-22T09:00:02.173456Z"
+      resTimestampMock: "2026-10-22T09:00:02.174456Z"

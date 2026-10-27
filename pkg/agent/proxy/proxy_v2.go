@@ -278,6 +278,12 @@ func (p *Proxy) recordViaSupervisor(
 			svSess.StoppedAt()
 			return !svSess.RecordingStopping()
 		},
+		// The destination's stream ends where the client stopped taking it
+		// (it closed its socket, and refused what came after): a parser
+		// that reaches that end mid-message knows the client's close cut
+		// the message there, not the destination (the HTTP recorder leaves
+		// that exchange out, and says why).
+		ClientStopped: svSess.MarkEndedWhereClientStopped,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via

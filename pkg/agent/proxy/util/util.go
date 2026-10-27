@@ -783,10 +783,7 @@ func PassThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, d
 		defer Recover(logger, clientConn, nil)
 		defer close(destBufferChannel)
 		defer func(destConn net.Conn) {
-			err := destConn.Close()
-			if err != nil {
-				utils.LogError(logger, err, "failed to close the destination connection")
-			}
+			LogCloseErr(logger, destConn.Close(), "failed to close the destination connection")
 		}(destConn)
 
 		ReadBuffConn(passthroughContext, logger, destConn, destBufferChannel, errChannel, false)
@@ -1108,31 +1105,25 @@ func RecoverWith(logger *zap.Logger, client, dest net.Conn, then func()) {
 	}
 }
 
+// Recovered is what Recover does with a panic r that a caller's own deferred
+// function recovered (integrations.RecoverCtx: recover stops a panic only in
+// the function the goroutine defers): it logs r, closes client and dest, and
+// reports r to Sentry.
+func Recovered(logger *zap.Logger, r any, client, dest net.Conn) {
+	recovered(logger, r, client, dest)
+}
+
 // recovered is what Recover, RecoverInto and RecoverWith do with a recovered
 // panic: log
 // it, close the parser's connections, and report it to Sentry.
 func recovered(logger *zap.Logger, r any, client, dest net.Conn) {
 	logger.Error("Recovered from panic in parser, closing active connections")
 	if client != nil {
-		err := client.Close()
-		if err != nil {
-			// Use string matching as a last resort to check for the specific error
-			if !strings.Contains(err.Error(), "use of closed network connection") {
-				// Log other errors
-				utils.LogError(logger, err, "failed to close the client connection")
-			}
-		}
+		LogCloseErr(logger, client.Close(), "failed to close the client connection")
 	}
 
 	if dest != nil {
-		err := dest.Close()
-		if err != nil {
-			// Use string matching as a last resort to check for the specific error
-			if !strings.Contains(err.Error(), "use of closed network connection") {
-				// Log other errors
-				utils.LogError(logger, err, "failed to close the destination connection")
-			}
-		}
+		LogCloseErr(logger, dest.Close(), "failed to close the destination connection")
 	}
 	utils.HandleRecovery(logger, r, "Recovered from panic")
 	sentry.Flush(time.Second * 2)

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -382,6 +383,13 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
 				continue
 			}
+			if step.kind == stepStoreMocks && errors.Is(err, models.ErrPayloadFileReplaced) {
+				// The stored mocks are of a set that has run: its mock
+				// file was rewritten once it ended, and the set being set
+				// up stores its own.
+				logger.Debug("keploy's restarted agent: not storing the mocks of a test set that has run; the next set stores its own", zap.Error(err))
+				continue
+			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)
 		}
 	}
@@ -402,6 +410,14 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	if err := a.awaitAgentAnswers(ctx); err != nil {
 		return err
 	}
+	// The process that answers was started in place of the agent while the
+	// app's container had never started: compose's retry runs only then
+	// (shouldRetryComposeUp), and its watch takes an agent found started
+	// again for one only before it finds the app's container running
+	// (App.retryComposeUp). So the app ran against none of the process it
+	// replaced, whether or not the setup below takes: the replay counts
+	// what this one counts from its start (AgentStartedBeforeApp).
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).startedBeforeApp()
 	// A docker-mode agent that restarted holds no container list.
 	a.pushContainers(ctx)
 	if err := a.session().reapply(ctx, a.logger); err != nil {
@@ -453,7 +469,21 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 
 // copyMockParams is params sharing no memory with it: the replayer goes on
 // changing the consumed-mocks map it hands over.
-func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
+//
+// A consumed history (models.ConsumedHistory) is not copied: it is marked, at
+// no cost, and rebuild puts the history as it was at the call back into the
+// copy, when the call is made again. A copy of the whole history at every
+// test made a replay's cost grow with the square of its tests.
+func copyMockParams(params models.MockFilterParams) (_ models.MockFilterParams, rebuild func(models.MockFilterParams) models.MockFilterParams) {
+	rebuild = func(p models.MockFilterParams) models.MockFilterParams { return p }
+	if h := params.ConsumedHistory; h != nil && params.TotalConsumedMocks != nil {
+		mark := h.Mark()
+		params.ConsumedHistory, params.TotalConsumedMocks = nil, nil
+		rebuild = func(p models.MockFilterParams) models.MockFilterParams {
+			p.TotalConsumedMocks = mark.State()
+			return p
+		}
+	}
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
 	params.MockMapping = slices.Clone(params.MockMapping)
@@ -465,7 +495,7 @@ func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 		ex.Ahead = slices.Clone(ex.Ahead)
 		params.Exact = &ex
 	}
-	return params
+	return params, rebuild
 }
 
 // mockParamsStep is the step kind a mock filter is recorded under: a set's

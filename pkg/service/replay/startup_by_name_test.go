@@ -279,7 +279,11 @@ func (f *managedAgent) StoreMocks(ctx context.Context, filtered, unfiltered []*m
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
 	for _, m := range append(append([]*models.Mock(nil), filtered...), unfiltered...) {
-		if err := enc.Encode(m); err != nil {
+		whole, err := m.WithPayload(ctx)
+		if err != nil {
+			return err
+		}
+		if err := enc.Encode(whole); err != nil {
 			return err
 		}
 	}

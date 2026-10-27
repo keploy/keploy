@@ -59,8 +59,12 @@ func setVersion() {
 	utils.VersionIdentifier = "version"
 }
 
+// newLogger is log.New; a test swaps in one that fails. log.New itself no
+// longer fails where it cannot open keploy-logs.txt: it logs to the console.
+var newLogger = log.New
+
 func start(ctx context.Context) {
-	logger, logFile, err := log.New()
+	logger, logFile, err := newLogger()
 	if err != nil {
 		fmt.Println("Failed to start the logger for the CLI", err)
 		utils.ErrCode = 1

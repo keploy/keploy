@@ -142,6 +142,14 @@ type Mock struct {
 	SourcePID uint32 `json:"-" yaml:"-" bson:"-"`
 	Start     string `json:"start,omitempty" yaml:"start,omitempty" bson:"start,omitempty"`
 	StartRef  string `json:"-" yaml:"-" bson:"-"`
+	// Origin is, under the proven switch, where the call came from: the clock
+	// its ReqTimestampMock is on, and the process that made it. Only a record
+	// under the switch sets it; a file's is read and
+	// carried whatever the switch (models.Origin). A recording's file holds it
+	// as its document's origin block (yaml.NetworkTrafficDoc.Origin), so it is
+	// yaml "-" here. Set it whole, never edit one in place: ShallowCopy shares
+	// it, as it shares Spec's pointers.
+	Origin *Origin `json:"origin,omitempty" yaml:"-" bson:"origin,omitempty"`
 
 	// pooled is set when the replay mock manager takes the mock into a staging,
 	// or stores it in a pool that matchers read, and is never cleared. The
@@ -166,6 +174,11 @@ type Mock struct {
 	// at serve time; set only for spilled per-test mocks by the agent disk store.
 	// Unexported so gob ignores it — never crosses the wire or a recording.
 	responseHydrator func() (*HTTPResp, []MongoResponse, error)
+
+	// onDisk is where a replay's read left the mock's payload, set only on
+	// the CLI side (LeavePayloadOnDisk); WithPayload reads it back to send
+	// the mock. Unexported so no encoder carries it.
+	onDisk *payloadOnDisk
 }
 
 // Pooled reports whether the replay mock manager has stored m in a pool that
@@ -283,8 +296,8 @@ type TestModeInfo struct {
 	// disk-loaded mocks.
 	IsStartup bool `json:"-" bson:"-"`
 
-	// ServedIn is, on a copy exact serving serves an open test (KEPLOY_PROVEN,
-	// S12), the number of that test's view; zero on every other mock. A
+	// ServedIn is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), the number of that test's view; zero on every other mock. A
 	// consume of a copy an earlier view served (a previous attempt of the
 	// same test) is refused. Runtime-only, like the fields above.
 	ServedIn uint64 `json:"-" bson:"-"`
@@ -296,8 +309,8 @@ type TestModeInfo struct {
 	// mock names. Runtime-only, like the fields above.
 	StagedSet uint64 `json:"-" bson:"-"`
 
-	// Concurrent is, on a copy exact serving serves an open test (KEPLOY_PROVEN,
-	// S12), set for a recording the test shares with the tests whose
+	// Concurrent is, on a copy exact serving serves an open test
+	// (KEPLOY_PROVEN), set for a recording the test shares with the tests whose
 	// requests were open beside its own at record time
 	// (ExactServing.Concurrent): a candidate, answered at most once in the
 	// staging by whichever of them makes its call, never required of the
@@ -1082,6 +1095,16 @@ type MockState struct {
 	// (ExactServing.Concurrent), not as one of its own: whose call it was is
 	// settled at the set's end. An agent that predates it reports none.
 	Concurrent bool `json:"concurrent,omitempty"`
+	// LearnedAfterEnd says the parser that consumed the mock reported, after
+	// the test set's learn step ended (MockFilterParams.LearnEnded: a retry
+	// cycle, an out-of-order streaming pass), learning the copy exact serving
+	// handed it out by did not carry: variables or binds its learn step
+	// learned, or noise paths or variables beyond the recording's and the
+	// round's kept learning. Its answer was served through that learning, so
+	// the replay gives the tests that consumed it no verdict, with that
+	// reason. An agent that predates it reports none; the agent and the CLI
+	// are one keploy.
+	LearnedAfterEnd bool `json:"learnedAfterEnd,omitempty"`
 }
 
 // ShallowCopy returns a new, unpooled Mock with m's fields: the same Spec
@@ -1118,6 +1141,11 @@ func (m *Mock) DeepCopy() *Mock {
 
 	// Carry the loader so tree copies can still hydrate their elided response.
 	c.responseHydrator = m.responseHydrator
+	c.onDisk = m.onDisk
+
+	// Where the call came from (proven switch): the copy's own, so a copy
+	// written later (the async gob writer's) holds what the mock held.
+	c.Origin = m.Origin.clone()
 
 	// Deep copy the Noise slice so mutations to one copy don't affect the other.
 	if len(m.Noise) > 0 {

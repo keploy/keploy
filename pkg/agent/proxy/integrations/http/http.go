@@ -58,6 +58,9 @@ type HTTP struct {
 	// life. Mock names repeat across test sets (mock-0, mock-1, ...), so a
 	// later set's mock of a name already warned about is not warned again.
 	ptLoadWarned sync.Map
+	// placeWarned holds the recordings (placeWarning) whose unreadable
+	// variable place the learn step warned of.
+	placeWarned sync.Map
 }
 
 func New(logger *zap.Logger) integrations.Integrations {

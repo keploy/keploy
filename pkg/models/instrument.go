@@ -239,7 +239,12 @@ type OutgoingOptions struct {
 	//
 	// Since automatic detection landed this list is an optimisation and
 	// an escape hatch rather than a requirement: a port listed here
-	// skips the detection probe entirely. See DisableMysqlAutoDetect.
+	// skips the detection probe entirely, pinned to MySQL, so an HTTP
+	// service on a listed port gets no answer. The built-in defaults are
+	// only a hint: at record whichever end speaks first decides (a client
+	// that speaks first is not MySQL), and at replay the recording does.
+	// With DisableMysqlAutoDetect the defaults are pinned as listed ports
+	// are.
 	MysqlPorts []uint32
 	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
 	// keploy should not record normally (see PassThroughRule). Ports gate on the
@@ -364,6 +369,12 @@ type IncomingOptions struct {
 
 type SetupOptions struct {
 	ClientNSPID uint32
+	// ClientPIDNS is the pid namespace keploy's CLI said it runs in, beside
+	// its pid (--client-pid-ns, utils.OwnPIDNamespace): "<inode>@<boot_id>",
+	// utils.ClientPIDNSNone for a CLI in no Linux pid namespace, or "" when
+	// the CLI did not say it. What reads ClientNSPID as a pid of the agent's
+	// own /proc reads it through utils.ClientPIDHere with this.
+	ClientPIDNS string
 	Container   string
 	// FromContainer is the already-running container to re-create under
 	// keploy's namespaces. Set only for utils.FromContainer runs.

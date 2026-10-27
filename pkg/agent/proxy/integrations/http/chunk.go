@@ -32,7 +32,8 @@ func (h *HTTP) readRequestHead(ctx context.Context, finalReq *[]byte, clientConn
 		h.Logger.Debug("couldn't get complete headers in first chunk so reading more chunks")
 		reqHeader, err := pUtil.ReadBytes(ctx, h.Logger, clientConn)
 		if err != nil {
-			utils.LogError(h.Logger, nil, "failed to read the request message from the client")
+			// With its error: the context's end (context.Canceled) is not logged.
+			utils.LogError(h.Logger, err, "failed to read the request message from the client")
 			return nil, 0, err
 		}
 		// destConn is nil in case of test mode
@@ -96,16 +97,22 @@ func (h *HTTP) contentLengthRequest(ctx context.Context, finalReq *[]byte, clien
 	defer func() { _ = clientConn.SetReadDeadline(time.Time{}) }()
 
 	for contentLength > 0 {
-		// 1. Check if context is already done before trying to read
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		// 2. Refresh the deadline
+		// 1. Refresh the deadline
 		err := clientConn.SetReadDeadline(time.Now().Add(20 * time.Second))
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err() // the connection was closed at the call's end
+			}
 			utils.LogError(h.Logger, err, "failed to set the read deadline for the client conn")
 			return err
+		}
+
+		// 2. Check if context is already done before trying to read. After
+		// the deadline is set, not before: a context that ended in between
+		// had the deadline that ends this read (pUtil.InterruptOnDone)
+		// replaced by this one, and the read waited it out.
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		// 3. Read directly from connection
@@ -237,7 +244,7 @@ func (h *HTTP) chunkedRequest(ctx context.Context, finalReq *[]byte, clientConn,
 			if done, ferr := complete(); ferr == nil && done {
 				return nil // the last bytes arrived together with the client closing
 			}
-			utils.LogError(h.Logger, nil, "failed to read the request message from the client")
+			utils.LogError(h.Logger, err, "failed to read the request message from the client")
 			return err
 		}
 	}

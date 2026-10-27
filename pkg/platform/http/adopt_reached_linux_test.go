@@ -433,7 +433,7 @@ func TestAKilledDaemonHeldOffTheCPUIsWaitedForUntilGone(t *testing.T) {
 			ended = true
 		case <-time.After(stopCheck):
 		}
-		if gotOut == 0 && !threadsLeft(pid) {
+		if gotOut == 0 && !threadsLeft(t, pid) {
 			gotOut = max(looks.Load()-killedAt, 1)
 		}
 	}
@@ -444,7 +444,7 @@ func TestAKilledDaemonHeldOffTheCPUIsWaitedForUntilGone(t *testing.T) {
 	if _, left := leftToKernel.Load([2]uint64{uint64(pid), proc.Start}); left {
 		t.Fatalf("the stop went on without the daemon (%d) it killed while it was held off the CPU, leaving it to the kernel", pid)
 	}
-	if threadsLeft(pid) {
+	if threadsLeft(t, pid) {
 		t.Errorf("the daemon (%d) outlived the stop", pid)
 	}
 	if gotOut > 0 && gotOut < stopStallChecks {
@@ -484,7 +484,9 @@ func killedOrGone(pid int) bool {
 }
 
 // threadExiting reports whether a thread of process pid is on its way out of
-// the kernel's exit: PF_EXITING (0x4) in the flags of its stat (field 9).
+// the kernel's exit: PF_EXITING (0x4) in the flags of its stat (field 9). A
+// bare listing of the threads will do here: one it leaves out (another was
+// released as it was taken) only puts off the answer to a later look.
 func threadExiting(pid int) bool {
 	tasks, err := os.ReadDir("/proc/" + strconv.Itoa(pid) + "/task")
 	if err != nil {
@@ -514,22 +516,17 @@ func threadExiting(pid int) bool {
 
 // threadsLeft reports whether a thread of process pid is still there, not
 // exited: a process whose leader has exited is still there while another
-// thread of it is.
-func threadsLeft(pid int) bool {
-	tasks, err := os.ReadDir("/proc/" + strconv.Itoa(pid) + "/task")
+// thread of it is (utils.RunningThread, whose listing of the threads is
+// checked against the process's count of them: a bare listing taken while
+// threads exit can leave out one that runs). A read that fails fails the
+// test.
+func threadsLeft(t *testing.T, pid int) bool {
+	t.Helper()
+	_, runs, err := utils.RunningThread("/proc", pid)
 	if err != nil {
-		return false
+		t.Fatalf("read the threads of the daemon (%d): %v", pid, err)
 	}
-	for _, task := range tasks {
-		b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/task/" + task.Name() + "/stat")
-		if err != nil {
-			continue
-		}
-		if st, ok := utils.ParseProcStat(b); ok && st.State != 'Z' && st.State != 'X' {
-			return true
-		}
-	}
-	return false
+	return runs
 }
 
 // commIs reports whether process pid runs command comm.

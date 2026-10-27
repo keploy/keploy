@@ -566,7 +566,7 @@ func TestStrictTheCallsRecordingsTakeTurnsInRecordOrder(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{}
 	pick := func(fits ...*models.Mock) string {
-		m, commit := h.strictCursorPick(fits, db, true)
+		m, commit, _ := h.strictCursorPick(fits, nil, db, true, nil)
 		if commit != nil {
 			commit()
 		}
@@ -741,7 +741,7 @@ func TestStrictARecordingReplayedAsItIsTakesNoTurn(t *testing.T) {
 	h := newHTTP()
 	db := &mockMemDb{}
 	for i := 0; i < 2; i++ {
-		m, commit := h.strictCursorPick([]*models.Mock{once, c1, c2}, db, true)
+		m, commit, _ := h.strictCursorPick([]*models.Mock{once, c1, c2}, nil, db, true, nil)
 		if commit != nil || m.Name != "once" {
 			t.Fatalf("pick %d = %s (commit %v), want once with no turn", i+1, m.Name, commit != nil)
 		}

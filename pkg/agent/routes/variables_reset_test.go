@@ -433,3 +433,56 @@ func TestATestCasesOwnBindAsItsWindowGoesLiveIsTheTestsNeverTheRuns(t *testing.T
 		t.Fatalf("test-2's call, which only uses key, was answered %s with test-1's value", got)
 	}
 }
+
+// readingSvc is a paramsSvc whose OpenTestCase hands the learn step the test
+// case's request its filter carries, or does not (testRequestReader).
+type readingSvc struct {
+	paramsSvc
+	reads bool
+}
+
+func (s readingSvc) ReadsTestRequest() bool { return s.reads }
+
+// The filter that opens a test case is answered saying the learn step took
+// its request (models.TestRequestReadHeader) only where the agent's
+// OpenTestCase hands it over; an agent that does not, or a filter that opens
+// no test case (a set's staging), says nothing, and the replay keeps none of
+// what the agent learned as noise for the test.
+func TestTheOpeningFilterSaysTheLearnStepReadItsRequest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	opening := `{"filterParams":{"afterTime":"2026-10-01T10:00:00Z","testRequest":{"test":"test-1","parts":[{"name":"url","recorded":"/a","sent":"/a"}]}}}`
+	staging := `{"filterParams":{"exact":{"stage":true}}}`
+	for _, tc := range []struct {
+		name string
+		svc  agent.Service
+		body string
+		want string
+	}{
+		{"an agent that reads it", readingSvc{reads: true}, opening, models.TestRequestRead},
+		{"an agent whose proxy reads none", readingSvc{reads: false}, opening, ""},
+		{"an agent that cannot tell", paramsSvc{}, opening, ""},
+		{"a set's staging", readingSvc{reads: true}, staging, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []string
+			svc := tc.svc
+			switch s := svc.(type) {
+			case readingSvc:
+				s.events = &events
+				svc = s
+			case paramsSvc:
+				s.events = &events
+				svc = s
+			}
+			a := &Agent{logger: zap.NewNop(), svc: svc}
+			rec := httptest.NewRecorder()
+			a.UpdateMockParams(rec, httptest.NewRequest(http.MethodPost, "/agent/updatemockparams", strings.NewReader(tc.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d, events %v", rec.Code, events)
+			}
+			if got := rec.Header().Get(models.TestRequestReadHeader); got != tc.want {
+				t.Fatalf("%s %q; want %q", models.TestRequestReadHeader, got, tc.want)
+			}
+		})
+	}
+}
