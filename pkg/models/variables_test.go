@@ -557,3 +557,70 @@ func TestAClockReadsZoneMeetsAsOneOrHoldsNothing(t *testing.T) {
 		}
 	}
 }
+
+// A read's Layout meets another as the one both saw, a Layout of "" (learned
+// before Layout was) as the other, and two layouts as LayoutApart, which is
+// Empty, holds nothing and says so, in either order and grouped either way.
+// A Layout this keploy does not name holds nothing. The Layout survives a
+// YAML, JSON and BSON-tagged round trip, and a read of none writes no field.
+func TestAClockReadsLayoutMeetsAsOneOrHoldsNothing(t *testing.T) {
+	ms := time.Millisecond
+	sec, epoch, old := ClockOffset{Res: ms, Layout: "iso-second"}, ClockOffset{Res: ms, Layout: "epoch-ms"}, ClockOffset{Res: ms}
+	at, from, to := time.Unix(100, 0), time.Unix(100, 0), time.Unix(101, 0)
+	if got := sec.Meet(ClockOffset{Res: time.Second, Layout: "iso-second"}); got != (ClockOffset{Res: time.Second, Layout: "iso-second"}) || got.Empty() {
+		t.Errorf("two reads in one layout met as %+v; want that layout at the coarser Res", got)
+	}
+	for _, got := range []ClockOffset{sec.Meet(old), old.Meet(sec)} {
+		if got.Layout != "iso-second" || got.Empty() || !got.Holds(at, ms, from, to) {
+			t.Errorf("a read of no Layout met one in iso-second as %+v; want iso-second, holding", got)
+		}
+	}
+	for _, pair := range [][2]ClockOffset{{sec, epoch}, {epoch, sec}, {sec, ClockOffset{Res: ms, Layout: LayoutTyped}}} {
+		got := pair[0].Meet(pair[1])
+		if got.Layout != LayoutApart || !got.Empty() || got.Holds(at, ms, from, to) {
+			t.Errorf("%+v meet %+v = %+v (Empty %v); want LayoutApart, Empty, holding nothing", pair[0], pair[1], got, got.Empty())
+		}
+		if s := got.String(); !strings.Contains(s, "no one form") {
+			t.Errorf("String of %+v = %q; want it to say no one form holds it", got, s)
+		}
+	}
+	if a, b := sec.Meet(epoch).Meet(old), sec.Meet(epoch.Meet(old)); a != b {
+		t.Errorf("Meet grouped two ways: %+v and %+v", a, b)
+	}
+	unknown := ClockOffset{Res: ms, Layout: "iso-week"}
+	if unknown.LayoutKnown() || unknown.Holds(at, ms, from, to) || !strings.Contains(unknown.String(), "a layout this keploy does not read") {
+		t.Errorf("an unknown layout: known %v, holds %v, %q; want unknown, holding nothing, saying so", unknown.LayoutKnown(), unknown.Holds(at, ms, from, to), unknown.String())
+	}
+	for _, o := range []ClockOffset{sec, old, {Res: ms, Layout: LayoutTyped}} {
+		if !o.LayoutKnown() {
+			t.Errorf("%+v: layout unknown; want known", o)
+		}
+	}
+	if s := sec.String(); s != "clock, written as an ISO 8601 date and time to the second or a fraction of it" {
+		t.Errorf("String of %+v = %q", sec, s)
+	}
+	if s := (ClockOffset{Res: ms, Layout: LayoutTyped}).String(); s != "clock" {
+		t.Errorf("String of a typed read = %q; want clock", s)
+	}
+	for _, o := range []ClockOffset{sec, old} {
+		y, err := yaml.Marshal(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back ClockOffset
+		if err := yaml.Unmarshal(y, &back); err != nil || back != o {
+			t.Errorf("YAML round trip of %+v = %+v (%v)", o, back, err)
+		}
+		if strings.Contains(string(y), "layout") != (o.Layout != "") {
+			t.Errorf("YAML of %+v = %q; want a layout field only where Layout is set", o, y)
+		}
+		j, _ := json.Marshal(o)
+		var jb ClockOffset
+		if err := json.Unmarshal(j, &jb); err != nil || jb != o {
+			t.Errorf("JSON round trip of %+v = %+v (%v)", o, jb, err)
+		}
+	}
+	if f, ok := reflect.TypeOf(ClockOffset{}).FieldByName("Layout"); !ok || f.Tag.Get("bson") != "layout,omitempty" {
+		t.Errorf("Layout's bson tag = %q; want layout,omitempty", f.Tag.Get("bson"))
+	}
+}
