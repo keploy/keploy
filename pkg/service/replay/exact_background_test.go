@@ -443,3 +443,58 @@ func TestUnansweredWorkerIsNoneUnderS12sRules(t *testing.T) {
 		t.Fatalf("the background rules require %v; want none", got)
 	}
 }
+
+// Under the switch a test case's recording judging marked as the
+// application's background work (models.MockEntry.Background) is handed to
+// the agent on the set's staging (models.ExactServing.Unrequired) and is not
+// required of the test case: one the application did not call leaves the set
+// passed. Unmarked, the same recording never called fails the set, and the
+// staging names none.
+func TestUnderTheSwitchAMarkedBackgroundRecordingIsNotRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		background string
+		unrequired map[string]string
+		want       models.TestSetStatus
+	}{
+		{"marked", "a timer's call landed in this test", map[string]string{"mock-tick": "a timer's call landed in this test"}, models.TestSetStatusPassed},
+		{"unmarked", "", nil, models.TestSetStatusFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSwitch(t, true)
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-tick", 1020)}
+			mappingFile(t, h, map[string][]models.MockEntry{"test-1": {
+				{Name: "mock-a", Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(attrAt(1010))},
+				{Name: "mock-tick", Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(attrAt(1020)), Background: tc.background},
+			}})
+			// The application never makes the timer's call.
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010)}})}
+			if got := h.run(t); got != tc.want {
+				t.Fatalf("set %s, want %s", got, tc.want)
+			}
+			ex, ok := stagedExact(h)
+			if !ok || !reflect.DeepEqual(ex.Unrequired, tc.unrequired) {
+				t.Fatalf("the staging named unrequired %v (staged %v); want %v", ex.Unrequired, ok, tc.unrequired)
+			}
+		})
+	}
+}
+
+// A background mark leaves an entry out of the per-test assertion only under
+// the switch: without it the entry is asserted as before, whatever its mark.
+func TestABackgroundMarkLeavesAnEntryUnassertedOnlyUnderTheSwitch(t *testing.T) {
+	marked := models.MockEntry{Name: "mock-tick", Kind: string(models.HTTP), Background: "a timer's call"}
+	setSwitch(t, true)
+	if !isUnassertedMockEntry(marked, nil) || len(eligibleExpectedEntries([]models.MockEntry{marked}, nil, nil)) != 0 {
+		t.Fatal("under the switch a marked entry is asserted")
+	}
+	if isUnassertedMockEntry(models.MockEntry{Name: "mock-a", Kind: string(models.HTTP)}, nil) {
+		t.Fatal("under the switch an unmarked entry is not asserted")
+	}
+	setSwitch(t, false)
+	if isUnassertedMockEntry(marked, nil) {
+		t.Fatal("without the switch a marked entry is not asserted")
+	}
+}
