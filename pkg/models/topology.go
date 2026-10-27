@@ -1,10 +1,6 @@
 package models
 
-import (
-	"encoding/json"
-
-	"gopkg.in/yaml.v3"
-)
+import "gopkg.in/yaml.v3"
 
 // Where a run's calls to local listeners went, under the proven switch
 // (design v14 §3.1; release 1 = one run's process tree, release1-cut §5.1
@@ -52,8 +48,8 @@ type MockedRow struct {
 	// destination. A file writes it as containerKey, the name mocks.yaml
 	// gives it, so the same key reads the same in both files (never
 	// "container: container:..."); JSON, the agent's wire format, keeps
-	// container, so an agent and a CLI of different versions agree. Either
-	// name reads in either format (UnmarshalYAML, UnmarshalJSON).
+	// container, so an agent and a CLI of different versions agree. A file
+	// an earlier keploy wrote reads under container too (UnmarshalYAML).
 	Container string `json:"container,omitempty" yaml:"containerKey,omitempty"`
 	// PID and Exe are a host listener's process and its program; zero and
 	// "" for a container, for a destination nothing listens at (a recorded
@@ -65,42 +61,20 @@ type MockedRow struct {
 	Port uint16 `json:"port" yaml:"port"`
 }
 
-// mockedRowFields is MockedRow as it reads: its container key under
-// containerKey or container, in YAML and in JSON.
-type mockedRowFields struct {
-	Test         string `json:"test,omitempty" yaml:"test,omitempty"`
-	Addr         string `json:"addr" yaml:"addr"`
-	Container    string `json:"containerKey,omitempty" yaml:"containerKey,omitempty"`
-	OldContainer string `json:"container,omitempty" yaml:"container,omitempty"`
-	PID          int    `json:"pid,omitempty" yaml:"pid,omitempty"`
-	Exe          string `json:"exe,omitempty" yaml:"exe,omitempty"`
-	Port         uint16 `json:"port" yaml:"port"`
-}
-
-func (r *MockedRow) set(f mockedRowFields) {
-	*r = MockedRow{Test: f.Test, Addr: f.Addr, Container: f.Container, PID: f.PID, Exe: f.Exe, Port: f.Port}
-	if r.Container == "" {
-		r.Container = f.OldContainer
-	}
-}
-
 // UnmarshalYAML reads a row, its container key under containerKey or, as an
 // earlier keploy wrote it, container.
 func (r *MockedRow) UnmarshalYAML(n *yaml.Node) error {
-	var f mockedRowFields
+	type plain MockedRow
+	var f struct {
+		plain `yaml:",inline"`
+		Old   string `yaml:"container,omitempty"`
+	}
 	if err := n.Decode(&f); err != nil {
 		return err
 	}
-	r.set(f)
-	return nil
-}
-
-// UnmarshalJSON is UnmarshalYAML for a JSON row.
-func (r *MockedRow) UnmarshalJSON(data []byte) error {
-	var f mockedRowFields
-	if err := json.Unmarshal(data, &f); err != nil {
-		return err
+	*r = MockedRow(f.plain)
+	if r.Container == "" {
+		r.Container = f.Old
 	}
-	r.set(f)
 	return nil
 }

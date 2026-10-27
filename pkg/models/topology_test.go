@@ -2,7 +2,6 @@ package models
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -39,57 +38,12 @@ func TestAMockedRowNamesItsContainerAsTheMocksDo(t *testing.T) {
 			t.Fatalf("%q read as %+v", old, back)
 		}
 	}
-	for _, j := range []string{`{"addr":"[::1]:27019","container":"container:mongo:27017@s1b008db297fc","port":27019}`, `{"addr":"[::1]:27019","containerKey":"container:mongo:27017@s1b008db297fc","port":27019}`} {
-		var back MockedRow
-		if err := json.Unmarshal([]byte(j), &back); err != nil || back.Container != row.Container {
-			t.Fatalf("%s read as %+v, %v", j, back, err)
-		}
+	var back MockedRow
+	if err := json.Unmarshal(j, &back); err != nil || back != row {
+		t.Fatalf("%s read as %+v, %v", j, back, err)
 	}
-}
-
-// Every field of a mocked row reads back as it was written, in YAML and in
-// JSON (the agent's wire format): the reader copies the row field by field
-// (set), so a field added to MockedRow and not to that copy would read back
-// empty with no compile error. Each field is filled through reflection, so a
-// new one is filled too.
-func TestEveryFieldOfAMockedRowRoundTrips(t *testing.T) {
-	var row MockedRow
-	v := reflect.ValueOf(&row).Elem()
-	for i := 0; i < v.NumField(); i++ {
-		f := v.Field(i)
-		switch f.Kind() {
-		case reflect.String:
-			f.SetString("v" + v.Type().Field(i).Name)
-		case reflect.Int, reflect.Int64, reflect.Int32:
-			f.SetInt(int64(100 + i))
-		case reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uint:
-			f.SetUint(uint64(200 + i))
-		case reflect.Bool:
-			f.SetBool(true)
-		default:
-			t.Fatalf("MockedRow.%s is a %s: teach this test to fill it", v.Type().Field(i).Name, f.Kind())
-		}
-	}
-	y, err := yaml.Marshal(row)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fromYAML MockedRow
-	if err := yaml.Unmarshal(y, &fromYAML); err != nil {
-		t.Fatal(err)
-	}
-	if fromYAML != row {
-		t.Errorf("YAML read back %+v, want %+v (wrote %s)", fromYAML, row, y)
-	}
-	j, err := json.Marshal(row)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fromJSON MockedRow
-	if err := json.Unmarshal(j, &fromJSON); err != nil {
-		t.Fatal(err)
-	}
-	if fromJSON != row {
-		t.Errorf("JSON read back %+v, want %+v (wrote %s)", fromJSON, row, j)
+	// Every other field of a row reads back as it was written.
+	if err := yaml.Unmarshal(y, &back); err != nil || back != row {
+		t.Fatalf("%s read as %+v, %v", y, back, err)
 	}
 }
