@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
@@ -558,5 +560,73 @@ func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T)
 					got.files, got.fileNames, got.fields, file)
 			}
 		})
+	}
+}
+
+// While the memory guard has paused recording, a capture hook's skip closes
+// the exchange's bodies and counts the request as not recorded, on the ingress
+// connection its context names: a request that was in flight as the pause
+// began is not recorded, and the recording says so. Recording running, it
+// skips nothing and counts nothing.
+func TestSkipUnderPressureClosesAndCountsOnTheIngressConnection(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	ctx := syncMock.WithIngressConn(syncMock.NewContext(context.Background(), mgr), "10.0.0.1:5000 -> 127.0.0.1:8080")
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	reqBody := &trackCloser{Reader: strings.NewReader("in")}
+	req.Body = reqBody
+	respBody := &trackCloser{Reader: strings.NewReader("out")}
+	resp := &http.Response{StatusCode: http.StatusOK, Body: respBody}
+
+	if SkipUnderPressure(ctx, req, resp) || reqBody.closed || respBody.closed || mgr.NotRecordedUnderPressure().Total != 0 {
+		t.Fatal("recording running: skipped, closed a body or counted")
+	}
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	skipped := SkipUnderPressure(ctx, req, resp)
+	restore()
+	if !skipped || !reqBody.closed || !respBody.closed {
+		t.Fatalf("recording paused: skipped %v, request body closed %v, response body closed %v; want all", skipped, reqBody.closed, respBody.closed)
+	}
+	got := mgr.NotRecordedUnderPressure()
+	if got.Total != 1 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:8080"] != 1 {
+		t.Fatalf("not recorded under pressure: %+v, want the request on its connection", got)
+	}
+}
+
+// A gRPC call is left out for a pause of the memory guard when the guard has
+// paused recording now, or had as the forwarder read the call's request, and
+// each one left out is counted on the ingress connection its context names. A
+// call whose request was read while recording was not paused is not, however
+// close to a pause its request's time is: the gRPC ingress tees a
+// connection's whole stream through a pause, and only the calls the pause took
+// part in are its cost. A request read just after a pause, in the tick its
+// span ended in, is not in it: on a clock as coarse as Windows' the request's
+// time cannot tell, and the first call after every pause was left out.
+func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	ctx := syncMock.WithIngressConn(syncMock.NewContext(context.Background(), mgr), "10.0.0.1:5000 -> 127.0.0.1:50051")
+	// A span that holds every instant: the request's time must not decide.
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+
+	for _, c := range []struct {
+		what            string
+		pausedAtRequest bool
+		now             bool // the guard has paused recording now
+		want            bool
+	}{
+		{what: "a request read while recording was not paused, its time in a span"},
+		{what: "a request read during the pause, decided after it", pausedAtRequest: true, want: true},
+		{what: "a request read after the pause, decided during the next", now: true, want: true},
+		{what: "a request read during a pause, decided during it", pausedAtRequest: true, now: true, want: true},
+	} {
+		restore := memoryguard.SetRecordingPausedForTest(c.now)
+		got := SkipGRPCUnderPressure(ctx, c.pausedAtRequest)
+		restore()
+		if got != c.want {
+			t.Errorf("%s: left out %v, want %v", c.what, got, c.want)
+		}
+	}
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 3 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:50051"] != 3 {
+		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
 	}
 }

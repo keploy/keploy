@@ -54,7 +54,7 @@ func teeDropLoss(reason string) (models.CaptureLossKind, bool) {
 	switch reason {
 	case relay.DropConsumerGone:
 		return models.CaptureLossParserStall, true
-	case relay.DropPerConnCap, relay.DropMemoryPressure:
+	case relay.DropPerConnCap:
 		return models.CaptureLossDropped, true
 	}
 	return "", false

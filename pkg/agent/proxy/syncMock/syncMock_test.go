@@ -61,6 +61,76 @@ func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testin
 	}
 }
 
+// TestAPauseCostsTheMocksOfRequestsMadeDuringItWhenEverTheyAreDecoded pins
+// that a memory-guard pause costs the per-test mocks whose request was made
+// during it, however late the parser decodes them, and nothing else.
+//
+// The relay hands a parser the whole stream through a pause, so a parser that
+// lags can decode a request made during the pause after it has ended. The
+// ingress captured no test for that request, so such a mock is dropped and
+// counted, not buffered for no test to own. A mock of the connection's
+// lifetime (a prepared statement, a handshake) is kept whenever it was made:
+// the tests the connection serves after the pause need it.
+func TestAPauseCostsTheMocksOfRequestsMadeDuringItWhenEverTheyAreDecoded(t *testing.T) {
+	t.Parallel()
+	perTest := func(at time.Time) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at}}
+	}
+	ofConnection := func(at time.Time) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at, Metadata: map[string]string{"type": "connection"}}}
+	}
+	mgr := &SyncMockManager{}
+
+	mgr.SetMemoryPressure(true)
+	during := time.Now()
+	mgr.AddMock(ofConnection(during))
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("a connection's mock made during the pause was dropped (buffer %d): the tests the connection serves after it need it", len(mgr.buffer))
+	}
+	mgr.SetMemoryPressure(false)
+
+	mgr.AddMock(perTest(during))
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("a per-test mock of a request made during the pause, decoded after it, was kept (buffer %d): no test owns it", len(mgr.buffer))
+	}
+	if _, dropped, _, _ := mgr.GetDropStats(); dropped != 1 {
+		t.Fatalf("mocks dropped by pressure = %d, want 1: what a pause costs is counted", dropped)
+	}
+	mgr.AddMock(ofConnection(during))
+	mgr.AddMock(perTest(time.Now()))
+	if len(mgr.buffer) != 3 {
+		t.Fatalf("buffer %d after a connection's mock of the pause and a per-test mock after it, want 3", len(mgr.buffer))
+	}
+}
+
+// TestTheBufferWipeOfAPauseKeepsAConnectionsMocksOfAnEarlierPause pins the
+// same rule in the wipe a pause starts with: a connection's mock whose request
+// was made during an earlier pause stays buffered, and a per-test one made
+// then is wiped (it can only be there if it was buffered before that pause's
+// rule reached AddMock, which the row above pins it no longer is).
+func TestTheBufferWipeOfAPauseKeepsAConnectionsMocksOfAnEarlierPause(t *testing.T) {
+	t.Parallel()
+	// Past the startup window, whose mocks every wipe keeps whatever else.
+	mgr := &SyncMockManager{firstReqSeen: true, resolvedTestCount: models.StartupMockTestCaseWindow}
+	mgr.SetMemoryPressure(true)
+	during := time.Now()
+	mgr.SetMemoryPressure(false)
+	ofConnection := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: during, Metadata: map[string]string{"type": "connection"}}}
+	ofConnection.DeriveLifetime()
+	perTest := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: during}}
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, ofConnection, perTest)
+	mgr.mu.Unlock()
+
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != ofConnection {
+		t.Fatalf("the wipe left %d mocks, want only the connection's mock of the earlier pause", len(mgr.buffer))
+	}
+}
+
 // TestAddMockAfterCloseDropsSilently exercises the shutdown path:
 // once CloseOutChan has fired, AddMock must silently drop (no panic,
 // no send) instead of racing a closed channel. Previously this was

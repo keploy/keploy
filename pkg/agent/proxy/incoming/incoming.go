@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -523,8 +524,11 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// Pass replayConn so RecordIncoming sees the full byte stream including
 		// the preface. RecordIncoming's forwardAndTee will forward everything
 		// (including the preface) to the upstream app, which is what cmux needs
-		// to see the original handshake.
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
+		// to see the original handshake. The context names the connection
+		// for the count of the calls a pause of the memory guard costs
+		// (hooksUtils.SkipGRPCUnderPressure).
+		grpcCtx := syncMock.WithIngressConn(ctx, ingressConnName(clientConn, finalAppAddr))
+		grpc.RecordIncoming(grpcCtx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}

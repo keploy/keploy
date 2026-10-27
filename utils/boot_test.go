@@ -293,6 +293,49 @@ func TestReportBootProgressToWritesNextToTheTeardownFile(t *testing.T) {
 	}
 }
 
+// StopTeardownReporting ends the agent's boot reporters as it ends its
+// teardown reporters, and returns once neither writes any more: a test that
+// ran the agent command stops them all before it removes the directory they
+// write in. A boot reporter it left running wrote its next report (a temporary
+// file, then the rename) into that directory while the test's cleanup removed
+// it, which failed the cleanup with "directory not empty".
+func TestStopTeardownReportingEndsTheBootReporters(t *testing.T) {
+	resetBoot(t)
+	ctx, cancel := context.WithCancel(context.Background()) // the agent never stops
+	defer cancel()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReportBootProgressTo(ctx, zap.NewNop(), filepath.Join(dir, "teardown.json")); err != nil {
+		t.Fatal(err)
+	}
+	exited := ReportBootProgress(ctx, zap.NewNop(), filepath.Join(t.TempDir(), BootProgressFileName))
+	if n := reporting.live.Load(); n != 2 {
+		t.Fatalf("%d reporters StopTeardownReporting would end, want both boot reporters", n)
+	}
+	BootStep("a step") // neither reporter's start is over
+
+	stopped := make(chan struct{})
+	go func() { StopTeardownReporting(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(time.Minute): // only turns a hang into a failure
+		t.Fatal("StopTeardownReporting never returned: a boot reporter it should have ended still runs")
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("a boot reporter still runs after StopTeardownReporting returned")
+	}
+	if n := reporting.live.Load(); n != 0 {
+		t.Fatalf("%d reporters still running after StopTeardownReporting returned", n)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("a stopped boot reporter's directory does not come away: %v", err)
+	}
+}
+
 // redactingSecret is a redactor that replaces "hunter2".
 type redactingSecret struct{}
 

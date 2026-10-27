@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
@@ -146,5 +149,40 @@ func TestMakeAgentReady_NoReadinessFileOn503(t *testing.T) {
 	}
 	if _, err := os.Stat(readyFile); err != nil {
 		t.Fatalf("after CA ready: expected agent.ready on disk: %v", err)
+	}
+}
+
+// A gRPC test case is checked against the recording's spans by its own window
+// (GrpcReq to GrpcResp), as an HTTP one is by its HTTPReq and HTTPResp: one a
+// pause of the memory guard overlapped, or a hole in a connection's capture,
+// is left out, and one clear of both is streamed. Read as an HTTP test case's,
+// its window was zero, on which the span checks make no claim, so every gRPC
+// test case was streamed, without the mocks a pause or a hole had cost it.
+func TestHandleIncoming_ChecksAGRPCTestCaseByItsOwnWindow(t *testing.T) {
+	syncmgr.Get().SetWatermark(nil)
+	tcs := make(chan *models.TestCase, 3)
+	resp := openStream(t, tcs)
+	grpcCase := func(name string, at time.Time) *models.TestCase {
+		return &models.TestCase{Name: name, Kind: models.GRPC_EXPORT,
+			GrpcReq: models.GrpcReq{Timestamp: at}, GrpcResp: models.GrpcResp{Timestamp: at.Add(time.Millisecond)}}
+	}
+
+	// A hole, in a stretch of its own: no span of another test reaches it.
+	start := newStretch()
+	if over, n := syncmgr.Get().WasMockOrphanedInWindow(start, start.Add(30*time.Second)); over {
+		t.Fatalf("%d spans recorded before this test already cover its test cases", n)
+	}
+	syncmgr.Get().RecordOrphanWindow(start, start.Add(time.Millisecond))
+	// A pause, on the clock the memory guard's spans are on.
+	syncmgr.Get().SetMemoryPressure(true)
+	during := time.Now()
+	syncmgr.Get().SetMemoryPressure(false)
+
+	tcs <- grpcCase("over-a-hole", start)
+	tcs <- grpcCase("over-a-pause", during)
+	tcs <- grpcCase("clean", start.Add(20*time.Second))
+	close(tcs)
+	if got := streamedNames(t, resp); len(got) != 1 || got[0] != "clean" {
+		t.Fatalf("streamed %v, want only [clean]", got)
 	}
 }

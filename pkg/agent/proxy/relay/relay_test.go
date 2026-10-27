@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
@@ -241,36 +242,67 @@ func TestTimestampsStampedAtRealBoundary(t *testing.T) {
 	}
 }
 
-func TestTeeDropOnMemoryGuard(t *testing.T) {
-	t.Parallel()
-	var pressure atomic.Bool
-	pressure.Store(true)
+// TestAMemoryGuardPauseKeepsTheCapturedStreamWhole pins that a memory-guard
+// pause does not cut a connection's captured byte stream.
+//
+// The tee used to refuse every chunk while the guard paused recording. A pooled
+// MySQL connection that carried one command during a half-second pause then
+// had a hole in its stream; the MySQL parser cannot re-anchor after one, so the
+// connection was never captured again, and every test it served for the rest
+// of the recording was suppressed. Not parallel: the pause is the process's.
+func TestAMemoryGuardPauseKeepsTheCapturedStreamWhole(t *testing.T) {
 	drops := newDropSink()
-
+	var desyncs atomic.Int32
+	// The relay forwards a chunk before it tees it, so the destination having
+	// it does not say the tee has seen it: OnCarried, after the tee, does.
+	carried := make(chan bool, 4)
 	h := newHarness(t, Config{
-		MemoryGuardCheck:     pressure.Load,
 		OnMarkMockIncomplete: drops.record,
+		OnCaptureDesync:      func(string) bool { desyncs.Add(1); return true },
+		OnCarried: func(dir fakeconn.Direction, _ time.Time, teed bool, _ int64) {
+			if dir == fakeconn.FromClient {
+				carried <- teed
+			}
+		},
 	})
 
-	// Forward traffic under memory pressure. Real traffic still flows.
-	go h.writeClient([]byte("visible"))
-	got := h.readDest(len("visible"))
-	if string(got) != "visible" {
-		t.Fatalf("dest got %q, want %q", got, "visible")
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	t.Cleanup(restore)
+	go h.writeClient([]byte("during"))
+	if got := h.readDest(len("during")); string(got) != "during" {
+		t.Fatalf("dest got %q, want %q", got, "during")
+	}
+	if teed := <-carried; !teed {
+		t.Fatal("the chunk sent during the pause was not teed")
+	}
+	restore()
+	go h.writeClient([]byte("after"))
+	if got := h.readDest(len("after")); string(got) != "after" {
+		t.Fatalf("dest got %q, want %q", got, "after")
+	}
+	if teed := <-carried; !teed {
+		t.Fatal("the chunk sent after the pause was not teed")
 	}
 
-	// But the FakeConn does not receive the chunk.
-	_ = h.r.ClientStream().SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	_, err := h.r.ClientStream().ReadChunk()
-	if err == nil {
-		t.Fatalf("ClientStream should have timed out, got chunk")
+	// The parser is handed both, in order: the one sent during the pause and
+	// the one after it. The mock manager, not the tee, decides what a pause
+	// costs (syncMock.SyncMockManager.AddMock).
+	var got []byte
+	for len(got) < len("duringafter") {
+		c, err := h.r.ClientStream().ReadChunk()
+		if err != nil {
+			t.Fatalf("the parser's stream ended after %q: %v", got, err)
+		}
+		got = append(got, c.Bytes...)
 	}
-	if !errors.Is(err, fakeconn.ErrDeadlineExceeded) && err.(net.Error).Timeout() != true {
-		t.Fatalf("expected deadline error, got %v", err)
+	if string(got) != "duringafter" {
+		t.Fatalf("the parser read %q, want %q", got, "duringafter")
 	}
-
-	if drops.count(DropMemoryPressure) == 0 {
-		t.Fatalf("expected memory_pressure drop reason, got %v", drops.snapshot())
+	if snap := drops.snapshot(); len(snap) != 0 {
+		t.Fatalf("the tee dropped %v during a memory-guard pause", snap)
+	}
+	if n := desyncs.Load(); n != 0 {
+		t.Fatalf("the connection's capture desynced %d times over a memory-guard pause", n)
 	}
 }
 

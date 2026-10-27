@@ -74,15 +74,54 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
+// SkipUnderPressure reports whether the memory guard has paused recording, as
+// a capture hook decides whether to record an exchange. When it has, it closes
+// the exchange's bodies, so the proxied connection's readers do not leak, and
+// counts the request as not recorded under pressure on the ingress connection
+// ctx names (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the
+// recording says what the pause cost. A capture hook asks it first and returns
+// when it says true.
+func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Response) bool {
+	if !memoryguard.IsRecordingPaused() {
+		return false
+	}
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+	return true
+}
+
+// SkipGRPCUnderPressure reports whether a pause of the memory guard costs a
+// gRPC call, as CaptureGRPC decides whether to record it: the guard has
+// paused recording now, or had as the forwarder read the call's request
+// (pausedAtRequest, pkg.HTTP2Stream.RequestPaused). When it does, it counts
+// the call as not recorded under pressure on the ingress connection ctx names
+// (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the recording
+// says what the pause cost.
+//
+// The gRPC ingress tees a connection's whole stream through a pause, so its
+// calls come here whenever they complete: whether the pause was on as the
+// request was read is what puts a call in it, as an HTTP ingress reads the
+// pause as a request comes. The request's time cannot: a pause's span ends at
+// the instant the pause does, and on a clock as coarse as Windows' the next
+// call's request is stamped in that same tick, so the first call after every
+// pause was judged to be in it. A call whose request came before a pause that
+// has ended by its response is captured, and the recording suppresses it for
+// the overlap (WasPressureActiveInWindow), as it does an HTTP exchange's.
+func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
+	paused := pausedAtRequest || memoryguard.IsRecordingPaused()
+	if paused {
+		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+	}
+	return paused
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
-	if memoryguard.IsRecordingPaused() {
-		// Close bodies even when skipping capture to avoid resource leaks.
-		if req.Body != nil {
-			req.Body.Close()
-		}
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
+	if SkipUnderPressure(ctx, req, resp) {
 		return
 	}
 
@@ -564,11 +603,10 @@ func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
 //   - Counter is always incremented so concurrent duplicate streams each get a
 //     unique window name; keep=false discards their mocks without saving the TC.
 //   - Duplicate streams return after ResolveRange, before the test case is sent.
+//
+// A call a pause of the memory guard costs (SkipGRPCUnderPressure) is left out
+// and counted before any of that.
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
-	if memoryguard.IsRecordingPaused() {
-		return
-	}
-
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -576,6 +614,10 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	if http2Stream.GRPCReq == nil || http2Stream.GRPCResp == nil {
 		logger.Error("gRPC request or response is nil")
+		return
+	}
+
+	if SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
 		return
 	}
 
