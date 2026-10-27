@@ -33,6 +33,27 @@ func unmadeRecording(name string, kind models.Kind, ms int, op, q string) *model
 
 func unmadeIsWrite(mk *models.Mock) bool { return mk.Spec.Metadata["op"] == "write" }
 
+// unmadeGates is what a parser says of chosen: nil for a write (it reads
+// nothing a write changes), else whether a recording is a write that can
+// change what chosen reads: one of the same namespace ("ns"), or of none
+// named (its reach unknown: it holds every read).
+func unmadeGates(chosen *models.Mock) func(*models.Mock) bool {
+	if chosen == nil || unmadeIsWrite(chosen) {
+		return nil
+	}
+	ns := chosen.Spec.Metadata["ns"]
+	return func(w *models.Mock) bool {
+		wns := w.Spec.Metadata["ns"]
+		return unmadeIsWrite(w) && (wns == "" || ns == "" || wns == ns)
+	}
+}
+
+// inNs is mk read or written in namespace ns.
+func inNs(mk *models.Mock, ns string) *models.Mock {
+	mk.Spec.Metadata["ns"] = ns
+	return mk
+}
+
 func unmadeSame(q string) func(*models.Mock) bool {
 	return func(mk *models.Mock) bool { return mk.Spec.Metadata["q"] == q }
 }
@@ -70,7 +91,7 @@ func viewCopy(t *testing.T, db integrations.MockMemDb, name string) *models.Mock
 
 func answer(t *testing.T, db integrations.MockMemDb, chosen *models.Mock, q string) integrations.BeforeUnmadeWrite {
 	t.Helper()
-	got, err := integrations.ReadBeforeUnmadeWrite(db, chosen, unmadeIsWrite, unmadeSame(q))
+	got, err := integrations.ReadBeforeUnmadeWrite(db, chosen, unmadeGates(chosen), unmadeSame(q))
 	if err != nil {
 		t.Fatalf("ReadBeforeUnmadeWrite: %v", err)
 	}
@@ -173,6 +194,29 @@ func TestUnmadeWrite_AReadBetweenTwoWritesIsAnsweredFromBetweenThem(t *testing.T
 
 // What is no read before one of the open test's own unmade writes keeps its
 // choice.
+// Only a write that can change what the read reads holds it: the parser
+// says which (gates). A write elsewhere the replay has not made, recorded
+// before the read, leaves the read its own recording, and the write the
+// read is held to is the first of those that can change it, past any
+// write elsewhere recorded before that one.
+func TestUnmadeWrite_OnlyAWriteThatCanChangeTheReadHoldsIt(t *testing.T) {
+	list1 := inNs(unmadeRecording("list-t1", models.Mongo, 0, "read", "list"), "oauth.blocklist")
+	audit := inNs(unmadeRecording("audit-t2", models.Mongo, 1000, "write", "audit"), "oauth.audit")
+	block := inNs(unmadeRecording("block-t2", models.Mongo, 1005, "write", "block"), "oauth.blocklist")
+	list2 := inNs(unmadeRecording("list-t2", models.Mongo, 1010, "read", "list"), "oauth.blocklist")
+
+	mm := unmadeStage(t, []*models.Mock{list1, audit, list2}, "test-2", audit, list2)
+	if got := answer(t, mm, viewCopy(t, mm, "list-t2"), "list"); got.Applies() {
+		t.Fatalf("a read held to %s, a write to another collection; want its own recording", got.Write.Name)
+	}
+
+	mm = unmadeStage(t, []*models.Mock{list1, audit, block, list2}, "test-2", audit, block, list2)
+	got := answer(t, mm, viewCopy(t, mm, "list-t2"), "list")
+	if !got.Applies() || got.Write.Name != "block-t2" || answerName(got) != "list-t1" {
+		t.Fatalf("held to %v answered by %q; want block-t2, answered by list-t1", got.Write, answerName(got))
+	}
+}
+
 func TestUnmadeWrite_WhatIsNoReadBeforeAnUnmadeWriteKeepsItsChoice(t *testing.T) {
 	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
 	block := unmadeRecording("block-t2", models.Mongo, 1000, "write", "block")

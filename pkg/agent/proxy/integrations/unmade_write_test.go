@@ -69,26 +69,25 @@ func TestReadBeforeUnmadeWrite_WhatTheStoreCannotTellKeepsTheChoiceOrFails(t *te
 		name    string
 		db      MockMemDb
 		chosen  *models.Mock
-		isWrite func(*models.Mock) bool
+		gates   func(*models.Mock) bool
 		same    func(*models.Mock) bool
 		applies bool
 		answer  string
 		err     error
 	}{
-		{name: "exact serving off", db: unmadeStore{exactStore: exactStore{exact: false}, write: write}, chosen: chosen, isWrite: isWriteRec, same: sameRead},
-		{name: "a store that cannot tell an unmade write", db: exactStore{exact: true}, chosen: chosen, isWrite: isWriteRec, same: sameRead},
-		{name: "no write is unmade", db: unmadeStore{exactStore: exactStore{exact: true}}, chosen: chosen, isWrite: isWriteRec, same: sameRead},
-		{name: "a store that names no unmade write", db: noWriteStore{exact}, chosen: chosen, isWrite: isWriteRec, same: sameRead},
-		{name: "a write chosen is no read", db: rangingStore{exact}, chosen: write, isWrite: isWriteRec, same: sameRead},
-		{name: "no recording chosen", db: rangingStore{exact}, isWrite: isWriteRec, same: sameRead},
-		{name: "no write classifier", db: rangingStore{exact}, chosen: chosen, same: sameRead},
-		{name: "no comparison", db: rangingStore{exact}, chosen: chosen, isWrite: isWriteRec},
-		{name: "a store that cannot read what was recorded before", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}, chosen: chosen, isWrite: isWriteRec, same: sameRead, applies: true, err: errNoEarlierRecordings},
-		{name: "the test's own answered recording, read without the recording", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: []*models.Mock{earlier}}, chosen: chosen, isWrite: isWriteRec, same: sameRead, applies: true, answer: "r0"},
-		{name: "the recording's", db: rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}}, chosen: chosen, isWrite: isWriteRec, same: sameRead, applies: true, answer: "r0"},
+		{name: "exact serving off", db: unmadeStore{exactStore: exactStore{exact: false}, write: write}, chosen: chosen, gates: isWriteRec, same: sameRead},
+		{name: "a store that cannot tell an unmade write", db: exactStore{exact: true}, chosen: chosen, gates: isWriteRec, same: sameRead},
+		{name: "no write is unmade", db: unmadeStore{exactStore: exactStore{exact: true}}, chosen: chosen, gates: isWriteRec, same: sameRead},
+		{name: "a store that names no unmade write", db: noWriteStore{exact}, chosen: chosen, gates: isWriteRec, same: sameRead},
+		{name: "no recording chosen", db: rangingStore{exact}, gates: isWriteRec, same: sameRead},
+		{name: "a recording that reads nothing a write changes (a write: no gates)", db: rangingStore{exact}, chosen: write, same: sameRead},
+		{name: "no comparison", db: rangingStore{exact}, chosen: chosen, gates: isWriteRec},
+		{name: "a store that cannot read what was recorded before", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, err: errNoEarlierRecordings},
+		{name: "the test's own answered recording, read without the recording", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
+		{name: "the recording's", db: rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ReadBeforeUnmadeWrite(tc.db, tc.chosen, tc.isWrite, tc.same)
+			got, err := ReadBeforeUnmadeWrite(tc.db, tc.chosen, tc.gates, tc.same)
 			if !errors.Is(err, tc.err) {
 				t.Fatalf("err = %v; want %v", err, tc.err)
 			}
@@ -148,6 +147,17 @@ func TestReportAnswered_NamesTheWriteAndTheRecordingThatAnswered(t *testing.T) {
 	lines := models.BeforeWriteLines("test-2", []models.UnmatchedCall{{Protocol: rep.Protocol, ActualSummary: rep.ActualSummary, ClosestMock: rep.ClosestMock, NextSteps: rep.NextSteps, Answer: rep.Answer}})
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], "test-2: MongoDB find oauth.blocklist: an extra read before mock-7, answered from mock-3: ") {
 		t.Fatalf("BeforeWriteLines = %q, want the test, the call, the write and the answer", lines)
+	}
+
+	// The parser's account of the write names what it changes, in the
+	// report and in the miss.
+	says := BeforeUnmadeWrite{Write: write, Answer: answer, WriteSays: "an insert into oauth.blocklist"}
+	if want := "an extra read before mock-7 (an insert into oauth.blocklist), answered from mock-3: "; !strings.HasPrefix(says.Answered(), want) {
+		t.Fatalf("Answered() = %q, want it to begin %q", says.Answered(), want)
+	}
+	says.Answer = nil
+	if want := "an extra read before mock-7 (an insert into oauth.blocklist) ("; !strings.HasPrefix(says.Note(), want) {
+		t.Fatalf("Note() = %q, want it to begin %q", says.Note(), want)
 	}
 
 	got = nil
