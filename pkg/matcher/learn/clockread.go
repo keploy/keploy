@@ -102,18 +102,45 @@ func readClockTextWall(s string) (time.Time, time.Duration, bool, bool) {
 
 // wallZone is the zone a replay reads a wall clock of no zone in
 // (models.ClockOffset.Zone) that the learn step learns as a plain read of
-// the application's clock, recorded as rt (its reading in UTC) in the call
-// recorded at call: models.ZoneUTC where the learn step reads such a clock
-// in UTC alone (the cache's zone is nil); otherwise the zone of its
-// recorded reading nearest call, one no later than call first
-// (nearestZone). A value is in a call only once the application read it, so
-// a window that holds it in one zone alone, narrower than the zone's offset
-// from UTC as a call's window is, holds that reading: the one nearest its
-// call. The replay checks the value in that zone alone (clockReadIn), so a
-// value read in another fails there, named.
-func (dc *DriftCache) wallZone(rt, call time.Time) string {
+// the application's clock, rt and lt its readings in UTC as recorded and as
+// record's full round saw it, each at the resolution its encoding writes
+// (rres, lres), in the call recorded at call whose window is w (nil: none):
+// models.ZoneUTC where the learn step reads such a clock in UTC alone (the
+// cache's zone is nil). Otherwise the zone the recording tells at the
+// value's resolution: of a call with a window, the zone in which w holds
+// the reading in both runs; with none, the zone whose reading, a unit of
+// the value long, holds the call (a date: the day of the call in that
+// zone). Where both do (the call falls in one day of a date in UTC and in
+// the application's zone), or the two readings are one instant (the
+// application's zone is UTC there), the recording cannot tell the two
+// apart: models.ZoneEither, which a replay passes read in either, so its
+// verdict on the application's own value is one at every hour of the day,
+// whichever of the two zones the application writes. Where neither does (a
+// read no window holds that the lead showed, or one made before its call),
+// the zone of its recorded reading nearest the call (nearestZone). The
+// replay checks the value in that zone alone (clockReadIn), so a value read
+// in another fails there, named.
+func (dc *DriftCache) wallZone(rt, lt time.Time, rres, lres time.Duration, w *Window, call time.Time) string {
 	if dc.zone == nil {
 		return models.ZoneUTC
+	}
+	rz, lz := wallIn(rt.UnixNano(), dc.zone), wallIn(lt.UnixNano(), dc.zone)
+	if rz.Equal(rt) && lz.Equal(lt) {
+		return models.ZoneEither
+	}
+	in := func(r, l time.Time) bool {
+		if w != nil {
+			return w.Rec.holds(r, rres) && w.F.holds(l, lres)
+		}
+		return !call.IsZero() && !r.After(call) && call.Before(r.Add(rres))
+	}
+	switch utc, app := in(rt, lt), in(rz, lz); {
+	case utc && app:
+		return models.ZoneEither
+	case utc:
+		return models.ZoneUTC
+	case app:
+		return models.ZoneApp
 	}
 	return nearestZone(rt, call, dc.zone)
 }
@@ -148,16 +175,17 @@ func nearestZone(rt, call time.Time, zone *time.Location) string {
 }
 
 // textReadZone is the Zone of textClockRead's read of a text recorded as rec
-// and seen in record's full round as live, in the call recorded at call: of
-// a wall clock of no zone in both (readClockTextWall), the zone wallZone
-// reads it in; "" where either names its zone, read as it names it.
-func (dc *DriftCache) textReadZone(rec, live string, call time.Time) string {
-	rt, _, rwall, okR := readClockTextWall(rec)
-	_, _, lwall, okL := readClockTextWall(live)
+// and seen in record's full round as live, in the call recorded at call
+// whose window is w (nil: none): of a wall clock of no zone in both
+// (readClockTextWall), the zone wallZone reads it in; "" where either names
+// its zone, read as it names it.
+func (dc *DriftCache) textReadZone(rec, live string, w *Window, call time.Time) string {
+	rt, rres, rwall, okR := readClockTextWall(rec)
+	lt, lres, lwall, okL := readClockTextWall(live)
 	if !okR || !okL || !rwall || !lwall {
 		return ""
 	}
-	return dc.wallZone(rt, call)
+	return dc.wallZone(rt, lt, rres, lres, w, call)
 }
 
 // textClockRead is Learned.Read of a text or number leaf recorded as rec
@@ -197,34 +225,51 @@ func clockReadOf(l Leaf) (at time.Time, res time.Duration, wall, typed, ok bool)
 }
 
 // clockReadIn reads live, the leaf a replay's call carries at a place the
-// learn step learned as o, as the instant of the clock read o's Zone says
+// learn step learned as o, as the instants of the clock read o's Zone says
 // it is (models.ClockOffset.Zone), in zone, the application's
-// (Span.Zone): a wall clock of no zone in UTC (models.ZoneUTC) or as the
-// wall clock of zone (models.ZoneApp, wallIn); of a Zone of "", as the
+// (Span.Zone): a wall clock of no zone in UTC (models.ZoneUTC), as the
+// wall clock of zone (models.ZoneApp, wallIn), or both, each a reading the
+// replay passes where it holds (models.ZoneEither); of a Zone of "", as the
 // value names its moment, or a text of no zone in UTC, as a replay read it
 // before Zone was learned (a typed wall clock is none then). Otherwise why
 // it reads none, after "<path> was learned as <o>, <read>": the value is no
 // instant keploy reads, it names its zone where the learn step read a wall
-// clock of no zone, or o reads in the application's zone and the replay
-// cannot tell it (zone nil).
-func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) (time.Time, time.Duration, string) {
+// clock of no zone, or o reads in the application's zone (alone or as one
+// of the two) and the replay cannot tell it (zone nil).
+func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) ([]time.Time, time.Duration, string) {
 	at, res, wall, typed, ok := clockReadOf(live)
 	if !ok || o.Zone == "" && wall && typed {
-		return time.Time{}, 0, ", and the value this call carries is no instant keploy reads: it changed"
+		return nil, 0, ", and the value this call carries is no instant keploy reads: it changed"
 	}
 	switch o.Zone {
-	case models.ZoneUTC, models.ZoneApp:
+	case models.ZoneUTC, models.ZoneApp, models.ZoneEither:
 		if !wall {
-			return time.Time{}, 0, ", and the value this call carries names its zone, where the learn step read a wall clock of no zone: it changed"
+			return nil, 0, ", and the value this call carries names its zone, where the learn step read a wall clock of no zone: it changed"
 		}
-		if o.Zone == models.ZoneApp {
-			if zone == nil {
-				return time.Time{}, 0, ", which a replay reads in the application's zone, but keploy cannot tell the application's zone at this call, so it refuses the value rather than read it in another zone"
-			}
-			at = wallIn(at.UnixNano(), zone)
+		if o.Zone == models.ZoneUTC {
+			break
+		}
+		if zone == nil {
+			return nil, 0, ", which a replay reads in the application's zone, but keploy cannot tell the application's zone at this call, so it refuses the value rather than read it in another zone"
+		}
+		if o.Zone == models.ZoneEither {
+			return []time.Time{at, wallIn(at.UnixNano(), zone)}, res, ""
+		}
+		at = wallIn(at.UnixNano(), zone)
+	}
+	return []time.Time{at}, res, ""
+}
+
+// holdsAny reports whether o holds one of ats, the readings clockReadIn
+// gives a replay's value, at resolution res in the span from from to to
+// (models.ClockOffset.Holds).
+func holdsAny(o models.ClockOffset, ats []time.Time, res time.Duration, from, to time.Time) bool {
+	for _, at := range ats {
+		if o.Holds(at, res, from, to) {
+			return true
 		}
 	}
-	return at, res, ""
+	return false
 }
 
 // ClockReadHolds reports whether live, the leaf a replay's call carries at a
@@ -232,17 +277,17 @@ func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) (time.Tim
 // models.MockSpec.Clocks holds it), is such a read: an instant made in s,
 // the call's span on the application's clock (ClockSpanFrom), plus o's
 // offset, read at the resolution its own form writes and in the zone o's
-// Zone says (clockReadIn; models.ClockOffset.Holds; of a plain read, a read
-// in s itself). False for a live value that reads as no instant (another
-// type, a text that is not one instant whole), one clockReadIn reads in no
-// zone, and for every value where s is no span (its From is zero): it fails
-// closed.
+// Zone says, or in either of the two it names (clockReadIn;
+// models.ClockOffset.Holds; of a plain read, a read in s itself). False for
+// a live value that reads as no instant (another type, a text that is not
+// one instant whole), one clockReadIn reads in no zone, and for every value
+// where s is no span (its From is zero): it fails closed.
 func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
-	at, res, why := clockReadIn(o, live, s.Zone)
+	ats, res, why := clockReadIn(o, live, s.Zone)
 	if why != "" {
 		return false
 	}
-	return o.Holds(at, res, s.From, s.To)
+	return holdsAny(o, ats, res, s.From, s.To)
 }
 
 // CheckClockRead is a replay's check of live, the leaf its call carries at
@@ -277,14 +322,14 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if !known {
 		return false, learned + ", which a replay checks against its call's window on the application's clock, but keploy cannot tell the application's clock at this call (no time hooks report it, or they could not tell it here), so it refuses the value rather than pass it unchecked"
 	}
-	at, res, why := clockReadIn(o, live, s.Zone)
+	ats, res, why := clockReadIn(o, live, s.Zone)
 	if why != "" {
 		return false, learned + why
 	}
 	if o.CutCoarserThan(res) {
 		return false, learned + ", at a resolution of " + models.ShortDuration(o.Res) + " (both of the learn step's values were whole multiples of it), coarser than the " + models.ShortDuration(res) + " this value's encoding writes: the application cuts its value, and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
-	if o.Holds(at, res, s.From, s.To) {
+	if holdsAny(o, ats, res, s.From, s.To) {
 		return true, ""
 	}
 	return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed"
