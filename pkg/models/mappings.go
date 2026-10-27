@@ -81,6 +81,15 @@ type MockEntry struct {
 	// Owner running beside it, as judging kept it. Read and kept by each
 	// rewrite, whatever the switch.
 	Drift bool `json:"drift,omitempty" yaml:"drift,omitempty" bson:"drift,omitempty"`
+	// Background is, on an entry of a test's list, why keploy's judging found
+	// its call to be the application's own background work (a timer, a
+	// start-up job, a delayed write) that happened to land in this test's
+	// window, in words: the test is served it in its window when it makes the
+	// call, and is never failed for not making it (MockManager.SetUnrequired).
+	// Empty on every other entry, which a test must make as recorded. Written
+	// by judging under the proven switch only; read and kept by each rewrite,
+	// whatever the switch.
+	Background string `json:"background,omitempty" yaml:"background,omitempty" bson:"background,omitempty"`
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy

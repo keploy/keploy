@@ -674,6 +674,9 @@ func (m *MockManager) ResetForReplaySession() {
 	// Nor its scope table's pool names (SetPoolNames): until the next
 	// session sends its own, whose mock is the pool's is not known.
 	m.exact.poolNames.Store(nil)
+	// Nor which of its recordings no test is required to make
+	// (SetUnrequired): the next session's staging names its own.
+	m.exact.unrequired.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}
