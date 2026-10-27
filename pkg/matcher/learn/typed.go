@@ -539,12 +539,19 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
 		// A read of the clock plus a constant offset (a time to live, a
 		// due date), in its call's window in both runs: compared, never
-		// noise.
-		// Not in a client test: keploy mock's harness gives the
-		// application inputs keploy does not see, which may be such a
-		// value too (clientTestWhy says so).
-		if off, cutWhy, ok := offsetReading(fieldName(ln.Recorded), rt, lt, w); ok && !dc.clientTests {
-			return dc.clockOffset(ln, off, max(rt.res, lt.res), w, unread, rec, resp)
+		// noise. In keploy mock's client tests too: a value the harness
+		// gives the application is compared all the same (the replay
+		// checks the offset, never lets it pass), and one built on a read
+		// made before its call's window shows no offset coarser than a
+		// second (clockOffset refuses it), as a read the application made
+		// earlier stands from the window by how long ago it was made.
+		// There the offset rule only learns: where it refuses, the client
+		// test's own refusal stands (clientTestWhy), which says how to
+		// correct a value the harness supplies.
+		if off, cutWhy, ok := offsetReading(fieldName(ln.Recorded), rt, lt, w); ok {
+			if got := dc.clockOffset(ln, off, max(rt.res, lt.res), w, unread, rec, resp); got.Kind == KindClockOffset || !dc.clientTests {
+				return got
+			}
 		} else if cutWhy != "" && !dc.clientTests {
 			ln.Kind, ln.Why = KindUnaccounted, cutWhy
 			return ln
@@ -900,6 +907,46 @@ func (dc *DriftCache) clockOffset(ln Learned, off models.ClockOffset, enc time.D
 		ln.Kind, ln.Offset, ln.Why = KindClockOffset, &off, clockOffsetEvidence(path, off)
 	}
 	return ln
+}
+
+// textClockOffset is classifyRead's reading, in keploy mock's client tests,
+// of a drifted text (r as recorded, l as record's full round saw it, v what
+// changed) that its call's window w holds as no plain read of the
+// application's clock (clientTestUnread): where each is one instant whole
+// that names its moment (readClockTextWall: an epoch's digits, a time with
+// its zone), both written in one layout, and w holds the two as a read of
+// each run's clock plus one constant offset (clockOffsetOf), that offset,
+// learned as classifyInstant learns a typed one (clockOffset: only for a
+// caller whose replay compares it, in a unit coarser than a second, and the
+// rest of its checks), in the text's layout, which a replay reads its value
+// in. ok is false where no offset is learned (the value is no such instant,
+// a wall clock of no zone, which stands from the clock by its zone's offset
+// as much as by one the application adds; the two runs wrote two layouts; w
+// shows no one offset; or clockOffset refuses it), and the client test's
+// refusal stands, as the typed reading's does (classifyInstant).
+func (dc *DriftCache) textClockOffset(r, l Leaf, v *valueDrift, w *Window, resp []Leaf) (Learned, bool) {
+	rat, rres, rwall, okR := readClockTextWall(r.Value)
+	lat, lres, lwall, okL := readClockTextWall(l.Value)
+	if !okR || !okL || rwall || lwall {
+		return Learned{}, false
+	}
+	lay := models.ClockOffset{Layout: clockTextLayout(r.Value)}.MeetLayout(clockTextLayout(l.Value))
+	if lay == "" || lay == models.LayoutApart {
+		return Learned{}, false
+	}
+	off, ok := clockOffsetOf(typedInstant{at: rat, res: rres, names: namesMoment}, typedInstant{at: lat, res: lres, names: namesMoment}, w)
+	if !ok {
+		return Learned{}, false
+	}
+	// The recorded moment the echo check reads the call's answer for.
+	for _, p := range v.instants {
+		if p.rec.key.at == rat.UnixNano() {
+			off.Layout = lay
+			got := dc.clockOffset(Learned{Kind: KindNoise, Recorded: r, Live: l}, off, max(rres, lres), w, "", p.rec, resp)
+			return got, got.Kind == KindClockOffset
+		}
+	}
+	return Learned{}, false
 }
 
 // fieldName is the leaf's name as keploy.yml's noise writes it (Leaf.Noise:
