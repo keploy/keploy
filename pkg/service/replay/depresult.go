@@ -467,7 +467,15 @@ func depTargetFor(m models.MockEntry, lookup map[string]mockDisplayInfo) string 
 // The entry's own Kind is enough for a connection failure the decoder skipped
 // (one this keploy does not support): it is in no lookup, but the mapping
 // still lists it, and it must not be counted as expected.
+//
+// Under the proven switch an entry judging marked as the application's own
+// background work (models.MockEntry.Background) is left out too, whatever its
+// kind: its test is served it in its window when it makes the call, and is
+// never failed for not making it.
 func isUnassertedMockEntry(m models.MockEntry, mockKindByName map[string]models.Kind) bool {
+	if m.Background != "" && provenswitch.On() {
+		return true
+	}
 	if strings.EqualFold(m.Kind, string(models.DNS)) || models.ExcludedFromDependencyAssertion(models.Kind(m.Kind)) {
 		return true
 	}
