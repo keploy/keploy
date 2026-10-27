@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -178,6 +179,16 @@ type exactView struct {
 	// (ServedInOpenTest).
 	heard    []*models.Mock
 	heardIDs map[string]bool
+
+	// keyed files, for each integrations.MockIndex a keyed read used
+	// (RangeSessionMocksWithKey), the positions in owned of the copies the
+	// index files under each key, in recorded order. owned never changes
+	// once the view is installed, so each copy's keys are computed once per
+	// view and index (ownedKeys), never on a call. Built on the first keyed
+	// read of each index, under keyedMu, and never changed after: read
+	// without the lock.
+	keyedMu sync.Mutex
+	keyed   map[*integrations.MockIndex]map[string][]int
 	// stamp is the learn tracker's open test (learn.Tracker.OpenEpoch) as
 	// the test's view was installed (exactState.stampTest), set before the
 	// view is published and never changed: 0 for a pool view, with no
@@ -1710,6 +1721,59 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 		}
 	}
 	return out
+}
+
+// unansweredWithKey is unanswered("") narrowed to the owned mocks ix files
+// under key, in the same order. The positions come from the view's own index
+// of its copies' keys (ownedKeys), so a keyed read visits the mocks filed
+// under key, never one Keys call per owned mock.
+func (v *exactView) unansweredWithKey(ix *integrations.MockIndex, key string) []*models.Mock {
+	if len(v.owned) == 0 {
+		return nil
+	}
+	at := v.ownedKeys(ix)[key]
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var out []*models.Mock
+	for _, i := range at {
+		if !v.consumed[i] && !v.takenByOther(i) {
+			out = append(out, v.owned[i])
+		}
+	}
+	if exactViewVerify.Load() {
+		// What a keyed read gave before the view kept its keys: every
+		// unanswered owned mock keyed on the call. Read in the same hold
+		// of the lock, so no consume falls between the two.
+		var want []*models.Mock
+		for i, mk := range v.owned {
+			if !v.consumed[i] && !v.takenByOther(i) && slices.Contains(ix.Keys(mk), key) {
+				want = append(want, mk)
+			}
+		}
+		verifyExactRead("the open test's mocks under key "+strconv.Quote(key), want, out)
+	}
+	return out
+}
+
+// ownedKeys is the view's index of its owned copies' keys under ix (keyed),
+// built on its first use.
+func (v *exactView) ownedKeys(ix *integrations.MockIndex) map[string][]int {
+	v.keyedMu.Lock()
+	defer v.keyedMu.Unlock()
+	if lists, ok := v.keyed[ix]; ok {
+		return lists
+	}
+	lists := map[string][]int{}
+	for i, mk := range v.owned {
+		for _, k := range distinctKeys(ix, mk) {
+			lists[k] = append(lists[k], i)
+		}
+	}
+	if v.keyed == nil {
+		v.keyed = map[*integrations.MockIndex]map[string][]int{}
+	}
+	v.keyed[ix] = lists
+	return lists
 }
 
 // shows reports whether the view shows mk among the staged mocks: a
