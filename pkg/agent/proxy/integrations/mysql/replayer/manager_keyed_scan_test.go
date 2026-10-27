@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -42,10 +42,10 @@ func keyedSet(n int, lifetime models.Lifetime) []*models.Mock {
 			req = queryReq(keyedSetText(i))
 		case 2:
 			req = executeReq(7, fmt.Sprintf("k%d", i%500))
-			req.PacketBundle.SetStoredQuery(diffQueryA)
+			req.SetStoredQuery(diffQueryA)
 		default:
 			req = executeReq(8, fmt.Sprintf("k%d", i%500))
-			req.PacketBundle.SetStoredQuery(strings.ToLower(diffQueryB))
+			req.SetStoredQuery(strings.ToLower(diffQueryB))
 		}
 		pool = append(pool, diffMock(fmt.Sprintf("m-%d", i), "c1", []mysql.Request{req}, ts, lifetime, typ))
 	}
@@ -81,7 +81,7 @@ func TestNoWindowSetsServeWhatTheFullScanServes(t *testing.T) {
 			ref, fast := newDiffSide(pool), newDiffSide(pool)
 			ref.stageNoWindow()
 			fast.stageNoWindow()
-			var eng *schemanoise.Engine
+			var eng *mocknoise.Engine
 			if strict {
 				eng = replayer.StrictEngineForTest()
 			}
@@ -120,7 +120,7 @@ func TestExactServingServesWhatTheFullScanServes(t *testing.T) {
 		ref, fast := newDiffSide(pool), newDiffSide(pool)
 		ref.stageNoWindow()
 		fast.stageNoWindow()
-		var eng *schemanoise.Engine
+		var eng *mocknoise.Engine
 		if strict {
 			eng = replayer.StrictEngineForTest()
 		}
@@ -183,7 +183,7 @@ func TestNoWindowCommandReadsOnlyItsStatement(t *testing.T) {
 		}
 		ofB++
 		req := executeReq(8, "k1")
-		req.PacketBundle.SetStoredQuery(strings.ToLower(diffQueryB))
+		req.SetStoredQuery(strings.ToLower(diffQueryB))
 		sameParams[i] = diffMock(pool[i].Name, "c1", []mysql.Request{req}, diffBase.Add(time.Duration(i)*time.Millisecond), models.LifetimePerTest, "mocks")
 	}
 	for _, tc := range []struct {
@@ -331,7 +331,7 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		pool := keyedSet(1000, models.LifetimePerTest)
 		ref, fast := newDiffSide(pool), newDiffSide(pool)
-		var eng *schemanoise.Engine
+		var eng *mocknoise.Engine
 		if strict {
 			eng = replayer.StrictEngineForTest()
 		}
@@ -372,24 +372,27 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 //
 //   - an EXECUTE visits at most the candidates the full scan visits;
 //   - an EXECUTE whose parameters no recording bound is settled by the test's
-//     own FIFO candidate: it visits the test's mocks and its statement's,
-//     and the full scan does not run on top;
-//   - after the test's first command, a command computes no mock's
-//     preparedIndex keys: the view's index is built once. Each EXECUTE
-//     computed the keys of every mock the test had not consumed, twice.
+//     own FIFO candidate: it visits each of the test's mocks once, in the
+//     per-test tier (the keyed walk of the session tier leaves them out), and
+//     the full scan does not run on top;
+//   - once the staged trees' indexes are built, no command computes a mock's
+//     preparedIndex keys, the test's first command included: the test's view
+//     files each mock it owns once, by OwnedKeys. The view's index of every
+//     key of every mock the test owned made its first EXECUTE cost two to
+//     four times main's call; before that index, each EXECUTE computed the
+//     keys of every mock the test had not consumed, twice.
 func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 	sizes := []int{1000, 10000}
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:1]
 	}
 	for _, n := range sizes {
-		ofB := n / 4 // the set's EXECUTEs of diffQueryB
 		for _, tc := range []struct {
 			name string
 			req  mysql.Request
 			max  int // visits at most, besides the full scan's
 		}{
-			{"EXECUTE, parameters no recording binds", executeReq(8, "no-such-key"), n + ofB},
+			{"EXECUTE, parameters no recording binds", executeReq(8, "no-such-key"), n},
 			{"EXECUTE, its own recording at pool index 3", executeReq(8, "k3"), 4},
 			{"EXECUTE, its own recording at pool index 499", executeReq(8, "k499"), 500},
 		} {
@@ -419,22 +422,31 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 
 		s := newDiffSide(keyedSet(n, models.LifetimePerTest))
 		s.stageNoWindow()
-		s.ownWholeSet()
 		match := func(req mysql.Request) {
 			if _, ok, _, err := replayer.MatchCommandExaminedForTest(context.Background(), req, s.mm, s.dctx, nil, false); err != nil || !ok {
 				t.Fatalf("n=%d: ok=%v err=%v", n, ok, err)
 			}
 		}
-		match(executeReq(8, "k1")) // the test's first command builds the indexes
-		computed := replayer.CountPreparedKeysForTest(func() {
-			for i := 0; i < 6; i++ {
-				match(executeReq(8, "no-such-key"))
-				match(executeReq(7, fmt.Sprintf("k%d", 2+4*i)))
-				match(queryReq(keyedSetText(4 * i)))
-			}
+		// The staged trees' indexes are built once per staging, by the first
+		// keyed read: here before the test opens.
+		match(executeReq(8, "k1"))
+		s.ownWholeSet()
+		computed := 0
+		filed := replayer.CountOwnedPreparedKeysForTest(func() {
+			computed = replayer.CountPreparedKeysForTest(func() {
+				match(executeReq(8, "no-such-key")) // the test's first command
+				for i := 0; i < 6; i++ {
+					match(executeReq(8, "no-such-key"))
+					match(executeReq(7, fmt.Sprintf("k%d", 2+4*i)))
+					match(queryReq(keyedSetText(4 * i)))
+				}
+			})
 		})
 		if computed != 0 {
-			t.Errorf("n=%d: 18 commands after the test's first computed %d mocks' keys, want 0", n, computed)
+			t.Errorf("n=%d: the test's first command and 18 more computed %d mocks' keys, want 0", n, computed)
+		}
+		if filed != n {
+			t.Errorf("n=%d: the test's commands filed its mocks %d times, want %d (each once)", n, filed, n)
 		}
 		s.mm.Close()
 	}
@@ -455,17 +467,22 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 //     with the live parameters (a definitive one). Under exact serving the
 //     definitive one ranks first, so the keyed pass must read past the FIFO
 //     candidate.
+//   - Under exact serving the open test owns an unnamed EXECUTE before a named
+//     one of the same query. The keyed walk of the session tier reads none of
+//     the test's mocks (the per-test tier holds them), and the unnamed one
+//     still sends the command to the full scan.
 func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *testing.T) {
 	at := func(ms int) time.Time { return diffBase.Add(time.Duration(ms) * time.Millisecond) }
 	named := func(name, param string, ms int) *models.Mock {
 		req := executeReq(7, param)
-		req.PacketBundle.SetStoredQuery(diffQueryA)
+		req.SetStoredQuery(diffQueryA)
 		return diffMock(name, "c1", []mysql.Request{req}, at(ms), models.LifetimeSession, "mocks")
 	}
 	for _, c := range []struct {
 		name  string
 		pool  []*models.Mock
 		exact bool
+		owned bool // the open test owns the whole pool
 		live  mysql.Request
 		want  string
 	}{{
@@ -483,10 +500,33 @@ func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *te
 		exact: true,
 		live:  executeReq(7, "k1"),
 		want:  "served definitive ",
+	}, {
+		name: "under exact serving, the open test owns an EXECUTE recorded without its query before one recorded with it",
+		pool: []*models.Mock{
+			diffPrepareMock("prepare", "c1", diffQueryA, 7, at(0)),
+			diffMock("unnamed", "c1", []mysql.Request{executeReq(7, "k1")}, at(1), models.LifetimePerTest, "mocks"),
+			named("named", "k2", 2),
+		},
+		owned: true,
+		live:  executeReq(7, "app-made"),
+		want:  "served unnamed ",
+	}, {
+		name: "under exact serving, the open test owns an EXECUTE recorded without its query, and one recorded with it binds the live parameters",
+		pool: []*models.Mock{
+			diffPrepareMock("prepare", "c1", diffQueryA, 7, at(0)),
+			diffMock("unnamed", "c1", []mysql.Request{executeReq(7, "k1")}, at(1), models.LifetimePerTest, "mocks"),
+			named("named", "k2", 2),
+		},
+		owned: true,
+		live:  executeReq(7, "k2"),
+		want:  "served named ",
 	}} {
 		ref, fast := newDiffSide(c.pool), newDiffSide(c.pool)
 		for _, s := range []*diffSide{ref, fast} {
 			s.stageNoWindow()
+			if c.owned {
+				s.ownWholeSet()
+			}
 			if c.exact {
 				names := make([]string, 0, len(c.pool))
 				for _, m := range c.pool {

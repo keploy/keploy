@@ -21,7 +21,17 @@ import (
 // window stays open until the next test is staged. In lax mode that tier holds
 // every test's traffic, and a walk per command cost more with every test the
 // set held.
-var preparedIndex = &integrations.MockIndex{Keys: preparedKeys}
+//
+// Under exact serving the per-test tier leads with every mock the open test
+// owns, and matchCommand walks it whole before each keyed walk of the session
+// tier (the keyed pass, and recordedQuery's look-up of a PREPARE after its
+// look-up in that tier). So the test's own mocks are filed only under
+// keyExecuteUnnamed (ownedPreparedKeys), the one key read before that tier: a
+// keyed walk reads the staged mocks alone, and a test view computes no
+// statement identity of the mocks it owns. Keploy mock replay can have one
+// test own a whole set, and the view's index of every key of every mock it
+// owned cost the test's first EXECUTE two to four times main's whole call.
+var preparedIndex = &integrations.MockIndex{Keys: preparedKeys, OwnedKeys: ownedPreparedKeys}
 
 const (
 	// keyPrepare + a statement's identity (sqlStatementIdentity): a mock with a
@@ -122,14 +132,15 @@ func preparedKeys(m *models.Mock) []string {
 	}
 	var keys []string
 	closeFiled := false
-	for _, r := range m.Spec.MySQLRequests {
-		h := r.PacketBundle.Header
+	for i := range m.Spec.MySQLRequests {
+		r := &m.Spec.MySQLRequests[i]
+		h := r.Header
 		if h == nil {
 			continue
 		}
 		switch h.Type {
 		case comStmtPrepare:
-			if sp, ok := r.PacketBundle.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
+			if sp, ok := r.Message.(*mysql.StmtPreparePacket); ok && sp != nil {
 				keys = append(keys, keyPrepare+sqlStatementIdentity(sp.Query))
 			}
 		case comStmtClose:
@@ -138,15 +149,15 @@ func preparedKeys(m *models.Mock) []string {
 				closeFiled = true
 			}
 		case comQuery:
-			if qp, ok := r.PacketBundle.Message.(*mysql.QueryPacket); ok && qp != nil {
+			if qp, ok := r.Message.(*mysql.QueryPacket); ok && qp != nil {
 				keys = appendKey(keys, keyQuery+sqlStatementIdentity(qp.Query))
 			}
 		case comStmtExecute:
-			if ep, ok := r.PacketBundle.Message.(*mysql.StmtExecutePacket); ok && ep != nil {
-				if q := r.PacketBundle.StoredQuery(); q != "" {
-					keys = appendKey(keys, keyExecute+foldKey(sqlStatementIdentity(q)))
-				} else {
+			if ep, ok := r.Message.(*mysql.StmtExecutePacket); ok && ep != nil {
+				if executeUnnamed(r) {
 					keys = appendKey(keys, keyExecuteUnnamed)
+				} else {
+					keys = appendKey(keys, keyExecute+foldKey(sqlStatementIdentity(r.StoredQuery())))
 				}
 			}
 		}
@@ -155,6 +166,31 @@ func preparedKeys(m *models.Mock) []string {
 		keys = append(keys, prepEntryKey(connID, e.statementID))
 	}
 	return keys
+}
+
+// executeUnnamed reports whether r is a COM_STMT_EXECUTE request that recorded
+// no query: preparedKeys files its mock under keyExecuteUnnamed.
+func executeUnnamed(r *mysql.Request) bool {
+	if r.Header == nil || r.Header.Type != comStmtExecute {
+		return false
+	}
+	ep, ok := r.Message.(*mysql.StmtExecutePacket)
+	return ok && ep != nil && r.StoredQuery() == ""
+}
+
+// ownedPreparedKeys is preparedIndex's OwnedKeys: keyExecuteUnnamed for a mock
+// preparedKeys files under it, no key otherwise. It reads each request's type,
+// and the stored query of an EXECUTE alone.
+func ownedPreparedKeys(m *models.Mock) []string {
+	if m == nil || m.Kind != models.MySQL {
+		return nil
+	}
+	for i := range m.Spec.MySQLRequests {
+		if executeUnnamed(&m.Spec.MySQLRequests[i]) {
+			return []string{keyExecuteUnnamed}
+		}
+	}
+	return nil
 }
 
 // recordedPrepEntry reports the entry buildRecordedPrepIndex makes of m, and

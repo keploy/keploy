@@ -844,6 +844,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	//     pool, which no key of its own can say: while the session tier holds
 	//     an EXECUTE that recorded no query (keyExecuteUnnamed), the full scan
 	//     matches it.
+	//
+	// Under exact serving the per-test tier leads with every mock the open
+	// test owns, and the keyed pass walks that tier whole before the session
+	// tier: preparedIndex files the test's own mocks under keyExecuteUnnamed
+	// alone (its OwnedKeys), so the keyed walks of the session tier read the
+	// staged mocks only, and no command computes a statement identity of the
+	// mocks the test owns.
 	keyReader, _ := mockDb.(integrations.SessionKeyReader)
 	if opts.fullScan {
 		keyReader = nil
@@ -892,7 +899,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return nil, false, nil, err
 		}
 		key := scanKey
-		// The per-test and connection tiers are small, and walked whole.
+		// The per-test and connection tiers are walked whole. Under exact
+		// serving the per-test tier leads with the open test's unanswered
+		// mocks, which the keyed walk of the session tier leaves out.
 		candidates = func(yield func(*models.Mock) bool) {
 			for _, mk := range perTestTier {
 				if !yield(mk) {
@@ -976,7 +985,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// key index, build that index from the pool. Otherwise the entry is found
 	// through the tiers, the session tier's through preparedIndex, so no
 	// command indexes the whole pool: the per-test and connection tiers are
-	// read once, and each statement is looked up once.
+	// read once, and each statement is looked up once. Under exact serving
+	// the open test's own entries are the per-test tier's, which is read
+	// first: preparedIndex files the test's mocks under no entry key.
 	var (
 		prepByConn         map[string][]prepEntry
 		tierPrep, connPrep map[prepKey]string

@@ -19,13 +19,32 @@ import (
 // staged mocks the view shows: what it gave when it computed every owned
 // mock's keys on each lookup. The owned ones now come from the view's own
 // key index, built at its first lookup, so later lookups compute no keys.
+// Some of the open test's mocks were recorded with a session lifetime: the
+// view serves them as its own too. An index with OwnedKeys files the open
+// test's mocks by OwnedKeys alone, and the staged ones by Keys.
 func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
 	base := time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)
-	var computed atomic.Int64
+	var computed, ownedKeys, ownedByKeys atomic.Int64
 	ix := &integrations.MockIndex{Keys: func(m *models.Mock) []string {
 		computed.Add(1)
 		return m.Noise
 	}}
+	// byOwned files the open test's mocks under "a" alone.
+	byOwned := &integrations.MockIndex{
+		Keys: func(m *models.Mock) []string {
+			if m.Name[0] == 'o' {
+				ownedByKeys.Add(1)
+			}
+			return m.Noise
+		},
+		OwnedKeys: func(m *models.Mock) []string {
+			ownedKeys.Add(1)
+			if slices.Contains(m.Noise, "a") {
+				return []string{"a"}
+			}
+			return nil
+		},
+	}
 	keys := []string{"a", "b", "c"}
 	for seed := int64(1); seed <= 10; seed++ {
 		r := rand.New(rand.NewSource(seed))
@@ -36,7 +55,11 @@ func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
 			staged = append(staged, mk)
 		}
 		for i := 0; i < 400; i++ {
-			mk := newMockForTest(fmt.Sprintf("o%d", i), base.Add(time.Duration(100+i)*time.Millisecond), models.LifetimePerTest)
+			lifetime := models.LifetimePerTest
+			if r.Intn(3) == 0 {
+				lifetime = models.LifetimeSession
+			}
+			mk := newMockForTest(fmt.Sprintf("o%d", i), base.Add(time.Duration(100+i)*time.Millisecond), lifetime)
 			for _, k := range keys {
 				if r.Intn(3) == 0 {
 					mk.Noise = append(mk.Noise, k, k) // a key given twice is filed once
@@ -58,7 +81,10 @@ func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
 		}
 		v.mu.Unlock()
 
-		walk := func(key string) []*models.Mock {
+		if !slices.Contains(v.session, true) || !slices.Contains(v.session, false) {
+			t.Fatalf("seed %d: precondition: the open test owns mocks of both lifetimes", seed)
+		}
+		walkIn := func(ix *integrations.MockIndex, key string) []*models.Mock {
 			var got []*models.Mock
 			if err := mm.RangeSessionMocksWithKey(ix, key, func(mk *models.Mock) bool {
 				got = append(got, mk)
@@ -68,12 +94,13 @@ func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
 			}
 			return got
 		}
+		walk := func(key string) []*models.Mock { return walkIn(ix, key) }
 		// The reference: every unanswered owned mock's keys computed, then
 		// the staged mocks the view shows, through the trees' index.
-		reference := func(key string) []*models.Mock {
+		referenceOf := func(ownedKeys func(*models.Mock) []string, key string) []*models.Mock {
 			var want []*models.Mock
 			for _, mk := range v.unanswered("") {
-				if slices.Contains(mk.Noise, key) {
+				if slices.Contains(ownedKeys(mk), key) {
 					want = append(want, mk)
 				}
 			}
@@ -88,16 +115,38 @@ func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
 			})
 			return want
 		}
-		for _, key := range append(keys, "none") {
-			got, want := walk(key), reference(key)
+		reference := func(key string) []*models.Mock {
+			return referenceOf(func(mk *models.Mock) []string { return mk.Noise }, key)
+		}
+		same := func(name, key string, got, want []*models.Mock) {
+			t.Helper()
 			if len(got) != len(want) {
-				t.Fatalf("seed %d, key %q: got %d mocks, want %d", seed, key, len(got), len(want))
+				t.Fatalf("seed %d, %s, key %q: got %d mocks, want %d", seed, name, key, len(got), len(want))
 			}
 			for i := range want {
 				if got[i] != want[i] {
-					t.Fatalf("seed %d, key %q: mock %d is %s, want %s", seed, key, i, got[i].Name, want[i].Name)
+					t.Fatalf("seed %d, %s, key %q: mock %d is %s, want %s", seed, name, key, i, got[i].Name, want[i].Name)
 				}
 			}
+		}
+		for _, key := range append(keys, "none") {
+			same("Keys", key, walk(key), reference(key))
+		}
+		ownedKeys.Store(0)
+		for _, key := range append(keys, "none") {
+			want := referenceOf(func(mk *models.Mock) []string {
+				if slices.Contains(mk.Noise, "a") {
+					return []string{"a"}
+				}
+				return nil
+			}, key)
+			same("OwnedKeys", key, walkIn(byOwned, key), want)
+		}
+		if n := ownedByKeys.Load(); n != 0 {
+			t.Fatalf("seed %d: an index with OwnedKeys computed the Keys of %d of the open test's mocks, want 0", seed, n)
+		}
+		if n := ownedKeys.Load(); n != int64(len(owned)) {
+			t.Fatalf("seed %d: four lookups computed OwnedKeys %d times, want %d (each owned mock once)", seed, n, len(owned))
 		}
 		// Once the view's index and the trees' are built, a lookup computes
 		// no mock's keys, whatever the test owns.
