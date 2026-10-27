@@ -367,7 +367,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					// replay stages another set, the request finds nothing
 					// to be answered with, and misses saying so.
 					db, _ = integrations.HoldToRound(mockDb, call)
-					stub, err = h.learnedMatch(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					stub, err = h.learnedMatchOf(reqCtx, input, db, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
 					ok = stub != nil
 				}
 				if !ok && err == nil {
