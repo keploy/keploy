@@ -465,7 +465,7 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 		mm.ServeExactPool("a", aSlice)
 	}
 
-	// One revision, bounds read by key in turn: each key's own (the cache
+	// One staging generation, bounds read by key in turn: each key's own (the cache
 	// is one key's), and outside every claim (PoolKeyNone) every test's.
 	mm := setup(owners)
 	at := aEnd.Spec.ReqTimestampMock
@@ -480,7 +480,7 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 	if after := mm.teardownAfter("b"); after == nil || !after(bEnd.Spec.ReqTimestampMock) {
 		t.Errorf("key b: b-end is not b's teardown")
 	}
-	// New owners in the same revision move a's bound: b1 now a's too.
+	// New owners in the same generation move a's bound: b1 now a's too.
 	mm.teardownAfter("a")
 	mm.SetPoolOwners(map[string]string{"a1": "a", "a2": "a", "b1": "a"})
 	if after := mm.teardownAfter("a"); after == nil || after(at) {
@@ -519,14 +519,16 @@ func TestEachTestProcessesTeardownIsBoundedByItsOwnTests(t *testing.T) {
 	}
 }
 
-// keploy mock replay's teardown bound is read once per revision of the
-// trees: the per-test reads of one burst (GetFilteredMocks, its by-kind
-// read, ...) reuse it while the revision and the scope table stand, not
-// every staged recording at every read. An exact serve bumps the revision,
-// so the next burst reads it afresh, to the same bound (exact serving hides
-// what it serves rather than deleting it). A new staging (a recording a test
-// owns, made later) moves it, so the pool's recording made before that one
-// is no teardown any more; a new scope table moves it too.
+// keploy mock replay's teardown bound is read once per staging generation
+// of the trees: the per-test reads of one burst (GetFilteredMocks, its
+// by-kind read, ...) reuse it while the generation and the scope table
+// stand, not every staged recording at every read. An exact serve moves
+// Revision but not the staging generation (exact serving hides what it
+// serves rather than deleting it from the trees, and the bound reads the
+// trees alone), so the next burst reuses it too: main read the trees again
+// after each served call. A new staging (a recording a test owns, made
+// later) moves it, so the pool's recording made before that one is no
+// teardown any more; a new scope table moves it too.
 func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
 	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
@@ -540,8 +542,9 @@ func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 	if mm.teardownAfter("k"); mm.exact.teardownLast.Load() != b {
 		t.Errorf("a second read in one revision read the trees again")
 	}
-	// Three bursts of three reads, an exact serve after the second: two scans
-	// of the trees, where every read scanned them (nine).
+	// Three bursts of three reads, an exact serve after the second: one scan
+	// of the trees, where every read scanned them (nine), and one per
+	// revision two.
 	slice := []string{"end-sessions"}
 	mm.ServeExactPool("k", slice)
 	mm.ServeExactTest("T", []*models.Mock{owned})
@@ -572,8 +575,8 @@ func TestTheTeardownBoundIsReadOncePerTreeRevision(t *testing.T) {
 		t.Fatalf("precondition: an exact serve did not move the revision")
 	}
 	burst()
-	if scans != 2 || last == nil || last.last != b.last {
-		t.Errorf("three bursts, an exact serve between: %d scans (bound %+v), want 2 to the same bound %s", scans, last, b.last)
+	if scans != 1 || last == nil || last.last != b.last {
+		t.Errorf("three bursts, an exact serve between: %d scans (bound %+v), want 1 to the same bound %s", scans, last, b.last)
 	}
 	mm.ServeExactPool("k", nil)
 	late := exactMongo("owned-late", 4*time.Second, models.LifetimePerTest)
