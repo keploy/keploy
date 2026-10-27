@@ -34,6 +34,11 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
+// DeclaresMockNoise reports that MySQL does field-level request-body mock-noise
+// learning (mysqlNoiseAdapter + the shared engine). Satisfies
+// integrations.NoiseDeclarer.
+func (m *MySQL) DeclaresMockNoise() bool { return true }
+
 func (m *MySQL) MatchType(_ context.Context, buf []byte) bool {
 	// The default proxy path routes MySQL by destination port (3306), so
 	// this matcher historically returned false — the caller already knew.
@@ -270,3 +275,7 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 	}
 	return nil
 }
+
+// ReportsMockMiss confirms MySQL reports a no-mock-matched miss (mock diff).
+// Satisfies integrations.MissReporter.
+func (m *MySQL) ReportsMockMiss() bool { return true }

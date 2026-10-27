@@ -126,6 +126,55 @@ type IntegrationsV2 interface {
 	IsV2() bool
 }
 
+// NoiseDeclarer is the capability interface every dependency parser is expected
+// to implement to DECLARE how it handles non-deterministic request-body drift
+// between record and replay. The registry conformance test
+// (TestEveryRegisteredParserDeclaresMockNoise) asserts every registered parser
+// implements this, so a NEW parser cannot be added without a conscious decision
+// — the "declare, don't silently forget" contract.
+//
+// It is a declaration, not an implementation requirement:
+//
+//   - A field-level parser (HTTP, MySQL, gRPC, HTTP/2, Mongo, Postgres, …) that
+//     compares request VALUES returns true and wires the shared mocknoise engine
+//     (auto-replay learns req_body_noise; see pkg/agent/proxy/integrations/mocknoise).
+//   - A blob/canonical parser (Redis, Aerospike, Couchbase, Memcached, ZooKeeper,
+//     Generic) that already tolerates drift by collapsing the request into one
+//     match key/lump returns false — field-level noise does not apply, and a
+//     byte-level strict check would break its own matching. Returning false is an
+//     EXPLICIT opt-out, not an oversight.
+//
+// Kept a bool (not a mocknoise.Adapter getter) on purpose: a parser's adapter
+// commonly lives in a sub-package (e.g. mysql/replayer), so the declaration must
+// be answerable from the top-level parser type without re-exporting internals.
+type NoiseDeclarer interface {
+	// DeclaresMockNoise reports whether this parser performs field-level
+	// request-body mock-noise learning (true) or deliberately opts out because
+	// it handles drift another way (false).
+	DeclaresMockNoise() bool
+}
+
+// MissReporter is the capability interface every dependency parser must
+// implement to confirm it reports a replay MOCK MISS (mock diff) — a call for
+// which no recorded mock matched — so the miss reaches the test report /
+// `keploy report` / UI instead of surfacing only as the application's error.
+// The registry conformance test
+// (TestEveryRegisteredParserReportsMockMiss) asserts every registered parser
+// implements this AND returns true, so a new parser cannot be added that
+// silently swallows a miss (the failure mode issue keploy/enterprise#2828 was
+// filed for).
+//
+// Unlike NoiseDeclarer there is no legitimate opt-out: every parser must report
+// its misses. The method exists (rather than relying on behaviour alone) so the
+// contract is checkable at the registry level and a new parser is forced to
+// make the reporting an explicit, tested promise.
+type MissReporter interface {
+	// ReportsMockMiss reports that this parser surfaces a no-mock-matched miss
+	// through models.NewMockMismatchError / models.ReportMockMismatch (and so
+	// into the test's UnmatchedCalls). Must return true.
+	ReportsMockMiss() bool
+}
+
 // GapResyncCapable is the optional capability interface implemented by
 // parsers that can recover a byte stream after a HOLE in capture — bytes
 // the proxy observed on the wire, forwarded to the real peer, but never

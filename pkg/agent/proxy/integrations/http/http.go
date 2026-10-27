@@ -70,6 +70,11 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
+// DeclaresMockNoise reports that HTTP does field-level request-body mock-noise
+// learning (httpNoiseAdapter + the shared engine). Satisfies
+// integrations.NoiseDeclarer.
+func (h *HTTP) DeclaresMockNoise() bool { return true }
+
 type FinalHTTP struct {
 	Req              []byte
 	Resp             []byte
@@ -419,3 +424,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 	}
 	return nil
 }
+
+// ReportsMockMiss confirms HTTP reports a no-mock-matched miss (mock diff).
+// Satisfies integrations.MissReporter.
+func (h *HTTP) ReportsMockMiss() bool { return true }

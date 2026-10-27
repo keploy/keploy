@@ -29,6 +29,12 @@ func New(logger *zap.Logger) integrations.Integrations {
 	}
 }
 
+// DeclaresMockNoise reports that Generic opts OUT of field-level request-body
+// mock-noise: it matches opaque byte streams whole (exact + Jaccard fuzzy), so
+// there are no named fields to learn noise on. Explicit opt-out, not an
+// oversight. Satisfies integrations.NoiseDeclarer.
+func (g *Generic) DeclaresMockNoise() bool { return false }
+
 func (g *Generic) MatchType(_ context.Context, _ []byte) bool {
 	// generic is checked explicitly in the proxy
 	return false
@@ -136,3 +142,7 @@ func (g *Generic) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models
 	}
 	return nil
 }
+
+// ReportsMockMiss confirms Generic reports a no-mock-matched miss (mock diff).
+// Satisfies integrations.MissReporter.
+func (g *Generic) ReportsMockMiss() bool { return true }
