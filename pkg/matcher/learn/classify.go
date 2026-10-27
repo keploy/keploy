@@ -1261,13 +1261,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			}
 		}
 		// A read whose two runs wrote it in two layouts (an ISO text, then
-		// an epoch number; a time to the second, then to the minute) is
-		// refused: a replay checks the form its learn step saw, and this
-		// one saw two.
+		// an epoch number; a time to the second, then to the minute), or in
+		// one layout that names its zone in one run and none in the other
+		// ("…Z", then a wall clock of no zone), is refused: a replay checks
+		// the form its learn step saw, and this one saw two.
 		switch {
 		case ln.Read != nil && ln.Read.Layout == models.LayoutApart:
 			ln.Kind, ln.Why, ln.Read = KindUnaccounted, textLayoutChangedWhy(r.Value, l.Value), nil
 		case ln.Read != nil:
+			if why := textFormChangedWhy(r.Value, l.Value); why != "" {
+				ln.Kind, ln.Why, ln.Read = KindUnaccounted, why, nil
+				break
+			}
 			if !models.LayoutTimeOfDay(ln.Read.Layout) {
 				ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
 			}
