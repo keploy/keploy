@@ -119,8 +119,15 @@ func noiseIn(ln Learned, w *Window) bool {
 	if read != nil && read.Layout == models.LayoutApart {
 		return ln.Kind == KindUnaccounted && ln.Why == textLayoutChangedWhy(ln.Recorded.Value, ln.Live.Value)
 	}
-	if w != nil && ln.Kind == KindUnaccounted {
-		return ln.Why == outsideWindowWhy
+	if w != nil && ln.Kind == KindUnaccounted && ln.Why == outsideWindowWhy {
+		return true
+	}
+	// Its two values show a cut coarser than a millisecond: refused,
+	// naming it.
+	if read != nil {
+		if why := textCutWhy(ln.Recorded.Value, ln.Live.Value, *read); why != "" {
+			return ln.Kind == KindUnaccounted && ln.Why == why
+		}
 	}
 	return ln.Kind == KindClockRead && ln.Read != nil
 }
@@ -2072,7 +2079,7 @@ func TestAValueBuiltOnAGivenDateIsTheEchos(t *testing.T) {
 			t.Errorf("its time alone changed, beside %s dates: %s from %+v (%s); want noise", c.name, ln.Kind, ln.From, ln.Why)
 		}
 		typed := func(d int) Shape {
-			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(2026, 10, d, 9, 0, 0, 0, time.UTC), time.Second)}}
+			return Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, time.Date(2026, 10, d, 9, 0, 7, 0, time.UTC), time.Second)}}
 		}
 		if ln := ClassifyIn(clockedDrifts(), []string{p}, typed(23), typed(22), at, c.earlier, nil, nil, nil)[0]; !plainRead(ln) {
 			t.Errorf("typed, beside %s dates: %s from %+v (%s); want no echo: a plain read of the clock, with no call window, checked at replay", c.name, ln.Kind, ln.From, ln.Why)
