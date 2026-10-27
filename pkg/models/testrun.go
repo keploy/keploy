@@ -257,6 +257,16 @@ type FailureInfo struct {
 	// Empty with the switch off, and for a test that owned none or whose
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// UnusedBackground are, under KEPLOY_PROVEN=1, the recordings of this
+	// test's mapping that keploy's judging marked as the application's own
+	// background work (MockEntry.Background) that no call of this test
+	// used: the test is served each in its window and never required to
+	// make it, so none of them fails it. Each names, in ConsumedBy, another
+	// test of the set that consumed it, when one did (the call was made).
+	// Judging takes a mark its confirming round left unused, by every test,
+	// out of the recording. In recorded order. Empty with the switch off,
+	// and for a test whose consumption was not read.
+	UnusedBackground []UnconsumedMock `json:"unused_background,omitempty" yaml:"unused_background,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
 	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
