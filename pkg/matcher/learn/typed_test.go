@@ -2153,7 +2153,7 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	if r := textClockRead("1793158200.123000", "1793158262.456000"); r == nil || r.Res != time.Millisecond {
 		t.Errorf("an epoch in seconds cut to the millisecond: %+v; want a Res of the 1ms cut", r)
 	} else {
-		check("an epoch in seconds cut to the millisecond", *r, "1793176200.005000", false, "the application cuts its value")
+		check("an epoch in seconds cut to the millisecond", *r, "1793172600.005000", false, "the application cuts its value")
 	}
 	// A time of day and an epoch in seconds read their fraction the same.
 	if r := clockedDrifts().todRead(3*time.Hour+30*time.Minute+495123*time.Microsecond, 3*time.Hour+31*time.Minute+2032456789, time.Microsecond, time.Nanosecond, "time-second", "time-second", nil, call); r.Res != time.Nanosecond {
@@ -2161,6 +2161,15 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	}
 	if r := textClockRead("1793158200.495", "1793158262.032456"); r == nil || r.Res != time.Microsecond {
 		t.Errorf("an epoch in seconds with three digits, then six: %+v; want a Res of 1µs", r)
+	}
+	// One fraction digit, the fewest the layout reads: a tenth of a second,
+	// read exactly (the span's own tenth passes; the next one, which starts
+	// after the span ends, is refused).
+	if r := textClockRead("1793158200.5", "1793158262.3"); r == nil || r.Res != 100*time.Millisecond {
+		t.Errorf("an epoch in seconds with one digit: %+v; want a Res of 100ms", r)
+	} else {
+		check("an epoch in seconds with one digit", *r, "1793172600.0", true, "")
+		check("an epoch in seconds with one digit, after the span", *r, "1793172600.1", false, "it changed")
 	}
 	// A layout that fixes its resolution reads no fraction: a cut epoch in
 	// nanoseconds, and a cut $date, are refused at replay even where the
