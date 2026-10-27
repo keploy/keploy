@@ -624,11 +624,12 @@ func (o ClockOffset) holdsRead(at time.Time, res time.Duration, from, to time.Ti
 }
 
 // ReadCut is the start of the cut of resolution res that holds t, read in
-// loc: for an hour or a day, the first instant of t's hour or calendar day
-// there (UnitStart: 01:00 on a day whose clocks skip midnight, 02:30 in an
-// hour whose first half hour they skip); for a finer res, t's wall clock
-// in loc cut down to a whole res (zones' offsets are whole minutes). Of res
-// none, t.
+// loc: for a day, the first instant of t's calendar day there (UnitStart:
+// 01:00 on a day whose clocks skip midnight); for an hour or a finer res,
+// t's wall clock in loc, at t's own offset, cut down to a whole res (zones'
+// offsets are whole minutes). In an hour the wall clock shows twice (the
+// clocks went back) that is the start of the showing t lies in, never the
+// first showing's, an hour or two earlier. Of res none, t.
 func ReadCut(t time.Time, res time.Duration, loc *time.Location) time.Time {
 	t = t.In(loc)
 	switch {
@@ -636,8 +637,6 @@ func ReadCut(t time.Time, res time.Duration, loc *time.Location) time.Time {
 		return t
 	case res >= 24*time.Hour:
 		return UnitStart(t, 24*time.Hour, loc)
-	case res == time.Hour:
-		return UnitStart(t, time.Hour, loc)
 	}
 	r := WallNanos(t, loc) % int64(res)
 	if r < 0 {
@@ -648,10 +647,13 @@ func ReadCut(t time.Time, res time.Duration, loc *time.Location) time.Time {
 
 // UnitStart is the first instant of t's hour (unit an hour) or calendar day
 // (a day) in loc: the instant its wall clock there turns to t's hour or
-// date, as an application's clock library cuts a time (Go's time.Date,
-// Java's truncatedTo and atStartOfDay, JavaScript's setHours(0)): midnight,
-// or, on a day whose clocks skip midnight (Cairo, Santiago, Havana on the
-// day summer time starts), the first instant after the skipped hour.
+// date, as Java's truncatedTo and atStartOfDay and JavaScript's
+// setHours(0) cut a time (Go's time.Date too in a zone ahead of UTC; behind
+// it, Go gives 23:00 the day before a skipped midnight): midnight, or, on a
+// day whose clocks skip midnight (Cairo, Santiago, Havana on the day summer
+// time starts), the first instant after the skipped hour. In an hour the
+// clocks show again more than an hour later (Troll's two-hour change), it
+// is the start of the showing t lies in.
 func UnitStart(t time.Time, unit time.Duration, loc *time.Location) time.Time {
 	l := t.In(loc)
 	y, m, d := l.Date()
