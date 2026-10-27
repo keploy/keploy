@@ -940,69 +940,16 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		servers = []string{"8.8.8.8", "1.1.1.1"}
 	}
 
-	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
-
 	m := new(dns.Msg)
 	m.SetQuestion(question.Name, question.Qtype)
 	m.RecursionDesired = true
 
-	var (
-		in         *dns.Msg
-		resolveErr error
-	)
-
-	for _, server := range servers {
-		addr := net.JoinHostPort(server, port)
-
-		// Per-server-attempt logs fire on every cache miss (worst case, multiple
-		// servers per miss) so we keep only the diagnostic ones — silent success
-		// path, log the rare failure / truncation / TCP-retry transitions.
-		c.Net = "udp"
-		resp, _, err := c.Exchange(m, addr)
-		if err != nil {
-			resolveErr = err
-			p.logger.Debug("upstream DNS exchange failed",
-				append(dnsQuestionFields(question),
-					zap.String("upstream_addr", addr),
-					zap.String("transport", c.Net),
-					zap.Error(err),
-				)...,
-			)
-			continue
-		}
-
-		if resp != nil && resp.Truncated {
-			p.logger.Debug("upstream DNS response truncated; retrying over TCP",
-				append(dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
-			)
-			c.Net = "tcp"
-			resp, _, err = c.Exchange(m, addr)
-			if err != nil {
-				resolveErr = err
-				p.logger.Debug("upstream DNS TCP retry failed",
-					append(dnsQuestionFields(question),
-						zap.String("upstream_addr", addr),
-						zap.String("transport", c.Net),
-						zap.Error(err),
-					)...,
-				)
-				continue
-			}
-		}
-
-		if resp != nil {
-			in = resp
-			resolveErr = nil
-			break
-		}
-	}
-
-	if resolveErr != nil {
-		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
-	}
-	if in == nil {
-		return dnsCacheEntry{}, fmt.Errorf("nil DNS response for %s", question.Name)
+	// Asked as the app's stub resolver would have asked: resends on loss,
+	// every server in turn, TCP when the answer is truncated. A lost packet
+	// must not become a SERVFAIL the app sees while the upstream answers.
+	in, err := exchangeDNSUpstream(p.logger, m, servers, port, p.dnsStub().waits(len(servers)))
+	if err != nil {
+		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, err)
 	}
 
 	resp := dnsCacheEntry{
