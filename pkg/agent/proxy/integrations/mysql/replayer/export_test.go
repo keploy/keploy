@@ -113,18 +113,18 @@ func CountPreparedKeysForTest(f func()) int {
 	return int(n.Load())
 }
 
-// CountOwnedPreparedKeysForTest runs f and returns how many times a mock's
-// preparedIndex OwnedKeys were computed meanwhile: once per mock an exact
-// view owns, at the view's first keyed read. f must not run matches on other
+// CountUnnamedExecKeysForTest runs f and returns how many times a mock's
+// unnamedExecIndex keys were computed meanwhile, by the store's indexes or by
+// an exact view's index of the mocks it owns. f must not run matches on other
 // goroutines past its return.
-func CountOwnedPreparedKeysForTest(f func()) int {
+func CountUnnamedExecKeysForTest(f func()) int {
 	var n atomic.Int64
-	keys := preparedIndex.OwnedKeys
-	preparedIndex.OwnedKeys = func(m *models.Mock) []string {
+	keys := unnamedExecIndex.Keys
+	unnamedExecIndex.Keys = func(m *models.Mock) []string {
 		n.Add(1)
 		return keys(m)
 	}
-	defer func() { preparedIndex.OwnedKeys = keys }()
+	defer func() { unnamedExecIndex.Keys = keys }()
 	f()
 	return int(n.Load())
 }

@@ -113,12 +113,12 @@ func TestExecuteComparisonAllocatesNothing(t *testing.T) {
 	}
 }
 
-// TestOwnedPreparedKeysFileWhatPreparedKeysFilesUnnamed: an exact view files
-// the mocks its test owns by preparedIndex's OwnedKeys, which reads only
+// TestUnnamedExecKeysFileWhatPreparedKeysFilesUnnamed: a COM_STMT_EXECUTE
+// looks up keyExecuteUnnamed through unnamedExecIndex, whose keys read only
 // whether a mock holds an EXECUTE recorded without its query. It must file
 // under keyExecuteUnnamed exactly the mocks preparedKeys files there, and
 // under no other key.
-func TestOwnedPreparedKeysFileWhatPreparedKeysFilesUnnamed(t *testing.T) {
+func TestUnnamedExecKeysFileWhatPreparedKeysFilesUnnamed(t *testing.T) {
 	req := func(typ string, msg interface{}, stored string) mysql.Request {
 		r := mysql.Request{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Header: &mysql.Header{}, Type: typ}, Message: msg}}
 		r.SetStoredQuery(stored)
@@ -152,12 +152,12 @@ func TestOwnedPreparedKeysFileWhatPreparedKeysFilesUnnamed(t *testing.T) {
 			m = &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{MySQLRequests: []mysql.Request{req(comStmtExecute, exec, "")}}}
 		}
 		want := slices.Contains(preparedKeys(m), keyExecuteUnnamed)
-		got := ownedPreparedKeys(m)
+		got := unnamedExecKeys(m)
 		if want {
 			unnamed++
 		}
 		if want != slices.Contains(got, keyExecuteUnnamed) || len(got) > 1 || (len(got) == 1 && got[0] != keyExecuteUnnamed) {
-			t.Errorf("%s: OwnedKeys %q, preparedKeys files it under %s: %v", name, got, keyExecuteUnnamed, want)
+			t.Errorf("%s: unnamedExecKeys %q, preparedKeys files it under %s: %v", name, got, keyExecuteUnnamed, want)
 		}
 	}
 	if unnamed != 4 {
