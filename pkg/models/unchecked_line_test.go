@@ -22,6 +22,11 @@ func TestUncheckedLineCountsWritesAnsweredByKind(t *testing.T) {
 		// A by-kind answer that names no write kind is named by its protocol.
 		{[]UnmatchedCall{{Answer: AnswerByKind, Protocol: "MongoDB", Kind: MissInTest}},
 			"post-url-1: 1 background write answered inside its window, unchecked (MongoDB)"},
+		// A background call answered again names the recording it repeated.
+		{[]UnmatchedCall{{Answer: AnswerBackgroundAgain, ClosestMock: "mock-7", Kind: MissInTest}},
+			"post-url-1: 1 background call answered again, unchecked (mock-7)"},
+		{[]UnmatchedCall{{Answer: AnswerBackgroundAgain, ClosestMock: "mock-7"}, byKind("Mongo insert keploy.events", MissInTest), {Answer: AnswerBackgroundAgain, ClosestMock: "mock-3"}, {Answer: AnswerBackgroundAgain, ClosestMock: "mock-7"}},
+			"post-url-1: 1 background write answered inside its window, unchecked (Mongo insert keploy.events); 3 background calls answered again, unchecked (mock-7 x2, mock-3)"},
 	} {
 		if got := UncheckedLine("post-url-1", tc.answers); got != tc.want {
 			t.Errorf("UncheckedLine(%+v) =\n %q\nwant\n %q", tc.answers, got, tc.want)

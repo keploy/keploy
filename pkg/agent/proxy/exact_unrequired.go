@@ -1,6 +1,11 @@
 package proxy
 
-import "maps"
+import (
+	"maps"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // SERVED, NEVER REQUIRED: AN APPLICATION'S BACKGROUND WORK IN A TEST'S WINDOW.
 //
@@ -13,8 +18,10 @@ import "maps"
 // window, when its call is made, and is never failed for not making it: it is
 // left out of the test's unconsumed recordings (ExactTestOutcome) and listed
 // on its own (ExactTestUnusedBackground), so judging can say which ones a
-// replay never used and take them out of the recording. A recording with no
-// mark is required as before.
+// replay never used and take them out of the recording. A call identical to
+// one that already answered in the window is answered again with it
+// (AnsweredBackground): the job ran more often than at record. A recording
+// with no mark is required as before.
 
 // SetUnrequired installs, for the staged set, the recordings a test is served
 // in its window but never required to make, each with why (judging's
@@ -51,3 +58,32 @@ func (m *MockManager) ExactTestUnusedBackground() (test string, unused []string,
 	}
 	return o.test, append([]string(nil), o.unusedBackground...), true
 }
+
+// AnsweredBackground implements integrations.AnsweredBackgroundReader: the
+// open test's own recordings marked as the application's background work
+// (SetUnrequired) that have answered in it, in the order they did; none while
+// no test is open, when nothing is marked, and with exact serving off.
+func (m *MockManager) AnsweredBackground() []*models.Mock {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return nil
+	}
+	unrequired := m.unrequiredNames()
+	if len(unrequired) == 0 {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	var out []*models.Mock
+	for _, i := range v.order {
+		if v.isCand(i) {
+			continue
+		}
+		if _, bg := unrequired[v.owned[i].Name]; bg {
+			out = append(out, v.owned[i])
+		}
+	}
+	return out
+}
+
+var _ integrations.AnsweredBackgroundReader = (*MockManager)(nil)

@@ -1135,6 +1135,13 @@ func (h *heldScope) ConsumedTestMocks() []*models.Mock {
 	return h.heldOf(h.MockManager.ConsumedTestMocks())
 }
 
+// AnsweredBackground is the manager's (integrations.AnsweredBackgroundReader)
+// while the staging is still h's call's: the marks and the recordings are the
+// staged set's, and recordings' names restart in each set.
+func (h *heldScope) AnsweredBackground() []*models.Mock {
+	return h.heldOf(h.MockManager.AnsweredBackground())
+}
+
 // FindAnsweredEarlier is the manager's (integrations.AnsweredFinder) while
 // the staging is still h's call's after the lookup: the answered log is the
 // staged set's, and recordings' names restart in each set, so a call of one
