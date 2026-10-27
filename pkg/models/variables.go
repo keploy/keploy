@@ -166,14 +166,18 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // learn step learned a wall clock of no zone there (a text, or a type of its
 // protocol, that names no zone: "2026-10-27 09:00:00", a Postgres
 // timestamp): ZoneUTC in UTC, ZoneApp in the application's own zone, as
-// the replay's tracker knows it (learn.Span.Zone); "" for a value that names
-// its moment, read as it names it, as a recording learned before Zone was
-// read is. A replay reads a wall clock of no zone only under ZoneUTC or
-// ZoneApp, the zone the learn step read it in, and refuses one under
-// ZoneApp where it cannot tell the application's zone, so it never checks a
-// value in a zone the learn step did not read it in. ZoneApart is the Meet
-// of two learnings that read the place in different zones, which holds
-// nothing (Empty), and so does a Zone this keploy does not read (ZoneKnown).
+// the replay's tracker knows it (learn.Span.Zone); ZoneEither in either of
+// the two, where the recording could not tell them apart at the value's
+// resolution (a date whose day is one in both zones at its call, or an
+// application whose zone is UTC there); "" for a value that names its
+// moment, read as it names it, as a recording learned before Zone was read
+// is. A replay reads a wall clock of no zone only under ZoneUTC, ZoneApp or
+// ZoneEither, the zones the learn step read it in, and refuses one under
+// ZoneApp or ZoneEither where it cannot tell the application's zone, so it
+// never checks a value in a zone the learn step did not read it in.
+// ZoneApart is the Meet of two learnings that read the place in zones no
+// one zone holds, which holds nothing (Empty), and so does a Zone this
+// keploy does not read (ZoneKnown).
 type ClockOffset struct {
 	Min  time.Duration `json:"min" yaml:"min" bson:"min"`
 	Max  time.Duration `json:"max" yaml:"max" bson:"max"`
@@ -187,17 +191,38 @@ const (
 	ZoneUTC = "utc"
 	// ZoneApp: a wall clock of no zone, read in the application's zone.
 	ZoneApp = "app"
-	// ZoneApart: two learnings of one place read it in different zones
-	// (Meet); it holds nothing.
+	// ZoneEither: a wall clock of no zone the recording could not tell
+	// UTC's from the application's at its resolution, read in each of the
+	// two: a replay passes it where either reading holds.
+	ZoneEither = "either"
+	// ZoneApart: two learnings of one place read it in zones no one zone
+	// holds (Meet); it holds nothing.
 	ZoneApart = "apart"
 )
 
 // ZoneKnown reports whether o's Zone is one a replay reads a value in: ""
-// (as the value names its moment), ZoneUTC or ZoneApp. Holds holds nothing
-// for any other: ZoneApart, or a Zone this keploy does not read, which it
-// never checks in some other zone.
+// (as the value names its moment), ZoneUTC, ZoneApp or ZoneEither. Holds
+// holds nothing for any other: ZoneApart, or a Zone this keploy does not
+// read, which it never checks in some other zone.
 func (o ClockOffset) ZoneKnown() bool {
-	return o.Zone == "" || o.Zone == ZoneUTC || o.Zone == ZoneApp
+	return o.Zone == "" || o.Zone == ZoneUTC || o.Zone == ZoneApp || o.Zone == ZoneEither
+}
+
+// meetZones is the zone a replay reads a place in that two learnings read
+// in a and b: the one zone both hold (ZoneEither holds UTC and the
+// application's, so its meet with either one is that one); ZoneApart where
+// none does (UTC and the application's zone, or a wall clock of no zone and
+// a value that names its zone).
+func meetZones(a, b string) string {
+	switch {
+	case a == b:
+		return a
+	case a == ZoneEither && (b == ZoneUTC || b == ZoneApp):
+		return b
+	case b == ZoneEither && (a == ZoneUTC || a == ZoneApp):
+		return a
+	}
+	return ZoneApart
 }
 
 // offsetUnits are the units an offset reads in, coarsest first.
@@ -305,7 +330,8 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // fell in the cut. Nor for an o whose Zone a replay reads no value in
 // (ZoneKnown: ZoneApart, or one this keploy does not read). at is the
 // value's instant as read in o's Zone: the caller reads a wall clock of no
-// zone there (learn.CheckClockRead). A window with no start (a zero to
+// zone there (learn.CheckClockRead), and under ZoneEither in each of UTC and
+// the application's zone, passing the value where either holds. A window with no start (a zero to
 // is before any from), one that ends before it starts, a res of none or an
 // empty o (it has no Unit) holds nothing, and so does an o the learn step
 // never finds (a Min of zero or below, a Max not above Min, or a Res of
@@ -340,22 +366,20 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // holds the true offset of a read its learn step saw, so the one place's
 // value holds it only where both do; a Res read coarser refuses more,
 // never less. Two that share no offset (a Plain and one with an offset, or
-// two offsets apart), or that read it in different zones (ZoneApart), meet
-// as an Empty one, which holds nothing. Meet is the
+// two offsets apart), or that read it in zones no one zone holds (UTC and
+// the application's: ZoneApart, meetZones), meet as an Empty one, which
+// holds nothing; ZoneEither meets UTC or the application's zone as that
+// one, the zone both hold. Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	zone := o.Zone
-	if p.Zone != o.Zone {
-		zone = ZoneApart
-	}
-	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: zone}
+	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone)}
 }
 
 // Empty reports whether o is the Meet of learnings of one place that share
 // no offset: a Min above zero and a Max not above it; or that read it in
-// different zones (ZoneApart). Holds holds nothing for it, and String says
+// zones no one zone holds (ZoneApart). Holds holds nothing for it, and String says
 // why.
 func (o ClockOffset) Empty() bool { return o.Min > 0 && o.Max <= o.Min || o.Zone == ZoneApart }
 
@@ -429,6 +453,8 @@ func (o ClockOffset) zoneString() string {
 		return ", a wall clock of no zone in UTC"
 	case ZoneApp:
 		return ", a wall clock of no zone in the application's zone"
+	case ZoneEither:
+		return ", a wall clock of no zone in UTC or in the application's zone"
 	}
 	return ""
 }
