@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -32,7 +33,7 @@ type fakePortHolder struct {
 	mu           sync.Mutex
 	registered   map[uint16]net.Listener
 	unregistered []uint16
-	parked       uint64
+	lookups      map[string]uint64
 }
 
 func (f *fakePortHolder) IngressParkListener() net.Listener { return f.park }
@@ -53,8 +54,8 @@ func (f *fakePortHolder) UnregisterIngressForwarder(orig uint16) {
 	defer f.mu.Unlock()
 	f.unregistered = append(f.unregistered, orig)
 }
-func (f *fakePortHolder) IngressHeld() bool     { return f.held }
-func (f *fakePortHolder) IngressParked() uint64 { return f.parked }
+func (f *fakePortHolder) IngressHeld() bool                      { return f.held }
+func (f *fakePortHolder) IngressLookupCounts() map[string]uint64 { return f.lookups }
 
 // parkListener is a loopback listener whose connections report port orig as
 // their local address, as the kernel's sk_lookup leaves a parked connection's:
@@ -290,15 +291,17 @@ type holdingHooks struct {
 }
 
 func (holdingHooks) Get(context.Context, uint16) (*agent.NetworkAddress, error) { return nil, nil }
-func (holdingHooks) Delete(context.Context, uint16) error                        { return nil }
-func (holdingHooks) Load(context.Context, agent.HookCfg, config.Agent) error     { return nil }
+func (holdingHooks) Delete(context.Context, uint16) error                       { return nil }
+func (holdingHooks) Load(context.Context, agent.HookCfg, config.Agent) error    { return nil }
 func (h holdingHooks) WatchBindEvents(context.Context) (<-chan models.IngressEvent, error) {
 	return h.events, nil
 }
 
 // New takes the hooks' hold, and Start serves its park; when recording ends
 // (the bind events end), keploy says how many calls the hold served, the
-// window it covered.
+// window it covered: its own count of the parked calls it forwarded, not the
+// lookup's (here 3 lookups, as a retransmitted SYN makes, for one call),
+// which it gives at Debug.
 func TestStartServesTheHoldsParkAndTheEndSaysWhatItServed(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
 	captured := make(chan uint16, 1)
@@ -310,9 +313,9 @@ func TestStartServesTheHoldsParkAndTheEndSaysWhatItServed(t *testing.T) {
 	app := oneShotUpstream(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
 	const dialed = 18082
 	park := parkListener{Listener: loopbackListener(t), orig: dialed}
-	holder := &fakePortHolder{park: park, moved: map[uint16]uint16{dialed: portOf(t, app)}, held: true, parked: 2}
+	holder := &fakePortHolder{park: park, moved: map[uint16]uint16{dialed: portOf(t, app)}, held: true, lookups: map[string]uint64{"parked": 3}}
 	hooks := holdingHooks{fakePortHolder: holder, events: make(chan models.IngressEvent)}
-	core, logs := observer.New(zapcore.InfoLevel)
+	core, logs := observer.New(zapcore.DebugLevel)
 	pm := New(zap.New(core), hooks, &config.Config{})
 	t.Cleanup(pm.captures.Wait)
 	if pm.portHolder == nil {
@@ -346,13 +349,126 @@ func TestStartServesTheHoldsParkAndTheEndSaysWhatItServed(t *testing.T) {
 	close(hooks.events) // recording ends
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		if l := logs.FilterMessageSnippet("served calls to the application's port that arrived before its forwarder listened").All(); len(l) == 1 {
-			if n := l[0].ContextMap()["count"]; n != uint64(2) {
-				t.Fatalf("the end said count %v, want 2", n)
+			if n := l[0].ContextMap()["count"]; n != uint64(1) || l[0].Level != zapcore.InfoLevel {
+				t.Fatalf("the end said count %v at %v, want 1 at info", n, l[0].Level)
+			}
+			d := logs.FilterMessageSnippet("the ingress hold's listener lookups").All()
+			if len(d) != 1 || d[0].Level != zapcore.DebugLevel || fmt.Sprint(d[0].ContextMap()["lookups"]) != "map[parked:3]" {
+				t.Fatalf("the end's Debug line of the lookup's counts: %v", d)
 			}
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the end did not say what the hold served: %v", logs.All())
+		}
+	}
+}
+
+// heldUpstream is an app that answers each call only once the test lets it:
+// got receives each request as it arrives, and each send on answer answers
+// one.
+func heldUpstream(t *testing.T) (addr string, got <-chan string, answer chan<- struct{}) {
+	t.Helper()
+	ln := loopbackListener(t)
+	gotc, answerc := make(chan string, 4), make(chan struct{})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				req, err := http.ReadRequest(bufio.NewReader(c))
+				if err != nil {
+					return
+				}
+				gotc <- req.URL.Path
+				<-answerc
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+			}(c)
+		}
+	}()
+	t.Cleanup(func() { close(answerc) })
+	return ln.Addr().String(), gotc, answerc
+}
+
+// callAndRead sends a GET for path on c and returns a channel the answer's
+// status (or the error) arrives on.
+func callAndRead(t *testing.T, c net.Conn, path string) <-chan string {
+	t.Helper()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second)) // an unanswered call fails the test, not the run
+	if _, err := io.WriteString(c, "GET "+path+" HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() {
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil {
+			done <- err.Error()
+			return
+		}
+		_ = resp.Body.Close()
+		done <- resp.Status
+	}()
+	return done
+}
+
+// In synchronous recording, a port's calls are taken one at a time: a call
+// the park serves and one the port's forwarder accepts take the port's one
+// semaphore (portSem), as two of the forwarder's own do. While the app holds
+// each, the port's slot is taken.
+func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
+	stubIngressPaused(t, func() bool { return false })
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase,
+		*http.Request, *http.Response, time.Time, time.Time,
+		models.IncomingOptions, bool, bool, uint16) {
+	})
+	app, got, answer := heldUpstream(t)
+	orig := portOf(t, freeAddr(t))
+	park := parkListener{Listener: loopbackListener(t), orig: int(orig)}
+	holder := &fakePortHolder{park: park, moved: map[uint16]uint16{orig: portOf(t, app)}, held: true}
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder, synchronous: true}
+	t.Cleanup(pm.captures.Wait)
+	ctx, cancel := context.WithCancel(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
+	defer cancel()
+	go pm.serveParkedConnections(ctx, park)
+
+	for _, via := range []string{"park", "forwarder"} {
+		if via == "forwarder" {
+			saved := ingressTargetWait
+			t.Cleanup(func() { ingressTargetWait = saved })
+			ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
+			g := newGoTCPIngressHook(pm)
+			if err := g.StartIngress(ctx, orig, portOf(t, app)); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = g.StopIngress(orig) })
+		}
+		addr := park.Addr().String()
+		if via == "forwarder" {
+			addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(orig)))
+		}
+		c, err := net.Dial("tcp4", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = c.Close() }()
+		done := callAndRead(t, c, "/"+via)
+		select {
+		case p := <-got:
+			if p != "/"+via {
+				t.Fatalf("the app got %s, want /%s", p, via)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the %s's call did not reach the app", via)
+		}
+		if n := len(pm.portSem(orig)); n != 1 {
+			t.Fatalf("while the app holds the %s's call, the port's synchronous slot holds %d, want 1", via, n)
+		}
+		answer <- struct{}{}
+		if s := <-done; s != "200 OK" {
+			t.Fatalf("the %s's call: %s", via, s)
 		}
 	}
 }
