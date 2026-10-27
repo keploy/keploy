@@ -884,8 +884,12 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 // F gave there is refused, never noise, naming where and which of the two
 // it is; and so is every such word where one of them could not be read
 // (unread). Stamps are searched as any text where the call's own places say
-// so (stampsEchoed).
-func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces) string {
+// so (stampsEchoed). Under the rule a copy follows its source (fol:
+// ClassifyFollowing), a word the recording and F both gave the application
+// at such a place before the call, which one of the two values lacks, is no
+// word the value copied there and is let go (follows.excusedGiven): a group
+// of a random id that another test's random id holds by chance.
+func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw []Raw, places func() *offsetPlaces, fol *follows) string {
 	keep, kept := false, false
 	return v.eachChanged(func(i int, t string, recorded bool) string {
 		op := places()
@@ -904,7 +908,11 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				return v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				why := v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				if fol.excusedGiven(g, v, i, t, at, why) {
+					continue
+				}
+				return why
 			}
 		}
 		return ""

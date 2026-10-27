@@ -312,7 +312,9 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			merge(p, true, g.first, g.last)
 			continue
 		}
-		op.words = append(op.words, g.words)
+		w := g.words
+		w.set = true
+		op.words = append(op.words, w)
 		op.answers = append(op.answers, g.answer...)
 		others = append(others, g)
 	}
@@ -645,11 +647,27 @@ type givenWords struct {
 	// late is Raw.late: the reason says the recording is read both ways;
 	// noTime, Raw.noTime: that keploy cannot read when it was recorded.
 	late, noTime bool
+	// same are the words of words, in each reading, that record's full
+	// round gave the application at the fields the recording gave them at
+	// (sameWords): what the rule a copy follows its source reads as a word
+	// both runs gave there (follows.excusedGiven).
+	same [][]string
+	// answered, conn and pos are the recording's (Raw), first and last F's
+	// serves of it: where the rule lets a word of it go, they place it in
+	// the order the recording and F gave the application the value's
+	// candidate sources (follows.followed). set: a recording F gave the
+	// application earlier in the set (GivenEarlier), which no Raw handed to
+	// the call stands for.
+	answered    time.Time
+	conn        string
+	pos         uint64
+	first, last int
+	set         bool
 }
 
 // wordsOf is x's givenWords, every word a copy.
 func (dc *DriftCache) wordsOf(x Raw) givenWords {
-	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime}
+	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
 	plain := dc.answerWords(x, false)
 	kept := plain
 	if len(x.stamps) > 0 {
@@ -659,7 +677,101 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 		g.words = append(g.words, sortedWords(plain[i], nil))
 		g.stamped = append(g.stamped, sortedWords(kept[i], plain[i]))
 	}
+	// Served unchanged, every word is one both gave: the same lists.
+	if x.AsRecorded() {
+		g.same = g.words
+		return g
+	}
+	for _, same := range dc.sameWords(x, plain) {
+		g.same = append(g.same, sortedWords(same, nil))
+	}
 	return g
+}
+
+// sameWords are the words of words (x's answer's, by reading) that record's
+// full round gave the application at every field of x's payload the
+// recording gave them at, and at no other: every one where F served x
+// unchanged (Raw.AsRecorded); of a payload F served changed and gave its
+// view of (ServedLive), those the view holds at exactly the fields (by
+// path) whose recorded text holds them, as liveAt reads a place F gave the
+// word at (fSame); none of a recording F did not serve, or served changed
+// with no view (F may have given another word there, which keploy does not
+// see). Payloads are read as searched: stamps and protocol-phase clock reads
+// blanked, so a word only a stamp holds is no word both gave.
+func (dc *DriftCache) sameWords(x Raw, words []map[string]bool) []map[string]bool {
+	out := make([]map[string]bool, len(words))
+	switch {
+	case x.AsRecorded():
+		return words
+	case !x.Live():
+		return out
+	}
+	rec := dc.searched(x, false)[0]
+	live := dc.searched(*x.live, false)[0]
+	tokensAt := func(fields []rawField, text string, f rawField) ([]map[string]bool, bool) {
+		for _, g := range fields {
+			if g.path == f.path && g.key == f.key {
+				if g.end > len(text) {
+					return nil, false
+				}
+				return dc.rawTokens(text[g.start:g.end]), true
+			}
+		}
+		return nil, false
+	}
+	held := make([]map[string]bool, len(words))
+	bad := make([]map[string]bool, len(words))
+	for i := range words {
+		held[i], bad[i] = map[string]bool{}, map[string]bool{}
+	}
+	// One side's field holding a word: the other's field of its path must
+	// hold it too, or the word is not given there alike.
+	read := func(fields []rawField, text string, other []rawField, otherText string, recorded bool) {
+		for _, f := range fields {
+			own, ok := tokensAt(fields, text, f)
+			if !ok {
+				continue
+			}
+			there, found := tokensAt(other, otherText, f)
+			for i := range words {
+				if i >= len(own) {
+					break
+				}
+				for w := range own[i] {
+					if !words[i][w] {
+						continue
+					}
+					switch {
+					case !found || i >= len(there) || !there[i][w]:
+						bad[i][w] = true
+					case recorded:
+						held[i][w] = true
+					}
+				}
+			}
+		}
+	}
+	read(x.fields, rec, x.live.fields, live, true)
+	read(x.live.fields, live, x.fields, rec, false)
+	for i := range words {
+		out[i] = map[string]bool{}
+		for w := range held[i] {
+			if !bad[i][w] {
+				out[i][w] = true
+			}
+		}
+	}
+	return out
+}
+
+// sameHolds reports whether record's full round gave the application t at
+// the fields the recording gave it at, in reading i (givenWords.same).
+func (g givenWords) sameHolds(i int, t string) bool {
+	if i >= len(g.same) {
+		return false
+	}
+	k := sort.SearchStrings(g.same[i], t)
+	return k < len(g.same[i]) && g.same[i][k] == t
 }
 
 // sortedWords are the words of set that minus does not hold, each a copy,
