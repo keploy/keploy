@@ -1220,6 +1220,12 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// Window.holdsRead) it is refused, as a read made before that window
 		// or no plain read of the clock (outsideWindowWhy).
 		//
+		// Where keploy cannot tell which clock the application reads
+		// (DriftCache.appClock), a call has no window and no replay can
+		// check a read of the clock (Tracker.LiveSpan): one with no window
+		// is refused here, at learn (noAppClockWhy), never learned as a read
+		// only a replay refuses.
+		//
 		// One its window holds only as a wall clock of no zone in the
 		// application's zone is a plain read of the clock too, never noise
 		// left unchecked. Each read of a wall clock of no zone carries the
@@ -1228,6 +1234,8 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		if ln.Kind == KindNoise && ln.Read == nil {
 			if read := textClockRead(r.Value, l.Value); read != nil {
 				switch {
+				case w == nil && !dc.appClock:
+					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
 				case w == nil || dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w):
 					ln.Read = read
 				default:
@@ -1690,11 +1698,19 @@ type DriftCache struct {
 	// beside UTC (Tracker.SetAppZone), nil for UTC alone: a client test's
 	// window reads such a wall clock in those two only (Window.holdsRead),
 	// and so does the clock rule of one its protocol types (instantClock).
-	zone   *time.Location
-	mu     sync.Mutex
-	m      map[driftKey]*valueDrift
-	raw    map[string]string
-	rawTok map[string][]map[string]bool
+	zone *time.Location
+	// appClock: the tracker knows which clock the application reads
+	// (Tracker.SetAppClock), set as the tracker makes the cache and as the
+	// agent sets the clock. false (a cache made otherwise, NewDriftCache)
+	// where keploy cannot tell: a call then has no window, and no replay can
+	// check a read of the clock (Tracker.LiveSpan), so an instant only a
+	// call's window could show a read is refused at learn (noAppClockWhy),
+	// never learned as a read that only a replay refuses.
+	appClock bool
+	mu       sync.Mutex
+	m        map[driftKey]*valueDrift
+	raw      map[string]string
+	rawTok   map[string][]map[string]bool
 	// mockText is each mock as Classify reads it (RawOf: its text and its
 	// answer's clock reads), by mock: the store's mocks are read once per
 	// test, not once per request.
