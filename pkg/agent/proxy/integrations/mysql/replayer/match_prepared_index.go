@@ -15,10 +15,12 @@ import (
 // preparedIndex files the mocks commands are matched against, so matchCommand
 // finds them in the session tier through the store's index
 // (integrations.SessionKeyReader) instead of walking the whole pool for every
-// COM_STMT_PREPARE, COM_STMT_CLOSE and, while no test window is open (between
-// tests, and under exact serving), COM_QUERY and COM_STMT_EXECUTE. In lax mode
-// that tier holds every test's traffic, and a walk per command cost more with
-// every test the set held.
+// COM_STMT_PREPARE, COM_STMT_CLOSE and, while no test window is open,
+// COM_QUERY and COM_STMT_EXECUTE. No window is open under exact serving (keploy
+// mock replay), and in keploy test only before a set's first test: a test's
+// window stays open until the next test is staged. In lax mode that tier holds
+// every test's traffic, and a walk per command cost more with every test the
+// set held.
 var preparedIndex = &integrations.MockIndex{Keys: preparedKeys}
 
 const (

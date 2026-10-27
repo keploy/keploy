@@ -697,9 +697,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// runs over the whole pool from clean state, as it always did, reusing
 	// what the first pass already computed for its candidates.
 	//
-	// While no test window is active (between tests, and under exact serving,
-	// whose store reports none), COM_QUERY and COM_STMT_EXECUTE are matched
-	// through preparedIndex too:
+	// While no test window is active, COM_QUERY and COM_STMT_EXECUTE are
+	// matched through preparedIndex too. That is under exact serving (keploy
+	// mock replay), whose store reports no window, and in keploy test only
+	// before a set's first test: a test's window is opened as the test is
+	// staged and stays open until the next test is staged. Then:
 	//
 	//   - a COM_QUERY stops at the first exact match the strict gate allows,
 	//     and a recorded COM_QUERY is exact only when its statement identity
