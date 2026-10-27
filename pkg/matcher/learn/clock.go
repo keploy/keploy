@@ -487,12 +487,18 @@ func readEpoch(s string) (time.Time, time.Duration, bool) {
 	var res time.Duration
 	digits := s
 	if i := strings.IndexByte(s, '.'); i >= 0 {
+		// Its seconds and its fraction's digits read exactly, never through
+		// a float64, which holds a second's fraction near 2026 only to
+		// about 240 ns: a value the application cut to the millisecond
+		// must read as a whole millisecond (readRes tells the cut by it).
 		digits = s[:i]
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
+		n, err := strconv.ParseInt(digits, 10, 64)
+		frac := s[i+1:]
+		if err != nil || frac == "" || strings.Trim(frac, "0123456789") != "" {
 			return time.Time{}, 0, false
 		}
-		t, res = time.Unix(0, int64(f*1e9)).UTC(), fractionRes(len(s)-i-1)
+		ns, _ := strconv.ParseInt((frac + "00000000")[:9], 10, 64)
+		t, res = time.Unix(n, ns).UTC(), fractionRes(len(frac))
 	} else {
 		n, err := strconv.ParseInt(digits, 10, 64)
 		if err != nil {
