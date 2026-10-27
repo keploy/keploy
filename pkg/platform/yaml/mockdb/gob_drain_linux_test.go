@@ -55,7 +55,7 @@ func newTestDisk(t *testing.T, dir string, chunk int) *testDisk {
 	return d
 }
 
-func (d *testDisk) run(fifo string) error {
+func (d *testDisk) run(fifo string) (err error) {
 	var once sync.Once
 	ready := func() { once.Do(func() { close(d.ready) }) }
 	defer ready()
@@ -63,7 +63,7 @@ func (d *testDisk) run(fifo string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	rc, err := in.SyscallConn()
 	if err != nil {
 		return err
@@ -82,7 +82,7 @@ func (d *testDisk) run(fifo string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { err = errors.Join(err, out.Close()) }()
 	buf := make([]byte, d.chunk)
 	for {
 		<-d.turn

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -85,3 +86,60 @@ func TestProgressWriter_CountsEachPieceTheFileTakes(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+// Close's wait counts the stall from the writer's last progress, not from
+// when it began: it waits through looks that see none for as long as the
+// writer moved within the window before them, across many windows in all,
+// and gives up once a whole window of run time has gone with no progress.
+func TestWhileWriting_CountsTheStallFromTheLastProgress(t *testing.T) {
+	ys := New(zap.NewNop(), t.TempDir(), "mocks")
+	clk := &stall.ManualClock{}
+	ys.gobClock = clk
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	got := make(chan bool, 1)
+	go func() { got <- ys.whileWriting(nil, done, nil) }()
+	// look runs one of whileWriting's looks: d of run time on, the
+	// writer having moved first or not. It reports whether whileWriting
+	// is still waiting once it has looked.
+	look := func(d time.Duration, moved bool) bool {
+		for clk.Pending() == 0 { // whileWriting arms its next look
+			select {
+			case r := <-got:
+				got <- r
+				return false
+			case <-time.After(time.Millisecond):
+			}
+		}
+		if moved {
+			ys.gobProgress.Add(1)
+		}
+		clk.Advance(d)
+		for clk.Pending() == 0 {
+			select {
+			case r := <-got:
+				got <- r
+				return false
+			case <-time.After(time.Millisecond):
+			}
+		}
+		return true
+	}
+	for i := 0; i < 10; i++ { // five windows of run time, the writer moving in each
+		if !look(gobStallAfter/2, false) {
+			t.Fatalf("gave up %s after the writer last moved, within the window %s (%s of run time in all)", gobStallAfter/2, gobStallAfter, time.Duration(2*i+1)*gobStallAfter/2)
+		}
+		if !look(gobStallAfter/2, true) {
+			t.Fatalf("gave up on a look that saw the writer move (%s of run time in all)", time.Duration(2*i+2)*gobStallAfter/2)
+		}
+	}
+	if !look(gobStallAfter-time.Nanosecond, false) {
+		t.Fatalf("gave up before a whole window %s with no progress", gobStallAfter)
+	}
+	if look(time.Nanosecond, false) {
+		t.Fatalf("still waiting once a whole window %s went with no progress", gobStallAfter)
+	}
+	if <-got {
+		t.Fatal("whileWriting said it got what it waited for, from a writer that stopped")
+	}
+}
