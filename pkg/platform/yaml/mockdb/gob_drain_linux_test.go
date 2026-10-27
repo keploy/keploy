@@ -124,15 +124,20 @@ func (d *testDisk) free() {
 	}
 }
 
+// maxUncountedPiece is the most of a write the writer may hand the disk
+// without counting it as progress. The tests own it: a writer whose pieces
+// grew (progressChunk) fails them, instead of moving their bound with it.
+const maxUncountedPiece = 32 << 10
+
 // writerClock is the time the process could run, as Close measures the gob
 // writer's stall on it (MockYaml.gobClock), moved by what the writer and the
 // test's disk do instead of by the box. Each look Close arms lets the disk
 // take a chunk at a time until the writer has moved since: the look comes
 // with half the stall window on (a writer that keeps writing, however slow
 // the disk). Or until the disk has taken more than the pipe held, a chunk
-// and a whole piece of a write (progressChunk) since, with the writer not
-// moved: the look comes with the whole window on (a writer that wrote a
-// piece it did not count as progress).
+// and maxUncountedPiece since, with the writer not moved: the look comes
+// with the whole window on (a writer that wrote more than maxUncountedPiece
+// without counting it as progress).
 //
 // The tests measured the stall on the process's own clock against a window
 // of 300 ms to 1 s, and the test's disk then had to take a chunk within the
@@ -169,7 +174,7 @@ func (c *writerClock) After(time.Duration) (<-chan time.Time, func() bool) {
 		case <-stop:
 			return
 		}
-		bound := c.disk.pipeSize + int64(c.disk.chunk+progressChunk)
+		bound := c.disk.pipeSize + int64(c.disk.chunk+maxUncountedPiece)
 		for {
 			// The disk's count first: the writer counts a piece before it
 			// writes the next, so once the disk has read past bound, the
@@ -206,7 +211,8 @@ func (c *writerClock) fire(ch chan<- time.Time, by time.Duration, moved bool) {
 }
 
 // stuckClock is the clock of a process that runs on while the writer does
-// not move: each look comes at once, a tenth of the stall window on.
+// not move: each look comes at once, with all of its wait on (CheckEvery of
+// the stall window, 1 s of 30 s), so Close gives up after 30 looks.
 func stuckClock() stall.Clock { return &stall.ManualClock{Step: stall.OnTime} }
 
 // waitsPastTheWindow fails t unless Close looked at a moving writer for more
