@@ -275,8 +275,10 @@ const (
 // application t there before the call; fv, what record's full round gave
 // there (followed: of fFollowed, why the value follows it; of fElsewhere,
 // where); untimed, of a place the recording gave, says why keploy cannot
-// tell when it did ("" where it can).
-func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands string) bool {
+// tell when it did ("" where it can); took, where the value that lacks t
+// holds another word of that place's payload, says where (givenTook: ""
+// where it holds none, or the rule reads no such evidence there).
+func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, why, stands, took string) bool {
 	if f == nil {
 		return false
 	}
@@ -293,6 +295,8 @@ func (f *follows) excused(t string, recGave bool, fv fView, followed, untimed, w
 		f.refused = "record's full round gave the application that word at " + followed + ", where the recording did not, so it cannot show the value does not follow it"
 	case f.dc.holdsWord(f.rec, t) && f.dc.holdsWord(f.live, t):
 		f.refused = "the recorded value and the value record's full round saw both hold that word, and both gave it there, so neither shows the value does not follow it"
+	case took != "":
+		f.refused = took + ", so it may have followed that payload's words to wherever each run gave them, and the recording cannot show the value does not follow that word"
 	default:
 		if f.first == "" {
 			f.first = why
@@ -444,7 +448,7 @@ func (f *follows) excusedSeen(e Earlier, ed, v *valueDrift, i int, t string, at 
 			fv = fFollowed
 		}
 	}
-	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path) {
+	if !f.excused(t, before && ed.recTok[i][t], fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+e.Mock+" at "+path, "") {
 		return false
 	}
 	f.source(e.Mock)
@@ -475,7 +479,7 @@ func (f *follows) excusedRaw(x Raw, v *valueDrift, i int, t string, at time.Time
 	case x.Live():
 		fv, followed = f.dc.liveAt(x, f.dc.searched(x, false)[0], false, v, func(own string) bool { return f.dc.rawTokens(own)[i][t] })
 	}
-	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place) {
+	if !f.excused(t, before && held, fv, followed, untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+place, "") {
 		return false
 	}
 	f.source(x.mock)
@@ -666,11 +670,16 @@ func movedFrom(ed, v *valueDrift) string {
 // before the call (recordedGave), and F gave it t at the fields the
 // recording gave it at (givenWords.same: g served unchanged, or its view
 // showing t there). Both runs then gave the application that word there, and
-// one of the two values lacks it (excused): the value was made beside the
-// word without taking it, and an application that copied it would have
-// copied it in both runs. That is what tells a word a value holds by chance
-// (a group of a random id that another test's random id holds too) from a
-// copy, never the word's shape. A recording F served changed with no view, a
+// one of the two values lacks it (excused), and that value holds no other
+// word of g's payload, as the recording or F gave it (givenTook): the value
+// was made beside the word without taking it, and an application that
+// copied it would have copied it in both runs. That is what tells a word a
+// value holds by chance (a group of a random id that another test's random
+// id holds too) from a copy, never the word's shape. A field is a whole
+// payload field (an HTTP body), so a view giving the same ids in another
+// order gives each id's words at the same field in both runs: a value that
+// copied the first id holds one id in each run, and the value lacking t
+// holds the other id's words, so it stays refused. A recording F served changed with no view, a
 // view that gives the word at another field or not at all, one the recording
 // answered at or after the call, or whose times keploy cannot read, shows
 // nothing, and the word stays refused, naming why.
@@ -683,11 +692,11 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 		gat = time.Time{}
 	}
 	before, untimed := recordedGave(gat, g.answered, at, g.mock)
-	fv := fNone
+	fv, took := fNone, ""
 	if g.sameHolds(i, t) {
-		fv = fSame
+		fv, took = fSame, f.givenTook(g, v, t)
 	}
-	if !f.excused(t, before, fv, "", untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+g.mock) {
+	if !f.excused(t, before, fv, "", untimed, why, v.wordOf(t, v.recTok[i][t])+" stands in "+g.mock, took) {
 		return false
 	}
 	f.source(g.mock)
@@ -700,6 +709,28 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 		f.given = append(f.given, Raw{mock: g.mock, at: g.at, noTime: g.noTime, answered: g.answered, conn: g.conn, pos: g.pos, served: true, read: true, first: g.first, last: g.last})
 	}
 	return true
+}
+
+// givenTook is recordedTook of a recording F gave the application that no
+// earlier place of the call's own test is (excusedGiven): where a word of
+// what the drifted value v changed, on the side of it that lacks word t (as
+// recorded, where the recorded value lacks t; as F saw it, where that value
+// does), stands in g's answer as the recording or F gave it (inAnswer), ""
+// where none does. Such a value is no value made beside the word without
+// taking any: it may have copied a word of that payload by where it stands
+// there (the first of two ids F gave in another order). Where both values
+// hold t, neither lacks it, and excused refuses it already.
+func (f *follows) givenTook(g givenWords, v *valueDrift, t string) string {
+	recLacks, liveLacks := !f.dc.holdsWord(f.rec, t), !f.dc.holdsWord(f.live, t)
+	return v.eachChanged(func(i int, w string, recorded bool) string {
+		if recorded && !recLacks || !recorded && !liveLacks {
+			return ""
+		}
+		if as := g.inAnswer(i, w); as != "" {
+			return "the value that lacks that word holds another word of that payload: " + v.wordOf(w, recorded) + " stands in " + g.mock + "'s answer " + as
+		}
+		return ""
+	})
 }
 
 // recordedGave reports whether the recording gave the application a place
