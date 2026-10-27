@@ -42,6 +42,19 @@ type Agent struct {
 	consumed consumedStore
 }
 
+// replayer is a service that says whether it is replaying a recording
+// (agent.Agent.Replaying).
+type replayer interface{ Replaying() bool }
+
+// streamCompleteMessage is what the agent logs as its stream of incoming
+// calls ends: a replay's is no recording.
+func streamCompleteMessage(svc any) string {
+	if r, ok := svc.(replayer); ok && r.Replaying() {
+		return "agent: replay complete"
+	}
+	return "agent: recording complete"
+}
+
 // agentReadyFilePath is the path MakeAgentReady writes on success. It
 // defaults to kdocker.AgentReadyFile (the canonical /tmp/agent.ready
 // location consumed by the docker-compose healthcheck) and is a var
@@ -825,7 +838,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Int("test_cases", tcsUnsettled),
 				zap.Duration("held_without_progress_for", testCaseHoldMax))
 		}
-		logRecordingComplete("agent: recording complete",
+		logRecordingComplete(streamCompleteMessage(a.svc),
 			// How the stream ended: "capture" (it closed its channel),
 			// "end" (its client asked the agent to end it, after it was
 			// told the agent held nothing more from before its stop), or

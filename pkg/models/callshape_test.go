@@ -159,8 +159,8 @@ func TestHolePathPlaces(t *testing.T) {
 }
 
 // A miss's summary in its shape: an HTTP or gRPC call's method and target
-// shape, a SQL statement without its literals, and nothing of any other
-// protocol.
+// shape, a SQL statement without its literals, a MongoDB call's command and
+// collection, and nothing of any other protocol.
 func TestCallShape(t *testing.T) {
 	cases := []struct {
 		name, protocol, summary, want string
@@ -174,6 +174,11 @@ func TestCallShape(t *testing.T) {
 		{"MySQL", "MySQL", "COM_QUERY SELECT * FROM users WHERE email = 'alice@example.com' AND id = 42", "COM_QUERY SELECT * FROM users WHERE email = ? AND id = ?"},
 		{"Postgres", "PostgresV2", "SELECT 1", "SELECT ?"},
 		{"SQL withheld from its first byte", "MySQL", "/* ping */ SELECT 1", "…"},
+		{"MongoDB", "MongoDB", "find on directory", "find on directory"},
+		{"MongoDB, the matcher's kind", "Mongo", "aggregate on app_lookups", "aggregate on app_lookups"},
+		{"MongoDB collection that reads as a value", "MongoDB", "find on 507f1f77bcf86cd799439011", "find on {}"},
+		{"MongoDB command with no collection", "MongoDB", "hello on 1", "hello on {}"},
+		{"MongoDB summary of another form", "MongoDB", "find users where name=alice", ""},
 		{"another protocol has no shape", "Redis", "GET session:alice", ""},
 	}
 	for _, c := range cases {

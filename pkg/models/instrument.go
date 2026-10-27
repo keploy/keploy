@@ -517,6 +517,10 @@ type SetupOptions struct {
 type RunOptions struct {
 	//IgnoreErrors bool
 	AppCommand string // command to run the application
+	// TestCommand: the command is the project's test command (keploy mock
+	// record and replay), whose non-zero exit is the tests' outcome, not an
+	// error of an application.
+	TestCommand bool
 }
 
 //For test bench

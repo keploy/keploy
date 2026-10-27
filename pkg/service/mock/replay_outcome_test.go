@@ -519,3 +519,25 @@ func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
 		t.Errorf("a call that missed is told as %q", messages[1])
 	}
 }
+
+// Under the proven switch a miss is told as keploy saw it: the call by its
+// shape (a MongoDB call's command and collection) and where it went, never an
+// empty call. The matcher's advice (re-record, mark a field as noise) is not
+// a fact about the call: the end of the replay's output says what to run.
+func TestAProvenMissIsToldWithoutAdvice(t *testing.T) {
+	provenOn(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	logMiss(zap.New(core), models.UnmatchedCall{Protocol: "MongoDB", ActualSummary: "find on directory", Destination: "[::1]:27019",
+		NextSteps: "1 field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"})
+	all := logs.All()
+	if len(all) != 1 {
+		t.Fatalf("told %d lines, want 1", len(all))
+	}
+	f := all[0].ContextMap()
+	if f["call"] != "find on directory" || f["destination"] != "[::1]:27019" {
+		t.Fatalf("the miss was told as %v", f)
+	}
+	if _, ok := f["next_step"]; ok {
+		t.Fatalf("a proven miss was told with advice: %v", f["next_step"])
+	}
+}

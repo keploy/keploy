@@ -1994,7 +1994,22 @@ func (a *AgentClient) GetUnchargedCaptureLosses(ctx context.Context) (models.Cap
 	return losses, nil
 }
 
-func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.AppError) {
+// logAppExit says how the command keploy ran ended, when it ended in error.
+// A test command (keploy mock record and replay) that exited non-zero is the
+// tests' outcome, which keploy's verdict reads: it is said as such, not as an
+// error of keploy's.
+func logAppExit(logger *zap.Logger, appErr models.AppError, testCommand bool) {
+	if appErr.Err == nil {
+		return
+	}
+	if testCommand && appErr.ExitCode > 0 && (appErr.AppErrorType == models.ErrUnExpected || appErr.AppErrorType == models.ErrCommandError) {
+		logger.Info(fmt.Sprintf("the test command exited %d", appErr.ExitCode))
+		return
+	}
+	utils.LogError(logger, appErr.Err, "error while running the app")
+}
+
+func (a *AgentClient) Run(ctx context.Context, opts models.RunOptions) (ret models.AppError) {
 	// The agent's container this run is to create, under docker compose: a
 	// release that waits for it ends once the run is over without it
 	// (containerExited). Its end is noted last, once Run returns, whichever
@@ -2064,9 +2079,7 @@ func (a *AgentClient) Run(ctx context.Context, _ models.RunOptions) (ret models.
 				stopKilled = "keploy stopped the application at the recording's end, and " + why
 			}
 		}
-		if appErr.Err != nil {
-			utils.LogError(a.logger, appErr.Err, "error while running the app")
-		}
+		logAppExit(a.logger, appErr, opts.TestCommand)
 		if appErr.AppErrorType != models.ErrCtxCanceled && appErr != (models.AppError{}) {
 			appErrCh <- appErr
 		}
@@ -4779,17 +4792,18 @@ func (a *AgentClient) PushScopeGate(ctx context.Context, run []string, reason st
 }
 
 // PushScopeSkips hands the agent the proven model's gate: the tests to skip,
-// by ID, each with its reason; an empty map skips nothing. Made again on a
-// restarted agent, like the scope gate. Any answer but 200 is a failure: a
-// replay that cannot skip what CI skips refuses.
-func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string) (retErr error) {
+// by ID, each with its reason (an empty map skips nothing), and the file the
+// replay writes its report to, which a failed test's reason names ("" names
+// none). Made again on a restarted agent, like the scope gate. Any answer but
+// 200 is a failure: a replay that cannot skip what CI skips refuses.
+func (a *AgentClient) PushScopeSkips(ctx context.Context, skip map[string]string, report string) (retErr error) {
 	defer func() {
 		if retErr == nil && a.session().recording() {
 			recorded := maps.Clone(skip)
-			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded) })
+			a.session().record(stepScopeGate, func(c context.Context) error { return a.PushScopeSkips(c, recorded, report) })
 		}
 	}()
-	body, err := json.Marshal(models.ScopeGateReq{Skip: skip})
+	body, err := json.Marshal(models.ScopeGateReq{Skip: skip, Report: report})
 	if err != nil {
 		return fmt.Errorf("failed to marshal the tests to skip: %w", err)
 	}

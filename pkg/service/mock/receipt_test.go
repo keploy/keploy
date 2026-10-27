@@ -309,6 +309,17 @@ func TestTheReplaySaysWhatItProved(t *testing.T) {
 	}
 }
 
+// A judged replay (the proven switch, in a build that judges replays) says
+// what it proved in its VERDICT, from keploy's evidence on each test: the log
+// line would only repeat it, vaguer.
+func TestAJudgedReplayLeavesWhatItProvedToTheVerdict(t *testing.T) {
+	provenOn(t)
+	_, _, logs := replayIn(t, replayCase{mapped: true, runExit: models.AppError{AppErrorType: models.ErrCommandError, ExitCode: 1}})
+	if n := logs.FilterMessageSnippet("did not prove the tests run with the dependencies off").Len(); n != 0 {
+		t.Fatalf("a judged replay said %d time(s) that it proved nothing", n)
+	}
+}
+
 // Coverage from a run that could reach real services is not offline coverage,
 // and the log must not say it is.
 func TestCoverageIsOnlyOfflineWhenIsolated(t *testing.T) {

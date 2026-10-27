@@ -38,18 +38,40 @@ func MissShape(m UnmatchedCall) string {
 
 // CallShape is a miss's summary in its shape: for HTTP and gRPC the method
 // and the target's shape ("GET /users/{}/orders", "/pkg.v1.Service/Method"),
-// for SQL the statement with its literals written "?" (SQLShape), and "" for
-// any other protocol, whose summary may hold the values it sent (a cache key,
-// a document) and which keploy has no shape for. An HTTP or gRPC shape is its
-// own shape; a SQL statement cut at its bound may shape again shorter.
+// for SQL the statement with its literals written "?" (SQLShape), for MongoDB
+// the command and the collection it names (mongoShape: "find on users"), and
+// "" for any other protocol, whose summary may hold the values it sent (a
+// cache key, a document) and which keploy has no shape for. An HTTP, gRPC or
+// MongoDB shape is its own shape; a SQL statement cut at its bound may shape
+// again shorter.
 func CallShape(protocol, summary string) string {
 	switch {
 	case IsPathProtocol(protocol):
 		return methodTargetShape(summary)
 	case isSQLCall(protocol):
 		return SQLShape(summary)
+	case isMongoCall(protocol):
+		return mongoShape(summary)
 	}
 	return ""
+}
+
+// isMongoCall reports whether a miss's protocol is MongoDB, whose summary
+// the matcher writes "<command> on <collection>".
+func isMongoCall(protocol string) bool {
+	return strings.EqualFold(protocol, "MongoDB") || strings.EqualFold(protocol, "Mongo")
+}
+
+// mongoShape is a MongoDB call's summary ("find on users") in its shape: the
+// command and the collection, each kept when it reads as a name
+// (pathSegmentShape) and written {} otherwise. They name the database's
+// schema, never a document's values. A summary of any other form is "".
+func mongoShape(summary string) string {
+	command, collection, ok := strings.Cut(summary, " on ")
+	if !ok || command == "" {
+		return ""
+	}
+	return pathSegmentShape(command) + " on " + pathSegmentShape(collection)
 }
 
 // isHTTPProtocol reports whether a miss's protocol is HTTP, whose summary is

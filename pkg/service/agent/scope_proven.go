@@ -57,6 +57,9 @@ type provenWire struct {
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	skip map[string]string
+	// report is the file the replay writes its report to, as the project
+	// names it (models.ScopeGateReq.Report); "" when the CLI named none.
+	report string
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -449,17 +452,30 @@ func (a *Agent) NoteRefusal(r models.RunRefusal) {
 }
 
 // SetScopeSkips installs the proven gate: the tests a replay skips, by ID,
-// with their reasons. nil skips nothing.
-func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string) error {
+// with their reasons (nil skips nothing), and the file the replay writes its
+// report to, which a failed test's reason names ("" names none).
+func (a *Agent) SetScopeSkips(_ context.Context, skip map[string]string, report string) error {
 	cp := make(map[string]string, len(skip))
 	for id, reason := range skip {
 		cp[id] = reason
 	}
 	a.provenMu.Lock()
-	a.proven.skip = cp
+	a.proven.skip, a.proven.report = cp, report
 	a.provenMu.Unlock()
 	return nil
 }
+
+// reportFile is the file the replay writes its report to, as the CLI named
+// it (SetScopeSkips); "" when it named none.
+func (a *Agent) reportFile() string {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.report
+}
+
+// Replaying reports whether the agent replays a recording (its mode is
+// test), not records one.
+func (a *Agent) Replaying() bool { return a.replaying() }
 
 func (a *Agent) replaying() bool {
 	return a.config != nil && a.config.Agent.Mode == models.MODE_TEST
@@ -788,13 +804,13 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		ev.Unread = true
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
-		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt)
+		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt, a.reportFile())
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
 		// kept for judging, as R0's capture_incomplete (design v14 §7.4),
 		// and the test's outcome is its own against real infra.
-		ev.Reason = evidenceReason(id, ev, nil, beganAt)
+		ev.Reason = evidenceReason(id, ev, nil, beganAt, "")
 	}
 	if len(uses) > 0 {
 		a.noteScopeReal(id, uses)
@@ -936,10 +952,11 @@ func (a *Agent) chargeCaptureLosses(ctx context.Context, id string, ev *models.S
 		// first: the same text in a record (whose evidence is the
 		// connections keploy could not capture) as in a replay.
 		var mocks map[string]*models.Mock
+		report := ""
 		if a.replaying() {
-			mocks = a.mocksFound(ev.Unconsumed)
+			mocks, report = a.mocksFound(ev.Unconsumed), a.reportFile()
 		}
-		ev.Reason = evidenceReason(id, ev, mocks, beganAt)
+		ev.Reason = evidenceReason(id, ev, mocks, beganAt, report)
 	default:
 		ev.Reason = strings.TrimSpace("keploy: " + judged.Text() + ". " + strings.TrimPrefix(ev.Reason, "keploy: "))
 	}
@@ -1371,13 +1388,16 @@ func (a *Agent) takeChargedMisses() []models.UnmatchedCall {
 
 // evidenceReason is keploy's text for a failed test (design v14 §5.3). It
 // names calls by method, destination and URL shape (models.PathShape), never
-// by a body or a query value.
+// by a body or a query value, and every field each call differed in. It
+// states what keploy saw, and ends by naming report, the file the replay
+// writes its report to, when the CLI named one: what to do about it is the
+// end of the replay's output, which knows every test's evidence.
 // beganAt is when the test began being served: a miss filed outside every
 // test whose call was made at or after it was made as the test ended (its
 // last call in flight, filed once the test stopped being served); one made
 // before it, before the test began, an extra call of another test's
 // included.
-func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time) string {
+func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*models.Mock, beganAt time.Time, report string) string {
 	var what []string
 	for _, c := range ev.Incomplete {
 		what = append(what, "keploy could not capture a connection to "+c.Destination+" ("+c.Why+")")
@@ -1445,21 +1465,10 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		// change, and nothing the test did needs re-recording or quarantine.
 		return "keploy: " + strings.Join(what, "; ") + "."
 	}
-	return fmt.Sprintf("keploy: %s. If this is an intended change, re-record it: keploy mock record -c \"<your command, selecting %s>\".\n"+
-		"If it is flaky, not broken: keploy mock quarantine %s --reason \"<why>\".", strings.Join(what, "; "), id, shellQuote(id))
-}
-
-// shellQuote quotes s for a POSIX shell unless it is made of characters a
-// shell reads as one plain word.
-func shellQuote(s string) string {
-	plain := s != "" && !strings.ContainsFunc(s, func(r rune) bool {
-		return !(r == '/' || r == ':' || r == '.' || r == '_' || r == '-' || r == '+' || r == '=' || r == ',' || r == '@' ||
-			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
-	})
-	if plain {
-		return s
+	if report == "" {
+		return "keploy: " + strings.Join(what, "; ") + "."
 	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "keploy: " + strings.Join(what, "; ") + ". Details: " + report
 }
 
 // missText names a miss: an HTTP or gRPC call by its method and target
@@ -1483,20 +1492,19 @@ func missText(m models.UnmatchedCall) string {
 	return s
 }
 
-// differsText names, for a miss's reason, the fields in which the call
+// differsText names, for a miss's reason, every field in which the call
 // differed from its closest recording: " (body.amount differs)", " (host and
-// header.accept differ)", " (a, b, c and 2 more differ)"; "" for none.
+// header.accept differ)", " (a, b, c and d differ)"; "" for none. None is
+// left out: when two changes are in one call, the one left out could be the
+// one that matters.
 func differsText(fields []string) string {
-	const most = 3
 	switch n := len(fields); {
 	case n == 0:
 		return ""
 	case n == 1:
 		return " (" + fields[0] + " differs)"
-	case n <= most:
-		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
 	default:
-		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:most], ", "), n-most)
+		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
 	}
 }
 

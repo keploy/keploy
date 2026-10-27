@@ -221,7 +221,7 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 		exit := models.AppError{AppErrorType: models.ErrInternal, Err: errors.New("the app runner panicked")}
 		defer utils.Recover(m.logger)
 		defer func() { appExit <- exit }()
-		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command})
+		exit = m.instrumentation.Run(ctx, models.RunOptions{AppCommand: m.config.Command, TestCommand: true})
 		return nil
 	})
 

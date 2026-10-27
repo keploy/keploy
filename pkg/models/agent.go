@@ -214,6 +214,11 @@ type ScopeGateReq struct {
 	// deny list: every test it does not name runs. Read under the proven
 	// switch, where it replaces Run.
 	Skip map[string]string `json:"skip,omitempty"`
+	// Report is the file this replay's report is written to, as the
+	// project names it (keploy/reports/<run>/replay.yaml): the reason a
+	// failed test is given ends by naming it. Read under the proven switch;
+	// empty names none.
+	Report string `json:"report,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
