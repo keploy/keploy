@@ -113,12 +113,16 @@ func TestExecuteComparisonAllocatesNothing(t *testing.T) {
 	}
 }
 
-// TestUnnamedExecKeysFileWhatPreparedKeysFilesUnnamed: a COM_STMT_EXECUTE
+// TestExecuteKeysAndUnnamedExecKeysFileEveryExecute: a COM_STMT_EXECUTE
 // looks up keyExecuteUnnamed through unnamedExecIndex, whose keys read only
-// whether a mock holds an EXECUTE recorded without its query. It must file
-// under keyExecuteUnnamed exactly the mocks preparedKeys files there, and
-// under no other key.
-func TestUnnamedExecKeysFileWhatPreparedKeysFilesUnnamed(t *testing.T) {
+// whether a mock holds an EXECUTE recorded without its query, and then reads
+// the mocks executeIndex files under its query. Between them the two must
+// file every mock that holds an EXECUTE request with its packet: a named one
+// under its query by executeKeys, an unnamed one under keyExecuteUnnamed by
+// unnamedExecKeys, which files no mock under any other key and no mock
+// without such a request (not a COM_QUERY header carrying an EXECUTE's
+// packet, nor an EXECUTE header carrying another packet).
+func TestExecuteKeysAndUnnamedExecKeysFileEveryExecute(t *testing.T) {
 	req := func(typ string, msg interface{}, stored string) mysql.Request {
 		r := mysql.Request{PacketBundle: mysql.PacketBundle{Header: &mysql.PacketInfo{Header: &mysql.Header{}, Type: typ}, Message: msg}}
 		r.SetStoredQuery(stored)
@@ -130,37 +134,40 @@ func TestUnnamedExecKeysFileWhatPreparedKeysFilesUnnamed(t *testing.T) {
 	exec := &mysql.StmtExecutePacket{StatementID: 1}
 	prep := &mysql.StmtPreparePacket{Query: "SELECT 1"}
 	query := &mysql.QueryPacket{Query: "SELECT 1"}
-	cases := map[string][]mysql.Request{
-		"named EXECUTE":                      {req(comStmtExecute, exec, "SELECT ?")},
-		"unnamed EXECUTE":                    {req(comStmtExecute, exec, "")},
-		"EXECUTE whose query is blank":       {req(comStmtExecute, exec, " ")},
-		"EXECUTE with no packet":             {req(comStmtExecute, nil, "")},
-		"EXECUTE with another packet":        {req(comStmtExecute, query, "")},
-		"PREPARE then unnamed EXECUTE":       {req(comStmtPrepare, prep, ""), req(comStmtExecute, exec, "")},
-		"PREPARE then named EXECUTE":         {req(comStmtPrepare, prep, ""), req(comStmtExecute, exec, "SELECT 1")},
-		"COM_QUERY":                          {req(comQuery, query, "")},
-		"COM_QUERY typed as an EXECUTE":      {req(comStmtExecute, query, "")},
-		"no header":                          {{PacketBundle: mysql.PacketBundle{Message: exec}}},
-		"named, then unnamed EXECUTE":        {req(comStmtExecute, exec, "SELECT ?"), req(comStmtExecute, exec, "")},
-		"COM_STMT_CLOSE":                     {req(comStmtClose, &mysql.StmtClosePacket{StatementID: 1}, "")},
-		"an unnamed EXECUTE of an HTTP mock": nil,
-	}
-	unnamed := 0
-	for name, reqs := range cases {
-		m := &models.Mock{Kind: models.MySQL, Spec: models.MockSpec{MySQLRequests: reqs}}
-		if reqs == nil {
+	for _, c := range []struct {
+		name           string
+		reqs           []mysql.Request
+		named, unnamed bool // filed by executeKeys, by unnamedExecKeys
+	}{
+		{"named EXECUTE", []mysql.Request{req(comStmtExecute, exec, "SELECT ?")}, true, false},
+		{"unnamed EXECUTE", []mysql.Request{req(comStmtExecute, exec, "")}, false, true},
+		{"EXECUTE whose query is blank", []mysql.Request{req(comStmtExecute, exec, " ")}, false, true},
+		{"EXECUTE with no packet", []mysql.Request{req(comStmtExecute, nil, "")}, false, false},
+		{"EXECUTE with another packet", []mysql.Request{req(comStmtExecute, query, "")}, false, false},
+		{"PREPARE then unnamed EXECUTE", []mysql.Request{req(comStmtPrepare, prep, ""), req(comStmtExecute, exec, "")}, false, true},
+		{"PREPARE then named EXECUTE", []mysql.Request{req(comStmtPrepare, prep, ""), req(comStmtExecute, exec, "SELECT 1")}, true, false},
+		{"COM_QUERY", []mysql.Request{req(comQuery, query, "")}, false, false},
+		{"COM_QUERY header carrying an EXECUTE's packet", []mysql.Request{req(comQuery, exec, "")}, false, false},
+		{"no header", []mysql.Request{{PacketBundle: mysql.PacketBundle{Message: exec}}}, false, false},
+		{"named, then unnamed EXECUTE", []mysql.Request{req(comStmtExecute, exec, "SELECT ?"), req(comStmtExecute, exec, "")}, true, true},
+		{"COM_STMT_CLOSE", []mysql.Request{req(comStmtClose, &mysql.StmtClosePacket{StatementID: 1}, "")}, false, false},
+		{"an unnamed EXECUTE of an HTTP mock", nil, false, false},
+	} {
+		m := &models.Mock{Kind: models.MySQL, Spec: models.MockSpec{MySQLRequests: c.reqs}}
+		if c.reqs == nil {
 			m = &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{MySQLRequests: []mysql.Request{req(comStmtExecute, exec, "")}}}
 		}
-		want := slices.Contains(preparedKeys(m), keyExecuteUnnamed)
-		got := unnamedExecKeys(m)
-		if want {
-			unnamed++
+		named, got := executeKeys(m), unnamedExecKeys(m)
+		if (len(named) > 0) != c.named {
+			t.Errorf("%s: executeKeys %q, want a key %v", c.name, named, c.named)
 		}
-		if want != slices.Contains(got, keyExecuteUnnamed) || len(got) > 1 || (len(got) == 1 && got[0] != keyExecuteUnnamed) {
-			t.Errorf("%s: unnamedExecKeys %q, preparedKeys files it under %s: %v", name, got, keyExecuteUnnamed, want)
+		for _, k := range named {
+			if !strings.HasPrefix(k, keyExecute) {
+				t.Errorf("%s: executeKeys filed it under %q, not an EXECUTE's query", c.name, k)
+			}
 		}
-	}
-	if unnamed != 4 {
-		t.Fatalf("precondition: preparedKeys filed %d of the cases under %s, want 4", unnamed, keyExecuteUnnamed)
+		if c.unnamed != slices.Contains(got, keyExecuteUnnamed) || len(got) > 1 || (len(got) == 1 && got[0] != keyExecuteUnnamed) {
+			t.Errorf("%s: unnamedExecKeys %q, want it filed under %s: %v", c.name, got, keyExecuteUnnamed, c.unnamed)
+		}
 	}
 }
