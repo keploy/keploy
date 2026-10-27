@@ -295,6 +295,9 @@ type matchOptions struct {
 	// examined, when set, counts the candidates the scan visits, so a test can
 	// check what a command costs without timing it.
 	examined *int
+	// refused are the copies whose consume the store refused on this
+	// command's earlier matches (matchCommand): the scan passes over them.
+	refused map[*models.Mock]struct{}
 }
 
 // matchCommand matches one live command-phase request against the mock pool.
@@ -314,7 +317,30 @@ type matchOptions struct {
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
-	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, matchOptions{})
+	var opts matchOptions
+	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
+	// A consume the store refused (integrations.ConsumeRefused: under exact
+	// serving, a test mock that already answered, perhaps on another
+	// connection, or one its view no longer shows) does not answer: the
+	// command is matched again against what the store shows now, without the
+	// copies it refused, and is answered or misses. N connections that run
+	// one statement with the same parameters at once all read its first
+	// recording; one of them is answered with it, and each of the others with
+	// the next one it can take. Each match again passes over every copy the
+	// store refused before, so no copy is asked twice: the matches end with
+	// the copies the store lists. Without exact serving the refusal is failed
+	// bookkeeping, and stays the error it was.
+	for {
+		var refused *refusedConsume
+		if !errors.As(err, &refused) || !integrations.ConsumeRefused(db, refused.mock.Name) {
+			break
+		}
+		if opts.refused == nil {
+			opts.refused = make(map[*models.Mock]struct{})
+		}
+		opts.refused[refused.mock] = struct{}{}
+		resp, ok, miss, err = matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
+	}
 	// A store that marked the command's round but could not hold it read
 	// nothing for it (integrations.HoldToRound fails closed): the miss says
 	// why.
@@ -340,6 +366,33 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 // errConsumeRefused is the matcher's error when the store refused the
 // consume of the mock it matched.
 var errConsumeRefused = errors.New("failed to update matched mock")
+
+// refusedConsume is errConsumeRefused for the copy of a mock whose consume
+// the store refused.
+type refusedConsume struct{ mock *models.Mock }
+
+func (e *refusedConsume) Error() string { return errConsumeRefused.Error() }
+func (e *refusedConsume) Unwrap() error { return errConsumeRefused }
+
+// paramExactOutranksFIFO reports whether, among the COM_STMT_EXECUTE
+// candidates that are not the open test's own, one recorded with the
+// command's own query and parameters (defExecMock) ranks above the first one
+// recorded with its query and other parameters (fifoExecMock). The open
+// test's own candidates rank above both either way.
+//
+// Under exact serving it does. The view shows no other test's recordings:
+// a candidate that is not the open test's own is the pool's (recorded at
+// start-up or between tests, the only data recordings the view shows while
+// no test is open), the worker scope's (made for no test's request) or a
+// protocol phase's, so no stale earlier-test match is among them, and of two
+// the one recorded with the command's parameters is its answer. Ranked the other way, a statement run
+// at start-up or between tests with two parameters was answered with each
+// other's rows.
+//
+// Without exact serving (keploy test) the ranking is as it was.
+func paramExactOutranksFIFO(exactServing bool) bool {
+	return exactServing
+}
 
 // restagedCommandNote is what a miss says when the replay staged a test set
 // again (the next set, or the same set for a replaced agent, which the store
@@ -406,6 +459,26 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return true
 		}
 		return integrations.InFlightIntoOpenTest(mockDb, mk)
+	}
+
+	// testsOwn reports whether an EXECUTE candidate is the open test's own,
+	// the one the EXECUTE ranking below prefers to every other recording.
+	// While a window is active that is a recording inside it. Under exact
+	// serving no window is (CurrentTestWindow is zero: the test's mapping
+	// says what it is served, no recorded time), and the test's own are its
+	// mapping's (integrations.OwnedByOpenTest). Read by the window alone, no
+	// recording was the test's own there, and the first recording of the
+	// statement whose parameters differ (the FIFO fallback) outranked the one
+	// recorded with the command's own parameters: a statement run twice with
+	// different parameters was answered with each other's rows, and N
+	// connections running it at once all picked the same recording, so all
+	// but one were refused.
+	exactServing := integrations.ExactServing(mockDb)
+	testsOwn := func(mk *models.Mock) bool {
+		if exactServing {
+			return integrations.OwnedByOpenTest(mockDb, mk)
+		}
+		return windowActive && mockInCurrentWindow(mk)
 	}
 
 	// pool is the full merged pool, filled on first need. When the in-window
@@ -1089,6 +1162,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			if opts.examined != nil {
 				*opts.examined++
 			}
+			if _, no := opts.refused[mock]; no {
+				continue
+			}
 			if mock.Kind != models.MySQL {
 				continue
 			}
@@ -1310,7 +1386,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						if !gate.allows(mock) {
 							continue
 						}
-						inWindow := windowActive && mockInCurrentWindow(mock)
+						inWindow := testsOwn(mock)
 						switch {
 						case expectedQuery == "" && inWindow:
 							if paramsOnlyMockWindow == nil {
@@ -1354,7 +1430,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							continue
 						}
 						if queryExact {
-							if windowActive && mockInCurrentWindow(mock) {
+							if testsOwn(mock) {
 								if fifoExecMockWindow == nil {
 									fifoExecRespWindow, fifoExecMockWindow = &mock.Spec.MySQLResponses[0], mock
 								}
@@ -1466,10 +1542,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		// FIFO so the current test's own recorded row always wins over a
 		// stale earlier-test exact match; it ranks above the score-based
 		// pick because exact query+params is strictly stronger evidence
-		// than partial-shape scoring.
+		// than partial-shape scoring. Under exact serving "in-window" is
+		// the open test's own (testsOwn), and 4 ranks above 3
+		// (paramExactOutranksFIFO).
 		chosenResp, chosenMock := paramsOnlyRespWindow, paramsOnlyMockWindow
 		if chosenMock == nil {
 			chosenResp, chosenMock = fifoExecRespWindow, fifoExecMockWindow
+		}
+		if chosenMock == nil && defExecMock != nil && paramExactOutranksFIFO(exactServing) {
+			chosenResp, chosenMock = defExecResp, defExecMock
 		}
 		if chosenMock == nil {
 			chosenResp, chosenMock = fifoExecResp, fifoExecMock
@@ -1899,8 +1980,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// This ensures we update using the original mock state
 	if okk := updateMock(ctx, logger, matchedMock, mockDb, detectedNoise); !okk {
 		logger.Debug("failed to update the matched mock")
-		// Re-fetch once to avoid spin
-		return nil, false, nil, errConsumeRefused
+		return nil, false, nil, &refusedConsume{mock: matchedMock}
 	}
 
 	// Create a copy of the response to avoid modifying the original mock
@@ -2935,8 +3015,26 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 		lifetime == models.LifetimeConnection ||
 		(lifetime == models.LifetimePerTest && rawConfig)
 
+	// usedOrRefused settles a consume the update door turned down. Under
+	// exact serving UpdateUnFilteredMock's false is no refusal on its own (a
+	// mock the view shows that the tree it updates does not hold is one too),
+	// and the view refuses at every door what it refuses: MarkMockAsUsed says
+	// which it was, as integrations.ConsumeRefused reads it, so a refused
+	// consume is matched again (matchCommand) and only a refused one.
+	// Without exact serving the false stays failed bookkeeping.
+	usedOrRefused := func() bool {
+		if !integrations.ExactServing(mockDb) {
+			return false
+		}
+		used := *matchedMock
+		if len(detectedNoise) > 0 {
+			used.Spec.ReqBodyNoise = schemanoise.MergeLearned(used.Spec.ReqBodyNoise, detectedNoise)
+		}
+		return mockDb.MarkMockAsUsed(used)
+	}
+
 	if isSessionOrConnection {
-		updated := mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock)
+		updated := mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) || usedOrRefused()
 		if !updated {
 			logger.Debug("failed to update matched session/connection mock",
 				zap.String("mock", updatedMock.Name),
@@ -2963,7 +3061,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true
 	}
-	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) {
+	if mockDb.UpdateUnFilteredMock(matchedMock, &updatedMock) || usedOrRefused() {
 		return true
 	}
 	logger.Debug("failed to delete or update matched per-test mock",

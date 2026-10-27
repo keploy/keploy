@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -36,6 +37,9 @@ import (
 type Agent struct {
 	logger *zap.Logger
 	svc    agent.Service
+	// consumed is the consumed history kept for the client between
+	// /updatemockparams calls (models.ConsumedSync).
+	consumed consumedStore
 }
 
 // agentReadyFilePath is the path MakeAgentReady writes on success. It
@@ -53,6 +57,10 @@ var agentReadyFilePath = kdocker.AgentReadyFile
 // handful of test cases a brief memory-pressure blip costs, and well below the
 // point where the recording has quietly become unrepresentative.
 const massSuppressionPercent = 25
+
+// maxNamedPressureConns is how many connections the summary's warning of the
+// requests a pause of the memory guard cost names, those with the most first.
+const maxNamedPressureConns = 8
 
 // massSuppressed reports whether a session that sent sent test cases and
 // suppressed suppressed of them suppressed a large share
@@ -529,6 +537,15 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 	// life. None is ever taken back, so this session's are what that count
 	// grows by from here.
 	mocksLeftOutBefore := syncmgr.Get().MocksLeftOut()
+	// The requests the ingress did not record because the memory guard had
+	// paused recording (NoteNotRecordedUnderPressure), counted the same way.
+	notRecordedBefore := syncmgr.Get().NotRecordedUnderPressure()
+	// The ingress requests that come during the memory guard's pauses, from
+	// here: counted by the order of events (the request count read at each
+	// pause's start and end), apart from what the capture then decided, so
+	// the summary can be held to it.
+	pauseTally := memoryguard.OpenPauseTally()
+	defer pauseTally.Close()
 
 	a.logger.Debug("Streaming incoming test cases to client")
 
@@ -554,19 +571,23 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// Whether t is streamed, left out or lost to a broken stream, this
 		// is the last that sees it.
 		defer discardUpload(a.logger, t)
-		if _, left := leftovers[t.HTTPReq.Timestamp.UnixNano()]; left && !t.HTTPReq.Timestamp.IsZero() {
+		// The test case's window, by its kind: a gRPC test case's times are
+		// its GrpcReq's and GrpcResp's. Read as an HTTP one's, they were zero,
+		// on which the span checks below make no claim, so a gRPC test case a
+		// pause or a hole overlapped was streamed without the mocks it lost.
+		tcReqTime, tcRespTime := testCaseWindow(t)
+		if _, left := leftovers[tcReqTime.UnixNano()]; left && !tcReqTime.IsZero() {
 			a.logger.Debug("Test case left out: its request was in flight across the stop of a recording that has ended",
-				zap.Time("request_time", t.HTTPReq.Timestamp))
+				zap.Time("request_time", tcReqTime))
 			return true
 		}
-		// Skip this test case if memory pressure overlapped its HTTP window
+		// Skip this test case if memory pressure overlapped its window
 		// [request, response]: under pressure the paired mock may have been
 		// dropped, so sending the TC would orphan it at replay. We check the
 		// TC window against recorded pressure ranges (not individual mock
 		// drops) because that check is race-free regardless of when the
 		// mock's goroutine runs relative to this handler.
-		tcRespTime := t.HTTPResp.Timestamp
-		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		hasPressure, pressureOverlaps := syncmgr.Get().WasPressureActiveInWindow(tcReqTime, tcRespTime)
 		// An exchange a connection carried but did not record as a mock
 		// strands its TC mock-less, whether or not a pressure range covers
 		// it: a parser's hole (a mongo/v2 reassembly resync), an exchange a
@@ -579,7 +600,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 		// only the TCs checked after it: without a watermark (the hold
 		// below), a TC streamed before it is saved without the mock, as the
 		// WARN that reports the exchange says.
-		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(t.HTTPReq.Timestamp, tcRespTime)
+		hasOrphan, orphanOverlaps := syncmgr.Get().WasMockOrphanedInWindow(tcReqTime, tcRespTime)
 		// A capacity drop (outChan overflow / already-closed channel)
 		// feeds nothing into pressureRanges, so the pressure-overlap check
 		// above cannot catch it. Suppress by EXACT owning test name so a
@@ -592,7 +613,7 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			tcsSuppressedSoFar++
 			a.logger.Debug("agent: TC suppressed — memory pressure or an exchange a connection did not record overlapped TC window, or a mock was capacity-dropped; not sent to CLI",
 				zap.String("tc_name", t.Name),
-				zap.Int64("tc_req_ms", t.HTTPReq.Timestamp.UnixMilli()),
+				zap.Int64("tc_req_ms", tcReqTime.UnixMilli()),
 				zap.Int64("tc_resp_ms", tcRespTime.UnixMilli()),
 				zap.Int("pressure_overlaps", pressureOverlaps),
 				zap.Int("orphan_overlaps", orphanOverlaps),
@@ -784,6 +805,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				zap.Uint64("test_cases", leftOutInFlight),
 				zap.Int64("hold_bound_bytes", syncmgr.MaxHeldBytes))
 		}
+		// Read once: the warning and the summary say the same.
+		notRecorded := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
+		duringPauses := pauseTally.Read()
+		if notRecorded.Total > 0 {
+			// Each came while the memory guard had paused recording, so it
+			// was forwarded and not recorded. The pause cost these and no
+			// more: each connection's requests after it are recorded.
+			a.logger.Warn("agent: some requests were not recorded: the agent was short of memory when they came, and the memory guard had paused recording; each connection's requests after the pause are recorded",
+				zap.Uint64("requests", notRecorded.Total),
+				zap.Uint64("requests_during_pauses", duringPauses.DuringPauses),
+				zap.Int("connections", notRecorded.Connections()),
+				zap.Strings("connections_most", notRecorded.Most(maxNamedPressureConns)))
+		}
 		if tcsUnsettled > 0 {
 			// The capture's parsers ran more than the hold's bound
 			// behind: these were checked against what was known then.
@@ -808,6 +842,19 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 			zap.Int("orphan_spans_closed", orphanClosed),
 			zap.Int("orphan_ranges_still_open", orphanOpen),
 			zap.Int64("mocks_dropped_by_pressure", finalDropped),
+			// Requests the ingress did not record because the memory guard
+			// had paused recording when they came (the WARN above names
+			// their connections).
+			zap.Uint64("tcs_not_recorded_under_pressure", notRecorded.Total),
+			// The HTTP/1 ingress requests that came while recording was
+			// paused (memoryguard.PauseTally), whatever their capture
+			// did: a pause costs these and those in flight at its edges,
+			// so tcs_not_recorded_under_pressure far above them says a
+			// pause did not end for some connection. And those that came
+			// before the first pause: all a recording would hold whose
+			// capture never came back after it.
+			zap.Uint64("requests_during_pauses", duringPauses.DuringPauses),
+			zap.Uint64("requests_before_first_pause", duringPauses.BeforeFirstPause),
 			// Every mock a parser left out, the exchange it stopped
 			// on included, each reported with Session.ReportLeftOut
 			// (Session.ReportStoppedOn for the one it stopped on):
@@ -908,8 +955,12 @@ func (a *Agent) HandleIncoming(w http.ResponseWriter, r *http.Request) {
 				TestCasesSent:       tcsSentSoFar,
 				TestCasesSuppressed: tcsSuppressedSoFar,
 				LeftOutInFlight:     leftOut.LeftOut(),
-				Unsettled:           tcsUnsettled,
-				MassSuppressed:      massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
+				NotRecordedUnderPressure: func() models.PressureSkipSummary {
+					n := syncmgr.Get().NotRecordedUnderPressure().Since(notRecordedBefore)
+					return models.PressureSkipSummary{Requests: n.Total, Connections: n.Connections()}
+				}(),
+				Unsettled:      tcsUnsettled,
+				MassSuppressed: massSuppressed(tcsSentSoFar, tcsSuppressedSoFar),
 			}); err != nil {
 				streamWriteFailed(a.logger, r, "failed to end the incoming stream with its marker", err)
 				return

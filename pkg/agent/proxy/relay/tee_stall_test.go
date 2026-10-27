@@ -13,7 +13,7 @@ import (
 func newTestTeeClock(t *testing.T, capBytes int64, buf int, clk stall.Clock) (*tee, *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, nil, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
 	t2.clock = clk
 	t2.start(make(chan struct{}))
 	t.Cleanup(func() {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -57,6 +58,76 @@ func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testin
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	if len(mgr.buffer) != 4 {
 		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
+	}
+}
+
+// TestAPauseCostsTheMocksOfRequestsMadeDuringItWhenEverTheyAreDecoded pins
+// that a memory-guard pause costs the per-test mocks whose request was made
+// during it, however late the parser decodes them, and nothing else.
+//
+// The relay hands a parser the whole stream through a pause, so a parser that
+// lags can decode a request made during the pause after it has ended. The
+// ingress captured no test for that request, so such a mock is dropped and
+// counted, not buffered for no test to own. A mock of the connection's
+// lifetime (a prepared statement, a handshake) is kept whenever it was made:
+// the tests the connection serves after the pause need it.
+func TestAPauseCostsTheMocksOfRequestsMadeDuringItWhenEverTheyAreDecoded(t *testing.T) {
+	t.Parallel()
+	perTest := func(at time.Time) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at}}
+	}
+	ofConnection := func(at time.Time) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at, Metadata: map[string]string{"type": "connection"}}}
+	}
+	mgr := &SyncMockManager{}
+
+	mgr.SetMemoryPressure(true)
+	during := time.Now()
+	mgr.AddMock(ofConnection(during))
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("a connection's mock made during the pause was dropped (buffer %d): the tests the connection serves after it need it", len(mgr.buffer))
+	}
+	mgr.SetMemoryPressure(false)
+
+	mgr.AddMock(perTest(during))
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("a per-test mock of a request made during the pause, decoded after it, was kept (buffer %d): no test owns it", len(mgr.buffer))
+	}
+	if _, dropped, _, _ := mgr.GetDropStats(); dropped != 1 {
+		t.Fatalf("mocks dropped by pressure = %d, want 1: what a pause costs is counted", dropped)
+	}
+	mgr.AddMock(ofConnection(during))
+	mgr.AddMock(perTest(time.Now()))
+	if len(mgr.buffer) != 3 {
+		t.Fatalf("buffer %d after a connection's mock of the pause and a per-test mock after it, want 3", len(mgr.buffer))
+	}
+}
+
+// TestTheBufferWipeOfAPauseKeepsAConnectionsMocksOfAnEarlierPause pins the
+// same rule in the wipe a pause starts with: a connection's mock whose request
+// was made during an earlier pause stays buffered, and a per-test one made
+// then is wiped (it can only be there if it was buffered before that pause's
+// rule reached AddMock, which the row above pins it no longer is).
+func TestTheBufferWipeOfAPauseKeepsAConnectionsMocksOfAnEarlierPause(t *testing.T) {
+	t.Parallel()
+	// Past the startup window, whose mocks every wipe keeps whatever else.
+	mgr := &SyncMockManager{firstReqSeen: true, resolvedTestCount: models.StartupMockTestCaseWindow}
+	mgr.SetMemoryPressure(true)
+	during := time.Now()
+	mgr.SetMemoryPressure(false)
+	ofConnection := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: during, Metadata: map[string]string{"type": "connection"}}}
+	ofConnection.DeriveLifetime()
+	perTest := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: during}}
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, ofConnection, perTest)
+	mgr.mu.Unlock()
+
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != ofConnection {
+		t.Fatalf("the wipe left %d mocks, want only the connection's mock of the earlier pause", len(mgr.buffer))
 	}
 }
 
@@ -2152,6 +2223,35 @@ func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
 		}
 		if got != want {
 			t.Fatalf("proven=%v: the mock's container key = %q, want %q", on, got, want)
+		}
+	}
+}
+
+// Every mock a parser hands over is stamped with the address its connection
+// reached, with the proven switch on or off (keploy record as keploy mock
+// record), while that connection is still open: a replay tells by it what a
+// built-in default MySQL port held. A recorder's own destAddr stays.
+func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
+	const conn = "add-mock-dest-4000"
+	starts.Default.Dest(conn, "127.0.0.1:4000")
+	t.Cleanup(func() { starts.Default.ForgetDest(conn) })
+
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		mgr := New(zap.NewNop())
+		ch := make(chan *models.Mock, 2)
+		mgr.SetOutputChannel(ch)
+		mgr.AddMock(&models.Mock{Kind: models.HTTP, ConnectionID: conn})
+		if got := (<-ch).Spec.Metadata["destAddr"]; got != "127.0.0.1:4000" {
+			t.Fatalf("proven=%v: the HTTP mock's destAddr = %q, want 127.0.0.1:4000", on, got)
+		}
+		mgr.AddMock(&models.Mock{Kind: models.MySQL, ConnectionID: conn, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "db:3306"}}})
+		if got := (<-ch).Spec.Metadata["destAddr"]; got != "db:3306" {
+			t.Fatalf("proven=%v: a recorder's own destAddr = %q, want db:3306 kept", on, got)
 		}
 	}
 }

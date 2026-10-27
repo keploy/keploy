@@ -23,8 +23,12 @@ import (
 // reaches the user through compose, which can drop its last lines as the
 // client tears the stack down, a moment after its drains end at the markers.
 // For an agent it started, whose log is the user's own, it says nothing more.
+// The requests a pause of the memory guard cost are said with their count and
+// the number of connections they came on.
 func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
-	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, Unsettled: 1, MassSuppressed: true}
+	sum := models.StreamEndSummary{TestCasesSent: 3, TestCasesSuppressed: 9, LeftOutInFlight: 2, Unsettled: 1, MassSuppressed: true,
+		NotRecordedUnderPressure: models.PressureSkipSummary{Requests: 5, Connections: 2}}
+	const pauseSaid = "the keploy agent did not record some requests: it was short of memory when they came, and its memory guard had paused recording; each connection's requests after the pause are recorded"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mw := multipart.NewWriter(w)
 		w.Header().Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
@@ -68,11 +72,18 @@ func TestTheClientSaysWhatTheSessionLostForAnAgentItDidNotStart(t *testing.T) {
 		said := map[string]bool{}
 		for _, e := range logs.All() {
 			said[e.Message] = true
+			if e.Message == pauseSaid {
+				f := e.ContextMap()
+				if f["requests"] != uint64(5) || f["connections"] != int64(2) {
+					t.Fatalf("the pause's cost was said as %v, want 5 requests on 2 connections", f)
+				}
+			}
 		}
 		want := []string{
 			"the keploy agent left some test cases out of the recording: each stayed in flight (a slow endpoint, a long poll, a stream) while mocks it may have made had to be let go",
 			"the keploy agent saved some test cases before it had parsed all the traffic they overlap; if a connection's parser failed on it afterwards, they lack mocks",
 			"the keploy agent left out a large share of this recording's test cases: it could not capture their mocks",
+			pauseSaid,
 		}
 		for _, m := range want {
 			if !started && !said[m] {

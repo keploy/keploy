@@ -20,6 +20,11 @@ type captureBuffer struct {
 	limit     int
 	total     int64
 	truncated bool
+	// lostToPause: a pause of the memory guard cut this body's capture
+	// (truncated is set too). The exchange's checks of the pause may all
+	// come after the pause has ended, so this is what says the exchange was
+	// lost to it rather than to the size budget.
+	lostToPause bool
 }
 
 func newCaptureBuffer(limit int) *captureBuffer {
@@ -46,6 +51,7 @@ func (b *captureBuffer) Write(p []byte) (int, error) {
 	// in-flight test case.
 	if isIngressRecordingPaused() {
 		b.truncated = true
+		b.lostToPause = true
 		b.buf = bytes.Buffer{}
 		return len(p), nil
 	}
@@ -81,6 +87,12 @@ func (b *captureBuffer) Total() int64 {
 
 func (b *captureBuffer) Truncated() bool {
 	return b.truncated
+}
+
+// LostToPause reports whether a pause of the memory guard cut this capture.
+// A nil buffer (no body, or capture off) was cut by nothing.
+func (b *captureBuffer) LostToPause() bool {
+	return b != nil && b.lostToPause
 }
 
 type teeReadCloser struct {

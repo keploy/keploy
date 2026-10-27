@@ -468,7 +468,21 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 
 // copyMockParams is params sharing no memory with it: the replayer goes on
 // changing the consumed-mocks map it hands over.
-func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
+//
+// A consumed history (models.ConsumedHistory) is not copied: it is marked, at
+// no cost, and rebuild puts the history as it was at the call back into the
+// copy, when the call is made again. A copy of the whole history at every
+// test made a replay's cost grow with the square of its tests.
+func copyMockParams(params models.MockFilterParams) (_ models.MockFilterParams, rebuild func(models.MockFilterParams) models.MockFilterParams) {
+	rebuild = func(p models.MockFilterParams) models.MockFilterParams { return p }
+	if h := params.ConsumedHistory; h != nil && params.TotalConsumedMocks != nil {
+		mark := h.Mark()
+		params.ConsumedHistory, params.TotalConsumedMocks = nil, nil
+		rebuild = func(p models.MockFilterParams) models.MockFilterParams {
+			p.TotalConsumedMocks = mark.State()
+			return p
+		}
+	}
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
 	params.MockMapping = slices.Clone(params.MockMapping)
@@ -480,7 +494,7 @@ func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
 		ex.Ahead = slices.Clone(ex.Ahead)
 		params.Exact = &ex
 	}
-	return params
+	return params, rebuild
 }
 
 // mockParamsStep is the step kind a mock filter is recorded under: a set's

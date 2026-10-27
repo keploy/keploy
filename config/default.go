@@ -150,8 +150,12 @@ bypassRules: []
 # configure anything here.
 #
 # mysqlPorts pins ports to the MySQL parser, skipping detection for
-# them. A list here replaces the built-in 3306 and 4000, so keep those
-# you use. List a port when replay reaches MySQL at an endpoint that
+# them. The built-in 3306 and 4000 are only a hint: a connection there
+# whose client speaks first (HTTP to a service on 4000) is relayed as
+# that protocol. A listed port is pinned: an HTTP service on a port
+# listed here gets no answer, so list only ports that serve MySQL. A
+# list here replaces the built-in 3306 and 4000, so keep those you use.
+# List a port when replay reaches MySQL at an endpoint that
 # moved since the recording and is neither the container nor the host
 # the recording reached MySQL at — another port of this machine
 # (localhost, or any address of its own), or of the Docker host at
@@ -160,7 +164,8 @@ bypassRules: []
 # alongside disableMysqlAutoDetect.
 mysqlPorts: []
 # Set to true to turn detection off and go back to matching mysqlPorts
-# strictly. MySQL on any other port will then hang its handshake.
+# strictly. MySQL on any other port will then hang its handshake, and
+# 3306 and 4000 (or the ports listed) are pinned to MySQL again.
 disableMysqlAutoDetect: false
 # During replay, keploy serves recorded MySQL mocks on a port the
 # recording never saw when the connection reaches the container the

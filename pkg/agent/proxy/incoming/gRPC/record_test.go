@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -72,6 +73,64 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 	require.Len(t, streams, 1)
 	assert.Equal(t, requestAt, streams[0].GRPCReq.Timestamp)
 	assert.Equal(t, responseAt, streams[0].GRPCResp.Timestamp)
+}
+
+// A call is in a pause by the flag the forwarder read with its request's
+// chunk (frameChunk.paused), not by the pause as the parser comes to the
+// chunk: the parser runs up to a channel's worth of chunks behind the
+// forwarder, so a call read before a pause may be parsed during it, and one
+// read during it parsed after. Here call 1's chunk was read during a pause
+// the parser finds over, and call 3's before a pause the parser finds on.
+func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
+	logger := zap.NewNop()
+	sm := pkg.NewStreamManager(logger)
+	request := func(id uint32) []byte {
+		return append(headersFrameBytes(t, id, []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":path", Value: "/svc.Echo/Ping"},
+			{Name: ":authority", Value: "localhost:50051"},
+			{Name: "content-type", Value: "application/grpc"},
+		}, false), dataFrameBytes(t, id, true, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'i', 'n', 'g'}))...)
+	}
+	response := func(id uint32) []byte {
+		return append(append(headersFrameBytes(t, id, []hpack.HeaderField{
+			{Name: ":status", Value: "200"},
+			{Name: "content-type", Value: "application/grpc"},
+		}, false), dataFrameBytes(t, id, false, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'o', 'n', 'g'}))...),
+			headersFrameBytes(t, id, []hpack.HeaderField{{Name: "grpc-status", Value: "0"}}, true)...)
+	}
+
+	clientCh := make(chan frameChunk)
+	chunkParsed := make(chan struct{})
+	parserDone := make(chan struct{})
+	go func() {
+		defer close(parserDone)
+		parseFramesFromChan(context.Background(), logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} })
+	}()
+	// Call 1: read while paused; parsed with the pause over.
+	clientCh <- frameChunk{data: append([]byte(http2.ClientPreface), request(1)...), timestamp: time.Unix(200, 0), paused: true}
+	<-chunkParsed
+	// Call 3: read before the pause; parsed with the pause on.
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	clientCh <- frameChunk{data: request(3), timestamp: time.Unix(201, 0), paused: false}
+	<-chunkParsed
+	restore()
+	close(clientCh)
+	<-parserDone
+
+	destCh := make(chan frameChunk, 1)
+	destCh <- frameChunk{data: append(response(1), response(3)...), timestamp: time.Unix(202, 0)}
+	close(destCh)
+	parseFramesFromChan(context.Background(), logger, destCh, sm, true, func([]func()) {})
+
+	got := map[uint32]bool{}
+	for _, s := range sm.GetCompleteStreams() {
+		got[s.ID] = s.RequestPaused
+	}
+	if want := map[uint32]bool{1: true, 3: false}; len(got) != 2 || got[1] != want[1] || got[3] != want[3] {
+		t.Fatalf("the calls read as in a pause %v, want %v: call 1's request was read during the pause, call 3's before it", got, want)
+	}
 }
 
 // The frame that ends a call's stream (its trailers) is stamped before its
@@ -264,27 +323,37 @@ func (caughtUp) PendingBefore(time.Time) bool                      { return fals
 // server's response with its trailers.
 func pingCall(t *testing.T) (req, resp []byte) {
 	t.Helper()
-	req = append([]byte(http2.ClientPreface),
+	return pingCallOn(t, 1, true)
+}
+
+// pingCallOn is pingCall on stream id, its request after the client's preface
+// when it is the connection's first call.
+func pingCallOn(t *testing.T, id uint32, first bool) (req, resp []byte) {
+	t.Helper()
+	if first {
+		req = []byte(http2.ClientPreface)
+	}
+	req = append(req,
 		append(
-			headersFrameBytes(t, 1, []hpack.HeaderField{
+			headersFrameBytes(t, id, []hpack.HeaderField{
 				{Name: ":method", Value: "POST"},
 				{Name: ":scheme", Value: "http"},
 				{Name: ":path", Value: "/svc.Echo/Ping"},
 				{Name: ":authority", Value: "localhost:50051"},
 				{Name: "content-type", Value: "application/grpc"},
 			}, false),
-			dataFrameBytes(t, 1, true, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'i', 'n', 'g'}))...,
+			dataFrameBytes(t, id, true, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'i', 'n', 'g'}))...,
 		)...,
 	)
 	resp = append(
 		append(
-			headersFrameBytes(t, 1, []hpack.HeaderField{
+			headersFrameBytes(t, id, []hpack.HeaderField{
 				{Name: ":status", Value: "200"},
 				{Name: "content-type", Value: "application/grpc"},
 			}, false),
-			dataFrameBytes(t, 1, false, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'o', 'n', 'g'}))...,
+			dataFrameBytes(t, id, false, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'o', 'n', 'g'}))...,
 		),
-		headersFrameBytes(t, 1, []hpack.HeaderField{
+		headersFrameBytes(t, id, []hpack.HeaderField{
 			{Name: "grpc-status", Value: "0"},
 			{Name: "grpc-message", Value: ""},
 		}, true)...,
@@ -470,13 +539,12 @@ func TestParseFramesFromChan_ReleasesEachChunkOnce(t *testing.T) {
 }
 
 // A parser that gives up on a connection that stays open (a frame it cannot
-// read, the tee stopped by memory pressure mid-frame) lets go of what it holds
+// read) lets go of what it holds
 // at once: gRPC connections are pooled and live long, and a chunk held until
 // the connection ends would keep a stop waiting on it until the stop gave up
 // and failed a recording that had lost nothing.
 func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 	req, _ := pingCall(t)
-	split := len(http2.ClientPreface) + 20 // inside the request's HEADERS frame
 	for name, tc := range map[string]struct {
 		chunks []frameChunk
 		want   int32 // chunks let go before ch closes
@@ -484,10 +552,6 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 		"a frame it cannot read": {
 			chunks: []frameChunk{{data: req}, {data: []byte{0, 0, 0, 0x0, 0, 0, 0, 0, 0}}}, // DATA on stream 0
 			want:   2,
-		},
-		"the tee stopped mid-frame": {
-			chunks: []frameChunk{{data: req[:split]}, {teeEnded: true}},
-			want:   1,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -504,9 +568,7 @@ func TestParseFramesFromChan_AParserThatGivesUpLetsGoAtOnce(t *testing.T) {
 			}()
 			for i := range tc.chunks {
 				c := tc.chunks[i]
-				if !c.teeEnded {
-					c.timestamp, c.built = time.Now(), func() { released.Add(1) }
-				}
+				c.timestamp, c.built = time.Now(), func() { released.Add(1) }
 				ch <- c
 			}
 			deadline := time.Now().Add(30 * time.Second) // bounds only a parser that never lets go
@@ -601,47 +663,52 @@ func TestRecordIncoming_AClientThatStopsReadingInAStreamsEndHoldsNoStop(t *testi
 	}
 }
 
-// The tee that memory pressure stops tells the parser so: the rest of the
-// frame it may be in the middle of will never come.
-func TestForwardAndTeeTellsTheParserWhenTheTeeStops(t *testing.T) {
-	var paused atomic.Bool
-	pausedNow := paused.Load
-	teePaused.Store(&pausedNow)
-	defer teePaused.Store(nil)
+// The tee goes on through a pause of the memory guard, from a connection's
+// first byte to its last, whether the pause was on as the connection opened
+// or came after: HTTP/2 cannot be read again from the middle of a stream, so
+// a tee that stopped for a pause stopped the capture of every later call on
+// the connection. Every chunk is teed whole and noted as being built.
+func TestForwardAndTeeTeesThroughAPause(t *testing.T) {
+	for _, pausedAtOpen := range []bool{false, true} {
+		t.Run(map[bool]string{false: "a pause mid-connection", true: "a connection that opens during a pause"}[pausedAtOpen], func(t *testing.T) {
+			restore := memoryguard.SetRecordingPausedForTest(pausedAtOpen)
+			defer restore()
 
-	srcRead, srcWrite := net.Pipe()
-	dstRead, dstWrite := net.Pipe()
-	defer srcWrite.Close()
-	defer dstRead.Close()
-	var released atomic.Int32
-	building := func(time.Time) func() { return func() { released.Add(1) } }
-	ch := make(chan frameChunk, 4)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil)
-	}()
-	forward := func(b []byte) {
-		t.Helper()
-		go func() { _, _ = srcWrite.Write(b) }()
-		_, err := io.ReadFull(dstRead, make([]byte, len(b)))
-		require.NoError(t, err)
+			srcRead, srcWrite := net.Pipe()
+			dstRead, dstWrite := net.Pipe()
+			defer srcWrite.Close()
+			defer dstRead.Close()
+			var noted atomic.Int32
+			building := func(time.Time) func() { noted.Add(1); return func() {} }
+			ch := make(chan frameChunk, 8)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				forwardAndTee(srcRead, dstWrite, ch, zap.NewNop(), "client→app", false, building, nil)
+			}()
+			forward := func(b string) {
+				t.Helper()
+				go func() { _, _ = srcWrite.Write([]byte(b)) }()
+				_, err := io.ReadFull(dstRead, make([]byte, len(b)))
+				require.NoError(t, err)
+			}
+
+			forward("before")
+			memoryguard.SetRecordingPausedForTest(true)
+			forward("during")
+			memoryguard.SetRecordingPausedForTest(false)
+			forward("after")
+			srcWrite.Close()
+			<-done
+			close(ch)
+			var teed []string
+			for c := range ch {
+				teed = append(teed, string(c.data))
+			}
+			assert.Equal(t, []string{"before", "during", "after"}, teed, "what the tee handed the parser")
+			assert.Equal(t, int32(3), noted.Load(), "chunks noted as being built")
+		})
 	}
-
-	forward([]byte("teed"))
-	first := <-ch
-	require.Equal(t, []byte("teed"), first.data)
-	paused.Store(true)
-	forward([]byte("not teed"))
-	ended := <-ch
-	assert.True(t, ended.teeEnded, "the parser is not told the tee stopped")
-	assert.Equal(t, int32(1), released.Load(), "the chunk read as the tee stopped is not released")
-	forward([]byte("after"))
-	paused.Store(false) // the tee does not come back mid-connection
-	forward([]byte("later"))
-	srcWrite.Close()
-	<-done
-	assert.Len(t, ch, 0, "chunks teed after the tee stopped")
 }
 
 // The forwarder notes each chunk it tees as being built before it reads the
@@ -722,10 +789,6 @@ func TestForwardAndTeeNotesEachChunkFromBeforeItsStamp(t *testing.T) {
 // a stop told nothing is pending is never followed by a test case from before
 // it. A pass that skipped it left it for a later pass, after the stream ended.
 func TestRecordIncoming_ACallCompletedUnderPressureIsDecidedBeforeItsChunksGo(t *testing.T) {
-	// The tee sees no pressure for the call's chunks; the capture does.
-	notPaused := func() bool { return false }
-	teePaused.Store(&notPaused)
-	defer teePaused.Store(nil)
 	restore := memoryguard.SetRecordingPausedForTest(true)
 	defer restore()
 
@@ -743,6 +806,98 @@ func TestRecordIncoming_ACallCompletedUnderPressureIsDecidedBeforeItsChunksGo(t 
 	case tc := <-g.tcCh:
 		t.Fatalf("after clear, a test case from before the stop came (response at %v): lost, as the stream had ended", tc.GrpcResp.Timestamp)
 	case <-g.recorded:
+	}
+}
+
+// A pause of the memory guard costs a gRPC connection the calls whose request
+// came during it, each counted as not recorded under pressure, and nothing
+// more: the connection's calls after the pause are captured, whether the
+// pause came mid-connection or the connection opened during it. A call whose
+// request came during the pause and whose response came after it is left out
+// too, and counted: the pause was on as its request was read. The tee stopped
+// for good at a pause, and one opened during a pause never started, so a
+// pooled gRPC client's connection was recorded no more for the rest of the
+// recording, and nothing said so. On a clock as coarse as Windows' too: the
+// next call's request is stamped in the tick the pause's span ended in, and
+// judged by that time, the first call after every pause was left out.
+func TestRecordIncoming_AConnectionIsCapturedAgainAfterAPause(t *testing.T) {
+	for _, tick := range []time.Duration{0, 500 * time.Microsecond, time.Millisecond, windowsTick} {
+		t.Run(clockName(tick), func(t *testing.T) {
+			if tick > 0 {
+				stubQuantizedClock(t, tick)
+			}
+			awaitTickStart(tick)
+			type call struct{ pausedAtRequest, pausedAtResponse, captured bool }
+			for name, tc := range map[string]struct {
+				pausedAtOpen bool
+				calls        []call
+			}{
+				"a pause mid-connection": {calls: []call{
+					{captured: true},
+					{pausedAtRequest: true, pausedAtResponse: true},
+					{captured: true},
+					{pausedAtRequest: true},
+					{captured: true},
+				}},
+				"a connection that opens during a pause": {pausedAtOpen: true, calls: []call{
+					{pausedAtRequest: true, pausedAtResponse: true},
+					{captured: true},
+				}},
+			} {
+				t.Run(name, func(t *testing.T) {
+					restore := memoryguard.SetRecordingPausedForTest(tc.pausedAtOpen)
+					defer restore()
+					g := startGRPCIngress(t)
+					// A pause as the memory guard makes one: what IsRecordingPaused
+					// reports, and a pressure span of the manager.
+					pause := func(on bool) {
+						memoryguard.SetRecordingPausedForTest(on)
+						g.m.SetMemoryPressure(on)
+					}
+					pause(tc.pausedAtOpen)
+					defer g.m.SetMemoryPressure(false)
+
+					skipped := uint64(0)
+					for i, c := range tc.calls {
+						req, resp := pingCallOn(t, uint32(2*i+1), i == 0)
+						pause(c.pausedAtRequest)
+						go func() { _, _ = g.cliApp.Write(req) }()
+						_, err := io.ReadFull(g.appApp, make([]byte, len(req)))
+						require.NoError(t, err)
+						g.waitFor(t, fmt.Sprintf("call %d's request chunk let go", i), func(st syncMock.BacklogState) bool { return st.Progress >= uint64(2*i+1) })
+						pause(c.pausedAtResponse)
+						go func() { _, _ = g.appApp.Write(resp) }()
+						_, err = io.ReadFull(g.cliApp, make([]byte, len(resp)))
+						require.NoError(t, err)
+
+						if c.captured {
+							select {
+							case <-g.tcCh:
+							case <-time.After(30 * time.Second): // bounds only a call never captured
+								t.Fatalf("call %d, after the pause, was not captured", i)
+							}
+							continue
+						}
+						skipped++
+						// Decided once its response chunk is let go: a capture would
+						// hold it on the test-case channel nothing reads.
+						deadline := time.Now().Add(30 * time.Second)
+						for g.backlog().Progress < uint64(2*i+2) {
+							select {
+							case <-g.tcCh:
+								t.Fatalf("call %d, its request during the pause, was captured", i)
+							default:
+							}
+							if time.Now().After(deadline) {
+								t.Fatalf("call %d was never decided: %+v", i, g.backlog())
+							}
+							time.Sleep(time.Millisecond)
+						}
+					}
+					assert.Equal(t, skipped, g.m.NotRecordedUnderPressure().Total, "calls counted as not recorded under pressure")
+				})
+			}
+		})
 	}
 }
 
