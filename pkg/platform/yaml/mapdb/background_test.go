@@ -54,8 +54,8 @@ func TestMarkBackgroundMarksOnlyTheNamedTestsEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(changed, []string{"mock-2"}) {
-		t.Fatalf("changed %v, want [mock-2]", changed)
+	if !reflect.DeepEqual(changed, map[string][]string{"test-1": {"mock-2"}}) {
+		t.Fatalf("changed %v, want test-1's mock-2 only (test-2 lists it too, unmarked)", changed)
 	}
 	want := map[string]map[string]string{
 		"test-1": {"mock-1": "Http|", "mock-2": "Mongo|count_varied: why"},
@@ -82,8 +82,8 @@ func TestMarkBackgroundMarksOnlyTheNamedTestsEntry(t *testing.T) {
 
 	// An empty line takes the mark off.
 	changed, err = db.MarkBackground(ctx, "test-set-0", map[string]map[string]string{"test-1": {"mock-2": ""}})
-	if err != nil || !reflect.DeepEqual(changed, []string{"mock-2"}) {
-		t.Fatalf("taking the mark off: changed %v, err %v; want [mock-2]", changed, err)
+	if err != nil || !reflect.DeepEqual(changed, map[string][]string{"test-1": {"mock-2"}}) {
+		t.Fatalf("taking the mark off: changed %v, err %v; want test-1's mock-2", changed, err)
 	}
 	want["test-1"]["mock-2"] = "Mongo|"
 	if got := entries(); !reflect.DeepEqual(got, want) {
@@ -144,8 +144,8 @@ func TestRemoveBackgroundTakesOnlyAMarkedEntryOffItsTestsList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(removed, []string{"shared", "tick", "w-1"}) || !reflect.DeepEqual(unlisted, []string{"tick"}) {
-		t.Fatalf("removed %v, unlisted %v; want [shared tick w-1], [tick] (test-2 lists shared, the worker scope w-1)", removed, unlisted)
+	if !reflect.DeepEqual(removed, map[string][]string{"test-1": {"shared", "tick", "w-1"}}) || !reflect.DeepEqual(unlisted, []string{"tick"}) {
+		t.Fatalf("removed %v, unlisted %v; want test-1's [shared tick w-1], [tick] (test-2 lists shared, the worker scope w-1)", removed, unlisted)
 	}
 	want := map[string][]string{
 		"test-1": {"mock-1|", "sweep|"},
@@ -171,5 +171,46 @@ func TestRemoveBackgroundTakesOnlyAMarkedEntryOffItsTestsList(t *testing.T) {
 
 	if _, _, err := db.RemoveBackground(ctx, "test-set-missing", map[string][]string{"test-1": {"tick"}}); err == nil {
 		t.Fatal("removing from a set with no mappings file: no error")
+	}
+}
+
+// A marked recording taken off its test's list stays in the mock file while
+// any other list of mappings.yaml names it: the startup, runner, worker or
+// shared list, or a boot's (keploy mock record writes boots). Without that a
+// recording the application needs to boot would be deleted.
+func TestRemoveBackgroundKeepsARecordingAnyListStillNames(t *testing.T) {
+	entry := []models.MockEntry{{Name: "tick", Kind: "Mongo"}}
+	for name, set := range map[string]func(m *models.Mapping){
+		"startup": func(m *models.Mapping) { m.Startup = entry },
+		"runner":  func(m *models.Mapping) { m.Runner = entry },
+		"worker":  func(m *models.Mapping) { m.Worker = entry },
+		"shared":  func(m *models.Mapping) { m.Shared = entry },
+		"boots":   func(m *models.Mapping) { m.Boots = []models.BootSpec{{Key: "app", Mocks: entry}} },
+		"none":    func(*models.Mapping) {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			m := &models.Mapping{Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
+				TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "tick", Kind: "Mongo", Background: "a timer"}}}}}
+			set(m)
+			data, err := EncodeMappingF(m, zap.NewNop(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dir, "test-set-0"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "test-set-0", "mappings.yaml"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			removed, unlisted, err := New(zap.NewNop(), dir, "mappings").RemoveBackground(ctx, "test-set-0", map[string][]string{"test-1": {"tick"}})
+			if err != nil || !reflect.DeepEqual(removed, map[string][]string{"test-1": {"tick"}}) {
+				t.Fatalf("removed %v, err %v; want test-1's tick", removed, err)
+			}
+			if want := name == "none"; (len(unlisted) == 1) != want {
+				t.Fatalf("unlisted %v: the %s list still names tick, so the mock file must keep it", unlisted, name)
+			}
+		})
 	}
 }

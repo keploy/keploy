@@ -732,23 +732,34 @@ func TestTheReplayPushesTheRecordedTestWindows(t *testing.T) {
 	}, instr.recordedWindows)
 }
 
-// Under the switch the replay hands the agent, with the per-test table, the
-// test entries judging marked as the application's background work, each
-// with why (models.MockEntry.Background): only those the agent holds, and
-// none of an unmarked entry. A set with no mark sends none.
+// Under the switch the replay hands the agent, with the per-test table, per
+// test, the entries of its own list judging marked as the application's
+// background work, each with why (models.MockEntry.Background): only those
+// the agent holds, and none of an unmarked entry, even when another test's
+// entry of the same recording is marked. A set with no mark sends none.
 func TestTheReplayHandsTheAgentTheBackgroundMarks(t *testing.T) {
 	provenOn(t)
+	testB := "    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-1\n"
 	for _, tc := range []struct {
 		name    string
 		entries string
-		want    map[string]string
+		more    string
+		table   map[string][]string
+		want    models.BackgroundMarks
 	}{
 		{
 			name:    "marked",
 			entries: "        - name: mock-0\n        - name: mock-1\n          background: a timer's call landed here\n        - name: mock-9\n          background: a connection failure the agent never holds\n",
-			want:    map[string]string{"mock-1": "a timer's call landed here"},
+			want:    models.BackgroundMarks{"o::TestA": {"mock-1": "a timer's call landed here"}},
 		},
 		{name: "unmarked", entries: "        - name: mock-0\n        - name: mock-1\n"},
+		{
+			name:    "marked on one test, unmarked on another",
+			entries: "        - name: mock-0\n        - name: mock-1\n          background: a timer's call landed here\n",
+			more:    testB,
+			table:   map[string][]string{"o::TestA": {"mock-0", "mock-1"}, "o::TestB": {"mock-1"}},
+			want:    models.BackgroundMarks{"o::TestA": {"mock-1": "a timer's call landed here"}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := t.TempDir()
@@ -756,7 +767,7 @@ func TestTheReplayHandsTheAgentTheBackgroundMarks(t *testing.T) {
 			keployDir := filepath.Join(repo, "keploy")
 			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
-			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n"+tc.entries), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n"+tc.entries+tc.more), 0o644))
 			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
 			cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
@@ -767,7 +778,11 @@ func TestTheReplayHandsTheAgentTheBackgroundMarks(t *testing.T) {
 			db := named("mock-0", "mock-1", "mock-9")
 			db.mocks[2].Kind = models.ConnectionFailure
 			_ = New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
-			require.Equal(t, map[string][]string{"o::TestA": {"mock-0", "mock-1"}}, instr.table)
+			table := tc.table
+			if table == nil {
+				table = map[string][]string{"o::TestA": {"mock-0", "mock-1"}}
+			}
+			require.Equal(t, table, instr.table)
 			require.Equal(t, tc.want, instr.background)
 		})
 	}
