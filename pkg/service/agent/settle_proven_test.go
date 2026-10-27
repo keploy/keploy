@@ -558,3 +558,45 @@ func TestTheSettleWatchdogWeighsTheAcceptsTheEndWaitsFor(t *testing.T) {
 	}
 	require.NoError(t, <-done)
 }
+
+// scopedProxy is a settleProxy that can keep a settle to the connections it
+// began with (coreAgent.InFlightScoper): its scope holds what scopePending
+// says, whatever the proxy's whole count (settledProxy.pending) is.
+type scopedProxy struct {
+	*settleProxy
+	scopePending atomic.Int32
+}
+
+func (s *scopedProxy) InFlightScope() coreAgent.InFlightScope { return proxyScope{s} }
+
+type proxyScope struct{ s *scopedProxy }
+
+func (f proxyScope) State(bool) (int, []string)             { return int(f.s.scopePending.Load()), nil }
+func (f proxyScope) PendingProgress(bool) map[uint64]uint64 { return nil }
+
+// Once the counts are settled, the settle waits for the connections it began
+// with only (InFlightScope): one the application keeps busy after (a timer's
+// calls) never holds it, and one of its own still holds it.
+func TestTheSettleWaitsOnlyForTheConnectionsItBeganWith(t *testing.T) {
+	_ = manualWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p}
+	a.Proxy = sp
+	h.established = 1
+	sp.scopePending.Store(1)
+	p.set(1, 2)
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.settle(context.Background(), true)
+		done <- err
+	}()
+	p.set(1, 2)
+	select {
+	case err := <-done:
+		t.Fatalf("settled while one of its own connections held work: %v", err)
+	default:
+	}
+	sp.scopePending.Store(0)
+	p.set(1, 1)
+	require.NoError(t, <-done)
+}

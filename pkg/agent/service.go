@@ -241,6 +241,26 @@ type InFlightReader interface {
 	InFlightState(answers bool) (pending int, unknown []string)
 }
 
+// InFlightScoper is the optional extension of an InFlightReader whose wait
+// can be kept to the connections a settle began with (InFlightScope), so
+// that an application that keeps calling cannot hold a test's end.
+type InFlightScoper interface {
+	// InFlightScope keeps the accepted connections now: once every
+	// connection and byte a settle waits for is in the proxy's hands, the
+	// connections that can hold its calls.
+	InFlightScope() InFlightScope
+}
+
+// InFlightScope is InFlightState and InFlightPendingProgress over the
+// connections kept when it began, each until it is seen holding no work
+// once: a connection accepted later never counts, nor work one takes on
+// after it was seen settled. unknown names every protocol whose parser,
+// as its connection was seen settled, could not say what it held.
+type InFlightScope interface {
+	State(answers bool) (pending int, unknown []string)
+	PendingProgress(answers bool) map[uint64]uint64
+}
+
 // PairedBytesWaiter is the optional extension of a proxy that holds the
 // connections the kernel paired with the application's (under the proven
 // switch) and can wait for the bytes on them: WaitPairedBytes returns once

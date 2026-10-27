@@ -148,3 +148,60 @@ func TestAClosedConnectionHoldsNothingOnceItsHandlerIsDone(t *testing.T) {
 	}
 	tr.forget(proxy) // a second forget is a no-op
 }
+
+// A settle's scope holds the connections kept when it began, each until it
+// is seen holding no work once: the test's own call still in flight holds
+// it; a connection accepted after it began never does, nor a call made on
+// one of its connections after that connection was seen settled (an
+// application that keeps calling: a timer's call, its miss, a new
+// connection).
+func TestAScopeIsHeldOnlyByTheWorkItBeganWith(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	sc := tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's call in flight: scope pending %d, want 1", n)
+	}
+	if got := sc.PendingProgress(true); len(got) != 1 {
+		t.Fatalf("the test's call in flight: scope progress %v, want its connection", got)
+	}
+
+	read := make(chan []byte, 2)
+	reader := func() {
+		buf := make([]byte, 64)
+		n, _ := proxy.Read(buf)
+		read <- buf[:n]
+	}
+	go reader()
+	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("its handler waiting on an empty socket: scope pending %d, want 0", n)
+	}
+
+	// A connection accepted after the scope began, its handler not reading
+	// (a request being handled): all of the proxy's connections hold it,
+	// the scope does not.
+	_, later := acceptedPair(t, tr)
+	if n := tr.Pending(true); n != 1 {
+		t.Fatalf("a later connection not reading: pending %d, want 1", n)
+	}
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("a connection accepted after the scope began: scope pending %d, want 0", n)
+	}
+
+	// A call on the scope's connection after it was seen settled.
+	if _, err := io.WriteString(app, "GET /tick HTTP/1.1\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	<-read
+	if n := tr.Pending(true); n != 2 {
+		t.Fatalf("a call read after the connection was seen settled, and the later connection: pending %d, want 2", n)
+	}
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("a call made after its connection was seen settled: scope pending %d, want 0", n)
+	}
+	if got := sc.PendingProgress(true); len(got) != 0 {
+		t.Fatalf("scope progress %v, want none", got)
+	}
+	_ = later
+}

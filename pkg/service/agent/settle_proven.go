@@ -154,6 +154,11 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	// holds some must move.
 	var working atomic.Bool
 	var accepts atomic.Uint64
+	// view is what the wait reads once it is for the connections' work:
+	// the connections kept when it got there (InFlightScope), set before
+	// working, else every connection the proxy keeps.
+	var view inFlightView = ir
+	var scoped atomic.Pointer[coreAgent.InFlightScope]
 	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
 		c, err := a.ProxyConns(ctx)
 		if !working.Load() {
@@ -166,8 +171,12 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			}
 			return map[string]uint64{"counts": v}
 		}
+		var pp func(bool) map[uint64]uint64 = ir.InFlightPendingProgress
+		if sc := scoped.Load(); sc != nil {
+			pp = (*sc).PendingProgress
+		}
 		out := map[string]uint64{}
-		for id, n := range ir.InFlightPendingProgress(answers) {
+		for id, n := range pp(answers) {
 			out[strconv.FormatUint(id, 10)] = n
 		}
 		return out
@@ -179,13 +188,24 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		}
 		return 0, err
 	}
+	// Every connection and byte the wait waits for is in the proxy's hands:
+	// the connections that can hold them are those kept now, each until it
+	// is seen holding no work once. A connection accepted from here on, or
+	// work one takes on after it was seen settled, is not this wait's: an
+	// application that keeps calling (a timer's call, its miss, a new
+	// connection) cannot hold it.
+	if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok {
+		sc := sr.InFlightScope()
+		scoped.Store(&sc)
+		view = scopeView{sc}
+	}
 	working.Store(true)
 	for {
 		changed := ir.InFlightChanged()
 		// One view of the connections (InFlightState): read apart, a parser
 		// that ended a state it could not tell between the two reads would be
 		// seen neither busy nor unknown.
-		pending, unknown := ir.InFlightState(answers)
+		pending, unknown := view.InFlightState(answers)
 		if pending == 0 {
 			c, err := a.ProxyConns(ctx)
 			if err != nil {
@@ -206,6 +226,16 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		}
 	}
 }
+
+// inFlightView is what a settle reads of the connections' work.
+type inFlightView interface {
+	InFlightState(answers bool) (pending int, unknown []string)
+}
+
+// scopeView reads a settle's scope (coreAgent.InFlightScope).
+type scopeView struct{ coreAgent.InFlightScope }
+
+func (v scopeView) InFlightState(answers bool) (int, []string) { return v.State(answers) }
 
 // droppedWhile is the error for a test (or a run's tail) during which the
 // kernel dropped packets at the proxy's listener: from its drops at the start,

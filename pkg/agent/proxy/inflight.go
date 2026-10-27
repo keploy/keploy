@@ -687,6 +687,91 @@ func (c *trackedConn) untaken(v connView) uint64 {
 	return received - v.delivered
 }
 
+// scope is a settle's share of the connections: those kept when it began
+// (inflight.scope), each until it is seen holding no work once (one view, as
+// State reads it). A connection accepted after it began is not in it, and
+// work a connection takes on after it was seen settled is not the settle's:
+// seen not busy after every byte the settle waits for was received (the
+// agent's first wait), it had read and answered all of them. So a settle
+// waits for a set that only shrinks, never for an application that keeps
+// calling.
+type scope struct {
+	t    *inflight
+	mu   sync.Mutex
+	left map[*trackedConn]struct{}
+	// unknown names the protocols of the connections seen settled while
+	// their parser could not say what it held (State's unknown, read in the
+	// same view).
+	unknown map[string]bool
+}
+
+// scope begins a scope with every connection kept now.
+func (t *inflight) scope() *scope {
+	t.mu.Lock()
+	left := make(map[*trackedConn]struct{}, len(t.conns))
+	for tc := range t.conns {
+		left[tc] = struct{}{}
+	}
+	t.mu.Unlock()
+	return &scope{t: t, left: left, unknown: map[string]bool{}}
+}
+
+// State is inflight.State over the scope's connections not yet seen
+// settled; it drops each it sees settled now (or forgotten), noting, in a
+// replay, the protocol of one whose parser could not say what it held.
+// unknown is every protocol noted so far.
+func (s *scope) State(answers bool) (pending int, unknown []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for tc := range s.left {
+		if tc.forgotten.Load() {
+			delete(s.left, tc)
+			continue
+		}
+		v := tc.view()
+		if busy(tc.untaken(v), answers, v.reading, v.held, v.idle, tc.closing.Load()) {
+			pending++
+			continue
+		}
+		if answers {
+			if p := tc.unknown.Load(); p != nil {
+				s.unknown[*p] = true
+			}
+			if v.marks > 0 {
+				if p := tc.unknownWhat.Load(); p != nil {
+					s.unknown[*p] = true
+				}
+			}
+		}
+		delete(s.left, tc)
+	}
+	if len(s.unknown) > 0 {
+		unknown = make([]string, 0, len(s.unknown))
+		for p := range s.unknown {
+			unknown = append(unknown, p)
+		}
+		sort.Strings(unknown)
+	}
+	return pending, unknown
+}
+
+// PendingProgress is inflight.PendingProgress over the scope's connections
+// not yet seen settled.
+func (s *scope) PendingProgress(answers bool) map[uint64]uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[uint64]uint64{}
+	for tc := range s.left {
+		if !tc.forgotten.Load() && tc.pending(answers) {
+			out[tc.id] = tc.progress.Load()
+		}
+	}
+	return out
+}
+
+// InFlightScope implements agent.InFlightScoper.
+func (p *Proxy) InFlightScope() agent.InFlightScope { return p.inflight.scope() }
+
 // InFlightChanged implements agent.InFlightReader.
 func (p *Proxy) InFlightChanged() <-chan struct{} { return p.inflight.Changed() }
 
@@ -702,6 +787,7 @@ func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
 
 var (
 	_ agent.InFlightReader       = (*Proxy)(nil)
+	_ agent.InFlightScoper       = (*Proxy)(nil)
 	_ integrations.RequestHolder = (*trackedConn)(nil)
 	_ integrations.UnknownMarker = (*trackedConn)(nil)
 	_ integrations.IdleMarker    = (*trackedConn)(nil)
