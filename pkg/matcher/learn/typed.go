@@ -624,22 +624,26 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 // recorded and as F saw it, that neither the lead nor a window shows a read
 // of the application's clock (instantClock), is still learned as a plain
 // read of it (Learned.Read), as a text one instant whole is (classifyRead):
-// in a call with no window w (a test's own call, read by the lead alone), an
-// instant of one form in both runs, in the years a recording's
-// clock reads (inClockRange), and recorded no later than its call at (zero:
-// not known), as a read the call carries is made. Every replay, record's
-// confirming round first, checks it in its call's own span on the
-// application's clock (CheckClockRead), so a value that is no read of the
-// clock fails there, naming the field, never noise that lets any value pass.
-// Whether the lead moved it depends on how late record's full round read its
-// clock, and the verdict must not. Not in keploy mock's client tests, whose
-// harness gives the application inputs keploy does not see (clientTestWhy),
-// nor for a time of day, which names no day. A wall clock of no zone in both
-// runs is one too, read in the zone its recording tells (wallZone), which a
-// replay checks it in alone, or in UTC and the application's zone both
-// where the recording cannot tell the two apart (models.ZoneEither). An echo of it
-// in its call's own answer stays refused (classifyInstant): an echo is
-// answered with this run's value, never checked as a read.
+// in a call with no window w, an instant of one form in both runs (a test's
+// own call, read by the lead alone, but every other call with none too: a
+// start-up or pool call whose window keploy could not tell, a background
+// pairing; each is checked at replay where its caller checks reads, and
+// refused at learn where keploy cannot tell the application's clock), in the
+// years a recording's clock reads (inClockRange), and recorded no later than
+// its call at (zero: not known), as a read the call carries is made. Every
+// replay, record's confirming round first, checks it in its call's own span
+// on the application's clock (CheckClockRead), so a value that is no read of
+// the clock fails there, naming the field, never noise that lets any value
+// pass. Whether the lead moved it depends on how late record's full round
+// read its clock, and the verdict must not. Not in keploy mock's client
+// tests, whose harness gives the application inputs keploy does not see
+// (clientTestWhy), nor for a time of day, which names no day. A wall clock
+// of no zone in both runs is one too, read in the zone its recording tells
+// (wallZone), which a replay checks it in alone, or in UTC and the
+// application's zone both where the recording cannot tell the two apart
+// (models.ZoneEither). An echo of it in its call's own answer stays refused
+// (classifyInstant): an echo is answered with this run's value, never
+// checked as a read.
 func (dc *DriftCache) noWindowRead(r, l typedInstant, w *Window, at time.Time) bool {
 	return w == nil && !dc.clientTests && r.names == l.names && r.names != namesTimeOfDay &&
 		inClockRange(r.at) && inClockRange(l.at) && !r.afterCall(at, dc.zone)

@@ -248,7 +248,8 @@ func nearestZone(rt, call time.Time, zone *time.Location) string {
 // and seen in record's full round as live, in the call recorded at call
 // whose window is w (nil: none): of a wall clock of no zone in both
 // (readClockTextWall), the zone wallZone reads it in; "" where either names
-// its zone, read as it names it.
+// its zone, read as it names it (where only one does, the learn step
+// refuses it: textFormChangedWhy).
 func (dc *DriftCache) textReadZone(rec, live string, w *Window, call time.Time) string {
 	rt, rres, rwall, okR := readClockTextWall(rec)
 	lt, lres, lwall, okL := readClockTextWall(live)
@@ -284,6 +285,28 @@ func textClockRead(rec, live string) *models.ClockOffset {
 // learn step saw it in, and one that saw two cannot tell which.
 func textLayoutChangedWhy(rec, live string) string {
 	return "it is a read of the application's clock written as " + models.LayoutName(textLayout(rec)) + " as recorded and as " + models.LayoutName(textLayout(live)) + " in record's full round: a replay checks such a read in the form its learn step saw it written in, and this one saw two, so keploy refuses it rather than pass either form unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// textFormChangedWhy is why the learn step refuses a text recorded as rec
+// and seen in record's full round as live, each one instant whole
+// (readClockTextWall), where one names its moment and the other is a wall
+// clock of no zone, read after "<field> changed, and ": a replay checks a
+// read in the form its learn step saw it written in, and one that saw two
+// cannot tell which zone to read it in; "" where both are one form (or
+// either is no instant).
+func textFormChangedWhy(rec, live string) string {
+	_, _, rwall, okR := readClockTextWall(rec)
+	_, _, lwall, okL := readClockTextWall(live)
+	if !okR || !okL || rwall == lwall {
+		return ""
+	}
+	form := func(wall bool) string {
+		if wall {
+			return namesWall.what()
+		}
+		return namesMoment.what()
+	}
+	return "it is a read of the application's clock written as " + form(rwall) + " as recorded and as " + form(lwall) + " in record's full round: a replay checks such a read in the form its learn step saw it written in, and this one saw two, so keploy refuses it rather than pass either form unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // textLayout is the layout of s, a text or a number that is one instant
@@ -460,18 +483,17 @@ func (dc *DriftCache) todRead(rtod, ltod, rres, lres time.Duration, rlay, llay s
 // is a wall clock of no zone (WallClockLeaf), or a text or a number that is
 // one instant whole (readClockText), with the resolution its form writes,
 // and whether it is a wall clock of no zone (wall), whose instant it reads in
-// UTC. typed says its protocol typed it. ok is false for any other value: a
-// time of day too, which names no day.
-func clockReadOf(l Leaf) (at time.Time, res time.Duration, wall, typed, ok bool) {
+// UTC. ok is false for any other value: a time of day too, which names no
+// day.
+func clockReadOf(l Leaf) (at time.Time, res time.Duration, wall, ok bool) {
 	if l.Type == Instant {
 		ti, ok := readTyped(l)
 		if !ok || ti.names == namesTimeOfDay {
-			return time.Time{}, 0, false, true, false
+			return time.Time{}, 0, false, false
 		}
-		return ti.at, ti.res, ti.names == namesWall, true, true
+		return ti.at, ti.res, ti.names == namesWall, true
 	}
-	at, res, wall, ok = readClockTextWall(l.Value)
-	return at, res, wall, false, ok
+	return readClockTextWall(l.Value)
 }
 
 // clockReadIn reads live, the leaf a replay's call carries at a place the
@@ -479,13 +501,14 @@ func clockReadOf(l Leaf) (at time.Time, res time.Duration, wall, typed, ok bool)
 // it is (models.ClockOffset.Zone), in zone, the application's
 // (Span.Zone): a wall clock of no zone in UTC (models.ZoneUTC), as the
 // wall clock of zone (models.ZoneApp, wallIn), or both, each a reading the
-// replay passes where it holds (models.ZoneEither); of a Zone of "", as the
-// value names its moment, or a text of no zone in UTC, as a replay read it
-// before Zone was learned (a typed wall clock is none then). Otherwise why
-// it reads none, after "<path> was learned as <o>, <read>": the value is no
-// instant keploy reads, it names its zone where the learn step read a wall
-// clock of no zone, or o reads in the application's zone (alone or as one
-// of the two) and the replay cannot tell it (zone nil). zone is s.Zone, s
+// replay passes where it holds (models.ZoneEither); of a Zone of "", which
+// the learn step gives only an instant that names its moment (or an offset
+// from one), as the value names its moment. Otherwise why it reads none,
+// after "<path> was learned as <o>, <read>": the value is no instant keploy
+// reads, it names its zone where the learn step read a wall clock of no
+// zone, it is a wall clock of no zone where the learn step read an instant
+// that names its moment (Zone ""), or o reads in the application's zone
+// (alone or as one of the two) and the replay cannot tell it (zone nil). zone is s.Zone, s
 // the call's span. Of a place learned as a time of day
 // (models.LayoutTimeOfDay), todReadIn reads it, in s.
 func clockReadIn(o models.ClockOffset, live Leaf, s Span) ([]time.Time, time.Duration, string) {
@@ -493,14 +516,18 @@ func clockReadIn(o models.ClockOffset, live Leaf, s Span) ([]time.Time, time.Dur
 		return todReadIn(o, live, s)
 	}
 	zone := s.Zone
-	at, res, wall, typed, ok := clockReadOf(live)
-	if !ok || o.Zone == "" && wall && typed {
+	at, res, wall, ok := clockReadOf(live)
+	if !ok {
 		return nil, 0, ", and the value this call carries is no instant keploy reads: it changed"
 	}
 	if lay := leafLayout(live); o.Layout != "" && lay != o.Layout {
 		return nil, 0, ", and the value this call carries is written as " + models.LayoutName(lay) + ", in another form than the learn step saw: it changed"
 	}
 	switch o.Zone {
+	case "":
+		if wall {
+			return nil, 0, ", and the value this call carries is a wall clock that names no zone, where the learn step read an instant that names its moment: it changed"
+		}
 	case models.ZoneUTC, models.ZoneApp, models.ZoneEither:
 		if !wall {
 			return nil, 0, ", and the value this call carries names its zone, where the learn step read a wall clock of no zone: it changed"
