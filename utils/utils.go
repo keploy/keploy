@@ -169,7 +169,8 @@ func ReplacePort(currentURL string, port string) (string, error) {
 // and the names of its query parameters. Never a query value, a header or
 // the body: those are the application's content (tokens, credentials), and
 // logs get pasted into issues. A query part with no "=" is not named either,
-// since it may be a bare token.
+// since it may be a bare token; a bare token that holds "=" (padded base64,
+// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
 func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
 	if req == nil {
@@ -187,7 +188,8 @@ func GetReqMeta(req *http.Request) map[string]string {
 }
 
 // queryKeys are the names of rawQuery's name=value parameters, unescaped,
-// sorted and each once.
+// sorted and each once. A name ends at its part's first "=": a value may
+// hold "=" too (base64 padding).
 func queryKeys(rawQuery string) []string {
 	var keys []string
 	for _, part := range strings.Split(rawQuery, "&") {
