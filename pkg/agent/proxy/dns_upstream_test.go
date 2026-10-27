@@ -1,15 +1,26 @@
 package proxy
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+	"golang.org/x/sync/errgroup"
 )
 
 // lossyUpstream is a fake upstream resolver on a raw UDP socket, so a row
@@ -157,7 +168,7 @@ func TestRecordModeAsksTheUpstreamAgainWhenItsFirstQueryIsLost(t *testing.T) {
 	p := proxyWithResolvConf(t, "timeout:1 attempts:3", u.addr)
 
 	q := dns.Question{Name: "_couchbase._tcp.couchbase.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	resp, err := p.recordDNSMock(q, time.Now(), nil)
+	resp, err := p.recordDNSMock(context.Background(), q, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("recordDNSMock: %v (the upstream saw %d queries)", err, len(u.seen()))
 	}
@@ -211,7 +222,7 @@ func TestALateAnswerToTheFirstQueryStillCounts(t *testing.T) {
 	p := proxyWithResolvConf(t, "timeout:1 attempts:2", u.addr)
 
 	q := dns.Question{Name: "late.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	resp, err := p.recordDNSMock(q, time.Now(), nil)
+	resp, err := p.recordDNSMock(context.Background(), q, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("recordDNSMock: %v (the upstream saw %d queries)", err, len(u.seen()))
 	}
@@ -235,7 +246,7 @@ func TestARefusingUpstreamIsPassedOverAtOnce(t *testing.T) {
 
 	q := dns.Question{Name: "next.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	start := time.Now()
-	resp, err := p.recordDNSMock(q, time.Now(), nil)
+	resp, err := p.recordDNSMock(context.Background(), q, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("recordDNSMock: %v", err)
 	}
@@ -280,7 +291,7 @@ func TestATruncatedAnswerIsAskedAgainOverTCP(t *testing.T) {
 	p.dnsForwardTimeout = 5 * time.Second
 	q := dns.Question{Name: "big.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 
-	rec, err := p.recordDNSMock(q, time.Now(), nil)
+	rec, err := p.recordDNSMock(context.Background(), q, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("recordDNSMock: %v", err)
 	}
@@ -304,6 +315,8 @@ func TestCaptureDNSUpstreamReadsTheResolverOptions(t *testing.T) {
 		{"timeout:3 attempts:4", dnsStubPolicy{timeout: 3 * time.Second, attempts: 4}},
 		{"ndots:5", dnsStubPolicy{timeout: 5 * time.Second, attempts: 2}},
 		{"timeout:90 attempts:9", dnsStubPolicy{timeout: 30 * time.Second, attempts: 5}},
+		{"timeout:3 rotate attempts:4", dnsStubPolicy{timeout: 3 * time.Second, attempts: 4, rotate: true}},
+		{"rotated", dnsStubPolicy{timeout: 5 * time.Second, attempts: 2}},
 	} {
 		p := proxyWithResolvConf(t, tc.options, "127.0.0.1:53")
 		if got := p.dnsStub(); got != tc.want {
@@ -362,9 +375,431 @@ func TestOnlyTheAnswerToThisQueryCounts(t *testing.T) {
 	p := proxyWithResolvConf(t, "timeout:5 attempts:1", u.addr)
 
 	q := dns.Question{Name: "only.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	resp, err := p.recordDNSMock(q, time.Now(), nil)
+	resp, err := p.recordDNSMock(context.Background(), q, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("recordDNSMock: %v", err)
 	}
 	answeredA(t, resp.Msg, "10.0.0.5")
+}
+
+// stepClock is a dnsClock a row steps by hand. Now stays where the row puts
+// it; each After the exchange asks for queues in order until the row takes
+// it and, if it wants, fires it. So a row reads which wait or budget the
+// exchange asked for, and ends a wait by its own event, never by time.
+type stepClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers chan *stepTimer
+}
+
+type stepTimer struct {
+	d    time.Duration
+	fire chan time.Time
+}
+
+func newStepClock() *stepClock {
+	return &stepClock{now: time.Unix(1_700_000_000, 0), timers: make(chan *stepTimer, 64)}
+}
+
+func (c *stepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *stepClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func (c *stepClock) After(d time.Duration) (<-chan time.Time, func()) {
+	st := &stepTimer{d: d, fire: make(chan time.Time, 1)}
+	c.timers <- st
+	return st.fire, func() {}
+}
+
+// next is the exchange's next After request, or a failure if the exchange
+// ended first.
+func (c *stepClock) next(t *testing.T, ended <-chan struct{}) *stepTimer {
+	t.Helper()
+	select {
+	case st := <-c.timers:
+		return st
+	case <-ended:
+		t.Fatalf("the exchange ended before it asked for its next wait")
+		return nil
+	}
+}
+
+type exchangeResult struct {
+	msg *dns.Msg
+	err error
+}
+
+// runExchange runs one exchange on clock in the background; ended closes when
+// it returns, and its result is then in the returned channel.
+func runExchange(ctx context.Context, clock dnsClock, name string, servers []string, port string, waits []time.Duration) (<-chan exchangeResult, <-chan struct{}) {
+	m := new(dns.Msg)
+	m.SetQuestion(name, dns.TypeA)
+	res := make(chan exchangeResult, 1)
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		msg, err := exchangeDNSUpstreamOn(ctx, clock, zap.NewNop(), m, servers, port, waits)
+		res <- exchangeResult{msg, err}
+	}()
+	return res, ended
+}
+
+// The agent's stop ends a record-mode exchange in flight: the DNS servers
+// stop at once, not after the exchange's resend schedule. The upstream never
+// answers and the first round waits 10 s, so the stop must finish before the
+// exchange's resend, an event the upstream sees. On the stop the agent logs
+// no "DNS resolution failed" ERROR: the upstream did not fail.
+func TestAStopEndsTheRecordExchangeInFlight(t *testing.T) {
+	asked, resent := make(chan struct{}), make(chan struct{})
+	u := startLossyUpstream(t, "127.0.0.1", func(u *lossyUpstream, seq int, q lossyQuery) {
+		switch seq {
+		case 1:
+			close(asked)
+		case 2:
+			close(resent)
+		}
+	})
+	p := proxyWithResolvConf(t, "timeout:10 attempts:2", u.addr)
+	core, logs := observer.New(zapcore.DebugLevel)
+	p.logger = zap.New(core)
+	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var g *errgroup.Group
+	var err error
+	for range 5 { // another process can take the free port before the bind
+		g = new(errgroup.Group)
+		p.DNSPort = uint32(freeDNSPort(t))
+		if err = p.startDNSServers(ctx, g); err == nil || !errors.Is(err, syscall.EADDRINUSE) {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("startDNSServers: %v", err)
+	}
+
+	c, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(p.DNSPort))))
+	if err != nil {
+		t.Fatalf("dial keploy's DNS server: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	q := new(dns.Msg)
+	q.SetQuestion("_couchbase._tcp.couchbase.", dns.TypeSRV)
+	wire, _ := q.Pack()
+	if _, err := c.Write(wire); err != nil {
+		t.Fatalf("ask keploy's DNS server: %v", err)
+	}
+	<-asked
+
+	cancel()
+	stopped := make(chan error, 1)
+	go func() { stopped <- g.Wait() }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("the DNS servers stopped with %v", err)
+		}
+	case <-resent:
+		t.Fatalf("the stop waited for the exchange in flight: it resent its query before the DNS servers stopped")
+	}
+	if n := len(u.seen()); n != 1 {
+		t.Errorf("the upstream saw %d queries, want 1: the stop ended the exchange before its resend", n)
+	}
+	if n := logs.FilterLevelExact(zapcore.ErrorLevel).Len(); n != 0 {
+		t.Errorf("the stop logged %d ERROR(s), first %q: want none, the upstream did not fail", n, logs.FilterLevelExact(zapcore.ErrorLevel).All()[0].Message)
+	}
+}
+
+// A refusal (ICMP port unreachable) is one message: the server's socket reads
+// on, so a later answer from that server still reaches the exchange. The
+// reader's exit is an event, so a reader that stops at the refusal fails the
+// row instead of leaving it waiting.
+func TestAServersSocketReadsOnAfterARefusal(t *testing.T) {
+	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := probe.LocalAddr().String()
+	_ = probe.Close() // nothing listens: the first send is refused
+
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	q := new(dns.Msg)
+	q.SetQuestion("again.example.", dns.TypeA)
+	wire, _ := q.Pack()
+
+	replies := make(chan dnsUpstreamReply)
+	done := make(chan struct{})
+	defer close(done)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go readDNSUpstreamReplies(c, 0, q.Id, replies, done, &wg)
+	exited := make(chan struct{})
+	go func() { wg.Wait(); close(exited) }()
+
+	if _, err := c.Write(wire); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	select {
+	case rep := <-replies:
+		if !errors.Is(rep.err, syscall.ECONNREFUSED) {
+			t.Fatalf("first reply %+v, want the refusal", rep)
+		}
+	case <-exited:
+		t.Fatalf("the reader stopped before it handed over the refusal")
+	}
+
+	// The server is up now, at the same address, and answers.
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Skipf("the refused address was taken in between: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+	go func() {
+		buf := make([]byte, dns.MaxMsgSize)
+		n, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		m := new(dns.Msg)
+		if m.Unpack(buf[:n]) != nil {
+			return
+		}
+		r := new(dns.Msg)
+		r.SetReply(m)
+		out, _ := r.Pack()
+		_, _ = pc.WriteTo(out, from)
+	}()
+	if _, err := c.Write(wire); err != nil {
+		t.Fatalf("second send: %v", err)
+	}
+	select {
+	case rep := <-replies:
+		if rep.err != nil || rep.msg == nil || rep.msg.Id != q.Id {
+			t.Fatalf("second reply %+v, want the server's answer", rep)
+		}
+	case <-exited:
+		t.Fatalf("the reader stopped at the refusal: the server's later answer was never read")
+	}
+}
+
+// A late answer from an earlier server counts while a later server is
+// awaited. Server 0 answers only once server 1 has been asked (an event), and
+// server 1 never answers; the wait for server 1 never ends unless the row
+// ends it, so only taking server 0's answer ends the exchange. The backstop
+// only bounds how long a broken exchange takes to fail.
+func TestALateAnswerFromAnEarlierServerCounts(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("127.0.0.2 is a loopback address on Linux only")
+	}
+	asked1 := make(chan struct{})
+	var once sync.Once
+	s1 := startLossyUpstream(t, "127.0.0.2", func(u *lossyUpstream, seq int, q lossyQuery) {
+		once.Do(func() { close(asked1) })
+	})
+	_, port, _ := net.SplitHostPort(s1.addr)
+	pc, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		t.Skipf("the port's 127.0.0.1 twin is taken: %v", err)
+	}
+	defer func() { _ = pc.Close() }()
+	go func() {
+		buf := make([]byte, dns.MaxMsgSize)
+		n, from, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		m := new(dns.Msg)
+		if m.Unpack(buf[:n]) != nil {
+			return
+		}
+		<-asked1
+		r := new(dns.Msg)
+		r.SetReply(m)
+		r.Answer = append(r.Answer, &dns.A{Hdr: dns.RR_Header{Name: m.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("10.0.2.1")})
+		out, _ := r.Pack()
+		_, _ = pc.WriteTo(out, from)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backstop := time.AfterFunc(time.Minute, cancel)
+	defer backstop.Stop()
+	clock := newStepClock()
+	res, ended := runExchange(ctx, clock, "early.example.", []string{"127.0.0.1", "127.0.0.2"}, port, []time.Duration{time.Second, time.Second})
+	clock.next(t, ended).fire <- time.Time{} // server 0's wait ends: server 1 is asked
+	got := <-res
+	if got.err != nil {
+		t.Fatalf("exchange: %v: server 0's answer, arriving while server 1 was awaited, was not taken", got.err)
+	}
+	answeredA(t, got.msg, "10.0.2.1")
+}
+
+// The schedule is absolute: a wait that ended late (the agent was slow to
+// wake) comes out of the next one, so the exchange still ends when its
+// schedule does. The upstream never answers.
+func TestALateWakeUpComesOutOfTheNextWait(t *testing.T) {
+	u := startLossyUpstream(t, "127.0.0.1", func(*lossyUpstream, int, lossyQuery) {})
+	host, port, _ := net.SplitHostPort(u.addr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := newStepClock()
+	res, ended := runExchange(ctx, clock, "slow.example.", []string{host}, port, []time.Duration{time.Second, 2 * time.Second})
+
+	first := clock.next(t, ended)
+	if first.d != time.Second {
+		t.Fatalf("first wait %s, want 1s", first.d)
+	}
+	clock.advance(1300 * time.Millisecond) // woke 300 ms late
+	first.fire <- time.Time{}
+	second := clock.next(t, ended)
+	if want := 1700 * time.Millisecond; second.d != want {
+		t.Errorf("second wait %s, want %s: the late wake-up must come out of it, so the exchange ends 3 s after its start", second.d, want)
+	}
+	second.fire <- time.Time{}
+	if got := <-res; got.err == nil {
+		t.Fatalf("exchange answered %v, want no answer", got.msg)
+	}
+}
+
+// The TCP retry of a truncated answer may take what is left of the whole
+// exchange, not only the wait of the send it answers; when that budget runs
+// out the exchange moves on to its next send. The UDP answer is truncated and
+// the TCP server accepts but never answers.
+func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
+	u := startLossyUpstream(t, "127.0.0.1", func(u *lossyUpstream, seq int, q lossyQuery) {
+		m := new(dns.Msg)
+		m.SetReply(q.msg)
+		m.Truncated = true
+		wire, _ := m.Pack()
+		_, _ = u.pc.WriteTo(wire, q.from)
+	})
+	host, port, _ := net.SplitHostPort(u.addr)
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		t.Skipf("the UDP port's TCP twin is taken: %v", err)
+	}
+	var held []net.Conn // accepted, held open, never answered
+	var heldMu sync.Mutex
+	accepting := make(chan struct{})
+	go func() {
+		defer close(accepting)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			heldMu.Lock()
+			held = append(held, c)
+			heldMu.Unlock()
+		}
+	}()
+	defer func() {
+		_ = ln.Close()
+		<-accepting
+		for _, c := range held {
+			_ = c.Close()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Only an exchange whose TCP retry never ends meets the backstop: it
+	// then fails below instead of hanging.
+	backstop := time.AfterFunc(time.Minute, cancel)
+	defer backstop.Stop()
+	clock := newStepClock()
+	res, ended := runExchange(ctx, clock, "big.example.", []string{host}, port, []time.Duration{time.Second, 2 * time.Second})
+
+	if send0 := clock.next(t, ended); send0.d != time.Second {
+		t.Fatalf("first wait %s, want 1s", send0.d)
+	}
+	tcp := clock.next(t, ended)
+	if want := 3 * time.Second; tcp.d != want {
+		t.Fatalf("the TCP retry's budget is %s, want %s: what is left of the exchange, not the first send's wait", tcp.d, want)
+	}
+	tcp.fire <- time.Time{}
+	if send1 := clock.next(t, ended); send1.d != 3*time.Second {
+		t.Errorf("after the TCP budget ran out the next send waits %s, want 3s (until the schedule's end)", send1.d)
+	}
+	cancel()
+	if got := <-res; !errors.Is(got.err, context.Canceled) {
+		t.Errorf("exchange ended with %v, want the context's end", got.err)
+	}
+}
+
+// resolv.conf's "options rotate" starts each query at the next server in
+// turn, as glibc does, on the record path and the test-mode forward alike;
+// without it every query starts at the first server.
+// Both servers answer at once, each with its own address.
+func TestRotateStartsEachQueryAtTheNextServer(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("127.0.0.2 is a loopback address on Linux only")
+	}
+	second := startLossyUpstream(t, "127.0.0.2", func(u *lossyUpstream, seq int, q lossyQuery) {
+		u.answerA(t, q.msg, q.from, "10.0.3.2")
+	})
+	_, port, _ := net.SplitHostPort(second.addr)
+	pc, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		t.Skipf("the port's 127.0.0.1 twin is taken: %v", err)
+	}
+	first := &lossyUpstream{pc: pc}
+	go func() {
+		buf := make([]byte, dns.MaxMsgSize)
+		for {
+			n, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			m := new(dns.Msg)
+			if m.Unpack(buf[:n]) == nil {
+				first.answerA(t, m, from, "10.0.3.1")
+			}
+		}
+	}()
+	t.Cleanup(func() { _ = pc.Close() })
+
+	for _, tc := range []struct {
+		options string
+		want    []string
+	}{
+		{"timeout:5 attempts:1 rotate", []string{"10.0.3.1", "10.0.3.2", "10.0.3.1", "10.0.3.2"}},
+		{"timeout:5 attempts:1", []string{"10.0.3.1", "10.0.3.1", "10.0.3.1", "10.0.3.1"}},
+	} {
+		p := proxyWithResolvConf(t, tc.options, net.JoinHostPort("127.0.0.1", port), "127.0.0.1", "127.0.0.2")
+		for k, want := range tc.want {
+			q := dns.Question{Name: fmt.Sprintf("q%d.rotate.example.", k), Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			// The first three are record mode's, the last the test-mode
+			// forward's: both paths take their turn from one count.
+			var resp *dns.Msg
+			var err error
+			if k < 3 {
+				var entry dnsCacheEntry
+				entry, err = p.recordDNSMock(context.Background(), q, time.Now(), nil)
+				resp = entry.Msg
+			} else {
+				resp, err = p.forwardDNSUpstream(q)
+			}
+			if err != nil {
+				t.Fatalf("options %q, query %d: %v", tc.options, k, err)
+			}
+			a, ok := resp.Answer[0].(*dns.A)
+			if !ok || a.A.String() != want {
+				t.Errorf("options %q, query %d answered by %v, want %s", tc.options, k, resp.Answer[0], want)
+			}
+		}
+	}
 }

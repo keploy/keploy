@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"runtime"
@@ -80,6 +81,7 @@ func (p *Proxy) captureDNSUpstream() {
 	// The resolver options (timeout, attempts) are how the app's own stub
 	// resolver would ask these servers; keploy asks them the same way.
 	p.dnsUpstreamPolicy = stubPolicyFromConfig(config)
+	p.dnsUpstreamPolicy.rotate = resolvConfRotates(resolvConfPath)
 
 	// Keep the search list: it is what makes a redundant expansion
 	// recognisable without a round trip. Captured even when every
@@ -174,7 +176,9 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	m.RecursionDesired = true
 
 	waits := p.dnsStub().waitsWithin(len(p.dnsUpstreamServers), p.dnsForwardTimeout)
-	resp, err := exchangeDNSUpstream(p.logger, m, p.dnsUpstreamServers, p.dnsUpstreamPort, waits)
+	// Not ended by the proxy's stop: dnsForwardTimeout bounds it, as it
+	// did before the exchange resent, so a stop waits no longer than that.
+	resp, err := exchangeDNSUpstream(context.Background(), p.logger, m, p.askOrder(p.dnsUpstreamServers), p.dnsUpstreamPort, waits)
 	if err != nil {
 		return nil, fmt.Errorf("no upstream DNS server answered %s: %w", question.Name, err)
 	}

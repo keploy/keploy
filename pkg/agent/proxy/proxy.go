@@ -493,6 +493,9 @@ type Proxy struct {
 	// dnsUpstreamServers: keploy asks the upstream as the app's stub
 	// resolver would (see exchangeDNSUpstream). Zero means the defaults.
 	dnsUpstreamPolicy dnsStubPolicy
+	// dnsRotateNext counts the upstream queries asked under resolv.conf's
+	// "options rotate": query n starts at server n mod the server count.
+	dnsRotateNext atomic.Uint32
 	// dnsForwardTimeout caps the test-mode forward on a mock miss, resends
 	// included. Short by design — a flaky resolver must never stall the
 	// app's DNS lookup. On timeout we fall through to the legacy
