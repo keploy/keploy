@@ -51,4 +51,14 @@ func TestStricterOfLeavesKeploysLimitOnlyWhenBothSaySo(t *testing.T) {
 	if got := stricterOf(limit, Learned{Kind: KindEcho}); got.NotFollowed {
 		t.Fatalf("the late reading binds it as an echo, yet the refusal is keploy's limit: %+v", got)
 	}
+	// A value the earlier place's reading finds in a payload recorded at the
+	// call's own instant, which the late reading learns as noise: a refusal
+	// of that binding is keploy's doubt.
+	raw := Learned{Kind: KindVariable, From: Place{Mock: "mock-1", AtCall: true}}
+	if got := stricterOf(raw, Learned{Kind: KindNoise}); !got.Doubted {
+		t.Fatalf("the late reading learns it as noise, yet the binding is not doubted: %+v", got)
+	}
+	if got := stricterOf(raw, raw); got.Doubted {
+		t.Fatalf("both readings bind it at one place, yet it is doubted: %+v", got)
+	}
 }

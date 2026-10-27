@@ -507,6 +507,12 @@ type Learned struct {
 	// cannot tell from a varying value) is not: it may be the app's change,
 	// and keploy's limit must never stand for one.
 	NotFollowed bool
+	// Doubted, of a variable or an echo, says the call was read two ways
+	// (classifyGiven) and the late reading does not bind the value where
+	// this one does: keploy cannot tell whether the recording came before
+	// the call. A refusal of it (learnPlan) is keploy's doubt, never its
+	// limit.
+	Doubted bool
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -962,7 +968,18 @@ func stricterOf(asPlace, asLate Learned) Learned {
 		// so it is not keploy's limit.
 		asPlace.NotFollowed = false
 	}
+	if (asPlace.Kind == KindVariable || asPlace.Kind == KindEcho) && !sameBinding(asPlace, asLate) {
+		// The late reading learns it as noise, or binds it elsewhere: the
+		// readings disagree, so a refusal of this binding is keploy's doubt.
+		asPlace.Doubted = true
+	}
 	return asPlace
+}
+
+// sameBinding says two readings learn a drift alike: of one kind, from one
+// place.
+func sameBinding(a, b Learned) bool {
+	return a.Kind == b.Kind && a.From.Mock == b.From.Mock && a.From.Side == b.From.Side && a.From.Path == b.From.Path
 }
 
 // boundAt says where a reading binds its drifted value: a variable of the

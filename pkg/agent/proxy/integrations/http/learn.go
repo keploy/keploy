@@ -1935,12 +1935,22 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 	// is refused for it only when no other leaf is the app's change, which
 	// returns at once, so keploy's limit never hides one.
 	var limited string
+	// doubted is the first leaf refused where keploy read the call two
+	// ways and the readings disagree (learn.Learned.Doubted): keploy's
+	// doubt, which, as the app's change does, takes the cause away from the
+	// call. doubt says the leaf read now is one.
+	var doubted string
+	doubt := false
 	limit := func(why string) {
 		if limited == "" {
 			limited = why
 		}
+		if doubt && doubted == "" {
+			doubted = why
+		}
 	}
 	for _, l := range learned {
+		doubt = false
 		r := l.Recorded
 		if g, ok := givenFor(r, l.Live, given); ok {
 			// The test case gave this value: a use of its key, no bind.
@@ -1965,6 +1975,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			p.noise[r.Path] = []string{}
 
 		case learn.KindVariable:
+			doubt = l.Doubted
 			from := l.From
 			switch {
 			case from.Given:
@@ -1991,6 +2002,12 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				limit(why)
 				continue
 			case !from.Whole || from.Var == "":
+				// A request place that held the value whole, where keploy
+				// binds no variable (a form field, a text body): the call
+				// not holding what F saw there is the app's change, as below.
+				if from.Whole && !variables.SameValue(from.Live, l.Live.Value, r.Type == learn.Number) {
+					return p, r.Path + " does not hold the value the test sent at " + from.Path + " of " + from.Mock + ", which it held when recorded", ""
+				}
 				why := r.Path + " carries a value " + from.Mock + " sent earlier in the test at " + from.Path + ", inside a longer value or at a place keploy cannot bind it"
 				if l.Why != "" {
 					why += "; " + l.Why
@@ -2054,6 +2071,7 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			return p, r.Path + " changed, and " + l.Why, ""
 
 		case learn.KindEcho:
+			doubt = l.Doubted
 			// noted keeps an echo refused for keploy's limit as a value of
 			// the call, under a key no variable is named, so a later leaf
 			// that held the same recorded value and holds another now is
@@ -2124,6 +2142,9 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 			p.vars[name] = models.MockVariable{Recorded: r.Value, Bind: place, Answer: at, Echo: true}
 			p.values[name] = variables.Binding{Name: name, Value: l.Live.Value, Recorded: r.Value, Mock: m.Name, Place: place}
 		}
+	}
+	if doubted != "" {
+		return p, doubted, ""
 	}
 	if limited != "" {
 		return p, limited, learn.CauseNotFollowed

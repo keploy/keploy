@@ -4572,6 +4572,9 @@ func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
 		{"from the test case's request", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "case", Given: true}}, learn.CauseNotFollowed},
 		{"unexplained", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "no earlier call holds it"}, ""},
 		{"echoed inside a longer answer value", learn.Learned{Kind: learn.KindUnaccounted, Recorded: rec, Why: "a word of it comes back in the answer at body.q, which keploy cannot answer with this run's value", NotFollowed: true}, learn.CauseNotFollowed},
+		{"from a form field that held it", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.user", Value: "abc"}, Live: learn.Leaf{Path: "body.user", Value: "xyz"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "id", Whole: true, Live: "xyz", Own: true}}, learn.CauseNotFollowed},
+		{"not what a form field held", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.user", Value: "abc"}, Live: learn.Leaf{Path: "body.user", Value: "qqq"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "id", Whole: true, Live: "xyz", Own: true}}, ""},
+		{"read two ways that disagree", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", AtCall: true}, Doubted: true}, ""},
 	} {
 		_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{c.l}, nil, nil)
 		if why == "" {
