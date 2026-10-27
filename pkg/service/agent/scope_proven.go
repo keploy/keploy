@@ -1080,6 +1080,13 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	unservable := append([]string(nil), a.proven.unservable...)
 	a.provenMu.Unlock()
 	ev.Unconsumed = append(unconsumed, unservable...)
+	// The test's recordings judging marked as the application's background
+	// work that it did not call: never a failure, said for judging.
+	if r, ok := es.(coreAgent.UnusedBackgroundReader); ok {
+		if bt, unused, ok := r.ExactTestUnusedBackground(); ok && bt == id {
+			ev.Background = unused
+		}
+	}
 	return ev, nil
 }
 

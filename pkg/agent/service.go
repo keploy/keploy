@@ -673,6 +673,22 @@ type PoolNamesSetter interface {
 	SetPoolNames(names []string) error
 }
 
+// UnrequiredSetter is an optional ExactServer capability: SetUnrequired hands
+// the proxy the recordings of the staged set that judging marked as the
+// application's own background work (models.MockEntry.Background), each with
+// why: a test is served one in its window when it makes the call, and is
+// never failed for not making it.
+type UnrequiredSetter interface {
+	SetUnrequired(names map[string]string) error
+}
+
+// UnusedBackgroundReader is an optional ExactServer capability:
+// ExactTestUnusedBackground names the latest test opened and its recordings
+// SetUnrequired marked that it did not call (models.ScopeEvidence.Background).
+type UnusedBackgroundReader interface {
+	ExactTestUnusedBackground() (test string, unused []string, ok bool)
+}
+
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
 // is ServeExactPool that also answers, while no test is open, the next test's
 // mocks that were in flight when it began (ahead, models.ExactServing.Ahead),
