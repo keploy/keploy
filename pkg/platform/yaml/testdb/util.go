@@ -60,10 +60,11 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 // each time a test case is written again) gets this noise, as it always has.
 // Under the switch it gets none: a field is noise only when it is declared, or
 // when the learn step of record's full round F saw it drift (F replays every
-// test 61.5 s past its recording, so a value the app reads from its clock
-// drifts there and is learned from the drift). A date-shaped value that stays
-// the same from record to replay (a created_at read back from a mocked
-// database) is then asserted. Noised by its shape, a change to it would pass.
+// test about a minute past its recording, learn.FullRoundLead, so a value the
+// app reads from its clock drifts there and is learned from the drift). A
+// date-shaped value that stays the same from record to replay (a created_at
+// read back from a mocked database) is then asserted. Noised by its shape, a
+// change to it would pass.
 // The Date header a server mints on every answer is not asserted either way:
 // the replay forgives it by its name (models.IsVolatileResponseHeader, unless
 // --disableAutoHeaderNoise), never by its value.
