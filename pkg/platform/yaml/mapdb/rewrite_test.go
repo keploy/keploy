@@ -2,6 +2,7 @@ package mapdb
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -294,6 +295,33 @@ func TestAJSONRewriteKeepsWhatAHandEditAdded(t *testing.T) {
 			must(t, err)
 			if len(back.TestCases) < 1 {
 				t.Fatalf("read back %+v", back)
+			}
+		})
+	}
+}
+
+// A test entry with both mock lists is refused with a BothMockListsError
+// naming it, through the decode a replay reads the file with, in YAML (a
+// mocks: list a merge key brings included) and in JSON: a reader that
+// checks a set names the entry from it.
+func TestBothMockListsIsATypedRefusalNamingTheTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for name, c := range map[string]struct {
+		format yaml.Format
+		doc    string
+	}{
+		"yaml":       {yaml.FormatYAML, "version: v\ntests:\n    - id: pkg::TestA\n      mocks: [{name: mock-0}]\n      mock_entries: [{name: mock-1}]\n"},
+		"yaml merge": {yaml.FormatYAML, "x-base: &base\n    mocks: [{name: mock-0}]\ntests:\n    - <<: *base\n      id: pkg::TestA\n      mock_entries: [{name: mock-1}]\n"},
+		"json":       {yaml.FormatJSON, `{"version":"v","tests":[{"id":"pkg::TestA","mocks":[{"name":"mock-0"}],"mock_entries":[{"name":"mock-1"}]}]}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodeMappingF([]byte(c.doc), zap.NewNop(), c.format)
+			var both *models.BothMockListsError
+			if !errors.As(err, &both) || both.Test != "pkg::TestA" {
+				t.Fatalf("err %v (%T); want a BothMockListsError naming pkg::TestA", err, err)
+			}
+			if !strings.Contains(err.Error(), "`mocks` and `mock_entries`") {
+				t.Fatalf("the refusal's words changed: %v", err)
 			}
 		})
 	}

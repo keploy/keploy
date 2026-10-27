@@ -514,6 +514,14 @@ func (tc *MappedTestCase) UnmarshalYAML(node *yaml.Node) error {
 // switch off the entry reads as it did before: mock_entries alone.
 const errBothMockLists = "test %q in mappings has both `mocks` and `mock_entries`, and keploy reads only `mock_entries`: move the entries under `mocks` into `mock_entries`, then delete `mocks`"
 
+// BothMockListsError is the refusal of a test entry that holds both mock
+// lists (errBothMockLists), with the entry's id (Test): a reader that checks
+// a set (enterprise's keploy mock check) names the entry from it, as a
+// replay refuses the set with it.
+type BothMockListsError struct{ Test string }
+
+func (e *BothMockListsError) Error() string { return fmt.Sprintf(errBothMockLists, e.Test) }
+
 // unmarshalYAMLEntry reads a test entry's id, mocks and the persisted
 // format's other fields, in whichever shape the entry has.
 func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
@@ -522,7 +530,7 @@ func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
 			ID string `yaml:"id"`
 		}
 		_ = node.Decode(&e)
-		return fmt.Errorf(errBothMockLists, e.ID)
+		return &BothMockListsError{Test: e.ID}
 	}
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
@@ -593,7 +601,7 @@ func (tc *MappedTestCase) unmarshalJSONEntry(data []byte) error {
 			ID string `json:"id"`
 		}
 		_ = json.Unmarshal(data, &e)
-		return fmt.Errorf(errBothMockLists, e.ID)
+		return &BothMockListsError{Test: e.ID}
 	}
 	var persisted persistedTestFormat
 	perr := json.Unmarshal(data, &persisted)
