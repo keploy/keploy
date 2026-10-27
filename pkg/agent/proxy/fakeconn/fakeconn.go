@@ -297,9 +297,6 @@ func (f *FakeConn) Peek() (Chunk, error) {
 	return c, nil
 }
 
-// skipLocked moves past the next n bytes of pending, and lets go of the chunk
-// once none of it is left. What is left of it otherwise is a chunk in part
-// (partial). Caller holds mu.
 // ReportHoles makes Read, ReadChunk and Peek return ErrCaptureHole, once
 // each, where SeqNos were skipped right before the next chunk. A reader asks
 // for it when it re-aligns its framing after a hole; any other reads across
@@ -322,6 +319,9 @@ func (f *FakeConn) takeHole() bool {
 	return true
 }
 
+// skipLocked moves past the next n bytes of pending, and lets go of the chunk
+// once none of it is left. What is left of it otherwise is a chunk in part
+// (partial). Caller holds mu.
 func (f *FakeConn) skipLocked(n int) {
 	if n >= len(f.pending.Bytes) {
 		f.pending, f.hasPending, f.partial = Chunk{}, false, false

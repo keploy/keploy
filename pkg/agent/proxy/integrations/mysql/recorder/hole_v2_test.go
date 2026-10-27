@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
 
@@ -18,8 +19,16 @@ import (
 // from the app's memory (keploy/enterprise mysql-pooled-unframed-e2e: one
 // 110-byte COM_QUERY of a pooled connection). The recorder is fed on across
 // the hole (MySQL.CanResyncAfterGap), and one hole must cost the exchanges it
-// cut, counted as left out, never the rest of the connection's recording, and
-// never a mock that pairs a command with another command's answer.
+// cut, counted as left out, never a mock that pairs a command with another
+// command's answer, and not the rest of the connection's recording where the
+// streams show where the client's next command and its answer start. Where
+// they do not (the client sent its next command before an answer to what the
+// hole lost came, or the hole came while the rest of a response left out was
+// still unread), the recording stops at the hole, as it did for every hole.
+// One case they cannot show: a hole that lost more than one command, where
+// the answer to an earlier one came before the client's next command was sent
+// and the answer to the last came after it (a client that first pipelines
+// inside the bytes lost). That stays a limit.
 
 // holed numbers chunks on from the handshake's (recordChunks: the client's
 // from 2, the server's from 3) and leaves out those lose picks, by index.
@@ -238,27 +247,32 @@ func TestRecordV2_APipeliningClientStopsAtACaptureHole(t *testing.T) {
 
 // A hole inside a LOAD DATA LOCAL INFILE: its upload, or the LOAD DATA
 // itself, lost on the client's stream. The upload's packets (sequence ids 2,
-// 3, ...) are never taken for a command.
+// 3, ...) are never taken for a command. The LOAD DATA is left out either
+// way, alone: the recorder does not record one (its answer asks for the
+// upload).
 func TestRecordV2_ALoadDataCutByACaptureHole(t *testing.T) {
 	t.Parallel()
 	small := kitTraffic(t, []int{7, 8}, false)
 	xs := insert(small, 3, loadDataLocal(t)...)
-	for _, c := range []struct {
-		name string
-		lose int // the exchange whose command is lost
-	}{
-		{"the upload lost", 4},
-		{"the LOAD DATA lost, its upload not", 3},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			t.Parallel()
-			client, server := onTheWire(xs, 7)
-			rec := recordChunks(t, holed(client, clientChunkOf(xs, c.lose)), holed(server), true, time.Minute)
-			// The LOAD DATA is left out either way, alone: the recorder
-			// does not record one (its answer asks for the upload).
-			requireHoleCost(t, rec, []time.Time{commandAt(t, xs, 7, 3)}, 18)
-		})
-	}
+	// The LOAD DATA lost: what follows it on the server's stream answers
+	// what the hole lost, and the recording goes on.
+	t.Run("the LOAD DATA lost, its upload not", func(t *testing.T) {
+		t.Parallel()
+		client, server := onTheWire(xs, 7)
+		rec := recordChunks(t, holed(client, clientChunkOf(xs, 3)), holed(server), true, time.Minute)
+		requireHoleCost(t, rec, []time.Time{commandAt(t, xs, 7, 3)}, 18)
+	})
+	// The upload lost, after the LOAD DATA was left out: the server's OK to
+	// it, still unread, cannot be told from an answer to a command the hole
+	// may also have lost, sent before the client's next command
+	// (TestRecordV2_ACaptureHoleWhileARestOfAResponseLeftOutIsUnread). The
+	// recording stops there.
+	t.Run("the upload lost", func(t *testing.T) {
+		t.Parallel()
+		client, server := onTheWire(xs, 7)
+		rec := recordChunks(t, holed(client, clientChunkOf(xs, 4)), holed(server), true, time.Minute)
+		requireStoppedAtTheHole(t, rec, commandAt(t, xs, 7, 3), 3)
+	})
 }
 
 // A PREPARE whose answer was lost: the PREPARE is left out, and so is the
@@ -324,4 +338,277 @@ func (o *orphanSpans) all() [][2]time.Time {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([][2]time.Time{}, o.windows...)
+}
+
+// pipelinedGroup lays the exchanges out as onTheWire does in reads of n, but
+// with the commands of exchanges first+1 to last captured right after the
+// command of first, before its answer: a client that pipelines that group,
+// and waits for each answer everywhere else.
+func pipelinedGroup(xs []exchange, n, first, last int) (client, server []fakeconn.Chunk) {
+	client, server = onTheWire(xs, n)
+	var order []*fakeconn.Chunk
+	for i := range xs {
+		if len(xs[i].command) > 0 && (i <= first || i > last) {
+			order = append(order, &client[clientChunkOf(xs, i)])
+		}
+		if i == first {
+			for j := first + 1; j <= last; j++ {
+				if len(xs[j].command) > 0 {
+					order = append(order, &client[clientChunkOf(xs, j)])
+				}
+			}
+		}
+		from, to := serverChunksOf(xs, n, i)
+		for k := from; k < to; k++ {
+			order = append(order, &server[k])
+		}
+	}
+	for k, c := range order {
+		c.ConnSeq = fakeconn.ConnSeqOf(uint64(handshakeChunks + 1 + k))
+		c.ReadAt = wireBase.Add(time.Duration(k+1) * time.Microsecond)
+	}
+	return client, server
+}
+
+// requireStoppedAtTheHole checks a recording that stops at a hole: no wrong
+// mock, stopped with ErrCaptureHole and stamped once, every query before the
+// hole recorded (queries), and a window left out that holds lostAt, when the
+// command the hole cut was sent.
+func requireStoppedAtTheHole(t *testing.T, rec recording, lostAt time.Time, queries int) {
+	t.Helper()
+	if w := wrongMocks(t, rec.mocks); len(w) > 0 {
+		t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+	}
+	if !rec.returned || !errors.Is(rec.err, fakeconn.ErrCaptureHole) {
+		t.Fatalf("RecordV2 returned=%v err=%v, want it stopped with ErrCaptureHole", rec.returned, rec.err)
+	}
+	if rec.stops != 1 {
+		t.Fatalf("the connection's stop was stamped %d times, want once", rec.stops)
+	}
+	if got := queryMocks(rec.mocks); got != queries {
+		t.Fatalf("%d query mocks, want the %d before the hole", got, queries)
+	}
+	held := false
+	for _, w := range rec.leftOut.all() {
+		if !w[0].After(lostAt) && !w[1].Before(lostAt) {
+			held = true
+		}
+	}
+	if !held {
+		t.Fatalf("no window left out holds %v, when the command the hole cut was sent", lostAt.Format(time.StampMicro))
+	}
+}
+
+// A client that first pipelines at the hole: the command lost was followed by
+// the next before its answer came. That answer is the first after the next
+// command, and nothing on either stream tells it from the next command's own,
+// so the recording stops at the hole, with what it cut left out, and records
+// no command paired with another command's answer. The client waited for
+// every answer before the hole, so it is not known to pipeline there.
+func TestRecordV2_ACommandSentBeforeTheAnswerToOneLostToACaptureHole(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false)
+	for _, p := range []int{0, 2, 3, 9} {
+		t.Run(fmt.Sprintf("exchange %d lost, %d sent before its answer", p, p+1), func(t *testing.T) {
+			t.Parallel()
+			client, server := pipelinedGroup(xs, 16384, p, p+1)
+			lost := clientChunkOf(xs, p)
+			rec := recordChunks(t, holed(client, lost), holed(server), true, time.Minute)
+			requireStoppedAtTheHole(t, rec, client[lost].ReadAt, p)
+		})
+	}
+}
+
+// Connector/J writes a streamed BLOB parameter as COM_STMT_RESET, then
+// COM_STMT_SEND_LONG_DATA and COM_STMT_EXECUTE, sent before the RESET's OK
+// arrives (pipelined_commands_test.go). With the RESET lost to a hole, that
+// OK comes after the EXECUTE, which must not be recorded with it.
+func TestRecordV2_AStreamedBlobWriteWhoseResetIsLostToACaptureHole(t *testing.T) {
+	t.Parallel()
+	small := kitTraffic(t, []int{7, 8}, false)
+	def := sessionColumns(t, "payload")[0]
+	execute := []byte{mysql.COM_STMT_EXECUTE, 0, 0, 0, 0, 0x00, 1, 0, 0, 0, 0x00, 0x01, 0x03, 0x00, 7, 0, 0, 0}
+	binary.LittleEndian.PutUint32(execute[1:], undecodableStmtID)
+	reset := []byte{mysql.COM_STMT_RESET, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(reset[1:], undecodableStmtID)
+	longData := []byte{mysql.COM_STMT_SEND_LONG_DATA, 0, 0, 0, 0, 0, 0, 'b', 'l', 'o', 'b'}
+	binary.LittleEndian.PutUint32(longData[1:], undecodableStmtID)
+	inserted := frame([][]byte{{0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00}}) // OK, 1 row
+	resetOK := frame([][]byte{{0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}})  // OK, 0 rows
+	for _, withLongData := range []bool{false, true} {
+		t.Run(fmt.Sprintf("with COM_STMT_SEND_LONG_DATA %v", withLongData), func(t *testing.T) {
+			t.Parallel()
+			group := []exchange{{command: wrapPacket(reset, 0), reply: resetOK}}
+			if withLongData {
+				group = append(group, exchange{command: wrapPacket(longData, 0)})
+			}
+			group = append(group, exchange{command: wrapPacket(execute, 0), reply: inserted})
+			xs := insert(small, 3, append([]exchange{
+				{command: wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "INSERT INTO t VALUES (?)"...), 0), reply: prepareOK(false, [][]byte{def}, nil)},
+				{command: wrapPacket(execute, 0), reply: inserted},
+			}, group...)...)
+			client, server := pipelinedGroup(xs, 16384, 5, 5+len(group)-1)
+			lost := clientChunkOf(xs, 5)
+			rec := recordChunks(t, holed(client, lost), holed(server), true, time.Minute)
+			executes := 0
+			for _, m := range rec.mocks {
+				if len(m.Spec.MySQLRequests) == 0 {
+					continue
+				}
+				if _, ok := m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket); !ok {
+					continue
+				}
+				executes++
+				if len(m.Spec.MySQLResponses) != 1 {
+					t.Fatalf("an EXECUTE mock with %d responses", len(m.Spec.MySQLResponses))
+				}
+				if ok, isOK := m.Spec.MySQLResponses[0].Message.(*mysql.OKPacket); !isOK || ok.AffectedRows != 1 {
+					t.Fatalf("an EXECUTE mock answered with %#v, not its own OK (1 row): the RESET's OK paired with it", m.Spec.MySQLResponses[0].Message)
+				}
+			}
+			if executes != 1 {
+				t.Fatalf("%d EXECUTE mocks, want the one before the hole", executes)
+			}
+			// The PREPARE, EXECUTE and COM_STMT_SEND_LONG_DATA mocks are
+			// checked above; the queries' as everywhere.
+			var queries []*models.Mock
+			for _, m := range rec.mocks {
+				if len(m.Spec.MySQLRequests) > 0 {
+					if _, ok := m.Spec.MySQLRequests[0].Message.(*mysql.QueryPacket); ok {
+						queries = append(queries, m)
+					}
+				}
+			}
+			rec.mocks = queries
+			requireStoppedAtTheHole(t, rec, client[lost].ReadAt, 3)
+		})
+	}
+}
+
+// A hole on the client's stream while the server's still holds the rest of a
+// response left out: an answer to what the hole lost cannot be told from that
+// rest, so the recording stops there. Here the client sent the command after
+// the hole before the answer to the one lost came, and that answer must not
+// be recorded with it.
+func TestRecordV2_ACaptureHoleWhileARestOfAResponseLeftOutIsUnread(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{7, 16384} {
+		t.Run(fmt.Sprintf("reads of %d", n), func(t *testing.T) {
+			t.Parallel()
+			xs := kitTraffic(t, []int{7, 8}, false)
+			// A response head that does not decode: its exchange is left out.
+			xs[3].reply = append([][]byte{{0x00, 0x00, 0x00, 0x01}}, xs[3].reply...)
+			client, server := pipelinedGroup(xs, n, 4, 5)
+			lost := clientChunkOf(xs, 4)
+			rec := recordChunks(t, holed(client, lost), holed(server), true, time.Minute)
+			requireStoppedAtTheHole(t, rec, client[lost].ReadAt, 3)
+		})
+	}
+}
+
+// A connection whose capture cannot order its two directions (each chunk the
+// same ConnSeq, as the proxyless capture numbers a connection it has no
+// copied_seq for): no floor drops the answer to the command a hole lost, and
+// only the cut by time at the next command (realignAnswer) keeps it from
+// that command.
+func TestRecordV2_ACommandLostToACaptureHoleOnAConnectionNotOrderedByConnSeq(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false)
+	for _, lost := range []int{3, 9} {
+		t.Run(fmt.Sprintf("exchange %d", lost), func(t *testing.T) {
+			t.Parallel()
+			client, server := onTheWire(xs, 16384)
+			for i := range client {
+				client[i].ConnSeq = 1
+			}
+			for i := range server {
+				server[i].ConnSeq = 1
+			}
+			rec := recordChunks(t, holed(client, clientChunkOf(xs, lost)), holed(server), true, time.Minute)
+			requireHoleCost(t, rec, []time.Time{commandAt(t, xs, 16384, lost)}, 18-1)
+		})
+	}
+}
+
+// A second hole inside the command taken up after the first: that command is
+// left out with what the first cut, and the recording goes on from the
+// client's next command.
+func TestRecordV2_ASecondCaptureHoleInsideTheCommandTakenUpAfterTheFirst(t *testing.T) {
+	t.Parallel()
+	xs := kitTraffic(t, []int{7, 8}, false)
+	client, server := onTheWire(xs, 7)
+	j := clientChunkOf(xs, 6)
+	first, second := client[j], client[j]
+	first.Bytes, second.Bytes = client[j].Bytes[:10], client[j].Bytes[10:]
+	split := append(append(append([]fakeconn.Chunk{}, client[:j]...), first, second), client[j+1:]...)
+	// Exchange 5's command lost, and the second chunk of exchange 6's.
+	rec := recordChunks(t, holed(split, j-1, j+1), holed(server), true, time.Minute)
+	if w := wrongMocks(t, rec.mocks); len(w) > 0 {
+		t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+	}
+	if !rec.returned || rec.err != nil {
+		t.Fatalf("RecordV2 returned=%v err=%v", rec.returned, rec.err)
+	}
+	if got := queryMocks(rec.mocks); got != 18-2 {
+		t.Fatalf("%d query mocks, want %d: all but the two exchanges the holes cut", got, 18-2)
+	}
+	w, ok := rec.leftOut.last()
+	if !ok || w[0].After(commandAt(t, xs, 7, 5)) || w[1].Before(commandAt(t, xs, 7, 6)) {
+		t.Fatalf("the span left out is %v; it must hold both commands the holes cut", w)
+	}
+}
+
+// A capture hole on the client's stream while a PREPARE is held (a
+// connection joined mid-stream, whose framing is only assumed): the server's
+// stream may still hold the PREPARE's EOF, captured before the command the
+// hole lost, and that EOF cannot be told from an answer to it. The client
+// here sent its next command before the answer to the one lost came: the
+// recording stops at the hole, the PREPARE left out, and that answer is not
+// recorded with the next command.
+func TestRecordV2_ACaptureHoleWhileAPrepareIsHeld(t *testing.T) {
+	t.Parallel()
+	def := func(name string) []byte {
+		return columnPayload(t, &mysql.ColumnDefinition41{Catalog: "def", Name: name, OrgName: name, FixedLength: 0x0c, CharacterSet: 0x3f, ColumnLength: 20, Type: byte(mysql.FieldTypeLongLong)})
+	}
+	j := newJoinedMidStream(t)
+	leftOut := &orphanSpans{}
+	j.h.sess.Orphans = leftOut
+	client := func(b []byte, seqNo uint64) {
+		at := j.at()
+		j.h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: fakeconn.ConnSeqOf(j.h.captured.Add(1)),
+			Bytes: b, ReadAt: at, WrittenAt: at, SeqNo: seqNo}
+	}
+	answer := func(affected byte) {
+		for _, p := range frame([][]byte{{0x00, affected, 0x00, 0x02, 0x00, 0x00, 0x00}}) {
+			j.h.pushDest(p, j.at())
+		}
+	}
+	// The PREPARE, answered with its definitions and the EOF after them,
+	// each a chunk of its own.
+	client(wrapPacket(append([]byte{mysql.COM_STMT_PREPARE}, "SELECT id FROM t WHERE a = ? AND b = ?"...), 0), 1)
+	for _, p := range prepareOK(false, [][]byte{def("?"), def("?")}, nil) {
+		j.h.pushDest(p, j.at())
+	}
+	j.at() // the lost command (SeqNo 2) was sent here
+	client(cannedCOMQuery(t, 0, "UPDATE t SET b = 2"), 3)
+	answer(5) // the lost command's
+	answer(7) // the UPDATE's
+	mocks, err := j.run(t)
+	for _, m := range mocks {
+		if len(m.Spec.MySQLRequests) == 0 || len(m.Spec.MySQLResponses) == 0 {
+			continue
+		}
+		if ok, isOK := m.Spec.MySQLResponses[0].Message.(*mysql.OKPacket); isOK && ok.AffectedRows == 5 {
+			t.Fatalf("a %T mock recorded with the answer to the command the hole lost", m.Spec.MySQLRequests[0].Message)
+		}
+	}
+	if !errors.Is(err, fakeconn.ErrCaptureHole) {
+		t.Fatalf("RecordV2 = %v, want it stopped with ErrCaptureHole", err)
+	}
+	if len(mocks) != 0 {
+		t.Fatalf("%d mocks, want none: the PREPARE is left out, and the recording stops at the hole", len(mocks))
+	}
+	if leftOut.count() < 1 {
+		t.Fatalf("%d exchanges left out, want the PREPARE's at least", leftOut.count())
+	}
 }

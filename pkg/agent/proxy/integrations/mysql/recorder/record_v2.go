@@ -1571,6 +1571,17 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// (lastEnd). The exchanges the hole cut ran from then to the client's
 	// next command, and are left out over that span once it is found.
 	var holeFrom time.Time
+	// holeUnproven is set at a capture hole on the client's stream until the
+	// first command taken up after it that the server answers. The answer
+	// that command is paired with is its own only if the answers to what the
+	// hole lost reached the capture before the command was sent, and the
+	// streams show that only when the cut by time there (realignAnswer)
+	// discards a chunk the server sent after the hole began. With none, the
+	// hole lost a command whose answer had not come (the client pipelined
+	// across the hole, as Connector/J does with COM_STMT_RESET and the
+	// COM_STMT_EXECUTE after it) or one with no answer, and the streams do
+	// not tell which: the recording stops there.
+	holeUnproven := false
 	// lastAnswerEnd is when the last byte of the last answer read was
 	// captured. pipelined: the client once sent a command not after that, so
 	// its answers cannot be told to start after their commands, and a
@@ -1621,7 +1632,15 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// sent before that command was captured is the rest of the response left
 	// out (fakeconn.FakeConn.SkipThrough). A stream that cannot be cut there
 	// stops the recording, as lost framing does.
+	//
+	// After a capture hole on the client's stream (holeUnproven), the cut
+	// must also discard a chunk captured after the last one the server's
+	// stream was read from, or the recording stops at the command
+	// (holeUnproven's rule): the answers to what the hole lost each start a
+	// chunk of their own (SkipThrough), and only one that reached the capture
+	// before the command shows the client waited for it.
 	realignAnswer := func(reqTs time.Time) error {
+		readBefore := sess.DestStream.LastReadTime()
 		n, last, err := sess.DestStream.SkipThrough(reqTs)
 		if err != nil {
 			if streamEnded(err) {
@@ -1631,7 +1650,12 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			warnFramingLost(logger, sess, "V2: mysql response framing lost; the connection is no longer recorded", err)
 			return leaveOutInFlight(sess, reqTs, err)
 		}
-		serverRealign = false
+		if holeUnproven && !last.After(readBefore) {
+			err = fmt.Errorf("%w: the client's next command was sent before any answer to what the hole lost reached the capture, so that answer cannot be told from the command's own", fakeconn.ErrCaptureHole)
+			warnFramingLost(logger, sess, "V2: mysql command after a capture hole may have been sent before the answer to what the hole lost; the connection is no longer recorded", err)
+			return leaveOutInFlight(sess, reqTs, err)
+		}
+		serverRealign, holeUnproven = false, false
 		if !last.IsZero() {
 			lastAnswerEnd = last
 		}
@@ -1662,7 +1686,19 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			joined = continues(cmdBuf)
 		} else if clientRealign {
 			clientRealign = false
-			cmdBuf, respFirst, joined, err = nextCommandAfterFault(ctx, logger, sess, !holeFrom.IsZero())
+			var holed bool
+			cmdBuf, respFirst, joined, holed, err = nextCommandAfterFault(ctx, logger, sess, !holeFrom.IsZero())
+			if err == nil && holed && holeFrom.IsZero() {
+				// A hole on the client's stream while the server's still
+				// holds the rest of a response left out (fail): an answer to
+				// what the hole lost cannot be told from that rest, so
+				// nothing shows the client waited for it before the command
+				// read here (holeUnproven's rule). The recording stops in
+				// the exchanges from the one left out on.
+				err = fmt.Errorf("%w: it came while the server's stream still held the rest of a response left out, so whether the client waited for the answers to what it lost cannot be told", fakeconn.ErrCaptureHole)
+				warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a capture hole met while re-aligning; the connection is no longer recorded", err)
+				return leaveOutInFlight(sess, lastEnd, err)
+			}
 			if err != nil && !holeFrom.IsZero() {
 				// The exchange the hole cut is lost all the same: it ran
 				// before the client's chunks passed over after the hole.
@@ -1699,25 +1735,26 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 						return endErr
 					}
 				}
-				if errors.Is(err, fakeconn.ErrCaptureHole) && !pipelined {
+				if errors.Is(err, fakeconn.ErrCaptureHole) && !pipelined && held == nil {
 					// The client's bytes before its next chunk were lost:
 					// a command, its answer's bytes still on the server's
 					// stream, or more of one read in part here. That
 					// exchange, or those, are left out, from the last one
 					// handled, once the client's next command is found
 					// (holeFrom), and the recording goes on from there, as
-					// after a response left out.
-					if held != nil {
-						h := held
-						held = nil
-						h.leaveOut(sess, notRecorded("the client's next command after the %s response was lost to a capture hole, so nothing settles its framing", h.what))
-					}
+					// after a response left out, where the streams show
+					// the client waited for the answers to what the hole
+					// lost (holeUnproven). With a PREPARE held, the
+					// server's stream may still hold the rest of its
+					// response (an EOF), which cannot be told from such an
+					// answer: the recording stops below, and the PREPARE
+					// is left out as it stops (held).
 					carry = nil
 					decodeCtx.LastOp.Store(clientKey, wire.RESET)
 					if holeFrom.IsZero() {
 						holeFrom = lastEnd
 					}
-					clientRealign, serverRealign = true, true
+					clientRealign, serverRealign, holeUnproven = true, true, true
 					continue
 				}
 				if errors.Is(err, ErrFramingLost) || errors.Is(err, fakeconn.ErrCaptureHole) {

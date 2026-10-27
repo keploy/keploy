@@ -254,7 +254,7 @@ func (p *Proxy) recordViaSupervisor(
 		// A chunk a tee drops is a hole a parser that reads holes in place
 		// learns of from its stream: it is not marked for one, and the loss is
 		// still counted. See [teeDropMark].
-		OnTeeDrop:         p.teeDropped(teeDropMark(svSess.MarkMockIncomplete, parser), func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
+		OnTeeDrop:         p.teeDropped(teeDropMark(svSess.MarkMockIncomplete, parser), func() string { return fmt.Sprint(dstConn.RemoteAddr()) }, svSess.RecordingStopping),
 		OnClientChunkTeed: sv.MarkPendingWork,
 		RealCertHook:      realCertHook,
 		// A hole in this connection's capture: every test case recorded while

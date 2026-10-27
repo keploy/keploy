@@ -155,8 +155,8 @@ func answered(command byte) bool {
 // the hole may start in the middle of a packet, and a header read there
 // claims any length. So chunks are passed over whole until one starts a
 // command the client sent on its own (provesCommand): the reading goes on
-// from there, as from any command.
-func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, afterHole bool) (cmdBuf []byte, respFirst byte, joined bool, err error) {
+// from there, as from any command. holed reports a hole met here.
+func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, afterHole bool) (cmdBuf []byte, respFirst byte, joined, holed bool, err error) {
 	// prevSeq and prevData: the last packet passed over ended at sequence id
 	// prevSeq, and carried data (one has been passed over: passed).
 	var prevSeq byte
@@ -164,17 +164,17 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 	for {
 		c, err := sess.NextRequest(models.MySQL, false)
 		if errors.Is(err, fakeconn.ErrCaptureHole) {
-			afterHole = true
+			afterHole, holed = true, true
 			continue
 		}
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, holed, err
 		}
 		atChunk := sess.ClientStream.AtChunkBoundary()
 		if afterHole {
 			if !atChunk || !provesCommand(c.Bytes) {
 				if _, err := sess.ClientStream.ReadChunk(); err != nil && !errors.Is(err, fakeconn.ErrCaptureHole) {
-					return nil, 0, false, err
+					return nil, 0, false, holed, err
 				}
 				clearPending(sess)
 				continue
@@ -197,12 +197,12 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 			return cs.take(header)
 		})
 		if errors.Is(err, fakeconn.ErrCaptureHole) {
-			afterHole = true
+			afterHole, holed = true, true
 			clearPending(sess)
 			continue
 		}
 		if err != nil {
-			return nil, 0, false, err
+			return nil, 0, false, holed, err
 		}
 		if inExchange {
 			prevSeq, prevData, passed = lastSeq, len(buf) > 4, true
@@ -210,9 +210,9 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 			continue
 		}
 		if !atChunk {
-			return nil, 0, false, framingLost("the command after a response left out does not start a chunk of the capture: the client did not send it on its own")
+			return nil, 0, false, holed, framingLost("the command after a response left out does not start a chunk of the capture: the client did not send it on its own")
 		}
-		return buf, cs.next, cs.joined, nil
+		return buf, cs.next, cs.joined, holed, nil
 	}
 }
 
@@ -244,9 +244,12 @@ var commandPayload = map[byte]int{
 // whose length is one that command can have (commandPayload). It is how the
 // client's stream is taken up after a capture hole: a chunk that starts in
 // the middle of a packet, or inside an exchange (a LOCAL INFILE upload), fails
-// it but for a chance of well under one in a hundred thousand, and the answer
-// to a packet taken for a command by that chance is checked by its sequence
-// ids as any answer is.
+// it but by chance: for text with no NUL bytes (a query's SQL) almost never,
+// since a packet's sequence id 0 would have to be one; for binary data (an
+// EXECUTE's parameters, a binary upload) about one in 9,400 for uniform
+// bytes, and more often for data heavy in zeros. The answer to a packet taken
+// for a command by that chance is checked by its sequence ids as any answer
+// is.
 func provesCommand(b []byte) bool {
 	if len(b) < 5 {
 		return false
