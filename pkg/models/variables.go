@@ -257,6 +257,15 @@ type ClockOffset struct {
 	Zone    string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
 	Layout  string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
 	AppZone string        `json:"app_zone,omitempty" yaml:"app_zone,omitempty" bson:"app_zone,omitempty"`
+	// Since is where a replay's span for the read starts: "" at its call's
+	// window (after the previous data-plane call); SinceTestBegin at the
+	// running test's begin, for a read the learn step saw made before its
+	// call's window in both runs and after the test began (keploy mock's
+	// client tests: an application that reads its clock once for a request
+	// and writes it at a later call). A replay that cannot tell where the
+	// running test began on the application's clock refuses such a read, and
+	// one of a Since this keploy does not read holds nothing (SinceKnown).
+	Since string `json:"since,omitempty" yaml:"since,omitempty" bson:"since,omitempty"`
 }
 
 // AppZoneMatters reports whether what the learn step learned of o depends
@@ -483,6 +492,30 @@ const (
 	ZoneApart = "apart"
 )
 
+// SinceTestBegin is a ClockOffset's Since for a read checked from the
+// running test's begin rather than from its call's window (ClockOffset).
+const SinceTestBegin = "test"
+
+// SinceKnown reports whether o's Since is one a replay reads: "" (its call's
+// window) or SinceTestBegin. A replay refuses a value at a place of any
+// other, from whatever keploy wrote it, rather than check it in a span its
+// learn step did not read.
+func (o ClockOffset) SinceKnown() bool { return o.Since == "" || o.Since == SinceTestBegin }
+
+// meetSince is the Since a replay reads a place from that two learnings read
+// from a and b: SinceTestBegin where either did (a span from the test's
+// begin holds every read its call's window does), and one this keploy does
+// not read where either is (SinceKnown fails it closed).
+func meetSince(a, b string) string {
+	switch {
+	case a == b || b == "":
+		return a
+	case a == "" || a == SinceTestBegin:
+		return b
+	}
+	return a
+}
+
 // ZoneKnown reports whether o's Zone is one a replay reads a value in: ""
 // (as the value names its moment), ZoneUTC, ZoneApp or ZoneEither. Holds
 // holds nothing for any other: ZoneApart, or a Zone this keploy does not
@@ -693,7 +726,7 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // recording paired many times keeps one answer whatever order its
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), AppZone: o.AppZone}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), Since: meetSince(o.Since, p.Since), AppZone: o.AppZone}
 	switch {
 	case o.AppZone == "":
 		m.AppZone = p.AppZone
@@ -913,8 +946,13 @@ func (o ClockOffset) String() string {
 		return "clock reads in no one form (one place learned written in different layouts at different calls)"
 	case !o.LayoutKnown():
 		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
+	case !o.SinceKnown():
+		return "clock read from a start this keploy does not read (" + strconv.Quote(o.Since) + ")"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
+	if o.Since == SinceTestBegin {
+		s += ", read after its test began and before its call"
+	}
 	if o.AppZone != "" {
 		s += ", read with the application's zone as " + o.AppZone
 	}
