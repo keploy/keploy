@@ -130,6 +130,10 @@ type Receipt struct {
 	// means the run has no verdict, whatever its tests' lines say: a call
 	// after the last test's read is on no line. Empty with the switch off.
 	CannotCapture models.CaptureLosses `yaml:"cannotCapture,omitempty" json:"cannotCapture,omitempty"`
+	// Report is the file the replay wrote its report to, as the project
+	// names it (ReportReplayTo): each failed test's calls, as keploy saw
+	// them. Absent when the replay named none.
+	Report string `yaml:"report,omitempty" json:"report,omitempty"`
 }
 
 // TestCounts counts a replay's tests by their verdict this run.
@@ -504,6 +508,19 @@ func MocksDigest(keployDir, set string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// receiptHeader opens last-replay.yaml: what wrote it, that it stays on this
+// machine, and what each field means.
+const receiptHeader = "# Written by `keploy mock replay`: the last replay of this set on this machine, rewritten by\n" +
+	"# every replay. Local: keploy/.gitignore keeps it out of git. Tools read it instead of replaying again.\n" +
+	"# report: this replay's report, each failed test's calls as keploy saw them (keploy mock report prints it).\n" +
+	"# exitCode: keploy's exit; runnerExitCode: the test command's (-1: it never exited on its own);\n" +
+	"#   failedBy: what failed the run, when something did; error: why keploy did not complete it.\n" +
+	"# loaded, consumed, missed: the recorded mocks loaded, the calls they answered, the calls none\n" +
+	"#   answered (-1: not read); missedData: the misses that fail a test (not DNS lookups).\n" +
+	"# isolated: every call the run made was answered from the recording; isolationNote: why not.\n" +
+	"# mocksDigest: the sha256 of the mocks.yaml replayed. tests: passed, failed, skipped (by the test),\n" +
+	"#   gated (not run: keploy skipped them, verdicts.yaml lists them), noVerdict (no verdict reported).\n"
+
 // writeReceipt records the run next to its set. Best-effort: a receipt that
 // cannot be written costs a later reader its answer, never this run its exit
 // code. A set directory that does not exist is not created -- there was
@@ -525,8 +542,7 @@ func writeReceipt(logger *zap.Logger, keployDir string, r Receipt) {
 		logger.Debug("failed to encode the replay receipt", zap.Error(err))
 		return
 	}
-	head := []byte("# Written by `keploy mock replay`: what the last replay of this set proved\n" +
-		"# on this machine. Local and git-ignored; tools read it instead of re-running the replay.\n")
+	head := []byte(receiptHeader)
 	// One exit for every failure to write: say so, and take the previous
 	// receipt with it. Leaving it is worse than losing it -- it is green,
 	// isolated, and about a run that has just been superseded by one whose

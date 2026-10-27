@@ -1084,3 +1084,28 @@ func TestARunWithRowsAndNoTestLeavesNoPerTestFile(t *testing.T) {
 	require.NotNil(t, gotRec, "a record keploy refused leaves its file")
 	require.Equal(t, withRefusal.Live, gotRec.Live, "the rows ride with the refusal")
 }
+
+// last-replay.yaml says what each of its fields means, and names the report
+// the replay wrote, so an agent reading it needs no keploy docs to tell
+// gated from skipped, or where each failed test's calls are.
+func TestTheReceiptExplainsItselfAndNamesTheReport(t *testing.T) {
+	ReportReplayTo("keploy/reports/r1/replay.yaml")
+	t.Cleanup(func() { ReportReplayTo("") })
+	keployDir, _, _ := replayIn(t, replayCase{})
+	raw, err := os.ReadFile(filepath.Join(keployDir, "set", ReceiptFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	if !strings.HasPrefix(got, receiptHeader) {
+		t.Fatalf("last-replay.yaml opens with %q", got[:min(len(got), 200)])
+	}
+	for _, field := range []string{"report:", "exitCode:", "runnerExitCode:", "failedBy:", "missedData:", "isolated:", "mocksDigest:", "gated", "noVerdict"} {
+		if !strings.Contains(receiptHeader, field) {
+			t.Errorf("the header does not say what %s means", field)
+		}
+	}
+	if !strings.Contains(got, "\nreport: keploy/reports/r1/replay.yaml\n") {
+		t.Fatalf("last-replay.yaml does not name the report:\n%s", got)
+	}
+}

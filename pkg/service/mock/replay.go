@@ -107,6 +107,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			MocksDigest:    MocksDigest(m.config.Path, name),
 			MinCoverage:    m.config.Mock.MinCoverage,
 			Version:        utils.Version,
+			Report:         replayReport,
 		})
 		// No test ran, or keploy could not read what they did: an earlier
 		// run's per-test results must not stand next to this receipt as
@@ -829,6 +830,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Version:        utils.Version,
 		Refusals:       m.refusals,
 		CannotCapture:  lostNotJudged,
+		Report:         replayReport,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
 		Set:           name,

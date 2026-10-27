@@ -187,7 +187,7 @@ func TestTheReceiptCountsDataMissesUnderTheSwitchOnly(t *testing.T) {
 	require.Nil(t, mustReceipt(t, dir).MissedData, "absent with the switch off")
 	raw, err := os.ReadFile(filepath.Join(dir, "set", ReceiptFile))
 	require.NoError(t, err)
-	require.NotContains(t, string(raw), "missedData")
+	require.NotContains(t, strings.TrimPrefix(string(raw), receiptHeader), "missedData", "the header says what it means; the fields hold none")
 
 	provenOn(t)
 	dir, _, _ = replayIn(t, replayCase{mockErrs: misses, mapped: true})
