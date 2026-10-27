@@ -96,11 +96,16 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				// Another variable of the same name: not this one.
 				continue
 			}
+			if had && models.VariableAboutState(n, cur).Hand() {
+				// A person's variable: a learned one never changes it.
+				continue
+			}
 			next := v
 			if had {
 				next = MergeVariable(cur, v)
 			}
 			added = append(added, variableAdded(n, cur, next)...)
+			next.About = variableAbout(n, cur, had, next, v.About)
 			vars[n] = next
 		}
 		mock.Spec.Variables = vars
@@ -122,9 +127,18 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			}
 		}
 		for k := range noise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
+			if _, ok := mock.Spec.ReqBodyNoise[k]; ok {
+				continue
 			}
+			if models.NoiseAboutState(&mock.Spec, k) == models.AboutHand {
+				// A person's about at a path they took out of the noise:
+				// the place stays compared.
+				delete(noise, k)
+				continue
+			}
+			added = append(added, k+" (noise)")
+			path := k
+			setAbout(&mock.Spec.NoiseAbout, k, st.NoiseAbout[k].Stamped(models.AboutKindNoise, k, false, func(run string) string { return models.NoiseSum(path, run) }))
 		}
 		if len(noise) > 0 {
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
@@ -137,6 +151,12 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		}
 		for path, o := range st.Clocks {
 			cur, had := clocks[path]
+			state := models.ClockAboutState(&mock.Spec, path)
+			if had && state.Hand() || !had && state == models.AboutHand {
+				// A person's clock read (or their about at a path they took
+				// out of the clocks): a learned one never changes it.
+				continue
+			}
 			next := o
 			if had {
 				next = cur.Meet(o)
@@ -145,17 +165,65 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				added = append(added, path+" ("+next.String()+")")
 			}
 			clocks[path] = next
+			at := path
+			sum := func(run string) string { return models.ClockSum(at, next, run) }
+			switch {
+			case !had:
+				setAbout(&mock.Spec.ClockAbout, path, st.ClockAbout[path].Stamped(models.AboutKindClock, path, false, sum))
+			case next != cur && state == models.AboutLearned:
+				// keploy's own clock read, narrowed: its sum follows.
+				a := mock.Spec.ClockAbout[path].Clone()
+				a.Sum = sum(a.Run)
+				mock.Spec.ClockAbout[path] = a
+			}
 		}
 		mock.Spec.Clocks = clocks
 	}
 	for k := range mock.Spec.ReqBodyNoise {
 		_, clock := mock.Spec.Clocks[k]
 		if varPlaces[k] || clock {
+			// The place is a variable's or a clock read's, so it is
+			// compared: the noise goes, and keploy's own about with it. A
+			// person's about stays, an orphan keploy mock check reports.
+			if !models.NoiseAboutState(&mock.Spec, k).Hand() {
+				delete(mock.Spec.NoiseAbout, k)
+			}
 			delete(mock.Spec.ReqBodyNoise, k)
 		}
 	}
 	sort.Strings(added)
 	return added
+}
+
+// setAbout sets (*m)[key] to a, making the map when there is none.
+func setAbout(m *map[string]models.About, key string, a models.About) {
+	if *m == nil {
+		*m = map[string]models.About{}
+	}
+	(*m)[key] = a
+}
+
+// variableAbout is the about of variable name as next declares it, where
+// cur was on disk (had) and the learn step gave learned: one keploy adds is
+// stamped; keploy's own (cur learned, its sum matching) keeps its about and
+// its sum follows a change; one of unknown origin stays so, never stamped.
+// (A person's is never merged: MergeLearned.)
+func variableAbout(name string, cur models.MockVariable, had bool, next models.MockVariable, learned *models.About) *models.About {
+	sum := func(run string) string { return models.VariableSum(name, next, run) }
+	if !had {
+		var a models.About
+		if learned != nil {
+			a = *learned
+		}
+		s := a.Stamped(models.AboutKindVariable, name, next.Echo, sum)
+		return &s
+	}
+	if models.VariableAboutState(name, cur) != models.AboutLearned {
+		return nil
+	}
+	a := cur.About.Clone()
+	a.Sum = sum(a.Run)
+	return &a
 }
 
 // MergeVariable is two declarations of one variable in one call as one: a

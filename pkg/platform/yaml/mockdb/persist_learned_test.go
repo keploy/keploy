@@ -70,13 +70,18 @@ func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 			if m0 == nil || m1 == nil {
 				t.Fatalf("mocks read back %v", byName)
 			}
-			if want := (models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}}}); !reflect.DeepEqual(m0.Spec.Variables, want) {
+			for _, m := range []*models.Mock{m0, m1} {
+				if s := models.VariableAboutState("key", m.Spec.Variables["key"]); s != models.AboutLearned {
+					t.Fatalf("%s's learned variable reads back as %v", m.Name, s)
+				}
+			}
+			if want := (models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}}}); !reflect.DeepEqual(withoutAbout(m0.Spec.Variables), want) {
 				t.Fatalf("mock-0's variables read back %+v: another call uses the value, so it is no echo", m0.Spec.Variables)
 			}
 			if !reflect.DeepEqual(m0.Spec.ReqBodyNoise, map[string][]string{"header.x-trace": {}, "url.path.1": {}}) {
 				t.Fatalf("mock-0's noise read back %v: a variable's place is never noise", m0.Spec.ReqBodyNoise)
 			}
-			if want := (models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}}); !reflect.DeepEqual(m1.Spec.Variables, want) {
+			if want := (models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}}); !reflect.DeepEqual(withoutAbout(m1.Spec.Variables), want) {
 				t.Fatalf("mock-1's variables read back %+v", m1.Spec.Variables)
 			}
 			again, err := ys.PersistLearned(ctx, set, states)
@@ -212,4 +217,14 @@ func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
 	if want := map[string][]string{"body.key": {}, "body.other": {}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch off: noise written %v, want %v", got, want)
 	}
+}
+
+// withoutAbout is vs with no variable's about: the decisions alone.
+func withoutAbout(vs models.MockVariables) models.MockVariables {
+	out := vs.Clone()
+	for n, v := range out {
+		v.About = nil
+		out[n] = v
+	}
+	return out
 }

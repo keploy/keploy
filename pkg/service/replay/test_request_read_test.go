@@ -90,7 +90,7 @@ func TestRunTestSet_TheFullRoundKeepsNoNoiseAnAgentLearnedWithoutTheRequest(t *t
 				if status != models.TestSetStatusPassed {
 					t.Fatalf("status %s, want PASSED", status)
 				}
-				if !reflect.DeepEqual(got.ReqBodyNoise, learned.ReqBodyNoise) || !reflect.DeepEqual(got.Variables, learned.Variables) || !reflect.DeepEqual(got.Binds, learned.Binds) {
+				if !reflect.DeepEqual(got.ReqBodyNoise, learned.ReqBodyNoise) || !reflect.DeepEqual(decisions(got).Variables, learned.Variables) || !reflect.DeepEqual(decisions(got).Binds, learned.Binds) {
 					t.Fatalf("kept %+v; want what was learned", got)
 				}
 				for _, res := range h.report.report.Tests {

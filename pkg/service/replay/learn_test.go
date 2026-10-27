@@ -31,3 +31,45 @@ func TestLearnedByTest(t *testing.T) {
 		t.Fatal("nothing learned says nothing")
 	}
 }
+
+// The test written into each learned decision's about is the test that
+// made a shared recording's call (consumerOf), else the test whose mapping
+// holds the mock (learn.StampStates).
+func TestLearnedStampNamesTheTestThatWasOpen(t *testing.T) {
+	mapping := &models.Mapping{TestCases: []models.MappedTestCase{
+		{ID: "test-1", Mocks: []models.MockEntry{{Name: "mock-1"}, {Name: "mock-shared"}}},
+		{ID: "test-2", Mocks: []models.MockEntry{{Name: "mock-2"}, {Name: "mock-shared"}}},
+	}}
+	s := learnedStamp(mapping, map[string]string{"mock-shared": "test-2"})
+	want := map[string]string{"mock-1": "test-1", "mock-2": "test-2", "mock-shared": "test-2"}
+	if !reflect.DeepEqual(s.Test, want) || s.Round != models.AboutRoundFull || s.Run == "" {
+		t.Fatalf("stamp: %+v, want tests %v", s, want)
+	}
+}
+
+// decisions is st with no about (MockState.NoiseAbout, ClockAbout, and each
+// variable's and bind's About): what was learned, without where it came
+// from, which a replay never reads.
+func decisions(st models.MockState) models.MockState {
+	st.NoiseAbout, st.ClockAbout = nil, nil
+	strip := func(vs models.MockVariables) models.MockVariables {
+		if vs == nil {
+			return nil
+		}
+		out := vs.Clone()
+		for n, v := range out {
+			v.About = nil
+			out[n] = v
+		}
+		return out
+	}
+	st.Variables = strip(st.Variables)
+	if st.Binds != nil {
+		binds := make(map[string]models.MockVariables, len(st.Binds))
+		for t, vs := range st.Binds {
+			binds[t] = strip(vs)
+		}
+		st.Binds = binds
+	}
+	return st
+}

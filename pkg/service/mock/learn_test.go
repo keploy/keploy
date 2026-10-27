@@ -225,3 +225,22 @@ func TestARoundsEndKeepsWhatWasLearnedOnlyFromAClientTestsReader(t *testing.T) {
 		})
 	}
 }
+
+// The test written into each learned decision's about is the test open
+// when it was learned: the first test that consumed the mock (a pool mock
+// too), else the test whose mapping holds it; a start-up mock no test
+// consumed was learned between tests (learn.StampStates).
+func TestLearnedStampNamesTheTestThatWasOpen(t *testing.T) {
+	flows := []FlowMocks{
+		{Flow: "items::TestA", Consumed: []models.MockState{{Name: "mock-pool"}, {Name: "mock-1"}}},
+		{Flow: "items::TestB", Consumed: []models.MockState{{Name: "mock-pool"}, {Name: "mock-2"}}},
+	}
+	s := learnedStamp(flows, map[string]string{"mock-1": "items::TestA", "mock-3": "items::TestC"})
+	want := map[string]string{"mock-pool": "items::TestA", "mock-1": "items::TestA", "mock-2": "items::TestB", "mock-3": "items::TestC"}
+	if !reflect.DeepEqual(s.Test, want) {
+		t.Fatalf("tests: %v, want %v", s.Test, want)
+	}
+	if s.Round != models.AboutRoundFull || s.Run == "" || s.Keploy != utils.Version {
+		t.Fatalf("stamp: %+v", s)
+	}
+}

@@ -933,7 +933,9 @@ func TestRunTestSet_TheRetryCyclesAreServedWhatTheFirstCycleLearned(t *testing.T
 			}
 			for _, st := range p.Learned {
 				got = append(got, st.Name)
-				if !reflect.DeepEqual(st, kept[st.Name]) {
+				// What the round keeps carries where each decision came
+				// from (learn.StampStates), which serving never reads.
+				if !reflect.DeepEqual(decisions(st), decisions(kept[st.Name])) {
 					t.Fatalf("%s was served the retry cycles as %+v; the round keeps %+v", st.Name, st, kept[st.Name])
 				}
 			}
