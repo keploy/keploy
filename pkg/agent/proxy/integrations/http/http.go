@@ -64,6 +64,9 @@ type HTTP struct {
 	// learnIx is the learn step's index of the last staging generation a
 	// learned call read (learnIndex).
 	learnIx learnIndexes
+	// strictIx is the strict pass's index of the last staging generation a
+	// strict call read (strictIndex).
+	strictIx genIndexes[*strictIndex]
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
