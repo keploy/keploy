@@ -37,6 +37,15 @@ const (
 	// and excluded_pids: k_sock_create runs only then. Never where something
 	// else owns those maps (DaemonSet, per-container targeting).
 	FlagClassifies uint32 = 1 << 4
+	// FlagIngressHold (bit 5; KEPLOY_FLAG_INGRESS_HOLD in
+	// headers/k_ingress_hold.h), set once the ingress hold's objects are
+	// attached (ingressport.go): the sk_lookup program, and the
+	// cgroup/sock_release program that takes a note back. The bind hooks
+	// then note each moved socket's family and address, and the lookup
+	// holds a moved port only where the application's own socket would
+	// have taken the connection. Unset, they note nothing, and the lookup
+	// holds nothing.
+	FlagIngressHold uint32 = 1 << 5
 )
 
 type BpfSpinLock struct{ Val uint32 }
