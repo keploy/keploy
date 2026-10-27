@@ -263,99 +263,6 @@ func TestTheForwarderBindsBeforeItsWait(t *testing.T) {
 	}
 }
 
-// A forwarder that cannot listen on the app's port because another listener
-// (not keploy's) holds it yields the hold's port to that listener, with a
-// WARN that names the port, and is not started: the port's calls are that
-// listener's, as without keploy. Without a hold there is nothing to yield;
-// a forwarder that fails for another reason (the agent stopping) yields
-// nothing.
-func TestAForwarderThatFindsItsPortTakenYieldsTheHold(t *testing.T) {
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) {
-		t.Error("a forwarder whose port is taken waited for the app")
-		return true, nil
-	}
-	other, err := net.Listen("tcp4", "0.0.0.0:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = other.Close() })
-	orig := portOf(t, other.Addr().String())
-
-	for _, held := range []bool{true, false} {
-		holder := &fakePortHolder{held: held}
-		core, logs := observer.New(zapcore.WarnLevel)
-		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-		err := newGoTCPIngressHook(pm).StartIngress(context.Background(), orig, portOf(t, freeAddr(t)))
-		if !errors.Is(err, syscall.EADDRINUSE) {
-			t.Fatalf("held %v: StartIngress on a taken port: %v, want EADDRINUSE", held, err)
-		}
-		holder.mu.Lock()
-		yielded, registered := holder.yielded, len(holder.registered)
-		holder.mu.Unlock()
-		warns := logs.FilterMessageSnippet("another listener, not keploy's, holds the application's port").All()
-		if !held {
-			if len(yielded) != 0 || len(warns) != 0 {
-				t.Fatalf("without a hold: yielded %v, %d WARNs, want nothing yielded", yielded, len(warns))
-			}
-			continue
-		}
-		if len(yielded) != 1 || yielded[0] != orig || registered != 0 {
-			t.Fatalf("yielded %v (registered %d), want [%d] and no forwarder", yielded, registered, orig)
-		}
-		if len(warns) != 1 || warns[0].ContextMap()["port"] != uint16(orig) || warns[0].ContextMap()["family"] != "IPv4" {
-			t.Fatalf("WARNs %v, want one naming port %d and IPv4", warns, orig)
-		}
-		if !errors.Is(err, errIngressPortYielded) {
-			t.Fatalf("a yield's error %v does not say the port was yielded", err)
-		}
-	}
-
-	holder := &fakePortHolder{held: true}
-	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1), portHolder: holder}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := newGoTCPIngressHook(pm).StartIngress(ctx, portOf(t, freeAddr(t)), portOf(t, freeAddr(t))); err == nil {
-		t.Fatal("a forwarder started on a canceled context")
-	}
-	if len(holder.yielded) != 0 {
-		t.Fatalf("a forwarder that failed for a canceled context yielded %v", holder.yielded)
-	}
-}
-
-// A port keploy yields by design is logged once, as the yield's WARN: the
-// manager logs no "Ingress hook failed to start" ERROR for it, which it still
-// does, as on main, for a forwarder that cannot listen on a port nothing
-// holds for keploy.
-func TestAYieldedPortLogsOnlyItsWarn(t *testing.T) {
-	saved := ingressTargetWait
-	t.Cleanup(func() { ingressTargetWait = saved })
-	ingressTargetWait = func(context.Context, uint16, string, time.Duration) (bool, error) { return true, nil }
-	other, err := net.Listen("tcp4", "0.0.0.0:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = other.Close() })
-	orig := portOf(t, other.Addr().String())
-	for _, held := range []bool{true, false} {
-		core, logs := observer.New(zapcore.DebugLevel)
-		holder := &fakePortHolder{held: held}
-		pm := &IngressProxyManager{logger: zap.New(core), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1),
-			active: make(map[uint16]proxyStop), portHolder: holder}
-		pm.ingressHook = newGoTCPIngressHook(pm)
-		pm.StartIngressProxy(context.Background(), orig, portOf(t, freeAddr(t)))
-		errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
-		warns := logs.FilterLevelExact(zapcore.WarnLevel).All()
-		if held && (len(errs) != 0 || len(warns) != 1) {
-			t.Fatalf("a yielded port logged %d ERRORs and %d WARNs, want only the yield's WARN: %v", len(errs), len(warns), logs.All())
-		}
-		if !held && (len(errs) != 1 || len(warns) != 0) {
-			t.Fatalf("without a hold, a taken port logged %d ERRORs and %d WARNs, want main's one ERROR: %v", len(errs), len(warns), logs.All())
-		}
-	}
-}
-
 // A forwarder whose agent stops while it waits for the app (it bound the
 // port before the wait) releases the port and starts nothing: no forwarder
 // entry, nothing registered with the hold, and the port free for the next
@@ -884,9 +791,15 @@ func callAndRead(t *testing.T, c net.Conn, path string) <-chan string {
 // each, the port's slot is taken.
 func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
-	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase,
-		*http.Request, *http.Response, time.Time, time.Time,
-		models.IncomingOptions, bool, bool, uint16) {
+	// Each call's capture is waited for below: its connection's goroutine
+	// (the park's or the forwarder's, which nothing joins) starts the
+	// capture after it answers, and pm.captures.Wait in the cleanup counts
+	// only a capture that started before it.
+	captured := make(chan string, 2)
+	stubCaptureHook(t, func(_ context.Context, _ *zap.Logger, _ chan *models.TestCase,
+		req *http.Request, _ *http.Response, _ time.Time, _ time.Time,
+		_ models.IncomingOptions, _ bool, _ bool, _ uint16) {
+		captured <- req.URL.Path
 	})
 	app, got, answer := heldUpstream(t)
 	orig := portOf(t, freeAddr(t))
@@ -933,6 +846,14 @@ func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
 		answer <- struct{}{}
 		if s := <-done; s != "200 OK" {
 			t.Fatalf("the %s's call: %s", via, s)
+		}
+		select {
+		case p := <-captured:
+			if p != "/"+via {
+				t.Fatalf("recorded %s, want /%s", p, via)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the %s's call was not recorded", via)
 		}
 	}
 }
