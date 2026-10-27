@@ -1,6 +1,9 @@
 package learn
 
 import (
+	"encoding/base64"
+	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,12 +178,17 @@ func TestAClientTestsClockReadRecordedWithAnEarlierStampIsNoCopyOfItWhereTheFull
 
 // A value found in a recording made before the call is followed as a value
 // from there: a word of it, the value whole (an id, a moment's epoch
-// milliseconds or its text), or a moment its protocol types. Where record's
-// full round never served that recording before the call (its own call
-// missed, was answered from another recording, or was not made), the reason
-// says so, never that keploy cannot follow the value there yet; where it
-// served it, the reason stands as before. Both the classifier keploy test
-// uses and the one keploy mock's client tests use read so.
+// milliseconds or its text, a read of the clock the lead moved, as it stands
+// or as its escaped text decodes), a moment its protocol types, or a moment
+// the echo takes for a pick from what the application was given (another
+// recording holds the moment F saw), in a field or in what an encoded
+// payload decodes to. A word the value holds only as F saw it, found in such
+// a recording, is refused naming it. Where record's full round never served
+// that recording before the call (its own call missed, was answered from
+// another recording, or was not made), the reason says so, never that keploy
+// cannot follow the value there yet; where it served it, the reason stands
+// as before. Both the classifier keploy test uses and the one keploy mock's
+// client tests use read so.
 func TestAReasonSaysTheFullRoundNeverServedTheValuesSource(t *testing.T) {
 	const p = "body.v"
 	const id = "bb7ed9ee-670e-48d1-982f-b54b2b73982f"
@@ -188,37 +196,66 @@ func TestAReasonSaysTheFullRoundNeverServedTheValuesSource(t *testing.T) {
 	const yet = "otherwise it flowed from mock-31, where keploy cannot follow it yet"
 	ms := time.Millisecond
 	day := r1Insert.Add(-24 * time.Hour).Truncate(ms)
+	// A moment the application picks from what it was given: recorded
+	// with day, F saw got, which another recording (mock-11) holds.
+	got := day.Add(2*time.Minute + 311*ms)
 	millis := func(at time.Time) string { return strconv.FormatInt(at.UnixMilli(), 10) }
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	escaped := func(at time.Time) string { return url.QueryEscape(at.Format(time.RFC3339)) }
+	const echo = "the moment it was recorded with stands in mock-31%s, and the moment record's full round saw in it stands earlier in the test too; "
 	for _, tc := range []struct {
 		name      string
 		body      string // what the recording's message holds
+		also      string // what mock-11, served before the call too, holds ("": no mock-11)
 		rec, live Shape
 		found     string // how the reason begins
+		kind      Kind   // what the value is learned as ("": a variable of mock-31)
 	}{
-		{"an id whole", "S12 message", strLeaf(p, id), strLeaf(p, "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"), "its recorded value stands whole in mock-31 at spec.resp.body; "},
-		{"a word of a longer value", "S12 message", strLeaf(p, "order 670e of"), strLeaf(p, "order 9a9a of"), "a part of its recorded value (its characters 7 to 10) stands in mock-31 at spec.resp.body; "},
-		{"a moment's epoch milliseconds whole", "at " + millis(day), strLeaf(p, millis(day)), strLeaf(p, millis(day.Add(time.Hour))), "its recorded value stands whole in mock-31 at spec.resp.body; "},
-		{"a moment's text whole", "at " + day.Format(time.RFC3339Nano), strLeaf(p, day.Format(time.RFC3339Nano)), strLeaf(p, day.Add(time.Hour).Format(time.RFC3339Nano)), "its recorded value stands whole in mock-31 at spec.resp.body; "},
-		{"a typed moment", "at " + millis(day), typedLeaf(p, day, ms), typedLeaf(p, day.Add(time.Hour), ms), "the moment it was recorded with stands in mock-31 at spec.resp.body, "},
+		{"an id whole", "S12 message", "", strLeaf(p, id), strLeaf(p, "0c1d2e3f-4a5b-4c7d-8e9f-a0b1c2d3e4f5"), "its recorded value stands whole in mock-31 at spec.resp.body; ", ""},
+		{"a word of a longer value", "S12 message", "", strLeaf(p, "order 670e of"), strLeaf(p, "order 9a9a of"), "a part of its recorded value (its characters 7 to 10) stands in mock-31 at spec.resp.body; ", ""},
+		{"a moment's epoch milliseconds whole", "at " + millis(day), "", strLeaf(p, millis(day)), strLeaf(p, millis(day.Add(time.Hour))), "its recorded value stands whole in mock-31 at spec.resp.body; ", ""},
+		{"a moment's text whole", "at " + day.Format(time.RFC3339Nano), "", strLeaf(p, day.Format(time.RFC3339Nano)), strLeaf(p, day.Add(time.Hour).Format(time.RFC3339Nano)), "its recorded value stands whole in mock-31 at spec.resp.body; ", ""},
+		{"a typed moment", "at " + millis(day), "", typedLeaf(p, day, ms), typedLeaf(p, day.Add(time.Hour), ms), "the moment it was recorded with stands in mock-31 at spec.resp.body, ", ""},
+		{"a read of the clock the lead moved, whole", "at " + secs(day), "", strLeaf(p, secs(day)), strLeaf(p, secs(day.Add(FullRoundLead))), "its recorded value stands whole in mock-31 at spec.resp.body; ", ""},
+		{"a read of the clock the lead moved, whole as its escaped text decodes", "at " + day.Format(time.RFC3339), "", strLeaf(p, escaped(day)), strLeaf(p, escaped(day.Add(FullRoundLead))), "its recorded value stands whole in mock-31 at spec.resp.body; ", ""},
+		{"a moment picked from what the application was given, in another layout", "at " + millis(day), "at " + millis(got), strLeaf(p, day.Format(time.RFC3339Nano)), strLeaf(p, got.Format(time.RFC3339Nano)), fmt.Sprintf(echo, " at spec.resp.body"), ""},
+		{"a typed moment picked from what the application was given", "at " + millis(day), "at " + millis(got), typedLeaf(p, day, ms), typedLeaf(p, got, ms), fmt.Sprintf(echo, " at spec.resp.body"), ""},
+		{"a typed moment picked from what the application was given, in an encoded payload", base64.StdEncoding.EncodeToString([]byte("sent at " + millis(day) + "!!")), "at " + millis(got), typedLeaf(p, day, ms), typedLeaf(p, got, ms), fmt.Sprintf(echo, "'s payload"), ""},
+		{"a word the value holds only as F saw it", "S12 message", "", strLeaf(p, "order 9a9a of"), strLeaf(p, "order 670e of"), "a word of what record's full round saw in it (its characters 7 to 10) appears in an earlier recording, in mock-31 at spec.resp.body: ", KindUnaccounted},
 	} {
+		kind := tc.kind
+		if kind == "" {
+			kind = KindVariable
+		}
 		for _, served := range []bool{false, true} {
 			for _, follow := range []bool{false, true} {
 				dc := clockedDrifts()
 				m := receiveOf("mock-31", id, r1Insert.Add(-time.Minute))
 				m.Spec.HTTPResp.Body = strings.Replace(m.Spec.HTTPResp.Body, "S12 message", tc.body, 1)
-				x := dc.RawOf(m, served)
+				raw := []Raw{dc.RawOf(m, served)}
+				if tc.also != "" {
+					o := receiveOf("mock-11", "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb", r1Insert.Add(-30*time.Second))
+					o.Spec.HTTPResp.Body = strings.Replace(o.Spec.HTTPResp.Body, "S12 message", tc.also, 1)
+					raw = append(raw, dc.RawOf(o, true))
+				}
 				var ln Learned
 				if follow {
-					ln = ClassifyFollowing(dc, []string{p}, tc.live, tc.rec, r1Insert, nil, []Raw{x}, nil, nil, nil)[0]
+					ln = ClassifyFollowing(dc, []string{p}, tc.live, tc.rec, r1Insert, nil, raw, nil, nil, nil)[0]
 				} else {
-					ln = ClassifyIn(dc, []string{p}, tc.live, tc.rec, r1Insert, nil, []Raw{x}, nil, nil)[0]
+					ln = ClassifyIn(dc, []string{p}, tc.live, tc.rec, r1Insert, nil, raw, nil, nil)[0]
 				}
 				want, not := never, yet
 				if served {
 					want, not = yet, never
 				}
-				if ln.Kind != KindVariable || ln.From.Mock != "mock-31" || !strings.HasPrefix(ln.Why, tc.found) || !strings.HasSuffix(ln.Why, want) || strings.Contains(ln.Why, not) {
-					t.Errorf("%s, served %v, client test %v: %s from %+v (%s); want a variable of mock-31 whose reason begins %q and ends: %s", tc.name, served, follow, ln.Kind, ln.From, ln.Why, tc.found, want)
+				// A refusal's reason may go on to say what the chance-word
+				// rule found (follows.excused); a variable's ends there.
+				ends := strings.HasSuffix(ln.Why, want)
+				if kind != KindVariable {
+					ends = strings.Contains(ln.Why, want+";") || ends
+				}
+				if ln.Kind != kind || kind == KindVariable && ln.From.Mock != "mock-31" || !strings.HasPrefix(ln.Why, tc.found) || !ends || strings.Contains(ln.Why, not) {
+					t.Errorf("%s, served %v, client test %v: %s from %+v (%s); want %s (of mock-31 where a variable) whose reason begins %q and ends: %s", tc.name, served, follow, ln.Kind, ln.From, ln.Why, kind, tc.found, want)
 				}
 			}
 		}
