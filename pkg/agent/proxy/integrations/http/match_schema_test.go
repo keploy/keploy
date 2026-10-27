@@ -435,8 +435,10 @@ func TestRecordedPathsStayBounded(t *testing.T) {
 			t.Fatalf("%s: path %q ok %v", u, p, ok)
 		}
 	}
-	if n := recordedPaths.n.Load(); n > recordedPathsCap {
-		t.Fatalf("%d entries kept, cap %d", n, recordedPathsCap)
+	kept := 0
+	recordedPaths.m.Range(func(any, any) bool { kept++; return true })
+	if kept > recordedPathsCap || recordedPaths.n.Load() > recordedPathsCap {
+		t.Fatalf("%d entries kept (%d counted), cap %d", kept, recordedPaths.n.Load(), recordedPathsCap)
 	}
 	if _, ok := recordedURLPath("http://[::1/x"); ok {
 		t.Fatal("a URL url.Parse refuses has a path")
@@ -446,8 +448,8 @@ func TestRecordedPathsStayBounded(t *testing.T) {
 // TestSchemaMatchAllocationsDoNotGrowWithThePool is the cost row (fails on
 // main, which parsed every mock's URL, and read every mock's content type and
 // body, on every call): a call over 2,000 mocks of which one has its method
-// and path allocates what a call over 20 does, for GET calls and for POST
-// calls with a JSON body.
+// and path, and half another method, allocates what a call over 20 does, for
+// GET calls and for POST calls with a JSON body.
 func TestSchemaMatchAllocationsDoNotGrowWithThePool(t *testing.T) {
 	if raceOn {
 		t.Skip("allocation counts vary under -race")
@@ -455,11 +457,18 @@ func TestSchemaMatchAllocationsDoNotGrowWithThePool(t *testing.T) {
 	t.Setenv(provenswitch.Env, "0")
 	h := newHTTP()
 	for _, method := range []string{"GET", "POST"} {
+		other := map[string]string{"GET": "POST", "POST": "GET"}[method]
+		// Every even mock but the match has the other method, so a call
+		// visits mocks that fail on their method and on their path.
 		mk := func(n int) []*models.Mock {
 			out := make([]*models.Mock, n)
 			for i := range out {
+				m := method
+				if i%2 == 0 && i != 7 {
+					m = other
+				}
 				r := &models.HTTPReq{
-					Method: models.Method(method), URL: "http://dep:8080/item/" + strconv.Itoa(i) + "?size=small",
+					Method: models.Method(m), URL: "http://dep:8080/item/" + strconv.Itoa(i) + "?size=small",
 					URLParams: map[string]string{"size": "small"}, Header: map[string]string{"Host": "dep:8080"},
 				}
 				if method == "POST" {

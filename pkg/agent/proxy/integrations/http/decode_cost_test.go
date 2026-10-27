@@ -100,6 +100,19 @@ func TestRequestNoiseForIsTheNoiseOfItsOptions(t *testing.T) {
 	if got := requestNoiseFor(nop, opts).Header["x-b"]; !reflect.DeepEqual(got, []string{"^v"}) {
 		t.Errorf("a header's patterns changed in place: noise %q, want [^v]", got)
 	}
+	opts.NoiseConfig["header"]["X-B"][0] = "^w"
+	if got := requestNoiseFor(nop, opts).Header["x-b"]; !reflect.DeepEqual(got, []string{"^w"}) {
+		t.Errorf("a header's pattern changed in place, the same number of them: noise %q, want [^w]", got)
+	}
+	opts.NoiseConfig["header"]["X-N"] = nil
+	_ = requestNoiseFor(nop, opts)
+	delete(opts.NoiseConfig["header"], "X-N")
+	opts.NoiseConfig["header"]["X-M"] = nil
+	n := requestNoiseFor(nop, opts).Header
+	_, renamed := n["x-m"]
+	if _, stale := n["x-n"]; !renamed || stale {
+		t.Errorf("a header with no patterns renamed in place: noise %v, want x-m and not x-n", n)
+	}
 	delete(opts.NoiseConfig, "header")
 	if _, ok := requestNoiseFor(nop, opts).Header["x-a"]; ok {
 		t.Error("a header bucket removed from the options in place is still noise")
@@ -229,19 +242,23 @@ func servedCallCost(t *testing.T, size int) (allocs float64, bytesPerCall uint64
 // 24.7 times the body for one with a 64 KB body and answer (linux/arm64).
 // The budgets are Linux's, without -race: sync.Pool drops what it is given at
 // random under -race, and another OS's network calls allocate differently.
+// The 16 B budget is each GOARCH's count exactly, so one more allocation,
+// a single guard reverted, fails the row.
 func TestAServedCallBuildsNoDebugEntryWithDebugOff(t *testing.T) {
 	if raceOn || runtime.GOOS != "linux" {
 		t.Skip("the allocation budgets are Linux's, without -race")
 	}
-	const (
-		smallBudget = 112     // allocations of a call with a 16 B body and answer
-		largeBudget = 15 << 6 // KB a call with a 64 KB body and answer allocates: 15 times the body
-	)
+	// Allocations of a call with a 16 B body and answer.
+	smallBudget, ok := map[string]float64{"amd64": 105, "arm64": 105}[runtime.GOARCH]
+	if !ok {
+		t.Skipf("no allocation budget for %s", runtime.GOARCH)
+	}
+	const largeBudget = 15 << 6 // KB a call with a 64 KB body and answer allocates: 15 times the body
 	small, _ := servedCallCost(t, 16)
 	_, large := servedCallCost(t, 64<<10)
 	t.Logf("a 16 B call allocates %v times; a 64 KB call %d bytes (%.1f times its body)", small, large, float64(large)/(64<<10))
 	if small > smallBudget {
-		t.Errorf("a served call with a 16 B body and answer allocated %v times, budget %d", small, smallBudget)
+		t.Errorf("a served call with a 16 B body and answer allocated %v times, budget %v (%s)", small, smallBudget, runtime.GOARCH)
 	}
 	if large > largeBudget<<10 {
 		t.Errorf("a served call with a 64 KB body and answer allocated %d bytes (%.1f times the body), budget %d KB",
