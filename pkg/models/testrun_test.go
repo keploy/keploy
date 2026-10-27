@@ -94,6 +94,26 @@ func TestALearningNotKeptLeavesATestWithNoVerdict(t *testing.T) {
 // value (an object key the app sent) is left out, as its why may quote that
 // field; so are an empty field or why. A miss's field_reasons are written
 // in YAML and JSON as field and why, and a miss without any writes none.
+// A Postgres call's reason survives FieldReasonShapes: its field is an SQL
+// place name (bind.$N, literal.N), a position keploy counts, which is its own
+// shape; a key of that look anywhere else may be a value and is still left
+// out.
+func TestFieldReasonShapesKeepSQLPlaces(t *testing.T) {
+	bind := "bind.$1 was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
+	lit := "literal.2 was learned as clock, a read of the application's clock, and the call's SQL text carries no value there: it changed"
+	got := FieldReasonShapes([]FieldReason{
+		{Field: "bind.$1", Why: bind},
+		{Field: "literal.2", Why: lit},
+		{Field: "body.bind.$1", Why: "body.bind.$1 was learned as a read of the application's clock"},
+		{Field: "bind.$123456", Why: "bind.$123456 was learned as a read of the application's clock"},
+		{Field: "bind.$1", Why: bind},
+	})
+	want := []FieldReason{{Field: "bind.$1", Why: bind}, {Field: "literal.2", Why: lit}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FieldReasonShapes = %+v; want %+v", got, want)
+	}
+}
+
 func TestFieldReasonShapesKeepOnlyFieldsThatNameNoValue(t *testing.T) {
 	why := "body.since was learned as a read of the application's clock: it changed"
 	got := FieldReasonShapes([]FieldReason{

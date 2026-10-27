@@ -1523,6 +1523,16 @@ func TestAMissSaysWhyAFieldWasRefused(t *testing.T) {
 	require.Equal(t, since, said.NextSteps, "a why the advice says already is not said twice")
 	bare := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", FieldReasons: []models.FieldReason{{Field: "body.since", Why: since}}})
 	require.Equal(t, since, bare.NextSteps)
+
+	// A Postgres miss's place names (bind.$N, literal.N) are positions, not
+	// values: its why reaches the test's reason, with the place it names.
+	bound := "bind.$1 was learned as clock, a read of the application's clock, and the call sends no value there: it changed"
+	pg := sanitizedMiss(models.UnmatchedCall{Protocol: "Postgres", ActualSummary: "INSERT INTO audit (at) VALUES ($1)", Destination: "db:5432",
+		Differs: []string{"bind.$1"}, FieldReasons: []models.FieldReason{{Field: "bind.$1", Why: bound}}})
+	require.Equal(t, []models.FieldReason{{Field: "bind.$1", Why: bound}}, pg.FieldReasons)
+	require.Equal(t, []string{"bind.$1"}, pg.Differs)
+	pgReason := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{pg}}, nil, time.Time{})
+	require.Contains(t, pgReason, " (bind.$1 differs: "+bound+")")
 }
 
 // endOrderProxy notes when the test stops being served and when its outcome
