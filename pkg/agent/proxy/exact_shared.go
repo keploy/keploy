@@ -174,3 +174,35 @@ func (s *scopedMockDb) OwnedUnanswered() ([]*models.Mock, bool) {
 }
 
 var _ integrations.SharedReads = (*scopedMockDb)(nil)
+
+// WhenRestaged runs release once, at the next move of every kind's stored
+// generation (a staging, a store into the trees, a delete from the shared
+// tree) or at Close; at once once closed (integrations.Restaged). A parser's index
+// of the staged recordings then lets them go with the trees, not at its next
+// call. One slot keeps one release.
+func (m *MockManager) WhenRestaged(slot any, release func()) {
+	m.restagedMu.Lock()
+	if m.closed.Load() {
+		m.restagedMu.Unlock()
+		release()
+		return
+	}
+	if m.restaged == nil {
+		m.restaged = make(map[any]func())
+	}
+	m.restaged[slot] = release
+	m.restagedMu.Unlock()
+}
+
+// letDerivedGo runs what the parsers asked to run at the stored generation's
+// move or Close (WhenRestaged), outside the lock: called after the move, so a
+// parser that asks after the call samples the moved generation.
+func (m *MockManager) letDerivedGo() {
+	m.restagedMu.Lock()
+	fns := m.restaged
+	m.restaged = nil
+	m.restagedMu.Unlock()
+	for _, f := range fns {
+		f()
+	}
+}

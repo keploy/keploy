@@ -453,6 +453,13 @@ type MockManager struct {
 	closeOnce   sync.Once
 	closed      atomic.Bool
 
+	// restaged holds, by slot, what the parsers asked to run once the
+	// manager lets go of the recordings its reads handed out
+	// (integrations.Restaged): run and emptied at each move of every kind's
+	// stored generation (bumpRevisionAll) and at Close.
+	restagedMu sync.Mutex
+	restaged   map[any]func()
+
 	// noConnMocks is a negative cache for GetConnectionMocks's
 	// fallback scan. A connID that returned zero connection-scoped
 	// mocks on a full scan gets memoised here so subsequent matches
@@ -591,6 +598,8 @@ func (m *MockManager) Close() {
 		// stop. The replacement channel stays open, so a waiter that does not
 		// check IsClosed blocks again instead of spinning.
 		m.signalWindowChange()
+		// A parser's data built from this manager's reads goes with it.
+		m.letDerivedGo()
 	})
 }
 
@@ -855,6 +864,7 @@ func (m *MockManager) Revision() uint64 {
 func (m *MockManager) bumpRevisionAll() {
 	atomic.AddUint64(&m.stored, 1)
 	m.bumpViewAll()
+	m.letDerivedGo()
 }
 
 // bumpViewAll is bumpRevisionAll for an exact view's install: the stored

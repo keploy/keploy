@@ -382,6 +382,12 @@ func (m *MockManager) stagedRecording(mk *models.Mock) *models.Mock {
 func (m *MockManager) bumpStagingEpoch() {
 	m.lockRound()
 	m.stagingEpoch.Add(1)
+	// The outside answers of the staging before (prepareOutside) hold every
+	// recording it staged, and no read takes them now (each checks the
+	// epoch): let them go with that staging's trees, not at the next call
+	// outside every test, which may come only well into this staging, or
+	// never.
+	m.exact.outside.cur.Store(nil)
 	// The set the tracker began last is staged now, whichever it is: the
 	// tracker's own (SetTrackerSetAt), as its set may have begun before any
 	// of its boundaries reached this manager.
