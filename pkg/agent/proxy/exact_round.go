@@ -958,6 +958,41 @@ func (h *heldScope) moved() bool {
 	return true
 }
 
+// StagingGeneration, StagingGenerationByKind, Revision and RevisionByKind are
+// the manager's while the staging is still h's call's after they were
+// sampled, and integrations.RestagedGeneration once it moved
+// (integrations.StagingGenerations): h reads nothing then, so the generation
+// it reports must not be the one of the set staged after the call, or a
+// parser that keyed what it read on it would keep that nothing for the next
+// set and miss each later call of it. Each is sampled before the check, as a
+// read is made before held's: a staging moves its epoch before it changes the
+// trees or a generation, so a sample the staging is still the call's after
+// is of the call's set.
+func (h *heldScope) StagingGeneration() uint64 {
+	return h.generation(h.MockManager.StagingGeneration())
+}
+
+func (h *heldScope) StagingGenerationByKind(kind models.Kind) uint64 {
+	return h.generation(h.MockManager.StagingGenerationByKind(kind))
+}
+
+func (h *heldScope) Revision() uint64 { return h.generation(h.MockManager.Revision()) }
+
+func (h *heldScope) RevisionByKind(kind models.Kind) uint64 {
+	return h.generation(h.MockManager.RevisionByKind(kind))
+}
+
+// generation is g, sampled before the call, while the staging is still h's
+// call's; integrations.RestagedGeneration once it moved.
+func (h *heldScope) generation(g uint64) uint64 {
+	if h.moved() {
+		return integrations.RestagedGeneration
+	}
+	return g
+}
+
+var _ integrations.StagingGenerations = (*heldScope)(nil)
+
 // held is mocks when the staging is still h's call's after they were read;
 // none once it moved.
 func (h *heldScope) held(mocks []*models.Mock, err error) ([]*models.Mock, error) {
