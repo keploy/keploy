@@ -3,9 +3,11 @@ package proxy
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -128,6 +130,14 @@ type trackedConn struct {
 	settled      uint64
 	settledMarks bool
 	hasSettled   bool
+	// lost is the cut a settle's watchdog gave up at (scope.GiveUp): the
+	// work up to it was charged to that settle, and no later scope waits
+	// for it while its handler has not passed it (scope.leftOut); hasLost
+	// says one stands. charged is how far its received bytes have been
+	// charged to a test since (scope.Behind): from lost on, the calls the
+	// application queued behind the lost work. Under mu.
+	lost, charged uint64
+	hasLost       bool
 	// flights, under the proven switch, is the learn step's tracker its
 	// requests are told to (learn.Flight): a read that returns bytes while
 	// none is aloft lifts one (flight), and the first write after it lands
@@ -738,6 +748,10 @@ type scope struct {
 	// unknown names the protocols of the connections seen done while their
 	// parser could not say what it held (State's unknown).
 	unknown map[string]bool
+	// behind maps each connection it leaves out (leftOut) that has received
+	// bytes past what was charged to a test (trackedConn.charged) to its
+	// cut (Behind).
+	behind map[*trackedConn]uint64
 }
 
 // scope begins a scope with every connection kept now, each cut at what its
@@ -753,7 +767,125 @@ func (t *inflight) scope() *scope {
 	for _, tc := range conns {
 		left[tc] = tc.received(tc.view())
 	}
-	return &scope{t: t, left: left, unknown: map[string]bool{}}
+	return &scope{t: t, left: left, unknown: map[string]bool{}, behind: map[*trackedConn]uint64{}}
+}
+
+// leftOut is whether the scope leaves tc out, under s.mu: a settle's
+// watchdog gave up on it (GiveUp) and its handler has not passed what it
+// held then, so no work on it can settle; that work was charged to the
+// settle that gave up. One that has received bytes past what was charged
+// (calls the application queued behind the lost work) is noted in behind.
+// One whose handler has passed it is waited for again from here, cut at the
+// scope's cut.
+func (s *scope) leftOut(tc *trackedConn, cut uint64, answers bool) bool {
+	tc.mu.Lock()
+	lost, has, charged := tc.lost, tc.hasLost, tc.charged
+	tc.mu.Unlock()
+	if !has {
+		return false
+	}
+	if held, _ := s.holds(tc, lost, answers); !held {
+		tc.mu.Lock()
+		if tc.hasLost && tc.lost == lost {
+			tc.hasLost = false
+		}
+		tc.mu.Unlock()
+		delete(s.behind, tc)
+		return false
+	}
+	if cut > charged {
+		s.behind[tc] = cut
+	}
+	return true
+}
+
+// GiveUp gives up, for the settle whose watchdog found them stuck, on each
+// connection named (PendingProgress's ids) that still holds the scope's
+// work: that work, up to its cut, is charged to the settle (its test is not
+// verified, with the words returned, one per connection, saying what it
+// held), and no later scope waits for it while its handler has not passed
+// it (leftOut).
+func (s *scope) GiveUp(ids []uint64, answers bool) []string {
+	want := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for tc, cut := range s.left {
+		if !want[tc.id] || tc.forgotten.Load() || s.leftOut(tc, cut, answers) {
+			continue
+		}
+		if held, _ := s.holds(tc, cut, answers); !held {
+			continue
+		}
+		out = append(out, tc.name()+", which held "+heldWords(tc, tc.view(), cut, answers))
+		tc.mu.Lock()
+		tc.lost, tc.charged, tc.hasLost = cut, max(tc.charged, cut), true
+		tc.mu.Unlock()
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Behind is, for each connection the scope left out (leftOut) that has
+// received bytes past what was charged to a test, words saying so: calls
+// the application queued behind the lost work, which keploy cannot tell
+// were answered. charge charges them, up to the scope's cut: a test's end
+// calls it, as the test is not verified with them; a begin leaves them to
+// the next end.
+func (s *scope) Behind() (conns []string, charge func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.behind) == 0 {
+		return nil, func() {}
+	}
+	cuts := make(map[*trackedConn]uint64, len(s.behind))
+	for tc, cut := range s.behind {
+		cuts[tc] = cut
+		tc.mu.Lock()
+		charged := tc.charged
+		tc.mu.Unlock()
+		conns = append(conns, fmt.Sprintf("%s received %d byte(s) after keploy gave up on it, queued behind what it held then: keploy cannot tell whether the calls in them were answered", tc.name(), cut-min(cut, charged)))
+	}
+	sort.Strings(conns)
+	return conns, func() {
+		for tc, cut := range cuts {
+			tc.mu.Lock()
+			tc.charged = max(tc.charged, cut)
+			tc.mu.Unlock()
+		}
+	}
+}
+
+// name names tc in a settle's words: its number and the application's end.
+func (c *trackedConn) name() string {
+	if c.Conn == nil {
+		return fmt.Sprintf("connection %d", c.id)
+	}
+	return fmt.Sprintf("connection %d from %s", c.id, c.RemoteAddr())
+}
+
+// heldWords says what tc, seen in v, holds of a scope's work cut at cut.
+func heldWords(tc *trackedConn, v connView, cut uint64, answers bool) string {
+	if v.delivered < cut {
+		return fmt.Sprintf("%d byte(s) the application had sent that its handler had not read", cut-v.delivered)
+	}
+	var what []string
+	if v.held > 0 {
+		what = append(what, fmt.Sprintf("%d request(s) its parser had read and not answered", v.held))
+	}
+	if tc.closing.Load() {
+		what = append(what, "a close its handler was not done with")
+	}
+	if answers && v.reading == 0 && v.idle == 0 {
+		what = append(what, "a request its handler had read and not answered (it had not gone back to reading)")
+	}
+	if len(what) == 0 {
+		return "work keploy could not name"
+	}
+	return strings.Join(what, ", and ")
 }
 
 // holds is whether tc still holds the scope's work, cut its cut: bytes up
@@ -779,13 +911,17 @@ func (s *scope) holds(tc *trackedConn, cut uint64, answers bool) (held, marked b
 // State is inflight.State over the scope's connections not yet seen done;
 // it drops each it sees done now (or forgotten), noting, in a replay, the
 // protocol of one whose parser could not say what it held. unknown is every
-// protocol noted so far.
+// protocol noted so far. One it leaves out (leftOut) is not pending.
 func (s *scope) State(answers bool) (pending int, unknown []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for tc, cut := range s.left {
 		if tc.forgotten.Load() {
 			delete(s.left, tc)
+			delete(s.behind, tc)
+			continue
+		}
+		if s.leftOut(tc, cut, answers) {
 			continue
 		}
 		held, marked := s.holds(tc, cut, answers)
@@ -816,13 +952,13 @@ func (s *scope) State(answers bool) (pending int, unknown []string) {
 }
 
 // PendingProgress is inflight.PendingProgress over the scope's connections
-// that still hold its work.
+// that still hold its work, those it leaves out (leftOut) not among them.
 func (s *scope) PendingProgress(answers bool) map[uint64]uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := map[uint64]uint64{}
 	for tc, cut := range s.left {
-		if tc.forgotten.Load() {
+		if tc.forgotten.Load() || s.leftOut(tc, cut, answers) {
 			continue
 		}
 		if held, _ := s.holds(tc, cut, answers); held {

@@ -3,9 +3,11 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -353,5 +355,86 @@ func TestAHeldRequestOrABegunCloseHoldsTheScope(t *testing.T) {
 	tr.forget(closing)
 	if n, _ := sc.State(true); n != 0 {
 		t.Fatalf("the handler done: scope pending %d, want 0", n)
+	}
+}
+
+// A connection a settle's watchdog gave up on (GiveUp: its handler read the
+// test's call and never answered it) is the settle's loss, named with what
+// it held, and holds no later scope: the next test's begin goes on. Calls
+// the application queues on it behind the lost work are named (Behind) until
+// a test's end charges them. Once its handler passes the lost work, later
+// scopes wait for it again.
+func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	const call, tick = "GET /test HTTP/1.1\r\n\r\n", "GET /tick HTTP/1.1\r\n\r\n"
+	got := make(chan string, 2)
+	go readOnce(proxy, got)
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	// The handler never answers it: the end's scope holds it, and its
+	// watchdog gives up on it.
+	sc := tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's call read and not answered: scope pending %d, want 1", n)
+	}
+	var ids []uint64
+	for id := range sc.PendingProgress(true) {
+		ids = append(ids, id)
+	}
+	words := sc.GiveUp(ids, true)
+	if len(words) != 1 || !strings.Contains(words[0], fmt.Sprintf("connection %d from ", proxy.id)) ||
+		!strings.Contains(words[0], "a request its handler had read and not answered") {
+		t.Fatalf("give-up words %q: want the connection named with what it held", words)
+	}
+
+	// The next test's begin.
+	next := tr.scope()
+	if n, _ := next.State(true); n != 0 {
+		t.Fatalf("a connection given up on: next scope pending %d, want 0", n)
+	}
+	if p := next.PendingProgress(true); len(p) != 0 {
+		t.Fatalf("a connection given up on: next scope progress %v, want none (its watchdog would weigh it)", p)
+	}
+	if b, _ := next.Behind(); len(b) != 0 {
+		t.Fatalf("nothing queued behind the lost work: behind %q", b)
+	}
+
+	// The application queues its next call on it, behind the lost work.
+	if _, err := io.WriteString(app, tick); err != nil {
+		t.Fatal(err)
+	}
+	waitInq(t, proxy, len(tick))
+	end := tr.scope()
+	if n, _ := end.State(true); n != 0 {
+		t.Fatalf("a call queued behind the lost work: scope pending %d, want 0", n)
+	}
+	b, charge := end.Behind()
+	if len(b) != 1 || !strings.Contains(b[0], fmt.Sprintf("received %d byte(s) after keploy gave up on it", len(tick))) {
+		t.Fatalf("a call queued behind the lost work: behind %q", b)
+	}
+	charge()
+	after := tr.scope()
+	_, _ = after.State(true)
+	if b, _ := after.Behind(); len(b) != 0 {
+		t.Fatalf("charged once: behind %q", b)
+	}
+
+	// Its handler passes the lost work and is handling the queued call: a
+	// scope waits for it again, until it has answered that.
+	go readOnce(proxy, got)
+	if r := <-got; r != tick {
+		t.Fatalf("read %q", r)
+	}
+	again := tr.scope()
+	if n, _ := again.State(true); n != 1 {
+		t.Fatalf("its handler past the lost work, a call read and not answered: scope pending %d, want 1", n)
+	}
+	go readOnce(proxy, got)
+	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
+	if n, _ := again.State(true); n != 0 {
+		t.Fatalf("its handler back reading: scope pending %d, want 0", n)
 	}
 }

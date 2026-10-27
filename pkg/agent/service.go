@@ -257,9 +257,19 @@ type InFlightScoper interface {
 // later never counts, nor bytes one receives later (the application's next
 // call on it). unknown names every protocol whose parser, as its connection
 // was seen done, could not say what it held.
+//
+// GiveUp is a settle's watchdog giving up on the connections it found stuck
+// (PendingProgress's ids): the work each still holds is charged to that
+// settle, with words, one per connection, saying what it held, and no later
+// scope waits for it while its handler has not passed it. Behind names each
+// connection a scope so left out that has received bytes since they were
+// last charged (calls the application queued behind the lost work); its
+// charge charges them.
 type InFlightScope interface {
 	State(answers bool) (pending int, unknown []string)
 	PendingProgress(answers bool) map[uint64]uint64
+	GiveUp(ids []uint64, answers bool) []string
+	Behind() (conns []string, charge func())
 }
 
 // PairedBytesWaiter is the optional extension of a proxy that holds the

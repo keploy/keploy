@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A test's end count (design v14 §5.2; release1-cut §5.1 item 5; verify-v14
@@ -55,7 +57,12 @@ import (
 // connection that still holds work: its bytes, its held requests, its close).
 // At settleStallLimit it fails the wait, and the test is not judged. It counts its own wake-ups, not seconds: a
 // starved agent starves its watchdog equally, so load alone cannot trip it,
-// and a deadlock can.
+// and a deadlock can. Under the proven switch, a connection it gives up on
+// is charged to the settle that gave up, named with what it held (gaveUp),
+// and no later settle waits for it while its handler has not passed that
+// (coreAgent.InFlightScope's GiveUp): the next test's begin goes on, and a
+// later test's end is not verified only when the application queued calls
+// behind the lost work in its window (behindLost).
 
 // settleStallLimit is the watchdog's count of wake-ups in a row with no
 // progress (design v14's lead decision: 600).
@@ -95,6 +102,38 @@ var settleWoken func()
 // errNoProgress is the watchdog's: the wait made no progress at all.
 var errNoProgress = errors.New("keploy's agent made no progress settling the test's calls")
 
+// noProgress is errNoProgress naming what the wait found stuck: the keys of
+// the watchdog's progress that did not move.
+type noProgress struct{ stalled []string }
+
+func (n noProgress) Error() string { return errNoProgress.Error() }
+
+func (n noProgress) Is(target error) bool { return target == errNoProgress }
+
+// gaveUp is errNoProgress for a settle that gave up on the connections it
+// found stuck (InFlightScope.GiveUp): held says what each held.
+type gaveUp struct{ held []string }
+
+func (g gaveUp) Error() string {
+	return errNoProgress.Error() + "; it gave up on " + strings.Join(g.held, "; ") + " (no later wait waits for that work)"
+}
+
+func (g gaveUp) Is(target error) bool { return target == errNoProgress }
+
+// behindLost: connections a settle left out, as an earlier one gave up on
+// them, received bytes since they were last charged, queued behind the lost
+// work (InFlightScope.Behind). Like a connection whose held requests cannot
+// be told (it Is errHoldsUnknown), it does not stop a begin; a test's end
+// that finds it is not verified, and charges them (settledSince).
+type behindLost struct {
+	conns  []string
+	charge func()
+}
+
+func (b behindLost) Error() string { return strings.Join(b.conns, "; ") }
+
+func (b behindLost) Is(target error) bool { return target == errHoldsUnknown }
+
 // errHoldsUnknown: a connection is served by a parser that reads ahead of
 // its answers and does not say which requests it holds
 // (integrations.RequestHolding), or that says for now it cannot tell
@@ -126,6 +165,10 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
 	}
+	// The scope, the give-up and the watchdog's own counts are the proven
+	// switch's: with it off, a settle (a read's, for an agent that settles
+	// its reads) waits as it always did.
+	proven := provenswitch.On()
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	// With the switch off a NAT'd connection that drops the run to not
@@ -166,7 +209,10 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			if err != nil {
 				return nil
 			}
-			v := min(c.AppSettled, counts.AppConns) + min(c.Accepted, accepts.Load())
+			v := c.Accepted + c.AppSettled
+			if proven {
+				v = min(c.AppSettled, counts.AppConns) + min(c.Accepted, accepts.Load())
+			}
 			if pb, ok := a.Proxy.(coreAgent.PairedBytesWaiter); ok {
 				v += pb.PairedBytesProgress()
 			}
@@ -196,7 +242,7 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	// here on, are not this wait's: an application that keeps calling (a
 	// timer's call, its miss, a new connection, the next call on a pooled
 	// one) cannot hold it.
-	if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok {
+	if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok && proven {
 		sc := sr.InFlightScope()
 		scoped.Store(&sc)
 		view = scopeView{sc}
@@ -217,14 +263,40 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			// not say which requests it holds, or says that for now it cannot
 			// tell: it may hold one.
 			if len(unknown) > 0 {
-				return c.ListenDrops, holdsUnknown(unknown)
+				err = holdsUnknown(unknown)
 			}
-			return c.ListenDrops, nil
+			// Calls the application queued behind work an earlier settle
+			// gave up on: whether they were answered cannot be told.
+			if sc := scoped.Load(); sc != nil {
+				if conns, charge := (*sc).Behind(); len(conns) > 0 {
+					bl := behindLost{conns: conns, charge: charge}
+					if err == nil {
+						return c.ListenDrops, bl
+					}
+					return c.ListenDrops, fmt.Errorf("%w; %w", err, bl)
+				}
+			}
+			return c.ListenDrops, err
 		}
 		select {
 		case <-changed:
 		case <-ctx.Done():
-			return 0, context.Cause(ctx)
+			// The watchdog gave up on the connections it found stuck: their
+			// work is this settle's loss, and no later settle waits for it.
+			cause := context.Cause(ctx)
+			var np noProgress
+			if sc := scoped.Load(); sc != nil && errors.As(cause, &np) {
+				ids := make([]uint64, 0, len(np.stalled))
+				for _, k := range np.stalled {
+					if id, err := strconv.ParseUint(k, 10, 64); err == nil {
+						ids = append(ids, id)
+					}
+				}
+				if held := (*sc).GiveUp(ids, answers); len(held) > 0 {
+					return 0, gaveUp{held: held}
+				}
+			}
+			return 0, cause
 		}
 	}
 }
@@ -290,15 +362,18 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 				}
 			}
 			now := progress()
-			fire := false
+			var stalled []string
 			for k, v := range now {
 				if was, ok := last[k]; ok && was == v {
 					stalls[k]++
 				} else {
 					stalls[k] = 0
 				}
-				fire = fire || stalls[k] >= settleStallLimit
+				if stalls[k] >= settleStallLimit {
+					stalled = append(stalled, k)
+				}
 			}
+			fire := len(stalled) > 0
 			for k := range stalls {
 				if _, ok := now[k]; !ok {
 					delete(stalls, k)
@@ -306,7 +381,8 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 			}
 			last = now
 			if fire {
-				cancel(errNoProgress)
+				sort.Strings(stalled)
+				cancel(noProgress{stalled: stalled})
 			}
 			if settleWoken != nil {
 				settleWoken()
@@ -342,6 +418,11 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	drops, err := a.settle(ctx, answers)
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		return err
+	}
+	// A window's end charges it the calls queued behind lost work.
+	var bl behindLost
+	if errors.As(err, &bl) {
+		bl.charge()
 	}
 	a.markDrops(drops)
 	if known {
