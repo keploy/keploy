@@ -186,6 +186,21 @@ ensure_success_phrase() {
 if [ "$MODE" = "incoming" ]; then
  echo "🧪 Testing with incoming requests"
 
+  # The RPCs go as soon as the server keploy records says it listens: keploy
+  # holds the server's port from its bind until keploy's own forwarder
+  # listens there. A released keploy from before that hold (it lacks the
+  # hold's eBPF program, k_ingress_lookup) refuses an RPC in that gap, so
+  # with one the lane also waits for its forwarder. A keploy built here
+  # always has the hold: one without it fails, not falls back to the wait.
+  server_ready=("gRPC server listening on :50051")
+  if ! grep -aqF k_ingress_lookup "$RECORD_BIN"; then
+    if [[ "$RECORD_SRC" != "latest" ]]; then
+      echo "::error::the record keploy ($RECORD_SRC: $RECORD_BIN) has no k_ingress_lookup, the program that holds the app's port from its bind"
+      exit 1
+    fi
+    server_ready+=('Started ingress forwarding.*"orig_port": 50051')
+  fi
+
   # Start server with keploy in record mode
   if [[ "$RECORD_SRC" == "latest" ]]; then
     "$RECORD_BIN" record -c "$FUZZER_SERVER_BIN" $BIG_PAYLOAD_FLAG 2>&1 | tee record_incoming.txt &
@@ -209,9 +224,7 @@ if [ "$MODE" = "incoming" ]; then
   fi
   sleep 1
  done
- # The server keploy launches must be listening, with keploy forwarding its
- # port, before any RPC is fired.
- wait_for_log record_incoming.txt "gRPC server listening on :50051" 'Started ingress forwarding.*"orig_port": 50051' || exit 1
+ wait_for_log record_incoming.txt "${server_ready[@]}" || exit 1
  # Kick off 1000 unary RPC fuzz calls
  run_fuzz || exit 1
 
@@ -299,7 +312,7 @@ if [ "$MODE" = "incoming" ]; then
    "$FUZZER_CLIENT_BIN" --http :18080 2>&1 | tee client_incoming_json.txt &
    sleep 10
    for i in {1..60}; do nc -z localhost 18080 && break; sleep 1; done
-   wait_for_log record_incoming_json.txt "gRPC server listening on :50051" 'Started ingress forwarding.*"orig_port": 50051' || exit 1
+   wait_for_log record_incoming_json.txt "${server_ready[@]}" || exit 1
    run_fuzz || exit 1
    sleep 10
    REC_PID=${rec_keploy:-$(pgrep keploy | sort -n | head -1)}
