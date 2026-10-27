@@ -261,8 +261,8 @@ func TestAnUnreadTestRequestRefusesEveryChange(t *testing.T) {
 		}
 	}
 	for _, f := range [][2]string{{"11:14", "11:15"}, {"req-3f2b8c1e9a4d", "req-a7c4e2d10b3f"}} {
-		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, nil, nil, nil, nil)[0]; ln.Kind != KindNoise {
-			t.Errorf("%q -> %q, no test case's request: %s (%s); want noise", f[0], f[1], ln.Kind, ln.Why)
+		if ln := ClassifyIn(clockedDrifts(), []string{p}, shape(f[1]), shape(f[0]), at, nil, nil, nil, nil)[0]; !noiseIn(ln, nil) {
+			t.Errorf("%q -> %q, no test case's request: %s (%s); want noise, and of a time of day a read of the clock modulo a day", f[0], f[1], ln.Kind, ln.Why)
 		}
 	}
 }

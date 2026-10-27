@@ -564,9 +564,11 @@ type Learned struct {
 	// caller whose replay checks it writes it to models.MockSpec.Clocks
 	// (Clock), not to the request-body noise, so the value is still
 	// compared: it must be a read of the clock made in its own call's window
-	// (ClockReadHolds). nil for any other leaf: a time of day (no window
-	// holds one without a day), and a clock read that is only a part of a
-	// longer value, stay noise.
+	// (ClockReadHolds). A time of day whole (a type of its protocol, or a
+	// text: timeOfDayOf), which names no day, is a read too, in the zone its
+	// recording read it in (todRead), which a replay checks modulo a day in
+	// its call's span. nil for any other leaf: a clock read that is only a
+	// part of a longer value stays noise.
 	Read *models.ClockOffset
 	// Why, of an unaccounted drift, is why it cannot be noise; of noise
 	// record's full round learned past a source it served unchanged that
@@ -1203,8 +1205,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
+		// A time of day whole (textTimeOfDay), which names no day, is a
+		// read modulo a day (textTodRead), checked so at every replay.
 		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
 			ln.Read = textClockRead(r.Value, l.Value)
+			if ln.Read == nil {
+				ln.Read = dc.textTodRead(r.Value, l.Value, w, at)
+			}
 		}
 		// A value that is one instant whole in both runs (readClockText),
 		// learned as noise that the lead did not show a read of the clock
@@ -1231,8 +1238,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// left unchecked. Each read of a wall clock of no zone carries the
 		// zone the learn step read it in (textReadZone), and a replay
 		// checks it in that zone alone (clockReadIn).
+		//
+		// A time of day whole in both runs, which no window holds (it names
+		// no day), is a read modulo a day all the same, never noise: every
+		// replay checks it in its call's span (textTodRead).
 		if ln.Kind == KindNoise && ln.Read == nil {
-			if read := textClockRead(r.Value, l.Value); read != nil {
+			if read := dc.textTodRead(r.Value, l.Value, w, at); read != nil {
+				if w == nil && !dc.appClock {
+					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
+				} else {
+					ln.Read = read
+				}
+			} else if read := textClockRead(r.Value, l.Value); read != nil {
 				switch {
 				case w == nil && !dc.appClock:
 					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
@@ -1251,7 +1268,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		case ln.Read != nil && ln.Read.Layout == models.LayoutApart:
 			ln.Kind, ln.Why, ln.Read = KindUnaccounted, textLayoutChangedWhy(r.Value, l.Value), nil
 		case ln.Read != nil:
-			ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
+			if !models.LayoutTimeOfDay(ln.Read.Layout) {
+				ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
+			}
 			ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
 		}
 		out = append(out, ln)

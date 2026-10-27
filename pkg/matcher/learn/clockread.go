@@ -283,17 +283,180 @@ func textClockRead(rec, live string) *models.ClockOffset {
 // changed, and ": a replay checks a read of the clock in the layout its
 // learn step saw it in, and one that saw two cannot tell which.
 func textLayoutChangedWhy(rec, live string) string {
-	return "it is a read of the application's clock written as " + models.LayoutName(clockTextLayout(rec)) + " as recorded and as " + models.LayoutName(clockTextLayout(live)) + " in record's full round: a replay checks such a read in the form its learn step saw it written in, and this one saw two, so keploy refuses it rather than pass either form unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+	return "it is a read of the application's clock written as " + models.LayoutName(textLayout(rec)) + " as recorded and as " + models.LayoutName(textLayout(live)) + " in record's full round: a replay checks such a read in the form its learn step saw it written in, and this one saw two, so keploy refuses it rather than pass either form unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// textLayout is the layout of s, a text or a number that is one instant
+// whole (clockTextLayout) or one time of day whole (textTimeOfDay); "" for
+// any other.
+func textLayout(s string) string {
+	if lay := clockTextLayout(s); lay != "" {
+		return lay
+	}
+	_, _, lay, _ := textTimeOfDay(s)
+	return lay
+}
+
+// textTodRead is Learned.Read of a text recorded as rec and seen in
+// record's full round as live, each one time of day whole (textTimeOfDay),
+// in the call recorded at call whose window is w (todRead); nil where
+// either is not.
+func (dc *DriftCache) textTodRead(rec, live string, w *Window, call time.Time) *models.ClockOffset {
+	rtod, rres, rlay, ok := textTimeOfDay(rec)
+	if !ok {
+		return nil
+	}
+	ltod, lres, llay, ok := textTimeOfDay(live)
+	if !ok {
+		return nil
+	}
+	return dc.todRead(rtod, ltod, rres, lres, rlay, llay, w, call)
 }
 
 // leafLayout is the layout l, a leaf of a replay's call, is written in
 // (models.ClockOffset.Layout): models.LayoutTyped for an instant its
-// protocol types, clockTextLayout of a text or a number.
+// protocol types, models.LayoutTypedTimeOfDay for a time of day it types,
+// clockTextLayout of a text or a number, or the layout of a text that is a
+// time of day whole (textTimeOfDay).
 func leafLayout(l Leaf) string {
 	if l.Type == Instant {
+		if ti, ok := readTyped(l); ok && ti.names == namesTimeOfDay {
+			return models.LayoutTypedTimeOfDay
+		}
 		return models.LayoutTyped
 	}
-	return clockTextLayout(l.Value)
+	return textLayout(l.Value)
+}
+
+// timeOfDayOf reads l, a leaf of a call, as a time of day whole: one its
+// protocol types (TimeOfDayLeaf), or a text the clock layouts read as one
+// whole (textTimeOfDay): its time into its day (24:00 is the next day's
+// 00:00), the resolution its form writes, and its layout
+// (models.LayoutTimeOfDay). ok is false for any other value.
+func timeOfDayOf(l Leaf) (tod, res time.Duration, layout string, ok bool) {
+	if l.Type == Instant {
+		ti, ok := readTyped(l)
+		if !ok || ti.names != namesTimeOfDay {
+			return 0, 0, "", false
+		}
+		return ti.at.Sub(timeOfDayDay) % (24 * time.Hour), ti.res, models.LayoutTypedTimeOfDay, true
+	}
+	return textTimeOfDay(l.Value)
+}
+
+// textTimeOfDay reads s as one time of day whole, by the clock layout of a
+// time of day (clockLayouts, wraps): "10:00", "10:00:41", "10:00:41.250":
+// its time into its day, the resolution its text writes, and its layout,
+// "time-minute" or "time-second" (models.ClockLayoutNames; a fraction of a
+// second is no part of a layout, as it is none of a date's). ok only where
+// that layout's pattern matches all of s and reads it.
+func textTimeOfDay(s string) (tod, res time.Duration, layout string, ok bool) {
+	for _, lay := range clockLayouts {
+		if !lay.wraps {
+			continue
+		}
+		if loc := lay.re.FindStringIndex(s); loc == nil || loc[0] != 0 || loc[1] != len(s) {
+			continue
+		}
+		t, res, ok := lay.read(s)
+		if !ok {
+			return 0, 0, "", false
+		}
+		layout = "time-second"
+		if res >= time.Minute {
+			layout = "time-minute"
+		}
+		return t.Sub(timeOfDayDay), res, layout, true
+	}
+	return 0, 0, "", false
+}
+
+// todAtOrBefore is the latest instant no later than ref whose time of day,
+// read in loc, is tod (a time into its day, below a day): on ref's own day
+// in loc, or on the day before where that is later than ref. A read of the
+// clock whose time of day a value writes at resolution res (which divides a
+// day, so the value's cell lies in one day) lies in a span ending at ref
+// exactly where this instant's cell, [it, it+res), meets the span: the
+// span's time of day read modulo a day, the midnight it may cross included.
+func todAtOrBefore(tod time.Duration, ref time.Time, loc *time.Location) time.Time {
+	y, m, d := ref.In(loc).Date()
+	h, mi := int(tod/time.Hour), int(tod%time.Hour/time.Minute)
+	sec, ns := int(tod%time.Minute/time.Second), int(tod%time.Second)
+	t := time.Date(y, m, d, h, mi, sec, ns, loc)
+	if t.After(ref) {
+		t = time.Date(y, m, d-1, h, mi, sec, ns, loc)
+	}
+	return t
+}
+
+// todZone is the Zone (models.ClockOffset.Zone) a read of the clock that
+// wrote a time of day is learned in: rtod as recorded and ltod as record's
+// full round saw it, at their encodings' resolutions (rres, lres), in the
+// call recorded at call whose window is w (nil: none). A time of day names
+// no zone, as a wall clock of no zone does not (wallZone): models.ZoneUTC
+// where the learn step reads such a clock in UTC alone (the cache's zone is
+// nil); models.ZoneEither where the application's zone is UTC there, or a
+// window holds the reading in both runs in each zone; the one zone in which
+// w holds it in both runs; and otherwise the zone whose recorded reading is
+// the nearest one no later than the call (of w's end where call is not
+// known; models.ZoneUTC where neither is), as nearestZone reads a wall
+// clock's. A replay checks the value in that zone alone (clockReadIn).
+func (dc *DriftCache) todZone(rtod, ltod, rres, lres time.Duration, w *Window, call time.Time) string {
+	if dc.zone == nil {
+		return models.ZoneUTC
+	}
+	ref := call
+	if ref.IsZero() && w != nil {
+		ref = w.Rec.To
+	}
+	if ref.IsZero() {
+		return models.ZoneUTC
+	}
+	ru, rz := todAtOrBefore(rtod, ref, time.UTC), todAtOrBefore(rtod, ref, dc.zone)
+	if ru.Equal(rz) {
+		return models.ZoneEither
+	}
+	in := func(loc *time.Location) bool {
+		return w != nil && w.Rec.holds(todAtOrBefore(rtod, w.Rec.To, loc), rres) && w.F.holds(todAtOrBefore(ltod, w.F.To, loc), lres)
+	}
+	switch utc, app := in(time.UTC), in(dc.zone); {
+	case utc && app:
+		return models.ZoneEither
+	case utc:
+		return models.ZoneUTC
+	case app:
+		return models.ZoneApp
+	}
+	if rz.After(ru) {
+		return models.ZoneApp
+	}
+	return models.ZoneUTC
+}
+
+// todGrain is the granularity two times of day, a and b, share
+// (sharedGrain), no coarser than a day: a time of day of midnight is a
+// whole number of every unit, as an instant on a day's start is of each
+// unit up to a day, so it shares the other's grain read on that day alone.
+func todGrain(a, b time.Duration) time.Duration {
+	at := func(d time.Duration) time.Time { return time.Unix(0, int64(d)) }
+	return sharedGrain(at(sharedGrain(at(a), at(b))), at(24*time.Hour))
+}
+
+// todRead is Learned.Read of a time of day whole (timeOfDayOf) recorded as
+// rtod and seen in record's full round as ltod, each at its encoding's
+// resolution, written in layouts rlay and llay, in the call recorded at
+// call whose window is w: a plain read at the coarsest of the two
+// resolutions and the granularity the two times share, in the layout both
+// are (models.LayoutApart where they differ, which the learn step refuses),
+// in the zone todZone reads it in. A replay checks it modulo a day in its
+// call's span (clockReadIn), so a time of day the lead moved is compared
+// at every replay, never noise that lets any value pass.
+func (dc *DriftCache) todRead(rtod, ltod, rres, lres time.Duration, rlay, llay string, w *Window, call time.Time) *models.ClockOffset {
+	return &models.ClockOffset{
+		Res:    max(rres, lres, todGrain(rtod, ltod)),
+		Zone:   dc.todZone(rtod, ltod, rres, lres, w, call),
+		Layout: models.ClockOffset{Layout: rlay}.MeetLayout(llay),
+	}
 }
 
 // clockReadOf reads l, a leaf of a replay's call, as the instant a clock
@@ -326,8 +489,14 @@ func clockReadOf(l Leaf) (at time.Time, res time.Duration, wall, typed, ok bool)
 // it reads none, after "<path> was learned as <o>, <read>": the value is no
 // instant keploy reads, it names its zone where the learn step read a wall
 // clock of no zone, or o reads in the application's zone (alone or as one
-// of the two) and the replay cannot tell it (zone nil).
-func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) ([]time.Time, time.Duration, string) {
+// of the two) and the replay cannot tell it (zone nil). zone is s.Zone, s
+// the call's span. Of a place learned as a time of day
+// (models.LayoutTimeOfDay), todReadIn reads it, in s.
+func clockReadIn(o models.ClockOffset, live Leaf, s Span) ([]time.Time, time.Duration, string) {
+	if models.LayoutTimeOfDay(o.Layout) {
+		return todReadIn(o, live, s)
+	}
+	zone := s.Zone
 	at, res, wall, typed, ok := clockReadOf(live)
 	if !ok || o.Zone == "" && wall && typed {
 		return nil, 0, ", and the value this call carries is no instant keploy reads: it changed"
@@ -354,6 +523,51 @@ func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) ([]time.T
 	return []time.Time{at}, res, ""
 }
 
+// todReadIn is clockReadIn of a place learned as a time of day (o, of a
+// models.LayoutTimeOfDay layout): live, the leaf a replay's call carries
+// there, read as a time of day whole in o's layout (timeOfDayOf), as the
+// instant nearest no later than the end of s, the call's span, that writes
+// it in each zone o's Zone names (todAtOrBefore: UTC, the application's,
+// s.Zone, or both under models.ZoneEither), at the resolution its form
+// writes: Holds of a plain read then holds it where its cell meets s, read
+// modulo a day, a span that crosses midnight too. Otherwise why it reads
+// none, as clockReadIn says it: the value is no time of day keploy reads,
+// or one in another layout; o is a time of day plus an offset, or of no
+// zone (no learn step writes either); or o reads it in the application's
+// zone, which s does not carry.
+func todReadIn(o models.ClockOffset, live Leaf, s Span) ([]time.Time, time.Duration, string) {
+	tod, res, lay, ok := timeOfDayOf(live)
+	if !ok {
+		return nil, 0, ", and the value this call carries is no time of day keploy reads: it changed"
+	}
+	if lay != o.Layout {
+		return nil, 0, ", and the value this call carries is written as " + models.LayoutName(lay) + ", in another form than the learn step saw: it changed"
+	}
+	if !o.Plain() {
+		return nil, 0, ", a time of day plus an offset, which keploy does not check: it refuses the value whatever it is. Record the test again with this keploy"
+	}
+	var locs []*time.Location
+	switch o.Zone {
+	case models.ZoneUTC:
+		locs = []*time.Location{time.UTC}
+	case models.ZoneApp, models.ZoneEither:
+		if s.Zone == nil {
+			return nil, 0, ", which a replay reads in the application's zone, but keploy cannot tell the application's zone at this call, so it refuses the value rather than read it in another zone"
+		}
+		locs = []*time.Location{s.Zone}
+		if o.Zone == models.ZoneEither {
+			locs = append(locs, time.UTC)
+		}
+	default:
+		return nil, 0, ", a time of day read in no zone, which names none: keploy refuses the value whatever it is rather than read it in a zone it was not read in. Record the test again with this keploy"
+	}
+	ats := make([]time.Time, 0, len(locs))
+	for _, loc := range locs {
+		ats = append(ats, todAtOrBefore(tod, s.To, loc))
+	}
+	return ats, res, ""
+}
+
 // holdsAny reports whether o holds one of ats, the readings clockReadIn
 // gives a replay's value, at resolution res in the span from from to to
 // (models.ClockOffset.Holds).
@@ -377,7 +591,7 @@ func holdsAny(o models.ClockOffset, ats []time.Time, res time.Duration, from, to
 // one instant whole), one clockReadIn reads in no zone, and for every value
 // where s is no span (its From is zero): it fails closed.
 func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
-	ats, res, why := clockReadIn(o, live, s.Zone)
+	ats, res, why := clockReadIn(o, live, s)
 	if why != "" {
 		return false
 	}
@@ -416,7 +630,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if !known {
 		return false, learned + ", which a replay checks against its call's window on the application's clock, but keploy cannot tell the application's clock at this call (no time hooks report it, or they could not tell it here), so it refuses the value rather than pass it unchecked"
 	}
-	ats, res, why := clockReadIn(o, live, s.Zone)
+	ats, res, why := clockReadIn(o, live, s)
 	if why != "" {
 		return false, learned + why
 	}
