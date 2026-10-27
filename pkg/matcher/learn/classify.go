@@ -1153,7 +1153,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
 		if follow {
-			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at}
+			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at, served: served, raw: raw, places: places}
 		}
 		if r.Value != "" {
 			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && !noSource {
