@@ -74,6 +74,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          RECORD_SRC: ${{ matrix.config.record_src }}
           # RCA instrumentation for postgres-v3 per-test window misalignment
           # (see PR #4126). Only echo-sql is postgres-touching in this matrix;
           # the env var is a no-op for the non-PG apps so we set it

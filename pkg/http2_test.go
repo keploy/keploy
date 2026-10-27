@@ -51,6 +51,45 @@ func TestStreamManagerUsesIncomingFrameTimeForGRPCRequestTimestamp(t *testing.T)
 	assert.Equal(t, responseAt.Add(2*time.Millisecond), streams[0].GRPCResp.Timestamp)
 }
 
+// A stream says whether recording was paused as its request's first frame
+// was read, and nothing read after that frame changes it: the request's later
+// frames, and its response, read during a pause or not. That read is what puts
+// a gRPC call in a pause of the memory guard (hooks/conn SkipGRPCUnderPressure).
+func TestStreamManagerSaysWhetherRecordingWasPausedAsTheRequestsFirstFrameWasRead(t *testing.T) {
+	for _, c := range []struct {
+		what                          string
+		headers, data, response, want bool
+	}{
+		{what: "nothing read during a pause"},
+		{what: "every frame read during a pause", headers: true, data: true, response: true, want: true},
+		{what: "the first frame read during a pause, the rest after it", headers: true, want: true},
+		{what: "the first frame read before a pause, the rest during it", data: true, response: true},
+	} {
+		sm := NewStreamManager(zap.NewNop())
+		at := time.Unix(100, 0)
+		require.NoError(t, sm.HandleFrameRead(headersFrame(t, 1, []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":path", Value: "/svc.Echo/Ping"},
+			{Name: ":authority", Value: "localhost:50051"},
+			{Name: "content-type", Value: "application/grpc"},
+		}, false), false, at, c.headers))
+		require.NoError(t, sm.HandleFrameRead(dataFrame(t, 1, true, grpcPayload([]byte{0x0a, 0x04, 'p', 'i', 'n', 'g'})), false, at, c.data))
+		require.NoError(t, sm.HandleFrameRead(headersFrame(t, 1, []hpack.HeaderField{
+			{Name: ":status", Value: "200"},
+			{Name: "content-type", Value: "application/grpc"},
+		}, false), true, at, c.response))
+		require.NoError(t, sm.HandleFrameRead(dataFrame(t, 1, false, grpcPayload([]byte{0x0a, 0x04, 'p', 'o', 'n', 'g'})), true, at, c.response))
+		require.NoError(t, sm.HandleFrameRead(headersFrame(t, 1, []hpack.HeaderField{
+			{Name: "grpc-status", Value: "0"},
+		}, true), true, at, c.response))
+
+		streams := sm.GetCompleteStreams()
+		require.Len(t, streams, 1, c.what)
+		assert.Equal(t, c.want, streams[0].RequestPaused, c.what)
+	}
+}
+
 func headersFrame(t *testing.T, streamID uint32, fields []hpack.HeaderField, endStream bool) http2.Frame {
 	t.Helper()
 
