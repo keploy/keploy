@@ -202,3 +202,19 @@ func TestID(project, file, key, name string) string {
 	}
 	return id
 }
+
+// TestIDPath is the path of a test's ID (TestID): its test file, else its
+// instance's key; "" for a bare name. The name's escape holds no "::" and
+// does not begin with ":", and a path does not end with one (IDPart), so the
+// ID's last "::" ends its path, and a "::" before it ends its project.
+func TestIDPath(id string) string {
+	i := strings.LastIndex(id, "::")
+	if i < 0 {
+		return ""
+	}
+	head := id[:i]
+	if j := strings.LastIndex(head, "::"); j >= 0 {
+		head = head[j+2:]
+	}
+	return head
+}
