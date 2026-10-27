@@ -1253,7 +1253,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	// The recording's window puts the offset from 29m59.96s up to 30m0.011s,
 	// F's from 29m59.955s up to 30m0.016s: both, the first. The two values
 	// share no granularity coarser than their encoding's millisecond.
-	want := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 11*ms, Res: ms}
+	want := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 11*ms, Res: ms, Layout: models.LayoutTyped}
 	if *ln.Offset != want {
 		t.Errorf("compared: offset %+v, want %+v", *ln.Offset, want)
 	}
@@ -1287,7 +1287,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	// thirty-one minutes from it: refused, naming the range.
 	min := time.Minute
 	ln = c.classify(p, c.read.Add(30*time.Minute).Truncate(min), c.fread.Add(30*time.Minute).Truncate(min), min, c.w.ComparesOffsets())
-	minute := models.ClockOffset{Min: 30*time.Minute - 17155*ms, Max: 31*time.Minute - 18632*ms, Res: min}
+	minute := models.ClockOffset{Min: 30*time.Minute - 17155*ms, Max: 31*time.Minute - 18632*ms, Res: min, Layout: models.LayoutTyped}
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != clockOffsetWideWhy(p, minute, min) || !strings.HasPrefix(ln.Why, p+" = clock plus an offset from 29m42.845s to 30m41.368s at a resolution of 1m (the one its encoding writes): ") || !strings.Contains(ln.Why, "not narrower than the minute the offset reads in") {
 		t.Errorf("a minute's expiry: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, clockOffsetWideWhy(p, minute, min))
 	}
@@ -1298,7 +1298,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	// whose value is written at the millisecond holds nothing, as a minute
 	// is a cut coarser than that.
 	ln = c.classify(p, c.read.Add(time.Hour).Truncate(min), c.fread.Add(time.Hour).Truncate(min), min, c.w.ComparesOffsets())
-	hour := models.ClockOffset{Min: time.Hour - 17155*ms, Max: time.Hour + 41368*ms, Res: min}
+	hour := models.ClockOffset{Min: time.Hour - 17155*ms, Max: time.Hour + 41368*ms, Res: min, Layout: models.LayoutTyped}
 	if ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != hour || ln.Offset.Unit() != time.Hour || !strings.HasPrefix(ln.Why, p+" = clock + 1h (") || !strings.Contains(ln.Why, "a time to live changed by an hour or more still fails") {
 		t.Fatalf("an hour's expiry at a minute's resolution: %s %+v (%s); want the clock offset %+v", ln.Kind, ln.Offset, ln.Why, hour)
 	}
@@ -1330,7 +1330,7 @@ func TestAWideCallWindowRefusesTheOffsetNamingItsRange(t *testing.T) {
 	ms := time.Millisecond
 	w := &Window{Rec: Span{From: c.call.Add(-3 * time.Minute), To: c.call}, F: Span{From: c.fcall.Add(-3 * time.Minute), To: c.fcall}}
 	ln := c.classify(p, c.read.Add(30*time.Minute).Truncate(ms), c.fread.Add(30*time.Minute).Truncate(ms), ms, w.ComparesOffsets())
-	wide := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 33*time.Minute - 44*ms, Res: ms}
+	wide := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 33*time.Minute - 44*ms, Res: ms, Layout: models.LayoutTyped}
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != clockOffsetWideWhy(p, wide, ms) {
 		t.Fatalf("FALSE GREEN? idle three minutes before the call: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, clockOffsetWideWhy(p, wide, ms))
 	}
@@ -1366,7 +1366,7 @@ func TestAClockOffsetIsBoundedByBothRunsWindows(t *testing.T) {
 	// encoding's.
 	narrow := &Window{Rec: c.w.Rec, F: Span{From: c.fcall.Add(-10 * ms), To: c.fcall}}
 	ln := c.classify(p, rec, c.fcall.Add(30*time.Minute-5*ms), ms, narrow.ComparesOffsets())
-	if want := (models.ClockOffset{Min: 30*time.Minute - 5*ms, Max: 30*time.Minute + 6*ms, Res: 3 * ms}); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want {
+	if want := (models.ClockOffset{Min: 30*time.Minute - 5*ms, Max: 30*time.Minute + 6*ms, Res: 3 * ms, Layout: models.LayoutTyped}); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want {
 		t.Errorf("F's narrower window: %s %+v (%s); want the offset %+v", ln.Kind, ln.Offset, ln.Why, want)
 	}
 	// F's least offset is the recording's bound, 30m0.011s: they touch.
@@ -1596,7 +1596,7 @@ func TestAValueCutCoarserThanItsEncodingIsRefusedAsACut(t *testing.T) {
 	turn := (&Window{Rec: Span{From: c.call.Add(-175 * ms), To: c.call}, F: Span{From: c.fcall.Add(-700 * ms), To: c.fcall}}).ComparesOffsets()
 	rec, live := c.call.Add(-145*ms).Truncate(sec).Add(30*time.Minute), c.fcall.Add(-682*ms).Truncate(sec).Add(30*time.Minute)
 	ln := c.classify(p, rec, live, ms, turn)
-	want := models.ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 9*ms, Res: sec}
+	want := models.ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 9*ms, Res: sec, Layout: models.LayoutTyped}
 	if cut := clockOffsetCutWhy(p, want, ms); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != cut || !strings.HasPrefix(ln.Why, p+" = clock + 30m (from 29m59.845s to 30m0.009s): ") || !strings.Contains(ln.Why, "but both runs' values are whole multiples of 1s, coarser than the 1ms their encoding writes: the application cuts its value") {
 		t.Errorf("FALSE GREEN? thirty minutes cut to the second, the second inside both windows: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, cut)
 	}
@@ -1647,8 +1647,8 @@ func TestAValueCutCoarserThanItsEncodingIsRefusedAsACut(t *testing.T) {
 		w    *Window
 		want models.ClockOffset
 	}{
-		{"the recording's bound the lesser", &Window{Rec: Span{From: half.Add(-20 * ms), To: half.Add(30 * ms)}, F: Span{From: half.Add(61500*ms - 50*ms), To: half.Add(61500*ms + 10*ms)}}, models.ClockOffset{Min: 30*time.Minute - 10*ms, Max: 30*time.Minute + 21*ms, Res: 500 * ms}},
-		{"F's bound the lesser", &Window{Rec: Span{From: half.Add(-30 * ms), To: half.Add(20 * ms)}, F: Span{From: half.Add(61500*ms - 10*ms), To: half.Add(61500*ms + 20*ms)}}, models.ClockOffset{Min: 30*time.Minute - 20*ms, Max: 30*time.Minute + 11*ms, Res: 500 * ms}},
+		{"the recording's bound the lesser", &Window{Rec: Span{From: half.Add(-20 * ms), To: half.Add(30 * ms)}, F: Span{From: half.Add(61500*ms - 50*ms), To: half.Add(61500*ms + 10*ms)}}, models.ClockOffset{Min: 30*time.Minute - 10*ms, Max: 30*time.Minute + 21*ms, Res: 500 * ms, Layout: models.LayoutTyped}},
+		{"F's bound the lesser", &Window{Rec: Span{From: half.Add(-30 * ms), To: half.Add(20 * ms)}, F: Span{From: half.Add(61500*ms - 10*ms), To: half.Add(61500*ms + 20*ms)}}, models.ClockOffset{Min: 30*time.Minute - 20*ms, Max: 30*time.Minute + 11*ms, Res: 500 * ms, Layout: models.LayoutTyped}},
 	} {
 		hc := clockOffsetCall{call: row.w.Rec.To, fcall: row.w.F.To}
 		ln := hc.classify(p, hrec, hlive, ms, row.w.ComparesOffsets())
@@ -1729,7 +1729,7 @@ func TestAValueCutCoarserThanItsEncodingIsRefusedAsACut(t *testing.T) {
 	if g := sharedGrain(trec, tlive); g != 2*sec {
 		t.Fatalf("precondition: the two second values share %s, want 2s", g)
 	}
-	twoWant := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 910*ms, Res: 2 * sec}
+	twoWant := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 910*ms, Res: 2 * sec, Layout: models.LayoutTyped}
 	if ln := two.classify(p, trec, tlive, sec, two.w); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != twoWant {
 		t.Errorf("2 s shared by chance at a second's encoding: %s %+v (%s); want the offset %+v", ln.Kind, ln.Offset, ln.Why, twoWant)
 	}

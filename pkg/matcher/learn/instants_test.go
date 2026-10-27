@@ -107,8 +107,13 @@ func shownClockRead(rec, live time.Time, typed bool, w *Window) bool {
 // read of the clock (Read), which a replay checks, and in a window that holds
 // it neither in both runs nor moved by the lead, refused (outsideWindowWhy).
 func noiseIn(ln Learned, w *Window) bool {
-	if textClockRead(ln.Recorded.Value, ln.Live.Value) == nil && ln.Recorded.Type != Instant {
+	read := textClockRead(ln.Recorded.Value, ln.Live.Value)
+	if read == nil && ln.Recorded.Type != Instant {
 		return ln.Kind == KindNoise
+	}
+	// Written in two layouts in its two runs: refused, naming both.
+	if read != nil && read.Layout == models.LayoutApart {
+		return ln.Kind == KindUnaccounted && ln.Why == textLayoutChangedWhy(ln.Recorded.Value, ln.Live.Value)
 	}
 	if w != nil && ln.Kind == KindUnaccounted {
 		return ln.Why == outsideWindowWhy

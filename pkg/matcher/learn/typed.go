@@ -600,7 +600,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if noWindow != "" {
 			ln.Why = noWindow
 		}
-		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
+		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at)), Layout: models.LayoutTyped}
 		if rt.names == namesWall {
 			ln.Read.Zone = dc.wallZone(rt.at, lt.at, rt.res, lt.res, w, at)
 		}
@@ -688,7 +688,7 @@ func clockOffsetOf(r, l typedInstant, w *Window) (models.ClockOffset, bool) {
 	if rlo <= 0 || llo <= 0 {
 		return models.ClockOffset{}, false
 	}
-	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi), Res: max(r.res, l.res, grain)}
+	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi), Res: max(r.res, l.res, grain), Layout: models.LayoutTyped}
 	return o, o.Min < o.Max
 }
 
