@@ -155,8 +155,9 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 	var working atomic.Bool
 	var accepts atomic.Uint64
 	// view is what the wait reads once it is for the connections' work:
-	// the connections kept when it got there (InFlightScope), set before
-	// working, else every connection the proxy keeps.
+	// the connections kept when it got there, with the bytes each had
+	// received (InFlightScope), set before working, else every connection
+	// the proxy keeps.
 	var view inFlightView = ir
 	var scoped atomic.Pointer[coreAgent.InFlightScope]
 	stop := a.watchSettle(ctx, cancel, func() map[string]uint64 {
@@ -171,7 +172,7 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 			}
 			return map[string]uint64{"counts": v}
 		}
-		var pp func(bool) map[uint64]uint64 = ir.InFlightPendingProgress
+		pp := ir.InFlightPendingProgress
 		if sc := scoped.Load(); sc != nil {
 			pp = (*sc).PendingProgress
 		}
@@ -189,11 +190,12 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		return 0, err
 	}
 	// Every connection and byte the wait waits for is in the proxy's hands:
-	// the connections that can hold them are those kept now, each until it
-	// is seen holding no work once. A connection accepted from here on, or
-	// work one takes on after it was seen settled, is not this wait's: an
-	// application that keeps calling (a timer's call, its miss, a new
-	// connection) cannot hold it.
+	// what can hold them is the bytes each connection kept now has
+	// received, until its handler has taken them and, in a replay, answered
+	// them. A connection accepted from here on, or bytes one receives from
+	// here on, are not this wait's: an application that keeps calling (a
+	// timer's call, its miss, a new connection, the next call on a pooled
+	// one) cannot hold it.
 	if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok {
 		sc := sr.InFlightScope()
 		scoped.Store(&sc)

@@ -116,6 +116,18 @@ type trackedConn struct {
 	// dependency held idle (MarkIdle): while one stands, a handler that is
 	// not reading is no work of keploy's.
 	idle atomic.Int32
+	// settled is what its reads had delivered the last time its handler
+	// held no request it read (as a read began, or a mark changed, with no
+	// request held, its close not begun, and a read in progress or an idle
+	// mark standing: busy's rule with nothing untaken), settledMarks
+	// whether an unknown mark stood then, and hasSettled whether that ever
+	// happened; under mu. A settle's scope reads them (scope): a handler
+	// that went back to reading after its reads delivered every byte the
+	// scope waits for had answered them, even when the application's next
+	// request is already in the socket and no later view sees it idle.
+	settled      uint64
+	settledMarks bool
+	hasSettled   bool
 	// flights, under the proven switch, is the learn step's tracker its
 	// requests are told to (learn.Flight): a read that returns bytes while
 	// none is aloft lifts one (flight), and the first write after it lands
@@ -470,7 +482,16 @@ func (c *trackedConn) endUntold(ground bool) {
 func (c *trackedConn) count(n *atomic.Int32, delta int32) {
 	c.mu.Lock()
 	n.Add(delta)
+	c.noteSettled()
 	c.mu.Unlock()
+}
+
+// noteSettled notes, under c.mu, what c's reads have delivered when its
+// handler holds no request it read (settled).
+func (c *trackedConn) noteSettled() {
+	if c.held.Load() == 0 && !c.closing.Load() && (c.reading.Load() > 0 || c.idle.Load() > 0) {
+		c.settled, c.settledMarks, c.hasSettled = c.delivered.Load(), c.unknownFor.Load() > 0, true
+	}
 }
 
 // returned is a read of c returning n bytes, and the end of the stream when
@@ -499,6 +520,11 @@ type connView struct {
 	eof       bool
 	// hangUps are its holds on a client's hang-up not yet told (HoldHangUp).
 	hangUps int32
+	// settled, settledMarks and hasSettled are its last note of holding
+	// no request (trackedConn.settled).
+	settled      uint64
+	settledMarks bool
+	hasSettled   bool
 }
 
 // view is c's counts, read at one instant.
@@ -508,6 +534,7 @@ func (c *trackedConn) view() connView {
 	return connView{
 		reading: c.reading.Load(), held: c.held.Load(), marks: c.unknownFor.Load(), idle: c.idle.Load(),
 		delivered: c.delivered.Load(), eof: c.eof.Load(), hangUps: c.hangUps.Load(),
+		settled: c.settled, settledMarks: c.settledMarks, hasSettled: c.hasSettled,
 	}
 }
 
@@ -671,65 +698,98 @@ func (c *trackedConn) NetConn() net.Conn { return c.Conn }
 // until the connection closes. 0 for a conn with no socket under it, or whose
 // socket its handler has closed (it cannot be asked).
 func (c *trackedConn) untaken(v connView) uint64 {
+	return c.received(v) - v.delivered
+}
+
+// received is how many bytes of the application's c's socket has received,
+// its FIN not counted, and never fewer than c's reads delivered (v); what
+// they delivered for a conn with no socket under it, or whose socket its
+// handler has closed (untaken).
+func (c *trackedConn) received(v connView) uint64 {
 	if c.raw == nil {
-		return 0
+		return v.delivered
 	}
 	received, state, ok := socketReceived(c.raw)
 	if !ok {
-		return 0
+		return v.delivered
 	}
 	if finReceived(state, v.eof) && received > 0 {
 		received--
 	}
-	if received <= v.delivered {
-		return 0
-	}
-	return received - v.delivered
+	return max(received, v.delivered)
 }
 
 // scope is a settle's share of the connections: those kept when it began
-// (inflight.scope), each until it is seen holding no work once (one view, as
-// State reads it). A connection accepted after it began is not in it, and
-// work a connection takes on after it was seen settled is not the settle's:
-// seen not busy after every byte the settle waits for was received (the
-// agent's first wait), it had read and answered all of them. So a settle
-// waits for a set that only shrinks, never for an application that keeps
-// calling.
+// (inflight.scope), each with the bytes its socket had received then (its
+// cut), until its handler has taken them and, in a replay, answered them.
+// It began once every byte the settle waits for was received (the agent's
+// first wait), so a connection's cut covers them. A connection accepted
+// after it began is not in it, and bytes one receives after it began are
+// not the settle's: a handler whose reads delivered its cut and that then
+// held no request (trackedConn.settled) had answered all of them, however
+// soon the application's next request arrived. So a settle waits for work
+// that only shrinks, never for an application that keeps calling, on new
+// connections or on the ones it kept.
 type scope struct {
-	t    *inflight
-	mu   sync.Mutex
-	left map[*trackedConn]struct{}
-	// unknown names the protocols of the connections seen settled while
-	// their parser could not say what it held (State's unknown, read in the
-	// same view).
+	t  *inflight
+	mu sync.Mutex
+	// left maps each connection not yet seen done to its cut.
+	left map[*trackedConn]uint64
+	// unknown names the protocols of the connections seen done while their
+	// parser could not say what it held (State's unknown).
 	unknown map[string]bool
 }
 
-// scope begins a scope with every connection kept now.
+// scope begins a scope with every connection kept now, each cut at what its
+// socket has received.
 func (t *inflight) scope() *scope {
 	t.mu.Lock()
-	left := make(map[*trackedConn]struct{}, len(t.conns))
+	conns := make([]*trackedConn, 0, len(t.conns))
 	for tc := range t.conns {
-		left[tc] = struct{}{}
+		conns = append(conns, tc)
 	}
 	t.mu.Unlock()
+	left := make(map[*trackedConn]uint64, len(conns))
+	for _, tc := range conns {
+		left[tc] = tc.received(tc.view())
+	}
 	return &scope{t: t, left: left, unknown: map[string]bool{}}
 }
 
-// State is inflight.State over the scope's connections not yet seen
-// settled; it drops each it sees settled now (or forgotten), noting, in a
-// replay, the protocol of one whose parser could not say what it held.
-// unknown is every protocol noted so far.
+// holds is whether tc still holds the scope's work, cut its cut: bytes up
+// to it its reads have not delivered, or, in a replay, a request read from
+// them not answered. Its handler answered them once, after its reads
+// delivered them, it held no request (settled); else its view now is read
+// by busy's rule with the bytes after cut left out. marked: an unknown mark
+// stood when it was found holding none.
+func (s *scope) holds(tc *trackedConn, cut uint64, answers bool) (held, marked bool) {
+	v := tc.view()
+	if v.delivered < cut {
+		return true, false
+	}
+	if !answers {
+		return false, false
+	}
+	if v.hasSettled && v.settled >= cut {
+		return false, v.settledMarks
+	}
+	return busy(0, answers, v.reading, v.held, v.idle, tc.closing.Load()), v.marks > 0
+}
+
+// State is inflight.State over the scope's connections not yet seen done;
+// it drops each it sees done now (or forgotten), noting, in a replay, the
+// protocol of one whose parser could not say what it held. unknown is every
+// protocol noted so far.
 func (s *scope) State(answers bool) (pending int, unknown []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for tc := range s.left {
+	for tc, cut := range s.left {
 		if tc.forgotten.Load() {
 			delete(s.left, tc)
 			continue
 		}
-		v := tc.view()
-		if busy(tc.untaken(v), answers, v.reading, v.held, v.idle, tc.closing.Load()) {
+		held, marked := s.holds(tc, cut, answers)
+		if held {
 			pending++
 			continue
 		}
@@ -737,7 +797,7 @@ func (s *scope) State(answers bool) (pending int, unknown []string) {
 			if p := tc.unknown.Load(); p != nil {
 				s.unknown[*p] = true
 			}
-			if v.marks > 0 {
+			if marked {
 				if p := tc.unknownWhat.Load(); p != nil {
 					s.unknown[*p] = true
 				}
@@ -756,13 +816,16 @@ func (s *scope) State(answers bool) (pending int, unknown []string) {
 }
 
 // PendingProgress is inflight.PendingProgress over the scope's connections
-// not yet seen settled.
+// that still hold its work.
 func (s *scope) PendingProgress(answers bool) map[uint64]uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := map[uint64]uint64{}
-	for tc := range s.left {
-		if !tc.forgotten.Load() && tc.pending(answers) {
+	for tc, cut := range s.left {
+		if tc.forgotten.Load() {
+			continue
+		}
+		if held, _ := s.holds(tc, cut, answers); held {
 			out[tc.id] = tc.progress.Load()
 		}
 	}

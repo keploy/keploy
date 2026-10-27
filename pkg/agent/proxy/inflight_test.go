@@ -205,3 +205,153 @@ func TestAScopeIsHeldOnlyByTheWorkItBeganWith(t *testing.T) {
 	}
 	_ = later
 }
+
+// waitInq waits until c's socket holds n bytes unread.
+func waitInq(t *testing.T, c *trackedConn, n int) {
+	t.Helper()
+	for inq(c) < n {
+		runtime.Gosched()
+	}
+}
+
+// readOnce reads c once, as a handler's read for the application's next
+// request, and sends what it returned.
+func readOnce(c *trackedConn, out chan<- string) {
+	buf := make([]byte, 256)
+	n, _ := c.Read(buf)
+	out <- string(buf[:n])
+}
+
+// A pooled connection the application keeps calling on (a timer's next call
+// already in the socket each time its handler answers one, so no view ever
+// sees it idle) holds a scope only until its handler has answered what the
+// socket had received when the scope began: it went back to reading after
+// its reads delivered those bytes, holding no request. The test's own call,
+// read and not yet answered, holds it until then.
+func TestAPooledConnectionKeptBusyByLaterCallsReleasesTheScope(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	const call, tick = "GET /test HTTP/1.1\r\n\r\n", "GET /tick HTTP/1.1\r\n\r\n"
+	got := make(chan string, 2)
+	go readOnce(proxy, got)
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-got; r != call {
+		t.Fatalf("read %q", r)
+	}
+	// The test's call is read, its answer not written: the scope begins.
+	sc := tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's call read and not answered: scope pending %d, want 1", n)
+	}
+	// The application's next call arrives before the test's is answered.
+	if _, err := io.WriteString(app, tick); err != nil {
+		t.Fatal(err)
+	}
+	waitInq(t, proxy, len(tick))
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's call not answered, a later call in the socket: scope pending %d, want 1", n)
+	}
+	// The handler answers the test's call and reads on: the later call is
+	// there at once, and it is handling that one.
+	go readOnce(proxy, got)
+	if r := <-got; r != tick {
+		t.Fatalf("read %q", r)
+	}
+	if n := tr.Pending(true); n != 1 {
+		t.Fatalf("the later call read and not answered: pending %d, want 1", n)
+	}
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("the test's call answered, a later one being handled: scope pending %d, want 0", n)
+	}
+	if p := sc.PendingProgress(true); len(p) != 0 {
+		t.Fatalf("scope progress %v, want none", p)
+	}
+}
+
+// Bytes the socket had received when a scope began hold it until the
+// handler's reads deliver them, in a record as in a replay, even when one
+// read delivers them with bytes that came later; in a replay, until the
+// handler has then answered the request they hold.
+func TestBytesReceivedBeforeTheScopeHoldItUntilAnswered(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	const call, tick = "GET /test HTTP/1.1\r\n\r\n", "GET /tick HTTP/1.1\r\n\r\n"
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	waitInq(t, proxy, len(call))
+	sc := tr.scope()
+	if n, _ := sc.State(false); n != 1 {
+		t.Fatalf("the test's call not taken: scope pending %d in a record, want 1", n)
+	}
+	if _, err := io.WriteString(app, tick); err != nil {
+		t.Fatal(err)
+	}
+	waitInq(t, proxy, len(call)+len(tick))
+	got := make(chan string, 2)
+	go readOnce(proxy, got)
+	if r := <-got; r != call+tick {
+		t.Fatalf("read %q, want both calls in one read", r)
+	}
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's call read with a later one, neither answered: scope pending %d in a replay, want 1", n)
+	}
+	recordScope := tr.scope()
+	if n, _ := recordScope.State(false); n != 0 {
+		t.Fatalf("every byte taken: scope pending %d in a record, want 0", n)
+	}
+	go readOnce(proxy, got)
+	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("both answered, the handler reading on: scope pending %d, want 0", n)
+	}
+}
+
+// A handler that reads on while its parser holds a request it read (Hold)
+// has not answered it: the scope is held until the hold is released. One
+// whose close has begun holds it until the handler is done (forget): the
+// close's own reads are no handler waiting for the application.
+func TestAHeldRequestOrABegunCloseHoldsTheScope(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	const call = "GET /test HTTP/1.1\r\n\r\n"
+	got := make(chan string, 2)
+	go readOnce(proxy, got)
+	if _, err := io.WriteString(app, call); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	release := proxy.Hold()
+	sc := tr.scope()
+	go readOnce(proxy, got)
+	waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("a held request, the handler reading on: scope pending %d, want 1", n)
+	}
+	release()
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("the hold released, the handler reading: scope pending %d, want 0", n)
+	}
+
+	app2, closing := acceptedPair(t, tr)
+	go readOnce(closing, got)
+	if _, err := io.WriteString(app2, call); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	sc = tr.scope()
+	if err := closing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readOnce(closing, got) // the close's own read
+	<-got
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("a close begun, its handler not done: scope pending %d, want 1", n)
+	}
+	tr.forget(closing)
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("the handler done: scope pending %d, want 0", n)
+	}
+}

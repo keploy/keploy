@@ -252,10 +252,11 @@ type InFlightScoper interface {
 }
 
 // InFlightScope is InFlightState and InFlightPendingProgress over the
-// connections kept when it began, each until it is seen holding no work
-// once: a connection accepted later never counts, nor work one takes on
-// after it was seen settled. unknown names every protocol whose parser,
-// as its connection was seen settled, could not say what it held.
+// connections kept when it began, each with the bytes it had received then,
+// until they are taken and, in a replay, answered: a connection accepted
+// later never counts, nor bytes one receives later (the application's next
+// call on it). unknown names every protocol whose parser, as its connection
+// was seen done, could not say what it held.
 type InFlightScope interface {
 	State(answers bool) (pending int, unknown []string)
 	PendingProgress(answers bool) map[uint64]uint64
