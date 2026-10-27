@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -18,64 +17,22 @@ import (
 // valueRedacted replaces sensitive/obfuscated values in the rendered requests.
 const valueRedacted = "(redacted)"
 
-// sensitiveKeyTokens marks header / query / body key names whose values must
-// never be printed into a report (they commonly carry credentials).
-var sensitiveKeyTokens = []string{"auth", "key", "token", "secret", "cookie", "signature", "credential", "password", "passwd", "pwd"}
-
 // isSensitiveHeader reports whether a header, query-param, or JSON body key
-// looks like it carries a credential and should be redacted.
-func isSensitiveHeader(name string) bool {
-	ln := strings.ToLower(name)
-	for _, t := range sensitiveKeyTokens {
-		if strings.Contains(ln, t) {
-			return true
-		}
-	}
-	return false
-}
-
-// secretValuePatterns matches credential-SHAPED values, independent of the key
-// name or the mock's noise config — the value-shape backstop behind the
-// key-name denylist and the noise regexes. They are deliberately
-// prefix/scheme-based (not raw Shannon entropy): a generic "high-entropy"
-// rule would also redact UUIDs, content hashes and idempotency keys, which are
-// frequently the exact field that drifted and caused the mismatch — redacting
-// those would gut the diagnostic value of the diff. Each pattern matches a
-// credential FORM with effectively no legitimate non-secret collision.
-var secretValuePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`),              // Authorization schemes
-	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}`), // JWT (header.payload.sig)
-	regexp.MustCompile(`-----BEGIN[A-Z ]*PRIVATE KEY-----`),                            // PEM private key
-	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),                                // AWS access key id
-	regexp.MustCompile(`\bgh[posru]_[A-Za-z0-9]{20,}\b`),                               // GitHub token
-	regexp.MustCompile(`\bkep_[A-Za-z0-9_-]{20,}\b`),                                   // keploy PAT
-	regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b`),                        // Stripe secret key
-	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`),                             // Slack token
-	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),                                 // GitLab PAT
-	regexp.MustCompile(`\bAIza[A-Za-z0-9_-]{35}\b`),                                    // Google API key
-}
+// looks like it carries a credential and should be redacted
+// (models.IsSensitiveKey).
+func isSensitiveHeader(name string) bool { return models.IsSensitiveKey(name) }
 
 // looksLikeSecretValue reports whether a single header / query-param /
 // JSON-scalar value is credential-shaped and must be redacted even when its key
-// isn't on the denylist and the mock's noise config didn't cover it.
-func looksLikeSecretValue(v string) bool {
-	s := strings.TrimSpace(v)
-	if len(s) < 8 {
-		return false
-	}
-	for _, re := range secretValuePatterns {
-		if re.MatchString(s) {
-			return true
-		}
-	}
-	return false
-}
+// isn't on the denylist and the mock's noise config didn't cover it
+// (models.LooksLikeSecretValue).
+func looksLikeSecretValue(v string) bool { return models.LooksLikeSecretValue(v) }
 
 // scrubSecretsInText replaces credential-shaped tokens embedded in free-form
 // (opaque, non-JSON / non-form) body text with the redaction marker, leaving
 // the surrounding structure intact so the diff stays useful.
 func scrubSecretsInText(s string) string {
-	for _, re := range secretValuePatterns {
+	for _, re := range models.SecretValuePatterns {
 		s = re.ReplaceAllString(s, valueRedacted)
 	}
 	return s

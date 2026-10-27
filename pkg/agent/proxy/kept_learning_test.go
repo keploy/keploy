@@ -1,6 +1,11 @@
 package proxy
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -766,10 +771,17 @@ func TestASecondStagingsFilingIsNotServedInItsRetryCycle(t *testing.T) {
 func TestAStagedCopyHoldsTheRecordingsClockReadsNotTheCopys(t *testing.T) {
 	base := beatMock("beat")
 	base.Spec.Clocks = map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+	base.Spec.ClockAbout = map[string]models.About{"body.at": {By: models.AboutByHand}}
 	mk := base.DeepCopy()
 	mk.Spec.Clocks = map[string]models.ClockOffset{"body.key": {Res: time.Second}}
-	if got := asStaged(mk, base).Spec.Clocks; !reflect.DeepEqual(got, base.Spec.Clocks) {
-		t.Fatalf("the staged copy holds clock reads %+v, want the recording's %+v", got, base.Spec.Clocks)
+	mk.Spec.ClockAbout = map[string]models.About{"body.key": {Why: "learned on the copy"}}
+	mk.Spec.NoiseAbout = map[string]models.About{"body.n": {Why: "learned on the copy"}}
+	got := asStaged(mk, base).Spec
+	if !reflect.DeepEqual(got.Clocks, base.Spec.Clocks) {
+		t.Fatalf("the staged copy holds clock reads %+v, want the recording's %+v", got.Clocks, base.Spec.Clocks)
+	}
+	if !reflect.DeepEqual(got.ClockAbout, base.Spec.ClockAbout) || got.NoiseAbout != nil {
+		t.Fatalf("the staged copy holds abouts %+v %+v, want the recording's %+v and no noise about", got.ClockAbout, got.NoiseAbout, base.Spec.ClockAbout)
 	}
 }
 
@@ -779,10 +791,16 @@ func TestAStagedCopyHoldsTheRecordingsClockReadsNotTheCopys(t *testing.T) {
 func TestEveryDeleteDoorCarriesTheCopysClockReads(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	clocks := map[string]models.ClockOffset{"body.at": {Res: time.Millisecond}}
+	// Where the learned clock reads and noise came from rides beside them.
+	clockAbout := map[string]models.About{"body.at": {Why: "a read of the app's clock", Call: "http api.test GET /beat #1"}}
+	noiseAbout := map[string]models.About{"body.n": {Why: "changed", Call: "http api.test GET /beat #1"}}
 	consumed := func(t *testing.T, mm *MockManager) map[string]models.ClockOffset {
 		t.Helper()
 		for _, st := range mm.GetConsumedMocks() {
 			if st.Name == "beat" {
+				if !reflect.DeepEqual(st.ClockAbout, clockAbout) || !reflect.DeepEqual(st.NoiseAbout, noiseAbout) {
+					t.Fatalf("the consume carries abouts %+v %+v, want %+v %+v", st.ClockAbout, st.NoiseAbout, clockAbout, noiseAbout)
+				}
 				return st.Clocks
 			}
 		}
@@ -796,6 +814,7 @@ func TestEveryDeleteDoorCarriesTheCopysClockReads(t *testing.T) {
 		}
 		c := *got[0].DeepCopy()
 		c.Spec.Clocks = clocks
+		c.Spec.ClockAbout, c.Spec.NoiseAbout = clockAbout, noiseAbout
 		return c
 	}
 	t.Run("per-test", func(t *testing.T) {
@@ -841,4 +860,111 @@ func TestEveryDeleteDoorCarriesTheCopysClockReads(t *testing.T) {
 			t.Fatalf("the start-up consume carries clock reads %+v, want %+v", g, clocks)
 		}
 	})
+	t.Run("kept", func(t *testing.T) {
+		kept := beatMock("beat")
+		kept.TestModeInfo = models.TestModeInfo{ID: 1, SortOrder: 1, IsFiltered: true, Lifetime: models.LifetimePerTest}
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindow([]*models.Mock{kept}, nil, exactT0.Add(-time.Second), exactT0.Add(time.Second))
+		got, _ := mm.GetFilteredMocks()
+		if !mm.MarkMockAsUsed(learned(t, got)) {
+			t.Fatal("precondition: the kept recording's consume is refused")
+		}
+		if g := consumed(t, mm); !reflect.DeepEqual(g, clocks) {
+			t.Fatalf("the kept recording's consume carries clock reads %+v, want %+v", g, clocks)
+		}
+	})
+}
+
+// Every consumed state the agent builds hands back where its learned noise
+// and clock reads came from wherever it hands back the clock reads, from the
+// same recording: a door that carried Clocks and dropped the abouts would
+// write a learned decision with no why. Doors no behaviour row reaches (an
+// exact serve, a carried copy, a pool update) are held to it here.
+func TestEveryStateThatCarriesClockReadsCarriesTheirAbouts(t *testing.T) {
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doors := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok || types.ExprString(lit.Type) != "models.MockState" {
+				return true
+			}
+			fields := map[string]string{}
+			for _, el := range lit.Elts {
+				if kv, ok := el.(*ast.KeyValueExpr); ok {
+					fields[types.ExprString(kv.Key)] = types.ExprString(kv.Value)
+				}
+			}
+			clocks, ok := fields["Clocks"]
+			if !ok {
+				return true
+			}
+			doors++
+			spec := strings.TrimSuffix(strings.TrimPrefix(clocks, "clocksOf("), ")")
+			at := fset.Position(lit.Pos())
+			if want := "noiseAboutOf(" + spec + ")"; fields["NoiseAbout"] != want {
+				t.Errorf("%s: the state carries Clocks %s and NoiseAbout %q, want %s", at, clocks, fields["NoiseAbout"], want)
+			}
+			if want := "clockAboutOf(" + spec + ")"; fields["ClockAbout"] != want {
+				t.Errorf("%s: the state carries Clocks %s and ClockAbout %q, want %s", at, clocks, fields["ClockAbout"], want)
+			}
+			return true
+		})
+	}
+	if doors < 8 {
+		t.Fatalf("found %d states that carry clock reads, want the 8 consume doors at least", doors)
+	}
+}
+
+// A recording consumed twice keeps the first learner's about for a place
+// both learned, and gains the second's for a place only it learned: the
+// state is cumulative as its decisions are (flagMockAsUsed).
+func TestASecondConsumeKeepsTheFirstLearnersAbout(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	first := map[string]models.About{"body.a": {Why: "first"}}
+	second := map[string]models.About{"body.a": {Why: "second"}, "body.b": {Why: "second"}}
+	for _, a := range []map[string]models.About{first, second} {
+		if err := mm.flagMockAsUsed(models.MockState{Name: "beat", NoiseAbout: a, ClockAbout: a}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[string]models.About{"body.a": {Why: "first"}, "body.b": {Why: "second"}}
+	for _, st := range mm.GetConsumedMocks() {
+		if st.Name == "beat" {
+			if !reflect.DeepEqual(st.NoiseAbout, want) || !reflect.DeepEqual(st.ClockAbout, want) {
+				t.Fatalf("after two consumes: noise about %+v, clock about %+v, want %+v", st.NoiseAbout, st.ClockAbout, want)
+			}
+			return
+		}
+	}
+	t.Fatal("beat's consume is not reported")
+}
+
+// With the proven switch off a consumed state carries no about, whatever the
+// recording holds: the bytes keploy writes stay as they are.
+func TestNoAboutRidesWithTheSwitchOff(t *testing.T) {
+	spec := models.MockSpec{NoiseAbout: map[string]models.About{"body.a": {Why: "w"}}, ClockAbout: map[string]models.About{"body.at": {Why: "w"}}}
+	t.Setenv(provenswitch.Env, "0")
+	if noiseAboutOf(spec) != nil || clockAboutOf(spec) != nil {
+		t.Fatal("a switch-off state carries an about")
+	}
+	t.Setenv(provenswitch.Env, "1")
+	if !reflect.DeepEqual(noiseAboutOf(spec), spec.NoiseAbout) || !reflect.DeepEqual(clockAboutOf(spec), spec.ClockAbout) {
+		t.Fatal("a switch-on state does not carry the recording's abouts")
+	}
 }

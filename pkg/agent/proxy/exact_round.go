@@ -645,7 +645,7 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	filteredVals, unfilteredVals, startupVals := m.treeValues(filtered, ""), m.treeValues(unfiltered, ""), m.treeValues(startup, "")
 	var teardown []*models.Mock
 	if v.afterTests(s.Fired) {
-		teardown = m.teardown(startupVals)
+		teardown = m.teardown(v.poolKey, startupVals)
 	}
 	s.PerTest = v.perTest("", filteredVals, teardown)
 	read("per-test")

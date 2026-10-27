@@ -99,6 +99,33 @@ func TestALearnStepMissCarriesItsReason(t *testing.T) {
 	}
 }
 
+// decided is vs with each variable's about taken off, after failing the test
+// unless every variable carries one with a why (under the switch the learn
+// step owes each decision its about): a test that asserts what was learned
+// compares the decisions.
+func decided(t *testing.T, vs models.MockVariables) models.MockVariables {
+	t.Helper()
+	out := vs.Clone()
+	for n, v := range out {
+		if v.About == nil || v.About.Why == "" {
+			t.Errorf("variable %s: about %+v, want one with a why", n, v.About)
+		}
+		v.About = nil
+		out[n] = v
+	}
+	return out
+}
+
+// decidedBinds is decided over each mock's binds.
+func decidedBinds(t *testing.T, binds map[string]models.MockVariables) map[string]models.MockVariables {
+	t.Helper()
+	out := make(map[string]models.MockVariables, len(binds))
+	for m, vs := range binds {
+		out[m] = decided(t, vs)
+	}
+	return out
+}
+
 // A request that drifted only in a value is answered from the mock it drifted
 // from, and the consumed mock carries what was learned, which the replay
 // writes onto the recording; the echo is rendered into the answer.
@@ -119,7 +146,7 @@ func TestALearnStepPairingAnswersAndLearns(t *testing.T) {
 		t.Fatalf("consumed %+v", consumed)
 	}
 	want := models.MockVariables{"rid": {Recorded: "r-1", Bind: "body.rid", Answer: []string{"body.rid"}, Echo: true}}
-	if !reflect.DeepEqual(consumed[0].Variables, want) {
+	if !reflect.DeepEqual(decided(t, consumed[0].Variables), want) {
 		t.Fatalf("the consumed mock's state carries %+v", consumed[0].Variables)
 	}
 }
@@ -182,10 +209,10 @@ func TestALearnStepFollowsAVariableAcrossCalls(t *testing.T) {
 	for _, st := range mm.GetConsumedMocks() {
 		states[st.Name] = st
 	}
-	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(states["mock-b"].Variables, want) {
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(decided(t, states["mock-b"].Variables), want) {
 		t.Fatalf("mock-b's state carries %+v", states["mock-b"].Variables)
 	}
-	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
+	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(decidedBinds(t, states["mock-b"].Binds), want) {
 		t.Fatalf("mock-b's state binds %+v", states["mock-b"].Binds)
 	}
 }
@@ -593,6 +620,7 @@ func TestALearnStepAnotherTestsVisibleRecordingIsNoSource(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	p := startedDrainProxy(t, 100)
 	p.learnTracker = learn.NewTracker()
+	p.learnTracker.SetAppClock(func(r time.Time) (time.Time, bool) { return r, true })
 	now := time.Now()
 	m1 := r3Mock("mock-t1", now.Add(500*time.Millisecond), "POST", "/ping", `{"at":1760436000}`, `{}`)
 	m2 := r3Mock("mock-t2", now.Add(2500*time.Millisecond), "POST", "/pong", `{"at":1760436000}`, `{}`)
@@ -1067,15 +1095,15 @@ func TestATestsOwnCallIsNotRefusedForAnotherTestsRowOnDisk(t *testing.T) {
 
 // Through the HTTP integration, the call's window ends when decodeHTTP had
 // the request whole: a start-up pool call's clock read in it is learned as
-// a read of the clock, whatever the receive's Date header holds. With no
-// window (the lead alone, which does not read it: F's clock ran 2 s past the
-// lead), it is learned as one too where that header is its server's stamp,
-// no place the value came from: a read of the clock a replay checks in its
-// call's own span, never noise, which would pass any value at every replay.
-// Where the server's clock ran a second ahead (its Date header after its
-// answer is no stamp), it is refused for that header: only the window learns
-// that one. The instants are fixed in UTC, so the row reads the same in every
-// zone.
+// a read of the clock, whatever the receive's Date header holds: a read a
+// replay checks in its call's window, never noise, which would pass any value
+// at every replay. With no app clock (keploy cannot tell which clock the
+// application reads), the call has no window, the lead alone does not read
+// the value (F's clock ran 2 s past the lead), and no replay could check a
+// read of the clock: it is refused at learn (the reason says so: learn's
+// TestAnInstantIsRefusedAtLearnWhereKeployCannotTellTheAppsClock), whether
+// or not that header is its server's stamp. The instants are fixed in UTC,
+// so the row reads the same in every zone.
 func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	iso := func(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z07:00") }
@@ -1113,19 +1141,18 @@ func TestAStartUpPoolCallsClockReadIsReadInTheWindowDecodeHTTPEnds(t *testing.T)
 					"POST /v1/events HTTP/1.1\r\nHost: deps.example\r\nContent-Type: application/json\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\n\r\n"+body)
 				st := r3States(mm)["mock-1"]
 				noise := st.ReqBodyNoise
-				if window || tc.stamp {
+				if window {
 					// An instant whole its call's window holds: a read of the
 					// clock, still compared at every replay (MockState.Clocks),
-					// never noise, its window's or, by its server's stamp
-					// alone with no window, its call's own span's.
+					// never noise.
 					_, clock := st.Clocks["body.processed_at"]
 					if code != http.StatusOK || got != `{"ok":true}` || !clock || noise["body.processed_at"] != nil {
 						t.Fatalf("answered %d %s, learned noise %v clocks %v; want the pool recording, its clock read learned at body.processed_at", code, got, noise, st.Clocks)
 					}
 					return
 				}
-				if code == http.StatusOK || noise["body.processed_at"] != nil {
-					t.Fatalf("by the lead alone, the server's clock a second ahead: answered %d %s, learned %v; want refused", code, got, noise)
+				if code == http.StatusOK || noise["body.processed_at"] != nil || len(st.Clocks) != 0 {
+					t.Fatalf("by the lead alone, no app clock: answered %d %s, learned noise %v clocks %v; want refused", code, got, noise, st.Clocks)
 				}
 			})
 		}

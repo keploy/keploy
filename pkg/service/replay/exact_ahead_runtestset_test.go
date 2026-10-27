@@ -239,9 +239,9 @@ type aheadMockDB struct {
 	persisted func(map[string]models.MockState)
 }
 
-func (m aheadMockDB) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+func (m aheadMockDB) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, map[string][]string, error) {
 	m.persisted(states)
-	return nil, nil
+	return nil, nil, nil
 }
 
 // aheadRun runs, under exact serving, a set of five test cases, test-4 and
@@ -933,7 +933,9 @@ func TestRunTestSet_TheRetryCyclesAreServedWhatTheFirstCycleLearned(t *testing.T
 			}
 			for _, st := range p.Learned {
 				got = append(got, st.Name)
-				if !reflect.DeepEqual(st, kept[st.Name]) {
+				// What the round keeps carries where each decision came
+				// from (learn.StampStates), which serving never reads.
+				if !reflect.DeepEqual(decisions(st), decisions(kept[st.Name])) {
 					t.Fatalf("%s was served the retry cycles as %+v; the round keeps %+v", st.Name, st, kept[st.Name])
 				}
 			}

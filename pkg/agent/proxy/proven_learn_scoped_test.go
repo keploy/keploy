@@ -76,10 +76,10 @@ func TestALearnStepVariableRidesAScopedHold(t *testing.T) {
 	for _, st := range mm.GetConsumedMocks() {
 		states[st.Name] = st
 	}
-	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(states["mock-b"].Variables, want) {
+	if want := (models.MockVariables{"order": {Recorded: "o-1", Use: []string{"url.path[1]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(decided(t, states["mock-b"].Variables), want) {
 		t.Fatalf("mock-b's state carries %+v", states["mock-b"].Variables)
 	}
-	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(states["mock-b"].Binds, want) {
+	if want := (map[string]models.MockVariables{"mock-a": {"order": {Recorded: "o-1", Bind: "body.order"}}}); !reflect.DeepEqual(decidedBinds(t, states["mock-b"].Binds), want) {
 		t.Fatalf("mock-b's state binds %+v", states["mock-b"].Binds)
 	}
 }

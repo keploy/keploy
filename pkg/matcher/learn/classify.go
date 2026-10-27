@@ -456,6 +456,18 @@ const (
 	// step learns it only for a caller whose replay so compares it
 	// (Window.ComparesOffsets); for any other it is unaccounted.
 	KindClockOffset Kind = "clock-offset"
+	// KindClockRead is a drifted leaf that is a plain read of the
+	// application's clock whole (Learned.Read): compared, never noise. A
+	// replay checks the value it sees is a read made in its own call's span
+	// on the application's clock (models.ClockOffset.Holds at offset zero).
+	// It is its own kind, never KindNoise with a read beside it, so that a
+	// caller whose replay checks no clock read, and switches on the kind
+	// alone, refuses it with its Why (clockReadUncheckedWhy, or the reason
+	// keploy refused such a value before it learned it as a read) rather
+	// than learn it as noise that lets any value pass at every replay. A
+	// caller whose replay checks it writes it to models.MockSpec.Clocks
+	// (Learned.Clock).
+	KindClockRead Kind = "clock-read"
 	// KindUnaccounted is a drift keploy can learn as none of the three:
 	// no earlier place is its source, and yet its readings cannot show it
 	// came from nowhere (unaccounted). The request is refused.
@@ -539,20 +551,24 @@ type Learned struct {
 	// the value at from the application's clock in both runs; nil for any
 	// other kind.
 	Offset *models.ClockOffset
-	// Read is, of a noise leaf (KindNoise) that is a read of the
-	// application's clock whole, that read as a replay checks it: a zero
+	// Read is, of a leaf that is a read of the application's clock whole
+	// (KindClockRead), that read as a replay checks it: a zero
 	// offset (models.ClockOffset.Plain) at the resolution the learn step
 	// read it at, the coarsest of the two values' encodings and the
 	// granularity they share. The leaf is an instant its protocol types that
-	// names its moment, or a text or a number that is one such instant whole
-	// (readClockText), every word of it that changed a read of the clock. A
+	// names its moment or is a wall clock of no zone, or a text or a number
+	// that is one such instant whole (readClockText), every word of it that
+	// changed a read of the clock; of a wall clock of no zone, it carries the
+	// zone the learn step read it in (models.ClockOffset.Zone, wallZone),
+	// which a replay reads it in alone. A
 	// caller whose replay checks it writes it to models.MockSpec.Clocks
 	// (Clock), not to the request-body noise, so the value is still
 	// compared: it must be a read of the clock made in its own call's window
-	// (ClockReadHolds). nil for any other leaf: a wall clock that names no
-	// zone or a time of day (no window holds either without a zone or a
-	// day), and a clock read that is only a part of a longer value, stay
-	// noise.
+	// (ClockReadHolds). A time of day whole (a type of its protocol, or a
+	// text: timeOfDayOf), which names no day, is a read too, in the zone its
+	// recording read it in (todRead), which a replay checks modulo a day in
+	// its call's span. nil for any other leaf: a clock read that is only a
+	// part of a longer value stays noise.
 	Read *models.ClockOffset
 	// Why, of an unaccounted drift, is why it cannot be noise; of noise
 	// record's full round learned past a source it served unchanged that
@@ -563,6 +579,11 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// SetAside is, of noise whose Why names the source it set aside, that
+	// source's mock, as Why names it, so a caller can name its call in a
+	// form that survives renames instead; "" otherwise, and for the test
+	// case's own request.
+	SetAside string
 }
 
 // Classify decides each drifted leaf of the mock rec was paired with
@@ -1005,7 +1026,8 @@ func givenAtCall(raw []Raw, at time.Time, given GivenEarlier) ([]Raw, bool) {
 //
 // A value the late reading learns as the clock plus an offset
 // (KindClockOffset), which the earlier place's reading binds (a variable,
-// or an echo) or learns as noise, is refused too: the two readings explain
+// or an echo) or learns as noise or a plain read (KindClockRead), is
+// refused too: the two readings explain
 // it differently, and keploy cannot tell which the application did. One
 // the earlier place's reading refuses keeps that refusal and its reason.
 // (The earlier place's reading never learns an offset the late one does
@@ -1023,7 +1045,11 @@ func stricterOf(asPlace, asLate Learned) Learned {
 			return asPlace
 		}
 		b := boundAt(asPlace)
-		if b == "" {
+		switch {
+		case b != "":
+		case asPlace.Kind == KindClockRead:
+			b = "a plain read of the application's clock, at no offset"
+		default:
 			b = "noise, which no replay compares"
 		}
 		asLate.Why = "read as a recording made after the call, " + clockOffsetSeen(fieldName(asLate.Recorded), *asLate.Offset) + "; read as one made before it, the value would be " + b + ", and keploy refuses a value the two readings explain differently"
@@ -1172,9 +1198,11 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				switch {
 				case ln.Kind != KindNoise:
 				case fol.refuted != "":
-					ln.Why = fol.refuted + ", and keploy learns it as varying"
+					ln.Why, ln.SetAside = fol.refuted+", and keploy learns it as varying", fol.refutedMock
 				case fol.moved != "":
-					ln.Why = fol.moved + ", and keploy learns it as varying"
+					ln.Why, ln.SetAside = fol.moved+", and keploy learns it as varying", fol.movedMock
+				case fol.kept != "":
+					ln.Why, ln.SetAside = fol.kept+", and keploy learns it as varying", fol.keptMock
 				}
 			case KindEcho:
 				why := fol.first
@@ -1184,8 +1212,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
 			}
 		}
+		// A time of day whole (textTimeOfDay), which names no day, is a
+		// read modulo a day (textTodRead), checked so at every replay.
 		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
 			ln.Read = textClockRead(r.Value, l.Value)
+			if ln.Read == nil {
+				ln.Read = dc.textTodRead(r.Value, l.Value, w, at)
+			}
 		}
 		// A value that is one instant whole in both runs (readClockText),
 		// learned as noise that the lead did not show a read of the clock
@@ -1200,15 +1233,57 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// application's clock may write (UTC, the application's own:
 		// Window.holdsRead) it is refused, as a read made before that window
 		// or no plain read of the clock (outsideWindowWhy).
+		//
+		// Where keploy cannot tell which clock the application reads
+		// (DriftCache.appClock), a call has no window and no replay can
+		// check a read of the clock (Tracker.LiveSpan): one with no window
+		// is refused here, at learn (noAppClockWhy), never learned as a read
+		// only a replay refuses.
+		//
+		// One its window holds only as a wall clock of no zone in the
+		// application's zone is a plain read of the clock too, never noise
+		// left unchecked. Each read of a wall clock of no zone carries the
+		// zone the learn step read it in (textReadZone), and a replay
+		// checks it in that zone alone (clockReadIn).
+		//
+		// A time of day whole in both runs, which no window holds (it names
+		// no day), is a read modulo a day all the same, never noise: every
+		// replay checks it in its call's span (textTodRead).
 		if ln.Kind == KindNoise && ln.Read == nil {
-			if read := textClockRead(r.Value, l.Value); read != nil {
-				switch {
-				case w == nil:
+			if read := dc.textTodRead(r.Value, l.Value, w, at); read != nil {
+				if w == nil && !dc.appClock {
+					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
+				} else {
 					ln.Read = read
-				case !dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w):
+				}
+			} else if read := textClockRead(r.Value, l.Value); read != nil {
+				switch {
+				case w == nil && !dc.appClock:
+					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
+				case w == nil || dc.windowHolds(dc.ofIn(r.Value, l.Value, w, at), w):
+					ln.Read = read
+				default:
 					ln.Kind, ln.Why = KindUnaccounted, outsideWindowWhy
 				}
 			}
+		}
+		// A read whose two runs wrote it in two layouts (an ISO text, then
+		// an epoch number; a time to the second, then to the minute), or in
+		// one layout that names its zone in one run and none in the other
+		// ("…Z", then a wall clock of no zone), is refused: a replay checks
+		// the form its learn step saw, and this one saw two.
+		switch {
+		case ln.Read != nil && ln.Read.Layout == models.LayoutApart:
+			ln.Kind, ln.Why, ln.Read = KindUnaccounted, textLayoutChangedWhy(r.Value, l.Value), nil
+		case ln.Read != nil:
+			if why := textFormChangedWhy(r.Value, l.Value); why != "" {
+				ln.Kind, ln.Why, ln.Read = KindUnaccounted, why, nil
+				break
+			}
+			if !models.LayoutTimeOfDay(ln.Read.Layout) {
+				ln.Read.Zone = dc.textReadZone(r.Value, l.Value, w, at)
+			}
+			ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
 		}
 		out = append(out, ln)
 	}
@@ -1661,11 +1736,19 @@ type DriftCache struct {
 	// beside UTC (Tracker.SetAppZone), nil for UTC alone: a client test's
 	// window reads such a wall clock in those two only (Window.holdsRead),
 	// and so does the clock rule of one its protocol types (instantClock).
-	zone   *time.Location
-	mu     sync.Mutex
-	m      map[driftKey]*valueDrift
-	raw    map[string]string
-	rawTok map[string][]map[string]bool
+	zone *time.Location
+	// appClock: the tracker knows which clock the application reads
+	// (Tracker.SetAppClock), set as the tracker makes the cache and as the
+	// agent sets the clock. false (a cache made otherwise, NewDriftCache)
+	// where keploy cannot tell: a call then has no window, and no replay can
+	// check a read of the clock (Tracker.LiveSpan), so an instant only a
+	// call's window could show a read is refused at learn (noAppClockWhy),
+	// never learned as a read that only a replay refuses.
+	appClock bool
+	mu       sync.Mutex
+	m        map[driftKey]*valueDrift
+	raw      map[string]string
+	rawTok   map[string][]map[string]bool
 	// mockText is each mock as Classify reads it (RawOf: its text and its
 	// answer's clock reads), by mock: the store's mocks are read once per
 	// test, not once per request.

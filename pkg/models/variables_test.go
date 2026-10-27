@@ -417,6 +417,11 @@ func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
 		{"a window that ends before it starts", from.Add(5 * ms), ms, o, to, from, false},
 		{"a cut to the second at a millisecond's encoding", from.Truncate(time.Second), ms, ClockOffset{Res: time.Second}, from.Add(-600 * ms), to, false},
 		{"a millisecond's Res at a nanosecond's replay", from.Add(5 * ms), time.Nanosecond, o, from, to, false},
+		{"a wall clock of no zone read in the application's zone", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneApp}, from, to, true},
+		{"a wall clock of no zone read in UTC", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneUTC}, from, to, true},
+		{"two learnings in different zones", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: ZoneApart}, from, to, false},
+		{"a zone this keploy does not read", from.Add(5 * ms), ms, ClockOffset{Res: ms, Zone: "pst"}, from, to, false},
+		{"an offset in a zone this keploy does not read", from.Add(30*time.Minute + 5*ms), ms, ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + ms, Res: ms, Zone: "pst"}, from, to, false},
 	} {
 		if got := row.o.Holds(row.at, row.res, row.from, row.to); got != row.want {
 			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
@@ -485,5 +490,137 @@ func TestAPlainClockReadHoldsNothingInAWindowThatEndsBeforeItStarts(t *testing.T
 	}
 	if o.Holds(from.Add(-300*time.Millisecond), time.Second, from, from.Add(-200*time.Millisecond)) {
 		t.Fatal("a window that ends before it starts held a read")
+	}
+}
+
+// A place's zone (ClockOffset.Zone) is carried through Meet: two learnings
+// in one zone keep it, two in different zones meet as ZoneApart, which is
+// Empty and holds nothing, in either order and however grouped. String
+// names the zone a replay reads a wall clock of no zone in, and says so of
+// ZoneApart and of a zone this keploy does not read; ZoneKnown is true of
+// "", ZoneUTC and ZoneApp alone.
+func TestAClockReadsZoneMeetsAsOneOrHoldsNothing(t *testing.T) {
+	ms := time.Millisecond
+	app, utc, named := ClockOffset{Res: ms, Zone: ZoneApp}, ClockOffset{Res: time.Second, Zone: ZoneUTC}, ClockOffset{Res: ms}
+	if got := app.Meet(ClockOffset{Res: time.Second, Zone: ZoneApp}); got != (ClockOffset{Res: time.Second, Zone: ZoneApp}) || got.Empty() {
+		t.Errorf("two reads in the application's zone met as %+v (Empty %v); want one there at the coarser Res", got, got.Empty())
+	}
+	for _, pair := range [][2]ClockOffset{{app, utc}, {utc, app}, {app, named}, {named, utc}} {
+		got := pair[0].Meet(pair[1])
+		if got.Zone != ZoneApart || !got.Empty() || got.Holds(time.Unix(0, 0), ms, time.Unix(0, 0), time.Unix(1, 0)) {
+			t.Errorf("%+v meet %+v = %+v (Empty %v); want ZoneApart, Empty, holding nothing", pair[0], pair[1], got, got.Empty())
+		}
+		if s := got.String(); !strings.Contains(s, "no one zone") {
+			t.Errorf("String of %+v = %q; want it to say no one zone holds it", got, s)
+		}
+	}
+	if a, b := app.Meet(utc).Meet(app), app.Meet(utc.Meet(app)); a != b {
+		t.Errorf("Meet grouped two ways: %+v and %+v", a, b)
+	}
+	// A read in either zone meets one in UTC or in the application's zone as
+	// that one, the zone both hold, in either order; another of either as
+	// either; one that names its zone as no zone at all. Grouped any way,
+	// either, UTC and the application's meet as ZoneApart.
+	either := ClockOffset{Res: ms, Zone: ZoneEither}
+	for _, row := range []struct {
+		with ClockOffset
+		want string
+	}{{utc, ZoneUTC}, {app, ZoneApp}, {either, ZoneEither}, {named, ZoneApart}, {ClockOffset{Res: ms, Zone: "pst"}, ZoneApart}} {
+		for _, got := range []ClockOffset{either.Meet(row.with), row.with.Meet(either)} {
+			if got.Zone != row.want || got.Empty() != (row.want == ZoneApart) {
+				t.Errorf("either meet %+v = %+v (Empty %v); want zone %q", row.with, got, got.Empty(), row.want)
+			}
+		}
+	}
+	for _, got := range []ClockOffset{either.Meet(utc).Meet(app), either.Meet(utc.Meet(app)), app.Meet(either).Meet(utc), utc.Meet(app.Meet(either))} {
+		if got.Zone != ZoneApart || !got.Empty() {
+			t.Errorf("either, UTC and the application's zone met as %+v; want ZoneApart", got)
+		}
+	}
+	for _, row := range []struct {
+		o    ClockOffset
+		want string
+	}{
+		{named, "clock"},
+		{app, "clock, a wall clock of no zone in the application's zone"},
+		{utc, "clock, a wall clock of no zone in UTC"},
+		{either, "clock, a wall clock of no zone in UTC or in the application's zone"},
+		{ClockOffset{Res: ms, Zone: "pst"}, `clock read in a zone this keploy does not read ("pst")`},
+	} {
+		if got := row.o.String(); got != row.want {
+			t.Errorf("String of %+v = %q; want %q", row.o, got, row.want)
+		}
+	}
+	for zone, want := range map[string]bool{"": true, ZoneUTC: true, ZoneApp: true, ZoneEither: true, ZoneApart: false, "pst": false} {
+		if got := (ClockOffset{Res: ms, Zone: zone}).ZoneKnown(); got != want {
+			t.Errorf("ZoneKnown of %q = %v; want %v", zone, got, want)
+		}
+	}
+}
+
+// A read's Layout meets another as the one both saw, a Layout of "" (learned
+// before Layout was) as the other, and two layouts as LayoutApart, which is
+// Empty, holds nothing and says so, in either order and grouped either way.
+// A Layout this keploy does not name holds nothing. The Layout survives a
+// YAML, JSON and BSON-tagged round trip, and a read of none writes no field.
+func TestAClockReadsLayoutMeetsAsOneOrHoldsNothing(t *testing.T) {
+	ms := time.Millisecond
+	sec, epoch, old := ClockOffset{Res: ms, Layout: "iso-second"}, ClockOffset{Res: ms, Layout: "epoch-ms"}, ClockOffset{Res: ms}
+	at, from, to := time.Unix(100, 0), time.Unix(100, 0), time.Unix(101, 0)
+	if got := sec.Meet(ClockOffset{Res: time.Second, Layout: "iso-second"}); got != (ClockOffset{Res: time.Second, Layout: "iso-second"}) || got.Empty() {
+		t.Errorf("two reads in one layout met as %+v; want that layout at the coarser Res", got)
+	}
+	for _, got := range []ClockOffset{sec.Meet(old), old.Meet(sec)} {
+		if got.Layout != "iso-second" || got.Empty() || !got.Holds(at, ms, from, to) {
+			t.Errorf("a read of no Layout met one in iso-second as %+v; want iso-second, holding", got)
+		}
+	}
+	for _, pair := range [][2]ClockOffset{{sec, epoch}, {epoch, sec}, {sec, ClockOffset{Res: ms, Layout: LayoutTyped}}} {
+		got := pair[0].Meet(pair[1])
+		if got.Layout != LayoutApart || !got.Empty() || got.Holds(at, ms, from, to) {
+			t.Errorf("%+v meet %+v = %+v (Empty %v); want LayoutApart, Empty, holding nothing", pair[0], pair[1], got, got.Empty())
+		}
+		if s := got.String(); !strings.Contains(s, "no one form") {
+			t.Errorf("String of %+v = %q; want it to say no one form holds it", got, s)
+		}
+	}
+	if a, b := sec.Meet(epoch).Meet(old), sec.Meet(epoch.Meet(old)); a != b {
+		t.Errorf("Meet grouped two ways: %+v and %+v", a, b)
+	}
+	unknown := ClockOffset{Res: ms, Layout: "iso-week"}
+	if unknown.LayoutKnown() || unknown.Holds(at, ms, from, to) || !strings.Contains(unknown.String(), "a layout this keploy does not read") {
+		t.Errorf("an unknown layout: known %v, holds %v, %q; want unknown, holding nothing, saying so", unknown.LayoutKnown(), unknown.Holds(at, ms, from, to), unknown.String())
+	}
+	for _, o := range []ClockOffset{sec, old, {Res: ms, Layout: LayoutTyped}} {
+		if !o.LayoutKnown() {
+			t.Errorf("%+v: layout unknown; want known", o)
+		}
+	}
+	if s := sec.String(); s != "clock, written as an ISO 8601 date and time to the second or a fraction of it" {
+		t.Errorf("String of %+v = %q", sec, s)
+	}
+	if s := (ClockOffset{Res: ms, Layout: LayoutTyped}).String(); s != "clock" {
+		t.Errorf("String of a typed read = %q; want clock", s)
+	}
+	for _, o := range []ClockOffset{sec, old} {
+		y, err := yaml.Marshal(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back ClockOffset
+		if err := yaml.Unmarshal(y, &back); err != nil || back != o {
+			t.Errorf("YAML round trip of %+v = %+v (%v)", o, back, err)
+		}
+		if strings.Contains(string(y), "layout") != (o.Layout != "") {
+			t.Errorf("YAML of %+v = %q; want a layout field only where Layout is set", o, y)
+		}
+		j, _ := json.Marshal(o)
+		var jb ClockOffset
+		if err := json.Unmarshal(j, &jb); err != nil || jb != o {
+			t.Errorf("JSON round trip of %+v = %+v (%v)", o, jb, err)
+		}
+	}
+	if f, ok := reflect.TypeOf(ClockOffset{}).FieldByName("Layout"); !ok || f.Tag.Get("bson") != "layout,omitempty" {
+		t.Errorf("Layout's bson tag = %q; want layout,omitempty", f.Tag.Get("bson"))
 	}
 }

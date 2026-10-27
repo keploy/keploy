@@ -126,16 +126,33 @@ func (w *Window) ComparesOffsets() *Window {
 
 // Span is one run's part of a Window: From, when its previous data-plane
 // call reached keploy, and To, when the call itself did, on its app clock.
-type Span struct{ From, To time.Time }
+// Zone is the zone the application writes a wall clock of no zone in
+// (Tracker.SetAppZone), as a replay's span carries it (Tracker.LiveSpan),
+// which a replay reads a learned read of the clock in the application's
+// zone in (models.ZoneApp, and models.ZoneEither as one of its two
+// readings: CheckClockRead); nil where the tracker was told none: such a
+// read is then refused. A Window's spans carry none: the learn
+// step reads the zone of its DriftCache.
+type Span struct {
+	From, To time.Time
+	Zone     *time.Location
+}
 
 // holds reports whether t, an instant read at resolution res, is a read of
-// the clock within s: each bound is read at the instant's own resolution (a
-// value in seconds is the second its read was made in).
+// the clock within s: t stands for the unit [t, t+res) its read was made in
+// (a value in seconds is the second its read was made in), and some instant
+// of s lies in it. A unit that starts off UTC's grid of res (a wall clock of
+// no zone read in the application's zone: the day of a date in IST starts at
+// 18:30 UTC) is read so too, never by cutting s's bounds to that grid. A
+// res of none is a nanosecond's: t itself lies in s.
 func (s Span) holds(t time.Time, res time.Duration) bool {
 	if s.From.IsZero() || s.To.IsZero() {
 		return false
 	}
-	return !t.Before(s.From.Truncate(res)) && !t.After(s.To.Truncate(res))
+	if res <= 0 {
+		res = time.Nanosecond
+	}
+	return !t.After(s.To) && t.Add(res).After(s.From)
 }
 
 // holds reports whether recorded and live, an instant in layout lay each,
@@ -470,12 +487,18 @@ func readEpoch(s string) (time.Time, time.Duration, bool) {
 	var res time.Duration
 	digits := s
 	if i := strings.IndexByte(s, '.'); i >= 0 {
+		// Its seconds and its fraction's digits read exactly, never through
+		// a float64, which holds a second's fraction near 2026 only to
+		// about 240 ns: a value the application cut to the millisecond
+		// must read as a whole millisecond (readRes tells the cut by it).
 		digits = s[:i]
-		f, err := strconv.ParseFloat(s, 64)
-		if err != nil {
+		n, err := strconv.ParseInt(digits, 10, 64)
+		frac := s[i+1:]
+		if err != nil || frac == "" || strings.Trim(frac, "0123456789") != "" {
 			return time.Time{}, 0, false
 		}
-		t, res = time.Unix(0, int64(f*1e9)).UTC(), fractionRes(len(s)-i-1)
+		ns, _ := strconv.ParseInt((frac + "00000000")[:9], 10, 64)
+		t, res = time.Unix(n, ns).UTC(), fractionRes(len(frac))
 	} else {
 		n, err := strconv.ParseInt(digits, 10, 64)
 		if err != nil {

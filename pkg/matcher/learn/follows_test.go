@@ -66,7 +66,7 @@ func classifyF(t *testing.T, recorded, live string, earlier []Earlier, raw []Raw
 	t.Helper()
 	const path = "bind.$8"
 	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}
-	got := ClassifyFollowing(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
+	got := ClassifyFollowing(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, rec, eRecAt, earlier, raw, resp, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 	}
@@ -97,7 +97,7 @@ func TestEFlywayExecutionTimeBesideStartupWordsIsLearnedVarying(t *testing.T) {
 			t.Errorf("execution_time 82 at record, %s in F (%s): %s (%q), want noise", tc.f, tc.matched, got.Kind, got.Why)
 		}
 		path := "bind.$8"
-		today := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
+		today := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.f}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}, eRecAt, nil, eStartup(), nil, nil, nil)
 		if today[0].Kind != KindUnaccounted {
 			t.Errorf("ClassifyGiven, execution_time 82 at record, %s in F: %s, want refused (the rule is ClassifyFollowing's)", tc.f, today[0].Kind)
 		}
@@ -327,12 +327,14 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 			t.Errorf("%s: a variable of %q (%+v), want of %s", tc.name, got.From.Mock, got.From, tc.from)
 		case tc.why != "" && !strings.Contains(got.Why, tc.why):
 			t.Errorf("%s: %s, why %q, want it to hold %q", tc.name, got.Kind, got.Why, tc.why)
+		case strings.Contains(tc.why, moved) && !namesItsSource(got):
+			t.Errorf("%s: the noise names %q as the source it set aside, its why %q", tc.name, got.SetAside, got.Why)
 		}
 		if tc.kind != KindNoise {
 			continue
 		}
 		path := "bind.$8"
-		given := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
+		given := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, tc.earlier, tc.raw, nil, nil, nil)
 		if given[0].Kind == KindNoise {
 			t.Errorf("FALSE GREEN? ClassifyGiven, %s: noise (%q), want it never learned (the rule is ClassifyFollowing's)", tc.name, given[0].Why)
 		}
@@ -374,7 +376,10 @@ func TestAVariableReadingFDidNotFollowIsNoise(t *testing.T) {
 	if got.Kind != KindNoise || !strings.Contains(got.Why, "its recorded value stands whole in mock-5 at") || !strings.Contains(got.Why, "which record's full round sent and gave the application as recorded, byte for byte, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying") {
 		t.Errorf("50 recorded beside VARCHAR(50) F sent unchanged, 7 in F: %s (%q), want noise naming mock-5", got.Kind, got.Why)
 	}
-	if today := ClassifyGiven(NewDriftCache(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
+	if got.SetAside != "mock-5" || !namesItsSource(got) {
+		t.Errorf("the noise names mock-5 as the source it set aside, but SetAside is %q", got.SetAside)
+	}
+	if today := ClassifyGiven(clockedDrifts(), []string{"bind.$8"}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "7"}}}, Shape{Leaves: map[string]Leaf{"bind.$8": {Path: "bind.$8", Type: String, Value: "50"}}}, eRecAt, nil, startup(eHistory(before, 6, true)), nil, nil, nil); today[0].Kind != KindVariable || today[0].From.Mock != "mock-5" {
 		t.Errorf("ClassifyGiven, 50 beside VARCHAR(50), 7 in F: %s (%q), want a variable of mock-5 (the rule is ClassifyFollowing's)", today[0].Kind, today[0].Why)
 	}
 	for _, tc := range []struct {
@@ -812,7 +817,7 @@ func TestAValueCopiedFromAStartUpIsRefusedWhenItsConnectionsSwapRoles(t *testing
 	const path = "bind.$8"
 	given := func(recorded, live string, raw []Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}
@@ -911,7 +916,7 @@ func TestAValueRecordedAsAWordEveryStartUpCarriesAlikeIsReadAsAnyRecordings(t *t
 		if got := classifyF(t, tc.recorded, tc.live, nil, raw, nil); got.Kind != KindNoise {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, the rule a copy follows its source: %s (%q); want noise", tc.recorded, tc.field, tc.live, got.Kind, got.Why)
 		}
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: tc.recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 || got[0].Kind != KindVariable || got[0].From.Mock != "mock-hs-81" || got[0].From.startUp {
 			t.Errorf("%s at record, a word every start-up carries alike (%s), %s in F, without the rule: %+v; want a variable at mock-hs-81 like any recording's word, not a start-up refusal", tc.recorded, tc.field, tc.live, got)
 		}
@@ -930,7 +935,7 @@ func TestAStartUpWordTheConnectionsDifferInIsRefusedWhateverItsField(t *testing.
 	const path = "bind.$8"
 	given := func(recorded, live string, raw []Raw) Learned {
 		t.Helper()
-		got := ClassifyGiven(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
+		got := ClassifyGiven(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: live}}}, Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: recorded}}}, eRecAt, nil, raw, nil, nil, nil)
 		if len(got) != 1 {
 			t.Fatalf("%q recorded, %q in F: %+v", recorded, live, got)
 		}
@@ -990,5 +995,49 @@ func TestAStartUpMatchInNoOneFieldIsReadAsASwapsWord(t *testing.T) {
 	other := RawOf(&models.Mock{Name: "mock-q", Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", URL: "http://deps.example/a"}}}, false)
 	if other.swapHolds(other.text, raw, func(string) bool { return false }) {
 		t.Error("a recording that is no start-up is read as one")
+	}
+}
+
+// namesItsSource reports whether noise learned past a source names, in
+// SetAside, the mock its Why names, so a caller can name that call by its
+// call key instead.
+func namesItsSource(l Learned) bool {
+	return l.Why != "" && l.SetAside != "" && (strings.Contains(l.Why, l.SetAside+" at ") || strings.Contains(l.Why, l.SetAside+"'s payload"))
+}
+
+// Noise learned past a word of the test case's own request, which F gave
+// the application another value at, names that request in its why and no
+// mock as the source it set aside: the request is no recording, so a caller
+// keeps the why's own words for it.
+func TestNoiseLearnedPastTheTestCasesRequestNamesNoMock(t *testing.T) {
+	before := eRecAt.Add(-50 * time.Millisecond)
+	given := []Earlier{{Mock: givenPlace("t1"), Given: true, At: before, Payload: eLeaf(before, 6, "", "").Payload, Seen: []Seen{
+		{Side: Request, Leaf: Leaf{Path: "body.cmd.documents.0._id", Type: String, Value: chanceSrcRec}, Live: chanceSrcLive},
+	}}}
+	got := classifyF(t, chanceValRec, chanceValLive, given, eStartup(), nil)
+	if got.Kind != KindNoise || !strings.Contains(got.Why, "stands in test case t1 at") || got.SetAside != "" {
+		t.Fatalf("%s (%q), set aside %q: want noise naming test case t1 and no mock", got.Kind, got.Why, got.SetAside)
+	}
+}
+
+// Noise learned past a word of the value that both runs gave the
+// application at an earlier place, as recorded, while the value took none
+// of it, says so in its why and names that place's mock as the source it set
+// aside, as noise learned past a source F moved from does: so the about of
+// such noise never says keploy found the value nowhere. A place F moved
+// from, where there is one, is the one named.
+func TestNoiseLearnedPastAWordFGaveAsRecordedNamesItsSource(t *testing.T) {
+	before := eRecAt.Add(-50 * time.Millisecond)
+	got := classifyF(t, "took 82 ms", "took 5 ms", []Earlier{eLeaf(before, 6, "82", "82")}, eStartup(), nil)
+	const kept = "where record's full round gave the application that word as recorded, while the value changed: a copy moves with its source, so the value is no copy of it, and keploy learns it as varying"
+	if got.Kind != KindNoise || !strings.Contains(got.Why, " stands in mock-8 at body.retries, "+kept) {
+		t.Errorf("82 recorded beside a leaf both runs gave 82 at, 5 in F: %s (%q), want noise naming mock-8's place", got.Kind, got.Why)
+	}
+	if got.SetAside != "mock-8" || !namesItsSource(got) {
+		t.Errorf("the noise names %q as the source it set aside (its why %q), want mock-8", got.SetAside, got.Why)
+	}
+	got = classifyF(t, chanceValRec, chanceValLive, []Earlier{eLeaf(before, 6, chanceSrcRec, chanceSrcRec), eLeaf(before.Add(time.Millisecond), 7, chanceSrcRec, chanceSrcLive)}, eStartup(), nil)
+	if got.Kind != KindNoise || strings.Contains(got.Why, kept) || !strings.Contains(got.Why, "another value, which the value took none of the words of") {
+		t.Errorf("a word both runs gave as recorded and one F moved from: %s (%q), want noise naming the place F moved from", got.Kind, got.Why)
 	}
 }

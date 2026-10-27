@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -126,9 +127,31 @@ func (m *mockService) clientTestsRead() bool {
 }
 
 // learnedPersister writes what the learn step learned onto a set's mocks and
-// says what it added, by mock (the yaml mock store, PersistLearned).
+// says what it added, by mock, and what a person's entry kept from being
+// applied (blocked) (the yaml mock store, PersistLearned).
 type learnedPersister interface {
-	PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error)
+	PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (added, blocked map[string][]string, err error)
+}
+
+// learnedStamp is what record's full round writes into the about of each
+// decision it learned (learn.Stamp): the test open when each mock's were
+// learned is the first test that consumed it (flows), else the test whose
+// mapping holds it (owner); one neither names was learned between tests.
+func learnedStamp(flows []FlowMocks, owner map[string]string) learn.Stamp {
+	test := make(map[string]string, len(owner))
+	for _, f := range flows {
+		for _, st := range f.Consumed {
+			if _, ok := test[st.Name]; !ok && f.Flow != "" {
+				test[st.Name] = f.Flow
+			}
+		}
+	}
+	for name, t := range owner {
+		if _, ok := test[name]; !ok && t != "" {
+			test[name] = t
+		}
+	}
+	return learn.Stamp{Round: models.AboutRoundFull, Run: learn.RunStarted(), Keploy: utils.Version, Test: test}
 }
 
 // persistLearned writes what the learn step learned onto the set's mocks, so
@@ -165,9 +188,13 @@ func (m *mockService) persistLearned(ctx context.Context, set string, consumed [
 		}
 		states[st.Name] = st
 	}
-	added, err := p.PersistLearned(ctx, set, states)
+	added, blocked, err := p.PersistLearned(ctx, set, learn.StampStates(states, learnedStamp(flows, owner)))
 	if err != nil {
 		return nil, nil, fmt.Errorf("writing what the learn step learned onto keploy/%s: %w", set, err)
+	}
+	if fields := learn.BlockedFields(blocked); len(fields) > 0 {
+		m.logger.Warn(learn.BlockedMessage,
+			zap.String("mock-set", set), zap.Strings("fields", fields), zap.String("next_step", learn.BlockedNextStep))
 	}
 	byTest := map[string][]string{}
 	seen := map[string]bool{}

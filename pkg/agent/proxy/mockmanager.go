@@ -672,9 +672,11 @@ func (m *MockManager) ResetForReplaySession() {
 	m.SetRecordingSource(nil)
 	m.SetRecordedBefore(nil)
 	m.SetRecordedOfKind(nil)
-	// Nor its scope table's pool names (SetPoolNames): until the next
-	// session sends its own, whose mock is the pool's is not known.
+	// Nor its scope table's pool names (SetPoolNames) and owners
+	// (SetPoolOwners): until the next session sends its own, whose mock is
+	// the pool's, and whose tests list each, is not known.
 	m.exact.poolNames.Store(nil)
+	m.exact.poolOwners.Store(nil)
 	if m.exact.view.Load() != nil {
 		m.installExact(&exactView{poolKey: models.PoolKeyNone, pool: map[string]struct{}{}})
 	}
@@ -3443,6 +3445,8 @@ func (m *MockManager) updateUnFilteredMock(old *models.Mock, new *models.Mock, g
 			ReqBodyNoise:     reqBodyNoiseOf(new.Spec),
 			Variables:        variablesOf(new.Spec),
 			Clocks:           clocksOf(new.Spec),
+			NoiseAbout:       noiseAboutOf(new.Spec),
+			ClockAbout:       clockAboutOf(new.Spec),
 			Binds:            bindsOf(new.Spec),
 			LearnedAfterEnd:  m.learnedAfterEnd(old, new),
 		}, old.TestModeInfo.StagedSet); err != nil {
@@ -3530,6 +3534,8 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Clocks:           clocksOf(mock.Spec),
+			NoiseAbout:       noiseAboutOf(mock.Spec),
+			ClockAbout:       clockAboutOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
@@ -3605,6 +3611,8 @@ func (m *MockManager) deleteFilteredMock(mock models.Mock, g *roundGuard) bool {
 				ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 				Variables:        variablesOf(mock.Spec),
 				Clocks:           clocksOf(mock.Spec),
+				NoiseAbout:       noiseAboutOf(mock.Spec),
+				ClockAbout:       clockAboutOf(mock.Spec),
 				Binds:            bindsOf(mock.Spec),
 				LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 				CarryOver:        true,
@@ -3680,6 +3688,8 @@ func (m *MockManager) deleteUnFilteredMock(mock models.Mock, g *roundGuard) bool
 			ReqBodyNoise:     reqBodyNoiseOf(mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Clocks:           clocksOf(mock.Spec),
+			NoiseAbout:       noiseAboutOf(mock.Spec),
+			ClockAbout:       clockAboutOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEndAt(removed, &mock),
 		}, mock.TestModeInfo.StagedSet); err != nil {
@@ -3847,6 +3857,8 @@ func (m *MockManager) deleteStartupMockFrom(tree *TreeDb, mock models.Mock) bool
 			ReqBodyNoise:     learnedNoiseOf(mk.Spec, mock.Spec),
 			Variables:        variablesOf(mock.Spec),
 			Clocks:           clocksOf(mock.Spec),
+			NoiseAbout:       noiseAboutOf(mock.Spec),
+			ClockAbout:       clockAboutOf(mock.Spec),
 			Binds:            bindsOf(mock.Spec),
 			LearnedAfterEnd:  m.learnedAfterEnd(m.servedAs(mk), &mock),
 			// A registered kind's startup-band mock first consumed after a
@@ -4084,9 +4096,11 @@ func (m *MockManager) markMockAsUsed(mock models.Mock, g *roundGuard) bool {
 		// What record's full round learned onto a mock this door keeps (a
 		// reusable stateful recording, a scoped worker's held own mock), as
 		// the other doors carry it (nil with the switch off).
-		Variables: variablesOf(mock.Spec),
-		Clocks:    clocksOf(mock.Spec),
-		Binds:     bindsOf(mock.Spec),
+		Variables:  variablesOf(mock.Spec),
+		Clocks:     clocksOf(mock.Spec),
+		NoiseAbout: noiseAboutOf(mock.Spec),
+		ClockAbout: clockAboutOf(mock.Spec),
+		Binds:      bindsOf(mock.Spec),
 		// Learning the consume carries beyond what exact serving handed
 		// the parser out, once the set's learn step ended.
 		LearnedAfterEnd: m.learnedAfterEndNamed(&mock),
@@ -4441,6 +4455,24 @@ func clocksOf(spec models.MockSpec) map[string]models.ClockOffset {
 	return maps.Clone(spec.Clocks)
 }
 
+// noiseAboutOf and clockAboutOf are what a consumed mock's state carries of
+// where its learned noise and clock reads came from (MockSpec.NoiseAbout,
+// MockSpec.ClockAbout): under the proven switch its own, as clocksOf. A
+// variable carries its own (variablesOf).
+func noiseAboutOf(spec models.MockSpec) map[string]models.About {
+	if !provenswitch.On() {
+		return nil
+	}
+	return models.CloneAbouts(spec.NoiseAbout)
+}
+
+func clockAboutOf(spec models.MockSpec) map[string]models.About {
+	if !provenswitch.On() {
+		return nil
+	}
+	return models.CloneAbouts(spec.ClockAbout)
+}
+
 // bindsOf is what a consumed mock's state carries of the variables the learn
 // step learned while answering it that are bound at an earlier mock
 // (MockSpec.LearnedBinds): under the proven switch only.
@@ -4501,6 +4533,8 @@ func (m *MockManager) flagMockAsUsed(mock models.MockState, staged uint64) error
 		if ok {
 			mock.Variables = models.MergeVariables(prev.Variables, mock.Variables)
 			mock.Clocks = models.MergeClocks(prev.Clocks, mock.Clocks)
+			mock.NoiseAbout = models.MergeAbouts(prev.NoiseAbout, mock.NoiseAbout)
+			mock.ClockAbout = models.MergeAbouts(prev.ClockAbout, mock.ClockAbout)
 			mock.Binds = models.MergeBinds(prev.Binds, mock.Binds)
 			if len(prev.ReqBodyNoise) > 0 {
 				mock.ReqBodyNoise = mocknoise.MergeLearned(mock.ReqBodyNoise, prev.ReqBodyNoise)

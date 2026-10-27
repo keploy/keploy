@@ -6,6 +6,7 @@ package learn
 // those cycles are served the recordings as the next keploy test reads them.
 
 import (
+	"maps"
 	"sort"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -51,21 +52,29 @@ func MergeReqBodyNoise(existing, detected map[string][]string) map[string][]stri
 // only the offsets both do, and is added when that changed it; one that
 // shares no offset with it is Empty and refuses every value there. A clock
 // read at a variable's place stays: the replay checks both.
-func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) []string {
-	var added []string
+//
+// A person's entry (models.AboutState.Hand: by hand, or learned and then
+// edited) wins over what was learned at its place, and blocked is each
+// learned change it kept from being applied, sorted, in added's spelling
+// and naming the entry that held (notApplied): the run's learn summary says
+// it once, and the file never carries it. A learned check (a variable or a
+// clock read) still replaces a person's noise at its place: the place is
+// then compared, and their about stays, an orphan keploy mock check
+// reports.
+func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVariables) (added, blocked []string) {
 	if !provenswitch.On() {
 		// Without the switch nothing learns variables, and noise merges as
 		// it always has.
 		for k := range st.ReqBodyNoise {
 			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
+				added = append(added, noiseAdded(k))
 			}
 		}
 		if len(st.ReqBodyNoise) > 0 {
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
 		}
 		sort.Strings(added)
-		return added
+		return added, nil
 	}
 	if len(st.Variables) > 0 || len(binds) > 0 {
 		vars := mock.Spec.Variables.Clone()
@@ -95,11 +104,19 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 				// Another variable of the same name: not this one.
 				continue
 			}
+			if s := models.VariableAboutState(n, cur); had && s.Hand() {
+				// A person's variable: a learned one never changes it.
+				for _, c := range variableAdded(n, cur, MergeVariable(cur, v)) {
+					blocked = append(blocked, notApplied(c, s))
+				}
+				continue
+			}
 			next := v
 			if had {
 				next = MergeVariable(cur, v)
 			}
 			added = append(added, variableAdded(n, cur, next)...)
+			next.About = variableAbout(n, cur, had, next, v.About)
 			vars[n] = next
 		}
 		mock.Spec.Variables = vars
@@ -121,9 +138,20 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			}
 		}
 		for k := range noise {
-			if _, ok := mock.Spec.ReqBodyNoise[k]; !ok {
-				added = append(added, k+" (noise)")
+			if _, ok := mock.Spec.ReqBodyNoise[k]; ok {
+				continue
 			}
+			if s := models.NoiseAboutState(&mock.Spec, k); s.Hand() {
+				// A person's about at a path they took out of the noise
+				// (by hand, or keploy's and edited since): the place
+				// stays compared.
+				blocked = append(blocked, notApplied(noiseAdded(k), s))
+				delete(noise, k)
+				continue
+			}
+			added = append(added, noiseAdded(k))
+			path := k
+			setAbout(&mock.Spec.NoiseAbout, k, st.NoiseAbout[k].Stamped(models.AboutKindNoise, k, false, func(run string) string { return models.NoiseSum(path, run) }))
 		}
 		if len(noise) > 0 {
 			mock.Spec.ReqBodyNoise = MergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
@@ -136,25 +164,114 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 		}
 		for path, o := range st.Clocks {
 			cur, had := clocks[path]
+			state := models.ClockAboutState(&mock.Spec, path)
 			next := o
 			if had {
 				next = cur.Meet(o)
 			}
+			if had && state.Hand() || !had && state == models.AboutHand {
+				// A person's clock read (or their about at a path they took
+				// out of the clocks): a learned one never changes it.
+				if !had || next != cur {
+					blocked = append(blocked, notApplied(clockAdded(path, next), state))
+				}
+				continue
+			}
 			if !had || next != cur {
-				added = append(added, path+" ("+next.String()+")")
+				added = append(added, clockAdded(path, next))
 			}
 			clocks[path] = next
+			at := path
+			sum := func(run string) string { return models.ClockSum(at, next, run) }
+			switch {
+			case !had:
+				setAbout(&mock.Spec.ClockAbout, path, st.ClockAbout[path].Stamped(models.AboutKindClock, path, false, sum))
+			case next != cur && state == models.AboutLearned:
+				// keploy's own clock read, narrowed: its sum follows.
+				a := mock.Spec.ClockAbout[path].Clone()
+				a.Sum = sum(a.Run)
+				mock.Spec.ClockAbout[path] = a
+			}
 		}
 		mock.Spec.Clocks = clocks
 	}
 	for k := range mock.Spec.ReqBodyNoise {
 		_, clock := mock.Spec.Clocks[k]
 		if varPlaces[k] || clock {
+			// The place is a variable's or a clock read's, so it is
+			// compared: the noise goes, and keploy's own about with it. A
+			// person's about stays, an orphan keploy mock check reports.
+			if !models.NoiseAboutState(&mock.Spec, k).Hand() {
+				delete(mock.Spec.NoiseAbout, k)
+			}
 			delete(mock.Spec.ReqBodyNoise, k)
 		}
 	}
 	sort.Strings(added)
-	return added
+	sort.Strings(blocked)
+	return added, blocked
+}
+
+// notApplied is how blocked (MergeLearned) names change, a learned change
+// in added's spelling, that the person's entry at its place, in state s,
+// kept from being applied.
+func notApplied(change string, s models.AboutState) string {
+	if s == models.AboutEdited {
+		return change + "; kept the entry there, edited by hand after keploy learned it"
+	}
+	return change + "; kept the entry there, written by hand"
+}
+
+// BlockedMessage is the run's learn summary line over what a person's
+// entries kept from being applied (BlockedFields), and BlockedNextStep what
+// to do about it.
+const (
+	BlockedMessage  = "keploy kept the entries a person wrote or edited, and did not apply what the learn step learned at their places"
+	BlockedNextStep = "to let keploy learn a place again, delete the entry there with its about block, and record again"
+)
+
+// BlockedFields is what a person's entries kept from being applied, by mock
+// name (blocked, MergeLearned), each as "<mock> <what was blocked>", sorted.
+func BlockedFields(blocked map[string][]string) []string {
+	var out []string
+	for name, bs := range blocked {
+		for _, b := range bs {
+			out = append(out, name+" "+b)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setAbout sets (*m)[key] to a, making the map when there is none.
+func setAbout(m *map[string]models.About, key string, a models.About) {
+	if *m == nil {
+		*m = map[string]models.About{}
+	}
+	(*m)[key] = a
+}
+
+// variableAbout is the about of variable name as next declares it, where
+// cur was on disk (had) and the learn step gave learned: one keploy adds is
+// stamped; keploy's own (cur learned, its sum matching) keeps its about and
+// its sum follows a change; one of unknown origin stays so, never stamped.
+// (A person's is never merged: MergeLearned.)
+func variableAbout(name string, cur models.MockVariable, had bool, next models.MockVariable, learned *models.About) *models.About {
+	sum := func(run string) string { return models.VariableSum(name, next, run) }
+	if !had {
+		var a models.About
+		if learned != nil {
+			a = *learned
+		}
+		s := a.Stamped(models.AboutKindVariable, name, next.Echo, sum)
+		return &s
+	}
+	if models.VariableAboutState(name, cur) != models.AboutLearned {
+		return nil
+	}
+	a := cur.About.Clone()
+	a.Sum = sum(a.Run)
+	return &a
 }
 
 // MergeVariable is two declarations of one variable in one call as one: a
@@ -164,7 +281,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 // both say so (models.MergeVariables).
 func MergeVariable(a, b models.MockVariable) models.MockVariable {
 	if a.Recorded == "" {
+		// a declares nothing yet: b is the first declaration, and where it
+		// came from goes with it.
 		a.Recorded, a.Echo = b.Recorded, b.Echo
+		a.About, a.Other = models.CloneAbout(b.About), maps.Clone(b.Other)
 	} else {
 		a.Echo = a.Echo && b.Echo
 	}
@@ -191,6 +311,48 @@ func unionSorted(a, b []string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+// noiseAdded is how added (MergeLearned) names noise learned at path.
+func noiseAdded(path string) string { return path + " (noise)" }
+
+// clockAdded is how added names the clock read o learned at path.
+func clockAdded(path string, o models.ClockOffset) string { return path + " (" + o.String() + ")" }
+
+// AddedAbouts is, by the name added (MergeLearned) gives each, the about of
+// every decision on mock that carries one: each ignored field, each clock
+// read, and each variable's bind and use places. The judge prints the why
+// of a learned line from it, so the line says what the file says. An about
+// at a path that is no longer noise or a clock read (an orphan) names no
+// decision, and a decision with no about (unknown origin) is not in it;
+// nil when there is none. The abouts share mock's Seen.
+func AddedAbouts(mock *models.Mock) map[string]models.About {
+	if mock == nil {
+		return nil
+	}
+	out := map[string]models.About{}
+	for path, a := range mock.Spec.NoiseAbout {
+		if _, ok := mock.Spec.ReqBodyNoise[path]; ok {
+			out[noiseAdded(path)] = a
+		}
+	}
+	for path, a := range mock.Spec.ClockAbout {
+		if o, ok := mock.Spec.Clocks[path]; ok {
+			out[clockAdded(path, o)] = a
+		}
+	}
+	for name, v := range mock.Spec.Variables {
+		if v.About == nil {
+			continue
+		}
+		for _, e := range variableAdded(name, models.MockVariable{}, v) {
+			out[e] = *v.About
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
 }
 

@@ -173,15 +173,18 @@ func (c *consumingAtStop) consumed() []models.MockState {
 }
 
 // learnedStore is the harness's mock store, which keeps what the learn step
-// learned: it records the consumed mocks it was handed.
+// learned: it records the consumed mocks it was handed, and says it added
+// added and that a person's entries kept blocked from being applied.
 type learnedStore struct {
 	*prMockDB
 	persisted map[string]models.MockState
+	added     map[string][]string
+	blocked   map[string][]string
 }
 
-func (l *learnedStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+func (l *learnedStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, map[string][]string, error) {
 	l.persisted = states
-	return nil, nil
+	return l.added, l.blocked, nil
 }
 
 // What the app consumes as the set's end stops it is drained into the set's

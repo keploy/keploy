@@ -1,6 +1,7 @@
 package models
 
 import (
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,31 @@ type MockVariable struct {
 	// regression. Each is still asserted at every one of its places. Only the
 	// learn step sets it, with a Bind; none for any other variable.
 	Clock []ClockRead `json:"clock,omitempty" yaml:"clock,omitempty" bson:"clock,omitempty"`
+	// About is where the variable came from (About); nil for one of
+	// unknown origin. Replay never reads it.
+	About *About `json:"about,omitempty" yaml:"about,omitempty" bson:"about,omitempty"`
+	// Other is the keys of the entry this keploy does not know, as written,
+	// so a rewrite keeps them.
+	Other UnknownKeys `json:"-" yaml:",inline" bson:"other,omitempty"`
+}
+
+type mockVariableJSON MockVariable
+
+// MarshalJSON writes v with the keys it does not know (Other) beside its own.
+func (v MockVariable) MarshalJSON() ([]byte, error) {
+	return MarshalJSONWithOther(mockVariableJSON(v), v.Other)
+}
+
+// UnmarshalJSON reads v, keeping the keys it does not know in Other.
+func (v *MockVariable) UnmarshalJSON(data []byte) error {
+	var w mockVariableJSON
+	other, err := UnmarshalJSONWithOther(data, &w)
+	if err != nil {
+		return err
+	}
+	w.Other = other
+	*v = MockVariable(w)
+	return nil
 }
 
 // ClockRead is one clock read a recorded value holds, as the learn step read
@@ -137,9 +163,22 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // bounded to a few milliseconds, never to a few minutes. Min is above zero
 // and Unit coarser than a second for any offset the learn step finds.
 //
-// Res is the resolution the learn step read the value at: the coarser of
-// the one its encoding writes and the granularity both runs' values share
-// (the greatest duration both are whole multiples of, from the Unix epoch).
+// Res is the resolution the learn step read the value at: of an offset, the
+// coarser of the one its encoding writes and the granularity both runs'
+// values share (the greatest duration both are whole multiples of, from the
+// Unix epoch); of a Plain read, the one its encoding writes, or, where both
+// values are a cut the application made (CutCoarserThan), the unit above it
+// (UnitAbove), never what the two share by chance (learn's readRes), so the
+// same recording learns the same Res whichever value record's full round
+// read. Of a text or a number, the encoding's is the finer of the two
+// values' forms (learn's textReadRes): a writer that drops a fraction's
+// trailing zeros writes fewer digits where its read fell on a whole unit, so
+// a fraction's digits bound its writer's resolution from above only, and one
+// value that happens to end in zeros never coarsens Res. Two that both
+// happen to end in zeros at a unit (one field in about a million, on a
+// clock of nanoseconds) are read at that unit, and a replay's value with
+// more digits is refused as a cut: a false red, the same at every replay of
+// that recording, never a pass.
 // An application that cuts its value coarser than its encoding
 // (Truncate(time.Second) stored as a millisecond $date) shows that cut in
 // both values, and the sums that decide whether a replay can compare the
@@ -161,10 +200,184 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // cut from two values to hold it anywhere. Nor are two values a whole
 // number of that unit apart (learn's apartByUnits): a cut to it plus a time
 // to live that is no whole number of cuts, which Res does not show.
+//
+// Zone says in which zone a replay reads the value at the place, where the
+// learn step learned a wall clock of no zone there (a text, or a type of its
+// protocol, that names no zone: "2026-10-27 09:00:00", a Postgres
+// timestamp): ZoneUTC in UTC, ZoneApp in the application's own zone, as
+// the replay's tracker knows it (learn.Span.Zone); ZoneEither in either of
+// the two, where the recording could not tell them apart at the value's
+// resolution (a date whose day is one in both zones at its call, or an
+// application whose zone is UTC there); "" for a value that names its
+// moment, read as it names it, as a recording learned before Zone was read
+// is. A replay reads a wall clock of no zone only under ZoneUTC, ZoneApp or
+// ZoneEither, the zones the learn step read it in, and refuses one under
+// ZoneApp or ZoneEither where it cannot tell the application's zone, so it
+// never checks a value in a zone the learn step did not read it in.
+// ZoneApart is the Meet of two learnings that read the place in zones no
+// one zone holds, which holds nothing (Empty), and so does a Zone this
+// keploy does not read (ZoneKnown).
+//
+// Layout is the form the learn step saw the value written in, in both of
+// its runs, which a replay's value must be written in too: LayoutTyped for a
+// type of its protocol (a BSON datetime, a Postgres timestamp), or the
+// layout of a text or a number, which names the resolution its form writes
+// (an ISO 8601 date, its time to the minute or to the second, an epoch in
+// seconds or in milliseconds, a time of day: ClockLayoutNames), or
+// LayoutTypedTimeOfDay for a type of its protocol that writes a time of day.
+// A time of day names no day (LayoutTimeOfDay): a replay reads it modulo a
+// day, in the zone Zone names (never "": the learn step reads the zone a
+// time of day was read in, as it does a wall clock's). A fraction of a second is
+// no part of it: a writer that drops a fraction's trailing zeros (Go's
+// RFC3339Nano) writes a value to the second, or with fewer digits, where
+// its clock read fell on a whole second, which a layout that held the
+// fraction would refuse by where the read fell. So is no zone a value
+// names part of it (Zone reads that). "" for a read learned before Layout
+// was, which a replay reads in any layout, as it did then. LayoutApart is
+// the Meet of two learnings that saw the place in different layouts, which
+// holds nothing (Empty).
 type ClockOffset struct {
-	Min time.Duration `json:"min" yaml:"min" bson:"min"`
-	Max time.Duration `json:"max" yaml:"max" bson:"max"`
-	Res time.Duration `json:"res" yaml:"res" bson:"res"`
+	Min    time.Duration `json:"min" yaml:"min" bson:"min"`
+	Max    time.Duration `json:"max" yaml:"max" bson:"max"`
+	Res    time.Duration `json:"res" yaml:"res" bson:"res"`
+	Zone   string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
+	Layout string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
+}
+
+// The layouts a ClockOffset's Layout names beside those of a text or a
+// number (ClockLayoutNames).
+const (
+	// LayoutTyped: a type of the value's protocol, which writes its own
+	// resolution.
+	LayoutTyped = "typed"
+	// LayoutApart: two learnings of one place saw it in different
+	// layouts (Meet); it holds nothing.
+	LayoutApart = "apart"
+	// LayoutTypedTimeOfDay: a type of the value's protocol that writes a
+	// time of day (a Postgres time), which names no day: a replay reads it
+	// modulo a day (LayoutTimeOfDay).
+	LayoutTypedTimeOfDay = "typed-time-of-day"
+)
+
+// LayoutTimeOfDay reports whether layout, a Layout, writes a time of day,
+// which names no day: LayoutTypedTimeOfDay, or a text's "time-minute" or
+// "time-second" (ClockLayoutNames). A replay reads a value at a place
+// learned so as its time into its day, in the zone Zone names, against its
+// call's span read modulo a day (the day it begins on and the one it ends
+// on), and reads a value of any other layout there as none; nor does it
+// read a time of day where the place was learned in a layout that names a
+// day.
+func LayoutTimeOfDay(layout string) bool {
+	return layout == LayoutTypedTimeOfDay || layout == "time-minute" || layout == "time-second"
+}
+
+// ClockLayoutNames are, by Layout, the forms of a text or a number a read of
+// the clock is learned in, as a person reads them; LayoutTyped and
+// LayoutApart are not among them. A Layout this keploy does not name holds
+// nothing (LayoutKnown).
+var ClockLayoutNames = map[string]string{
+	"rfc1123":          "an HTTP date (RFC 1123), to the second",
+	"iso-date":         "an ISO 8601 date",
+	"iso-hour":         "an ISO 8601 date and hour",
+	"iso-minute":       "an ISO 8601 date and time to the minute",
+	"iso-second":       "an ISO 8601 date and time to the second or a fraction of it",
+	"iso-minute-space": "an ISO 8601 date and time to the minute, with a space before the time",
+	"iso-second-space": "an ISO 8601 date and time to the second or a fraction of it, with a space before the time",
+	"compact":          "a compact date and time (yyyymmddThhmmss), to the second",
+	"uuid1":            "a version 1 UUID's time",
+	"uuid7":            "a version 7 UUID's time",
+	"epoch-s":          "a number of seconds since the epoch, whole or with a fraction",
+	"epoch-ms":         "a number of milliseconds since the epoch",
+	"epoch-us":         "a number of microseconds since the epoch",
+	"epoch-ns":         "a number of nanoseconds since the epoch",
+	"time-minute":      "a time of day to the minute",
+	"time-second":      "a time of day to the second or a fraction of it",
+}
+
+// LayoutKnown reports whether o's Layout is one a replay reads a value's
+// form against: "" (any form, as learned before Layout was), LayoutTyped,
+// LayoutTypedTimeOfDay or one of ClockLayoutNames. Holds holds nothing for any other (LayoutApart,
+// or a Layout this keploy does not name), which it never checks in some
+// other form.
+func (o ClockOffset) LayoutKnown() bool {
+	if o.Layout == "" || o.Layout == LayoutTyped || o.Layout == LayoutTypedTimeOfDay {
+		return true
+	}
+	_, ok := ClockLayoutNames[o.Layout]
+	return ok
+}
+
+// LayoutName is how a person reads layout, a Layout or the layout of a
+// replay's value: "a type of its protocol" for LayoutTyped, a name of
+// ClockLayoutNames, or the layout quoted where keploy names none.
+func LayoutName(layout string) string {
+	switch layout {
+	case LayoutTyped:
+		return "a type of its protocol"
+	case LayoutTypedTimeOfDay:
+		return "a time of day its protocol types"
+	}
+	if n, ok := ClockLayoutNames[layout]; ok {
+		return n
+	}
+	return strconv.Quote(layout)
+}
+
+// MeetLayout is the Layout two learnings of one place saw it in, o's and
+// layout (meetLayouts), as Meet reads it.
+func (o ClockOffset) MeetLayout(layout string) string { return meetLayouts(o.Layout, layout) }
+
+// meetLayouts is the Layout a replay reads a place's form against that two
+// learnings saw it in, a and b: the one both saw, the other where one is ""
+// (learned before Layout was: any form), LayoutApart where they differ.
+func meetLayouts(a, b string) string {
+	switch {
+	case a == b || b == "":
+		return a
+	case a == "":
+		return b
+	}
+	return LayoutApart
+}
+
+// The zones a ClockOffset's Zone names (ClockOffset).
+const (
+	// ZoneUTC: a wall clock of no zone, read in UTC.
+	ZoneUTC = "utc"
+	// ZoneApp: a wall clock of no zone, read in the application's zone.
+	ZoneApp = "app"
+	// ZoneEither: a wall clock of no zone the recording could not tell
+	// UTC's from the application's at its resolution, read in each of the
+	// two: a replay passes it where either reading holds.
+	ZoneEither = "either"
+	// ZoneApart: two learnings of one place read it in zones no one zone
+	// holds (Meet); it holds nothing.
+	ZoneApart = "apart"
+)
+
+// ZoneKnown reports whether o's Zone is one a replay reads a value in: ""
+// (as the value names its moment), ZoneUTC, ZoneApp or ZoneEither. Holds
+// holds nothing for any other: ZoneApart, or a Zone this keploy does not
+// read, which it never checks in some other zone.
+func (o ClockOffset) ZoneKnown() bool {
+	return o.Zone == "" || o.Zone == ZoneUTC || o.Zone == ZoneApp || o.Zone == ZoneEither
+}
+
+// meetZones is the zone a replay reads a place in that two learnings read
+// in a and b: the one zone both hold (ZoneEither holds UTC and the
+// application's, so its meet with either one is that one); ZoneApart where
+// none does (UTC and the application's zone, or a wall clock of no zone and
+// a value that names its zone).
+func meetZones(a, b string) string {
+	switch {
+	case a == b:
+		return a
+	case a == ZoneEither && (b == ZoneUTC || b == ZoneApp):
+		return b
+	case b == ZoneEither && (a == ZoneUTC || a == ZoneApp):
+		return a
+	}
+	return ZoneApart
 }
 
 // offsetUnits are the units an offset reads in, coarsest first.
@@ -269,7 +482,11 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // which the learn step never learns, or one it learned at an encoding
 // coarser than the replay's (a millisecond's Res at a nanosecond's
 // replay): the replay's value, read at res, would hold by where its read
-// fell in the cut. A window with no start (a zero to
+// fell in the cut. Nor for an o whose Zone a replay reads no value in
+// (ZoneKnown: ZoneApart, or one this keploy does not read). at is the
+// value's instant as read in o's Zone: the caller reads a wall clock of no
+// zone there (learn.CheckClockRead), and under ZoneEither in each of UTC and
+// the application's zone, passing the value where either holds. A window with no start (a zero to
 // is before any from), one that ends before it starts, a res of none or an
 // empty o (it has no Unit) holds nothing, and so does an o the learn step
 // never finds (a Min of zero or below, a Max not above Min, or a Res of
@@ -277,6 +494,9 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 // have its sums read finer than the application cuts its value), whose
 // width could overflow or whose Unit could swallow the sign of the offset.
 func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
+	if !o.ZoneKnown() || !o.LayoutKnown() {
+		return false
+	}
 	if o.Plain() {
 		return o.holdsRead(at, res, from, to)
 	}
@@ -301,18 +521,26 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // holds the true offset of a read its learn step saw, so the one place's
 // value holds it only where both do; a Res read coarser refuses more,
 // never less. Two that share no offset (a Plain and one with an offset, or
-// two offsets apart) meet as an Empty one, which holds nothing. Meet is the
+// two offsets apart), or that read it in zones no one zone holds (UTC and
+// the application's: ZoneApart, meetZones), meet as an Empty one, which
+// holds nothing; ZoneEither meets UTC or the application's zone as that
+// one, the zone both hold. So do two that saw it written in different
+// layouts (LayoutApart, meetLayouts); a Layout of "" (learned before Layout
+// was) meets another as that one. Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res)}
+	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout)}
 }
 
 // Empty reports whether o is the Meet of learnings of one place that share
-// no offset: a Min above zero and a Max not above it. Holds holds nothing
-// for it, and String says why.
-func (o ClockOffset) Empty() bool { return o.Min > 0 && o.Max <= o.Min }
+// no offset: a Min above zero and a Max not above it; or that read it in
+// zones no one zone holds (ZoneApart). Holds holds nothing for it, and String says
+// why.
+func (o ClockOffset) Empty() bool {
+	return o.Min > 0 && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart
+}
 
 // MergeClocks is a and b, two sets of the places a call's learn steps
 // learned as clock reads (MockSpec.Clocks), as one fresh map: every place
@@ -362,9 +590,63 @@ func (o ClockOffset) holdsRead(at time.Time, res time.Duration, from, to time.Ti
 // than a nanosecond apart: "clock + 30m (from 29m59.998s to 30m0.001s)".
 // Where they hold more than one multiple, it names no offset: "clock plus an
 // offset from 29m59.96s to 32m59.956s"; an Empty o says it holds none:
-// "clock reads no one offset holds (from 30m up to 0s)". It never decides
-// anything.
+// "clock reads no one offset holds (from 30m up to 0s)". A Zone of a wall
+// clock of no zone follows it: "clock, a wall clock of no zone in the
+// application's zone"; one of ZoneApart, or one this keploy does not read,
+// says so instead. It never decides anything.
 func (o ClockOffset) String() string {
+	switch {
+	case o.Zone == ZoneApart:
+		return "clock reads in no one zone (one place learned as a wall clock of no zone in UTC, in the application's zone, or as a value that names its zone, at different calls)"
+	case !o.ZoneKnown():
+		return "clock read in a zone this keploy does not read (" + strconv.Quote(o.Zone) + ")"
+	case o.Layout == LayoutApart:
+		return "clock reads in no one form (one place learned written in different layouts at different calls)"
+	case !o.LayoutKnown():
+		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
+	}
+	return o.offsetString() + o.zoneString() + o.layoutString()
+}
+
+// layoutString is the form o's Layout says a replay's value is written in,
+// as String writes it after the zone: "" for a Layout of "" (any form), and
+// for LayoutTyped and LayoutTypedTimeOfDay, whose type its protocol's place
+// already says (and zoneString that it is a time of day).
+func (o ClockOffset) layoutString() string {
+	if o.Layout == "" || o.Layout == LayoutTyped || o.Layout == LayoutTypedTimeOfDay {
+		return ""
+	}
+	return ", written as " + LayoutName(o.Layout)
+}
+
+// zoneString is where o's Zone says a replay reads a wall clock of no zone,
+// or a time of day (LayoutTimeOfDay), as String writes it after the offset:
+// "" for a value that names its zone.
+func (o ClockOffset) zoneString() string {
+	if LayoutTimeOfDay(o.Layout) {
+		switch o.Zone {
+		case ZoneUTC:
+			return ", a time of day in UTC"
+		case ZoneApp:
+			return ", a time of day in the application's zone"
+		case ZoneEither:
+			return ", a time of day in UTC or in the application's zone"
+		}
+		return ""
+	}
+	switch o.Zone {
+	case ZoneUTC:
+		return ", a wall clock of no zone in UTC"
+	case ZoneApp:
+		return ", a wall clock of no zone in the application's zone"
+	case ZoneEither:
+		return ", a wall clock of no zone in UTC or in the application's zone"
+	}
+	return ""
+}
+
+// offsetString is String of o's offset alone.
+func (o ClockOffset) offsetString() string {
 	if o.Plain() {
 		return "clock"
 	}
@@ -416,6 +698,8 @@ func (v MockVariables) Clone() MockVariables {
 		mv.Use = append([]string(nil), mv.Use...)
 		mv.Answer = append([]string(nil), mv.Answer...)
 		mv.Clock = append([]ClockRead(nil), mv.Clock...)
+		mv.About = CloneAbout(mv.About)
+		mv.Other = maps.Clone(mv.Other)
 		out[name] = mv
 	}
 	return out

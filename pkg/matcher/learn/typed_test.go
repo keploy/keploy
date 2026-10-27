@@ -151,7 +151,7 @@ func qnWindow() *Window {
 // it) and the exchanges F served (earlier), with the call's recorded answer
 // resp, in w.
 func classifyTyped(r, l Leaf, w *Window, earlier []Earlier, resp []Leaf, raw ...*models.Mock) Learned {
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	var rs []Raw
 	for _, m := range raw {
 		rs = append(rs, dc.RawOf(m, false))
@@ -181,17 +181,17 @@ func qnTyped(at time.Time) Leaf {
 func TestATypedInstantIsComparedWhole(t *testing.T) {
 	raw := qnRecordings()
 	noMonitor := raw[:len(raw)-1]
-	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), nil, nil, raw...); ln.Kind != KindNoise {
+	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), nil, nil, raw...); !noiseOrRead(ln) {
 		t.Errorf("typed, in its window: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
 	}
 	lead := qnRec.Add(FullRoundLead + 202*time.Millisecond)
-	if ln := classifyTyped(qnTyped(qnRec), qnTyped(lead), nil, nil, nil, raw...); ln.Kind != KindNoise {
+	if ln := classifyTyped(qnTyped(qnRec), qnTyped(lead), nil, nil, nil, raw...); !noiseOrRead(ln) {
 		t.Errorf("typed, moved by the lead: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
 	}
 	for name, rs := range map[string][]*models.Mock{"with mock-15": raw, "without mock-15": noMonitor} {
 		ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), nil, nil, nil, rs...)
-		if ln.Kind != KindUnaccounted || ln.From.Mock != "" || !strings.HasPrefix(ln.Why, "nothing shows it is a read of the application's clock") || strings.Contains(ln.Why, "mock-") {
-			t.Errorf("typed, no provenance, %s: %s (from %q, %s); want refused for its provenance, naming no recording", name, ln.Kind, ln.From.Mock, ln.Why)
+		if !plainRead(ln) || ln.From.Mock != "" {
+			t.Errorf("typed, no provenance, %s: %s (from %q, %s); want a plain read of the clock, with no call window, checked at replay, naming no recording", name, ln.Kind, ln.From.Mock, ln.Why)
 		}
 	}
 	// A window F's moment falls outside of shows no read either.
@@ -207,10 +207,10 @@ func TestATypedInstantIsComparedWhole(t *testing.T) {
 	if ln.Kind == KindNoise || ln.From.Mock != "mock-15" && !strings.Contains(ln.Why, "mock-15") {
 		t.Errorf("a date-like string, no provenance: %s (from %q, %s); want refused for mock-15's requestId", ln.Kind, ln.From.Mock, ln.Why)
 	}
-	if ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, noMonitor...); ln.Kind != KindNoise || ln.Read == nil {
+	if ln := classifyTyped(str(qnRec), str(qnLive), nil, nil, nil, noMonitor...); ln.Kind != KindClockRead || ln.Read == nil {
 		t.Errorf("a date-like string, no provenance, without mock-15: %s (from %q, %s); want a read of the clock: one instant whole, with no call window, compared at replay", ln.Kind, ln.From.Mock, ln.Why)
 	}
-	if ln := classifyTyped(str(qnRec), str(qnLive), qnWindow(), nil, nil, raw...); ln.Kind != KindNoise {
+	if ln := classifyTyped(str(qnRec), str(qnLive), qnWindow(), nil, nil, raw...); !noiseOrRead(ln) {
 		t.Errorf("a date-like string, in its window: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
 	}
 }
@@ -271,12 +271,12 @@ func TestATypedInstantEqualToAnEarlierOneIsAVariable(t *testing.T) {
 					t.Errorf("%s, %s: %s (from %+v, %s); want a variable of %s at %s, naming no value", row.name, wname, ln.Kind, ln.From, ln.Why, row.m.Name, row.field)
 				}
 			case w != nil:
-				if ln.Kind != KindNoise {
+				if !noiseOrRead(ln) {
 					t.Errorf("%s, %s: %s (from %q, %s); want noise", row.name, wname, ln.Kind, ln.From.Mock, ln.Why)
 				}
 			default:
-				if ln.Kind != KindUnaccounted || ln.From.Mock != "" {
-					t.Errorf("%s, %s: %s (from %q, %s); want refused for its provenance", row.name, wname, ln.Kind, ln.From.Mock, ln.Why)
+				if !plainRead(ln) || ln.From.Mock != "" {
+					t.Errorf("%s, %s: %s (from %q, %s); want a plain read of the clock, with no call window, checked at replay", row.name, wname, ln.Kind, ln.From.Mock, ln.Why)
 				}
 			}
 		}
@@ -284,7 +284,7 @@ func TestATypedInstantEqualToAnEarlierOneIsAVariable(t *testing.T) {
 	// A payload recorded after the insert is no earlier place.
 	late := answer(`{"Attributes":{"SentTimestamp":"1792726810740"}}`)
 	late.Spec.ReqTimestampMock = qnInsert.Add(time.Second)
-	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), nil, nil, late); ln.Kind != KindNoise {
+	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), nil, nil, late); !noiseOrRead(ln) {
 		t.Errorf("a payload recorded after the insert: %s (from %q, %s); want noise", ln.Kind, ln.From.Mock, ln.Why)
 	}
 }
@@ -301,7 +301,7 @@ func TestATypedPickFromAServedTimetableStaysChecked(t *testing.T) {
 	rec, live := time.Date(2026, 10, 22, 11, 14, 0, 0, time.UTC), time.Date(2026, 10, 22, 11, 15, 0, 0, time.UTC)
 	leaf := func(t time.Time) Leaf { return InstantLeaf("body.departure", "body.departure", t, time.Second) }
 	classify := func(w *Window, earlier []Earlier, raw ...*models.Mock) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		var rs []Raw
 		for _, m := range raw {
 			rs = append(rs, dc.RawOf(m, true))
@@ -389,12 +389,12 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 					t.Errorf("%s, %s: evidence %q; want it held as recorded only %v", row.name, wname, ln.Why, row.held)
 				}
 			case w != nil:
-				if ln.Kind != KindNoise {
+				if !noiseOrRead(ln) {
 					t.Errorf("%s, %s: %s (from %+v, %s); want noise", row.name, wname, ln.Kind, ln.From, ln.Why)
 				}
 			default:
-				if ln.Kind != KindUnaccounted || ln.From.Mock != "" {
-					t.Errorf("%s, %s: %s (from %+v, %s); want refused for its provenance", row.name, wname, ln.Kind, ln.From, ln.Why)
+				if !plainRead(ln) || ln.From.Mock != "" {
+					t.Errorf("%s, %s: %s (from %+v, %s); want a plain read of the clock, with no call window, checked at replay", row.name, wname, ln.Kind, ln.From, ln.Why)
 				}
 			}
 		}
@@ -412,7 +412,7 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 	stampAt := []Earlier{{Mock: "mock-1", At: qnInsert.Add(-time.Second), Payload: payloadOf("mock-1", qnInsert.Add(-time.Second)), Own: true, Seen: []Seen{
 		{Side: Response, Leaf: Leaf{Path: "header.date", Noise: "header.date", Type: String, Value: "2026-10-23T03:40:10.740Z"}, Live: "2026-10-23T03:40:10.740Z", Stamp: true},
 	}}}
-	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), stampAt, nil); ln.Kind != KindNoise {
+	if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), stampAt, nil); !noiseOrRead(ln) {
 		t.Errorf("an answer's stamp served as recorded: %s (from %+v, %s); want noise", ln.Kind, ln.From, ln.Why)
 	}
 	// A leaf that held both moments, on one side or both, did not drift with
@@ -436,7 +436,7 @@ func TestATypedInstantThatDriftedWithAServedLeafIsAVariable(t *testing.T) {
 // echo; one whose minute is a word of the value holds nothing of it.
 func TestAValueReadWordByWordMeetsATypedInstantByItsMoment(t *testing.T) {
 	classify := func(rec, live string, w *Window, earlier []Earlier, resp []Leaf) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		const p = "body.q"
 		r := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: rec}}}
 		l := Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: live}}}
@@ -485,7 +485,7 @@ func TestATypedInstantEchoedInItsOwnAnswer(t *testing.T) {
 		if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), nil, nil, resp); ln.Kind != KindUnaccounted || len(ln.Echo) != 0 {
 			t.Errorf("%s, no provenance: %s (echo %+v, %s); want refused", held, ln.Kind, ln.Echo, ln.Why)
 		}
-		if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), nil, resp[:1]); ln.Kind != KindNoise {
+		if ln := classifyTyped(qnTyped(qnRec), qnTyped(qnLive), qnWindow(), nil, resp[:1]); !noiseOrRead(ln) {
 			t.Errorf("an answer that holds no instant: %s (%s); want noise", ln.Kind, ln.Why)
 		}
 	}
@@ -525,7 +525,7 @@ func TestATypedInstantKeployCannotReadIsRefused(t *testing.T) {
 		}
 		// Read in the second before its call, which a read is no later
 		// than: refused for the range alone.
-		if ln := ClassifyIn(NewDriftCache(), []string{qnPath}, Shape{Leaves: map[string]Leaf{qnPath: qnTyped(rec.Add(FullRoundLead))}}, Shape{Leaves: map[string]Leaf{qnPath: qnTyped(rec)}}, rec.Add(time.Second), nil, nil, nil, nil)[0]; ln.Kind != KindUnaccounted {
+		if ln := ClassifyIn(clockedDrifts(), []string{qnPath}, Shape{Leaves: map[string]Leaf{qnPath: qnTyped(rec.Add(FullRoundLead))}}, Shape{Leaves: map[string]Leaf{qnPath: qnTyped(rec)}}, rec.Add(time.Second), nil, nil, nil, nil)[0]; ln.Kind != KindUnaccounted {
 			t.Errorf("an instant that the lead moved %s, read before its call: %s (%s); want refused", name, ln.Kind, ln.Why)
 		}
 	}
@@ -612,17 +612,17 @@ func TestATypedInstantMeetsNoTwoDigitCoincidence(t *testing.T) {
 		holder := row.holder(at)
 		w := &Window{Rec: Span{From: row.rec.Add(-300 * time.Millisecond), To: at}, F: Span{From: row.live.Add(-300 * time.Millisecond), To: row.live.Add(time.Millisecond)}}
 		classify := func(r, l Leaf, w *Window) Learned {
-			dc := NewDriftCache()
+			dc := clockedDrifts()
 			return ClassifyIn(dc, []string{qnPath}, Shape{Leaves: map[string]Leaf{qnPath: l}}, Shape{Leaves: map[string]Leaf{qnPath: r}}, at, nil, []Raw{dc.RawOf(holder, false)}, nil, w)[0]
 		}
-		if ln := classify(qnTyped(row.rec), qnTyped(row.live), w); ln.Kind != KindNoise {
+		if ln := classify(qnTyped(row.rec), qnTyped(row.live), w); !noiseOrRead(ln) {
 			t.Errorf("%s, typed, in its window: %s (from %q, %s); want noise", row.name, ln.Kind, ln.From.Mock, ln.Why)
 		}
-		if ln := classify(qnTyped(row.rec), qnTyped(row.rec.Add(FullRoundLead+202*time.Millisecond)), nil); ln.Kind != KindNoise {
+		if ln := classify(qnTyped(row.rec), qnTyped(row.rec.Add(FullRoundLead+202*time.Millisecond)), nil); !noiseOrRead(ln) {
 			t.Errorf("%s, typed, moved by the lead: %s (from %q, %s); want noise", row.name, ln.Kind, ln.From.Mock, ln.Why)
 		}
-		if ln := classify(qnTyped(row.rec), qnTyped(row.live), nil); ln.Kind != KindUnaccounted || ln.From.Mock != "" || ln.Why != instantNotClock {
-			t.Errorf("%s, typed, no provenance: %s (from %q, %s); want refused for its provenance, naming no recording", row.name, ln.Kind, ln.From.Mock, ln.Why)
+		if ln := classify(qnTyped(row.rec), qnTyped(row.live), nil); !plainRead(ln) || ln.From.Mock != "" {
+			t.Errorf("%s, typed, no provenance: %s (from %q, %s); want a plain read of the clock, with no call window, checked at replay, naming no recording", row.name, ln.Kind, ln.From.Mock, ln.Why)
 		}
 		str := func(at time.Time) Leaf {
 			return Leaf{Path: qnPath, Noise: "body.docs.msgs.0.processed_at", Type: String, Value: at.Format(time.RFC3339Nano)}
@@ -650,10 +650,30 @@ func TestATypedInstantLaterThanItsCallIsRefusedSayingSo(t *testing.T) {
 	}{
 		{"an hour after its call", read.Add(time.Hour), read.Add(time.Hour + FullRoundLead + 37*time.Millisecond), time.Millisecond, instantAfterCall},
 		// The call's minute, F's two on: the lead takes two minutes'
-		// move, a read before its call one.
-		{"F's past the lead from its call", call.Truncate(time.Minute), call.Truncate(time.Minute).Add(2 * time.Minute), time.Minute, instantPastCall},
+		// move, a read before its call one. With no window it is a plain
+		// read of the clock all the same ("" here), which every replay
+		// checks in its call's span: how late record's full round read its
+		// clock must not decide; in a window that does not hold it, it is
+		// refused saying so.
+		{"F's past the lead from its call", call.Truncate(time.Minute), call.Truncate(time.Minute).Add(2 * time.Minute), time.Minute, ""},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, nil)[0]
+		if row.why == "" {
+			if !plainRead(ln) {
+				t.Errorf("%s, no window: %s Read=%+v (%s); want a plain read of the clock, checked at replay", row.name, ln.Kind, ln.Read, ln.Why)
+			}
+			// Its call's own answer echoes it: an echo is answered with
+			// this run's value and checks no read, so it is refused, the
+			// reason saying it moved by the lead past its call, never that
+			// it did not move by the lead.
+			answer := []Leaf{{Path: "body.doc.expiresAt", Type: Instant, Value: InstantLeaf(p, p, row.rec, row.res).Value}}
+			if ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, answer, nil)[0]; ln.Kind != KindUnaccounted || len(ln.Echo) != 0 || ln.Why != instantPastCall {
+				t.Errorf("%s, no window, its answer echoes it: %s (echo %+v, %s); want refused: %s", row.name, ln.Kind, ln.Echo, ln.Why, instantPastCall)
+			}
+			w := &Window{Rec: Span{From: call.Add(-time.Hour), To: call.Add(-30 * time.Minute)}, F: Span{From: call.Add(-time.Hour), To: call.Add(-30 * time.Minute)}}
+			ln = ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.live, row.res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, row.rec, row.res)}}, call, nil, nil, nil, w)[0]
+			row.why = instantPastCall
+		}
 		if ln.Kind != KindUnaccounted || ln.Why != row.why {
 			t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.why)
 		}
@@ -665,7 +685,7 @@ func TestATypedInstantLaterThanItsCallIsRefusedSayingSo(t *testing.T) {
 // application writes a wall clock of no zone in zone (nil: UTC alone), of
 // keploy mock's client tests where clientTests is set, in window w.
 func classifyZoned(zone *time.Location, clientTests bool, p string, rec, live Leaf, call time.Time, w *Window) Learned {
-	dc := NewDriftCache()
+	dc := clockedDrifts()
 	dc.zone, dc.clientTests = zone, clientTests
 	return ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, nil, nil, nil, w)[0]
 }
@@ -707,7 +727,7 @@ func TestAWallClockOfNoZoneIsAClockReadInTheApplicationsZoneToo(t *testing.T) {
 	} {
 		ln := classifyZoned(row.zone, false, p, row.leaf(read), row.leaf(live), call, nil)
 		switch {
-		case row.why == "" && ln.Kind != KindNoise:
+		case row.why == "" && !noiseOrRead(ln):
 			t.Errorf("%s: %s (%s); want noise, a read of the clock", row.name, ln.Kind, ln.Why)
 		case row.why != "" && (ln.Kind != KindUnaccounted || ln.Why != row.why):
 			t.Errorf("%s: %s (%s); want it refused: %s", row.name, ln.Kind, ln.Why, row.why)
@@ -727,11 +747,13 @@ func TestAWallClockOfNoZoneIsAClockReadInTheApplicationsZoneToo(t *testing.T) {
 		t.Errorf("a time of day, then a wall clock, in a client test: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantFormChangedWhy(namesTimeOfDay, namesWall))
 	}
 	// The call's minute in IST, F's two on: the lead takes two minutes'
-	// move, a read before its call one. Later than the call in UTC alone,
-	// so the reason is that F's is past the lead.
+	// move, a read before its call one. With no window, a plain read of the
+	// clock all the same (noWindowRead), in the application's zone, where
+	// its recorded reading is its call's minute: in UTC it is hours after
+	// its call (nearestZone).
 	minute := func(at time.Time) Leaf { return WallClockLeaf(p, p, at.In(ist), time.Minute) }
-	if ln := classifyZoned(ist, false, p, minute(call), minute(call.Add(2*time.Minute)), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantPastCall {
-		t.Errorf("a minute read in IST, F's past the lead from its call: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantPastCall)
+	if ln := classifyZoned(ist, false, p, minute(call), minute(call.Add(2*time.Minute)), call, nil); !zonedRead(ln, models.ZoneApp) {
+		t.Errorf("a minute read in IST, F's past the lead from its call: %s Read=%+v (%s); want a plain read in the application's zone", ln.Kind, ln.Read, ln.Why)
 	}
 	// A day of no zone (a Postgres date), read in IST just before its
 	// midnight, that the lead moved to the next day: in UTC F's day is hours
@@ -743,11 +765,14 @@ func TestAWallClockOfNoZoneIsAClockReadInTheApplicationsZoneToo(t *testing.T) {
 	if r, l := day(read), day(live); r.Value != "2026-10-22" || l.Value != "2026-10-23" {
 		t.Fatalf("the days as written: %q and %q; want 2026-10-22 and 2026-10-23", r.Value, l.Value)
 	}
-	if ln := classifyZoned(ist, false, p, day(read), day(live), call, nil); ln.Kind != KindNoise {
+	if ln := classifyZoned(ist, false, p, day(read), day(live), call, nil); !noiseOrRead(ln) {
 		t.Errorf("a day read in the application's zone that the lead moved: %s (%s); want noise", ln.Kind, ln.Why)
 	}
-	if ln := classifyZoned(nil, false, p, day(read), day(live), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantPastCall {
-		t.Errorf("a day read in IST, the application's zone not known: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantPastCall)
+	// The zone not known, the learn step reads it in UTC alone: a plain
+	// read there, with no window (noWindowRead), which a replay checks in
+	// UTC (models.ZoneUTC).
+	if ln := classifyZoned(nil, false, p, day(read), day(live), call, nil); !zonedRead(ln, models.ZoneUTC) {
+		t.Errorf("a day read in IST, the application's zone not known: %s Read=%+v (%s); want a plain read in UTC", ln.Kind, ln.Read, ln.Why)
 	}
 	// InstantLeaf's date is the same day of no zone.
 	if got := InstantLeaf(p, p, time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), 24*time.Hour); got != day(read) {
@@ -767,7 +792,7 @@ func TestAClientTestsWindowReadsAWallClockOfNoZoneInTheApplicationsZone(t *testi
 	w := &Window{Rec: Span{From: call.Add(-time.Second), To: call}, F: Span{From: fCall.Add(-time.Second), To: fCall}}
 	rec := WallClockLeaf(p, p, call.Add(-40*time.Millisecond).In(ist), time.Millisecond)
 	live := WallClockLeaf(p, p, fCall.Add(-25*time.Millisecond).In(ist), time.Millisecond)
-	if ln := classifyZoned(ist, true, p, rec, live, call, w); ln.Kind != KindNoise {
+	if ln := classifyZoned(ist, true, p, rec, live, call, w); !noiseOrRead(ln) {
 		t.Errorf("read in IST within the window: %s (%s); want noise", ln.Kind, ln.Why)
 	}
 	if ln := classifyZoned(nil, true, p, rec, live, call, w); ln.Kind != KindUnaccounted || ln.Why != clientTestWhy("", true) {
@@ -802,8 +827,8 @@ func TestATimeOfDayIsAClockReadWhereTheLeadMovedIt(t *testing.T) {
 	if r, l := tod(read), tod(read.Add(FullRoundLead)); r.Value != "T23:59:30.115000" || l.Value != "T00:00:31.615000" {
 		t.Fatalf("the times as written: %q and %q", r.Value, l.Value)
 	}
-	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil); ln.Kind != KindNoise {
-		t.Errorf("moved by the lead across midnight: %s (%s); want noise", ln.Kind, ln.Why)
+	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil); !todRead(ln, models.ZoneUTC) || ln.Read.Layout != models.LayoutTypedTimeOfDay {
+		t.Errorf("moved by the lead across midnight: %s Read=%+v (%s); want a read of the clock modulo a day, typed, in UTC", ln.Kind, ln.Read, ln.Why)
 	}
 	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(time.Hour)), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
 		t.Errorf("moved by an hour: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantNotClock)
@@ -879,7 +904,7 @@ func TestAWallClockOrTimeOfDayPickedFromAServedTimetableStaysChecked(t *testing.
 		}}
 	}
 	classify := func(zone *time.Location, client bool, rec, live Leaf, w *Window, tt *models.Mock) Learned {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		dc.zone, dc.clientTests = zone, client
 		return ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, nil, []Raw{dc.RawOf(tt, true)}, nil, w)[0]
 	}
@@ -946,7 +971,7 @@ func TestAWallClockOrTimeOfDayCopiedFromTheRequestInTheAppsZoneIsFollowed(t *tes
 		{"a wall clock", WallClockLeaf(p, p, read.In(ist), time.Microsecond), WallClockLeaf(p, p, live.In(ist), time.Microsecond)},
 		{"a time of day", tod(read), tod(live)},
 	} {
-		dc := NewDriftCache()
+		dc := clockedDrifts()
 		dc.zone = ist
 		ln := ClassifyIn(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: row.live}}, Shape{Leaves: map[string]Leaf{p: row.rec}}, call, given, nil, nil, nil)[0]
 		if ln.Kind != KindVariable || ln.From.Mock != "test-2" || ln.From.Path != "body.since" {
@@ -1012,7 +1037,7 @@ func TestATypedTimeOfDayAnEarlierExchangeHoldsIsReadThere(t *testing.T) {
 			if payload {
 				e.Payload = payloadOf("pg-1", call.Add(-time.Second))
 			}
-			ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.live}}, Shape{Leaves: map[string]Leaf{p: c.rec}}, call, []Earlier{e}, nil, nil, nil)[0]
+			ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.live}}, Shape{Leaves: map[string]Leaf{p: c.rec}}, call, []Earlier{e}, nil, nil, nil)[0]
 			if ln.Kind == KindNoise {
 				t.Errorf("%s, the exchange's payload given %v: noise; want it followed or refused, never a read of the clock", c.name, payload)
 			}
@@ -1073,7 +1098,7 @@ func TestATypedTimeOfDayAnEarlierExchangeHoldsIsBoundOrRefusedNamingItsLeaf(t *t
 		{"F saw what an answer served it, recorded as another", seen(Response, read.Add(-time.Hour), live), typed(time.Millisecond), "pick", false},
 		{"a text F saw where an answer held it as recorded", seen(Response, live, live.Add(time.Hour)), texted("15:04:05.000"), "pick", false},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.v[1]}}, Shape{Leaves: map[string]Leaf{p: c.v[0]}}, call, []Earlier{c.e}, nil, nil, nil)[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: c.v[1]}}, Shape{Leaves: map[string]Leaf{p: c.v[0]}}, call, []Earlier{c.e}, nil, nil, nil)[0]
 		at := ln.Kind == KindVariable && ln.From.Mock == "pg-1" && ln.From.Path == sp && ln.From.Whole == c.whole
 		var ok bool
 		switch c.want {
@@ -1123,7 +1148,7 @@ func TestATimeOfDayInTheOtherFormIsTheSameMoment(t *testing.T) {
 	}
 	classify := func(v string, e []Earlier, raw []Raw, resp []Leaf) Learned {
 		rec, lv := forms[v](p, read), forms[v](p, live)
-		return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: lv}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, e, raw, resp, nil)[0]
+		return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: lv}}, Shape{Leaves: map[string]Leaf{p: rec}}, call, e, raw, resp, nil)[0]
 	}
 	seen := func(side Side, form string, f time.Time) []Earlier {
 		return []Earlier{{Mock: "pg-1", At: call.Add(-time.Second), Own: true, Payload: payloadOf("pg-1", call.Add(-time.Second)), Seen: []Seen{{Side: side, Leaf: forms[form](sp, read), Live: forms[form](sp, f).Value}}}}
@@ -1203,7 +1228,7 @@ func newClockOffsetCall() clockOffsetCall {
 // F, each at resolution res, in window w, with the call's recorded answer
 // resp.
 func (c clockOffsetCall) classify(p string, rec, live time.Time, res time.Duration, w *Window, resp ...Leaf) Learned {
-	return ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, live, res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, rec, res)}}, c.call, nil, nil, resp, w)[0]
+	return ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, live, res)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, rec, res)}}, c.call, nil, nil, resp, w)[0]
 }
 
 // An instant its protocol types that the application builds on its clock by
@@ -1228,7 +1253,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	// The recording's window puts the offset from 29m59.96s up to 30m0.011s,
 	// F's from 29m59.955s up to 30m0.016s: both, the first. The two values
 	// share no granularity coarser than their encoding's millisecond.
-	want := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 11*ms, Res: ms}
+	want := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 11*ms, Res: ms, Layout: models.LayoutTyped}
 	if *ln.Offset != want {
 		t.Errorf("compared: offset %+v, want %+v", *ln.Offset, want)
 	}
@@ -1252,7 +1277,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 
 	// A wall clock of no zone stands from the clock by its zone's offset
 	// as much as by a time to live: refused as before.
-	wl := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: WallClockLeaf(p, p, live, ms)}}, Shape{Leaves: map[string]Leaf{p: WallClockLeaf(p, p, rec, ms)}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
+	wl := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: WallClockLeaf(p, p, live, ms)}}, Shape{Leaves: map[string]Leaf{p: WallClockLeaf(p, p, rec, ms)}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
 	if wl.Kind != KindUnaccounted || wl.Offset != nil || wl.Why != instantAfterCall {
 		t.Errorf("a wall clock of no zone: %s %+v (%s); want refused as before: %s", wl.Kind, wl.Offset, wl.Why, instantAfterCall)
 	}
@@ -1262,7 +1287,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	// thirty-one minutes from it: refused, naming the range.
 	min := time.Minute
 	ln = c.classify(p, c.read.Add(30*time.Minute).Truncate(min), c.fread.Add(30*time.Minute).Truncate(min), min, c.w.ComparesOffsets())
-	minute := models.ClockOffset{Min: 30*time.Minute - 17155*ms, Max: 31*time.Minute - 18632*ms, Res: min}
+	minute := models.ClockOffset{Min: 30*time.Minute - 17155*ms, Max: 31*time.Minute - 18632*ms, Res: min, Layout: models.LayoutTyped}
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != clockOffsetWideWhy(p, minute, min) || !strings.HasPrefix(ln.Why, p+" = clock plus an offset from 29m42.845s to 30m41.368s at a resolution of 1m (the one its encoding writes): ") || !strings.Contains(ln.Why, "not narrower than the minute the offset reads in") {
 		t.Errorf("a minute's expiry: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, clockOffsetWideWhy(p, minute, min))
 	}
@@ -1273,7 +1298,7 @@ func TestAnInstantAtTheClockPlusAnOffsetIsLearnedAsThatOffset(t *testing.T) {
 	// whose value is written at the millisecond holds nothing, as a minute
 	// is a cut coarser than that.
 	ln = c.classify(p, c.read.Add(time.Hour).Truncate(min), c.fread.Add(time.Hour).Truncate(min), min, c.w.ComparesOffsets())
-	hour := models.ClockOffset{Min: time.Hour - 17155*ms, Max: time.Hour + 41368*ms, Res: min}
+	hour := models.ClockOffset{Min: time.Hour - 17155*ms, Max: time.Hour + 41368*ms, Res: min, Layout: models.LayoutTyped}
 	if ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != hour || ln.Offset.Unit() != time.Hour || !strings.HasPrefix(ln.Why, p+" = clock + 1h (") || !strings.Contains(ln.Why, "a time to live changed by an hour or more still fails") {
 		t.Fatalf("an hour's expiry at a minute's resolution: %s %+v (%s); want the clock offset %+v", ln.Kind, ln.Offset, ln.Why, hour)
 	}
@@ -1305,7 +1330,7 @@ func TestAWideCallWindowRefusesTheOffsetNamingItsRange(t *testing.T) {
 	ms := time.Millisecond
 	w := &Window{Rec: Span{From: c.call.Add(-3 * time.Minute), To: c.call}, F: Span{From: c.fcall.Add(-3 * time.Minute), To: c.fcall}}
 	ln := c.classify(p, c.read.Add(30*time.Minute).Truncate(ms), c.fread.Add(30*time.Minute).Truncate(ms), ms, w.ComparesOffsets())
-	wide := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 33*time.Minute - 44*ms, Res: ms}
+	wide := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 33*time.Minute - 44*ms, Res: ms, Layout: models.LayoutTyped}
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != clockOffsetWideWhy(p, wide, ms) {
 		t.Fatalf("FALSE GREEN? idle three minutes before the call: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, clockOffsetWideWhy(p, wide, ms))
 	}
@@ -1341,7 +1366,7 @@ func TestAClockOffsetIsBoundedByBothRunsWindows(t *testing.T) {
 	// encoding's.
 	narrow := &Window{Rec: c.w.Rec, F: Span{From: c.fcall.Add(-10 * ms), To: c.fcall}}
 	ln := c.classify(p, rec, c.fcall.Add(30*time.Minute-5*ms), ms, narrow.ComparesOffsets())
-	if want := (models.ClockOffset{Min: 30*time.Minute - 5*ms, Max: 30*time.Minute + 6*ms, Res: 3 * ms}); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want {
+	if want := (models.ClockOffset{Min: 30*time.Minute - 5*ms, Max: 30*time.Minute + 6*ms, Res: 3 * ms, Layout: models.LayoutTyped}); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != want {
 		t.Errorf("F's narrower window: %s %+v (%s); want the offset %+v", ln.Kind, ln.Offset, ln.Why, want)
 	}
 	// F's least offset is the recording's bound, 30m0.011s: they touch.
@@ -1355,7 +1380,7 @@ func TestAClockOffsetIsBoundedByBothRunsWindows(t *testing.T) {
 		name       string
 		rres, lres time.Duration
 	}{{"a millisecond recorded, a minute seen", ms, time.Minute}, {"a minute recorded, a millisecond seen", time.Minute, ms}} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, c.fread.Add(30*time.Minute), row.lres)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, c.read.Add(30*time.Minute), row.rres)}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, c.fread.Add(30*time.Minute), row.lres)}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, c.read.Add(30*time.Minute), row.rres)}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
 		if ln.Kind != KindUnaccounted || ln.Offset != nil || !strings.Contains(ln.Why, "at a resolution of 1m (the one its encoding writes): ") {
 			t.Errorf("%s: %s %+v (%s); want refused at a minute's resolution", row.name, ln.Kind, ln.Offset, ln.Why)
 		}
@@ -1369,7 +1394,7 @@ func TestAClockOffsetIsBoundedByBothRunsWindows(t *testing.T) {
 		{"a moment recorded, a wall clock seen", InstantLeaf(p, p, rec, ms), WallClockLeaf(p, p, c.fread.Add(30*time.Minute).Truncate(ms), ms), instantFormChangedWhy(namesMoment, namesWall)},
 		{"a wall clock recorded, a moment seen", WallClockLeaf(p, p, rec, ms), InstantLeaf(p, p, c.fread.Add(30*time.Minute).Truncate(ms), ms), instantFormChangedWhy(namesWall, namesMoment)},
 	} {
-		ln := ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: row.see}}, Shape{Leaves: map[string]Leaf{p: row.rec}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: row.see}}, Shape{Leaves: map[string]Leaf{p: row.rec}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
 		if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != row.want {
 			t.Errorf("%s: %s %+v (%s); want refused: %s", row.name, ln.Kind, ln.Offset, ln.Why, row.want)
 		}
@@ -1443,7 +1468,7 @@ func TestAClockOffsetsReasonNamesTheField(t *testing.T) {
 	c := newClockOffsetCall()
 	ms := time.Millisecond
 	const path, field = "body.cmd.documents.0.expiresAt.$date.$numberLong", "body.cmd.documents[].expiresAt"
-	ln := ClassifyIn(NewDriftCache(), []string{path}, Shape{Leaves: map[string]Leaf{path: InstantLeaf(path, field, c.fread.Add(30*time.Minute).Truncate(ms), ms)}}, Shape{Leaves: map[string]Leaf{path: InstantLeaf(path, field, c.read.Add(30*time.Minute).Truncate(ms), ms)}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
+	ln := ClassifyIn(clockedDrifts(), []string{path}, Shape{Leaves: map[string]Leaf{path: InstantLeaf(path, field, c.fread.Add(30*time.Minute).Truncate(ms), ms)}}, Shape{Leaves: map[string]Leaf{path: InstantLeaf(path, field, c.read.Add(30*time.Minute).Truncate(ms), ms)}}, c.call, nil, nil, nil, c.w.ComparesOffsets())[0]
 	if ln.Kind != KindClockOffset || !strings.HasPrefix(ln.Why, field+" = clock + 30m (") || strings.Contains(ln.Why, "$numberLong") {
 		t.Errorf("a Mongo date: %s (%s); want it to name %s", ln.Kind, ln.Why, field)
 	}
@@ -1488,6 +1513,12 @@ func TestAValueReadAsAVariableAndAsAClockOffsetIsRefused(t *testing.T) {
 	noise := Learned{Kind: KindNoise, Recorded: leaf}
 	if got := stricterOf(noise, late); got.Kind != KindUnaccounted || got.Offset != nil || !strings.Contains(got.Why, p+" = clock + 30m (") || !strings.Contains(got.Why, "would be noise, which no replay compares, and keploy refuses") || strings.Contains(got.Why, "would be ,") {
 		t.Errorf("FALSE GREEN? noise before the call, a clock offset after: %s %+v (%s); want refused naming both", got.Kind, got.Offset, got.Why)
+	}
+	// A plain read of the clock before the call (KindClockRead) is named as
+	// one, never as noise no replay compares.
+	read := Learned{Kind: KindClockRead, Recorded: leaf, Read: &models.ClockOffset{Res: time.Millisecond}}
+	if got := stricterOf(read, late); got.Kind != KindUnaccounted || got.Offset != nil || !strings.Contains(got.Why, "would be a plain read of the application's clock, at no offset, and keploy refuses") {
+		t.Errorf("FALSE GREEN? a plain read before the call, a clock offset after: %s %+v (%s); want refused naming both", got.Kind, got.Offset, got.Why)
 	}
 }
 
@@ -1565,7 +1596,7 @@ func TestAValueCutCoarserThanItsEncodingIsRefusedAsACut(t *testing.T) {
 	turn := (&Window{Rec: Span{From: c.call.Add(-175 * ms), To: c.call}, F: Span{From: c.fcall.Add(-700 * ms), To: c.fcall}}).ComparesOffsets()
 	rec, live := c.call.Add(-145*ms).Truncate(sec).Add(30*time.Minute), c.fcall.Add(-682*ms).Truncate(sec).Add(30*time.Minute)
 	ln := c.classify(p, rec, live, ms, turn)
-	want := models.ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 9*ms, Res: sec}
+	want := models.ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 9*ms, Res: sec, Layout: models.LayoutTyped}
 	if cut := clockOffsetCutWhy(p, want, ms); ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != cut || !strings.HasPrefix(ln.Why, p+" = clock + 30m (from 29m59.845s to 30m0.009s): ") || !strings.Contains(ln.Why, "but both runs' values are whole multiples of 1s, coarser than the 1ms their encoding writes: the application cuts its value") {
 		t.Errorf("FALSE GREEN? thirty minutes cut to the second, the second inside both windows: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, cut)
 	}
@@ -1616,8 +1647,8 @@ func TestAValueCutCoarserThanItsEncodingIsRefusedAsACut(t *testing.T) {
 		w    *Window
 		want models.ClockOffset
 	}{
-		{"the recording's bound the lesser", &Window{Rec: Span{From: half.Add(-20 * ms), To: half.Add(30 * ms)}, F: Span{From: half.Add(61500*ms - 50*ms), To: half.Add(61500*ms + 10*ms)}}, models.ClockOffset{Min: 30*time.Minute - 10*ms, Max: 30*time.Minute + 21*ms, Res: 500 * ms}},
-		{"F's bound the lesser", &Window{Rec: Span{From: half.Add(-30 * ms), To: half.Add(20 * ms)}, F: Span{From: half.Add(61500*ms - 10*ms), To: half.Add(61500*ms + 20*ms)}}, models.ClockOffset{Min: 30*time.Minute - 20*ms, Max: 30*time.Minute + 11*ms, Res: 500 * ms}},
+		{"the recording's bound the lesser", &Window{Rec: Span{From: half.Add(-20 * ms), To: half.Add(30 * ms)}, F: Span{From: half.Add(61500*ms - 50*ms), To: half.Add(61500*ms + 10*ms)}}, models.ClockOffset{Min: 30*time.Minute - 10*ms, Max: 30*time.Minute + 21*ms, Res: 500 * ms, Layout: models.LayoutTyped}},
+		{"F's bound the lesser", &Window{Rec: Span{From: half.Add(-30 * ms), To: half.Add(20 * ms)}, F: Span{From: half.Add(61500*ms - 10*ms), To: half.Add(61500*ms + 20*ms)}}, models.ClockOffset{Min: 30*time.Minute - 20*ms, Max: 30*time.Minute + 11*ms, Res: 500 * ms, Layout: models.LayoutTyped}},
 	} {
 		hc := clockOffsetCall{call: row.w.Rec.To, fcall: row.w.F.To}
 		ln := hc.classify(p, hrec, hlive, ms, row.w.ComparesOffsets())
@@ -1698,7 +1729,7 @@ func TestAValueCutCoarserThanItsEncodingIsRefusedAsACut(t *testing.T) {
 	if g := sharedGrain(trec, tlive); g != 2*sec {
 		t.Fatalf("precondition: the two second values share %s, want 2s", g)
 	}
-	twoWant := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 910*ms, Res: 2 * sec}
+	twoWant := models.ClockOffset{Min: 30*time.Minute - 40*ms, Max: 30*time.Minute + 910*ms, Res: 2 * sec, Layout: models.LayoutTyped}
 	if ln := two.classify(p, trec, tlive, sec, two.w); ln.Kind != KindClockOffset || ln.Offset == nil || *ln.Offset != twoWant {
 		t.Errorf("2 s shared by chance at a second's encoding: %s %+v (%s); want the offset %+v", ln.Kind, ln.Offset, ln.Why, twoWant)
 	}
@@ -1863,7 +1894,7 @@ func TestAClockOffsetLeavesAPlainReadAloneAndRefusesOneTheAnswerHolds(t *testing
 	const p = "body.expiresAt"
 	c := newClockOffsetCall()
 	ms := time.Millisecond
-	if ln := c.classify(p, c.read.Truncate(ms), c.fread.Truncate(ms), ms, c.w.ComparesOffsets()); ln.Kind != KindNoise || ln.Offset != nil {
+	if ln := c.classify(p, c.read.Truncate(ms), c.fread.Truncate(ms), ms, c.w.ComparesOffsets()); !noiseOrRead(ln) || ln.Offset != nil {
 		t.Errorf("a read in its window: %s %+v (%s); want noise", ln.Kind, ln.Offset, ln.Why)
 	}
 	// A read made 2 ms before its window in both runs (before the previous
@@ -1884,8 +1915,279 @@ func TestAClockOffsetLeavesAPlainReadAloneAndRefusesOneTheAnswerHolds(t *testing
 		t.Errorf("held by the recorded answer: %s %+v (%s); want refused naming the offset and the answer", ln.Kind, ln.Offset, ln.Why)
 	}
 	live := InstantLeaf(p, p, c.fread.Add(30*time.Minute).Truncate(ms), ms)
-	ln = ClassifyIn(NewDriftCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, rec, ms)}}, c.call, []Earlier{GivenRequest(nil)}, nil, nil, c.w.ComparesOffsets())[0]
+	ln = ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: live}}, Shape{Leaves: map[string]Leaf{p: InstantLeaf(p, p, rec, ms)}}, c.call, []Earlier{GivenRequest(nil)}, nil, nil, c.w.ComparesOffsets())[0]
 	if ln.Kind != KindUnaccounted || ln.Offset != nil || ln.Why != unreadRequestWhy(unsentRequest) {
 		t.Errorf("the test case's request unread: %s %+v (%s); want refused: %s", ln.Kind, ln.Offset, ln.Why, unreadRequestWhy(unsentRequest))
+	}
+}
+
+// An instant its protocol types (a Mongo $date) in a call with no window (a
+// test's own call, read by the lead alone) that the lead did not move, as
+// when record's full round read its clock late on a loaded box, is a plain
+// read of the application's clock all the same, read whole, which every
+// replay checks in its call's own span: whether the lead moved it must not
+// decide what is learned (noWindowRead). The confirming round's check passes
+// a read of its own clock and refuses one that is not (the recorded value
+// again, an instant the application built on what the test gave it), naming
+// the field. One recorded later than its call and one echoed in its own
+// answer (answered with this run's value, never checked) stay refused, and
+// so does one in a client test. A wall clock of no zone is a plain read too,
+// in the zone of its recorded reading nearest its call (here UTC).
+func TestATypedInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) {
+	rec := time.Date(2026, 10, 27, 9, 0, 0, 123e6, time.UTC)
+	call := rec.Add(time.Millisecond)
+	const p = "body.u.processed_at"
+	shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{p: l}} }
+	ms := func(at time.Time) Leaf { return InstantLeaf(p, p, at, time.Millisecond) }
+	classify := func(dc *DriftCache, r, l Leaf, at time.Time, resp []Leaf) Learned {
+		return ClassifyIn(dc, []string{p}, shape(l), shape(r), at, nil, nil, resp, nil)[0]
+	}
+	late := rec.Add(FullRoundLead + 3400*time.Millisecond)
+	for _, row := range []struct {
+		what string
+		l    time.Time
+	}{{"read late", late}, {"read early", rec.Add(FullRoundLead - 400*time.Millisecond)}, {"moved by the lead", rec.Add(FullRoundLead)}} {
+		if ln := classify(clockedDrifts(), ms(rec), ms(row.l), call, nil); !plainRead(ln) {
+			t.Errorf("a $date with no window, %s: %s Read=%+v (%s); want a plain read of the clock, checked at replay", row.what, ln.Kind, ln.Read, ln.Why)
+		}
+	}
+	o, ok := classify(clockedDrifts(), ms(rec), ms(late), call, nil).Clock()
+	if !ok {
+		t.Fatal("a $date with no window learned no read of the clock")
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+	if ok, why := CheckClockRead(p, o, ms(now.Add(5*time.Millisecond)), span, true); !ok {
+		t.Errorf("the confirming round's read of its own clock: refused (%s); want it passed", why)
+	}
+	// It carries the protocol's type as its layout: a text of the same
+	// instant at replay is another form, refused.
+	if o.Layout != models.LayoutTyped {
+		t.Errorf("a typed read's layout = %q; want %q", o.Layout, models.LayoutTyped)
+	}
+	if ok, why := CheckClockRead(p, o, Leaf{Path: p, Type: String, Value: now.Add(5 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")}, span, true); ok || !strings.Contains(why, "in another form") {
+		t.Errorf("a typed read, its instant as a text at replay: %v (%s); want refused, naming the form", ok, why)
+	}
+	if ok, why := CheckClockRead(p, o, ms(rec), span, true); ok || !strings.HasPrefix(why, p+" was learned as clock") || !strings.Contains(why, "it changed") {
+		t.Errorf("the confirming round's recorded value again: ok=%v (%s); want it refused, naming %s", ok, why, p)
+	}
+	if ln := classify(clockedDrifts(), ms(rec), ms(late), rec.Add(-time.Hour), nil); ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
+		t.Errorf("a $date recorded an hour after its call: %s (%s); want refused: %s", ln.Kind, ln.Why, instantNotClock)
+	}
+	answer := []Leaf{{Path: "body.doc.processed_at", Type: Instant, Value: ms(rec).Value}}
+	if ln := classify(clockedDrifts(), ms(rec), ms(late), call, answer); ln.Kind != KindUnaccounted || len(ln.Echo) != 0 || ln.Why != instantNotClock {
+		t.Errorf("a $date its own answer echoes: %s (echo %+v, %s); want refused: %s", ln.Kind, ln.Echo, ln.Why, instantNotClock)
+	}
+	// A wall clock of no zone with no window: a plain read of the clock
+	// too, in UTC where the learn step reads such a clock in UTC alone.
+	wall := func(at time.Time) Leaf { return WallClockLeaf(p, p, at, time.Millisecond) }
+	if ln := classify(clockedDrifts(), wall(rec), wall(late), call, nil); !zonedRead(ln, models.ZoneUTC) {
+		t.Errorf("a wall clock of no zone with no window: %s Read=%+v (%s); want a plain read in UTC", ln.Kind, ln.Read, ln.Why)
+	}
+	client := clockedDrifts()
+	client.clientTests = true
+	if ln := classify(client, ms(rec), ms(late), call, nil); ln.Kind != KindUnaccounted {
+		t.Errorf("a $date with no window in a client test: %s Read=%+v (%s); want refused", ln.Kind, ln.Read, ln.Why)
+	}
+}
+
+// A plain read of the clock is learned at its encoding's resolution (a
+// $date's millisecond), never at the granularity its two values happen to
+// share (readRes): two millisecond values both whole multiples of 492 ms by
+// chance, and the same recording with a value of record's full round that
+// shares only a millisecond, learn the same resolution, so a replay's
+// window is the same whichever value the full round read, and a stamp
+// 400 ms before its call's span is refused under each. A text one and a
+// time of day the same. A value the application cut to the second (both
+// whole seconds) is learned at the second, the unit above its encoding,
+// whatever more the two share (7 s, or 2 s), and every replay refuses it,
+// naming the cut.
+func TestAPlainClockReadsResolutionIsItsEncodingsNotAChanceGrain(t *testing.T) {
+	const p = "body.u.processed_at"
+	ms := time.Millisecond
+	base := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	rec := time.UnixMilli(base.UnixMilli()/492*492 + 492).UTC()
+	chance, fine := rec.Add(126*492*ms), rec.Add(126*492*ms+ms)
+	if g, f := sharedGrain(rec, chance), sharedGrain(rec, fine); g < 492*ms || f >= 492*ms {
+		t.Fatalf("the values share %v and %v; want at least 492ms and less", g, f)
+	}
+	shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{p: l}} }
+	typed := func(at time.Time) Leaf { return InstantLeaf(p, p, at, ms) }
+	learn := func(r, l time.Time) models.ClockOffset {
+		t.Helper()
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(typed(l)), shape(typed(r)), r.Add(ms), nil, nil, nil, nil)[0]
+		o, ok := ln.Clock()
+		if !plainRead(ln) || !ok {
+			t.Fatalf("a $date with no window, %v then %v: %s Read=%+v (%s); want a plain read of the clock", r, l, ln.Kind, ln.Read, ln.Why)
+		}
+		return o
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * ms)}
+	for _, row := range []struct {
+		what string
+		l    time.Time
+	}{{"sharing 492ms by chance", chance}, {"sharing a millisecond", fine}} {
+		o := learn(rec, row.l)
+		if o.Res != ms {
+			t.Errorf("%s: Res = %v; want the 1ms a $date writes", row.what, o.Res)
+		}
+		if ok, why := CheckClockRead(p, o, typed(now.Add(-400*ms)), span, true); ok || !strings.Contains(why, "it changed") {
+			t.Errorf("%s, a stamp 400ms before the call's span: %v (%s); want refused", row.what, ok, why)
+		}
+		if ok, why := CheckClockRead(p, o, typed(now.Add(5*ms)), span, true); !ok {
+			t.Errorf("%s, a read in the call's span: refused (%s); want it passed", row.what, why)
+		}
+	}
+	const lay = "2006-01-02T15:04:05.000Z"
+	for _, l := range []time.Time{chance, fine} {
+		if r := textClockRead(rec.Format(lay), l.Format(lay)); r == nil || r.Res != ms {
+			t.Errorf("a text read, %v then %v: %+v; want a Res of 1ms", rec, l, r)
+		}
+	}
+	rtod := 9*time.Hour + 960*ms
+	for _, ltod := range []time.Duration{rtod + 129*480*ms, rtod + 129*480*ms + ms} {
+		if r := clockedDrifts().todRead(rtod, ltod, ms, ms, models.LayoutTypedTimeOfDay, models.LayoutTypedTimeOfDay, nil, rec); r.Res != ms {
+			t.Errorf("a time of day, %v then %v (sharing %v): Res = %v; want 1ms", rtod, ltod, todGrain(rtod, ltod), r.Res)
+		}
+	}
+	if g := todGrain(rtod, rtod+129*480*ms); g < 480*ms {
+		t.Fatalf("the times of day share %v; want at least 480ms", g)
+	}
+	// Above a day no unit is above the encoding, so two dates that share
+	// two days by chance are no cut: read at the day.
+	if got := readRes(24*time.Hour, 48*time.Hour); got != 24*time.Hour {
+		t.Errorf("readRes of a day's encoding sharing two days = %v; want the day", got)
+	}
+	// Cut to the second: 7 s shared, or 2 s, learned at the second alike,
+	// and refused at replay naming the cut.
+	sec := time.Unix(base.Unix()/7*7+7, 0).UTC()
+	for _, l := range []time.Time{sec.Add(63 * time.Second), sec.Add(62 * time.Second)} {
+		o := learn(sec, l)
+		if o.Res != time.Second {
+			t.Errorf("cut to the second, %v then %v (sharing %v): Res = %v; want 1s", sec, l, sharedGrain(sec, l), o.Res)
+		}
+		if ok, why := CheckClockRead(p, o, typed(now.Add(time.Second)), Span{From: now.Add(time.Second - 5*ms), To: now.Add(time.Second + 5*ms)}, true); ok || !strings.Contains(why, "the application cuts its value") {
+			t.Errorf("cut to the second, at replay: %v (%s); want refused naming the cut", ok, why)
+		}
+	}
+}
+
+// A text's fraction digits are no evidence of the resolution its writer
+// writes: a writer that drops trailing zeros (Go's RFC3339Nano, Java's
+// Instant) writes ".495123" where its read fell on a whole microsecond. So a
+// text read is learned at the finer of its two values' digits (textReadRes),
+// never coarser because one of them happened to end in zeros, and a
+// nine-digit replay value passes. A replay's value with fewer digits passes
+// where it is the same instant at its own precision (the writer dropped its
+// zeros; ruled 2026-10-27). Two values that both end in zeros at a unit are
+// read at it, and a replay value with more digits is refused as a cut (a
+// stated limit: the same at every replay of that recording). A value the
+// application does cut is still refused naming the cut: written with nine
+// digits on both sides, with three and six, or as an epoch in seconds with
+// a fraction (read exactly, never through a float); and so is a cut value
+// of a form whose layout fixes its resolution (an epoch in nanoseconds, a
+// $date), wherever its replay value falls.
+func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T) {
+	const p = "body.at"
+	str := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	learn := func(rec, live string) models.ClockOffset {
+		t.Helper()
+		ln := ClassifyIn(clockedDrifts(), []string{p}, Shape{Leaves: map[string]Leaf{p: str(live)}}, Shape{Leaves: map[string]Leaf{p: str(rec)}}, call, nil, nil, nil, nil)[0]
+		o, ok := ln.Clock()
+		if !plainRead(ln) || !ok {
+			t.Fatalf("%s then %s: %s Read=%+v (%s); want a plain read of the clock", rec, live, ln.Kind, ln.Read, ln.Why)
+		}
+		return o
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * time.Millisecond)}
+	check := func(what string, o models.ClockOffset, v string, want bool, whyHas string) {
+		t.Helper()
+		ok, why := CheckClockRead(p, o, str(v), span, true)
+		if ok != want || !want && !strings.Contains(why, whyHas) {
+			t.Errorf("%s, replay %s: %v (%s); want %v %q", what, v, ok, why, want, whyHas)
+		}
+	}
+	six, nine := "2026-10-27T03:30:00.495123Z", "2026-10-27T03:31:02.032456789Z"
+	for _, pr := range [][2]string{{six, nine}, {nine, six}} {
+		o := learn(pr[0], pr[1])
+		if o.Res != time.Nanosecond {
+			t.Errorf("%s then %s: Res = %v; want the 1ns of the value with nine digits", pr[0], pr[1], o.Res)
+		}
+		what := "one value ending in 000ns"
+		check(what, o, "2026-10-28T07:30:00.005123456Z", true, "")
+		check(what, o, "2026-10-28T07:30:00.00512345Z", true, "")
+		check(what+", fewer digits", o, "2026-10-28T07:30:00.005123Z", true, "")
+		check(what+", before the span", o, "2026-10-28T07:29:59.995123456Z", false, "it changed")
+	}
+	// Both values happened to end in zeros: learned at the microsecond
+	// their digits show; a six-digit replay value passes, a nine-digit one
+	// is refused as a cut (the stated limit), never passed.
+	both := learn(six, "2026-10-27T03:31:02.032456Z")
+	if both.Res != time.Microsecond {
+		t.Errorf("both values with six digits: Res = %v; want 1µs", both.Res)
+	}
+	check("both values ending in 000ns", both, "2026-10-28T07:30:00.005123Z", true, "")
+	check("both values ending in 000ns, nine digits", both, "2026-10-28T07:30:00.005123456Z", false, "the application cuts its value")
+	// Cut to the second, nine digits on both sides: the cut is learned (the
+	// microsecond above the nanosecond) and a replay value that is cut so
+	// too is refused naming it, wherever in the span its read fell.
+	cut := learn("2026-10-27T03:30:00.000000000Z", "2026-10-27T03:31:02.000000000Z")
+	if cut.Res != time.Microsecond {
+		t.Errorf("cut to the second with nine digits: Res = %v; want the 1µs cut", cut.Res)
+	}
+	check("cut to the second", cut, "2026-10-28T07:30:00.000000000Z", false, "the application cuts its value")
+	// Cut to the second, written with three digits, then six: the cut is
+	// the second above the coarser's millisecond, so a three-digit replay
+	// value cut so is refused too, not checked at its millisecond.
+	mixed := learn("2026-10-27T03:30:00.000Z", "2026-10-27T03:31:02.000000Z")
+	if mixed.Res != time.Second {
+		t.Errorf("cut to the second with three digits, then six: Res = %v; want the 1s cut", mixed.Res)
+	}
+	check("cut to the second, three digits", mixed, "2026-10-28T07:30:00.000Z", false, "the application cuts its value")
+	check("cut to the second, six digits", mixed, "2026-10-28T07:30:00.000000Z", false, "the application cuts its value")
+	// An epoch in seconds cut to the millisecond, with six digits: read
+	// exactly, both values are whole milliseconds, a cut.
+	if r := textClockRead("1793158200.123000", "1793158262.456000"); r == nil || r.Res != time.Millisecond {
+		t.Errorf("an epoch in seconds cut to the millisecond: %+v; want a Res of the 1ms cut", r)
+	} else {
+		check("an epoch in seconds cut to the millisecond", *r, "1793172600.005000", false, "the application cuts its value")
+	}
+	// A time of day and an epoch in seconds read their fraction the same.
+	if r := clockedDrifts().todRead(3*time.Hour+30*time.Minute+495123*time.Microsecond, 3*time.Hour+31*time.Minute+2032456789, time.Microsecond, time.Nanosecond, "time-second", "time-second", nil, call); r.Res != time.Nanosecond {
+		t.Errorf("a time of day with six digits, then nine: Res = %v; want 1ns", r.Res)
+	}
+	if r := textClockRead("1793158200.495", "1793158262.032456"); r == nil || r.Res != time.Microsecond {
+		t.Errorf("an epoch in seconds with three digits, then six: %+v; want a Res of 1µs", r)
+	}
+	// One fraction digit, the fewest the layout reads: a tenth of a second,
+	// read exactly (the span's own tenth passes; the next one, which starts
+	// after the span ends, is refused).
+	if r := textClockRead("1793158200.5", "1793158262.3"); r == nil || r.Res != 100*time.Millisecond {
+		t.Errorf("an epoch in seconds with one digit: %+v; want a Res of 100ms", r)
+	} else {
+		check("an epoch in seconds with one digit", *r, "1793172600.0", true, "")
+		check("an epoch in seconds with one digit, after the span", *r, "1793172600.1", false, "it changed")
+	}
+	// A layout that fixes its resolution reads no fraction: a cut epoch in
+	// nanoseconds, and a cut $date, are refused at replay even where the
+	// replay's value is no whole number of the cut.
+	ns := func(at time.Time) string { return strconv.FormatInt(at.UnixNano(), 10) }
+	sec := time.Date(2026, 10, 26, 9, 0, 0, 123000000, time.UTC)
+	if r := textClockRead(ns(sec), ns(sec.Add(FullRoundLead+7*time.Millisecond))); r == nil || r.Res != time.Microsecond {
+		t.Fatalf("a cut epoch in nanoseconds: %+v; want a Res of 1µs, a cut", r)
+	} else if ok, why := CheckClockRead(p, *r, str(ns(now.Add(5*time.Millisecond+7))), span, true); ok || !strings.Contains(why, "the application cuts its value") {
+		t.Errorf("a cut epoch in nanoseconds, a replay value no whole microsecond: %v (%s); want refused naming the cut", ok, why)
+	}
+	const tp = "body.at.$date.$numberLong"
+	typed := func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at, time.Millisecond) }
+	whole := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	ln := ClassifyIn(clockedDrifts(), []string{tp}, Shape{Leaves: map[string]Leaf{tp: typed(whole.Add(61 * time.Second))}}, Shape{Leaves: map[string]Leaf{tp: typed(whole)}}, whole.Add(time.Millisecond), nil, nil, nil, nil)[0]
+	if o, ok := ln.Clock(); !ok || o.Res != time.Second {
+		t.Fatalf("a cut $date: %s %+v,%v (%s); want a read at the second's cut", ln.Kind, o, ok, ln.Why)
+	} else if ok, why := CheckClockRead("at", o, typed(now.Add(5*time.Millisecond)), span, true); ok || !strings.Contains(why, "the application cuts its value") {
+		t.Errorf("a cut $date, a replay value no whole second: %v (%s); want refused naming the cut", ok, why)
 	}
 }

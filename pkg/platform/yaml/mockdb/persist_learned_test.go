@@ -43,7 +43,7 @@ func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 					Variables: models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}},
 					Binds:     map[string]models.MockVariables{"mock-0": {"key": {Recorded: "k-1", Bind: "body.key"}}}},
 			}
-			added, err := ys.PersistLearned(ctx, set, states)
+			added, _, err := ys.PersistLearned(ctx, set, states)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -70,16 +70,21 @@ func TestPersistLearnedWritesNoiseAndVariables(t *testing.T) {
 			if m0 == nil || m1 == nil {
 				t.Fatalf("mocks read back %v", byName)
 			}
-			if want := (models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}}}); !reflect.DeepEqual(m0.Spec.Variables, want) {
+			for _, m := range []*models.Mock{m0, m1} {
+				if s := models.VariableAboutState("key", m.Spec.Variables["key"]); s != models.AboutLearned {
+					t.Fatalf("%s's learned variable reads back as %v", m.Name, s)
+				}
+			}
+			if want := (models.MockVariables{"key": {Recorded: "k-1", Bind: "body.key", Answer: []string{"body.idempotency_key"}}}); !reflect.DeepEqual(withoutAbout(m0.Spec.Variables), want) {
 				t.Fatalf("mock-0's variables read back %+v: another call uses the value, so it is no echo", m0.Spec.Variables)
 			}
 			if !reflect.DeepEqual(m0.Spec.ReqBodyNoise, map[string][]string{"header.x-trace": {}, "url.path.1": {}}) {
 				t.Fatalf("mock-0's noise read back %v: a variable's place is never noise", m0.Spec.ReqBodyNoise)
 			}
-			if want := (models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}}); !reflect.DeepEqual(m1.Spec.Variables, want) {
+			if want := (models.MockVariables{"key": {Recorded: "k-1", Use: []string{"url.query.key"}}}); !reflect.DeepEqual(withoutAbout(m1.Spec.Variables), want) {
 				t.Fatalf("mock-1's variables read back %+v", m1.Spec.Variables)
 			}
-			again, err := ys.PersistLearned(ctx, set, states)
+			again, _, err := ys.PersistLearned(ctx, set, states)
 			if err != nil || len(again) != 0 {
 				t.Fatalf("what a mock already carries is not added again: %v %v", again, err)
 			}
@@ -112,7 +117,7 @@ func TestPersistLearnedKeepsAClockVariablesReads(t *testing.T) {
 			}
 			states := map[string]models.MockState{"mock-0": {Name: "mock-0",
 				Variables: models.MockVariables{"at": {Recorded: "2026-10-14T10:00:00.250Z 10:00:41", Bind: "body.at", Clock: reads}}}}
-			if _, err := ys.PersistLearned(ctx, set, states); err != nil {
+			if _, _, err := ys.PersistLearned(ctx, set, states); err != nil {
 				t.Fatal(err)
 			}
 			mocks, err := ys.GetUnFilteredMocks(ctx, set, models.BaseTime, models.BaseTime.AddDate(100, 0, 0), nil, nil)
@@ -212,4 +217,14 @@ func TestPersistMockNoiseSwitchOffKeepsNoiseAtAVariablePlace(t *testing.T) {
 	if want := map[string][]string{"body.key": {}, "body.other": {}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("switch off: noise written %v, want %v", got, want)
 	}
+}
+
+// withoutAbout is vs with no variable's about: the decisions alone.
+func withoutAbout(vs models.MockVariables) models.MockVariables {
+	out := vs.Clone()
+	for n, v := range out {
+		v.About = nil
+		out[n] = v
+	}
+	return out
 }

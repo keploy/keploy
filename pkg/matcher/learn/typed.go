@@ -112,7 +112,8 @@ func WallClockLeaf(path, noise string, wall time.Time, res time.Duration) Leaf {
 // compared whole; a time of day names no day, so no call's window holds it
 // and no call bounds it: the learn step reads it as a read of the clock only
 // where it moved by FullRoundLead, read modulo a day, as it reads a text's
-// time of day (moved). Outside 0 to 24 hours it is written as it is, a text
+// time of day (moved), and learns it so (todRead), which a replay checks
+// modulo a day in its call's span (clockReadIn). Outside 0 to 24 hours it is written as it is, a text
 // InstantOf does not read, and the learn step refuses it where it changed.
 func TimeOfDayLeaf(path, noise string, tod, res time.Duration) Leaf {
 	if res > 0 {
@@ -529,6 +530,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.Why = KindUnaccounted, why
 		return ln
 	}
+	// noWindow, of an instant neither the lead nor a window shows a read
+	// that is learned as a plain read all the same (noWindowRead), is why
+	// keploy refused it before it learned it so: a caller whose replay
+	// checks no read of the clock refuses it with that reason still
+	// (KindClockRead). "" for any other.
+	noWindow := ""
 	if !instantClock(rt, lt, w, !dc.clientTests, at, dc.zone) {
 		// A read of the clock plus a constant offset (a time to live, a
 		// due date), in its call's window in both runs: compared, never
@@ -539,24 +546,37 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if off, ok := clockOffsetOf(rt, lt, w); ok && !dc.clientTests {
 			return dc.clockOffset(ln, off, max(rt.res, lt.res), lt.at.Sub(rt.at), w, unread, rec, resp)
 		}
-		ln.Kind, ln.Why = KindUnaccounted, instantNotClock
+		why := instantNotClock
 		switch {
 		case rt.names != lt.names:
-			ln.Why = instantFormChangedWhy(rt.names, lt.names)
+			why = instantFormChangedWhy(rt.names, lt.names)
 		case dc.clientTests && rt.names == namesTimeOfDay:
-			ln.Why = timeOfDayClientTestWhy
+			why = timeOfDayClientTestWhy
 		case dc.clientTests:
-			ln.Why = clientTestWhy("", w != nil)
+			why = clientTestWhy("", w != nil)
 		case inClockRange(rt.at) && inClockRange(lt.at) && leadMoved(rt.at, lt.at, rt.res, lt.res, false):
 			// Moved by the lead, as a read made after its call would
 			// (readNoLaterThan): the reason says so, never that it did
 			// not move by it.
-			ln.Why = instantPastCall
+			why = instantPastCall
 			if rt.afterCall(at, dc.zone) {
-				ln.Why = instantAfterCall
+				why = instantAfterCall
 			}
 		}
-		return ln
+		// With no window, one that names its moment is a plain read of
+		// the clock all the same, checked at every replay (noWindowRead).
+		if !dc.noWindowRead(rt, lt, w, at) {
+			ln.Kind, ln.Why = KindUnaccounted, why
+			return ln
+		}
+		// Where keploy cannot tell which clock the application reads, no
+		// replay can check such a read: refused here, at learn, whatever the
+		// lead did not show.
+		if !dc.appClock {
+			ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
+			return ln
+		}
+		noWindow = why
 	}
 	// Noise, or an echo, only where the echo could read the test case's own
 	// request, where the moment F saw may stand.
@@ -565,12 +585,68 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		return ln
 	}
 	if echo := dc.instantEchoes(rec, resp); len(echo) > 0 {
+		// An echo answers with this run's value and checks none, so one
+		// that neither the lead nor a window shows a read is refused.
+		if noWindow != "" {
+			ln.Kind, ln.Why = KindUnaccounted, noWindow
+			return ln
+		}
 		ln.Kind, ln.Echo = KindEcho, echo
 	}
-	if ln.Kind == KindNoise && rt.names == namesMoment && lt.names == namesMoment {
-		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at))}
+	// A read of the clock, checked at every replay (KindClockRead, never
+	// noise): one that names its moment as it names it, a wall clock of no
+	// zone in the zone the learn step read it in (wallZone).
+	if ln.Kind == KindNoise && rt.names == lt.names && rt.names != namesTimeOfDay {
+		ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
+		if noWindow != "" {
+			ln.Why = noWindow
+		}
+		ln.Read = &models.ClockOffset{Res: readRes(max(rt.res, lt.res), sharedGrain(rt.at, lt.at)), Layout: models.LayoutTyped}
+		if rt.names == namesWall {
+			ln.Read.Zone = dc.wallZone(rt.at, lt.at, rt.res, lt.res, w, at)
+		}
+	}
+	// A time of day the lead moved (instantClock) names no day, so no
+	// window holds it: a read of the clock all the same, which every replay
+	// checks modulo a day in its call's span, in the zone the learn step
+	// read it in (todRead, clockReadIn), never noise that lets any value
+	// pass.
+	if ln.Kind == KindNoise && rt.names == namesTimeOfDay && lt.names == namesTimeOfDay {
+		day := time.Duration(nsPerDay)
+		rtod, ltod := rt.at.Sub(timeOfDayDay)%day, lt.at.Sub(timeOfDayDay)%day
+		ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
+		ln.Read = dc.todRead(rtod, ltod, rt.res, lt.res, models.LayoutTypedTimeOfDay, models.LayoutTypedTimeOfDay, w, at)
 	}
 	return ln
+}
+
+// noWindowRead reports whether r and l, an instant its protocol types as
+// recorded and as F saw it, that neither the lead nor a window shows a read
+// of the application's clock (instantClock), is still learned as a plain
+// read of it (Learned.Read), as a text one instant whole is (classifyRead):
+// in a call with no window w, an instant of one form in both runs (a test's
+// own call, read by the lead alone, but every other call with none too: a
+// start-up or pool call whose window keploy could not tell, a background
+// pairing; each is checked at replay where its caller checks reads, and
+// refused at learn where keploy cannot tell the application's clock), in the
+// years a recording's clock reads (inClockRange), and recorded no later than
+// its call at (zero: not known), as a read the call carries is made. Every
+// replay, record's confirming round first, checks it in its call's own span
+// on the application's clock (CheckClockRead), so a value that is no read of
+// the clock fails there, naming the field, never noise that lets any value
+// pass. Whether the lead moved it depends on how late record's full round
+// read its clock, and the verdict must not. Not in keploy mock's client
+// tests, whose harness gives the application inputs keploy does not see
+// (clientTestWhy), nor for a time of day, which names no day. A wall clock
+// of no zone in both runs is one too, read in the zone its recording tells
+// (wallZone), which a replay checks it in alone, or in UTC and the
+// application's zone both where the recording cannot tell the two apart
+// (models.ZoneEither). An echo of it in its call's own answer stays refused
+// (classifyInstant): an echo is answered with this run's value, never
+// checked as a read.
+func (dc *DriftCache) noWindowRead(r, l typedInstant, w *Window, at time.Time) bool {
+	return w == nil && !dc.clientTests && r.names == l.names && r.names != namesTimeOfDay &&
+		inClockRange(r.at) && inClockRange(l.at) && !r.afterCall(at, dc.zone)
 }
 
 // clockOffsetOf is the offset (models.ClockOffset) r and l, an instant as
@@ -628,7 +704,7 @@ func clockOffsetOf(r, l typedInstant, w *Window) (models.ClockOffset, bool) {
 	if rlo <= 0 || llo <= 0 {
 		return models.ClockOffset{}, false
 	}
-	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi), Res: max(r.res, l.res, grain)}
+	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi), Res: max(r.res, l.res, grain), Layout: models.LayoutTyped}
 	return o, o.Min < o.Max
 }
 
@@ -655,6 +731,28 @@ func sharedGrain(a, b time.Time) time.Duration {
 		x, y = y, x%y
 	}
 	return time.Duration(x)
+}
+
+// readRes is the resolution a plain read of the clock (Learned.Read: a
+// typed instant, a text one, a time of day) is learned at, from enc, the
+// coarser of the resolutions its two values' encodings write (a BSON
+// datetime's millisecond, a layout's second), and grain, the granularity
+// the two values share (sharedGrain, todGrain): enc itself, whatever the two
+// share by chance (two millisecond values both whole multiples of 492 ms,
+// or of 3 ms), so the same recording learns the same resolution whichever
+// value record's full round read, and a replay's window is never wider for
+// it. Where grain is a cut the application made (models.ClockOffset's
+// CutCoarserThan: both whole multiples of the unit above enc, a value cut to
+// the second stored at the millisecond), the unit above enc
+// (models.UnitAbove), the same for every cut, which every replay refuses
+// (CheckClockRead: checked at its encoding's resolution, a cut value would
+// pass or fail by where its read fell in the cut). Above a day no unit is
+// above enc and no cut is told: enc.
+func readRes(enc, grain time.Duration) time.Duration {
+	if u := models.UnitAbove(enc); u > 0 && (models.ClockOffset{Res: grain}).CutCoarserThan(enc) {
+		return u
+	}
+	return enc
 }
 
 // offsetBounds are the offsets d, from lo up to, not including, hi, that put

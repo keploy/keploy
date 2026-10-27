@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
@@ -41,19 +42,21 @@ func TestLearnsOnto(t *testing.T) {
 }
 
 // learnedStore is a mock store whose PersistLearned says it added a field on
-// each mock it is handed.
+// each mock it is handed, and that a person's entries kept blocked from
+// being applied.
 type learnedStore struct {
 	MockDB
-	got map[string]models.MockState
+	got     map[string]models.MockState
+	blocked map[string][]string
 }
 
-func (s *learnedStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, error) {
+func (s *learnedStore) PersistLearned(_ context.Context, _ string, states map[string]models.MockState) (map[string][]string, map[string][]string, error) {
 	s.got = states
 	out := map[string][]string{}
 	for name := range states {
 		out[name] = []string{"body.ts (noise)"}
 	}
-	return out, nil
+	return out, s.blocked, nil
 }
 
 // What was learned is said per test, and what was learned onto mocks no test
@@ -77,6 +80,43 @@ func TestPersistLearnedSaysEveryField(t *testing.T) {
 	bound := []models.MockState{{Name: "mock-1", Binds: map[string]models.MockVariables{"mock-old": {"id": {Recorded: "1", Bind: "body.id"}}}}}
 	if _, _, err := m.persistLearned(context.Background(), "s", bound, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}, "o::B": {{Name: "mock-old"}}}); err == nil {
 		t.Fatal("a bind onto a recording the record did not make was written")
+	}
+}
+
+// What a person's entries kept from being applied is said once, in the
+// round's learn summary, apart from what was learned, and never as learned.
+func TestPersistLearnedSaysOnceWhatAPersonsEntriesKept(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	store := &learnedStore{blocked: map[string][]string{
+		"startup-0": {"body.at (clock); kept the entry there, written by hand"},
+		"mock-1":    {"body.exp (noise); kept the entry there, edited by hand after keploy learned it"},
+	}}
+	m := &mockService{config: &config.Config{}, mockDB: store, logger: zap.New(core)}
+	consumed := []models.MockState{{Name: "mock-1"}, {Name: "startup-0"}}
+	flows := []FlowMocks{{Flow: "o::A", Consumed: []models.MockState{{Name: "mock-1"}}}}
+	byTest, pool, err := m.persistLearned(context.Background(), "s", consumed, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(byTest, map[string][]string{"o::A": {"mock-1 body.ts (noise)"}}) || !reflect.DeepEqual(pool, []string{"startup-0 body.ts (noise)"}) {
+		t.Fatalf("what was blocked was said as learned: by test %v, pool %v", byTest, pool)
+	}
+	lines := logs.FilterMessage(learn.BlockedMessage).All()
+	if len(lines) != 1 {
+		t.Fatalf("the blocked list was said %d times, want once", len(lines))
+	}
+	want := []any{"mock-1 body.exp (noise); kept the entry there, edited by hand after keploy learned it", "startup-0 body.at (clock); kept the entry there, written by hand"}
+	if got := lines[0].ContextMap()["fields"]; !reflect.DeepEqual(got, want) || lines[0].Level != zap.WarnLevel || lines[0].ContextMap()["next_step"] != learn.BlockedNextStep {
+		t.Fatalf("the blocked line: %v %v", lines[0].Level, lines[0].ContextMap())
+	}
+
+	store.blocked = nil
+	logs.TakeAll()
+	if _, _, err := m.persistLearned(context.Background(), "s", consumed, flows, map[string][]models.MockEntry{"o::A": {{Name: "mock-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if n := logs.FilterMessage(learn.BlockedMessage).Len(); n != 0 {
+		t.Fatalf("nothing blocked was said %d times", n)
 	}
 }
 
@@ -223,5 +263,24 @@ func TestARoundsEndKeepsWhatWasLearnedOnlyFromAClientTestsReader(t *testing.T) {
 				t.Fatalf("logs %v; want the round to say it kept nothing", logs.All())
 			}
 		})
+	}
+}
+
+// The test written into each learned decision's about is the test open
+// when it was learned: the first test that consumed the mock (a pool mock
+// too), else the test whose mapping holds it; a start-up mock no test
+// consumed was learned between tests (learn.StampStates).
+func TestLearnedStampNamesTheTestThatWasOpen(t *testing.T) {
+	flows := []FlowMocks{
+		{Flow: "items::TestA", Consumed: []models.MockState{{Name: "mock-pool"}, {Name: "mock-1"}}},
+		{Flow: "items::TestB", Consumed: []models.MockState{{Name: "mock-pool"}, {Name: "mock-2"}}},
+	}
+	s := learnedStamp(flows, map[string]string{"mock-1": "items::TestA", "mock-3": "items::TestC"})
+	want := map[string]string{"mock-pool": "items::TestA", "mock-1": "items::TestA", "mock-2": "items::TestB", "mock-3": "items::TestC"}
+	if !reflect.DeepEqual(s.Test, want) {
+		t.Fatalf("tests: %v, want %v", s.Test, want)
+	}
+	if s.Round != models.AboutRoundFull || s.Run == "" || s.Keploy != utils.Version {
+		t.Fatalf("stamp: %+v", s)
 	}
 }
