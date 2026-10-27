@@ -585,8 +585,18 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 // (keptAnswers), unless it is served rewritten or read back per serve
 // (keepsAnswer). The returned bytes are never to be written to.
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
-	if keepsAnswer(stub) {
-		return keptAnswers.serve(stub, h.encodeAnswer)
+	return h.buildAnswer(stub, nil)
+}
+
+// buildAnswer is buildMockResponseBytes with rewrite applied to the answer's
+// wire headers and body for this serve; nil serves the answer as recorded.
+// A rewritten serve never reads or fills keptAnswers: the table's encoder
+// (encodeRecordedAnswer) cannot rewrite, so a serve that changes what the
+// recording answers builds its bytes for itself, and no serve is given
+// another's rewritten answer.
+func (h *HTTP) buildAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
+	if rewrite == nil && keepsAnswer(stub) {
+		return keptAnswers.serve(stub, h.encodeRecordedAnswer)
 	}
 	name := ""
 	if stub != nil {
@@ -599,7 +609,7 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
-	return h.encodeAnswer(stub)
+	return h.encodeAnswer(stub, rewrite)
 }
 
 // RequestNoise is what of a request may differ from its recording when it is

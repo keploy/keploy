@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/bodydigest"
@@ -307,27 +308,130 @@ func TestAnswersServedRewrittenAreBuiltEachServe(t *testing.T) {
 			t.Fatalf("%s: %d builds went through the kept answers", m.Name, n)
 		}
 	}
-	// One response, served from a GET and from a HEAD: a HEAD's answer keeps
-	// its recorded Content-Length, a GET's has it recomputed.
+	// One response, served from two mocks that read it otherwise: a GET's
+	// and a HEAD's (a HEAD's answer keeps its recorded Content-Length, a
+	// GET's has it recomputed), an HTTP/1.1 and an HTTP/1.0 request's (the
+	// status line), and a mock with a body-digest note and one without (a
+	// noted Content-MD5 is recomputed over the body sent, an unnoted one is
+	// sent as recorded). Each pair is served alternately, so each mock's
+	// answer is kept while the other's is served.
+	pair := func(a, b *models.Mock) [2]*models.Mock {
+		a.MarkPooled()
+		b.MarkPooled()
+		return [2]*models.Mock{a, b}
+	}
 	shared := resp()
 	shared.Header["Content-Length"] = "999"
-	get := &models.Mock{Kind: models.HTTP, Name: "get", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "GET", ProtoMajor: 1, ProtoMinor: 1}, HTTPResp: shared}}
-	head := &models.Mock{Kind: models.HTTP, Name: "head", Spec: models.MockSpec{HTTPReq: &models.HTTPReq{Method: "HEAD", ProtoMajor: 1, ProtoMinor: 1}, HTTPResp: shared}}
-	get.MarkPooled()
-	head.MarkPooled()
-	for range 4 {
-		for _, m := range []*models.Mock{get, head} {
-			want, err := mainBuildMockResponseBytes(h, m)
-			if err != nil {
-				t.Fatal(err)
+	digested := resp()
+	recordedBody := []byte(`{"id":"recorded"}`)
+	sum := md5.Sum(recordedBody)
+	digested.Header["Content-MD5"] = base64.StdEncoding.EncodeToString(sum[:])
+	note := bodydigest.Note(digested.Header, recordedBody, recordedBody)
+	if note == "" {
+		t.Fatal("precondition: no body-digest note for a Content-MD5 of the body")
+	}
+	req := func(method string, major, minor int) *models.HTTPReq {
+		return &models.HTTPReq{Method: models.Method(method), ProtoMajor: major, ProtoMinor: minor}
+	}
+	protoResp := resp()
+	pairs := [][2]*models.Mock{
+		pair(&models.Mock{Kind: models.HTTP, Name: "get", Spec: models.MockSpec{HTTPReq: req("GET", 1, 1), HTTPResp: shared}},
+			&models.Mock{Kind: models.HTTP, Name: "head", Spec: models.MockSpec{HTTPReq: req("HEAD", 1, 1), HTTPResp: shared}}),
+		pair(&models.Mock{Kind: models.HTTP, Name: "http/1.1", Spec: models.MockSpec{HTTPReq: req("GET", 1, 1), HTTPResp: protoResp}},
+			&models.Mock{Kind: models.HTTP, Name: "http/1.0", Spec: models.MockSpec{HTTPReq: req("GET", 1, 0), HTTPResp: protoResp}}),
+		pair(&models.Mock{Kind: models.HTTP, Name: "noted", Spec: models.MockSpec{HTTPReq: req("GET", 1, 1), HTTPResp: digested,
+			Metadata: map[string]string{models.MetadataBodyDigestsKey: note}}},
+			&models.Mock{Kind: models.HTTP, Name: "unnoted", Spec: models.MockSpec{HTTPReq: req("GET", 1, 1), HTTPResp: digested}}),
+	}
+	for _, p := range pairs {
+		var served [2][]byte
+		for range 4 {
+			for i, m := range p {
+				want, err := mainBuildMockResponseBytes(h, m)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := h.buildMockResponseBytes(m)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sameAnswer(t, m.Name, want, got)
+				served[i] = got
 			}
-			got, err := h.buildMockResponseBytes(m)
-			if err != nil {
-				t.Fatal(err)
-			}
-			sameAnswer(t, m.Name, want, got)
+		}
+		if bytes.Equal(served[0], served[1]) {
+			t.Fatalf("precondition: %s and %s are served the same answer %q", p[0].Name, p[1].Name, served[0])
 		}
 	}
+}
+
+// TestARewrittenServeNeverReadsOrFillsKeptAnswers: a serve whose answer is
+// rewritten for it (buildAnswer with a rewrite: here a stand-in for an
+// identity alias, putting the serve's own pod name in the body and a header)
+// is answered with its own rewrite, whether the recording's answer is kept or
+// not, and leaves the kept answer as recorded: a serve after it is given the
+// recorded answer, never another serve's rewrite.
+func TestARewrittenServeNeverReadsOrFillsKeptAnswers(t *testing.T) {
+	h := newHTTP()
+	m := reusedAnswer(`{"holder":"recorded-pod"}`)
+	alias := func(pod string) answerRewrite {
+		return func(header http.Header, body string) (http.Header, string) {
+			header.Set("X-Pod", pod)
+			return header, strings.ReplaceAll(body, "recorded-pod", pod)
+		}
+	}
+	recorded, err := mainBuildMockResponseBytes(h, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := func(what string) {
+		t.Helper()
+		got, err := h.buildMockResponseBytes(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sameAnswer(t, what, recorded, got)
+	}
+	rewritten := func(what, pod string) {
+		t.Helper()
+		got, err := h.buildAnswer(m, alias(pod))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, fields, body := answerShape(t, got)
+		wantBody := `{"holder":"` + pod + `"}`
+		header := strings.Join(fields, "\n")
+		if string(body) != wantBody || !strings.Contains(header, "X-Pod: "+pod) || !strings.Contains(header, "Content-Length: "+strconv.Itoa(len(wantBody))) {
+			t.Fatalf("%s: served %q, want the answer rewritten for %s", what, got, pod)
+		}
+	}
+	entry := func() *keptAnswer {
+		v, ok := keptAnswers.entries.Load(weak.Make(m.Spec.HTTPResp))
+		if !ok {
+			t.Fatal("the recording's answer has no entry after a plain serve")
+		}
+		return v.(*keptAnswer)
+	}
+	before := keptAnswers.builds.Load()
+	plain("first plain serve")
+	for i := range 3 {
+		rewritten(fmt.Sprintf("rewritten serve %d before the answer is kept", i), fmt.Sprintf("pod-%d", i))
+	}
+	if entry().wire.Load() != nil {
+		t.Fatal("rewritten serves filled the kept answer")
+	}
+	plain("second plain serve, which keeps the answer")
+	if entry().wire.Load() == nil {
+		t.Fatal("precondition: a plain answer served twice is not kept")
+	}
+	for i := range 3 {
+		rewritten(fmt.Sprintf("rewritten serve %d after the answer is kept", i), fmt.Sprintf("pod-%d", 10+i))
+	}
+	plain("plain serve after rewritten ones")
+	if n := keptAnswers.builds.Load() - before; n != 2 {
+		t.Fatalf("%d builds went through the kept answers, want the two plain serves' only", n)
+	}
+	runtime.KeepAlive(m)
 }
 
 // reusedAnswer is a recorded answer with a dozen header lines.
@@ -411,7 +515,7 @@ func TestKeptAnswersGoWithTheirRecording(t *testing.T) {
 	func() {
 		m := reusedAnswer(strings.Repeat("k", 1_000))
 		for range 3 {
-			if _, err := table.serve(m, h.encodeAnswer); err != nil {
+			if _, err := table.serve(m, h.encodeRecordedAnswer); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -431,7 +535,7 @@ func TestKeptAnswersGoWithTheirRecording(t *testing.T) {
 	small := newAnswerTable(100)
 	m := reusedAnswer(strings.Repeat("s", 1_000))
 	for range 5 {
-		if _, err := small.serve(m, h.encodeAnswer); err != nil {
+		if _, err := small.serve(m, h.encodeRecordedAnswer); err != nil {
 			t.Fatal(err)
 		}
 	}

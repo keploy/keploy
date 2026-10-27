@@ -13,13 +13,24 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
+// answerRewrite changes an answer's wire headers and body for one serve
+// (buildAnswer), before its Content-Length, compression and digests are
+// worked out over the body sent. header is the serve's own map.
+type answerRewrite func(header http.Header, body string) (http.Header, string)
+
+// encodeRecordedAnswer is stub's answer as recorded: the only encoder
+// keptAnswers is given.
+func (h *HTTP) encodeRecordedAnswer(stub *models.Mock) ([]byte, error) {
+	return h.encodeAnswer(stub, nil)
+}
+
 // encodeAnswer is a recorded answer's wire bytes: the status line, the header
 // lines (a Content-Length recomputed over the body sent, unless the answer has
-// no body by rule) and the body, compressed per its Content-Encoding. stub's
-// response is in its Spec (withResponse). The bytes are written into one buffer
-// of their size: each header line was a fmt.Sprintf and a new string holding
-// every line before it.
-func (h *HTTP) encodeAnswer(stub *models.Mock) ([]byte, error) {
+// no body by rule) and the body, compressed per its Content-Encoding, after
+// rewrite, if any. stub's response is in its Spec (withResponse). The bytes are
+// written into one buffer of their size: each header line was a fmt.Sprintf
+// and a new string holding every line before it.
+func (h *HTTP) encodeAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
 	resp := stub.Spec.HTTPResp
 	protoMajor, protoMinor := 1, 1
 	method := ""
@@ -29,6 +40,9 @@ func (h *HTTP) encodeAnswer(stub *models.Mock) ([]byte, error) {
 	}
 	body := resp.Body
 	header := pkg.ToWireHTTPHeader(resp.Header, resp.HeaderLineLengths)
+	if rewrite != nil {
+		header, body = rewrite(header, body)
+	}
 	respBody := body
 	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
 		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
