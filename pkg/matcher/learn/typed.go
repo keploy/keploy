@@ -601,7 +601,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if noWindow != "" {
 			ln.Why = noWindow
 		}
-		ln.Read = &models.ClockOffset{Res: max(rt.res, lt.res, sharedGrain(rt.at, lt.at)), Layout: models.LayoutTyped}
+		ln.Read = &models.ClockOffset{Res: readRes(max(rt.res, lt.res), sharedGrain(rt.at, lt.at)), Layout: models.LayoutTyped}
 		if rt.names == namesWall {
 			ln.Read.Zone = dc.wallZone(rt.at, lt.at, rt.res, lt.res, w, at)
 		}
@@ -731,6 +731,28 @@ func sharedGrain(a, b time.Time) time.Duration {
 		x, y = y, x%y
 	}
 	return time.Duration(x)
+}
+
+// readRes is the resolution a plain read of the clock (Learned.Read: a
+// typed instant, a text one, a time of day) is learned at, from enc, the
+// coarser of the resolutions its two values' encodings write (a BSON
+// datetime's millisecond, a layout's second), and grain, the granularity
+// the two values share (sharedGrain, todGrain): enc itself, whatever the two
+// share by chance (two millisecond values both whole multiples of 492 ms,
+// or of 3 ms), so the same recording learns the same resolution whichever
+// value record's full round read, and a replay's window is never wider for
+// it. Where grain is a cut the application made (models.ClockOffset's
+// CutCoarserThan: both whole multiples of the unit above enc, a value cut to
+// the second stored at the millisecond), the unit above enc
+// (models.UnitAbove), the same for every cut, which every replay refuses
+// (CheckClockRead: checked at its encoding's resolution, a cut value would
+// pass or fail by where its read fell in the cut). Above a day no unit is
+// above enc and no cut is told: enc.
+func readRes(enc, grain time.Duration) time.Duration {
+	if u := models.UnitAbove(enc); u > 0 && (models.ClockOffset{Res: grain}).CutCoarserThan(enc) {
+		return u
+	}
+	return enc
 }
 
 // offsetBounds are the offsets d, from lo up to, not including, hi, that put

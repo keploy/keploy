@@ -261,9 +261,9 @@ func (dc *DriftCache) textReadZone(rec, live string, w *Window, call time.Time) 
 
 // textClockRead is Learned.Read of a text or number leaf recorded as rec
 // and seen in record's full round as live, whose every changed word the
-// learn step read as a read of the clock: a plain read at the coarsest of
-// the two values' resolutions and the granularity they share, where each is
-// one instant whole (readClockText), written in the layout both are
+// learn step read as a read of the clock: a plain read at the coarser of
+// the two values' resolutions, or the cut the two show (readRes), where
+// each is one instant whole (readClockText), written in the layout both are
 // (clockTextLayout), or in models.LayoutApart where the two differ, which
 // the learn step refuses (textLayoutChangedWhy); nil where either is not.
 func textClockRead(rec, live string) *models.ClockOffset {
@@ -275,7 +275,7 @@ func textClockRead(rec, live string) *models.ClockOffset {
 	if !ok {
 		return nil
 	}
-	return &models.ClockOffset{Res: max(rres, lres, sharedGrain(rt, lt)), Layout: models.ClockOffset{Layout: clockTextLayout(rec)}.MeetLayout(clockTextLayout(live))}
+	return &models.ClockOffset{Res: readRes(max(rres, lres), sharedGrain(rt, lt)), Layout: models.ClockOffset{Layout: clockTextLayout(rec)}.MeetLayout(clockTextLayout(live))}
 }
 
 // textLayoutChangedWhy is why the learn step refuses a text or a number
@@ -464,15 +464,15 @@ func todGrain(a, b time.Duration) time.Duration {
 // todRead is Learned.Read of a time of day whole (timeOfDayOf) recorded as
 // rtod and seen in record's full round as ltod, each at its encoding's
 // resolution, written in layouts rlay and llay, in the call recorded at
-// call whose window is w: a plain read at the coarsest of the two
-// resolutions and the granularity the two times share, in the layout both
+// call whose window is w: a plain read at the coarser of the two
+// resolutions, or the cut the two times show (readRes), in the layout both
 // are (models.LayoutApart where they differ, which the learn step refuses),
 // in the zone todZone reads it in. A replay checks it modulo a day in its
 // call's span (clockReadIn), so a time of day the lead moved is compared
 // at every replay, never noise that lets any value pass.
 func (dc *DriftCache) todRead(rtod, ltod, rres, lres time.Duration, rlay, llay string, w *Window, call time.Time) *models.ClockOffset {
 	return &models.ClockOffset{
-		Res:    max(rres, lres, todGrain(rtod, ltod)),
+		Res:    readRes(max(rres, lres), todGrain(rtod, ltod)),
 		Zone:   dc.todZone(rtod, ltod, rres, lres, w, call),
 		Layout: models.ClockOffset{Layout: rlay}.MeetLayout(llay),
 	}
