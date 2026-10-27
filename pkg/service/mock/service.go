@@ -133,7 +133,7 @@ type SetPusher interface {
 // pool slice (models.ScopeTableReq.Pool) and the tests' recordings judging
 // marked as background work (models.ScopeTableReq.Background) in one request.
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool map[string][]string, background map[string]string) error
+	PushProvenTable(ctx context.Context, table, pool map[string][]string, background models.BackgroundMarks) error
 }
 
 type MappingReader interface {

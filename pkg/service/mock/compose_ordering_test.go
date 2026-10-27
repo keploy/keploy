@@ -73,7 +73,7 @@ type composeInstr struct {
 	// table and pool are the per-test table and the pool slices the last
 	// proven table push sent, and background its background marks.
 	table, pool map[string][]string
-	background  map[string]string
+	background  models.BackgroundMarks
 	// begins is what the last push of the tests' recorded begins sent, and
 	// beginsErr what it fails with.
 	begins    map[string]time.Time
@@ -219,7 +219,7 @@ func (f *composeInstr) PushScopeTable(context.Context, map[string][]string) erro
 
 // PushProvenTable takes the per-test table, the pool slices and the
 // background marks (ProvenTablePusher), and keeps them.
-func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, background map[string]string) error {
+func (f *composeInstr) PushProvenTable(_ context.Context, table, pool map[string][]string, background models.BackgroundMarks) error {
 	f.table, f.pool, f.background = table, pool, background
 	return nil
 }

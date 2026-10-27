@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -90,6 +91,46 @@ type MockEntry struct {
 	// by judging under the proven switch only; read and kept by each rewrite,
 	// whatever the switch.
 	Background string `json:"background,omitempty" yaml:"background,omitempty" bson:"background,omitempty"`
+}
+
+// BackgroundMarks is, per test, the recordings of its own list that keploy's
+// judging marked as the application's background work, each with why
+// (MockEntry.Background): test -> recording name -> why. A mark is the test's
+// entry's, never the recording's: another test that lists the same recording
+// without a mark must still make it, and a second copy of its call is still an
+// extra-call miss.
+type BackgroundMarks map[string]map[string]string
+
+// Of is the marks of test's own list; nil when it has none.
+func (b BackgroundMarks) Of(test string) map[string]string { return b[test] }
+
+// Add marks name on test's list with why.
+func (b BackgroundMarks) Add(test, name, why string) {
+	if b[test] == nil {
+		b[test] = map[string]string{}
+	}
+	b[test][name] = why
+}
+
+// Clone is a copy that shares no map with b; nil for nil.
+func (b BackgroundMarks) Clone() BackgroundMarks {
+	if b == nil {
+		return nil
+	}
+	out := make(BackgroundMarks, len(b))
+	for test, names := range b {
+		out[test] = maps.Clone(names)
+	}
+	return out
+}
+
+// Len is how many test entries carry a mark.
+func (b BackgroundMarks) Len() int {
+	n := 0
+	for _, names := range b {
+		n += len(names)
+	}
+	return n
 }
 
 // RecordedWithS12Routing is the Mapping.RecordedWith mark of a test set keploy
