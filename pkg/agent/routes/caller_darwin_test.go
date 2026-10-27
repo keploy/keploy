@@ -37,7 +37,7 @@ func TestCallerPIDErrorsOnUnknownPort(t *testing.T) {
 	defer func() { DarwinCallerPID = nil }()
 
 	r := httptest.NewRequest(http.MethodPost, "/agent/instance", nil)
-	r.RemoteAddr = "127.0.0.1:99999"
+	r.RemoteAddr = "127.0.0.1:54322" // valid port the callback doesn't recognize
 
 	_, err := callerPID(r)
 	if err == nil {
