@@ -18,7 +18,6 @@ type unmadeStore struct {
 	write    *models.Mock
 	consumed []*models.Mock
 	before   []*models.Mock
-	ranges   bool
 }
 
 func (s unmadeStore) UnmadeWriteBefore(*models.Mock, func(*models.Mock) bool) (*models.Mock, bool) {
@@ -47,6 +46,18 @@ func (s rangingStore) RangeRecordedBefore(t time.Time, visit func(*models.Mock) 
 	return nil
 }
 
+// failingRangeStore is rangingStore whose read of the recordings made before
+// an instant fails after it has visited them, as a disk store's does when a
+// spilled recording cannot be read back.
+type failingRangeStore struct{ rangingStore }
+
+var errRangeRead = errors.New("a recording made before the write could not be read")
+
+func (s failingRangeStore) RangeRecordedBefore(t time.Time, visit func(*models.Mock) bool) error {
+	_ = s.rangingStore.RangeRecordedBefore(t, visit)
+	return errRangeRead
+}
+
 func unmadeRec(name string, ms int, op string) *models.Mock {
 	return &models.Mock{Name: name, Kind: models.Mongo, Spec: models.MockSpec{
 		Metadata:         map[string]string{"op": op},
@@ -59,8 +70,8 @@ func sameRead(mk *models.Mock) bool   { return mk.Spec.Metadata["op"] == "read" 
 
 // The rule decides only under exact serving, for a read, over a store that
 // says a write is unmade; a store that says so but cannot read what was
-// recorded before the write fails the call, never answering with the
-// recording chosen.
+// recorded before the write, or fails to, fails the call, never answering
+// with the recording chosen or with what it read before it failed.
 func TestReadBeforeUnmadeWrite_WhatTheStoreCannotTellKeepsTheChoiceOrFails(t *testing.T) {
 	write, chosen := unmadeRec("w", 100, "write"), unmadeRec("r", 110, "read")
 	earlier := unmadeRec("r0", 10, "read")
@@ -83,6 +94,7 @@ func TestReadBeforeUnmadeWrite_WhatTheStoreCannotTellKeepsTheChoiceOrFails(t *te
 		{name: "a recording that reads nothing a write changes (a write: no gates)", db: rangingStore{exact}, chosen: write, same: sameRead},
 		{name: "no comparison", db: rangingStore{exact}, chosen: chosen, gates: isWriteRec},
 		{name: "a store that cannot read what was recorded before", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, err: errNoEarlierRecordings},
+		{name: "a store whose read of what was recorded before fails", db: failingRangeStore{rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, err: errRangeRead},
 		{name: "the test's own answered recording, read without the recording", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
 		{name: "the recording's", db: rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
 	} {
