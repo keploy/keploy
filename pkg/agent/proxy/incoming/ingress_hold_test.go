@@ -472,3 +472,62 @@ func TestAParkedCallAndTheForwardersShareThePortsSynchronousSlot(t *testing.T) {
 		}
 	}
 }
+
+// gatedIngressHook is a forwarder whose start returns only once release is
+// closed, and says on entered that it began: the window in which the manager
+// has reserved the port for it but does not yet know where the app went.
+type gatedIngressHook struct {
+	entered chan uint16
+	release chan struct{}
+}
+
+func (g gatedIngressHook) StartIngress(_ context.Context, orig, _ uint16) error {
+	g.entered <- orig
+	<-g.release
+	return nil
+}
+func (gatedIngressHook) StopIngress(uint16) error { return nil }
+
+// Under the hold a call to the app's port is served and recorded as a test on
+// that port before keploy's forwarder listens there, so the record's question
+// of where the app listens on it (the unpublished- and loopback-only-port
+// warnings) can come before the forwarder has started, or while it starts.
+// The app's socket is then on the port its bind was moved to, which the hold
+// knows from the bind itself: answering the app's own port there reads
+// nothing listening (no socket is on it until the forwarder's), and answering
+// "not known" says nothing.
+func TestAppListenPortIsTheHeldMoveBeforeTheForwarderListens(t *testing.T) {
+	hook := gatedIngressHook{entered: make(chan uint16, 1), release: make(chan struct{})}
+	pm := &IngressProxyManager{logger: zap.NewNop(), active: make(map[uint16]proxyStop), ingressHook: hook,
+		portHolder: &fakePortHolder{held: true, moved: map[uint16]uint16{8096: 45629, 8098: 41000}}}
+
+	if port, ok := pm.AppListenPort(8096); !ok || port != 45629 {
+		t.Fatalf("held, before its bind event is read: got %d, %v; want the moved bind 45629", port, ok)
+	}
+	if port, ok := pm.AppListenPort(8095); !ok || port != 8095 {
+		t.Fatalf("a port the hooks did not move: got %d, %v; want the app's own port", port, ok)
+	}
+
+	started := make(chan struct{})
+	go func() {
+		defer close(started)
+		pm.StartIngressProxy(context.Background(), 8096, 45629)
+	}()
+	if orig := <-hook.entered; orig != 8096 {
+		t.Fatalf("the forwarder started for %d, want 8096", orig)
+	}
+	if port, ok := pm.AppListenPort(8096); !ok || port != 45629 {
+		t.Fatalf("held, while its forwarder starts: got %d, %v; want the moved bind 45629", port, ok)
+	}
+	close(hook.release)
+	<-started
+	if port, ok := pm.AppListenPort(8096); !ok || port != 45629 {
+		t.Fatalf("forwarded: got %d, %v; want the moved bind 45629", port, ok)
+	}
+
+	// A bind event without the new port: the hold still knows it.
+	pm.StartIngressProxy(context.Background(), 8098, 0)
+	if port, ok := pm.AppListenPort(8098); !ok || port != 41000 {
+		t.Fatalf("forwarded, the bind event without the new port: got %d, %v; want the hold's 41000", port, ok)
+	}
+}

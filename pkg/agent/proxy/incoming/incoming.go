@@ -252,18 +252,31 @@ func (pm *IngressProxyManager) StartIngressProxy(ctx context.Context, origAppPor
 }
 
 // AppListenPort is the port the app's own socket listens on for its port orig.
-// That is orig, unless the record hooks moved the app's bind elsewhere and
-// keploy's ingress forwarder holds orig: then it is the port the app was moved
-// to, and ok is false while that port is not known (the forwarder is still
-// starting, or the bind event did not carry it).
+// That is orig, unless the record hooks moved the app's bind elsewhere: then
+// it is the port the app was moved to. keploy's forwarder holds orig once it
+// listens, and before that the hooks hold it from the app's bind (the park
+// serves its calls, and records them as tests on orig): so a test can be on
+// orig while the forwarder is still starting, or before its bind event is
+// read, and the hold's own record of the move says where the app went. ok is
+// false while the forwarder holds orig and that port is not known (no hold,
+// and the forwarder is still starting or the bind event did not carry it).
 func (pm *IngressProxyManager) AppListenPort(orig uint16) (port uint16, ok bool) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	if _, forwarded := pm.active[orig]; !forwarded {
+	_, forwarded := pm.active[orig]
+	moved, relocated := pm.relocated[orig]
+	pm.mu.Unlock()
+	if relocated {
+		return moved, true
+	}
+	if pm.portHolder != nil {
+		if moved, ok := pm.portHolder.MovedPort(orig); ok {
+			return moved, true
+		}
+	}
+	if !forwarded {
 		return orig, true
 	}
-	moved, ok := pm.relocated[orig]
-	return moved, ok
+	return 0, false
 }
 
 // StopAll gracefully shuts down all active ingress proxies.
