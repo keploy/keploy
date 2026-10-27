@@ -139,14 +139,17 @@ func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
 
 // backgroundAgain is, for an exchange no mock answered under exact serving
 // (the proven switch), the recording of the open test that judging marked as
-// the application's background work and that the exchange repeats: matched
-// as the per-test pool is (exactly, or at the per-test similarity) against
-// such recordings that already answered in the test's window
+// the application's background work and that the exchange repeats exactly:
+// the same bytes in every request buffer (a buffer the recording marks as
+// noise aside, as the per-test pool's exact pass reads it), against such
+// recordings that already answered in the test's window
 // (integrations.AnsweredBackgroundReader). A timer or a start-up job ran more
 // often at replay than at record, and its exchange is answered again with
 // that recording, unchecked, where it would otherwise be one exchange more
-// than the test recorded (extraCall). nil when it repeats none, or the store
-// marks nothing.
+// than the test recorded (extraCall). Never at the per-test pool's
+// similarity: an exchange that is only like a marked recording may be the
+// test's own, and it stays a miss. nil when it repeats none exactly, or the
+// store marks nothing.
 func backgroundAgain(reqBuffs [][]byte, mockDb integrations.MockMemDb) *models.Mock {
 	br, ok := mockDb.(integrations.AnsweredBackgroundReader)
 	if !ok {
@@ -162,9 +165,6 @@ func backgroundAgain(reqBuffs [][]byte, mockDb integrations.MockMemDb) *models.M
 		return nil
 	}
 	idx := findExactMatch(marked, reqBuffs)
-	if idx == -1 {
-		idx = findBinaryMatch(marked, reqBuffs, 0.9)
-	}
 	if idx == -1 {
 		return nil
 	}
