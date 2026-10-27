@@ -2145,14 +2145,16 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	check("both values ending in 000ns", both, "2026-10-28T07:30:00.005123Z", true, "")
 	check("both values ending in 000ns, nine digits", both, "2026-10-28T07:30:00.005123456Z", true, "")
 	check("both values ending in 000ns, nine digits ending in 000ns", both, "2026-10-28T07:30:00.005123000Z", true, "")
-	check("both values ending in 000ns, nine digits, before the span", both, "2026-10-28T07:29:59.999999999Z", false, "it changed")
+	check("both values ending in 000ns, nine digits, a nanosecond before the span (one unit stale)", both, "2026-10-28T07:29:59.999999999Z", true, "")
+	check("both values ending in 000ns, nine digits, 3ns before the span", both, "2026-10-28T07:29:59.999999997Z", false, "it changed")
 	// Cut to the second, nine digits on both sides: the cut (the coarsest
 	// step both values are whole multiples of) is learned, and a replay
-	// value cut so passes wherever in its second its read fell, and is
-	// refused a second stale, naming the cut.
+	// value cut so passes wherever in its second its read fell, and a
+	// second stale, and is refused two seconds stale, naming the cut.
 	o := cutAt("cut to the second with nine digits", "2026-10-27T03:30:00.000000000Z", "2026-10-27T03:31:02.000000000Z", time.Second)
 	check("cut to the second with nine digits", o, "2026-10-28T07:30:00.000000000Z", true, "")
-	check("cut to the second with nine digits, a second stale", o, "2026-10-28T07:29:59.000000000Z", false, "it changed (read as standing for the whole 1s it is cut to)")
+	check("cut to the second with nine digits, a second stale", o, "2026-10-28T07:29:59.000000000Z", true, "")
+	check("cut to the second with nine digits, two seconds stale", o, "2026-10-28T07:29:58.000000000Z", false, "it changed (read as standing for the whole 1s it is cut to)")
 	// Cut to the second, written with three digits, then six: the same,
 	// above the finer of the two encodings.
 	cutAt("cut to the second with three digits, then six", "2026-10-27T03:30:00.000Z", "2026-10-27T03:31:02.000000Z", time.Second)
@@ -2161,7 +2163,7 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	// A replay reads a Res coarser than its value's encoding by the cut its
 	// own value shows, no coarser than Res: at a Res of an hour and a
 	// second's encoding, a value on a whole minute is checked at the minute
-	// (passed where its minute meets the span, refused a minute stale), one
+	// (passed within a minute of the span, refused two minutes stale), one
 	// on a whole hour at the hour, and one that is no whole minute shows no
 	// cut above its second and is checked at it.
 	hour := models.ClockOffset{Res: time.Hour, Layout: "iso-second"}
@@ -2171,9 +2173,11 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 		ok     bool
 	}{
 		{"2026-10-28T07:30:00Z", "", true},
-		{"2026-10-28T07:29:00Z", "it changed (read as standing for the whole 1m it is cut to)", false},
+		{"2026-10-28T07:29:00Z", "", true},
+		{"2026-10-28T07:28:00Z", "it changed (read as standing for the whole 1m it is cut to)", false},
 		{"2026-10-28T07:00:00Z", "", true},
-		{"2026-10-28T06:00:00Z", "it changed (read as standing for the whole 1h it is cut to)", false},
+		{"2026-10-28T06:00:00Z", "", true},
+		{"2026-10-28T05:00:00Z", "it changed (read as standing for the whole 1h it is cut to)", false},
 	} {
 		if ok, why := CheckClockRead(p, hour, str(c.v), late, true); ok != c.ok || !strings.HasSuffix(why, c.why) {
 			t.Errorf("a Res of 1h, replay %s: %v (%s); want %v %q", c.v, ok, why, c.ok, c.why)
@@ -2185,12 +2189,13 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	// An epoch in seconds cut to the millisecond, with six digits: read
 	// exactly, both values are whole milliseconds, a cut, which a replay
 	// checks at the cut: a value cut so passes in the millisecond its read
-	// fell in, and not in the one before.
+	// fell in and in the one before, and not in the one before that.
 	if r := textClockRead("1793158200.123000", "1793158262.456000"); r == nil || r.Res != time.Millisecond {
 		t.Errorf("an epoch in seconds cut to the millisecond: %+v; want a Res of the 1ms cut", r)
 	} else {
 		check("an epoch in seconds cut to the millisecond, checked at the cut", *r, "1793172600.005000", true, "")
-		check("an epoch in seconds cut to the millisecond, the one before the span", *r, "1793172599.999000", false, "it changed")
+		check("an epoch in seconds cut to the millisecond, the one before the span", *r, "1793172599.999000", true, "")
+		check("an epoch in seconds cut to the millisecond, two before the span", *r, "1793172599.998000", false, "it changed")
 	}
 	// A time of day and an epoch in seconds read their fraction the same.
 	if r := clockedDrifts().todRead(3*time.Hour+30*time.Minute+495123*time.Microsecond, 3*time.Hour+31*time.Minute+2032456789, time.Microsecond, time.Nanosecond, "time-second", "time-second", nil, call); r.Res != time.Nanosecond {
@@ -2202,8 +2207,8 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	// A time of day cut to the second, written with three digits and with
 	// six, in either order: learned at its cut of a second; a replay value
 	// cut so is checked at the cut in either form (passed in the span's
-	// second, refused a second stale, naming the cut); one that is no whole
-	// second is checked at its own millisecond.
+	// second and a second stale, refused two seconds stale, naming the cut);
+	// one that is no whole second is checked at its own millisecond.
 	cutAt("a time of day cut to the second, three digits then six", "03:30:00.000", "03:31:02.000000", time.Second)
 	cutAt("a time of day cut to the second, six digits then three", "03:30:00.000000", "03:31:02.000", time.Second)
 	tods := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: time.UTC}
@@ -2219,8 +2224,13 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 			}
 		}
 		for _, v := range []string{"07:29:59.000", "07:29:59.000000"} {
+			if ok, why := CheckClockRead(p, *r, str(v), tods, true); !ok {
+				t.Errorf("a time of day cut to the second, written at %v then %v, replay %s a second stale: refused (%s); want passed", pr[0], pr[1], v, why)
+			}
+		}
+		for _, v := range []string{"07:29:58.000", "07:29:58.000000"} {
 			if ok, why := CheckClockRead(p, *r, str(v), tods, true); ok || !strings.HasSuffix(why, "it changed (read as standing for the whole 1s it is cut to)") {
-				t.Errorf("a time of day cut to the second, written at %v then %v, replay %s a second stale: %v (%s); want refused naming the cut", pr[0], pr[1], v, ok, why)
+				t.Errorf("a time of day cut to the second, written at %v then %v, replay %s two seconds stale: %v (%s); want refused naming the cut", pr[0], pr[1], v, ok, why)
 			}
 		}
 		if ok, why := CheckClockRead(p, *r, str("07:30:00.005"), tods, true); !ok {
@@ -2229,24 +2239,28 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	}
 	// An epoch in seconds with nine digits on both sides is read exactly, to
 	// the nanosecond: no cut, and a nine-digit replay value in the span
-	// passes, one a nanosecond before it is refused.
+	// passes, and so does one a nanosecond before it; one 3 ns before it is
+	// refused.
 	if r := textClockRead("1793158200.495123456", "1793158262.032456789"); r == nil || r.Res != time.Nanosecond {
 		t.Errorf("an epoch in seconds with nine digits: %+v; want a Res of 1ns", r)
 	} else {
 		check("an epoch in seconds with nine digits", *r, "1793172600.005123456", true, "")
-		check("an epoch in seconds with nine digits, before the span", *r, "1793172599.999999999", false, "it changed")
+		check("an epoch in seconds with nine digits, a nanosecond before the span", *r, "1793172599.999999999", true, "")
+		check("an epoch in seconds with nine digits, 3ns before the span", *r, "1793172599.999999997", false, "it changed")
 	}
 	if r := textClockRead("1793158200.495", "1793158262.032456"); r == nil || r.Res != time.Microsecond {
 		t.Errorf("an epoch in seconds with three digits, then six: %+v; want a Res of 1µs", r)
 	}
 	// One fraction digit, the fewest the layout reads: a tenth of a second,
-	// read exactly (the span's own tenth passes; the next one, which starts
-	// after the span ends, is refused).
+	// read exactly (the span's own tenth passes, and so does the next one,
+	// which starts after the span ends, one tenth ahead; the one after it is
+	// refused).
 	if r := textClockRead("1793158200.5", "1793158262.3"); r == nil || r.Res != 100*time.Millisecond {
 		t.Errorf("an epoch in seconds with one digit: %+v; want a Res of 100ms", r)
 	} else {
 		check("an epoch in seconds with one digit", *r, "1793172600.0", true, "")
-		check("an epoch in seconds with one digit, after the span", *r, "1793172600.1", false, "it changed")
+		check("an epoch in seconds with one digit, after the span", *r, "1793172600.1", true, "")
+		check("an epoch in seconds with one digit, two tenths after the span", *r, "1793172600.2", false, "it changed")
 	}
 	// A layout that fixes its resolution reads no fraction: a cut epoch in
 	// nanoseconds is learned at its cut of a millisecond. A replay value
@@ -2462,12 +2476,17 @@ func TestAPlainClockReadsVerdictIsTheSameAtEveryReplayWhateverItsWriter(t *testi
 						ex = append(ex, fmt.Sprintf("%s then %s (Res %v), replay %s: %s", rec, live, o.Res, v, why))
 					}
 				}
-				// Moved by more than the cut it was learned at (a writer's
-				// cut, or a coarser one both learned values fell on).
-				for _, d := range []time.Duration{-o.Res - time.Second, -o.Res - 50*time.Millisecond, o.Res + 50*time.Millisecond + 20*time.Millisecond, o.Res + time.Second + 20*time.Millisecond} {
+				// Moved by more than two of the cut it was learned at (a
+				// writer's cut, or a coarser one both learned values fell
+				// on): a value passes only within one of the resolution it
+				// is checked at of the span, either side, which is no
+				// coarser than the coarser of o.Res and its own form's (a
+				// writer that drops trailing zeros writes .7 for .700).
+				for _, d := range []time.Duration{-2*o.Res - time.Second, -2*o.Res - 50*time.Millisecond, 2*o.Res + 50*time.Millisecond + 20*time.Millisecond, 2*o.Res + time.Second + 20*time.Millisecond} {
 					mv := wr.w(now.Add(d + time.Duration(rng.Int63n(int64(20*time.Millisecond)))))
 					at, res, _ := readClockText(mv)
-					if ok, _ := CheckClockRead(p, o, str(mv), span, true); ok && (!span.From.Before(at.Add(res)) || at.After(span.To)) {
+					r := max(res, o.Res)
+					if ok, _ := CheckClockRead(p, o, str(mv), span, true); ok && (at.Before(span.From.Truncate(r).Add(-r)) || at.After(span.To.Add(r))) {
 						movedPassed++
 						if len(ex) < 3 {
 							ex = append(ex, fmt.Sprintf("%s then %s (Res %v), a value moved %v, %s, passed", rec, live, o.Res, d, mv))
@@ -2551,8 +2570,8 @@ func TestAChanceCutIsOneVerdictPerRecordingNeverPerReplay(t *testing.T) {
 					t.Errorf("%s, %s, replay %s: refused (%s); want every replay passed", f.name, c.what, f.w(v), why)
 					break
 				}
-				if ok, _ := CheckClockRead(p, o, str(f.w(v.Add(-c.res-f.enc))), span, true); ok {
-					t.Errorf("%s, %s, replay %s, a cut and a unit stale: passed; want refused", f.name, c.what, f.w(v.Add(-c.res-f.enc)))
+				if ok, _ := CheckClockRead(p, o, str(f.w(v.Add(-2*c.res-f.enc))), span, true); ok {
+					t.Errorf("%s, %s, replay %s, two cuts and a unit stale: passed; want refused", f.name, c.what, f.w(v.Add(-2*c.res-f.enc)))
 					break
 				}
 			}
@@ -2598,12 +2617,14 @@ func TestACoarseCutIsCheckedAtTheCut(t *testing.T) {
 		path     string
 		cut, enc time.Duration
 		w        func(time.Time) Leaf
+		// u writes a value in w's form, cut to its encoding alone.
+		u func(time.Time) Leaf
 	}{
-		{"nine digits cut to 10ms", "body.at", 10 * time.Millisecond, time.Nanosecond, text("2006-01-02T15:04:05.000000000Z07:00", 10*time.Millisecond)},
-		{"six digits cut to 100ms", "body.at", 100 * time.Millisecond, time.Microsecond, text("2006-01-02T15:04:05.000000Z07:00", 100*time.Millisecond)},
-		{"a $date cut to the second", tp, time.Second, time.Millisecond, func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at.Truncate(time.Second), time.Millisecond) }},
-		{"RFC 3339 cut to the minute", "body.at", time.Minute, time.Second, text(time.RFC3339, time.Minute)},
-		{"a midnight to the second (a date)", "body.at", 24 * time.Hour, time.Second, text(time.RFC3339, 24*time.Hour)},
+		{"nine digits cut to 10ms", "body.at", 10 * time.Millisecond, time.Nanosecond, text("2006-01-02T15:04:05.000000000Z07:00", 10*time.Millisecond), text("2006-01-02T15:04:05.000000000Z07:00", time.Nanosecond)},
+		{"six digits cut to 100ms", "body.at", 100 * time.Millisecond, time.Microsecond, text("2006-01-02T15:04:05.000000Z07:00", 100*time.Millisecond), text("2006-01-02T15:04:05.000000Z07:00", time.Microsecond)},
+		{"a $date cut to the second", tp, time.Second, time.Millisecond, func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at.Truncate(time.Second), time.Millisecond) }, func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at, time.Millisecond) }},
+		{"RFC 3339 cut to the minute", "body.at", time.Minute, time.Second, text(time.RFC3339, time.Minute), text(time.RFC3339, time.Second)},
+		{"a midnight to the second (a date)", "body.at", 24 * time.Hour, time.Second, text(time.RFC3339, 24*time.Hour), text(time.RFC3339, time.Second)},
 	} {
 		shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{f.path: l}} }
 		rec := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC).Add(f.cut * 7)
@@ -2624,18 +2645,252 @@ func TestACoarseCutIsCheckedAtTheCut(t *testing.T) {
 		k := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC).Add(5 * f.cut)
 		span := Span{From: k.Add(f.enc), To: k.Add(f.cut + f.cut/2), Zone: time.UTC}
 		check("the cut the span starts in", k, span, true)
-		check("one cut and a unit before the span", k.Add(-f.cut), span, false)
+		check("one cut stale", k.Add(-f.cut), span, true)
+		check("two cuts stale", k.Add(-2*f.cut), span, false)
 		check("the cut the span ends in", k.Add(f.cut), span, true)
-		check("the cut after the span", k.Add(2*f.cut), span, false)
+		check("one cut past the cut the span ends in (a writer that rounds)", k.Add(2*f.cut), span, true)
+		check("two cuts past it", k.Add(3*f.cut), span, false)
+		unit := func(what string, at time.Time, want bool) {
+			t.Helper()
+			l := f.u(at)
+			if ok, why := CheckClockRead(f.path, o, l, span, true); ok != want {
+				t.Errorf("%s, %s (%s): %v (%s); want %v", f.name, what, l.Value, ok, why, want)
+			}
+		}
+		// A value one unit of its encoding past the widened span shows no
+		// cut, so it is checked at its own resolution, and fails.
+		unit("one cut and a unit stale", k.Add(-f.cut-f.enc), false)
+		unit("one unit past the widened span", span.To.Add(f.cut).Truncate(f.enc).Add(f.enc), false)
 		rng := rand.New(rand.NewSource(41))
 		for i := 0; i < 2000; i++ {
 			from := k.Add(time.Duration(rng.Int63n(int64(24 * time.Hour))))
 			s := Span{From: from, To: from.Add(time.Duration(rng.Int63n(int64(f.cut)))), Zone: time.UTC}
 			read := s.From.Add(time.Duration(rng.Int63n(int64(s.To.Sub(s.From)) + 1)))
 			check("a read in its span", read, s, true)
-			check("a read more than one cut before its span", s.From.Add(-f.cut-time.Duration(1+rng.Int63n(int64(f.cut)))), s, false)
-			check("a read after its span", s.To.Add(time.Duration(1+rng.Int63n(int64(f.cut)))).Add(f.cut), s, false)
+			check("a read in its span, rounded up", read.Truncate(f.cut).Add(f.cut), s, true)
+			check("a read one cut before its span", s.From.Add(-f.cut), s, true)
+			check("a read more than one cut before the cut its span starts in", s.From.Truncate(f.cut).Add(-f.cut-time.Duration(1+rng.Int63n(int64(f.cut)))), s, false)
+			check("a value more than one cut after its span", s.To.Add(f.cut).Truncate(f.cut).Add(f.cut+time.Duration(rng.Int63n(int64(f.cut)))), s, false)
 		}
+	}
+}
+
+// A cut is read in UTC, in the offset a value writes, and in the
+// application's zone, at learn and at replay, so an hour or a day the
+// application cuts in a zone whose offset is no whole number of it is
+// learned and checked as that hour or day (founder decision, 2026-10-27,
+// and the coordinator's ruling of 23:44): a text that writes +05:30 or
+// -03:30 cut to its hour, one that writes +02:00 cut to its day, a typed
+// $date cut to the IST hour, a "Z" text cut to the IST day, and a $date
+// cut to Berlin's day across the 25 hours of 2026-10-25, when its clocks go
+// back (a day of the zone's calendar, never 24 hours). Read in UTC alone,
+// each shows a finer cut (a minute, an hour) and a replay flipped by when
+// in the hour or the day it ran. Writers that round rather than cut
+// (JavaScript's Math.round(Date.now()/1000) as a JSON number, a value
+// rounded to the second written with three fraction digits, a time of day
+// rounded so, read on the day after the one the span ends on where it is
+// ahead of the span's end) pass, one cut ahead of the span. Over 2,000 replays each, every value a read in its
+// span writes passes, and one two cuts stale or two cuts past the span is
+// refused: no verdict turns on when the replay ran.
+func TestACutIsReadInTheZoneTheApplicationCutsIn(t *testing.T) {
+	const tp = "body.at.$date.$numberLong"
+	ist, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		ist = time.FixedZone("IST", 5*3600+1800)
+	}
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("no zone data: %v", err)
+	}
+	plus2, nf := time.FixedZone("", 2*3600), time.FixedZone("", -(3*3600+1800))
+	hour := func(loc *time.Location) func(time.Time) time.Time {
+		return func(t time.Time) time.Time {
+			l := t.In(loc)
+			return time.Date(l.Year(), l.Month(), l.Day(), l.Hour(), 0, 0, 0, loc)
+		}
+	}
+	day := func(loc *time.Location) func(time.Time) time.Time {
+		return func(t time.Time) time.Time {
+			l := t.In(loc)
+			return time.Date(l.Year(), l.Month(), l.Day(), 0, 0, 0, 0, loc)
+		}
+	}
+	zone := func(name string) *time.Location {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			t.Skipf("no zone data for %s: %v", name, err)
+		}
+		return loc
+	}
+	// first is the first instant at or before t whose wall clock in loc
+	// shows the same key (its date, or its date and hour), found by a walk
+	// back a minute at a time: the start of a day or an hour whose clocks
+	// skipped it.
+	first := func(loc *time.Location, key func(time.Time) string) func(time.Time) time.Time {
+		return func(t time.Time) time.Time {
+			t = t.Truncate(time.Minute)
+			for k := key(t); key(t.Add(-time.Minute)) == k; {
+				t = t.Add(-time.Minute)
+			}
+			return t
+		}
+	}
+	dayStart := func(loc *time.Location) func(time.Time) time.Time {
+		return first(loc, func(t time.Time) string { return t.In(loc).Format("2006-01-02") })
+	}
+	hourStart := func(loc *time.Location) func(time.Time) time.Time {
+		return first(loc, func(t time.Time) string { return t.In(loc).Format("2006-01-02T15") })
+	}
+	round := func(c time.Duration) func(time.Time) time.Time {
+		return func(t time.Time) time.Time { return t.Round(c) }
+	}
+	text := func(loc *time.Location, lay string) func(time.Time) Leaf {
+		return func(at time.Time) Leaf {
+			return Leaf{Path: "body.at", Noise: "body.at", Type: String, Value: at.In(loc).Format(lay)}
+		}
+	}
+	typed := func(at time.Time) Leaf { return InstantLeaf(tp, "body.at", at, time.Millisecond) }
+	for _, f := range []struct {
+		name, path string
+		app        *time.Location
+		cut        time.Duration
+		days       int
+		// cutOf is the value the application writes for a read at t,
+		// leaf the leaf that writes it.
+		cutOf func(time.Time) time.Time
+		leaf  func(time.Time) Leaf
+	}{
+		{"a +05:30 text cut to its hour", "body.at", nil, time.Hour, 0, hour(ist), text(ist, time.RFC3339)},
+		{"a -03:30 text cut to its hour", "body.at", nil, time.Hour, 0, hour(nf), text(nf, time.RFC3339)},
+		{"a +02:00 text cut to its day", "body.at", nil, 24 * time.Hour, 1, day(plus2), text(plus2, time.RFC3339)},
+		{"a typed $date cut to the IST hour", tp, ist, time.Hour, 0, hour(ist), typed},
+		{"a Z text cut to the IST day", "body.at", ist, 24 * time.Hour, 1, day(ist), text(time.UTC, time.RFC3339)},
+		{"a typed $date cut to Berlin's day", tp, berlin, 24 * time.Hour, 1, day(berlin), typed},
+		// Days whose clocks skip midnight (summer time starts at 00:00):
+		// the day starts at 01:00, as Go, Java and JavaScript cut it.
+		{"a typed $date cut to Cairo's day", tp, zone("Africa/Cairo"), 24 * time.Hour, 1, dayStart(zone("Africa/Cairo")), typed},
+		{"a typed $date cut to Santiago's day", tp, zone("America/Santiago"), 24 * time.Hour, 1, dayStart(zone("America/Santiago")), typed},
+		{"a typed $date cut to Havana's day", tp, zone("America/Havana"), 24 * time.Hour, 1, dayStart(zone("America/Havana")), typed},
+		// Lord Howe's clocks skip 02:00-02:30 when summer time starts: that
+		// hour starts at 02:30.
+		{"a typed $date cut to Lord Howe's hour", tp, zone("Australia/Lord_Howe"), time.Hour, 0, hourStart(zone("Australia/Lord_Howe")), typed},
+		{"Math.round(Date.now()/1000)", "body.iat", nil, time.Second, 0, round(time.Second), func(at time.Time) Leaf {
+			return Leaf{Path: "body.iat", Noise: "body.iat", Type: Number, Value: strconv.FormatInt(at.Unix(), 10)}
+		}},
+		{"three digits rounded to the second", "body.at", nil, time.Second, 0, round(time.Second), text(time.UTC, "2006-01-02T15:04:05.000Z07:00")},
+		{"a time of day rounded to the second", "body.at", nil, time.Second, 0, round(time.Second), text(time.UTC, "15:04:05")},
+	} {
+		// shift is t moved by n cuts. Of an hour or a day, the start of the
+		// n-th one after (before) t's, as the application cuts it: days and
+		// hours of the zone's calendar, which may last 23 or 25 hours, or
+		// start after the hour its clocks skip.
+		shift := func(t time.Time, n int) time.Time {
+			if f.cut < time.Hour {
+				return t.Add(time.Duration(n) * f.cut)
+			}
+			step := f.cut + 1
+			if f.days > 0 {
+				step = 30 * time.Hour
+			}
+			for ; n < 0; n++ {
+				t = f.cutOf(f.cutOf(t).Add(-1))
+			}
+			for ; n > 0; n-- {
+				t = f.cutOf(f.cutOf(t).Add(step))
+			}
+			return t
+		}
+		shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{f.path: l}} }
+		rec := time.Date(2026, 10, 20, 9, 47, 7, 600e6, time.UTC)
+		live := shift(rec, 3)
+		dc := clockedDrifts()
+		dc.zone = f.app
+		ln := ClassifyIn(dc, []string{f.path}, shape(f.leaf(f.cutOf(live))), shape(f.leaf(f.cutOf(rec))), rec.Add(time.Millisecond), nil, nil, nil, nil)[0]
+		o, ok := ln.Clock()
+		if !plainRead(ln) || !ok || o.Res != f.cut || o.Zone != "" && !models.LayoutTimeOfDay(o.Layout) {
+			t.Errorf("%s: %s Read=%+v (%s); want a plain read of the clock learned at its %v cut", f.name, ln.Kind, ln.Read, ln.Why, f.cut)
+			continue
+		}
+		bad := 0
+		check := func(what string, at time.Time, s Span, want bool) {
+			t.Helper()
+			if ok, why := CheckClockRead(f.path, o, f.leaf(at), s, true); ok != want && bad < 5 {
+				bad++
+				t.Errorf("%s, %s (%s, span %s to %s): %v (%s); want %v", f.name, what, f.leaf(at).Value, s.From.Format(time.RFC3339Nano), s.To.Format(time.RFC3339Nano), ok, why, want)
+			}
+		}
+		rng := rand.New(rand.NewSource(42))
+		base := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+		switch f.name {
+		case "a typed $date cut to Cairo's day":
+			base = time.Date(2026, 4, 19, 0, 0, 0, 0, time.UTC)
+		case "a typed $date cut to Santiago's day":
+			base = time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+		case "a typed $date cut to Havana's day":
+			base = time.Date(2026, 3, 3, 0, 0, 0, 0, time.UTC)
+		case "a typed $date cut to Lord Howe's hour":
+			base = time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+		}
+		for i := 0; i < 2000; i++ {
+			from := base.Add(time.Duration(rng.Int63n(int64(min(10*24*time.Hour, 2000*f.cut)))))
+			s := Span{From: from, To: from.Add(time.Duration(rng.Int63n(int64(min(f.cut, 10*time.Minute))))), Zone: f.app}
+			read := s.From.Add(time.Duration(rng.Int63n(int64(s.To.Sub(s.From)) + 1)))
+			check("a read in its span", f.cutOf(read), s, true)
+			check("one cut stale", shift(f.cutOf(read), -1), s, true)
+			// The start of the cut that holds the span's start, which a
+			// writer that rounds may write one cut later.
+			start := f.cutOf(s.From)
+			if start.After(s.From) {
+				start = shift(start, -1)
+			}
+			check("two cuts stale", shift(start, -2), s, false)
+			// An hour's window is one hour of instants past the span (the
+			// ruling); where a skipped half hour shortened a wall hour, the
+			// second wall hour after the span's may still lie in it.
+			past := shift(f.cutOf(s.To), 2)
+			for f.days == 0 && !past.After(s.To.Add(f.cut)) {
+				past = shift(past, 1)
+			}
+			check("two cuts past the span", past, s, false)
+		}
+		if f.name == "a typed $date cut to Lord Howe's hour" {
+			s := Span{From: time.Date(2026, 10, 4, 2, 50, 0, 0, f.app), Zone: f.app}
+			s.To = s.From.Add(time.Minute)
+			check("the hour that starts at 02:30", f.cutOf(s.From), s, true)
+		}
+		if f.days > 0 && f.app == berlin && f.name == "a typed $date cut to Berlin's day" {
+			late := time.Date(2026, 10, 25, 23, 40, 0, 0, berlin)
+			s := Span{From: late, To: late.Add(time.Minute), Zone: berlin}
+			check("the day the clocks go back, read late in it", f.cutOf(late), s, true)
+			check("the day before it", shift(f.cutOf(late), -1), s, true)
+			check("two days before it", shift(f.cutOf(late), -2), s, false)
+		}
+	}
+}
+
+// A wall clock of no zone writes its own zone's clock: its cut is read on
+// its digits (and where the application's zone skipped the start of their
+// hour or day), never on the instant they name read in another zone. Digits
+// of 18:30 in IST are a whole day in UTC: learned at the minute they show,
+// and a replay value of 05:30 (00:00 in UTC) is checked at its minute, so
+// one fourteen hours stale is refused, not passed as a day's cut.
+func TestAWallClocksCutIsReadOnItsDigits(t *testing.T) {
+	const p = "body.at"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	wall := func(digits string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: digits} }
+	call := time.Date(2026, 10, 20, 13, 0, 0, 5e6, time.UTC)
+	ln := classifyZoned(ist, false, p, wall("2026-10-20 18:30:00"), wall("2026-10-21 18:30:00"), call, nil)
+	if o, ok := ln.Clock(); !plainRead(ln) || !ok || o.Res != time.Minute {
+		t.Errorf("digits of 18:30 a day apart, the application in IST: %s Read=%+v (%s); want a plain read learned at the minute its digits show", ln.Kind, ln.Read, ln.Why)
+	}
+	o := models.ClockOffset{Res: 24 * time.Hour, Zone: models.ZoneApp, Layout: "iso-second-space"}
+	now := time.Date(2026, 10, 27, 20, 0, 0, 0, ist)
+	s := Span{From: now, To: now.Add(time.Minute), Zone: ist}
+	if ok, why := CheckClockRead(p, o, wall("2026-10-27 05:30:00"), s, true); ok {
+		t.Errorf("a wall clock of 05:30 in IST (00:00 in UTC), read at 20:00: passed (%s); want checked at its minute and refused", why)
+	}
+	if ok, why := CheckClockRead(p, o, wall("2026-10-27 20:00:00"), s, true); !ok {
+		t.Errorf("a wall clock of 20:00 in IST, read at 20:00: refused (%s); want passed", why)
 	}
 }
 
@@ -2972,8 +3227,10 @@ func TestAnIsoformatTenthsColumnLearnedOnWholeSecondsPassesEveryReplayInItsSpan(
 			{"the replay's read at .31 of its second", now.Add(310 * ms), "", true, ""},
 			{"the replay's read at .57 of its second", now.Add(570 * ms), "", true, ""},
 			{"the replay's read at .9 of its second", now.Add(900 * ms), "", true, ""},
-			{"a value with a fraction a cut stale, the read at .31 of its second", now.Add(310 * ms), w(now.Add(305*ms - col.cut)), false, "it changed (read as standing for the whole " + map[bool]string{true: "100ms", false: "10ms"}[col.cut == 100*ms] + " it is cut to)"},
-			{"a whole second's value a second stale, the read 40 ms into its second", now.Add(40 * ms), "2026-10-29T16:40:01+00:00", false, "made in this call's window: it changed"},
+			{"a value with a fraction a cut stale, the read at .31 of its second", now.Add(310 * ms), w(now.Add(305*ms - col.cut)), true, ""},
+			{"a value with a fraction two cuts stale, the read at .31 of its second", now.Add(310 * ms), w(now.Add(305*ms - 2*col.cut)), false, "it changed (read as standing for the whole " + map[bool]string{true: "100ms", false: "10ms"}[col.cut == 100*ms] + " it is cut to)"},
+			{"a whole second's value a second stale, the read 40 ms into its second", now.Add(40 * ms), "2026-10-29T16:40:01+00:00", true, ""},
+			{"a whole second's value two seconds stale, the read 40 ms into its second", now.Add(40 * ms), "2026-10-29T16:40:00+00:00", false, "made in this call's window: it changed"},
 		} {
 			span := Span{From: row.at.Add(-5 * ms), To: row.at.Add(5 * ms)}
 			v := row.v

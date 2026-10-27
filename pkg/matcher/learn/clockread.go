@@ -269,15 +269,22 @@ func (dc *DriftCache) textReadZone(rec, live string, w *Window, call time.Time) 
 // (clockTextLayout), or in models.LayoutApart where the two differ, which
 // the learn step refuses (textLayoutChangedWhy); nil where either is not.
 func textClockRead(rec, live string) *models.ClockOffset {
-	rt, rres, ok := readClockText(rec)
+	return textClockReadIn(rec, live, nil)
+}
+
+// textClockReadIn is textClockRead with the cut the two values show read in
+// zone, the application's, too (nil: not known), beside UTC and the offset
+// each writes (zonedRes): what the learn step reads (DriftCache.zone).
+func textClockReadIn(rec, live string, zone *time.Location) *models.ClockOffset {
+	rt, rres, rwall, ok := readClockTextWall(rec)
 	if !ok {
 		return nil
 	}
-	lt, lres, ok := readClockText(live)
+	lt, lres, lwall, ok := readClockTextWall(live)
 	if !ok {
 		return nil
 	}
-	return &models.ClockOffset{Res: textReadRes(rres, lres, sharedGrain(rt, lt)), Layout: models.ClockOffset{Layout: clockTextLayout(rec)}.MeetLayout(clockTextLayout(live))}
+	return &models.ClockOffset{Res: zonedRes(min(rres, lres), rt, lt, rwall || lwall, zone), Layout: models.ClockOffset{Layout: clockTextLayout(rec)}.MeetLayout(clockTextLayout(live))}
 }
 
 // textReadRes is the resolution a plain read of the clock written as a text
@@ -414,9 +421,10 @@ func textTimeOfDay(s string) (tod, res time.Duration, layout string, ok bool) {
 // read in loc, is tod (a time into its day, below a day): on ref's own day
 // in loc, or on the day before where that is later than ref. A read of the
 // clock whose time of day a value writes at resolution res (which divides a
-// day, so the value's cell lies in one day) lies in a span ending at ref
-// exactly where this instant's cell, [it, it+res), meets the span: the
-// span's time of day read modulo a day, the midnight it may cross included.
+// day, so the value's cell lies in one day) is checked at this instant, or
+// the one a day after it where the value is ahead of ref (todReadIn), within
+// one res of the span on either side: the span's time of day read modulo a
+// day, the midnight it may cross included.
 func todAtOrBefore(tod time.Duration, ref time.Time, loc *time.Location) time.Time {
 	y, m, d := ref.In(loc).Date()
 	h, mi := int(tod/time.Hour), int(tod%time.Hour/time.Minute)
@@ -572,9 +580,10 @@ func clockReadIn(o models.ClockOffset, live Leaf, s Span) ([]time.Time, time.Dur
 // there, read as a time of day whole in o's layout (timeOfDayOf), as the
 // instant nearest no later than the end of s, the call's span, that writes
 // it in each zone o's Zone names (todAtOrBefore: UTC, the application's,
-// s.Zone, or both under models.ZoneEither), at the resolution its form
-// writes: Holds of a plain read then holds it where its cell meets s, read
-// modulo a day, a span that crosses midnight too. Otherwise why it reads
+// s.Zone, or both under models.ZoneEither), and the one a day after it, at
+// the resolution its form writes: Holds of a plain read then holds it
+// within one of its cuts of s on either side, read modulo a day, a span
+// that crosses midnight too. Otherwise why it reads
 // none, as clockReadIn says it: the value is no time of day keploy reads,
 // or one in another layout; o is a time of day plus an offset, or of no
 // zone (no learn step writes either); or o reads it in the application's
@@ -605,9 +614,13 @@ func todReadIn(o models.ClockOffset, live Leaf, s Span) ([]time.Time, time.Durat
 	default:
 		return nil, 0, ", a time of day read in no zone, which names none: keploy refuses the value whatever it is rather than read it in a zone it was not read in. Record the test again with this keploy"
 	}
-	ats := make([]time.Time, 0, len(locs))
+	ats := make([]time.Time, 0, 2*len(locs))
 	for _, loc := range locs {
-		ats = append(ats, todAtOrBefore(tod, s.To, loc))
+		// The instant no later than the span's end, and the next one: a
+		// value up to one cut ahead of the span holds (a writer that rounds,
+		// models.ClockOffset.holdsRead).
+		at := todAtOrBefore(tod, s.To, loc)
+		ats = append(ats, at, at.AddDate(0, 0, 1))
 	}
 	return ats, res, ""
 }
@@ -650,29 +663,34 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // application's clock at the call; the value is no instant keploy reads in
 // o's zone (clockReadIn: one that names its zone where the learn step read a
 // wall clock of no zone, or one of the application's zone, which s does not
-// carry); or it is no such read: it changed. Where o is a plain read whose
-// Res is above the resolution the value's encoding writes (a cut the learn
-// step's two values showed, or an encoding coarser than this value's), the
-// cut is the value's own: the coarsest step above its encoding, no coarser
-// than o.Res, it is a whole multiple of (models.CutOf, ownReading). A value
-// that shows one is checked at it, as standing for its whole cut: a value v
-// cut to c holds where from-c < v <= to, the call's span widened by one cut
-// before it, exactly the values a read in the span writes (a value cut to
-// the second read in the span passes wherever its read fell in its second;
-// one cached across a second's boundary, or yesterday's date at a cut of a
-// day, is refused). A value that shows none is checked at its own
-// resolution, the stricter check: the learn step's two values fell on a
-// step by chance (a Python float epoch's, or .NET's trimmed ticks, both
-// whole microseconds), or the application cuts its value no coarser than a
+// carry); or it is no such read: it changed. A plain read is checked at a
+// resolution: a value holds within one of it of the span on either side
+// (founder decision, 2026-10-27; models.ClockOffset.holdsRead): from the
+// start of the cut that holds from, less one, up to to plus one, days of
+// the zone's calendar. Where o's Res is above the resolution the value's
+// encoding writes (a cut the learn step's two values showed, or an
+// encoding coarser than this value's), the resolution is the value's own
+// cut: the coarsest step above its encoding, no coarser than o.Res, it is
+// a whole multiple of (models.CutOf), read in UTC, in the offset the value
+// writes and in the application's zone, s.Zone, where the replay can tell
+// it, as the learn step read the two values' (cutZones, readCut,
+// zonedRes); of a wall clock of no zone or a time of day, in the zone the
+// value was read in. So an hour or a day the application cuts in its own
+// zone (an hour in UTC+05:30, a day in UTC+02:00) is checked as that hour
+// or day, never as the finer cut it shows in UTC, which would pass or fail
+// by when the replay ran. A value that shows a cut is checked at it: one
+// cut to the second read in the span passes wherever its read fell in its
+// second, cut down or rounded, and so does one up to a second stale or
+// ahead (yesterday's date at a cut of a day); one more than a cut off is
+// refused. A value that shows none is checked at its own resolution, the
+// stricter check: the learn step's two values fell on a step by chance (a
+// Python float epoch's, or .NET's trimmed ticks, both whole
+// microseconds), or the application cuts its value no coarser than a
 // finer step than o.Res (Python's isoformat over a column of tenths, whose
-// two learned values had no fraction, learned at the second: a replay value
-// of .4 s is checked at 100 ms). A value read in the span holds, whichever
-// cut it shows, where the cut is read on the instant the value writes: an
-// hour or a day the application cuts in a zone whose offset is no whole
-// number of it (an hour in UTC+05:30, a day in UTC+02:00) shows a finer cut
-// there, and a replay's verdict on it turns on where its read fell. An
-// offset whose Res is a cut is never learned (learn's
-// clockOffset), and a value against one is refused as before.
+// two learned values had no fraction, learned at the second: a replay
+// value of .4 s is checked at 100 ms). An offset whose Res is a cut is
+// never learned (learn's clockOffset), and a value against one is refused
+// as before.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they
 // share no offset, or read it in different zones) is refused whatever the
 // call carries, saying so, and so is one of a Zone this keploy does not
@@ -700,34 +718,78 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if !o.Plain() && o.CutCoarserThan(res) {
 		return false, learned + ", at a resolution of " + models.ShortDuration(o.Res) + " (both of the learn step's values were whole multiples of it), coarser than the " + models.ShortDuration(res) + " this value's encoding writes: the application cuts its value, and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 	}
-	cut := ""
-	if o.Plain() && o.Res > res {
-		// A cut the value shows is checked at that cut; a value that shows
-		// none, at its own resolution.
-		if c := models.CutOf(ownReading(o, live), res, o.Res); c > res {
-			res = c
-			cut = " (read as standing for the whole " + models.ShortDuration(c) + " it is cut to)"
+	if !o.Plain() {
+		if holdsAny(o, ats, res, s.From, s.To) {
+			return true, ""
 		}
-		o.Res = res
+		return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed"
 	}
-	if holdsAny(o, ats, res, s.From, s.To) {
-		return true, ""
+	// A cut the value shows is checked at that cut, read in the zone it
+	// shows it in; a value that shows none, at its own resolution.
+	cut := ""
+	for _, at := range ats {
+		c, in := res, at
+		if o.Res > res {
+			if ci, ati := readCut(at, cutZones(o, at, s), res, o.Res); ci > res {
+				c, in = ci, ati
+				if cut == "" {
+					cut = " (read as standing for the whole " + models.ShortDuration(c) + " it is cut to" + zoneName(ati) + ")"
+				}
+			}
+		}
+		p := o
+		p.Res = c
+		if p.Holds(in, c, s.From, s.To) {
+			return true, ""
+		}
 	}
 	return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed" + cut
 }
 
-// ownReading is live, a replay's value at a place the learn step learned a
-// plain read of the clock at as o, read as the learn step reads two values'
-// grain (readRes): a time of day in nanoseconds into its day (todGrain), any
-// other instant in nanoseconds from the Unix epoch (sharedGrain), a wall
-// clock of no zone read in UTC. Only for a value clockReadIn read.
-func ownReading(o models.ClockOffset, live Leaf) int64 {
-	if models.LayoutTimeOfDay(o.Layout) {
-		tod, _, _, _ := timeOfDayOf(live)
-		return int64(tod)
+// cutZones are the zones a replay reads the cut of at, a reading of its
+// value at a place learned as the plain read o, in (readCut): of a value
+// that names its moment (o's Zone ""), UTC, the offset it writes and the
+// application's zone (s.Zone, where the replay can tell it), as the learn
+// step read its two values' (zonedRes); of a wall clock of no zone or a
+// time of day, the zone clockReadIn read it in alone (at's), whose clock it
+// writes.
+func cutZones(o models.ClockOffset, at time.Time, s Span) []*time.Location {
+	if o.Zone != "" || models.LayoutTimeOfDay(o.Layout) {
+		return []*time.Location{at.Location()}
 	}
-	at, _, _, _ := clockReadOf(live)
-	return at.UnixNano()
+	return []*time.Location{time.UTC, at.Location(), s.Zone}
+}
+
+// readCut is the coarsest step of models.CutOf above enc and no coarser
+// than upTo that at shows in one of zones (nil ones skipped: models.CutIn,
+// its wall clock there a whole multiple of it, or the first instant of its
+// hour or day there), and at read in that zone, which a check at the cut
+// reads its day and its start in (models.ClockOffset.holdsRead); 0 and at
+// where it shows none.
+func readCut(at time.Time, zones []*time.Location, enc, upTo time.Duration) (time.Duration, time.Time) {
+	c, in := time.Duration(0), at
+	for _, loc := range zones {
+		if loc == nil {
+			continue
+		}
+		if u := models.CutIn(at, loc, enc, upTo); u > c {
+			c, in = u, at.In(loc)
+		}
+	}
+	return c, in
+}
+
+// zoneName names the zone at is read in for a person, after the cut it
+// reads there: "" in UTC, " in Asia/Kolkata" (a zone's name), or
+// " in UTC+05:30" (its offset, where it has no name).
+func zoneName(at time.Time) string {
+	if at.Location() == time.UTC {
+		return ""
+	}
+	if n := at.Location().String(); n != "" && n != "Local" && n != "UTC" {
+		return " in " + n
+	}
+	return " in UTC" + at.Format("-07:00")
 }
 
 // ClockSpanFrom is the span on the application's clock in which the call
