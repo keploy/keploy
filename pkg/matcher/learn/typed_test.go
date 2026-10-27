@@ -1960,6 +1960,14 @@ func TestATypedInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 	if ok, why := CheckClockRead(p, o, ms(now.Add(5*time.Millisecond)), span, true); !ok {
 		t.Errorf("the confirming round's read of its own clock: refused (%s); want it passed", why)
 	}
+	// It carries the protocol's type as its layout: a text of the same
+	// instant at replay is another form, refused.
+	if o.Layout != models.LayoutTyped {
+		t.Errorf("a typed read's layout = %q; want %q", o.Layout, models.LayoutTyped)
+	}
+	if ok, why := CheckClockRead(p, o, Leaf{Path: p, Type: String, Value: now.Add(5 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")}, span, true); ok || !strings.Contains(why, "in another form") {
+		t.Errorf("a typed read, its instant as a text at replay: %v (%s); want refused, naming the form", ok, why)
+	}
 	if ok, why := CheckClockRead(p, o, ms(rec), span, true); ok || !strings.HasPrefix(why, p+" was learned as clock") || !strings.Contains(why, "it changed") {
 		t.Errorf("the confirming round's recorded value again: ok=%v (%s); want it refused, naming %s", ok, why, p)
 	}
