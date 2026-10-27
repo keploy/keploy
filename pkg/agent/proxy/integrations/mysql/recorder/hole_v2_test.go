@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -187,6 +188,52 @@ func TestRecordV2_AnAnswerCutByACaptureHole(t *testing.T) {
 		rec := recordChunks(t, holed(client), holed(server, lose...), true, time.Minute)
 		requireHoleCost(t, rec, []time.Time{commandAt(t, xs, 16384, 4)}, 18-1)
 	})
+}
+
+// A client that pipelines its commands gets answers that do not start after
+// their commands, so after a hole neither stream can be taken up at a command
+// the answers after it are known to follow: the recording stops at the hole,
+// with the exchange it cut left out and nothing recorded wrong, as for a
+// pipelining client's response it cannot frame.
+func TestRecordV2_APipeliningClientStopsAtACaptureHole(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		lose func(xs []exchange, client, server []fakeconn.Chunk) (c, s []fakeconn.Chunk)
+	}{
+		{"a command lost on the client's stream", func(xs []exchange, client, server []fakeconn.Chunk) ([]fakeconn.Chunk, []fakeconn.Chunk) {
+			return holed(client, clientChunkOf(xs, 5)), holed(server)
+		}},
+		{"an answer lost on the server's stream", func(xs []exchange, client, server []fakeconn.Chunk) ([]fakeconn.Chunk, []fakeconn.Chunk) {
+			from, _ := serverChunksOf(xs, 16384, 5)
+			return holed(client), holed(server, from)
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			xs := kitTraffic(t, []int{7, 8}, false)
+			client, server := onTheWire(xs, 16384)
+			// The 2nd command sent before the answer to the 1st arrived.
+			client[1].ReadAt = client[0].ReadAt.Add(time.Nanosecond)
+			holedClient, holedServer := c.lose(xs, client, server)
+			rec := recordChunks(t, holedClient, holedServer, true, time.Minute)
+			if w := wrongMocks(t, rec.mocks); len(w) > 0 {
+				t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+			}
+			if !rec.returned || !errors.Is(rec.err, fakeconn.ErrCaptureHole) {
+				t.Fatalf("RecordV2 returned=%v err=%v, want it stopped with ErrCaptureHole: a pipelining client's streams cannot be taken up again after a hole", rec.returned, rec.err)
+			}
+			if rec.stops != 1 {
+				t.Fatalf("the connection's stop was stamped %d times, want once", rec.stops)
+			}
+			if got := queryMocks(rec.mocks); got != 5 {
+				t.Fatalf("%d query mocks, want the 5 before the hole", got)
+			}
+			if w, ok := rec.leftOut.last(); !ok || w[0].After(commandAt(t, xs, 16384, 5)) {
+				t.Fatalf("the window left out is %v (found %v); it must hold the command the hole cut, sent at %v", w, ok, commandAt(t, xs, 16384, 5).Format(time.StampMicro))
+			}
+		})
+	}
 }
 
 // A hole inside a LOAD DATA LOCAL INFILE: its upload, or the LOAD DATA
