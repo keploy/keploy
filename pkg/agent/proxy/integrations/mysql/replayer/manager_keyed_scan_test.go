@@ -434,3 +434,71 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 		s.mm.Close()
 	}
 }
+
+// TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex: two
+// cases the keyed pass of a COM_STMT_EXECUTE settles from outside the mocks
+// filed under the live query, each served on one side by the keyed pass and
+// on the other by the full scan, which must serve the same recording.
+//
+//   - An EXECUTE recorded without its query (an older recorder's; its query
+//     is its PREPARE's in the pool) is filed under no query. With one in the
+//     session tier, before an EXECUTE of the same query recorded with it, the
+//     full scan serves the first of them, as recorded: the unnamed one. The
+//     keyed pass must leave such a command to the full scan.
+//   - Under exact serving between tests, the pool holds the live query's
+//     recording with other parameters (a FIFO candidate) before its recording
+//     with the live parameters (a definitive one). Under exact serving the
+//     definitive one ranks first, so the keyed pass must read past the FIFO
+//     candidate.
+func TestNoWindowExecuteServesWhatTheFullScanServesAcrossTheStatementIndex(t *testing.T) {
+	at := func(ms int) time.Time { return diffBase.Add(time.Duration(ms) * time.Millisecond) }
+	named := func(name, param string, ms int) *models.Mock {
+		req := executeReq(7, param)
+		req.PacketBundle.SetStoredQuery(diffQueryA)
+		return diffMock(name, "c1", []mysql.Request{req}, at(ms), models.LifetimeSession, "mocks")
+	}
+	for _, c := range []struct {
+		name  string
+		pool  []*models.Mock
+		exact bool
+		live  mysql.Request
+		want  string
+	}{{
+		name: "an EXECUTE recorded without its query, first in the session tier",
+		pool: []*models.Mock{
+			diffPrepareMock("prepare", "c1", diffQueryA, 7, at(0)),
+			diffMock("unnamed", "c1", []mysql.Request{executeReq(7, "k1")}, at(1), models.LifetimeSession, "mocks"),
+			named("named", "k2", 2),
+		},
+		live: executeReq(7, "app-made"),
+		want: "served unnamed ",
+	}, {
+		name:  "under exact serving between tests, a FIFO candidate before the definitive one",
+		pool:  []*models.Mock{named("fifo", "k2", 1), named("definitive", "k1", 2)},
+		exact: true,
+		live:  executeReq(7, "k1"),
+		want:  "served definitive ",
+	}} {
+		ref, fast := newDiffSide(c.pool), newDiffSide(c.pool)
+		for _, s := range []*diffSide{ref, fast} {
+			s.stageNoWindow()
+			if c.exact {
+				names := make([]string, 0, len(c.pool))
+				for _, m := range c.pool {
+					names = append(names, m.Name)
+				}
+				s.mm.ServeExactPool("-", names)
+			}
+		}
+		want := ref.match(context.Background(), c.live, nil, true)
+		got := fast.match(context.Background(), c.live, nil, false)
+		if !strings.HasPrefix(want, c.want) {
+			t.Fatalf("%s: the full scan %s, want %q", c.name, want, c.want)
+		}
+		if got != want {
+			t.Fatalf("%s:\n full scan:  %s\n keyed pass: %s", c.name, want, got)
+		}
+		ref.mm.Close()
+		fast.mm.Close()
+	}
+}
