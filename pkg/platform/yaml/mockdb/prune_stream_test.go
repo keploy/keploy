@@ -610,14 +610,36 @@ func (c *heapSampleCtx) sample() {
 // sampled.
 func pruneHeapPeak(t *testing.T, path string, prune func(ctx context.Context) error) (peak uint64, samples int, err error) {
 	t.Helper()
-	lines := func() int64 {
-		data, err := os.ReadFile(path)
+	return heapPeakEvery(max(1, fileLines(t, path)/256), prune)
+}
+
+// fileLines counts the newlines of the file at path, reading it a buffer at a
+// time: a fixture of a GiB is never in memory.
+func fileLines(t testing.TB, path string) int64 {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	var n int64
+	buf := make([]byte, 1<<20)
+	for {
+		k, err := f.Read(buf)
+		n += int64(bytes.Count(buf[:k], []byte("\n")))
+		if err == io.EOF {
+			return n
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		return int64(bytes.Count(data, []byte("\n")))
-	}()
-	ctx := &heapSampleCtx{Context: context.Background(), doneEvery: max(1, lines/256)}
+	}
+}
+
+// heapPeakEvery is pruneHeapPeak sampling at every doneEvery-th check of the
+// context (and at each Err).
+func heapPeakEvery(doneEvery int64, prune func(ctx context.Context) error) (peak uint64, samples int, err error) {
+	ctx := &heapSampleCtx{Context: context.Background(), doneEvery: doneEvery}
 	runtime.GC()
 	s := []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
 	metrics.Read(s)
