@@ -293,6 +293,66 @@ func TestLearnMatchNamesAVariableAboveADollarKey(t *testing.T) {
 	}
 }
 
+// A variable at a place whose key may be a value the app sent (an ID used as
+// a JSON key) is named by its recording and the place's rank among that
+// recording's value places, by shape and then by the place itself: the
+// second of two such places is "-v2" whether the variable is bound there
+// for a later call or echoed in the call's own answer, and whether or not
+// the other place drifted. No part of either key names it.
+func TestLearnMatchRanksAValueKeyedPlaceAmongItsRecordingsPlaces(t *testing.T) {
+	noKey := func(t *testing.T, vars ...models.MockVariables) {
+		t.Helper()
+		for _, vs := range vars {
+			for name := range vs {
+				if strings.Contains(name, "u12345") {
+					t.Fatalf("variable %q is named by a key that may be a value", name)
+				}
+			}
+		}
+	}
+	t.Run("bound for a later call", func(t *testing.T) {
+		h, n, opts := learnOn(t)
+		tr := learn.NewTracker()
+		tr.Begin()
+		db := &learnDb{perTest: []*models.Mock{
+			learnRecorded("mock-0", 0, "POST", "/v1/orders", `{"users":{"u12345a1":"o-1","u12345z9":"o-2"}}`, nil, `{}`),
+			learnRecorded("mock-1", time.Second, "GET", "/v1/orders/o-2", "", nil, `{"id":"o-2"}`),
+		}}
+		ctx := learn.WithTracker(context.Background(), tr)
+		if served, miss, _ := h.learnMatch(ctx, live("POST", "/v1/orders", `{"users":{"u12345a1":"o-1","u12345z9":"o-9"}}`, nil), db, n, opts); served == nil || miss != nil {
+			t.Fatalf("the first call is paired: %+v", miss)
+		}
+		served, miss, err := h.learnMatch(ctx, live("GET", "/v1/orders/o-9", "", nil), db, n, opts)
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("served %v miss %+v err %v", served, miss, err)
+		}
+		use := db.consumed[1]
+		if want := (models.MockVariables{"mock-0-v2": {Recorded: "o-2", Use: []string{"url.path[2]"}, Answer: []string{"body.id"}}}); !reflect.DeepEqual(use.Spec.Learned(), want) {
+			t.Fatalf("variables %+v, want %+v", use.Spec.Learned(), want)
+		}
+		if want := (map[string]models.MockVariables{"mock-0": {"mock-0-v2": {Recorded: "o-2", Bind: "body.users.u12345z9"}}}); !reflect.DeepEqual(use.Spec.LearnedBinds(), want) {
+			t.Fatalf("binds %+v, want %+v", use.Spec.LearnedBinds(), want)
+		}
+		noKey(t, use.Spec.Learned(), use.Spec.LearnedBinds()["mock-0"])
+	})
+	t.Run("echoed in the call's own answer", func(t *testing.T) {
+		h, n, opts := learnOn(t)
+		db := &learnDb{perTest: []*models.Mock{learnRecorded("mock-0", 0, "POST", "/v1/keys", `{"keys":{"u12345a1":"k-1","u12345z9":"k-2"}}`, nil, `{"key":"k-2"}`)}}
+		served, miss, err := h.learnMatch(context.Background(), live("POST", "/v1/keys", `{"keys":{"u12345a1":"k-1","u12345z9":"k-7"}}`, nil), db, n, opts)
+		if err != nil || miss != nil || served == nil {
+			t.Fatalf("served %v miss %+v err %v", served, miss, err)
+		}
+		if served.Spec.HTTPResp.Body != `{"key":"k-7"}` {
+			t.Fatalf("served %s: this run's value is answered where the recorded one was echoed whole", served.Spec.HTTPResp.Body)
+		}
+		want := models.MockVariables{"mock-0-v2": {Recorded: "k-2", Bind: "body.keys.u12345z9", Answer: []string{"body.key"}, Echo: true}}
+		if got := db.consumed[0].Spec.Learned(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("variables %+v, want %+v", got, want)
+		}
+		noKey(t, db.consumed[0].Spec.Learned())
+	})
+}
+
 // A variable whose value F saw drift only with its clock where it is bound (a
 // clock read moved by the lead: learn.ClockOf) is marked so at its bind with
 // the read its recording holds, the instant and resolution it says
