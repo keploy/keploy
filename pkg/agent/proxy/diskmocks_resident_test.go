@@ -61,8 +61,10 @@ func recordedMocks(t *testing.T, dir string) []*models.Mock {
 }
 
 // storeCorpus is a mock of each kind the store holds, with answers on both
-// sides of responseSpillMinBytes, and the MySQL recording of the
-// mysql-capture-starved lane, each made per-test at its own second.
+// sides of responseSpillMinBytes, the MySQL recording of the
+// mysql-capture-starved lane, and MySQL mocks that teach a type inside an
+// interface value inside an interface value, each made per-test at its own
+// second.
 func storeCorpus(t *testing.T) []*models.Mock {
 	t.Helper()
 	ms := recordedMocks(t, filepath.Join("..", "..", "platform", "yaml", "mockdb", "testdata"))
@@ -98,6 +100,7 @@ func storeCorpus(t *testing.T) []*models.Mock {
 	dns.Spec.DNSReq = &models.DNSReq{Name: "db.local.", Qtype: 1, Qclass: 1}
 	dns.Spec.DNSResp = &models.DNSResp{Rcode: 0, Authoritative: true}
 	ms = append(ms, pg, grpc, generic, dns)
+	ms = append(ms, nestedMocks()...)
 	base := time.Unix(1_700_000_000, 0).UTC()
 	for i, m := range ms {
 		m.Name = fmt.Sprintf("%03d-%s", i, m.Name)
@@ -405,25 +408,46 @@ func TestStoreReadsOnAfterAMockItCannotEncode(t *testing.T) {
 }
 
 // TestCorpusTeachesItsTypesInLessons: the corpus's MySQL and Mongo mocks
-// hold interface values, which gob splits around their types' definitions,
-// so the comparisons above cover records read after lessons; and no stored
-// record holds a definition.
+// hold interface values, some inside others, whose types gob defines inside
+// a record, so the comparisons above cover records read after lessons; and
+// every stored record reads alone with a new decoder that has read the
+// lessons and nothing else, so no record teaches a type a later one needs.
 func TestCorpusTeachesItsTypesInLessons(t *testing.T) {
 	d := newStoreWith(t, residentBudgetBytes, storeCorpus(t)...)
 	defer d.Close()
-	if n := len(d.records.lessons); n < 3 {
-		t.Fatalf("the corpus wrote %d lessons, want the first mock's and its interface values' (3 or more)", n)
+	if n := len(d.records.lessons); n < 4 {
+		t.Fatalf("the corpus wrote %d lessons, want the first mock's, its interface values' and a nested one's (4 or more)", n)
 	}
+	type rec struct {
+		name string
+		off  int64
+		n    int
+		resp bool
+	}
+	var recs []rec
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	lessons := d.records.lessons
 	for name, e := range d.byName {
-		for _, at := range [][2]int64{{e.off, int64(e.length)}, {e.respOff, int64(e.respLen)}} {
-			if at[0] < 0 {
-				continue
-			}
-			if b := d.mem[at[0]]; !oneValueMessage(b) {
-				t.Fatalf("mock %s: stored %d bytes at %d that are not one value message", name, len(b), at[0])
-			}
+		recs = append(recs, rec{name, e.off, e.length, false})
+		if e.respOff >= 0 {
+			recs = append(recs, rec{name, e.respOff, e.respLen, true})
+		}
+	}
+	d.mu.Unlock()
+	for _, r := range recs {
+		k := &keptDecoder{}
+		k.dec = gob.NewDecoder(&k.in)
+		if err := k.learn(d, lessons); err != nil {
+			t.Fatal(err)
+		}
+		b, err := d.bytesAt(r.off, r.n)
+		if err == nil && r.resp {
+			err = k.decode(b, new(spilledResponse))
+		} else if err == nil {
+			err = k.decode(b, new(models.Mock))
+		}
+		if err != nil {
+			t.Fatalf("mock %s: the record at %d (answer %v) does not read with the lessons alone: %v", r.name, r.off, r.resp, err)
 		}
 	}
 }

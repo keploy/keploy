@@ -22,14 +22,23 @@ import (
 // the first record that uses it, and keeps decoders that have read those
 // definitions.
 //
-// A record that sends a definition (gob may split such a record's value
-// around it) is a lesson: it is kept as written, and the record is encoded
-// again, now with every type it uses already sent, as one message of its
-// value alone. Every stored record is such a message. A kept decoder first
-// reads the lessons in the order they were written, decoding their values
-// and dropping them, and then reads any record. What it decodes is what a
-// new decoder decodes from the record written alone, into a new value each
-// time, so every read is a copy no other caller holds.
+// A record that sends a definition is a lesson: it is kept as written, and
+// the record stored is the value encoded again, now with every type it uses
+// already sent, so it carries no definition. A definition need not come in a
+// message of its own: gob writes the definition of a type first held in an
+// interface value inside another interface value into the outer value's
+// message (a MySQL parameter's map[string]interface{} inside a packet), so
+// a record that is one gob message may still teach a type. The store tells
+// by length instead: every value is encoded twice, and the first encode is
+// kept as a lesson when it is longer than the second. It is longer exactly
+// when it sent a definition, as the second sends none and, with no
+// definition in it, a value's gob length is the value's alone (map entries
+// come in any order, each at its own length; the one GobEncode among the
+// stored types, PostgresV3Cell's, writes a value the same way each time).
+// A kept decoder first reads the lessons in the order they were written,
+// decoding their values and dropping them, and then reads any record. What
+// it decodes is what a new decoder decodes from the record written alone,
+// into a new value each time, so every read is a copy no other caller holds.
 //
 // A failed encode, or a lesson the store failed to keep, can leave the
 // encoder having sent a definition no lesson holds, so from then on the store
@@ -75,8 +84,8 @@ var errGobRecord = errors.New("gob record: not read whole")
 
 func newGobRecords() gobRecords { return gobRecords{freshFrom: math.MaxInt64} }
 
-// encodeLocked returns v encoded for the store as one message of its value
-// alone, or, once the stream cannot go on (freshFrom), as a gob stream of its
+// encodeLocked returns v encoded for the store with no type definition in
+// it, or, once the stream cannot go on (freshFrom), as a gob stream of its
 // own. offset is where the store writes next, and store keeps a lesson's
 // bytes there. Caller holds the store's mu.
 func (g *gobRecords) encodeLocked(v any, resp bool, offset int64, store func([]byte) (int64, int, error)) ([]byte, error) {
@@ -84,26 +93,24 @@ func (g *gobRecords) encodeLocked(v any, resp bool, offset int64, store func([]b
 		if g.enc == nil {
 			g.enc = gob.NewEncoder(&g.encBuf)
 		}
-		for try := 0; try < 2; try++ {
-			g.encBuf.Reset()
-			if err := g.enc.Encode(v); err != nil {
-				break
+		first, err := g.encodeOnce(v)
+		var second []byte
+		if err == nil {
+			second, err = g.encodeOnce(v)
+		}
+		if err == nil {
+			if len(first) == len(second) {
+				return second, nil
 			}
-			out := g.encBuf.Bytes()
-			if oneValueMessage(out) {
-				return bytes.Clone(out), nil
-			}
-			if try == 1 {
-				break
-			}
-			off, n, err := store(bytes.Clone(out))
+			off, n, err := store(first)
 			if err != nil {
 				g.freshFrom, g.enc = offset, nil
 				return nil, err
 			}
 			g.lessons = append(g.lessons, lesson{off: off, n: n, resp: resp})
-			offset = off + int64(n)
+			return second, nil
 		}
+		// The encoder may have sent a definition no lesson holds.
 		g.freshFrom, g.enc = offset, nil
 	}
 	var buf bytes.Buffer
@@ -113,32 +120,13 @@ func (g *gobRecords) encodeLocked(v any, resp bool, offset int64, store func([]b
 	return buf.Bytes(), nil
 }
 
-// oneValueMessage reports whether b, one Encode's output, is a single gob
-// message: its value alone, as a type definition always comes in a message
-// of its own before the value's.
-func oneValueMessage(b []byte) bool {
-	n, w, ok := gobUint(b)
-	return ok && uint64(len(b)-w) == n
-}
-
-// gobUint reads an unsigned integer as gob writes it: one byte below 0x80,
-// else the negated byte count and then the bytes, big-endian.
-func gobUint(b []byte) (x uint64, n int, ok bool) {
-	if len(b) == 0 {
-		return 0, 0, false
+// encodeOnce returns v as the store's encoder writes it next.
+func (g *gobRecords) encodeOnce(v any) ([]byte, error) {
+	g.encBuf.Reset()
+	if err := g.enc.Encode(v); err != nil {
+		return nil, err
 	}
-	c := b[0]
-	if c <= 0x7f {
-		return uint64(c), 1, true
-	}
-	k := -int(int8(c))
-	if k < 1 || k > 8 || len(b) < 1+k {
-		return 0, 0, false
-	}
-	for _, d := range b[1 : 1+k] {
-		x = x<<8 | uint64(d)
-	}
-	return x, 1 + k, true
+	return bytes.Clone(g.encBuf.Bytes()), nil
 }
 
 // decodeRecord decodes the record rec stored at off into a new T.
