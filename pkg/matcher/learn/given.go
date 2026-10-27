@@ -602,10 +602,28 @@ func (w *Window) holdsRead(rec, live moment, zone *time.Location) bool {
 
 // wallIn is the instant a wall clock of no zone names in zone, at its
 // reading in UTC (a moment's key): its date and time there, as zone's rules
-// give them at that date (summer time too).
+// give them at that date (summer time too). A wall clock zone's clocks
+// skipped (Santiago's midnight on the day summer time starts) names the
+// instant as far past the skip as it is past the last wall clock before
+// it, as Java's ZonedDateTime and JavaScript's Date read it: a date of no
+// zone is that day's first instant, never the day before's 23:00, which
+// Go's time.Date gives in a zone behind UTC.
 func wallIn(at int64, zone *time.Location) time.Time {
-	t := time.Unix(0, at).UTC()
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), zone)
+	w := time.Unix(0, at).UTC()
+	t := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), w.Minute(), w.Second(), w.Nanosecond(), zone)
+	if models.WallNanos(t, zone) == at {
+		return t
+	}
+	// Skipped: read at the offset in force before the skip, the lesser of
+	// the two it lies between (the clocks move ahead over a skip). Go's t
+	// lies before the skip (a zone behind UTC) or past it, and a day
+	// earlier the earlier offset is in force: no zone moves its clocks
+	// twice within a day.
+	_, o := t.Zone()
+	if _, x := t.Add(-26 * time.Hour).Zone(); x < o {
+		o = x
+	}
+	return w.Add(-time.Duration(o) * time.Second).In(zone)
 }
 
 // clientTestUnread says why a drifted value v of a client test, read in its
