@@ -119,10 +119,12 @@ type progressSink interface {
 	write(b []byte) error
 }
 
-// reporting is the reporters ReportTeardownProgress and
-// ReportTeardownProgressTo started, which run until the process exits unless
-// StopTeardownReporting ends them: stop is closed then and cleared, and the
-// next reporter started makes a new one.
+// reporting is the reporters the agent's entry points started --
+// ReportTeardownProgress, ReportTeardownProgressTo, ReportBootProgress and
+// ReportBootProgressTo -- which run until the process exits (a boot reporter:
+// until the agent's start is over) unless StopTeardownReporting ends them:
+// stop is closed then and cleared, and the next reporter started makes a new
+// one.
 var reporting struct {
 	mu      sync.Mutex
 	stop    chan struct{}
@@ -130,8 +132,18 @@ var reporting struct {
 	live    atomic.Int32 // how many are running (tests read it)
 }
 
-// startReporting starts a reporter on sink that StopTeardownReporting ends.
+// startReporting starts a teardown reporter on sink that
+// StopTeardownReporting ends.
 func startReporting(ctx context.Context, logger *zap.Logger, sink progressSink) {
+	trackReporter(func(stop <-chan struct{}) <-chan struct{} {
+		return reportTeardownProgress(ctx, logger, sink, stop, nil)
+	})
+}
+
+// trackReporter starts a reporter, start(stop), as one StopTeardownReporting
+// ends: start returns the channel its reporter closes once it has returned,
+// and so has written its last report. It returns that channel.
+func trackReporter(start func(stop <-chan struct{}) <-chan struct{}) <-chan struct{} {
 	reporting.mu.Lock()
 	defer reporting.mu.Unlock()
 	if reporting.stop == nil {
@@ -139,19 +151,21 @@ func startReporting(ctx context.Context, logger *zap.Logger, sink progressSink) 
 	}
 	reporting.running.Add(1)
 	reporting.live.Add(1)
-	done := reportTeardownProgress(ctx, logger, sink, reporting.stop, nil)
+	done := start(reporting.stop)
 	go func() {
 		<-done
 		reporting.live.Add(-1)
 		reporting.running.Done()
 	}()
+	return done
 }
 
-// StopTeardownReporting ends every reporter ReportTeardownProgress and
-// ReportTeardownProgressTo started, and returns once none writes any more. An
-// agent's reporter runs until its process exits; this is for a test that
-// starts one (through the agent command) and must stop it before the
-// directory it writes in is removed. Tests only: an agent whose reports stop
+// StopTeardownReporting ends every reporter ReportTeardownProgress,
+// ReportTeardownProgressTo, ReportBootProgress and ReportBootProgressTo
+// started, and returns once none writes any more. An agent's teardown reporter
+// runs until its process exits, and its boot reporter until its start is over;
+// this is for a test that starts them (through the agent command) and must
+// stop them before the directory they write in is removed. Tests only: an agent whose reports stop
 // is one its CLI never kills for want of progress. It ends the reporters of
 // the whole process, so a test that calls it must not run in parallel with
 // another that starts one.
