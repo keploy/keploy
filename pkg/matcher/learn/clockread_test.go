@@ -776,14 +776,30 @@ func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 	if ln := classifyZoned(nil, false, p, Leaf{Path: p, Noise: p, Type: String, Value: "03:29"}, Leaf{Path: p, Noise: p, Type: String, Value: "03:31:01"}, call, nil); ln.Kind != KindUnaccounted || ln.Read != nil || !strings.Contains(ln.Why, "a time of day to the minute") {
 		t.Errorf("a text time of day in two layouts: %s Read=%+v (%s); want refused, naming both", ln.Kind, ln.Read, ln.Why)
 	}
-	// One learned with an offset, or in no zone, which no learn step
-	// writes, holds nothing.
-	for _, o := range []models.ClockOffset{
-		{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Microsecond, Zone: models.ZoneUTC, Layout: models.LayoutTypedTimeOfDay},
-		{Res: time.Microsecond, Layout: models.LayoutTypedTimeOfDay},
-	} {
-		if ok, _ := CheckClockRead(p, o, typed(todIn(call, time.UTC)), s, true); ok {
-			t.Errorf("a time of day learned as %+v passed", o)
+	// One learned with an offset, or in no zone, which no learn step writes
+	// (a clocks entry edited by hand, or written by another build), holds
+	// nothing, and its reason names which: keploy checks neither. Without
+	// these guards the replay refuses it all the same, the time of day of
+	// a forward offset read on the day before, but with another check's
+	// reason (a cut, or "it changed"); the value its offset names (an hour
+	// after the clock, as a time to live's end) is no exception.
+	for name, leaf := range forms {
+		layout := models.LayoutTypedTimeOfDay
+		if name == "text" {
+			layout = "time-second"
+		}
+		for _, tc := range []struct {
+			o    models.ClockOffset
+			v    time.Time
+			want string
+		}{
+			{models.ClockOffset{Min: time.Hour, Max: time.Hour + time.Minute, Res: time.Millisecond, Zone: models.ZoneUTC, Layout: layout}, call.Add(time.Hour - 500*time.Millisecond), "a time of day plus an offset"},
+			{models.ClockOffset{Min: time.Hour, Max: time.Hour + time.Second, Res: time.Microsecond, Zone: models.ZoneUTC, Layout: layout}, call, "a time of day plus an offset"},
+			{models.ClockOffset{Res: time.Millisecond, Layout: layout}, call, "a time of day read in no zone"},
+		} {
+			if ok, why := CheckClockRead(p, tc.o, leaf(todIn(tc.v, time.UTC)), s, true); ok || !strings.Contains(why, tc.want) {
+				t.Errorf("a %s time of day learned as %+v, the value %s: %v (%s); want refused, saying %q", name, tc.o, tc.v.Format("15:04:05.000"), ok, why, tc.want)
+			}
 		}
 	}
 }
