@@ -112,7 +112,7 @@ func TestAPickFromTheTestRequestIsRefused(t *testing.T) {
 		// learn step did before it read the request), and of a whole
 		// instant, with no call window, a read of the clock a replay checks.
 		// Written to the second, the pair is taken off the whole minute
-		// (:07), where the learn step would refuse it as a cut (cutWhy).
+		// (:07), where the learn step would learn it at the minute's cut.
 		off := func(v string) Shape {
 			if strings.HasSuffix(v, ":00Z") {
 				v = strings.TrimSuffix(v, ":00Z") + ":07Z"
