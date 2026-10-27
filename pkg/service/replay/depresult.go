@@ -258,6 +258,9 @@ func buildDepResults(
 		}
 		consumedNames[m.Name] = true
 	}
+	// Read before the eligibility guard: a test whose every recording is
+	// marked has none eligible, and still says which it left unused.
+	unusedBG := unusedBackground(expected, consumed)
 
 	var out []models.DepResult
 	var missing []models.UnconsumedMock
@@ -363,14 +366,45 @@ func buildDepResults(
 	// The user learns WHY from the per-test-set warning — see
 	// depInertNoEligibleDepsReason, which names this exact state.
 	if len(eligible) == 0 {
-		return depAssertion{}
+		return depAssertion{UnusedBackground: unusedBG}
 	}
 
 	if missingOverflow > 0 {
 		out = append(out, models.DepMissingOverflowRow(missingOverflow))
 	}
 
-	return depAssertion{Checked: true, Consumed: consumedCount, Rows: out, Missing: missing}
+	return depAssertion{Checked: true, Consumed: consumedCount, Rows: out, Missing: missing, UnusedBackground: unusedBG}
+}
+
+// unusedBackground is, under the proven switch, each entry of a test's
+// mapping that judging marked as the application's background work
+// (models.MockEntry.Background) that the test consumed no call of, by its
+// mock's name and kind, in recorded order: every name the test consumed
+// counts, whatever the assertion leaves out of its consumed side, so a
+// recording the test used is never named unused. nil with the switch off
+// and when nothing marked went unused.
+func unusedBackground(expected []models.MockEntry, consumed []models.MockState) []models.UnconsumedMock {
+	if !provenswitch.On() {
+		return nil
+	}
+	var used map[string]bool
+	var out []models.UnconsumedMock
+	for _, e := range expected {
+		if e.Background == "" {
+			continue
+		}
+		if used == nil {
+			used = make(map[string]bool, len(consumed))
+			for _, m := range consumed {
+				used[m.Name] = true
+			}
+		}
+		if used[e.Name] || slices.ContainsFunc(out, func(u models.UnconsumedMock) bool { return u.Name == e.Name }) {
+			continue
+		}
+		out = append(out, models.UnconsumedMock{Name: e.Name, Kind: e.Kind})
+	}
+	return out
 }
 
 // depAssertion is the complete per-test dependency verdict buildDepResults
@@ -401,6 +435,11 @@ type depAssertion struct {
 	// and kind, in recorded order: Rows caps its rows and names a display
 	// target, not the mock.
 	Missing []models.UnconsumedMock
+	// UnusedBackground names, under the proven switch, the test's recordings
+	// judging marked as the application's background work that it did not
+	// use (unusedBackground). They fail nothing. Set whether or not the
+	// assertion had anything eligible, when the test's consumption was read.
+	UnusedBackground []models.UnconsumedMock
 }
 
 // depMissingRowCap bounds the number of INDIVIDUAL missing-dependency rows
@@ -708,8 +747,11 @@ func attachDepResults(
 	tcResult.Result.DepsConsumed = dep.Consumed
 	// Under the proven switch each unconsumed test mock fails the test, and
 	// its name is the evidence (unconsumed_mock).
+	// Its marked background recordings it did not use fail nothing: they
+	// are named for judging, which takes out what no round used.
 	if provenswitch.On() {
 		tcResult.FailureInfo.UnconsumedMocks = dep.Missing
+		tcResult.FailureInfo.UnusedBackground = dep.UnusedBackground
 	}
 
 	missingNames = models.MissingDepNames(dep.Rows)
