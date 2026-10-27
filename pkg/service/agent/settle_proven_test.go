@@ -774,3 +774,80 @@ func TestCallsQueuedBehindLostWorkAreTheNextEndsLoss(t *testing.T) {
 	sp.fmu.Unlock()
 	require.NoError(t, a.settledSince(context.Background(), true, "TestAfter"), "charged once")
 }
+
+// stallWake has the settle watchdog wake only when untilDone says, with
+// settleStallLimit 3; untilDone wakes it until fn's settle returns, failing
+// the test if that takes more wake-ups than the watchdog's limit.
+func stallWake(t *testing.T) (untilDone func(fn func() error) error) {
+	t.Helper()
+	wake, woken := make(chan struct{}), make(chan struct{})
+	prevWake, prevWoken, prevLimit := settleWake, settleWoken, settleStallLimit
+	settleWake = func(context.Context) (<-chan struct{}, func()) { return wake, func() {} }
+	settleWoken = func() { woken <- struct{}{} }
+	settleStallLimit = 3
+	t.Cleanup(func() { settleWake, settleWoken, settleStallLimit = prevWake, prevWoken, prevLimit })
+	return func(fn func() error) error {
+		done := make(chan error, 1)
+		go func() { done <- fn() }()
+		for i := 0; ; i++ {
+			require.LessOrEqual(t, i, settleStallLimit+1, "the settle outlived its watchdog")
+			select {
+			case err := <-done:
+				return err
+			case wake <- struct{}{}:
+				<-woken
+			}
+		}
+	}
+}
+
+// A test's begin whose watchdog gives up on a connection it found stuck
+// fails that begin (that test is not judged), naming the connection and
+// what it held; the give-up is per connection, so the test's end does not
+// wait for it again.
+func TestABeginThatGivesUpOnAConnectionFailsItAndTheEndGoesOn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	untilDone := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}}
+	sp.scopePending.Store(1)
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 0)
+	err := untilDone(func() error { _, err := a.settle(context.Background(), true); return err })
+	require.ErrorIs(t, err, errNoProgress)
+	require.False(t, errors.Is(err, errHoldsUnknown), "a begin goes on only past connections whose requests cannot be told: %v", err)
+	require.Contains(t, err.Error(), "connection 7 held 1 request(s) its parser had read and not answered")
+	sp.fmu.Lock()
+	require.Equal(t, []uint64{7}, sp.gaveUp, "the begin's watchdog gave up on the connection it found stuck")
+	sp.fmu.Unlock()
+	require.NoError(t, untilDone(func() error { return a.settledSince(context.Background(), true, "TestEnd") }),
+		"the end does not wait for what the begin gave up on")
+}
+
+// A wait still in its first part (an application connection the kernel
+// counted that the proxy never paired) has no connection to give up on: its
+// watchdog fails the settle as a whole, takes no scope, and the next settle
+// reads fresh counts, so it waits for that connection again (a stated
+// limit) until it is paired.
+func TestAGiveUpBeforeTheCountsSettleIsNotPerConnection(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	untilDone := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p}
+	a.Proxy = sp
+	h.established = 1
+	h.setApp(2, 1)
+	p.set(1, 0)
+	end := func() error { return a.settledSince(context.Background(), true, "TestEnd") }
+	err := untilDone(end)
+	require.ErrorIs(t, err, errNoProgress)
+	require.NotContains(t, err.Error(), "gave up on", "no connection to give up on before the counts settle")
+	err = untilDone(func() error { _, err := a.settle(context.Background(), true); return err })
+	require.ErrorIs(t, err, errNoProgress, "the next begin waits for the unpaired connection again")
+	sp.fmu.Lock()
+	require.Zero(t, sp.scopes, "neither wait got to the connections' work")
+	sp.fmu.Unlock()
+	h.setApp(2, 2)
+	require.NoError(t, untilDone(end), "once paired, the next settle goes on")
+}

@@ -438,3 +438,55 @@ func TestAConnectionASettleGaveUpOnHoldsNoLaterScopeUntilItsHandlerPassesIt(t *t
 		t.Fatalf("its handler back reading: scope pending %d, want 0", n)
 	}
 }
+
+// A multiplexed connection (HTTP/2's parser holds a request for each new
+// client stream and releases one hold for each request a handler is done
+// with, by count, not by stream) holds a scope while it holds any request:
+// the test's own request may be the one still held, even after the
+// application opened later ones on it. The scope is released once the
+// connection holds none at one instant with its reads past the cut. So an
+// application that keeps a request in flight on such a connection at every
+// instant holds the end for as long as it does so (a stated limit, as on
+// main), and none of the test's requests is ever left out.
+func TestAMultiplexedConnectionHoldsTheScopeWhileItHoldsAnyRequest(t *testing.T) {
+	tr := &inflight{}
+	app, proxy := acceptedPair(t, tr)
+	const call, tick = "HEADERS stream 1", "HEADERS stream 3"
+	got := make(chan string, 4)
+	// open reads the application's next request on a new stream, holds it
+	// as the parser does, and has the frame reader read on.
+	open := func(req string) (release func()) {
+		t.Helper()
+		if _, err := io.WriteString(app, req); err != nil {
+			t.Fatal(err)
+		}
+		if r := <-got; r != req {
+			t.Fatalf("read %q", r)
+		}
+		release = proxy.Hold()
+		go readOnce(proxy, got)
+		waitSettled(t, tr, func() bool { return proxy.reading.Load() == 1 })
+		return release
+	}
+	go readOnce(proxy, got)
+	first := open(call)
+	sc := tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's request held: scope pending %d, want 1", n)
+	}
+	// Each answer releases one hold while the application has opened the
+	// next request: by count, the request still held may be the test's.
+	release := first
+	for i := 0; i < 3; i++ {
+		next := open(tick)
+		release()
+		if n, _ := sc.State(true); n != 1 {
+			t.Fatalf("one request answered while another is held (overlap %d): scope pending %d, want 1", i, n)
+		}
+		release = next
+	}
+	release()
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("no request held, the frame reader reading: scope pending %d, want 0", n)
+	}
+}
