@@ -1218,3 +1218,45 @@ func TestAClockTextsLayoutNamesItsFormAndResolution(t *testing.T) {
 		}
 	}
 }
+
+// A time of day whose recording's windows hold its reading in UTC and in
+// the application's zone alike (windows wider than the two readings lie
+// apart: in an IST application, a time read in UTC reads in IST five and a
+// half hours earlier, one read in IST reads in UTC eighteen and a half hours
+// earlier) is learned in either zone (models.ZoneEither), as the recording
+// cannot tell which the application read, so a replay passes it read in
+// either; never in the zone whose reading is nearest the call alone, which
+// would refuse the application's own value read in the other. Windows that
+// hold one zone's reading learn that zone.
+func TestATimeOfDayBothZonesWindowsHoldIsLearnedInEither(t *testing.T) {
+	const p = "body.cmd.filter.at"
+	ist := time.FixedZone("IST", 5*3600+1800)
+	todIn := func(at time.Time, loc *time.Location) time.Duration {
+		at = at.In(loc)
+		return at.Sub(time.Date(at.Year(), at.Month(), at.Day(), 0, 0, 0, 0, loc))
+	}
+	leaf := func(tod time.Duration) Leaf { return TimeOfDayLeaf(p, p, tod, time.Microsecond) }
+	call := time.Date(2026, 10, 27, 3, 30, 0, 500e6, time.UTC)
+	read := call.Add(-5 * time.Millisecond)
+	fread := read.Add(FullRoundLead + 37*time.Millisecond)
+	window := func(width time.Duration) *Window {
+		return &Window{Rec: Span{From: call.Add(-width), To: call}, F: Span{From: fread.Add(5*time.Millisecond - width), To: fread.Add(5 * time.Millisecond)}}
+	}
+	for _, tc := range []struct {
+		what  string
+		loc   *time.Location
+		width time.Duration
+		want  string
+	}{
+		{"read in UTC, six-hour windows", time.UTC, 6 * time.Hour, models.ZoneEither},
+		{"read in IST, six-hour windows", ist, 6 * time.Hour, models.ZoneApp},
+		{"read in IST, nineteen-hour windows", ist, 19 * time.Hour, models.ZoneEither},
+		{"read in UTC, one-second windows", time.UTC, time.Second, models.ZoneUTC},
+		{"read in IST, one-second windows", ist, time.Second, models.ZoneApp},
+	} {
+		ln := classifyZoned(ist, false, p, leaf(todIn(read, tc.loc)), leaf(todIn(fread, tc.loc)), call, window(tc.width))
+		if !todRead(ln, tc.want) {
+			t.Errorf("%s: %s Read=%+v (%s); want a read modulo a day in %s", tc.what, ln.Kind, ln.Read, ln.Why, tc.want)
+		}
+	}
+}
