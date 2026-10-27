@@ -177,6 +177,91 @@ func TestAClockOffsetHoldsOnlyAReadOfItsWindowPlusThatOffset(t *testing.T) {
 	}
 }
 
+// An offset below zero (a cutoff the application queries from: createdAt
+// >= now - 2m) holds as one above zero does: where some read of its call's
+// window, less the offset the learn step bounded, cuts to it, within one
+// resolution of it on either side (the train's check at the cut,
+// 2026-10-28): one resolution past the edges of both ranges holds, two do
+// not, and a changed offset (two minutes become one or three), the same
+// offset above zero and a plain read do not. It reads as "clock - 2m". Two learnings of it meet as what both
+// hold, and as Empty with one apart (of either sign) or with a plain read.
+// A range around zero is no offset the learn step finds: it names none.
+// Stored in YAML and JSON, it reads back as it was.
+func TestAClockOffsetBelowZeroHoldsOnlyAReadOfItsWindowLessThatOffset(t *testing.T) {
+	ms, min2 := time.Millisecond, 2*time.Minute
+	from := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	to := from.Add(50 * ms)
+	o := ClockOffset{Min: -min2 - 40*ms, Max: -min2 + 11*ms, Res: ms}
+	for _, row := range []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{"a read in the window less two minutes", from.Add(20*ms - min2), true},
+		{"the earliest read plus the least offset", from.Add(o.Min), true},
+		{"a millisecond before it (one resolution stale)", from.Add(o.Min - ms), true},
+		{"two milliseconds before it", from.Add(o.Min - 2*ms), false},
+		{"the latest read plus the greatest offset, less a millisecond", to.Add(o.Max - ms), true},
+		{"the latest read plus the greatest offset, plus a millisecond (one resolution ahead)", to.Add(o.Max + ms), true},
+		{"the latest read plus the greatest offset, plus two milliseconds", to.Add(o.Max + 2*ms), false},
+		{"a read less one minute", from.Add(20*ms - time.Minute), false},
+		{"a read less three minutes", from.Add(20*ms - 3*time.Minute), false},
+		{"a read plus two minutes", from.Add(20*ms + min2), false},
+		{"a plain read", from.Add(20 * ms), false},
+	} {
+		if got := o.Holds(row.at, ms, from, to); got != row.want {
+			t.Errorf("%s: Holds = %v, want %v", row.name, got, row.want)
+		}
+	}
+	if u := o.Unit(); u != time.Minute {
+		t.Errorf("Unit %s, want a minute", u)
+	}
+	if got, want := o.String(), "clock - 2m (from -2m0.04s to -1m59.989s)"; got != want {
+		t.Errorf("String %q, want %q", got, want)
+	}
+	if got, want := (ClockOffset{Min: -time.Hour, Max: -time.Hour + 1}).String(), "clock - 1h"; got != want {
+		t.Errorf("String %q, want %q", got, want)
+	}
+
+	b := ClockOffset{Min: -min2 - 5*ms, Max: -min2 + 30*ms, Res: ms}
+	if got, want := o.Meet(b), (ClockOffset{Min: b.Min, Max: o.Max, Res: ms}); got != want || got.Empty() || !got.Holds(from.Add(20*ms-min2), ms, from, to) {
+		t.Errorf("two learnings of two minutes before meet as %+v; want %+v, holding a read less two minutes", got, want)
+	}
+	minute := ClockOffset{Min: -time.Minute - 40*ms, Max: -time.Minute + 11*ms, Res: ms}
+	after := ClockOffset{Min: min2 - 40*ms, Max: min2 + 11*ms, Res: ms}
+	plain := ClockOffset{Res: ms}
+	for name, e := range map[string]ClockOffset{"one minute before": o.Meet(minute), "two minutes after": o.Meet(after), "a plain read": plain.Meet(o)} {
+		if !e.Empty() || e.Plain() {
+			t.Errorf("two minutes before meet %s as %+v: want Empty", name, e)
+		}
+		if e.Holds(from.Add(20*ms-min2), ms, from, to) || e.Holds(from.Add(20*ms-time.Minute), ms, from, to) {
+			t.Errorf("two minutes before met with %s holds a value", name)
+		}
+		if s := e.String(); !strings.HasPrefix(s, "clock reads no one offset holds") {
+			t.Errorf("two minutes before met with %s reads %q", name, s)
+		}
+	}
+	if got, want := (ClockOffset{Min: -ms, Max: ms, Res: ms}).String(), "clock plus an offset from -1ms to 1ms"; got != want {
+		t.Errorf("a range around zero reads %q, want %q", got, want)
+	}
+
+	y, err := yaml.Marshal(map[string]ClockOffset{"q": o})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := json.Marshal(map[string]ClockOffset{"q": o})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fromYAML, fromJSON map[string]ClockOffset
+	if err := yaml.Unmarshal(y, &fromYAML); err != nil || fromYAML["q"] != o {
+		t.Errorf("YAML %s read back as %+v (%v), want %+v", y, fromYAML["q"], err, o)
+	}
+	if err := json.Unmarshal(j, &fromJSON); err != nil || fromJSON["q"] != o {
+		t.Errorf("JSON %s read back as %+v (%v), want %+v", j, fromJSON["q"], err, o)
+	}
+}
+
 // A replay's verdict on a ClockOffset never turns on where its read falls
 // for a time to live changed by its unit or more: it holds only where its
 // window, the offset's width and the value's resolution add up to less than
