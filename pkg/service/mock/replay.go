@@ -1159,16 +1159,17 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 		return m.refuseUnknownMocks(ctx, name, mp, unknown)
 	}
 	table = heldOnly(table, loaded)
+	background := backgroundMarks(mappings, table)
 	if !ownsTestMocks(table, loaded) {
 		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
 			zap.String("mock-set", name),
 			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
 	}
-	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+	if err := pp.PushProvenTable(ctx, table, pool, background); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
 	m.mockOwners = models.MockOwners(table)
-	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.Int("background recordings", len(background)), zap.String("mock-set", name))
 	return nil
 }
 
@@ -1305,6 +1306,30 @@ func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *m
 	}
 	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s. %s; otherwise record the set again with keploy mock record",
 		name, strings.Join(why, "; "), strings.Join(fix, ". "))
+}
+
+// backgroundMarks is, of the mappings' test entries the agent is handed
+// (table), those judging marked as the application's own background work
+// (models.MockEntry.Background), each with why: the agent serves each in its
+// test's window and never requires it. nil when none is marked.
+func backgroundMarks(mappings map[string][]models.MockEntry, table map[string][]string) map[string]string {
+	var marks map[string]string
+	for test, entries := range mappings {
+		held := make(map[string]bool, len(table[test]))
+		for _, n := range table[test] {
+			held[n] = true
+		}
+		for _, e := range entries {
+			if e.Background == "" || !held[e.Name] {
+				continue
+			}
+			if marks == nil {
+				marks = map[string]string{}
+			}
+			marks[e.Name] = e.Background
+		}
+	}
+	return marks
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
