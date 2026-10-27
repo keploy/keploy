@@ -34,7 +34,7 @@ func recordedMocks(t *testing.T, dir string) []*models.Mock {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		dec := yamlLib.NewDecoder(f)
 		var docs []*yaml.NetworkTrafficDoc
 		for {
@@ -279,7 +279,7 @@ func TestStoreKeepsRecordsInMemoryUpToItsBudget(t *testing.T) {
 	}
 	budget := upTo20 + 2*1024
 	d := newStoreWith(t, budget, ms...)
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	if got := d.ResidentBytes(); got != upTo20 {
 		t.Fatalf("budget %d: %d B kept in memory, want the first 20 records' %d B", budget, got, upTo20)
 	}
@@ -342,7 +342,7 @@ func TestStoreHandsOutCopies(t *testing.T) {
 func TestStoreServesConcurrentReadersAlike(t *testing.T) {
 	corpus := storeCorpus(t)
 	d := newStoreWith(t, residentBudgetBytes, corpus...)
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	want := make(map[string]*models.Mock, len(corpus))
 	for _, m := range corpus {
 		want[m.Name] = freshRead(t, m)
@@ -414,7 +414,7 @@ func TestStoreReadsOnAfterAMockItCannotEncode(t *testing.T) {
 // lessons and nothing else, so no record teaches a type a later one needs.
 func TestCorpusTeachesItsTypesInLessons(t *testing.T) {
 	d := newStoreWith(t, residentBudgetBytes, storeCorpus(t)...)
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	if n := len(d.records.lessons); n < 4 {
 		t.Fatalf("the corpus wrote %d lessons, want the first mock's, its interface values' and a nested one's (4 or more)", n)
 	}
@@ -484,7 +484,7 @@ func BenchmarkStoreWindowRead(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			defer d.Close()
+			defer func() { _ = d.Close() }()
 			for _, m := range corpus {
 				if err := d.Add(m); err != nil {
 					b.Fatal(err)

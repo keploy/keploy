@@ -16,7 +16,7 @@ import (
 // reads only part of fails the read, and the decoder is not kept.
 func TestAKeptDecoderRefusesWhatItDoesNotReadWhole(t *testing.T) {
 	d := newStoreWith(t, residentBudgetBytes, perTestMockAt("a", 1))
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	e := d.byName["a"]
 	rec, err := d.bytesAt(e.off, e.length)
 	if err != nil {
@@ -42,7 +42,7 @@ func TestAKeptDecoderRefusesWhatItDoesNotReadWhole(t *testing.T) {
 // decoder each, and the store keeps no more than maxKeptDecoders of them.
 func TestAStoreKeepsAtMostMaxKeptDecodersIdle(t *testing.T) {
 	d := newStoreWith(t, residentBudgetBytes)
-	defer d.Close()
+	defer func() { _ = d.Close() }()
 	var ks []*keptDecoder
 	for i := 0; i < maxKeptDecoders+8; i++ {
 		ks = append(ks, d.records.get())

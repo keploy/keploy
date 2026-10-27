@@ -30,7 +30,7 @@ func cellEncodings(t *testing.T, v reflect.Value, out *[][]byte) {
 		return
 	}
 	switch v.Kind() {
-	case reflect.Ptr, reflect.Interface:
+	case reflect.Pointer, reflect.Interface:
 		if !v.IsNil() {
 			cellEncodings(t, v.Elem(), out)
 		}
@@ -152,7 +152,7 @@ func BenchmarkRecordedPostgresSetRead(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var encs [][]byte
 	dec := yaml.NewDecoder(f)
 	for {
