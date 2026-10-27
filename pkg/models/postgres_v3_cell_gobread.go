@@ -64,8 +64,10 @@ const (
 	gobIDString = 6
 )
 
-// gobTooBig is the message size gob refuses (encoding/gob's tooBig on 64-bit
-// platforms; a smaller one is refused here too, by gob then).
+// gobTooBig is the smallest message size this reader leaves to gob: encoding/gob
+// refuses a message of its tooBig or more, 1 GiB on 32-bit platforms and 8 GiB
+// on 64-bit ones, so a message this size or larger is handed to gob, which
+// reads or refuses it as it would have.
 const gobTooBig = 1 << 30
 
 // gobUint reads one of gob's unsigned integers off b, as gob's decodeUint does.

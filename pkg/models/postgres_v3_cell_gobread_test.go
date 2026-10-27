@@ -223,6 +223,8 @@ func foreignCellStreams(t *testing.T) [][]byte {
 	}
 	wide := append([]uint64(nil), elems...)
 	wide[3] = 300
+	edge := append([]uint64(nil), elems...)
+	edge[3] = math.MaxUint8 + 1
 	// A point whose discriminator is the point's kind plus 256, then the
 	// point's own messages.
 	pt, err := NewValueCell(pgtype.Point{P: pgtype.Vec2{X: 1.5, Y: 2.5}, Valid: true}).GobEncode()
@@ -242,6 +244,7 @@ func foreignCellStreams(t *testing.T) [][]byte {
 	}
 	return [][]byte{
 		uuidValue(16, wide),              // an element out of uint8's range
+		uuidValue(16, edge),              // an element one past uint8's range
 		uuidValue(15, elems),             // a count of 15 before 16 elements
 		uuidValue(17, elems),             // a count of 17 before 16 elements
 		uuidValue(16, elems, 0x07, 0x08), // bytes after the elements, in the value's message
@@ -259,6 +262,21 @@ func foreignCellStreams(t *testing.T) [][]byte {
 		cell(cellTagInt32, int64(1)<<40), cell(cellTagInt32, int64(math.MinInt32)-1), cell(cellTagInt16, int64(1)<<20),
 		cell(cellTagInt8, int64(300)), cell(cellTagInt8, int64(-129)), cell(cellTagUint16, uint64(1)<<20),
 		cell(cellTagUint32, uint64(1)<<40), cell(cellTagFloat32, 1e300), cell(cellTagFloat32, -1e39),
+		// Each range's edges: the last value it holds and the first it
+		// does not, on both sides (gob refuses the second as an overflow).
+		cell(cellTagInt8, int64(math.MaxInt8)), cell(cellTagInt8, int64(math.MaxInt8)+1),
+		cell(cellTagInt8, int64(math.MinInt8)), cell(cellTagInt8, int64(math.MinInt8)-1),
+		cell(cellTagInt16, int64(math.MaxInt16)), cell(cellTagInt16, int64(math.MaxInt16)+1),
+		cell(cellTagInt16, int64(math.MinInt16)), cell(cellTagInt16, int64(math.MinInt16)-1),
+		cell(cellTagInt32, int64(math.MaxInt32)), cell(cellTagInt32, int64(math.MaxInt32)+1),
+		cell(cellTagInt32, int64(math.MinInt32)),
+		cell(cellTagUint16, uint64(math.MaxUint16)), cell(cellTagUint16, uint64(math.MaxUint16)+1),
+		cell(cellTagUint32, uint64(math.MaxUint32)), cell(cellTagUint32, uint64(math.MaxUint32)+1),
+		cell(cellTagGeom, uint64(math.MaxUint8)), cell(cellTagGeom, uint64(math.MaxUint8)+1),
+		cell(cellTagFloat32, math.MaxFloat32), cell(cellTagFloat32, -math.MaxFloat32),
+		cell(cellTagFloat32, math.Nextafter(math.MaxFloat32, math.Inf(1))),
+		cell(cellTagFloat32, math.MaxFloat64), cell(cellTagFloat32, -math.MaxFloat64),
+		cell(cellTagFloat32, math.Inf(1)), cell(cellTagFloat32, math.Inf(-1)),
 		cell(cellTagInt64, uint64(5)), cell(cellTagUint64, int64(5)), cell(cellTagString, []byte("x")),
 		cell(cellTagBytes, "x"), cell(cellTagBool, int64(1)), cell(cellTagBool, uint64(2)), cell(cellTagFloat64, int64(2)),
 		cell(cellTagTime, int64(1)), cell(cellTagTime, "2026"), cell(cellTagUUIDBytes, [15]uint8{1}),
