@@ -450,6 +450,13 @@ func waitForIngressTarget(ctx context.Context, addr string, timeout time.Duratio
 }
 
 func dialIngressTarget(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	// A self-call handed over whole (ServeLive) reaches the app over the
+	// connection keploy dialled while it held the caller's connect
+	// (util.WithPredialed): a second one would show the app's listener a
+	// connection the caller never made, which the listener's close waits for.
+	if c := util.PredialedFrom(ctx).Take(addr); c != nil {
+		return c, nil
+	}
 	deadline := time.Now().Add(timeout)
 	network := "tcp4"
 	if host, _, err := net.SplitHostPort(addr); err == nil {

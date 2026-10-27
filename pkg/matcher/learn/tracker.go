@@ -199,6 +199,11 @@ type Minted struct {
 	// Outside: a call of the claim key made outside every test made it
 	// (Tracker.MintOutside); it is the key's, not one test's.
 	Outside bool
+	// Given is, for a value the test case or its harness gave (a template
+	// key, a typed text, an installed token: variables.Binding.Given), the
+	// name it was given by: its variable is that name, which the table binds,
+	// never a bind at Mock and Place.
+	Given string
 }
 
 // NewTracker makes a tracker with no test open.
@@ -242,6 +247,58 @@ func (t *Tracker) NewSet() {
 	t.beganAt, t.recBegan, t.nextRecBegan = time.Time{}, time.Time{}, time.Time{}
 	t.mu.Unlock()
 	say()
+}
+
+// Warm reads, in the background, what each of the mocks' texts reads as
+// (ReadRaw: its other forms, its words by reading, and the instants of its
+// text and its other forms) into the set's text
+// cache, the one every test's learn step of the set reads (Begin keeps it):
+// a learned call then finds the set's recordings read, instead of reading
+// every recording made before it while its caller waits. What a text reads
+// as is the same whenever it is read, so this changes when the reading is
+// done, never what any call learns. It stops once another set starts
+// (NewSet): that set's cache is another.
+func (t *Tracker) Warm(lists ...[]*models.Mock) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	c := t.texts
+	t.mu.Unlock()
+	if c == nil {
+		return
+	}
+	var mocks []*models.Mock
+	for _, l := range lists {
+		mocks = append(mocks, l...)
+	}
+	if len(mocks) == 0 {
+		return
+	}
+	go func() {
+		for _, m := range mocks {
+			t.mu.Lock()
+			current := t.texts == c
+			t.mu.Unlock()
+			if !current {
+				return
+			}
+			if m == nil {
+				continue
+			}
+			if r, err := ReadRaw(m, false); err == nil && r.Text() != "" {
+				// Its words, and the instants of its text and its other
+				// forms, as a learned call reads an earlier place
+				// (heldIn).
+				text := r.Text()
+				c.tokensOf(text)
+				c.spansOf(text)
+				if extra := c.extraOf(text); extra != "" {
+					c.spansOf(extra)
+				}
+			}
+		}
+	}()
 }
 
 // closeAwaiting ends the running test's wait for its request (awaiting):

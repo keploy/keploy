@@ -261,6 +261,31 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		if req.Pool == nil {
 			req.Pool = map[string][]string{}
 		}
+		// The tests' own reads that wait for a write, before the worker scope
+		// whose serving says them to the proxy. An agent that cannot hold
+		// them says so, and a table without them leaves none of the previous
+		// set's.
+		if bs, ok := a.svc.(scopeBoundsSetter); ok {
+			if err := bs.SetScopeBounds(r.Context(), req.Bounds); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Bounds) > 0 {
+			http.Error(w, "this keploy agent cannot hold a test's reads back until a write", http.StatusNotImplemented)
+			return
+		}
+		// The set's worker scope first: the pool served next carries it.
+		// An agent that cannot serve one says so, and a table without one
+		// leaves none of the previous set's.
+		if ws, ok := a.svc.(scopeWorkerSetter); ok {
+			if err := ws.SetScopeWorker(r.Context(), req.Worker); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if len(req.Worker) > 0 {
+			http.Error(w, "this keploy agent cannot serve a test set's worker scope", http.StatusNotImplemented)
+			return
+		}
 		// Each key's pool slice (design v14 §5.2). An agent that cannot
 		// serve them says so: a CLI that sent them judges on them.
 		s, ok := a.svc.(scopePoolSetter)
@@ -280,6 +305,17 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 // scopePoolSetter installs each key's pool slice (proven wire).
 type scopePoolSetter interface {
 	SetScopePool(ctx context.Context, pool map[string][]string) error
+}
+
+// scopeWorkerSetter installs the set's worker scope (proven wire).
+type scopeWorkerSetter interface {
+	SetScopeWorker(ctx context.Context, worker []models.MockEntry) error
+}
+
+// scopeBoundsSetter installs the tests' own reads that answer only once the
+// run has passed a write (proven wire, models.ScopeTableReq.Bounds).
+type scopeBoundsSetter interface {
+	SetScopeBounds(ctx context.Context, bounds []models.MockEntry) error
 }
 
 // HandleScopeGate installs the replay's gate: the only tests that should run

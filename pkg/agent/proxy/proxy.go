@@ -2815,7 +2815,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}()
 
-	served, outside, err := p.serveTreeListener(parserCtx, srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
+	// A self-call reaches the run's own listener over the connection dialled
+	// while the app's connect was held, as any first dial does.
+	served, outside, err := p.serveTreeListener(util.WithPredialed(parserCtx, predialed), srcConn, destInfo, dstAddr, fmt.Sprint(clientConnID))
 	if served {
 		return err
 	}
@@ -4371,6 +4373,13 @@ func (p *Proxy) stageWithWindow(ctx context.Context, filtered, unFiltered []*mod
 		stage(m)
 		p.dnsCache.Purge()
 	}
+	// Under the proven switch, the learn step reads what each recording of
+	// the set reads as (learn.Tracker.Warm) from the staging on, in the
+	// background: a learned call then finds them read, instead of reading
+	// every recording made before it while it waits.
+	if provenswitch.On() {
+		p.learnTracker.Warm(filtered, unFiltered)
+	}
 	// A test set's staging (from models.BaseTime, the first since its Mock,
 	// under the proven switch): what was missed until its mocks were in is
 	// not the set's (cutMissesAtSetStart).
@@ -4693,6 +4702,18 @@ func (p *Proxy) ServeExactWorker(names []string) error {
 	m.ServeExactWorker(names)
 	return nil
 }
+
+// ServeExactStretches implements agent.ExactStretchServer (exact.go).
+func (p *Proxy) ServeExactStretches(stretches map[string]models.Stretch, passed []string) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.ServeExactStretches(stretches, passed)
+	return nil
+}
+
+var _ agent.ExactStretchServer = (*Proxy)(nil)
 
 // StageExactBackground implements agent.ExactBackgroundServer
 // (exact_background.go).
@@ -6118,7 +6139,10 @@ func (p *Proxy) serveTreeListener(ctx context.Context, srcConn net.Conn, dest *a
 		p.live(ctx, srcConn, dstAddr, uint16(dest.Port))
 		return true, nil, nil
 	}
-	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr})
+	// The connection dialled while the app's connect was held, if it was
+	// (util.WithPredialed): a second one would show the listener a
+	// connection the app never made, which a server's close waits for.
+	dstConn, err := util.DialDestination(ctx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: util.PredialedFrom(ctx)})
 	if isReal && err == nil {
 		// DialDestination falls back to the other loopback family when the
 		// app's address refuses: that reaches an address an IP-literal

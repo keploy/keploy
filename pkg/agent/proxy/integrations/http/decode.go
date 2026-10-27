@@ -5,11 +5,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -47,6 +50,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
 		defer close(errCh)
 		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
+		// The GraphQL query in flight on this connection whose answer
+		// answerOrder orders; over once it is answered or the connection is.
+		var ordered *orderedCall
+		defer func() { h.order.end(ordered) }()
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -271,6 +278,14 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// staging last, and says that it moved.
 				db = mockDb
 			)
+			// Under the proven switch a GraphQL query is answered in the order
+			// its recording was beside the calls in flight that a client's
+			// cache files under one entry with it (answerOrder).
+			h.order.end(ordered)
+			ordered = nil
+			if provenswitch.On() {
+				ordered = h.order.begin(graphQLRoot(input.header.Get("Content-Type"), input.body))
+			}
 			// DIAG (local build only): how long the match took, for KPSLOW.
 			diagStart := time.Now()
 			switch {
@@ -367,6 +382,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
 				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				if n == 0 && lmiss != nil && lmiss.extra {
+					// The learn step found it exactly a recording of the test
+					// that answered already, the values the test gave
+					// included (a session the test signed, which the
+					// matcher's dry run above reads only as recorded).
+					n = 1
+				}
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
@@ -429,9 +451,17 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					if lmiss != nil {
 						why = lmiss.res.Why
 					}
+					// Who sent it and what it sent, without its content: the
+					// process (its pid and executable), its User-Agent, and
+					// its body's length and hash (sha256's first 8 bytes, as
+					// a recording's request body is hashed offline).
+					exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", opts.SrcPid))
+					sum := sha256.Sum256([]byte(input.body))
 					h.Logger.Info("KPWHY no answer for a call", zap.String("call", diagCall(input)), zap.String("closest", report.ClosestMock),
 						zap.String("phase", report.MatchPhase), zap.Int("extra_of_recorded", n), zap.String("learn_why", why),
-						zap.String("diff", report.Diff), zap.String("next_step", report.NextSteps))
+						zap.String("diff", report.Diff), zap.String("next_step", report.NextSteps),
+						zap.Uint32("src_pid", opts.SrcPid), zap.String("src_exe", exe), zap.String("user_agent", input.header.Get("User-Agent")),
+						zap.Int("body_len", len(input.body)), zap.String("body_sha", hex.EncodeToString(sum[:8])))
 				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
@@ -467,6 +497,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					} else if handled {
 						// Served live — continue the keep-alive loop for the next
 						// request on this connection. Not reported as a miss.
+						h.order.end(ordered)
+						ordered = nil
 						reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 						if err != nil {
 							h.Logger.Debug("client closed connection after on-miss passthrough", zap.Error(err))
@@ -520,6 +552,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			// Written once the calls in flight answered before it at
+			// record are (answerOrder).
+			h.order.matched(ordered, stub)
+			h.order.hold(reqCtx, ordered)
+
 			// Serialize the matched mock's response to wire bytes (hydrates a
 			// spilled body, recomputes Content-Length, compresses per
 			// Content-Encoding). Shared with the async serving branch above.
@@ -533,6 +570,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
 
 			_, err = clientConn.Write(respBytes)
+			h.order.end(ordered)
+			ordered = nil
 			if err != nil {
 				if ctx.Err() != nil {
 					return

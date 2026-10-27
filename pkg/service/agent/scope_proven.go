@@ -60,6 +60,10 @@ type provenWire struct {
 	open string
 	// skip is the gate: test ID -> the reason its harness skips it with.
 	skip map[string]string
+	// skipped is, in a replay, each claim key under which the gate skipped a
+	// test -> the first test it skipped there: the key's closing hooks send
+	// what that test would have bound (skippedGroupMisses).
+	skipped map[string]string
 	// charged holds the misses the ends drained from the proxy, until the
 	// CLI's own end-of-run read (GetMockErrors) collects them, so charging a
 	// miss to a test never hides it from the run's totals.
@@ -327,6 +331,25 @@ func (a *Agent) ClaimInstance(ctx context.Context, req models.InstanceReq, calle
 				"keploy could not read the calls made before this test process started: "+err.Error(), "check the agent's log")
 		}
 	}
+	// A group a test of which the gate skipped closes with its own hooks (an
+	// afterAll, a last afterEach) before the process claims the next group:
+	// what they send was bound inside the skipped test, so no recording
+	// answers it. The misses made since the previous test ended, all under
+	// that group's key, are read here and charged to no test
+	// (skippedGroupMisses); a miss made from this claim on is the next
+	// test's, as ever.
+	a.provenMu.Lock()
+	prevKey, testOpen := a.proven.key, a.proven.open != ""
+	skippedTest := a.proven.skipped[prevKey]
+	a.provenMu.Unlock()
+	if prev == me && prevKey != key && skippedTest != "" && !testOpen && a.replaying() && a.Proxy != nil {
+		misses, err := a.Proxy.GetMockErrors(ctx)
+		a.charge(skippedGroupMisses(misses, prevKey, skippedTest))
+		if err != nil {
+			return models.InstanceResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
+				"keploy could not read the calls the closing hooks of "+prevKey+" made: "+err.Error(), "check the agent's log")
+		}
+	}
 	if prev != me {
 		// A failed TLS handshake before this claim is the run's -- charged
 		// to no test (UnchargedCaptureLosses), and in the run's own verdict,
@@ -523,6 +546,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	reason, gated := a.proven.skip[id]
 	dir := a.proven.dir
+	if gated && a.replaying() {
+		if a.proven.skipped == nil {
+			a.proven.skipped = map[string]string{}
+		}
+		if _, ok := a.proven.skipped[a.proven.key]; !ok {
+			a.proven.skipped[a.proven.key] = id
+		}
+	}
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.NoteScopeGated(id, 0, at)
@@ -1335,6 +1366,11 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 		}
 		out.NextSteps = "a test variable did not hold in " + m.ClosestMock + " (the call sent another value than the one the test bound, a value of another type, or a value before the call that binds it), or that mock's variables cannot be followed: fix the application, or re-record the test with 'keploy mock record' if that is intended"
 	}
+	if m.SkippedGroup != "" {
+		// Charged to no test: it says whose closing hooks made it, by the
+		// group's key and the skipped test's ID, no value.
+		out.SkippedGroup, out.NextSteps = m.SkippedGroup, m.NextSteps
+	}
 	return out
 }
 
@@ -1352,6 +1388,21 @@ func nextStepOf(m models.UnmatchedCall) string {
 		}
 	}
 	return m.NextSteps
+}
+
+// skippedGroupMisses are misses the closing hooks of the group of key made
+// after the gate skipped its test skipped: each charged to no test
+// (models.UnmatchedCall.SkippedGroup), with what to do about it.
+func skippedGroupMisses(misses []models.UnmatchedCall, key, skipped string) []models.UnmatchedCall {
+	out := make([]models.UnmatchedCall, len(misses))
+	for i, m := range misses {
+		m.SkippedGroup = key
+		m.NextSteps = "made outside every test by the closing hooks of " + key + " after keploy skipped " + skipped +
+			", whose calls bound what it sends: keploy cannot answer it, and it fails no test; to verify that cleanup, make " +
+			skipped + " replayable (fix it, or re-record it)"
+		out[i] = m
+	}
+	return out
 }
 
 // charge keeps misses drained from the proxy for the CLI's end-of-run read,

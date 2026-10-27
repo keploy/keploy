@@ -121,13 +121,15 @@ const (
 
 // CountsAgainstTest reports whether a miss is evidence against the test it was
 // made in: every miss but a DNS lookup's (the proxy answers an unrecorded name
-// itself) and a connection whose client sent nothing (MatchPhaseNoRequest: no
-// call was made, and a dependency's TCP health check closes the same way). An
+// itself), a connection whose client sent nothing (MatchPhaseNoRequest: no
+// call was made, and a dependency's TCP health check closes the same way) and
+// a call the closing hooks of a group made after keploy skipped a test of it
+// (SkippedGroup: what it sends was bound inside the skipped test). An
 // answered call (Answer, under the proven switch) is no miss, and counts
 // against nothing. Every verdict, count and evidence line that judges misses
 // reads this.
 func (c UnmatchedCall) CountsAgainstTest() bool {
-	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest
+	return c.Answer == "" && !strings.EqualFold(c.Protocol, "DNS") && c.MatchPhase != MatchPhaseNoRequest && c.SkippedGroup == ""
 }
 
 // CountsAgainstTest is UnmatchedCall.CountsAgainstTest for the report a miss

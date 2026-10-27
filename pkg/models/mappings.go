@@ -49,6 +49,18 @@ type MockEntry struct {
 	// lists it. Empty for a mock recorded while one test's request was
 	// open, or none.
 	Group string `json:"group,omitempty" yaml:"group,omitempty" bson:"group,omitempty"`
+	// Cause is, for a mock of the worker scope, what made its call:
+	// CauseTimer for a call a repeating timer made (a page's poller), as the
+	// test's harness reported it. Such a recording is never charged to a test,
+	// nor required at the set's end, and answers only within its Stretch.
+	Cause string `json:"cause,omitempty" yaml:"cause,omitempty" bson:"cause,omitempty"`
+	// Stretch is, for a timer's recording (Cause), the stretch of the set's
+	// writes it was recorded in: it answers only after its After write and
+	// before its Until write were answered. For a test's own read of a
+	// timer's call, recorded after the write that ended a run of the timer's
+	// and answered otherwise than the run, it is After alone: the read
+	// answers only once the run has passed that write.
+	Stretch *Stretch `json:"stretch,omitempty" yaml:"stretch,omitempty" bson:"stretch,omitempty"`
 	// Unresolved says, under the proven switch, that keploy record's full
 	// round could not tell which test of its group made this mock's call,
 	// and charged the test that lists it now (it placed it there, not time):
@@ -359,6 +371,22 @@ func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
 
 // errRecordedGiven is a test entry whose given: is not a list of named values.
 const errRecordedGiven = "the values a test's harness gave (given) are not a list of names and values: %w"
+
+// MarshalYAML writes a given value with its name and value double-quoted. A
+// value a test gave may be any text it typed or sent (a pasted schema, a
+// command): yaml.v3 writes a text of several lines as a block, and one whose
+// first line is indented, or tab-indented, it cannot read back ("did not find
+// expected key"), so the record could not update its own mappings.yaml. A
+// double-quoted scalar reads back as written, whatever it holds.
+func (g GivenValue) MarshalYAML() (interface{}, error) {
+	str := func(v string, style yaml.Style) *yaml.Node {
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v, Style: style}
+	}
+	return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		str("name", 0), str(g.Name, yaml.DoubleQuotedStyle),
+		str("value", 0), str(g.Value, yaml.DoubleQuotedStyle),
+	}}, nil
+}
 
 // recordedGivenYAML is a test entry's given: under the proven switch. One that
 // is not a list of named values is an error, never a reason to read the entry

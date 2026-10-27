@@ -393,19 +393,21 @@ func TestAMappingNamingAnAbsentMockIsRefusedUnderTheSwitch(t *testing.T) {
 	require.Zero(t, runs, "the test command ran unjudged")
 }
 
-// Each key's pool slice is every mock no test lists, under the key its
-// startup entry gives it, else the keyless slice; a test's mock is in no
-// slice, and names nothing loaded has are reported.
+// Each key's pool slice is every mock no test lists and the worker scope
+// does not hold, under the key its startup entry gives it, else the keyless
+// slice; a test's mock and a worker-scope one are in no slice, and names
+// nothing loaded has are reported.
 func TestPoolSlices(t *testing.T) {
-	mp := &models.Mapping{Startup: []models.MockEntry{{Name: "mock-1", Key: "o"}, {Name: "mock-2"}, {Name: "mock-0", Key: "o"}, {Name: "mock-8", Key: "o"}}}
-	held := named("mock-0", "mock-1", "mock-2", "mock-3").mocks
+	mp := &models.Mapping{Startup: []models.MockEntry{{Name: "mock-1", Key: "o"}, {Name: "mock-2"}, {Name: "mock-0", Key: "o"}, {Name: "mock-8", Key: "o"}},
+		Worker: []models.MockEntry{{Name: "mock-4", Cause: models.CauseTimer}, {Name: "mock-7"}}}
+	held := named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4").mocks
 	// mock-cf is decoded but never held (a connection failure): a mapping
 	// may name it, and it is in no slice.
 	decoded := append(append([]*models.Mock(nil), held...), named("mock-cf").mocks...)
 	mp.Startup = append(mp.Startup, models.MockEntry{Name: "mock-cf"})
 	pool, unknown := poolSlices(mp, map[string][]string{"o::TestA": {"mock-0", "mock-9"}, "o::TestB": {"mock-cf"}}, held, decoded)
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-3"}}, pool)
-	require.Equal(t, []string{"mock-8", "mock-9"}, unknown)
+	require.Equal(t, []string{"mock-7", "mock-8", "mock-9"}, unknown)
 	pool, unknown = poolSlices(nil, nil, nil, nil)
 	require.Empty(t, pool)
 	require.Empty(t, unknown)
@@ -517,6 +519,39 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-4"}, "users": {"mock-3"}}, instr.pool, "a mock no test lists and no startup entry keys is the keyless slice's")
 	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
+}
+
+// Under the switch the replay hands the agent the set's worker scope from the
+// recording's mappings (worker:), each timer's recording with its stretch,
+// and none of them in a pool slice.
+func TestTheReplayPushesTheWorkerScope(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n        - name: mock-0\nstartup:\n    - name: mock-1\nworker:\n    - name: mock-2\n      kind: Http\n      cause: timer\n      stretch:\n        until: mock-0\n"), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
+	require.Equal(t, map[string][]string{models.PoolKeyNone: {"mock-1", "mock-4"}}, instr.pool, "a worker-scope mock is in no pool slice")
+	require.Equal(t, []models.MockEntry{{Name: "mock-2", Kind: "Http", Cause: models.CauseTimer, Stretch: &models.Stretch{Until: "mock-0"}}}, instr.worker,
+		"the worker scope, with its stretches")
+}
+
+// The worker scope handed to the agent is the one it holds: a mock keploy
+// never hands it (a connection failure) is no one's, and so is one a test
+// lists.
+func TestHeldWorker(t *testing.T) {
+	mp := &models.Mapping{Worker: []models.MockEntry{{Name: "mock-1"}, {Name: "mock-cf"}, {Name: "mock-0"}}}
+	got := heldWorker(mp, map[string][]string{"o::TestA": {"mock-0"}}, named("mock-0", "mock-1").mocks)
+	require.Equal(t, []models.MockEntry{{Name: "mock-1"}}, got)
+	require.Nil(t, heldWorker(nil, nil, nil))
 }
 
 // Under the switch the replay never arms the whole pool before its run: the

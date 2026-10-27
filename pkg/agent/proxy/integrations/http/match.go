@@ -43,6 +43,18 @@ type req struct {
 	// arrived is when keploy had read the whole request (zero: unknown):
 	// the app sent it, and read whatever clock it carries, no later.
 	arrived time.Time
+	// doc is body read as one JSON document, read once for every recording
+	// the call is compared with (jsonBody); a view of the call with the same
+	// body shares it (reqView.asReq). A req is one call's, read by its
+	// connection's goroutine alone.
+	doc *bodyDoc
+}
+
+// bodyDoc is a body read as one JSON document (decodeJSONDoc), once.
+type bodyDoc struct {
+	once sync.Once
+	v    interface{}
+	ok   bool
 }
 
 // sentBody is the body as the client sent it: what a hash of the payload
@@ -52,6 +64,18 @@ func (r *req) sentBody() []byte {
 		return r.encoded
 	}
 	return r.body
+}
+
+// jsonBody is the body read as one JSON document, as decodeJSONDoc reads it:
+// read the first time a comparison asks, and the same value for every later
+// one. A comparison only reads it (strictKnown.jsonDiffs), so a call compared
+// with a whole pool reads its body once, not once per recording.
+func (r *req) jsonBody() (interface{}, bool) {
+	if r.doc == nil {
+		r.doc = &bodyDoc{}
+	}
+	r.doc.once.Do(func() { r.doc.v, r.doc.ok = decodeJSONDoc(r.body) })
+	return r.doc.v, r.doc.ok
 }
 
 // matchDiag captures where the match cascade stopped when no mock matched, so
@@ -106,7 +130,15 @@ type matchDiag struct {
 // as response assertions.
 func (h *HTTP) match(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise map[string][]string, userBodyNoise map[string][]string, urlNoise []string, autoURLDynamic bool, schemaNoiseDetection bool, schemaNoiseStrict bool, statefulMocks bool, mockCorrelation bool) (bool, *models.Mock, *matchDiag, error) {
 	ctx = context.WithValue(ctx, statefulMocksKey{}, statefulMocks)
+	var kp *kpMatch
+	if _, extra := mockDb.(answeredOnly); provenswitch.On() && !extra {
+		kp = &kpMatch{start: time.Now(), call: kpCallName(input), body: len(input.body)}
+		ctx = context.WithValue(ctx, kpMatchKey{}, kp)
+	}
 	ok, stub, diag, err := h.matchCascade(ctx, input, mockDb, headerNoise, userBodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, statefulMocks, mockCorrelation)
+	if kp != nil {
+		kp.log(h.Logger, ok)
+	}
 	if diag != nil && provenswitch.On() {
 		// Under the proven switch a miss names where the call went too
 		// (strict.go), so its report can name a destination that differs.
@@ -235,6 +267,11 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// Less what a test kept for its repeats and is over with.
 		combined = integrations.WithoutSpent(mockDb, combined)
 		unfilteredMocks := FilterHTTPMocks(combined)
+		kp := kpOf(ctx)
+		if kp != nil {
+			kp.attempt(mockDb, FilterHTTPMocks(perTestMocks), FilterHTTPMocks(sessionMocks))
+			kp.strict = len(unfilteredMocks)
+		}
 
 		// Log all mock names in a single line for better readability
 		mockNames := make([]string, len(unfilteredMocks))
@@ -257,7 +294,13 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		var vp *varProblem
 		if provenswitch.On() {
 			withVars, rest := splitVariableMocks(unfilteredMocks)
+			if kp != nil {
+				kp.withVars, kp.strict = len(withVars), len(rest)
+			}
 			if len(withVars) > 0 {
+				if kp != nil {
+					kp.pass = "variable"
+				}
 				hits, problem, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
 				if err != nil {
 					return false, nil, nil, err
@@ -291,6 +334,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 					// A recording fit this call but its variables did not
 					// hold: only an exact recording of this very call may
 					// still answer it, never a lenient pass.
+					if kp != nil {
+						kp.pass = "exactOnly"
+					}
 					served, ok, retry, err := h.exactOnly(ctx, input, rest, mockDb, headerNoise, userBodyNoise, urlNoise, statefulMocks)
 					if err != nil {
 						return false, nil, nil, err
@@ -317,6 +363,9 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb integrations
 		// strict_compare.go): no lenient pass, no closest match and no fuzzy
 		// fallback below (design v14 row S1).
 		if provenswitch.On() {
+			if kp != nil {
+				kp.pass = "strict"
+			}
 			served, diag, retry, err := h.strictServe(ctx, input, unfilteredMocks, comparedPool, mockDb, h.newStrictNoise(headerNoise, userBodyNoise, urlNoise), statefulMocks)
 			if err != nil {
 				return false, nil, nil, err

@@ -258,3 +258,53 @@ func serveFromDisk(t *testing.T, m *models.Mock) []byte {
 	}
 	return served
 }
+
+// The client left the stream midway, and the connection's teardown closed the
+// server's stream (fakeconn Close: its reader gets ErrClosed once it has
+// taken every chunk already captured) before the relay ended it: the stream
+// holds all keploy relayed, as when it ends with the connection. Whether the
+// teardown or the relay's end comes first is timing; either way the response
+// is recorded as the client had it (atg-features' request-config: a progress
+// stream left at 272ms was not recorded, "read response body: unexpected
+// EOF", and the test had no answer at replay).
+func TestRecordV2_ClientLeftAStreamTheTeardownClosed(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	sess, sendReq, closeReq, sendResp, _, mocks := newTestSession(t)
+	at := time.Unix(1_700_006_000, 0)
+	sendReq(progressRequest, at, at)
+	last := ndjsonChunk(`{"progress":3}`)
+	for i, c := range [][]byte{[]byte(progressHead), ndjsonChunk(`{"progress":1}`), ndjsonChunk(`{"progress":2}`), last} {
+		ts := at.Add(time.Duration(i+1) * time.Millisecond)
+		sendResp(c, ts, ts)
+	}
+	sess.MarkReceiverGone(fakeconn.FromDest, len(last))
+	sess.MarkMockIncomplete(relay.MarkWriteError)
+	closeReq()
+	_ = sess.DestStream.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- h.recordV2(ctx, sess) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recordV2 did not exit within 2s")
+	}
+	if err != nil {
+		t.Fatalf("recordV2 returned %v; want nil (the exchange is recorded as the client had it)", err)
+	}
+	select {
+	case m := <-mocks:
+		if want := "{\"progress\":1}\n{\"progress\":2}\n"; m.Spec.HTTPResp.Body != want {
+			t.Errorf("body %q, want %q", m.Spec.HTTPResp.Body, want)
+		}
+		if m.Spec.Metadata[metaClientLeft] != "true" {
+			t.Errorf("metadata %v: the mock does not say its client left before the end", m.Spec.Metadata)
+		}
+	default:
+		t.Fatal("no mock: the call the client left midway has no recorded answer")
+	}
+}

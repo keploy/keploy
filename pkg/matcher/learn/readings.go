@@ -48,9 +48,47 @@ import (
 // Telling the two apart takes where the value came from, not its shape.
 const maxDecodeLevels = 4
 
-// b64Run is a run of the base64 alphabets, standard or URL-safe, with its
-// padding (base32's too: up to six '=').
-var b64Run = regexp.MustCompile(`[A-Za-z0-9+/_-]+={0,6}`)
+// A b64Run is a run of the base64 alphabets, standard or URL-safe, with its
+// padding (base32's too: up to six '='): a stretch of b64RunByte as long as
+// it goes, then at most six '='. Every byte of it is ASCII, so it is read
+// byte by byte.
+
+// b64RunByte reports whether c is of a b64Run's alphabet (its padding aside).
+func b64RunByte(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/' || c == '_' || c == '-'
+}
+
+// b64RunEnd is the end of the b64Run that starts at i, a b64RunByte of s.
+func b64RunEnd(s string, i int) int {
+	j := i + 1
+	for j < len(s) && b64RunByte(s[j]) {
+		j++
+	}
+	for k := 0; k < 6 && j < len(s) && s[j] == '='; k++ {
+		j++
+	}
+	return j
+}
+
+// b64RunSpans are the b64Runs of s, in order, as [start, end) offsets.
+func b64RunSpans(s string) [][2]int {
+	var out [][2]int
+	for i := 0; i < len(s); {
+		if !b64RunByte(s[i]) {
+			i++
+			continue
+		}
+		j := b64RunEnd(s, i)
+		out = append(out, [2]int{i, j})
+		i = j
+	}
+	return out
+}
+
+// isB64Run reports whether s is one b64Run, whole.
+func isB64Run(s string) bool {
+	return s != "" && b64RunByte(s[0]) && b64RunEnd(s, 0) == len(s)
+}
 
 // b64Text is the text the encoded runs of s decode to, each on a line of
 // its own, decoded again while that finds more, up to maxDecodeLevels
@@ -126,7 +164,7 @@ func b64Text(s string, clock map[string]bool) string {
 				texts = append(texts, j)
 			}
 			for ti, tx := range texts {
-				for _, ix := range b64Run.FindAllStringIndex(tx, -1) {
+				for _, ix := range b64RunSpans(tx) {
 					if tryRun(tx[ix[0]:ix[1]]) || ti == 0 {
 						continue
 					}
@@ -155,7 +193,7 @@ func b64Text(s string, clock map[string]bool) string {
 					}
 				}
 				for _, part := range strings.FieldsFunc(tx, func(r rune) bool { return r == '.' }) {
-					if b64Run.FindString(part) == part {
+					if isB64Run(part) {
 						try(part)
 					}
 				}
@@ -657,8 +695,8 @@ func unparsed(rec, live string, clock clockSet) string {
 // b64Runs are the runs of the base64 alphabets in s, with their padding.
 func b64Runs(s string) map[string]bool {
 	out := map[string]bool{}
-	for _, r := range b64Run.FindAllString(s, -1) {
-		out[r] = true
+	for _, ix := range b64RunSpans(s) {
+		out[s[ix[0]:ix[1]]] = true
 	}
 	return out
 }
@@ -939,11 +977,12 @@ func (v *valueDrift) wordOf(t string, recorded bool) string {
 // as recorded or as F saw it (recorded), until find says why one cannot be
 // noise, and says that ("" when it says so of none): the words it lost,
 // those it gained, then every word of its runs (runsBy) as recorded and as
-// F saw them. A word of a run counts unless it is a clock word itself; a
-// word lost or gained, unless it only regrouped words the other side holds
-// (clockWord). Each set of words is handed in the order its words stand in
-// the value (inOrder), never in a set's: the first one found names the
-// place and the reason.
+// F saw them. A word of a run counts unless it is a clock word itself, or
+// the run changed only in its clock words (clockOnly); a word lost or
+// gained, unless it only regrouped words the other side holds (clockWord).
+// Each set of words is handed in the order its words stand in the value
+// (inOrder), never in a set's: the first one found names the place and the
+// reason.
 func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) string) string {
 	for i := range readings {
 		for _, set := range []struct {
@@ -951,7 +990,7 @@ func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) strin
 			recorded, moved bool
 		}{{v.lost[i], true, false}, {v.gained[i], false, false}, {v.movedRec[i], true, true}, {v.movedLive[i], false, true}} {
 			for _, t := range v.inOrder(set.words, set.recorded) {
-				if set.moved && allClock(t, set.recorded, v.clock) || !set.moved && clockWord(t, set.recorded, v, v.clock) {
+				if set.moved && (allClock(t, set.recorded, v.clock) || clockOnly(i, t, set.recorded, v)) || !set.moved && clockWord(t, set.recorded, v, v.clock) {
 					continue
 				}
 				if why := find(i, t, set.recorded); why != "" {
@@ -961,6 +1000,54 @@ func (v *valueDrift) eachChanged(find func(i int, t string, recorded bool) strin
 		}
 	}
 	return ""
+}
+
+// clockOnly reports whether t, a run of v that moved in reading i (its
+// recorded side, or its live one), changed only in its clock words: with
+// each clock word of its side masked, it is a run that moved on the other
+// side with that side's clock words masked, and it has one. A name the app
+// makes with an instant in it ("e2e-mock-1792838439174", read whole where a
+// '-' joins words) moved because the instant did; the rest of it is the same
+// on both sides, word for word.
+func clockOnly(i int, t string, recorded bool, v *valueDrift) bool {
+	own, other, otherSide := v.clock.rec, v.movedLive[i], v.clock.live
+	if !recorded {
+		own, other, otherSide = v.clock.live, v.movedRec[i], v.clock.rec
+	}
+	masked := maskClock(t, own)
+	if masked == t {
+		return false
+	}
+	for u := range other {
+		if maskClock(u, otherSide) == masked {
+			return true
+		}
+	}
+	return false
+}
+
+// maskClock is s with each ASCII word of it that is a clock word of set
+// replaced by one NUL, its other bytes kept.
+func maskClock(s string, set map[string]bool) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if !isWord(s[i]) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && isWord(s[j]) {
+			j++
+		}
+		if set[s[i:j]] {
+			b.WriteByte(0)
+		} else {
+			b.WriteString(s[i:j])
+		}
+		i = j
+	}
+	return b.String()
 }
 
 // gluedIn reports whether a declared form of a place's value (ed), as

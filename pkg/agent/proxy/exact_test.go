@@ -2333,6 +2333,141 @@ func TestTheWorkerScopeAnswersFromItsPlaceOnInAndOutOfTests(t *testing.T) {
 	}
 }
 
+// A timer's worker-scope recording (ServeExactStretches) is shown only within
+// the stretch of writes it was recorded in: once the write recorded before it
+// has answered a call of the staging, and while the one recorded after it has
+// not. So a poll made before a test's write reads the state before it, one
+// made after reads the state after, and a poll more than the stretch recorded
+// misses. A worker-scope mock with no stretch is shown wherever its place is
+// reached. A new replay session starts every stretch afresh.
+func TestATimersRecordingAnswersOnlyWithinItsStretch(t *testing.T) {
+	create := httpCall("create", 0, "/create")
+	pollA := httpCall("w-poll-a", time.Second, "/jobs")
+	pollB := httpCall("w-poll-b", 2*time.Second, "/jobs")
+	del := httpCall("delete", 3*time.Second, "/delete")
+	pollC := httpCall("w-poll-c", 4*time.Second, "/jobs")
+	plain := httpCall("plain", 5*time.Second, "/receive")
+	all := []*models.Mock{create, pollA, pollB, del, pollC, plain}
+	mm := stagedManager(t, nil, all)
+	stretches := map[string]models.Stretch{
+		"w-poll-a": {Until: "create"},
+		"w-poll-b": {After: "create", Until: "delete"},
+		"w-poll-c": {After: "delete"},
+	}
+	worker := []string{"w-poll-a", "w-poll-b", "w-poll-c", "plain"}
+	shown := func(what string, want ...string) {
+		t.Helper()
+		sess, _ := mm.GetSessionScopedMocks()
+		var got []string
+		for _, n := range exactNames(sess) {
+			if strings.HasPrefix(n, "w-") || n == "plain" {
+				got = append(got, n)
+			}
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s: the worker scope shows %v, want %v", what, got, want)
+		}
+	}
+	answer := func(name string) {
+		t.Helper()
+		pt, _ := mm.GetPerTestMocksInWindow()
+		for _, mk := range pt {
+			if mk.Name == name {
+				if !mm.DeleteFilteredMock(*mk) {
+					t.Fatalf("the test's write %s was refused", name)
+				}
+				return
+			}
+		}
+		t.Fatalf("the test's write %s is not shown: %v", name, exactNames(pt))
+	}
+
+	mm.ServeExactStretches(stretches, nil)
+	mm.ServeExactWorker(worker)
+	mm.ServeExactPool("k", nil)
+	shown("before any write", "w-poll-a", "plain")
+
+	mm.ServeExactTest("T1", []*models.Mock{create, del})
+	shown("in the test, before its create", "w-poll-a", "plain")
+	answer("create")
+	shown("after the create", "w-poll-b", "plain")
+	if got := pollFirst(t, mm, "w-poll"); got != "w-poll-b" {
+		t.Fatalf("the poll after the create was answered %s, want w-poll-b", got)
+	}
+	if got := pollFirst(t, mm, "w-poll"); got != "a miss" {
+		t.Fatalf("a poll more than the stretch recorded was answered %s, want a miss", got)
+	}
+	answer("delete")
+	shown("after the delete", "w-poll-c", "plain")
+
+	// Between tests the stretch holds: what the writes left is the same.
+	mm.ServeExactPool("k", nil)
+	shown("after the test", "w-poll-c", "plain")
+
+	// A new replay session keeps neither the worker scope nor its
+	// stretches; once the agent names them again, no write has answered yet.
+	mm.ResetForReplaySession()
+	mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now())
+	mm.ServeExactPool("k", nil)
+	shown("the next session, before its worker scope is named")
+	mm.ServeExactStretches(stretches, nil)
+	mm.ServeExactWorker(worker)
+	mm.ServeExactPool("k", nil)
+	shown("the next session's start", "w-poll-a", "plain")
+
+	// No stretches named: every worker-scope mock shows from its place.
+	mm.ServeExactStretches(nil, nil)
+	mm.ServeExactPool("k", nil)
+	shown("with no stretches", "w-poll-a", "w-poll-b", "w-poll-c", "plain")
+}
+
+// A timer's stretch also opens once one of its run's other recordings
+// (models.Stretch.With: the test's own read of the call, that answered alike)
+// has answered in the staging, though the write recorded before the run (a
+// keep-alive ping) was never made: the run has reached the state the
+// recordings read. It still closes at the write recorded after the run.
+func TestATimersStretchOpensOnceARecordingOfItsRunAnswered(t *testing.T) {
+	ping := httpCall("ping", 0, "/auth/session/activity")
+	own := httpCall("own-app", time.Second, "/app")
+	poll := httpCall("w-app", 2*time.Second, "/app")
+	save := httpCall("save", 3*time.Second, "/save")
+	mm := stagedManager(t, nil, []*models.Mock{ping, own, poll, save})
+	shown := func(what string, want bool) {
+		t.Helper()
+		sess, _ := mm.GetSessionScopedMocks()
+		got := false
+		for _, n := range exactNames(sess) {
+			got = got || n == "w-app"
+		}
+		if got != want {
+			t.Fatalf("%s: the worker scope shows w-app %v, want %v", what, got, want)
+		}
+	}
+	answer := func(name string) {
+		t.Helper()
+		pt, _ := mm.GetPerTestMocksInWindow()
+		for _, mk := range pt {
+			if mk.Name == name {
+				if !mm.DeleteFilteredMock(*mk) {
+					t.Fatalf("the test's %s was refused", name)
+				}
+				return
+			}
+		}
+		t.Fatalf("the test's %s is not shown: %v", name, exactNames(pt))
+	}
+
+	mm.ServeExactStretches(map[string]models.Stretch{"w-app": {After: "ping", Until: "save", With: []string{"own-app"}}}, nil)
+	mm.ServeExactWorker([]string{"w-app"})
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T1", []*models.Mock{own, save})
+	shown("before the test's own read answered, the ping never made", false)
+	answer("own-app")
+	shown("after the test's own read answered", true)
+	answer("save")
+	shown("after the write recorded after the run", false)
+}
+
 // stagedNotOwnedNow is mm's lookup of a recording made elsewhere for a call
 // whose first read is now (MarkCallRound).
 func stagedNotOwnedNow(mm *MockManager, kind models.Kind, match func(*models.Mock) bool) string {
@@ -2672,6 +2807,35 @@ func TestThePoolNamesSayWhatIsThePools(t *testing.T) {
 	if _, known := mm.InPool(a); known {
 		t.Fatal("a new replay session reads the last session's pool names")
 	}
+}
+
+// A test's own read recorded after a write that changed what it reads (a
+// branch page after the commit) waits for that write: before it, the test's
+// mocks do not show it, so a timer's call made sooner cannot take the
+// after-commit answer; once the commit has answered, it shows. A read of the
+// test with no bound shows throughout.
+func TestATestsReadThatWaitsForAWriteShowsOnlyAfterIt(t *testing.T) {
+	pre := httpCall("page-before", 0, "/page")
+	commit := httpCall("commit", time.Second, "/commit")
+	post := httpCall("page-after", 2*time.Second, "/page")
+	mm := stagedManager(t, nil, []*models.Mock{pre, commit, post})
+	shown := func(what string, want ...string) {
+		t.Helper()
+		pt, _ := mm.GetPerTestMocksInWindow()
+		if got := strings.Join(exactNames(pt), ","); got != strings.Join(want, ",") {
+			t.Fatalf("%s: the test shows %s, want %s", what, got, strings.Join(want, ","))
+		}
+	}
+
+	mm.ServeExactStretches(map[string]models.Stretch{"page-after": {After: "commit"}}, nil)
+	mm.ServeExactWorker(nil)
+	mm.ServeExactPool("k", nil)
+	mm.ServeExactTest("T1", []*models.Mock{pre, commit, post})
+	shown("before the commit", "page-before", "commit")
+	if !mm.DeleteFilteredMock(*commit) {
+		t.Fatal("the commit was refused")
+	}
+	shown("after the commit", "page-before", "page-after")
 }
 
 // A call marked where keploy's store no longer shows the view of the test

@@ -252,6 +252,10 @@ type ScopeWindow struct {
 	// Given is, under the proven wire, what the test's harness gave keploy
 	// while the test was open in a record (POST /agent/given), in order.
 	Given []GivenValue `json:"given,omitempty"`
+	// Timers is, under the proven wire, each call of the test its harness
+	// saw a repeating timer make while it was open in a record (POST
+	// /agent/cause), in order.
+	Timers []TimerCall `json:"timers,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
@@ -286,6 +290,16 @@ type ScopeTableReq struct {
 	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
 	// between tests"; only a nil one is left out (with the switch off).
 	Pool map[string][]string `json:"pool,omitzero"`
+	// Worker is, under the proven switch, the set's worker scope
+	// (Mapping.Worker) of mocks the agent holds: no test owns them, and none
+	// is in a pool slice. Each answers at most one call, and only within its
+	// stretch (MockEntry.Stretch).
+	Worker []MockEntry `json:"worker,omitempty"`
+	// Bounds is, under the proven switch, the tests' own reads that answer
+	// only once the run has passed a write (MockEntry.Stretch.After): a read
+	// recorded after the write that ended a timer's run of the same call,
+	// whose answer differs from the run's.
+	Bounds []MockEntry `json:"bounds,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy

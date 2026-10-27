@@ -176,6 +176,34 @@ func (p *Predialed) Return(taken, replay net.Conn) bool {
 	return true
 }
 
+type predialedKey struct{}
+
+// WithPredialed carries pre to the code an application's connection is handed
+// to whole (the live handler of a self-call, which dials the app itself), so
+// its first dial of pre's address takes pre (Take) rather than open a second
+// connection the application never made.
+func WithPredialed(ctx context.Context, pre *Predialed) context.Context {
+	if pre == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, predialedKey{}, pre)
+}
+
+// PredialedFrom is the pre-dialled connection ctx carries (WithPredialed); nil
+// when it carries none.
+func PredialedFrom(ctx context.Context) *Predialed {
+	pre, _ := ctx.Value(predialedKey{}).(*Predialed)
+	return pre
+}
+
+// Take is DialRaw's take for a dial of addr that does not go through DialRaw:
+// the pre-dialled connection the first time it is asked for its address, nil
+// otherwise (a nil Predialed, taken already, dialled at another address, or
+// closed by its destination, which the dial then opens afresh).
+func (p *Predialed) Take(addr string) net.Conn {
+	return p.take("tcp", addr)
+}
+
 // DialUpstream dials addr: every connection to a destination is opened here,
 // the pre-dialled ones too, and read through the connseq.Upstream it returns,
 // under any TLS, so the relay can number what the connection carries by what

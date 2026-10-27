@@ -67,6 +67,14 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 		key = models.PoolKeyNone
 	}
 	if !staged {
+		// No worker-scope mock answers before the replay's stage lands: a
+		// name is unique only within a set, and one still staged from the
+		// previous session would answer under it.
+		if ws, ok := es.(coreAgent.ExactWorkerServer); ok {
+			if err := ws.ServeExactWorker(nil); err != nil {
+				return err
+			}
+		}
 		if err := es.ServeExactPool(key, nil); err != nil {
 			return err
 		}
@@ -78,6 +86,11 @@ func (a *Agent) servePoolExactly(ctx context.Context) error {
 			a.provenMu.Lock()
 			a.proven.staged = true
 			a.provenMu.Unlock()
+		}
+	}
+	if staged {
+		if err := a.serveWorkerExactly(es); err != nil {
+			return err
 		}
 	}
 	return es.ServeExactPool(key, append([]string(nil), slice[key]...))
@@ -166,6 +179,17 @@ func (a *Agent) serveTestExactly(ctx context.Context, id string) error {
 	a.provenMu.Lock()
 	a.proven.unservable = unservable
 	a.provenMu.Unlock()
+	// The worker scope's mocks placed after this test's begin are reachable
+	// from its view on.
+	a.scopeMu.Lock()
+	if a.testBegun == nil {
+		a.testBegun = map[string]bool{}
+	}
+	a.testBegun[id] = true
+	a.scopeMu.Unlock()
+	if err := a.serveWorkerExactly(es); err != nil {
+		return err
+	}
 	// A test is the scope of the variables keploy mock replay binds: it
 	// begins with none bound, as it opens.
 	if err := a.openExactTest(es, id, owned, nil); err != nil {
@@ -564,8 +588,10 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 // (testWorker) the set's run has reached the place of: those placed at the
 // set's start, and those placed after a test case that has begun since the
 // staging (testBegun). It is said before each view is installed, so the view
-// shows them. A proxy that has no worker scope (coreAgent.ExactWorkerServer)
-// cannot serve a set that has one.
+// shows them, each of a timer's only within its stretch of writes
+// (coreAgent.ExactStretchServer). A proxy that has no worker scope
+// (coreAgent.ExactWorkerServer) cannot serve a set that has one, nor one
+// without stretches a set whose worker scope has them.
 //
 // Under the background rules (testBg) a worker-scope mock
 // with no identical sibling among the set's background answers from the set's
@@ -577,16 +603,125 @@ func (a *Agent) diskRecordedBefore() func(t time.Time, visit func(*models.Mock) 
 func (a *Agent) serveWorkerExactly(es coreAgent.ExactServer) error {
 	a.scopeMu.Lock()
 	reachable := reachableWorker(a.testWorker, a.testBegun, a.testBegunAt, a.testBg)
+	stretches := map[string]models.Stretch{}
+	for _, e := range a.testWorker {
+		if e.Stretch != nil {
+			stretches[e.Name] = *e.Stretch
+		}
+	}
+	// A test's own read that waits for a write (SetScopeBounds): the proxy
+	// shows it, among its test's, only once the run has passed the write.
+	for _, e := range a.testBounds {
+		if e.Stretch != nil {
+			stretches[e.Name] = models.Stretch{After: e.Stretch.After}
+		}
+	}
+	// The run is past every write recorded before the latest recorded begin
+	// of the tests begun since the staging: a write of a test that did not
+	// run (or that the run made elsewhere) holds no stretch shut or open.
+	var reached time.Time
+	for id := range a.testBegun {
+		if at := a.testBegins[id]; at.After(reached) {
+			reached = at
+		}
+	}
+	var passed []string
+	if !reached.IsZero() {
+		for write, at := range a.testEdgeAt {
+			if at.Before(reached) {
+				passed = append(passed, write)
+			}
+		}
+	}
 	has := len(a.testWorker) > 0
+	bounds := len(a.testBounds) > 0
 	a.scopeMu.Unlock()
 	ws, ok := es.(coreAgent.ExactWorkerServer)
 	if !ok {
+		if bounds {
+			return errors.New("this keploy agent's proxy cannot hold a test's reads back until a write")
+		}
 		if has {
 			return errors.New("this keploy agent's proxy cannot serve a test set's worker scope, the calls no test case owns")
 		}
 		return nil
 	}
+	if ss, ok := es.(coreAgent.ExactStretchServer); ok {
+		if err := ss.ServeExactStretches(stretches, passed); err != nil {
+			return err
+		}
+	} else if len(stretches) > 0 {
+		return errors.New("this keploy agent's proxy cannot serve a timer's recordings within their stretch of writes")
+	}
 	return ws.ServeExactWorker(reachable)
+}
+
+// SetScopeWorker installs the set's worker scope for keploy mock replay
+// (models.ScopeTableReq.Worker): no test owns its mocks, and each of a
+// timer's answers only within its stretch. It reads when each write ending a
+// stretch was recorded, from the replay's stored mocks, so the run can tell
+// when it has gone past one (serveWorkerExactly); a write it does not hold
+// ends its stretches only by being answered. It is served with the pool that
+// SetScopePool serves next, once the replay's stage lands.
+func (a *Agent) SetScopeWorker(ctx context.Context, worker []models.MockEntry) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	var edges []string
+	seen := map[string]bool{}
+	a.scopeMu.Lock()
+	bounds := a.testBounds
+	a.scopeMu.Unlock()
+	for _, e := range append(append([]models.MockEntry(nil), worker...), bounds...) {
+		if e.Stretch == nil {
+			continue
+		}
+		for _, w := range []string{e.Stretch.After, e.Stretch.Until} {
+			if w != "" && !seen[w] {
+				seen[w] = true
+				edges = append(edges, w)
+			}
+		}
+	}
+	edgeAt := map[string]time.Time{}
+	if len(edges) > 0 {
+		mocks, err := a.mocksByName(edges)
+		if err != nil {
+			return fmt.Errorf("read when the writes ending a timer's stretches were recorded: %w", err)
+		}
+		for name, mk := range mocks {
+			if mk != nil && !mk.Spec.ReqTimestampMock.IsZero() {
+				edgeAt[name] = mk.Spec.ReqTimestampMock
+			}
+		}
+	}
+	a.scopeMu.Lock()
+	a.testWorker = append([]models.MockEntry(nil), worker...)
+	a.testBegun = map[string]bool{}
+	a.testEdgeAt = edgeAt
+	// keploy mock replay serves its worker scope by today's rules: no
+	// background rules or begin order a keploy test staging left behind.
+	a.testBegunAt, a.testBg = nil, nil
+	a.scopeMu.Unlock()
+	return nil
+}
+
+// SetScopeBounds installs the tests' own reads that answer only once the run
+// has passed a write (models.ScopeTableReq.Bounds): each is shown among its
+// test's mocks only after its Stretch.After write has answered or the run has
+// gone past it (serveWorkerExactly says them to the proxy with the worker
+// scope's stretches; SetScopeWorker, which comes next, reads when the writes
+// were recorded). A table without them leaves none of the previous set's.
+func (a *Agent) SetScopeBounds(ctx context.Context, bounds []models.MockEntry) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	a.scopeMu.Lock()
+	a.testBounds = append([]models.MockEntry(nil), bounds...)
+	a.scopeMu.Unlock()
+	return nil
 }
 
 // entryNames is the names of entries, in order.

@@ -79,3 +79,10 @@ type ExactConcurrentReader interface {
 	// manager's copies, in recorded order; read-only.
 	ExactTakenCandidates(kind models.Kind) []*models.Mock
 }
+
+// ExactPoolPartsReader is an optional MockMemDb capability, for a diagnostic
+// (KPMATCH): how the mocks a parser read split by where exact serving shows
+// them from (MockManager.ExactPoolParts).
+type ExactPoolPartsReader interface {
+	ExactPoolParts(mocks []*models.Mock) (test, key string, own, pool, worker, other int, ok bool)
+}

@@ -2158,3 +2158,46 @@ func TestTokenValue(t *testing.T) {
 		}
 	}
 }
+
+// A name the test made with an instant in it ("e2e-mock-<ms>", atg-features'
+// RBAC Smart Test Set), sent first on its own and then inside a longer value
+// (a mock's YAML). F moved the instant by the lead, so the name's run (read
+// whole where '-' joins words) moved only in its clock word, word for word
+// the same otherwise (clockOnly). Where only an earlier recording's payload
+// holds the name, the moved run is no word of what changed: learned as
+// noise, as the name alone is, not refused for that payload. A run that
+// changed in more than its clock word (the role it names, as well as the
+// instant) is still refused there. Where an earlier exchange F served holds
+// the name at a leaf, the name's instant drifted with it (instants.go, rule
+// 1): the value is that leaf's, found before any word is read.
+func TestClassifyInARunThatMovedOnlyInItsClockWordIsNoise(t *testing.T) {
+	at := time.Date(2026, 10, 24, 10, 43, 20, 0, time.UTC)
+	rec, live := "e2e-mock-1792838439174", "e2e-mock-1792838500715"
+	const p = "body.variables.mockYaml"
+	yaml := func(n string) Shape {
+		v := "version: api.keploy.io/v1beta1\nkind: Http\nname: " + n + "\nspec: {}\n"
+		return Shape{Leaves: map[string]Leaf{p: {Path: p, Noise: p, Type: String, Value: v}}}
+	}
+	dc := NewDriftCache()
+	create := &models.Mock{Name: "mock-461", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:          &models.HTTPReq{Method: "POST", URL: "/graphql", Body: `{"variables":{"name":"` + rec + `"}}`},
+		HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+		ReqTimestampMock: at.Add(-time.Second),
+		ResTimestampMock: at.Add(-time.Second + time.Millisecond),
+	}}
+	raw := []Raw{dc.RawOf(create, false)}
+	if got := ClassifyIn(dc, []string{p}, yaml(live), yaml(rec), at, nil, raw, nil, nil)[0]; got.Kind != KindNoise {
+		t.Fatalf("learned %s (%s), want noise", got.Kind, got.Why)
+	}
+	if got := ClassifyIn(NewDriftCache(), []string{p}, yaml("e2e-role-1792838500715"), yaml(rec), at, nil, raw, nil, nil)[0]; got.Kind == KindNoise || got.Kind == KindEcho {
+		t.Fatalf("a run that changed beyond its clock word was learned as %s", got.Kind)
+	}
+
+	name := Earlier{Mock: "mock-461", At: at.Add(-time.Second), Payload: dc.RawOf(create, false), Own: true, Seen: []Seen{{Side: Request,
+		Leaf: Leaf{Path: "body.variables.name", Noise: "body.variables.name", Type: String, Value: rec}, Live: live, Place: "body.variables.name"}}}
+	// Beside the name F served at a leaf, with its exchange's payload, the run
+	// that moved only in its clock word is still noise (clockOnly).
+	if got := ClassifyIn(NewDriftCache(), []string{p}, yaml(live), yaml(rec), at, []Earlier{name}, nil, nil, nil)[0]; got.Kind != KindNoise {
+		t.Fatalf("beside the name F served at a leaf: %s from %q (%s), want noise", got.Kind, got.From.Mock, got.Why)
+	}
+}

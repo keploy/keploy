@@ -61,6 +61,9 @@ type HTTP struct {
 	// placeWarned holds the recordings (placeWarning) whose unreadable
 	// variable place the learn step warned of.
 	placeWarned sync.Map
+	// order keeps the recorded answer order of GraphQL queries a client's
+	// cache files under one entry (answerOrder).
+	order answerOrder
 }
 
 func New(logger *zap.Logger) integrations.Integrations {

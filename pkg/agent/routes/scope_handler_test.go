@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -447,5 +448,85 @@ func TestScopeTableCarriesThePoolSlices(t *testing.T) {
 	svc = &poolSvc{}
 	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {
 		t.Fatalf("switch off: status %d, pool %v", rec.Code, svc.pool)
+	}
+}
+
+// workerSvc takes the per-test table, the worker scope and the pool slices,
+// in the order they came.
+type workerSvc struct {
+	poolSvc
+	worker []models.MockEntry
+	order  []string
+}
+
+func (s *workerSvc) SetScopeWorker(_ context.Context, w []models.MockEntry) error {
+	s.worker = w
+	s.order = append(s.order, "worker")
+	return nil
+}
+
+func (s *workerSvc) SetScopePool(ctx context.Context, p map[string][]string) error {
+	s.order = append(s.order, "pool")
+	return s.poolSvc.SetScopePool(ctx, p)
+}
+
+// Under the switch the scope table carries the set's worker scope, installed
+// before the pool slices so the pool served next carries it; an agent that
+// cannot serve a worker scope refuses a table that has one.
+func TestScopeTableCarriesTheWorkerScope(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	body := `{"mappings":{"o::TestA":["mock-3"]},"pool":{},"worker":[{"name":"mock-4","kind":"Http","cause":"timer","stretch":{"after":"mock-3"}}]}`
+	post := func(a *Agent) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		a.HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	svc := &workerSvc{}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	want := []models.MockEntry{{Name: "mock-4", Kind: "Http", Cause: models.CauseTimer, Stretch: &models.Stretch{After: "mock-3"}}}
+	if !reflect.DeepEqual(svc.worker, want) || !slices.Equal(svc.order, []string{"worker", "pool"}) {
+		t.Fatalf("worker %+v, order %v", svc.worker, svc.order)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: &poolSvc{}}); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent without a worker scope answered %d", rec.Code)
+	}
+}
+
+// boundsSvc takes, besides the worker scope and the pool slices, the tests'
+// own reads that wait for a write, in the order they came.
+type boundsSvc struct {
+	workerSvc
+	bounds []models.MockEntry
+}
+
+func (s *boundsSvc) SetScopeBounds(_ context.Context, b []models.MockEntry) error {
+	s.bounds = b
+	s.order = append(s.order, "bounds")
+	return nil
+}
+
+// Under the switch the scope table carries the tests' own reads that wait for
+// a write (Bounds), installed before the worker scope whose serving says them
+// to the proxy; an agent that cannot hold them refuses a table that has them.
+func TestScopeTableCarriesTheTestsBoundReads(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	body := `{"mappings":{"o::TestA":["mock-3","mock-5"]},"pool":{},"worker":[{"name":"mock-4","kind":"Http","cause":"timer","stretch":{"until":"mock-6"}}],"bounds":[{"name":"mock-5","stretch":{"after":"mock-6"}}]}`
+	post := func(a *Agent) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		a.HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	svc := &boundsSvc{}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	want := []models.MockEntry{{Name: "mock-5", Stretch: &models.Stretch{After: "mock-6"}}}
+	if !reflect.DeepEqual(svc.bounds, want) || !slices.Equal(svc.order, []string{"bounds", "worker", "pool"}) {
+		t.Fatalf("bounds %+v, order %v", svc.bounds, svc.order)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: &workerSvc{}}); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent that cannot hold bound reads answered %d", rec.Code)
 	}
 }

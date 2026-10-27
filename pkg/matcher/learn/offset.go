@@ -716,7 +716,7 @@ func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
 		}
 		for _, form := range textForms(text[f.start:f.end]) {
 			if len(keys) > 0 {
-				form = blankSpans(form, func(sp instant) bool { return sp.keyed && keys[sp.key] })
+				form = dc.blankSpans(form, func(sp instant) bool { return sp.keyed && keys[sp.key] })
 			}
 			forms = append(forms, form)
 		}

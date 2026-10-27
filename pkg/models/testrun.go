@@ -518,6 +518,13 @@ type UnmatchedCall struct {
 	// no test's: the replay fails the set with it, naming the call, and
 	// charges no test (the read of the set's first test carries it).
 	BeforeSet bool `json:"before_set,omitempty" yaml:"before_set,omitempty"`
+	// SkippedGroup is, under the proven switch, the claim key of the group
+	// whose closing hooks (afterAll, a last afterEach) made the call while no
+	// test was open, after keploy skipped a test of that group: what the call
+	// sends was bound inside the skipped test, so no recording answers it. It
+	// is reported for its next step and charged to no test
+	// (CountsAgainstTest).
+	SkippedGroup string `json:"skipped_group,omitempty" yaml:"skipped_group,omitempty"`
 	// Differs mirrors MockMismatchReport.Differs: the names of the fields in
 	// which the call differs from its closest recording, without values.
 	Differs []string `json:"differs,omitempty" yaml:"differs,omitempty"`

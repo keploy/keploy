@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -59,8 +61,9 @@ func TestAgentClient_GetScopeWindowsIsTheFinalRead(t *testing.T) {
 	}
 }
 
-// PushProvenTable sends the per-test table and the pool slices in one
-// request, an empty pool as {}, and any answer but 200 is an error.
+// PushProvenTable sends the per-test table, the pool slices and the worker
+// scope in one request, an empty pool as {} and no worker scope as nothing,
+// and any answer but 200 is an error.
 func TestAgentClient_PushProvenTable(t *testing.T) {
 	var bodies []string
 	status := http.StatusOK
@@ -76,19 +79,27 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	defer srv.Close()
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	ctx := context.Background()
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, map[string][]string{"o": {"mock-1"}}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil); err != nil {
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`, `{"mappings":{"o::TestA":[]},"pool":{}}`}
-	if len(bodies) != 2 || bodies[0] != want[0] || bodies[1] != want[1] {
+	worker := []models.MockEntry{{Name: "mock-2", Kind: "Http", Cause: models.CauseTimer, Stretch: &models.Stretch{After: "mock-1"}}}
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, worker, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`,
+		`{"mappings":{"o::TestA":[]},"pool":{}}`,
+		`{"mappings":{"o::TestA":[]},"pool":{},"worker":[{"name":"mock-2","kind":"Http","cause":"timer","stretch":{"after":"mock-1"}}]}`,
+	}
+	if !reflect.DeepEqual(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)
 	}
 	for _, s := range []int{http.StatusNotFound, http.StatusNotImplemented, http.StatusInternalServerError} {
 		status = s
-		if err := a.PushProvenTable(ctx, nil, nil); err == nil {
+		if err := a.PushProvenTable(ctx, nil, nil, nil, nil); err == nil {
 			t.Fatalf("status %d: want an error", s)
 		}
 	}

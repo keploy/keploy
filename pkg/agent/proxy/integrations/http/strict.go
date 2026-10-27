@@ -382,7 +382,12 @@ func bandPick(group []*models.Mock, cs integrations.MockCursor, bg bool, mockDb 
 // rules a band in a test is the worker scope's; one that holds any other
 // recording keeps the test's window. Each worker-scope recording is spent as
 // it answers, so today the cursor's served marks only restate the spends:
-// what the band changes is the window.
+// what the band changes is the window. Between tests the walk holds only the
+// recordings the gap's view can serve (sv.Gap: its pool slice's, the reached
+// worker scope's, the next test's in flight): a test's own recording of the
+// call never answers there, so once the gap's own have each answered, the
+// last of them answers again while it is live (a beforeAll's page that reads
+// once more than recorded), never a later test's that the gap cannot use.
 func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv integrations.SequenceView, mockDb integrations.MockMemDb, member func(*models.Mock) bool) (int, func(), *answeredSequence) {
 	switch {
 	case bg:
@@ -393,6 +398,11 @@ func bandWalk(group []*models.Mock, cs integrations.MockCursor, bg bool, sv inte
 		if member != nil {
 			of := member
 			member = func(m *models.Mock) bool { return worker(m) && of(m) }
+		}
+	case sv.Test == "" && sv.Gap != nil:
+		if member != nil {
+			gap, of := sv.Gap, member
+			member = func(m *models.Mock) bool { return gap(m) && of(m) }
 		}
 	}
 	return servedWalk(group, stagedGroup(mockDb, group, member), sv)

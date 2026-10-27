@@ -578,6 +578,18 @@ type ExactWorkerServer interface {
 	ServeExactWorker(names []string) error
 }
 
+// ExactStretchServer is implemented by a proxy that serves a timer's
+// recordings of the worker scope (models.MockEntry.Cause) only within the
+// stretch of the set's writes each answers within (models.Stretch):
+// ServeExactStretches names each such mock's stretch, and the writes ending a
+// stretch that the run has gone past without them (passed). Each view
+// installed after it shows one only once its After write answered in the
+// staging or was passed, and while its Until write has neither; the last of a
+// stretch's run answers again once the rest have.
+type ExactStretchServer interface {
+	ServeExactStretches(stretches map[string]models.Stretch, passed []string) error
+}
+
 // ExactBackgroundServer is implemented by a proxy that serves a test set's
 // background (its worker scope and its pool) by the background rules under
 // exact serving (models.RecordedWithS12Routing, replay.RegisterS12Serving):
