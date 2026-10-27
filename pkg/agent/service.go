@@ -713,9 +713,12 @@ type AppClockSetter interface {
 // proxy the names the replay's scope table puts in a pool slice, of every key,
 // so that the parsers' learn steps can tell the pool's mocks from a test's
 // where the replay sends no recorded test windows (keploy mock replay):
-// integrations.PoolMembership.
+// integrations.PoolMembership. owners is, of the same table, the key of the
+// test process whose tests list each mock ("" where no one key is known),
+// which bounds each process's teardown, the calls it makes after its own last
+// test.
 type PoolNamesSetter interface {
-	SetPoolNames(names []string) error
+	SetPoolNames(names []string, owners map[string]string) error
 }
 
 // ExactAheadServer is an optional ExactServer capability: ServeExactPoolAhead
