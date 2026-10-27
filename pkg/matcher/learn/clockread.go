@@ -374,8 +374,9 @@ func leafLayout(l Leaf) string {
 
 // timeOfDayOf reads l, a leaf of a call, as a time of day whole: one its
 // protocol types (TimeOfDayLeaf), or a text the clock layouts read as one
-// whole (textTimeOfDay): its time into its day (24:00 is the next day's
-// 00:00), the resolution its form writes, and its layout
+// whole (textTimeOfDay): its time into its day (a typed 24:00, which
+// Postgres writes, is the next day's 00:00; a text 24:00 reads as no time of
+// day), the resolution its form writes, and its layout
 // (models.LayoutTimeOfDay). ok is false for any other value.
 func timeOfDayOf(l Leaf) (tod, res time.Duration, layout string, ok bool) {
 	if l.Type == Instant {
