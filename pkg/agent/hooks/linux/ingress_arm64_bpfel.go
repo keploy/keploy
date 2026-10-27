@@ -22,6 +22,7 @@ const (
 	ingressMapIngressForwarders  = "ingress_forwarders"
 	ingressMapIngressLookupStats = "ingress_lookup_stats"
 	ingressMapIngressPark        = "ingress_park"
+	ingressMapIngressYielded     = "ingress_yielded"
 	ingressMapPendingHolds       = "pending_holds"
 	ingressProgK_ingressLookup   = "k_ingress_lookup"
 	ingressProgK_ingressRelease  = "k_ingress_release"
@@ -83,6 +84,7 @@ type ingressMapSpecs struct {
 	IngressForwarders  *ebpf.MapSpec `ebpf:"ingress_forwarders"`
 	IngressLookupStats *ebpf.MapSpec `ebpf:"ingress_lookup_stats"`
 	IngressPark        *ebpf.MapSpec `ebpf:"ingress_park"`
+	IngressYielded     *ebpf.MapSpec `ebpf:"ingress_yielded"`
 	PendingHolds       *ebpf.MapSpec `ebpf:"pending_holds"`
 }
 
@@ -118,6 +120,7 @@ type ingressMaps struct {
 	IngressForwarders  *ebpf.Map `ebpf:"ingress_forwarders"`
 	IngressLookupStats *ebpf.Map `ebpf:"ingress_lookup_stats"`
 	IngressPark        *ebpf.Map `ebpf:"ingress_park"`
+	IngressYielded     *ebpf.Map `ebpf:"ingress_yielded"`
 	PendingHolds       *ebpf.Map `ebpf:"pending_holds"`
 }
 
@@ -129,6 +132,7 @@ func (m *ingressMaps) Close() error {
 		m.IngressForwarders,
 		m.IngressLookupStats,
 		m.IngressPark,
+		m.IngressYielded,
 		m.PendingHolds,
 	)
 }

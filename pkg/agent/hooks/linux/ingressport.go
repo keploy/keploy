@@ -42,6 +42,8 @@ type ingressHold struct {
 	release    link.Link    // k_ingress_release on the app's cgroup
 	park       net.Listener // dual-stack, MPTCP off, so a sockmap takes it
 	forwarders *ebpf.Map    // ingress_forwarders, a sockhash by port
+	parkMap    *ebpf.Map    // ingress_park, the park's sockmap
+	yielded    *ebpf.Map    // ingress_yielded, the ports the agent yields
 	appPort    *ebpf.Map    // the main object's app_port_info (P -> P')
 	stats      *ebpf.Map    // ingress_lookup_stats
 }
@@ -58,6 +60,8 @@ const (
 	ingressStatNoPark
 	ingressStatParkFailed
 	ingressStatElsewhere
+	ingressStatYielded
+	ingressStatForwardedOver
 	ingressStatCount
 )
 
@@ -70,6 +74,10 @@ var ingressStatNames = [ingressStatCount]string{
 	ingressStatNoPark:     "no_park",
 	ingressStatParkFailed: "park_refused",
 	ingressStatElsewhere:  "not_where_the_app_bound",
+	ingressStatYielded:    "yielded_to_another_listener",
+	// An agent attached before this one parked it, and this one's forwarder
+	// listens on the port: two keploy runs whose apps both use the port.
+	ingressStatForwardedOver: "to_forwarder_over_another_agents_park",
 }
 
 // ingressShared are the main object's maps the ingress object uses in place
@@ -146,6 +154,8 @@ func (h *Hooks) loadIngressHold(cgroupPath string) (*ingressHold, error) {
 	hold := &ingressHold{
 		coll:       coll,
 		forwarders: coll.Maps["ingress_forwarders"],
+		parkMap:    coll.Maps["ingress_park"],
+		yielded:    coll.Maps["ingress_yielded"],
 		appPort:    appPort,
 		stats:      coll.Maps["ingress_lookup_stats"],
 	}
@@ -282,6 +292,54 @@ func (h *Hooks) RegisterIngressForwarder(origPort uint16, ln net.Listener) {
 	if err := putListener(hold.forwarders, uint32(origPort), ln); err != nil {
 		h.logger.Debug("could not register keploy's ingress forwarder for the lookup; the park serves the port until the forwarder's own listen does",
 			zap.Uint16("port", origPort), zap.Error(err))
+	}
+	// The forwarder listens on the port, so no other listener holds it now:
+	// take back a yield an earlier forwarder's failed listen left.
+	if hold.yielded != nil {
+		if err := hold.yielded.Delete(uint32(origPort)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			h.logger.Debug("could not take back the ingress hold's yield of the port", zap.Uint16("port", origPort), zap.Error(err))
+		}
+	}
+}
+
+// YieldIngressPort stops holding origPort: keploy's forwarder could not
+// listen there, as another listener (not keploy's) holds it, so the lookup
+// leaves the port's calls to the kernel, and so to that listener, as without
+// keploy. A no-op when nothing is held.
+func (h *Hooks) YieldIngressPort(origPort uint16) {
+	h.ingressMu.Lock()
+	hold := h.ingress
+	h.ingressMu.Unlock()
+	if hold == nil {
+		return
+	}
+	if hold.yielded == nil {
+		h.logger.Warn("the ingress hold cannot yield the port to the listener that holds it: its yield map is not loaded", zap.Uint16("port", origPort))
+		return
+	}
+	if err := hold.yielded.Put(uint32(origPort), uint8(1)); err != nil {
+		h.logger.Warn("the ingress hold could not yield the port to the listener that holds it; keploy keeps taking the port's calls", zap.Uint16("port", origPort), zap.Error(err))
+	}
+}
+
+// StopIngressPark takes the park out of the lookup's sockmap and closes it,
+// for an ingress manager whose park accept loop stopped: a call to a moved
+// port that no forwarder takes is then refused, as without the hold, never
+// held for a park nothing accepts. A no-op when nothing is held.
+func (h *Hooks) StopIngressPark() {
+	h.ingressMu.Lock()
+	hold := h.ingress
+	h.ingressMu.Unlock()
+	if hold == nil {
+		return
+	}
+	if hold.parkMap != nil {
+		if err := hold.parkMap.Delete(uint32(0)); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			h.logger.Debug("could not take the ingress park out of the lookup's sockmap; closing it does", zap.Error(err))
+		}
+	}
+	if hold.park != nil {
+		_ = hold.park.Close()
 	}
 }
 

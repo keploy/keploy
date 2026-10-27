@@ -365,3 +365,96 @@ func TestAPortWhoseSocketWentIsNotHeld(t *testing.T) {
 	}
 	refusedPort(t, orig, "a port whose noted socket went")
 }
+
+// acceptedOn reports whether ln accepts a connection within 10 s (each call
+// takes one).
+func acceptedOn(ln net.Listener) <-chan bool {
+	got := make(chan bool, 1)
+	go func() {
+		if tl, ok := ln.(*net.TCPListener); ok {
+			_ = tl.SetDeadline(time.Now().Add(10 * time.Second))
+		}
+		c, err := ln.Accept()
+		if err == nil {
+			_ = c.Close()
+		}
+		got <- err == nil
+	}()
+	return got
+}
+
+// dialAccepted dials port and fails the test unless ln accepts the call.
+func dialAccepted(t *testing.T, port uint16, ln net.Listener, what string) {
+	t.Helper()
+	got := acceptedOn(ln)
+	c, err := dialPort(port)
+	if err != nil {
+		t.Fatalf("%s: dial: %v", what, err)
+	}
+	defer func() { _ = c.Close() }()
+	if !<-got {
+		t.Fatalf("%s did not get the call", what)
+	}
+}
+
+// A port the agent yields (its forwarder found another listener, not
+// keploy's, on it) is that listener's: the lookup leaves its calls to the
+// kernel. A forwarder registered for the port later takes the yield back,
+// so once that forwarder goes the park holds the port again. A stopped park
+// (its accept loop could not go on) is out of the lookup and closed: a call
+// to a moved port no forwarder takes is then refused, as without the hold.
+func TestAYieldedPortIsItsListenersAndAStoppedParkHoldsNothing(t *testing.T) {
+	h := ingressHoldAgent(t)
+	orig := unusedPort(t)
+	movedAndNoted(t, h, orig, true)
+	other, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(orig))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.startIngressHold(ctx, holdCgroup(t))
+	if !h.IngressHeld() {
+		t.Fatal("the hold did not start on this kernel")
+	}
+	park := h.IngressParkListener()
+	dialAccepted(t, orig, park, "the park, before the agent yields the port,")
+
+	h.YieldIngressPort(orig)
+	dialAccepted(t, orig, other, "the listener that held the port")
+	if n := h.IngressLookupCounts()["yielded_to_another_listener"]; n != 1 {
+		t.Fatalf("yielded %d, want 1: %v", n, h.IngressLookupCounts())
+	}
+	_ = other.Close()
+
+	var lc net.ListenConfig
+	lc.SetMultipathTCP(false)
+	fwd, err := lc.Listen(context.Background(), "tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(int(orig))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.RegisterIngressForwarder(orig, fwd)
+	dialAccepted(t, orig, fwd, "the forwarder registered after the yield")
+	if n := h.IngressLookupCounts()["to_forwarder"]; n != 1 {
+		t.Fatalf("to the forwarder %d, want 1 (the registration takes the yield back): %v", n, h.IngressLookupCounts())
+	}
+	_ = fwd.Close()
+	dialAccepted(t, orig, park, "the park, once the forwarder that took the yield back went,")
+
+	h.StopIngressPark()
+	refusedPort(t, orig, "a moved port once the park stopped")
+	if n := h.IngressLookupCounts()["no_park"]; n != 1 {
+		t.Fatalf("no park %d, want 1: %v", n, h.IngressLookupCounts())
+	}
+	if tl, ok := park.(*net.TCPListener); ok {
+		_ = tl.SetDeadline(time.Now().Add(10 * time.Second)) // an open park fails the test, not the run
+	}
+	if c, err := park.Accept(); err == nil {
+		_ = c.Close()
+		t.Fatal("the stopped park still accepts")
+	} else if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("the stopped park's Accept: %v, want it closed", err)
+	}
+}
