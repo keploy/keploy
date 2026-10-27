@@ -508,7 +508,9 @@ func TestAWallClockOfNoZoneIsCheckedAtReplayInTheZoneItWasLearnedIn(t *testing.T
 			{"the replay's now in the application's zone", form.leaf(ist)(now.Add(5 * time.Millisecond)), span, true, ""},
 			{"an hour on", form.leaf(ist)(now.Add(time.Hour)), span, false, "it changed"},
 			{"the replay's now written in UTC", form.leaf(time.UTC)(now.Add(5 * time.Millisecond)), span, false, "it changed"},
-			{"the replay's now, the application's zone not told", form.leaf(ist)(now.Add(5 * time.Millisecond)), Span{From: span.From, To: span.To}, false, "keploy cannot tell the application's zone"},
+			// The learn step named the zone (+05:30, models.ClockOffset.AppZone):
+			// a replay reads it there whatever its tracker knows.
+			{"the replay's now, the application's zone not told", form.leaf(ist)(now.Add(5 * time.Millisecond)), Span{From: span.From, To: span.To}, true, ""},
 		} {
 			ok, why := CheckClockRead(p, o, row.live, row.s, true)
 			if ok != row.want || !strings.Contains(why, row.why) || !ok && !strings.HasPrefix(why, p+" was learned as clock, a wall clock of no zone in the application's zone") {
@@ -517,6 +519,16 @@ func TestAWallClockOfNoZoneIsCheckedAtReplayInTheZoneItWasLearnedIn(t *testing.T
 			if got := ClockReadHolds(o, row.live, row.s); got != row.want {
 				t.Errorf("%s, %s: ClockReadHolds %v; want %v", form.what, row.what, got, row.want)
 			}
+		}
+		if o.AppZone != "+05:30" {
+			t.Errorf("%s: learned in a zone of no name at UTC+05:30: %+v; want it named +05:30", form.what, o)
+		}
+		// An old file names no zone: a replay that cannot tell the
+		// application's zone refuses it, saying so.
+		oldFile := o
+		oldFile.AppZone = ""
+		if ok, why := CheckClockRead(p, oldFile, form.leaf(ist)(now.Add(5*time.Millisecond)), Span{From: span.From, To: span.To}, true); ok || !strings.Contains(why, "keploy cannot tell the application's zone") {
+			t.Errorf("%s, an old file, the application's zone not told: %v %q; want refused, saying so", form.what, ok, why)
 		}
 		ln = classifyZoned(ist, false, p, form.leaf(time.UTC)(read), form.leaf(time.UTC)(fRead), call, w)
 		if !zonedRead(ln, models.ZoneUTC) {
@@ -730,8 +742,18 @@ func TestATimeOfDayTheLeadMovedIsAClockReadCheckedModuloTheDay(t *testing.T) {
 				}
 			}
 			if tc.zone != models.ZoneUTC {
-				if ok, why := CheckClockRead(p, o, leaf(todIn(s.To, tc.loc)), Span{From: s.From, To: s.To}, true); ok || !strings.Contains(why, "cannot tell the application's zone") {
-					t.Errorf("%s: the zone unknown at replay: %v (%s); want refused, saying so", at, ok, why)
+				// An old file names no zone (models.ClockOffset.AppZone): a
+				// replay that cannot tell the application's refuses it; one
+				// learned naming it reads it there.
+				oldFile := o
+				oldFile.AppZone = ""
+				if ok, why := CheckClockRead(p, oldFile, leaf(todIn(s.To, tc.loc)), Span{From: s.From, To: s.To}, true); ok || !strings.Contains(why, "cannot tell the application's zone") {
+					t.Errorf("%s: an old file, the zone unknown at replay: %v (%s); want refused, saying so", at, ok, why)
+				}
+				if o.AppZone != "" {
+					if ok, why := CheckClockRead(p, o, leaf(todIn(s.To, tc.loc)), Span{From: s.From, To: s.To}, true); !ok {
+						t.Errorf("%s: learned naming %s, the zone unknown at replay: refused (%s); want read in it", at, o.AppZone, why)
+					}
 				}
 			}
 			other := forms["text"]
@@ -1088,8 +1110,14 @@ func TestADateOfNoZoneIsCheckedAtEveryHourWhicheverZoneItIsWrittenIn(t *testing.
 						}
 						if o.Zone == models.ZoneEither {
 							now := time.Date(2026, 11, 3, 12, 10, 0, 0, time.UTC)
-							if ok, why := CheckClockRead(p, o, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy cannot tell the application's zone") {
-								t.Errorf("%s: the application's zone not told at replay: %v %q; want refused, saying so", what, ok, why)
+							// An old file names no zone (models.ClockOffset.AppZone).
+							oldFile := o
+							oldFile.AppZone = ""
+							if ok, why := CheckClockRead(p, oldFile, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy cannot tell the application's zone") {
+								t.Errorf("%s: an old file, the application's zone not told at replay: %v %q; want refused, saying so", what, ok, why)
+							}
+							if ok, why := CheckClockRead(p, o, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); o.AppZone == "" || !ok {
+								t.Errorf("%s: learned naming %q, the application's zone not told at replay: %v %q; want read in it", what, o.AppZone, ok, why)
 							}
 							if !strings.HasPrefix(o.String(), "clock, a wall clock of no zone in UTC or in the application's zone") {
 								t.Errorf("%s: String %q", what, o.String())

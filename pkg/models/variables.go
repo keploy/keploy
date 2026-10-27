@@ -1,9 +1,14 @@
 package models
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	// A replay reads a ClockOffset's AppZone on any machine, one with no
+	// zone files too (ZoneLocation).
+	_ "time/tzdata"
 )
 
 // MockVariables names, by variable, the places of a recorded dependency call
@@ -191,15 +196,17 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // Zone says in which zone a replay reads the value at the place, where the
 // learn step learned a wall clock of no zone there (a text, or a type of its
 // protocol, that names no zone: "2026-10-27 09:00:00", a Postgres
-// timestamp): ZoneUTC in UTC, ZoneApp in the application's own zone, as
-// the replay's tracker knows it (learn.Span.Zone); ZoneEither in either of
+// timestamp): ZoneUTC in UTC, ZoneApp in the application's own zone, the
+// one AppZone names, else as the replay's tracker knows it
+// (learn.Span.Zone); ZoneEither in either of
 // the two, where the recording could not tell them apart at the value's
 // resolution (a date whose day is one in both zones at its call, or an
 // application whose zone is UTC there); "" for a value that names its
 // moment, read as it names it, as a recording learned before Zone was read
 // is. A replay reads a wall clock of no zone only under ZoneUTC, ZoneApp or
 // ZoneEither, the zones the learn step read it in, and refuses one under
-// ZoneApp or ZoneEither where it cannot tell the application's zone, so it
+// ZoneApp or ZoneEither that names no AppZone where it cannot tell the
+// application's zone, so it
 // never checks a value in a zone the learn step did not read it in.
 // ZoneApart is the Meet of two learnings that read the place in zones no
 // one zone holds, which holds nothing (Empty), and so does a Zone this
@@ -223,12 +230,143 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // was, which a replay reads in any layout, as it did then. LayoutApart is
 // the Meet of two learnings that saw the place in different layouts, which
 // holds nothing (Empty).
+//
+// AppZone names the application's zone the learn step read the value in,
+// where what it learned depends on that zone (AppZoneMatters): a wall clock
+// of no zone read in it (ZoneApp, ZoneEither), or a value that names its
+// moment cut coarser than a minute, to an hour or a day, which a zone's
+// offset moves (an hour in UTC+05:30 is no hour in UTC). It is "UTC" or a
+// fixed offset ("+05:30") of a zone with no change of offset ahead, else
+// an IANA name ("Europe/Berlin"), as ZoneNameOf names it (ZoneLocation
+// reads each). A replay reads the application's zone as
+// AppZone, on any machine, never as its own (learn's CheckClockRead): a
+// recording learned on a laptop in IST checks the same cut in IST on a CI
+// machine in UTC, and one learned in UTC checks it in UTC on the laptop.
+// "" in a recording learned before AppZone was, or where keploy could not
+// name the zone (a zone file copied with no name, whose offset changes):
+// a replay reads the application's zone as its tracker knows it, as
+// before. Two learnings of one place in different named zones meet as
+// ZoneApart (Meet), which holds nothing.
 type ClockOffset struct {
-	Min    time.Duration `json:"min" yaml:"min" bson:"min"`
-	Max    time.Duration `json:"max" yaml:"max" bson:"max"`
-	Res    time.Duration `json:"res" yaml:"res" bson:"res"`
-	Zone   string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
-	Layout string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
+	Min     time.Duration `json:"min" yaml:"min" bson:"min"`
+	Max     time.Duration `json:"max" yaml:"max" bson:"max"`
+	Res     time.Duration `json:"res" yaml:"res" bson:"res"`
+	Zone    string        `json:"zone,omitempty" yaml:"zone,omitempty" bson:"zone,omitempty"`
+	Layout  string        `json:"layout,omitempty" yaml:"layout,omitempty" bson:"layout,omitempty"`
+	AppZone string        `json:"app_zone,omitempty" yaml:"app_zone,omitempty" bson:"app_zone,omitempty"`
+}
+
+// AppZoneMatters reports whether what the learn step learned of o depends
+// on the application's zone, so it names that zone in AppZone: a wall clock
+// of no zone read in it (ZoneApp, ZoneEither), or a plain read of a value
+// that names its moment cut coarser than a minute (an hour, a day), whose
+// cut a replay reads in the application's zone beside UTC and the offset it
+// writes (learn's cutZones). A minute or any finer cut is one in every zone
+// (zones' offsets are whole minutes); a wall clock read in UTC (ZoneUTC) is
+// cut in UTC alone.
+func (o ClockOffset) AppZoneMatters() bool {
+	return o.Zone == ZoneApp || o.Zone == ZoneEither || o.Zone == "" && o.Plain() && o.Res > time.Minute
+}
+
+// ZoneLocation is the zone name names (ClockOffset.AppZone): "UTC", a fixed
+// offset ("+05:30", "-03:00") or an IANA name ("Asia/Kolkata"), read from
+// the host's zone files, else from the ones built into keploy (time/tzdata),
+// so a replay reads it on any machine. An error for any other name.
+func ZoneLocation(name string) (*time.Location, error) {
+	if name == "UTC" {
+		return time.UTC, nil
+	}
+	if len(name) == 6 && (name[0] == '+' || name[0] == '-') && name[3] == ':' {
+		h, herr := strconv.Atoi(name[1:3])
+		m, merr := strconv.Atoi(name[4:6])
+		if herr != nil || merr != nil || h > 14 || m > 59 || !isDigits(name[1:3]) || !isDigits(name[4:6]) {
+			return nil, fmt.Errorf("%q is no fixed offset keploy reads", name)
+		}
+		off := h*3600 + m*60
+		if name[0] == '-' {
+			off = -off
+		}
+		return time.FixedZone(name, off), nil
+	}
+	if name == "" || name == "Local" {
+		return nil, fmt.Errorf("%q names no zone", name)
+	}
+	if loc, ok := zoneLocations.Load(name); ok {
+		return loc.(*time.Location), nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, err
+	}
+	zoneLocations.Store(name, loc)
+	return loc, nil
+}
+
+// zoneLocations are the IANA zones ZoneLocation has read, by name: a
+// replay checks a place's AppZone at every call, and reads its file once.
+var zoneLocations sync.Map
+
+// sameZoneAt reports whether a and b write at with one offset and next
+// change it at one instant (time.Time.ZoneBounds; none in either).
+func sameZoneAt(a, b *time.Location, at time.Time) bool {
+	ta, tb := at.In(a), at.In(b)
+	_, oa := ta.Zone()
+	_, ob := tb.Zone()
+	_, ea := ta.ZoneBounds()
+	_, eb := tb.ZoneBounds()
+	return oa == ob && ea.Equal(eb)
+}
+
+// isDigits reports whether s is ASCII digits alone (strconv.Atoi takes a
+// sign, which a fixed offset's hours or minutes never carry).
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// ZoneNameOf is the name ClockOffset.AppZone stores for loc, which
+// ZoneLocation reads back as the same zone from at on: of a zone whose
+// offset never changes after at, "UTC" or its fixed offset ("+05:30" of
+// Asia/Kolkata, its alias Asia/Calcutta, or a zone file copied with no
+// name), so names of one such zone are one name (Etc/UTC and UTC); of one
+// whose offset changes, its IANA name ("Europe/Berlin"); "" where it has
+// none keploy reads back as it (a zone file of summer time copied with no
+// name) or loc is nil.
+func ZoneNameOf(loc *time.Location, at time.Time) string {
+	if loc == nil {
+		return ""
+	}
+	if loc == time.UTC {
+		return "UTC"
+	}
+	t := at.In(loc)
+	if _, end := t.ZoneBounds(); !end.IsZero() {
+		// A name another zone's file holds ("CET" of a rule IANA's CET
+		// does not follow) names loc only where the two agree at at and on
+		// its next change of offset.
+		if n := loc.String(); n != "" && n != "Local" {
+			if l, err := ZoneLocation(n); err == nil && sameZoneAt(l, loc, at) {
+				return n
+			}
+		}
+		return ""
+	}
+	_, off := t.Zone()
+	if off == 0 {
+		return "UTC"
+	}
+	sign := byte('+')
+	if off < 0 {
+		sign, off = '-', -off
+	}
+	if off%60 != 0 {
+		return ""
+	}
+	return fmt.Sprintf("%c%02d:%02d", sign, off/3600, off%3600/60)
 }
 
 // The layouts a ClockOffset's Layout names beside those of a text or a
@@ -559,7 +697,21 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // recording paired many times keeps one answer whatever order its
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	return ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout)}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), AppZone: o.AppZone}
+	switch {
+	case o.AppZone == "":
+		m.AppZone = p.AppZone
+	case p.AppZone != "" && p.AppZone != o.AppZone:
+		// Read in two named zones (recordings learned on two machines): no
+		// one zone holds both readings.
+		m.Zone, m.AppZone = ZoneApart, ""
+	}
+	if !m.AppZoneMatters() {
+		// A meet that reads no zone of the application's (a wall clock
+		// either zone held, met with one in UTC) names none.
+		m.AppZone = ""
+	}
+	return m
 }
 
 // Empty reports whether o is the Meet of learnings of one place that share
@@ -758,7 +910,7 @@ func WallNanos(t time.Time, loc *time.Location) int64 {
 func (o ClockOffset) String() string {
 	switch {
 	case o.Zone == ZoneApart:
-		return "clock reads in no one zone (one place learned as a wall clock of no zone in UTC, in the application's zone, or as a value that names its zone, at different calls)"
+		return "clock reads in no one zone (one place learned as a wall clock of no zone in UTC, in the application's zone, or as a value that names its zone, at different calls, or with the application's zone read as two different zones)"
 	case !o.ZoneKnown():
 		return "clock read in a zone this keploy does not read (" + strconv.Quote(o.Zone) + ")"
 	case o.Layout == LayoutApart:
@@ -766,7 +918,11 @@ func (o ClockOffset) String() string {
 	case !o.LayoutKnown():
 		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
 	}
-	return o.offsetString() + o.zoneString() + o.layoutString()
+	s := o.offsetString() + o.zoneString() + o.layoutString()
+	if o.AppZone != "" {
+		s += ", read with the application's zone as " + o.AppZone
+	}
+	return s
 }
 
 // layoutString is the form o's Layout says a replay's value is written in,
