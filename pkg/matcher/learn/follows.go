@@ -60,8 +60,9 @@ import (
 // or one F gave earlier in the set: givenWhy, excusedGiven): a group of a
 // random id that another test's random id holds by chance is let go where
 // the recording gave that answer strictly before the call, F gave the word
-// at the same fields, the two values do not both hold it, the value that
-// lacks it holds no word of any place the rule reads (that answer or
+// at the same fields, the two values do not both hold it, no word that
+// changed of the value that lacks it, but for a read of the clock, stands
+// in any place the rule reads (that answer or
 // another, or an earlier place of the call's own test: tookElsewhere), and
 // the order holds; keploy still follows no value of another test's, and a
 // value that moved with such a word stays refused. And it holds the other way about: a
@@ -123,8 +124,9 @@ type follows struct {
 	// as noise says of it, where no place was refuted.
 	moved string
 	// chance, where the word rule let a word of the value go at a recording
-	// both runs gave the application that word at before the call, and the
-	// value lacking it holds no word of any place the rule reads
+	// both runs gave the application that word at before the call, and no
+	// word that changed of the value lacking it (but for a read of the
+	// clock) stands in any place the rule reads
 	// (excusedGiven), names the first such word and why it stands there by
 	// chance: what a value learned as noise says of it, where no place was
 	// refuted and none moved.
@@ -776,9 +778,10 @@ func movedFrom(ed, v *valueDrift) string {
 // before the call (recordedGave), and F gave it t at the fields the
 // recording gave it at (givenWords.same: g served unchanged, or its view
 // showing t there). Both runs then gave the application that word there, and
-// one of the two values lacks it (excused), and that value holds no word of
-// any place the word rule reads, g's payload or another, as the recording
-// or F gave it (tookElsewhere): the value was made beside the word without
+// one of the two values lacks it (excused), and no word that changed of
+// that value (but for a read of the clock) stands in any place the word
+// rule reads, g's payload or another, as the recording or F gave it
+// (tookElsewhere): the value was made beside the word without
 // taking it, and an application that copied it would have copied it in
 // both runs. That is what tells a word a
 // value holds by chance (a group of a random id that another test's random
@@ -812,7 +815,7 @@ func (f *follows) excusedGiven(g givenWords, v *valueDrift, i int, t string, at 
 		if !v.recTok[i][t] {
 			lacks = "the recorded value"
 		}
-		f.chance = stands + ", which the recording and record's full round both gave the application at the same fields before the call, and " + lacks + " lacks that word and holds no word of any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance"
+		f.chance = stands + ", which the recording and record's full round both gave the application at the same fields before the call, and " + lacks + " lacks that word, and no word of it that changed, but for a read of the clock, stands in any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance"
 	}
 	f.source(g.mock)
 	if g.set {
