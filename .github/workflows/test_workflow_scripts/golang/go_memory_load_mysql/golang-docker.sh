@@ -228,26 +228,40 @@ recording_counter() {
 }
 
 # check_capture_accounted fails when the recording loses requests without
-# saying so. Each k6 request must be a recorded test or a loss the agent's
-# summary counts: suppressed, not recorded under memory pressure, left out in
-# flight, dropped at capacity, or held at the end. Requests k6 saw fail may
-# have reached no one, so they are allowed for, with 1% of the requests (at
-# least 10) on top. Every pause must also be temporary, the forced one
-# (FORCE_PAUSE) and each one real memory pressure made: a pause costs at most
-# the requests that come during it, which the agent counts as not recorded
-# under pressure, and those in flight at its two edges (each k6 VU has one
-# request in flight), and every connection's capture resumes after it. So
-# whatever the number of pauses N, the recording holds at least
-# reqs - failed - not recorded - N * 2 * VUs - slack tests; a suppressed test
-# does not count towards that. One 0.5 s pause used to stop capture on every
-# pooled MySQL connection for the rest of the run: 1,985 tests of 7,287
-# requests, 1,466 suppressed, 3,836 not counted; and when it did, and the
-# suppressed tests were counted, a run that real memory pressure paused as
-# well passed: 1,497 tests of 6,963 requests, 5,358 suppressed, 3 pauses.
+# saying so, or when a pause did not end. Each k6 request must be a recorded
+# test or a loss the agent's summary counts: suppressed, not recorded under
+# memory pressure, left out in flight, dropped at capacity, or held at the end.
+# Requests k6 saw fail may have reached no one, so they are allowed for, with
+# 1% of the requests (at least 10) on top.
+#
+# Every pause must also be temporary, the forced one (FORCE_PAUSE) and each one
+# real memory pressure made. The agent counts the ingress requests that came
+# during its pauses by the order of events, apart from what capture did with
+# them (requests_during_pauses: the request count read at each pause's start
+# and end). A pause costs those and the requests in flight at its two edges
+# (each k6 VU has one in flight), and no more. So, whatever the number of
+# pauses N:
+# - the requests not recorded under pressure are at most
+#   requests_during_pauses + N * 2 * VUs: more says a pause stayed on for a
+#   connection after it ended, and the agent counted its later requests;
+# - the recording holds at least
+#   reqs - failed - requests_during_pauses - N * 2 * VUs - slack tests (a
+#   suppressed test does not count towards that): fewer says capture did not
+#   come back after a pause, on a connection to the app or to MySQL.
+# The second check can judge only when a recording that captured nothing after
+# its first pause would fall below that floor: when the floor is above the
+# requests that came before the first pause (requests_before_first_pause).
+# When it is not, too few requests came outside the pauses and their edges
+# for the check to tell a pause that ended from one that did not, and the lane
+# fails, saying it could not judge, rather than pass on a bound nothing can
+# miss. One 0.5 s pause used to stop capture on every pooled MySQL connection
+# for the rest of the run: 1,985 tests of 7,287 requests, 1,466 suppressed,
+# 3,836 not counted. A build whose pause stayed on for each keep-alive
+# connection, counting each later request as not recorded, recorded 3,421 tests
+# of 7,051 requests through a forced pause of 30.
 #
 # Only a recorder built from this tree is checked: a released agent predates
-# the count of requests not recorded under pressure, and does not know the
-# forced pause.
+# these counts, and does not know the forced pause.
 check_capture_accounted() {
     section "Checking that the recording accounts for every request"
     if [ "${RECORD_SRC:-build}" != build ]; then
@@ -273,7 +287,8 @@ check_capture_accounted() {
     local rc=0
     local -A n=()
     for name in tcs_sent_to_cli tcs_suppressed_total tcs_not_recorded_under_pressure \
-        tcs_left_out_in_flight tcs_dropped_capacity tcs_held_at_end pressure_ranges_total; do
+        tcs_left_out_in_flight tcs_dropped_capacity tcs_held_at_end pressure_ranges_total \
+        requests_during_pauses requests_before_first_pause; do
         value="$(recording_counter "$line" "$name")"
         if [ -z "$value" ]; then
             echo "FAIL: the agent's summary does not say ${name}; counted as 0 below."
@@ -308,14 +323,36 @@ check_capture_accounted() {
         [ "$vus" -gt "$max_vus" ] && max_vus="$vus"
     done
     max_vus=$((max_vus + LARGE_PAYLOAD_MAX_VUS))
-    local pauses="${n[pressure_ranges_total]}"
-    local floor=$((reqs - failed - n[tcs_not_recorded_under_pressure] - pauses * 2 * max_vus - slack))
-    echo "Memory-guard pauses: ${pauses}, with ${n[tcs_not_recorded_under_pressure]} requests during them and ${max_vus} VUs in flight at each of their edges: the recording must hold at least ${floor} tests."
-    if [ "$tests" -lt "$floor" ]; then
-        echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pauses cost more than the requests during them and at their edges, so capture did not resume after a pause."
+    local pauses="${n[pressure_ranges_total]}" during="${n[requests_during_pauses]}"
+    local before="${n[requests_before_first_pause]}" not_recorded="${n[tcs_not_recorded_under_pressure]}"
+    local edges=$((pauses * 2 * max_vus))
+    echo "Memory-guard pauses: ${pauses}. The agent read ${during} requests during them and ${before} before the first; ${max_vus} VUs are in flight at each of their edges (${edges} for all)."
+    if [ "$not_recorded" -gt $((during + edges)) ]; then
+        echo "FAIL: the agent did not record ${not_recorded} requests under pressure, more than the ${during} that came during its pauses and the ${edges} in flight at their edges: a pause stayed on for some connection after it ended."
         rc=1
     fi
-    [ "$rc" -ne 0 ] || echo "The recording accounts for every request, and capture resumed after every pause."
+    local floor=$((reqs - failed - during - edges - slack))
+    local judged=0
+    if [ "$pauses" -eq 0 ]; then
+        echo "No memory-guard pause in this recording: there is no resumption to judge."
+    elif [ "$floor" -le "$before" ]; then
+        echo "COULD NOT JUDGE: the recording would have to hold ${floor} tests, and the ${before} requests before the first pause alone reach that: too few requests came outside the pauses and their edges to tell a pause that ended from one that did not."
+        rc=1
+    else
+        judged=1
+        echo "The recording must hold at least ${floor} tests (more than the ${before} before the first pause)."
+        if [ "$tests" -lt "$floor" ]; then
+            echo "FAIL: the recording holds ${tests} tests of ${reqs} requests: the pauses cost more than the requests during them and at their edges, so capture did not resume after a pause."
+            rc=1
+        fi
+    fi
+    if [ "$rc" -eq 0 ]; then
+        if [ "$judged" -eq 1 ]; then
+            echo "The recording accounts for every request, and capture resumed after every pause."
+        else
+            echo "The recording accounts for every request."
+        fi
+    fi
     return "$rc"
 }
 
