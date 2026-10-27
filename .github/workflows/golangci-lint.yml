@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  # Optional: allow read access to pull request. Use with `only-new-issues` option.
-  pull-requests: read
 
 # cancel the in-progress workflow when PR is refreshed.
 concurrency:
@@ -35,7 +33,11 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
+      # The whole history: the lint step finds the lines this event changed
+      # with git (golangci-new-from.sh), not with GitHub's diff API.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # No lane pulls from ECR Public, whose anonymous quota is per source IP
       # and GitHub's runners share theirs (the script says how). First, so a
@@ -49,6 +51,20 @@ jobs:
       # script says how). It needs no Go either.
       - name: Check artifact downloads
         run: bash ./.github/workflows/test_workflow_scripts/check-artifact-downloads.sh
+
+      # The flag that limits the lint step to issues on the lines this event
+      # adds or changes, from the checkout's history (the script says why).
+      # It needs no Go, so a checkout it cannot read fails here in seconds.
+      # Its cases first: they fetch a repository of their own over file://.
+      - name: Test finding the lines an event changed
+        run: bash ./.github/workflows/test_workflow_scripts/golangci-new-from.tests.sh
+
+      - name: Find the lines this event changed
+        id: newfrom
+        env:
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash ./.github/workflows/test_workflow_scripts/golangci-new-from.sh
 
       - uses: actions/setup-go@v6
         with:
@@ -104,8 +120,14 @@ jobs:
           #               issues on go1.27.3 (go.mod's go line, the eMudhra
           #               crypto/x509 fix). Same version keploy-ci-golint ships.
           version: v2.14.0
-          only-new-issues: true
-          args: --timeout=5m
+          # Never the action's only-new-issues: it fetches the diff from
+          # GitHub's API, which refuses a PR diff over 20,000 lines (406),
+          # and on that, or on any API error for a push, the action lints the
+          # whole repository instead (over a thousand issues no PR added).
+          # The flag from the step above has golangci-lint diff the checkout
+          # with git: an issue on a line this event adds or changes fails.
+          only-new-issues: false
+          args: --timeout=5m ${{ steps.newfrom.outputs.flag }}
 
       - name: Check gofmt (diff with line numbers)
         run: |

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -10,7 +11,9 @@ import (
 
 // What the proxy learns of a test set's recorded destinations is read from
 // the mocks it is staged with: the MySQL ports it routes to the MySQL parser
-// (deriveMysqlPorts), and which destinations were recorded speaking HTTP/2
+// (deriveMysqlPorts), whether a built-in default MySQL port held another
+// dependency, which a replay then serves on its client's bytes
+// (recordedNotMysql), and which destinations were recorded speaking HTTP/2
 // (replayTargetHasHTTP2Mock, for the ALPN a TLS client is offered while the
 // app starts). Since a set's staging reads only what was recorded before its
 // first test (keploy #4819), a destination whose mocks are all per-test and
@@ -28,9 +31,12 @@ import (
 
 // destinationKey identifies a recorded destination as the proxy's seeded
 // rules read it: a MySQL mock's address (destAddr) with the recorded
-// container it ran in and whether the test command started it, or an HTTP/2
-// mock's scheme and authority, which the h2 preference matches on. "" for a
-// mock of any other kind, or one that names no destination.
+// container it ran in and whether the test command started it (one key for
+// every MySQL mock that names no address, which may be any default port's),
+// an HTTP/2 mock's scheme and authority, which the h2 preference matches on,
+// or, for any other dependency reached at a built-in default MySQL port
+// (3306, 4000), that port, which decides how a replay serves a connection
+// there (mysqlPortRegistry.recordedNotMysql). "" for any other mock.
 func destinationKey(m *models.Mock) string {
 	if m == nil {
 		return ""
@@ -39,7 +45,7 @@ func destinationKey(m *models.Mock) string {
 	case models.MySQL:
 		addr := m.Spec.Metadata["destAddr"]
 		if addr == "" {
-			return ""
+			return string(m.Kind)
 		}
 		key, _ := containerkey.Recorded(m)
 		return strings.Join([]string{
@@ -48,12 +54,22 @@ func destinationKey(m *models.Mock) string {
 			key, m.Spec.Metadata[containerkey.InstanceKey],
 		}, "\x00")
 	case models.HTTP2:
-		if m.Spec.HTTP2Req == nil || m.Spec.HTTP2Req.Authority == "" {
-			return ""
+		if m.Spec.HTTP2Req != nil && m.Spec.HTTP2Req.Authority != "" {
+			return string(m.Kind) + "\x00" + m.Spec.HTTP2Req.Scheme + "://" + m.Spec.HTTP2Req.Authority
 		}
-		return string(m.Kind) + "\x00" + m.Spec.HTTP2Req.Scheme + "://" + m.Spec.HTTP2Req.Authority
+	}
+	if port, ok := defaultPortReached(m); ok {
+		return "port\x00" + strconv.FormatUint(uint64(port), 10)
 	}
 	return ""
+}
+
+// defaultPortReached is the built-in default MySQL port (3306, 4000) a
+// recorded mock of a dependency other than MySQL reached (otherDependencyPort),
+// if it reached one.
+func defaultPortReached(m *models.Mock) (uint32, bool) {
+	port, ok := otherDependencyPort(m)
+	return port, ok && isMysqlPort(port, nil)
 }
 
 // recordedH2 is one destination a recording reached speaking HTTP/2: its
@@ -102,20 +118,31 @@ func (r *recordedHTTP2) has(sniHost string, port uint32) bool {
 // (DiskMocks.LoadDestinations). Each store's seed replaces the previous
 // store's; a set with no on-disk store seeds none (its per-test mocks are all
 // resident, so its staging reaches them). Nothing is derived here: every
-// staging derives the MySQL ports from the seed beside what it stages
+// staging derives the MySQL ports, and what the default ports held, from the
+// seed beside what it stages
 // (seededDestinations), so a session's reset of what was derived (Mock marks
 // the MySQL ports stale) never loses it, whichever comes first. The HTTP/2
 // destinations are read while the app starts (replayTargetHasHTTP2Mock).
 // Satisfies the agent's optional RecordedDestinationsSeeder.
 func (p *Proxy) SeedRecordedDestinations(mocks []*models.Mock) {
-	// Kept is what a staging's derivation reads of each MySQL mock (its kind
-	// and metadata), not the mock, so nothing recorded stays resident.
+	// Kept is what a staging's derivation reads of each mock, not the mock,
+	// so nothing recorded stays resident: a MySQL mock's kind and metadata,
+	// and, of another dependency reached at a built-in default MySQL port,
+	// its kind and the address it reached there (otherDependencyAddr), which
+	// tells a replay that port held something other than MySQL.
 	var seeded []*models.Mock
 	for _, mk := range mocks {
-		if mk == nil || mk.Kind != models.MySQL {
-			continue
+		switch {
+		case mk == nil:
+		case mk.Kind == models.MySQL:
+			seeded = append(seeded, &models.Mock{Kind: mk.Kind, Spec: models.MockSpec{Metadata: mk.Spec.Metadata}})
+		default:
+			if _, ok := defaultPortReached(mk); ok {
+				seeded = append(seeded, &models.Mock{Kind: mk.Kind, Spec: models.MockSpec{
+					Metadata: map[string]string{"destAddr": otherDependencyAddr(mk)},
+				}})
+			}
 		}
-		seeded = append(seeded, &models.Mock{Kind: mk.Kind, Spec: models.MockSpec{Metadata: mk.Spec.Metadata}})
 	}
 	p.seededDests.Store(&seeded)
 	p.recordedH2.seed(mocks)

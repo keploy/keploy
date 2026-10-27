@@ -647,7 +647,7 @@ func TestSendMockFilterParamsCarriesTheTestCasesOpening(t *testing.T) {
 	h := newPartialRunHarness(t, 1, 0)
 	req := &models.TestRequest{Test: "test-1", Parts: []models.TestRequestPart{{Name: "url", Recorded: "/a", Sent: "/a"}}}
 	vars := []models.VariableBinding{{Name: "id", Value: "u_1"}}
-	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if got := h.instr.lastParams; got.TestRequest != req || !reflect.DeepEqual(got.Variables, vars) {
@@ -660,13 +660,13 @@ func TestSendMockFilterParamsCarriesTheTestCasesOpening(t *testing.T) {
 	}
 	h.replayer.requestsUnread.reset()
 	h.replayer.instrumentation = &readsInstr{prInstr: h.instr, reads: true}
-	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, nil, false, recordedSetShape{}, &testOpening{vars: vars, request: req}); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if unread := h.replayer.requestsUnread.set(); unread != nil {
 		t.Fatalf("an agent that read the request: noted %v", unread)
 	}
-	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, false, recordedSetShape{}, nil); err != nil {
+	if err := h.replayer.SendMockFilterParamsToAgent(context.Background(), nil, time.Now().Add(-time.Second), time.Now(), nil, nil, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if got := h.instr.lastParams; got.TestRequest != nil || got.Variables != nil {

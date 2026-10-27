@@ -269,7 +269,6 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.PerConnCap,
 		cfg.TeeChanBuf,
 		cfg.ConsumerStallGrace,
-		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
@@ -278,13 +277,12 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.PerConnCap,
 		cfg.TeeChanBuf,
 		cfg.ConsumerStallGrace,
-		cfg.MemoryGuardCheck,
 		cfg.OnMarkMockIncomplete,
 		cfg.Logger,
 	)
 
 	// Assigned after construction rather than threaded through newTee's
-	// positional signature, which is already at seven arguments.
+	// positional signature, which is already at six arguments.
 	r.teeC2D.onDesync = cfg.OnCaptureDesync
 	r.teeD2C.onDesync = cfg.OnCaptureDesync
 	if cfg.stallClock != nil {

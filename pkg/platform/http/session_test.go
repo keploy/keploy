@@ -129,7 +129,7 @@ func TestCopyMockParamsSharesNothing(t *testing.T) {
 		MockMapping:        []string{"m1"},
 		RecordedWindows:    []models.TestWindow{{}},
 	}
-	c := copyMockParams(params)
+	c, _ := copyMockParams(params)
 	params.TotalConsumedMocks["b"] = models.MockState{}
 	params.MockMapping[0] = "changed"
 	params.RecordedWindows[0].Start = time.Now()
@@ -755,14 +755,14 @@ func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
 		t.Fatalf("set up again with %v, want %s", got, want)
 	}
 	// The copy recorded shares nothing with the call's exact serving.
-	c := copyMockParams(stage)
+	c, _ := copyMockParams(stage)
 	stage.Exact.Pool[0] = "changed"
 	if c.Exact.Pool[0] != "mock-9" {
 		t.Fatalf("the copy changed with the original: %+v", c.Exact)
 	}
 	// Nor with a pool call's calls in flight (models.ExactServing.Ahead).
 	poolCall := models.MockFilterParams{Exact: &models.ExactServing{Ahead: []string{"mock-3"}}}
-	pc := copyMockParams(poolCall)
+	pc, _ := copyMockParams(poolCall)
 	poolCall.Exact.Ahead[0] = "changed"
 	if pc.Exact.Ahead[0] != "mock-3" {
 		t.Fatalf("the copy's calls in flight changed with the original: %+v", pc.Exact)

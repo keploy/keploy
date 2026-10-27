@@ -28,7 +28,9 @@ func TestATeeDropThatLosesBytesIsACaptureLoss(t *testing.T) {
 	}
 	got := p.CaptureLosses()
 	want := models.CaptureLosses{
-		{Kind: models.CaptureLossDropped, Count: 2, What: relay.DropMemoryPressure + " on a connection to 10.0.0.5:5432"},
+		// A memory-guard pause no longer drops a chunk (relay.DropMemoryPressure
+		// is not produced), and what a pause costs is the mock manager's count.
+		{Kind: models.CaptureLossDropped, Count: 1, What: relay.DropPerConnCap + " on a connection to 10.0.0.5:5432"},
 		{Kind: models.CaptureLossParserStall, Count: 1, What: relay.DropConsumerGone + " on a connection to 10.0.0.5:5432"},
 	}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {

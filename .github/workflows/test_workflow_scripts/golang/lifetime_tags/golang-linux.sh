@@ -58,13 +58,54 @@
 #      made with --sync: every test passes. The connection's setup (SET) and
 #      post-orders-1's transaction (START TRANSACTION, COMMIT) are stated
 #      session, so no test is required to make them, and every test that uses
-#      the connection is served them.
+#      the connection is served them. This recording adds a fifth test, GET
+#      /pool: one prepared statement on a pool of eight connections, run on
+#      one connection for three ids in turn, then on all eight at once for
+#      eight ids, then on all eight at once for one id. Each call is answered
+#      with its own recorded answer: the app checks every row it reads and
+#      answers 500, naming the call, for a row of another id or a call that
+#      failed, so a recording served to the wrong call fails the test.
 #  10. No data race in any log.
+#  11. A prepared read the app makes before any test, or between two tests,
+#      is answered with a recording of its own request, and a test's with its
+#      own: recorded with SHOP_SETTINGS_BY_KEY=1, the app reads two settings
+#      at startup (the boot limit, then the boot retries), post-orders-1 the
+#      tax rate, and between post-orders-1 and get-profile-1 the boot retries
+#      again, by one prepared statement (SELECT k, v FROM settings WHERE k =
+#      ?); each read checks that its row is its key's. While recording, the
+#      lane signals the app for the between-tests read once post-orders-1 is
+#      answered and waits for it; replayed, no signal comes, and the app
+#      makes the read as get-profile-1 begins, in that test's window, which
+#      holds no recording of the statement. No test window is open before
+#      the first test. So neither read's own recording is the open test's,
+#      and a replayer that ranks the statement's first recording with other
+#      parameters above it answers the boot limit's read, and the between
+#      read, with another key's row: the app logs each such read and answers
+#      every request 500, and the set fails. Replayed as configured by
+#      default (a strict mock window: the whole set is staged before the
+#      first test, and then each test's window's recordings beside the
+#      startup ones, so the between read's own recording is not staged and
+#      the startup recording of the same read, with the same row, answers
+#      it), with KEPLOY_STRICT_MOCK_WINDOW=0 (every recording is staged at
+#      once, and the between read takes its own), and, recorded again with
+#      --sync, under the proven switch. The app makes the between-tests read before it
+#      checks the reads made so far, so on a replayer that answers a startup
+#      read wrong the between read is still made and judged by its own log
+#      line. Under the proven switch the between-tests read is recorded but
+#      not made again when replayed (SHOP_BETWEEN_ON_SIGNAL_ONLY=1): keploy
+#      test sends get-profile-1 as soon as post-orders-1 is answered, so,
+#      with no wall-clock wait, a replayed read can only be made inside
+#      get-profile-1's window, whose --sync mapping does not hold it, and
+#      exact serving refuses it by design. There the startup reads are
+#      judged, with the between-tests recording a second recording of the
+#      boot retries' read outside every test.
 #
 # Which binary is this build: download-binary's build/keploy or
 # build-no-race/keploy. A published release replaying a recording that states
 # lifetimes may predate them, so steps 3-7 judge its outcome only for this
-# build (steps 1 and 2 hold for every replayer).
+# build (steps 1 and 2 hold for every replayer); step 11 runs for this build's
+# replayer alone, as a release before it answers the startup read with another
+# request's row.
 #
 # Readiness is event-driven: MySQL answering SELECT 1, the auth service's and
 # the app's ports, the test files keploy writes. Ports: 8096 (app), 9096 (auth
@@ -193,10 +234,10 @@ send() {
 TESTS=4
 # record [proven]: keploy record of the four requests; proven records under
 # the proven switch with --sync (KEPLOY_PROVEN=1), which maps each test to the
-# mocks it made as it records.
+# mocks it made as it records, and a fifth request, GET /pool.
 record() {
-    local proven="${1:-}" flags=()
-    [ -n "$proven" ] && flags=(--sync)
+    local proven="${1:-}" flags=() want="$TESTS"
+    [ -n "$proven" ] && flags=(--sync) && want=$((TESTS + 1))
     rm -rf keploy keploy.yml
     start_mysql
     start_upstream
@@ -205,10 +246,12 @@ record() {
     REC_PID=$!
     wait_listen "$APP" "$REC_PID" || { echo "::error::the app did not start under keploy record"; tail -30 record.log; exit 1; }
     send POST /orders 201 '{"qty":2}'
+    [ "${SHOP_SETTINGS_BY_KEY:-}" = 1 ] && between_read
     send GET /profile 200
     send GET '/quote?qty=4' 200
     send GET /orders/count 200
-    wait_tests "$TESTS" "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want $TESTS"
+    [ -n "$proven" ] && send GET /pool 200
+    wait_tests "$want" "$REC_PID" || fail "keploy record wrote $(test_files) test cases, want $want"
     stop_pid "$REC_PID"
     REC_PID=""
     own
@@ -219,6 +262,22 @@ record() {
     [ -n "$proven" ] && return
     for t in post-orders-1 get-profile-1 get-quote-1 get-orders-count-1; do
         [ -s "keploy/test-set-0/tests/$t.yaml" ] || { echo "::error::keploy record wrote no $t"; ls keploy/test-set-0/tests; exit 1; }
+    done
+}
+
+# between_read: step 11's read between two tests, while recording: signal the
+# app (the pid it wrote to SHOP_PIDFILE) and wait for its log line saying the
+# read is done, so the read is recorded between post-orders-1 and the next
+# request.
+between_read() {
+    until [ -s "$SHOP_PIDFILE" ]; do
+        pid_running "$REC_PID" || { fail "the app wrote no pid to $SHOP_PIDFILE"; return; }
+        sleep 0.2
+    done
+    sudo kill -USR1 "$(cat "$SHOP_PIDFILE")" || fail "could not signal the app for the between-tests read"
+    until grep -qE 'between-tests setting boot_retries = |between tests: ' record.log; do
+        pid_running "$REC_PID" || { fail "keploy record exited before the app's between-tests read"; return; }
+        sleep 0.2
     done
 }
 
@@ -398,6 +457,70 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
             fail "the --sync recording holds no $q stated session"
     done
     PROVEN_REPLAY=1 replay proven-all mapped && expect_pass "the whole set under the proven switch" proven-all.log
+    # The pool test, by name: keploy names the fifth request test-5.
+    pool_url=$(yq -N '.spec.req.url' keploy/test-set-0/tests/test-5.yaml 2>/dev/null)
+    case "$pool_url" in
+        */pool) ;;
+        *) fail "the --sync recording's test-5 is '$pool_url', want GET /pool" ;;
+    esac
+    if [ "$(test_status test-5)" != PASSED ]; then
+        fail "under the proven switch GET /pool (test-5) must pass: each call of the pool its own recorded answer (status $(test_status test-5))"
+        # What the app answered: the calls that read another id's row or failed.
+        T=test-5 yq -N '.tests[] | select(.test_case_id == strenv(T)) | .result.body_result[].actual' "$(REPORT)" 2>/dev/null | head -c 4000
+        echo
+    fi
+    refused=$(grep -ac 'failed to update matched mock' proven-all.log)
+    [ "$refused" -eq 0 ] || fail "under the proven switch the MySQL matcher failed $refused command(s) with a consume the store refused (failed to update matched mock)"
+    cd "$WORK" || exit 1
+fi
+
+# 11. A prepared read before any test, the same statement read in a test with
+#     other parameters.
+if [ "$judged" = true ]; then
+    mkdir -p "$WORK/by-key" && cd "$WORK/by-key" || exit 1
+    cp "$WORK/shop" "$WORK/upstream" .
+    export SHOP_SETTINGS_BY_KEY=1 SHOP_PIDFILE="$WORK/by-key/shop.pid"
+    rm -f "$SHOP_PIDFILE"
+    record
+    grep -q 'between-tests setting boot_retries = 5' record.log ||
+        fail "while recording, the app's between-tests read did not read the boot retries"
+    # The recording holds each read once: the startup ones, and
+    # post-orders-1's.
+    for kn in boot_limit:1 boot_retries:2 tax_rate:1; do
+        [ "$(K="${kn%%:*}" yq -N 'select(.kind == "MySQL" and .spec.requests[0].header.packet_type == "COM_STMT_EXECUTE" and
+            .spec.requests[0].message.parameters[0].value == strenv(K)) | .name' keploy/test-set-0/mocks.yaml | grep -c .)" -eq "${kn##*:}" ] ||
+            fail "the recording with settings read by key holds not ${kn##*:} prepared read(s) of ${kn%%:*}"
+    done
+    replay by-key fresh && expect_pass "the whole set, its startup reads prepared" by-key.log
+    if grep -n 'got the row of' by-key.log; then
+        fail "a prepared read was answered with another request's row"
+    fi
+    export KEPLOY_STRICT_MOCK_WINDOW=0
+    replay by-key-lax fresh && expect_pass "the whole set, its startup reads prepared, every recording staged at once" by-key-lax.log
+    unset KEPLOY_STRICT_MOCK_WINDOW
+    if grep -n 'got the row of' by-key-lax.log; then
+        fail "with every recording staged at once, a prepared read was answered with another request's row"
+    fi
+    for l in by-key.log by-key-lax.log; do
+        grep -q 'between-tests setting boot_retries = 5' "$l" || fail "$l: the app's between-tests read did not read the boot retries"
+    done
+    # Under the proven switch, a recording made with --sync.
+    mkdir -p "$WORK/by-key-proven" && cd "$WORK/by-key-proven" || exit 1
+    cp "$WORK/shop" "$WORK/upstream" .
+    SHOP_PIDFILE="$WORK/by-key-proven/shop.pid"
+    export SHOP_BETWEEN_ON_SIGNAL_ONLY=1
+    rm -f "$SHOP_PIDFILE"
+    record proven
+    grep -q 'between-tests setting boot_retries = 5' record.log ||
+        fail "while recording with --sync, the app's between-tests read did not read the boot retries"
+    PROVEN_REPLAY=1 replay by-key-proven mapped && expect_pass "the whole set, its startup reads prepared and a between-tests read recorded, under the proven switch" by-key-proven.log
+    if grep -n 'got the row of' by-key-proven.log; then
+        fail "under the proven switch, a prepared read was answered with another request's row"
+    fi
+    for kv in 'boot_limit = 7' 'boot_retries = 5'; do
+        grep -q "startup setting $kv" by-key-proven.log || fail "by-key-proven.log: the app's startup read did not log $kv"
+    done
+    unset SHOP_SETTINGS_BY_KEY SHOP_PIDFILE SHOP_BETWEEN_ON_SIGNAL_ONLY
     cd "$WORK" || exit 1
 fi
 

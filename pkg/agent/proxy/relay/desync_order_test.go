@@ -20,7 +20,7 @@ import (
 func TestTee_ReportsItsHoleBeforeAnythingElseSeesIt(t *testing.T) {
 	t.Parallel()
 	core, logs := observer.New(zapcore.DebugLevel)
-	tt := newTee(fakeconn.FromClient, 4, 1, testStallGrace, nil, nil, zap.New(core))
+	tt := newTee(fakeconn.FromClient, 4, 1, testStallGrace, nil, zap.New(core))
 	tt.start(make(chan struct{}))
 	t.Cleanup(func() {
 		tt.close()
@@ -66,7 +66,7 @@ func TestTee_WarnsOfAHoleOnlyWhenItCostsTheRecordingSomething(t *testing.T) {
 	t.Parallel()
 	for _, costs := range []bool{true, false} {
 		core, logs := observer.New(zapcore.DebugLevel)
-		tt := newTee(fakeconn.FromClient, 4, 1, testStallGrace, nil, nil, zap.New(core))
+		tt := newTee(fakeconn.FromClient, 4, 1, testStallGrace, nil, zap.New(core))
 		tt.start(make(chan struct{}))
 		reported := 0
 		tt.onDesync = func(string) bool {

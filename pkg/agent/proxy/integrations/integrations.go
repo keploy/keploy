@@ -936,6 +936,20 @@ type TestWindows interface {
 	SameRecordedTestWindow(a, b time.Time) (same, known bool)
 }
 
+// RecordedWindowIndex is an optional TestWindows capability: where a time
+// lies among the set's recorded test windows, by their starts. A matcher
+// tells by it which gap between two recorded tests a recording made outside
+// every test lies in, and which gaps a call made with a test's window open
+// may fall in (the one before that window, or the one after it).
+type RecordedWindowIndex interface {
+	// RecordedWindowIndex is the index, in start order, of the last
+	// recorded test window that starts at or before t, -1 when t precedes
+	// every window (the app's start-up) or is zero. A time inside no window
+	// lies in the gap after that window. known is false when the replay
+	// sent none.
+	RecordedWindowIndex(t time.Time) (index int, known bool)
+}
+
 // VariableScopes is an optional MockMemDb capability, beside VariableStore:
 // the scope a call binds test variables in, by the mock that answers it. Under
 // exact serving, between tests, the next test's calls in flight the pool view

@@ -7,7 +7,6 @@ import (
 	"net"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils/stall"
@@ -190,12 +189,6 @@ type Config struct {
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
 	ForwardBuf int
 
-	// MemoryGuardCheck is polled on every chunk. When it returns
-	// true the tee is dropped with reason "memory_pressure" — the
-	// forward itself is not affected. Nil resolves to
-	// [memoryguard.IsRecordingPaused].
-	MemoryGuardCheck func() bool
-
 	// TLSUpgradeFn performs TLS handshakes in response to
 	// KindUpgradeTLS directives. If nil, a KindUpgradeTLS directive
 	// is acked with OK=false and a wrapped ErrNoTLSUpgrader.
@@ -281,7 +274,7 @@ type Config struct {
 	OnCarried func(dir fakeconn.Direction, at time.Time, teed bool, through int64)
 
 	// OnMarkMockIncomplete is invoked whenever the relay drops a
-	// tee chunk (memoryguard, cap, channel full) or processes a
+	// tee chunk (per-connection cap, desync, pause) or processes a
 	// KindAbortMock directive. The reason string is the same value
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
@@ -463,9 +456,8 @@ type Config struct {
 	//
 	// The default is FALSE, and that is the load-bearing choice.
 	//
-	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
-	// [DropMemoryPressure] — the connection's captured byte stream has a
-	// hole in it. The tee already says so in its own words: it logs "capture
+	// When a tee desyncs — a chunk lost to [DropPerConnCap] — the
+	// connection's captured byte stream has a hole in it. The tee already says so in its own words: it logs "capture
 	// dropped a chunk" at Warn (once per direction) and fires
 	// [Config.OnCaptureDesync] so the owner can suppress the test cases
 	// recorded over the hole. Until now it then kept pushing anyway, and a
@@ -498,7 +490,7 @@ type Config struct {
 	// direction at its hole: once a tee has desynced and delivered every
 	// chunk it queued before the hole, it ends its FakeConn (io.EOF), and
 	// calls EndAtHole first, with the direction and the reason the chunk was
-	// lost ([DropPerConnCap] or [DropMemoryPressure]). The caller wires it to
+	// lost ([DropPerConnCap]). The caller wires it to
 	// supervisor.Session.MarkEndedAtHole, so the parser that reaches the end
 	// learns it is the hole's and not the connection's. The tee then marks
 	// no mock incomplete (OnMarkMockIncomplete) for the lost chunk, nor for
@@ -576,9 +568,6 @@ func (c Config) withDefaults() Config {
 		out.Logger.Error("relay: HoldClientWrites and PreDispatchPause are mutually exclusive; ignoring PreDispatchPause",
 			zap.String("next_step", "a parser should implement WantsClientWriteHold or WantsPreDispatchPause, never both — the hold subsumes pre-dispatch for the client direction"),
 		)
-	}
-	if out.MemoryGuardCheck == nil {
-		out.MemoryGuardCheck = memoryguard.IsRecordingPaused
 	}
 	if out.BumpActivity == nil {
 		out.BumpActivity = func() {}

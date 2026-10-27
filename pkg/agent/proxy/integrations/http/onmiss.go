@@ -16,6 +16,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -122,9 +123,10 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 		return false, err
 	}
 
+	// By its shape (method, host, path, query keys): the URL's query values
+	// are the application's content, and this entry is at Info.
 	h.Logger.Info("on-miss: served an unrecorded call from the real dependency",
-		zap.String("method", request.Method),
-		zap.String("url", request.URL.String()),
+		zap.Any("metadata", utils.GetReqMeta(request)),
 		zap.String("policy", string(opts.OnMiss)))
 
 	// record policy: capture the exchange for the CLI to persist.

@@ -142,6 +142,9 @@ type HTTP2StreamState struct {
 	// Timing
 	startTime time.Time
 	endTime   time.Time
+	// startPaused: recording was paused as the request's first frame was
+	// read (HandleFrameRead).
+	startPaused bool
 
 	// ===== Request (incoming frames) =====
 	reqHeaderFrags       [][]byte
@@ -174,6 +177,10 @@ type HTTP2Stream struct {
 	ID       uint32
 	GRPCReq  *models.GrpcReq
 	GRPCResp *models.GrpcResp
+	// RequestPaused reports that recording was paused as the request's first
+	// frame was read (HandleFrameRead): the order of the read and the pause,
+	// not the request's time, puts the call in the pause.
+	RequestPaused bool
 }
 
 // DefaultStreamManager implements stream management
@@ -203,6 +210,14 @@ func NewStreamManager(logger *zap.Logger) *DefaultStreamManager {
 // isOutgoing=false => incoming (client->server) => REQUEST side
 // isOutgoing=true  => outgoing (server->client) => RESPONSE side
 func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, frameTime time.Time) error {
+	return sm.HandleFrameRead(frame, isOutgoing, frameTime, false)
+}
+
+// HandleFrameRead processes an HTTP/2 frame as HandleFrame does, and notes
+// whether recording was paused (pausedAtRead) as the frame was read: when the
+// frame is its stream's first request frame, the stream it completes says so
+// (HTTP2Stream.RequestPaused).
+func (sm *DefaultStreamManager) HandleFrameRead(frame http2.Frame, isOutgoing bool, frameTime time.Time, pausedAtRead bool) error {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
@@ -234,6 +249,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 	s := sm.streams[streamID]
 	if !isOutgoing && s.startTime.IsZero() {
 		s.startTime = frameTime
+		s.startPaused = pausedAtRead
 	}
 
 	switch f := frame.(type) {
@@ -480,9 +496,10 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 			stream.grpcReq.Timestamp = stream.startTime
 			stream.grpcResp.Timestamp = stream.endTime
 			http2Stream := &HTTP2Stream{
-				ID:       id,
-				GRPCReq:  stream.grpcReq,
-				GRPCResp: stream.grpcResp,
+				ID:            id,
+				GRPCReq:       stream.grpcReq,
+				GRPCResp:      stream.grpcResp,
+				RequestPaused: stream.startPaused,
 			}
 			completed = append(completed, http2Stream)
 		}
