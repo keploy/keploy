@@ -75,6 +75,64 @@ func TestParseFramesFromChanUsesChunkTimestamps(t *testing.T) {
 	assert.Equal(t, responseAt, streams[0].GRPCResp.Timestamp)
 }
 
+// A call is in a pause by the flag the forwarder read with its request's
+// chunk (frameChunk.paused), not by the pause as the parser comes to the
+// chunk: the parser runs up to a channel's worth of chunks behind the
+// forwarder, so a call read before a pause may be parsed during it, and one
+// read during it parsed after. Here call 1's chunk was read during a pause
+// the parser finds over, and call 3's before a pause the parser finds on.
+func TestParseFramesFromChanPutsACallInAPauseByItsChunksReadFlag(t *testing.T) {
+	logger := zap.NewNop()
+	sm := pkg.NewStreamManager(logger)
+	request := func(id uint32) []byte {
+		return append(headersFrameBytes(t, id, []hpack.HeaderField{
+			{Name: ":method", Value: "POST"},
+			{Name: ":scheme", Value: "http"},
+			{Name: ":path", Value: "/svc.Echo/Ping"},
+			{Name: ":authority", Value: "localhost:50051"},
+			{Name: "content-type", Value: "application/grpc"},
+		}, false), dataFrameBytes(t, id, true, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'i', 'n', 'g'}))...)
+	}
+	response := func(id uint32) []byte {
+		return append(append(headersFrameBytes(t, id, []hpack.HeaderField{
+			{Name: ":status", Value: "200"},
+			{Name: "content-type", Value: "application/grpc"},
+		}, false), dataFrameBytes(t, id, false, grpcPayloadBytes([]byte{0x0a, 0x04, 'p', 'o', 'n', 'g'}))...),
+			headersFrameBytes(t, id, []hpack.HeaderField{{Name: "grpc-status", Value: "0"}}, true)...)
+	}
+
+	clientCh := make(chan frameChunk)
+	chunkParsed := make(chan struct{})
+	parserDone := make(chan struct{})
+	go func() {
+		defer close(parserDone)
+		parseFramesFromChan(context.Background(), logger, clientCh, sm, false, func([]func()) { chunkParsed <- struct{}{} })
+	}()
+	// Call 1: read while paused; parsed with the pause over.
+	clientCh <- frameChunk{data: append([]byte(http2.ClientPreface), request(1)...), timestamp: time.Unix(200, 0), paused: true}
+	<-chunkParsed
+	// Call 3: read before the pause; parsed with the pause on.
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	clientCh <- frameChunk{data: request(3), timestamp: time.Unix(201, 0), paused: false}
+	<-chunkParsed
+	restore()
+	close(clientCh)
+	<-parserDone
+
+	destCh := make(chan frameChunk, 1)
+	destCh <- frameChunk{data: append(response(1), response(3)...), timestamp: time.Unix(202, 0)}
+	close(destCh)
+	parseFramesFromChan(context.Background(), logger, destCh, sm, true, func([]func()) {})
+
+	got := map[uint32]bool{}
+	for _, s := range sm.GetCompleteStreams() {
+		got[s.ID] = s.RequestPaused
+	}
+	if want := map[uint32]bool{1: true, 3: false}; len(got) != 2 || got[1] != want[1] || got[3] != want[3] {
+		t.Fatalf("the calls read as in a pause %v, want %v: call 1's request was read during the pause, call 3's before it", got, want)
+	}
+}
+
 // The frame that ends a call's stream (its trailers) is stamped before its
 // client can see it: the bytes before its last byte are written, then it is
 // stamped and handed to the parser, and its last byte goes to the client once

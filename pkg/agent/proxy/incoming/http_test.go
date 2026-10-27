@@ -1032,12 +1032,13 @@ func TestHandleHttp1ZeroCopy_AKeepAliveConnectionIsCapturedAgainAfterAPause(t *t
 }
 
 // In the synchronous loop an exchange whose capture a pause decided against is
-// counted as not recorded, once, whichever of the loop's checks saw the pause:
-// the one as its request is read, or one of those that read a pause that began
-// mid-exchange (before its request is forwarded, after its response's
-// headers, after its response). One that came while recording ran is captured
-// and counts nothing. A pause that began mid-exchange and that a check read
-// without its count was a request lost without a word.
+// counted as not recorded, once, whichever of the exchange's five reads of the
+// pause saw it: the one as its request is read, or one of those that read a
+// pause that began mid-exchange (before its request is forwarded, after its
+// response's headers, the capture buffer's as the response body is captured,
+// and the loop's own after the response). One that came while recording ran
+// is captured and counts nothing. A pause that began mid-exchange and that a
+// check read without its count was a request lost without a word.
 func TestHandleHttp1Connection_SyncCountsAnExchangeAPauseCost(t *testing.T) {
 	// The pause begins at the loop's from-th check of it, and stays: what
 	// the n-th check reads, in the order the exchange reads them; never
@@ -1066,7 +1067,8 @@ func TestHandleHttp1Connection_SyncCountsAnExchangeAPauseCost(t *testing.T) {
 		{what: "a pause as the request is read", from: 1},
 		{what: "a pause that begins before the request is forwarded", from: 2},
 		{what: "a pause that begins after the response's headers", from: 3},
-		{what: "a pause that begins after the response", from: 4},
+		{what: "a pause that begins as the response body is captured", from: 4},
+		{what: "a pause that begins after the response", from: 5},
 		{what: "no pause"},
 	} {
 		t.Run(c.what, func(t *testing.T) {
