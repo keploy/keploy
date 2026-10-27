@@ -308,7 +308,9 @@ func clockedTracker() *learn.Tracker {
 // the read its recording holds, the instant and resolution it says
 // (MockVariable.Clock, learn.ClockReads); one that drifted otherwise is not.
 func TestLearnMatchMarksAClockReadAtItsBind(t *testing.T) {
-	rec := learnAt.Add(-time.Hour).Truncate(time.Second)
+	// A whole second, no whole minute: a writer of seconds whose two values
+	// both fall on a whole minute shows a cut, which the learn step refuses.
+	rec := learnAt.Add(-time.Hour + 17*time.Second)
 	for _, c := range []struct {
 		name  string
 		live  string
