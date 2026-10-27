@@ -100,6 +100,76 @@ func readClockTextWall(s string) (time.Time, time.Duration, bool, bool) {
 	return time.Time{}, 0, false, false
 }
 
+// clockTextLayout is the layout (models.ClockOffset.Layout, one of
+// models.ClockLayoutNames) of s, a text or a number that is one instant
+// whole (readClockTextWall), which names the resolution its form writes
+// but no fraction of a second and no zone; "" where s is no such instant.
+// Its words are the clock layout's (clockLayouts) that reads all of s,
+// refined by what its resolution and form are: an ISO 8601 date, its hour,
+// its time to the minute or to the second (with a space or a "T" before the
+// time), an epoch's unit by its digits, a UUID's version.
+func clockTextLayout(s string) string {
+	if _, _, _, ok := readClockTextWall(s); !ok {
+		return ""
+	}
+	for k, lay := range clockLayouts {
+		if lay.wraps {
+			continue
+		}
+		if loc := lay.re.FindStringIndex(s); loc == nil || loc[0] != 0 || loc[1] != len(s) {
+			continue
+		}
+		switch k {
+		case 0:
+			return "rfc1123"
+		case 1:
+			return isoLayout(s)
+		case 2:
+			return "compact"
+		case 3:
+			return "uuid" + s[14:15]
+		case 4:
+			digits := s
+			if i := strings.IndexByte(s, '.'); i >= 0 {
+				digits = s[:i]
+			}
+			switch len(digits) {
+			case 10:
+				return "epoch-s"
+			case 13:
+				return "epoch-ms"
+			case 16:
+				return "epoch-us"
+			case 19:
+				return "epoch-ns"
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// isoLayout is clockTextLayout of s, an ISO 8601 text clockLayouts reads
+// whole: its date (the first ten bytes), and after a "T" or a space and a
+// digit, its hour, minute or second; whatever follows (a fraction, a zone)
+// is no part of it.
+func isoLayout(s string) string {
+	if len(s) < 13 || (s[10] != 'T' && s[10] != ' ') || s[11] < '0' || s[11] > '9' {
+		return "iso-date"
+	}
+	space := ""
+	if s[10] == ' ' {
+		space = "-space"
+	}
+	switch {
+	case len(s) < 14 || s[13] != ':':
+		return "iso-hour"
+	case len(s) < 17 || s[16] != ':':
+		return "iso-minute" + space
+	}
+	return "iso-second" + space
+}
+
 // wallZone is the zone a replay reads a wall clock of no zone in
 // (models.ClockOffset.Zone) that the learn step learns as a plain read of
 // the application's clock, rt and lt its readings in UTC as recorded and as
@@ -192,7 +262,9 @@ func (dc *DriftCache) textReadZone(rec, live string, w *Window, call time.Time) 
 // and seen in record's full round as live, whose every changed word the
 // learn step read as a read of the clock: a plain read at the coarsest of
 // the two values' resolutions and the granularity they share, where each is
-// one instant whole (readClockText); nil where either is not.
+// one instant whole (readClockText), written in the layout both are
+// (clockTextLayout), or in models.LayoutApart where the two differ, which
+// the learn step refuses (textLayoutChangedWhy); nil where either is not.
 func textClockRead(rec, live string) *models.ClockOffset {
 	rt, rres, ok := readClockText(rec)
 	if !ok {
@@ -202,7 +274,26 @@ func textClockRead(rec, live string) *models.ClockOffset {
 	if !ok {
 		return nil
 	}
-	return &models.ClockOffset{Res: max(rres, lres, sharedGrain(rt, lt))}
+	return &models.ClockOffset{Res: max(rres, lres, sharedGrain(rt, lt)), Layout: models.ClockOffset{Layout: clockTextLayout(rec)}.MeetLayout(clockTextLayout(live))}
+}
+
+// textLayoutChangedWhy is why the learn step refuses a text or a number
+// recorded as rec and seen in record's full round as live, each one instant
+// whole, written in two layouts (clockTextLayout), read after "<field>
+// changed, and ": a replay checks a read of the clock in the layout its
+// learn step saw it in, and one that saw two cannot tell which.
+func textLayoutChangedWhy(rec, live string) string {
+	return "it is a read of the application's clock written as " + models.LayoutName(clockTextLayout(rec)) + " as recorded and as " + models.LayoutName(clockTextLayout(live)) + " in record's full round: a replay checks such a read in the form its learn step saw it written in, and this one saw two, so keploy refuses it rather than pass either form unchecked. If the field is a time the application reads from its own clock, declare it noise in keploy.yml, and keploy stops comparing it"
+}
+
+// leafLayout is the layout l, a leaf of a replay's call, is written in
+// (models.ClockOffset.Layout): models.LayoutTyped for an instant its
+// protocol types, clockTextLayout of a text or a number.
+func leafLayout(l Leaf) string {
+	if l.Type == Instant {
+		return models.LayoutTyped
+	}
+	return clockTextLayout(l.Value)
 }
 
 // clockReadOf reads l, a leaf of a replay's call, as the instant a clock
@@ -240,6 +331,9 @@ func clockReadIn(o models.ClockOffset, live Leaf, zone *time.Location) ([]time.T
 	at, res, wall, typed, ok := clockReadOf(live)
 	if !ok || o.Zone == "" && wall && typed {
 		return nil, 0, ", and the value this call carries is no instant keploy reads: it changed"
+	}
+	if lay := leafLayout(live); o.Layout != "" && lay != o.Layout {
+		return nil, 0, ", and the value this call carries is written as " + models.LayoutName(lay) + ", in another form than the learn step saw: it changed"
 	}
 	switch o.Zone {
 	case models.ZoneUTC, models.ZoneApp, models.ZoneEither:
