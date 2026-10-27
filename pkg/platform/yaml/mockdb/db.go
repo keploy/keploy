@@ -146,12 +146,15 @@ type MockYaml struct {
 	gobQueued, gobEncoded atomic.Uint64
 	// gobPathSeen is gobFilePath, for a Close that cannot take gobMu.
 	gobPathSeen atomic.Value
+	// gobClock is the clock Close measures the writer's stall on: nil, the
+	// process's own (stall.Process); tests drive their own.
+	gobClock stall.Clock
 }
 
-// gobStallAfter is how long the gob writer may go without progress
-// (MockYaml.gobProgress) before Close stops waiting for it and says what it
-// had not written. A var so tests need not wait it out.
-var gobStallAfter = 30 * time.Second
+// gobStallAfter is how long, in time the process could run, the gob writer
+// may go without progress (MockYaml.gobProgress) before Close stops waiting
+// for it and says what it had not written.
+const gobStallAfter = 30 * time.Second
 
 // progressWriter is the gob file as the writer's buffer writes to it: each
 // write is handed on in pieces of at most progressChunk, and the bytes the
@@ -1339,7 +1342,7 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 // (gobProgress) and stop is not closed, to take lock (a send; nil: none) or
 // for done to close (nil: none). It reports whether it got what it waited for.
 func (ys *MockYaml) whileWriting(lock chan struct{}, done, stop <-chan struct{}) bool {
-	m := stall.NewMeter(nil, gobStallAfter)
+	m := stall.NewMeter(ys.gobClock, gobStallAfter)
 	defer m.Stop()
 	last := ys.gobProgress.Load()
 	for {
