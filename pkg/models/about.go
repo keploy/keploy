@@ -91,6 +91,12 @@ type About struct {
 	// Other is the keys of the block this keploy does not know, as written:
 	// a rewrite keeps them (a newer keploy's keys survive an older one).
 	Other UnknownKeys `json:"-" yaml:",inline" bson:"other,omitempty"`
+	// Malformed is the block as written when it is not of this shape (a
+	// text, a list, or a key of the wrong kind, such as by: [hand]): the
+	// file still loads, a rewrite writes the block back as it was, the
+	// learn step reads it as a person's (AboutHand), and keploy mock check
+	// can report it. Every other field is then empty.
+	Malformed *UnknownValue `json:"-" yaml:"-" bson:"malformed,omitempty"`
 }
 
 // AboutSeen is what each round saw at a decision's place: the recording
@@ -109,6 +115,10 @@ func (a About) Clone() About {
 		a.Seen = &s
 	}
 	a.Other = maps.Clone(a.Other)
+	if a.Malformed != nil {
+		m := *a.Malformed
+		a.Malformed = &m
+	}
 	return a
 }
 
@@ -166,21 +176,59 @@ func CloneUnknowns(m map[string]UnknownKeys) map[string]UnknownKeys {
 
 type aboutJSON About
 
-// MarshalJSON writes a with the keys it does not know (Other) beside its own.
+// MarshalJSON writes a with the keys it does not know (Other) beside its own,
+// or, for a Malformed block, the block as written.
 func (a About) MarshalJSON() ([]byte, error) {
+	if a.Malformed != nil {
+		return a.Malformed.MarshalJSON()
+	}
 	return MarshalJSONWithOther(aboutJSON(a), a.Other)
 }
 
-// UnmarshalJSON reads a, keeping the keys it does not know in Other.
+// UnmarshalJSON reads a, keeping the keys it does not know in Other. A
+// block not of the about shape never fails the read: it is kept as written
+// (Malformed).
 func (a *About) UnmarshalJSON(data []byte) error {
 	var v aboutJSON
 	other, err := UnmarshalJSONWithOther(data, &v)
 	if err != nil {
-		return err
+		var u UnknownValue
+		if uerr := u.UnmarshalJSON(data); uerr != nil {
+			return uerr // not JSON at all: the document is broken, not the block
+		}
+		*a = About{Malformed: &u}
+		return nil
 	}
 	v.Other = other
 	*a = About(v)
 	return nil
+}
+
+type aboutYAML About
+
+// UnmarshalYAML reads a, keeping the keys it does not know in Other. A
+// block not of the about shape never fails the read: it is kept as written
+// (Malformed).
+func (a *About) UnmarshalYAML(n *yaml.Node) error {
+	var v aboutYAML
+	if n.Decode(&v) != nil {
+		var u UnknownValue
+		if err := u.UnmarshalYAML(n); err != nil {
+			return err
+		}
+		*a = About{Malformed: &u}
+		return nil
+	}
+	*a = About(v)
+	return nil
+}
+
+// MarshalYAML writes a, or, for a Malformed block, the block as written.
+func (a About) MarshalYAML() (any, error) {
+	if a.Malformed != nil {
+		return a.Malformed.node()
+	}
+	return aboutYAML(a), nil
 }
 
 type aboutSeenJSON AboutSeen
@@ -306,7 +354,7 @@ func jsonable(v any) any {
 // MarshalJSONWithOther is the JSON of v, a struct whose type has no
 // MarshalJSON (a conversion of the type that has one), with the keys of
 // other beside its fields. A key of other that names a field of v is not
-// written: the field is.
+// written when the field is (one left out as empty is not).
 func MarshalJSONWithOther(v any, other UnknownKeys) ([]byte, error) {
 	b, err := json.Marshal(v)
 	if err != nil || len(other) == 0 {
@@ -317,8 +365,12 @@ func MarshalJSONWithOther(v any, other UnknownKeys) ([]byte, error) {
 		return nil, err
 	}
 	known := jsonKeys(reflect.TypeOf(v))
+	written := make(map[string]bool, len(m))
+	for k := range m {
+		written[strings.ToLower(k)] = true
+	}
 	for k, u := range other {
-		if known[strings.ToLower(k)] {
+		if known[strings.ToLower(k)] && written[strings.ToLower(k)] {
 			continue
 		}
 		raw, err := u.MarshalJSON()

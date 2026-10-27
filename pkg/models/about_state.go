@@ -59,7 +59,7 @@ func readAbout(a *About, sum func(run string) string) AboutState {
 	switch {
 	case a == nil:
 		return AboutUnknown
-	case a.By != AboutByLearned:
+	case a.By != AboutByLearned: // a Malformed block has no by
 		return AboutHand
 	case a.Sum != "" && a.Sum == sum(a.Run):
 		return AboutLearned
@@ -73,6 +73,12 @@ func readAbout(a *About, sum func(run string) string) AboutState {
 func NoiseAboutState(spec *MockSpec, path string) AboutState {
 	a, ok := spec.NoiseAbout[path]
 	if !ok {
+		if _, asWritten := spec.NoiseOther[AboutKey]; asWritten {
+			// The noise.about block is not of its shape, kept as
+			// written (yaml.DocNoise): it may name any path, so every
+			// place reads as a person's.
+			return AboutHand
+		}
 		return AboutUnknown
 	}
 	return readAbout(&a, func(run string) string { return NoiseSum(path, run) })

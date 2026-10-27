@@ -141,9 +141,10 @@ func MergeLearned(mock *models.Mock, st models.MockState, binds models.MockVaria
 			if _, ok := mock.Spec.ReqBodyNoise[k]; ok {
 				continue
 			}
-			if s := models.NoiseAboutState(&mock.Spec, k); s == models.AboutHand {
-				// A person's about at a path they took out of the noise:
-				// the place stays compared.
+			if s := models.NoiseAboutState(&mock.Spec, k); s.Hand() {
+				// A person's about at a path they took out of the noise
+				// (by hand, or keploy's and edited since): the place
+				// stays compared.
 				blocked = append(blocked, notApplied(noiseAdded(k), s))
 				delete(noise, k)
 				continue
@@ -313,8 +314,6 @@ func unionSorted(a, b []string) []string {
 	return out
 }
 
-// variableAdded says what next declares of variable name that was not
-// declared before (was).
 // noiseAdded is how added (MergeLearned) names noise learned at path.
 func noiseAdded(path string) string { return path + " (noise)" }
 
@@ -357,6 +356,8 @@ func AddedAbouts(mock *models.Mock) map[string]models.About {
 	return out
 }
 
+// variableAdded says what next declares of variable name that was not
+// declared before (was).
 func variableAdded(name string, was, next models.MockVariable) []string {
 	var out []string
 	if next.Bind != "" && next.Bind != was.Bind {

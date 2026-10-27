@@ -284,11 +284,75 @@ func (n *DocNoise) UnmarshalYAML(value *yamlLib.Node) error {
 	// Alias type to avoid recursing back into this method.
 	type rawDocNoise DocNoise
 	var raw rawDocNoise
+	value, about := takeMalformedAbout(value)
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
 	*n = DocNoise(raw)
+	if about != nil {
+		n.keepAbout(*about)
+	}
 	return nil
+}
+
+// takeMalformedAbout is the noise mapping n without its about entry when
+// that entry is not a mapping of paths (a text or a list a person wrote),
+// and the entry's value as written; n itself and nil otherwise. Such a
+// block never fails the file (DocNoise.keepAbout).
+func takeMalformedAbout(n *yamlLib.Node) (*yamlLib.Node, *models.UnknownValue) {
+	if n.Kind != yamlLib.MappingNode {
+		return n, nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := n.Content[i], n.Content[i+1]
+		if k.Value != models.AboutKey || v.Kind == yamlLib.MappingNode || v.ShortTag() == "!!null" {
+			continue
+		}
+		var u models.UnknownValue
+		if err := u.UnmarshalYAML(v); err != nil {
+			return n, nil // left to the decode, which says what is wrong
+		}
+		rest := *n
+		rest.Content = append(append([]*yamlLib.Node(nil), n.Content[:i]...), n.Content[i+2:]...)
+		return &rest, &u
+	}
+	return n, nil
+}
+
+// keepAbout keeps about, a noise.about block not of its shape, as written:
+// in Other under the about key, so a rewrite writes it back (MarshalYAML,
+// MarshalJSON) and the learn step reads every place of the block as a
+// person's (models.NoiseAboutState), adding no about of its own beside it.
+func (n *DocNoise) keepAbout(about models.UnknownValue) {
+	if n.Other == nil {
+		n.Other = models.UnknownKeys{}
+	}
+	n.Other[models.AboutKey] = about
+}
+
+// MarshalYAML writes n; a noise.about block kept as written (keepAbout)
+// is written back in its place, and wins over any about entry beside it.
+func (n DocNoise) MarshalYAML() (any, error) {
+	type rawDocNoise DocNoise
+	about, ok := n.Other[models.AboutKey]
+	if !ok {
+		return rawDocNoise(n), nil
+	}
+	rest := n
+	rest.About = nil
+	rest.Other = maps.Clone(n.Other)
+	delete(rest.Other, models.AboutKey)
+	var node yamlLib.Node
+	if err := node.Encode(rawDocNoise(rest)); err != nil {
+		return nil, err
+	}
+	v, err := about.MarshalYAML()
+	if err != nil {
+		return nil, err
+	}
+	key := &yamlLib.Node{Kind: yamlLib.ScalarNode, Tag: "!!str", Value: models.AboutKey}
+	node.Content = append(node.Content, key, v.(*yamlLib.Node))
+	return &node, nil
 }
 
 // UnmarshalJSON mirrors UnmarshalYAML: it accepts the new object shape and the
@@ -308,19 +372,53 @@ func (n *DocNoise) UnmarshalJSON(data []byte) error {
 	}
 	type rawDocNoise DocNoise
 	var raw rawDocNoise
+	trimmed, about, err := takeMalformedAboutJSON(trimmed)
+	if err != nil {
+		return err
+	}
 	other, err := models.UnmarshalJSONWithOther(trimmed, &raw)
 	if err != nil {
 		return err
 	}
 	raw.Other = other
 	*n = DocNoise(raw)
+	if about != nil {
+		n.keepAbout(*about)
+	}
 	return nil
+}
+
+// takeMalformedAboutJSON is takeMalformedAbout for a JSON noise object.
+func takeMalformedAboutJSON(data []byte) ([]byte, *models.UnknownValue, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return data, nil, nil // left to the decode, which says what is wrong
+	}
+	raw, ok := m[models.AboutKey]
+	if t := bytes.TrimSpace(raw); !ok || len(t) == 0 || t[0] == '{' || string(t) == "null" {
+		return data, nil, nil
+	}
+	var u models.UnknownValue
+	if err := u.UnmarshalJSON(raw); err != nil {
+		return nil, nil, err
+	}
+	delete(m, models.AboutKey)
+	rest, err := json.Marshal(m)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rest, &u, nil
 }
 
 type docNoiseJSON DocNoise
 
-// MarshalJSON writes n with the keys it does not know (Other) beside its own.
+// MarshalJSON writes n with the keys it does not know (Other) beside its own;
+// a noise.about block kept as written (keepAbout) is written back in its
+// place, and wins over any about entry beside it.
 func (n DocNoise) MarshalJSON() ([]byte, error) {
+	if _, ok := n.Other[models.AboutKey]; ok {
+		n.About = nil
+	}
 	return models.MarshalJSONWithOther(docNoiseJSON(n), n.Other)
 }
 

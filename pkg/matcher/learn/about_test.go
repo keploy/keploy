@@ -346,3 +346,33 @@ func TestEachLearnedLineFindsTheAboutAtItsPlace(t *testing.T) {
 		t.Fatalf("an orphan about or an entry of unknown origin named a line: %v", got)
 	}
 }
+
+// An orphan noise about a person edited after keploy wrote it (by: learned,
+// its path taken out of noise.req, its sum no longer matching) holds as a
+// person's: the place stays compared and the learned noise is blocked; one
+// keploy wrote and nobody touched does not hold.
+func TestAnEditedOrphanNoiseAboutKeepsItsPlaceCompared(t *testing.T) {
+	t.Setenv("KEPLOY_PROVEN", "1")
+	kept := models.About{Run: testStamp.Run}.Stamped(models.AboutKindNoise, "body.id", false, func(run string) string { return models.NoiseSum("body.id", run) })
+	edited := kept.Clone()
+	edited.Why = "our clock skew, not the app's"
+	edited.Sum = ""
+	for _, c := range []struct {
+		name  string
+		about models.About
+		held  bool
+	}{{"edited", edited, true}, {"keploy's own", kept, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			mock := &models.Mock{Name: "mock-1", Spec: models.MockSpec{NoiseAbout: map[string]models.About{"body.id": c.about}}}
+			st := map[string]models.MockState{"mock-1": {Name: "mock-1", ReqBodyNoise: map[string][]string{"body.id": nil}}}
+			added, blocked := MergeLearned(mock, StampStates(st, testStamp)["mock-1"], nil)
+			_, noise := mock.Spec.ReqBodyNoise["body.id"]
+			if held := len(blocked) == 1 && len(added) == 0 && !noise; held != c.held || !c.held && (!noise || len(added) != 1) {
+				t.Fatalf("added %q, blocked %q, noise %v; want held=%v", added, blocked, mock.Spec.ReqBodyNoise, c.held)
+			}
+			if c.held && mock.Spec.NoiseAbout["body.id"].Why != edited.Why {
+				t.Fatalf("the person's about was re-stamped: %+v", mock.Spec.NoiseAbout["body.id"])
+			}
+		})
+	}
+}
