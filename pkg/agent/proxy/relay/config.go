@@ -279,6 +279,16 @@ type Config struct {
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
 
+	// OnTeeDrop, when set, is what the tees call for a chunk they drop in
+	// place of OnMarkMockIncomplete, which still takes every other mark (a
+	// failed or short forward write, the client hold's cap, a KindAbortMock
+	// directive). A dropped chunk was stamped with its SeqNo before the push,
+	// so it is a hole in the stream it was meant for (fakeconn.ErrCaptureHole),
+	// where a parser that reads holes in place learns of it; the caller can
+	// leave such a parser unmarked for it and still count the loss. Nil: the
+	// tees call OnMarkMockIncomplete, as before.
+	OnTeeDrop func(reason string)
+
 	// OnCaptureDesync is invoked at most once per direction, the first time
 	// a chunk is dropped on that tee. It returns whether the hole costs the
 	// owner's recording anything, and the tee warns of the hole only then. An

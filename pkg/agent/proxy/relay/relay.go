@@ -264,12 +264,18 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		r.holdClient.Store(true)
 	}
 
+	// A chunk a tee drops goes to OnTeeDrop when it is set (see
+	// [Config.OnTeeDrop]).
+	teeDrop := cfg.OnMarkMockIncomplete
+	if cfg.OnTeeDrop != nil {
+		teeDrop = cfg.OnTeeDrop
+	}
 	r.teeC2D = newTee(
 		fakeconn.FromClient,
 		cfg.PerConnCap,
 		cfg.TeeChanBuf,
 		cfg.ConsumerStallGrace,
-		cfg.OnMarkMockIncomplete,
+		teeDrop,
 		cfg.Logger,
 	)
 	r.teeD2C = newTee(
@@ -277,7 +283,7 @@ func New(cfg Config, src, dst net.Conn) *Relay {
 		cfg.PerConnCap,
 		cfg.TeeChanBuf,
 		cfg.ConsumerStallGrace,
-		cfg.OnMarkMockIncomplete,
+		teeDrop,
 		cfg.Logger,
 	)
 

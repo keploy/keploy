@@ -251,8 +251,12 @@ func (p *Proxy) recordViaSupervisor(
 		// returned, it also says which chunks it had read (parserReads).
 		OnCarried:            reads.carried,
 		OnMarkMockIncomplete: p.teeDropped(svSess.MarkMockIncomplete, func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
-		OnClientChunkTeed:    sv.MarkPendingWork,
-		RealCertHook:         realCertHook,
+		// A chunk a tee drops is a hole a parser that reads holes in place
+		// learns of from its stream: it is not marked for one, and the loss is
+		// still counted. See [teeDropMark].
+		OnTeeDrop:         p.teeDropped(teeDropMark(svSess.MarkMockIncomplete, parser), func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
+		OnClientChunkTeed: sv.MarkPendingWork,
+		RealCertHook:      realCertHook,
 		// A hole in this connection's capture: every test case recorded while
 		// it carries traffic from here on is left out rather than shipped
 		// mock-less (replay would report match_phase=no_mocks). A parser that
@@ -865,6 +869,20 @@ func parserClientBrakes(parser integrations.Integrations, logger *zap.Logger, pa
 		preDispatchPause = false
 	}
 	return holdClientWrites, preDispatchPause
+}
+
+// teeDropMark is how a chunk a tee drops marks the session's mock incomplete
+// for parser: with mark, or not at all for a parser that reads each capture
+// hole in place (integrations.CaptureHoleReader). The tees stamp a chunk's
+// SeqNo before they push it, so one dropped is a hole its stream reports where
+// it is, and that parser leaves out what the hole cut itself. A mark would
+// void whichever mock it emits next, one it captured whole: from before the
+// hole when the parser runs behind its capture, else the first one after it.
+func teeDropMark(mark func(reason string), parser integrations.Integrations) func(reason string) {
+	if hr, ok := parser.(integrations.CaptureHoleReader); ok && hr.ReadsCaptureHoles() {
+		return nil
+	}
+	return mark
 }
 
 func parserCanResyncAfterGap(parser integrations.Integrations) bool {

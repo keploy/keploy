@@ -170,6 +170,21 @@ type GapResyncCapable interface {
 	CanResyncAfterGap() bool
 }
 
+// CaptureHoleReader is implemented by a parser whose streams report each
+// capture hole where it is (FakeConn.ReportHoles, fakeconn.ErrCaptureHole):
+// it leaves out what a hole cut itself. The relay then does not mark the
+// session's mock incomplete for a chunk a tee dropped (relay.Config.OnTeeDrop):
+// the dropped chunk is a hole its stream reports, and a mark would void
+// whichever mock the parser emits next, one it captured whole. The loss is
+// still counted. It is consulted once per connection, before the relay
+// starts. Absent the capability the answer is false, and a dropped chunk
+// marks the session as before.
+type CaptureHoleReader interface {
+	// ReadsCaptureHoles reports whether this parser's streams report each
+	// capture hole in place (see CaptureHoleReader).
+	ReadsCaptureHoles() bool
+}
+
 // EndAtHoleCapable is the optional capability interface of a parser that
 // cannot re-align after a hole (GapResyncCapable not implemented, or answered
 // no) and reads each direction of its connection to that direction's own end.

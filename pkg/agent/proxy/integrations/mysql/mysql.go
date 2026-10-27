@@ -279,3 +279,9 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 // (recorder.handleCommandsV2): one hole costs the exchanges it cut, not the
 // rest of a pooled connection's recording.
 func (m *MySQL) CanResyncAfterGap() bool { return true }
+
+// ReadsCaptureHoles says MySQL's streams report each capture hole in place
+// (integrations.CaptureHoleReader): its recorder leaves out what a hole cut,
+// so a chunk the relay drops does not mark the session, which would void the
+// next mock it emits, one it captured whole.
+func (m *MySQL) ReadsCaptureHoles() bool { return true }
