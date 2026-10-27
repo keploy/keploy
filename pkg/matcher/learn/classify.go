@@ -3048,14 +3048,17 @@ var commaFraction = regexp.MustCompile(`^,(?:\d{3}){1,3}(?:[ Z+-]|$)`)
 // form). The same value whole is a whole repeated value, followed (a
 // refusal, where it cannot be bound); "1760436041,42", the next column of a
 // row, is still the second whole.
+//
+// The text's clock reads are read (clockSpans) only once v stands in it as a
+// token, and once: the learn step asks this of every payload served earlier
+// in the set, for each changed clock read (appearedIn), and a payload that
+// does not hold v has no read to tell apart.
 func containsWholeClock(text, v string) bool {
 	if v == "" {
 		return false
 	}
 	var spans [][]int
-	for _, lay := range clockLayouts {
-		spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
-	}
+	read := false
 	for i := 0; i <= len(text)-len(v); {
 		j := strings.Index(text[i:], v)
 		if j < 0 {
@@ -3063,6 +3066,9 @@ func containsWholeClock(text, v string) bool {
 		}
 		at := i + j
 		if tokenAt(text, v, at) {
+			if !read {
+				spans, read = clockSpans(text), true
+			}
 			longer := false
 			for _, sp := range spans {
 				if sp[0] <= at && at+len(v) <= sp[1] && sp[1]-sp[0] > len(v) {
@@ -3103,6 +3109,16 @@ func escapeClock(s string, set map[string]bool) {
 		}
 		i += len(w)
 	}
+}
+
+// clockSpans are the spans of text each clock layout matches, layout by
+// layout (containsWholeClock). A variable so a row can count the texts read.
+var clockSpans = func(text string) [][]int {
+	var spans [][]int
+	for _, lay := range clockLayouts {
+		spans = append(spans, lay.re.FindAllStringIndex(text, -1)...)
+	}
+	return spans
 }
 
 // b64Holds reports whether the text d's recorded encoded runs decode to
