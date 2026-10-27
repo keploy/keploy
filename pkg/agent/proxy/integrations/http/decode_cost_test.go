@@ -120,8 +120,13 @@ func TestRequestNoiseForIsTheNoiseOfItsOptions(t *testing.T) {
 }
 
 // The calls of one options value build their request noise once and allocate
-// nothing for it.
+// nothing for it. The switch is pinned, as the agent pins it from its flag:
+// unpinned, every call reads KEPLOY_PROVEN, and on Windows that read allocates
+// (syscall.Getenv converts the key to UTF-16 and makes a buffer), so the row
+// would count the test process's env read and not the memo.
 func TestRequestNoiseForBuildsOncePerOptionsValue(t *testing.T) {
+	provenswitch.Pin(false)
+	t.Cleanup(provenswitch.Unpin)
 	nop := zap.NewNop()
 	opts := requestNoiseCases()["every bucket"]
 	lastRequestNoise.Store(nil)
@@ -197,9 +202,12 @@ func TestServedCallsBuildTheirRequestNoiseOncePerOptionsValue(t *testing.T) {
 // answer of size bytes, over one kept-alive connection with debug off, and
 // returns what one call allocated: how many times (testing.AllocsPerRun) and
 // how many bytes. The app's side reads the answer into a reused buffer, so what
-// is counted is the serving.
+// is counted is the serving. The switch is pinned off, as the agent pins it
+// from its flag, so the count is the serving's and not an env read's per call.
 func servedCallCost(t *testing.T, size int) (allocs float64, bytesPerCall uint64) {
 	t.Helper()
+	provenswitch.Pin(false)
+	t.Cleanup(provenswitch.Unpin)
 	body := strings.Repeat("a", size)
 	req := "POST /u HTTP/1.1\r\nHost: api.example\r\nContent-Type: text/plain\r\nContent-Length: " + strconv.Itoa(size) + "\r\n\r\n" + body
 	// One header: a served answer's headers come in its map's order.
