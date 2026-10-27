@@ -2,6 +2,7 @@ package http
 
 import (
 	"fmt"
+	"net/url"
 	"reflect"
 	"runtime"
 	"sync"
@@ -29,12 +30,31 @@ var parsedRecordings sync.Map // uintptr (the mock's address) -> *parsedRecordin
 // the recording (weakly), its recorded request, by identity (a copy or a
 // re-decode of the mock gives it a new one; nothing changes one in place),
 // and the container keyer's tally (its destination reads which recorded
-// keys are ambiguous).
+// keys are ambiguous). strict is its URL as the strict comparison reads it
+// (recordedURL), which parses a path-only URL as a request line, unlike the
+// learn step's parts.
 type parsedRecording struct {
-	mock  weak.Pointer[models.Mock]
-	req   *models.HTTPReq
-	gen   uint64
-	parts httpParts
+	mock   weak.Pointer[models.Mock]
+	req    *models.HTTPReq
+	gen    uint64
+	parts  httpParts
+	strict strictURL
+}
+
+// strictURL is a recorded URL's path and query as recordedURL reads them.
+type strictURL struct {
+	path  string
+	query url.Values
+}
+
+// strictURLOf is r's URL as the strict comparison reads it; none for a mock
+// that recorded no request.
+func strictURLOf(r *models.HTTPReq) strictURL {
+	if r == nil {
+		return strictURL{}
+	}
+	path, query := recordedURL(r)
+	return strictURL{path: path, query: query}
 }
 
 // recordedParsings counts the recordings parsed for recordedParts: what the
@@ -47,23 +67,38 @@ var recordedParsings atomic.Int64
 // exact view's verify mode (integrations.ExactViewVerify) each kept read is
 // parsed again and a difference panics.
 func recordedParts(m *models.Mock) httpParts {
+	return parsedOf(m).parts
+}
+
+// recordedStrictURL is the recorded request's path and query as the strict
+// comparison reads them (recordedURL), parsed once per recording as
+// recordedParts' are, and shared the same way: read only.
+func recordedStrictURL(m *models.Mock) (string, url.Values) {
+	s := parsedOf(m).strict
+	return s.path, s.query
+}
+
+// parsedOf is m's entry in parsedRecordings, parsed now when it has none or
+// its entry is stale.
+func parsedOf(m *models.Mock) *parsedRecording {
 	gen := containerkey.Default.RecordedGeneration()
 	addr := uintptr(unsafe.Pointer(m))
 	prev, _ := parsedRecordings.Load(addr)
 	if p, ok := prev.(*parsedRecording); ok && p.mock.Value() == m && p.req == m.Spec.HTTPReq && p.gen == gen {
 		if integrations.ExactViewVerify.Load() {
 			verifyRecordedParts(m, p.parts)
+			verifyStrictURL(m, p.strict)
 		}
-		return p.parts
+		return p
 	}
 	recordedParsings.Add(1)
-	p := &parsedRecording{mock: weak.Make(m), req: m.Spec.HTTPReq, gen: gen, parts: parseRecordedParts(m)}
+	p := &parsedRecording{mock: weak.Make(m), req: m.Spec.HTTPReq, gen: gen, parts: parseRecordedParts(m), strict: strictURLOf(m.Spec.HTTPReq)}
 	if old, _ := parsedRecordings.Swap(addr, p); old == nil || old.(*parsedRecording).mock != p.mock {
 		// The recording's first entry: it goes with the recording, unless
 		// another mock has the address by then.
 		runtime.AddCleanup(m, forgetParsedRecording, parsedKey{addr: addr, mock: p.mock})
 	}
-	return p.parts
+	return p
 }
 
 // parsedKey names a recording's entry for its cleanup.
@@ -85,5 +120,13 @@ func forgetParsedRecording(k parsedKey) {
 func verifyRecordedParts(m *models.Mock, kept httpParts) {
 	if now := parseRecordedParts(m); !reflect.DeepEqual(now, kept) {
 		panic(fmt.Sprintf("exact view verify: recorded parts of %s: kept %+v, parsed now %+v", m.Name, kept, now))
+	}
+}
+
+// verifyStrictURL panics when kept, a recording's URL as parsedOf kept it for
+// the strict comparison, is not what reading the recording now gives.
+func verifyStrictURL(m *models.Mock, kept strictURL) {
+	if now := strictURLOf(m.Spec.HTTPReq); !reflect.DeepEqual(now, kept) {
+		panic(fmt.Sprintf("exact view verify: recorded strict URL of %s: kept %+v, read now %+v", m.Name, kept, now))
 	}
 }

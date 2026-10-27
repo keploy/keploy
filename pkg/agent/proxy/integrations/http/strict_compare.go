@@ -176,6 +176,7 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 	if r == nil {
 		return []strictField{field(models.MockFieldDiff{Path: "method", Kind: models.DiffKindMissingInMock, Actual: input.method})}
 	}
+	strictDiffs.Add(1)
 	k := strictKnown{n: n, learned: m.Spec.ReqBodyNoise, values: util.NewNoiseChecker(m.Noise), clocks: clocksOf(m)}
 	var out []strictField
 	if string(r.Method) != input.method {
@@ -184,7 +185,7 @@ func strictDiff(ctx context.Context, input *req, live destination, m *models.Moc
 	for _, d := range destinationDiff(live, m) {
 		out = append(out, field(d))
 	}
-	recPath, recQuery := recordedURL(r)
+	recPath, recQuery := recordedStrictURL(m)
 	livePath := ""
 	var liveQuery url.Values
 	if input.url != nil {
