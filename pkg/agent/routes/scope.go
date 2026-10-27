@@ -261,6 +261,17 @@ func (a *Agent) HandleScopeTable(w http.ResponseWriter, r *http.Request) {
 		if req.Pool == nil {
 			req.Pool = map[string][]string{}
 		}
+		// The tests' recordings judging marked as the application's
+		// background work: served in their test's window, never required. A
+		// table without marks clears the previous one's, so every test mock
+		// is required. An agent that cannot take them requires them all,
+		// which is never looser.
+		if s, ok := a.svc.(scopeBackgroundSetter); ok {
+			if err := s.SetScopeBackground(r.Context(), req.Background); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		// Each key's pool slice (design v14 §5.2). An agent that cannot
 		// serve them says so: a CLI that sent them judges on them.
 		s, ok := a.svc.(scopePoolSetter)
@@ -297,6 +308,13 @@ type scopePoolSetter interface {
 // (proven wire).
 type recordedWindowsSetter interface {
 	SetRecordedWindows(ctx context.Context, ws []models.TestWindow) error
+}
+
+// scopeBackgroundSetter installs the tests' recordings judging marked as the
+// application's background work, each with why (proven wire,
+// models.ScopeTableReq.Background).
+type scopeBackgroundSetter interface {
+	SetScopeBackground(ctx context.Context, names map[string]string) error
 }
 
 // HandleScopeGate installs the replay's gate: the only tests that should run
