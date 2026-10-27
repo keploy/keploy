@@ -34,7 +34,9 @@ type composeDocker struct {
 	exitsOnInt bool
 	signals    []string
 	starts     int
-	exitedCh   chan struct{}
+	// nextExit is closed at the container's next exit, as the daemon
+	// records it, and made anew at once.
+	nextExit   chan struct{}
 	streams    chan chan events.Message
 	errStreams chan chan error
 	// inspected gets one value for each inspect, once it has answered.
@@ -56,6 +58,16 @@ type composeDocker struct {
 	// onKill, set, is given each signal first; true: the daemon has yet to
 	// record what it did (the container still runs, as it says).
 	onKill func(signal string) bool
+	// waitErr, set, fails each wait the daemon is asked for.
+	waitErr error
+	// onWait, set, is told of each wait the daemon is asked for, as it is
+	// asked: pending, the container's state did not meet its condition,
+	// so only a later exit answers it.
+	onWait func(cond container.WaitCondition, pending bool)
+	// afterInspect, set, runs once, after the next inspect has read the
+	// container and before it answers: what the daemon does between an
+	// inspect and the caller's next call.
+	afterInspect func()
 }
 
 func (d *composeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
@@ -87,14 +99,15 @@ func (d *composeDocker) ContainerStop(_ context.Context, id string, opts contain
 }
 
 func newComposeDocker(running, exitsOnInt bool) *composeDocker {
-	return &composeDocker{running: running, exitsOnInt: exitsOnInt, exitedCh: make(chan struct{}),
+	return &composeDocker{running: running, exitsOnInt: exitsOnInt, nextExit: make(chan struct{}),
 		streams: make(chan chan events.Message, 8), errStreams: make(chan chan error, 8), inspected: make(chan struct{}, 8)}
 }
 
 func (d *composeDocker) stop() {
 	if d.running {
 		d.running = false
-		close(d.exitedCh)
+		close(d.nextExit)
+		d.nextExit = make(chan struct{})
 	}
 }
 
@@ -122,19 +135,29 @@ func (d *composeDocker) ContainerKill(_ context.Context, _ string, signal string
 	return nil
 }
 
-func (d *composeDocker) ContainerWait(ctx context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+// ContainerWait answers as the daemon does: not-running (the default) at once
+// for a container that is not running, else at its exit; next-exit only at an
+// exit after the wait was asked, though the container is not running.
+func (d *composeDocker) ContainerWait(ctx context.Context, _ string, cond container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
 	d.mu.Lock()
-	exited := d.exitedCh
-	running := d.running
+	running, next, waitErr, onWait := d.running, d.nextExit, d.waitErr, d.onWait
 	d.mu.Unlock()
 	out, errs := make(chan container.WaitResponse, 1), make(chan error, 1)
-	if !running {
+	if waitErr != nil {
+		errs <- waitErr
+		return out, errs
+	}
+	met := !running && cond != container.WaitConditionNextExit
+	if onWait != nil {
+		onWait(cond, !met)
+	}
+	if met {
 		out <- container.WaitResponse{}
 		return out, errs
 	}
 	go func() {
 		select {
-		case <-exited:
+		case <-next:
 			out <- container.WaitResponse{}
 		case <-ctx.Done():
 			errs <- ctx.Err()
@@ -147,17 +170,19 @@ func (d *composeDocker) ContainerStart(context.Context, string, container.StartO
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.starts++
-	if !d.running {
-		d.running = true
-		d.exitedCh = make(chan struct{})
-	}
+	d.running = true
 	return nil
 }
 
 func (d *composeDocker) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
 	d.mu.Lock()
 	running, project, pid, id, code := d.running, d.project, d.pid, d.id, d.exitCode
+	after := d.afterInspect
+	d.afterInspect = nil
 	d.mu.Unlock()
+	if after != nil {
+		after()
+	}
 	defer func() { d.inspected <- struct{}{} }()
 	return container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code}},
