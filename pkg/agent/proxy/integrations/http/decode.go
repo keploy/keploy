@@ -382,6 +382,15 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					}
 					ok, stub, diag, err = h.matchOf(reqCtx, input, db, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
 				}
+				if !ok && err == nil && proven {
+					// The application's background work made again in the
+					// test's window, after its marked recording answered
+					// there: answered again with it, unchecked, not a miss.
+					if again := h.backgroundAgain(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseStrict()); again != nil {
+						reportBackgroundAgain(reqCtx, input, again)
+						stub, ok = again, true
+					}
+				}
 			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
