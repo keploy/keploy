@@ -30,6 +30,13 @@ func TestTestID(t *testing.T) {
 		if got := TestID(tc.project, tc.file, tc.key, tc.name); got != tc.want {
 			t.Errorf("TestID(%q, %q, %q, %q) = %q, want %q", tc.project, tc.file, tc.key, tc.name, got, tc.want)
 		}
+		path := tc.file
+		if path == "" {
+			path = tc.key
+		}
+		if got := TestIDPath(tc.want); got != path {
+			t.Errorf("TestIDPath(%q) = %q, want %q", tc.want, got, path)
+		}
 	}
 }
 
@@ -65,6 +72,12 @@ func TestTestIDsAreDistinctAndSplitAtThePath(t *testing.T) {
 			i := strings.LastIndex(id, "::")
 			if i < 0 || id[:i] != key || id[i+2:] != escapeTestName(name) {
 				t.Fatalf("key %q, name %q: ID %q splits at %d", key, name, id, i)
+			}
+			if p := TestIDPath(id); p != key {
+				t.Fatalf("key %q, name %q: TestIDPath(%q) = %q", key, name, id, p)
+			}
+			if pid := TestID("proj", "", key, name); TestIDPath(pid) != key {
+				t.Fatalf("key %q, name %q: TestIDPath(%q) = %q", key, name, pid, TestIDPath(pid))
 			}
 		}
 	}

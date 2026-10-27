@@ -410,17 +410,54 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	a.provenMu.Unlock()
 	// Whose a mock is, for the learn steps: keploy mock replay sends no
 	// recorded test windows, and the table's pool slices are what says a
-	// mock was recorded while no test was open.
+	// mock was recorded while no test was open. Whose tests list each, by
+	// key, bounds each test process's teardown.
 	if ps, ok := a.Proxy.(coreAgent.PoolNamesSetter); ok {
 		var names []string
 		for _, slice := range cp {
 			names = append(names, slice...)
 		}
-		if err := ps.SetPoolNames(names); err != nil {
+		a.scopeMu.Lock()
+		owners := teardownOwners(a.scopeTable, cp)
+		a.scopeMu.Unlock()
+		if err := ps.SetPoolNames(names, owners); err != nil {
 			return err
 		}
 	}
 	return a.applyPool(ctx)
+}
+
+// teardownOwners is, of a replay's scope table (test ID -> the mocks it
+// lists) and its pool slices (key -> names), the key of the test process
+// whose tests list each mock: a test's key is its ID's path
+// (models.TestIDPath) where that path is a pool slice's key, which it is for
+// a test whose harness names no test file (the agent builds the ID from the
+// claim's key then). A mock that a test of no such key lists (its ID names
+// its test file, or its process recorded no pool call), or that tests of two
+// keys list, is "": it bounds every process's teardown, failing closed. A
+// file path is never a key, which names a directory.
+func teardownOwners(table, pool map[string][]string) map[string]string {
+	keys := make(map[string]bool, len(pool))
+	for k := range pool {
+		if k != "" && k != models.PoolKeyNone {
+			keys[k] = true
+		}
+	}
+	out := map[string]string{}
+	for id, names := range table {
+		key := models.TestIDPath(id)
+		if !keys[key] {
+			key = ""
+		}
+		for _, n := range names {
+			if prev, ok := out[n]; ok && prev != key {
+				out[n] = ""
+				continue
+			}
+			out[n] = key
+		}
+	}
+	return out
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),

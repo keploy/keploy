@@ -4734,12 +4734,14 @@ func (p *Proxy) openExact(open func(*MockManager)) error {
 }
 
 // SetPoolNames implements agent.PoolNamesSetter: the mock manager's pool
-// membership (MockManager.SetPoolNames).
-func (p *Proxy) SetPoolNames(names []string) error {
+// membership (MockManager.SetPoolNames) and the key of the test process
+// whose tests list each mock (MockManager.SetPoolOwners), the owners first.
+func (p *Proxy) SetPoolNames(names []string, owners map[string]string) error {
 	m := p.getMockManager()
 	if m == nil {
 		return errNoMockManager
 	}
+	m.SetPoolOwners(owners)
 	m.SetPoolNames(names)
 	return nil
 }

@@ -61,6 +61,9 @@ type wireProxy struct {
 	// poolNames are the names the agent last handed the proxy as the pool's
 	// (SetPoolNames), nil until it did.
 	poolNames []string
+	// poolOwners are the owners handed with them (the key of each test-listed
+	// mock's process), nil until they were.
+	poolOwners map[string]string
 	// failPools fails that many pool serves, then serves again.
 	failPools int
 	// staged counts the stagings (SetMocks).
@@ -128,11 +131,12 @@ func (p *wireProxy) ServeExactTest(test string, owned []*models.Mock) error {
 	return nil
 }
 
-func (p *wireProxy) SetPoolNames(names []string) error {
+func (p *wireProxy) SetPoolNames(names []string, owners map[string]string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.poolNames = append([]string{}, names...)
 	sort.Strings(p.poolNames)
+	p.poolOwners = owners
 	return nil
 }
 
@@ -1203,6 +1207,32 @@ func TestTheScopePoolTellsTheProxyWhatIsThePools(t *testing.T) {
 	require.NoError(t, a.SetScopePool(ctx, map[string][]string{}))
 	require.NotNil(t, p.poolNames)
 	require.Empty(t, p.poolNames)
+}
+
+// With the pool names, the proxy is told the key of the test process whose
+// tests list each mock (teardownOwners), which bounds each process's
+// teardown: a test's key is its ID's path where that path is a pool slice's
+// key. A test whose ID names its test file, a test of a key with no pool
+// slice (or the keyless one), and a mock tests of two keys list give "":
+// such a mock bounds every process's teardown.
+func TestTheScopePoolTellsTheProxyWhoseTestsListEachMock(t *testing.T) {
+	a, p := wireAgent(t, models.MODE_TEST)
+	storeMocks(a, httpMock("mock-1", "GET", "http://h/a"), httpMock("mock-2", "GET", "http://h/b"))
+	a.scopeTable = map[string][]string{
+		"a::TestA1":             {"m-a1", "m-shared"},
+		"proj::a::TestA2":       {"m-a2"},
+		"b::TestB":              {"m-b", "m-shared"},
+		"a/a_test.go::TestFile": {"m-file"},
+		"c::TestC":              {"m-c"},
+		"-::TestNone":           {"m-none"},
+		"TestBare":              {"m-bare"},
+		"b::TestB/[%3A%3A1]":    {"m-b2"},
+	}
+	require.NoError(t, a.SetScopePool(context.Background(), map[string][]string{"a": {"mock-1"}, "b": {"mock-2"}, models.PoolKeyNone: {}}))
+	require.Equal(t, map[string]string{
+		"m-a1": "a", "m-a2": "a", "m-b": "b", "m-b2": "b",
+		"m-shared": "", "m-file": "", "m-c": "", "m-none": "", "m-bare": "",
+	}, p.poolOwners)
 }
 
 // Without the slices (a CLI that sent none) no data-plane pool mock answers
