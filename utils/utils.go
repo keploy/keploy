@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -164,18 +165,45 @@ func ReplacePort(currentURL string, port string) (string, error) {
 	return parsedURL.String(), nil
 }
 
-// GetReqMeta returns the metadata of the request
+// GetReqMeta is what a log says about req: its method, its host, its path
+// and the names of its query parameters. Never a query value, a header or
+// the body: those are the application's content (tokens, credentials), and
+// logs get pasted into issues. A query part with no "=" is not named either,
+// since it may be a bare token; a bare token that holds "=" (padded base64,
+// ?dG9rZW4=) is named by what comes before its first "=" (dG9rZW4).
 func GetReqMeta(req *http.Request) map[string]string {
 	reqMeta := map[string]string{}
-	if req != nil {
-		// get request metadata
-		reqMeta = map[string]string{
-			"method": req.Method,
-			"url":    req.URL.String(),
-			"host":   req.Host,
+	if req == nil {
+		return reqMeta
+	}
+	reqMeta["method"] = req.Method
+	reqMeta["host"] = req.Host
+	if req.URL != nil {
+		reqMeta["path"] = req.URL.Path
+		if keys := queryKeys(req.URL.RawQuery); len(keys) > 0 {
+			reqMeta["query keys"] = strings.Join(keys, ",")
 		}
 	}
 	return reqMeta
+}
+
+// queryKeys are the names of rawQuery's name=value parameters, unescaped,
+// sorted and each once. A name ends at its part's first "=": a value may
+// hold "=" too (base64 padding).
+func queryKeys(rawQuery string) []string {
+	var keys []string
+	for _, part := range strings.Split(rawQuery, "&") {
+		k, _, ok := strings.Cut(part, "=")
+		if !ok || k == "" {
+			continue
+		}
+		if u, err := url.QueryUnescape(k); err == nil {
+			k = u
+		}
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return slices.Compact(keys)
 }
 
 func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts models.OutgoingOptions) bool {

@@ -10,19 +10,27 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
-	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+// debugOn reports whether l writes debug entries. A served call builds a
+// debug entry's message or fields only when it does (logger.Check): with debug
+// off, the copies of the request and the answer they held, the names of every
+// mock in a pool and the boxed values were built on every call and dropped,
+// a third of what a served 64 KB call allocated.
+func debugOn(l *zap.Logger) bool { return l.Core().Enabled(zapcore.DebugLevel) }
 
 // ErrMockNotMatched is returned by decodeHTTP when no recorded mock
 // matches the outgoing HTTP request. It aliases models.ErrNoMockMatched so
@@ -77,7 +85,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			arrived := time.Now()
-			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
 
 			//Parse the request buffer
 			request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(reqBuf)))
@@ -87,7 +94,6 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
-			h.Logger.Debug("Decoded HTTP request headers", zap.Any("headers", request.Header))
 			// Set the host header explicitly because the `http.ReadRequest`` trim the host header
 			// func ReadRequest(b *bufio.Reader) (*Request, error) {
 			// 	req, err := readRequest(b)
@@ -134,19 +140,27 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			h.Logger.Debug("decodeHTTP debug logs for input",
-				zap.Any("method", input.method),
-				zap.Any("url", input.url),
-				zap.Any("header", input.header),
-				zap.Any("body", string(input.body)),
-				zap.Any("raw", string(input.raw)))
+			// The request is customer content: its credentials, cookies,
+			// query and body never go to the log, only its shape.
+			if ce := h.Logger.Check(zap.DebugLevel, "decodeHTTP debug logs for input"); ce != nil {
+				ce.Write(zap.String("method", input.method),
+					zap.String("path", input.url.Path),
+					zap.Strings("header names", headerNames(input.header)),
+					zap.Int("body bytes", len(input.body)))
+			}
 
-			noise := NewRequestNoise(h.Logger, opts)
+			noise := requestNoiseFor(h.Logger, opts)
 			headerNoise, bodyNoise, urlNoise := noise.Header, noise.Body, noise.URL
 
-			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
-			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
-			h.Logger.Debug("url noise", zap.Any("url noise", urlNoise))
+			if ce := h.Logger.Check(zap.DebugLevel, "header noise"); ce != nil {
+				ce.Write(zap.Any("header noise", headerNoise))
+			}
+			if ce := h.Logger.Check(zap.DebugLevel, "body noise"); ce != nil {
+				ce.Write(zap.Any("body noise", bodyNoise))
+			}
+			if ce := h.Logger.Check(zap.DebugLevel, "url noise"); ce != nil {
+				ce.Write(zap.Any("url noise", urlNoise))
+			}
 
 			// Telemetry / noisy-egress passthrough. Configurable via
 			// record.passThroughPorts / passThroughHosts (see models.PassThroughRule),
@@ -184,9 +198,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 					out = recorded
 					served = "recorded"
 				}
-				h.Logger.Debug("egress passthrough: serving without mock match",
-					zap.String("mode", string(mode)), zap.String("served", served),
-					zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+				if ce := h.Logger.Check(zap.DebugLevel, "egress passthrough: serving without mock match"); ce != nil {
+					ce.Write(zap.String("mode", string(mode)), zap.String("served", served),
+						zap.String("path", input.url.Path), zap.Any("metadata", utils.GetReqMeta(request)))
+				}
 				if _, werr := clientConn.Write(out); werr != nil {
 					if ctx.Err() != nil {
 						return
@@ -337,7 +352,11 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			h.Logger.Debug("after matching the http request", zap.Any("isMatched", ok), zap.Any("stub", stub), zap.Error(err))
+			// The recording matched is named, not dumped: its credentials and
+			// body are the application's content too, and the test set holds it.
+			if ce := h.Logger.Check(zap.DebugLevel, "after matching the http request"); ce != nil {
+				ce.Write(zap.Bool("isMatched", ok), zap.String("mock name", mockNameOf(stub)), zap.Error(err))
+			}
 
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
@@ -506,8 +525,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				errCh <- err
 				return
 			}
-			responseString := string(respBytes)
-			h.Logger.Debug(fmt.Sprintf("Mock Response sending back to client:\n%v", responseString))
+			if ce := h.Logger.Check(zap.DebugLevel, "Mock Response sending back to client"); ce != nil {
+				ce.Write(zap.String("mock name", stub.Name), zap.Int("status", stub.Spec.HTTPResp.StatusCode),
+					zap.Int("answer bytes", len(respBytes)))
+			}
 
 			_, err = clientConn.Write(respBytes)
 			if err != nil {
@@ -522,7 +543,9 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
 			if err != nil {
 				h.Logger.Debug("failed to read the request buffer from the client", zap.Error(err))
-				h.Logger.Debug("This was the last response from the server:\n" + string(responseString))
+				if ce := h.Logger.Check(zap.DebugLevel, "This was the last response from the server"); ce != nil {
+					ce.Write(zap.Int("answer bytes", len(respBytes)))
+				}
 				errCh <- nil
 				return
 			}
@@ -550,14 +573,30 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 
 // buildMockResponseBytes serializes a recorded HTTP mock's response to raw
 // wire bytes (status line + headers + recomputed Content-Length + body,
-// compressing the body when Content-Encoding is set). It lives here (not in
-// async.go) because it is the shared serializer for BOTH the ordinary
-// matched-mock path and the async serving branch.
+// compressing the body when Content-Encoding is set; encodeAnswer). It lives
+// here (not in async.go) because it is the shared serializer for BOTH the
+// ordinary matched-mock path and the async serving branch.
 // A response still kept apart from its mock is loaded first (withResponse).
 // A response with no body by rule (to a HEAD, a 1xx, 204 or 304) keeps the
 // Content-Length it was recorded with: a HEAD's is the size of the body a GET
 // gets, which the client takes for that size (an S3 client's Stat).
+// An answer served again is written from the bytes built for it before
+// (keptAnswers), unless it is served rewritten or read back per serve
+// (keepsAnswer). The returned bytes are never to be written to.
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
+	return h.buildAnswer(stub, nil)
+}
+
+// buildAnswer is buildMockResponseBytes with rewrite applied to the answer's
+// wire headers and body for this serve; nil serves the answer as recorded.
+// A rewritten serve never reads or fills keptAnswers: the table's encoder
+// (encodeRecordedAnswer) cannot rewrite, so a serve that changes what the
+// recording answers builds its bytes for itself, and no serve is given
+// another's rewritten answer.
+func (h *HTTP) buildAnswer(stub *models.Mock, rewrite answerRewrite) ([]byte, error) {
+	if rewrite == nil && keepsAnswer(stub) {
+		return keptAnswers.serve(stub, h.encodeRecordedAnswer)
+	}
 	name := ""
 	if stub != nil {
 		name = stub.Name
@@ -569,42 +608,7 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	if stub == nil || stub.Spec.HTTPResp == nil {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
-	protoMajor, protoMinor := 1, 1
-	method := ""
-	if stub.Spec.HTTPReq != nil {
-		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
-		method = string(stub.Spec.HTTPReq.Method)
-	}
-	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
-		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
-	body := stub.Spec.HTTPResp.Body
-	header := pkg.ToWireHTTPHeader(stub.Spec.HTTPResp.Header, stub.Spec.HTTPResp.HeaderLineLengths)
-	var respBody string
-	if encoding, ok := header["Content-Encoding"]; ok && len(encoding) > 0 {
-		compressed, err := pkg.Compress(h.Logger, encoding[0], []byte(body))
-		if err != nil {
-			return nil, err
-		}
-		respBody = string(compressed)
-	} else {
-		respBody = body
-	}
-	// The digests the recorded body matched as its server sent it, over the
-	// bytes sent now (models.MetadataBodyDigestsKey): obfuscation, encryption
-	// and a variable rewrite a body, and keploy's compressor is not the
-	// server's. Those it did not match are sent as recorded.
-	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
-	noBody := responseHasNoBody(method, stub.Spec.HTTPResp.StatusCode)
-	var headers string
-	for key, values := range header {
-		if key == "Content-Length" && !noBody {
-			values = []string{strconv.Itoa(len(respBody))}
-		}
-		for _, value := range values {
-			headers += fmt.Sprintf("%s: %s\r\n", key, value)
-		}
-	}
-	return []byte(statusLine + headers + "\r\n" + respBody), nil
+	return h.encodeAnswer(stub, rewrite)
 }
 
 // RequestNoise is what of a request may differ from its recording when it is
@@ -711,4 +715,115 @@ func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoi
 		}
 	}
 	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}
+}
+
+// requestNoiseMemo is the request noise requestNoiseFor built last, beside
+// what it was built from: a copy of the options' noise configuration, their
+// auto-header-noise setting and the proven switch's state (flakyHeaderNoise).
+type requestNoiseMemo struct {
+	cfg         map[string]map[string][]string
+	disableAuto bool
+	proven      bool
+	noise       RequestNoise
+}
+
+var lastRequestNoise atomic.Pointer[requestNoiseMemo]
+
+// requestNoiseBuilds counts the request noise requestNoiseFor built.
+var requestNoiseBuilds atomic.Int64
+
+// requestNoiseFor is NewRequestNoise(logger, opts), built once per options
+// value: a call whose options carry the noise configuration, the
+// auto-header-noise setting and the proven switch's state the last build was
+// made from gets that build. The configuration is compared by content, not by
+// the map's identity, so options changed in place get a build of their own.
+// The noise is shared by every call it is handed to, so no reader writes it
+// (the matchers only read it). Building it on every request was about 15% of
+// a served call's CPU.
+func requestNoiseFor(logger *zap.Logger, opts models.OutgoingOptions) RequestNoise {
+	proven := provenswitch.On()
+	if m := lastRequestNoise.Load(); m != nil && m.proven == proven &&
+		m.disableAuto == opts.DisableAutoHeaderNoise && sameNoiseConfig(m.cfg, opts.NoiseConfig) {
+		return m.noise
+	}
+	requestNoiseBuilds.Add(1)
+	// Built from a copy of its own, so nothing the options' maps share with
+	// the noise (a header's patterns) is written through the options later.
+	noise := NewRequestNoise(logger, models.OutgoingOptions{
+		NoiseConfig:            cloneNoiseConfig(opts.NoiseConfig),
+		DisableAutoHeaderNoise: opts.DisableAutoHeaderNoise,
+	})
+	lastRequestNoise.Store(&requestNoiseMemo{cfg: cloneNoiseConfig(opts.NoiseConfig),
+		disableAuto: opts.DisableAutoHeaderNoise, proven: proven, noise: noise})
+	return noise
+}
+
+// cloneNoiseConfig copies a noise configuration whole, keeping which maps and
+// slices are nil.
+func cloneNoiseConfig(cfg map[string]map[string][]string) map[string]map[string][]string {
+	if cfg == nil {
+		return nil
+	}
+	out := make(map[string]map[string][]string, len(cfg))
+	for bucket, entries := range cfg {
+		if entries == nil {
+			out[bucket] = nil
+			continue
+		}
+		c := make(map[string][]string, len(entries))
+		for k, v := range entries {
+			if v != nil {
+				v = append(make([]string, 0, len(v)), v...)
+			}
+			c[k] = v
+		}
+		out[bucket] = c
+	}
+	return out
+}
+
+// sameNoiseConfig reports whether a and b hold the same noise configuration,
+// down to which maps and slices are nil (NewRequestNoise reads a bucket that is
+// present and empty unlike one that is absent).
+func sameNoiseConfig(a, b map[string]map[string][]string) bool {
+	if (a == nil) != (b == nil) || len(a) != len(b) {
+		return false
+	}
+	for bucket, ae := range a {
+		be, ok := b[bucket]
+		if !ok || (ae == nil) != (be == nil) || len(ae) != len(be) {
+			return false
+		}
+		for k, av := range ae {
+			bv, ok := be[k]
+			if !ok || (av == nil) != (bv == nil) || len(av) != len(bv) {
+				return false
+			}
+			for i := range av {
+				if av[i] != bv[i] {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// headerNames are h's header names, sorted, without their values: a live
+// request's (http.Header) or a recording's.
+func headerNames[V any](h map[string]V) []string {
+	names := make([]string, 0, len(h))
+	for k := range h {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// mockNameOf is m's name, or "" for no mock.
+func mockNameOf(m *models.Mock) string {
+	if m == nil {
+		return ""
+	}
+	return m.Name
 }

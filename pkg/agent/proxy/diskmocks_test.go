@@ -66,9 +66,16 @@ func TestEligibleForDisk(t *testing.T) {
 
 func newDiskWith(t *testing.T, ms ...*models.Mock) *DiskMocks {
 	t.Helper()
-	s, err := NewDiskMocks(zap.NewNop())
+	return newStoreWith(t, residentBudgetBytes, ms...)
+}
+
+// newStoreWith is newDiskWith over a store keeping up to budget bytes of
+// records in memory; 0 writes every record to its file.
+func newStoreWith(t *testing.T, budget int64, ms ...*models.Mock) *DiskMocks {
+	t.Helper()
+	s, err := newDiskMocks(zap.NewNop(), budget)
 	if err != nil {
-		t.Fatalf("NewDiskMocks: %v", err)
+		t.Fatalf("newDiskMocks: %v", err)
 	}
 	for _, m := range ms {
 		if err := s.Add(m); err != nil {
@@ -229,7 +236,7 @@ func TestRangeRecordedBefore_HoldsOneMockAtATime(t *testing.T) {
 // learn step reads what it holds as an earlier place, and refuses the call
 // when it cannot.
 func TestRangeRecordedBefore_TellsAFailedRead(t *testing.T) {
-	s := newDiskWith(t, perTestMockAt("m10", 10), perTestMockAt("m20", 20))
+	s := newStoreWith(t, 0, perTestMockAt("m10", 10), perTestMockAt("m20", 20))
 	defer s.Close()
 	if err := s.f.Truncate(0); err != nil {
 		t.Fatal(err)
@@ -315,9 +322,12 @@ func TestDiskMocks_ResidentBounded(t *testing.T) {
 
 	baseline := heapInUse()
 
-	d, err := NewDiskMocks(zap.NewNop())
+	// A store with no memory budget: every record goes to its file, the tier
+	// this proof is of (TestStoreKeepsRecordsInMemoryUpToItsBudget is the
+	// budget's).
+	d, err := newDiskMocks(zap.NewNop(), 0)
 	if err != nil {
-		t.Fatalf("NewDiskMocks: %v", err)
+		t.Fatalf("newDiskMocks: %v", err)
 	}
 	defer d.Close()
 
@@ -404,9 +414,11 @@ func TestLoadWindow_FanOutElidesBodies(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0).UTC()
 
 	baseline := heapInUse()
-	d, err := NewDiskMocks(zap.NewNop())
+	// No memory budget: the bodies go to the file, and the proof is that the
+	// window does not bring them back.
+	d, err := newDiskMocks(zap.NewNop(), 0)
 	if err != nil {
-		t.Fatalf("NewDiskMocks: %v", err)
+		t.Fatalf("newDiskMocks: %v", err)
 	}
 	defer d.Close()
 
@@ -466,40 +478,54 @@ func TestClose_FailsSubsequentOps(t *testing.T) {
 	}
 }
 
+// mongoAnswerMock is a per-test Mongo mock at second sec whose one response
+// carries an OP_MSG section of sectionBytes.
+func mongoAnswerMock(name string, sec int64, sectionBytes int) *models.Mock {
+	m := perTestMockAt(name, sec)
+	m.Kind = models.Mongo
+	m.Spec.MongoRequests = []models.MongoRequest{{Header: &models.MongoHeader{Opcode: 2013}, Message: &models.MongoOpMessage{Sections: []string{`{ "SectionSingle msg": {"find":"orders"} }`}}}}
+	m.Spec.MongoResponses = []models.MongoResponse{{Header: &models.MongoHeader{Opcode: 2013}, Message: &models.MongoOpMessage{Sections: []string{strings.Repeat("d", sectionBytes)}}}}
+	return m
+}
+
 // TestSpilledResponsesCountsTheResponsesKeptApart: the agent's mock residency
 // log reports SpilledResponses, and CI's strict mock-window replay of
 // http-pokeapi requires it to be non-zero, so that phase fails, rather than
 // passing without serving one, if the store stops keeping responses apart.
+// An answer under responseSpillMinBytes stays with its mock, HTTP or Mongo.
 func TestSpilledResponsesCountsTheResponsesKeptApart(t *testing.T) {
 	base := time.Unix(1_700_000_000, 0).UTC()
 	big := bigMockAt("big", base, responseSpillMinBytes)
 	big.TestModeInfo.Lifetime = models.LifetimePerTest
 	small := bigMockAt("small", base.Add(time.Second), responseSpillMinBytes-1)
 	small.TestModeInfo.Lifetime = models.LifetimePerTest
-	mongo := perTestMockAt("mongo", 1_700_000_002)
-	mongo.Kind = models.Mongo
-	mongo.Spec.MongoResponses = []models.MongoResponse{{}}
+	mongo := mongoAnswerMock("mongo", 1_700_000_002, responseSpillMinBytes)
+	smallMongo := mongoAnswerMock("small-mongo", 1_700_000_004, 200)
 	noResp := perTestMockAt("no-response", 1_700_000_003)
 
-	d := newDiskWith(t, big, small, mongo, noResp)
-	defer d.Close()
-	if got := d.Len(); got != 4 {
-		t.Fatalf("precondition: %d mocks on disk, want 4", got)
-	}
-	if got := d.SpilledResponses(); got != 2 {
-		t.Fatalf("SpilledResponses = %d, want 2 (the %d-byte HTTP body and the Mongo responses)", got, responseSpillMinBytes)
-	}
-	win, err := d.LoadWindow(base, base.Add(time.Minute))
-	if err != nil {
-		t.Fatalf("LoadWindow: %v", err)
-	}
-	if len(win) != 4 {
-		t.Fatalf("LoadWindow returned %d mocks, want all 4", len(win))
-	}
-	for _, m := range win {
-		elided := m.Spec.HTTPResp == nil && len(m.Spec.MongoResponses) == 0 && m.HasSpilledResponse()
-		if want := m.Name == "big" || m.Name == "mongo"; elided != want {
-			t.Fatalf("mock %s: response kept apart = %v, want %v", m.Name, elided, want)
+	for _, budget := range []int64{residentBudgetBytes, 0} {
+		d := newStoreWith(t, budget, big, small, mongo, smallMongo, noResp)
+		if got := d.Len(); got != 5 {
+			t.Fatalf("budget %d: precondition: %d mocks stored, want 5", budget, got)
+		}
+		if got := d.SpilledResponses(); got != 2 {
+			t.Fatalf("budget %d: SpilledResponses = %d, want 2 (the %d-byte HTTP body and the big Mongo answer)", budget, got, responseSpillMinBytes)
+		}
+		win, err := d.LoadWindow(base, base.Add(time.Minute))
+		if err != nil {
+			t.Fatalf("budget %d: LoadWindow: %v", budget, err)
+		}
+		if len(win) != 5 {
+			t.Fatalf("budget %d: LoadWindow returned %d mocks, want all 5", budget, len(win))
+		}
+		for _, m := range win {
+			elided := m.Spec.HTTPResp == nil && len(m.Spec.MongoResponses) == 0 && m.HasSpilledResponse()
+			if want := m.Name == "big" || m.Name == "mongo"; elided != want {
+				t.Fatalf("budget %d: mock %s: response kept apart = %v, want %v", budget, m.Name, elided, want)
+			}
+		}
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
