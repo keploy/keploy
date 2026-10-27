@@ -25,10 +25,11 @@ import (
 // they do not (the client sent its next command before an answer to what the
 // hole lost came, or the hole came while the rest of a response left out was
 // still unread), the recording stops at the hole, as it did for every hole.
-// One case they cannot show: a hole that lost more than one command, where
-// the answer to an earlier one came before the client's next command was sent
-// and the answer to the last came after it (a client that first pipelines
-// inside the bytes lost). That stays a limit.
+// It stops too where more than one chunk of the client's stream was lost
+// before the command taken up after a hole was answered: each may have held a
+// command, and the answer to an earlier one may have come before the client's
+// next command and the answer to the last after it, which nothing on the
+// streams tells from that command's own answer.
 
 // holed numbers chunks on from the handshake's (recordChunks: the client's
 // from 2, the server's from 3) and leaves out those lose picks, by index.
@@ -148,24 +149,63 @@ func TestRecordV2_ACaptureHoleWithNoCommandAfterIt(t *testing.T) {
 	requireHoleCost(t, rec, []time.Time{commandAt(t, xs, 7, 16)}, 18-2)
 }
 
-// Two commands in a row lost: both exchanges are left out, in one span.
+// Two commands in a row lost to one hole (two chunks of the client's stream):
+// the answer to the first came before the client's next command, and the one
+// to the second came before it too, or, sent before it, only after it. The
+// streams cannot tell those apart, and in the second the next command's
+// first answer is the second lost command's: the recording stops at the
+// hole, with what it cut left out, and records no command with another
+// command's answer.
 func TestRecordV2_TwoCommandsLostToOneCaptureHole(t *testing.T) {
 	t.Parallel()
 	xs := kitTraffic(t, []int{7, 8}, false)
-	client, server := onTheWire(xs, 7)
-	rec := recordChunks(t, holed(client, clientChunkOf(xs, 4), clientChunkOf(xs, 5)), holed(server), true, time.Minute)
-	if w := wrongMocks(t, rec.mocks); len(w) > 0 {
-		t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
+	t.Run("both answered before the next command", func(t *testing.T) {
+		t.Parallel()
+		client, server := onTheWire(xs, 7)
+		rec := recordChunks(t, holed(client, clientChunkOf(xs, 4), clientChunkOf(xs, 5)), holed(server), true, time.Minute)
+		requireStoppedAtTheHole(t, rec, commandAt(t, xs, 7, 4), 4)
+	})
+	for _, n := range []int{7, 16384} {
+		t.Run(fmt.Sprintf("the second's answer after the next command, reads of %d", n), func(t *testing.T) {
+			t.Parallel()
+			client, server := pipelinedGroup(xs, n, 4, 5)
+			first := clientChunkOf(xs, 3)
+			rec := recordChunks(t, holed(client, first, clientChunkOf(xs, 4)), holed(server), true, time.Minute)
+			requireStoppedAtTheHole(t, rec, client[first].ReadAt, 3)
+		})
 	}
-	if !rec.returned || rec.err != nil {
-		t.Fatalf("RecordV2 returned=%v err=%v", rec.returned, rec.err)
-	}
-	if got := queryMocks(rec.mocks); got != 18-2 {
-		t.Fatalf("%d query mocks, want %d", got, 18-2)
-	}
-	w, ok := rec.leftOut.last()
-	if !ok || w[0].After(commandAt(t, xs, 7, 4)) || w[1].Before(commandAt(t, xs, 7, 5)) {
-		t.Fatalf("the span left out is %v; it must hold both lost commands", w)
+}
+
+// Two holes of one chunk each, with a command that has no answer taken up
+// between them (COM_STMT_CLOSE): the second came before any command taken up
+// after the first was answered, so the two lost commands' answers are on the
+// server's stream as after one hole that lost both. The second lost command
+// was sent before the next one's answer came: the recording stops at the
+// second hole, and that answer is not recorded with the next command.
+func TestRecordV2_ASecondCaptureHoleBeforeTheFirstIsAnswered(t *testing.T) {
+	t.Parallel()
+	xs := insert(kitTraffic(t, []int{7, 8}, false), 4, exchange{command: stmtCloseCommand(0, 1)})
+	for _, n := range []int{7, 16384} {
+		t.Run(fmt.Sprintf("reads of %d", n), func(t *testing.T) {
+			t.Parallel()
+			client, server := pipelinedGroup(xs, n, 5, 6)
+			second := clientChunkOf(xs, 5)
+			rec := recordChunks(t, holed(client, clientChunkOf(xs, 3), second), holed(server), true, time.Minute)
+			var mocks []*models.Mock
+			closes := 0
+			for _, m := range rec.mocks {
+				if m.Spec.Metadata["requestOperation"] == "COM_STMT_CLOSE" {
+					closes++
+					continue
+				}
+				mocks = append(mocks, m)
+			}
+			if closes != 1 {
+				t.Fatalf("%d COM_STMT_CLOSE mocks, want the one taken up after the first hole", closes)
+			}
+			rec.mocks = mocks
+			requireStoppedAtTheHole(t, rec, client[second].ReadAt, 3)
+		})
 	}
 }
 
@@ -530,9 +570,9 @@ func TestRecordV2_ACommandLostToACaptureHoleOnAConnectionNotOrderedByConnSeq(t *
 	}
 }
 
-// A second hole inside the command taken up after the first: that command is
-// left out with what the first cut, and the recording goes on from the
-// client's next command.
+// A second hole inside the command taken up after the first: two chunks of
+// the client's stream lost before a command taken up was answered, so the
+// recording stops at the first hole, with what the two cut left out.
 func TestRecordV2_ASecondCaptureHoleInsideTheCommandTakenUpAfterTheFirst(t *testing.T) {
 	t.Parallel()
 	xs := kitTraffic(t, []int{7, 8}, false)
@@ -543,19 +583,8 @@ func TestRecordV2_ASecondCaptureHoleInsideTheCommandTakenUpAfterTheFirst(t *test
 	split := append(append(append([]fakeconn.Chunk{}, client[:j]...), first, second), client[j+1:]...)
 	// Exchange 5's command lost, and the second chunk of exchange 6's.
 	rec := recordChunks(t, holed(split, j-1, j+1), holed(server), true, time.Minute)
-	if w := wrongMocks(t, rec.mocks); len(w) > 0 {
-		t.Fatalf("%d wrong mock(s) recorded; the first: %s", len(w), w[0])
-	}
-	if !rec.returned || rec.err != nil {
-		t.Fatalf("RecordV2 returned=%v err=%v", rec.returned, rec.err)
-	}
-	if got := queryMocks(rec.mocks); got != 18-2 {
-		t.Fatalf("%d query mocks, want %d: all but the two exchanges the holes cut", got, 18-2)
-	}
-	w, ok := rec.leftOut.last()
-	if !ok || w[0].After(commandAt(t, xs, 7, 5)) || w[1].Before(commandAt(t, xs, 7, 6)) {
-		t.Fatalf("the span left out is %v; it must hold both commands the holes cut", w)
-	}
+	requireStoppedAtTheHole(t, rec, commandAt(t, xs, 7, 5), 5)
+	requireStoppedAtTheHole(t, rec, commandAt(t, xs, 7, 6), 5)
 }
 
 // A capture hole on the client's stream while a PREPARE is held (a

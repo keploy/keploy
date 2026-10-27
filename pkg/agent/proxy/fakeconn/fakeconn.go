@@ -2,7 +2,9 @@ package fakeconn
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -52,16 +54,46 @@ var ErrDeadlineExceeded net.Error = deadlineError{}
 // mispairing the number exists to prevent, so the chunk is refused instead.
 var ErrUnnumbered = errors.New("fakeconn: a chunk without a capture sequence (ConnSeq 0): its producer must number every chunk (fakeconn.ConnSeqOf)")
 
-// ErrCaptureHole is returned once by Read, ReadChunk or Peek of a FakeConn
-// that reports holes (ReportHoles) where the next chunk does not follow the
-// last one taken from the stream: its SeqNo skips one or more. The producer
-// saw bytes between them that never reached the stream (a capture that
-// dropped a chunk, a send whose bytes the capture could not read). Nothing is
-// delivered with it, and the call after it reads on from the chunk after the
-// hole, so a reader that frames a byte stream can re-align there instead of
-// reading the bytes after the hole as if they followed the ones before it.
-// A chunk with no SeqNo (0) neither opens nor closes a hole.
+// ErrCaptureHole is returned, as a CaptureHoleError, once by Read, ReadChunk
+// or Peek of a FakeConn that reports holes (ReportHoles) where the next chunk
+// does not follow the last one taken from the stream: its SeqNo skips one or
+// more. The producer saw bytes between them that never reached the stream (a
+// capture that dropped a chunk, a send whose bytes the capture could not
+// read). Nothing is delivered with it, and the call after it reads on from
+// the chunk after the hole, so a reader that frames a byte stream can
+// re-align there instead of reading the bytes after the hole as if they
+// followed the ones before it. A chunk with no SeqNo (0) neither opens nor
+// closes a hole.
 var ErrCaptureHole = errors.New("fakeconn: capture hole: bytes were lost from the stream before the next chunk")
+
+// CaptureHoleError is the error a FakeConn reports a capture hole with: it is
+// ErrCaptureHole (errors.Is), and Lost is how many chunks the hole lost, the
+// SeqNos skipped right before the next chunk. A producer numbers each chunk it
+// captured or dropped, so a reader that frames a request/response protocol
+// can tell a hole that lost one chunk (one send of the client's, one read of
+// the relay's) from one that lost more, each of which may have held a request
+// of its own.
+type CaptureHoleError struct {
+	Lost uint64
+}
+
+func (e *CaptureHoleError) Error() string {
+	return fmt.Sprintf("%v (%d chunk(s) lost)", ErrCaptureHole, e.Lost)
+}
+
+// Unwrap makes a CaptureHoleError ErrCaptureHole.
+func (e *CaptureHoleError) Unwrap() error { return ErrCaptureHole }
+
+// HoleLost is how many chunks the capture hole err reports lost
+// (CaptureHoleError.Lost): 0 when err, or what it wraps, is not one a
+// FakeConn reported, which says nothing of how much a hole lost.
+func HoleLost(err error) uint64 {
+	var h *CaptureHoleError
+	if errors.As(err, &h) {
+		return h.Lost
+	}
+	return 0
+}
 
 // FakeConn is a read-only net.Conn driven by a Chunk channel owned
 // by the proxy relay. Reads take what is left of the chunk the reader is
@@ -159,12 +191,14 @@ type FakeConn struct {
 	closeCh chan struct{}
 
 	// lastSeqNo is the SeqNo of the last chunk taken from ch that had one, and
-	// holeAhead says SeqNos were skipped right before the pending chunk: a
-	// hole not reported yet (ErrCaptureHole). Both are kept whether or not
-	// holes are reported (reportHoles: ReportHoles), so a reader that asks
-	// for them late misses none that is still ahead of it. Guarded by mu.
+	// holeAhead is how many SeqNos were skipped right before the pending
+	// chunk (0: none): a hole not reported yet (CaptureHoleError). Both are
+	// kept whether or not holes are reported (reportHoles: ReportHoles), so
+	// a reader that asks for them late misses none that is still ahead of
+	// it. Guarded by mu. A uint32 beside reportHoles takes the 8 bytes the
+	// two bools did.
 	lastSeqNo   uint64
-	holeAhead   bool
+	holeAhead   uint32
 	reportHoles bool
 
 	deadlineMu        sync.Mutex
@@ -239,8 +273,8 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	if err := f.fill(); err != nil {
 		return 0, err
 	}
-	if f.takeHole() {
-		return 0, ErrCaptureHole
+	if lost := f.takeHole(); lost > 0 {
+		return 0, &CaptureHoleError{Lost: lost}
 	}
 	f.mu.Lock()
 	n := copy(p, f.pending.Bytes)
@@ -269,8 +303,8 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 	if err := f.fill(); err != nil {
 		return Chunk{}, err
 	}
-	if f.takeHole() {
-		return Chunk{}, ErrCaptureHole
+	if lost := f.takeHole(); lost > 0 {
+		return Chunk{}, &CaptureHoleError{Lost: lost}
 	}
 	f.mu.Lock()
 	c := f.pending
@@ -288,8 +322,8 @@ func (f *FakeConn) Peek() (Chunk, error) {
 	if err := f.fill(); err != nil {
 		return Chunk{}, err
 	}
-	if f.takeHole() {
-		return Chunk{}, ErrCaptureHole
+	if lost := f.takeHole(); lost > 0 {
+		return Chunk{}, &CaptureHoleError{Lost: lost}
 	}
 	f.mu.Lock()
 	c := f.pending
@@ -297,8 +331,9 @@ func (f *FakeConn) Peek() (Chunk, error) {
 	return c, nil
 }
 
-// ReportHoles makes Read, ReadChunk and Peek return ErrCaptureHole, once
-// each, where SeqNos were skipped right before the next chunk. A reader asks
+// ReportHoles makes Read, ReadChunk and Peek return ErrCaptureHole (a
+// CaptureHoleError saying how many chunks it lost), once each, where SeqNos
+// were skipped right before the next chunk. A reader asks
 // for it when it re-aligns its framing after a hole; any other reads across
 // one, as every reader always has.
 func (f *FakeConn) ReportHoles() {
@@ -307,16 +342,18 @@ func (f *FakeConn) ReportHoles() {
 	f.mu.Unlock()
 }
 
-// takeHole reports whether a hole lies right before the pending chunk, not
-// reported yet, on a FakeConn that reports holes; it is reported by then.
-func (f *FakeConn) takeHole() bool {
+// takeHole is how many chunks a hole right before the pending chunk lost, not
+// reported yet, on a FakeConn that reports holes (0: none); it is reported by
+// then.
+func (f *FakeConn) takeHole() uint64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.reportHoles || !f.holeAhead {
-		return false
+	if !f.reportHoles || f.holeAhead == 0 {
+		return 0
 	}
-	f.holeAhead = false
-	return true
+	lost := uint64(f.holeAhead)
+	f.holeAhead = 0
+	return lost
 }
 
 // skipLocked moves past the next n bytes of pending, and lets go of the chunk
@@ -379,7 +416,10 @@ func (f *FakeConn) next() error {
 		// A chunk dropped or skipped before it is read takes its hole with
 		// it: what the hole lost came before that chunk, so the reader would
 		// have dropped or skipped it too.
-		f.holeAhead = c.SeqNo != 0 && f.lastSeqNo != 0 && c.SeqNo > f.lastSeqNo+1
+		f.holeAhead = 0
+		if c.SeqNo != 0 && f.lastSeqNo != 0 && c.SeqNo > f.lastSeqNo+1 {
+			f.holeAhead = uint32(min(c.SeqNo-f.lastSeqNo-1, math.MaxUint32))
+		}
 		if c.SeqNo != 0 {
 			f.lastSeqNo = c.SeqNo
 		}

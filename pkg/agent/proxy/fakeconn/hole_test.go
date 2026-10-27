@@ -2,6 +2,7 @@ package fakeconn
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -21,7 +22,8 @@ func holeStream() *FakeConn {
 }
 
 // A reader that reports holes is told of each one once, where it is, with
-// nothing delivered, and reads on from the chunk after it.
+// how many chunks it lost and nothing delivered, and reads on from the chunk
+// after it.
 func TestReportHoles_EachHoleOnceWhereItIs(t *testing.T) {
 	f := holeStream()
 	f.ReportHoles()
@@ -36,7 +38,7 @@ func TestReportHoles_EachHoleOnceWhereItIs(t *testing.T) {
 			if n != 0 {
 				t.Fatalf("ErrCaptureHole delivered %d bytes", n)
 			}
-			got = append(got, "|")
+			got = append(got, fmt.Sprintf("|%d", HoleLost(err)))
 			continue
 		}
 		if err != nil {
@@ -44,7 +46,7 @@ func TestReportHoles_EachHoleOnceWhereItIs(t *testing.T) {
 		}
 		got = append(got, string(buf[:n]))
 	}
-	if want := []string{"a", "b", "|", "c", "|", "d"}; !equal(got, want) {
+	if want := []string{"a", "b", "|1", "c", "|2", "d"}; !equal(got, want) {
 		t.Fatalf("read %q, want %q", got, want)
 	}
 }

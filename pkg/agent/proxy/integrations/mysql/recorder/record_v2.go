@@ -1581,6 +1581,14 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// across the hole, as Connector/J does with COM_STMT_RESET and the
 	// COM_STMT_EXECUTE after it) or one with no answer, and the streams do
 	// not tell which: the recording stops there.
+	//
+	// That proof holds for one lost command only: with two lost, the answer
+	// to the first may come before the next command and the answer to the
+	// last after it. So the recording goes on only after a hole that lost
+	// one chunk of the client's stream (fakeconn.HoleLost: one send of the
+	// client's, one read of the relay's), with no other hole before the
+	// command taken up after it is answered; anywhere else it stops at the
+	// hole.
 	holeUnproven := false
 	// lastAnswerEnd is when the last byte of the last answer read was
 	// captured. pipelined: the client once sent a command not after that, so
@@ -1699,6 +1707,16 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 				warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a capture hole met while re-aligning; the connection is no longer recorded", err)
 				return leaveOutInFlight(sess, lastEnd, err)
 			}
+			if err == nil && holed {
+				// A second hole on the client's stream before the command
+				// taken up after the first was read whole: more than one
+				// chunk lost, each of which may have held a command
+				// (holeUnproven's rule). The recording stops at the first
+				// hole, with what the two cut left out.
+				err = fmt.Errorf("%w: a second hole on the client's stream came before the command taken up after the first was read, so more than one command may be lost, and the answer to the last of them cannot be told from the next command's own", fakeconn.ErrCaptureHole)
+				warnFramingLost(logger, sess, "V2: mysql capture hole lost more than one chunk of the client's stream; the connection is no longer recorded", err)
+				return leaveOutInFlight(sess, holeFrom, err)
+			}
 			if err != nil && !holeFrom.IsZero() {
 				// The exchange the hole cut is lost all the same: it ran
 				// before the client's chunks passed over after the hole.
@@ -1734,6 +1752,22 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 						reportFault(logger, sess, endErr, false)
 						return endErr
 					}
+				}
+				if errors.Is(err, fakeconn.ErrCaptureHole) && !pipelined && held == nil && (fakeconn.HoleLost(err) != 1 || holeUnproven) {
+					// More than one chunk of the client's stream lost before
+					// an answer proved the command taken up after the first
+					// (this hole lost more than one, or an earlier hole's
+					// command taken up has no answer yet: holeUnproven). Each
+					// chunk is a send of the client's (a read of the relay's)
+					// and may have held a command of its own, and the
+					// answers to two lost commands cannot be told apart from
+					// the next command's: the first may have come before the
+					// client's next command, the last after it. The recording
+					// stops at the hole, as it did for every hole, with what
+					// it cut left out and counted.
+					err = fmt.Errorf("%w: more than one chunk of the client's stream was lost before a command taken up after a hole was answered, and the answer to the last command lost cannot be told from the next command's own", err)
+					warnFramingLost(logger, sess, "V2: mysql capture hole lost more than one chunk of the client's stream; the connection is no longer recorded", err)
+					return leaveOutInFlight(sess, lastEnd, err)
 				}
 				if errors.Is(err, fakeconn.ErrCaptureHole) && !pipelined && held == nil {
 					// The client's bytes before its next chunk were lost:
