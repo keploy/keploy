@@ -842,15 +842,17 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	//     query settles it when it finds either. A recorded EXECUTE's query is
 	//     its own (mysql.PacketBundle.StoredQuery) or its PREPARE's in the
 	//     pool, which no key of its own can say: while the session tier holds
-	//     an EXECUTE that recorded no query (keyExecuteUnnamed), the full scan
-	//     matches it.
+	//     an EXECUTE that recorded no query (keyExecuteUnnamed, looked up
+	//     through unnamedExecIndex, which computes no statement identity), the
+	//     full scan matches it.
 	//
 	// Under exact serving the per-test tier leads with every mock the open
 	// test owns, and the keyed pass walks that tier whole before the session
-	// tier: preparedIndex files the test's own mocks under keyExecuteUnnamed
-	// alone (its OwnedKeys), so the keyed walks of the session tier read the
-	// staged mocks only, and no command computes a statement identity of the
-	// mocks the test owns.
+	// tier: preparedIndex files the test's own mocks under no key (its
+	// OwnedKeys), so the keyed walks of the session tier read the staged mocks
+	// only, and no command computes a statement identity of the mocks the test
+	// owns. The staged trees' preparedIndex is built by the first keyed walk
+	// that reaches the session tier, not by the look-up of keyExecuteUnnamed.
 	keyReader, _ := mockDb.(integrations.SessionKeyReader)
 	if opts.fullScan {
 		keyReader = nil
@@ -876,7 +878,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	case sCOM_STMT_EXEC:
 		if !windowActive && liveExec.identity != "" && keyReader != nil {
 			unnamed := false
-			if err := keyReader.RangeSessionMocksWithKey(preparedIndex, keyExecuteUnnamed, func(*models.Mock) bool {
+			if err := keyReader.RangeSessionMocksWithKey(unnamedExecIndex, keyExecuteUnnamed, func(*models.Mock) bool {
 				unnamed = true
 				return false
 			}); err == nil && !unnamed {

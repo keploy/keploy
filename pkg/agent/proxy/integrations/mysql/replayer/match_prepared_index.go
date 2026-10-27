@@ -25,13 +25,24 @@ import (
 // Under exact serving the per-test tier leads with every mock the open test
 // owns, and matchCommand walks it whole before each keyed walk of the session
 // tier (the keyed pass, and recordedQuery's look-up of a PREPARE after its
-// look-up in that tier). So the test's own mocks are filed only under
-// keyExecuteUnnamed (ownedPreparedKeys), the one key read before that tier: a
-// keyed walk reads the staged mocks alone, and a test view computes no
-// statement identity of the mocks it owns. Keploy mock replay can have one
-// test own a whole set, and the view's index of every key of every mock it
-// owned cost the test's first EXECUTE two to four times main's whole call.
-var preparedIndex = &integrations.MockIndex{Keys: preparedKeys, OwnedKeys: ownedPreparedKeys}
+// look-up in that tier). So the test's own mocks are filed under no key
+// (fileNone): a keyed walk reads the staged mocks alone, and a test view
+// computes no statement identity of the mocks it owns. Keploy mock replay can
+// have one test own a whole set, and the view's index of every key of every
+// mock it owned cost the test's first EXECUTE two to four times main's whole
+// call.
+//
+// The one key matchCommand reads before the per-test tier,
+// keyExecuteUnnamed, is read through unnamedExecIndex instead, which computes
+// no statement identity of any mock: a COM_STMT_EXECUTE's look-up of it builds
+// no store index of every key of every staged mock, and the trees' index of
+// preparedIndex is built only by a keyed walk that reaches the session tier.
+var preparedIndex = &integrations.MockIndex{Keys: preparedKeys, OwnedKeys: fileNone}
+
+// unnamedExecIndex files under keyExecuteUnnamed the mocks preparedKeys files
+// there (unnamedExecKeys), the open test's own and the staged ones alike, and
+// files no mock under any other key.
+var unnamedExecIndex = &integrations.MockIndex{Keys: unnamedExecKeys}
 
 const (
 	// keyPrepare + a statement's identity (sqlStatementIdentity): a mock with a
@@ -178,10 +189,10 @@ func executeUnnamed(r *mysql.Request) bool {
 	return ok && ep != nil && r.StoredQuery() == ""
 }
 
-// ownedPreparedKeys is preparedIndex's OwnedKeys: keyExecuteUnnamed for a mock
+// unnamedExecKeys is unnamedExecIndex's Keys: keyExecuteUnnamed for a mock
 // preparedKeys files under it, no key otherwise. It reads each request's type,
 // and the stored query of an EXECUTE alone.
-func ownedPreparedKeys(m *models.Mock) []string {
+func unnamedExecKeys(m *models.Mock) []string {
 	if m == nil || m.Kind != models.MySQL {
 		return nil
 	}
@@ -192,6 +203,9 @@ func ownedPreparedKeys(m *models.Mock) []string {
 	}
 	return nil
 }
+
+// fileNone is preparedIndex's OwnedKeys: it files no mock under any key.
+func fileNone(*models.Mock) []string { return nil }
 
 // recordedPrepEntry reports the entry buildRecordedPrepIndex makes of m, and
 // the recorded connection it files it under, if it makes one: a MySQL mock
