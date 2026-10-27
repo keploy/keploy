@@ -432,3 +432,132 @@ func TestUnmadeWrite_TheManagerAskedOfNothingItCanTellSaysNone(t *testing.T) {
 		t.Fatalf("the manager says %v (%v) of the test's own read; want block-t2: the rows test nothing", w, ok)
 	}
 }
+
+// outcome is the test's mock accounting once the replay ended it (the pool
+// view installed): which of its own recordings answered and which did not,
+// and the names flagged as used (what the replay compares with the test's
+// recorded mapping).
+func outcome(t *testing.T, mm *MockManager) (consumed, unconsumed, flagged string) {
+	t.Helper()
+	mm.ServeExactPool(models.PoolKeyNone, nil)
+	_, c, u, ok := mm.ExactTestOutcome()
+	if !ok {
+		t.Fatal("exact serving is off")
+	}
+	var f []string
+	for _, st := range mm.GetConsumedMocks() {
+		f = append(f, st.Name)
+	}
+	return strings.Join(c, ","), strings.Join(u, ","), strings.Join(f, ",")
+}
+
+// A read answered from before a write the replay has not made is the call
+// of the recording chosen for it, made at another point: one read recorded
+// is one read replayed. The recording still answers a call made after the
+// write, once; when the test ends with none having taken it, it counts as
+// the read's, so a scheduling difference (the read sent ahead of a write of
+// the same collection) never fails the test's mock accounting.
+func TestUnmadeWrite_AReadAnsweredFromBeforeTheWriteIsItsRecordingsCall(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block := unmadeRecording("block-t2", models.Mongo, 1000, "write", "block")
+	list2 := unmadeRecording("list-t2", models.Mongo, 1010, "read", "list")
+	staged := []*models.Mock{list1, block, list2}
+
+	t.Run("the read sent ahead of the write: the test's accounting holds", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block, list2)
+		if got := answerName(answer(t, mm, viewCopy(t, mm, "list-t2"), "list")); got != "list-t1" {
+			t.Fatalf("answered by %q; want list-t1", got)
+		}
+		if !mm.MarkMockAsUsed(*viewCopy(t, mm, "block-t2")) {
+			t.Fatal("the block was refused")
+		}
+		c, u, f := outcome(t, mm)
+		if c != "block-t2,list-t2" || u != "" || f != "block-t2,list-t2" {
+			t.Fatalf("consumed [%s] unconsumed [%s] flagged [%s]; want block-t2 and list-t2 consumed and flagged, nothing unconsumed: the read made ahead of the block was list-t2's call", c, u, f)
+		}
+	})
+	t.Run("a read made after the write still takes its recording, once", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block, list2)
+		answer(t, mm, viewCopy(t, mm, "list-t2"), "list")
+		if !mm.MarkMockAsUsed(*viewCopy(t, mm, "block-t2")) {
+			t.Fatal("the block was refused")
+		}
+		after := viewCopy(t, mm, "list-t2")
+		if !mm.MarkMockAsUsed(*after) {
+			t.Fatal("the read after the block was refused its own recording: the earlier read consumed it")
+		}
+		if mm.MarkMockAsUsed(*after) {
+			t.Fatal("list-t2 answered twice")
+		}
+		c, u, f := outcome(t, mm)
+		if c != "block-t2,list-t2" || u != "" || f != "block-t2,list-t2" {
+			t.Fatalf("consumed [%s] unconsumed [%s] flagged [%s]; want block-t2,list-t2 once each", c, u, f)
+		}
+	})
+	t.Run("a second read before the write is still held", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block, list2)
+		answer(t, mm, viewCopy(t, mm, "list-t2"), "list")
+		if got := answer(t, mm, viewCopy(t, mm, "list-t2"), "list"); !got.Applies() || answerName(got) != "list-t1" {
+			t.Fatalf("the second read before the block: applies %v answered by %q; want list-t1 again, never list-t2", got.Applies(), answerName(got))
+		}
+	})
+	t.Run("a miss stands in for nothing", func(t *testing.T) {
+		mm := unmadeStage(t, []*models.Mock{block, list2}, "test-2", block, list2)
+		if got := answer(t, mm, viewCopy(t, mm, "list-t2"), "list"); got.Answer != nil {
+			t.Fatalf("answered by %q; want a miss", answerName(got))
+		}
+		if !mm.MarkMockAsUsed(*viewCopy(t, mm, "block-t2")) {
+			t.Fatal("the block was refused")
+		}
+		if _, u, f := outcome(t, mm); u != "list-t2" || f != "block-t2" {
+			t.Fatalf("unconsumed [%s] flagged [%s]; want list-t2 unconsumed: the read was answered by nothing", u, f)
+		}
+	})
+	t.Run("another test's recording is no call this test owes", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block)
+		if got := answerName(answer(t, mm, list2.DeepCopy(), "list")); got != "list-t1" {
+			t.Fatalf("answered by %q; want list-t1", got)
+		}
+		if c, u, f := outcome(t, mm); c != "" || u != "block-t2" || f != "" {
+			t.Fatalf("consumed [%s] unconsumed [%s] flagged [%s]; want nothing consumed or flagged", c, u, f)
+		}
+	})
+	t.Run("a recording the test shares is no call it owes", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "")
+		mm.ServeExactTestConcurrent("test-2", []*models.Mock{block}, []*models.Mock{list2})
+		if got := answerName(answer(t, mm, viewCopy(t, mm, "list-t2"), "list")); got != "list-t1" {
+			t.Fatalf("answered by %q; want list-t1", got)
+		}
+		if c, _, f := outcome(t, mm); c != "" || f != "" {
+			t.Fatalf("consumed [%s] flagged [%s]; want nothing: list-t2 is shared with the tests beside test-2, and a read of test-2 stands in for none of them", c, f)
+		}
+	})
+	t.Run("a copy an earlier attempt read stands in for nothing", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block, list2)
+		earlier := viewCopy(t, mm, "list-t2")
+		mm.ServeExactTest("test-2", []*models.Mock{block, list2})
+		mm.StandIn(earlier)
+		if _, u, _ := outcome(t, mm); u != "block-t2,list-t2" {
+			t.Fatalf("unconsumed [%s]; want block-t2,list-t2: the copy was the previous attempt's", u)
+		}
+	})
+	t.Run("with no test open, nothing", func(t *testing.T) {
+		// A test that ended between the rule and the stand-in: the pool
+		// view in force holds no test's recordings.
+		mm := unmadeStage(t, staged, "")
+		mm.StandIn(list2.DeepCopy())
+		if f := mm.GetConsumedMocks(); len(f) != 0 {
+			t.Fatalf("flagged %v; want nothing", f)
+		}
+	})
+	t.Run("a scoped view forwards it", func(t *testing.T) {
+		mm := unmadeStage(t, staged, "test-2", block, list2)
+		var db integrations.MockMemDb = &scopedMockDb{MockMemDb: mm, live: true}
+		if got := answerName(answer(t, db, viewCopy(t, db, "list-t2"), "list")); got != "list-t1" {
+			t.Fatalf("answered by %q; want list-t1", got)
+		}
+		if _, u, _ := outcome(t, mm); u != "block-t2" {
+			t.Fatalf("unconsumed [%s]; want block-t2 alone: list-t2 was the read's", u)
+		}
+	})
+}

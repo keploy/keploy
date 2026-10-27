@@ -33,7 +33,11 @@ import (
 // test, or the background (a request time after the write's). With none,
 // it is a miss that says so (BeforeUnmadeWrite.Note).
 // Serving the earlier recording consumes nothing: the read the test recorded
-// after the write still answers the call made after it.
+// after the write still answers the call made after it. The read is still
+// that recording's call, made at another point than the recording made it:
+// when the test ends with no call made after the write having taken the
+// recording, the read counts as its call (OwnRecordingStandIn), so one read
+// recorded is one read replayed and the test's mock accounting holds.
 //
 // The parser says which of its recordings are writes that can change what
 // the read reads (gates: Mongo's of the same collection, of its database as
@@ -60,6 +64,25 @@ type UnmadeWriteReader interface {
 	// own that answered already, or no test is open. gates is called
 	// without the store's locks held.
 	UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock) bool) (*models.Mock, bool)
+}
+
+// OwnRecordingStandIn is an optional MockMemDb capability under exact
+// serving: the read a step answers from before an unmade write is the call
+// of the recording the step chose for it, when that recording is one of the
+// open test's own. The agent's MockManager implements it, and every
+// MockMemDb wrapper that passes reads through to it must forward it: one
+// that drops it leaves the recording unconsumed when no call made after the
+// write takes it, and the test fails the mock accounting for a call it made.
+type OwnRecordingStandIn interface {
+	// StandIn files mk, the recording a read answered from before an
+	// unmade write was chosen for, as one the read stood in for, when it is
+	// one of the open test's own that has not answered. It answers nothing
+	// and consumes nothing now: a call made later still takes it, once.
+	// When the test ends with none having taken it, it counts as answered
+	// (the read was its call), flagged as used with nothing learned onto
+	// it. Any other recording (another test's, the background's, one the
+	// test shares) is no call the test owes, and nothing is filed.
+	StandIn(mk *models.Mock)
 }
 
 // BeforeUnmadeWrite is what ReadBeforeUnmadeWrite decided for a read.
@@ -102,7 +125,7 @@ func (b BeforeUnmadeWrite) Answered() string {
 		return ""
 	}
 	return fmt.Sprintf("an extra read before %s, answered from %s: the newest recording of this request made before that write, which the replay had not made yet. "+
-		"The recording made after the write still answers the read made after it, and nothing is learned from this answer",
+		"The recording made after the write still answers the read made after it; when the test makes no such read, this read counts as that recording's call. Nothing is learned from this answer",
 		b.writeName(), b.Answer.Name)
 }
 
@@ -149,6 +172,10 @@ var errNoEarlierRecordings = errors.New("the mock store cannot read the recordin
 // keeps its choice. With exact serving off, for a store that cannot tell,
 // and for a recording no unmade write it gates on precedes, the zero value:
 // the parser serves chosen as before.
+//
+// A parser asks it of the recording a step will answer the read with, and
+// answers the read with Answer when it is set: chosen is then filed with the
+// store as the recording the read stood in for (OwnRecordingStandIn).
 func ReadBeforeUnmadeWrite(db MockMemDb, chosen *models.Mock, gates, same func(*models.Mock) bool) (BeforeUnmadeWrite, error) {
 	if chosen == nil || gates == nil || same == nil || !ExactServing(db) {
 		return BeforeUnmadeWrite{}, nil
@@ -192,6 +219,9 @@ func ReadBeforeUnmadeWrite(db MockMemDb, chosen *models.Mock, gates, same func(*
 	}
 	if answer != nil {
 		out.Answer = answer.DeepCopy()
+		if si, ok := db.(OwnRecordingStandIn); ok {
+			si.StandIn(chosen)
+		}
 	}
 	return out, nil
 }
