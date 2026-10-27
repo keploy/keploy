@@ -255,3 +255,20 @@ func TestMockPlaces(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+// A test entry whose mock list a merge key (<<) brings reads with it, as
+// the both-lists refusal sees it, with the switch on or off: before, it read
+// with no mocks, and the next rewrite erased them.
+func TestAMergeKeyGivesATestEntryItsMocks(t *testing.T) {
+	for _, on := range []string{"", "1"} {
+		t.Setenv(provenswitch.Env, on)
+		var m Mapping
+		doc := "x-a: &a\n    mock_entries:\n        - name: mock-0\n        - name: mock-1\ntests:\n    - <<: *a\n      id: t2\n"
+		if err := yaml.Unmarshal([]byte(doc), &m); err != nil {
+			t.Fatalf("switch %q: %v", on, err)
+		}
+		if len(m.TestCases) != 1 || m.TestCases[0].ID != "t2" || len(m.TestCases[0].Mocks) != 2 {
+			t.Fatalf("switch %q: read as %+v; want t2 with mock-0 and mock-1", on, m.TestCases)
+		}
+	}
+}

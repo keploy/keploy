@@ -516,7 +516,10 @@ func (tc *MappedTestCase) unmarshalYAMLEntry(node *yaml.Node) error {
 	// Prefer the backward-compatible persisted format first.
 	var persisted persistedTestFormat
 	perr := node.Decode(&persisted)
-	if perr == nil && (nodeHasField(node, "mock_entries") || ((nodeHasField(node, "dir") || nodeHasField(node, "starts") || nodeHasField(node, "cases")) && !nodeHasField(node, "mocks"))) {
+	// A field a merge key (<<) brings counts as the entry's own, as the
+	// decode above reads it and as the both-lists check sees it.
+	has := func(field string) bool { return mergedField(node, field) != nil }
+	if perr == nil && (has("mock_entries") || ((has("dir") || has("starts") || has("cases")) && !has("mocks"))) {
 		tc.applyDecodedMocks(persisted.ID, persisted.MockEntries, "", persisted.Cases)
 		tc.extras(persisted)
 		return nil
