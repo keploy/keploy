@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -126,5 +127,49 @@ func TestANestedMergeIsKept(t *testing.T) {
 	}
 	if back["note0"] != "x" || back["note1"] != "y" {
 		t.Fatalf("read back as %v\n%s", back, out)
+	}
+}
+
+// A field kept from one format whose name the other format's form knows (a
+// YAML file's testSetId, a JSON file's test_set_id) is not written there: it
+// would be the key twice.
+func TestAKeptFieldNeverDuplicatesAKnownKeyOfTheOtherFormat(t *testing.T) {
+	var m Mapping
+	if err := yaml.Unmarshal([]byte("version: v\nkind: k\ntest_set_id: s\ntestSetId: other\nnote: kept\n"), &m); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(b), `"testSetId"`) != 1 || !strings.Contains(string(b), `"note":"kept"`) {
+		t.Fatalf("JSON %s; want testSetId once and the note kept", b)
+	}
+	var j Mapping
+	if err := json.Unmarshal([]byte(`{"version":"v","kind":"k","testSetId":"s","test_set_id":"other","note":"kept"}`), &j); err != nil {
+		t.Fatal(err)
+	}
+	y, err := yaml.Marshal(j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(y), "test_set_id:") != 1 || !strings.Contains(string(y), "note: kept") {
+		t.Fatalf("YAML %s; want test_set_id once and the note kept", y)
+	}
+	// A JSON string that reads as a number in plain YAML stays a string.
+	var n Mapping
+	if err := json.Unmarshal([]byte(`{"version":"v","ref":"123"}`), &n); err != nil {
+		t.Fatal(err)
+	}
+	y, err = yaml.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back map[string]any
+	if err := yaml.Unmarshal(y, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back["ref"] != "123" {
+		t.Fatalf("YAML %s read ref back as %#v; want the string 123", y, back["ref"])
 	}
 }

@@ -1,6 +1,8 @@
 package models
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,9 +13,11 @@ import (
 
 // yamlExtra is the fields of a mapping, a test entry or a mock entry this
 // keploy does not know, as they read: key and value nodes in pairs, written
-// back after the fields it knows. So a hand edit of mappings.yaml (a note, a
-// ticket, a field a newer keploy wrote) survives keploy's rewrites of the
-// file. nil when there are none.
+// back after the fields it knows. So a hand edit of the mappings file (a
+// note, a ticket, a field a newer keploy wrote) survives keploy's rewrites of
+// it, in YAML (mappings.yaml) and in JSON (mappings.json) alike: a JSON
+// file's fields are kept as the nodes YAML reads them as (jsonExtra), and
+// written back as JSON (withJSONExtra). nil when there are none.
 type yamlExtra struct{ nodes []*yaml.Node }
 
 // extraFields is the fields of the mapping node n whose keys known does not
@@ -132,8 +136,10 @@ func detached(n *yaml.Node, budget *int) *yaml.Node {
 }
 
 // withExtra is v encoded as a mapping node with x's fields after its own,
-// or v itself when x has none.
-func withExtra(v any, x *yamlExtra) (any, error) {
+// or v itself when x has none. A field whose key the YAML form knows (one a
+// JSON file kept under a name its YAML form spells as a known key) is not
+// written: it would be the key twice.
+func withExtra(v any, x *yamlExtra, known map[string]bool) (any, error) {
 	if x == nil || len(x.nodes) == 0 {
 		return v, nil
 	}
@@ -144,8 +150,162 @@ func withExtra(v any, x *yamlExtra) (any, error) {
 	if n.Kind != yaml.MappingNode {
 		return v, nil
 	}
-	n.Content = append(n.Content, x.nodes...)
+	for i := 0; i+1 < len(x.nodes); i += 2 {
+		if !known[x.nodes[i].Value] {
+			n.Content = append(n.Content, x.nodes[i], x.nodes[i+1])
+		}
+	}
 	return &n, nil
+}
+
+// jsonExtra is the fields of the JSON object data whose keys known does not
+// hold, in the order data has them, as the nodes YAML reads them as: the one
+// form a mapping keeps unknown fields in, whichever file they came from.
+// nil when there are none, or when data is no object.
+func jsonExtra(data []byte, known map[string]bool) *yamlExtra {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil
+	}
+	var x *yamlExtra
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return x
+		}
+		key, _ := tok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return x
+		}
+		if known[key] {
+			continue
+		}
+		// JSON is YAML: the value reads as the node a YAML file would hold.
+		var doc yaml.Node
+		if err := yaml.Unmarshal(raw, &doc); err != nil || len(doc.Content) == 0 {
+			continue
+		}
+		if x == nil {
+			x = &yamlExtra{}
+		}
+		v := doc.Content[0]
+		defaultStyle(v)
+		x.nodes = append(x.nodes, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, v)
+	}
+	return x
+}
+
+// defaultStyle gives n and the nodes under it YAML's default style, in place
+// of the JSON one (double quotes, flow mappings), so a kept field reads as
+// YAML where a YAML file holds it. The encoder still quotes a scalar whose
+// plain form would read as another type.
+func defaultStyle(n *yaml.Node) {
+	n.Style = 0
+	for _, c := range n.Content {
+		defaultStyle(c)
+	}
+}
+
+// withJSONExtra is the JSON object b with x's fields after its own, or b
+// itself when x has none. A field whose key the JSON form knows is not
+// written, as withExtra does for YAML.
+func withJSONExtra(b []byte, x *yamlExtra, known map[string]bool) ([]byte, error) {
+	if x == nil || len(x.nodes) == 0 || len(b) < 2 || b[len(b)-1] != '}' {
+		return b, nil
+	}
+	out := append([]byte(nil), b[:len(b)-1]...)
+	for i := 0; i+1 < len(x.nodes); i += 2 {
+		if known[x.nodes[i].Value] {
+			continue
+		}
+		k, err := json.Marshal(x.nodes[i].Value)
+		if err != nil {
+			return nil, err
+		}
+		v, err := nodeJSON(x.nodes[i+1])
+		if err != nil {
+			return nil, err
+		}
+		if out[len(out)-1] != '{' {
+			out = append(out, ',')
+		}
+		out = append(append(append(out, k...), ':'), v...)
+	}
+	return append(out, '}'), nil
+}
+
+// nodeJSON is the YAML node n as JSON, a mapping's keys in their order: how a
+// kept field is written to a JSON file. A mapping that merges another (<<)
+// is written as YAML resolves it, its keys sorted; a scalar JSON cannot hold
+// (NaN, an infinity) is written as its text.
+func nodeJSON(n *yaml.Node) ([]byte, error) {
+	switch n.Kind {
+	case yaml.DocumentNode:
+		if len(n.Content) == 0 {
+			return []byte("null"), nil
+		}
+		return nodeJSON(n.Content[0])
+	case yaml.AliasNode:
+		if n.Alias == nil {
+			return []byte("null"), nil
+		}
+		return nodeJSON(n.Alias)
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == "<<" {
+				var v map[string]any
+				if err := n.Decode(&v); err != nil {
+					return nil, err
+				}
+				return json.Marshal(v)
+			}
+		}
+		var b bytes.Buffer
+		b.WriteByte('{')
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			var key string
+			if err := n.Content[i].Decode(&key); err != nil {
+				key = n.Content[i].Value
+			}
+			k, _ := json.Marshal(key)
+			b.Write(k)
+			b.WriteByte(':')
+			v, err := nodeJSON(n.Content[i+1])
+			if err != nil {
+				return nil, err
+			}
+			b.Write(v)
+		}
+		b.WriteByte('}')
+		return b.Bytes(), nil
+	case yaml.SequenceNode:
+		var b bytes.Buffer
+		b.WriteByte('[')
+		for i, c := range n.Content {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			v, err := nodeJSON(c)
+			if err != nil {
+				return nil, err
+			}
+			b.Write(v)
+		}
+		b.WriteByte(']')
+		return b.Bytes(), nil
+	}
+	var v any
+	if err := n.Decode(&v); err != nil {
+		return json.Marshal(n.Value)
+	}
+	if b, err := json.Marshal(v); err == nil {
+		return b, nil
+	}
+	return json.Marshal(n.Value)
 }
 
 // yamlKeys is the keys the yaml tags of t's fields name, inline structs'
@@ -171,21 +331,58 @@ func yamlKeys(t reflect.Type) map[string]bool {
 	return keys
 }
 
+// jsonKeys is the keys the json tags of t's fields name, embedded structs'
+// included: what a JSON decode of t knows.
+func jsonKeys(t reflect.Type) map[string]bool {
+	keys := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		switch {
+		case name == "-":
+		case name == "" && f.Anonymous && f.Type.Kind() == reflect.Struct:
+			for k := range jsonKeys(f.Type) {
+				keys[k] = true
+			}
+		case name != "":
+			keys[name] = true
+		case f.IsExported():
+			keys[f.Name] = true
+		}
+	}
+	return keys
+}
+
 var (
-	knownOnce                        sync.Once
-	mappingKeys, testKeys, entryKeys map[string]bool
+	knownOnce                                    sync.Once
+	mappingKeys, testKeys, entryKeys             map[string]bool
+	mappingJSONKeys, testJSONKeys, entryJSONKeys map[string]bool
 )
 
-// known is the keys a mapping, a test entry (in every shape it reads in) and
-// a mock entry know.
-func known() (mapping, test, entry map[string]bool) {
+func initKnown() {
 	knownOnce.Do(func() {
 		mappingKeys = yamlKeys(reflect.TypeOf(Mapping{}))
 		testKeys = yamlKeys(reflect.TypeOf(writtenTestFormat{}))
 		testKeys["mocks"] = true
 		entryKeys = yamlKeys(reflect.TypeOf(MockEntry{}))
+		mappingJSONKeys = jsonKeys(reflect.TypeOf(Mapping{}))
+		testJSONKeys = jsonKeys(reflect.TypeOf(writtenTestFormat{}))
+		testJSONKeys["mocks"] = true
+		entryJSONKeys = jsonKeys(reflect.TypeOf(MockEntry{}))
 	})
+}
+
+// known is the keys a mapping, a test entry (in every shape it reads in) and
+// a mock entry know, in YAML.
+func known() (mapping, test, entry map[string]bool) {
+	initKnown()
 	return mappingKeys, testKeys, entryKeys
+}
+
+// knownJSON is known for JSON, whose keys the fields' json tags name.
+func knownJSON() (mapping, test, entry map[string]bool) {
+	initKnown()
+	return mappingJSONKeys, testJSONKeys, entryJSONKeys
 }
 
 // KeepExtra gives m the top-level fields from read and this keploy does not
@@ -293,7 +490,33 @@ func (m *Mapping) UnmarshalYAML(n *yaml.Node) error {
 // not know after its own.
 func (m Mapping) MarshalYAML() (interface{}, error) {
 	type plain Mapping
-	return withExtra(plain(m), m.extra)
+	mk, _, _ := known()
+	return withExtra(plain(m), m.extra, mk)
+}
+
+// UnmarshalJSON is UnmarshalYAML for a JSON mapping (mappings.json): it
+// keeps the fields this keploy does not know.
+func (m *Mapping) UnmarshalJSON(data []byte) error {
+	type plain Mapping
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*m = Mapping(p)
+	mk, _, _ := knownJSON()
+	m.extra = jsonExtra(data, mk)
+	return nil
+}
+
+// MarshalJSON is MarshalYAML for JSON.
+func (m Mapping) MarshalJSON() ([]byte, error) {
+	type plain Mapping
+	b, err := json.Marshal(plain(m))
+	if err != nil {
+		return nil, err
+	}
+	mk, _, _ := knownJSON()
+	return withJSONExtra(b, m.extra, mk)
 }
 
 // UnmarshalYAML reads a mock entry, keeping the fields this keploy does not
@@ -314,5 +537,30 @@ func (e *MockEntry) UnmarshalYAML(n *yaml.Node) error {
 // does not know after its own.
 func (e MockEntry) MarshalYAML() (interface{}, error) {
 	type plain MockEntry
-	return withExtra(plain(e), e.extra)
+	_, _, ek := known()
+	return withExtra(plain(e), e.extra, ek)
+}
+
+// UnmarshalJSON is UnmarshalYAML for a JSON mock entry.
+func (e *MockEntry) UnmarshalJSON(data []byte) error {
+	type plain MockEntry
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*e = MockEntry(p)
+	_, _, ek := knownJSON()
+	e.extra = jsonExtra(data, ek)
+	return nil
+}
+
+// MarshalJSON is MarshalYAML for JSON.
+func (e MockEntry) MarshalJSON() ([]byte, error) {
+	type plain MockEntry
+	b, err := json.Marshal(plain(e))
+	if err != nil {
+		return nil, err
+	}
+	_, _, ek := knownJSON()
+	return withJSONExtra(b, e.extra, ek)
 }

@@ -388,11 +388,19 @@ type stringSliceTestFormat struct {
 }
 
 func (tc MappedTestCase) MarshalYAML() (interface{}, error) {
-	return withExtra(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, tc.extra)
+	_, tk, _ := known()
+	return withExtra(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real}, tc.extra, tk)
 }
 
+// MarshalJSON writes a test entry with the fields it read and this keploy
+// does not know after its own, as MarshalYAML does.
 func (tc MappedTestCase) MarshalJSON() ([]byte, error) {
-	return json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
+	b, err := json.Marshal(writtenTestFormat{persistedTestFormat: tc.persistedFormat(), At: tc.At, Real: tc.Real})
+	if err != nil {
+		return nil, err
+	}
+	_, tk, _ := knownJSON()
+	return withJSONExtra(b, tc.extra, tk)
 }
 
 // errRecordedBegin is a test entry whose at: is not a time.
@@ -572,6 +580,9 @@ func (tc *MappedTestCase) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	tc.At, tc.Real = at, rl
+	// The fields this keploy does not know, kept as a YAML entry's are.
+	_, tk, _ := knownJSON()
+	tc.extra = jsonExtra(data, tk)
 	return nil
 }
 
