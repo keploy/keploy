@@ -12,11 +12,18 @@ import (
 // What a parser asks the manager to run once it lets its recordings go
 // (integrations.Restaged) runs once, at the next staging, and at Close; at
 // once when asked after Close; a later ask for a slot replaces the earlier;
-// and through a worker's view, as through the manager.
+// and through a worker's view, as through the manager. A store into the
+// trees runs nothing: a parser's changed copy of another kind's recording
+// (MySQL's matcher stores one on a match) leaves the HTTP indexes' keys as
+// they were, and what they keep is of the set staged.
 func TestWhatAParserAskedToRunRunsOnceWhenTheManagerLetsItsRecordingsGo(t *testing.T) {
 	now := time.Now()
+	var cfg *models.Mock
 	stage := func(mm *MockManager) {
-		mm.SetMocksWithWindow(nil, []*models.Mock{r3Mock("mock-0", now, "GET", "/a", "", "{}")}, models.BaseTime, now.Add(time.Hour))
+		cfg = newMockForTest("mysql-handshake", now.Add(-time.Second), models.LifetimeSession)
+		cfg.Kind = models.MySQL
+		cfg.Spec.Metadata = map[string]string{"type": "config"}
+		mm.SetMocksWithWindow(nil, []*models.Mock{r3Mock("mock-0", now, "GET", "/a", "", "{}"), cfg}, models.BaseTime, now.Add(time.Hour))
 	}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	ran := map[string]int{}
@@ -39,10 +46,20 @@ func TestWhatAParserAskedToRunRunsOnceWhenTheManagerLetsItsRecordingsGo(t *testi
 	if ran["replaced"] != 1 || ran["b"] != 1 {
 		t.Fatalf("a staging ran again what an earlier one ran: %v", ran)
 	}
+	ask(mm, "c", "kept")
+	stored := mm.Revision()
+	cp := cfg.ShallowCopy()
+	cp.Spec.Metadata = map[string]string{"type": "config", "rev": "1"}
+	if !mm.UpdateUnFilteredMock(cfg, cp) || mm.Revision() == stored {
+		t.Fatal("the changed copy was not stored")
+	}
+	if ran["kept"] != 0 {
+		t.Fatalf("a store into the trees ran what a parser asked %d times", ran["kept"])
+	}
 	ask(&scopedMockDb{MockMemDb: mm}, "a", "view")
 	stage(mm)
-	if ran["view"] != 1 {
-		t.Fatalf("asked through a worker's view, a staging ran it %d times", ran["view"])
+	if ran["view"] != 1 || ran["kept"] != 1 {
+		t.Fatalf("asked through a worker's view, a staging ran it %d times; asked before a store, %d", ran["view"], ran["kept"])
 	}
 	ask(mm, "a", "closing")
 	mm.Close()

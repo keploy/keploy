@@ -152,7 +152,11 @@ type SharedGen struct {
 //   - GetPerTestMocksInWindow is OwnedUnanswered then perTest less what
 //     MockSpent reports.
 //   - GetSessionMocks is OwnedUnanswered then session less what MockSpent
-//     reports, each recording once (the first place kept).
+//     reports.
+//
+// The two parts never overlap: the shared part holds none of the test's own
+// recordings, answered or not, so each read holds each recording once, and a
+// recording the test answered with is in neither.
 //
 // The shared part is static: it holds what a view spent too, since a spend
 // lasts only as long as its view, so a parser keeps one index of it per
@@ -188,17 +192,16 @@ func SharedGenerationOf(db MockMemDb, kind models.Kind) (SharedGen, bool) {
 
 // Restaged is a store that tells a parser when it lets go of the recordings
 // its reads handed out: at a staging (which moves SharedGen's Store) and at
-// its Close; also at a store into its trees or a delete from them that moves
-// every kind's stored generation. A parser that keeps data built
+// its Close, never at a store into its trees or a delete from them, whose
+// recordings are of the same set. A parser that keeps data built
 // from a store's reads (an index of one staging's recordings) asks to be told
 // (WhenRestaged), so the data, and the recordings it points at, go with the
 // store's own rather than at the parser's next call, which may come only in a
 // later set, or never.
 type Restaged interface {
-	// WhenRestaged runs release once, at the next staging (or store or
-	// delete that moves every kind's stored generation) or Close; at once
-	// on a closed store. One slot keeps one
-	// release: a later one for the same slot replaces it.
+	// WhenRestaged runs release once, at the next staging (after its moves)
+	// or Close; at once on a closed store. One slot keeps one release: a
+	// later one for the same slot replaces it.
 	WhenRestaged(slot any, release func())
 }
 

@@ -525,13 +525,7 @@ func (d *sharedOwnDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 func (d *sharedOwnDb) OwnedUnanswered() ([]*models.Mock, bool) { return slices.Clone(d.perTest), true }
 
 func (d *sharedOwnDb) GetSessionMocks() ([]*models.Mock, error) {
-	out := slices.Clone(d.perTest)
-	for _, m := range d.shared {
-		if !slices.Contains(out, m) {
-			out = append(out, m)
-		}
-	}
-	return out, nil
+	return append(slices.Clone(d.perTest), d.shared...), nil
 }
 
 // Through the index of the shared part of a test's reads a call compares,
@@ -561,33 +555,5 @@ func TestACallThroughTheSharedIndexComparesOnlyTheOwnRecordingsOfItsPath(t *test
 		}
 	}); v != 2 {
 		t.Fatalf("a learned call placed %d recordings; want 2 (own-151 in each read)", v)
-	}
-}
-
-// A store whose shared part holds a recording the open test owns too reads
-// it once in its session read (integrations.SharedReads: the first place
-// kept), so the index of the shared part places it once there too: in the
-// verify mode a strict call and a learned call of it find what a read finds
-// (one place in each read), and a third place panics.
-func TestARecordingOwnedAndSharedIsReadOnceInTheSessionReadThroughTheIndex(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	was := integrations.ExactViewVerify.Load()
-	integrations.ExactViewVerify.Store(true)
-	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
-	own := strictItems("own", 2)
-	db := &sharedOwnDb{ownGenDb: newOwnGenDb(own, nil), shared: []*models.Mock{own[1]}}
-	hl, n, _ := learnOn(t)
-	if _, err := hl.learnedMatch(context.Background(), strictCall(1), db, n, models.OutgoingOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if !hl.learnIx.shared.has {
-		t.Fatal("no learn index of the shared part was built")
-	}
-	h := newHTTP()
-	if got := strictMatchOf(t, h, strictCall(1), db, db, nil); got == nil || got.Name != "own-1" {
-		t.Fatalf("served %v; want own-1", got)
-	}
-	if !h.strictIx.shared.has {
-		t.Fatal("no index of the shared part was built")
 	}
 }

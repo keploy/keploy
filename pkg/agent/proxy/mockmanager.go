@@ -864,7 +864,6 @@ func (m *MockManager) Revision() uint64 {
 func (m *MockManager) bumpRevisionAll() {
 	atomic.AddUint64(&m.stored, 1)
 	m.bumpViewAll()
-	m.letDerivedGo()
 }
 
 // bumpViewAll is bumpRevisionAll for an exact view's install: the stored
@@ -1944,6 +1943,12 @@ func (m *MockManager) setMocksWithWindowLocked(filtered, unfiltered, explicitSta
 		m.bumpRevisionKind(k)
 	}
 	m.bumpRevisionAll()
+	// What the parsers built of the trees this staging replaced goes with
+	// them (WhenRestaged), once every generation moved. A store into the
+	// trees or a delete from them lets nothing go: it moves every kind's
+	// stored generation, but the parsers' indexes of a kind it did not touch
+	// still hold, and what an index of a touched kind keeps is of this set.
+	m.letDerivedGo()
 	// Index the staged names for counting so MarkMockAsUsed takes the
 	// O(1) fast path; a set boundary starts the counts afresh.
 	// The startup tier is included: without it a startup-only mock never enters

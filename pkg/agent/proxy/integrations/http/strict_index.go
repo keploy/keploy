@@ -115,12 +115,11 @@ type strictIndexes struct {
 // the call reads declares variables (strictIndex.vars). gen is the staging
 // generation the read is of.
 type strictLook struct {
-	ix         *strictIndex
-	shared     bool
-	owned      []*models.Mock
-	ownedMocks map[*models.Mock]bool
-	vars       bool
-	gen        uint64
+	ix     *strictIndex
+	shared bool
+	owned  []*models.Mock
+	vars   bool
+	gen    uint64
 }
 
 // of is the strict pass's indexed read of what db reads now, for base, or
@@ -143,10 +142,7 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise) (stri
 			if !ok {
 				return strictLook{}, false
 			}
-			look := strictLook{ix: ix, shared: true, gen: gen, vars: ix.vars, ownedMocks: make(map[*models.Mock]bool, len(owned))}
-			for _, m := range owned {
-				look.ownedMocks[m] = true
-			}
+			look := strictLook{ix: ix, shared: true, gen: gen, vars: ix.vars}
 			for _, m := range FilterHTTPMocks(owned) {
 				if hasVariables(m) {
 					look.vars = true
@@ -199,7 +195,7 @@ func (l strictLook) candidates(s strictSieve, n strictNoise, mockSpent func(stri
 		out = append(out, owned...)
 		for ; i < len(ps) && (ps[i] < l.ix.split) == perTest; i++ {
 			m := l.ix.entries[ps[i]]
-			if mockSpent(m.Name) || spent(m) || !perTest && l.ownedMocks[m] {
+			if mockSpent(m.Name) || spent(m) {
 				continue
 			}
 			out = append(out, m)
