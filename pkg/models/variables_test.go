@@ -484,6 +484,69 @@ func TestAPlainClockReadIsCheckedAtItsCutInItsZone(t *testing.T) {
 			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
 		}
 	}
+	// Adelaide's clocks go back at 2026-04-04T16:30Z (03:00 ACDT to 02:00
+	// ACST): its wall clock shows 02:00-03:00 twice. Read in the second
+	// showing, the hour cut is 02:00 ACST (Java's truncatedTo, Go's
+	// time.Date) or 02:00 ACDT, an hour before (JavaScript's setMinutes,
+	// Python's fold 0); 01:00 ACDT is two hours before the read's hour.
+	if adelaide, err := time.LoadLocation("Australia/Adelaide"); err == nil {
+		read := time.Date(2026, 4, 4, 16, 45, 0, 0, time.UTC)
+		for _, row := range []struct {
+			what string
+			at   time.Time
+			want bool
+		}{
+			{"Adelaide: the read's hour, at its second showing", time.Date(2026, 4, 4, 16, 30, 0, 0, time.UTC), true},
+			{"Adelaide: the read's hour, at its first showing", time.Date(2026, 4, 4, 15, 30, 0, 0, time.UTC), true},
+			{"Adelaide: the hour before the first showing (two hours before the read's hour)", time.Date(2026, 4, 4, 14, 30, 0, 0, time.UTC), false},
+		} {
+			if got := o.Holds(row.at.In(adelaide), h, read, read.Add(time.Minute)); got != row.want {
+				t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
+			}
+		}
+		if got, want := ReadCut(read, h, adelaide), time.Date(2026, 4, 4, 16, 30, 0, 0, time.UTC); !got.Equal(want) {
+			t.Errorf("ReadCut of %v to an hour in Adelaide = %v, want %v (the hour's second showing)", read, got, want)
+		}
+	}
+	// Chatham's clocks skip 02:45 to 03:45 at 2026-09-26T14:00Z. Read at
+	// 03:45 +13:45, the hour's start at the read's offset is 03:00 +13:45
+	// (13:15Z): 01:00 +12:45 is one hour before it, 00:00 +12:45 two.
+	if chatham, err := time.LoadLocation("Pacific/Chatham"); err == nil {
+		read := time.Date(2026, 9, 26, 14, 0, 0, 0, time.UTC)
+		for _, row := range []struct {
+			what string
+			at   time.Time
+			want bool
+		}{
+			{"Chatham: one hour stale, read as the clocks skip", time.Date(2026, 9, 26, 12, 15, 0, 0, time.UTC), true},
+			{"Chatham: two hours stale, read as the clocks skip", time.Date(2026, 9, 26, 11, 15, 0, 0, time.UTC), false},
+		} {
+			if got := o.Holds(row.at.In(chatham), h, read, read.Add(time.Minute)); got != row.want {
+				t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
+			}
+		}
+	}
+	// Amman's clocks went back at 01:00 on 2010-10-29, so its wall clock
+	// showed that day's midnight twice (21:00Z and 22:00Z the day before;
+	// Go's time.Date gives the second). Read after the second, the day still
+	// starts at the first, and yesterday's date is one cut stale.
+	if amman, err := time.LoadLocation("Asia/Amman"); err == nil {
+		read := time.Date(2010, 10, 28, 22, 30, 0, 0, time.UTC)
+		yesterday := time.Date(2010, 10, 27, 21, 0, 0, 0, time.UTC).In(amman)
+		if !(ClockOffset{Res: d}).Holds(yesterday, d, read, read.Add(time.Minute)) {
+			t.Errorf("Amman: yesterday's date (%v) read after the day's second midnight: Holds = false, want true", yesterday)
+		}
+	}
+	// Santiago's clocks skip 00:00-01:00 on 2026-09-06: read at 00:10 the
+	// day before, tomorrow's date (that day's first instant, 01:00 -03) is
+	// one cut ahead; the same time of day tomorrow does not exist there.
+	if santiago, err := time.LoadLocation("America/Santiago"); err == nil {
+		read := time.Date(2026, 9, 5, 0, 10, 0, 0, santiago)
+		tomorrow := time.Date(2026, 9, 6, 4, 0, 0, 0, time.UTC).In(santiago)
+		if !(ClockOffset{Res: d}).Holds(tomorrow, d, read, read.Add(time.Minute)) {
+			t.Errorf("Santiago: tomorrow's date (%v) read at 00:10 the day before its clocks skip midnight: Holds = false, want true", tomorrow)
+		}
+	}
 	if got, want := ReadCut(late, d, berlin), time.Date(2026, 10, 25, 0, 0, 0, 0, berlin); !got.Equal(want) || late.Sub(got) != 24*time.Hour+40*time.Minute {
 		t.Errorf("ReadCut of %v to a day in Berlin = %v (%v before), want %v, 24h40m (23h40m of wall clock and the hour the clocks went back)", late, got, late.Sub(got), want)
 	}

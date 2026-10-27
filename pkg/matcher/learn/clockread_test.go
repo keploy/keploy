@@ -1345,3 +1345,60 @@ func TestATimeOfDayBothZonesWindowsHoldIsLearnedInEither(t *testing.T) {
 		}
 	}
 }
+
+// Santiago's clocks skip from 00:00 to 01:00 on 2026-09-06: a date of no
+// zone for that day is its first instant, 01:00, as Java and JavaScript
+// read it (wallIn), never 23:00 the day before (Go's time.Date). So the
+// day after, that date is one day stale and passes, the date before it is
+// two and is refused, whatever hour the replay runs.
+func TestADateOfNoZoneOnADayWithNoMidnightIsThatDaysFirstInstant(t *testing.T) {
+	const p = "body.day"
+	santiago, err := time.LoadLocation("America/Santiago")
+	if err != nil {
+		t.Skipf("no zone data: %v", err)
+	}
+	text := func(v string) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: v} }
+	if got, want := wallIn(time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC).UnixNano(), santiago), time.Date(2026, 9, 6, 4, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Fatalf("wallIn of 2026-09-06 00:00 in Santiago = %v, want %v (01:00 -03)", got, want)
+	}
+	// Ahead of UTC too, and over a skipped day: Lord Howe skips 02:00-02:30
+	// on 2026-10-04 (+10:30 to +11), Samoa skipped 2011-12-30 (-10 to +14).
+	for _, row := range []struct {
+		zone       string
+		wall, want time.Time
+	}{
+		{"Australia/Lord_Howe", time.Date(2026, 10, 4, 2, 10, 0, 0, time.UTC), time.Date(2026, 10, 3, 15, 40, 0, 0, time.UTC)},
+		{"Pacific/Apia", time.Date(2011, 12, 30, 12, 0, 0, 0, time.UTC), time.Date(2011, 12, 30, 22, 0, 0, 0, time.UTC)},
+		// Not skipped: as the zone's rules give it, just after a skip.
+		{"Europe/Berlin", time.Date(2026, 3, 29, 3, 10, 0, 0, time.UTC), time.Date(2026, 3, 29, 1, 10, 0, 0, time.UTC)},
+	} {
+		loc, err := time.LoadLocation(row.zone)
+		if err != nil {
+			continue
+		}
+		if got := wallIn(row.wall.UnixNano(), loc); !got.Equal(row.want) || got.Location() != loc {
+			t.Errorf("wallIn of %s in %s = %v, want %v there", row.wall.Format("2006-01-02 15:04"), row.zone, got, row.want.In(loc))
+		}
+	}
+	// Learned in a plain period, the app in Santiago, at an hour its date is
+	// not UTC's: the date is read in the app's zone alone (ZoneApp), so
+	// every hour below reads it through wallIn.
+	call := time.Date(2026, 1, 20, 2, 30, 0, 0, time.UTC)
+	ln := classifyZoned(santiago, false, p, text("2026-01-19"), text("2026-01-20"), call, nil)
+	o, ok := ln.Clock()
+	if !plainRead(ln) || !ok || o.Res != 24*time.Hour || o.Zone != models.ZoneApp {
+		t.Fatalf("learned %s %+v (%s); want a plain read of the clock cut to a day in the application's zone", ln.Kind, o, ln.Why)
+	}
+	for h := 0; h < 24; h++ {
+		from := time.Date(2026, 9, 7, h, 10, 0, 0, santiago)
+		s := Span{From: from, To: from.Add(time.Minute), Zone: santiago}
+		for _, row := range []struct {
+			v    string
+			want bool
+		}{{"2026-09-07", true}, {"2026-09-06", true}, {"2026-09-05", false}} {
+			if ok, why := CheckClockRead(p, o, text(row.v), s, true); ok != row.want {
+				t.Errorf("%s for a span from %s: %v (%s), want %v", row.v, from.Format(time.RFC3339), ok, why, row.want)
+			}
+		}
+	}
+}
