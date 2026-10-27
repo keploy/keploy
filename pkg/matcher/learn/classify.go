@@ -1203,6 +1203,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// call's window shows it a read of the application's clock.
 			if why == "" && dc.clientTests {
 				why = dc.clientTestUnread(v, w)
+				// One instant whole in both runs that its window holds as
+				// a read of the clock plus a constant offset (an
+				// expires_at, as its millisecond text): that offset,
+				// compared at every replay (textClockOffset), never noise,
+				// so no order of the places the word rule let a word of it
+				// go at (follows.followed, which orders noise) is needed:
+				// a replay passes it only as the clock plus that offset.
+				if why != "" {
+					if off, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+						return off
+					}
+				}
 			}
 			if why != "" {
 				ln.Kind, ln.Why, ln.Echo = KindUnaccounted, why, nil
