@@ -88,8 +88,16 @@ func TestAChanceWordOfAnotherTestsAnswerIsLearnedAsVarying(t *testing.T) {
 				refused := "appears in mock-31, a recording record's full round gave the application before the call that is another test's"
 				switch {
 				case follow && row.want == "":
-					if ln.Kind != KindNoise {
-						t.Errorf("%s (set %v): %s (%s); want noise", row.name, viaSet, ln.Kind, ln.Why)
+					// The noise names its evidence (learning is legible): the
+					// word, where both runs gave it, which value lacks it, and
+					// that the value lacking it holds no word of any place
+					// either run gave.
+					word, lacks := "a word of its recorded value (its characters ", "the value record's full round saw lacks that word"
+					if row.rec != chance {
+						word, lacks = "a word of what record's full round saw in it (its characters ", "the recorded value lacks that word"
+					}
+					if ln.Kind != KindNoise || !strings.HasPrefix(ln.Why, word) || !strings.HasSuffix(ln.Why, ") stands in mock-31, which the recording and record's full round both gave the application at the same fields before the call, and "+lacks+" and holds no word of any place either run gave the application before the call: an application that copied the word would have copied it in both runs, so the value holds it by chance, and keploy learns it as varying") {
+						t.Errorf("%s (set %v): %s (%s); want noise naming the chance word", row.name, viaSet, ln.Kind, ln.Why)
 					}
 				case follow:
 					if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.want) {

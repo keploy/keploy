@@ -823,14 +823,14 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				ed := dc.of(s.Leaf.Value, s.Live)
 				if recorded && ed.recTok[i][t] || !recorded && ed.liveTok[i][t] {
-					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
+					why := word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", which did not drift with it: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock, false)
 					if fol.excusedSeen(e, ed, v, i, t, at, why, s.Leaf.Path) {
 						continue
 					}
 					return why
 				}
 				if s.Undeclared && gluedIn(ed, t, recorded) {
-					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock)
+					return word(t, recorded) + " appears " + where + ", in " + e.Mock + " at " + s.Leaf.Path + ", glued to the bytes around it, in a body that declares no media type (no Content-Type): keploy cannot tell the words the application was given there from the bytes that frame them, so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(e.Mock, false)
 				}
 			}
 		}
@@ -847,7 +847,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 					place = x.mock + " at " + f
 				}
 				place += note
-				why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				why := word(t, recorded) + " appears in an earlier recording, in " + place + ": keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, !x.served)
 				if fol.excusedRaw(x, v, i, t, at, why, place) {
 					continue
 				}
@@ -866,7 +866,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				if f := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
 					place = x.mock + " at " + f + ", as record's full round gave it"
 				}
-				why := word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock)
+				why := word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, false)
 				if fol.excusedLive(x, v, i, t, at, why, place) {
 					continue
 				}
@@ -916,7 +916,7 @@ func givenWhy(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, raw
 				keep, kept = dc.stampsEchoed(v, served, raw), true
 			}
 			if g.holds(i, t, keep) {
-				why := v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock)
+				why := v.wordOf(t, recorded) + " appears in " + g.mock + ", a recording record's full round gave the application before the call that " + givenWhose(g.at, at, g.late, g.noTime) + ", so it cannot tell whether it came from there; " + notClock(v) + ". " + correction(g.mock, false)
 				if fol.excusedGiven(g, v, i, t, at, why) {
 					continue
 				}
