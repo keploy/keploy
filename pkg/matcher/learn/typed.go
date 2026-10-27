@@ -759,7 +759,8 @@ func offsetAt(r, l typedInstant, w *Window, res time.Duration) (models.ClockOffs
 	// a second, one multiple of it in range) refuse it in all but a whole
 	// number of minutes; even then every replay compares that offset, so a
 	// read whose wait changed fails there, never passes unchecked.
-	if !(rlo > 0 && llo > 0) && !(rhi <= 0 && lhi <= 0) {
+	later, earlier := rlo > 0 && llo > 0, rhi <= 0 && lhi <= 0
+	if !later && !earlier {
 		return models.ClockOffset{}, false
 	}
 	o := models.ClockOffset{Min: max(rlo, llo), Max: min(rhi, lhi), Res: res, Layout: models.LayoutTyped}
