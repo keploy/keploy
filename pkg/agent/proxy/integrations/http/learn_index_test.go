@@ -144,7 +144,7 @@ func TestALearnedCallReadsTheIndexOfItsOwnGeneration(t *testing.T) {
 	if get("/a") == nil || get("/b") == nil {
 		t.Fatal("the first set's recordings were not served")
 	}
-	db.learnDb.perTest, db.gen = []*models.Mock{rec("b-0", "/a"), rec("b-1", "/c")}, 2
+	db.perTest, db.gen = []*models.Mock{rec("b-0", "/a"), rec("b-1", "/c")}, 2
 	if s := get("/c"); s == nil || s.Name != "b-1" {
 		t.Fatalf("after a staging: served %v; want b-1", s)
 	}
@@ -157,7 +157,7 @@ func TestALearnedCallReadsTheIndexOfItsOwnGeneration(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) {
 			db.gen = 4
-			return db.learnDb.perTest, nil, nil
+			return db.perTest, nil, nil
 		})
 		if ix != nil || h.learnIx.last != nil && h.learnIx.last.gen != 2 {
 			t.Fatal("an index was kept from a read the generation moved under")
@@ -165,10 +165,10 @@ func TestALearnedCallReadsTheIndexOfItsOwnGeneration(t *testing.T) {
 		db.gen = 3
 	}
 	db.gen = integrations.RestagedGeneration
-	if ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.learnDb.perTest, nil, nil }); ix != nil {
+	if ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ix != nil {
 		t.Fatal("a store held to a staging that moved was read through an index")
 	}
-	if ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.learnDb.perTest, nil, nil }); ix != nil {
+	if ix := h.learnIx.of(db, db, n, func() ([]*models.Mock, []*models.Mock, error) { return db.perTest, nil, nil }); ix != nil {
 		t.Fatal("a store held to a staging that moved built an index")
 	}
 }
@@ -219,8 +219,8 @@ func TestAnIndexedLearnedGroupIsTheOneAReadGives(t *testing.T) {
 			ctx = learn.WithTracker(ctx, tr)
 		}
 		for call := 0; call < 6; call++ {
-			if len(db.learnDb.perTest) > 0 && rng.Intn(3) == 0 {
-				_ = db.DeleteFilteredMock(*db.learnDb.perTest[rng.Intn(len(db.learnDb.perTest))])
+			if len(db.perTest) > 0 && rng.Intn(3) == 0 {
+				_ = db.DeleteFilteredMock(*db.perTest[rng.Intn(len(db.perTest))])
 			}
 			in := live([]string{"GET", "POST"}[rng.Intn(2)], paths[rng.Intn(len(paths))], "", nil)
 			lp := liveParts(ctx, in)
