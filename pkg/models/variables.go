@@ -144,7 +144,15 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // values are a cut the application made (CutCoarserThan), the unit above it
 // (UnitAbove), never what the two share by chance (learn's readRes), so the
 // same recording learns the same Res whichever value record's full round
-// read.
+// read. Of a text or a number, the encoding's is the finer of the two
+// values' forms (learn's textReadRes): a writer that drops a fraction's
+// trailing zeros writes fewer digits where its read fell on a whole unit, so
+// a fraction's digits bound its writer's resolution from above only, and one
+// value that happens to end in zeros never coarsens Res. Two that both
+// happen to end in zeros at a unit (one field in about a million, on a
+// clock of nanoseconds) are read at that unit, and a replay's value with
+// more digits is refused as a cut: a false red, the same at every replay of
+// that recording, never a pass.
 // An application that cuts its value coarser than its encoding
 // (Truncate(time.Second) stored as a millisecond $date) shows that cut in
 // both values, and the sums that decide whether a replay can compare the
