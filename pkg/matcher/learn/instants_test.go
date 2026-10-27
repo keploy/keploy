@@ -122,13 +122,6 @@ func noiseIn(ln Learned, w *Window) bool {
 	if w != nil && ln.Kind == KindUnaccounted && ln.Why == outsideWindowWhy {
 		return true
 	}
-	// Its two values show a cut coarser than a millisecond: refused,
-	// naming it.
-	if read != nil {
-		if why := textCutWhy(ln.Recorded.Value, ln.Live.Value, *read); why != "" {
-			return ln.Kind == KindUnaccounted && ln.Why == why
-		}
-	}
 	return ln.Kind == KindClockRead && ln.Read != nil
 }
 
