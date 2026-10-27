@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"runtime"
 	"sort"
@@ -156,7 +157,11 @@ func TestRequestNoiseForBuildsOncePerOptionsValue(t *testing.T) {
 //   - three: one recorded with one more header and other credentials, one on
 //     another path, and the request's (its header-key and path checks skip
 //     the first two);
+//   - a query token that rotated between record and replay, served by the
+//     auto-dynamic query pass (the proven switch off, the default);
 //   - a passthrough destination;
+//   - a missed call --on-miss passthrough or record serves from the real
+//     dependency (an info entry);
 //   - a call whose body does not decode (an error entry).
 //
 // Values are searched as plain text: a field that encodes one (base64, say)
@@ -166,10 +171,10 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		body := tag + "-an5wer"
 		return "HTTP/1.1 200 OK\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
 	}
-	start := func(t *testing.T, req string, db *mockMemDb, opts models.OutgoingOptions, h *HTTP) (*bufio.Reader, func() error) {
+	start := func(t *testing.T, req string, db *mockMemDb, opts models.OutgoingOptions, h *HTTP, dst *models.ConditionalDstCfg) (*bufio.Reader, func() error) {
 		app, proxy := tcpPair(t)
 		done := runDecode(t, proxy, func(ctx context.Context) error {
-			return h.decodeHTTP(ctx, []byte(req), proxy, nil, db, opts)
+			return h.decodeHTTP(ctx, []byte(req), proxy, dst, db, opts)
 		})
 		// ended closes the application's side and waits for decodeHTTP to
 		// return, so every entry the connection logs is in.
@@ -198,7 +203,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		db := serveHTTPMock(t, h, req, answer("live"))
 		db.mocks[0].Name = "mock-live"
 		logs.TakeAll()
-		app, ended := start(t, req, db, models.OutgoingOptions{}, h)
+		app, ended := start(t, req, db, models.OutgoingOptions{}, h, nil)
 		if got := readServed(t, app); got != "live-an5wer" {
 			t.Fatalf("served %q, want the mock's answer", got)
 		}
@@ -235,7 +240,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 			build("mock-live", req, answer("live")),
 		}, updateUnFilteredReturn: true, deleteFilteredReturn: true}
 		logs.TakeAll()
-		app, ended := start(t, req, db, models.OutgoingOptions{}, h)
+		app, ended := start(t, req, db, models.OutgoingOptions{}, h, nil)
 		if got := readServed(t, app); got != "live-an5wer" {
 			t.Fatalf("served %q, want the matching recording's answer", got)
 		}
@@ -254,12 +259,62 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		noValueLogged(t, logs, append(append(shapeValues("live"), shapeValues("rec2")...), shapeValues("rec3")...))
 	})
 
+	t.Run("a query token that rotated, served by the auto-dynamic query pass", func(t *testing.T) {
+		// The zero-config default: the proven switch off.
+		provenswitch.Pin(false)
+		t.Cleanup(provenswitch.Unpin)
+		const liveTok, recTok = "live0123456789abcdef", "rec00123456789abcdef"
+		rotated := func(tok string) string { return strings.Replace(shapeCall("/u", "live", ""), "live-q-t0ken", tok, 1) }
+		core, logs := observer.New(zapcore.DebugLevel)
+		h := &HTTP{Logger: zap.New(core)}
+		db := serveHTTPMock(t, h, rotated(recTok), answer("live"))
+		db.mocks[0].Name = "mock-rec"
+		logs.TakeAll()
+		app, ended := start(t, rotated(liveTok), db, models.OutgoingOptions{}, h, nil)
+		if got := readServed(t, app); got != "live-an5wer" {
+			t.Fatalf("served %q, want the recording's answer", got)
+		}
+		if err := ended(); err != nil {
+			t.Fatalf("decodeHTTP = %v", err)
+		}
+		wantOnce(t, logs, "http query: value treated as auto-detected dynamic", map[string]interface{}{"param": "token", "type class": "token"})
+		noValueLogged(t, logs, append(shapeValues("live"), liveTok, recTok))
+	})
+
+	for _, policy := range []models.MissPolicy{models.MissPassthrough, models.MissRecord} {
+		t.Run("a missed call served from the real dependency, on-miss "+string(policy), func(t *testing.T) {
+			dep := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("dep-an5wer"))
+			}))
+			t.Cleanup(dep.Close)
+			ResetCaptured()
+			t.Cleanup(ResetCaptured)
+			req := shapeCall("/u", "live", "")
+			core, logs := observer.New(zapcore.DebugLevel)
+			h := &HTTP{Logger: zap.New(core)}
+			dst := &models.ConditionalDstCfg{Addr: strings.TrimPrefix(dep.URL, "http://")}
+			app, ended := start(t, req, &mockMemDb{}, models.OutgoingOptions{OnMiss: policy}, h, dst)
+			if got := readServed(t, app); got != "dep-an5wer" {
+				t.Fatalf("served %q, want the dependency's answer", got)
+			}
+			if err := ended(); err != nil {
+				t.Fatalf("decodeHTTP = %v", err)
+			}
+			served := logs.FilterMessage("on-miss: served an unrecorded call from the real dependency").All()
+			if len(served) != 1 || served[0].Level != zapcore.InfoLevel || !reflect.DeepEqual(metadataOf(served[0]), reqMeta("/u")) ||
+				served[0].ContextMap()["policy"] != string(policy) {
+				t.Errorf("logged the on-miss call as %v, want one info entry with the request's method, host, path and query keys", served)
+			}
+			noValueLogged(t, logs, append(shapeValues("live"), "dep-an5wer"))
+		})
+	}
+
 	t.Run("a passthrough destination", func(t *testing.T) {
 		req := shapeCall("/u", "live", "")
 		core, logs := observer.New(zapcore.DebugLevel)
 		h := &HTTP{Logger: zap.New(core)}
 		opts := models.OutgoingOptions{PassThroughHosts: []models.PassThroughRule{{Host: "api.example", Mode: models.PassThroughSkip}}}
-		app, ended := start(t, req, &mockMemDb{}, opts, h)
+		app, ended := start(t, req, &mockMemDb{}, opts, h, nil)
 		if got := readServed(t, app); got != "" {
 			t.Fatalf("served %q, want the synthetic empty 200", got)
 		}
@@ -277,7 +332,7 @@ func TestTheRequestIsLoggedByItsShapeOnly(t *testing.T) {
 		req := shapeCall("/u", "live", "Content-Encoding: gzip\r\n")
 		core, logs := observer.New(zapcore.DebugLevel)
 		h := &HTTP{Logger: zap.New(core)}
-		_, ended := start(t, req, &mockMemDb{}, models.OutgoingOptions{}, h)
+		_, ended := start(t, req, &mockMemDb{}, models.OutgoingOptions{}, h, nil)
 		if err := ended(); err == nil {
 			t.Fatalf("decodeHTTP = nil, want the body's decode error")
 		}

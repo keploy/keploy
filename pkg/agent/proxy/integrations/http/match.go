@@ -1270,11 +1270,10 @@ func (h *HTTP) QueryParamsMatch(mockParams map[string]string, reqQuery url.Value
 			// differently and false-reject (~1/900, negligible for longer ids) —
 			// the loud, safe direction versus the silent wrong-mock this replaces.
 			if c := queryValueTypeClass(rv[i]); autoDynamic && c != "" && c == queryValueTypeClass(av[i]) {
+				// The param's name and the class only: its values are
+				// the application's content (a rotating token, most often).
 				if ce := h.Logger.Check(zap.DebugLevel, "http query: value treated as auto-detected dynamic"); ce != nil {
-					ce.Write(zap.String("param", key),
-						zap.String("mock value", rv[i]),
-						zap.String("request value", av[i]),
-						zap.String("type class", c))
+					ce.Write(zap.String("param", key), zap.String("type class", c))
 				}
 				continue
 			}
