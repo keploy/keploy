@@ -72,7 +72,7 @@ func (s *diffSide) stageNoWindow() {
 // row the set never recorded, and EXECUTEs whose parameters drifted.
 func TestNoWindowSetsServeWhatTheFullScanServes(t *testing.T) {
 	sizes := []int{100, 1000, 10000}
-	if testing.Short() {
+	if testing.Short() || raceEnabled {
 		sizes = sizes[:2]
 	}
 	for _, n := range sizes {
@@ -323,6 +323,11 @@ func (s *diffSide) ownWholeSet() {
 // recording bound (each settled by the test's own FIFO candidate) and reads
 // of rows the set never recorded. Both serve, consume and report the same.
 func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
+	// Each kind of command 13 times under -race (see raceEnabled), 50 without.
+	commands := 400
+	if raceEnabled {
+		commands = 104
+	}
 	for _, strict := range []bool{false, true} {
 		pool := keyedSet(1000, models.LifetimePerTest)
 		ref, fast := newDiffSide(pool), newDiffSide(pool)
@@ -334,7 +339,7 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 			s.stageNoWindow()
 			s.ownWholeSet()
 		}
-		for i := 0; i < 400; i++ {
+		for i := 0; i < commands; i++ {
 			var req mysql.Request
 			switch i % 8 {
 			case 0:
@@ -374,7 +379,7 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 //     computed the keys of every mock the test had not consumed, twice.
 func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 	sizes := []int{1000, 10000}
-	if testing.Short() {
+	if testing.Short() || raceEnabled {
 		sizes = sizes[:1]
 	}
 	for _, n := range sizes {
