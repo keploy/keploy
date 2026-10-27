@@ -66,6 +66,21 @@ const callDeadline = time.Minute
 // status and body the app got, or the error that ended its read (the parser
 // closing the connection on a miss, or the deadline).
 func sendWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request string) (int, string, error) {
+	return callWithin(h, p, mm, request, true)
+}
+
+// answerWithin is sendWithin that returns once the app has its answer,
+// without waiting for the parser to see the app hang up: the parser's next
+// read of the closed connection retries an empty read a few times before it
+// believes the close (util.ReadBytes), which a walk of hundreds of calls
+// would wait out on every call.
+func answerWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request string) (int, string, error) {
+	return callWithin(h, p, mm, request, false)
+}
+
+// callWithin is one call of request through h, ended at callDeadline, that
+// returns once the parser returned too where untilParserEnds.
+func callWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request string, untilParserEnds bool) (int, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), callDeadline)
 	defer cancel()
 	app, agentEnd := net.Pipe()
@@ -85,7 +100,9 @@ func sendWithin(h integrations.Integrations, p *Proxy, mm *MockManager, request 
 	// only once this one is over.
 	defer func() {
 		_ = app.Close()
-		<-done
+		if untilParserEnds {
+			<-done
+		}
 	}()
 	if _, err := app.Write([]byte(request)); err != nil {
 		return 0, "", err

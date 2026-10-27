@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // sharedPoolRun stages pool recordings shown to every test under the
@@ -176,8 +178,11 @@ func httpGet(target string) string {
 // per-test or session recordings, a test that
 // owns a pool recording too (the session read holds it once), a recording a
 // test kept for its repeats and is over with (Spend), calls of the test's
-// own, the pool's, and another test's paths, repeats, calls between tests,
-// and a staging of the set again between tests.
+// own, the pool's, and another test's paths, repeats, calls past what the
+// test and the pool recorded of a path, calls between tests, and a staging of
+// the set again between tests. Every call ends at its deadline and reads the
+// store a few times at most, so a parser that reads a recording the view
+// refuses again and again fails the row at that call.
 func TestTheHTTPIndexOfASharedPartIsTheReadUnderRandomTests(t *testing.T) {
 	defer exactViewVerify.Store(exactViewVerify.Load())
 	exactViewVerify.Store(true)
@@ -243,9 +248,23 @@ func walkSharedHTTP(t *testing.T, seed int64) {
 	stage()
 	p.setMockManager(mm)
 	t.Cleanup(func() { p.setMockManager(nil) })
-	h := httpint.New(zap.NewNop())
+	core, logs := observer.New(zap.DebugLevel)
+	h := httpint.New(zap.New(core))
+	// A call reads the store a few times at most (the hang row's bound,
+	// with the learn step's reads beside the strict pass's); one that reads
+	// a refused recording without end reads it thousands of times before
+	// its deadline.
+	const maxReads, readMsg = 16, "mocks under consideration for match function"
 	send := func(target string) {
-		_, _ = r3SendVia(t, context.Background(), h, p, mm, models.OutgoingOptions{}, httpGet(target))
+		t.Helper()
+		before := logs.FilterMessage(readMsg).Len()
+		_, _, err := answerWithin(h, p, mm, httpGet(target))
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GET %s: %v", target, err)
+		}
+		if reads := logs.FilterMessage(readMsg).Len() - before; reads > maxReads {
+			t.Fatalf("GET %s read the store %d times: a recording the read shows is one the view refuses", target, reads)
+		}
 	}
 	randomPath := func(k int) string {
 		switch rng.Intn(3) {
@@ -262,8 +281,11 @@ func walkSharedHTTP(t *testing.T, seed int64) {
 		for j := 0; j < own; j++ {
 			owned = append(owned, roundMock(mm, fmt.Sprintf("mock-own-%d-%d", k, j)))
 		}
+		past := fmt.Sprintf("/p/%d", rng.Intn(paths))
 		if rng.Intn(3) == 0 {
-			owned = append(owned, roundMock(mm, poolNames[rng.Intn(pool)]))
+			i := rng.Intn(pool)
+			owned = append(owned, roundMock(mm, poolNames[i]))
+			past = fmt.Sprintf("/p/%d", i%paths)
 		}
 		if rng.Intn(4) == 0 {
 			mm.Spend(fmt.Sprintf("mock-own-%d-%d", k, rng.Intn(own)))
@@ -272,6 +294,17 @@ func walkSharedHTTP(t *testing.T, seed int64) {
 		p.ContinueTestErrorCapture()
 		for c := 0; c < 6; c++ {
 			send(randomPath(k))
+		}
+		// Past what was recorded: each of the test's own paths twice, and
+		// one pool path (that of the pool recording the test owns, if it
+		// owns one) once more than the pool and the test can answer of it.
+		for j := 0; j < own; j++ {
+			path := ownPath[fmt.Sprintf("mock-own-%d-%d", k, j)]
+			send(path)
+			send(path)
+		}
+		for c := 0; c <= pool/paths+own; c++ {
+			send(past)
 		}
 		mm.ServeExactPool(models.PoolKeyNone, poolNames)
 		if rng.Intn(2) == 0 {
