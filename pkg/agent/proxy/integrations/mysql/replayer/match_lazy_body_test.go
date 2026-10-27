@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -21,13 +21,13 @@ import (
 // (auto-replay learning request-body noise), and both.
 var noiseEngines = []struct {
 	name string
-	eng  func() *schemanoise.Engine
+	eng  func() *mocknoise.Engine
 }{
-	{"none", func() *schemanoise.Engine { return nil }},
-	{"off", func() *schemanoise.Engine { return replayer.NoiseEngineForTest(false, false) }},
+	{"none", func() *mocknoise.Engine { return nil }},
+	{"off", func() *mocknoise.Engine { return replayer.NoiseEngineForTest(false, false) }},
 	{"strict", replayer.StrictEngineForTest},
-	{"detect", func() *schemanoise.Engine { return replayer.NoiseEngineForTest(true, false) }},
-	{"detect+strict", func() *schemanoise.Engine { return replayer.NoiseEngineForTest(true, true) }},
+	{"detect", func() *mocknoise.Engine { return replayer.NoiseEngineForTest(true, false) }},
+	{"detect+strict", func() *mocknoise.Engine { return replayer.NoiseEngineForTest(true, true) }},
 }
 
 // learnDb is the mock manager, noting the request-body noise each command
@@ -57,7 +57,7 @@ func (d learnDb) note(m *models.Mock) {
 // matchBody is match with the live request body built before the scan (eager)
 // or on first read, and also says what the command learned and how many live
 // bodies it built.
-func (s *diffSide) matchBody(ctx context.Context, req mysql.Request, eng *schemanoise.Engine, eager bool) (string, int) {
+func (s *diffSide) matchBody(ctx context.Context, req mysql.Request, eng *mocknoise.Engine, eager bool) (string, int) {
 	var learned strings.Builder
 	resp, ok, miss, built, err := replayer.MatchCommandBodiesForTest(ctx, zap.NewNop(), req, learnDb{s.mm, &learned}, s.dctx, eng, eager)
 	return s.describe(resp, ok, miss, err) + "; learned" + learned.String(), built
@@ -206,7 +206,7 @@ func TestCommandAllocationsDoNotGrowWithItsParametersWithoutNoise(t *testing.T) 
 			exec.Parameters = append(exec.Parameters, mysql.Parameter{Type: 254, Value: fmt.Sprintf("k%d", i)})
 		}
 		rec := req
-		rec.PacketBundle.SetStoredQuery(diffQueryB)
+		rec.SetStoredQuery(diffQueryB)
 		s := newDiffSide([]*models.Mock{diffMock("m-0", "c1", []mysql.Request{rec}, diffBase, models.LifetimeSession, "config")})
 		s.mm.SetMocksWithWindow(nil, []*models.Mock{s.pool[0].DeepCopy()}, time.Time{}, time.Time{})
 		s.mm.SetCurrentTestWindow(time.Time{}, time.Time{})

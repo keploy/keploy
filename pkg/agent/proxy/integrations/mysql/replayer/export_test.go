@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -17,7 +17,7 @@ import (
 // tests, which run it against the real mock manager. With fullScan every
 // command scans the whole pool: the reference the first passes are checked
 // against. The miss diagnostics come back as text.
-func MatchCommandForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine, fullScan bool) (*mysql.Response, bool, string, error) {
+func MatchCommandForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, fullScan bool) (*mysql.Response, bool, string, error) {
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{fullScan: fullScan})
 	missText := ""
 	if miss != nil {
@@ -43,7 +43,7 @@ func MatchForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db
 
 // MatchWithEngineForTest is MatchForTest with the schema-noise engine eng
 // (StrictEngineForTest: strict enforcement).
-func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine) (*mysql.Response, bool, string, error) {
+func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine) (*mysql.Response, bool, string, error) {
 	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, eng, nil)
 	missText := ""
 	if miss != nil {
@@ -54,13 +54,13 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 
 // StrictEngineForTest is the schema-noise engine matchCommand runs with under
 // strict enforcement.
-func StrictEngineForTest() *schemanoise.Engine {
-	return schemanoise.New(mysqlNoiseAdapter{}, false, true)
+func StrictEngineForTest() *mocknoise.Engine {
+	return mocknoise.New(mysqlNoiseAdapter{}, false, true)
 }
 
 // MatchCommandExaminedForTest is MatchCommandForTest that also returns how
 // many candidates the scan visited (matchOptions.examined).
-func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine, fullScan bool) (*mysql.Response, bool, int, error) {
+func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, fullScan bool) (*mysql.Response, bool, int, error) {
 	examined := 0
 	resp, ok, _, err := matchCommandWith(ctx, zap.NewNop(), req, db, dctx, eng, nil, matchOptions{fullScan: fullScan, examined: &examined})
 	return resp, ok, examined, err
@@ -70,7 +70,7 @@ func MatchCommandExaminedForTest(ctx context.Context, req mysql.Request, db inte
 // live request bodies the command built (matchOptions.bodiesBuilt). With eager
 // it builds the body before the scan, as the matcher did before it built the
 // body on first read (matchOptions.eagerBody).
-func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *schemanoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
+func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine, eager bool) (*mysql.Response, bool, string, int, error) {
 	built := 0
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, dctx, eng, nil, matchOptions{bodiesBuilt: &built, eagerBody: eager})
 	missText := ""
@@ -83,8 +83,8 @@ func MatchCommandBodiesForTest(ctx context.Context, logger *zap.Logger, req mysq
 // NoiseEngineForTest is the schema-noise engine matchCommand runs with, with
 // detection (auto-replay learning request-body noise) and strict enforcement
 // on or off.
-func NoiseEngineForTest(detection, strict bool) *schemanoise.Engine {
-	return schemanoise.New(mysqlNoiseAdapter{}, detection, strict)
+func NoiseEngineForTest(detection, strict bool) *mocknoise.Engine {
+	return mocknoise.New(mysqlNoiseAdapter{}, detection, strict)
 }
 
 // ConfigTagReadsForTest runs fn and returns how many times it read a mock's
@@ -109,6 +109,22 @@ func CountPreparedKeysForTest(f func()) int {
 		return keys(m)
 	}
 	defer func() { preparedIndex.Keys = keys }()
+	f()
+	return int(n.Load())
+}
+
+// CountOwnedPreparedKeysForTest runs f and returns how many times a mock's
+// preparedIndex OwnedKeys were computed meanwhile: once per mock an exact
+// view owns, at the view's first keyed read. f must not run matches on other
+// goroutines past its return.
+func CountOwnedPreparedKeysForTest(f func()) int {
+	var n atomic.Int64
+	keys := preparedIndex.OwnedKeys
+	preparedIndex.OwnedKeys = func(m *models.Mock) []string {
+		n.Add(1)
+		return keys(m)
+	}
+	defer func() { preparedIndex.OwnedKeys = keys }()
 	f()
 	return int(n.Load())
 }
