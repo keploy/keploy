@@ -224,6 +224,7 @@ func (db *TreeDb) rangeKeyed(ix *integrations.MockIndex, key string, fn func(*mo
 		if after != nil {
 			pos = sort.Search(len(list), func(j int) bool { return cmp(list[j].key, after) > 0 })
 		}
+		start := pos
 		for pos < len(list) && len(buf) < batch {
 			e := list[pos]
 			pos++
@@ -234,6 +235,7 @@ func (db *TreeDb) rangeKeyed(ix *integrations.MockIndex, key string, fn func(*mo
 		}
 		more := pos < len(list)
 		db.mu.RUnlock()
+		keyedExamined.Add(uint64(pos - start))
 		for _, mk := range buf {
 			if !fn(mk) {
 				return
