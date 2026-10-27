@@ -18,6 +18,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
@@ -26,87 +27,20 @@ import (
 
 var isIngressRecordingPaused = memoryguard.IsRecordingPaused
 
-type httpCaptureState struct {
-	mu        sync.Mutex
-	maxBytes  int
-	usedBytes int
-	aborted   bool
-}
-
-func newHTTPCaptureState(maxBytes int) *httpCaptureState {
-	return &httpCaptureState{maxBytes: maxBytes}
-}
-
-func (s *httpCaptureState) reserve(n int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.aborted {
-		return false
-	}
-	if isIngressRecordingPaused() {
-		s.aborted = true
-		return false
-	}
-	if s.maxBytes > 0 && s.usedBytes+n > s.maxBytes {
-		s.aborted = true
-		return false
-	}
-
-	s.usedBytes += n
-	return true
-}
-
-func (s *httpCaptureState) isAborted() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.aborted
-}
-
-type httpBodyCaptureBuffer struct {
-	state *httpCaptureState
-	buf   bytes.Buffer
-}
-
-func (b *httpBodyCaptureBuffer) Write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if b.state == nil || !b.state.reserve(len(p)) {
-		b.buf = bytes.Buffer{} // release backing array for GC
-		return len(p), nil
-	}
-
-	if _, err := b.buf.Write(p); err != nil {
-		return 0, err
-	}
-
-	return len(p), nil
-}
-
-func (b *httpBodyCaptureBuffer) Bytes() []byte {
-	return b.buf.Bytes()
-}
-
-func (b *httpBodyCaptureBuffer) Reset() {
-	b.buf.Reset()
-}
-
-// timedChunk pairs a forwarded byte slice with the time the proxy's
-// io.Copy goroutine read it from the source socket. asyncPipeFeeder.Read
-// stores chunk.readAt into lastReadNano BEFORE returning any bytes from
-// the chunk, so a subsequent LastReadTime call from the same parser
-// goroutine sees the chunk's timestamp.
-type timedChunk struct {
-	data   []byte
-	readAt time.Time
-}
+// noteIngressRequest counts each request the ingress has read, before it reads
+// the pause for it: the debug knob that forces a pause by request count
+// (memoryguard.ForcePauseEnv) starts and ends its pause here. A no-op unless
+// the knob is set.
+var noteIngressRequest = memoryguard.IngressRequest
 
 // wireTimeConn wraps a net.Conn and stamps the time of the most recent
-// non-empty Read on an atomic field. The sync-path HTTP capture loop
-// uses this to sample the wire-arrival time of an HTTP request: when
-// http.ReadRequest had to drive at least one new socket Read during
-// this iteration, the latest stamp is the tightest available upper
+// non-empty Read on an atomic field. The zero-copy loop also wraps the app's
+// side in one, for when the bytes that end a response arrived: the end of
+// its exchange's window.
+//
+// Both HTTP/1 capture loops use it to sample the wire-arrival time of an
+// HTTP request: when http.ReadRequest had to drive at least one new socket
+// Read during this iteration, the latest stamp is the tightest available upper
 // bound on actual wire arrival of THIS request's bytes, and is < the
 // time at which parsing completed.
 //
@@ -154,24 +88,6 @@ func (c *wireTimeConn) LastReadTime() time.Time {
 	return time.Unix(0, n)
 }
 
-// Global cap on the bytes held in flight across every asyncPipeFeeder's
-// channel. The per-feeder channel is sized to tolerate large response
-// bodies (5 MB needs ~160 slots at 32 KB/chunk), so under stress workloads
-// with many concurrent connections (go-memory-load: hundreds of in-flight
-// requests, parser unable to drain channels at wire speed) memory growth
-// per feeder × N feeders rapidly exceeds the agent's 250 MiB record-time
-// guard. Counter is decremented when Read pulls a chunk off a channel
-// or when shutdown drains residual chunks; pre-check in Write is the
-// fast path that prevents new allocations once the cap is reached.
-//
-// Value chosen to leave headroom for the rest of the agent (proxy state,
-// mock storage, postgres v3 cohort indexes) under the 200 MiB memory
-// limit set by the CI memory-load harness, while still allowing >2 MB of
-// in-flight capture per active connection in the steady state.
-const feederGlobalLimitBytes = 80 * 1024 * 1024 // 80 MB
-
-var feederInFlightBytes atomic.Int64
-
 // captureHookConcurrency caps the number of CaptureHook goroutines
 // running at the same time across every handleHttp1ZeroCopy
 // invocation: each takes its slot with takeCaptureSlot.
@@ -185,11 +101,9 @@ var feederInFlightBytes atomic.Int64
 // per HTTP exchange unconditionally; the go-memory-load workload
 // (k6 firing 42 concurrent VUs against /large_payload endpoints)
 // piles hundreds of these goroutines up faster than the unbuffered
-// tcChan can drain them, taking the agent past the 250 MiB CI guard
-// even with the 80 MB feeder cap holding firm. 16 in-flight × ~10 MB
-// = ~160 MB worst-case, leaving headroom inside the 200 MB Docker
-// memory limit alongside the feeder cap (80 MB) and the rest of agent
-// state.
+// tcChan can drain them, taking the agent past the 250 MiB CI guard.
+// 16 in-flight × ~10 MB = ~160 MB worst-case, leaving headroom inside
+// the 200 MB Docker memory limit for the rest of agent state.
 const captureHookConcurrency = 16
 
 var captureHookSem = make(chan struct{}, captureHookConcurrency)
@@ -207,237 +121,6 @@ func takeCaptureSlot(ctx context.Context) (release func(), ok bool) {
 	case <-ctx.Done():
 		return nil, false
 	}
-}
-
-// asyncPipeFeeder is the parser-side reader for streaming HTTP capture.
-// io.Copy on the forwarding path writes into it via Write (non-blocking,
-// drops on backpressure); a parser goroutine reads from it via Read.
-//
-// Earlier revisions placed an io.Pipe + a separate bridge goroutine
-// between Write and Read so the forwarding path was decoupled from
-// parser stalls. That design had a window-attribution bug: the bridge
-// stored chunk N+1's readAt into lastReadNano BEFORE pipe.Write blocked
-// on chunk N+1, so a parser that finished consuming chunk N and then
-// queried LastReadTime could observe chunk N+1's ts (the *next*
-// request's arrival time) as the *current* request's reqTimestamp.
-// Empty-body GETs hit this every time because the parser does not
-// trigger another pipe.Read between ReadRequest's return and its
-// LastReadTime call, so there is no scheduling barrier protecting
-// the read of lastReadNano. The integration listmonk-postgres workload
-// reproduced it as 403-invalid-session failures on tightly packed
-// per-test GETs whose session-lookup mocks ended up attributed to the
-// previous test's window.
-//
-// The simpler design below keeps the channel for backpressure but
-// removes the bridge: Read pulls one chunk at a time from the channel
-// and updates lastReadNano synchronously before returning data. The
-// timestamp store and the data hand-off happen on the same goroutine
-// as the parser's eventual LastReadTime call, so there is no race.
-//
-// Graceful degradation is unchanged: memory pressure, exceeding
-// maxSize, or a full channel cause the feeder to silently stop
-// capturing while forwarding continues unimpacted.
-type asyncPipeFeeder struct {
-	ch             chan timedChunk
-	closed         atomic.Bool
-	written        atomic.Int64
-	maxSize        int64
-	logger         *zap.Logger
-	closeOnce      sync.Once
-	parserExited   chan struct{}
-	parserExitOnce sync.Once
-
-	// cur and lastReadNano are touched only from the parser goroutine
-	// (the single Read caller), so no synchronization is needed for
-	// either. The atomic is for Go's memory model rather than any
-	// cross-goroutine visibility concern: we want LastReadTime callers
-	// from the same goroutine to see the most recent store, which a
-	// plain field would also provide, but atomic.Int64 keeps the type
-	// honest if a future caller queries from another goroutine.
-	cur          []byte
-	lastReadNano atomic.Int64
-}
-
-// newAsyncPipeFeeder creates a feeder used as both the forwarding-side
-// io.Writer and the parser-side io.Reader. There is no separate bridge
-// goroutine; Read pulls chunks from the channel directly.
-func newAsyncPipeFeeder(maxSize int, logger *zap.Logger) *asyncPipeFeeder {
-	return &asyncPipeFeeder{
-		// 512 slots ≈ 16MB at 32KB/chunk. Must be large enough that
-		// the channel never overflows during normal operation — a single
-		// 5MB response body needs ~160 slots, and brief pipeline stalls
-		// (parser transitioning between request/response reads) can
-		// cause data to accumulate. Overflowing kills capture for the
-		// rest of the connection because the HTTP stream becomes
-		// unrecoverable.
-		ch:           make(chan timedChunk, 512),
-		maxSize:      int64(maxSize),
-		logger:       logger,
-		parserExited: make(chan struct{}),
-	}
-}
-
-// Read returns bytes from the current chunk's data, pulling a new chunk
-// from the channel when the current one is exhausted. The new chunk's
-// readAt is stored into lastReadNano BEFORE any of its data is returned,
-// so a parser that calls LastReadTime after a successful Read sees the
-// timestamp of the chunk that delivered the most recent byte.
-//
-// Read is the only consumer of the channel and only ever runs on the
-// parser goroutine; cur and lastReadNano are not shared.
-// On channel close, Read returns io.EOF, which propagates through the
-// bufio.Reader to terminate ReadRequest/ReadResponse cleanly.
-func (f *asyncPipeFeeder) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	if len(f.cur) == 0 {
-		chunk, ok := <-f.ch
-		if !ok {
-			return 0, io.EOF
-		}
-		// Bytes leave the feeder's in-flight pool the moment they're
-		// pulled off the channel — they live on the parser goroutine's
-		// stack/heap until consumed and freed naturally by GC.
-		feederInFlightBytes.Add(-int64(len(chunk.data)))
-		f.cur = chunk.data
-		if !chunk.readAt.IsZero() {
-			f.lastReadNano.Store(chunk.readAt.UnixNano())
-		}
-	}
-	n := copy(p, f.cur)
-	f.cur = f.cur[n:]
-	return n, nil
-}
-
-// Write copies p and enqueues it for the parser. It never blocks the
-// caller. Called only from the forwarding goroutine (via io.MultiWriter).
-func (f *asyncPipeFeeder) Write(p []byte) (int, error) {
-	if f.closed.Load() {
-		return len(p), nil
-	}
-	if isIngressRecordingPaused() {
-		f.shutdown() // close channel so the parser exits promptly
-		return len(p), nil
-	}
-	newTotal := f.written.Add(int64(len(p)))
-	if f.maxSize > 0 && newTotal > f.maxSize {
-		f.shutdown()
-		return len(p), nil
-	}
-	// Pre-allocation pressure check: if the global feeder in-flight
-	// counter is already saturated, refuse this chunk and shut the
-	// feeder down rather than allocating into a memory-pressured agent.
-	// Approximate on the Load side (a parallel feeder could push us
-	// over by one chunk) — exactly accurate increment happens below
-	// after the channel send succeeds. Captures-lost is an acceptable
-	// trade for not OOM'ing the agent under stress workloads.
-	chunkSize := int64(len(p))
-	if feederInFlightBytes.Load()+chunkSize > feederGlobalLimitBytes {
-		f.shutdown()
-		if f.logger != nil {
-			f.logger.Debug("Global feeder in-flight cap reached — dropping remaining capture on this connection.",
-				zap.Int64("global_limit_bytes", feederGlobalLimitBytes),
-				zap.Int64("current_in_flight", feederInFlightBytes.Load()),
-				zap.Int("chunk_size", len(p)),
-			)
-		}
-		return len(p), nil
-	}
-	// Copy data — the original slice belongs to io.Copy's reusable buffer.
-	// Capture the arrival time NOW (right after io.Copy.Read returned bytes
-	// from the source socket); this is the timestamp the parser will see
-	// via LastReadTime once these bytes are consumed downstream.
-	buf := make([]byte, len(p))
-	copy(buf, p)
-	chunk := timedChunk{data: buf, readAt: time.Now()}
-	select {
-	case f.ch <- chunk:
-		// Account for the bytes now sitting in the channel; Read or the
-		// shutdown drain decrement on consumption.
-		feederInFlightBytes.Add(chunkSize)
-	default:
-		// Channel full — parser can't keep up. Stop capture entirely
-		// so the parser goroutine sees io.EOF and exits.
-		f.shutdown()
-		if f.logger != nil {
-			f.logger.Debug("Capture channel full — dropping remaining test cases on this connection. "+
-				"This may indicate responses too large for the channel buffer.",
-				zap.Int64("total_bytes_written", f.written.Load()),
-				zap.Int("chunk_size", len(p)),
-				zap.Int("channel_capacity", cap(f.ch)),
-			)
-		}
-	}
-	return len(p), nil
-}
-
-// shutdown idempotently stops the feeder: sets the closed flag and closes
-// the channel. Safe to call from both Write() (capture disabled mid-stream)
-// and Close() (connection ended). The sync.Once ensures the channel is
-// closed exactly once regardless of which path fires first.
-//
-// After close, residual chunks still sitting in f.ch are drained off-thread
-// and their bytes returned to the global in-flight counter. Without the
-// drain those bytes would stay accounted-for (counter never decrements)
-// even though the parser goroutine has already exited on io.EOF — which
-// would slowly leak the global cap over the lifetime of the agent.
-//
-// The drain MUST wait for the parser to exit before consuming chunks. If the
-// drain races the parser, it can steal chunks that the parser has not yet
-// read — `<-f.ch` happily returns buffered chunks even after the channel is
-// closed, so whichever goroutine wins the read takes the data. Under
-// short-lived HTTP/1.0 + Connection: close exchanges (response arrives,
-// upstream closes immediately, shutdown fires) the drain frequently wins on
-// connections whose parser hasn't yet been scheduled by the Go runtime,
-// silently dropping a request/response pair from the test set. python-schema-match
-// reproduced this as a missing capture (/edge/nested_null) under the burst of
-// 12 sequential urllib calls. Sequencing the drain after the parser's exit
-// removes the race while still reclaiming the in-flight counter.
-func (f *asyncPipeFeeder) shutdown() {
-	f.closed.Store(true)
-	f.closeOnce.Do(func() {
-		close(f.ch)
-		go func() {
-			<-f.parserExited
-			for chunk := range f.ch {
-				feederInFlightBytes.Add(-int64(len(chunk.data)))
-			}
-		}()
-	})
-}
-
-// Close signals the parser goroutine to exit by closing the chunk channel.
-// Must be called after the forwarding goroutine finishes (after io.Copy returns).
-func (f *asyncPipeFeeder) Close() {
-	f.shutdown()
-}
-
-// signalParserExit must be called by the parser goroutine on exit (typically
-// via defer) so the shutdown drain can safely proceed without racing the
-// parser for channel data. Idempotent — safe to call multiple times. If
-// no parser is ever attached to this feeder (e.g. capture disabled before
-// the goroutine launches) the deferred close in handleHttp1ZeroCopy must
-// still fire this so shutdown's drain doesn't block forever.
-func (f *asyncPipeFeeder) signalParserExit() {
-	f.parserExitOnce.Do(func() { close(f.parserExited) })
-}
-
-// LastReadTime returns the arrival timestamp of the most recent chunk
-// that Read returned bytes from. Zero time means no chunk has been read
-// yet — callers should fall back to time.Now() in that case.
-//
-// Intended call site: from the parser goroutine, immediately after
-// http.ReadRequest / http.ReadResponse returns. Because the timestamp
-// store happens inside Read (same goroutine, before bytes are returned),
-// the parser is guaranteed to see the right chunk's timestamp without
-// any synchronization beyond Go's memory model.
-func (f *asyncPipeFeeder) LastReadTime() time.Time {
-	n := f.lastReadNano.Load()
-	if n == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, n)
 }
 
 func serializeCapturedRequest(req *http.Request, body []byte) ([]byte, error) {
@@ -530,10 +213,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// Dial Upstream
 	upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 	if err != nil {
-		logger.Error("Failed to connect to upstream application. Verify the application is listening on the resolved address.",
-			zap.String("final_app_addr", finalAppAddr),
-			zap.Error(err),
-		)
+		pm.logAppDialFailure(logger, "Failed to connect to upstream application. Verify the application is listening on the resolved address.",
+			err, zap.String("final_app_addr", finalAppAddr))
 		return
 	}
 	defer func() {
@@ -551,6 +232,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 	// (strict one-at-a-time ordering with forced close). Sampling mode now
 	// uses the zero-copy path for both tracked and bypass connections.
 	forceCloseMode := pm.synchronous
+	// connName names the connection in the count of the requests a pause of
+	// the memory guard costs (syncMock NoteNotRecordedUnderPressure), here and
+	// in the capture hook (hooksUtils.SkipUnderPressure).
+	connName := ingressConnName(clientConn, finalAppAddr)
 
 	if !forceCloseMode {
 		// Sampling bypass: no capture, but route through the same
@@ -563,8 +248,8 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			return
 		}
 		// Normal mode OR sampling-tracked: zero-copy TCP passthrough with
-		// streaming capture. Forwarding runs at wire speed via io.Copy;
-		// capture is fully decoupled via non-blocking asyncPipeFeeders.
+		// streaming capture: the body tees (captureBuffer) copy what is
+		// forwarded, and each capture is built off the forwarding path.
 		//
 		// Sampling-tracked: pass forceClose=true so each captured
 		// exchange terminates the connection (Connection: close on req
@@ -664,8 +349,24 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// pressureCloseMode unifies forceCloseMode with memory pressure.
 		// When true, expected close errors are handled gracefully (DEBUG level),
 		// the sampling lock is released early, and the loop exits after one exchange.
-		pressureCloseMode := forceCloseMode || isIngressRecordingPaused()
-		captureEnabled := !isIngressRecordingPaused()
+		noteIngressRequest()
+		pausedAtRequest := isIngressRecordingPaused()
+		pressureCloseMode := forceCloseMode || pausedAtRequest
+		captureEnabled := !pausedAtRequest
+		// lostToPause: a pause of the memory guard decided this exchange is
+		// not recorded, at any of the checks below; counted once, as it ends.
+		lostToPause := !captureEnabled
+		// pausedNow is every check below of a pause that began mid-exchange:
+		// when the memory guard has paused recording, the exchange is lost
+		// to the pause (lostToPause), so no check can decide it is not
+		// recorded without its count.
+		pausedNow := func() bool {
+			if !isIngressRecordingPaused() {
+				return false
+			}
+			lostToPause = true
+			return true
+		}
 		// The exchange may be captured: open its window before the request
 		// reaches the app, so no egress call it makes is ever older than it.
 		// One that cannot be captured opens none: nothing would decide it.
@@ -698,7 +399,10 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 		// Note: the pressureCloseMode && !forceCloseMode branch was removed
 		// because forceCloseMode is always true here (the !forceCloseMode
-		// path returns early via handleHttp1ZeroCopy/forwardRawTCP).
+		// path returns early via handleHttp1ZeroCopy/forwardRawTCP). So is
+		// pressureCloseMode, and the re-checks that ran only while it was
+		// false (after the request is forwarded, after the response) are
+		// gone too: they could never run.
 
 		// Determine whether capture is eligible for this exchange.
 		// Chunked-encoded exchanges are still captured: the tee reads the
@@ -707,7 +411,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		captureEligible := captureEnabled && (!pm.sampling || acquiredLock)
 
 		// Re-check memory pressure right before attaching capture buffers.
-		if captureEligible && isIngressRecordingPaused() {
+		if captureEligible && pausedNow() {
 			pressureCloseMode = true
 			captureEligible = false
 			captureEnabled = false
@@ -743,13 +447,6 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 				return
 			}
 			req.Body.Close() // Close explicitly to avoid defer leak in loop.
-		}
-
-		// Re-check memory pressure after forwarding the request.
-		if !pressureCloseMode && isIngressRecordingPaused() {
-			pressureCloseMode = true
-			captureEnabled = false
-			releaseLock()
 		}
 
 		resp, _, err := readFinalResponse(upstreamReader, req, clientConn)
@@ -834,7 +531,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// Re-evaluate capture eligibility after response headers.
 		// Also re-check memory pressure in case it started mid-exchange.
 		captureEligible = captureEnabled && (!pm.sampling || acquiredLock)
-		if captureEligible && isIngressRecordingPaused() {
+		if captureEligible && pausedNow() {
 			pressureCloseMode = true
 			captureEligible = false
 			captureEnabled = false
@@ -906,24 +603,16 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		// The app's side is read ahead of the client (aheadReader), so a slow
 		// client does not stretch the window past when the app finished, up
 		// to the read-ahead's bounds; nor is it the moment the body was
-		// forwarded (the zero-copy loop's stamp). A body read whole with its
-		// headers keeps the headers' time, taken before the lock is given
-		// back. A window that goes on past its headers overlaps the requests
-		// run beside the rest of it, and the yield at the headers (above)
-		// keeps what they claim theirs.
+		// forwarded. A body read whole with its headers keeps the headers'
+		// time, taken before the lock is given back. A window that goes on
+		// past its headers overlaps the requests run beside the rest of it,
+		// and the yield at the headers (above) keeps what they claim theirs.
 		respTimestamp = endAt()
 		// The exchange is over: from its last byte on its request is in flight
 		// no more, and claims nothing over the requests that run beside a
 		// stream still being sent (a no-op for one that yielded at its
 		// headers already).
 		win.Yield(respTimestamp)
-
-		// Final memory pressure check before capture evaluation.
-		if !pressureCloseMode && isIngressRecordingPaused() {
-			pressureCloseMode = true
-			captureEnabled = false
-			releaseLock()
-		}
 
 		shouldCapture := captureEnabled
 		if forceCloseMode {
@@ -940,7 +629,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 			}
 		}
 		// Skip capture if memory pressure kicked in during the exchange
-		if shouldCapture && isIngressRecordingPaused() {
+		if shouldCapture && pausedNow() {
+			shouldCapture = false
+		}
+
+		// A pause that cut a body's capture and ended before the checks
+		// above read it: the exchange is lost to the pause, and counted.
+		if shouldCapture && (reqCapture.LostToPause() || respCapture.LostToPause()) {
+			lostToPause = true
 			shouldCapture = false
 		}
 
@@ -973,6 +669,9 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		}
 
 		if !shouldCapture {
+			if lostToPause {
+				syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
+			}
 			win.Close()
 			win = nil
 			if forceCloseMode || pressureCloseMode {
@@ -1007,9 +706,14 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 		capturedWin := win
 		win = nil
 
+		// Being built until it is in the recorder's queue (or given up): a
+		// recording's stop waits for it (syncMock BacklogBefore). Noted
+		// here, as the response completes, not when the goroutine runs.
+		built := syncMock.FromContextOrGlobal(ctx).BuildingTestCase(capturedRespTS)
 		pm.captures.Add(1)
 		go func() {
 			defer pm.captures.Done()
+			defer built()
 			defer capturedWin.Close() // once the capture has decided it, or skipped it
 			exchangeCaptureSize, err := capturedExchangeSize(capturedReq, capturedResp, reqBodyBytes, respBodyBytes)
 			if err != nil {
@@ -1078,7 +782,7 @@ func (pm *IngressProxyManager) handleHttp1Connection(ctx context.Context, client
 
 			defer parsedHTTPReq.Body.Close()
 			defer parsedHTTPRes.Body.Close()
-			hooksUtils.CaptureHook(syncMock.WithWindow(ctx, capturedWin), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+			hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), logger, t, parsedHTTPReq, parsedHTTPRes, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 		}()
 
 		// Exit the loop in sync/sampling mode or when memory pressure requires closing.
@@ -1239,34 +943,50 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 
 	wireConn := &wireTimeConn{Conn: clientConn}
 	clientReader := bufio.NewReader(wireConn)
-	upstreamReader := bufio.NewReader(upConn)
+	// The app's side is stamped as it is read: when the bytes that end a
+	// response arrived from the app is where its exchange's window ends.
+	upWire := &wireTimeConn{Conn: upConn}
+	upstreamReader := bufio.NewReader(upWire)
 	// t == nil → caller (sampling-bypass path) wants MSG_PEEK protection
 	// without capture. Suppress capture for this connection's lifetime.
-	captureEnabled := t != nil && !isIngressRecordingPaused()
+	// connCapture is the connection's capture; whether one exchange of it is
+	// captured is decided per exchange (captureEnabled, in the loop). A pause
+	// of the memory guard is the exchange's, never the connection's: latched
+	// for the connection's life, one pause stopped the capture of every
+	// keep-alive connection open through it (a load generator's, a pooled
+	// client's) for the rest of the recording, and nothing said so.
+	connCapture := t != nil
+	// connName names the connection in the count of the requests a pause
+	// costs (syncMock NoteNotRecordedUnderPressure), here and in the capture
+	// hook (hooksUtils.SkipUnderPressure).
+	var connName string
+	if connCapture {
+		connName = ingressConnName(clientConn, upstreamAddr)
+	}
+	notRecordedUnderPressure := func() {
+		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(connName)
+	}
 
 	// forceCloseActive mirrors the caller's forceClose intent but can be
 	// flipped to false mid-connection by demoteToBypass when the exchange
 	// turns out to be ineligible for the sampling budget (chunked /
-	// unknown-length body, or mid-stream memory pressure). Once demoted,
-	// the connection becomes pure passthrough: no Connection: close
+	// unknown-length body, or memory pressure as its request came). Once
+	// demoted, the connection becomes pure passthrough: no Connection: close
 	// injection on subsequent iterations, the sampling slot is released,
 	// and capture is disabled — matching the "untracked + unchanged" rule
-	// for non-capturable exchanges. The flag never re-enables itself.
+	// for non-capturable exchanges. The flag never re-enables itself: a
+	// sampled connection serves one exchange, and one demoted is out of the
+	// sample, not lost to it.
 	forceCloseActive := forceClose
 	demoteToBypass := func() {
 		if !forceCloseActive {
 			return
 		}
 		forceCloseActive = false
-		captureEnabled = false
+		connCapture = false
 		if releaseSlot != nil {
 			releaseSlot()
 		}
-	}
-	// Memory pressure at function entry: demote immediately so the slot
-	// is freed for non-pressure use and we don't inject any headers.
-	if forceCloseActive && isIngressRecordingPaused() {
-		demoteToBypass()
 	}
 
 	// Close the most recent upstream conn on function return. The caller
@@ -1313,7 +1033,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			return err
 		}
 		upConn = newConn
-		upstreamReader = bufio.NewReader(upConn)
+		upWire = &wireTimeConn{Conn: upConn}
+		upstreamReader = bufio.NewReader(upWire)
 		upConnHolder.Store(&connHolder{c: newConn})
 		return nil
 	}
@@ -1326,11 +1047,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 	defer func() { win.Close() }()
 
 	for {
-		if isIngressRecordingPaused() {
-			captureEnabled = false
-		}
-
-		iterStart := time.Now()
+		iterStart := clockNow()
 		req, err := http.ReadRequest(clientReader)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
@@ -1364,9 +1081,19 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		if forceCloseActive && (req.ContentLength == -1 || isChunked(req.TransferEncoding)) {
 			demoteToBypass()
 		}
-		if forceCloseActive && isIngressRecordingPaused() {
+		// The pause is read as the request has come: what it costs is this
+		// exchange, which is counted, and the connection's next one is
+		// captured if the pause is over by then. An Upgrade is a tunnel no
+		// pause costs anything.
+		noteIngressRequest()
+		paused := isIngressRecordingPaused()
+		if paused && connCapture && !isHTTPUpgrade(req) {
+			notRecordedUnderPressure()
+		}
+		if forceCloseActive && paused {
 			demoteToBypass()
 		}
+		captureEnabled := connCapture && !paused
 
 		// HTTP Upgrade / CONNECT — bail out to raw byte pump after
 		// forwarding the parsed handshake. Subsequent frames are not
@@ -1379,8 +1106,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Stale upstream pool entry detected before upgrade; redialing",
 					zap.String("upstream", upstreamAddr))
 				if rerr := redial(); rerr != nil {
-					logger.Error("Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
-						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					pm.logAppDialFailure(logger, "Upstream redial before upgrade failed. Verify the application is still listening on the resolved address.",
+						rerr, zap.String("upstream", upstreamAddr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1443,8 +1170,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				if pm.mockMode {
 					logger.Debug("the app is not listening after a restart; closing the call as the app would", zap.String("upstream", upstreamAddr), zap.Error(err))
 				} else {
-					logger.Error("Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
-						zap.String("upstream", upstreamAddr), zap.Error(err))
+					pm.logAppDialFailure(logger, "Upstream redial after stale-detect failed. Verify the application is still listening on the resolved address and that the network path between the agent and upstream is healthy.",
+						err, zap.String("upstream", upstreamAddr))
 				}
 				pm.appGone(clientConn)
 				if req.Body != nil {
@@ -1571,8 +1298,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Idempotent request write failed; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
-					logger.Error("Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
-						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					pm.logAppDialFailure(logger, "Replay redial after request-write failure failed. Verify the upstream application is still listening on the resolved address.",
+						rerr, zap.String("upstream", upstreamAddr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1642,8 +1369,8 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				logger.Debug("Empty response from upstream; redial+replay",
 					zap.String("method", req.Method), zap.Error(err))
 				if rerr := redial(); rerr != nil {
-					logger.Error("Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
-						zap.String("upstream", upstreamAddr), zap.Error(rerr))
+					pm.logAppDialFailure(logger, "Replay redial after empty-response failed. Verify the upstream application is still listening on the resolved address.",
+						rerr, zap.String("upstream", upstreamAddr))
 					pm.appGone(clientConn)
 					return
 				}
@@ -1689,6 +1416,9 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			}
 		}
 
+		// The response's headers are read: the earliest its exchange can end.
+		headersAt := clockNow()
+
 		// The app has answered. The rest of a body it answered before it came
 		// is forwarded, within bounds, before the answer (requestRelay.finish).
 		// A request that still did not reach the app whole (an upload its
@@ -1726,6 +1456,42 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			appResp = closeAfter(resp)
 		}
 
+		// The response's time, the end of its exchange's window, is taken as
+		// its end is found, BEFORE what ends it is forwarded: when the bytes
+		// that end it arrived from the app (its headers', for a response with
+		// no body), or, for a body that ends when the app closes the
+		// connection, when that close was read. The client sees the end only
+		// once the clock reads past it (waitPastYield), so the window holds
+		// every call the app made for the exchange and nothing its client does
+		// on the answer: a sequential client's next request, on this
+		// connection or on a new one, and the calls that request makes.
+		// Stamped after the write instead, the window ran on for as long as
+		// this goroutine waited to run again once its client had the answer,
+		// and took the next request's calls: on a loaded host the next test
+		// was recorded without them and this one with calls it never made.
+		// On Linux the wait returns at once; on a clock as coarse as Windows'
+		// it holds the end up to one tick, as the synchronous loop does.
+		endAt, ended := headersAt, false
+		hasBody := resp.Body != nil && resp.Body != http.NoBody
+		closeDelimited := hasBody && resp.ContentLength < 0 && !isChunked(resp.TransferEncoding)
+		markEnd := func() {
+			ended = true
+			if closeDelimited {
+				endAt = clockNow()
+			} else if last := upWire.LastReadTime(); last.After(endAt) {
+				endAt = last
+			}
+			// An exchange that is not recorded claims nothing: no wait.
+			if captureEligible && (reqCapture == nil || !reqCapture.Truncated()) && (respCapture == nil || !respCapture.Truncated()) {
+				waitPastYield(win, endAt)
+			}
+		}
+		if hasBody {
+			resp.Body = &endWaitBody{ReadCloser: resp.Body, left: resp.ContentLength, atEnd: markEnd}
+		} else {
+			markEnd()
+		}
+
 		if err := resp.Write(clientConn); err != nil {
 			if resp.Body != nil {
 				_ = resp.Body.Close()
@@ -1737,14 +1503,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			_ = resp.Body.Close()
 		}
 
-		// Last-byte semantics for respTimestamp: capture AFTER resp.Write
-		// has drained the upstream body and forwarded it to the client.
-		// This keeps the per-test window invariant
-		// (reqTimestamp ≤ outbound-mock-timestamp ≤ respTimestamp): any
-		// DB-side mocks the app fired while streaming the response body
-		// stamp before time.Now() here, so they fall inside the per-test
-		// window and match correctly at replay.
-		respTimestamp := time.Now()
+		// The window invariant (reqTimestamp <= an egress call's time <=
+		// respTimestamp) holds with the end found above. A write that
+		// returned without its body's end being read (none does today) ends
+		// it now, as before.
+		respTimestamp := endAt
+		if !ended {
+			respTimestamp = clockNow()
+		}
 
 		// Async capture (matches synchronous-mode pattern at the call
 		// site below — keeps the proxy hot-loop free of dump+parse
@@ -1757,6 +1523,13 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 		// pre-buffered).
 		reqTeeTruncated := reqCapture != nil && reqCapture.Truncated()
 		respTeeTruncated := respCapture != nil && respCapture.Truncated()
+		// The pause is read once, as the request comes: one that starts
+		// later in the exchange cuts a body's capture instead, and the
+		// exchange it costs is counted here. Not twice: a body is captured
+		// only for an exchange the pause had not cost as its request came.
+		if reqCapture.LostToPause() || respCapture.LostToPause() {
+			notRecordedUnderPressure()
+		}
 		if captureEligible && !reqTeeTruncated && !respTeeTruncated {
 			releaseCaptureSlot, ok := takeCaptureSlot(ctx)
 			if !ok {
@@ -1782,9 +1555,14 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			capturedWin := win
 			win = nil
 
+			// Being built until it is in the recorder's queue (or given
+			// up): a recording's stop waits for it (syncMock
+			// BacklogBefore).
+			built := syncMock.FromContextOrGlobal(ctx).BuildingTestCase(capturedRespTS)
 			pm.captures.Add(1)
 			go func() {
 				defer pm.captures.Done()
+				defer built()
 				defer releaseCaptureSlot()
 				defer capturedWin.Close() // once the capture has decided it, or skipped it
 
@@ -1811,7 +1589,7 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 				}
 				defer parsedReq.Body.Close()
 				defer parsedResp.Body.Close()
-				hooksUtils.CaptureHook(syncMock.WithWindow(ctx, capturedWin), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
+				hooksUtils.CaptureHook(proxyWindowClock(syncMock.WithWindow(syncMock.WithIngressConn(ctx, connName), capturedWin)), logger, t, parsedReq, parsedResp, capturedReqTS, capturedRespTS, pm.loadIncomingOpts(), pm.synchronous, pm.mapping, actualPort)
 			}()
 		}
 		// Not captured: nothing will decide it.
@@ -1830,6 +1608,17 @@ func (pm *IngressProxyManager) handleHttp1ZeroCopy(ctx context.Context, clientCo
 			return
 		}
 	}
+}
+
+// ingressConnName names an ingress connection, its client's address and the
+// app's, for the count of the requests a pause of the memory guard costs
+// (syncMock NoteNotRecordedUnderPressure).
+func ingressConnName(clientConn net.Conn, app string) string {
+	client := "unknown client"
+	if a := clientConn.RemoteAddr(); a != nil {
+		client = a.String()
+	}
+	return client + " -> " + app
 }
 
 // forwardRawTCP does bidirectional TCP forwarding between two connections
@@ -1897,4 +1686,13 @@ func isIngressExpectedCloseErr(err error) bool {
 		strings.Contains(errStr, "wsarecv") ||
 		strings.Contains(errStr, "wsasend") ||
 		strings.Contains(errStr, "forcibly closed by the remote host")
+}
+
+// proxyWindowClock is ctx carrying the clock an exchange's window start is on
+// (hooksUtils.WithWindowClock): the proxy's. Both HTTP loops
+// stamp a request with the proxy's time.Now as its bytes arrived, and open its
+// window at that stamp before they forward it to the app (OpenWindow), so an
+// egress call the app makes for it is stamped no earlier on that same clock.
+func proxyWindowClock(ctx context.Context) context.Context {
+	return hooksUtils.WithWindowClock(ctx, fakeconn.NameProxyClock())
 }

@@ -19,11 +19,15 @@ import (
 // goroutines, so the parser really does see the next REQUEST before the
 // RESPONSE that preceded it on the wire.
 //
-// These tests drive that order deliberately. Chunk timestamps are the
-// wire truth (a request's ReadAt is when the relay read it off the client
-// socket; a response's WrittenAt is when the client could first see it),
-// so the pairing rules are stated against them rather than against the
-// order the events happen to arrive in.
+// These tests drive that order deliberately. A chunk's capture number
+// (fakeconn.Chunk.ConnSeq, given to each chunk here as the relay would
+// number it) is the wire truth: the relay numbers a request after every
+// byte the destination had sent when it read it, so a response numbered
+// below a request was sent before the destination could have had it. The
+// pairing rules are stated against those numbers, never against the order
+// the events happen to arrive in. The chunks' times are the mocks' windows,
+// and order only chunks the numbers do not tell apart (a producer that
+// gives both directions one number).
 
 // runPairing feeds evs through the exchange state machine in exactly the
 // given order and returns the mocks it emitted.
@@ -70,15 +74,16 @@ func runPairingOn(t *testing.T, evs []chunkEvent, incomplete bool) []*models.Moc
 }
 
 // clientChunk / destChunk name the two directions the way the relay does.
-// readAt is when the relay read a request off the client socket; writtenAt
-// is when it wrote a response TO that socket, i.e. the first moment the
-// client could act on it. Those two are the wire clock the rules read.
-func clientChunk(b string, readAt time.Time) chunkEvent {
-	return chunkEvent{dir: fakeconn.FromClient, bytes: []byte(b), readAt: readAt}
+// seq is the chunk's capture number (0: unnumbered), the order the rules
+// read. readAt is when the relay read a request off the client socket;
+// writtenAt is when its write of a response TO that socket returned: the
+// mocks' times.
+func clientChunk(b string, seq uint32, readAt time.Time) chunkEvent {
+	return chunkEvent{dir: fakeconn.FromClient, bytes: []byte(b), connSeq: seq, readAt: readAt}
 }
 
-func destChunk(b string, writtenAt time.Time) chunkEvent {
-	return chunkEvent{dir: fakeconn.FromDest, bytes: []byte(b), writtenAt: writtenAt}
+func destChunk(b string, seq uint32, writtenAt time.Time) chunkEvent {
+	return chunkEvent{dir: fakeconn.FromDest, bytes: []byte(b), connSeq: seq, writtenAt: writtenAt}
 }
 
 // payloads flattens a mock's request (or response) buffers to strings so
@@ -139,10 +144,10 @@ func TestV2_LateResponsePushKeepsExchangesApart(t *testing.T) {
 	)
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("*1\r\n$5\r\nhello\r\n", helloRead),
-		clientChunk("*1\r\n$4\r\nping\r\n", pingRead),
-		destChunk("%7\r\n$6\r\nserver\r\n", helloReply),
-		destChunk("+PONG\r\n", pongWritten),
+		clientChunk("*1\r\n$5\r\nhello\r\n", 1, helloRead),
+		clientChunk("*1\r\n$4\r\nping\r\n", 3, pingRead),
+		destChunk("%7\r\n$6\r\nserver\r\n", 2, helloReply),
+		destChunk("+PONG\r\n", 4, pongWritten),
 	})
 
 	if len(got) != 2 {
@@ -168,15 +173,15 @@ func TestV2_LateResponsePushKeepsExchangesApart(t *testing.T) {
 // A client that really does pipeline — both commands written before the
 // first reply came back — must still be recorded as ONE exchange with two
 // request buffers, because that is what replay will see it send. The only
-// difference from the test above is which side of the reply the second
-// request was read on.
+// difference from the test above is which side of the reply's arrival at
+// the proxy the second request was read on.
 func TestV2_PipelinedRequestsStayInOneExchange(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("MULTI\r\n", time.Unix(1000, 0)),
-		clientChunk("EXEC\r\n", time.Unix(1001, 0)),
-		destChunk("+OK\r\n", time.Unix(1002, 0)),
+		clientChunk("MULTI\r\n", 1, time.Unix(1000, 0)),
+		clientChunk("EXEC\r\n", 2, time.Unix(1001, 0)),
+		destChunk("+OK\r\n", 3, time.Unix(1002, 0)),
 	})
 
 	if len(got) != 1 {
@@ -193,11 +198,11 @@ func TestV2_MultiChunkResponseStillDropsItsTail(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("GET big\r\n", time.Unix(1000, 0)),
-		destChunk("head", time.Unix(1001, 0)),
-		destChunk("tail", time.Unix(1002, 0)),
-		clientChunk("GET small\r\n", time.Unix(1003, 0)),
-		destChunk("+OK\r\n", time.Unix(1004, 0)),
+		clientChunk("GET big\r\n", 1, time.Unix(1000, 0)),
+		destChunk("head", 2, time.Unix(1001, 0)),
+		destChunk("tail", 3, time.Unix(1002, 0)),
+		clientChunk("GET small\r\n", 4, time.Unix(1003, 0)),
+		destChunk("+OK\r\n", 5, time.Unix(1004, 0)),
 	})
 
 	if len(got) != 2 {
@@ -209,8 +214,8 @@ func TestV2_MultiChunkResponseStillDropsItsTail(t *testing.T) {
 
 // The mirror image: the relay can be descheduled between forwarding a
 // request and queueing its chunk, so a response can reach the parser
-// first. The request was read off the wire BEFORE that response was
-// written, which is what says they belong together — without that test
+// first. The request was captured BEFORE that response, which is what
+// says they belong together — without that test
 // the response is treated as an orphan and thrown away, and the request
 // then pairs with the NEXT response, i.e. a mock that replays one
 // dependency's answer for another's question.
@@ -218,10 +223,10 @@ func TestV2_LateRequestPushStillPairsWithItsResponse(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		destChunk("+PONG\r\n", time.Unix(1001, 0)),
-		clientChunk("PING\r\n", time.Unix(1000, 0)),
-		clientChunk("GET k\r\n", time.Unix(1002, 0)),
-		destChunk("$1\r\nv\r\n", time.Unix(1003, 0)),
+		destChunk("+PONG\r\n", 2, time.Unix(1001, 0)),
+		clientChunk("PING\r\n", 1, time.Unix(1000, 0)),
+		clientChunk("GET k\r\n", 3, time.Unix(1002, 0)),
+		destChunk("$1\r\nv\r\n", 4, time.Unix(1003, 0)),
 	})
 
 	if len(got) != 2 {
@@ -231,16 +236,16 @@ func TestV2_LateRequestPushStillPairsWithItsResponse(t *testing.T) {
 	assertExchange(t, got[1], []string{"GET k\r\n"}, []string{"$1\r\nv\r\n"})
 }
 
-// Chunks without timestamps carry no ordering evidence, so the parser
-// must fall back to arrival order rather than invent a split. Synthetic
-// inputs (tests, replayed fixtures) are the only producers of these.
-func TestV2_UntimestampedChunksKeepArrivalOrder(t *testing.T) {
+// Chunks with neither a capture number nor a timestamp carry no ordering
+// evidence, so the parser must fall back to arrival order rather than
+// invent a split. The relay numbers and stamps every chunk.
+func TestV2_UnorderedChunksKeepArrivalOrder(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("A", time.Time{}),
-		clientChunk("B", time.Time{}),
-		destChunk("R", time.Time{}),
+		clientChunk("A", 0, time.Time{}),
+		clientChunk("B", 0, time.Time{}),
+		destChunk("R", 0, time.Time{}),
 	})
 
 	if len(got) != 1 {
@@ -271,18 +276,18 @@ func TestV2_ServerPushIsPairedTheSameEitherWay(t *testing.T) {
 	)
 
 	inOrder := runPairing(t, []chunkEvent{
-		clientChunk("REQ0", req0),
-		destChunk("PUSH", push),
-		clientChunk("REQ1", req1),
-		destChunk("D0", d0),
-		destChunk("D1", d1),
+		clientChunk("REQ0", 1, req0),
+		destChunk("PUSH", 2, push),
+		clientChunk("REQ1", 3, req1),
+		destChunk("D0", 4, d0),
+		destChunk("D1", 5, d1),
 	})
 	teedLate := runPairing(t, []chunkEvent{
-		clientChunk("REQ0", req0),
-		clientChunk("REQ1", req1),
-		destChunk("PUSH", push),
-		destChunk("D0", d0),
-		destChunk("D1", d1),
+		clientChunk("REQ0", 1, req0),
+		clientChunk("REQ1", 3, req1),
+		destChunk("PUSH", 2, push),
+		destChunk("D0", 4, d0),
+		destChunk("D1", 5, d1),
 	})
 
 	if len(inOrder) != 2 || len(teedLate) != 2 {
@@ -297,7 +302,7 @@ func TestV2_ServerPushIsPairedTheSameEitherWay(t *testing.T) {
 	assertExchange(t, teedLate[1], []string{"REQ1"}, []string{"D0"})
 }
 
-// A response that predates even the FIRST request held cannot be that
+// A response captured before even the FIRST request held cannot be that
 // exchange's answer, so it is not evidence of where the exchange ends
 // and the rule stays out of it. The bytes are still mis-paired — they
 // were mis-paired before the rule existed, because an opaque parser has
@@ -308,10 +313,10 @@ func TestV2_ResponseOlderThanEveryRequestDoesNotSplit(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("REQ0", time.Unix(1000, 0)),
-		clientChunk("REQ1", time.Unix(1002, 0)),
-		destChunk("STALE", time.Unix(999, 0)),
-		destChunk("D1", time.Unix(1003, 0)),
+		clientChunk("REQ0", 2, time.Unix(1000, 0)),
+		clientChunk("REQ1", 3, time.Unix(1002, 0)),
+		destChunk("STALE", 1, time.Unix(999, 0)),
+		destChunk("D1", 4, time.Unix(1003, 0)),
 	})
 
 	if len(got) != 1 {
@@ -328,13 +333,13 @@ func TestV2_SplitsCascadeAcrossAWholeBurst(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("A", time.Unix(1000, 0)),
-		clientChunk("B", time.Unix(1002, 0)),
-		clientChunk("C", time.Unix(1004, 0)),
-		clientChunk("D", time.Unix(1006, 0)),
-		destChunk("a", time.Unix(1001, 0)),
-		destChunk("b", time.Unix(1003, 0)),
-		destChunk("c", time.Unix(1005, 0)),
+		clientChunk("A", 1, time.Unix(1000, 0)),
+		clientChunk("B", 3, time.Unix(1002, 0)),
+		clientChunk("C", 5, time.Unix(1004, 0)),
+		clientChunk("D", 7, time.Unix(1006, 0)),
+		destChunk("a", 2, time.Unix(1001, 0)),
+		destChunk("b", 4, time.Unix(1003, 0)),
+		destChunk("c", 6, time.Unix(1005, 0)),
 	})
 
 	if len(got) != 3 {
@@ -345,18 +350,18 @@ func TestV2_SplitsCascadeAcrossAWholeBurst(t *testing.T) {
 	assertExchange(t, got[2], []string{"C"}, []string{"c"})
 }
 
-// A request buffer with no timestamp cannot be placed on either side of
-// the response, so the scan stops there rather than guessing. The
-// exchange stays whole — the same mock the parser produced before any of
-// this existed.
-func TestV2_SplitStopsAtAnUntimestampedRequest(t *testing.T) {
+// A request buffer with neither a capture number nor a timestamp cannot be
+// placed on either side of the response, so the scan stops there rather
+// than guessing. The exchange stays whole — the same mock the parser
+// produced before any of this existed.
+func TestV2_SplitStopsAtAnUnorderedRequest(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		clientChunk("A", time.Unix(1000, 0)),
-		clientChunk("B", time.Time{}),
-		clientChunk("C", time.Unix(1004, 0)),
-		destChunk("a", time.Unix(1001, 0)),
+		clientChunk("A", 1, time.Unix(1000, 0)),
+		clientChunk("B", 0, time.Time{}),
+		clientChunk("C", 4, time.Unix(1004, 0)),
+		destChunk("a", 2, time.Unix(1001, 0)),
 	})
 
 	if len(got) != 1 {
@@ -372,13 +377,13 @@ func TestV2_IncompleteCaptureIsNotSplitIntoASurvivor(t *testing.T) {
 	t.Parallel()
 
 	got := runPairingHoled(t, []chunkEvent{
-		clientChunk("HELLO", time.Unix(1000, 0)),
-		clientChunk("PING", time.Unix(1002, 0)),
-		destChunk("hello-reply", time.Unix(1001, 0)),
+		clientChunk("HELLO", 1, time.Unix(1000, 0)),
+		clientChunk("PING", 3, time.Unix(1002, 0)),
+		destChunk("hello-reply", 2, time.Unix(1001, 0)),
 		// PING's own reply: without the guard the split hands the
 		// second half of the holed exchange to this chunk and emits a
 		// mock that looks perfectly well-formed.
-		destChunk("pong", time.Unix(1003, 0)),
+		destChunk("pong", 4, time.Unix(1003, 0)),
 	})
 
 	if len(got) != 0 {
@@ -405,14 +410,14 @@ func TestV2_AdoptTakesTheHeadChunkOnlyLikeWireOrder(t *testing.T) {
 	)
 
 	inOrder := runPairing(t, []chunkEvent{
-		clientChunk("GET big", reqRead),
-		destChunk("head", headSeen),
-		destChunk("tail", tailSeen),
+		clientChunk("GET big", 1, reqRead),
+		destChunk("head", 2, headSeen),
+		destChunk("tail", 3, tailSeen),
 	})
 	teedLate := runPairing(t, []chunkEvent{
-		destChunk("head", headSeen),
-		destChunk("tail", tailSeen),
-		clientChunk("GET big", reqRead),
+		destChunk("head", 2, headSeen),
+		destChunk("tail", 3, tailSeen),
+		clientChunk("GET big", 1, reqRead),
 	})
 
 	if len(inOrder) != 1 {
@@ -429,16 +434,17 @@ func TestV2_AdoptTakesTheHeadChunkOnlyLikeWireOrder(t *testing.T) {
 	}
 }
 
-// A request with no timestamp says nothing about what it answers, and
-// the zero time is "before" every real instant — so without an explicit
-// guard it would adopt any response held, on no evidence at all.
-func TestV2_UntimestampedRequestDoesNotAdoptAHeldResponse(t *testing.T) {
+// A request with neither a capture number nor a timestamp says nothing
+// about what it answers: 0 compared as a serial number is before half of
+// all numbers, and the zero time before every real instant, so without an
+// explicit guard it would adopt a response held, on no evidence at all.
+func TestV2_UnorderedRequestDoesNotAdoptAHeldResponse(t *testing.T) {
 	t.Parallel()
 
 	got := runPairing(t, []chunkEvent{
-		destChunk("orphan", time.Unix(1001, 0)),
-		clientChunk("REQ", time.Time{}),
-		destChunk("answer", time.Unix(1002, 0)),
+		destChunk("orphan", 2, time.Unix(1001, 0)),
+		clientChunk("REQ", 0, time.Time{}),
+		destChunk("answer", 3, time.Unix(1002, 0)),
 	})
 
 	if len(got) != 1 {
@@ -465,16 +471,16 @@ func TestV2_CarriedHalfDoesNotPairWithAnOlderTail(t *testing.T) {
 	)
 
 	inOrder := runPairing(t, []chunkEvent{
-		clientChunk("A", first),
-		destChunk("a-head", headSeen),
-		destChunk("a-tail", tailSeen),
-		clientChunk("B", second),
+		clientChunk("A", 1, first),
+		destChunk("a-head", 2, headSeen),
+		destChunk("a-tail", 3, tailSeen),
+		clientChunk("B", 4, second),
 	})
 	teedLate := runPairing(t, []chunkEvent{
-		clientChunk("A", first),
-		clientChunk("B", second),
-		destChunk("a-head", headSeen),
-		destChunk("a-tail", tailSeen),
+		clientChunk("A", 1, first),
+		clientChunk("B", 4, second),
+		destChunk("a-head", 2, headSeen),
+		destChunk("a-tail", 3, tailSeen),
 	})
 
 	if len(inOrder) != 1 || len(teedLate) != 1 {
@@ -489,18 +495,129 @@ func TestV2_CarriedHalfDoesNotPairWithAnOlderTail(t *testing.T) {
 	}
 }
 
-// Two chunks stamped in the same instant carry no order between them,
-// and both rules compare strictly, so neither fires: the recording is
-// whatever arrival order produced. Clocks read on two goroutines do tie.
-func TestV2_EqualTimestampsFireNeitherRule(t *testing.T) {
+// Where the capture numbers tell two chunks apart, their times order
+// nothing, whatever they say: two chunks stamped in the same instant, or a
+// response stamped after the request it unblocked, are ordered by their
+// numbers. The relay stamps a chunk on the goroutine that forwards it,
+// after its read or its write returns, and that goroutine can lose its CPU
+// before it stamps.
+func TestV2_TimesDoNotOrderTheDirections(t *testing.T) {
 	t.Parallel()
 
 	same := time.Unix(1000, 0)
 
 	split := runPairing(t, []chunkEvent{
-		clientChunk("A", same),
-		clientChunk("B", same),
-		destChunk("r", same),
+		clientChunk("A", 1, same),
+		clientChunk("B", 3, same),
+		destChunk("r", 2, same),
+	})
+	if len(split) != 1 {
+		t.Fatalf("split: expected 1 mock, got %d", len(split))
+	}
+	assertExchange(t, split[0], []string{"A"}, []string{"r"})
+
+	adopt := runPairing(t, []chunkEvent{
+		destChunk("r", 2, same),
+		clientChunk("A", 1, same),
+		destChunk("r2", 3, same),
+	})
+	if len(adopt) != 1 {
+		t.Fatalf("adopt: expected 1 mock, got %d", len(adopt))
+	}
+	assertExchange(t, adopt[0], []string{"A"}, []string{"r"})
+}
+
+// TestV2_AReplyStampedAfterTheNextRequestStillEndsItsExchange is CI's
+// mock-mismatch-streaming lane again (run 39725971345), with the stamps the
+// relay took. go-redis opens its pool connection with HELLO 3, then CLIENT
+// SETINFO twice in one write, then PING, each after the reply before it. The
+// relay wrote the two OKs on to the app, and the app sent PING, which the
+// other forwarder read, before the first one stamped its write: the OKs'
+// WrittenAt is after PING's ReadAt, and their chunk was teed after PING's.
+// Read by those times, SETINFO and PING were one exchange: one mock with two
+// request buffers, the PONG dropped, 10 mocks where the app made 11 calls.
+// On replay the app's lone SETINFO matched nothing (findExactMatch requires
+// equal buffer counts), the proxy closed the connection, and the sample died
+// at startup ("cannot reach Redis: EOF"). The OKs were captured before PING
+// (the relay numbers PING after every byte Redis had sent when it read it),
+// and that says they are SETINFO's answer and PING is an exchange of its own.
+// The numbers are the ones the relay gives this exchange (connseq.Upstream:
+// a client chunk read after the destination's bytes reserves a number below
+// itself for them, so the clients' are 1, 4 and 7).
+func TestV2_AReplyStampedAfterTheNextRequestStillEndsItsExchange(t *testing.T) {
+	t.Parallel()
+
+	base := time.Unix(1000, 0)
+	at := func(us int) time.Time { return base.Add(time.Duration(us) * time.Microsecond) }
+	const (
+		hello      = "*2\r\n$5\r\nhello\r\n$1\r\n3\r\n"
+		helloReply = "%7\r\n$6\r\nserver\r\n$5\r\nredis\r\n"
+		setinfo    = "*4\r\n$6\r\nclient\r\n$7\r\nsetinfo\r\n$8\r\nLIB-NAME\r\n$19\r\ngo-redis(,go1.27.0)\r\n" +
+			"*4\r\n$6\r\nclient\r\n$7\r\nsetinfo\r\n$7\r\nLIB-VER\r\n$5\r\n9.7.1\r\n"
+		oks  = "+OK\r\n+OK\r\n"
+		ping = "*1\r\n$4\r\nping\r\n"
+		pong = "+PONG\r\n"
+	)
+
+	got := runPairing(t, []chunkEvent{
+		clientChunk(hello, 1, at(0)),
+		destChunk(helloReply, 2, at(350)),
+		clientChunk(setinfo, 4, at(480)),
+		clientChunk(ping, 7, at(750)),
+		destChunk(oks, 5, at(900)),
+		destChunk(pong, 8, at(1000)),
+	})
+
+	if len(got) != 3 {
+		for _, m := range got {
+			t.Logf("mock: requests %q, responses %q", payloads(m.Spec.GenericRequests), payloads(m.Spec.GenericResponses))
+		}
+		t.Fatalf("expected 3 mocks (HELLO, SETINFO, PING), got %d", len(got))
+	}
+	assertExchange(t, got[0], []string{hello}, []string{helloReply})
+	assertExchange(t, got[1], []string{setinfo}, []string{oks})
+	assertExchange(t, got[2], []string{ping}, []string{pong})
+	if !got[2].Spec.ReqTimestampMock.Equal(at(750)) || !got[2].Spec.ResTimestampMock.Equal(at(1000)) {
+		t.Errorf("PING's mock spans %v..%v, want its own chunks' times %v..%v",
+			got[2].Spec.ReqTimestampMock, got[2].Spec.ResTimestampMock, at(750), at(1000))
+	}
+}
+
+// A producer that gives both directions of a connection one number (a
+// capture that cannot number them apart) leaves the chunks' times to order
+// them, as they did before the numbers existed: the rules still fire on
+// them, and a reply teed behind the request it unblocked still ends its
+// exchange when its stamp says so.
+func TestV2_ChunksNumberedAlikeAreOrderedByTheirTimes(t *testing.T) {
+	t.Parallel()
+
+	got := runPairing(t, []chunkEvent{
+		clientChunk("HELLO", 1, time.Unix(1000, 0)),
+		clientChunk("PING", 1, time.Unix(1002, 0)),
+		destChunk("hello-reply", 1, time.Unix(1001, 0)),
+		destChunk("pong", 1, time.Unix(1003, 0)),
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 mocks, got %d", len(got))
+	}
+	assertExchange(t, got[0], []string{"HELLO"}, []string{"hello-reply"})
+	assertExchange(t, got[1], []string{"PING"}, []string{"pong"})
+}
+
+// Chunks numbered alike and stamped in the same instant carry no order
+// between them, and the times compare strictly, so neither rule fires: the
+// recording is whatever arrival order produced. A producer that gives both
+// directions one number and one clock stamps its chunks so.
+func TestV2_ChunksNumberedAlikeAndStampedAlikeFireNeitherRule(t *testing.T) {
+	t.Parallel()
+
+	same := time.Unix(1000, 0)
+
+	split := runPairing(t, []chunkEvent{
+		clientChunk("A", 1, same),
+		clientChunk("B", 1, same),
+		destChunk("r", 1, same),
 	})
 	if len(split) != 1 {
 		t.Fatalf("split: expected 1 mock, got %d", len(split))
@@ -508,9 +625,9 @@ func TestV2_EqualTimestampsFireNeitherRule(t *testing.T) {
 	assertExchange(t, split[0], []string{"A", "B"}, []string{"r"})
 
 	adopt := runPairing(t, []chunkEvent{
-		destChunk("r", same),
-		clientChunk("A", same),
-		destChunk("r2", same),
+		destChunk("r", 1, same),
+		clientChunk("A", 1, same),
+		destChunk("r2", 1, same),
 	})
 	if len(adopt) != 1 {
 		t.Fatalf("adopt: expected 1 mock, got %d", len(adopt))

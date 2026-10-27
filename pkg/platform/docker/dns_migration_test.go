@@ -104,7 +104,7 @@ func TestModifyAppServiceForKeploy_MovesSequenceDNSNodes(t *testing.T) {
 		"dns_opt":    dnsOpt,
 	})
 
-	if err := newImpl().modifyAppServiceForKeploy(compose, "app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestModifyAppServiceForKeploy_MovesScalarAndMappingDNSNodes(t *testing.T) {
 		"dns_opt":    dnsOptMapping,
 	})
 
-	if err := newImpl().modifyAppServiceForKeploy(compose, "app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func TestModifyAppServiceForKeploy_MovesScalarAndMappingDNSNodes(t *testing.T) {
 func TestModifyAppServiceForKeploy_SkipsMigrationWhenNoDNSSettings(t *testing.T) {
 	compose := buildComposeForDNSMigration("app", nil)
 
-	if err := newImpl().modifyAppServiceForKeploy(compose, "app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 
@@ -208,7 +208,7 @@ func TestModifyAppServiceForKeploy_CloneDoesNotAliasOriginalNode(t *testing.T) {
 	dns := buildSequenceNode("8.8.8.8")
 	compose := buildComposeForDNSMigration("app", map[string]*yaml.Node{"dns": dns})
 
-	if err := newImpl().modifyAppServiceForKeploy(compose, "app"); err != nil {
+	if err := newImpl().modifyAppServiceForKeploy(compose, "app", false); err != nil {
 		t.Fatalf("modifyAppServiceForKeploy returned error: %v", err)
 	}
 

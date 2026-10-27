@@ -17,6 +17,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -57,6 +58,9 @@ type HTTP struct {
 	// life. Mock names repeat across test sets (mock-0, mock-1, ...), so a
 	// later set's mock of a name already warned about is not warned again.
 	ptLoadWarned sync.Map
+	// placeWarned holds the recordings (placeWarning) whose unreadable
+	// variable place the learn step warned of.
+	placeWarned sync.Map
 }
 
 func New(logger *zap.Logger) integrations.Integrations {
@@ -250,6 +254,8 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	//Add the content length to the headers.
 	var respBody []byte
+	// wire is the body as the server sent it, encoded (respBody once decoded).
+	var wire []byte
 	//Checking if the body of the response is empty or does not exist.
 	if respParsed.Body != nil { // Read
 		respBody, err = io.ReadAll(respParsed.Body)
@@ -257,6 +263,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			utils.LogError(h.Logger, err, "failed to read the the http response body", zap.Any("metadata", utils.GetReqMeta(req)))
 			return err
 		}
+		wire = respBody
 
 		if respParsed.Header.Get("Content-Encoding") != "" {
 			respBody, err = pkg.Decompress(h.Logger, respParsed.Header.Get("Content-Encoding"), respBody, pkg.MaxDecompressedSize)
@@ -267,8 +274,12 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 
 		h.Logger.Debug("This is the response body: " + string(respBody))
-		//Set the content length to the headers.
-		respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		//Set the content length to the headers, except on a response with no
+		//body by rule (to a HEAD, a 1xx, 204 or 304), which keeps its own (as
+		//buildHTTPMock does).
+		if !responseHasNoBody(req.Method, respParsed.StatusCode) {
+			respParsed.Header.Set("Content-Length", strconv.Itoa(len(respBody)))
+		}
 	}
 
 	// store the request and responses as mocks
@@ -278,7 +289,6 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		"operation": req.Method,
 		"connID":    ctx.Value(models.ClientConnectionIDKey).(string),
 	}
-
 	// Check if the request is a passThrough request
 	if utils.IsPassThrough(h.Logger, req, destPort, opts) {
 		h.Logger.Debug("The request is a passThrough request", zap.Any("metadata", utils.GetReqMeta(req)))
@@ -298,7 +308,7 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		if ptHost == "" && req.URL != nil {
 			ptHost = req.URL.Host
 		}
-		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL); matched {
+		if rule, matched := passThroughRecordDecision(opts, ptHost, uint32(destPort), req.Method, req.URL, req.Header); matched {
 			if rule.Mode == models.PassThroughSkip {
 				h.Logger.Debug("egress passthrough: skip mode, not recording", zap.Any("metadata", utils.GetReqMeta(req)))
 				return nil
@@ -313,9 +323,21 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		}
 	}
 
+	// The digest headers the body matched as the server sent it, which a
+	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
+	// once the exchange is known to be recorded: passthrough traffic is not.
+	if note := bodydigest.Note(pkg.ToYamlHTTPHeader(respParsed.Header), respBody, wire); note != "" {
+		meta[models.MetadataBodyDigestsKey] = note
+	}
+
+	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
+	// type tag older replayers read: an exchange is the data of the test it
+	// was made in, a recordOne representative is served to every test.
 	ptLifetime := models.LifetimePerTest
+	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
 	if ptRecordOne {
 		ptLifetime = models.LifetimeSession
+		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}
 	newMock := &models.Mock{
 		Version: models.GetVersion(),

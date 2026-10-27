@@ -10,19 +10,29 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -63,19 +73,15 @@ func newTestServerTLSConfig(t *testing.T, nextProtos []string) *tls.Config {
 // newTLSTestServer spins up a TLS listener with a self-signed cert. The
 // handler hook (if non-nil) receives each accepted, fully-handshaked
 // *tls.Conn. Returns the listener and the server's TLS config.
-func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
+func newTLSTestServer(t *testing.T, nextProtos []string, onAccept func(*tls.Conn)) (net.Listener, *tls.Config) {
 	t.Helper()
 	cfg := newTestServerTLSConfig(t, nextProtos)
 
-	// Wrap with a delaying listener so we can simulate slow upstream
-	// handshake behavior (the delay fires after TCP accept, before TLS
-	// handshake — i.e. between the ClientHello arriving and the server
-	// starting to reply).
 	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	tlsLn := tls.NewListener(&delayingListener{Listener: rawLn, delay: handshakeDelay}, cfg)
+	tlsLn := tls.NewListener(rawLn, cfg)
 
 	go func() {
 		for {
@@ -103,208 +109,6 @@ func newTLSTestServer(t *testing.T, handshakeDelay time.Duration, nextProtos []s
 	return tlsLn, cfg
 }
 
-type delayingListener struct {
-	net.Listener
-	delay time.Duration
-}
-
-func (d *delayingListener) Accept() (net.Conn, error) {
-	c, err := d.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	if d.delay > 0 {
-		time.Sleep(d.delay)
-	}
-	return c, nil
-}
-
-func TestStartSpeculativeUpstreamTLS_Join_Success(t *testing.T) {
-	ln, _ := newTLSTestServer(t, 0, []string{"h2", "http/1.1"}, nil)
-	defer ln.Close()
-
-	cfg := &tls.Config{
-		InsecureSkipVerify: true, // nolint:gosec
-		ServerName:         "test.local",
-		NextProtos:         []string{"h2", "http/1.1"},
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
-	conn, err := s.join(ctx)
-	if err != nil {
-		t.Fatalf("join: %v", err)
-	}
-	if conn == nil {
-		t.Fatalf("expected non-nil conn")
-	}
-	defer conn.Close()
-
-	negotiated := conn.ConnectionState().NegotiatedProtocol
-	if negotiated != "h2" && negotiated != "http/1.1" {
-		t.Fatalf("unexpected negotiated protocol: %q", negotiated)
-	}
-}
-
-func TestStartSpeculativeUpstreamTLS_Abandon_Cleanup(t *testing.T) {
-	ln, _ := newTLSTestServer(t, 0, []string{"http/1.1"}, nil)
-	defer ln.Close()
-
-	cfg := &tls.Config{
-		InsecureSkipVerify: true, // nolint:gosec
-		ServerName:         "test.local",
-		NextProtos:         []string{"http/1.1"},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), ln.Addr().String(), cfg, nil)
-	s.abandon()
-
-	// Give the background drainer a moment to run if the dial had
-	// already succeeded. The race detector (-race) will flag any
-	// mishandling of the buffered channel.
-	time.Sleep(50 * time.Millisecond)
-
-	// abandon() must be idempotent.
-	s.abandon()
-}
-
-func TestStartSpeculativeUpstreamTLS_DialFailure(t *testing.T) {
-	// Point at a closed port — dial fails fast.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-
-	cfg := &tls.Config{
-		InsecureSkipVerify: true, // nolint:gosec
-		ServerName:         "test.local",
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), addr, cfg, nil)
-	conn, err := s.join(ctx)
-	if err == nil {
-		if conn != nil {
-			_ = conn.Close()
-		}
-		t.Fatalf("expected dial error, got nil")
-	}
-}
-
-func TestStartSpeculativeUpstreamTLS_ContextCancelDuringDial(t *testing.T) {
-	// Slow handshake so cancel lands mid-dial.
-	ln, _ := newTLSTestServer(t, 500*time.Millisecond, []string{"http/1.1"}, nil)
-	defer ln.Close()
-
-	cfg := &tls.Config{
-		InsecureSkipVerify: true, // nolint:gosec
-		ServerName:         "test.local",
-	}
-
-	parent, cancel := context.WithCancel(context.Background())
-	s := startSpeculativeUpstreamTLS(parent, zap.NewNop(), ln.Addr().String(), cfg, nil)
-
-	// Cancel before the handshake completes.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-
-	joinCtx, joinCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer joinCancel()
-	conn, err := s.join(joinCtx)
-	if err == nil {
-		if conn != nil {
-			_ = conn.Close()
-		}
-		t.Fatalf("expected error from cancelled dial")
-	}
-}
-
-// TestSpeculativeParallelism asserts that the speculative upstream dial runs
-// in parallel with the MITM client-facing handshake. This is the core
-// optimization — the test must fail if someone accidentally reverts the
-// parallelization.
-//
-// The test plays the upstream server itself, and only starts serving once
-// startSpeculativeUpstreamTLS has returned. Its own work — standing in for the
-// client-facing handshake — is the server half of the upstream TLS handshake,
-// which can only complete if the speculative goroutine drives the client half
-// at the same time. So a dial run inline (start would block on a server that
-// is not answering yet), one deferred into join(), or a join() that redials
-// instead of handing over the speculative conn all fail; nothing is timed.
-func TestSpeculativeParallelism(t *testing.T) {
-	srvCfg := newTestServerTLSConfig(t, []string{"h2", "http/1.1"})
-	rawLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer rawLn.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	deadline, _ := ctx.Deadline()
-	_ = rawLn.(*net.TCPListener).SetDeadline(deadline)
-
-	cfg := &tls.Config{
-		InsecureSkipVerify: true, // nolint:gosec
-		ServerName:         "test.local",
-		NextProtos:         []string{"h2", "http/1.1"},
-	}
-
-	// Nobody serves TLS yet, so this returns only if the upstream handshake
-	// does not run inline.
-	s := startSpeculativeUpstreamTLS(ctx, zap.NewNop(), rawLn.Addr().String(), cfg, nil)
-	defer s.abandon()
-
-	raw, err := rawLn.Accept()
-	if err != nil {
-		t.Fatalf("accept: %v — no upstream dial reached the server while the caller was busy (handshake run inline in start, or deferred into join)", err)
-	}
-	defer raw.Close()
-	if err := tls.Server(raw, srvCfg).HandshakeContext(ctx); err != nil {
-		t.Fatalf("the upstream handshake did not complete before join(): %v", err)
-	}
-
-	conn, err := s.join(ctx)
-	if err != nil {
-		t.Fatalf("join: %v", err)
-	}
-	defer conn.Close()
-	if got, want := conn.LocalAddr().String(), raw.RemoteAddr().String(); got != want {
-		t.Fatalf("join returned conn %s, not the speculatively handshaken %s", got, want)
-	}
-}
-
-func TestNextProtosSubset(t *testing.T) {
-	cases := []struct {
-		name     string
-		want     []string
-		offered  []string
-		expected bool
-	}{
-		{"empty want", nil, []string{"h2"}, true},
-		{"single match", []string{"h2"}, []string{"h2", "http/1.1"}, true},
-		{"missing element", []string{"h2", "http/1.1"}, []string{"h2"}, false},
-		{"exact match", []string{"h2", "http/1.1"}, []string{"h2", "http/1.1"}, true},
-		{"want subset of offered", []string{"http/1.1"}, []string{"h2", "http/1.1"}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := nextProtosSubset(tc.want, tc.offered); got != tc.expected {
-				t.Fatalf("nextProtosSubset(%v, %v) = %v; want %v", tc.want, tc.offered, got, tc.expected)
-			}
-		})
-	}
-}
-
 // TestNewProxyTLSUpgradeFn_DestSide_DefaultSkipsVerification locks in the
 // DEFAULT dest-side posture: when the upgrade fn is invoked with
 // isClient=true (keploy dialing the real upstream) and upstream
@@ -329,11 +133,11 @@ func TestNewProxyTLSUpgradeFn_DestSide_DefaultSkipsVerification(t *testing.T) {
 	// Self-signed cert with CN "test.local"; we'll dial it asking for
 	// a different ServerName to force the strict-verify path to fail
 	// if the fix is missing.
-	ln, _ := newTLSTestServer(t, 0, []string{"h2", "http/1.1"}, nil)
+	ln, _ := newTLSTestServer(t, []string{"h2", "http/1.1"}, nil)
 	defer ln.Close()
 
 	// verify=false, rootCAs=nil — the zero-config default.
-	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil, nil)
+	upgrade := newProxyTLSUpgradeFn(zap.NewNop(), false, nil)
 
 	rawConn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -491,7 +295,7 @@ func TestMockClearsThePreviousTestSetsConsumption(t *testing.T) {
 		{Name: "mock-1", Kind: models.MySQL, Usage: models.Deleted},
 		{Name: "mock-2", Kind: models.MySQL, Usage: models.Updated, IsFiltered: true, SortOrder: 7},
 	} {
-		if err := mm.flagMockAsUsed(st); err != nil {
+		if err := mm.flagMockAsUsed(st, 0); err != nil {
 			t.Fatalf("flagMockAsUsed: %v", err)
 		}
 	}
@@ -731,5 +535,573 @@ func TestHandleConnectionClosesTheTunnelWhenTheAppLeavesBeforeUsingIt(t *testing
 	}
 	if src.closes.Load() == 0 {
 		t.Fatal("handleConnection returned without closing the application's connection")
+	}
+}
+
+// containerAt names one address a container, as the index of the local
+// Docker daemon would for a container's published port.
+type containerAt struct {
+	addr string
+	c    containerkey.Container
+}
+
+func (r containerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return r.c, dst.String() == r.addr, nil
+}
+
+func (containerAt) Bind(context.Context)                               {}
+func (containerAt) Watch(context.Context, *zap.Logger)                 {}
+func (containerAt) Endpoint() string                                   { return "unix:///fake.sock" }
+func (containerAt) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (containerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (containerAt) AwaitReadsOf(context.Context, []string)             {}
+
+// probeSaw is what a parser saw of its connection's container key while the
+// proxy served it: through its context, and on a mock of its connection.
+type probeSaw struct {
+	fromCtx, stamped, connID string
+}
+
+// ctxProbe is a parser that takes every connection and reports what it saw.
+type ctxProbe struct{ saw chan probeSaw }
+
+func (ctxProbe) MatchType(context.Context, []byte) bool { return true }
+
+func (p ctxProbe) look(ctx context.Context) error {
+	connID, _ := ctx.Value(models.ClientConnectionIDKey).(string)
+	key, _ := containerkey.FromContext(ctx)
+	m := &models.Mock{ConnectionID: connID}
+	containerkey.Default.Stamp(m)
+	p.saw <- probeSaw{fromCtx: key, stamped: m.Spec.Metadata[containerkey.MetadataKey], connID: connID}
+	return nil
+}
+
+func (p ctxProbe) RecordOutgoing(ctx context.Context, _ *integrations.RecordSession) error {
+	return p.look(ctx)
+}
+
+func (p ctxProbe) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	return p.look(ctx)
+}
+
+// Under the proven switch the proxy names a container destination when it
+// accepts the connection: the parser's context carries the key, and the
+// mocks of that connection (by the connection ID the same context carries)
+// are stamped with it while it is open. Once handleConnection returns, the
+// keyer holds nothing of it. Without the switch nothing is named. The same in
+// a record (Record) and in a replay (Mock).
+func TestHandleConnectionNamesAContainerDestination(t *testing.T) {
+	for _, tc := range []struct {
+		mode models.Mode
+		on   bool
+	}{{models.MODE_RECORD, true}, {models.MODE_RECORD, false}, {models.MODE_TEST, true}, {models.MODE_TEST, false}} {
+		mode, on := tc.mode, tc.on
+		t.Run(fmt.Sprintf("%s/proven=%v", mode, on), func(t *testing.T) {
+			if on {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			upstream := keepAliveHTTPUpstream(t)
+			saved := containerkey.Default
+			containerkey.Default = containerkey.NewKeyer(containerAt{addr: upstream,
+				c: containerkey.Container{ID: "c1", Image: "localstack/localstack:3.8", Port: 4566, Fingerprint: "0123456789ab"}})
+			t.Cleanup(func() { containerkey.Default = saved })
+
+			cfg := config.New()
+			cfg.Agent.Mode = mode
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			probe := ctxProbe{saw: make(chan probeSaw, 1)}
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{"probe": probe}
+			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: "probe"}}
+			opts := models.OutgoingOptions{DisableMysqlAutoDetect: true}
+			if mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				// Mock can fail last, at its nsswitch setup (root's), with
+				// the session already set up.
+				opts.Mocking = true
+				_ = p.Mock(context.Background(), opts)
+			}
+
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			if _, err := io.WriteString(app, "GET /queue HTTP/1.1\r\nHost: dependency\r\n\r\n"); err != nil {
+				t.Fatal(err)
+			}
+			saw := awaitEvent(t, probe.saw, "the parser being handed the connection")
+			awaitEvent(t, done, "handleConnection returning")
+
+			want := ""
+			if on {
+				want = "container:localstack/localstack:4566@0123456789ab"
+			}
+			if saw.fromCtx != want || saw.stamped != want {
+				t.Fatalf("while open, the parser's context carried %q and its connection's mock was stamped %q, want %q", saw.fromCtx, saw.stamped, want)
+			}
+			// A mock handed over after the connection closed is still
+			// stamped; a new session forgets the connection.
+			m := &models.Mock{ConnectionID: saw.connID}
+			containerkey.Default.Stamp(m)
+			if got := m.Spec.Metadata[containerkey.MetadataKey]; got != want {
+				t.Fatalf("after the connection closed the keyer stamped %q, want %q", got, want)
+			}
+			containerkey.Default.Reset()
+			m = &models.Mock{ConnectionID: saw.connID}
+			containerkey.Default.Stamp(m)
+			if got := m.Spec.Metadata[containerkey.MetadataKey]; got != "" {
+				t.Fatalf("after a new session the keyer still stamped %q", got)
+			}
+		})
+	}
+}
+
+// sessionIndex is a container index that counts what the proxy asks of it.
+type sessionIndex struct {
+	at             map[string]containerkey.Container
+	binds, watches atomic.Int32
+}
+
+func (s *sessionIndex) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	c, ok := s.at[dst.String()]
+	return c, ok, nil
+}
+
+func (s *sessionIndex) Bind(context.Context)                             { s.binds.Add(1) }
+func (s *sessionIndex) Watch(context.Context, *zap.Logger)               { s.watches.Add(1) }
+func (*sessionIndex) Endpoint() string                                   { return "unix:///fake.sock" }
+func (*sessionIndex) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (*sessionIndex) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (*sessionIndex) AwaitReadsOf(context.Context, []string)             {}
+
+// Only under the proven switch does the agent bind its reading of Docker to
+// its life, and a session start (Record, Mock) index the local daemon's
+// containers and start their scopes afresh. Without the switch the proxy
+// never touches the index: no watch of the daemon (its goroutines, its
+// connection, its messages) and the scopes left as they were.
+func TestContainerKeysStartOnlyUnderTheSwitch(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", on), func(t *testing.T) {
+			if on {
+				t.Setenv("KEPLOY_PROVEN", "1")
+			} else {
+				t.Setenv("KEPLOY_PROVEN", "")
+			}
+			idx := &sessionIndex{at: map[string]containerkey.Container{
+				"172.17.0.2:5432": {ID: "a", Image: "postgres:16", Port: 5432, Fingerprint: "0123456789ab"},
+				"172.17.0.3:5432": {ID: "b", Image: "postgres:16", Port: 5432, Fingerprint: "0123456789ab"},
+			}}
+			saved := containerkey.Default
+			containerkey.Default = containerkey.NewKeyer(idx)
+			t.Cleanup(func() { containerkey.Default = saved })
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			cfg := config.New()
+			p := New(zap.NewNop(), fakeDestInfo{}, cfg)
+			p.bindContainerKeys(ctx)
+			t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			sessions := map[string]func(){
+				"Record": func() {
+					_ = p.Record(ctx, make(chan *models.Mock, 16), models.OutgoingOptions{DisableMysqlAutoDetect: true})
+				},
+				// Mock can fail later, at its nsswitch setup: after the
+				// container keys' start, which is what is checked here.
+				"Mock": func() { _ = p.Mock(ctx, models.OutgoingOptions{}) },
+			}
+			use := func(connID, dst string) containerkey.State {
+				containerkey.Default.Name(nil, connID, dst)
+				_, st := containerkey.StateFromContext(containerkey.WithConn(ctx, containerkey.Default, connID))
+				containerkey.Default.Forget(connID)
+				return st
+			}
+			for _, name := range []string{"Record", "Mock"} {
+				containerkey.Default.Reset()
+				a := use("a", "172.17.0.2:5432")
+				sessions[name]()
+				// b is configured as a is: in a's scope it cannot be told
+				// apart from it, in a new session's it can.
+				b := use("b", "172.17.0.3:5432")
+				want := containerkey.Withheld
+				if on {
+					want = containerkey.Keyed
+				}
+				if a != containerkey.Keyed || b != want {
+					t.Fatalf("around %s: a was %v and b %v, want b %v", name, a, b, want)
+				}
+			}
+			wantBinds, wantWatches := int32(0), int32(0)
+			if on {
+				wantBinds, wantWatches = 1, 2
+			}
+			if got := idx.binds.Load(); got != wantBinds {
+				t.Fatalf("the agent bound the index %d times, want %d", got, wantBinds)
+			}
+			if got := idx.watches.Load(); got != wantWatches {
+				t.Fatalf("Record and Mock watched the index %d times, want %d", got, wantWatches)
+			}
+		})
+	}
+}
+
+// A client that dialled an IP literal sends no SNI and checks the MITM leaf
+// against an IP SAN, as client-go does reaching the Kubernetes API at
+// https://10.96.0.1 (dsmon F7). On replay that has to hold whether or not the
+// proxy offers h2 to the destination: the h2 hint used to be put on a context
+// rebuilt from the connection's, which dropped the destination IP, so a
+// destination with PreferH2 or a recorded Http2 mock got a leaf with no IP SAN.
+func TestHandleConnectionNamesTheLeafForAnIPLiteralDestinationOnReplay(t *testing.T) {
+	const ip = "10.96.0.1"
+	for _, tc := range []struct {
+		name     string
+		preferH2 bool
+		mocks    []*models.Mock
+		wantALPN string
+	}{
+		{name: "the destination is http/1.1", wantALPN: "http/1.1"},
+		{name: "PreferH2 is set", preferH2: true, wantALPN: "h2"},
+		{name: "the destination has a recorded Http2 mock", mocks: []*models.Mock{h2MockForTest("k8s-api", ip+":443")}, wantALPN: "h2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := replayProxyTo(t, ip+":443", models.OutgoingOptions{PreferH2: tc.preferH2}, tc.mocks...)
+
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+
+			// An IP literal: crypto/tls sends no SNI for it.
+			client := leafCheckingClient(app, ip, ip)
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake with %s: %v", ip, err)
+			}
+			if got := client.ConnectionState().NegotiatedProtocol; got != tc.wantALPN {
+				t.Fatalf("negotiated %q, want %q", got, tc.wantALPN)
+			}
+			_ = client.Close()
+			awaitEvent(t, done, "handleConnection returning after the client left")
+		})
+	}
+}
+
+// replayProxyTo is a proxy replaying mocks, with opts, the connections the
+// connect hooks say went to dst (an ip:port).
+func replayProxyTo(t *testing.T, dst string, opts models.OutgoingOptions, mocks ...*models.Mock) *Proxy {
+	t.Helper()
+	p := &Proxy{logger: zap.NewNop(), DestInfo: fakeDestInfo{dest: ipv4Dest(t, dst)}, mysqlPorts: newMysqlPortRegistry()}
+	opts.Mocking, opts.DisableMysqlAutoDetect = true, true
+	p.setSession(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: opts})
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	mm.SetUnFilteredMocks(mocks)
+	p.mockManager = mm
+	return p
+}
+
+// leafCheckingClient is a TLS client on conn that sends sni ("" for none)
+// and takes keploy's leaf only if it is valid for name under this run's MITM
+// CA, as an application trusting that CA would.
+func leafCheckingClient(conn net.Conn, sni, name string) *tls.Conn {
+	return tls.Client(conn, &tls.Config{
+		ServerName: sni,
+		NextProtos: []string{"h2", "http/1.1"},
+		// The run's CA is minted by the handshake itself, so the leaf is
+		// verified in VerifyConnection.
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			roots := x509.NewCertPool()
+			if !roots.AppendCertsFromPEM(pTls.ActiveCACertPEM()) {
+				return errors.New("no MITM CA for this run")
+			}
+			leaf := cs.PeerCertificates[0]
+			if _, err := leaf.Verify(x509.VerifyOptions{DNSName: name, Roots: roots}); err != nil {
+				return fmt.Errorf("leaf CN %q, IP SANs %v: %w", leaf.Subject.CommonName, leaf.IPAddresses, err)
+			}
+			return nil
+		},
+	})
+}
+
+// A client that made a CONNECT request and sends no SNI in the ClientHello
+// after it gets a leaf for the host its CONNECT named: it already told the
+// proxy where it is going. The name goes with its own connection to the
+// handshake (pTls.WithConnectTarget).
+func TestHandleConnectionNamesTheLeafForTheConnectTargetWithNoSNI(t *testing.T) {
+	const target = "api.example.com"
+	app, src := acceptedConn(t)
+	// The connect hooks report the corporate proxy the application dialled.
+	p := replayProxyTo(t, "10.96.0.9:3128", models.OutgoingOptions{})
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+
+	if _, err := fmt.Fprintf(app, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", target, target); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("reading the CONNECT reply: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT answered %s, want 200", resp.Status)
+	}
+	client := leafCheckingClient(app, "", target)
+	if err := client.Handshake(); err != nil {
+		t.Fatalf("client handshake after CONNECT %s, no SNI: %v", target, err)
+	}
+	_ = client.Close()
+	awaitEvent(t, done, "handleConnection returning after the client left")
+}
+
+// starttlsParser serves a plaintext STARTTLS on replay: it answers the
+// client's "STARTTLS" line and then terminates TLS on the connection with
+// keploy's MITM, under the context the proxy hands it, the way a parser's
+// client-side upgrade does.
+type starttlsParser struct{}
+
+func (starttlsParser) MatchType(_ context.Context, buf []byte) bool {
+	return strings.HasPrefix(string(buf), "STARTTLS")
+}
+
+func (starttlsParser) RecordOutgoing(context.Context, *integrations.RecordSession) error {
+	return errors.New("starttlsParser serves replays only")
+}
+
+func (starttlsParser) MockOutgoing(ctx context.Context, src net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	line := make([]byte, len("STARTTLS\r\n"))
+	if _, err := io.ReadFull(src, line); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(src, "OK\r\n"); err != nil {
+		return err
+	}
+	c, _, err := pTls.HandleTLSConnection(ctx, zap.NewNop(), src, time.Time{})
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, c)
+	return nil
+}
+
+// A parser that terminates TLS on a connection after its CONNECT (a STARTTLS
+// upgrade) names the leaf for the CONNECT target when the client sends no
+// SNI, as the proxy's own handshake does: the target is on the context
+// handleConnection hands the parser.
+func TestAParserUpgradingAConnectionAfterItsConnectNamesTheLeafForTheTarget(t *testing.T) {
+	const target = "db.example.com"
+	app, src := acceptedConn(t)
+	p := starttlsReplayProxyTo(t, "10.96.0.9:3128")
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+
+	if _, err := fmt.Fprintf(app, "CONNECT %s:6000 HTTP/1.1\r\nHost: %s:6000\r\n\r\n", target, target); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(app)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("reading the CONNECT reply: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT answered %s, want 200", resp.Status)
+	}
+	askForSTARTTLS(t, app, br)
+	client := leafCheckingClient(app, "", target)
+	if err := client.Handshake(); err != nil {
+		t.Fatalf("client handshake with the parser after CONNECT %s, no SNI: %v", target, err)
+	}
+	_ = client.Close()
+	awaitEvent(t, done, "handleConnection returning after the client left")
+}
+
+// A parser that terminates TLS on a connection (a STARTTLS upgrade) names the
+// leaf for the IP the client dialled when the client sends no SNI, as the
+// proxy's own handshake does: a MySQL or Postgres client that dialled an IP
+// literal and checks the server's identity verifies the leaf against an IP
+// SAN. The IP is on the context handleConnection hands the parser.
+func TestAParserUpgradingAConnectionNamesTheLeafForTheIPItsClientDialled(t *testing.T) {
+	const ip = "10.96.0.7"
+	app, src := acceptedConn(t)
+	p := starttlsReplayProxyTo(t, ip+":6000")
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+
+	askForSTARTTLS(t, app, bufio.NewReader(app))
+	client := leafCheckingClient(app, "", ip)
+	if err := client.Handshake(); err != nil {
+		t.Fatalf("client handshake with the parser for %s, no SNI: %v", ip, err)
+	}
+	_ = client.Close()
+	awaitEvent(t, done, "handleConnection returning after the client left")
+}
+
+// starttlsReplayProxyTo is replayProxyTo with starttlsParser its only parser.
+func starttlsReplayProxyTo(t *testing.T, dst string) *Proxy {
+	t.Helper()
+	p := replayProxyTo(t, dst, models.OutgoingOptions{})
+	p.Integrations = map[integrations.IntegrationType]integrations.Integrations{"starttls": starttlsParser{}}
+	p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: "starttls"}}
+	return p
+}
+
+// askForSTARTTLS sends starttlsParser its STARTTLS line on w and reads its OK
+// from r, after which the parser terminates TLS on the connection.
+func askForSTARTTLS(t *testing.T, w io.Writer, r *bufio.Reader) {
+	t.Helper()
+	if _, err := io.WriteString(w, "STARTTLS\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	ok := make([]byte, len("OK\r\n"))
+	if _, err := io.ReadFull(r, ok); err != nil || string(ok) != "OK\r\n" {
+		t.Fatalf("the parser answered %q (%v), want OK", ok, err)
+	}
+}
+
+// bootStageRecord is one stage of the agent's start the proxy began
+// (beginBootWork): the goroutine that began it, and the one that ended it.
+type bootStageRecord struct {
+	name           string
+	beganOn, endOn uint64
+	ended          bool
+}
+
+// recordBootWork stands in for utils.BeginBootWork for the rest of the test,
+// and returns what has been begun so far.
+func recordBootWork(t *testing.T) (begun func() []bootStageRecord) {
+	t.Helper()
+	var mu sync.Mutex
+	var recs []*bootStageRecord
+	was := beginBootWork
+	beginBootWork = func(name string) func() {
+		r := &bootStageRecord{name: name, beganOn: goroutineID()}
+		mu.Lock()
+		recs = append(recs, r)
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if !r.ended {
+				r.ended, r.endOn = true, goroutineID()
+			}
+		}
+	}
+	t.Cleanup(func() { beginBootWork = was })
+	return func() []bootStageRecord {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]bootStageRecord, len(recs))
+		for i, r := range recs {
+			out[i] = *r
+		}
+		return out
+	}
+}
+
+// goroutineID is the calling goroutine's id, from its stack's header.
+func goroutineID() uint64 {
+	var b [64]byte
+	f := strings.Fields(strings.TrimPrefix(string(b[:runtime.Stack(b[:], false)]), "goroutine "))
+	id, _ := strconv.ParseUint(f[0], 10, 64)
+	return id
+}
+
+// The proxy listener's start -- its bind, the kernel count's proof, the
+// handshake hold -- is a stage of the agent's start of its own, begun and
+// ended on the goroutine that does it, and over before readyChan says how it
+// went: StartProxy's stage waits for it on readyChan, and that wait alone
+// shows no progress, so a listener's start that took long on a loaded host
+// was counted as beats without progress, and the agent's start given up on.
+// So is a start that cannot listen.
+func TestTheProxyListenersStartIsAStageOfTheAgentsStart(t *testing.T) {
+	t.Run("it listens", func(t *testing.T) {
+		begun := recordBootWork(t)
+		// The shutdown closes the shared mock manager's channel: a new one,
+		// then none, for the next test.
+		mgr := syncMock.Get()
+		t.Cleanup(func() {
+			mgr.SetOutputChannel(make(chan *models.Mock))
+			mgr.SetOutputChannel(nil)
+		})
+		p := &Proxy{logger: zap.NewNop()}
+		ctx, cancel := context.WithCancel(context.Background())
+		readyChan := make(chan error, 1)
+		startErr := make(chan error, 1)
+		go func() { startErr <- p.start(ctx, readyChan) }()
+		select {
+		case err := <-readyChan:
+			if err != nil {
+				cancel()
+				t.Fatalf("start() reported not ready: %v", err)
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			cancel()
+			t.Fatal("start() never said it was ready")
+		}
+		assertOneOwnStage(t, begun(), "the proxy listener's start")
+		cancel()
+		select {
+		case <-startErr:
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("start() did not return after its context was cancelled")
+		}
+	})
+	t.Run("it cannot listen", func(t *testing.T) {
+		held, err := net.Listen("tcp", ":0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+		begun := recordBootWork(t)
+		p := &Proxy{logger: zap.NewNop(), Port: uint32(held.Addr().(*net.TCPAddr).Port)}
+		readyChan := make(chan error, 1)
+		go func() { _ = p.start(context.Background(), readyChan) }()
+		select {
+		case err := <-readyChan:
+			if err == nil {
+				t.Fatal("start() said it was ready on a port another socket holds")
+			}
+		case <-time.After(time.Minute): // only turns a hang into a failure
+			t.Fatal("start() never said how its start went")
+		}
+		assertOneOwnStage(t, begun(), "the proxy listener's start")
+	})
+}
+
+// assertOneOwnStage fails the test unless recs is one stage, name, begun and
+// ended on one goroutine other than the test's.
+func assertOneOwnStage(t *testing.T, recs []bootStageRecord, name string) {
+	t.Helper()
+	if len(recs) != 1 || recs[0].name != name {
+		t.Fatalf("stages begun %+v, want %q alone", recs, name)
+	}
+	r := recs[0]
+	if !r.ended {
+		t.Fatalf("%q had not ended when its start was over", name)
+	}
+	if r.beganOn != r.endOn || r.beganOn == goroutineID() {
+		t.Fatalf("%q was begun on goroutine %d and ended on %d (the test is %d): want both on the goroutine doing the work", name, r.beganOn, r.endOn, goroutineID())
+	}
+}
+
+// The app clock the agent hands the proxy is the one its learn step reads a
+// call's window on.
+func TestSetAppClockIsTheLearnStepsClock(t *testing.T) {
+	p := &Proxy{learnTracker: learn.NewTracker()}
+	rec := time.Date(2026, 10, 20, 15, 49, 55, 0, time.UTC)
+	prev := &models.Mock{Name: "mock-0", Kind: models.HTTP, Spec: models.MockSpec{ReqTimestampMock: rec}}
+	paired := &models.Mock{Name: "mock-4", Kind: models.Mongo, Spec: models.MockSpec{ReqTimestampMock: rec.Add(4 * time.Millisecond)}}
+	served := time.Date(2026, 10, 20, 15, 50, 37, 0, time.UTC)
+	p.learnTracker.ServedMockAt(prev, served)
+	if w := p.learnTracker.CallWindow(paired, []*models.Mock{prev}, served.Add(time.Millisecond)); w != nil {
+		t.Fatalf("a window before the app's clock was set: %+v", w)
+	}
+	p.SetAppClock(func(real time.Time) (time.Time, bool) { return real.Add(21 * time.Second), true })
+	w := p.learnTracker.CallWindow(paired, []*models.Mock{prev}, served.Add(time.Millisecond))
+	if w == nil || !w.F.From.Equal(served.Add(21*time.Second)) || !w.F.To.Equal(served.Add(21*time.Second+time.Millisecond)) {
+		t.Fatalf("window %+v; want F read on the app clock the agent handed the proxy", w)
 	}
 }

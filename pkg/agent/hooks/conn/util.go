@@ -74,15 +74,54 @@ const MaxTestCaseSize = 5 * 1024 * 1024 // 5 MB
 // are skipped during recording and only body size is stored.
 const LargeBodyThreshold = 1 * 1024 * 1024 // 1 MB
 
+// SkipUnderPressure reports whether the memory guard has paused recording, as
+// a capture hook decides whether to record an exchange. When it has, it closes
+// the exchange's bodies, so the proxied connection's readers do not leak, and
+// counts the request as not recorded under pressure on the ingress connection
+// ctx names (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the
+// recording says what the pause cost. A capture hook asks it first and returns
+// when it says true.
+func SkipUnderPressure(ctx context.Context, req *http.Request, resp *http.Response) bool {
+	if !memoryguard.IsRecordingPaused() {
+		return false
+	}
+	if req != nil && req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+	return true
+}
+
+// SkipGRPCUnderPressure reports whether a pause of the memory guard costs a
+// gRPC call, as CaptureGRPC decides whether to record it: the guard has
+// paused recording now, or had as the forwarder read the call's request
+// (pausedAtRequest, pkg.HTTP2Stream.RequestPaused). When it does, it counts
+// the call as not recorded under pressure on the ingress connection ctx names
+// (syncMock NoteNotRecordedUnderPressure, WithIngressConn), so the recording
+// says what the pause cost.
+//
+// The gRPC ingress tees a connection's whole stream through a pause, so its
+// calls come here whenever they complete: whether the pause was on as the
+// request was read is what puts a call in it, as an HTTP ingress reads the
+// pause as a request comes. The request's time cannot: a pause's span ends at
+// the instant the pause does, and on a clock as coarse as Windows' the next
+// call's request is stamped in that same tick, so the first call after every
+// pause was judged to be in it. A call whose request came before a pause that
+// has ended by its response is captured, and the recording suppresses it for
+// the overlap (WasPressureActiveInWindow), as it does an HTTP exchange's.
+func SkipGRPCUnderPressure(ctx context.Context, pausedAtRequest bool) bool {
+	paused := pausedAtRequest || memoryguard.IsRecordingPaused()
+	if paused {
+		syncMock.FromContextOrGlobal(ctx).NoteNotRecordedUnderPressure(syncMock.IngressConn(ctx))
+	}
+	return paused
+}
+
 func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, req *http.Request, resp *http.Response, reqTimeTest time.Time, resTimeTest time.Time, opts models.IncomingOptions, synchronous bool, mapping bool, appPort uint16) {
-	if memoryguard.IsRecordingPaused() {
-		// Close bodies even when skipping capture to avoid resource leaks.
-		if req.Body != nil {
-			req.Body.Close()
-		}
-		if resp.Body != nil {
-			resp.Body.Close()
-		}
+	if SkipUnderPressure(ctx, req, resp) {
 		return
 	}
 
@@ -240,6 +279,8 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		AppPort: appPort,
 		// Mocks: mocks,
 	}
+	// The clock its window start is on (proven switch).
+	StampOrigin(ctx, testCase)
 
 	if synchronous {
 		// The request's open window (the ingress opened it at the request's
@@ -287,12 +328,25 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		// takes what was held for the request and ends its window before
 		// handing the mocks on.
 		mgr.ResolveKept(win, reqTimeTest, resTimeTest, testName, mapping)
+	} else if syncMock.WindowFromContext(ctx).LeftAtStop() {
+		// Without --sync nothing is resolved here, but a request that was in
+		// flight across its recording's stop is left out as Keep leaves it
+		// out with --sync: the recording it began in has ended without it,
+		// and it is no request of the next one.
+		logger.Debug("Test case left out: its request was in flight across its recording's stop",
+			zap.String("method", req.Method),
+			zap.Time("in_flight_since", reqTimeTest))
+		return
 	}
 	select {
 	case <-ctx.Done():
 		return
 	case t <- testCase:
 		sent = true
+		// Without --sync no resolve ends the window: it is noted a test
+		// case's here, before the ingress ends it (syncMock.TestSpanAt).
+		// With --sync ResolveKept noted it, and its window has ended.
+		syncMock.WindowFromContext(ctx).Tested(reqTimeTest, resTimeTest)
 	}
 }
 func IsFiltered(logger *zap.Logger, req *http.Request, opts models.IncomingOptions) bool {
@@ -511,6 +565,36 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 	return formData
 }
 
+// InlineFormFiles moves the file parts ExtractFormData left in local temp files
+// into tc itself (FormData.FileContents), for a test case persisted by another
+// process than this one: the DaemonSet agent streams its test cases to
+// k8s-proxy's control plane, which cannot read this pod's temp files. Each temp
+// file is removed once read and its path cleared, so the persister writes the
+// asset from the bytes. A file that cannot be read keeps its path.
+func InlineFormFiles(logger *zap.Logger, tc *models.TestCase) {
+	for i := range tc.HTTPReq.Form {
+		form := &tc.HTTPReq.Form[i]
+		for j, path := range form.Paths {
+			if path == "" {
+				continue
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				utils.LogError(logger, err, "Error reading multipart temp file", zap.String("path", path))
+				continue
+			}
+			if len(form.FileContents) < len(form.Paths) {
+				form.FileContents = append(form.FileContents, make([][]byte, len(form.Paths)-len(form.FileContents))...)
+			}
+			form.FileContents[j] = content
+			form.Paths[j] = ""
+			if err := os.Remove(path); err != nil {
+				utils.LogError(logger, err, "Error removing temp file", zap.String("path", path))
+			}
+		}
+	}
+}
+
 // CaptureGRPC captures a gRPC request/response pair and sends it to the test case channel.
 // Mirrors NewCapture (HTTP) exactly:
 //   - GRPCCaptureHook is invoked unconditionally before ResolveRange, so
@@ -519,11 +603,10 @@ func ExtractFormData(logger *zap.Logger, body []byte, contentType string) []mode
 //   - Counter is always incremented so concurrent duplicate streams each get a
 //     unique window name; keep=false discards their mocks without saving the TC.
 //   - Duplicate streams return after ResolveRange, before the test case is sent.
+//
+// A call a pause of the memory guard costs (SkipGRPCUnderPressure) is left out
+// and counted before any of that.
 func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, http2Stream *pkg.HTTP2Stream, appPort uint16, synchronous bool, mapping bool) {
-	if memoryguard.IsRecordingPaused() {
-		return
-	}
-
 	if http2Stream == nil {
 		logger.Error("Stream is nil")
 		return
@@ -531,6 +614,10 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 
 	if http2Stream.GRPCReq == nil || http2Stream.GRPCResp == nil {
 		logger.Error("gRPC request or response is nil")
+		return
+	}
+
+	if SkipGRPCUnderPressure(ctx, http2Stream.RequestPaused) {
 		return
 	}
 
@@ -589,6 +676,8 @@ func CaptureGRPC(ctx context.Context, logger *zap.Logger, t chan *models.TestCas
 		Noise:     map[string][]string{},
 		AppPort:   appPort,
 	}
+	// The clock its window start is on (proven switch).
+	StampOrigin(ctx, testCase)
 
 	select {
 	case <-ctx.Done():

@@ -41,6 +41,11 @@ type TreeDb struct {
 	// keyed holds a keyIndex per integrations.MockIndex a lookup has used.
 	// Built, read and dropped under mu.
 	keyed map[*integrations.MockIndex]*keyIndex
+	// bootBuilt marks a startup tier a staging built before the set's first
+	// test fired: what it serves is consumed as the app starts
+	// (MockManager.carryTaken). Set before the tree is published, read-only
+	// after.
+	bootBuilt bool
 }
 
 func NewTreeDb(comparator func(a, b interface{}) int) *TreeDb {
@@ -111,6 +116,17 @@ func (db *TreeDb) delete(key interface{}) bool {
 		delete(db.idIndex, info.ID)
 	}
 	return true
+}
+
+// holds reports whether the entry at key is the mock want names (sameMock).
+func (db *TreeDb) holds(key models.TestModeInfo, want *models.Mock) bool {
+	if want == nil {
+		return false
+	}
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	v, found := db.rbt.Get(key)
+	return found && sameMock(v, *want)
 }
 
 // deleteMock removes the entry at key only when it is the mock the caller

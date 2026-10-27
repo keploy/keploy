@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/agent"
 )
 
@@ -307,6 +308,8 @@ func (h *anchorHooks) SetFreezeAnchor(_ context.Context, at time.Time) error {
 }
 
 func TestScopeTableAnchorsTheClockAtTheFirstSuiteStart(t *testing.T) {
+	// The per-start table is the old wire's: the proven switch refuses it.
+	t.Setenv(provenswitch.Env, "")
 	h := &anchorHooks{}
 	prev := agent.ActiveHooks
 	agent.ActiveHooks = h
@@ -319,5 +322,130 @@ func TestScopeTableAnchorsTheClockAtTheFirstSuiteStart(t *testing.T) {
 	post(t, a.HandleScopeTable, `{"sets":{"a":{}}}`)
 	if len(h.got) != 1 {
 		t.Fatalf("anchored without a suite start: %v", h.got)
+	}
+}
+
+// windowsSvc answers each window read with the read it was.
+type windowsSvc struct {
+	agent.Service
+	reads []string
+}
+
+func (s *windowsSvc) GetScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	s.reads = append(s.reads, "plain")
+	return []models.ScopeWindow{{Name: "plain"}}, nil
+}
+
+func (s *windowsSvc) FinalScopeWindows(context.Context) ([]models.ScopeWindow, error) {
+	s.reads = append(s.reads, "final")
+	return []models.ScopeWindow{{Name: "final"}}, nil
+}
+
+// The CLI's last read (?final=1) is the final one, which fails a test still
+// open; a plain read is not; any other value is refused, since a client that
+// meant the last read would otherwise get a plain one and leave an open test
+// out of the verdict.
+func TestScopeWindowsFinalReadIsTheRunsLast(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	svc := &windowsSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	for _, tc := range []struct {
+		query, read string
+		status      int
+	}{
+		{"", "plain", http.StatusOK},
+		{"?final=1", "final", http.StatusOK},
+		{"?final=true", "", http.StatusBadRequest},
+		{"?final=0", "", http.StatusBadRequest},
+	} {
+		svc.reads = nil
+		rec := httptest.NewRecorder()
+		a.HandleScopeWindows(rec, httptest.NewRequest(http.MethodGet, "/agent/scope/windows"+tc.query, nil))
+		if rec.Code != tc.status {
+			t.Fatalf("%q: status %d, want %d (%s)", tc.query, rec.Code, tc.status, rec.Body.String())
+		}
+		if tc.read == "" {
+			if len(svc.reads) != 0 {
+				t.Fatalf("%q: read %v, want none", tc.query, svc.reads)
+			}
+			continue
+		}
+		var got []models.ScopeWindow
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%q: %v", tc.query, err)
+		}
+		if !slices.Equal(svc.reads, []string{tc.read}) || len(got) != 1 || got[0].Name != tc.read {
+			t.Fatalf("%q: reads %v, answered %+v, want the %s read", tc.query, svc.reads, got, tc.read)
+		}
+	}
+}
+
+// With the switch off any final value other than 1 is the plain read, as
+// before the final read existed.
+func TestScopeWindowsWithTheSwitchOffReadAnyOtherFinalPlainly(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	svc := &windowsSvc{}
+	a := &Agent{logger: zap.NewNop(), svc: svc}
+	rec := httptest.NewRecorder()
+	a.HandleScopeWindows(rec, httptest.NewRequest(http.MethodGet, "/agent/scope/windows?final=true", nil))
+	if rec.Code != http.StatusOK || !slices.Equal(svc.reads, []string{"plain"}) {
+		t.Fatalf("status %d, reads %v, want one plain read", rec.Code, svc.reads)
+	}
+}
+
+// poolSvc takes the per-test table and the pool slices.
+type poolSvc struct {
+	agent.Service
+	table map[string][]string
+	pool  map[string][]string
+}
+
+func (s *poolSvc) SetScopeTable(_ context.Context, t map[string][]string) error {
+	s.table = t
+	return nil
+}
+
+func (s *poolSvc) SetScopePool(_ context.Context, p map[string][]string) error {
+	s.pool = p
+	return nil
+}
+
+// tableOnlySvc takes the per-test table and no pool slices.
+type tableOnlySvc struct{ agent.Service }
+
+func (tableOnlySvc) SetScopeTable(context.Context, map[string][]string) error { return nil }
+
+// Under the switch the scope table carries each key's pool slice; an agent
+// that cannot serve them says so, since the CLI judges on them. With the
+// switch off the slices are not read.
+func TestScopeTableCarriesThePoolSlices(t *testing.T) {
+	body := `{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"],"-":["mock-2"]}}`
+	post := func(a *Agent) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		a.HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec
+	}
+	t.Setenv(provenswitch.Env, "1")
+	svc := &poolSvc{}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !slices.Equal(svc.table["o::TestA"], []string{"mock-3"}) || !slices.Equal(svc.pool["o"], []string{"mock-1"}) || !slices.Equal(svc.pool["-"], []string{"mock-2"}) {
+		t.Fatalf("table %v, pool %v", svc.table, svc.pool)
+	}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: tableOnlySvc{}}); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("an agent without pool slices answered %d", rec.Code)
+	}
+	// A table without slices serves no pool mock between tests.
+	svc = &poolSvc{}
+	rec := httptest.NewRecorder()
+	(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(`{"mappings":{"o::TestA":["mock-3"]}}`)))
+	if rec.Code != http.StatusOK || svc.pool == nil || len(svc.pool) != 0 {
+		t.Fatalf("a table without slices: status %d, pool %v, want an empty pool", rec.Code, svc.pool)
+	}
+	t.Setenv(provenswitch.Env, "")
+	svc = &poolSvc{}
+	if rec := post(&Agent{logger: zap.NewNop(), svc: svc}); rec.Code != http.StatusOK || svc.pool != nil {
+		t.Fatalf("switch off: status %d, pool %v", rec.Code, svc.pool)
 	}
 }

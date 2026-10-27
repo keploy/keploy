@@ -147,6 +147,9 @@ type prReportDB struct {
 	onRead     func()
 	readErr    error
 	dropOnRead string
+	// dupOnRead returns the named test's result twice, as a store that kept
+	// an earlier cycle's row beside the last one does.
+	dupOnRead string
 }
 
 func (f *prReportDB) GetAllTestRunIDs(context.Context) ([]string, error) { return nil, nil }
@@ -159,6 +162,9 @@ func (f *prReportDB) GetTestCaseResults(context.Context, string, string) ([]mode
 	out := make([]models.TestResult, 0, len(f.results))
 	for _, r := range f.results {
 		if r.TestCaseID != f.dropOnRead {
+			out = append(out, r)
+		}
+		if r.TestCaseID == f.dupOnRead {
 			out = append(out, r)
 		}
 	}
@@ -232,6 +238,12 @@ type prInstr struct {
 	// lastParams is the filter-params payload of the most recent send, so a
 	// test can assert what the agent was actually told.
 	lastParams models.MockFilterParams
+	// windowAfter is the start of the window of the test the agent was last
+	// told to serve: a send's AfterTime, or, under exact serving (the proven
+	// switch), the recorded start of the test case it opened (of cases). A
+	// send that serves the pool between test cases leaves it.
+	windowAfter time.Time
+	cases       []*models.TestCase
 	// allParams is every send, in order.
 	allParams []models.MockFilterParams
 	// perTestScope makes the stand-in agent answer each send the way an agent
@@ -240,6 +252,12 @@ type prInstr struct {
 	// the last answer, cleared by a store as the real client clears it.
 	perTestScope bool
 	scopeSaid    bool
+	// oldAgent makes the stand-in agent answer a staging as one that predates
+	// background serving does: saying no background rules (models.BackgroundRulesHeader);
+	// otherwise it says it serves the rules the staging named. backgroundSaid
+	// is what the client took from the last staging's answer.
+	oldAgent       bool
+	backgroundSaid string
 	// storedFiltered and storedUnfiltered are the pools of the last store.
 	storedFiltered, storedUnfiltered []*models.Mock
 	// release, when set, holds the stand-in application after the run's
@@ -248,6 +266,19 @@ type prInstr struct {
 	// returns.
 	release chan struct{}
 	stopped chan struct{}
+	// leftRunning is what the app's stop leaves running
+	// (models.AppError.LeftRunning) when its run is stopped.
+	leftRunning string
+	// mockErrorsFor, when set, answers every GetMockErrors call: what the agent
+	// read of the calls no mock answered during the test that just ran. The
+	// replayer reads them once per test, in test order.
+	mockErrorsFor func() ([]models.UnmatchedCall, error)
+}
+
+func (f *prInstr) AgentServesBackground() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.backgroundSaid
 }
 
 func (f *prInstr) AgentReadsConsumedPerTestOnly() bool {
@@ -273,7 +304,7 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		if f.release != nil {
 			<-f.release
 		}
-		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1}
+		return models.AppError{AppErrorType: models.ErrCtxCanceled, ExitCode: -1, LeftRunning: f.leftRunning}
 	case <-f.appStopped:
 		errType := models.ErrAppStopped
 		if f.stopErr != "" {
@@ -286,8 +317,12 @@ func (f *prInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError 
 		}
 	}
 }
-func (f *prInstr) GetErrorChannel() <-chan error                                    { return make(chan error) }
-func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error)    { return nil, nil }
+func (f *prInstr) GetErrorChannel() <-chan error                                 { return make(chan error) }
+func (f *prInstr) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) { return f.errs() }
+
+// TestVariables answers as an agent that bound no test variable does: the
+// stand-in agent serves no mock with variables.
+func (f *prInstr) TestVariables(context.Context) ([]models.VariableBinding, error)  { return nil, nil }
 func (f *prInstr) BeforeSimulate(context.Context, *time.Time, string, string) error { return nil }
 func (f *prInstr) AfterSimulate(context.Context, string, string) error              { return nil }
 func (f *prInstr) BeforeTestRun(context.Context, string) error                      { return nil }
@@ -295,20 +330,69 @@ func (f *prInstr) BeforeTestSetCompose(context.Context, string, string, bool) er
 func (f *prInstr) AfterTestRun(context.Context, string, []string, models.TestCoverage) error {
 	return nil
 }
-func (f *prInstr) StoreMocks(_ context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+
+// errs answers GetMockErrors: mockErrorsFor when a test set it, else no miss.
+func (f *prInstr) errs() ([]models.UnmatchedCall, error) {
+	if f.mockErrorsFor != nil {
+		return f.mockErrorsFor()
+	}
+	return nil, nil
+}
+func (f *prInstr) StoreMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error {
+	filtered, err := wholeMocks(ctx, filtered)
+	if err != nil {
+		return err
+	}
+	if unfiltered, err = wholeMocks(ctx, unfiltered); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.scopeSaid = false
 	f.storedFiltered, f.storedUnfiltered = filtered, unfiltered
 	return nil
 }
+
+// wholeMocks is mocks as the agent gets them: each one whose payload its read
+// left on disk read back (models.Mock.WithPayload), as AgentClient.StoreMocks
+// reads it back to send it. nil stays nil.
+func wholeMocks(ctx context.Context, mocks []*models.Mock) ([]*models.Mock, error) {
+	if mocks == nil {
+		return nil, nil
+	}
+	out := make([]*models.Mock, 0, len(mocks))
+	for _, m := range mocks {
+		whole, err := m.WithPayload(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, whole)
+	}
+	return out, nil
+}
 func (f *prInstr) UpdateMockParams(ctx context.Context, params models.MockFilterParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastParams = params
+	switch ex := params.Exact; {
+	case ex == nil || ex.Stage:
+		f.windowAfter = params.AfterTime
+	case ex.Test != "":
+		for _, tc := range f.cases {
+			if tc.Name == ex.Test {
+				f.windowAfter = tc.HTTPReq.Timestamp
+			}
+		}
+	}
 	f.allParams = append(f.allParams, params)
 	f.updateCalls++
 	f.scopeSaid = f.perTestScope
+	if ex := params.Exact; ex != nil && ex.Stage {
+		f.backgroundSaid = ""
+		if !f.oldAgent {
+			f.backgroundSaid = ex.Background
+		}
+	}
 	if f.stopAppAfterNUpdates != 0 && f.updateCalls == f.stopAppAfterNUpdates {
 		close(f.appStopped) // the application exits mid-set
 		// Wait for the replayer to ACTUALLY observe the exit rather than
@@ -458,6 +542,8 @@ type prRun struct {
 	cases    []*models.TestCase
 	// cancel stops the run from outside, as a SIGINT does; set by run.
 	cancel context.CancelFunc
+	// set is the test set the next run replays: test-set-0 where empty.
+	set string
 }
 
 func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
@@ -482,7 +568,7 @@ func newPartialRunHarness(t *testing.T, n int, failUpdateFromNth int) *prRun {
 	// first — which on a v6-first host is not where the listener is.
 	cfg.Test.Host = "127.0.0.1"
 	reportDB := &prReportDB{}
-	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{})}
+	instr := &prInstr{failUpdateFromNth: failUpdateFromNth, appStopped: make(chan struct{}), cases: cases}
 	mocks := &prMockDB{}
 	mappings := &prMappingDB{}
 	r := &Replayer{
@@ -522,10 +608,26 @@ func (p *prRun) streaming(names ...string) {
 
 func (p *prRun) run(t *testing.T) models.TestSetStatus {
 	t.Helper()
+	return p.runTestSet(t, false)
+}
+
+// runServing runs the test set as one of several an agent serves (serveTest:
+// the agent and the application outlive the test set).
+func (p *prRun) runServing(t *testing.T) models.TestSetStatus {
+	t.Helper()
+	return p.runTestSet(t, true)
+}
+
+func (p *prRun) runTestSet(t *testing.T, serveTest bool) models.TestSetStatus {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
 	defer cancel()
 	p.cancel = cancel
-	status, err := p.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
+	set := p.set
+	if set == "" {
+		set = "test-set-0"
+	}
+	status, err := p.replayer.RunTestSet(ctx, set, "test-run-0", serveTest)
 	if err != nil {
 		t.Fatalf("RunTestSet returned an error, which is a different path from the one under test: %v", err)
 	}
@@ -851,7 +953,7 @@ func TestRunTestSetOrdinaryFailureStillPrunes(t *testing.T) {
 // (the default) a run creates mappings.yaml only when none exists, and never
 // touches it again. A run that left tests without a verdict or an answer has no
 // entries for them, so creating the file from it leaves those tests out for
-// good. The startup-only backfill would create the file just the same.
+// good. (The startup-only backfill writes only into a file that exists.)
 // --update-test-mapping writes a run with an unanswered test either way:
 // mapdb.Insert replaces only the entries this run has, so into an existing file
 // the unanswered test keeps its own, and a new file gains it on the next such
@@ -1358,12 +1460,12 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 
 	h := newPartialRunHarness(t, 1, 0)
 	r := h.replayer
-	consumed := map[string]models.MockState{"mock-1": {Name: "mock-1", Usage: models.Deleted}}
+	consumed := models.ConsumedHistoryOf(map[string]models.MockState{"mock-1": {Name: "mock-1", Usage: models.Deleted}})
 
 	// Baseline: with a trustworthy agent history the flag is honoured and the
 	// CLI's map is NOT sent. Without this the assertion below proves nothing.
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		models.BaseTime, time.Now(), consumed, nil, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if !h.instr.lastParams.AgentOwnsConsumed {
@@ -1372,10 +1474,10 @@ func TestSendMockFilterParamsFallsBackAfterARetryRewind(t *testing.T) {
 	}
 
 	// A retry cycle rewinds the CLI's map; nothing rewinds the agent's.
-	r.rewindConsumedForRetryCycle(map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
+	r.rewindConsumedForRetryCycle(models.NewConsumedHistory(0), map[string]models.MockState{}, map[string]models.MockState{})
 
 	if err := r.SendMockFilterParamsToAgent(context.Background(), nil,
-		models.BaseTime, time.Now(), consumed, false, recordedSetShape{}); err != nil {
+		models.BaseTime, time.Now(), consumed, nil, false, recordedSetShape{}, nil); err != nil {
 		t.Fatalf("SendMockFilterParamsToAgent: %v", err)
 	}
 	if h.instr.lastParams.AgentOwnsConsumed {

@@ -44,6 +44,12 @@ jobs:
       # signals pid 1; without user namespaces it skips, and the package
       # still reports ok. With this set it fails instead.
       KEPLOY_TEST_USERNS_REQUIRED: "1"
+      # The tests that hold processes off the CPU (internal/starvetest: 32
+      # hogs pinned to one CPU) or spin one run where this says the host is
+      # one for them, and skip elsewhere, so that a routine `go test` of
+      # utils or pkg/platform/http on a developer's machine pins no CPU.
+      # This lane is where they run.
+      KEPLOY_TEST_CPU_HOLD: "1"
       KEPLOY_TEST_MYSQL_ADDR: "127.0.0.1:3306"
       KEPLOY_TEST_MYSQL_USER: root
       KEPLOY_TEST_MYSQL_PASS: rootpass
@@ -122,6 +128,27 @@ jobs:
 
       - name: Running Unit Tests
         run: go test ./...
+
+      # The hooks package's root tests skip in the run above, which is the
+      # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
+      # objects against this kernel's BTF, as the agent does, and
+      # TestTracefsMountedAgreesWithCiliumInEveryLayout holds tracefsMounted to
+      # cilium/ebpf's own tracefs lookup in five mount layouts, each built in a
+      # mount namespace of its own, and TestTheClientsRegistrationKeepsItsPIDNamespace
+      # holds RegisterClient, which needs a kernel map, to keeping the pid
+      # namespace the CLI said. Built as the runner user, run as root, and
+      # each PASS line grepped, so a test or layout that skips or vanishes
+      # fails the step.
+      - name: Hooks tests as root
+        shell: bash
+        run: |
+          go test -c -o /tmp/hooks-linux.test ./pkg/agent/hooks/linux/
+          cd pkg/agent/hooks/linux
+          sudo /tmp/hooks-linux.test -test.count=1 -test.v -test.run '^(TestTheHooksLoadOnThisKernel|TestTracefsMountedAgreesWithCiliumInEveryLayout|TestTheClientsRegistrationKeepsItsPIDNamespace)$' | tee /tmp/hooks-linux.out
+          for t in TestTheHooksLoadOnThisKernel TestTracefsMountedAgreesWithCiliumInEveryLayout TestTheClientsRegistrationKeepsItsPIDNamespace \
+            TestTracefsMountedAgreesWithCiliumInEveryLayout/{none,canonical,elsewhere,subdir,debugfs}; do
+            grep -q -- "--- PASS: $t " /tmp/hooks-linux.out || { echo "$t did not pass as root"; exit 1; }
+          done
 
       # The compose library is behind the `composelib` build tag, so the plain
       # run above exercises the SHELL-OUT path and never the library. Its own

@@ -25,15 +25,20 @@ func EncodeAuthMoreData(_ context.Context, packet *mysql.AuthMoreDataPacket) ([]
 		return nil, fmt.Errorf("failed to write StatusTag for AuthMoreData packet: %w", err)
 	}
 
-	switch packet.Data {
+	// The symbolic caching_sha2_password mechanism a recording holds is
+	// written as its status byte. Into a copy: packet is the recorded mock's,
+	// shared by every connection replay serves from it, and rewriting it raced
+	// with connections reading it, and lost the name they rank it by.
+	data := packet.Data
+	switch data {
 	case mysql.CachingSha2PasswordToString(mysql.PerformFullAuthentication):
-		packet.Data = string(mysql.PerformFullAuthentication)
+		data = string(mysql.PerformFullAuthentication)
 	case mysql.CachingSha2PasswordToString(mysql.FastAuthSuccess):
-		packet.Data = string(mysql.FastAuthSuccess)
+		data = string(mysql.FastAuthSuccess)
 	}
 
 	// Write Data
-	if _, err := buf.WriteString(packet.Data); err != nil {
+	if _, err := buf.WriteString(data); err != nil {
 		return nil, fmt.Errorf("failed to write Data for authMoreData packet: %w", err)
 	}
 

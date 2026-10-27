@@ -48,7 +48,7 @@ func TestMatchStmtExecuteQueryAware_QueryExactSignal(t *testing.T) {
 	t.Run("query exact + params equal -> definitive, queryExact", func(t *testing.T) {
 		exp := execBundle("user-1")
 		act := execBundle("user-1")
-		def, _, queryExact := matchStmtExecutePacketQueryAware(logger, exp, act, sameQuery, sameQuery, "m", nc)
+		def, _, queryExact := matchStmtExecutePacketQueryAware(logger, exp, act, sameQuery, sameQuery, -1, "m", nc)
 		if !def {
 			t.Errorf("expected definitive match when query and params both match")
 		}
@@ -60,7 +60,7 @@ func TestMatchStmtExecuteQueryAware_QueryExactSignal(t *testing.T) {
 	t.Run("query exact + params differ -> NOT definitive, but queryExact (read-back case)", func(t *testing.T) {
 		exp := execBundle("recorded-id")   // recorded param
 		act := execBundle("replay-new-id") // freshly generated at replay
-		def, _, queryExact := matchStmtExecutePacketQueryAware(logger, exp, act, sameQuery, sameQuery, "m", nc)
+		def, _, queryExact := matchStmtExecutePacketQueryAware(logger, exp, act, sameQuery, sameQuery, -1, "m", nc)
 		if def {
 			t.Errorf("must NOT be a definitive match when bound params differ")
 		}
@@ -76,7 +76,7 @@ func TestMatchStmtExecuteQueryAware_QueryExactSignal(t *testing.T) {
 			logger, exp, act,
 			"SELECT id FROM users WHERE id = ?",
 			"SELECT title FROM tasks WHERE owner = ?",
-			"m", nc,
+			-1, "m", nc,
 		)
 		if def {
 			t.Errorf("different queries must not be a definitive match")

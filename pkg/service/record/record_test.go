@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,8 +22,10 @@ import (
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
 	"golang.org/x/sync/errgroup"
 	yamlLib "gopkg.in/yaml.v3"
@@ -265,6 +270,7 @@ func (c *countingMapDb) Insert(context.Context, *models.Mapping) error { return 
 func (c *countingMapDb) Upsert(ctx context.Context, testSetID, testID string, e []models.MockEntry) error {
 	return c.UpsertBatch(ctx, testSetID, map[string][]models.MockEntry{testID: e})
 }
+func (c *countingMapDb) UpsertWorker(context.Context, string, []models.MockEntry) error { return nil }
 func (c *countingMapDb) UpsertBatch(_ context.Context, _ string, byTest map[string][]models.MockEntry) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -435,14 +441,14 @@ from a send that completed.
 A send to f.incoming / f.outgoing / f.mappings completes at the FORWARDER,
 which is one hop before the consumer and is spawned by GetTestAndMockChans --
 several hundred lines before Start spawns anything that reads it. Start then
-has a `ctx.Err()` gate to pass. So a test that sends and immediately cancels is
-racing that gate, and when it loses, Start returns context.Canceled and the
-test's own require.NoError fails. MEASURED on four tests in this file with a
-200ms sleep in front of the gate: 5/5 red, every time at the same assertion.
+has its consumers to spawn. A test that sends and immediately cancels used to
+race a `ctx.Err()` gate there (removed: a stop before the consumers now
+drains); waiting for a persisted test case still pins the test to the path it
+is named for.
 
-A persisted test case is the first thing that can only happen AFTER the gate --
-the consumer that writes it is spawned past it -- so it is exactly the signal
-these tests need. Polling rather than sleeping: a sleep long enough to be safe
+A persisted test case is the first thing that can only happen once Start's
+consumers are running -- the consumer that writes it is one -- so it is
+exactly the signal these tests need. Polling rather than sleeping: a sleep long enough to be safe
 on a loaded machine is a sleep paid on every green run, and one short enough
 not to be is the flake all over again.
 
@@ -467,7 +473,7 @@ func waitForPersistedTestCase(t *testing.T, db *recTestDB, name string) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("test case %q was never persisted, so the recording never got "+
-				"past Start's post-setup gate; cancelling now would assert on a race "+
+				"past Start's consumers starting; cancelling now would assert on a race "+
 				"rather than on the behaviour under test", name)
 		}
 		time.Sleep(time.Millisecond)
@@ -531,6 +537,18 @@ func (d *recMockDB) ResetCounterID()                                 {}
 type recMappingDB struct {
 	mu      sync.Mutex
 	batches []map[string][]models.MockEntry
+	// worker is the worker scope written last (UpsertWorker), and workers
+	// how many times it was.
+	worker  []models.MockEntry
+	workers int
+}
+
+func (d *recMappingDB) UpsertWorker(_ context.Context, _ string, worker []models.MockEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.worker = append([]models.MockEntry(nil), worker...)
+	d.workers++
+	return nil
 }
 
 func (d *recMappingDB) Insert(context.Context, *models.Mapping) error                    { return nil }
@@ -567,6 +585,8 @@ type recTelemetry struct {
 	suiteRecorded    bool
 	sessionTestCount int64
 	sessionRecorded  bool
+	sessionStatus    string
+	sessionReason    string
 }
 
 func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]int, metadata map[string]interface{}) {
@@ -579,11 +599,13 @@ func (tl *recTelemetry) RecordedTestSuite(_ string, testCount int, _ map[string]
 func (tl *recTelemetry) RecordedTestCaseMock(string)  {}
 func (tl *recTelemetry) RecordedMocks(map[string]int) {}
 func (tl *recTelemetry) RecordedTestAndMocks()        {}
-func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, _ string, _ string) {
+func (tl *recTelemetry) RecordSessionCompleted(testCount int64, _ int64, _ int64, status string, reason string) {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	tl.sessionTestCount = testCount
 	tl.sessionRecorded = true
+	tl.sessionStatus = status
+	tl.sessionReason = reason
 }
 
 type recTestSetConf struct{}
@@ -794,7 +816,7 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 	}
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, testDB, "test-1")
@@ -899,7 +921,7 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 	})
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, testDB, "test-1")
@@ -1027,7 +1049,7 @@ func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
 	}
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, testDB, "test-1")
@@ -1139,7 +1161,7 @@ func TestStart_FailedRevokeKeepsTheTestInTheShortPoolCount(t *testing.T) {
 	})
 
 	// The recording must be demonstrably under way before it is stopped;
-	// otherwise this cancel races Start's post-setup gate and the
+	// otherwise this cancel races Start's consumers starting and the
 	// require.NoError below asserts on that race. See
 	// waitForPersistedTestCase.
 	waitForPersistedTestCase(t, &testDB.recTestDB, "test-1")
@@ -1221,8 +1243,9 @@ gateBlockingInstr blocks inside GetOutgoing until the test releases it.
 
 That is the only way to hold GetTestAndMockChans open while the test
 arranges the state Start must survive: the INCOMING forwarder is already
-spawned by then (GetIncoming runs first), so the test can fill it and
-cancel ctx before Start ever reaches its post-setup gate.
+spawned by then (GetIncoming runs first), so the test can fill it before
+Start goes on to its one return between the streams and the consumers: the
+agent's refusal of this keploy's proven switch (MakeAgentReadyForDockerCompose).
 */
 type gateBlockingInstr struct {
 	*fakeInstr
@@ -1246,15 +1269,23 @@ func (g *gateBlockingInstr) Run(ctx context.Context, _ models.RunOptions) models
 	return models.AppError{AppErrorType: models.ErrCtxCanceled}
 }
 
+// MakeAgentReadyForDockerCompose refuses, as an agent without this keploy's
+// proven switch does.
+func (g *gateBlockingInstr) MakeAgentReadyForDockerCompose(context.Context) error {
+	return provenswitch.ErrAgentSwitch
+}
+
 /*
 START MUST TELL THE FORWARDERS WHEN NO CONSUMER IS COMING.
 
 This is the PRODUCTION half of the shutdown-wedge fix, and until this test
 existed nothing covered it. GetTestAndMockChans spawns three forwarders on
 reqCtx (WithoutCancel); Start spawns their consumers three hundred lines
-later, past an `if ctx.Err() != nil` gate that returns. On that path the
-forwarders are alive with nobody reading, and each ends by handing over an
-item it has already taken from the agent -- a send that parks forever.
+later, past a return: the agent's refusal of this keploy's proven switch
+(once, an `if ctx.Err() != nil` gate too, whose stop now drains instead). On
+that path the forwarders are alive with nobody reading, and each ends by
+handing over an item it has already taken from the agent -- a send that
+parks forever.
 
 `consumersStarted` plus `defer frames.Abandon()` is what closes it.
 MEASURED, both halves are load-bearing and both were invisible to the
@@ -1271,6 +1302,9 @@ healthy path, so it is not a benchmark -- 30s and ~3s do not overlap under
 any load this suite runs at.
 */
 func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T) {
+	// The refusal fails the run, which arms the process's exit code.
+	saved := utils.ErrCode
+	t.Cleanup(func() { utils.ErrCode = saved })
 	f := &fakeInstr{
 		mappings: make(chan models.TestMockMapping),
 		incoming: make(chan *models.TestCase),
@@ -1281,6 +1315,13 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 		release:   make(chan struct{}),
 		entered:   make(chan struct{}),
 	}
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK) // the compose agent's health check
+	}))
+	defer agent.Close()
+	cfg := &config.Config{}
+	cfg.CommandType = string(utils.DockerCompose)
+	cfg.Agent.AgentURI = agent.URL
 	r := &Recorder{
 		logger:          zap.NewNop(),
 		testDB:          &recTestDB{},
@@ -1290,10 +1331,11 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 		instrumentation: instr,
 		testSetConf:     recTestSetConf{},
 		hooks:           BaseRecordHooks{},
-		config:          &config.Config{},
+		config:          cfg,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	/*
 	 * RELEASED ON EVERY EXIT. Any t.Fatal below would otherwise leave
 	 * GetOutgoing parked, holding Start and its errgroup for the rest of
@@ -1334,10 +1376,9 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 		}
 	}
 
-	// Ctrl+C lands while the tail is still in flight, THEN setup finishes.
-	// Start now finds ctx.Err() != nil at its gate and returns without ever
-	// spawning a consumer.
-	cancel()
+	// Setup finishes with the tail still in flight, and the agent refuses
+	// this keploy's proven switch: Start returns without ever spawning a
+	// consumer.
 	release()
 
 	started := time.Now()
@@ -1349,7 +1390,7 @@ func TestStart_ReturningBeforeItsConsumersDoesNotWedgeTheForwarders(t *testing.T
 	elapsed := time.Since(started)
 
 	if elapsed > 20*time.Second {
-		t.Fatalf("Start took %s to return after cancellation. The forwarders were "+
+		t.Fatalf("Start took %s to return after the agent refused its proven switch. The forwarders were "+
 			"never told that no consumer was coming, so one is parked on its "+
 			"shutdown hand-over and teardown is waiting out the full "+
 			"DrainErrGroup budget -- and that goroutine is leaked for the "+
@@ -1472,8 +1513,9 @@ func TestStart_AnUnreachableAgentDoesNotLeaveTheMappingConsumerParked(t *testing
 	 * THIS WAIT IS LOAD-BEARING, and a comment here previously said it
 	 * was not. MEASURED with the bug present: a 300ms sleep failed 5/5,
 	 * no wait at all passed 0/5 -- because cancel() beat Start's
-	 * post-setup gate, consumersStarted stayed false, consumeMappings was
-	 * never spawned, and nothing could park. A too-short wait does not
+	 * post-open ctx check (since removed: a stop there now drains),
+	 * consumersStarted stayed false, consumeMappings was never spawned, and
+	 * nothing could park. A too-short wait does not
 	 * weaken this test, it makes it VACUOUS, which on a loaded machine is
 	 * what a sleep eventually is.
 	 */
@@ -1918,8 +1960,8 @@ func TestGetTestAndMockChans_AnErrorAfterTheSpawnStillReleasesTheForwarder(t *te
 // Both forwarders deliberately hand over an item already taken from the agent
 // when ctx is cancelled, so the tail is not silently dropped. That send must
 // complete even when NOTHING is consuming — which is a reachable state, not a
-// hypothetical: Start can return at its post-setup ctx.Err() gate before it
-// spawns the consumers, while these forwarders run on reqCtx (WithoutCancel)
+// hypothetical: Start can return before it spawns the consumers (the agent's
+// refusal of this keploy's proven switch), while these forwarders run on reqCtx (WithoutCancel)
 // and keep pulling from the agent. On an unbuffered channel the handover parks
 // forever: a 30s DrainErrGroup timeout on every affected Ctrl+C and a goroutine
 // leaked for the process lifetime, which compounds in the DaemonSet embedding
@@ -1986,7 +2028,8 @@ func TestGetTestAndMockChans_ShutdownHandoffDoesNotWedgeWithoutAConsumer(t *test
 				 * Start's abandon defer is registered AFTER the stop defer that
 				 * calls reqCtxCancel(), and Go runs defers LIFO, so abandon
 				 * always runs FIRST. It also fires only when consumersStarted is
-				 * false, whose single reachable return is the ctx.Err() gate. So
+				 * false, whose single reachable return is the agent's refusal
+				 * of this keploy's proven switch. So
 				 * `abandon_then_cancel` is the production order, and
 				 * `cancel_then_abandon` names no path this binary can take.
 				 *
@@ -2299,6 +2342,564 @@ func TestStart_WarnsOnceForATestCaseRecordedOnAnUnreachablePort(t *testing.T) {
 
 	instr.mu.Lock()
 	defer instr.mu.Unlock()
-	assert.Equal(t, []string{"localhost:8095 for 8095", "localhost:8096 for 8096"}, instr.asked,
+	assert.ElementsMatch(t, []string{"localhost:8095 for 8095", "localhost:8096 for 8096"}, instr.asked,
 		"each port is checked once, at the address replay will send its tests to by default: the port they were recorded on")
+}
+
+// slowUnpublishedInstr is unpublishedInstr whose question about port 8096
+// is answered only once release closes.
+type slowUnpublishedInstr struct {
+	*unpublishedInstr
+	release chan struct{}
+}
+
+func (s *slowUnpublishedInstr) UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string {
+	if port == 8096 {
+		<-s.release
+	}
+	return s.unpublishedInstr.UnreachableAppPort(ctx, host, port, appPort)
+}
+
+// A question about an app port that the docker daemon is slow to answer holds
+// no test case up, and the stop waits for it, saying so, before Start ends:
+// its warning is not lost.
+func TestStart_SavesWhileAPortQuestionIsOutAndWaitsForIt(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	const reason = "it is not published on the host; add -p 8096:8096"
+	instr := &slowUnpublishedInstr{
+		unpublishedInstr: &unpublishedInstr{blockingInstr: &blockingInstr{f}, unpublished: map[uint16]string{8096: reason}},
+		release:          make(chan struct{}),
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	testDB := &recTestDB{}
+	tele := &summaryTelemetry{recTelemetry: &recTelemetry{}, logs: logs, snippet: "port 8096 cannot be replayed"}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          namingTestDB{testDB},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       tele,
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		waitNotice:      5 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	for _, tc := range []*models.TestCase{
+		{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}},
+		{Kind: models.HTTP, AppPort: 8095, HTTPReq: models.HTTPReq{URL: "http://localhost:8095/health"}},
+		{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}},
+	} {
+		select {
+		case f.incoming <- tc:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the recorder stopped consuming test cases at %s", tc.HTTPReq.URL)
+		}
+	}
+	require.Eventually(t, func() bool {
+		testDB.mu.Lock()
+		defer testDB.mu.Unlock()
+		return len(testDB.inserted) == 3
+	}, 10*time.Second, 5*time.Millisecond, "a question about port 8096 held up saving the test cases")
+
+	cancel()
+	close(f.outgoing)
+	close(f.incoming)
+	close(f.mappings)
+	deadline := time.Now().Add(60 * time.Second) // bounds only a stop that never says it waits
+	for logs.FilterMessageSnippet("Still checking whether the test cases recorded on the app's port(s) can be replayed").Len() == 0 {
+		select {
+		case <-done:
+			t.Fatalf("Start ended while the question about port 8096 was out: %v", logs.FilterLevelExact(zap.WarnLevel).All())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never said it waits for the question about port 8096")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(instr.release)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	warned := logs.FilterMessageSnippet("port 8096 cannot be replayed").All()
+	require.Len(t, warned, 1, "the warning for port 8096 came after Start ended, or not at all: %v", logs.FilterLevelExact(zap.WarnLevel).All())
+	assert.Equal(t, "test-1", warned[0].ContextMap()["first testcase on the port"])
+	require.True(t, tele.sessionRecorded, "no session summary")
+	require.True(t, tele.saidBefore, "the warning for port 8096 came after the session's summary")
+}
+
+// summaryTelemetry is recTelemetry that notes whether a line holding snippet
+// was logged before the session's summary (RecordSessionCompleted).
+type summaryTelemetry struct {
+	*recTelemetry
+	logs       *observer.ObservedLogs
+	snippet    string
+	saidBefore bool
+}
+
+func (s *summaryTelemetry) RecordSessionCompleted(testCount int64, mocks int64, ms int64, status string, reason string) {
+	s.saidBefore = s.logs.FilterMessageSnippet(s.snippet).Len() > 0
+	s.recTelemetry.RecordSessionCompleted(testCount, mocks, ms, status, reason)
+}
+
+// heldPortInstr is an agent that, from the stop on, hands over the mocks it
+// captured before it (heldAgent), and whose question about the app's port
+// 8096 the docker daemon answers only as its context ends.
+type heldPortInstr struct {
+	*heldAgent
+	asked chan struct{}
+	once  sync.Once
+}
+
+func (h *heldPortInstr) Run(ctx context.Context, _ models.RunOptions) models.AppError {
+	<-ctx.Done()
+	return models.AppError{AppErrorType: models.ErrCtxCanceled}
+}
+
+func (h *heldPortInstr) UnreachableAppPort(ctx context.Context, _ string, _, _ uint16) string {
+	h.once.Do(func() { close(h.asked) })
+	<-ctx.Done()
+	return ""
+}
+
+// The stop waits for the app ports' questions only once its drains are over:
+// a press at that wait's offer closes utils.StopNow, which the frame drains
+// give up at, so a wait standing it while they save would lose what the agent
+// held. Here the agent hands over its mocks after the stop, and the user
+// presses at the port wait's offer: every mock is saved, the recording is
+// complete, and the press ends the wait.
+func TestStart_APressAtThePortWaitLosesNothingTheDrainsSave(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+	stoppedOnce(t)
+	const held = 300
+	agent := &heldAgent{fakeInstr: &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase)},
+		held: held, at: time.Now(), started: make(chan struct{})}
+	instr := &heldPortInstr{heldAgent: agent, asked: make(chan struct{})}
+	core, logs := observer.New(zap.InfoLevel)
+	testDB := &recTestDB{}
+	mockDB := &recMockDB{unencodable: map[string]bool{}}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          namingTestDB{testDB},
+		mockDB:          mockDB,
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      time.Hour, // the drains end as the streams do, not on a quiet
+		waitNotice:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case agent.incoming <- &models.TestCase{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo"}}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recorder never consumed the test case")
+	}
+	soon(t, instr.asked, "the question about port 8096")
+	cancel() // the stop
+	close(agent.incoming)
+	close(agent.mappings)
+	close(agent.started) // the agent hands over what it held
+	logged(t, logs, "can be replayed from the host; press Ctrl+C again")
+	if !utils.MarkInterruptedAgain() {
+		t.Fatal("the press did not answer the port wait's offer")
+	}
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	mockDB.mu.Lock()
+	got := len(mockDB.inserted)
+	mockDB.mu.Unlock()
+	switch {
+	case got != held && r.captureLost.Load():
+		t.Fatalf("saved %d of the %d mocks the agent held, and the recording is cut: the port wait's press gave a drain up", got, held)
+	case got != held:
+		t.Fatalf("saved %d of the %d mocks the agent held, the recording not cut: a drain ended without them", got, held)
+	case r.captureLost.Load() || utils.ErrCode == utils.ExitKeployError:
+		t.Fatalf("every mock saved, but the recording is cut (exit %d)", utils.ErrCode)
+	}
+}
+
+// lateInsertInstr is an agent whose question about the app's port 8096 the
+// docker daemon answers, with reason, only once release closes, and that
+// says when the stop stops it (setupEnded: its setup's context ends).
+type lateInsertInstr struct {
+	*blockingInstr
+	reason     string
+	release    chan struct{}
+	setupEnded chan struct{}
+}
+
+func (l *lateInsertInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	go func() { <-ctx.Done(); close(l.setupEnded) }()
+	return nil
+}
+
+func (l *lateInsertInstr) UnreachableAppPort(ctx context.Context, _ string, port, _ uint16) string {
+	if port != 8096 {
+		return ""
+	}
+	select {
+	case <-l.release:
+		return l.reason
+	case <-ctx.Done():
+		return ""
+	}
+}
+
+// slowInsertDB saves a test case on port 8096 only once the stop has stopped
+// the agent: after the frame drains, before the record drain is over.
+type slowInsertDB struct {
+	namingTestDB
+	until <-chan struct{}
+}
+
+func (s slowInsertDB) InsertTestCase(ctx context.Context, tc *models.TestCase, set string, log bool) error {
+	if tc.AppPort == 8096 {
+		<-s.until
+	}
+	return s.namingTestDB.InsertTestCase(ctx, tc, set, log)
+}
+
+// A test case handed over in the stop's frame drain but saved only after it
+// (a slow insert) asks its question then: the record drain joins the
+// test-case consumer that saves it before the stop's wait for the questions
+// begins, so that one too is waited for, and its warning comes before Start
+// ends.
+func TestStart_AQuestionAskedAsTheRecordDrainSavesIsWaitedFor(t *testing.T) {
+	f := &fakeInstr{mappings: make(chan models.TestMockMapping), incoming: make(chan *models.TestCase), outgoing: make(chan *models.Mock)}
+	const reason = "it is not published on the host; add -p 8096:8096"
+	instr := &lateInsertInstr{blockingInstr: &blockingInstr{f}, reason: reason, release: make(chan struct{}), setupEnded: make(chan struct{})}
+	core, logs := observer.New(zap.InfoLevel)
+	testDB := &recTestDB{}
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          slowInsertDB{namingTestDB: namingTestDB{testDB}, until: instr.setupEnded},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: instr,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      time.Hour, // the drains end as the streams do
+		waitNotice:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case f.incoming <- &models.TestCase{Kind: models.HTTP, AppPort: 8095, HTTPReq: models.HTTPReq{URL: "http://localhost:8095/health"}}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recorder never consumed the test case")
+	}
+	waitForPersistedTestCase(t, testDB, "test-1")
+	before := time.Now()
+	cancel() // the stop
+	select { // captured before the stop, handed over as it stops
+	case f.incoming <- &models.TestCase{Kind: models.HTTP, AppPort: 8096, HTTPReq: models.HTTPReq{URL: "http://localhost:8096/echo", Timestamp: before}}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stop's drain never took the test case")
+	}
+	close(f.incoming)
+	close(f.outgoing)
+	close(f.mappings)
+	deadline := time.Now().Add(60 * time.Second) // bounds only a stop that never waits for the question
+	for logs.FilterMessageSnippet("Still checking whether the test cases recorded on the app's port(s) can be replayed").Len() == 0 {
+		select {
+		case <-done:
+			t.Fatalf("Start ended under the question about port 8096: %v", logs.FilterLevelExact(zap.WarnLevel).All())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stop never waited for the question about port 8096")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(instr.release)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	require.Len(t, logs.FilterMessageSnippet("port 8096 cannot be replayed").All(), 1, "the warning for port 8096 came after Start ended, or not at all")
+}
+
+// stuckBacklogInstr is an agent that, once the recording stops, says it still
+// holds what it captured before the stop and never gets further.
+type stuckBacklogInstr struct{ *blockingInstr }
+
+func (s *stuckBacklogInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending, Progress: 1, WaitingOn: "connection 3: its parser is stuck"}, nil
+}
+
+// A recording whose agent still held captures from before the stop when the
+// stop stopped waiting for them is incomplete: the run ends with a Keploy-side
+// failure exit code and an incomplete session, never as a success.
+func TestStart_ABacklogTheAgentNeverHandsOverFailsTheRun(t *testing.T) {
+	saved := utils.ErrCode
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = saved })
+
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	testDB := &recTestDB{}
+	tele := &recTelemetry{}
+	core, logs := observer.New(zapcore.ErrorLevel)
+	r := &Recorder{
+		logger:          zap.New(core),
+		testDB:          testDB,
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       tele,
+		instrumentation: &stuckBacklogInstr{&blockingInstr{f}},
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	select {
+	case f.incoming <- &models.TestCase{Name: "test-1", Kind: models.HTTP}:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recorder never consumed the test case")
+	}
+	waitForPersistedTestCase(t, testDB, "test-1")
+
+	cancel()
+	// The agent's frame streams stay open: it holds more, and never hands it
+	// over. Its mapping stream is done.
+	close(f.mappings)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	if utils.ErrCode != utils.ExitKeployError {
+		t.Fatalf("exit code %d, want %d: a recording that lost what the agent held at the stop must fail", utils.ErrCode, utils.ExitKeployError)
+	}
+	tele.mu.Lock()
+	status := tele.sessionStatus
+	tele.mu.Unlock()
+	if status != "incomplete" {
+		t.Fatalf("session status %q, want incomplete", status)
+	}
+	if logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("the recording may be incomplete").Len() == 0 {
+		t.Fatalf("the run did not say it was incomplete at ERROR: %v", logs.All())
+	}
+}
+
+// lifetimeInstr is an agent whose lifetime is the context its Setup got, as a
+// native agent's process, or a docker agent's container, is. Once the
+// recording stops it says it still holds what it captured before the stop,
+// moving through it, until released.
+type lifetimeInstr struct {
+	*blockingInstr
+	setupCtx atomic.Pointer[context.Context]
+	release  chan struct{}
+	looks    atomic.Uint64
+}
+
+func (l *lifetimeInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	l.setupCtx.Store(&ctx)
+	return nil
+}
+
+func (l *lifetimeInstr) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	n := l.looks.Add(1)
+	select {
+	case <-l.release:
+		return models.AgentBacklog{Verdict: models.BacklogClear}, nil
+	default:
+		return models.AgentBacklog{Verdict: models.BacklogPending, Progress: n}, nil
+	}
+}
+
+// The agent outlives a Ctrl+C until the stop has drained what it captured
+// before the stop: its lifetime (the context Setup got) ends after the drains,
+// not as the interrupt lands. Ended then, the agent closed the streams the
+// drains were reading, and what its parsers still held was lost with it.
+func TestStart_TheAgentOutlivesTheInterruptUntilTheDrainsAreDone(t *testing.T) {
+	f := &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}
+	testDB := &recTestDB{}
+	inst := &lifetimeInstr{blockingInstr: &blockingInstr{f}, release: make(chan struct{})}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          testDB,
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: inst,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case f.incoming <- &models.TestCase{Name: "test-1", Kind: models.HTTP}:
+	case <-time.After(30 * time.Second):
+		t.Fatal("recorder never consumed the test case")
+	}
+	waitForPersistedTestCase(t, testDB, "test-1")
+	agentLife := *inst.setupCtx.Load()
+
+	cancel() // Ctrl+C
+	close(f.mappings)
+	deadline := time.Now().Add(30 * time.Second)
+	for inst.looks.Load() < 6 {
+		if time.Now().After(deadline) {
+			t.Fatal("the drains never asked the agent what it held")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if agentLife.Err() != nil {
+		t.Fatal("the agent was stopped at the interrupt, while the drains still waited for what it held from before the stop")
+	}
+	close(inst.release)
+	select {
+	case <-done:
+	case <-time.After(90 * time.Second):
+		t.Fatal("Start did not return")
+	}
+	if agentLife.Err() == nil {
+		t.Fatal("the agent was not stopped once the drains were done")
+	}
+}
+
+// interruptedSetupInstr's Setup is interrupted as it finishes: the user's
+// Ctrl+C lands, and the setup returns only once the interrupt has stopped the
+// agent it brought up (its context, the agent's lifetime, is done).
+type interruptedSetupInstr struct {
+	*fakeInstr
+	interrupt context.CancelFunc
+	captured  atomic.Bool
+}
+
+func (i *interruptedSetupInstr) Setup(ctx context.Context, _ string, _ models.SetupOptions) error {
+	i.interrupt()
+	<-ctx.Done()
+	return nil
+}
+
+func (i *interruptedSetupInstr) GetOutgoing(ctx context.Context, o models.OutgoingOptions) (<-chan *models.Mock, error) {
+	i.captured.Store(true)
+	return i.fakeInstr.GetOutgoing(ctx, o)
+}
+
+func (i *interruptedSetupInstr) GetIncoming(ctx context.Context, o models.IncomingOptions) (<-chan *models.TestCase, error) {
+	i.captured.Store(true)
+	return i.fakeInstr.GetIncoming(ctx, o)
+}
+
+// An interrupt that stopped the agent as its setup finished ends the run as an
+// interrupted setup: no recording goes on with an agent that is stopping
+// (utils.SetupGate).
+func TestStart_AnInterruptThatStoppedTheSetupEndsTheRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inst := &interruptedSetupInstr{fakeInstr: &fakeInstr{
+		mappings: make(chan models.TestMockMapping),
+		incoming: make(chan *models.TestCase),
+		outgoing: make(chan *models.Mock),
+	}, interrupt: cancel}
+	r := &Recorder{
+		logger:          zap.NewNop(),
+		testDB:          &recTestDB{},
+		mockDB:          &recMockDB{unencodable: map[string]bool{}},
+		mappingDb:       &recMappingDB{},
+		telemetry:       &recTelemetry{},
+		instrumentation: inst,
+		testSetConf:     recTestSetConf{},
+		hooks:           BaseRecordHooks{},
+		config:          &config.Config{},
+		frameQuiet:      5 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("an interrupted setup ended with %v, want nil", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("Start did not return after its setup was interrupted")
+	}
+	if inst.captured.Load() {
+		t.Fatal("the recording went on to capture with an agent the interrupt had stopped")
+	}
+}
+
+// reachingSetupFails is an agent that never comes up, and that can answer
+// whether an app port is reachable (as AgentClient always can).
+type reachingSetupFails struct{ *setupFailsInstr }
+
+func (reachingSetupFails) UnreachableAppPort(context.Context, string, uint16, uint16) string {
+	return ""
+}
+
+// reachingInterruptedSetup is interruptedSetupInstr that can answer whether
+// an app port is reachable.
+type reachingInterruptedSetup struct{ *interruptedSetupInstr }
+
+func (reachingInterruptedSetup) UnreachableAppPort(context.Context, string, uint16, uint16) string {
+	return ""
+}
+
+// A recording that ends before it captured (its agent never came up, or the
+// user's Ctrl+C stopped its setup) has no test-case consumer to ask about
+// app ports: the stop's wait for their questions does not wait for one, with
+// an instrumentation that can answer them as with one that cannot.
+func TestStart_ARecordingThatEndsBeforeItCapturesDoesNotWaitForPortQuestions(t *testing.T) {
+	r := exitCodeRecorder(reachingSetupFails{&setupFailsInstr{fakeInstr: newFakeInstr(), err: errors.New("the keploy agent could not start")}})
+	done := make(chan struct{})
+	go func() { _, _ = startForExitCode(t, context.Background(), r); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second): // bounds only a stop that never ends
+		t.Fatal("Start did not return after its agent could not start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inst := reachingInterruptedSetup{&interruptedSetupInstr{fakeInstr: newFakeInstr(), interrupt: cancel}}
+	r = exitCodeRecorder(inst)
+	finished := make(chan error, 1)
+	go func() { finished <- r.Start(ctx) }()
+	select {
+	case <-finished:
+	case <-time.After(60 * time.Second): // bounds only a stop that never ends
+		t.Fatal("Start did not return after its setup was interrupted")
+	}
 }

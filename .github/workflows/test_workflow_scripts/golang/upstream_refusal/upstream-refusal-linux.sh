@@ -34,6 +34,11 @@
 # handshake is with keploy, and the upstream connection opened at connect
 # time must not take the application's connection down with it.
 #
+# and 10000 TCP connections to port 53 (keploy sends them to its DNS server),
+# then 50 HTTP calls: every one must still be routed (before, each DNS
+# connection left a redirect behind, and once 1024 had, the proxy could route
+# almost no new connection).
+#
 # Then once more with --disable-handshake-hold: a refused connect connects,
 # as it did before handshakes were held.
 #
@@ -123,6 +128,31 @@ python3 ../idle_client.py 18083
 python3 ../tls_idle_client.py 18444
 unshare --mount sh -c '$ORDER' sh ../hosts ../addr_order.py
 python3 ../udp_reconnect.py 127.0.0.1 18082
+python3 -c "
+import socket
+n = 0
+for i in range(10000):
+    s = socket.socket()
+    s.settimeout(10)
+    try:
+        s.connect(('198.18.0.1', 53))
+        n += 1
+    except OSError:
+        pass
+    s.close()
+print('TCPDNS', n)
+"
+python3 -c "
+import urllib.request
+ok = 0
+for i in range(50):
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:18080/', timeout=20) as r:
+            ok += r.status == 200
+    except Exception:
+        pass
+print('AFTERDNS', ok)
+"
 APP
 chmod +x app.sh
 : > tls_conns.txt
@@ -139,6 +169,7 @@ grep '^IDLE ' record.log > idle_recorded.txt || true
 grep '^TLSIDLE ' record.log > tlsidle_recorded.txt || true
 grep '^ORDER ' record.log > order_recorded.txt || true
 grep '^RECONNECT ' record.log > reconnect_recorded.txt || true
+grep -E '^(TCPDNS|AFTERDNS) ' record.log > tcpdns.txt || true
 
 # The switch: with the hold turned off, a refused connect connects again.
 mkdir rec_off && cd rec_off
@@ -234,6 +265,24 @@ elif [ "$tls_got" != "$tls_want" ]; then
   fail=1
 else
   echo "ok: a TLS connection used after its upstream's handshake deadline still works, as without keploy"
+fi
+# TCP to port 53, which keploy sends to its own DNS server, left a redirect
+# behind for each connection: after about 1024 of them the proxy could route
+# almost no new connection, and said so only at DEBUG.
+tcpdns=$(awk '$1 == "TCPDNS" { print $2 }' "$WORK/tcpdns.txt")
+afterdns=$(awk '$1 == "AFTERDNS" { print $2 }' "$WORK/tcpdns.txt")
+if [ "${tcpdns:-0}" != 10000 ]; then
+  echo "::error::only ${tcpdns:-no} of 10000 TCP connections to port 53 reached keploy's DNS server under keploy record"
+  fail=1
+elif [ "$afterdns" != "50" ]; then
+  echo "::error::after $tcpdns TCP DNS connections, ${afterdns:-no} of 50 HTTP calls were answered under keploy record: the proxy stopped routing new connections"
+  fail=1
+elif grep -q 'Untracked connection' "$WORK/record.log"; then
+  echo "::error::keploy record could not route a connection after the TCP DNS ones:"
+  grep 'Untracked connection' "$WORK/record.log" | head -5
+  fail=1
+else
+  echo "ok: $tcpdns TCP DNS connections, then 50/50 calls answered and routed"
 fi
 off=$(awk '$1 == "PROBE" { print $3 }' "$WORK/recorded_off.txt")
 if [ "$off" != "connected" ]; then

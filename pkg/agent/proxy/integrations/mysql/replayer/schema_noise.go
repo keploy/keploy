@@ -52,7 +52,27 @@ func (mysqlNoiseAdapter) RecordedBody(m *models.Mock) ([]byte, bool) {
 	if m == nil || len(m.Spec.MySQLRequests) != 1 {
 		return nil, false
 	}
-	return mysqlRequestBodyJSON(&m.Spec.MySQLRequests[0].PacketBundle)
+	bundle := &m.Spec.MySQLRequests[0].PacketBundle
+	return mysqlRequestBody(bundle, recordedStatementParams(bundle, nil, bundle.StoredQuery(), "", -1))
+}
+
+// recordedStatementParams is how many of a recorded COM_STMT_EXECUTE's
+// parameters it is compared on: all of them when its statement (q: the query
+// it recorded, mysql.MetaQuery, or its PREPARE's) or the live statement
+// (liveQuery) reads its attributes (readsQueryAttributes), else as
+// recordedAttributesFrom splits it against the live statement's own count
+// (liveParams, -1 when not known), its statement being the live one's when q
+// is liveQuery.
+func recordedStatementParams(recorded *mysql.PacketBundle, live *mysql.StmtExecutePacket, q, liveQuery string, liveParams int) int {
+	exec, _ := recorded.Message.(*mysql.StmtExecutePacket)
+	if exec == nil {
+		return -1
+	}
+	if readsQueryAttributes(q) || readsQueryAttributes(liveQuery) {
+		return len(exec.Parameters)
+	}
+	e := sqlStatementIdentity(q)
+	return recordedAttributesFrom(exec, live, e != "" && strings.EqualFold(e, sqlStatementIdentity(liveQuery)), liveParams)
 }
 
 // StoredNoise returns the noise learned on this mock (kind-agnostic
@@ -89,6 +109,33 @@ func (mysqlNoiseAdapter) RecordedValueIsNoise(m *models.Mock) func(string) bool 
 	return func(v string) bool { return nc.IsNoisy(v) }
 }
 
+// executeBodyNoise is the request-body noise a recorded COM_STMT_EXECUTE is
+// compared with the live one under, for the schema-noise engine: noise, plus
+// every parameter's type, unsigned flag and name unless both packets sent
+// them (typesSentByBoth). Any other request keeps noise as it is.
+func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *mysql.PacketBundle) map[string][]string {
+	if recorded == nil || live == nil || len(recorded.Spec.MySQLRequests) != 1 {
+		return noise
+	}
+	act, _ := live.Message.(*mysql.StmtExecutePacket)
+	exp, _ := recorded.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket)
+	if act == nil || exp == nil || typesSentByBoth(exp, act) {
+		return noise
+	}
+	n := max(len(exp.Parameters), len(act.Parameters))
+	out := make(map[string][]string, len(noise)+3*n)
+	for k, v := range noise {
+		out[k] = v
+	}
+	for i := 0; i < n; i++ {
+		for _, field := range []string{"type", "unsigned", "name"} {
+			// An empty list ignores the field whatever its value.
+			out["parameters."+strconv.Itoa(i)+"."+field] = []string{}
+		}
+	}
+	return out
+}
+
 // strictGate applies schemaNoiseStrict enforcement while matchCommand scans
 // candidate mocks, and accumulates the diagnostics the mismatch report needs.
 // Consult allows() before a mock may become a match candidate: under
@@ -102,9 +149,19 @@ type strictGate struct {
 	engine        *schemanoise.Engine
 	logger        *zap.Logger
 	requestType   string
+	live          *mysql.PacketBundle
 	liveBody      []byte
 	liveBodyOK    bool
 	userBodyNoise map[string][]string
+
+	// liveQuery and liveParams are a live COM_STMT_EXECUTE's statement and
+	// its own parameter count (-1 not known): a recording of that statement
+	// is compared on as many of its parameters (recordedStatementParams).
+	// queries are the candidates' statements as the matcher resolved them
+	// (their recorded query, or their PREPARE's in the pool).
+	liveQuery  string
+	liveParams int
+	queries    map[*models.Mock]string
 
 	// Rejection diagnostics for the mismatch report:
 	//   rejected    — how many candidates strict enforcement ruled out.
@@ -124,6 +181,49 @@ type strictGate struct {
 	// candidate the scan meets again (another of its packets, or the full scan
 	// after the in-window pass) is not diffed or logged a second time.
 	verdicts map[*models.Mock]gateVerdict
+
+	// legacyBody is the live body as an older keploy read the live packet
+	// (mysql.StmtExecutePacket's LegacyParameters, mysql.QueryPacket's
+	// LegacyQuery), compared with what such a keploy recorded
+	// (legacyRecordedMock); read once, when first needed.
+	legacyBody                   []byte
+	legacyBodyOK, legacyBodyRead bool
+}
+
+// bodyFor is the live request body mock's recorded one is compared with: the
+// live packet as an older keploy read it when that keploy recorded mock
+// (legacyRecordedMock), else as this one reads it.
+func (g *strictGate) bodyFor(mock *models.Mock) ([]byte, bool) {
+	if !legacyRecordedMock(mock) {
+		return g.liveBody, g.liveBodyOK
+	}
+	if !g.legacyBodyRead {
+		g.legacyBodyRead = true
+		if g.live != nil {
+			switch act := g.live.Message.(type) {
+			case *mysql.StmtExecutePacket:
+				if act != nil && act.LegacyParameters != nil {
+					read := *act
+					read.Parameters = act.LegacyParameters
+					bundle := *g.live
+					bundle.Message = &read
+					g.legacyBody, g.legacyBodyOK = mysqlRequestBodyJSON(&bundle)
+				}
+			case *mysql.QueryPacket:
+				if readsLegacy(act) {
+					read := *act
+					read.Query, read.Parameters = act.LegacyQuery, act.LegacyParameters
+					bundle := *g.live
+					bundle.Message = &read
+					g.legacyBody, g.legacyBodyOK = mysqlRequestBodyJSON(&bundle)
+				}
+			}
+		}
+	}
+	if !g.legacyBodyOK {
+		return g.liveBody, g.liveBodyOK
+	}
+	return g.legacyBody, true
 }
 
 type gateVerdict struct {
@@ -131,15 +231,47 @@ type gateVerdict struct {
 	drift   map[string][]string
 }
 
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
 		engine:        engine,
 		logger:        logger,
 		requestType:   requestType,
+		live:          live,
 		liveBody:      liveBody,
 		liveBodyOK:    liveBodyOK,
 		userBodyNoise: userBodyNoise,
+		liveParams:    -1,
 	}
+}
+
+// recordedQuery tells the gate the statement the matcher resolved for a
+// candidate COM_STMT_EXECUTE (empty: none), before it asks allows.
+func (g *strictGate) recordedQuery(mock *models.Mock, q string) {
+	if q == "" {
+		return
+	}
+	if g.queries == nil {
+		g.queries = make(map[*models.Mock]string)
+	}
+	g.queries[mock] = q
+}
+
+// recordedBody is mock's recorded request body as compared with the live one
+// (recordedStatementParams).
+func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
+	if mock == nil || len(mock.Spec.MySQLRequests) != 1 {
+		return nil, false
+	}
+	bundle := &mock.Spec.MySQLRequests[0].PacketBundle
+	q := bundle.StoredQuery()
+	if q == "" {
+		q = g.queries[mock]
+	}
+	var live *mysql.StmtExecutePacket
+	if g.live != nil {
+		live, _ = g.live.Message.(*mysql.StmtExecutePacket)
+	}
+	return mysqlRequestBody(bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams))
 }
 
 // allows reports whether the candidate mock survives strict enforcement,
@@ -148,9 +280,12 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	if !g.engine.StrictEnabled() || !g.liveBodyOK {
 		return true
 	}
+	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
+	body, _ := g.bodyFor(mock)
 	v, seen := g.verdicts[mock]
+	recorded, recordedOK := g.recordedBody(mock)
 	if !seen {
-		v.allowed, v.drift = g.engine.StrictReject(mock, g.liveBody, g.userBodyNoise)
+		v.allowed, v.drift = g.engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
 		if g.verdicts == nil {
 			g.verdicts = make(map[*models.Mock]gateVerdict)
 		}
@@ -162,11 +297,11 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	g.rejected++
 	if g.closestMock == "" {
 		g.closestMock = mock.Name
-		if recorded, ok := (mysqlNoiseAdapter{}).RecordedBody(mock); ok {
+		if recordedOK {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
-			known := g.engine.KnownNoise(mock, g.userBodyNoise)
-			g.fieldDiffs = matcher.JSONFieldDiffs(string(recorded), string(g.liveBody), known, "body.", 96)
+			known := g.engine.KnownNoise(mock, noise)
+			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96), mock, g.live)
 		}
 	}
 	if !seen {
@@ -319,6 +454,57 @@ func queryBodyValue(sql string) any {
 	return q
 }
 
+// maskAttributeDiffs masks, in a mismatch report's field diffs, the recorded
+// and live values of a query attribute (a parameter sent with a name on
+// either side): its name, not its value's shape, may make it a secret
+// (executeForLog).
+func maskAttributeDiffs(diffs []models.MockFieldDiff, mock *models.Mock, live *mysql.PacketBundle) []models.MockFieldDiff {
+	named := func(b *mysql.PacketBundle, i int) bool {
+		if b == nil {
+			return false
+		}
+		var ps []mysql.Parameter
+		switch m := b.Message.(type) {
+		case *mysql.StmtExecutePacket:
+			if m != nil {
+				ps = m.Parameters
+			}
+		case *mysql.QueryPacket:
+			if m != nil {
+				ps = m.Parameters
+			}
+		}
+		return i < len(ps) && ps[i].Name != ""
+	}
+	var recorded *mysql.PacketBundle
+	if mock != nil && len(mock.Spec.MySQLRequests) == 1 {
+		recorded = &mock.Spec.MySQLRequests[0].PacketBundle
+	}
+	for i := range diffs {
+		rest, ok := strings.CutPrefix(diffs[i].Path, "body.parameters.")
+		if !ok {
+			continue
+		}
+		idx, field, _ := strings.Cut(rest, ".")
+		n, err := strconv.Atoi(idx)
+		if err != nil || field == "name" || field == "type" || field == "unsigned" {
+			// Everything else under the parameter is its value, an
+			// enveloped one ($bin, $ts) included.
+			continue
+		}
+		if named(live, n) || named(recorded, n) {
+			// The side the field is absent from stays empty.
+			if diffs[i].Kind != models.DiffKindMissingInMock {
+				diffs[i].Expected = maskedAttributeValue
+			}
+			if diffs[i].Kind != models.DiffKindMissingInLive {
+				diffs[i].Actual = maskedAttributeValue
+			}
+		}
+	}
+	return diffs
+}
+
 // mysqlRequestBodyJSON serializes the drift-carrying content of a command
 // packet into a canonical JSON document for the schema-noise engine. ok=false
 // means the packet has no drift-capable body (utility commands, statement-id
@@ -334,8 +520,19 @@ func queryBodyValue(sql string) any {
 // Deliberately EXCLUDED fields: StatementID (unstable across runs, remapped
 // query-aware by the matcher), Status/Flags/IterationCount/NullBitmap
 // (protocol plumbing already scored by matchStmtExecutePacketQueryAware, not
-// user data).
+// user data), and a COM_QUERY's or COM_STMT_EXECUTE's query attributes
+// (executeAttributesFrom) unless the statement reads one
+// (readsQueryAttributes): an EXECUTE's packet does not name its statement, so
+// matchCommand and strictGate.recordedBody give the count of its parameters
+// to keep (mysqlRequestBody, recordedStatementParams).
 func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
+	return mysqlRequestBody(bundle, -1)
+}
+
+// mysqlRequestBody is mysqlRequestBodyJSON with a COM_STMT_EXECUTE's
+// statement's own parameter count when known (a live packet's), -1 when not
+// (executeAttributesFrom).
+func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int) ([]byte, bool) {
 	if bundle == nil || bundle.Header == nil {
 		return nil, false
 	}
@@ -346,7 +543,7 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 			return nil, false
 		}
 		doc = map[string]any{"query": queryBodyValue(msg.Query)}
-		if len(msg.Parameters) > 0 {
+		if len(msg.Parameters) > 0 && readsQueryAttributes(msg.Query) {
 			doc["parameters"] = parametersByIndex(msg.Parameters)
 		}
 	case *mysql.StmtPreparePacket:
@@ -358,7 +555,7 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 		if msg == nil {
 			return nil, false
 		}
-		doc = map[string]any{"parameters": parametersByIndex(msg.Parameters)}
+		doc = map[string]any{"parameters": parametersByIndex(executeOwnParameters(msg, statementParams))}
 	case *mysql.StmtSendLongDataPacket:
 		if msg == nil {
 			return nil, false
@@ -380,6 +577,21 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+// readsQueryAttributes reports whether a COM_QUERY's statement reads its query
+// attributes: the server answers with them only through
+// mysql_query_attribute_string(). Any other statement's answer is the same
+// whatever attributes it carries, and a client sends ones that differ on
+// every call: Connector/J 8.1+ sends the caller's OpenTelemetry trace
+// (traceparent) with every statement. So they are compared, and drift as a
+// request field, only for a statement that reads one; for any other they
+// would make every call drift, and be learned as noise. A statement that
+// reads one without naming the function is not seen: a stored procedure
+// (CALL) or function (SELECT f()), a view, a trigger, or EXECUTE of a
+// statement prepared from a variable.
+func readsQueryAttributes(query string) bool {
+	return strings.Contains(strings.ToLower(query), "mysql_query_attribute_string")
 }
 
 // parametersByIndex converts a parameter slice to an index-keyed map (see

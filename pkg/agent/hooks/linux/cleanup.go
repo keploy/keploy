@@ -30,8 +30,33 @@ var keployBPFProgNames = map[string]ebpf.AttachType{
 	"k_getpeername4": ebpf.AttachCgroupInet4GetPeername,
 	"k_getpeername6": ebpf.AttachCgroupInet6GetPeername,
 	"k_sockops":      ebpf.AttachCGroupSockOps,
+	"k_sock_create":  ebpf.AttachCGroupInetSockCreate,
 	"k_udp4_sendmsg": ebpf.AttachCGroupUDP4Sendmsg,
 	"k_udp6_sendmsg": ebpf.AttachCGroupUDP6Sendmsg,
+	"k_udp4_recvmsg": ebpf.AttachCGroupUDP4Recvmsg,
+	"k_udp6_recvmsg": ebpf.AttachCGroupUDP6Recvmsg,
+	// Attached only under the proven switch (udpwatch.go).
+	"k_udp_bind4":        ebpf.AttachCGroupInet4Bind,
+	"k_udp_bind6":        ebpf.AttachCGroupInet6Bind,
+	"k_udp_ingress":      ebpf.AttachCGroupInetIngress,
+	"k_udp_egress":       ebpf.AttachCGroupInetEgress,
+	"k_udp_sock_release": ebpf.AttachCgroupInetSockRelease,
+	// Attached only under the proven switch (readywatch.go).
+	"k_ready_bind4":    ebpf.AttachCGroupInet4Bind,
+	"k_ready_bind6":    ebpf.AttachCGroupInet6Bind,
+	"k_ready_connect4": ebpf.AttachCGroupInet4Connect,
+	"k_ready_connect6": ebpf.AttachCGroupInet6Connect,
+}
+
+// kernelProgName is the name the kernel keeps for a program loaded as name:
+// at most BPF_OBJ_NAME_LEN-1 (15) bytes, the rest cut (k_udp_sock_release is
+// k_udp_sock_rele there, and k_ready_connect4 and 6 are both k_ready_connect,
+// told apart by their attach types).
+func kernelProgName(name string) string {
+	if len(name) > 15 {
+		return name[:15]
+	}
+	return name
 }
 
 // DetectAndCleanOrphanedCgroupPrograms finds BPF programs attached to the
@@ -85,6 +110,12 @@ func DetectAndCleanOrphanedCgroupPrograms(logger *zap.Logger, cgroupPath string)
 	return cleaned
 }
 
+// orphanNamed says whether a program the kernel names name (cut to the 15
+// bytes it keeps) is keploy's progName.
+func orphanNamed(name, progName string) bool {
+	return name == kernelProgName(progName)
+}
+
 // detachOrphanedByName iterates all BPF programs of the given attach type on
 // the cgroup, finds ones matching the expected name, and detaches them.
 // It does not (and cannot, via BPF_PROG_GET_INFO_BY_FD) verify per-program
@@ -136,7 +167,7 @@ func detachOrphanedByName(logger *zap.Logger, cgroupFD *os.File, cgroupPath stri
 		name := info.Name
 		prog.Close()
 
-		if name != progName {
+		if !orphanNamed(name, progName) {
 			continue
 		}
 

@@ -25,19 +25,22 @@
 #
 # Then the app's port published on another host port (-p 18095:8095, as a
 # compose file's "18080:8080" or a CI job's ephemeral port is), recorded there
-# and replayed with --port 18095 while the app takes 25s to start serving.
-# Host port 18095 leads to the app's port 8095, where those tests were
-# recorded, so it reaches the app: keploy used to compare 18095 with itself,
-# call the publish to 8095 a publish elsewhere, skip the readiness gate's HTTP
-# probe for it (passing on docker's own listener accepting instead) and fail
-# the first tests at once as a port the host can never reach. This asserts:
-#   record: the warning for 8095 names the host port it is published on and
-#           says a port map in keploy.yml can send those tests there, not
-#           --port, which sends every test of every set to one port;
-#   replay: no 8095 test is said to be unreachable; the first request the app
-#           serves on 8095 is the readiness gate's HTTP probe, so the gate
-#           waited for the app's answer before any test went; the probe did
-#           not time out; every 8095 test passes.
+# while the app takes 25s to start serving, and replayed twice. Host port
+# 18095 is the only one the app's port 8095 is published on, so replay sends
+# the 8095 tests there itself (the client that was recorded called it), and
+# with --port 18095 too. keploy used to send them to host port 8095, where
+# nothing is published, and fail every one; with --port it compared 18095
+# with itself, called the publish to 8095 a publish elsewhere, skipped the
+# readiness gate's HTTP probe (passing on docker's own listener accepting
+# instead) and failed the first tests at once as a port the host can never
+# reach. This asserts:
+#   record: no warning for 8095, whose tests replay will reach;
+#   replay without --port: keploy says once that it sends the 8095 tests to
+#           host port 18095;
+#   both replays: no 8095 test is said to be unreachable; the first request
+#           the app serves on 8095 is the readiness gate's HTTP probe, so the
+#           gate waited for the app's answer before any test went; the probe
+#           did not time out; every 8095 test passes.
 
 set -uo pipefail
 # Explicit `set +e`: exit codes are captured explicitly and cleanup always runs.
@@ -244,73 +247,93 @@ if ! wait "$driver_pid"; then
     exit 1
 fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-warn95="test cases recorded on the app's port 8095 cannot be replayed at that port from the host: it is published on host port 18095 instead"
-if [ "$(grep -c "$warn95" remap_record_logs.txt)" -ne 1 ]; then
-    echo "::error::want exactly one record-time warning naming host port 18095 for port 8095, got $(grep -c "$warn95" remap_record_logs.txt)"
-    fail=1
-fi
-if ! grep "$warn95" remap_record_logs.txt | grep -qF "send these tests to host port 18095 with a port map in keploy.yml (test.replaceWith.global.port: {8095: 18095})"; then
-    echo "::error::the 8095 warning does not say a port map in keploy.yml can send those tests to host port 18095"
-    fail=1
-fi
-if grep "$warn95" remap_record_logs.txt | grep -q -- "--port"; then
-    echo "::error::the 8095 warning points at --port, which sends every test of every set to one port"
+warn95="test cases recorded on the app's port 8095 cannot be replayed"
+if grep -q "$warn95" remap_record_logs.txt; then
+    echo "::error::record warned that the 8095 tests cannot be replayed, while replay sends them to host port 18095, the only one 8095 is published on"
+    grep "$warn95" remap_record_logs.txt
     fail=1
 fi
 grep "cannot be replayed" remap_record_logs.txt
 
-echo "=== remapped port: replay with --port 18095, the app serving 25s after it starts ==="
-start=$(date +%s)
-sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$REMAP_TEST_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
-    --delay 5 --port 18095 --generateGithubActions=false --disable-ansi > remap_test_logs.txt 2>&1
-echo "test exit status: $? after $(( $(date +%s) - start ))s"
-docker rm -f "$NAME" >/dev/null 2>&1 || true
-# 8095 is the app's port; keploy before this check knew of no other than the
-# host port the test went to, and named that one.
-if grep -qE "the app's port (8095|18095) cannot be reached from the host" remap_test_logs.txt; then
-    echo "::error::replay said a test on the app's port 8095, sent to host port 18095 which is published to it, cannot be reached"
-    fail=1
-fi
-# The app holds 8095 back 25s and logs each request it serves there. The
-# readiness gate's HTTP probe of host port 18095 has to be the first: a gate
-# that skipped the probe passes on docker's own listener accepting, and the
-# first thing the app sees is a test, or, as before this, nothing at all.
-first95=$(grep -m1 -F '[app:8095] "' remap_test_logs.txt)
-if ! printf '%s\n' "$first95" | grep -qF '"GET /keploy/__readiness_probe__ '; then
-    echo "::error::the first request the app served on 8095 was not the readiness gate's HTTP probe: ${first95:-it served none}"
-    fail=1
-fi
-if grep -q "never completed an HTTP round-trip" remap_test_logs.txt; then
-    echo "::error::the readiness gate's HTTP probe of host port 18095 timed out"
-    fail=1
-fi
-grep -E "cannot be reached from the host|re-sending|round-trip|readiness|\[app:8095\]" remap_test_logs.txt | head -20
-remap_report="$REMAP_DIR/keploy/reports/test-run-0/test-set-0-report.yaml"
-if [ ! -f "$remap_report" ]; then
-    echo "::error::no replay report for the remapped port"
-    tail -100 remap_test_logs.txt
-    exit 1
-fi
-remap_passed=0
-for id in $(yq -r '.tests[] | .test_case_id' "$remap_report"); do
-    port=$(yq -r '.spec.app_port // .app_port' "$REMAP_DIR/keploy/test-set-0/tests/$id.yaml")
-    [ "$port" = 8095 ] || continue
-    status=$(yq -r ".tests[] | select(.test_case_id == \"$id\") | .status" "$remap_report")
-    if [ "$status" != PASSED ]; then
-        echo "::error::test $id on the app's port 8095, sent to host port 18095 which leads to it, $status"
+# remap_replay NAME ARGS...: keploy test of the remapped recording, with ARGS,
+# the app serving 8095 25s after it starts; asserts what both replays must,
+# with the log in NAME_test_logs.txt.
+remap_replay() {
+    local name=$1 log="$1_test_logs.txt" start first95 report passed=0 id port status
+    shift
+    echo "=== remapped port: replay $*, the app serving 25s after it starts ==="
+    sudo rm -rf "$REMAP_DIR/keploy/reports"
+    start=$(date +%s)
+    sudo -E env PATH="$PATH" "$REPLAY_BIN" test -c "$REMAP_TEST_CMD" --container-name "$NAME" --path "$REMAP_DIR" \
+        --delay 5 "$@" --generateGithubActions=false --disable-ansi > "$log" 2>&1
+    echo "test exit status: $? after $(( $(date +%s) - start ))s"
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    # 8095 is the app's port; keploy before this check knew of no other than
+    # the host port the test went to, and named that one.
+    if grep -qE "the app's port (8095|18095) cannot be reached from the host" "$log"; then
+        echo "::error::$name: a test on the app's port 8095, sent to host port 18095 which is published to it, was said to be unreachable"
         fail=1
-    else
-        remap_passed=$((remap_passed + 1))
     fi
-done
-if [ "$remap_passed" -eq 0 ]; then
-    echo "::error::want tests on 8095 passing through host port 18095"
+    # The app holds 8095 back 25s and logs each request it serves there. The
+    # readiness gate's HTTP probe of host port 18095 has to be the first: a
+    # gate that skipped the probe passes on docker's own listener accepting,
+    # and the first thing the app sees is a test, or, as before this, nothing
+    # at all. The probe is an OPTIONS, so a router answers it without running
+    # a GET handler; this app has no do_OPTIONS, so http.server answers it 501.
+    first95=$(grep -m1 -F '[app:8095] "' "$log")
+    if ! printf '%s\n' "$first95" | grep -qF '"OPTIONS /keploy/__readiness_probe__ '; then
+        echo "::error::$name: the first request the app served on 8095 was not the readiness gate's HTTP probe: ${first95:-it served none}"
+        fail=1
+    fi
+    if grep -q "never completed an HTTP round-trip" "$log"; then
+        echo "::error::$name: the readiness gate's HTTP probe of host port 18095 timed out"
+        fail=1
+    fi
+    # The gate before the first test probed where the tests go, so none is
+    # reset and re-sent: a gate that probed the recorded port instead finds
+    # nothing, the first test meets the starting app, and the reset re-send's
+    # own probe would then be the app's first request.
+    if grep -q "re-sending" "$log"; then
+        echo "::error::$name: a test was reset and re-sent: the readiness gate did not wait for the app where the tests go"
+        grep "re-sending" "$log" | head -3
+        fail=1
+    fi
+    grep -E "cannot be reached from the host|re-sending|round-trip|readiness|sending these tests there|\[app:8095\]" "$log" | head -20
+    report=$(ls "$REMAP_DIR"/keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | tail -n 1)
+    if [ -z "$report" ]; then
+        echo "::error::$name: no replay report for the remapped port"
+        tail -100 "$log"
+        exit 1
+    fi
+    for id in $(yq -r '.tests[] | .test_case_id' "$report"); do
+        port=$(yq -r '.spec.app_port // .app_port' "$REMAP_DIR/keploy/test-set-0/tests/$id.yaml")
+        [ "$port" = 8095 ] || continue
+        status=$(yq -r ".tests[] | select(.test_case_id == \"$id\") | .status" "$report")
+        if [ "$status" != PASSED ]; then
+            echo "::error::$name: test $id on the app's port 8095, sent to host port 18095 which leads to it, $status"
+            fail=1
+        else
+            passed=$((passed + 1))
+        fi
+    done
+    if [ "$passed" -eq 0 ]; then
+        echo "::error::$name: want tests on 8095 passing through host port 18095"
+        fail=1
+    fi
+}
+
+remap_replay remap_auto
+said="app port 8095 is published on host port 18095; sending these tests there"
+if [ "$(grep -cF "$said" remap_auto_test_logs.txt)" -ne 1 ]; then
+    echo "::error::without --port, want keploy to say once: $said; said it $(grep -cF "$said" remap_auto_test_logs.txt) times"
     fail=1
 fi
+remap_replay remap_port --port 18095
 if [ "$fail" -ne 0 ]; then
-    tail -120 remap_test_logs.txt
+    tail -120 remap_auto_test_logs.txt
+    tail -120 remap_port_test_logs.txt
     exit 1
 fi
 
-echo "PASS: each unreachable port is named at record time and at replay, with what would make it reachable, and a port published elsewhere is reached through --port"
+echo "PASS: each unreachable port is named at record time and at replay, with what would make it reachable, and a port published on one other host port is reached there, and through --port"
 exit 0

@@ -40,6 +40,11 @@ type fileDoc struct {
 	mocks []*models.Mock
 	// raw is the document as read (see yaml.MockReader.ReadNextDocBytes).
 	raw []byte
+	// off and n are where, in the file, the bytes mocks were decoded from
+	// are: raw's, but for the document before an unfinished separator, whose
+	// mock is decoded from raw's whole lines.
+	off int64
+	n   int
 	// name and kind are the document's own, when it parsed: for a document
 	// the decoders skipped, they say what was skipped.
 	name string
@@ -95,6 +100,7 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 			return d, err, nil
 		}
 		d.raw, d.unterminated = raw, reader.Unterminated()
+		d.off, d.n = reader.DocOffset(), len(raw)
 		if d.unterminated && (err != nil || !jsonDocDecodes(doc)) {
 			d.verbatim, d.incomplete = true, true
 			if err == nil {
@@ -114,6 +120,7 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 			return d, err, nil
 		}
 		d.raw, d.unterminated = raw, reader.Unterminated()
+		d.off, d.n = reader.DocOffset(), len(raw)
 		if d.unterminated {
 			lastLine := bytes.LastIndexByte(raw, '\n') + 1
 			if !separatorPrefix(raw[lastLine:]) {
@@ -136,7 +143,7 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 				}
 				return d, errors.New("failed to decode the mock document before the unfinished separator at the end of the file"), nil
 			}
-			doc, err = whole, nil
+			doc, err, d.n = whole, nil, lastLine
 		}
 		if err != nil {
 			return d, err, nil
@@ -224,9 +231,10 @@ func pruneKeeps(mock *models.Mock, mockNames map[string]models.MockState, pruneB
 		// auto-replay matching (config.Test.SchemaNoiseDetection) onto the
 		// disk-read mock before it is re-written. Stored uniformly on the
 		// kind-agnostic MockSpec.ReqBodyNoise for every parser (HTTP included).
-		if len(st.ReqBodyNoise) > 0 {
-			mock.Spec.ReqBodyNoise = mergeReqBodyNoise(mock.Spec.ReqBodyNoise, st.ReqBodyNoise)
-		}
+		// The learn step's variables ride the same way (mergeLearned); the
+		// variables bound at this mock by others were written by
+		// PersistLearned, before any prune.
+		mergeLearned(mock, st, nil)
 		return true
 	}
 	// Preserve mocks written after replay start.

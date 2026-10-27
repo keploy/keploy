@@ -393,9 +393,9 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	// Client-facing handshake. HandleTLSConnection's inner
 	// tls.Config has KeyLogWriter wired into the package-level
 	// fanout sink, so the master secret for this side is logged.
-	tlsClient, _, err := pTls.HandleTLSConnection(ctx, p.logger, wrappedSrc, backdate)
+	tlsClient, _, err := pTls.HandleTLSConnection(p.withClientTLS(ctx, dstAddr), p.logger, wrappedSrc, backdate)
 	if err != nil {
-		return fmt.Errorf("client-side handshake: %w", err)
+		return fmt.Errorf("client-side handshake: %w", pTls.HandshakeCause(err))
 	}
 	defer tlsClient.Close()
 
@@ -435,7 +435,7 @@ func (p *Proxy) hijackAndMITM(ctx context.Context, srcConn, dstConn net.Conn, bu
 	//     connection after it has already completed its handshake with us.
 	serverName := hostFromAddr(dstAddr)
 	if opts.UpstreamTLSVerify {
-		serverName = resolveUpstreamServerName(capturedClientSNI(tlsClient), "", dstAddr, true)
+		serverName = resolveUpstreamServerName(util.ClientServerName(tlsClient), "", dstAddr, true)
 	}
 	upstreamCfg := &tls.Config{
 		InsecureSkipVerify: !opts.UpstreamTLSVerify, //nolint:gosec // MITM proxy by design; opt in with record.upstreamTls.verify
@@ -685,24 +685,6 @@ func hostFromAddr(addr string) string {
 		return addr
 	}
 	return host
-}
-
-// capturedClientSNI returns the ServerName the APPLICATION put in the
-// ClientHello it sent to keploy, or "" if it sent none (which is what
-// crypto/tls does for an IP-literal destination — RFC 6066 forbids IP
-// literals in SNI).
-//
-// Read straight off the completed client-facing *tls.Conn rather than through
-// pTls.SrcPortToDstURL: it is the same value CertForClient stored there
-// moments earlier, but it needs no source-port lookup and so cannot be
-// confused by a recycled port. Returns "" for anything that is not a
-// *tls.Conn, so callers degrade to their existing fallback.
-func capturedClientSNI(clientConn net.Conn) string {
-	tc, ok := clientConn.(*tls.Conn)
-	if !ok {
-		return ""
-	}
-	return tc.ConnectionState().ServerName
 }
 
 // hostFromConn is hostFromAddr over a connection's remote address — the peer

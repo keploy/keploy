@@ -5,13 +5,16 @@ source "${GITHUB_WORKSPACE:-${PWD%/samples-*}}/.github/workflows/test_workflow_s
 
 # E2E for STREAMING mock-mismatch reporting. Uses the sse-redis sample, whose
 # streaming endpoints (SSE / NDJSON / multipart / plain-text) are served from
-# Redis. We record it, then MUTATE the recorded LRANGE read mock — the outgoing
-# Redis call the streaming GETs depend on — to a non-matching key of the SAME
-# byte length (so RESP framing stays valid). On replay the streaming (Phase-2)
-# path must SURFACE the unmatched outgoing Redis (Generic) call on a streaming
-# test case. This is the behavior added by finalizing the per-test capture
-# window AFTER stream consumption; before it, the streaming path opened no
-# window and carried no unmatched_calls. Success here is INVERTED: we assert the
+# Redis. SSE, NDJSON and multipart are streams by their Content-Type; the
+# text/plain one is a stream only when its recording kept its body as frames
+# (a keploy recorder older than that rule), and is otherwise replayed whole in
+# the main loop. We record it, then MUTATE the recorded LRANGE read mock — the
+# outgoing Redis call the streaming GETs depend on — to a non-matching key of
+# the SAME byte length (so RESP framing stays valid). On replay the streaming
+# (Phase-2) path must SURFACE the unmatched outgoing Redis (Generic) call on a
+# streaming test case. This is the behavior added by finalizing the per-test
+# capture window AFTER stream consumption; before it, the streaming path opened
+# no window and carried no unmatched_calls. Success here is INVERTED: we assert the
 # streaming mismatch is reported, not that every test passes.
 
 echo "$RECORD_BIN"
@@ -70,7 +73,8 @@ send_request() {
     done
     echo "App started"
     # request.sh fires POST /messages (writes) then GETs every streaming
-    # endpoint (SSE/NDJSON/multipart/plain), producing the streaming test cases.
+    # endpoint (SSE/NDJSON/multipart/plain), producing the events test cases
+    # (plain is a stream only when an older keploy recorded it; see the top).
     BASE_URL=http://localhost:8080 bash ./request.sh || true
     sleep 7
     pid=$(pgrep keploy)
@@ -141,10 +145,13 @@ if grep "WARNING: DATA RACE" test_logs.txt; then
 fi
 
 # Assert the mismatch surfaced on a STREAMING test case (events-sse / -ndjson /
-# -multipart / -plain) — i.e. a test routed through the Phase-2 streaming path
-# carries an unmatched_calls entry. This is the streaming-specific behavior:
-# before the fix the streaming path opened no capture window, so these tests
-# carried no unmatched_calls regardless of the forced mismatch.
+# -multipart) — i.e. a test routed through the Phase-2 streaming path carries
+# an unmatched_calls entry. This is the streaming-specific behavior: before the
+# fix the streaming path opened no capture window, so these tests carried no
+# unmatched_calls regardless of the forced mismatch. events-plain is checked on
+# its own: whether it is a stream depends on which keploy recorded it (frames
+# from an older one, whole from this one, which runs it in the main loop), and
+# its miss must be reported whichever path ran it.
 shopt -s nullglob
 reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
 shopt -u nullglob
@@ -153,11 +160,14 @@ if [ ${#reports[@]} -eq 0 ]; then
     tail -40 test_logs.txt
     exit 1
 fi
-streaming_reported=false
-for rf in "${reports[@]}"; do
-    if python3 - "$rf" <<'PY'
+# report_has_streaming_miss says whether a report holds a streaming test with
+# an unmatched_calls entry; with a second argument, a test whose id matches
+# that pattern instead.
+report_has_streaming_miss() {
+    python3 - "$1" "${2:-events-(sse|ndjson|multipart)}" <<'PY'
 import sys, re
 txt = open(sys.argv[1]).read()
+pattern = sys.argv[2]
 # Each per-test block starts with "    - " at the test-results list level.
 blocks = re.split(r'\n    - ', txt)
 ok = False
@@ -166,12 +176,17 @@ for b in blocks:
     if not m:
         continue
     tid = m.group(1)
-    # streaming test cases are the get-events-* endpoints
-    if 'events-' in tid and 'unmatched_calls:' in b:
+    # by default the test cases that are streams by their Content-Type,
+    # whichever keploy recorded them: get-events-sse / -ndjson / -multipart
+    if re.search(pattern, tid) and 'unmatched_calls:' in b:
         ok = True
-        print("streaming test reported a mismatch:", tid)
+        print("test reported a mismatch:", tid)
 sys.exit(0 if ok else 1)
 PY
+}
+streaming_reported=false
+for rf in "${reports[@]}"; do
+    if report_has_streaming_miss "$rf"
     then
         echo "✓ $(basename "$rf") has a streaming test with an unmatched_calls entry"
         streaming_reported=true
@@ -187,6 +202,73 @@ if [ "$streaming_reported" != true ]; then
     docker compose down 2>/dev/null || true
     exit 1
 fi
+# require_plain_miss <log> <report>...: the text/plain events test reported
+# its forced miss, whichever path ran it.
+require_plain_miss() {
+    local log=$1 rf
+    shift
+    for rf in "$@"; do
+        if report_has_streaming_miss "$rf" 'events-plain'; then
+            return 0
+        fi
+    done
+    echo "::error::replay did NOT report the forced mock mismatch on the text/plain events test ($log)"
+    echo "--- events-plain in the reports ---"
+    grep -n -A30 'test_case_id: .*events-plain' "$@" | head -60
+    echo "--- events-plain, mismatch and unmatched lines in $log ---"
+    grep -iE "events-plain|events/plain|deferring streaming|mismatch|unmatched|no matching" "$log" | head -30
+    echo "--- tail of $log ---"
+    tail -40 "$log"
+    docker compose down 2>/dev/null || true
+    exit 1
+}
+require_plain_miss test_logs.txt "${reports[@]}"
+
+# The same replay under the proven switch (KEPLOY_PROVEN=1, the proven model's
+# staging gate). The agent then waits for its error drain on events instead of
+# a 2 s deadline, never drops a miss for want of room in its error channel, and
+# says when a read of a test's misses is incomplete (models.
+# ErrUnmatchedCallsUnread), which leaves the test's set unjudged. Here nothing
+# is lost: the forced misses must still reach their streaming tests, no test may
+# be marked unmatched_calls_unread, and no set INTERNAL_ERR. The agent is
+# started through sudo, which drops KEPLOY_PROVEN, so its own debug line is the
+# proof the switch reached it as --proven.
+rm -rf ./keploy/reports
+KEPLOY_PROVEN=1 "$REPLAY_BIN" test -c "./sse-redis-app" --delay 7 --debug --generateGithubActions=false 2>&1 | tee test_logs_proven.txt
+if grep "WARNING: DATA RACE" test_logs_proven.txt; then
+    echo "::error::Race condition detected in the proven-switch replay"
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+if ! grep -q "staging switch is on in this agent" test_logs_proven.txt; then
+    echo "::error::the agent never said the proven switch is on: KEPLOY_PROVEN=1 did not reach it as --proven"
+    grep -n "agent" test_logs_proven.txt | head -20
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+shopt -s nullglob
+proven_reports=( ./keploy/reports/test-run-*/test-set-*-report.yaml )
+shopt -u nullglob
+proven_streaming_reported=false
+for rf in "${proven_reports[@]}"; do
+    if grep -q 'unmatched_calls_unread: true' "$rf" || grep -q '^status: INTERNAL_ERR' "$rf"; then
+        echo "::error::$(basename "$rf"): a read of a test's misses was incomplete under the proven switch, though nothing was lost"
+        grep -n 'unmatched_calls_unread\|^status\|failure_reason' "$rf" | head -20
+        docker compose down 2>/dev/null || true
+        exit 1
+    fi
+    if report_has_streaming_miss "$rf"; then
+        proven_streaming_reported=true
+    fi
+done
+if [ "$proven_streaming_reported" != true ]; then
+    echo "::error::under the proven switch the forced misses never reached a streaming test"
+    tail -40 test_logs_proven.txt
+    docker compose down 2>/dev/null || true
+    exit 1
+fi
+require_plain_miss test_logs_proven.txt "${proven_reports[@]}"
+echo "✓ under KEPLOY_PROVEN=1 the agent got the switch, every forced miss reached its test, and no read was incomplete"
 
 echo "streaming mock-mismatch e2e passed: a streaming test reported the forced unmatched Redis read"
 docker compose down 2>/dev/null || true

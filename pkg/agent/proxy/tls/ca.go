@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	_ "embed"
 	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
@@ -32,6 +31,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
 )
 
 // The MITM signing CA is no longer a committed, //go:embed-ed static cert+key
@@ -83,11 +83,13 @@ func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
 	hookMu.Unlock()
 }
 
-// embeddedFallbackRoots is the Mozilla NSS root bundle, vendored from
-// https://curl.se/ca/cacert.pem (curl's daily-refreshed extract of Mozilla's
-// certdata.txt). Compiled into the binary via go:embed so the agent always
-// has a valid trust store regardless of the runtime image's filesystem
-// state. See pkg/agent/proxy/tls/data/REFRESH.md for the refresh procedure.
+// embeddedFallbackRoots is the Mozilla NSS root bundle as PEM, built at startup
+// from golang.org/x/crypto/x509roots/fallback/bundle (the Go team's extract of
+// Mozilla's certdata.txt) so the agent always has a valid trust store
+// regardless of the runtime image's filesystem state. It is refreshed by
+// bumping that module (.github/workflows/refresh-nss-roots.yml proposes a bump
+// weekly), not by hand: a vendored copy went stale and kept trusting roots
+// Mozilla had distrusted (the October 2026 eMudhra/emSign compromise).
 //
 // This bundle is the safety net that prevents the failure mode in
 // keploy/k8s-proxy#375: even if /etc/ssl/certs/ca-certificates.crt is
@@ -98,9 +100,19 @@ func SetMITMPublishHook(h func(connID string, mitmCertDER []byte)) {
 // becomes (system_or_embedded_roots ∪ keploy_mitm_ca) instead of
 // (keploy_mitm_ca alone), which is what made the customer's pods fail
 // CERTIFICATE_VERIFY_FAILED on every public-endpoint HTTPS call.
-//
-//go:embed data/mozilla_roots.pem
-var embeddedFallbackRoots []byte
+var embeddedFallbackRoots = nssRootsPEM()
+
+// nssRootsPEM encodes every root of the NSS bundle as PEM. A few roots carry a
+// "distrust after" constraint that X.509 cannot express; PEM consumers (the
+// recorded app's TLS stack) trust them unconstrained, exactly as they would
+// with curl's cacert.pem or a distro ca-certificates package.
+func nssRootsPEM() []byte {
+	var buf bytes.Buffer
+	for root := range nssbundle.Roots() {
+		_ = pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: root.Certificate})
+	}
+	return buf.Bytes()
+}
 
 var caStorePath = []string{
 	"/usr/local/share/ca-certificates/",
@@ -557,8 +569,8 @@ const (
 //     locations where `ca-certificates` (Debian/Ubuntu/Alpine) or
 //     equivalent (RHEL/Fedora/openSUSE/FreeBSD) installs the OS trust
 //     store. First readable, non-empty file wins.
-//  2. embeddedFallbackRoots — Mozilla NSS roots vendored from curl.se,
-//     compiled into the agent binary via go:embed. Used when every disk
+//  2. embeddedFallbackRoots — Mozilla NSS roots from x509roots/fallback,
+//     compiled into the agent binary. Used when every disk
 //     path was missing/empty.
 //
 // This function used to return (nil, "") on miss, leaving the merged
@@ -697,7 +709,7 @@ func loadSystemCABundleFromPathsAndFallback(logger *zap.Logger, paths []string, 
 	}
 	// fallback==nil only happens via the disk-only test entry point.
 	// Production callers always pass embeddedFallbackRoots which is
-	// non-empty by build-time go:embed.
+	// always non-empty (built from the compiled-in NSS bundle).
 	return nil, ""
 }
 
@@ -886,6 +898,14 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 			}
 		}()
 
+		// Recorded before the install, as on Linux below: whatever it leaves
+		// in the ROOT store is removed by this run's teardown however the
+		// install ends (removeWindowsCAByName finds nothing to remove when it
+		// added nothing). A persisted per-user CA is kept across runs (so the
+		// ROOT-store prompt fires at most once); an ephemeral one is removed
+		// at teardown.
+		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()})
+
 		// Install certificate using certutil
 		if err = installWindowsCA(ctx, logger, tempCertPath); err != nil {
 			utils.LogError(logger, err, "Failed to install CA certificate on Windows")
@@ -899,10 +919,6 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		if err = installJavaCAForHome(ctx, logger, tempCertPath, resolvedJavaHome, alias); err != nil {
 			logger.Warn("could not import the keploy CA into the Java keystore; Java uses the JAVA_TOOL_OPTIONS truststore instead", zap.Error(err))
 		}
-
-		// A persisted per-user CA is kept across runs (so the ROOT-store prompt
-		// fires at most once); an ephemeral one is removed at teardown.
-		recordNativeInstall(&nativeInstall{alias: alias, cn: ca.cert.Subject.CommonName, remove: !store.persistsKey()})
 
 		// Set environment variables for Node.js and Python to use the custom CA
 		if err := SetEnvForPath(logger, tempCertPath); err != nil {
@@ -932,6 +948,14 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 	sweepRunLeftovers(logger, ca.runID)
 
 	certFileName := runCertFileName(ca)
+	// Recorded before the first anchor is written, so that whatever this
+	// install leaves in the trust store -- an anchor, the JDK alias -- is
+	// removed by this run's teardown (TeardownNativeCA) however the install
+	// ends: also when it fails part way, or the stop cuts it short (the stop
+	// cancels ctx, which kills the store's update after the anchors are
+	// written). Recorded only once the update had succeeded, such an install
+	// left its anchor trusted until the next run's sweep.
+	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, remove: true})
 	var finalCAPath string
 	for _, path := range caPaths {
 		caPath := filepath.Join(path, certFileName)
@@ -965,10 +989,6 @@ func setupNativeForApp(ctx context.Context, logger *zap.Logger, ca *caState, sto
 		utils.LogError(logger, err, "Failed to update the CA store")
 		return err
 	}
-
-	// Record what we installed so teardown removes exactly this run's anchor and
-	// JDK alias (native CAs are ephemeral, so remove is always true here).
-	recordNativeInstall(&nativeInstall{certFile: certFileName, alias: alias, remove: true})
 
 	// Set Env Vars pointing to the installed cert.
 	//
@@ -1299,7 +1319,9 @@ func updateCaStore(ctx context.Context) error {
 		if commandExists(cmd) {
 			commandRun = true
 			c := exec.CommandContext(ctx, cmd)
-			if _, err := c.CombinedOutput(); err != nil {
+			_, err := c.CombinedOutput()
+			utils.BootStep(cmd + " is over") // the trust store's update
+			if err != nil {
 				return err
 			}
 			break
@@ -1339,6 +1361,7 @@ func isJavaCAExist(ctx context.Context, alias, storepass, cacertsPath string) bo
 func isJavaCAExistWithTool(ctx context.Context, keytoolBin, alias, storepass, cacertsPath string) bool {
 	cmd := exec.CommandContext(ctx, keytoolBin, "-list", "-keystore", cacertsPath, "-storepass", storepass, "-alias", alias)
 	err := cmd.Run()
+	utils.BootStep("keytool -list is over")
 	select {
 	case <-ctx.Done():
 		return false
@@ -1437,6 +1460,7 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 
 	cmd := exec.CommandContext(ctx, keytoolBin, "-import", "-trustcacerts", "-keystore", cacertsPath, "-storepass", storePass, "-noprompt", "-alias", alias, "-file", caPath)
 	cmdOutput, err := cmd.CombinedOutput()
+	utils.BootStep("keytool -import is over")
 	if err != nil {
 		utils.LogError(logger, err, "Java detected but failed to import CA", zap.String("output", string(cmdOutput)))
 		return err
@@ -1467,7 +1491,12 @@ func installJavaCAForHome(ctx context.Context, logger *zap.Logger, caPath, javaH
 // what preserves the previous behaviour for an elevated run.
 func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) error {
 	userCmd := exec.CommandContext(ctx, "certutil", "-user", "-addstore", "-f", "ROOT", certPath)
+	// Windows asks the user, in a dialog, whether to trust a certificate added
+	// to their ROOT store, and certutil waits for the answer: the agent's
+	// start waits for the user (utils.BeginBootPrompt), however long they take.
+	answered := utils.BeginBootPrompt("Windows' prompt to trust keploy's CA")
 	userOut, userErr := userCmd.CombinedOutput()
+	answered()
 	if userErr == nil {
 		logger.Debug("installed the keploy CA in the current user's Windows ROOT store",
 			zap.String("output", string(userOut)))
@@ -1478,6 +1507,7 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 
 	machineCmd := exec.CommandContext(ctx, "certutil", "-addstore", "-f", "ROOT", certPath)
 	machineOut, machineErr := machineCmd.CombinedOutput()
+	utils.BootStep("certutil -addstore is over")
 	if machineErr != nil {
 		utils.LogError(logger, machineErr, "Failed to install CA certificate using certutil",
 			zap.String("user_store_output", string(userOut)),
@@ -1490,7 +1520,19 @@ func installWindowsCA(ctx context.Context, logger *zap.Logger, certPath string) 
 	return nil
 }
 
-// SrcPortToDstURL map is used to store the mapping between source port and DstURL for the TLS connection
+// SrcPortToDstURL holds, under a client's source port, the name the client
+// asked for on its latest connection through keploy's MITM: the target of
+// its CONNECT request once it made one, then, from its handshake, the SNI of
+// its ClientHello, else that target ("" for neither).
+//
+// A source port is not a connection: another client with the same port (a pod
+// of the same node reaching the DaemonSet agent, or a connection that took a
+// port before the previous one's entry went) reads or overwrites this one's
+// entry. So nothing in this module reads it. A connection's names are read off
+// the connection: its SNI from the TLS connection keploy served it
+// (util.ClientServerName), its CONNECT target from its context
+// (ConnectTargetFrom). It is still filed for the readers outside this module
+// (keploy/integrations' Postgres v3 recorder).
 var SrcPortToDstURL = sync.Map{}
 
 // srcPortOwner tracks which live connection currently owns a source port,
@@ -1580,6 +1622,20 @@ func getCertCache() *expirable.LRU[string, *tls.Certificate] {
 }
 
 func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time) (*tls.Certificate, error) {
+	return certForClient(logger, clientHello, caPrivKey, caCertParsed, backdate, "", nil)
+}
+
+// certForClient is CertForClient with what the connection itself says of its
+// destination: the host its CONNECT request named ("" when it made none) and
+// the IP it dialled (nil when unknown). The leaf is named from the SNI, else
+// the CONNECT target; with neither, it is named for dstIP, because a client
+// that dialled an IP literal sends no SNI and checks the leaf's IP SANs.
+//
+// Nothing else names it. The name used to fall back to the one filed under
+// the client's source port (SrcPortToDstURL), and a port is not a connection:
+// another client on the same port (a pod of the same node, or a connection
+// whose port was reused) had its host put on this client's leaf.
+func certForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivKey any, caCertParsed *x509.Certificate, backdate time.Time, connectTarget string, dstIP net.IP) (*tls.Certificate, error) {
 	// Ensure log level is set only once
 
 	/*
@@ -1601,20 +1657,32 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Generate a new server certificate and private key for the given hostname.
 	// When the client omits SNI (common after CONNECT tunnel setup where the
 	// client already knows the target from the CONNECT request), fall back to
-	// the hostname stored by handleConnectTunnel in SrcPortToDstURL.
+	// the host its CONNECT request named.
 	dstURL := clientHello.ServerName
-	remoteAddr := clientHello.Conn.RemoteAddr().(*net.TCPAddr)
-	sourcePort := remoteAddr.Port
-
 	if dstURL == "" {
-		if stored, ok := SrcPortToDstURL.Load(sourcePort); ok {
-			if s, ok := stored.(string); ok && s != "" {
-				dstURL = s
-			}
-		}
+		dstURL = connectTarget
+	}
+	// The client's source port names nothing here. It is the key the
+	// channel-binding shim pairs this leaf under (publishMITM) and
+	// SrcPortToDstURL files the name under, which a connection that is not
+	// TCP has none of (0: neither is done).
+	sourcePort := 0
+	if remoteAddr, ok := clientHello.Conn.RemoteAddr().(*net.TCPAddr); ok {
+		sourcePort = remoteAddr.Port
+	}
+	if sourcePort != 0 {
+		// Filed as it always was, for the map's readers outside this module:
+		// what this handshake was asked for, "" included.
+		SrcPortToDstURL.Store(sourcePort, dstURL)
 	}
 
-	SrcPortToDstURL.Store(sourcePort, dstURL)
+	// The name the leaf is minted for. With no SNI and no CONNECT target the
+	// client dialled an IP literal, and it verifies the leaf against an IP SAN,
+	// which cfssl makes of an IP host.
+	certHost := dstURL
+	if certHost == "" && dstIP != nil {
+		certHost = dstIP.String()
+	}
 
 	// Cache key = host + backdate bucket + CA identity. Keying on the hostname
 	// alone was wrong twice over: (1) it ignored backdate, so a frozen-time
@@ -1623,13 +1691,13 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// ignored which CA signed the leaf, so a regenerated CA could serve a stale
 	// leaf. A zero backdate — the live record path — buckets to one "live" key so
 	// repeated connections to the same host still hit the cache.
-	cacheKey := certCacheKey(dstURL, backdate, caCertParsed)
+	cacheKey := certCacheKey(certHost, backdate, caCertParsed)
 
 	// Check the cert cache before generating a new certificate.
-	if dstURL != "" {
+	if certHost != "" {
 		if cached, ok := getCertCache().Get(cacheKey); ok {
 			probeCert(logger, "cache-hit", dstURL, 0)
-			logger.Debug("reusing cached certificate", zap.String("hostname", dstURL))
+			logger.Debug("reusing cached certificate", zap.String("hostname", certHost))
 			publishMITM(sourcePort, cached)
 			return cached, nil
 		}
@@ -1641,9 +1709,9 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	}()
 
 	serverReq := &csr.CertificateRequest{
-		CN: dstURL,
+		CN: certHost,
 		Hosts: []string{
-			dstURL,
+			certHost,
 		},
 		KeyRequest: csr.NewKeyRequest(),
 	}
@@ -1711,7 +1779,7 @@ func CertForClient(logger *zap.Logger, clientHello *tls.ClientHelloInfo, caPrivK
 	// Cache the generated certificate for reuse by subsequent connections to the
 	// same host, under the composite key (host + backdate bucket + CA identity)
 	// computed above — so a frozen-time replay and a live run never share a leaf.
-	if dstURL != "" {
+	if certHost != "" {
 		getCertCache().Add(cacheKey, &serverTLSCert)
 	}
 

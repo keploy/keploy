@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 func mockWithBodies(reqBody, respBody string) *models.Mock {
@@ -67,7 +68,12 @@ func TestCorrelationsFromMock(t *testing.T) {
 // TestMaterializeCorrelations pins the replay-ingest helper: it populates an
 // echo mock's Correlations, leaves a no-echo mock empty, and never clobbers a
 // mock that already carries correlations.
+//
+// With the proven switch off, which this test sets: under it nothing is
+// detected (TestMaterializeCorrelations_NothingUnderTheProvenSwitch), and left
+// to the environment the switch-on run failed this test.
 func TestMaterializeCorrelations(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
 	const id = "550e8400-e29b-41d4-a716-446655440000"
 
 	echo := mockWithBodies(`{"idempotencyKey":"`+id+`"}`, `{"ok":true,"idempotencyKey":"`+id+`"}`)
@@ -87,5 +93,24 @@ func TestMaterializeCorrelations(t *testing.T) {
 	MaterializeCorrelations(pre)
 	if len(pre.Spec.Correlations) != 1 || pre.Spec.Correlations[0].RequestPath != "pre" {
 		t.Fatalf("already-populated must be left unchanged, got %+v", pre.Spec.Correlations)
+	}
+}
+
+// Under the proven switch nothing is detected from what a value looks like: an
+// echo is a variable of its call, written by the learn step.
+func TestMaterializeCorrelations_NothingUnderTheProvenSwitch(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	m := &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Body: `{"key":"550e8400-e29b-41d4-a716-446655440000"}`},
+		HTTPResp: &models.HTTPResp{Body: `{"key":"550e8400-e29b-41d4-a716-446655440000"}`},
+	}}
+	MaterializeCorrelations(m)
+	if len(m.Spec.Correlations) != 0 {
+		t.Fatalf("a correlation was detected under the switch: %+v", m.Spec.Correlations)
+	}
+	t.Setenv(provenswitch.Env, "0")
+	MaterializeCorrelations(m)
+	if len(m.Spec.Correlations) != 1 {
+		t.Fatalf("switch off: %d correlations, want 1 as before", len(m.Spec.Correlations))
 	}
 }

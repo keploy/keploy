@@ -5,9 +5,12 @@ package log
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // inDir runs the test in a fresh directory holding target, a file that stands
@@ -322,4 +325,94 @@ func TestNew_AsRootUnderSudoTheLogIsTheInvokingUsers(t *testing.T) {
 		}
 		_ = f.Close()
 	})
+}
+
+// A run that cannot open its log at all loses the file, never the command
+// (`keploy --version` in a read-only directory exited 1): New logs to the
+// console only, and the first debug-level logger says why, once. A run that
+// keeps its log says nothing about it.
+func TestNew_LogsToTheConsoleWhereItCannotOpenTheLog(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(t *testing.T)
+		wantFile bool
+	}{
+		{name: "a directory it may write", setup: func(*testing.T) {}, wantFile: true},
+		{name: "a directory it may not write", setup: func(t *testing.T) {
+			if os.Geteuid() == 0 {
+				t.Skip("root writes a directory whatever its mode")
+			}
+			wd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(wd, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(wd, 0o755) })
+		}},
+		{name: "a directory removed under it", setup: func(t *testing.T) {
+			wd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(wd); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a directory at the log's name", setup: func(t *testing.T) {
+			if err := os.Mkdir(LogFileName, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			console, err := os.CreateTemp(t.TempDir(), "console")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(TestOnlyResetSink)
+			setPrimarySink(console)
+			inDir(t)
+			c.setup(t)
+
+			logger, f, err := New()
+			if err != nil {
+				t.Fatalf("New failed, so the command would: %v", err)
+			}
+			if f != nil {
+				_ = f.Close()
+			}
+			if (f != nil) != c.wantFile {
+				t.Fatalf("New kept a log file: %v, want %v", f != nil, c.wantFile)
+			}
+			logger.Info("a line the run logs")
+			for i := 0; i < 2; i++ {
+				debug, err := ChangeLogLevel(zap.DebugLevel)
+				if err != nil {
+					t.Fatal(err)
+				}
+				debug.Debug("a debug line")
+			}
+
+			out, err := os.ReadFile(console.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(out), "a line the run logs") {
+				t.Errorf("the console lacks the run's line:\n%s", out)
+			}
+			want := 1
+			if c.wantFile {
+				want = 0
+			}
+			if n := strings.Count(string(out), "not writing "+LogFileName); n != want {
+				t.Errorf("the console says %d times that the log is not written, want %d:\n%s", n, want, out)
+			}
+			if !c.wantFile && !strings.Contains(string(out), LogFileName+":") {
+				t.Errorf("the note does not say why (the open's error):\n%s", out)
+			}
+		})
+	}
 }

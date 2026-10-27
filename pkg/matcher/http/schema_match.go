@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/k0kubun/pp/v3"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -18,10 +17,6 @@ import (
 // failed on its own (a template variable's place) prints no pass line when
 // its schema matches.
 func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *zap.Logger, opts ...MatchOption) (bool, *models.Result) {
-	var mo matchOptions
-	for _, opt := range opts {
-		opt(&mo)
-	}
 	// If the response body was skipped during recording (>1MB), compute body size comparison
 	// and clear the actual body so the normal comparison runs (empty vs empty).
 	var bodySizeResult models.IntResult
@@ -145,16 +140,8 @@ func MatchSchema(tc *models.TestCase, actualResponse *models.HTTPResp, logger *z
 		if err := printer.Render(); err != nil {
 			utils.LogError(logger, err, "failed to print schema diffs")
 		}
-	} else if !mo.noPassLine {
-		newLogger := pp.New()
-		newLogger.WithLineInfo = false
-		newLogger.SetColorScheme(models.GetPassingColorScheme())
-		var log2 = ""
-		log2 += newLogger.Sprintf("Testrun passed for testcase with id: %s\n\n--------------------------------------------------------------------\n\n", tc.Name)
-		_, err := newLogger.Printf(log2)
-		if err != nil {
-			utils.LogError(logger, err, "failed to print the logs")
-		}
+	} else {
+		PrintPassLine(tc, logger, opts...)
 	}
 
 	return pass, result

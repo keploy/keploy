@@ -6,12 +6,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // grabPort binds an ephemeral port and returns the listener (still holding the
@@ -205,5 +212,110 @@ func TestNewAgentHTTPServer_BoundsIdleClientsWithoutCuttingStreams(t *testing.T)
 	}
 	if srv.IdleTimeout <= 0 {
 		t.Error("no IdleTimeout: a keep-alive connection that goes quiet is held indefinitely")
+	}
+}
+
+// A server that cannot bind for a reason a fresh start would meet again (here,
+// a port no TCP address has) fails the agent's start, reported at once: the
+// agent lives on without its server, and nothing else would say so. Run in a
+// process of its own: the start's report is the process's.
+func TestABindThatFailsForGoodFailsTheStart(t *testing.T) {
+	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestABindThatFailsForGoodFailsTheStart$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return
+	}
+	path := filepath.Join(t.TempDir(), utils.BootProgressFileName)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The reporter writes into the test's temp dir until it has seen ctx end:
+	// it is waited for before that dir is removed.
+	reported := utils.ReportBootProgress(ctx, zap.NewNop(), path)
+	t.Cleanup(func() { cancel(); <-reported })
+	StartAgentServer(ctx, zap.NewNop(), 70000, false, http.NotFoundHandler()) // returns: no listener
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if b, err := os.ReadFile(path); err == nil {
+			if p, err := utils.ParseBootProgress(b); err == nil && p.Failed {
+				if p.Ready || !strings.Contains(p.Failure, "127.0.0.1:70000") {
+					t.Fatalf("report %+v; want the bind's failure, not ready", p)
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a bind that failed for good did not fail the start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A port still held when the bind's retries run out is no failure of the
+// agent's start: a fresh start (the CLI's retry, on ports of its own) would not
+// meet it again. The start, taking no step while it waited, is left to the
+// CLI to give up on as stalled, which retries. Run in a process of its own:
+// the start's report is the process's.
+func TestABindToAPortStillHeldDoesNotFailTheStart(t *testing.T) {
+	if os.Getenv("KEPLOY_TEST_BOOT_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestABindToAPortStillHeldDoesNotFailTheStart$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), "KEPLOY_TEST_BOOT_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return
+	}
+	held, port, _ := grabPort(t)
+	defer held.Close()
+	budget, interval := bindRetryBudget, bindRetryInterval
+	bindRetryBudget, bindRetryInterval = 300*time.Millisecond, 20*time.Millisecond
+	defer func() { bindRetryBudget, bindRetryInterval = budget, interval }()
+	StartAgentServer(context.Background(), zap.NewNop(), port, false, http.NotFoundHandler()) // returns: the port stays held
+	select {
+	case <-utils.BootOver():
+		t.Fatal("a port still held when the bind's retries ran out failed (or ended) the agent's start")
+	default:
+	}
+}
+
+// Under the proven switch the line the agent's HTTP server logs as it starts
+// names the agent process as its answers do (processInstance,
+// models.AgentInstanceHeader) and its pid, so the two processes a verdict
+// names when the agent was started again ("agent process X, then Y") can be
+// matched to the agent's starts in its log. With the switch off the line is
+// as it was, its address alone.
+func TestTheServersStartLineNamesTheAgentProcessUnderTheSwitch(t *testing.T) {
+	for _, proven := range []string{"", "1"} {
+		t.Run(provenswitch.Env+"="+proven, func(t *testing.T) {
+			t.Setenv(provenswitch.Env, proven)
+			// A port held and a context already done: the server logs its
+			// start, finds the port taken and gives up at once, failing no
+			// start (the context ended it).
+			holder, port, _ := grabPort(t)
+			defer holder.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			core, logs := observer.New(zap.InfoLevel)
+			StartAgentServer(ctx, zap.New(core), port, false, http.NotFoundHandler())
+
+			starts := logs.FilterMessage("Starting Agent's HTTP server").All()
+			if len(starts) != 1 {
+				t.Fatalf("%d start lines, want 1: %v", len(starts), logs.All())
+			}
+			got := starts[0].ContextMap()
+			want := map[string]any{"addr": agentBindAddr(port, false)}
+			if proven == "1" {
+				want["agent process"] = processInstance
+				want["pid"] = int64(os.Getpid())
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("start line's fields %v, want %v", got, want)
+			}
+		})
+	}
+	if processInstance == "" {
+		t.Fatal("the agent process has no instance")
 	}
 }

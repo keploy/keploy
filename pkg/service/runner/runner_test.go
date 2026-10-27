@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.uber.org/zap"
 )
 
@@ -205,6 +206,7 @@ func (s *setupInstr) StoreMocks(_ context.Context, f, u []*models.Mock) error {
 }
 func (*setupInstr) MakeAgentReadyForDockerCompose(context.Context) error { return nil }
 func (*setupInstr) NotifyGracefulShutdown(context.Context) error         { return nil }
+func (*setupInstr) WatchAgentStart(context.Context) <-chan error         { return nil }
 
 // skippingMockDB reads every pool in one pass (TestSetMocksReader); its
 // decoders skipped the named documents and read the filtered mocks.
@@ -245,6 +247,62 @@ func TestTheRunnerStoresNoConnectionFailureOnTheAgent(t *testing.T) {
 	}
 	if setup.mockKindByName["mock-0"] != models.ConnectionFailure {
 		t.Fatal("the connection failure's kind is still known, for the mismatch report")
+	}
+}
+
+// The runner holds a small entry per mock, not the set: from the YAML store it
+// stores on the agent each mock with its payload left in the set's mocks.yaml,
+// which the agent client reads back as it sends the mock (models.Mock.WithPayload).
+func TestTheRunnerStoresMocksWithTheirPayloadsLeftOnDisk(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "") // gob would write, and read, a mocks.gob instead
+	dir := t.TempDir()
+	ys := mockdb.New(zap.NewNop(), dir, "mocks")
+	ts := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
+	for i, typ := range []string{"config", "mocks"} {
+		m := &models.Mock{
+			Version: models.GetVersion(),
+			Kind:    models.HTTP,
+			Spec: models.MockSpec{
+				Metadata:         map[string]string{"type": typ},
+				HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://example.com/" + typ, ProtoMajor: 1, ProtoMinor: 1},
+				HTTPResp:         &models.HTTPResp{StatusCode: 200, StatusMessage: "OK", Body: `{"pool":"` + typ + `"}`},
+				ReqTimestampMock: ts.Add(time.Duration(i) * time.Second),
+				ResTimestampMock: ts.Add(time.Duration(i)*time.Second + time.Millisecond),
+			},
+		}
+		if err := ys.InsertMock(context.Background(), m, "test-set-0"); err != nil {
+			t.Fatalf("InsertMock: %v", err)
+		}
+	}
+
+	instr := &setupInstr{}
+	r := &Runner{
+		logger:          zap.NewNop(),
+		instrumentation: instr,
+		mappingDB:       &stubMappingDB{mappings: map[string][]models.MockEntry{}},
+		mockDB:          ys,
+	}
+	setup, err := r.setupTestSet(context.Background(), "test-set-0", time.Time{})
+	if err != nil {
+		t.Fatalf("setupTestSet: %v", err)
+	}
+	defer setup.cleanup()
+
+	if len(instr.stored) != 2 {
+		t.Fatalf("stored %d mocks on the agent; want both of the set's", len(instr.stored))
+	}
+	for _, m := range instr.stored {
+		if !m.PayloadOnDisk() || m.Spec.HTTPResp != nil {
+			t.Fatalf("%s was stored with its payload in memory; the runner holds a small entry per mock", m.Name)
+		}
+		sent, err := m.WithPayload(context.Background())
+		if err != nil {
+			t.Fatalf("reading %s's payload back: %v", m.Name, err)
+		}
+		want := `{"pool":"` + m.Spec.Metadata["type"] + `"}`
+		if sent.Spec.HTTPResp == nil || sent.Spec.HTTPResp.Body != want {
+			t.Fatalf("%s read back %+v; want the recorded body %s", m.Name, sent.Spec.HTTPResp, want)
+		}
 	}
 }
 

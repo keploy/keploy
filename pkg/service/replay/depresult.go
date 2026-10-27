@@ -1,12 +1,13 @@
 package replay
 
 import (
-	"net/url"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
 
@@ -23,97 +24,65 @@ type mockDisplayInfo struct {
 	summary  string
 	protocol string
 	target   string
+	// request is the mock's models.Mock.RequestFingerprint and recordedAt
+	// its request's time at record, for a mock whose payload is in memory.
+	request    string
+	recordedAt time.Time
+	// lifetime is the mock's (models.TestModeInfo.Lifetime), for a mock
+	// whose payload is in memory.
+	lifetime models.Lifetime
+	// onDisk is the mock when a replay's read left its payload on disk
+	// (models.Mock.LeavePayloadOnDisk): its summary and target, which can
+	// carry a whole recorded command, are worked out when a report names it
+	// rather than held for every mock of the set.
+	onDisk *models.Mock
 }
 
-// mockTargetFromSpec derives a human-meaningful destination for a mock.
-//
-// Neither models.MockEntry (the mapping / expected side) nor models.MockState
-// (the consumed side) records a destination, so the loaded *models.Mock is the
-// only place one exists. Priority order, MOST DISCRIMINATING first — the row
-// name has to tell five outgoing calls to the same service apart:
-//
-//  1. HTTP: method + host + path. A bare host collapses every call to one
-//     service into indistinguishable rows; `GET api.internal:8080/orders` is
-//     the string a human acts on and an agent keys off.
-//  2. Metadata["destAddr"] ("host:port", written by the MySQL and Postgres
-//     recorders) PLUS the mock's operation token when it has one, so the two
-//     protocols that route every call through a single address still produce
-//     distinct rows ("mysql:3306 COM_QUERY").
-//  3. The protocol-generic summary (models.MockSummaryFromSpec), which is what
-//     the report UI already shows for MatchedCalls. It beats the bare
-//     `operation` token below because for Mongo/MySQL/Postgres it is
-//     "<protocol> <operation>" rather than a naked verb.
-//  4. The operation token on its own — the only identifying thing some v1
-//     mocks carry.
-//
-// Returns "" when none is available; DepRowName renders correctly without it.
+// summaryOf is the mock's summary (models.MockSummaryFromSpec).
+func (i mockDisplayInfo) summaryOf() string {
+	if i.onDisk != nil {
+		return models.MockSummaryFromSpec(i.onDisk)
+	}
+	return i.summary
+}
+
+// requestOf is the mock's request fingerprint (models.Mock.RequestFingerprint).
+func (i mockDisplayInfo) requestOf() string {
+	if i.onDisk != nil {
+		return i.onDisk.RequestFingerprint()
+	}
+	return i.request
+}
+
+// recordedAtOf is when the mock's request was recorded.
+func (i mockDisplayInfo) recordedAtOf() time.Time {
+	if i.onDisk != nil {
+		return i.onDisk.Spec.ReqTimestampMock
+	}
+	return i.recordedAt
+}
+
+// lifetimeOf is the mock's lifetime (models.TestModeInfo.Lifetime).
+func (i mockDisplayInfo) lifetimeOf() models.Lifetime {
+	if i.onDisk != nil {
+		return i.onDisk.TestModeInfo.Lifetime
+	}
+	return i.lifetime
+}
+
+// targetOf is the mock's target (mockTargetFromSpec).
+func (i mockDisplayInfo) targetOf() string {
+	if i.onDisk != nil {
+		return mockTargetFromSpec(i.onDisk)
+	}
+	return i.target
+}
+
+// mockTargetFromSpec is models.MockTargetFromSpec: a human-meaningful
+// destination for a mock, which a mock whose payload a replay left on disk
+// answers from what it kept.
 func mockTargetFromSpec(mock *models.Mock) string {
-	if mock == nil {
-		return ""
-	}
-	if t := httpTargetFromReq(mock.Spec.HTTPReq); t != "" {
-		return t
-	}
-	md := mock.Spec.Metadata
-	op := mockOperationToken(md)
-	if v := strings.TrimSpace(md["destAddr"]); v != "" {
-		if op != "" {
-			return v + " " + op
-		}
-		return v
-	}
-	// MockSummaryFromSpec falls back to the bare Kind when a mock carries
-	// nothing identifying. That is already the row's `type` token, so using it
-	// as the target too would render "deps[0] redis Redis (presence)".
-	if s := strings.TrimSpace(models.MockSummaryFromSpec(mock)); s != "" && s != string(mock.Kind) {
-		return s
-	}
-	return op
-}
-
-// mockOperationToken returns the most specific operation verb a mock's
-// metadata carries.
-//
-// "operation" is the key every v1 recorder writes and the only one
-// models.MockSummaryFromSpec reads. The MySQL v2 recorder writes
-// "requestOperation"/"responseOperation" instead (see
-// integrations/mysql/recorder/record_v2.go), which is why MockSummaryFromSpec
-// returns a bare "MySQL" for those mocks — and why every MySQL dependency row
-// would otherwise collapse to the shared "mysql:3306" address with only the
-// index to tell them apart. The response side is deliberately not consulted:
-// it names the server's reply status ("OK"), not the call.
-func mockOperationToken(md map[string]string) string {
-	for _, key := range []string{"operation", "requestOperation"} {
-		if v := strings.TrimSpace(md[key]); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// httpTargetFromReq renders an outgoing HTTP call as "<METHOD> <host><path>".
-// The scheme is dropped (it is implied by the port and adds noise to a name
-// that is already long) but the path is not: the path is the only thing that
-// distinguishes two calls to the same service.
-func httpTargetFromReq(req *models.HTTPReq) string {
-	if req == nil {
-		return ""
-	}
-	method := strings.TrimSpace(string(req.Method))
-	raw := strings.TrimSpace(req.URL)
-	target := raw
-	if u, err := url.Parse(raw); err == nil && u.Host != "" {
-		target = u.Host + u.EscapedPath()
-	}
-	switch {
-	case method == "" && target == "":
-		return ""
-	case method == "":
-		return target
-	case target == "":
-		return method
-	}
-	return method + " " + target
+	return models.MockTargetFromSpec(mock)
 }
 
 // eligibleExpectedEntries is THE SINGLE DEFINITION of "which of the
@@ -181,7 +150,16 @@ func eligibleExpectedEntries(
 // isMockSubsetWithConfig) calls it, so the two sides exclude the same kinds:
 // a kind left out of one side only makes every test that maps one of its
 // mocks look like it lost a dependency.
+//
+// Under the proven switch the expected side keeps every data-plane mock,
+// session-tier ones included (excludedFromTestMockAssertion), so the consumed
+// side must keep them too, or an untagged HTTP mock the test did consume would
+// read as unconsumed. Only the excluded kinds and the recorder-tagged
+// protocol-phase mocks are left out.
 func consumedOutsideAssertion(m models.MockState) bool {
+	if provenswitch.On() {
+		return models.ExcludedFromDependencyAssertion(m.Kind) || ((m.Type == "config" || m.Type == "connection") && !m.DataPlane)
+	}
 	return models.ExcludedFromDependencyAssertion(m.Kind) || isReusableTierState(m)
 }
 
@@ -277,6 +255,7 @@ func buildDepResults(
 	}
 
 	var out []models.DepResult
+	var missing []models.UnconsumedMock
 	consumedCount := 0
 	// missingOverflow counts the missing dependencies past depMissingRowCap.
 	// They collapse into one models.DepMissingOverflowRow instead of being
@@ -320,6 +299,7 @@ func buildDepResults(
 			consumedCount++
 			continue
 		}
+		missing = append(missing, models.UnconsumedMock{Name: m.Name, Kind: m.Kind})
 
 		if len(out) >= depMissingRowCap {
 			// Past the cap. The dependencies are visited in RECORDED order
@@ -385,7 +365,7 @@ func buildDepResults(
 		out = append(out, models.DepMissingOverflowRow(missingOverflow))
 	}
 
-	return depAssertion{Checked: true, Consumed: consumedCount, Rows: out}
+	return depAssertion{Checked: true, Consumed: consumedCount, Rows: out, Missing: missing}
 }
 
 // depAssertion is the complete per-test dependency verdict buildDepResults
@@ -412,6 +392,10 @@ type depAssertion struct {
 	// Rows carries one presence row per dependency that went missing, plus at
 	// most one models.DepMissingOverflowRow. Nil when nothing went missing.
 	Rows []models.DepResult
+	// Missing names every dependency that went missing, by its mock's name
+	// and kind, in recorded order: Rows caps its rows and names a display
+	// target, not the mock.
+	Missing []models.UnconsumedMock
 }
 
 // depMissingRowCap bounds the number of INDIVIDUAL missing-dependency rows
@@ -465,7 +449,7 @@ func depTypeFor(m models.MockEntry, mockKindByName map[string]models.Kind, looku
 // Empty is a legitimate answer (r.mockDB may be nil, or the mock carries
 // nothing identifying); DepRowName renders correctly without it.
 func depTargetFor(m models.MockEntry, lookup map[string]mockDisplayInfo) string {
-	return lookup[m.Name].target
+	return lookup[m.Name].targetOf()
 }
 
 // isUnassertedMockEntry reports whether a mapping entry refers to a mock of a
@@ -488,39 +472,35 @@ func isUnassertedMockEntry(m models.MockEntry, mockKindByName map[string]models.
 	return false
 }
 
-// shouldEmitFailureLogs reports whether the response-diff logs are printed for
-// a test whose per-test mock set diverged.
-//
-// Historically a divergence meant "re-record", so the diff was suppressed as
-// noise and the test was quietly demoted to OBSOLETE. Under
-// --assert-dependencies that same test is about to be marked FAILED, and
-// suppressing its diffs would hand the user a red test with no explanation.
-// Knob off (the default) is byte-identical to before.
-func shouldEmitFailureLogs(mockSetMismatch, assertDependencies bool) bool {
-	return !mockSetMismatch || assertDependencies
-}
-
 // dependencyAssertionRejects reports whether the opt-in dependency assertion
 // (config.Test.AssertDependencies / --assert-dependencies) turns a diverged
 // per-test mock set into a real test failure.
 //
 // A diverged set means an expected per-test mock was not observed during the
 // test's window — the app stopped making an outgoing call the recording says
-// it makes. Today that is demoted to OBSOLETE and the run still exits 0
-// (keploy-consumer-design-v2.md §5, false-pass row 0). Default false keeps
-// that behaviour for every existing user; opting in fails the test, the test
-// set, and the process exit code.
+// it makes. A test whose response failed too is demoted to OBSOLETE, which
+// leaves it, and its test set, not judged (FailureInfo.MappingStale; it used to
+// exit 0: keploy-consumer-design-v2.md §5, false-pass row 0, now closed); one
+// whose response matched passes. Default false keeps that for every existing
+// user; opting in fails the test, the test set, and the process exit code.
 func dependencyAssertionRejects(mockSetMismatch, assertDependencies bool) bool {
 	return mockSetMismatch && assertDependencies
 }
 
 // demoteToObsolete reports whether a non-passing test whose mock set diverged
-// keeps the historical silent demotion to OBSOLETE (which does NOT fail the
-// test set and does NOT affect the exit code) rather than being marked FAILED.
+// is demoted to OBSOLETE (the recorded mapping may be stale) rather than being
+// marked FAILED. OBSOLETE does not fail the test set: the test has no verdict
+// (FailureInfo.MappingStale), and a set that would otherwise pass is not
+// judged, so keploy exits non-zero all the same (testsWithStaleMapping). A set
+// with a verdict of its own (a FAILED test, a partial run) keeps it, and its
+// reason names the tests not judged.
 //
-// Three independent opt-ins veto the demotion: --schema-noise-strict
-// (strictMockReject), --assert-dependencies (depAssertFail) and
-// --strict-failure. All default false, so the default verdict is unchanged.
+// Two independent opt-ins veto the demotion of a wrong answer:
+// --assert-dependencies (depAssertFail) and --strict-failure. A third,
+// --schema-noise-strict (strictMockReject), fails a test whose answer
+// MATCHED while its expected mock was rejected for a drifted request field
+// (resolveTestOutcome); it leaves a wrong answer to the other two. All default
+// false.
 func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFailure bool) bool {
 	return mockSetMismatch && !strictMockReject && !depAssertFail && !strictFailure
 }
@@ -537,8 +517,10 @@ func demoteToObsolete(mockSetMismatch, strictMockReject, depAssertFail, strictFa
 // asserting, on its own.
 //
 // failsSet is deliberately separate from "status == FAILED": OBSOLETE does not
-// fail the test set, and that asymmetry IS the silent-green hole
-// (keploy-consumer-design-v2.md §5, false-pass row 0).
+// fail the test set. That asymmetry was the silent-green hole
+// (keploy-consumer-design-v2.md §5, false-pass row 0); it is closed by an
+// OBSOLETE test having no verdict, which leaves its set not judged
+// (testsWithStaleMapping) rather than PASSED.
 func resolveTestStatus(responseMatched, mockSetMismatch, strictMockReject, depAssertFail, strictFailure bool) (status models.TestStatus, failsSet bool) {
 	if responseMatched {
 		return models.TestStatusPassed, false
@@ -711,6 +693,11 @@ func attachDepResults(
 	// run, which omitempty then keeps off the wire entirely.
 	tcResult.Result.DepsChecked = dep.Checked
 	tcResult.Result.DepsConsumed = dep.Consumed
+	// Under the proven switch each unconsumed test mock fails the test, and
+	// its name is the evidence (unconsumed_mock).
+	if provenswitch.On() {
+		tcResult.FailureInfo.UnconsumedMocks = dep.Missing
+	}
 
 	missingNames = models.MissingDepNames(dep.Rows)
 	if len(missingNames) == 0 {
@@ -777,6 +764,11 @@ func recordUnexercised(set map[string]models.TestStatus, name string, status mod
 // verdict, so the log tells the user which knob to look at instead of pointing
 // them at re-recording.
 func vetoFlagName(depAssertFail, strictFailure bool) string {
+	if (depAssertFail || strictFailure) && provenswitch.On() {
+		// Under the switch the veto holds whatever the flags say: it is the
+		// switch that keeps the test FAILED, so the switch is named, alone.
+		return provenswitch.Env + "=1"
+	}
 	switch {
 	case depAssertFail && strictFailure:
 		return "--assert-dependencies, --strict-failure"
@@ -816,7 +808,7 @@ func vetoFlagName(depAssertFail, strictFailure bool) string {
 //
 // deferredStreaming is the SIXTH case (it is checked last) and, with the two
 // above it, one of the three that are not test-set wide. RunTestSet splits
-// SSE/chunked test cases out of the main replay loop into a Phase-2 pass
+// streaming test cases out of the main replay loop into a Phase-2 pass
 // (pkg.IsHTTPStreamingTestCase), and that pass deliberately writes no
 // DepResult and never calls resolveTestOutcome — see the NOTE on
 // models.Result.DepResult in the Phase-2 body — so --assert-dependencies
@@ -884,7 +876,7 @@ func dependencyAssertionInertReason(instrument, useMappingBased, isMappingEnable
 // depInertStreamingReason is compared by identity in
 // dependencyAssertionInertMessage to pick the scope-accurate message, so it
 // lives as a constant rather than an inline string.
-const depInertStreamingReason = "this test set contains streaming (SSE/chunked) test cases, which are replayed in a deferred pass that writes no dependency rows and runs no dependency assertion: those test cases cannot be failed by the flag, however healthy the mapping is"
+const depInertStreamingReason = "this test set contains streaming test cases (server-sent events, NDJSON or multipart by their Content-Type, and application/stream+json under KEPLOY_PROVEN=1, or a text or binary body the recording kept as frames), which are replayed in a deferred pass that writes no dependency rows and runs no dependency assertion: those test cases cannot be failed by the flag, however healthy the mapping is"
 
 // depInertConsumedFetchReason names the state where the assertion is fully
 // armed — instrument mode, mapping enabled, a usable mappings.yaml — and the
@@ -968,15 +960,25 @@ func dependencyAssertionInertMessage(reason string) string {
 // The message is chosen from the reason (dependencyAssertionInertMessage)
 // because the scopes are not the same claim.
 func (r *Replayer) warnDependencyAssertionInert(testSetID string, useMappingBased, isMappingEnabled, consumedFetchFailed, deferredStreaming, noEligibleDeps bool, warned *bool) {
-	if !r.config.Test.AssertDependencies || warned == nil || *warned {
+	if !r.assertTestMocks() || warned == nil || *warned {
 		return
+	}
+	if provenswitch.On() {
+		// Under the proven switch the streaming pass judges its tests on
+		// their test mocks too (unconsumedTestMocks): it is not inert there.
+		deferredStreaming = false
 	}
 	reason := dependencyAssertionInertReason(r.instrument, useMappingBased, isMappingEnabled, consumedFetchFailed, deferredStreaming, noEligibleDeps)
 	if reason == "" {
 		return
 	}
 	*warned = true
-	r.logger.Warn(dependencyAssertionInertMessage(reason),
+	msg := dependencyAssertionInertMessage(reason)
+	if provenswitch.On() {
+		// It is the switch that asks for the assertion, whatever the flags.
+		msg = provenswitch.Env + "=1" + strings.TrimPrefix(msg, "--assert-dependencies")
+	}
+	r.logger.Warn(msg,
 		zap.String("testset", testSetID),
 		zap.String("reason", reason))
 }

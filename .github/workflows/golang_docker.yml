@@ -74,6 +74,7 @@ jobs:
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
           REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          RECORD_SRC: ${{ matrix.config.record_src }}
           # RCA instrumentation for postgres-v3 per-test window misalignment
           # (see PR #4126). Only echo-sql is postgres-touching in this matrix;
           # the env var is a no-op for the non-PG apps so we set it
@@ -113,8 +114,11 @@ jobs:
   # still-running application after a restart. Before the recording starts on
   # a restarted agent, the application's calls must be passed through, and a
   # pooled connection opened then must be reset when it starts and its
-  # reconnection recorded. Only the PR's image: the published one is what this
-  # guards against.
+  # reconnection recorded. With the proven switch on, the agent started again
+  # must name another process in its answers than the one before
+  # (X-Keploy-Agent-Instance), by which keploy test refuses a verdict on what
+  # the agent before held; with it off, no answer names one. Only the PR's
+  # image: the published one is what this guards against.
   agent_restart_docker:
     # Passes in well under a minute. A run in which nothing is recorded waits
     # out the script's no-progress guard (HANG_GUARD, 300s) on each recorder

@@ -1,6 +1,10 @@
 package agent
 
-import "go.keploy.io/server/v3/pkg/agent/hooks/structs"
+import (
+	"sync"
+
+	"go.keploy.io/server/v3/pkg/agent/hooks/structs"
+)
 
 // Pinnable is implemented by eBPF maps that support pinning to bpffs.
 type Pinnable interface {
@@ -74,4 +78,61 @@ var ExtraPassThroughPortsHook ExtraPassThroughPortsFn
 
 func RegisterExtraPassThroughPortsHook(h ExtraPassThroughPortsFn) {
 	ExtraPassThroughPortsHook = h
+}
+
+// extraLossReporters are the capture-loss counts a downstream build adds to
+// the agent's own (RegisterCaptureLossReporter), under extraLossMu, each with
+// the token its unregister removes it by.
+var (
+	extraLossMu        sync.Mutex
+	extraLossReporters []registeredLossReporter
+	extraLossNext      uint64
+)
+
+type registeredLossReporter struct {
+	r     CaptureLossReporter
+	token uint64
+}
+
+// RegisterCaptureLossReporter adds r's counts to every read of the agent's
+// capture losses, beside the proxy's and the hooks' own: a downstream build
+// whose capture neither of them sees (one of its own kernel programs, its own
+// ring buffer) counts what that capture lost here, so that a session under
+// the proven switch charges it to its tests as it charges keploy's own. r's
+// counts must only ever grow for the agent's life, as every count there does
+// (models.CaptureLosses). r may also be a CaptureLossDrainer (drained before
+// each read) and a CaptureLossErrReporter (its counts unknown while it errs),
+// as the hooks may. Call it before the agent serves. unregister takes r out
+// again (a test's cleanup).
+func RegisterCaptureLossReporter(r CaptureLossReporter) (unregister func()) {
+	if r == nil {
+		return func() {}
+	}
+	extraLossMu.Lock()
+	defer extraLossMu.Unlock()
+	extraLossNext++
+	token := extraLossNext
+	extraLossReporters = append(extraLossReporters, registeredLossReporter{r: r, token: token})
+	return func() {
+		extraLossMu.Lock()
+		defer extraLossMu.Unlock()
+		for i, x := range extraLossReporters {
+			if x.token == token {
+				extraLossReporters = append(extraLossReporters[:i:i], extraLossReporters[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// CaptureLossReporters are the reporters RegisterCaptureLossReporter added,
+// in the order it added them.
+func CaptureLossReporters() []CaptureLossReporter {
+	extraLossMu.Lock()
+	defer extraLossMu.Unlock()
+	out := make([]CaptureLossReporter, 0, len(extraLossReporters))
+	for _, x := range extraLossReporters {
+		out = append(out, x.r)
+	}
+	return out
 }

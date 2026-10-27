@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,10 +19,14 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
-var _ pkg.AppPortReachability = (*AgentClient)(nil)
+var (
+	_ pkg.AppPortReachability = (*AgentClient)(nil)
+	_ pkg.AppPortPublishing   = (*AgentClient)(nil)
+)
 
 // appPortCheckTimeout bounds one UnreachableAppPort answer: a container inspect
 // and up to two questions to the agent. It is asked from a recording's insert
@@ -29,6 +34,15 @@ var _ pkg.AppPortReachability = (*AgentClient)(nil)
 // daemon must hold none of them up for longer. A var only so tests can shorten
 // it.
 var appPortCheckTimeout = 5 * time.Second
+
+// publishAnswerStall bounds PublishedHostPort's inspect of the agent
+// container in keploy's runnable time (withRunnableBound). A var only so
+// tests can shorten it.
+var publishAnswerStall = stall.HangBudget
+
+// errPublishSilent is why PublishedHostPort could not tell: the daemon did
+// not answer its inspect for publishAnswerStall of keploy's runnable time.
+var errPublishSilent = errors.New("the container engine's daemon did not answer the agent container's inspect")
 
 // UnreachableAppPort implements pkg.AppPortReachability for Docker mode.
 //
@@ -39,8 +53,9 @@ var appPortCheckTimeout = 5 * time.Second
 // port port on an address host reaches leads, and nowhere if there is none. It
 // is for the app's server on appPort, the port it was recorded on. Replay
 // sends each test to that port number, unless test.port (--port), a protocol
-// port or replaceWith sends it to another host port, which a compose file
-// publishing "18080:8080" needs.
+// port or replaceWith sends it to another host port, or the app's port is
+// published on one other host port only (a compose file publishing
+// "18080:8080"), where it sends it instead (PublishedHostPort).
 //
 // What can be told from the publishes and from where the agent, which shares
 // the app's namespace, sees the app listen:
@@ -74,33 +89,13 @@ var appPortCheckTimeout = 5 * time.Second
 // it up), whenever the container cannot be inspected, and wherever the agent
 // cannot tell what decides it: "cannot tell" must never read as "unreachable".
 func (a *AgentClient) UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string {
-	if a.conf == nil || a.dockerClient == nil || a.conf.KeployContainer == "" {
-		return ""
-	}
-	cmdType := utils.CmdType(a.conf.CommandType)
-	if !utils.IsDockerCmd(cmdType) || !isLoopbackHost(host) {
-		return ""
-	}
 	ctx, cancel := context.WithTimeout(ctx, appPortCheckTimeout)
 	defer cancel()
-	inspect, err := a.dockerClient.ContainerInspect(ctx, a.conf.KeployContainer)
-	if err != nil {
-		a.logger.Debug("could not inspect the keploy agent container to tell whether the app's port is published",
-			zap.String("container", a.conf.KeployContainer), zap.Uint16("port", port), zap.Uint16("appPort", appPort), zap.Error(err))
-		return ""
-	}
-	// The agent container also publishes keploy's own ports on loopback; the
-	// user never asked for those, so they are not listed as theirs.
-	own := map[string]bool{}
-	for _, p := range []uint32{a.conf.Agent.AgentPort, a.conf.Agent.ProxyPort, a.conf.ProxyPort, a.conf.Agent.DnsPort, a.conf.DNSPort} {
-		if p != 0 {
-			own[strconv.FormatUint(uint64(p), 10)] = true
-		}
-	}
-	pub, ok := appPortPublish(inspect, host, port, appPort, own)
+	pub, ok := a.inspectPublish(ctx, host, port, appPort)
 	if !ok {
 		return ""
 	}
+	cmdType := utils.CmdType(a.conf.CommandType)
 	listening := a.appListening(ctx, pub.listenPort())
 	var atTarget appListening
 	if pub.leadsTo != "" && (listening.state == listenNothing || listening.state == listenLoopbackOnly) {
@@ -110,6 +105,77 @@ func (a *AgentClient) UnreachableAppPort(ctx context.Context, host string, port,
 		atTarget = a.appListening(ctx, pub.targetPort())
 	}
 	return unreachableAppPortReason(pub, cmdType, listening, atTarget)
+}
+
+// inspectPublish is how the agent container publishes host port port and the
+// app's port appPort (0: not known), for tests sent from host (portPublish).
+// ok is false outside Docker mode, for a host that is not this machine's
+// loopback, when the container cannot be inspected, and where the question
+// does not apply (appPortPublish).
+func (a *AgentClient) inspectPublish(ctx context.Context, host string, port, appPort uint16) (portPublish, bool) {
+	if !a.publishApplies(host) {
+		return portPublish{}, false
+	}
+	inspect, err := a.dockerClient.ContainerInspect(ctx, a.conf.KeployContainer)
+	if err != nil {
+		a.logger.Debug("could not inspect the keploy agent container to tell whether the app's port is published",
+			zap.String("container", a.conf.KeployContainer), zap.Uint16("port", port), zap.Uint16("appPort", appPort), zap.Error(err))
+		return portPublish{}, false
+	}
+	// The agent container also publishes keploy's own ports on loopback; the
+	// user never asked for those, so they are not listed as theirs.
+	own := map[string]bool{}
+	for _, p := range []uint32{a.conf.Agent.AgentPort, a.conf.Agent.ProxyPort, a.conf.ProxyPort, a.conf.Agent.DnsPort, a.conf.DNSPort} {
+		if p != 0 {
+			own[strconv.FormatUint(uint64(p), 10)] = true
+		}
+	}
+	return appPortPublish(inspect, host, port, appPort, own)
+}
+
+// publishApplies says the question of how the agent container publishes a
+// port applies: Docker mode, a container to inspect, and a host that is this
+// machine's loopback.
+func (a *AgentClient) publishApplies(host string) bool {
+	if a.conf == nil || a.dockerClient == nil || a.conf.KeployContainer == "" {
+		return false
+	}
+	return utils.IsDockerCmd(utils.CmdType(a.conf.CommandType)) && isLoopbackHost(host)
+}
+
+// PublishedHostPort implements pkg.AppPortPublishing for Docker mode: the one
+// host port the app's port appPort is published on where host reaches it,
+// when host port appPort is not published to it (onlyHostPort). It reads the
+// agent container's publishes as they are now, the app sharing its network
+// namespace, never what the recording saw.
+//
+// Where a test is sent rests on this answer, so its wait is bounded in
+// keploy's own runnable time (stall.HangBudget, as a read of a container's
+// configuration elsewhere is), not wall time: a busy daemon on a loaded host
+// is waited for, and only one that does not answer while keploy could run
+// for the whole budget leaves the answer unknown.
+func (a *AgentClient) PublishedHostPort(ctx context.Context, host string, appPort uint16) (uint16, bool) {
+	if appPort == 0 || !a.publishApplies(host) {
+		return 0, false
+	}
+	ctx, cancel := withRunnableBound(ctx, publishAnswerStall, errPublishSilent)
+	defer cancel()
+	pub, ok := a.inspectPublish(ctx, host, appPort, appPort)
+	if !ok {
+		return 0, false
+	}
+	return pub.onlyHostPort(), true
+}
+
+// onlyHostPort is the host port the tests for the app's port go to in place
+// of it: the one host port it is published on, where host reaches it, when
+// host port port does not lead to it. 0 when host port port does, and when it
+// is published on several host ports or none.
+func (p portPublish) onlyHostPort() uint16 {
+	if p.reaches || len(p.elsewhere) != 1 {
+		return 0
+	}
+	return portNumber(p.elsewhere[0])
 }
 
 // isLoopbackHost reports whether a dial to host stays on this machine.

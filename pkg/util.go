@@ -36,7 +36,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -62,6 +64,10 @@ const (
 type HTTPStreamConfig struct {
 	Mode     HTTPStreamMode
 	Boundary string
+	// Target names the stream's request ("GET /events"), for what a stream
+	// that ended with nothing of its answer to compare says
+	// (AnswerStallError). Set only under the proven switch.
+	Target string
 }
 
 // StreamMismatchInfo holds details about a streaming frame mismatch for reporting.
@@ -345,7 +351,11 @@ func IsTime(stringDate string) bool {
 }
 
 type SimulationConfig struct {
-	APITimeout      uint64
+	APITimeout uint64
+	// Unbounded: no clock bounds the app's answer, and APITimeout is not
+	// applied. The replay sets it under the proven switch when the user set
+	// no apiTimeout of their own (config.Test.APITimeoutSet, rule 15).
+	Unbounded       bool
 	RequestTimeout  time.Duration
 	ConfigPort      uint32
 	KeployPath      string
@@ -358,7 +368,9 @@ type SimulationConfig struct {
 	// left out of the request: the recorded app_port does not replace the
 	// URL's port, and the recorded Host header is not sent, so the request
 	// asks for the URL's host (see HostHeaderOf). An app behind an ingress or
-	// a virtual host is not reached under the name it was recorded with.
+	// a virtual host is not reached under the name it was recorded with. (A
+	// CONNECT in authority form still asks for the target it was recorded
+	// with: its Host names that, not the app; ConnectsToAuthority.)
 	TargetFromURL bool
 	// SentTo, when set, is told where each HTTP request goes once everything
 	// that moves it (replaceWith, ports, TargetFromURL) has been applied: the
@@ -376,6 +388,20 @@ type SimulationConfig struct {
 	// never be reached at fails the test at once, saying why, instead of
 	// being re-sent as an app still starting.
 	AppPortReachability AppPortReachability
+	// PublishedPort, when non-nil, is the host port a test for the app's port
+	// appPort goes to from host in place of appPort, or 0 to send it to
+	// appPort (PublishedTarget): in Docker mode, the one host port the app's
+	// port is published on when host port appPort is not published to it
+	// (AppPortPublishing).
+	PublishedPort func(ctx context.Context, host string, appPort uint16) uint16
+	// StallGrace and StallClock are the stall rule on the exchange when
+	// Unbounded, under the proven switch (answerWatch): its grace
+	// (AnswerStallGrace when 0) and the runnable clock it is measured on
+	// (the process's own when nil). Tests set them.
+	StallGrace time.Duration
+	StallClock stall.Clock
+	// answer is the stall rule's watch on this exchange, for the dial.
+	answer *answerWatch
 }
 
 // AppPortReachability is implemented by an instrumentation that can tell a
@@ -403,6 +429,90 @@ type AppPortReachability interface {
 	// It bounds its own wait: it is asked from a recording's insert loop, a
 	// readiness gate and a failing test, with whatever context they hold.
 	UnreachableAppPort(ctx context.Context, host string, port, appPort uint16) string
+}
+
+// AppPortPublishing is implemented by an instrumentation that can tell, in
+// Docker mode, which host port reaches the app's port a test was recorded on
+// when host port appPort does not: a compose file publishing "18080:8080"
+// makes the app's port 8080 the host's 18080, and the client that was
+// recorded called 18080. Replay sends each test from the host to the port it
+// was recorded on (app_port, over the URL's: an app serving on several ports
+// gets each test on its own), and nothing answers there.
+type AppPortPublishing interface {
+	// PublishedHostPort is the one host port, on an address host reaches,
+	// the app's port appPort is published on, when host port appPort is not
+	// published to it. It is 0 when host port appPort reaches it, and when
+	// appPort is published on several host ports or none: the test then goes
+	// where it was recorded, as without it. known is false when it cannot
+	// tell (not Docker mode, a host not this machine's loopback, a container
+	// that cannot be inspected or is not running, host networking).
+	PublishedHostPort(ctx context.Context, host string, appPort uint16) (port uint16, known bool)
+}
+
+// PublishedTarget is target, as ResolveTestTarget made it from original for a
+// test recorded on the app's port appPort, sent instead to the host port
+// cfg.PublishedPort names: in Docker mode, the one host port the app's port is
+// published on when host port appPort is not published to it. It applies only
+// when target is that app port and nothing the user set chose this test's
+// port (ConfigPort, a replaceWith URL that matches original and names a
+// port, a replaceWith port mapping of appPort, TargetFromURL), since a port
+// the user chose is where they mean the test to go. A replacement or mapping
+// that does not apply to this test, or one that changes only its host or
+// path, does not stop it. Otherwise target is returned as it is.
+func PublishedTarget(ctx context.Context, cfg SimulationConfig, original, target string, appPort uint16, isHTTP bool) string {
+	if cfg.PublishedPort == nil || appPort == 0 || cfg.ConfigPort != 0 || cfg.TargetFromURL {
+		return target
+	}
+	if _, mapped := cfg.PortMappings[uint32(appPort)]; mapped {
+		return target
+	}
+	if _, replacement, ok := urlReplacement(original, cfg.URLReplacements); ok && replacementNamesPort(replacement, isHTTP) {
+		return target
+	}
+	var u *url.URL
+	var host, port string
+	if isHTTP {
+		var err error
+		if u, err = url.Parse(target); err != nil {
+			return target
+		}
+		host, port = u.Hostname(), u.Port()
+	} else {
+		var err error
+		if host, port, err = net.SplitHostPort(target); err != nil {
+			return target
+		}
+	}
+	if port != strconv.Itoa(int(appPort)) {
+		return target
+	}
+	p := cfg.PublishedPort(ctx, host, appPort)
+	if p == 0 || p == appPort {
+		return target
+	}
+	hostPort := net.JoinHostPort(host, strconv.Itoa(int(p)))
+	if !isHTTP {
+		return hostPort
+	}
+	u.Host = hostPort
+	return u.String()
+}
+
+// replacementNamesPort says a replaceWith value names a port of its own (a
+// "host:port", with or without the scheme), which then decides the port its
+// tests go to (ResolveTestTarget's replacementHasPort).
+//
+// ResolveTestTarget asks it of the replacement it applies (urlReplacement).
+func replacementNamesPort(replacement string, isHTTP bool) bool {
+	checkStr := replacement
+	if isHTTP {
+		if strings.HasPrefix(replacement, "http://") {
+			checkStr = strings.TrimPrefix(replacement, "http://")
+		} else if strings.HasPrefix(replacement, "https://") {
+			checkStr = strings.TrimPrefix(replacement, "https://")
+		}
+	}
+	return hasExplicitPort(checkStr)
 }
 
 // UnreachableAppPortError is a test request that failed to connect at an
@@ -680,6 +790,7 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	if err != nil {
 		return nil, err
 	}
+	testURL = PublishedTarget(ctx, cfg, tc.HTTPReq.URL, testURL, appPort, true)
 
 	req, err := http.NewRequestWithContext(ctx, string(tc.HTTPReq.Method), testURL, bytes.NewBuffer(reqBody))
 	if err != nil {
@@ -706,6 +817,22 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 	} else if hostHeader != "" {
 		logger.Debug("overriding host header", zap.String("host", hostHeader))
 		req.Host = hostHeader
+	}
+	// A CONNECT in authority form (ConnectsToAuthority) names the host and
+	// port it asks to reach as its request target and as its Host (RFC 9110
+	// §9.3.6, §7.2): the Host it was recorded with, wherever the request is
+	// sent (a base path's host included: it is the proxy the CONNECT goes
+	// through, not the target). net/http would send the recorded URL's path
+	// "/" as the request target; with no path and the target as the opaque
+	// part, it sends the target, and the answer's label (describe) names it.
+	// A recording with no Host asks for the host it is sent to.
+	if ConnectsToAuthority(req.Method, req.URL) {
+		target := hostHeader
+		if target == "" {
+			target = req.URL.Host
+		}
+		req.URL.Path, req.URL.RawPath, req.URL.Opaque = "", "", target
+		req.Host = target
 	}
 	if cfg.SentTo != nil {
 		asked := req.Host
@@ -767,6 +894,73 @@ func prepareHTTPRequest(ctx context.Context, tc *models.TestCase, testSet string
 		Client:  client,
 		AppPort: appPort,
 	}, nil
+}
+
+// endAtHeaders gives an answer that switches its connection to another
+// protocol no body: a 101 (Switching Protocols), whose response ends at its
+// header section, what follows on the connection belonging to the protocol it
+// switched to (RFC 9110 §15.2.2); and a 2xx answer to CONNECT, after whose
+// header section the connection is a tunnel, its bytes those of the
+// connection it tunnels to (RFC 9110 §9.3.6). For a 101, net/http hands back
+// the connection itself as the body; for a 2xx answer to CONNECT with no
+// length, a body read until the connection closes. keploy test speaks no
+// protocol a request switches to and opens no tunnel, so it closes the
+// connection unread, as a client that will not go on does. Read as the body,
+// the next protocol's bytes (an h2c tunnel's preface, a WebSocket's frames, a
+// tunnelled TLS handshake) made a replayed answer differ from its recording,
+// which has none, once a body of another kind than the recorded one was
+// compared (pkg/matcher/http, cfea2520e); and the read lasted as long as the
+// app kept the connection open. A 101's connection is the caller's once it is
+// handed back, so for an app that waits on its peer (most WebSocket servers)
+// that was for ever: neither --api-timeout nor the proven switch's stall rule
+// closes it. A CONNECT's body is the transport's still, and they end it, but
+// the test failed all the same.
+func endAtHeaders(resp *http.Response) {
+	if resp == nil || resp.Body == nil || !switchesProtocol(resp) {
+		return
+	}
+	_ = resp.Body.Close()
+	resp.Body = http.NoBody
+}
+
+// ConnectsToAuthority reports whether a test's request, by its method and
+// URL, is a CONNECT that names its target in authority form, the host and
+// port it asks to reach (RFC 9110 §9.3.6). The capture records one as a URL of
+// that authority (its Host) with the path "/" and no query. "CONNECT /", an
+// origin-form CONNECT to the path "/", records alike, and is taken as the
+// authority form, CONNECT's own; a CONNECT with another path or a query (Go's
+// net/rpc's "CONNECT /_goRPC_") is in origin form, its path its own.
+func ConnectsToAuthority(method string, u *url.URL) bool {
+	return method == http.MethodConnect && u != nil && u.Opaque == "" &&
+		(u.Path == "/" || u.Path == "") && u.RawQuery == "" && !u.ForceQuery
+}
+
+// switchesProtocol reports whether resp's connection goes on in another
+// protocol after its header section (endAtHeaders).
+func switchesProtocol(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return true
+	}
+	return resp.Request != nil && resp.Request.Method == http.MethodConnect && resp.StatusCode/100 == 2
+}
+
+// connClosingBody is the body of the app's answer to a test request: closed,
+// it also closes the connection the request's own client (prepareHTTPRequest
+// makes one for each request) left idle. No later request uses that client,
+// so a keep-alive connection it kept would stay open to the app for the rest
+// of keploy's run, one for each test: an app that serves each connection on
+// a thread of its own holds those threads, and one that waits for its open
+// connections as it stops (Python's ThreadingTCPServer joins each one's
+// thread on its way out) cannot stop while keploy runs.
+type connClosingBody struct {
+	io.ReadCloser
+	client *http.Client
+}
+
+func (b *connClosingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.client.CloseIdleConnections()
+	return err
 }
 
 // maxConnRefusedRetries bounds how many times a replay test request is re-sent
@@ -901,7 +1095,8 @@ func IsAppNoAnswer(err error) bool {
 	return isTimedOut(err) ||
 		errors.Is(err, context.Canceled) ||
 		isAnswerCutShort(err) ||
-		isGRPCNoAnswer(err)
+		isGRPCNoAnswer(err) ||
+		errors.Is(err, ErrAnswerStalled)
 }
 
 // IsTransportConnReset reports whether err is a transport-level connection
@@ -1007,6 +1202,28 @@ func answerDoesNotDecode(status int, encoding string, err error) error {
 	return fmt.Errorf("the app's %d answer does not decode as its Content-Encoding %q says: %v", status, encoding, err)
 }
 
+// decodedPart is what of a body cut part-way decodes as its Content-Encoding
+// says: the bytes gzip or br gave before the cut, which may be none. A body
+// in no encoding, or in one keploy does not decode (Decompress keeps such a
+// body as it came), is kept as it came.
+func decodedPart(encoding string, data []byte) string {
+	var r io.Reader
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return ""
+		}
+		r = zr
+	case "br":
+		r = brotli.NewReader(bytes.NewReader(data))
+	default:
+		return string(data)
+	}
+	out, _ := io.ReadAll(io.LimitReader(r, MaxDecompressedSize))
+	return string(out)
+}
+
 // SimulateHTTP sends tc's request to the app and returns its answer. It sends
 // tc as given: a test case's placeholders are rendered by the replay, on a
 // copy, before it gets here (pkg/templates), and what the app answers is
@@ -1016,18 +1233,40 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 
 	// Prepare the HTTP request using the shared helper
 	cfg.RequestTimeout = time.Second * time.Duration(cfg.APITimeout)
+	if cfg.Unbounded {
+		cfg.RequestTimeout = 0
+	}
+	// With no clock on the app's answer, the stall rule (answerWatch) ends
+	// an exchange the app makes no progress on: the whole call waits on the
+	// app, and the cut cancels the request's context.
+	cfg.answer = newAnswerWatch(cfg)
+	defer cfg.answer.stop()
+	defer cfg.answer.waiting()()
+	ctx = cfg.answer.bind(ctx)
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.countRequestBody(prepared.Request)
 
 	logger.Debug(fmt.Sprintf("Sending request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		prepared.Client.CloseIdleConnections()
+		if cfg.answer.didStall() {
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
+	}
+	endAtHeaders(httpResp)
+	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
+	if cfg.answer != nil {
+		cfg.answer.answering()
+		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
 	}
 
 	defer func() {
@@ -1041,6 +1280,18 @@ func SimulateHTTP(ctx context.Context, tc *models.TestCase, testSet string, logg
 	// Read full response body
 	respBody, errReadRespBody := io.ReadAll(httpResp.Body)
 	if errReadRespBody != nil {
+		if cfg.answer.didStall() {
+			// The answer stopped part-way: nothing whole to compare. Its
+			// status, headers and the part of its body that came, decoded
+			// as far as it decodes, go with the error, for the replay to
+			// judge the start first (AnswerBegan).
+			return &models.HTTPResp{
+				StatusCode:    httpResp.StatusCode,
+				StatusMessage: http.StatusText(httpResp.StatusCode),
+				Header:        ToYamlHTTPHeader(httpResp.Header),
+				Body:          decodedPart(httpResp.Header.Get("Content-Encoding"), respBody),
+			}, cfg.answer.err()
+		}
 		utils.LogError(logger, errReadRespBody, "failed reading response body")
 		return nil, errReadRespBody
 	}
@@ -1081,24 +1332,59 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 	// Calculate streaming timeout
 	APITimeout := ComputeStreamingTimeoutSeconds(tc, cfg.APITimeout)
 	cfg.RequestTimeout = time.Second * time.Duration(APITimeout)
+	if cfg.Unbounded {
+		// The stream's mocks keep their window (effectiveStreamMockWindow
+		// computes it on its own); only the clock on the app's answer goes.
+		cfg.RequestTimeout = 0
+	}
+
+	// With no clock on the app's answer, the stall rule (answerWatch) ends
+	// an exchange the app makes no progress on, the stream's read included:
+	// this call waits on the app, then each read of the returned Reader
+	// does, and its Close ends the watch. The cut cancels the request's
+	// context.
+	cfg.answer = newAnswerWatch(cfg)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cfg.answer.stop()
+		}
+	}()
+	defer cfg.answer.waiting()()
+	ctx = cfg.answer.bind(ctx)
 
 	// Prepare the HTTP request using the shared helper
 	prepared, err := prepareHTTPRequest(ctx, tc, testSet, logger, cfg)
 	if err != nil {
 		return nil, err
 	}
+	cfg.answer.describe(prepared.Request.Method+" "+prepared.Request.URL.RequestURI(), prepared.Request.ContentLength)
+	cfg.answer.countRequestBody(prepared.Request)
 
 	logger.Debug(fmt.Sprintf("Sending streaming request to user app:%v", prepared.Request))
 
 	// Execute the request (re-sending only on a pre-response connection-refused)
 	httpResp, errHTTPReq := doRequestWithConnRefusedRetry(ctx, logger, prepared.Client, prepared.Request, cfg.AppPortReachability, prepared.AppPort)
 	if errHTTPReq != nil {
+		prepared.Client.CloseIdleConnections()
+		if cfg.answer.didStall() {
+			return nil, cfg.answer.err()
+		}
 		utils.LogError(logger, errHTTPReq, "failed to send testcase request to app")
 		return nil, errHTTPReq
+	}
+	endAtHeaders(httpResp)
+	httpResp.Body = &connClosingBody{ReadCloser: httpResp.Body, client: prepared.Client}
+	if cfg.answer != nil {
+		cfg.answer.answering()
+		httpResp.Body = &answerBody{ReadCloser: httpResp.Body, w: cfg.answer}
 	}
 
 	statusMessage := http.StatusText(httpResp.StatusCode)
 	streamCfg := DetectHTTPStreamConfig(tc, httpResp)
+	if provenswitch.On() {
+		streamCfg.Target = prepared.Request.Method + " " + prepared.Request.URL.RequestURI()
+	}
 
 	logger.Debug("detected HTTP streaming response",
 		zap.String("testcase", tc.Name),
@@ -1113,6 +1399,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 		gzipReader, gzErr := gzip.NewReader(httpResp.Body)
 		if gzErr != nil {
 			httpResp.Body.Close()
+			if cfg.answer.didStall() {
+				// Not one byte of the stream came: nothing to compare.
+				return nil, cfg.answer.err()
+			}
 			utils.LogError(logger, gzErr, "failed to create gzip reader for streaming response")
 			// A body that ended, by its own framing, before its first byte
 			// (io.EOF), or whose first bytes are not a gzip header, is the
@@ -1135,6 +1425,10 @@ func SimulateHTTPStreaming(ctx context.Context, tc *models.TestCase, testSet str
 			zap.String("content_encoding", contentEncoding))
 	}
 
+	if cfg.answer != nil {
+		streamReader = &answerReader{ReadCloser: streamReader, w: cfg.answer}
+		handedOff = true
+	}
 	return &StreamingHTTPResponse{
 		StatusCode:    httpResp.StatusCode,
 		StatusMessage: statusMessage,
@@ -1177,8 +1471,22 @@ func (b *brotliReadCloser) Close() error {
 	return b.underlying.Close()
 }
 
-// DetectHTTPStreamConfig detects the streaming mode of an HTTP response based on content type and other factors.
+// DetectHTTPStreamConfig is how a test case's response is read: as a stream
+// of which format, or whole (HTTPStreamModeNone). It is keploy's one stream
+// rule (models.HTTPStreamOf) on the answer's Content-Type (the recorded one
+// when there is no answer yet, or the answer has none) and on whether the
+// recording kept its body as frames. How the answer framed its length
+// (Transfer-Encoding: chunked, no Content-Length) is no evidence of a stream.
+//
+// A response that HTTP says has no body (the answer to a HEAD, a 1xx, 204 or
+// 304: models.HTTPResponseHasNoBody) is no stream, whatever its Content-Type
+// says: it has no frame to compare, and its status and headers are compared
+// as any response's are. Which response has none the app's answer says
+// (streamResponseHasNoBody), never the recording.
 func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStreamConfig {
+	if streamResponseHasNoBody(tc, resp) {
+		return HTTPStreamConfig{Mode: HTTPStreamModeNone}
+	}
 	contentType := ""
 	if resp != nil {
 		contentType = resp.Header.Get("Content-Type")
@@ -1186,56 +1494,66 @@ func DetectHTTPStreamConfig(tc *models.TestCase, resp *http.Response) HTTPStream
 	if contentType == "" && tc != nil {
 		contentType = getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
 	}
+	framed := tc != nil && len(tc.HTTPResp.StreamBody) > 0
 
-	mediaType := ""
-	params := map[string]string{}
-	if contentType != "" {
-		parsedType, parsedParams, err := mime.ParseMediaType(contentType)
-		if err == nil {
-			mediaType = strings.ToLower(strings.TrimSpace(parsedType))
-			params = parsedParams
-		} else {
-			mediaType = strings.ToLower(strings.TrimSpace(contentType))
-		}
-	}
-
-	switch mediaType {
-	case "text/event-stream":
-		if isSSETestCase(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
-		}
-		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-	case "application/x-ndjson", "application/ndjson":
+	switch models.HTTPStreamOf(contentType, framed) {
+	case models.HTTPStreamSSE:
+		return HTTPStreamConfig{Mode: HTTPStreamModeSSE}
+	case models.HTTPStreamNDJSON:
 		return HTTPStreamConfig{Mode: HTTPStreamModeNDJSON}
-	case "multipart/x-mixed-replace", "multipart/mixed":
-		boundary := strings.TrimSpace(params["boundary"])
+	case models.HTTPStreamMultipart:
+		boundary := boundaryFromContentTypeHeader(contentType)
 		if boundary == "" && tc != nil {
 			boundary = boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type"))
 		}
 		if boundary != "" {
 			return HTTPStreamConfig{Mode: HTTPStreamModeMultipart, Boundary: boundary}
 		}
-	case "text/plain":
-		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-		}
-		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
-		}
-	case "application/octet-stream":
-		if tc != nil && len(tc.HTTPResp.StreamBody) > 0 {
-			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
-		}
-		if isLikelyStreamingHTTPResponse(tc, resp) {
-			return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
-		}
+	case models.HTTPStreamText:
+		return HTTPStreamConfig{Mode: HTTPStreamModePlainText}
+	case models.HTTPStreamBinary:
+		return HTTPStreamConfig{Mode: HTTPStreamModeBinary}
 	}
 
 	return HTTPStreamConfig{Mode: HTTPStreamModeNone}
 }
 
-// IsHTTPStreamingTestCase returns true if the testcase response is identified as a stream format
-// supported by replay-time incremental validators.
+// streamResponseHasNoBody reports whether resp, the app's answer, has no body
+// by HTTP: by the method of the request it answers (the test's recorded one
+// when resp names none) and its status. Before the answer (resp nil:
+// IsHTTPStreamingTestCase, choosing how a test's answer is read) it is false:
+// a test case of a stream's Content-Type is sent as a stream test whatever
+// its recorded method and status, and its answer says how it is read. The
+// recorded status cannot say it: the app may answer a recorded 204 or 304
+// with a stream, which read whole, as a response with no body by its
+// recording was, is a read that never ends when the app never ends the
+// stream (under the proven switch no clock bounds it, and every byte of it
+// is progress to the stall rule). Read as a stream, a recording of no frame
+// ends that read on the stream's first keepalive or frame
+// (streamRecordedWithNoFrame), and an answer with no body (any answer to a
+// HEAD among them) is compared as a response (SimulateHTTPStreaming, by its
+// answer).
+func streamResponseHasNoBody(tc *models.TestCase, resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	method := ""
+	if resp.Request != nil {
+		method = resp.Request.Method
+	} else if tc != nil {
+		method = string(tc.HTTPReq.Method)
+	}
+	return models.HTTPResponseHasNoBody(method, resp.StatusCode)
+}
+
+// IsHTTPStreamingTestCase reports whether a test case's recorded response is a
+// stream by keploy's one stream rule (DetectHTTPStreamConfig, on its recorded
+// Content-Type and frames): such a test case is replayed after its set's other
+// test cases, with a stream's mock window (effectiveStreamMockWindow), and its
+// answer read frame by frame. Every other one runs in its recorded order and
+// is read whole. A recorded HEAD, 204 or 304 is one by its Content-Type, as
+// any test case is, and its answer says whether it has a body
+// (streamResponseHasNoBody): one with none is compared as a response.
 func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 	if tc == nil {
 		return false
@@ -1245,7 +1563,40 @@ func IsHTTPStreamingTestCase(tc *models.TestCase) bool {
 
 // CompareHTTPStream compares an expected HTTP response with a streaming response.
 // It returns whether they match, the captured body content, mismatch details (if any), and any error.
+//
+// Without the proven switch the comparison stops at the last recorded frame
+// (part, or byte), so a stream that goes on is not waited for; a stream
+// recorded with no frame has none to stop at, and is read to its end under
+// either switch (streamRecordedWithNoFrame). Under the
+// switch every response is compared whole (O-K): the stream is read to its
+// end, and a frame after the recorded ones is a difference (trailingFrame),
+// as are bytes beyond a recorded binary stream. A keepalive beyond the
+// recorded ones (an SSE frame of comments alone, an NDJSON blank line) once
+// every recorded frame has come ends the read: the app kept the stream open
+// past its recording, and the test has no verdict (ErrStreamHeldOpen, row
+// W1). The read is bounded as the request is: the --api-timeout or the
+// recorded duration plus 10 s, whichever is longer
+// (ComputeStreamingTimeoutSeconds); under the
+// switch only when the user set an apiTimeout of their own, and otherwise by
+// no clock (SimulationConfig.Unbounded).
 func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	ok, body, info, err := compareHTTPStream(expectedResp, stream, cfg, jsonNoiseKeys, logger)
+	var st *AnswerStallError
+	if errors.As(err, &st) && st.Stream && info == nil {
+		// The stall rule cut the stream with every frame that came
+		// matching: judged on what came, not judged as a whole.
+		ok = true
+	}
+	if errors.As(err, &st) && !st.Stream && st.Target == "" && cfg.Target != "" {
+		// A stream with nothing of its answer to compare names its request.
+		named := *st
+		named.Target = cfg.Target
+		err = &named
+	}
+	return ok, body, info, err
+}
+
+func compareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPStreamConfig, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
 	switch cfg.Mode {
 	case HTTPStreamModeSSE:
 		return compareSSEStream(expectedResp, stream, jsonNoiseKeys, logger)
@@ -1260,6 +1611,93 @@ func CompareHTTPStream(expectedResp models.HTTPResp, stream io.Reader, cfg HTTPS
 	default:
 		return false, "", nil, fmt.Errorf("unsupported HTTP stream mode: %s", cfg.Mode)
 	}
+}
+
+// ErrStreamHeldOpen ends the read of a stream, under the proven switch, that
+// the app kept open past its recording (row W1): every recorded frame (gRPC:
+// message) came, and then a keepalive beyond the recorded ones. A stream is
+// read to its end and no clock ends it, so the app's keepalives do: the test
+// has no verdict (models.FailureInfo.StreamHeldOpen), never a pass, and the
+// wait does not outlast the app's next keepalive. A frame beyond the
+// recording that is no keepalive fails the test, as before.
+var ErrStreamHeldOpen = errors.New("the app kept the stream open past its recording")
+
+// ErrStreamStalled ends the read of a stream, under the proven switch, that
+// stalled short of its recording (row W1, round 2): the app neither ended it
+// nor sent the rest of its recorded answer, and sent keepalives, two in a row
+// with no frame (gRPC: message) between them. It is an ErrStreamHeldOpen
+// (errors.Is): the test has no verdict, never a pass or a failure on the rest
+// that did not come, and the wait never hangs. What came is still compared,
+// and a difference in it fails the test. An app idle for two of its
+// keepalive intervals before the rest of its answer is not judged either.
+var ErrStreamStalled error = streamStalledError{}
+
+type streamStalledError struct{}
+
+func (streamStalledError) Error() string {
+	return "the app kept the stream open and sent no more of its recording, keepalive after keepalive"
+}
+
+func (streamStalledError) Is(target error) bool { return target == ErrStreamHeldOpen }
+
+// ErrStreamNotRecorded refuses a stream test whose recording saved nothing of
+// its stream: its body was over 1 MB, and a recording does not save one
+// (BodySkipped). Compared with nothing, a stream passed on its first frame,
+// whatever it held, with the proven switch off. The test fails with the
+// reason instead, under either switch, and its stream is not read. A
+// recording that saved its body is compared with it, however little it holds
+// (streamRecordedWithNoFrame): re-recording the app gives the same one.
+var ErrStreamNotRecorded = errors.New("keploy refuses this stream test: its recording keeps nothing of the stream to compare the app's stream with")
+
+// streamRecordedWithNoFrame is the rule for a stream recorded with no frame
+// to compare (no SSE frame, NDJSON line, multipart part, text line or byte).
+// A recording that saved nothing of its stream (its body was over 1 MB, and a
+// recording does not save one: BodySkipped) is refused: the error it returns
+// (ErrStreamNotRecorded). Any other saved its body, and holds what the stream
+// held: nothing, the app having ended it with nothing in it, or blank lines
+// alone (an SSE body of blank lines, NDJSON's keepalives, which a recording
+// keeps no frame of; a multipart body of no part). The app's stream is
+// compared with that, under either switch, and read to its end (nil): with no
+// recorded frame to stop at, the comparison stopped before the answer's first
+// frame, and passed whatever came. A frame (an SSE event, a line, a part) is
+// one past the recording (trailingFrame); a keepalive (an SSE comment, an
+// NDJSON blank line) ends the read with nothing of the answer to compare, not
+// judged (keptOpenWithKeepalivesOnly); and its end passes. A recording of SSE
+// comments alone is none of these: its comments are its frames, compared in
+// order as any recording's are, the comparison stopping at the last of them
+// with the switch off. Re-recording the app gives the same recording, so it
+// is never refused.
+func streamRecordedWithNoFrame(expected models.HTTPResp) error {
+	if !expected.BodySkipped {
+		return nil
+	}
+	why := "its body was over 1 MB, and a recording does not save one"
+	if expected.BodySize > 0 {
+		why = fmt.Sprintf("its body, %d bytes, was over 1 MB, and a recording does not save one", expected.BodySize)
+	}
+	return fmt.Errorf("%w (%s)", ErrStreamNotRecorded, why)
+}
+
+// trailingFrame is the mismatch of a frame the answer streamed after the
+// recorded ones (index of them): under the proven switch a stream is read to
+// its end, and one that goes on past its recording differs from it.
+func trailingFrame(index int, frame string) *StreamMismatchInfo {
+	return &StreamMismatchInfo{
+		FrameIndex:    index,
+		ExpectedFrame: "(the recorded stream ended)",
+		ActualFrame:   frame,
+		Reason:        fmt.Sprintf("the stream went on after its %d recorded frames", index),
+	}
+}
+
+// sseCommentsOnly reports whether an SSE frame holds comment lines alone.
+func sseCommentsOnly(fields []sseField) bool {
+	for _, f := range fields {
+		if !f.comment {
+			return false
+		}
+	}
+	return len(fields) > 0
 }
 
 func ComputeStreamingTimeoutSeconds(tc *models.TestCase, defaultSeconds uint64) uint64 {
@@ -1324,23 +1762,6 @@ func CollectStreamingGlobalNoiseKeys(globalBodyNoise map[string][]string, tcNois
 	return keys
 }
 
-func isSSETestCase(tc *models.TestCase, resp *http.Response) bool {
-	if tc != nil {
-		respContentType := getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")
-		if hasSSEContentType(respContentType) {
-			return true
-		}
-		acceptHeader := getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept")
-		if hasSSEContentType(acceptHeader) {
-			return true
-		}
-	}
-	if resp != nil && hasSSEContentType(resp.Header.Get("Content-Type")) {
-		return true
-	}
-	return false
-}
-
 func getHeaderValueCaseInsensitive(headers map[string]string, key string) string {
 	key = strings.ToLower(strings.TrimSpace(key))
 	for k, v := range headers {
@@ -1356,12 +1777,16 @@ func hasSSEContentType(value string) bool {
 }
 
 // IsSSERequest checks whether a test case targets an SSE endpoint based on
-// the recorded response Content-Type or request Accept header.
+// the recorded response Content-Type or request Accept header. It picks the
+// port the request is sent to (an app may serve SSE on its own port, and a
+// CORS preflight to it asks for text/event-stream in its Accept), not
+// whether the response is a stream (models.HTTPStreamOf).
 func IsSSERequest(tc *models.TestCase) bool {
 	if tc == nil || tc.Kind != models.HTTP {
 		return false
 	}
-	return isSSETestCase(tc, nil)
+	return hasSSEContentType(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Content-Type")) ||
+		hasSSEContentType(getHeaderValueCaseInsensitive(tc.HTTPReq.Header, "Accept"))
 }
 
 func boundaryFromContentTypeHeader(contentType string) string {
@@ -1375,53 +1800,55 @@ func boundaryFromContentTypeHeader(contentType string) string {
 	return strings.TrimSpace(params["boundary"])
 }
 
-func isLikelyStreamingHTTPResponse(tc *models.TestCase, resp *http.Response) bool {
-	if resp != nil {
-		for _, te := range resp.TransferEncoding {
-			if strings.EqualFold(strings.TrimSpace(te), "chunked") {
-				return true
-			}
-		}
-		if strings.Contains(strings.ToLower(resp.Header.Get("Transfer-Encoding")), "chunked") {
-			return true
-		}
-		if resp.ContentLength == -1 {
-			return true
-		}
-	}
-
-	if tc != nil {
-		respTE := strings.ToLower(getHeaderValueCaseInsensitive(tc.HTTPResp.Header, "Transfer-Encoding"))
-		if strings.Contains(respTE, "chunked") {
-			return true
-		}
-	}
-
-	return false
-}
-
 type expectedSSEFrame struct {
 	fields []sseField
 	raw    string
 }
 
 func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
-	expectedQueue := extractExpectedSSEQueue(expectedResp)
+	readToEnd := provenswitch.On()
+	expectedQueue, err := extractExpectedSSEQueue(expectedResp)
+	if err != nil {
+		return false, "", nil, err
+	}
+	if len(expectedQueue) == 0 {
+		// No frame: an empty stream's, or blank lines alone. A recording
+		// of comments alone holds frames, and is compared by them, as any
+		// recording is.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
+	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
-	scanner.Split(splitSSEFrames)
-
+	scanner := sseFrameScanner(stream)
 	for scanner.Scan() {
-		rawFrame := normalizeLineEndings(scanner.Text())
-		frame := strings.Trim(rawFrame, "\n")
-		if strings.TrimSpace(frame) == "" {
+		frame, ok := sseFrameOf(scanner.Text())
+		if !ok {
 			continue
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				// A frame of comments alone (": ping") is a keepalive: it
+				// carries no event, so one after the recorded frames is no
+				// difference. It is one beyond the recorded keepalives,
+				// which are among the recorded frames: the app kept the
+				// stream open past its recording, and the read ends there
+				// (ErrStreamHeldOpen).
+				if sseCommentsOnly(parseSSEFrame(frame)) {
+					if nextExpected == 0 {
+						// A recording of no frame, and the app sent
+						// none: nothing of the answer to compare.
+						return false, strings.Join(actualQueue, "\n\n"), nil, keptOpenWithKeepalivesOnly()
+					}
+					return true, strings.Join(actualQueue, "\n\n"), nil, ErrStreamHeldOpen
+				}
+				actualQueue = append(actualQueue, frame)
+				return false, strings.Join(actualQueue, "\n\n"), trailingFrame(len(expectedQueue), frame), nil
+			}
 			logger.Debug("received additional SSE data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1446,7 +1873,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected SSE frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1454,7 +1881,7 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n\n"), nil, err
+		return false, strings.Join(actualQueue, "\n\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "frame")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1479,20 +1906,59 @@ func compareSSEStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseK
 }
 
 func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
-	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
+	readToEnd := provenswitch.On()
+	expectedQueue, err := extractExpectedRawQueue(expectedResp, canonicalizeNDJSONLine, true)
+	if err != nil {
+		return false, "", nil, err
+	}
+	if len(expectedQueue) == 0 {
+		// No line: an empty stream's, or blank lines alone (keepalives).
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
+	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner := lineScanner(stream)
 
+	// keepalives counts the blank lines since the last line.
+	keepalives := 0
 	for scanner.Scan() {
 		line := canonicalizeNDJSONLine(scanner.Text())
 		if line == "" {
+			// A blank line is NDJSON's keepalive. One after the recorded
+			// lines is beyond the recorded keepalives (a recording keeps
+			// none: it drops blank lines): the app kept the stream open
+			// past its recording (ErrStreamHeldOpen). Two in a row before
+			// them, with no line between, and the app stalled short of
+			// its recording (ErrStreamStalled): the lines that came
+			// matched theirs.
+			// Either with no line come is nothing of the answer to
+			// compare: it fails closed, not judged (ErrAnswerStalled).
+			if readToEnd && nextExpected >= len(expectedQueue) {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
+				}
+				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamHeldOpen
+			}
+			keepalives++
+			if readToEnd && keepalives >= 2 {
+				if nextExpected == 0 {
+					return false, strings.Join(actualQueue, "\n"), nil, keptOpenWithKeepalivesOnly()
+				}
+				return true, strings.Join(actualQueue, "\n"), nil, ErrStreamStalled
+			}
 			continue
 		}
+		keepalives = 0
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, line)
+				return false, strings.Join(actualQueue, "\n"), trailingFrame(len(expectedQueue), line), nil
+			}
 			logger.Debug("received additional NDJSON data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1521,7 +1987,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected NDJSON frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1529,7 +1995,7 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), nil, err
+		return false, strings.Join(actualQueue, "\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "line")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1549,17 +2015,32 @@ func compareNDJSONStream(expectedResp models.HTTPResp, stream io.Reader, jsonNoi
 }
 
 func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
-	expectedQueue := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
+	readToEnd := provenswitch.On()
+	expectedQueue, err := extractExpectedRawQueue(expectedResp, canonicalizePlainTextLine, false)
+	if err != nil {
+		return false, "", nil, err
+	}
+	if len(expectedQueue) == 0 {
+		// No line (a text stream's blank lines are its lines): an empty
+		// stream's.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
+	}
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
 
-	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner := lineScanner(stream)
 
 	for scanner.Scan() {
 		line := canonicalizePlainTextLine(scanner.Text())
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, line)
+				return false, strings.Join(actualQueue, "\n"), trailingFrame(len(expectedQueue), line), nil
+			}
 			logger.Debug("received additional plain-text stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_frames", len(expectedQueue)))
 			break
@@ -1582,7 +2063,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected plain-text frames matched; closing stream capture early to avoid waiting for extra stream events",
 				zap.Int("matched_frames", nextExpected))
 			break
@@ -1590,7 +2071,7 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 	}
 
 	if err := scanner.Err(); err != nil {
-		return false, strings.Join(actualQueue, "\n"), nil, err
+		return false, strings.Join(actualQueue, "\n"), nil, streamCut(err, nextExpected, len(expectedQueue), "line")
 	}
 
 	if nextExpected < len(expectedQueue) {
@@ -1610,12 +2091,23 @@ func comparePlainTextStream(expectedResp models.HTTPResp, stream io.Reader, logg
 }
 
 func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	expectedBytes := expectedBinaryBytes(expectedResp)
+	if len(expectedBytes) == 0 {
+		// No byte: an empty stream's. The answer's first byte ends the
+		// read and fails it under either switch (the size differs), and
+		// its end with none passes: readToEnd changes nothing here.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+	}
 	expectedSize := len(expectedBytes)
 	actualSize := 0
 	contentMatch := true
 	mismatchOffset := -1
 	buffer := make([]byte, 32*1024)
+	// cut: the stall rule cut the stream after bytes that differ came.
+	cut := false
 
 	for {
 		n, err := stream.Read(buffer)
@@ -1631,7 +2123,12 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 				}
 			}
 			actualSize += n
-			if actualSize >= expectedSize {
+			if readToEnd && actualSize > expectedSize {
+				// Bytes beyond the recording: the stream differs, whether
+				// or not it goes on, so it is not read further.
+				break
+			}
+			if actualSize >= expectedSize && !readToEnd {
 				if actualSize > expectedSize {
 					logger.Debug("received additional binary stream data after expected size was matched; closing stream capture",
 						zap.Int("expected_size", expectedSize),
@@ -1644,11 +2141,27 @@ func compareBinaryStream(expectedResp models.HTTPResp, stream io.Reader, logger 
 			break
 		}
 		if err != nil {
+			var st *AnswerStallError
+			if errors.As(err, &st) && actualSize == 0 {
+				// Cut by the stall rule with nothing of the stream
+				// come: nothing to compare.
+				return false, "0", nil, st
+			}
+			if errors.As(err, &st) && contentMatch {
+				// Cut by the stall rule, every byte that came matching.
+				return true, strconv.Itoa(actualSize), nil, st.asStream(fmt.Sprintf("%d of the %d recorded bytes came", actualSize, expectedSize))
+			}
+			if errors.As(err, &st) {
+				// What came differs: the comparison says so below, by
+				// its content (the cut, not the app, set its size).
+				cut = true
+				break
+			}
 			return false, strconv.Itoa(actualSize), nil, err
 		}
 	}
 
-	if actualSize != expectedSize {
+	if actualSize != expectedSize && !cut {
 		logger.Debug("binary stream size mismatch",
 			zap.Int("expected_size", expectedSize),
 			zap.Int("actual_size", actualSize))
@@ -1693,12 +2206,66 @@ func expectedBinaryBytes(expectedResp models.HTTPResp) []byte {
 	return []byte(expectedResp.Body)
 }
 
-func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
-	if len(expectedResp.StreamBody) == 0 {
+// extractExpectedSSEQueue is the recorded SSE events an answer is compared
+// with: those its recording kept (StreamBody), or, when it kept none (a test
+// case carried as JSON carries its body alone), its recorded body read as the
+// answer is read (sseQueueOfBody). One that holds no frame is compared with
+// none, and the answer read to its end (streamRecordedWithNoFrame): stopping
+// before the answer's first frame, any stream would pass.
+func extractExpectedSSEQueue(expectedResp models.HTTPResp) ([]expectedSSEFrame, error) {
+	if queue := sseQueueOf(expectedResp.StreamBody); len(queue) > 0 {
+		return queue, nil
+	}
+	return sseQueueOfBody(expectedResp.Body)
+}
+
+// sseQueueOfBody is a recorded SSE body's events, read as compareSSEStream
+// reads the answer's (sseFrameScanner, sseFrameOf, parseSSEFrame), so an
+// event of the recording and the same event of the answer are read alike. A
+// body that cannot be read so (a frame over maxStreamTokenSize) is an error,
+// never the events before it alone.
+func sseQueueOfBody(body string) ([]expectedSSEFrame, error) {
+	var queue []expectedSSEFrame
+	scanner := sseFrameScanner(strings.NewReader(body))
+	for scanner.Scan() {
+		if frame, ok := sseFrameOf(scanner.Text()); ok {
+			queue = append(queue, expectedSSEFrame{fields: parseSSEFrame(frame), raw: frame})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read the recorded SSE body: %w", err)
+	}
+	return queue, nil
+}
+
+// sseFrameScanner reads an SSE stream frame by frame (splitSSEFrames).
+func sseFrameScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	scanner.Split(splitSSEFrames)
+	return scanner
+}
+
+// sseFrameOf is a frame sseFrameScanner read, its line endings normalized and
+// its edges trimmed; false for a blank one, which carries nothing.
+func sseFrameOf(token string) (string, bool) {
+	frame := strings.Trim(normalizeLineEndings(token), "\n")
+	return frame, strings.TrimSpace(frame) != ""
+}
+
+// lineScanner reads a stream of lines (NDJSON, text) line by line.
+func lineScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxStreamTokenSize)
+	return scanner
+}
+
+func sseQueueOf(chunks []models.HTTPStreamChunk) []expectedSSEFrame {
+	if len(chunks) == 0 {
 		return nil
 	}
-	queue := make([]expectedSSEFrame, 0, len(expectedResp.StreamBody))
-	for _, chunk := range expectedResp.StreamBody {
+	queue := make([]expectedSSEFrame, 0, len(chunks))
+	for _, chunk := range chunks {
 		if len(chunk.Data) == 0 {
 			continue
 		}
@@ -1739,12 +2306,44 @@ func extractExpectedSSEQueue(expectedResp models.HTTPResp) []expectedSSEFrame {
 	return queue
 }
 
-func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) []string {
-	if len(expectedResp.StreamBody) == 0 {
+// extractExpectedRawQueue is the recorded lines (NDJSON, a text stream) an
+// answer is compared with: those its recording kept (StreamBody), or, when it
+// kept none, its recorded body read as the answer is read (rawQueueOfBody),
+// as extractExpectedSSEQueue does for SSE.
+func extractExpectedRawQueue(expectedResp models.HTTPResp, canonicalizer func(string) string, ignoreEmpty bool) ([]string, error) {
+	if queue := rawQueueOf(expectedResp.StreamBody, canonicalizer, ignoreEmpty); len(queue) > 0 {
+		return queue, nil
+	}
+	return rawQueueOfBody(expectedResp.Body, canonicalizer, ignoreEmpty)
+}
+
+// rawQueueOfBody is a recorded body's lines, read as compareNDJSONStream and
+// comparePlainTextStream read the answer's (lineScanner): each canonicalized,
+// a blank one skipped when ignoreEmpty (NDJSON's keepalives). A body that
+// cannot be read so (a line over maxStreamTokenSize) is an error, never the
+// lines before it alone.
+func rawQueueOfBody(body string, canonicalizer func(string) string, ignoreEmpty bool) ([]string, error) {
+	var queue []string
+	scanner := lineScanner(strings.NewReader(body))
+	for scanner.Scan() {
+		line := canonicalizer(scanner.Text())
+		if ignoreEmpty && line == "" {
+			continue
+		}
+		queue = append(queue, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read the recorded body by its lines: %w", err)
+	}
+	return queue, nil
+}
+
+func rawQueueOf(chunks []models.HTTPStreamChunk, canonicalizer func(string) string, ignoreEmpty bool) []string {
+	if len(chunks) == 0 {
 		return nil
 	}
-	queue := make([]string, 0, len(expectedResp.StreamBody))
-	for _, chunk := range expectedResp.StreamBody {
+	queue := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
 		raw, ok := streamChunkFieldValue(chunk, "raw")
 		if !ok {
 			continue
@@ -1968,36 +2567,62 @@ func removeGlobalNoiseKeys(node any, jsonNoiseKeys map[string]struct{}) any {
 }
 
 func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boundary string, jsonNoiseKeys map[string]struct{}, logger *zap.Logger) (bool, string, *StreamMismatchInfo, error) {
+	readToEnd := provenswitch.On()
 	if strings.TrimSpace(boundary) == "" {
 		return false, "", nil, fmt.Errorf("missing multipart boundary for stream comparison")
 	}
 
 	expectedBody := expectedResp.Body
-	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), boundary)
+	// The recording is read by its own boundary, the answer by its own: a
+	// multipart writer picks a new boundary for each response (Go's does),
+	// and read by the answer's, the recorded body held no part to compare.
+	expectedBoundary := boundaryFromContentTypeHeader(getHeaderValueCaseInsensitive(expectedResp.Header, "Content-Type"))
+	if expectedBoundary == "" {
+		expectedBoundary = boundary
+	}
+	expectedQueue, err := parseMultipartQueue(strings.NewReader(expectedBody), expectedBoundary)
 	if err != nil {
-		return false, "", nil, err
+		return false, "", nil, fmt.Errorf("failed to read the recorded multipart body by its boundary %q: %w", expectedBoundary, err)
+	}
+	if len(expectedQueue) == 0 {
+		// No part: an empty stream's, or a body of none.
+		if err := streamRecordedWithNoFrame(expectedResp); err != nil {
+			return false, "", nil, err
+		}
+		readToEnd = true
 	}
 
 	actualQueue := make([]string, 0, len(expectedQueue))
 	nextExpected := 0
-	reader := multipart.NewReader(stream, boundary)
+	answer := &byteCount{r: stream}
+	reader := multipart.NewReader(answer, boundary)
 
 	for {
 		part, partErr := reader.NextPart()
 		if partErr == io.EOF {
 			break
 		}
+		if partErr != nil && answer.n == 0 && errors.Is(partErr, io.EOF) {
+			// An answer that ended before its first byte holds no
+			// part: multipart.Reader reads it as an error ("NextPart:
+			// EOF"), not as the end of a stream of none.
+			break
+		}
 		if partErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partErr, nextExpected, len(expectedQueue), "part")
 		}
 
 		actualPart, partReadErr := readMultipartPart(part)
 		_ = part.Close()
 		if partReadErr != nil {
-			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, partReadErr
+			return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, streamCut(partReadErr, nextExpected, len(expectedQueue), "part")
 		}
 
 		if nextExpected >= len(expectedQueue) {
+			if readToEnd {
+				actualQueue = append(actualQueue, actualPart.describe())
+				return false, strings.Join(actualQueue, "\n\n--PART--\n\n"), trailingFrame(len(expectedQueue), actualPart.describe()), nil
+			}
 			logger.Debug("received additional multipart stream data after expected stream was fully matched; closing stream capture",
 				zap.Int("expected_parts", len(expectedQueue)))
 			break
@@ -2022,7 +2647,7 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 		}
 
 		nextExpected++
-		if nextExpected == len(expectedQueue) {
+		if nextExpected == len(expectedQueue) && !readToEnd {
 			logger.Debug("all expected multipart parts matched; closing stream capture early to avoid waiting for extra stream parts",
 				zap.Int("matched_parts", nextExpected))
 			break
@@ -2043,6 +2668,18 @@ func compareMultipartStream(expectedResp models.HTTPResp, stream io.Reader, boun
 	}
 
 	return true, strings.Join(actualQueue, "\n\n--PART--\n\n"), nil, nil
+}
+
+// byteCount counts the bytes read through it.
+type byteCount struct {
+	r io.Reader
+	n int64
+}
+
+func (c *byteCount) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 type multipartPartPayload struct {
@@ -2536,38 +3173,37 @@ func WaitForPort(ctx context.Context, host string, port string, timeout time.Dur
 	}
 }
 
-// DefaultAgentReadyTimeout is how long keploy waits for the in-docker
-// keploy-agent's HTTP endpoint to become reachable before giving up. This
-// bounds container BOOT only — the AgentHealthTicker gate that runs before
-// StoreMocks — not the compose ready-file healthcheck, which has its own
-// generous, env-tunable start_period floor (see agentHealthcheckStartPeriod in
-// pkg/platform/docker). Under heavy CI docker-daemon contention the agent
-// container can take ~2 minutes just to start — observed in CI as a `docker
-// run` of an already-local image taking 126s before the agent process ran. A
-// shorter CLI wait gives up while the container is still booting, tearing down
-// a bring-up that would have succeeded.
-//
-// ErrAgentNotReady is returned by an agent Setup whose agent never reported
-// healthy within AgentReadyTimeout. It is a distinct sentinel so callers can
-// retry a fresh bring-up on this — a nondeterministic container-runtime stall,
-// observed intermittently on macOS Docker Desktop — WITHOUT retrying
-// deterministic failures like missing kernel privileges or a bad config.
+// ErrAgentNotReady is the error of an agent start that stopped making progress
+// before the agent reported healthy (pkg/platform/http, agent_boot_watch.go):
+// one keploy started itself (Setup), or one docker compose started
+// (WatchAgentStart). No budget of wall time ends a start that makes progress:
+// under heavy CI docker-daemon contention the agent container can take
+// minutes just to start, and a fixed budget (KEPLOY_AGENT_READY_TIMEOUT, 330 s,
+// since removed) tore down bring-ups that would have succeeded. It is a
+// distinct sentinel so callers can retry a fresh bring-up on this — a
+// nondeterministic container-runtime stall, observed intermittently on macOS
+// Docker Desktop — WITHOUT retrying deterministic failures like missing kernel
+// privileges or a bad config.
 var ErrAgentNotReady = errors.New("keploy-agent did not become ready in time")
 
-const DefaultAgentReadyTimeout = 330 * time.Second
+// AgentStartWatcher is implemented by an instrumentation that can watch the
+// start of the agent it set up (pkg/platform/http's AgentClient): a wait for an
+// agent it did not start itself (docker compose starts it as a service of the
+// project) follows the start's progress, not a clock. WatchAgentStart sends one
+// error once the start has failed (the agent says so) or has stopped making
+// progress (ErrAgentNotReady), and nothing while it makes progress, or while
+// its process does not run yet; ctx ends it.
+type AgentStartWatcher interface {
+	WatchAgentStart(ctx context.Context) <-chan error
+}
 
-// AgentReadyTimeout returns how long to wait for the keploy-agent to become
-// ready. It defaults to DefaultAgentReadyTimeout and is overridable via the
-// KEPLOY_AGENT_READY_TIMEOUT env var (whole seconds) for tuning on unusually
-// slow or fast hosts. A non-positive / unparsable value falls back to the
-// default.
-func AgentReadyTimeout() time.Duration {
-	if v := strings.TrimSpace(os.Getenv("KEPLOY_AGENT_READY_TIMEOUT")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return time.Duration(n) * time.Second
-		}
+// WatchAgentStart is inst's watch of its agent's start (AgentStartWatcher), or
+// nil, which never sends, for an instrumentation that cannot watch one.
+func WatchAgentStart(ctx context.Context, inst any) <-chan error {
+	if w, ok := inst.(AgentStartWatcher); ok {
+		return w.WatchAgentStart(ctx)
 	}
-	return DefaultAgentReadyTimeout
+	return nil
 }
 
 // agentSetupAttempts bounds how many times a stalled agent bring-up is retried
@@ -2636,7 +3272,10 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 	return 2 * wait
 }
 
-// AgentHealthTicker continuously monitors the agent health endpoint at specified intervals.
+// AgentHealthTicker checks the agent's health endpoint every checkInterval
+// until an answer finds it healthy, sends true on agentReadyCh, and returns. It
+// returns when ctx ends too, and closes agentReadyCh either way, so a receive
+// that gets false means ctx ended first.
 //
 // Each check waits agentHealthFirstWait for its answer to begin with, and twice
 // as long after a check that ran out of time (nextAgentHealthWait), so an agent
@@ -2646,17 +3285,46 @@ func nextAgentHealthWait(wait time.Duration, timedOut bool) time.Duration {
 // for it, off this goroutine and after the readiness signal, so the check never
 // spends the caller's readiness budget. That check can log at error level, which
 // keploy's CI treats as fatal.
-// and signals on the provided channel when the agent becomes available or unavailable.
-// It respects the context timeout and returns when the context is cancelled.
 func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, agentReadyCh chan<- bool, checkInterval time.Duration) {
+	defer close(agentReadyCh)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(http.Header) bool {
+		select {
+		case agentReadyCh <- true:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// AgentHealthTickerWithAnswer is AgentHealthTicker that sends, in place of
+// true, the headers of the answer that found the agent healthy (never nil),
+// so the caller reads what that same answer said, with no second request that
+// an agent which has since stopped answering, or a budget that has since run
+// out, could fail. A receive that gets nil means ctx ended first.
+func AgentHealthTickerWithAnswer(ctx context.Context, logger *zap.Logger, agentURI string, answers chan<- http.Header, checkInterval time.Duration) {
+	defer close(answers)
+	agentHealthTicker(ctx, logger, agentURI, checkInterval, func(header http.Header) bool {
+		select {
+		case answers <- header:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	})
+}
+
+// agentHealthTicker is the loop of the two above: it checks the agent's health
+// every checkInterval until an answer finds it healthy, hands that answer's
+// headers to ready, which reports whether it delivered them (false when ctx
+// ended first), and returns; or it returns when ctx ends.
+func agentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string, checkInterval time.Duration, ready func(http.Header) bool) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
-	defer close(agentReadyCh)
 
 	// No client-wide timeout: each check waits as long as `wait` (below).
 	client := &http.Client{}
 	wait := agentHealthFirstWait
-	agentStarted := false
 
 	for {
 		select {
@@ -2664,72 +3332,70 @@ func AgentHealthTicker(ctx context.Context, logger *zap.Logger, agentURI string,
 			return
 		case <-ticker.C:
 			checkCtx, cancel := context.WithTimeout(ctx, wait)
-			isHealthy := isAgentHealthy(checkCtx, logger, client, agentURI)
-			timedOut := !isHealthy && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+			header := agentHealthAnswer(checkCtx, logger, client, agentURI)
+			timedOut := header == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
 			if next := nextAgentHealthWait(wait, timedOut); next != wait {
 				logger.Debug("agent health check ran out of time; the next one waits longer",
 					zap.String("agentURI", agentURI), zap.Duration("waited", wait), zap.Duration("next_wait", next))
 				wait = next
 			}
-
-			if isHealthy && !agentStarted {
-				// Agent became healthy
-				agentStarted = true
-				select {
-				case agentReadyCh <- true:
-					// Only now, and off this goroutine. The check is a
-					// diagnostic: every caller races this send against a
-					// readiness deadline, and spending any of that budget on
-					// it could fail the user's run with "did not become ready"
-					// against an agent that had just answered its health
-					// check. Detached from ctx for the same reason it runs at
-					// all — the caller cancels this context as soon as it has
-					// its answer, which would cancel the check before it could
-					// report anything.
-					go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
-					return
-				case <-ctx.Done():
-					return
-				}
-			} else if !isHealthy && agentStarted {
-				// Agent became unhealthy
-				agentStarted = false
-				select {
-				case agentReadyCh <- false:
-				case <-ctx.Done():
-					return
-				}
+			if header == nil {
+				continue
 			}
+			if ready(header) {
+				// Only now, and off this goroutine. The check is a
+				// diagnostic: every caller races this signal against a
+				// readiness deadline, and spending any of that budget on it
+				// could fail the user's run with "did not become ready"
+				// against an agent that had just answered its health check.
+				// Detached from ctx for the same reason it runs at all --
+				// the caller cancels this context as soon as it has its
+				// answer, which would cancel the check before it could
+				// report anything.
+				go verifyControlPlaneGuarded(context.WithoutCancel(ctx), logger, agentURI)
+			}
+			return
 		}
 	}
 }
 
-// isAgentHealthy checks if the agent is running and healthy by calling the /agent/health endpoint
-func isAgentHealthy(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) bool {
+// agentHealthAnswer checks whether the agent is running and healthy by calling
+// its /agent/health endpoint, and returns the headers of a healthy (200)
+// answer, never nil, or nil when there was none: no answer, or an answer
+// other than 200, whose headers say nothing about the agent.
+func agentHealthAnswer(ctx context.Context, logger *zap.Logger, client *http.Client, agentURI string) http.Header {
 	healthURL := fmt.Sprintf("%s/health", agentURI)
 	logger.Debug("Checking agent health", zap.String("url", healthURL))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
 	if err != nil {
 		logger.Debug("Failed to create health check request", zap.Error(err))
-		return false
+		return nil
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return nil
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Debug("Failed to read agent health response body", zap.Error(err))
-		return false
+		return nil
 	}
 	logger.Debug("Agent health check response", zap.Int("status_code", resp.StatusCode), zap.String("body", string(body)))
 
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	if resp.Header == nil {
+		// A RoundTripper other than net/http's may leave it nil; healthy is
+		// never nil.
+		return http.Header{}
+	}
+	return resp.Header
 }
 
 // TestSetMocksReader is an optional extension of the mock store a replay, the
@@ -2742,6 +3408,15 @@ type TestSetMocksReader interface {
 	GetTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
 }
 
+// TestSetMockIndexReader is an optional extension of the mock store a replay
+// loads a test set's mocks from: GetTestSetMocks that leaves each mock's
+// payload in the set's mock file (models.Mock.LeavePayloadOnDisk), so the
+// replay holds a small entry per mock, and reads a payload back only to send
+// the mock to the agent (models.Mock.WithPayload).
+type TestSetMockIndexReader interface {
+	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
 // ConsumedScopeReader is an optional extension of the instrumentation a replay
 // or a runner talks to the agent through: whether the agent has said it reads
 // the consumed-mock history only for the per-test mocks it stages
@@ -2749,6 +3424,71 @@ type TestSetMocksReader interface {
 // (ConsumedForAgent). Without it the whole history is sent.
 type ConsumedScopeReader interface {
 	AgentReadsConsumedPerTestOnly() bool
+}
+
+// ClientTestsReader is an optional extension of the instrumentation keploy
+// mock talks to the agent through: whether the agent said, in its answer to
+// the session's MockOutgoing, that its learn step reads the session's tests
+// as client tests (models.ClientTestsReadHeader). Without it, keploy mock
+// takes the agent for one that does not.
+type ClientTestsReader interface {
+	AgentReadsClientTests() bool
+}
+
+// AgentVersionReader is an optional extension of the instrumentation the CLI
+// talks to the agent through: the keploy version the agent named in its last
+// answer (models.AgentVersionHeader), "" where it named none. Without it, the
+// agent is taken for one that named none.
+type AgentVersionReader interface {
+	AgentVersion() string
+}
+
+// AgentVersionOf is the keploy version instr's agent named in its last answer
+// (AgentVersionReader): "" where it named none, or instr cannot say.
+func AgentVersionOf(instr any) string {
+	if r, ok := instr.(AgentVersionReader); ok {
+		return r.AgentVersion()
+	}
+	return ""
+}
+
+// AgentDidNotSay is how a reason that keeps nothing the agent learned says
+// that the agent did not say what (as "it read the test case's request"),
+// naming the agent by the version it named (agent; AgentVersionOf), or as
+// one that named none, and this keploy by its own: "the agent (keploy
+// v3.6.1) did not say <what>, as an agent older than this keploy (v3.7.0)
+// does not", or "the agent did not say <what>, nor its version, as ...".
+func AgentDidNotSay(agent, what string) string {
+	who, nor := "the agent", ", nor its version"
+	if agent != "" {
+		who, nor = "the agent (keploy "+agent+")", ""
+	}
+	own := ""
+	if utils.Version != "" {
+		own = " (" + utils.Version + ")"
+	}
+	return who + " did not say " + what + nor + ", as an agent older than this keploy" + own + " does not"
+}
+
+// TestCaseFilterSender is an optional extension of the instrumentation a
+// replay talks to the agent through: SendTestCaseFilter sends params, a
+// filter that opens a test case and carries its request
+// (models.MockFilterParams.TestRequest), as UpdateMockParams does, and says
+// whether the agent's answer to that call said its learn step took the
+// request (models.TestRequestReadHeader). The answer is that call's own: no
+// other call, concurrent or later, changes what it says. Without it, the
+// request is taken for one the agent did not read.
+type TestCaseFilterSender interface {
+	SendTestCaseFilter(ctx context.Context, params models.MockFilterParams) (requestRead bool, err error)
+}
+
+// BackgroundRulesReader is an optional extension of the instrumentation a
+// replay talks to the agent through: the background rules the agent said, in
+// its answer to the last staging call, it serves the staged set by
+// (models.BackgroundRulesHeader). Without it, or with "", the agent serves by
+// today's rules.
+type BackgroundRulesReader interface {
+	AgentServesBackground() string
 }
 
 // PerTestRegion is the set of names of the per-test mocks a test set hands the
@@ -2862,7 +3602,17 @@ func FilterPerTestAndLaxPromoted(ctx context.Context, logger *zap.Logger, m []*m
 // the first test), because there is no cutoff to preserve against. Legacy callers that don't know firstWindowStart can keep
 // calling FilterPerTestAndLaxPromoted unchanged.
 func FilterPerTestAndLaxPromotedTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
-	perTestInWindow, promotedToSession := filterByTimeStampTierAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart)
+	return FilterPerTestAndLaxPromotedInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, time.Time{}, false)
+}
+
+// FilterPerTestAndLaxPromotedInFlightAware is FilterPerTestAndLaxPromotedTierAware
+// that also keeps in the per-test slice the per-test mocks in flight when the
+// window began (sent after inFlightFrom, the end of the gap before it, and
+// answered at or after afterTime); see filterByTimeStampInFlightAware.
+// strictWindow is the user's window mode (MockFilterParams.StrictMockWindow),
+// which decides that, whatever strict says. A zero inFlightFrom keeps none.
+func FilterPerTestAndLaxPromotedInFlightAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strict bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
+	perTestInWindow, promotedToSession := filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strict, firstWindowStart, inFlightFrom, strictWindow)
 
 	sort.SliceStable(perTestInWindow, func(i, j int) bool {
 		return perTestInWindow[i].Spec.ReqTimestampMock.Before(perTestInWindow[j].Spec.ReqTimestampMock)
@@ -2912,6 +3662,41 @@ func FilterTcsMocksMapping(ctx context.Context, logger *zap.Logger, m []*models.
 	})
 
 	return filteredMocks
+}
+
+// IsTestWindow reports whether [afterTime, beforeTime] is a test's window: a
+// staging call's starts at models.BaseTime (the set's, a scope's, an exact
+// staging's), and a call with no window has a zero bound. The mock manager
+// reads its start so (SetMocksWithWindow).
+func IsTestWindow(afterTime, beforeTime time.Time) bool {
+	return !afterTime.IsZero() && !afterTime.Equal(models.BaseTime) && !beforeTime.IsZero()
+}
+
+// FilterTcsMocksMappingInWindow is FilterTcsMocksMapping for the test window
+// [afterTime, beforeTime]: beside the per-test mocks the mapping names, the
+// ones placed at their answer (models.IsAnswerPlaced) whose place the window
+// holds (models.PlaceOf), whatever the mapping lists. A mapping lists what a
+// test consumed; one an older keploy wrote, or a --sync recording's, lists a
+// consumer's poll under the test it was sent in, by request time, and the
+// mock manager's staging keeps a mock placed at its answer only in the
+// window that holds its answer: named for the test before, it would be
+// staged by no test. With no test's window (IsTestWindow: a staging call's
+// names the test's whole recording, ExactMapping), or no kind placed at its
+// answer, it is FilterTcsMocksMapping.
+func FilterTcsMocksMappingInWindow(ctx context.Context, logger *zap.Logger, m []*models.Mock, mocksPresentInMapping []string, afterTime, beforeTime time.Time) []*models.Mock {
+	if !models.AnswerPlacedRegistered() || !IsTestWindow(afterTime, beforeTime) {
+		return FilterTcsMocksMapping(ctx, logger, m, mocksPresentInMapping)
+	}
+	names := append([]string(nil), mocksPresentInMapping...)
+	for _, mk := range m {
+		if mk == nil || !models.IsAnswerPlaced(mk) {
+			continue
+		}
+		if place := models.PlaceOf(mk); !place.Before(afterTime) && !place.After(beforeTime) {
+			names = append(names, mk.Name)
+		}
+	}
+	return FilterTcsMocksMapping(ctx, logger, m, names)
 }
 
 // FilterConfigMocksMapping tags the reusable (config/session/connection) pool
@@ -3126,7 +3911,29 @@ func filterByTimeStamp(_ context.Context, logger *zap.Logger, m []*models.Mock, 
 // it through. Third-party Proxy implementations that don't implement
 // the reader fall through to the zero-time behaviour and remain
 // functionally identical to the pre-fix blanket-drop contract.
-func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+func filterByTimeStampTierAware(ctx context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart time.Time) ([]*models.Mock, []*models.Mock) {
+	return filterByTimeStampInFlightAware(ctx, logger, m, afterTime, beforeTime, strictPerCall, firstWindowStart, time.Time{}, false)
+}
+
+// filterByTimeStampInFlightAware is filterByTimeStampTierAware that also keeps
+// in the per-test slice the per-test mocks in flight when the window began
+// (models.InFlightEligible): sent after inFlightFrom, the end of the gap
+// before the window (models.WindowSchedule.GapBefore), before afterTime, and
+// answered at or after it (models.SentInGapAnsweredBy). They are the window's
+// test's, as the mock manager's own window filter holds them.
+//
+// The user's window mode decides (strictWindow, MockFilterParams.
+// StrictMockWindow, through strictWindowEnabled), not strictPerCall: on a
+// windowed proxy the agent's own filter is never strict (agentStrict), and
+// the mock manager does the strict filtering, from what this slice hands it.
+// With the strict window (the default) a mock in flight is kept per-test,
+// stated lifetime or not, as the window's own mocks are. In lax mode
+// (strictMockWindow false, KEPLOY_STRICT_MOCK_WINDOW=0) one whose recorder
+// stated its lifetime is kept, since lax mode drops a stated mock out of its
+// window, and an unstated one is promoted to the session pool as every
+// unstated per-test mock out of the window is, as before. A zero inFlightFrom
+// keeps none.
+func filterByTimeStampInFlightAware(_ context.Context, logger *zap.Logger, m []*models.Mock, afterTime time.Time, beforeTime time.Time, strictPerCall bool, firstWindowStart, inFlightFrom time.Time, strictWindow bool) ([]*models.Mock, []*models.Mock) {
 
 	filteredMocks := make([]*models.Mock, 0)
 	unfilteredMocks := make([]*models.Mock, 0)
@@ -3214,11 +4021,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// request-timestamp the recording is inconsistent (clock skew,
 		// serialisation bug, or file corruption). Skip it — keeping such
 		// a mock in either pool risks confusing downstream scoring.
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
+		if LeaveOutAnsweredBeforeAsked(logger, p) {
 			droppedInvalidOrder++
 			continue
 		}
@@ -3229,7 +4032,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// pool even when the cached Lifetime field is the zero value
 		// (LifetimePerTest). metadata.scope is deliberately NOT
 		// consulted here.
-		if p.Spec.Metadata != nil &&
+		if p.Spec.Metadata != nil && !p.StatesLifetime() &&
 			(p.Spec.Metadata["type"] == "config" || p.Spec.Metadata["type"] == "connection") {
 			if p.Spec.Metadata["type"] == "config" {
 				p.TestModeInfo.Lifetime = models.LifetimeSession
@@ -3241,7 +4044,7 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 			continue
 		}
 
-		// In-window = request-timestamp inside [afterTime, beforeTime].
+		// In-window = placed inside [afterTime, beforeTime] (models.PlaceOf).
 		// The response may straggle past beforeTime — DB/HTTP downstream
 		// responses routinely complete a few micro-to-milliseconds after
 		// the outer test response is captured. The cross-test bleed bug
@@ -3254,11 +4057,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		//
 		// Only per-test-lifetime mocks reach this predicate — session/
 		// connection-lifetime mocks short-circuited above to the session
-		// pool. A perTest-lifetime mock with reqTimestamp inside
+		// pool. A perTest-lifetime mock placed inside
 		// [afterTime, beforeTime] lands in the per-test pool; outside
 		// the window it falls through to the strict/lax out-of-window
 		// handling below.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
@@ -3290,14 +4096,35 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 		// them to the tier built for exactly that is what both modes intend.
 		// A zero firstWindowStart still means "no cutoff yet" and falls through
 		// to the legacy behaviour below, unchanged.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			filteredMocks = append(filteredMocks, p)
 			preservedStartup++
 			continue
 		}
 
-		if strict {
+		// A per-test mock whose recorder stated its lifetime is the data of
+		// the test it was recorded in, and is served to no other test whatever
+		// the window mode: lax promotion exists for recordings whose recorders
+		// could not tell data from shared traffic, which this one did. Nor does
+		// KEPLOY_STRICT_MOCK_WINDOW=0, that promotion's escape hatch, serve it
+		// to another test: an HTTP call every test may make is declared in
+		// keploy.yaml (models.SessionCallRule).
+		// In flight when the window began: sent in the gap before it and
+		// answered at or after its start (a consumer's long poll). The
+		// window's test's, as the mock manager holds it, in the user's
+		// strict window mode, and for a stated mock in lax mode too, where
+		// it would otherwise be dropped. Lax mode promotes an unstated one
+		// to the session pool below, as every unstated per-test mock out of
+		// the window.
+		if !inFlightFrom.IsZero() && (strictWindowEnabled(strictWindow) || p.StatesLifetime()) && models.InFlightEligible(p) &&
+			models.SentInGapAnsweredBy(p.Spec.ReqTimestampMock, p.Spec.ResTimestampMock, inFlightFrom, afterTime) {
+			p.TestModeInfo.IsFiltered = true
+			filteredMocks = append(filteredMocks, p)
+			continue
+		}
+
+		if strict || p.StatesLifetime() {
 			// Per-test, out-of-window. Genuine stale cross-test bleed
 			// (firstWindowStart <= req < afterTime, or req > beforeTime) is
 			// dropped — the strictMockWindow guarantee. The startup-init band
@@ -3314,8 +4141,14 @@ func filterByTimeStampTierAware(_ context.Context, logger *zap.Logger, m []*mode
 				// runs without --debug. Tagged with "diag/" so it is
 				// obviously diagnostic. Will be demoted/removed once the
 				// strict-window regression on listmonk + pgtype-tour is
-				// root-caused.
-				logger.Info("diag/strict-mode drop: per-test mock outside window",
+				// root-caused. A stated mock dropped outside strict mode is
+				// at Debug: every test's staging leaves out every other
+				// test's mocks, which is the design, not a regression.
+				log := logger.Info
+				if !strict {
+					log = logger.Debug
+				}
+				log("diag/strict-mode drop: per-test mock outside window",
 					zap.String("mock", p.Name),
 					zap.String("kind", string(p.Kind)),
 					zap.String("connID", p.ConnectionID),
@@ -3462,11 +4295,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			filtered = append(filtered, p)
 			continue
 		}
-		if p.Spec.ResTimestampMock.Before(p.Spec.ReqTimestampMock) {
-			logger.Debug("mock has response timestamp before request timestamp; dropping",
-				zap.String("mock", p.Name),
-				zap.Time("req", p.Spec.ReqTimestampMock),
-				zap.Time("res", p.Spec.ResTimestampMock))
+		if LeaveOutAnsweredBeforeAsked(logger, p) {
 			droppedInvalidOrder++
 			continue
 		}
@@ -3485,8 +4314,11 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 			continue
 		}
 
-		// PerTest: window containment on request timestamp.
-		inWindow := !p.Spec.ReqTimestampMock.Before(afterTime) && !p.Spec.ReqTimestampMock.After(beforeTime)
+		// PerTest: window containment by place (models.PlaceOf).
+		// A mock is in the window its place is in (models.PlaceOf): its
+		// request time, or its answer's for a mock placed at its answer.
+		place := models.PlaceOf(p)
+		inWindow := !place.Before(afterTime) && !place.After(beforeTime)
 		if inWindow {
 			p.TestModeInfo.IsFiltered = true
 			filtered = append(filtered, p)
@@ -3500,7 +4332,7 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		// test-called today, but fixing one of two identical functions would
 		// guarantee the bug returns the moment the three-tier path is wired for
 		// postgres v3 / mysql.
-		if !firstWindowStart.IsZero() && p.Spec.ReqTimestampMock.Before(firstWindowStart) {
+		if !firstWindowStart.IsZero() && place.Before(firstWindowStart) {
 			p.TestModeInfo.IsFiltered = true
 			startup = append(startup, p)
 			preservedStartup++
@@ -3508,8 +4340,10 @@ func FilterByTimeStampThreeTier(ctx context.Context, logger *zap.Logger, m []*mo
 		}
 
 		// Out-of-window per-test: strict drops, lax promotes to unfiltered.
-		// The startup-init band was already claimed above, in both modes.
-		if strict {
+		// The startup-init band was already claimed above, in both modes. A
+		// per-test mock whose recorder stated its lifetime is dropped in both,
+		// as filterByTimeStampTierAware drops it.
+		if strict || p.StatesLifetime() {
 			// Per-mock diagnostic: emit hash + window deltas at Debug
 			// for the three-tier strict-drop path so a CI log can
 			// identify which postgres / mongo / etc. mock the per-test
@@ -3622,6 +4456,13 @@ func effectiveLifetimeForRouting(m *models.Mock) models.Lifetime {
 	}
 	if m.TestModeInfo.LifetimeDerived {
 		return m.TestModeInfo.Lifetime
+	}
+	// A recorder's statement decides over the type tag, as DeriveLifetime
+	// decides it.
+	if m.StatesLifetime() {
+		c := *m
+		c.DeriveLifetime()
+		return c.TestModeInfo.Lifetime
 	}
 	if m.Spec.Metadata != nil {
 		switch m.Spec.Metadata["type"] {
@@ -3933,6 +4774,25 @@ func hasExplicitPort(hostStr string) bool {
 	return false
 }
 
+// urlReplacement is the replaceWith URL entry that applies to target: of those
+// whose substring target contains, the one with the longest substring (the
+// most specific), then the lowest. One entry, chosen the same way wherever it
+// is asked: ResolveTestTarget applies it, and PublishedTarget leaves a test
+// it sends to a port of its own where it is. (A map's order is random: taking
+// the first entry that matched applied a different one from run to run when
+// several did.)
+func urlReplacement(target string, urlReplacements map[string]string) (substr, replacement string, ok bool) {
+	for s, r := range urlReplacements {
+		if !strings.Contains(target, s) {
+			continue
+		}
+		if !ok || len(s) > len(substr) || (len(s) == len(substr) && s < substr) {
+			substr, replacement, ok = s, r, true
+		}
+	}
+	return substr, replacement, ok
+}
+
 // ResolveTestTarget determines the final target (URL for HTTP, Authority for gRPC)
 // by applying replacement logic and precedence rules.
 //
@@ -3947,34 +4807,16 @@ func ResolveTestTarget(originalTarget string, urlReplacements map[string]string,
 	replacementMatched := false
 
 	// Step 1: Check replaceWith URL
-	if len(urlReplacements) > 0 {
-		for substr, replacement := range urlReplacements {
-			if strings.Contains(finalTarget, substr) {
-				replacementMatched = true
-				finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
-
-				// Check if the replacement value explicitly defines a port.
-				checkStr := replacement
-				if isHTTP {
-					if strings.HasPrefix(replacement, "http://") {
-						checkStr = strings.TrimPrefix(replacement, "http://")
-					} else if strings.HasPrefix(replacement, "https://") {
-						checkStr = strings.TrimPrefix(replacement, "https://")
-					}
-				}
-
-				if hasExplicitPort(checkStr) {
-					replacementHasPort = true
-				}
-
-				logger.Debug("Applied replaceWith substitution",
-					zap.String("find", substr),
-					zap.String("replace", replacement),
-					zap.String("result_target", finalTarget),
-					zap.Bool("replacement_has_port", replacementHasPort))
-				break
-			}
-		}
+	if substr, replacement, ok := urlReplacement(finalTarget, urlReplacements); ok {
+		replacementMatched = true
+		finalTarget = strings.Replace(finalTarget, substr, replacement, 1)
+		// Whether the replacement value explicitly defines a port.
+		replacementHasPort = replacementNamesPort(replacement, isHTTP)
+		logger.Debug("Applied replaceWith substitution",
+			zap.String("find", substr),
+			zap.String("replace", replacement),
+			zap.String("result_target", finalTarget),
+			zap.Bool("replacement_has_port", replacementHasPort))
 	}
 
 	// If URL replacement set a port and there are no port mappings, we are done

@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,6 +29,19 @@ func resetProbeOnce(t *testing.T) {
 	}
 	clear()
 	t.Cleanup(clear)
+}
+
+// recordLaunch records that this process launched the agent at agentURI, a
+// test server's, and forgets it when the test ends: the server's port is the
+// one the system gave it, and a later test's server may get the same port.
+// One that was not forgotten made a later test's agent, which this process
+// never launched, look launched by it: the check then probed it and reported
+// a broken token handoff (TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone,
+// about once in 20 runs of the package on a loaded machine).
+func recordLaunch(t *testing.T, agentURI string) {
+	t.Helper()
+	launch := token.RecordLaunch(agentURI)
+	t.Cleanup(func() { token.ForgetLaunch(agentURI, launch) })
 }
 
 // TestVerifyControlPlaneGuarded is what makes a broken token handoff loud.
@@ -67,7 +81,7 @@ func TestVerifyControlPlaneGuarded(t *testing.T) {
 			// The real AgentURI carries the /agent prefix the routes are
 			// mounted under; probing without it would exercise a URL that
 			// never occurs.
-			token.RecordLaunch(srv.URL + "/agent")
+			recordLaunch(t, srv.URL+"/agent")
 			verifyControlPlaneGuarded(context.Background(), zap.New(core), srv.URL+"/agent")
 
 			mu.Lock()
@@ -101,14 +115,28 @@ func TestVerifyControlPlaneGuarded_DoesNotReportAProbeThatCouldNotComplete(t *te
 	// Reporting one would cry wolf with an error that fails keploy's own CI.
 	resetProbeOnce(t)
 
-	// A server that has been closed: its address is real but nothing is
-	// listening, which is deterministic in a way "port 1" is not.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
+	// An agent whose connection drops before it answers: a listener this
+	// test holds, so nothing else can answer at its address, closing every
+	// connection it accepts. A closed server's port was used for this, and
+	// another server (a later test's, another process's) could take the
+	// port and answer the probe: the test then failed a correct run, twice
+	// in 2000 on a loaded machine.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	deadURL := "http://" + ln.Addr().String()
 
 	core, logs := observer.New(zap.ErrorLevel)
-	token.RecordLaunch(deadURL + "/agent")
+	recordLaunch(t, deadURL+"/agent")
 	verifyControlPlaneGuarded(context.Background(), zap.New(core), deadURL+"/agent")
 
 	require.Zero(t, logs.Len(), "a probe that never reached the agent was reported as an unauthenticated agent")
@@ -138,8 +166,9 @@ func TestVerifyControlPlaneGuarded_LeavesAgentsItNeverStartedAlone(t *testing.T)
 }
 
 func TestVerifyControlPlaneGuarded_RunsOncePerAgent(t *testing.T) {
-	// Six readiness gates call AgentHealthTicker across record, replay, mock
-	// and the runner; one agent should not be probed once per gate. But every
+	// Five readiness gates call AgentHealthTicker or AgentHealthTickerWithAnswer
+	// across record, replay, mock, the runner and the agent client's own
+	// bring-up; one agent should not be probed once per gate. But every
 	// agent must be: a compose `keploy test` starts a new agent for each
 	// test-set, at the same address, and a handoff that breaks on a later
 	// agent would otherwise go unseen.
@@ -161,8 +190,8 @@ func TestVerifyControlPlaneGuarded_RunsOncePerAgent(t *testing.T) {
 		return hits[strings.TrimPrefix(uri, srv.URL)+token.ProbePath]
 	}
 
-	token.RecordLaunch(first)
-	token.RecordLaunch(second)
+	recordLaunch(t, first)
+	recordLaunch(t, second)
 	for i := 0; i < 3; i++ {
 		verifyControlPlaneGuarded(context.Background(), zap.NewNop(), first)
 		verifyControlPlaneGuarded(context.Background(), zap.NewNop(), second)
@@ -171,7 +200,7 @@ func TestVerifyControlPlaneGuarded_RunsOncePerAgent(t *testing.T) {
 	require.Equal(t, 1, probes(second), "a second agent was never checked")
 
 	// The next test-set's agent, at the first one's address.
-	token.RecordLaunch(first)
+	recordLaunch(t, first)
 	verifyControlPlaneGuarded(context.Background(), zap.NewNop(), first)
 	require.Equal(t, 2, probes(first), "a new agent on a reused port inherited its predecessor's answer and was never checked")
 }
@@ -199,29 +228,74 @@ func TestAgentHealthTicker_ChecksTheGuardWhenTheAgentBecomesReady(t *testing.T) 
 	}))
 	t.Cleanup(srv.Close)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	token.RecordLaunch(srv.URL + "/agent")
+	recordLaunch(t, srv.URL+"/agent")
 	readyCh := make(chan bool, 1)
 	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
 
-	select {
-	case ready := <-readyCh:
-		require.True(t, ready)
-	case <-ctx.Done():
-		t.Fatal("the agent never became ready")
-	}
+	// No clock bounds either wait: an agent that never becomes ready, or a
+	// check that never lands, fails the run at go test's own -timeout,
+	// where a budget here would fail a correct run on a starved machine.
+	require.True(t, <-readyCh, "the agent never became ready")
 
 	// The readiness signal must not wait on the check, so the check is allowed
 	// to land after it — but it must land.
-	select {
-	case auth := <-probed:
-		require.Equal(t, "Bearer not-the-session-token", auth,
-			"the check presented a credential that a guarded agent would accept, which would prove nothing")
-	case <-time.After(5 * time.Second):
-		t.Fatal("the agent became ready but its control plane was never checked")
-	}
+	auth := <-probed
+	require.Equal(t, "Bearer not-the-session-token", auth,
+		"the check presented a credential that a guarded agent would accept, which would prove nothing")
+}
+
+// TestAgentHealthTickerWithAnswer_SendsTheReadyAnswerAndChecksTheGuard holds
+// the variant the native and docker-run bring-up waits on to what it promises:
+// it sends the headers of the answer that found the agent ready, once, then
+// closes the channel; it starts the control-plane check as AgentHealthTicker
+// does; and when ctx ends before any healthy answer it closes the channel with
+// nothing sent. Every wait here has a definite end, so none has a deadline.
+func TestAgentHealthTickerWithAnswer_SendsTheReadyAnswerAndChecksTheGuard(t *testing.T) {
+	resetProbeOnce(t)
+
+	probed := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/agent/health":
+			w.Header().Set("X-Test-Answer", "the ready one")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`"OK"`))
+		case "/agent" + token.ProbePath:
+			probed <- r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	recordLaunch(t, srv.URL+"/agent")
+	answers := make(chan http.Header, 1)
+	go AgentHealthTickerWithAnswer(ctx, zap.NewNop(), srv.URL+"/agent", answers, 10*time.Millisecond)
+
+	header := <-answers
+	require.NotNil(t, header, "the agent answered 200, so the ticker must send its headers")
+	require.Equal(t, "the ready one", header.Get("X-Test-Answer"), "the headers sent are not the ready answer's")
+	_, open := <-answers
+	require.False(t, open, "the ticker must send one answer and close the channel")
+	require.Equal(t, "Bearer not-the-session-token", <-probed,
+		"the check presented a credential that a guarded agent would accept, which would prove nothing")
+
+	gone := httptest.NewServer(http.NotFoundHandler())
+	goneURL := gone.URL
+	gone.Close()
+	ended, end := context.WithCancel(context.Background())
+	nothing := make(chan http.Header, 1)
+	go AgentHealthTickerWithAnswer(ended, zap.NewNop(), goneURL+"/agent", nothing, 10*time.Millisecond)
+	end()
+	header, open = <-nothing
+	require.False(t, open, "a ticker whose ctx ended must close the channel")
+	require.Nil(t, header, "a ticker whose ctx ended must send nothing")
 }
 
 // TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck is the other half of the
@@ -232,8 +306,10 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 	resetProbeOnce(t)
 
 	release := make(chan struct{})
+	probed := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/agent"+token.ProbePath {
+			probed <- struct{}{}
 			<-release // hold the check open
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -243,16 +319,20 @@ func TestAgentHealthTicker_ReadinessDoesNotWaitOnTheCheck(t *testing.T) {
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	token.RecordLaunch(srv.URL + "/agent")
+	recordLaunch(t, srv.URL+"/agent")
 	readyCh := make(chan bool, 1)
 	go AgentHealthTicker(ctx, zap.NewNop(), srv.URL+"/agent", readyCh, 10*time.Millisecond)
 
-	select {
-	case <-readyCh:
-	case <-time.After(3 * time.Second):
-		t.Fatal("readiness was blocked behind the control-plane check")
-	}
+	// Readiness comes while the check is held open. No clock bounds the
+	// wait: a readiness blocked behind the check never comes, and go
+	// test's own -timeout fails that run, where a budget here would fail
+	// a correct run on a starved machine.
+	<-readyCh
+	// The check runs on after readiness. It is waited for here, held open,
+	// so that it cannot dial after this test, when a later test's server
+	// may have this one's port.
+	<-probed
 }

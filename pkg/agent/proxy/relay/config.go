@@ -7,8 +7,9 @@ import (
 	"net"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -47,7 +48,7 @@ const (
 	// It bounds STALLED time, not elapsed time: the wait ends the moment the
 	// parser takes anything at all, so an arbitrarily slow parser still
 	// receives every chunk. And it is time the process could RUN, not wall
-	// time (see stallMeter): a starved process's parser cannot read either.
+	// time (utils/stall): a starved process's parser cannot read either.
 	// It only elapses when the parser frees nothing at all for this long,
 	// which is taken as "gone" — the whole remaining queue is then abandoned
 	// at once and reported, rather than the wait being re-entered per chunk.
@@ -114,6 +115,22 @@ type Config struct {
 	// logger is substituted.
 	Logger *zap.Logger
 
+	// OnCaptureLoss, when set, is told of each call the relay could not
+	// capture: today a TLS upgrade (STARTTLS, Postgres SSLRequest) it could
+	// not make, after which the connection is not parsed. kind and what are
+	// as for models.CaptureLoss. Nil is safe.
+	OnCaptureLoss func(kind models.CaptureLossKind, what string)
+
+	// OnClientHandshakeFailed, when set, is handed the error of a
+	// client-side TLS upgrade that failed in its handshake (TLSUpgradeFn
+	// with isClient=false), in place of the STARTTLS loss OnCaptureLoss is
+	// told of: it is a client-side handshake with keploy's proxy like any
+	// other, which the proxy tells apart -- a client that hung up, one that
+	// abandoned it once keploy's certificate was out, one that rejected
+	// the certificate -- rather than an upgrade keploy could not make. Not
+	// called once ctx is done. Nil keeps the STARTTLS loss.
+	OnClientHandshakeFailed func(ctx context.Context, err error)
+
 	// PerConnCap is the soft cap on parser-owned buffered bytes.
 	// When the number of bytes currently sitting in the tee channel
 	// (i.e. read from the socket but not yet consumed by the parser)
@@ -148,23 +165,29 @@ type Config struct {
 	// pkg/agent/proxy/proxy.go; zero and negative are passed through
 	// untouched so the default above applies.
 	ConsumerStallGrace time.Duration
-	// stallClock measures ConsumerStallGrace (see stallMeter); nil is the
-	// process's own clocks. Tests set it to drive the window.
-	stallClock stallClock
+	// stallClock measures ConsumerStallGrace (stall.Meter); nil is the
+	// process's own runnable clock. Tests set it to drive the window.
+	stallClock stall.Clock
+	// readClock is the clock a forwarder takes a chunk's read stamp from
+	// when its socket reports none (nil: time.Now). Tests set it to see the
+	// forwarder's hand at the moment the stamp is taken.
+	readClock func() time.Time
 	// beforeTee, when set, runs on a forwarder after it has written a chunk
 	// on and before it tees it. Tests set it to hold one direction's tee
 	// back, so the other direction's later capture is teed first.
 	beforeTee func(fakeconn.Direction)
 
+	// ReaderLag, when positive, delivers each captured chunk to its parser
+	// no earlier than this long after the relay read it: the parser then runs
+	// that far behind the traffic, as a starved agent's does, while the
+	// application's bytes are forwarded as fast as ever. It exists to make
+	// capture lag deterministic in end-to-end tests (the proxy sets it from
+	// KEPLOY_DEBUG_PARSER_LAG); zero, the default, adds nothing.
+	ReaderLag time.Duration
+
 	// ForwardBuf is the size of the per-iteration scratch buffer
 	// used by forwarder Reads. Zero resolves to DefaultForwardBuf.
 	ForwardBuf int
-
-	// MemoryGuardCheck is polled on every chunk. When it returns
-	// true the tee is dropped with reason "memory_pressure" — the
-	// forward itself is not affected. Nil resolves to
-	// [memoryguard.IsRecordingPaused].
-	MemoryGuardCheck func() bool
 
 	// TLSUpgradeFn performs TLS handshakes in response to
 	// KindUpgradeTLS directives. If nil, a KindUpgradeTLS directive
@@ -229,8 +252,29 @@ type Config struct {
 	// idle". Nil is safe.
 	BumpActivity func()
 
+	// OnCarried is told of each chunk the forwarder hands to the tee, on
+	// that forwarder, or, for destination chunks written to a client after
+	// its FIN, which wait for the client's answer (client_took.go), on the
+	// goroutine that settles them, in order and before any later chunk of
+	// that direction: its direction, when it was read (Chunk.ReadAt), and
+	// whether the tee took it. through is the position just past the chunk
+	// in its direction's stream, in the offsets fakeconn.FakeConn counts
+	// what its reader is done with in (Consumed, ReadThrough): the reader
+	// has taken the whole chunk once those reach it. When the tee refused
+	// the chunk, through is where the stream already stood (the chunk moved
+	// nothing). That is what tells a chunk the parser read from one it never
+	// did, once the parser has stopped reading; the order in which the relay
+	// and the parser get to a chunk does not (the parser can read a chunk
+	// before the relay is done with it). A chunk the forwarder only stashes
+	// across a pause, with no push, is not told of, nor is a destination
+	// chunk the client refused (ClientStopped). It runs under the client
+	// hold's lock on that path, and under the relay's own lock as it settles
+	// chunks that waited, so it must not block or call back into the relay.
+	// Nil is safe.
+	OnCarried func(dir fakeconn.Direction, at time.Time, teed bool, through int64)
+
 	// OnMarkMockIncomplete is invoked whenever the relay drops a
-	// tee chunk (memoryguard, cap, channel full) or processes a
+	// tee chunk (per-connection cap, desync, pause) or processes a
 	// KindAbortMock directive. The reason string is the same value
 	// the supervisor will record in telemetry. Nil is safe.
 	OnMarkMockIncomplete func(reason string)
@@ -412,9 +456,8 @@ type Config struct {
 	//
 	// The default is FALSE, and that is the load-bearing choice.
 	//
-	// When a tee desyncs — a chunk lost to [DropPerConnCap] or
-	// [DropMemoryPressure] — the connection's captured byte stream has a
-	// hole in it. The tee already says so in its own words: it logs "capture
+	// When a tee desyncs — a chunk lost to [DropPerConnCap] — the
+	// connection's captured byte stream has a hole in it. The tee already says so in its own words: it logs "capture
 	// dropped a chunk" at Warn (once per direction) and fires
 	// [Config.OnCaptureDesync] so the owner can suppress the test cases
 	// recorded over the hole. Until now it then kept pushing anyway, and a
@@ -447,7 +490,7 @@ type Config struct {
 	// direction at its hole: once a tee has desynced and delivered every
 	// chunk it queued before the hole, it ends its FakeConn (io.EOF), and
 	// calls EndAtHole first, with the direction and the reason the chunk was
-	// lost ([DropPerConnCap] or [DropMemoryPressure]). The caller wires it to
+	// lost ([DropPerConnCap]). The caller wires it to
 	// supervisor.Session.MarkEndedAtHole, so the parser that reaches the end
 	// learns it is the hole's and not the connection's. The tee then marks
 	// no mock incomplete (OnMarkMockIncomplete) for the lost chunk, nor for
@@ -463,6 +506,20 @@ type Config struct {
 	// had closed there. The forward path is untouched either way, and so is
 	// the relay when the parser returns: a parser's return never ends it.
 	EndAtHole func(dir fakeconn.Direction, reason string)
+
+	// ClientStopped, when set, is told once, at the first destination chunk
+	// the client did not take (client_took.go): the chunk was written once a
+	// look found the client's FIN at the proxy's socket, and the connection
+	// then closed with nothing acknowledged since that look, as it does for a
+	// client that closed its socket. The destination's stream ends there:
+	// that chunk and every one after it is forwarded but not teed. It is
+	// told on the goroutine that waited for the client's answer. The caller
+	// wires it to supervisor.Session.MarkEndedWhereClientStopped, so a parser
+	// that reaches the end of the stream in the middle of a message knows the
+	// client stopped taking it there, and the destination did not cut it
+	// short. It is called before the stream ends, and must not block. Nil is
+	// safe.
+	ClientStopped func()
 }
 
 // withDefaults returns a copy of cfg with zero-valued optional fields
@@ -512,11 +569,11 @@ func (c Config) withDefaults() Config {
 			zap.String("next_step", "a parser should implement WantsClientWriteHold or WantsPreDispatchPause, never both — the hold subsumes pre-dispatch for the client direction"),
 		)
 	}
-	if out.MemoryGuardCheck == nil {
-		out.MemoryGuardCheck = memoryguard.IsRecordingPaused
-	}
 	if out.BumpActivity == nil {
 		out.BumpActivity = func() {}
+	}
+	if out.OnCarried == nil {
+		out.OnCarried = func(fakeconn.Direction, time.Time, bool, int64) {}
 	}
 	if out.OnMarkMockIncomplete == nil {
 		out.OnMarkMockIncomplete = func(string) {}

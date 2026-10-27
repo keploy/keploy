@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -16,6 +20,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
@@ -409,5 +415,218 @@ func TestARecordingWithoutRepeatedHeadersGainsNothingOnDisk(t *testing.T) {
 	// nothing either: a test case's response is only compared.
 	if bytes.Contains(onDisk, []byte("header_line_lengths")) {
 		t.Errorf("a recording without a repeated request header stores something new:\n%s", onDisk)
+	}
+}
+
+// A multipart file part is captured into a temp file of the capturing process
+// (dsmon F19). Saved by that process (sidecar, local) the persister copies it
+// from there, as it always has. Saved by another one -- the DaemonSet agent
+// streams the test case as JSON to k8s-proxy's control plane, where that temp
+// file does not exist -- the bytes ride the test case (InlineFormFiles). Either
+// way the asset is written byte for byte, binary content included, and replay
+// sends the file.
+func TestAMultipartFileReachesReplayWhereverItsTestCaseIsPersisted(t *testing.T) {
+	file := []byte{'P', 'K', 0x03, 0x04, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28, '\n'} // not valid UTF-8
+	type sent struct {
+		fields, files, fileNames map[string]string
+	}
+	var got sent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = sent{fields: map[string]string{}, files: map[string]string{}, fileNames: map[string]string{}}
+		mr, err := r.MultipartReader()
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			data, err := io.ReadAll(part)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if part.FileName() != "" {
+				got.files[part.FormName()] = string(data)
+				got.fileNames[part.FormName()] = part.FileName()
+				continue
+			}
+			got.fields[part.FormName()] = string(data)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	for _, remote := range []bool{false, true} {
+		name := "persisted by the capturing process"
+		if remote {
+			name = "persisted by another process"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			var body bytes.Buffer
+			mw := multipart.NewWriter(&body)
+			if err := mw.WriteField("namespace", "ns"); err != nil {
+				t.Fatal(err)
+			}
+			fw, err := mw.CreateFormFile("classes", "classes.zip")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fw.Write(file); err != nil {
+				t.Fatal(err)
+			}
+			if err := mw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/dedup/bytecode", &body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"status":"stored"}`))}
+			tcChan := make(chan *models.TestCase, 1)
+			// App port 0: replay sends the request to the recorded URL, srv.
+			Capture(ctx, zap.NewNop(), tcChan, req, resp, time.Now(), time.Now(), models.IncomingOptions{}, false, false, 0)
+			tc := <-tcChan
+
+			var tempPath string
+			for _, form := range tc.HTTPReq.Form {
+				if form.Key == "classes" && len(form.Paths) == 1 {
+					tempPath = form.Paths[0]
+				}
+			}
+			if tempPath == "" {
+				t.Fatalf("the capture left no temp file for the file part: %+v", tc.HTTPReq.Form)
+			}
+			t.Cleanup(func() { _ = os.Remove(tempPath) })
+
+			if remote {
+				InlineFormFiles(zap.NewNop(), tc)
+				if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+					t.Fatalf("temp file %s left behind after its bytes were inlined (stat err %v)", tempPath, err)
+				}
+				// What the DaemonSet stream carries to the control plane.
+				payload, err := json.Marshal(tc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var streamed models.TestCase
+				if err := json.Unmarshal(payload, &streamed); err != nil {
+					t.Fatal(err)
+				}
+				tc = &streamed
+			}
+
+			keployPath := t.TempDir()
+			db := testdb.New(zap.NewNop(), keployPath)
+			if err := db.InsertTestCase(ctx, tc, "test-set-0", false); err != nil {
+				t.Fatalf("insert test case: %v", err)
+			}
+			stored, err := db.GetTestCases(ctx, "test-set-0")
+			if err != nil || len(stored) != 1 {
+				t.Fatalf("stored test cases = %d (err %v), want 1", len(stored), err)
+			}
+			var asset string
+			for _, form := range stored[0].HTTPReq.Form {
+				if form.Key == "classes" && len(form.Paths) == 1 {
+					asset = form.Paths[0]
+				}
+			}
+			if asset == "" {
+				t.Fatalf("the stored test case has no file for the file part: %+v", stored[0].HTTPReq.Form)
+			}
+			onDisk, err := os.ReadFile(filepath.Join(keployPath, asset))
+			if err != nil || !bytes.Equal(onDisk, file) {
+				t.Fatalf("asset %s = %q (err %v), want %q", asset, onDisk, err, file)
+			}
+
+			got = sent{}
+			replayed, err := pkg.SimulateHTTP(ctx, stored[0], "test-set-0", zap.NewNop(), pkg.SimulationConfig{APITimeout: 10, KeployPath: keployPath})
+			if err != nil {
+				t.Fatalf("replay: %v", err)
+			}
+			if replayed.StatusCode != http.StatusOK {
+				t.Fatalf("replay status = %d, want 200", replayed.StatusCode)
+			}
+			if got.files["classes"] != string(file) || got.fileNames["classes"] != "classes.zip" || got.fields["namespace"] != "ns" {
+				t.Fatalf("replay sent files %q (names %v), fields %v; want classes.zip = %q and namespace = ns",
+					got.files, got.fileNames, got.fields, file)
+			}
+		})
+	}
+}
+
+// While the memory guard has paused recording, a capture hook's skip closes
+// the exchange's bodies and counts the request as not recorded, on the ingress
+// connection its context names: a request that was in flight as the pause
+// began is not recorded, and the recording says so. Recording running, it
+// skips nothing and counts nothing.
+func TestSkipUnderPressureClosesAndCountsOnTheIngressConnection(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	ctx := syncMock.WithIngressConn(syncMock.NewContext(context.Background(), mgr), "10.0.0.1:5000 -> 127.0.0.1:8080")
+	req := httptest.NewRequest(http.MethodPost, "/x", nil)
+	reqBody := &trackCloser{Reader: strings.NewReader("in")}
+	req.Body = reqBody
+	respBody := &trackCloser{Reader: strings.NewReader("out")}
+	resp := &http.Response{StatusCode: http.StatusOK, Body: respBody}
+
+	if SkipUnderPressure(ctx, req, resp) || reqBody.closed || respBody.closed || mgr.NotRecordedUnderPressure().Total != 0 {
+		t.Fatal("recording running: skipped, closed a body or counted")
+	}
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	skipped := SkipUnderPressure(ctx, req, resp)
+	restore()
+	if !skipped || !reqBody.closed || !respBody.closed {
+		t.Fatalf("recording paused: skipped %v, request body closed %v, response body closed %v; want all", skipped, reqBody.closed, respBody.closed)
+	}
+	got := mgr.NotRecordedUnderPressure()
+	if got.Total != 1 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:8080"] != 1 {
+		t.Fatalf("not recorded under pressure: %+v, want the request on its connection", got)
+	}
+}
+
+// A gRPC call is left out for a pause of the memory guard when the guard has
+// paused recording now, or had as the forwarder read the call's request, and
+// each one left out is counted on the ingress connection its context names. A
+// call whose request was read while recording was not paused is not, however
+// close to a pause its request's time is: the gRPC ingress tees a
+// connection's whole stream through a pause, and only the calls the pause took
+// part in are its cost. A request read just after a pause, in the tick its
+// span ended in, is not in it: on a clock as coarse as Windows' the request's
+// time cannot tell, and the first call after every pause was left out.
+func TestSkipGRPCUnderPressureDecidesByThePauseAsTheRequestWasRead(t *testing.T) {
+	mgr := syncMock.New(zap.NewNop())
+	ctx := syncMock.WithIngressConn(syncMock.NewContext(context.Background(), mgr), "10.0.0.1:5000 -> 127.0.0.1:50051")
+	// A span that holds every instant: the request's time must not decide.
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+
+	for _, c := range []struct {
+		what            string
+		pausedAtRequest bool
+		now             bool // the guard has paused recording now
+		want            bool
+	}{
+		{what: "a request read while recording was not paused, its time in a span"},
+		{what: "a request read during the pause, decided after it", pausedAtRequest: true, want: true},
+		{what: "a request read after the pause, decided during the next", now: true, want: true},
+		{what: "a request read during a pause, decided during it", pausedAtRequest: true, now: true, want: true},
+	} {
+		restore := memoryguard.SetRecordingPausedForTest(c.now)
+		got := SkipGRPCUnderPressure(ctx, c.pausedAtRequest)
+		restore()
+		if got != c.want {
+			t.Errorf("%s: left out %v, want %v", c.what, got, c.want)
+		}
+	}
+	if got := mgr.NotRecordedUnderPressure(); got.Total != 3 || got.ByConn["10.0.0.1:5000 -> 127.0.0.1:50051"] != 3 {
+		t.Fatalf("not recorded under pressure: %+v, want the three calls left out, on their connection", got)
 	}
 }

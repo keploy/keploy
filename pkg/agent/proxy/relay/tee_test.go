@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -17,10 +17,10 @@ import (
 // cap is expressed in bytes; buf is the channel capacity.
 const testStallGrace = 150 * time.Millisecond
 
-func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*tee, func(reason string), *dropRecorder) {
+func newTestTee(t *testing.T, capBytes int64, buf int) (*tee, func(reason string), *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, memCheck, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
 	// A consumer that never goes away: these tests exercise queueing and
 	// delivery, so drain must never take the abandon branch. Tests that
 	// simulate a departed parser build their own signal (see
@@ -54,7 +54,7 @@ func newTestTee(t *testing.T, capBytes int64, buf int, memCheck func() bool) (*t
 func newTestTeeQueued(t *testing.T, capBytes int64, buf int) (*tee, *dropRecorder) {
 	t.Helper()
 	rec := &dropRecorder{}
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, nil, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
 	t.Cleanup(t2.close)
 	return t2, rec
 }
@@ -63,7 +63,7 @@ func newTestTeeWithConsumer(t *testing.T, capBytes int64, buf int) (*tee, *dropR
 	t.Helper()
 	rec := &dropRecorder{}
 	gone := make(chan struct{})
-	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, nil, rec.record, nil)
+	t2 := newTee(fakeconn.FromClient, capBytes, buf, testStallGrace, rec.record, nil)
 	t2.start(gone)
 	t.Cleanup(func() {
 		t2.close()
@@ -115,7 +115,7 @@ func mkChunk(payload string) fakeconn.Chunk {
 
 func TestTee_PushAndDrain(t *testing.T) {
 	t.Parallel()
-	tt, _, rec := newTestTee(t, 1<<20, 4, nil)
+	tt, _, rec := newTestTee(t, 1<<20, 4)
 
 	if !tt.push(mkChunk("hello")) {
 		t.Fatalf("push returned false unexpectedly")
@@ -124,22 +124,8 @@ func TestTee_PushAndDrain(t *testing.T) {
 	if string(got.Bytes) != "hello" {
 		t.Fatalf("got bytes %q, want %q", got.Bytes, "hello")
 	}
-	if rec.count(DropMemoryPressure)+rec.count(DropPerConnCap)+rec.count(DropChannelFull) != 0 {
+	if rec.count(DropPerConnCap)+rec.count(DropChannelFull) != 0 {
 		t.Fatalf("unexpected drops: %v", rec.snapshot())
-	}
-}
-
-func TestTee_DropOnMemoryPressure(t *testing.T) {
-	t.Parallel()
-	var paused atomic.Bool
-	paused.Store(true)
-	tt, _, rec := newTestTee(t, 1<<20, 4, paused.Load)
-
-	if tt.push(mkChunk("x")) {
-		t.Fatalf("push should have dropped under memory pressure")
-	}
-	if rec.count(DropMemoryPressure) != 1 {
-		t.Fatalf("want 1 memory_pressure drop, got reasons %v", rec.snapshot())
 	}
 }
 
@@ -171,7 +157,7 @@ func TestTee_DropOnPerConnCap(t *testing.T) {
 func TestTee_SpillsInsteadOfDroppingOnChannelFull(t *testing.T) {
 	t.Parallel()
 	// Large cap so the spill has headroom; buf=1 so staging fills at once.
-	tt, _, rec := newTestTee(t, 1<<30, 1, nil)
+	tt, _, rec := newTestTee(t, 1<<30, 1)
 
 	for i := 0; i < 64; i++ {
 		if !tt.push(mkChunk(fmt.Sprintf("c%03d", i))) {
@@ -189,7 +175,7 @@ func TestTee_SpillsInsteadOfDroppingOnChannelFull(t *testing.T) {
 // assert the exact sequence is delivered.
 func TestTee_SpillPreservesOrderNoLoss(t *testing.T) {
 	t.Parallel()
-	tt, _, rec := newTestTee(t, 1<<30, 1, nil)
+	tt, _, rec := newTestTee(t, 1<<30, 1)
 
 	recvd := make(chan []string, 1)
 	go func() {
@@ -234,8 +220,8 @@ func TestTee_CloseRacingSpillBacklog_Conserves(t *testing.T) {
 	t.Parallel()
 	for iter := 0; iter < 100; iter++ {
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 1, testStallGrace, nil, rec.record, nil) // buf=1 forces spill
-		tt.start(make(chan struct{}))                                                     // consumer stays alive for this test
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, testStallGrace, rec.record, nil) // buf=1 forces spill
+		tt.start(make(chan struct{}))                                                // consumer stays alive for this test
 
 		recvd := make(chan []int, 1)
 		go func() {
@@ -309,7 +295,7 @@ func TestTee_DropsWhenOverflowExceedsCap(t *testing.T) {
 
 func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 	t.Parallel()
-	tt, _, rec := newTestTee(t, 1<<20, 4, nil)
+	tt, _, rec := newTestTee(t, 1<<20, 4)
 
 	tt.setPaused(true)
 	if tt.push(mkChunk("hello")) {
@@ -327,7 +313,7 @@ func TestTee_PausedDropsWithoutCapUsage(t *testing.T) {
 
 func TestTee_ClosePreventsSendPanic(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
 	tt.start(make(chan struct{})) // consumer stays alive for this test
 
 	// Spawn pushers racing with close; no panic expected.
@@ -349,7 +335,7 @@ func TestTee_ClosePreventsSendPanic(t *testing.T) {
 
 func TestTee_CloseIsIdempotent(t *testing.T) {
 	t.Parallel()
-	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
+	tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
 	tt.start(make(chan struct{})) // consumer stays alive for this test
 	tt.close()
 	tt.close() // must not panic
@@ -376,7 +362,7 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 	const iters = 200
 	for i := 0; i < iters; i++ {
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 4, testStallGrace, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 1<<30, 4, testStallGrace, rec.record, nil)
 		tt.start(make(chan struct{})) // consumer stays alive for this test
 
 		// Admit a chunk into staging, then immediately tear the tee
@@ -401,7 +387,7 @@ func TestTee_StagedChunkSurvivesClose(t *testing.T) {
 		if got != 1 {
 			t.Fatalf("iter %d: delivered %d chunks, want 1 (chunk dropped on teardown)", i, got)
 		}
-		if d := rec.count(DropChannelFull) + rec.count(DropMemoryPressure) + rec.count(DropPerConnCap); d != 0 {
+		if d := rec.count(DropChannelFull) + rec.count(DropPerConnCap); d != 0 {
 			t.Fatalf("iter %d: unexpected push-side drops: %v", i, rec.snapshot())
 		}
 	}
@@ -492,14 +478,14 @@ func TestTee_GoneConsumerIsAbandonedAtOnce(t *testing.T) {
 // tempting. Deciding once and abandoning the remainder gets both: this must
 // finish in ONE window regardless of how much is queued.
 //
-// The window is time the process could run (stallMeter), so it is measured
+// The window is time the process could run (utils/stall), so it is measured
 // on an injected clock, not in wall time: on a starved host one window of run
 // time is many of wall time, and a wall-clock bound here would fail there
 // for the behaviour the window exists to have.
 func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	t.Parallel()
 	const queued = 200
-	clk := newFakeStallClock(onTime)
+	clk := &stall.ManualClock{Step: stall.OnTime}
 	tt, rec := newTestTeeClock(t, 1<<30, 1, clk) // consumer never reads
 
 	for i := 0; i < queued; i++ {
@@ -510,8 +496,8 @@ func TestTee_StalledConsumerCostsOneGraceNotOnePerChunk(t *testing.T) {
 	tt.waitDone()
 
 	// Per-chunk re-decision would take queued windows of samples.
-	if got, want := clk.waits(), int(testStallGrace/stallTick); got != want {
-		t.Errorf("teardown sampled %d ticks with %d chunks queued, want one window of %d: the stall verdict is being "+
+	if got, want := clk.Waits, int(testStallGrace/stall.CheckEvery(testStallGrace)); got != want {
+		t.Errorf("teardown looked %d times with %d chunks queued, want one window of %d: the stall verdict is being "+
 			"re-taken per chunk instead of once for the connection", got, queued, want)
 	}
 	if n := rec.count(DropConsumerGone); n != 1 {
@@ -723,7 +709,7 @@ func TestConfigSuppliesTheStallGrace(t *testing.T) {
 		// Demonstrates WHY the clause above matters, so the guard reads as a
 		// consequence rather than a style rule.
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<30, 1, 0 /* zero grace */, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 1<<30, 1, 0 /* zero grace */, rec.record, nil)
 		tt.start(make(chan struct{}))
 		for i := 0; i < 50; i++ {
 			tt.push(mkChunk("x"))
@@ -776,9 +762,9 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 // TestAnUnintendedDropReportsCaptureDesync pins the signal that a connection's
 // capture is finished.
 //
-// This is the guard for a proven production data-loss bug: under memory
-// pressure the agent dropped egress chunks while continuing to record test
-// cases, so a recording ended with test cases that had no mocks at all and
+// This is the guard for a proven production data-loss bug: the agent dropped
+// egress chunks (then under memory pressure, now only past the per-connection
+// cap) while continuing to record test cases, so a recording ended with test cases that had no mocks at all and
 // replayed as match_phase=no_mocks. The drop was reported only through the
 // per-mock MarkMockIncomplete (cleared after every cycle) and a sampled Debug
 // line, so a whole failing run contained zero errors. What makes it permanent
@@ -788,42 +774,11 @@ func TestNewWiresTheStallGraceIntoBothTees(t *testing.T) {
 func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 	t.Parallel()
 
-	t.Run("memory pressure mid-capture desyncs the connection", func(t *testing.T) {
-		t.Parallel()
-		var desyncs []string
-		pressure := false
-		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, func() bool { return pressure }, nil, nil)
-		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
-		t.Cleanup(tt.close)
-
-		// Capture is underway: this is the connection a reconnect can rescue.
-		if !tt.push(fakeconn.Chunk{Bytes: []byte("framed")}) {
-			t.Fatal("first push should have been teed")
-		}
-		pressure = true
-		if tt.push(fakeconn.Chunk{Bytes: []byte("abc")}) {
-			t.Fatal("push should have dropped under memory pressure")
-		}
-		if len(desyncs) != 1 || desyncs[0] != DropMemoryPressure {
-			t.Fatalf("onDesync calls = %v, want exactly [%s]: a lost chunk leaves the parser "+
-				"mid-frame, and nothing else reports that the connection is now uncapturable",
-				desyncs, DropMemoryPressure)
-		}
-
-		// Sustained pressure must not re-report: one connection, one event.
-		for i := 0; i < 5; i++ {
-			tt.push(fakeconn.Chunk{Bytes: []byte("more")})
-		}
-		if len(desyncs) != 1 {
-			t.Errorf("onDesync fired %d times, want 1 — it is per-connection, not per-chunk", len(desyncs))
-		}
-	})
-
 	t.Run("exceeding the per-connection cap desyncs the connection", func(t *testing.T) {
 		t.Parallel()
 		var desyncs []string
 		// Cap admits the first chunk and refuses the second.
-		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, nil, nil)
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, nil)
 		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
@@ -835,14 +790,14 @@ func TestAnUnintendedDropReportsCaptureDesync(t *testing.T) {
 		}
 		if len(desyncs) != 1 || desyncs[0] != DropPerConnCap {
 			t.Fatalf("onDesync calls = %v, want exactly [%s]: a capped-out chunk is lost to the "+
-				"parser just as surely as a pressure-dropped one", desyncs, DropPerConnCap)
+				"parser just as surely as any other lost chunk", desyncs, DropPerConnCap)
 		}
 	})
 
 	t.Run("a deliberate pause does NOT desync the connection", func(t *testing.T) {
 		t.Parallel()
 		var desyncs []string
-		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil, nil)
+		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, nil)
 		tt.onDesync = func(reason string) bool { desyncs = append(desyncs, reason); return true }
 		t.Cleanup(tt.close)
 
@@ -886,7 +841,7 @@ func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
 		t.Helper()
 		rec := &dropRecorder{}
 		desyncs := 0
-		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, rec.record, nil)
 		tt.parserCanResync = canResync
 		tt.onDesync = func(string) bool { desyncs++; return true }
 		t.Cleanup(tt.close)
@@ -948,7 +903,7 @@ func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
 	t.Run("the gate keys off the desync latch, not off any drop", func(t *testing.T) {
 		t.Parallel()
 		rec := &dropRecorder{}
-		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, nil, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 1<<20, 4, testStallGrace, rec.record, nil)
 		// Default: cannot resync. A pause must still not engage the gate.
 		t.Cleanup(tt.close)
 
@@ -981,21 +936,19 @@ func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
 		}
 	})
 
-	t.Run("the desync reason outranks memory pressure and the cap", func(t *testing.T) {
+	t.Run("the desync reason outranks the cap", func(t *testing.T) {
 		t.Parallel()
 		// A dead connection's remaining chunks must be attributed to the
-		// desync that killed it, not re-reported as memory_pressure /
-		// per_conn_cap once per chunk for the rest of its life. Those two
-		// reasons name a CAUSE the operator can act on ("raise
-		// maxMemoryPerConnection"); repeating them after the stream position
-		// is already lost sends the operator after a knob that would not have
-		// saved this connection.
+		// desync that killed it, not re-reported as per_conn_cap once per
+		// chunk for the rest of its life. That reason names a CAUSE the
+		// operator can act on ("raise maxMemoryPerConnection"); repeating it
+		// after the stream position is already lost sends the operator after
+		// a knob that would not have saved this connection.
 		//
-		// Pinning it needs a chunk that BOTH later checks would also refuse,
-		// which is why pressure is switched on and the chunk is oversized.
+		// Pinning it needs a chunk the cap check would also refuse, which is
+		// why the chunk is oversized.
 		rec := &dropRecorder{}
-		var pressure atomic.Bool
-		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, pressure.Load, rec.record, nil)
+		tt := newTee(fakeconn.FromClient, 8, 4, testStallGrace, rec.record, nil)
 		t.Cleanup(tt.close)
 
 		if !tt.push(mkChunk("abcd")) {
@@ -1008,18 +961,12 @@ func TestTee_DesyncedTeeStopsFeedingAParserThatCannotResync(t *testing.T) {
 			t.Fatal("a per_conn_cap drop must have latched the desync")
 		}
 
-		pressure.Store(true)
 		if tt.push(mkChunk("also far too long for this cap")) {
 			t.Fatal("push after a permanent desync must be refused")
 		}
 		if got := rec.count(DropDesynced); got != 1 {
-			t.Fatalf("%s drops = %d, want 1 — the gate must run BEFORE the memory and "+
-				"cap checks; reasons=%v", DropDesynced, got, rec.snapshot())
-		}
-		if got := rec.count(DropMemoryPressure); got != 0 {
-			t.Fatalf("%s drops = %d, want 0: memory pressure did not cost this chunk, the "+
-				"already-lost stream position did; reasons=%v",
-				DropMemoryPressure, got, rec.snapshot())
+			t.Fatalf("%s drops = %d, want 1 — the gate must run BEFORE the cap "+
+				"check; reasons=%v", DropDesynced, got, rec.snapshot())
 		}
 		if got := rec.count(DropPerConnCap); got != 1 {
 			t.Fatalf("%s drops = %d, want exactly 1 (the original loss); re-reporting the "+

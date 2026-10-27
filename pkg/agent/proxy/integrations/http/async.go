@@ -10,6 +10,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/async"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // compile-time assertions.
@@ -98,7 +99,14 @@ func (h *HTTP) MatchRequestShape(live, recorded *models.Mock, lane models.AsyncL
 	rec := stripVolatile(recorded, vol)
 	// SchemaMatch does field-by-field request-shape comparison; a non-empty
 	// result means the single candidate matched.
-	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, true)
+	// Under the proven switch the destination is compared as every HTTP
+	// call's is, and no path segment or query value is relaxed for its shape
+	// (strict.go). The live call here carries no connection, so it is
+	// compared as a call that reached no container (sameDestination). The
+	// verdict only counts a flag: the engine serves
+	// the recorded epoch either way (async.Engine.decideServe), as a lane the
+	// user declared asks.
+	matched, err := h.SchemaMatch(context.Background(), liveReq, []*models.Mock{rec}, flakyHeaderNoise(), nil, !provenswitch.On())
 	if err != nil {
 		return false, "schema match error: " + err.Error()
 	}
@@ -221,6 +229,12 @@ func liveReqToMock(input *req) *models.Mock {
 // Shared by MatchRequestShape and decode.go's auto-header-noise setup so the two
 // can't drift. The response assertion shares the underlying models list but not
 // this function — it must compare names exactly, not through a noise map.
+//
+// Under the proven switch the credentials leave it (models.CredentialHeaders):
+// a request's Authorization, idempotency keys and CSRF tokens are compared.
 func flakyHeaderNoise() map[string][]string {
+	if provenswitch.On() {
+		return models.ProvenFlakyHeaderNoise()
+	}
 	return models.FlakyHeaderNoise()
 }

@@ -279,8 +279,8 @@ func TestExpected_SetCookieCapturesCookieByCookie(t *testing.T) {
 	r := newRun(t, map[string]interface{}{"csrf": "C0rec", "sid": "S0rec"})
 	res := r.Expected(exp, models.HTTPResp{Header: map[string]string{"Date": ansDate, "Set-Cookie": "csrftoken=C1; Path=/; Expires=x,sessionid=S1; Max-Age=1209600; Path=/; HttpOnly,theme=dark; Path=/"}}, ExpectOptions{})
 	require.Len(t, res.Captures, 2)
-	assert.Equal(t, Capture{Key: "csrf", Value: "C1", Where: "header Set-Cookie.csrftoken"}, res.Captures[0])
-	assert.Equal(t, Capture{Key: "sid", Value: "S1", Where: "header Set-Cookie.sessionid"}, res.Captures[1])
+	assert.Equal(t, Capture{Key: "csrf", Value: "C1", Where: "header Set-Cookie.csrftoken", Type: TypeString}, res.Captures[0])
+	assert.Equal(t, Capture{Key: "sid", Value: "S1", Where: "header Set-Cookie.sessionid", Type: TypeString}, res.Captures[1])
 	assert.Contains(t, res.Resp.Header["Set-Cookie"], "Expires=Fri, 23 Oct 2026 10:00:00 GMT", "an Expires that does not read is compared as recorded")
 }
 
@@ -1139,4 +1139,64 @@ func TestExpected_ASecretInACookiesNameIsTheNameTheRecordingHeld(t *testing.T) {
 			assert.NotContains(t, got.Failures[0].Where+" "+got.Failures[0].Why, c.secret, "a failure prints the secret")
 		})
 	}
+}
+
+// A capture carries its placeholder's type, wherever it stands: a number is
+// one value whatever its spelling, a string is its text.
+func TestExpected_ACaptureCarriesItsPlaceholdersType(t *testing.T) {
+	r := newRun(t, map[string]interface{}{"n": 1, "id": "u_rec", "price": 1.5})
+	res := r.Expected(models.HTTPResp{
+		Body:   `{"n":"{{capture int .n}}","id":"{{capture string .id}}"}`,
+		Header: map[string]string{"X-Price": "{{capture float .price}}"},
+	}, models.HTTPResp{Body: `{"n":7,"id":"u_live"}`, Header: map[string]string{"X-Price": "1.50"}}, ExpectOptions{})
+	require.Empty(t, res.Failures)
+	got := map[string]string{}
+	for _, c := range res.Captures {
+		got[c.Key] = c.Type
+	}
+	assert.Equal(t, map[string]string{"n": TypeInt, "id": TypeString, "price": TypeFloat}, got)
+}
+
+// ExpectedStart resolves an answer's headers as Expected does, its captures
+// first and its uses at each key's value after them, on a copy of the run: a
+// use of a key a cookie of the same answer captures takes the captured value,
+// and the run moves no value. A use of a key the body captures is the app's,
+// the body never having come; a header the answer lacks keeps its expected
+// value. Only the headers that hold a placeholder are returned.
+func TestExpectedStart_AHeaderIsResolvedAsTheMainPathResolvesIt(t *testing.T) {
+	r := NewRun(nil, map[string]interface{}{"id": "REC", "sid": "S1"}, nil)
+	exp := models.HTTPResp{
+		StatusCode: 201,
+		Header: map[string]string{
+			"Content-Type": "application/json",
+			"Location":     "/orders/{{string .id}}",
+			"Set-Cookie":   "sid={{capture string .sid}}; Path=/",
+			"X-Sid":        "{{string .sid}}",
+			"X-Order":      "{{string .id}}",
+		},
+		Body: `{"id":"{{capture string .id}}"}`,
+	}
+	answer := models.HTTPResp{StatusCode: 201, Header: map[string]string{
+		"Content-Type": "application/json",
+		"Location":     "/orders/NEW",
+		"Set-Cookie":   "sid=S2; Path=/",
+		"X-Sid":        "S1",
+	}}
+	got := r.ExpectedStart(exp, answer, ExpectOptions{})
+	assert.Equal(t, map[string]string{
+		"Location":   "/orders/NEW",
+		"Set-Cookie": "sid=S2; Path=/",
+		"X-Sid":      "S2",
+		"X-Order":    "REC",
+	}, got)
+	assert.Equal(t, map[string]string{"id": "REC", "sid": "S1"}, r.Values(), "the run moved")
+}
+
+// A run that defines only secrets resolves a header that holds one.
+func TestExpectedStart_ASecretOnlyRunResolvesItsHeaders(t *testing.T) {
+	r := NewRun(nil, nil, map[string]interface{}{"key": "k-123"})
+	exp := models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Key": "{{.secret.key}}", "X-Plain": "p"}}
+	got := r.ExpectedStart(exp, models.HTTPResp{StatusCode: 200, Header: map[string]string{"X-Key": "k-123"}}, ExpectOptions{})
+	assert.Equal(t, map[string]string{"X-Key": "k-123"}, got)
+	assert.Nil(t, NewRun(nil, nil, nil).ExpectedStart(exp, models.HTTPResp{}, ExpectOptions{}), "a set with no template resolved a header")
 }

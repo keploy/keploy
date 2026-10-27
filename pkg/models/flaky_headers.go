@@ -123,6 +123,55 @@ func FlakyHeaderNoise() map[string][]string {
 	return nm
 }
 
+// CredentialHeaders are the request headers that say who is calling, or make
+// a call the one it is: under the proven switch they leave the static list and
+// are compared (design v14 §7.2 item 8). A token minted earlier in the test is
+// a variable, one from the environment binds, one that drifts at record's
+// full round is learned as noise, and anything else must be the recorded one.
+var CredentialHeaders = []string{
+	"authorization",
+	"idempotency-key",
+	"x-idempotency-key",
+	"x-csrf-token",
+	"x-xsrf-token",
+}
+
+// PayloadHashHeaders are the request headers that carry a hash of the
+// request's own body, which a signature covers: under the proven switch they
+// leave the static list too, and the strict matcher compares each with the
+// body it hashes (founder decision 25): a hash must be the hash of the body
+// the client sent, a literal (UNSIGNED-PAYLOAD) the recorded one.
+var PayloadHashHeaders = []string{
+	"x-amz-content-sha256",
+}
+
+// ProvenFlakyHeaderNoise is FlakyHeaderNoise without the CredentialHeaders and
+// the PayloadHashHeaders: the static list a request is matched with under the
+// proven switch.
+func ProvenFlakyHeaderNoise() map[string][]string {
+	nm := FlakyHeaderNoise()
+	for _, h := range CredentialHeaders {
+		delete(nm, h)
+	}
+	for _, h := range PayloadHashHeaders {
+		delete(nm, h)
+	}
+	for _, h := range ProvenOnlyFlakyHeaders {
+		nm[h] = []string{}
+	}
+	return nm
+}
+
+// ProvenOnlyFlakyHeaders are the headers the static list holds under the
+// proven switch only: the strict matcher's (ProvenFlakyHeaderNoise) and the
+// learn step's, one list, so that without the switch the list is as it was.
+var ProvenOnlyFlakyHeaders = []string{
+	// aws-sdk-java v1's retry header (<retries>/<last backoff ms>/<capacity>):
+	// its capacity falls after any retryable error in the client's life, so
+	// it differs from call to call once one throttle came.
+	"amz-sdk-retry",
+}
+
 // volatileResponseHeaders are response headers a server mints fresh on every
 // call, so comparing their VALUES asserts nothing.
 //

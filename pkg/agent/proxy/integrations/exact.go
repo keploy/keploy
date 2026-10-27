@@ -1,0 +1,81 @@
+package integrations
+
+import "go.keploy.io/server/v3/pkg/models"
+
+// ExactServingReader is an optional MockMemDb capability: a store that can
+// serve each test exactly its own mocks (the proven switch, design v14
+// §5.2). While it does, every read shows one view, which changes as a test
+// begins and ends, and a consume the view refuses fails: a test mock that
+// already answered, perhaps on another connection, or a mock the view no
+// longer shows (one read before a test began or ended, one another consume
+// evicted). The agent's MockManager implements it, and every MockMemDb wrapper
+// that passes the consume doors through to its store must forward it: one that
+// drops it hides exact serving from the parsers it serves, and they take a
+// refused consume for failed bookkeeping and answer with the mock. A wrapper
+// whose doors never fail (http's answeredOnly) has nothing to forward.
+type ExactServingReader interface {
+	ExactServing() bool
+}
+
+// ExactServing reports whether db serves each test exactly its own mocks now.
+// Exact serving can begin and end while a connection is open, so a parser
+// asks at each decision that depends on it, never once per connection.
+func ExactServing(db MockMemDb) bool {
+	es, ok := db.(ExactServingReader)
+	return ok && es.ExactServing()
+}
+
+// ConsumeRefused reports whether MarkMockAsUsed's false for the mock named
+// name is a refusal: the mock may not answer, and the parser matches again
+// against what the store shows now, or misses.
+//
+// It is one while db serves exactly, for a named mock. Without exact serving
+// MarkMockAsUsed's false only ever said its bookkeeping failed, and the mock
+// answers as before. MarkMockAsUsed turns a mock with no name away before it
+// asks the view, so that false is bookkeeping too, and refusing it would have
+// a parser match it again forever.
+//
+// It is one too, for any mock, from a store HoldToRound returned that could
+// not hold its call to its round (UnheldWhy: the fail-closed store, or a view
+// over one). That store refuses every consume and offers no exact serving,
+// so read by exact serving alone its false would be bookkeeping, and the
+// parser would answer with a recording the hold never let it read. Every
+// read of it finds no recording, so a parser that matches again misses,
+// and saying so (UnheldNote).
+//
+// The other doors need no such question. A delete door's false
+// (DeleteFilteredMock, DeleteUnFilteredMock, DeleteStartupMock) already says
+// that door did not take the mock, with or without exact serving; under exact
+// serving every door refuses what the view refuses, so a parser that falls
+// through from one to MarkMockAsUsed learns of the refusal there (for a named
+// mock).
+// UpdateUnFilteredMock's false is never a refusal on its own: under exact
+// serving it is also a mock the view shows that the tree it updates does not
+// hold, so a parser that updates a reusable mock asks MarkMockAsUsed after it.
+func ConsumeRefused(db MockMemDb, name string) bool {
+	if UnheldWhy(db) != "" {
+		return true
+	}
+	return name != "" && ExactServing(db)
+}
+
+// ExactConcurrentReader is an optional MockMemDb capability under exact
+// serving: what the open test's view says of the recordings it shares with
+// the tests whose requests were open beside its own at record time
+// (models.ExactServing.Concurrent, models.Mock.TestModeInfo.Concurrent on the
+// copies it shows). Those recordings answer at most once in the staging, for
+// whichever of the tests makes its call first, and a parser's learn step never
+// learns against one (another of those tests may have made it): it reads here
+// which of them another test took, so a call closest to one is a conflict.
+// Only keploy record's full round shares recordings; every other view has
+// none, and every answer here is empty.
+type ExactConcurrentReader interface {
+	// ClaimantOf is the test that answered a call with the shared recording
+	// name in the current staging, if one did.
+	ClaimantOf(name string) (test string, ok bool)
+	// ExactTakenCandidates are, of the open test's shared recordings of kind
+	// (every kind for ""), those another test answered a call with: the view
+	// shows them no longer, and a parser only compares a call with them. The
+	// manager's copies, in recorded order; read-only.
+	ExactTakenCandidates(kind models.Kind) []*models.Mock
+}

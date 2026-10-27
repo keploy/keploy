@@ -19,10 +19,17 @@
 // launcher appends AgentArgs to the agent's argv, and the agent pins its switch
 // from its --proven flag, on or off (Pin): an agent's own environment never
 // decides, so an agent cannot run the new paths while the CLI that started it
-// runs the old ones, or the reverse. The agent reports what it pinned on its
-// health check (HealthHeader, State), and the CLI refuses, at the agent's
-// bring-up, an agent whose state is not its own (CheckAgent). Parsers run
-// inside the agent, so they see the pinned switch too.
+// runs the old ones, or the reverse. Parsers run inside the agent, so they see
+// the pinned switch too.
+//
+// The agent reports what it pinned on its health check (HealthHeader, State),
+// and the CLI refuses an agent whose state is not its own (CheckAgent). A
+// native or docker-run agent is checked at its bring-up, with the switch on or
+// off, from the health answer that found it ready. A docker compose agent is
+// checked before it is told to release the app, with the switch on only: with
+// it off its switch is not read, so no agent is asked anything it was not asked
+// before the switch existed. A compose agent is the one keploy wrote into the
+// compose file, whose command carries the flag only when the switch is on.
 package provenswitch
 
 import (
@@ -47,11 +54,11 @@ const (
 	HealthHeader = "X-Keploy-Proven"
 )
 
-// ErrAgentSwitch marks an agent this keploy must not run against: its proven
-// switch is not this keploy's, or, with the switch on here, cannot be read.
-// The bring-up of a native or docker-run agent fails with it, and record,
-// replay and the runner stop on it (errors.Is) when the docker compose
-// readiness step returns it. A compose agent that compose starts again
+// ErrAgentSwitch marks an agent this keploy must not run against: the proven
+// switch it reports is not this keploy's (CheckAgent). The bring-up of a native
+// or docker-run agent fails with it. The docker compose readiness step returns
+// it with the switch on (with it off it reads nothing), and record, replay and
+// the runner stop on it (errors.Is). A compose agent that compose starts again
 // mid-run is started from the same generated file, with the same flag.
 var ErrAgentSwitch = errors.New("keploy's agent does not have this keploy's proven switch")
 
@@ -93,6 +100,13 @@ func Pin(on bool) {
 	pinned.Store(pinnedOff)
 }
 
+// Unpin undoes Pin, so the process reads KEPLOY_PROVEN again. keploy itself
+// never calls it: it is for a test that runs the agent's flag handling (which
+// pins) in a process whose later tests set the switch with t.Setenv.
+func Unpin() {
+	pinned.Store(unpinned)
+}
+
 // IgnoredEnv is, for a pinned process, a KEPLOY_PROVEN in its environment
 // that says something other than what was pinned (a value that is set and does
 // not read as the pinned state, unreadable values included), and whether there
@@ -132,7 +146,11 @@ func AgentArgs() []string {
 // Validate refuses a KEPLOY_PROVEN that is set to something strconv.ParseBool
 // does not read ("yes", "on", a typo): such a value would otherwise mean "off"
 // without a word, and run a staging lane on the old paths. Unset or empty is
-// fine. The CLI calls it before any command runs.
+// fine. keploy's CmdConfigurator.ValidateFlags calls it, so every command
+// whose flags it validates (record, test, mock, report and the others whose
+// PreRunE runs it) refuses such a value before it runs; the agent does not,
+// because its switch comes from its --proven flag alone. Commands that do not
+// validate their flags there, and k8s-proxy, do not refuse it yet.
 func Validate() error {
 	if _, err := parse(os.Getenv(Env)); err != nil {
 		return fmt.Errorf("%s=%q is not a value keploy reads: set it to 1 to turn the proven model's staging switch on, or unset it", Env, os.Getenv(Env))

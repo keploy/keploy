@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +15,9 @@ import (
 	httpMatcher "go.keploy.io/server/v3/pkg/matcher/http"
 	"go.keploy.io/server/v3/pkg/models"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/templates"
+	"go.keploy.io/server/v3/pkg/variables"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -62,7 +66,7 @@ type resolvedCase struct {
 // values. The options tell the matcher what the body was when it was recorded,
 // for the headers that are a digest of it.
 func (r *Replayer) resolveExpected(run *templates.Run, check *templates.CheckResult, sent *models.TestCase, answer *models.HTTPResp, testSetID string) resolvedCase {
-	res := run.Expected(sent.HTTPResp, *answer, templates.ExpectOptions{IgnoreOrdering: r.config.Test.IgnoreOrdering})
+	res := run.Expected(sent.HTTPResp, *answer, templates.ExpectOptions{IgnoreOrdering: r.responseIgnoreOrdering()})
 	r.logTemplateFailures(sent.Name, testSetID, res.Failures, check, true)
 	for _, c := range res.Captures {
 		r.logger.Debug("captured a template value from the app's answer",
@@ -144,9 +148,9 @@ const vetoTemplateFailure = "the test case failed on a template variable's place
 // variable's place (failed): FAILED, and its set fails, whatever its mock set
 // did. A diverged mock set demotes any other failure to OBSOLETE unless
 // --strict-failure is set or --assert-dependencies finds a dependency of the
-// test case missing (resolveTestOutcome), and an OBSOLETE test case leaves
-// its set passing;
-// a template failure is never hidden that way. The log line then names why
+// test case missing (resolveTestOutcome), and an OBSOLETE test case is not
+// judged (FailureInfo.MappingStale); a template failure is never hidden that
+// way. The log line then names why
 // it stays FAILED, as it names a veto flag.
 func keepTemplateFailure(o testOutcome, failed bool) testOutcome {
 	if !failed || o.Status != models.TestStatusObsolete {
@@ -290,7 +294,7 @@ func (p *passValues) finish() {
 // the use is asserted at its own index (templates.Run.StreamUseFailures), so
 // nothing unties it there.
 func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.CheckResult, cases []*models.TestCase) {
-	if !r.config.Test.IgnoreOrdering || len(check.Places) == 0 {
+	if !r.responseIgnoreOrdering() || len(check.Places) == 0 {
 		return
 	}
 	byName := make(map[string]*models.TestCase, len(cases))
@@ -309,7 +313,7 @@ func (r *Replayer) refuseUntiedArrayUses(testSetID string, check *templates.Chec
 		literal := "write " + p.Placeholder.Key + "'s recorded value in place of the placeholder (as the test case was recorded)"
 		var why string
 		switch entry := r.noiseCovering(p, tc, global); {
-		case r.config.Test.SchemaMatch:
+		case r.schemaMatch():
 			why = "this use is inside an array and test.ignoreOrdering is on, and --schema-match compares no value, so " + untied + "; run this set without --schema-match, turn ignoreOrdering off for it, or " + literal
 		case entry != "":
 			why = "this use is inside an array and test.ignoreOrdering is on, and the noise entry " + entry + " covers its place, so " + untied + "; remove that noise entry (the variable is asserted anyway), turn ignoreOrdering off for this set, or " + literal
@@ -548,7 +552,7 @@ func (r *Replayer) failRefusedTest(ctx context.Context, testRunID, testSetID str
 	utils.LogError(r.logger, refusalError(refusals), "failed the test without sending it",
 		zap.String("testcase", tc.Name),
 		zap.String("next_step", nextStepRefused))
-	res := r.refusedResult(testSetID, tc, reportRefusals(refusals))
+	res := r.refusedResult(testSetID, tc, reportRefusals(refusals), models.TemplateVariable)
 	if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
 		utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
 		return err
@@ -557,8 +561,11 @@ func (r *Replayer) failRefusedTest(ctx context.Context, testRunID, testSetID str
 }
 
 // refusedResult is the result of a test case refused unsent, with failures,
-// each a refusal, as its template failures (failRefusedTest).
-func (r *Replayer) refusedResult(testSetID string, tc *models.TestCase, failures []models.TemplateFailure) *models.TestResult {
+// each a refusal, as its template failures, graded HIGH and filed under
+// category: TEMPLATE_VARIABLE for a placeholder the test case cannot run with
+// (failRefusedTest), TEST_SET_REFUSED for a set keploy refused whole
+// (refuseInterruptedSet).
+func (r *Replayer) refusedResult(testSetID string, tc *models.TestCase, failures []models.TemplateFailure, category models.FailureCategory) *models.TestResult {
 	now := time.Now().UTC()
 	res := &models.TestResult{
 		Kind:             tc.Kind,
@@ -584,7 +591,8 @@ func (r *Replayer) refusedResult(testSetID string, tc *models.TestCase, failures
 	default:
 		res.Req = tc.HTTPReq
 	}
-	markTemplateFailures(&res.Result)
+	res.Result.FailureInfo.Category = appendCategoryUnique(res.Result.FailureInfo.Category, category)
+	res.Result.FailureInfo.Risk = models.High
 	res.FailureInfo.Risk, res.FailureInfo.Category = res.Result.FailureInfo.Risk, res.Result.FailureInfo.Category
 	return res
 }
@@ -603,7 +611,8 @@ type interruptedSets interface {
 // recording, so a run would replay a set nobody wrote. The error names each
 // file left and the steps that put the set in one state, the steps keploy
 // templatize prints. It is logged once, and each test case of the set gets a
-// FAILED result refused unsent with it as the reason (refusedResult), so
+// FAILED result refused unsent with it as the reason (refusedResult, filed
+// under TEST_SET_REFUSED: no template variable failed), so
 // every report format, the run's totals and --must-pass read the set as
 // failed and refused: none of its test cases is removed. It reports whether
 // it refused the set. Any other error of the store's (a set directory it
@@ -631,7 +640,7 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 	}}
 	results := make([]models.TestResult, 0, len(testCases))
 	for _, tc := range testCases {
-		res := r.refusedResult(testSetID, tc, refusal)
+		res := r.refusedResult(testSetID, tc, refusal, models.TestSetRefused)
 		if err := r.reportDB.InsertTestCaseResult(ctx, testRunID, testSetID, res); err != nil {
 			utils.LogError(r.logger, err, "failed to insert test case result for a test that was not sent")
 			return true, err
@@ -650,7 +659,9 @@ func (r *Replayer) refuseInterruptedSet(ctx context.Context, testRunID, testSetI
 		Tests:         results,
 		TimeTaken:     timeTaken.String(),
 		CmdUsed:       r.config.Test.CmdUsed,
+		Proven:        provenswitch.On(),
 	}
+	r.noteSetEnd(report)
 	if err := r.reportDB.InsertReport(ctx, testRunID, testSetID, report); err != nil {
 		utils.LogError(r.logger, err, "failed to insert report")
 		return true, err
@@ -699,4 +710,289 @@ func refusedUnsent(res models.TestResult) bool {
 		}
 	}
 	return true
+}
+
+// requestVariables are the template variables tc's request sends, for the agent
+// to bind as tc begins (proven switch): a dependency call that the learn step
+// declared to use one is then asserted to send this run's value. None for a
+// set without templates, a test case that is not HTTP, or with the switch off.
+func requestVariables(run *templates.Run, tc *models.TestCase) []models.VariableBinding {
+	if !provenswitch.On() || run == nil || run.Empty() || tc == nil || tc.Kind != models.HTTP {
+		return nil
+	}
+	var out []models.VariableBinding
+	for _, v := range run.RequestVariables(tc.HTTPReq) {
+		out = append(out, models.VariableBinding{Name: v.Key, Value: v.Value, Recorded: v.Recorded, Mock: "test case " + tc.Name, Place: "request", Given: true})
+	}
+	return out
+}
+
+// testOpening is what the mock filter that opens a test case carries for it
+// (proven switch): the values its request gives (requestVariables), and, in
+// record's full round, its request itself (testRequestOf), which the agent's
+// learn step reads.
+type testOpening struct {
+	vars    []models.VariableBinding
+	request *models.TestRequest
+}
+
+// openingOf is tc's opening.
+func (r *Replayer) openingOf(run *templates.Run, tc *models.TestCase) testOpening {
+	o := testOpening{vars: requestVariables(run, tc)}
+	if r.learning() {
+		o.request = testRequestOf(run, tc, r.config.Path)
+	}
+	return o
+}
+
+// maxTestRequest is the most of a test case's request, in bytes of its
+// parts, recorded and as sent, that the filter carries to the learn step.
+const maxTestRequest = 16 << 20
+
+// testRequestOf is tc's own request, as recorded (with the values its
+// template placeholders were recorded with: templates.Run.RecordedRequest)
+// and as this run sends it (toSend: with its template values), part by part,
+// in a stable order, for
+// record's full round's learn step (models.TestRequest): an HTTP test case's
+// URL, headers, body (read back from its asset where it is kept apart from
+// the test case, against keployPath as the replay reads it) and every part
+// of its form, each as its own part in the order recorded ("form.<key>", a
+// repeated key's later parts "form.<key>#2", ...), a value kept apart and a
+// file's contents read back too; a gRPC test case's headers and every
+// message it sends ("body", then "body#2", ...). A request keploy cannot
+// read here (of another kind, an asset it cannot read, one larger than
+// maxTestRequest) says why, with no parts, and the learn step refuses what
+// only it could account for.
+func testRequestOf(run *templates.Run, tc *models.TestCase, keployPath string) *models.TestRequest {
+	if tc == nil {
+		return nil
+	}
+	out := &models.TestRequest{Test: tc.Name}
+	sent := toSend(run, tc)
+	var parts []models.TestRequestPart
+	size := 0
+	add := func(name, recorded, live string) {
+		parts = append(parts, models.TestRequestPart{Name: name, Recorded: recorded, Sent: live})
+		size += len(recorded) + len(live)
+	}
+	headers := func(prefix string, rec, live map[string]string) {
+		for _, k := range headerNames(rec, live) {
+			add(prefix+k, rec[k], live[k])
+		}
+	}
+	read := func(path string) (string, error) {
+		if keployPath != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(keployPath, path)
+		}
+		b, err := os.ReadFile(path)
+		return string(b), err
+	}
+	// numbered names the n-th part (from 0) of a name: the name, then
+	// "<name>#2", ...
+	numbered := func(name string, n int) string {
+		if n == 0 {
+			return name
+		}
+		return name + "#" + strconv.Itoa(n+1)
+	}
+	switch tc.Kind {
+	case models.HTTP:
+		// As recorded: the text the recording held where each placeholder
+		// now is, not the placeholder (templates.Run.RecordedRequest).
+		rec, live := run.RecordedRequest(tc.HTTPReq), sent.HTTPReq
+		add("url", rec.URL, live.URL)
+		headers("header.", rec.Header, live.Header)
+		recBody, liveBody := rec.Body, live.Body
+		if rec.Body == "" && rec.BodyRef.Path != "" {
+			b, err := read(rec.BodyRef.Path)
+			if err != nil {
+				out.Unread = "its body is kept apart from the test case (" + rec.BodyRef.Path + "), and keploy could not read it: " + err.Error()
+				return out
+			}
+			recBody = b
+			if live.Body == "" {
+				liveBody = b
+			}
+		}
+		add("body", recBody, liveBody)
+		if rec.Binary != "" || live.Binary != "" {
+			add("binary", rec.Binary, live.Binary)
+		}
+		seen := map[string]int{}
+		for i, f := range rec.Form {
+			var lf models.FormData
+			if i < len(live.Form) {
+				lf = live.Form[i]
+			}
+			name := numbered("form."+f.Key, seen[f.Key])
+			seen[f.Key]++
+			r, l, why := formPart(f, lf, read)
+			if why != "" {
+				out.Unread = "its form part " + name + " " + why
+				return out
+			}
+			add(name, r, l)
+		}
+	case models.GRPC_EXPORT:
+		rec, live := run.RecordedGRPCRequest(tc.GrpcReq), sent.GrpcReq
+		headers("header.", rec.Headers.PseudoHeaders, live.Headers.PseudoHeaders)
+		headers("header.", rec.Headers.OrdinaryHeaders, live.Headers.OrdinaryHeaders)
+		add("body", rec.Body.DecodedData, live.Body.DecodedData)
+		for i, m := range rec.AdditionalMessages {
+			var lm models.GrpcLengthPrefixedMessage
+			if i < len(live.AdditionalMessages) {
+				lm = live.AdditionalMessages[i]
+			}
+			add(numbered("body", i+1), m.DecodedData, lm.DecodedData)
+		}
+	default:
+		out.Unread = "keploy reads no request of a test case of kind " + string(tc.Kind)
+		return out
+	}
+	if size > maxTestRequest {
+		out.Unread = "it is " + strconv.Itoa(size) + " bytes, recorded and as sent, more than the " + strconv.Itoa(maxTestRequest) + " keploy carries to the learn step"
+		return out
+	}
+	out.Parts = parts
+	return out
+}
+
+// formPart is one part of a test case's form, as recorded (f) and as this
+// run sends it (live): its values, one per line, a value kept apart from the
+// test case and a file's contents read back (read), as the replay reads
+// them to send them. why says why it could not be read, "" when it was.
+func formPart(f, live models.FormData, read func(string) (string, error)) (recorded, sent, why string) {
+	text := func(fd models.FormData) (string, string) {
+		var vals []string
+		for j, v := range fd.Values {
+			// A value kept apart from the test case (the replay reads it
+			// back before it sends the form).
+			if v == "" && len(fd.FileNames) == 0 && j < len(fd.Paths) && fd.Paths[j] != "" {
+				b, err := read(fd.Paths[j])
+				if err != nil {
+					return "", "its value kept apart from the test case (" + fd.Paths[j] + ") could not be read: " + err.Error()
+				}
+				v = b
+			}
+			vals = append(vals, v)
+		}
+		// A file's contents: inline, or from its path.
+		if len(fd.FileNames) > 0 {
+			for j := range fd.FileNames {
+				switch {
+				case j < len(fd.FileContents) && fd.FileContents[j] != nil:
+					vals = append(vals, string(fd.FileContents[j]))
+				case j < len(fd.Paths) && fd.Paths[j] != "":
+					b, err := read(fd.Paths[j])
+					if err != nil {
+						return "", "its file (" + fd.Paths[j] + ") could not be read: " + err.Error()
+					}
+					vals = append(vals, b)
+				}
+			}
+		}
+		return strings.Join(vals, "\n"), ""
+	}
+	recorded, why = text(f)
+	if why != "" {
+		return "", "", why
+	}
+	if live.Key == "" && len(live.Values) == 0 && len(live.FileNames) == 0 {
+		return recorded, recorded, ""
+	}
+	sent, why = text(live)
+	if why != "" {
+		return "", "", why
+	}
+	return recorded, sent, ""
+}
+
+// variableReader reads back the test variables the agent bound in a test.
+type variableReader interface {
+	TestVariables(ctx context.Context) ([]models.VariableBinding, error)
+}
+
+// testVariables reads back the test variables the agent bound while tc ran
+// (proven switch, with an agent), and checks each value tc's response captured
+// against them: a capture of a key a dependency call bound must have taken
+// the value the app sent that dependency (the app answered the id it stored,
+// not another), a failure of the test case logged with its next step.
+//
+// What keploy itself cannot vouch for is no failure of the app: when the read
+// fails (or this keploy cannot read) and tc captured something, or when a
+// dependency's variable named after a template key was recorded with another
+// value than config.yaml's (the learn step and the templates disagree),
+// unjudged says why and the test set is not judged. A read that fails for a
+// test case that captured nothing only loses its report rows, said once per
+// set (warned).
+func (r *Replayer) testVariables(ctx context.Context, run *templates.Run, tc *models.TestCase, caps []templates.Capture, warned *bool) (bound []models.VariableBinding, fails []models.TemplateFailure, unjudged string) {
+	if !provenswitch.On() || !r.instrument || tc == nil || tc.Kind != models.HTTP {
+		return nil, nil, ""
+	}
+	err := errors.New("this keploy cannot read the variables its agent bound")
+	if reader, ok := r.instrumentation.(variableReader); ok {
+		bound, err = reader.TestVariables(ctx)
+	}
+	if err != nil {
+		if len(caps) == 0 {
+			if !*warned {
+				*warned = true
+				r.logger.Warn("keploy could not read the test variables its agent bound; the report lists none for the test cases of this set that capture nothing",
+					zap.String("testcase", tc.Name), zap.Error(err))
+			}
+			return nil, nil, ""
+		}
+		return nil, nil, "keploy could not read the variables its agent bound, so it cannot check what the test case captured: " + err.Error()
+	}
+	byName := make(map[string]models.VariableBinding, len(bound))
+	for _, b := range bound {
+		byName[b.Name] = b
+	}
+	for _, c := range caps {
+		// Only a variable named after the key is the key's: a variable under
+		// another name recorded with an equal value may be another value (two
+		// counters both at 1 when recorded), so values cannot tell a misnamed
+		// variable from it, and the capture is checked by its template alone.
+		b, ok := byName[c.Key]
+		if !ok || b.Given {
+			continue
+		}
+		// Compared as the placeholder types the capture: numbers by their
+		// value, a string as written ("1e2" is not "100").
+		number := c.Type == templates.TypeInt || c.Type == templates.TypeFloat
+		recorded, _ := run.Recorded(c.Key)
+		if !variables.SameValue(b.Recorded, recorded, number) {
+			unjudged = fmt.Sprintf("the variables block of %s names a variable after template key %s but records it as %q, and config.yaml records %q: the learn step and the templates disagree (report it to keploy, or remove that block to replay the call as recorded)",
+				b.Mock, c.Key, b.Recorded, recorded)
+			continue
+		}
+		if variables.SameValue(b.Value, c.Value, number) {
+			continue
+		}
+		why := fmt.Sprintf("the app answered %q here, but sent %q as %s to its dependency (%s %s) in this test",
+			c.Value, b.Value, c.Key, b.Mock, b.Place)
+		r.logger.Warn("a value this test case captured is not the one the application sent its dependency",
+			zap.String("testcase", tc.Name), zap.String("where", c.Where), zap.String("why", why),
+			zap.String("next_step", "the application answers another value than the one it stored: fix the application, or re-record the test if that is intended"))
+		fails = append(fails, models.TemplateFailure{Where: c.Where, Placeholder: templates.Format(true, "", c.Key), Why: why})
+	}
+	return bound, fails, unjudged
+}
+
+// headerNames are the names of the headers either side of a test case's
+// request holds (rec as recorded, live as keploy test sends it), sorted, each
+// once: a header one side alone holds is a part of the request too, "" on the
+// other side.
+func headerNames(rec, live map[string]string) []string {
+	keys := make([]string, 0, len(rec)+len(live))
+	for k := range rec {
+		keys = append(keys, k)
+	}
+	for k := range live {
+		if _, ok := rec[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }

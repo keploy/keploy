@@ -17,6 +17,7 @@ import (
 
 	"github.com/protocolbuffers/protoscope"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -75,38 +76,60 @@ func createLengthPrefixedMessage(data []byte) models.GrpcLengthPrefixedMessage {
 	}
 }
 
-// ExtractHTTP2Frame attempts to extract an HTTP/2 frame from raw bytes
-func ExtractHTTP2Frame(data []byte) (http2.Frame, int, error) {
-	if len(data) < 9 { // Minimum frame size
-		return nil, 0, fmt.Errorf("incomplete frame: got %d bytes, need at least 9", len(data))
+// FrameReader reads the frames of one direction of an HTTP/2 connection, one
+// complete frame at a time, in order, with one Framer for all of them. A
+// header block a peer splits across a HEADERS frame and CONTINUATION frames
+// (one larger than a frame) is one block (RFC 9113 §6.10): the Framer accepts
+// the CONTINUATION frames that follow a HEADERS frame without END_HEADERS,
+// and refuses any other frame between them, as the RFC does. Each frame read
+// alone, by a Framer that had seen no frame before it, a CONTINUATION was
+// refused as following no HEADERS frame, and the parser of that direction gave
+// up on the connection.
+//
+// A frame it returns is valid until the next ReadFrame (the Framer reuses its
+// buffer).
+type FrameReader struct {
+	src frameSource
+	fr  *http2.Framer
+}
+
+// frameSource is what a FrameReader's Framer reads: the frame ReadFrame was
+// given.
+type frameSource struct{ b []byte }
+
+func (s *frameSource) Read(p []byte) (int, error) {
+	if len(s.b) == 0 {
+		return 0, io.EOF
 	}
+	n := copy(p, s.b)
+	s.b = s.b[n:]
+	return n, nil
+}
 
-	// First, read the frame header to determine the full frame length
-	// Length is a 24-bit unsigned integer
-	length := (uint32(data[0]) << 16) | (uint32(data[1]) << 8) | uint32(data[2])
+// NewFrameReader is a FrameReader for one direction of a connection, from its
+// first frame (after the client's preface).
+func NewFrameReader() *FrameReader {
+	r := &FrameReader{}
+	r.fr = http2.NewFramer(nil, &r.src) // reads frames up to MaxFrameSize
+	return r
+}
 
-	// Validate length before proceeding
-	if length > MaxFrameSize {
-		return nil, 0, fmt.Errorf("frame length %d exceeds maximum allowed size %d", length, MaxFrameSize)
-	}
-
-	// Check if we have the complete frame
-	totalSize := int(length) + 9 // frame header (9 bytes) + payload
-	if len(data) < totalSize {
-		return nil, 0, fmt.Errorf("incomplete frame: got %d bytes, need %d", len(data), totalSize)
-	}
-
-	// Create a reader for just this frame
-	frameReader := bytes.NewReader(data[:totalSize])
-	framer := http2.NewFramer(nil, frameReader)
-
-	// Read the frame
-	frame, err := framer.ReadFrame()
+// ReadFrame reads data, exactly one complete frame (its header and payload),
+// as the next frame of the direction.
+func (r *FrameReader) ReadFrame(data []byte) (http2.Frame, error) {
+	r.src.b = data
+	frame, err := r.fr.ReadFrame()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read frame: %v", err)
+		if detail := r.fr.ErrorDetail(); detail != nil {
+			return nil, fmt.Errorf("%w: %v", err, detail)
+		}
+		return nil, err
 	}
-
-	return frame, totalSize, nil
+	if left := len(r.src.b); left > 0 {
+		r.src.b = nil
+		return nil, fmt.Errorf("%d bytes after the frame", left)
+	}
+	return frame, nil
 }
 
 // HTTP2StreamState represents the state of an HTTP/2 stream
@@ -119,12 +142,18 @@ type HTTP2StreamState struct {
 	// Timing
 	startTime time.Time
 	endTime   time.Time
+	// startPaused: recording was paused as the request's first frame was
+	// read (HandleFrameRead).
+	startPaused bool
 
 	// ===== Request (incoming frames) =====
 	reqHeaderFrags       [][]byte
 	reqHeadersReceived   bool
 	reqDataFrames        [][]byte
 	reqEndStreamReceived bool
+	// reqEndsWithBlock: a HEADERS frame with END_STREAM began the header
+	// block still open; the stream ends at that block's end.
+	reqEndsWithBlock bool
 
 	// ===== Response (outgoing frames) =====
 	respHeaderFrags       [][]byte
@@ -132,6 +161,8 @@ type HTTP2StreamState struct {
 	respTrailersReceived  bool
 	respDataFrames        [][]byte
 	respEndStreamReceived bool
+	// respEndsWithBlock: as reqEndsWithBlock, for the response.
+	respEndsWithBlock bool
 
 	// gRPC specific state
 	grpcReq  *models.GrpcReq
@@ -146,6 +177,10 @@ type HTTP2Stream struct {
 	ID       uint32
 	GRPCReq  *models.GrpcReq
 	GRPCResp *models.GrpcResp
+	// RequestPaused reports that recording was paused as the request's first
+	// frame was read (HandleFrameRead): the order of the read and the pause,
+	// not the request's time, puts the call in the pause.
+	RequestPaused bool
 }
 
 // DefaultStreamManager implements stream management
@@ -175,6 +210,14 @@ func NewStreamManager(logger *zap.Logger) *DefaultStreamManager {
 // isOutgoing=false => incoming (client->server) => REQUEST side
 // isOutgoing=true  => outgoing (server->client) => RESPONSE side
 func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, frameTime time.Time) error {
+	return sm.HandleFrameRead(frame, isOutgoing, frameTime, false)
+}
+
+// HandleFrameRead processes an HTTP/2 frame as HandleFrame does, and notes
+// whether recording was paused (pausedAtRead) as the frame was read: when the
+// frame is its stream's first request frame, the stream it completes says so
+// (HTTP2Stream.RequestPaused).
+func (sm *DefaultStreamManager) HandleFrameRead(frame http2.Frame, isOutgoing bool, frameTime time.Time, pausedAtRead bool) error {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
@@ -206,6 +249,7 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 	s := sm.streams[streamID]
 	if !isOutgoing && s.startTime.IsZero() {
 		s.startTime = frameTime
+		s.startPaused = pausedAtRead
 	}
 
 	switch f := frame.(type) {
@@ -217,49 +261,26 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		fragCopy := make([]byte, len(f.HeaderBlockFragment()))
 		copy(fragCopy, f.HeaderBlockFragment())
 
+		// A HEADERS frame with END_STREAM ends its stream with its header
+		// block, the CONTINUATION frames that follow it included: they are
+		// part of it (RFC 9113 §8.1). The stream ends at the block's end
+		// (endHeaderBlock), and a response's end is the time of the frame
+		// that ends the block, as a frame's time is that of the chunk that
+		// completes it.
 		if isOutgoing {
 			s.respHeaderFrags = append(s.respHeaderFrags, fragCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
-					return err
-				}
-			}
 			if f.StreamEnded() {
-				s.respEndStreamReceived = true
-				// gRPC error responses send a single HEADERS frame with END_STREAM
-				// that merges initial headers and trailers (grpc-status, grpc-message).
-				// processHeaderBlock treated it as initial headers, so respTrailersReceived
-				// is still false. Promote the initial headers to trailers so that
-				// checkStreamCompletion can mark the stream complete.
-				if s.respHeadersReceived && !s.respTrailersReceived {
-					if s.grpcResp == nil {
-						s.grpcResp = &models.GrpcResp{}
-					}
-					s.grpcResp.Trailers = models.GrpcHeaders{
-						PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
-						OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
-					}
-					s.respTrailersReceived = true
-				}
-				if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
-					return err
-				}
-				s.endTime = frameTime
-				sm.checkStreamCompletion(streamID)
+				s.respEndsWithBlock = true
 			}
 		} else {
 			s.reqHeaderFrags = append(s.reqHeaderFrags, fragCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
-					return err
-				}
-			}
 			if f.StreamEnded() {
-				s.reqEndStreamReceived = true
-				if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
-					return err
-				}
-				sm.checkStreamCompletion(streamID)
+				s.reqEndsWithBlock = true
+			}
+		}
+		if f.HeadersEnded() {
+			if err := sm.endHeaderBlock(s, isOutgoing, frameTime); err != nil {
+				return err
 			}
 		}
 
@@ -269,17 +290,12 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 
 		if isOutgoing {
 			s.respHeaderFrags = append(s.respHeaderFrags, contCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, true); err != nil {
-					return err
-				}
-			}
 		} else {
 			s.reqHeaderFrags = append(s.reqHeaderFrags, contCopy)
-			if f.HeadersEnded() {
-				if err := sm.processHeaderBlock(s /*isOutgoing=*/, false); err != nil {
-					return err
-				}
+		}
+		if f.HeadersEnded() {
+			if err := sm.endHeaderBlock(s, isOutgoing, frameTime); err != nil {
+				return err
 			}
 		}
 
@@ -311,6 +327,58 @@ func (sm *DefaultStreamManager) HandleFrame(frame http2.Frame, isOutgoing bool, 
 		}
 	}
 
+	return nil
+}
+
+// endHeaderBlock decodes the header block that ended on stream s, its
+// fragments joined (processHeaderBlock), and, when the HEADERS frame that
+// began it had END_STREAM, ends that side of the stream; a response's at
+// frameTime, the time of the frame that ended the block. Stamped with the
+// HEADERS frame's time instead, a block split across chunks ended its call
+// before the chunk that completed it: the HEADERS frame's chunk was let go
+// as completing no call, and a stop that asked before the next chunk was
+// noted heard "clear", then a call from before it came.
+func (sm *DefaultStreamManager) endHeaderBlock(s *HTTP2StreamState, isOutgoing bool, frameTime time.Time) error {
+	if err := sm.processHeaderBlock(s, isOutgoing); err != nil {
+		return err
+	}
+	if !isOutgoing {
+		if !s.reqEndsWithBlock {
+			return nil
+		}
+		s.reqEndsWithBlock = false
+		s.reqEndStreamReceived = true
+		if err := sm.processCompleteMessage(s /*isOutgoing=*/, false); err != nil {
+			return err
+		}
+		sm.checkStreamCompletion(s.ID)
+		return nil
+	}
+	if !s.respEndsWithBlock {
+		return nil
+	}
+	s.respEndsWithBlock = false
+	s.respEndStreamReceived = true
+	s.endTime = frameTime
+	// gRPC error responses send a single header block with END_STREAM that
+	// merges initial headers and trailers (grpc-status, grpc-message).
+	// processHeaderBlock treated it as initial headers, so respTrailersReceived
+	// is still false. Promote the initial headers to trailers so that
+	// checkStreamCompletion can mark the stream complete.
+	if s.respHeadersReceived && !s.respTrailersReceived {
+		if s.grpcResp == nil {
+			s.grpcResp = &models.GrpcResp{}
+		}
+		s.grpcResp.Trailers = models.GrpcHeaders{
+			PseudoHeaders:   maps.Clone(s.grpcResp.Headers.PseudoHeaders),
+			OrdinaryHeaders: maps.Clone(s.grpcResp.Headers.OrdinaryHeaders),
+		}
+		s.respTrailersReceived = true
+	}
+	if err := sm.processCompleteMessage(s /*isOutgoing=*/, true); err != nil {
+		return err
+	}
+	sm.checkStreamCompletion(s.ID)
 	return nil
 }
 
@@ -428,9 +496,10 @@ func (sm *DefaultStreamManager) GetCompleteStreams() []*HTTP2Stream {
 			stream.grpcReq.Timestamp = stream.startTime
 			stream.grpcResp.Timestamp = stream.endTime
 			http2Stream := &HTTP2Stream{
-				ID:       id,
-				GRPCReq:  stream.grpcReq,
-				GRPCResp: stream.grpcResp,
+				ID:            id,
+				GRPCReq:       stream.grpcReq,
+				GRPCResp:      stream.grpcResp,
+				RequestPaused: stream.startPaused,
 			}
 			completed = append(completed, http2Stream)
 		}
@@ -630,10 +699,12 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	// Determine which port to use for test execution.
 	var err error
+	recorded := authority
 	authority, err = ResolveTestTarget(authority, cfg.URLReplacements, cfg.PortMappings, cfg.ConfigHost, tc.AppPort, cfg.ConfigPort, false, logger)
 	if err != nil {
 		return nil, err
 	}
+	authority = PublishedTarget(ctx, cfg, recorded, authority, tc.AppPort, false)
 
 	// Extract method path
 	path, ok := grpcReq.Headers.PseudoHeaders[":path"]
@@ -657,8 +728,26 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		}
 	}()
 
-	// Create gRPC client connection using the TCP connection
-	dialer := func(context.Context, string) (net.Conn, error) { return conn, nil }
+	// Create gRPC client connection using the TCP connection. Under the
+	// proven switch the app's frames are watched (pingWatch): a stream it
+	// keeps open past its recording ends on its keepalives (row W1).
+	//
+	// With no clock on the app's answer, the stall rule (answerWatch) ends an
+	// exchange the app makes no progress on: the whole call waits on the
+	// app, and AnswerStallGrace of keploy's runnable time with no frame of
+	// the exchange (pingWatch tells it which: never a keepalive) cuts it.
+	var dialed net.Conn = conn
+	var pings *pingWatch
+	answer := newAnswerWatch(cfg)
+	defer answer.stop()
+	defer answer.waiting()()
+	answer.closeOnCut(conn)
+	if provenswitch.On() {
+		pings = newPingWatch(conn)
+		pings.answer = answer
+		dialed = pings
+	}
+	dialer := func(context.Context, string) (net.Conn, error) { return dialed, nil }
 
 	clientConn, err := grpc.DialContext(
 		ctx,
@@ -696,15 +785,37 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	//
 	// APITimeout is the same knob the HTTP replay path uses. Zero means the
 	// caller did not set one, so fall back rather than leaving it unbounded.
-	timeout := time.Duration(cfg.APITimeout) * time.Second
-	if timeout <= 0 {
-		timeout = defaultGrpcCallTimeout
+	//
+	// Unbounded (the proven switch, and no apiTimeout of the user's) sets no
+	// clock: the drain ends on the app's end of the stream (rule 15, row
+	// W1), or, on a stream the app holds open past its recording, on its
+	// keepalives (pingWatch): the test then has no verdict.
+	if !cfg.Unbounded {
+		timeout := time.Duration(cfg.APITimeout) * time.Second
+		if timeout <= 0 {
+			timeout = defaultGrpcCallTimeout
+		}
+		var cancelCall context.CancelFunc
+		ctx, cancelCall = context.WithTimeout(ctx, timeout)
+		defer cancelCall()
 	}
-	ctx, cancelCall := context.WithTimeout(ctx, timeout)
-	defer cancelCall()
 
 	// Create context with metadata
 	callCtx := metadata.NewOutgoingContext(ctx, md)
+	// A stream the app keeps open past its recording is cut through its
+	// own context (pingWatch).
+	if pings != nil {
+		streamCtx, cancelStream := context.WithCancel(ctx)
+		defer cancelStream()
+		callCtx = metadata.NewOutgoingContext(streamCtx, md)
+		pings.arm(recordedMessagesComplete(tc.GrpcResp), cancelStream)
+		answer.onCut(cancelStream)
+	}
+
+	reqMsgs := grpcReq.AllMessages()
+	if answer != nil {
+		answer.describe(path, grpcRequestSize(reqMsgs))
+	}
 
 	// Create a new stream
 	stream, err := clientConn.NewStream(callCtx, &grpc.StreamDesc{
@@ -713,6 +824,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		ClientStreams: true,
 	}, path)
 	if err != nil {
+		if answer.didStall() {
+			return nil, answer.err()
+		}
 		return nil, fmt.Errorf("failed to create stream: %w", unreachableGRPCAuthority(ctx, cfg.AppPortReachability, authority, tc.AppPort, err))
 	}
 
@@ -726,7 +840,6 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// zero-value body — the health check records message_length 0 with empty
 	// decoded_data and expects exactly one empty message. An empty payload
 	// here is a real message, not the absence of one.
-	reqMsgs := grpcReq.AllMessages()
 	for i, m := range reqMsgs {
 		var requestPayload []byte
 		if m.DecodedData != "" {
@@ -739,12 +852,18 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			}
 		}
 		if err := stream.SendMsg(&rawMessage{data: requestPayload}); err != nil {
+			if answer.didStall() {
+				return stalledStart(stream, answer), answer.err()
+			}
 			return nil, fmt.Errorf("failed to send request (message %d of %d): %w", i, len(reqMsgs), err)
 		}
 	}
 
 	// Close the send side of the stream
 	if err := stream.CloseSend(); err != nil {
+		if answer.didStall() {
+			return stalledStart(stream, answer), answer.err()
+		}
 		return nil, fmt.Errorf("failed to close send: %w", err)
 	}
 
@@ -753,6 +872,9 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 	// answers nil; the error check stays for a client that does not.
 	respHeaders, err := stream.Header()
 	if err != nil {
+		if answer.didStall() {
+			return stalledStart(stream, answer), answer.err()
+		}
 		return nil, fmt.Errorf("failed to get response headers: %w", err)
 	}
 
@@ -786,6 +908,60 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 			break
 		}
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(responseMsg.data))
+		if pings != nil && pings.gotMessage(len(respMsgs)) {
+			break
+		}
+	}
+	// Every recorded message came, then a keepalive beyond them before any
+	// end: the app kept the stream open past its recording (pingWatch, on
+	// the wire's order). The messages that came before the keepalive are
+	// returned, with ErrStreamHeldOpen: the test has no verdict, and what the
+	// app sent after it is not its answer. A message beyond the recording
+	// among them still fails the comparison, as before.
+	//
+	// A stream that stalled short of its recording (two keepalives, and no
+	// message between them) is returned with ErrStreamStalled: the messages
+	// that came, then the recording's for the rest, which the app never
+	// sent, so that only what came is compared.
+	heldOpen, heldAt, stalled := pings.heldOpen()
+	heldOpen = heldOpen && len(respMsgs) >= heldAt
+	if heldOpen && stalled && heldAt == 0 {
+		// Keepalives, and no message: nothing of the answer to compare.
+		// It fails closed, not judged (ErrAnswerStalled), never a pass on
+		// the recording's fill.
+		headers, data := pings.heldAnswer()
+		if headers {
+			return headersOnly(respHeaders), keptOpenWithNothing(path, headers, data)
+		}
+		return nil, keptOpenWithNothing(path, headers, data)
+	}
+	if heldOpen {
+		respMsgs, drainErr = respMsgs[:heldAt], nil
+		if recorded := tc.GrpcResp.AllMessages(); stalled && heldAt < len(recorded) {
+			respMsgs = append(respMsgs, recorded[heldAt:]...)
+		}
+	}
+	// The stall rule cut the exchange, and no keepalive held it open: an
+	// answer that never began, or none of whose messages came, is nothing to
+	// compare (ErrAnswerStalled), and a stream the app went silent on is
+	// judged on what came, the recording's rest in place of what did not
+	// (the stall's own fill), not judged as a whole.
+	var silent error
+	if !heldOpen && drainErr != nil && answer.didStall() {
+		if !answer.answered.Load() {
+			return nil, answer.err()
+		}
+		if len(respMsgs) == 0 {
+			return headersOnly(respHeaders), answer.err()
+		}
+		recorded := tc.GrpcResp.AllMessages()
+		came := len(respMsgs)
+		silent = streamCut(answer.err(), came, len(recorded), "message")
+		if came < len(recorded) {
+			respMsgs = append(respMsgs, recorded[came:]...)
+		}
+		drainErr = nil
+		heldOpen = true
 	}
 	if len(respMsgs) == 0 {
 		// A response carrying only trailers is legitimate (an error status, or
@@ -803,40 +979,21 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 		respMsgs = append(respMsgs, createLengthPrefixedMessage(nil))
 	}
 
-	// Now that the stream is finished, the trailers are real.
-	trailers := stream.Trailer()
+	// Now that the stream is finished, the trailers are real. One the app
+	// held open has none: the drain may have left it before its cut was
+	// done.
+	var trailers metadata.MD
+	if !heldOpen {
+		trailers = stream.Trailer()
+	}
 
 	// Construct the response
 	grpcResp := &models.GrpcResp{
-		Headers: models.GrpcHeaders{
-			PseudoHeaders:   make(map[string]string),
-			OrdinaryHeaders: make(map[string]string),
-		},
+		Headers: grpcHeadersOf(respHeaders),
 		Trailers: models.GrpcHeaders{
 			PseudoHeaders:   make(map[string]string),
 			OrdinaryHeaders: make(map[string]string),
 		},
-	}
-
-	// Convert response headers
-	for k, v := range respHeaders {
-		val := strings.Join(v, ", ")
-		if strings.HasPrefix(k, ":") {
-			grpcResp.Headers.PseudoHeaders[k] = val
-		} else {
-			grpcResp.Headers.OrdinaryHeaders[k] = val
-		}
-	}
-
-	// Add the :status pseudo-header since gRPC client abstracts it away
-	// For successful gRPC calls, HTTP status is always 200
-	if _, ok := grpcResp.Headers.PseudoHeaders[":status"]; !ok {
-		grpcResp.Headers.PseudoHeaders[":status"] = "200"
-	}
-
-	// Add standard gRPC headers if not present
-	if _, ok := grpcResp.Headers.OrdinaryHeaders["content-type"]; !ok {
-		grpcResp.Headers.OrdinaryHeaders["content-type"] = "application/grpc"
 	}
 
 	// Convert trailers
@@ -879,7 +1036,93 @@ func SimulateGRPC(ctx context.Context, tc *models.TestCase, testSetID string, lo
 
 	logger.Info("successfully completed gRPC simulation",
 		zap.String("method", path), zap.Int("response_messages", len(respMsgs)))
+	if silent != nil {
+		return grpcResp, silent
+	}
+	if heldOpen && stalled {
+		return grpcResp, ErrStreamStalled
+	}
+	if heldOpen {
+		return grpcResp, ErrStreamHeldOpen
+	}
 	return grpcResp, nil
+}
+
+// grpcHeadersOf is the response headers respHeaders as a GrpcResp holds them:
+// with :status 200 and content-type application/grpc when the app sent none
+// (the gRPC client hides :status; a successful call's is always 200).
+func grpcHeadersOf(respHeaders metadata.MD) models.GrpcHeaders {
+	h := models.GrpcHeaders{PseudoHeaders: make(map[string]string), OrdinaryHeaders: make(map[string]string)}
+	for k, v := range respHeaders {
+		val := strings.Join(v, ", ")
+		if strings.HasPrefix(k, ":") {
+			h.PseudoHeaders[k] = val
+		} else {
+			h.OrdinaryHeaders[k] = val
+		}
+	}
+	if _, ok := h.PseudoHeaders[":status"]; !ok {
+		h.PseudoHeaders[":status"] = "200"
+	}
+	if _, ok := h.OrdinaryHeaders["content-type"]; !ok {
+		h.OrdinaryHeaders["content-type"] = "application/grpc"
+	}
+	return h
+}
+
+// headersOnly is the answer of a stream whose headers came and nothing more
+// (an ErrAnswerStalled after its answer began): its headers, for the replay
+// to judge them against the recording before it calls the stream not judged.
+// nil with no metadata in hand: a start is never made up.
+func headersOnly(respHeaders metadata.MD) *models.GrpcResp {
+	if respHeaders == nil {
+		return nil
+	}
+	return &models.GrpcResp{Headers: grpcHeadersOf(respHeaders)}
+}
+
+// stalledStart is what of the answer a call the stall rule cut while keploy
+// still sent its request had: the app's headers, when they came before the
+// cut (the cut call's Header returns at once), else nothing.
+func stalledStart(stream grpc.ClientStream, answer *answerWatch) *models.GrpcResp {
+	if !answer.answered.Load() {
+		return nil
+	}
+	md, _ := stream.Header()
+	return headersOnly(md)
+}
+
+// grpcRequestSize is the size of reqMsgs on the wire, their 5-byte prefixes
+// with them: what the stall rule says of a request the app did not take
+// whole. A payload that does not parse counts as empty.
+func grpcRequestSize(reqMsgs []models.GrpcLengthPrefixedMessage) int64 {
+	var n int64
+	for _, m := range reqMsgs {
+		n += 5
+		if m.DecodedData != "" {
+			if b, err := protoscope.NewScanner(m.DecodedData).Exec(); err == nil {
+				n += int64(len(b))
+			}
+		}
+	}
+	return n
+}
+
+// recordedMessagesComplete is how many response messages complete resp, the
+// recorded answer: a keepalive after them, under the proven switch, is one
+// beyond the recording (pingWatch). One empty message is how a recording keeps
+// an answer of trailers alone (SimulateGRPC), and also an empty message
+// (google.protobuf.Empty): the recorded status, as a gRPC client reads it
+// (models.GrpcResp.TrailersAsRead), tells them apart, an error being an
+// answer of trailers alone, which none completes.
+func recordedMessagesComplete(resp models.GrpcResp) int {
+	msgs := resp.AllMessages()
+	if len(msgs) == 1 && msgs[0].MessageLength == 0 && msgs[0].DecodedData == "" {
+		if code := strings.TrimSpace(resp.TrailersAsRead().OrdinaryHeaders["grpc-status"]); code != "" && code != "0" {
+			return 0
+		}
+	}
+	return len(msgs)
 }
 
 // defaultGrpcCallTimeout bounds a replayed gRPC call when the caller supplies

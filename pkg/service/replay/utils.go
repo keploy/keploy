@@ -40,12 +40,19 @@ const healthProbeTimeout = 1 * time.Second
 // healthPoller is swapped out in tests; production wires to net/http via httpHealthPoll.
 var healthPoller = httpHealthPoll
 
+// healthClient is httpHealthPoll's client: the poll's connection to the app is
+// kept for its next poll, and closed once waitForAppReady is over. Kept open,
+// it would be one more of keploy's connections the app holds as it stops, and
+// an app that waits for its open connections then (Python's ThreadingTCPServer
+// joins each one's thread) could not stop.
+var healthClient = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
+
 // httpHealthPoll issues a single GET to url with a short per-request timeout and reports
 // whether it returned a 2xx status. Non-2xx, transport errors, and timeouts all report false;
 // the caller decides whether to retry.
 //
 // The response body is fully drained (io.Copy to io.Discard) before Close so the underlying
-// TCP connection can be returned to the DefaultClient's keep-alive pool and reused by the
+// TCP connection can be returned to healthClient's keep-alive pool and reused by the
 // next poll iteration. Without the drain, net/http treats the connection as dirty and opens
 // a new socket every 500ms, which is pure overhead against an endpoint we are going to hit
 // many times in a row.
@@ -56,7 +63,7 @@ func httpHealthPoll(ctx context.Context, url string) bool {
 	if err != nil {
 		return false
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := healthClient.Do(req)
 	if err != nil {
 		return false
 	}
@@ -327,7 +334,19 @@ func parseShortPortSpec(spec string) (host, port string, ok bool) {
 // with a 404 WITHOUT invoking an application handler — the probe therefore never
 // consumes a mock or triggers an app side effect. Any HTTP response to it (the
 // 404 included) still proves the proxy→app path is serving.
+//
+// It is requested with keployReadinessProbeMethod, not GET: a path alone does
+// not keep a catch-all route out. Echo (v4.9.0) hands GET
+// /keploy/__readiness_probe__ to a `/:param` route, whose handler then queries
+// the app's database before any test has opened a window, a call no recorded
+// mock can answer.
 const keployReadinessProbePath = "/keploy/__readiness_probe__"
+
+// keployReadinessProbeMethod is the method the reserved probe path is requested
+// with. Routers answer an OPTIONS for routes registered with other methods
+// themselves (Echo 204, gin and net/http 404 or 405; Express, Flask and Spring
+// list the allowed methods), so no application handler runs.
+const keployReadinessProbeMethod = http.MethodOptions
 
 // resetProbeRequestTimeout bounds a single readiness probe round-trip.
 const resetProbeRequestTimeout = 800 * time.Millisecond
@@ -367,7 +386,11 @@ const resetProbeInterval = 200 * time.Millisecond
 // almost always one the real dispatch will get wrong too, so the run was going
 // to fail regardless. It is bounded, warn-and-proceed, and never turns a passing
 // run into a failing one.
-func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger) (scheme, host, port string, ok bool) {
+//
+// published is where the set's tests go in place of their app port
+// (pkg.SimulationConfig.PublishedPort), nil when nowhere else: the probe goes
+// where the tests will.
+func resolveProbeTarget(ctx context.Context, testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger, published func(context.Context, string, uint16) uint16) (scheme, host, port string, ok bool) {
 	if tc == nil || tc.Kind != models.HTTP {
 		return "", "", "", false
 	}
@@ -382,6 +405,7 @@ func resolveProbeTarget(testCfg config.Test, tc *models.TestCase, testSetID stri
 	if err != nil {
 		return "", "", "", false
 	}
+	target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: configPort, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, tc.HTTPReq.URL, target, tc.AppPort, true)
 	u, err := url.Parse(strings.TrimSpace(target))
 	if err != nil || u == nil {
 		return "", "", "", false
@@ -476,6 +500,11 @@ func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path stri
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	// An operator's health path is their endpoint, requested as they would.
+	method := http.MethodGet
+	if path == keployReadinessProbePath {
+		method = keployReadinessProbeMethod
+	}
 	target := fmt.Sprintf("%s://%s%s", scheme, net.JoinHostPort(host, port), path)
 	client := &http.Client{
 		Timeout: resetProbeRequestTimeout,
@@ -492,7 +521,7 @@ func waitForHTTPServingPathOr(ctx context.Context, scheme, host, port, path stri
 	defer client.CloseIdleConnections()
 
 	probe := func() bool {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		req, err := http.NewRequestWithContext(ctx, method, target, nil)
 		if err != nil {
 			return false
 		}
@@ -705,10 +734,10 @@ type httpProbeTarget struct {
 // Returns ok=false when no test case resolves (empty set, non-HTTP set, or an
 // unresolvable or unreachable target); the caller then keeps the TCP-accept stage
 // only, which is exactly the pre-existing behaviour.
-func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability) httpProbeTarget {
+func resolveTestSetProbeTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, reach pkg.AppPortReachability, published func(context.Context, string, uint16) uint16) httpProbeTarget {
 	src := &probeTargetSource{
 		testCfg: testCfg, testCases: testCases, testSetID: testSetID, logger: logger,
-		reach: reach, seen: map[string]bool{},
+		reach: reach, published: published, seen: map[string]bool{},
 	}
 	return src.nextTarget(ctx)
 }
@@ -722,8 +751,9 @@ type probeTargetSource struct {
 	testSetID string
 	logger    *zap.Logger
 	reach     pkg.AppPortReachability
-	next      int             // the next test case to look at
-	seen      map[string]bool // addresses, for an app port, already returned or skipped
+	published func(context.Context, string, uint16) uint16 // resolveProbeTarget's
+	next      int                                          // the next test case to look at
+	seen      map[string]bool                              // addresses, for an app port, already returned or skipped
 }
 
 // nextTarget is the next address the set's tests dial that the host may reach,
@@ -735,7 +765,7 @@ func (s *probeTargetSource) nextTarget(ctx context.Context) httpProbeTarget {
 		if tc == nil || tc.Kind != models.HTTP {
 			continue
 		}
-		scheme, host, port, ok := resolveProbeTarget(s.testCfg, tc, s.testSetID, s.logger)
+		scheme, host, port, ok := resolveProbeTarget(ctx, s.testCfg, tc, s.testSetID, s.logger, s.published)
 		if !ok {
 			continue
 		}
@@ -807,6 +837,8 @@ func appPortReachabilityOf(instrumentation Instrumentation) pkg.AppPortReachabil
 }
 
 func waitForAppReady(ctx context.Context, logger *zap.Logger, cfg *config.Config, probe httpProbeTarget) bool {
+	// The health poll's connection to the app ends with the wait.
+	defer healthClient.CloseIdleConnections()
 	delay := time.Duration(cfg.Test.Delay) * time.Second
 
 	healthURL := cfg.Test.HealthURL
@@ -1234,6 +1266,24 @@ func splitURLOrigin(rawURL string) (scheme, rest string, ok bool) {
 // parameter, a trailing slash would go, and so would a {{template}} as
 // written.
 func ReplaceBaseURL(newURL, oldURL string) (string, error) {
+	return replaceBase(newURL, oldURL, true)
+}
+
+// requestAtBasePath is the URL a test's HTTP request goes to under basePath:
+// ReplaceBaseURL's, except for a CONNECT in authority form
+// (pkg.ConnectsToAuthority), which takes the base path's scheme and host only.
+// Its request target is the host and port it asks to reach, and has no path
+// for the base path's to go in front of: under it, it was another request
+// ("CONNECT /api/"), which a proxy refuses.
+func requestAtBasePath(basePath string, req models.HTTPReq) (string, error) {
+	recorded, err := url.Parse(req.URL)
+	authority := err == nil && pkg.ConnectsToAuthority(string(req.Method), recorded)
+	return replaceBase(basePath, req.URL, !authority)
+}
+
+// replaceBase is ReplaceBaseURL, which puts the base path's path in front of
+// the URL's only when withPath says to.
+func replaceBase(newURL, oldURL string, withPath bool) (string, error) {
 	scheme, rest, ok := splitURLOrigin(oldURL)
 	if !ok {
 		return "", fmt.Errorf("the test's URL %q does not start with a scheme and a host, so it has none to replace", oldURL)
@@ -1248,7 +1298,11 @@ func ReplaceBaseURL(newURL, oldURL string) (string, error) {
 	// The host as a URL writes it, escaped: an IPv6 zone's % is %25 there,
 	// and the URL has to parse again.
 	host := strings.TrimPrefix((&url.URL{Host: base.Host}).String(), "//")
-	return scheme + "://" + host + strings.TrimRight(base.EscapedPath(), "/") + rest, nil
+	path := ""
+	if withPath {
+		path = strings.TrimRight(base.EscapedPath(), "/")
+	}
+	return scheme + "://" + host + path + rest, nil
 }
 
 func mergeMaps(map1, map2 map[string][]string) map[string][]string {
@@ -1642,6 +1696,20 @@ func (tfs *TestFailureStore) AddUnmatchedCallForTest(testSetID string, testCaseI
 			FieldDiffs:       call.FieldDiffs,
 			ClosestMockReq:   call.ClosestMockReq,
 			ReceivedReq:      call.ReceivedReq,
+			MissKind:         call.Kind,
+			Recorded:         call.Recorded,
+			Differs:          call.Differs,
+			VariablePlaces:   call.VariablePlaces,
+			NotOwned:         call.NotOwned,
+			Reason:           call.Reason,
+			Concurrent:       call.Concurrent,
+			Answer:           call.Answer,
+			Drift:            call.Drift,
+			Reused:           call.Reused,
+			WriteKind:        call.WriteKind,
+			Source:           call.Source,
+			RecordedIn:       call.RecordedIn,
+			Repeat:           call.Repeat.Clone(),
 		},
 	}
 	tfs.failures = append(tfs.failures, failure)
@@ -1847,6 +1915,12 @@ func printMismatchReport(r *models.MockMismatchReport) {
 		// full second copy of that sentence, once per missed call, was pure
 		// duplication.
 		fmt.Println("  (closest-mock diff omitted — see hint)")
+	case r.MatchPhase == models.MatchPhaseVariable && r.Diff != "":
+		// A test variable did not hold: the recording is not what the call
+		// should have sent (it holds the recorded value, not this run's), so
+		// a request diff against it would mislead. The diff names the
+		// variable, the value it has in this test and the one the call sent.
+		fmt.Printf("  Diff: %s\n", strings.ReplaceAll(r.Diff, "\n", " "))
 	case r.ClosestMockReq != "" && r.ReceivedReq != "":
 		printRequestDiff(r.ClosestMock, r.ClosestMockReq, r.ReceivedReq)
 	case len(r.FieldDiffs) > 0:

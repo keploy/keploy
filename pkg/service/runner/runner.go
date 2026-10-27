@@ -367,25 +367,32 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	// "connect: connection refused" on the agent URL. Mirrors replay's
 	// pre-MockOutgoing AgentHealthTicker gate (replay.go:939-952).
 	if r.config != nil && r.config.Agent.AgentURI != "" {
-		// Use the same contention-tuned budget as the record/replay/agent
-		// readiness gates (pkg.AgentReadyTimeout, default 330s, overridable via
-		// KEPLOY_AGENT_READY_TIMEOUT) rather than a hardcoded 120s. On a
-		// saturated CI daemon the agent container can take well over a minute
-		// just to start, so the 120s ceiling here fired prematurely and failed
-		// an otherwise-healthy sandbox/runner bring-up that the other gates
-		// would have waited out.
-		agentReadyTimeout := keployPkg.AgentReadyTimeout()
-		agentCtx, cancel := context.WithTimeout(gCtx, agentReadyTimeout)
+		// The gate follows the agent's start, as the record and replay gates
+		// do, not a clock: it lasts while the start makes progress (and while
+		// the engine has not run the agent's container yet), and ends once the
+		// start fails or stops making progress (keployPkg.WatchAgentStart). On
+		// a saturated CI daemon the agent container can take well over a
+		// minute just to start; a fixed budget gave up on such a start, and
+		// waited out the whole of it for one that had stopped.
+		agentCtx, cancel := context.WithCancel(gCtx)
 		agentReadyCh := make(chan bool, 1)
 		go keployPkg.AgentHealthTicker(agentCtx, r.logger, r.config.Agent.AgentURI, agentReadyCh, 1*time.Second)
+		agentStart := r.instrumentation.WatchAgentStart(agentCtx)
 		select {
 		case <-gCtx.Done():
 			cancel()
 			return nil, gCtx.Err()
-		case <-agentCtx.Done():
+		case err := <-agentStart:
 			cancel()
-			return nil, fmt.Errorf("keploy-agent at %s did not become ready within %s; check the agent container logs and ensure its host port is reachable", r.config.Agent.AgentURI, agentReadyTimeout)
-		case <-agentReadyCh:
+			if gCtx.Err() != nil {
+				return nil, gCtx.Err()
+			}
+			return nil, fmt.Errorf("keploy-agent at %s did not come up; check the agent container logs and ensure its host port is reachable: %w", r.config.Agent.AgentURI, err)
+		case ready, ok := <-agentReadyCh:
+			if !ok || !ready {
+				cancel()
+				return nil, gCtx.Err()
+			}
 		}
 		cancel()
 	}
@@ -406,6 +413,7 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 		outOpts.MysqlPorts = r.config.MysqlPorts
 		outOpts.DisableMysqlAutoDetect = r.config.DisableMysqlAutoDetect
 		outOpts.DisableMysqlEndpointDrift = r.config.DisableMysqlEndpointDrift
+		outOpts.DisablePgTimeSliceCohort = r.config.DisablePgTimeSliceCohort
 		outOpts.PassThroughPorts = r.config.Record.PassThroughPorts
 		outOpts.PassThroughHosts = r.config.Record.PassThroughHosts
 		// Validate modes at load: NormalizeMode fails an unknown/typo'd mode CLOSED
@@ -440,6 +448,9 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 	if len(noiseCfg) > 0 {
 		outOpts.NoiseConfig = noiseCfg
 	}
+	// A set's session: what the agent recorded consumed of the previous
+	// set's pool is not this set's (models.OutgoingOptions.StartsTestSet).
+	outOpts.StartsTestSet = true
 	if err := r.instrumentation.MockOutgoing(gCtx, outOpts); err != nil {
 		return nil, fmt.Errorf("mock-outgoing failed: %w", err)
 	}
@@ -551,18 +562,31 @@ func (r *Runner) strictMockWindow() bool {
 
 // loadMocks returns the test set's per-test and session pools over the widest
 // window, from one read of its mock file when the mock store can (see
-// keployPkg.TestSetMocksReader), otherwise with one read per pool. skipped is
-// the documents the store's decoders skipped (models.TestSetMocks.Skipped),
-// nil from a store that reads one pool per call.
+// keployPkg.TestSetMocksReader), otherwise with one read per pool. A store
+// that indexes the file (keployPkg.TestSetMockIndexReader) leaves each mock's
+// payload in it: the runner holds a small entry per mock, and StoreMocks reads
+// each payload back as it sends the mock to the agent. skipped is the
+// documents the store's decoders skipped (models.TestSetMocks.Skipped), nil
+// from a store that reads one pool per call.
 func (r *Runner) loadMocks(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
-	if reader, ok := r.mockDB.(keployPkg.TestSetMocksReader); ok {
-		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
-		if err != nil {
-			// The pass that failed is the one the per-test pool was read in.
-			return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
-		}
-		return set.Filtered, set.Unfiltered, set.Skipped, nil
+	var set models.TestSetMocks
+	switch reader := r.mockDB.(type) {
+	case keployPkg.TestSetMockIndexReader:
+		set, err = reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	case keployPkg.TestSetMocksReader:
+		set, err = reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
+	default:
+		return r.loadMocksPerPool(ctx, testSetID, mocksThatHaveMappings, mocksWeNeed)
 	}
+	if err != nil {
+		// The pass that failed is the one the per-test pool was read in.
+		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)
+	}
+	return set.Filtered, set.Unfiltered, set.Skipped, nil
+}
+
+// loadMocksPerPool is loadMocks for a store that reads one pool per call.
+func (r *Runner) loadMocksPerPool(ctx context.Context, testSetID string, mocksThatHaveMappings, mocksWeNeed map[string]bool) (filtered, unfiltered []*models.Mock, skipped map[string]models.Kind, err error) {
 	filtered, err = r.mockDB.GetFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), mocksThatHaveMappings, mocksWeNeed)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get filtered mocks: %w", err)

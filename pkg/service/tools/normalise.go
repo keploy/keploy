@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	models "go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.uber.org/zap"
 )
@@ -47,44 +48,60 @@ func (t *Tools) Normalize(ctx context.Context) error {
 	}
 
 	for _, testSet := range t.config.Normalize.SelectedTests {
-		testSetID := testSet.TestSet
-		testCases := testSet.Tests
-
-		// Check if test set is sanitized (has secret.yaml)
-		// If yes, desanitize before normalization
-		desanitized, err := t.DesanitizeTestSet(testSetID, t.config.Path)
-		if err != nil {
-			t.logger.Error("Failed to desanitize test set before normalization",
-				zap.String("testSetID", testSetID),
-				zap.Error(err))
-			return fmt.Errorf("failed to desanitize test set %s: %w", testSetID, err)
-		}
-		if desanitized {
-			t.logger.Info("Desanitized test set before normalization",
-				zap.String("testSetID", testSetID))
-		}
-
-		// Normalize test cases
-		err = t.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
-		if err != nil {
+		if err := t.normalizeTestSet(ctx, testRun, testSet); err != nil {
 			return err
-		}
-
-		// Re-sanitize after normalization if it was originally sanitized
-		if desanitized {
-			testSetDir := filepath.Join(t.config.Path, testSetID)
-			err = t.SanitizeTestSetDir(ctx, testSetDir)
-			if err != nil {
-				t.logger.Error("Failed to re-sanitize test set after normalization",
-					zap.String("testSetID", testSetID),
-					zap.Error(err))
-				return fmt.Errorf("failed to re-sanitize test set %s: %w", testSetID, err)
-			}
-			t.logger.Info("Re-sanitized test set after normalization",
-				zap.String("testSetID", testSetID))
 		}
 	}
 	t.logger.Info("Normalized test cases successfully. Please run keploy tests to verify the changes.")
+	return nil
+}
+
+// normalizeTestSet normalizes one selected set. A sanitized set is
+// desanitized, normalized and sanitized again: its recordings are named
+// before the first of those writes and re-keyed once, after the last
+// (testdb.SetRewrite), as the desanitized recordings in between are no
+// entry's.
+func (t *Tools) normalizeTestSet(ctx context.Context, testRun string, testSet config.SelectedTests) error {
+	testSetID := testSet.TestSet
+	testCases := testSet.Tests
+	rw, err := testdb.BeginSetRewrite(t.logger, t.config.Path, testSetID)
+	if err != nil {
+		return err
+	}
+	defer rw.Done()
+	// Check if test set is sanitized (has secret.yaml)
+	// If yes, desanitize before normalization
+	desanitized, err := t.DesanitizeTestSet(testSetID, t.config.Path)
+	if err != nil {
+		t.logger.Error("Failed to desanitize test set before normalization",
+			zap.String("testSetID", testSetID),
+			zap.Error(err))
+		return fmt.Errorf("failed to desanitize test set %s: %w", testSetID, err)
+	}
+	if desanitized {
+		t.logger.Info("Desanitized test set before normalization",
+			zap.String("testSetID", testSetID))
+	}
+
+	// Normalize test cases
+	err = t.NormalizeTestCases(ctx, testRun, testSetID, testCases, nil)
+	if err != nil {
+		return err
+	}
+
+	// Re-sanitize after normalization if it was originally sanitized
+	if desanitized {
+		testSetDir := filepath.Join(t.config.Path, testSetID)
+		err = t.SanitizeTestSetDir(ctx, testSetDir)
+		if err != nil {
+			t.logger.Error("Failed to re-sanitize test set after normalization",
+				zap.String("testSetID", testSetID),
+				zap.Error(err))
+			return fmt.Errorf("failed to re-sanitize test set %s: %w", testSetID, err)
+		}
+		t.logger.Info("Re-sanitized test set after normalization",
+			zap.String("testSetID", testSetID))
+	}
 	return nil
 }
 

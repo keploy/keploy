@@ -1,8 +1,10 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -106,6 +108,10 @@ func (r AgentResp) Err() error {
 type TestMockMapping struct {
 	TestName string   `json:"test_name"`
 	MockIDs  []string `json:"mock_ids"`
+	// StreamEnd marks the end of an agent's mapping stream, written once a
+	// recording's client asked it to end its streams (StreamEndPath) and it
+	// has put on the stream all it had: no test or mocks of its own.
+	StreamEnd bool `json:"stream_end,omitempty" yaml:"-"`
 }
 
 // ScopeReq is the body of POST /agent/scope/begin and /agent/scope/end — a
@@ -134,6 +140,11 @@ type ScopeReq struct {
 	// that cannot skip would run the test anyway, against a pool the gate never
 	// narrowed for it.
 	CanSkip bool `json:"canSkip,omitempty"`
+	// File and Project qualify the test's ID under the proven wire (TestID):
+	// the test file a harness names, and its project (a Jest displayName).
+	// A Go test sends neither; its instance's key is the path.
+	File    string `json:"file,omitempty"`
+	Project string `json:"project,omitempty"`
 }
 
 // The verdicts a harness reports in ScopeReq.Outcome, and ScopeOutcomeGated,
@@ -178,6 +189,8 @@ func NormalizeScopeOutcome(s string) string {
 // {"status":"ok"}, as before, so a harness that predates gating — or decodes
 // the answer as strings — is unaffected, and a missing action means "run".
 type ScopeBeginResp struct {
+	// V is ScopeProtocolVersion under the proven wire, absent otherwise.
+	V      int    `json:"v,omitempty"`
 	Status string `json:"status"`
 	Action string `json:"action,omitempty"`
 	Reason string `json:"reason,omitempty"`
@@ -196,6 +209,11 @@ const ScopeActionSkip = "skip"
 type ScopeGateReq struct {
 	Run    []string `json:"run"`
 	Reason string   `json:"reason,omitempty"`
+	// Skip is the proven model's gate (design v14 §6.1): the tests keploy
+	// skips, by ID, each with the reason its harness skips it with. It is a
+	// deny list: every test it does not name runs. Read under the proven
+	// switch, where it replaces Run.
+	Skip map[string]string `json:"skip,omitempty"`
 }
 
 // ScopeWindow is one recorded per-test scope: the agent-clock interval during
@@ -224,7 +242,33 @@ type ScopeWindow struct {
 	// Outcome is the verdict the test's harness reported when it ended the
 	// scope (ScopeReq.Outcome); "" when it reported none.
 	Outcome string `json:"outcome,omitempty"`
+	// Evidence is, under the proven wire, what keploy saw that failed the
+	// test at its end in a replay; nil when nothing did.
+	Evidence *ScopeEvidence `json:"evidence,omitempty"`
+	// Real is, under the proven wire, the mock.real destinations the test
+	// used while it was open (design v14 §4): its REAL rows, and in a
+	// record, the REAL list its recording carries.
+	Real []RealUse `json:"real,omitempty"`
+	// Claim, under the proven wire, makes this no test's window but a claim:
+	// from Start on, the run's test process is the one that claimed it with
+	// this key (POST /agent/instance), until the next claim. A call made
+	// while no test is open belongs to the pool slice of that key (design
+	// v14 §5.2).
+	Claim string `json:"claim,omitempty"`
+	// Refused, under the proven wire, makes this no test's window but a
+	// refusal keploy made at Start (RunRefusal).
+	Refused *RunRefusal `json:"refused,omitempty"`
+	// Live and Mocked, under the proven wire, make this no test's window
+	// but one row of where the run's calls to local listeners went
+	// (LiveRow, MockedRow), first seen at Start.
+	Live   *LiveRow   `json:"live,omitempty"`
+	Mocked *MockedRow `json:"mocked,omitempty"`
 }
+
+// PoolKeyNone is the pool slice of calls made before any test process
+// claimed the run, and the slice a pool mock recorded without a key serves
+// (design v14 U21).
+const PoolKeyNone = "-"
 
 // ScopeTableReq is the body of POST /agent/scope/table — the replay CLI hands
 // the agent the per-test name→mock-names table (from mappings.yaml) so the
@@ -233,6 +277,25 @@ type ScopeTableReq struct {
 	Mappings map[string][]string `json:"mappings"`
 	Root     string              `json:"root,omitempty"`
 	Sets     map[string]SetTable `json:"sets,omitempty"`
+	// Pool is, under the proven switch, each key's pool slice: the names of
+	// the mocks recorded while no test was open, by the key of the claim
+	// then (PoolKeyNone for none, and for a mock recorded without a key).
+	// omitzero: an empty pool ({}) is sent, and means "serve no pool mock
+	// between tests"; only a nil one is left out (with the switch off).
+	Pool map[string][]string `json:"pool,omitzero"`
+}
+
+// TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
+// CLI sends: when each test of the replayed recording began
+// (MappedTestCase.At), by test name. Under the proven switch the agent moves
+// the clock of the run's processes to a test's begin while the test is open,
+// and back to the run's start time after it (design v14 §3.4).
+type TestBeginsReq struct {
+	Begins map[string]time.Time `json:"begins"`
+	// Real is, by test, the mock.real destinations its recording lists: such
+	// a test runs on the real clock, not at its recorded begin (design v14
+	// §3.4, F3). Absent when no test lists any.
+	Real map[string][]string `json:"real,omitempty"`
 }
 
 type SetTable struct {
@@ -256,6 +319,13 @@ type Owned struct {
 // Callers must treat it as "unknown", never as "no mocks stored": a caller that
 // conflates the two reads an unreportable agent as a replaced one.
 var ErrMockStatsUnsupported = errors.New("agent cannot report mock stats")
+
+// ErrNoMappingStream is what GetMappings returns for an agent that predates
+// test-mock mappings (keploy #3715): it has no /mappings route, so there is no
+// mapping stream at all, and a recording goes on without one. It is not a
+// failure, and not a stream the agent ended: a recorder that takes it for
+// either says a loss that never happened.
+var ErrNoMappingStream = errors.New("this keploy agent has no mapping stream")
 
 // ErrScopeGateUnsupported is returned for an agent that cannot gate which
 // tests run (one that predates POST /agent/replay/gate).
@@ -281,6 +351,22 @@ type StoreMocksReq struct {
 
 const StoreMocksStreamContentType = "application/x-gob-stream"
 
+// MockStreamMinAgentVersion is the first keploy release whose agent takes the
+// /storemocks stream (keploy #4327). Keploy Enterprise's first agent image built
+// on it is v3.5.76.
+const MockStreamMinAgentVersion = "v3.5.85"
+
+// ErrAgentPredatesMockStream is the /storemocks failure of an agent older than
+// MockStreamMinAgentVersion. Such an agent reads the body as one StoreMocksReq,
+// fails on the MockStreamHeader that opens the stream, and answers 400 with an
+// AgentResp whose error it cannot encode, so the reply holds a type and no
+// value. Nothing this side sends makes it take the mocks, and the legacy
+// single-shot framing it reads is gone (it held the whole corpus in memory), so
+// the agent has to be upgraded. A caller that knows which agent it is talking
+// to (k8s-proxy knows the image of the replay pods it made) names it.
+var ErrAgentPredatesMockStream = errors.New("the agent is older than keploy " + MockStreamMinAgentVersion +
+	" and cannot take the streamed mocks; upgrade the agent image to the version of the keploy that runs the replay")
+
 // MockStreamEncodingZstd is the Content-Encoding of a zstd-compressed /storemocks
 // stream. An agent that can decode it says so with "Accept-Encoding: zstd" on its
 // /health response (RFC 7694), and the client compresses only for such an agent:
@@ -302,6 +388,11 @@ type MockStreamHeader struct {
 
 type MockFilterParams struct {
 	AfterTime time.Time `json:"afterTime,omitempty"`
+	// ExactMapping makes MockMapping the test's whole recording even when
+	// it is empty: a test recorded with no call is served no per-test mock,
+	// only the reusable tier. Without it an empty mapping means "none
+	// supplied", which leaves the whole pool armed.
+	ExactMapping bool `json:"exactMapping,omitempty"`
 	// FirstRecordedTestStart is the request time of the EARLIEST RECORDED test
 	// in the set being staged, which the replayer knows because it loads test
 	// cases sorted by request timestamp. The agent seeds the manager's
@@ -331,6 +422,17 @@ type MockFilterParams struct {
 	// (which is O(testcases^2) marshaling). Default false = legacy behaviour.
 	AgentOwnsConsumed  bool                 `json:"agentOwnsConsumed,omitempty"`
 	TotalConsumedMocks map[string]MockState `json:"totalConsumedMocks,omitempty"`
+	// ConsumedHistory, when set, is the history TotalConsumedMocks is the live
+	// map of (ConsumedHistory.Map). It lets the client send an agent that
+	// already holds an earlier state of it only the entries written since
+	// (ConsumedSync), instead of the whole history at every test. Never on
+	// the wire.
+	ConsumedHistory *ConsumedHistory `json:"-"`
+	// ConsumedRegion names the per-test mocks of the set: the only ones whose
+	// entries an agent that reads the history for per-test mocks only
+	// (ConsumedScopeHeader) is sent, when it is sent the whole history. Never
+	// on the wire.
+	ConsumedRegion map[string]struct{} `json:"-"`
 	// StrictMockWindow controls whether out-of-window non-config mocks are
 	// dropped rather than being promoted into the cross-test config pool.
 	// Default TRUE (see config.Test default) — out-of-window per-test
@@ -342,6 +444,179 @@ type MockFilterParams struct {
 	// in: an enabling value forces strict; an explicit disabling value
 	// ("0") forces strict off regardless of the per-call flag.
 	StrictMockWindow bool `json:"strictMockWindow,omitempty"`
+
+	// Variables are the test variables the test's own request carries (its
+	// test case's template values), under the proven switch: a mock filter
+	// starts a test, and the agent binds these as the test begins, so a
+	// dependency call that uses one is asserted to send that value. Empty for
+	// every other caller.
+	Variables []VariableBinding `json:"variables,omitempty"`
+
+	// Exact makes the call keploy test's exact serving, under the proven
+	// switch (design v14 §5.2): the agent stages nothing per test, and
+	// serves each test case exactly its own mocks. nil for every other
+	// caller, and always without the switch.
+	Exact *ExactServing `json:"exact,omitempty"`
+
+	// TestRequest is, on the filter that opens a test case in record's full
+	// round (the learn step's round, under the proven switch), the test
+	// case's own request: what the application was given before any call
+	// of the test. The agent's learn step reads it as the test's earliest
+	// place: a value the application took from it (a part of it, the next
+	// of the slots it lists picked by its clock) is refused, never learned
+	// as noise. nil for every other caller. An agent that reads it says so
+	// in its answer (TestRequestReadHeader); one that predates it ignores
+	// it, and the replay then keeps none of what that agent learned as noise
+	// for the test (its request was not read). An agent that has it reads a
+	// filter that opens a test case without it (a keploy older than its
+	// agent) as a request it could not read, and refuses every value that
+	// changed in the test.
+	TestRequest *TestRequest `json:"testRequest,omitempty"`
+
+	// LearnEnded is set, in record's full round (the learn step's round,
+	// under the proven switch), on every filter of a test set's cycle after
+	// its first: keploy replay's mock-consistency retry cycles
+	// (config.RetryPassing) run the passing test cases again, test-1 after
+	// test-N, so recorded order is no longer replay order there. The agent's
+	// learn step then decides no request and pairs none until the next
+	// set's staging: such a cycle is served as keploy test serves (exact
+	// serving), with what the first cycle learned on the recordings
+	// (Learned), judged, and learns nothing. What the set's first cycle
+	// learned is what the replay keeps.
+	// false on a set's staging and on each filter of its first cycle. The
+	// agent keeps it ended for the rest of the set, whatever a later filter
+	// says: only the next set's staging takes the learn step back up. The
+	// agent's answer does not say it took it: an agent that ignored it would
+	// learn on, but no released keploy agent has the learn step, so every
+	// agent that learns is one that reads it.
+	LearnEnded bool `json:"learnEnded,omitempty"`
+
+	// Learned is, in record's full round, what the replay keeps of what its
+	// test set's first cycle learned (the states of the mocks it consumed
+	// that carry learned noise, variables or binds), sent once, with
+	// LearnEnded, on the pool filter before the set's first retry cycle. The
+	// agent serves every recording of the set from then on with it merged
+	// (learn.KeptLearning), as the recording carries it once persisted: a
+	// test that passed in the first cycle only through drift its learn step
+	// learned is judged the same way in the retry cycles, never failed for
+	// learning they do not take. It holds for the rest of the set: the next
+	// set's mocks come without it. The agent refuses it on a filter without
+	// LearnEnded (the learn step would read learned recordings as recorded).
+	// nil on every other filter.
+	Learned []MockState `json:"learned,omitempty"`
+}
+
+// TestRequest is a keploy test case's own request, as the filter that opens
+// it in record's full round carries it to the agent (MockFilterParams): each
+// part as recorded and as keploy test sends it in this run (with its
+// template values), or why keploy could not read it.
+type TestRequest struct {
+	// Test is the test case's name.
+	Test string `json:"test"`
+	// Parts are the request's parts, in a stable order: "url", each header
+	// as "header.<name>", "body", each form field as "form.<key>".
+	Parts []TestRequestPart `json:"parts,omitempty"`
+	// Unread says why keploy could not read the request (a test case of a
+	// kind it reads no request of, a body kept apart from the test case),
+	// "" when it could. A request keploy could not read has no parts.
+	Unread string `json:"unread,omitempty"`
+}
+
+// TestRequestPart is one part of a test case's request, as recorded and as
+// sent in this run.
+type TestRequestPart struct {
+	Name     string `json:"name"`
+	Recorded string `json:"recorded"`
+	Sent     string `json:"sent"`
+}
+
+// ExactServing is what a keploy test filter asks of exact serving, under the
+// proven switch.
+type ExactServing struct {
+	// Stage is the set's staging call: the agent stages every mock of the
+	// set once (the rest of the filter says how, as without exact serving),
+	// then serves Pool between test cases.
+	Stage bool `json:"stage,omitempty"`
+	// Pool is, on the staging call, the set's pool: every mock no test
+	// case's mapping lists. It answers between test cases, beside the
+	// protocol-phase mocks.
+	Pool []string `json:"pool,omitempty"`
+	// Test opens this test case, which owns the data-plane mocks of Owned
+	// (its mapping). Without Stage, an empty Test serves the pool again.
+	Test  string   `json:"test,omitempty"`
+	Owned []string `json:"owned,omitempty"`
+	// Ahead is, on a call that serves the pool (no Test), the mocks of the
+	// next test case's mapping that were in flight when it began: recorded
+	// in the gap before its window, answered once it had begun
+	// (models.WindowSchedule.InFlightInto). They answer between test cases,
+	// each at most once, as that test case's own: one answered then counts
+	// as answered when it opens. An agent that predates it ignores it.
+	Ahead []string `json:"ahead,omitempty"`
+	// Worker is, on the staging call, the set's worker scope
+	// (Mapping.Worker): the mocks no test case owns, each with its place
+	// (MockEntry.Place). The agent stages them with the pool, and each
+	// answers from its place in the set's run on (once the test case it is
+	// placed after has begun; from the start for an empty place), whether a
+	// test case is open or not, after the open test case's own, at most one
+	// request in the staging.
+	Worker []MockEntry `json:"worker,omitempty"`
+	// Concurrent is, on a call that opens a test case (Test), the
+	// recordings it may answer with beside Owned: those recorded while its
+	// request and other tests' requests were open together, which keploy
+	// record's full round shares between those tests (Mapping.Groups). Each
+	// answers at most once in the staging, for whichever of those tests
+	// makes its call first, and is never required of the test. Owned answer
+	// before them. Sent only to an agent that says it serves them
+	// (ExactConcurrentHeader); an agent that predates it ignores it.
+	Concurrent []string `json:"concurrent,omitempty"`
+	// Background names, on the staging call, the rules the set's background
+	// (Worker and Pool) is served by: RecordedWithS12Routing for the background rules, which
+	// the replay sends only for a set marked so (Mapping.RecordedWith), under
+	// the proven switch, in a build whose judging enables them
+	// (replay.RegisterS12Serving); empty for today's. An agent that predates
+	// it ignores it, and serves by today's rules: never looser.
+	Background string `json:"background,omitempty"`
+}
+
+// ExactConcurrentHeader is the /storemocks response header in which an agent
+// with the proven switch on says it serves a test case the recordings it
+// shares with the tests that ran beside it (ExactServing.Concurrent).
+// ExactConcurrentServes is its value. An agent that does not send it is never
+// sent them.
+const (
+	ExactConcurrentHeader = "Keploy-Exact-Concurrent"
+	ExactConcurrentServes = "1"
+)
+
+// BeginsTestVariables reports whether, under the proven switch, the agent
+// begins a test's variables as it applies this filter: a filter that opens a
+// test case, with exact serving or without. Two filters begin none:
+//
+//   - A test set's staging (StagesSet). The set's variables began at its
+//     Mock (MockManager.NewVariableSet), as the learn step's set did
+//     (learn.Tracker.NewSet), and what the set's start-up binds before its
+//     first test begins is the run's, which every test of the set reads: a
+//     scope begun at the staging would take the start-up's bindings as its
+//     own, and the first test's would forget them.
+//   - Exact serving's pool call. It ends a test case's serving, and the
+//     variables its dependency calls bound stay readable until the next test
+//     case's filter begins the next scope: keploy test reads them after it.
+func (p MockFilterParams) BeginsTestVariables() bool {
+	if p.StagesSet() {
+		return false
+	}
+	return p.Exact == nil || p.Exact.Test != ""
+}
+
+// StagesSet reports whether the filter is a test set's staging: the set's
+// mocks staged before any of its tests runs, from BaseTime and naming no
+// test's mapping, as keploy test sends it once per set (exact serving's
+// Stage, which it sends on that same call).
+func (p MockFilterParams) StagesSet() bool {
+	if p.Exact != nil {
+		return p.Exact.Stage
+	}
+	return p.AfterTime.Equal(BaseTime) && len(p.MockMapping) == 0
 }
 
 // ConsumedScopeHeader is the /updatemockparams response header in which an agent
@@ -357,14 +632,146 @@ const (
 	ConsumedScopePerTest = "per-test"
 )
 
+// BackgroundRulesHeader is the /updatemockparams response header in which an
+// agent says, answering a set's staging call (ExactServing.Stage), the rules
+// it serves the set's background by: RecordedWithS12Routing when it applied
+// the background rules (ExactServing.Background), absent for today's. An agent that does not
+// send it, every agent released before background serving among them, serves by today's
+// rules, and the replay then keeps today's checks for the set (its worker
+// scope required by its end) whatever it asked for: never looser than the
+// rules the set was served by.
+const BackgroundRulesHeader = "X-Keploy-Background-Rules"
+
+// TestRequestReadHeader is the /updatemockparams response header in which an
+// agent says, answering the filter that opens a keploy test case
+// (MockFilterParams.TestRequest), that its learn step took the request the
+// filter carried, or that it carried none (TestRequestRead). An agent that
+// does not send it, every agent released before it among them, learns from
+// the test without reading its request, so a value the application took from
+// the request may be learned as noise: the replay keeps nothing the agent
+// learned as noise, or as an echo, on the mocks the test consumed.
+const (
+	TestRequestReadHeader = "X-Keploy-Test-Request"
+	TestRequestRead       = "read"
+)
+
+// ClientTestsReadHeader is the /mock response header in which an agent says,
+// answering a keploy mock session's MockOutgoing that turns its learn step on
+// (OutgoingOptions.Learn, under the proven switch), that the learn step reads
+// the session's tests as a test harness's client tests (ClientTestsRead):
+// there a changed instant is learned as noise only where its call's window
+// shows it a read of the application's clock. An agent that does not send
+// it, every agent released before it among them, learns a value the harness
+// gave the application as noise where it changed: keploy mock keeps nothing
+// such an agent learned.
+const (
+	ClientTestsReadHeader = "X-Keploy-Client-Tests"
+	ClientTestsRead       = "read"
+)
+
+// AgentVersionHeader is the response header in which an agent names its own
+// keploy version, on every answer of its routes, where it was built with one.
+// Where the CLI keeps nothing of what the agent learned, because the agent
+// did not say it reads what this keploy sends it (TestRequestReadHeader,
+// ClientTestsReadHeader), its reasons name the agent by it. An agent that
+// does not send it, every agent released before it among them, is named as
+// one that did not say its version.
+const AgentVersionHeader = "X-Keploy-Agent-Version"
+
+// UnmatchedCallsUnreadHeader is the /mockerrors response header in which an
+// agent says the list in the body is incomplete (ErrUnmatchedCallsUnread), with
+// why. The body is still the list that was read, so a client that does not know
+// the header reads it as before. Only an agent with the proven switch on sends
+// it.
+const UnmatchedCallsUnreadHeader = "X-Keploy-Unmatched-Calls-Unread"
+
+// AgentInstanceHeader is the response header in which an agent names the
+// process that answers: an id the agent draws once, as its process starts.
+// What a test set is judged on (the calls no mock answered, what its tests
+// consumed, what keploy could not capture) is held in that process's memory,
+// and an agent started again in its place (kubelet restarting a crashed
+// sidecar, docker restarting a container) answers at the same address with
+// none of it. Two answers that name different processes say that happened
+// between them. Only an agent with the proven switch on sends it.
+const AgentInstanceHeader = "X-Keploy-Agent-Instance"
+
+// AgentReplacement is an agent process answering where another answered
+// before it: First, the process that answered first since a watch began
+// (AgentInstanceWatch), and Next, the first other one that answered after it.
+type AgentReplacement struct {
+	First string
+	Next  string
+}
+
+// AgentInstanceWatch watches which agent process answers a client's agent
+// address (AgentInstanceHeader): from when it begins, the first process to
+// answer is the one the watch keeps to, and any other that answers after it
+// replaced it.
+type AgentInstanceWatch interface {
+	// Replacement reports the first process that answered after the one the
+	// watch keeps to, and whether one did.
+	Replacement() (AgentReplacement, bool)
+	// Accept says the process that answers now was set up again in full
+	// before the application ran against it (the docker compose bring-up's
+	// retry): nothing the watch keeps to was on the process it replaced, and
+	// the watch keeps to this one from now on.
+	Accept()
+	// Stop ends the watch.
+	Stop()
+}
+
 type UpdateMockParamsReq struct {
 	FilterParams MockFilterParams `json:"filterParams"`
+	// ConsumedSync, when set, says how FilterParams.TotalConsumedMocks relates
+	// to the consumed history an agent keeps between calls. A client that
+	// predates it never sends it, and an agent that predates it ignores it.
+	ConsumedSync *ConsumedSync `json:"consumedSync,omitempty"`
+}
+
+// ConsumedSync lets an agent keep a client's consumed history between
+// /updatemockparams calls, so the client does not send the whole history with
+// every test, which made a replay's cost grow with the square of its tests.
+//
+// A full send (Full) carries the whole history in TotalConsumedMocks and starts
+// a stream: the agent keeps the map under Stream at Seq. A later send of the
+// same stream carries only the entries written since Base, the Seq of the
+// send before it, and the agent adds them to what it keeps and filters with
+// the result, which is exactly the map a full send would have carried. An
+// agent that does not hold Stream at Base applies nothing and answers 409
+// with ConsumedSyncHeader set to ConsumedSyncResync; the client then sends the
+// whole history again.
+type ConsumedSync struct {
+	Stream string `json:"stream"`
+	Full   bool   `json:"full,omitempty"`
+	Base   uint64 `json:"base,omitempty"`
+	Seq    uint64 `json:"seq"`
+}
+
+// ConsumedSyncHeader is the /updatemockparams response header in which an
+// agent that keeps a client's consumed history (ConsumedSync) says what it
+// holds after the call: "<stream>/<seq>". An agent that does not send it,
+// which includes every agent released before it, keeps nothing, and is sent
+// the whole history every time. ConsumedSyncResync, with status 409, says it
+// does not hold the stream a send built on.
+const (
+	ConsumedSyncHeader = "X-Keploy-Consumed-Sync"
+	ConsumedSyncResync = "resync"
+)
+
+// ConsumedSyncHeld is the ConsumedSyncHeader value of an agent that holds
+// stream at seq.
+func ConsumedSyncHeld(stream string, seq uint64) string {
+	return stream + "/" + strconv.FormatUint(seq, 10)
 }
 
 type BeforeSimulateRequest struct {
 	TimeStamp    time.Time `json:"timestamp"`
 	TestSetID    string    `json:"testSetID"`
 	TestCaseName string    `json:"testCaseName"`
+	// Real, under the proven switch, is the mock.real destinations the test
+	// case's recording lists: its request runs on the real clock, not at
+	// TimeStamp (design v14 §3.4, F3).
+	Real []string `json:"real,omitempty"`
 }
 
 type AfterSimulateRequest struct {
@@ -402,4 +809,203 @@ type AppStartReq struct {
 	Port int       `json:"port"`
 	Pid  int       `json:"pid,omitempty"`
 	At   time.Time `json:"at,omitzero"`
+}
+
+// BacklogVerdict is what the agent answers when a recording's stop asks
+// whether it may still hand over something captured before the stop
+// (GET /agent/record/pending, AgentBacklog). It has three values, and a fourth
+// for an agent that can never tell: an answer that did not come is never read
+// as "nothing pending".
+type BacklogVerdict int
+
+const (
+	// BacklogCannotTell: no answer came (a timeout, a transport error, an
+	// error status, a body that does not decode). The agent may still hold
+	// something; the stop keeps waiting while it can. The zero value, so an
+	// answer that was never filled in is never taken for BacklogClear.
+	BacklogCannotTell BacklogVerdict = iota
+	// BacklogPending: the agent may still hand over something captured
+	// before the stop.
+	BacklogPending
+	// BacklogClear: the agent holds nothing more captured before the stop:
+	// its capture, parsers and test-case queue are through it. What it has
+	// already handed on and the client has not received yet (in its mock
+	// manager's channel, the stream's encoder, the socket) is not counted:
+	// clear is not delivered.
+	BacklogClear
+	// BacklogUnsupported: the agent cannot tell, and never will (it predates
+	// the route, or its capture has no watermark). The stop goes by its
+	// streams' quiet alone.
+	BacklogUnsupported
+)
+
+func (v BacklogVerdict) String() string {
+	switch v {
+	case BacklogPending:
+		return "pending"
+	case BacklogClear:
+		return "clear"
+	case BacklogUnsupported:
+		return "unsupported"
+	}
+	return "cannot tell"
+}
+
+// AgentBacklog is the agent's answer to whether it may still hand over a test
+// case or a mock captured before a time.
+type AgentBacklog struct {
+	Verdict BacklogVerdict
+	// EndMarkers says the agent counts in its answer the mappings it owes for
+	// tests from before the time asked about, and ends its frame streams, each
+	// with a marker after all it had, when a recording's client asks it to
+	// (StreamEndPath): its client's drains then end on those events, not on a
+	// stream's quiet. False from an agent that predates it, whose client goes
+	// by quiet as before.
+	EndMarkers bool
+	// Progress is a count that moves whenever the agent's capture gets
+	// further: with BacklogPending, a stop tells a backlog being worked
+	// through from one that is not moving. Zero from an agent that predates
+	// it.
+	Progress uint64
+	// WaitingOn says what is pending, when the agent can tell.
+	WaitingOn string
+}
+
+// StreamEndPath is the agent route a recording's client POSTs to, once the
+// agent has said it holds nothing more from before the client's stop, to have
+// the agent end that recording's frame streams (test cases, mocks, mappings),
+// named by their token (?token=, StreamEndTokenHeader): each puts on the
+// stream what it still has, then its end marker (StreamEndKind,
+// TestMockMapping.StreamEnd, a "stream-end" part), and ends.
+const StreamEndPath = "/record/end"
+
+// StreamEndTokenHeader carries, on each frame stream's request, the token of
+// the recording the stream is for: the agent ends the streams of the token a
+// client names (StreamEndPath), that recording's alone, whoever started the
+// agent (the client, or docker compose).
+const StreamEndTokenHeader = "Keploy-Stream-End-Token"
+
+type streamEndTokenKey struct{}
+
+// WithStreamEndToken marks the frame streams opened on ctx as a recording's
+// whose token is tok (StreamEndTokenHeader).
+func WithStreamEndToken(ctx context.Context, tok string) context.Context {
+	return context.WithValue(ctx, streamEndTokenKey{}, tok)
+}
+
+// StreamEndToken is the recording token of the frame streams opened on ctx
+// (WithStreamEndToken): "" when none.
+func StreamEndToken(ctx context.Context) string {
+	t, _ := ctx.Value(streamEndTokenKey{}).(string)
+	return t
+}
+
+// StreamEndKind is the kind of the marker that ends an agent's mock stream
+// (StreamEndPath): a control frame, no mock, never recorded, and no
+// dependency kind (mock.go's kinds).
+const StreamEndKind Kind = "KeployStreamEnd"
+
+// StreamEndPart is the form name of the multipart part that ends an agent's
+// test-case stream (StreamEndPath). Its body is the session's StreamEndSummary.
+const StreamEndPart = "stream-end"
+
+// StreamEndSummary is the body of the test-case stream's end marker
+// (StreamEndPart): what the agent's summary of the session says it lost, for
+// its client to say in its own log. An agent docker compose runs logs through
+// compose, which can drop its last lines as the stack stops: the client tears
+// the stack down once its drains end at the markers.
+type StreamEndSummary struct {
+	TestCasesSent       int `json:"tcs_sent_to_cli"`
+	TestCasesSuppressed int `json:"tcs_suppressed_total"`
+	// LeftOutInFlight: test cases left out because each stayed in flight
+	// while mocks it may have made had to be let go.
+	LeftOutInFlight uint64 `json:"tcs_left_out_in_flight"`
+	// Unsettled: test cases saved before the agent had parsed all the
+	// traffic they overlap.
+	Unsettled int `json:"tcs_released_unsettled"`
+	// MassSuppressed: a large share of the session's test cases was
+	// suppressed (the agent's summary says so at WARN).
+	MassSuppressed bool `json:"mass_suppressed"`
+	// NotRecordedUnderPressure: requests not recorded because the memory
+	// guard had paused recording when they came.
+	NotRecordedUnderPressure PressureSkipSummary `json:"not_recorded_under_pressure,omitzero"`
+}
+
+// PressureSkipSummary is how many requests a recording did not record
+// because the memory guard had paused recording when they came, and on how
+// many connections (StreamEndSummary).
+type PressureSkipSummary struct {
+	Requests    uint64 `json:"requests"`
+	Connections int    `json:"connections"`
+}
+
+// FrameStream names one of an agent's frame streams to a recording's client.
+type FrameStream string
+
+const (
+	TestCaseStream FrameStream = "incoming"
+	MockStream     FrameStream = "outgoing"
+	MappingStream  FrameStream = "mappings"
+)
+
+// DrainsAfterStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it after a recording's stop and closes it
+// before it stops the agent, and is the only thing that stops the agent: it
+// started it (natively, or in a container it runs). `keploy record` and
+// `keploy mock record` send it then. A stop signal the agent gets meanwhile
+// (a `pkill -INT keploy`, or a stop of its container, that reaches it too)
+// waits for such streams (utils.SetSignalHold). An agent something else
+// stops (docker compose, with the project the client waits on; kubelet, with
+// a sidecar's pod) gets no header, and stops on the signal as it always has:
+// held for the client, it would only be killed at that stop's timeout.
+const DrainsAfterStopHeader = "Keploy-Drains-After-Stop"
+
+type drainsAfterStopKey struct{}
+
+// WithDrainsAfterStop marks the agent frame streams opened on ctx as ones
+// their client drains after the stop and closes before it stops the agent.
+// The agent client sends DrainsAfterStopHeader for them when it started the
+// agent itself. On the agent, the graceful-shutdown ctx carries it while such
+// a client holds a stream: that client stops the app it started first.
+func WithDrainsAfterStop(ctx context.Context) context.Context {
+	return context.WithValue(ctx, drainsAfterStopKey{}, true)
+}
+
+// DrainsAfterStop reports whether ctx was marked with WithDrainsAfterStop.
+func DrainsAfterStop(ctx context.Context) bool {
+	v, _ := ctx.Value(drainsAfterStopKey{}).(bool)
+	return v
+}
+
+// DrainsOnAgentStopHeader marks an agent frame stream (test cases, mocks,
+// mappings) whose client drains it once the agent says a stop signal reached
+// it (StopNoticePath), and closes it then: something else stops this agent
+// (docker compose, with the app's project, also when the app exits on its
+// own), and the client is not told otherwise before the agent goes. A stop
+// signal the agent gets while such a stream has carried a frame, or the
+// agent holds one for it, waits for the stream to close, as for a
+// DrainsAfterStopHeader stream: the client, told, drains what the agent
+// captured before the stop. An agent with nothing to hand over does not wait.
+// `keploy record` sends it under docker compose, and watches StopNoticePath.
+const DrainsOnAgentStopHeader = "Keploy-Drains-On-Agent-Stop"
+
+// StopNoticePath is the agent route (GET) a recording's client of an agent
+// something else stops waits on (DrainsOnAgentStopHeader): it answers 204 once
+// a stop signal has reached the agent and the agent waits for the client to
+// drain its streams. 404 from an agent that predates it.
+const StopNoticePath = "/record/stopping"
+
+type agentStopNoticeKey struct{}
+
+// WithAgentStopNotice marks the agent frame streams opened on ctx as ones
+// their client drains when the agent says a stop reached it
+// (DrainsOnAgentStopHeader): the client watches StopNoticePath meanwhile.
+func WithAgentStopNotice(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentStopNoticeKey{}, true)
+}
+
+// AgentStopNotice reports whether ctx was marked with WithAgentStopNotice.
+func AgentStopNotice(ctx context.Context) bool {
+	v, _ := ctx.Value(agentStopNoticeKey{}).(bool)
+	return v
 }

@@ -2,17 +2,21 @@ package replay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -254,4 +258,66 @@ func TestADroppedConnectionAtAnUnreachableAppPortSaysSo(t *testing.T) {
 			assert.Equal(t, []string{fmt.Sprintf("%s for %d", authority, n)}, instr.asked, "asked once, about the address the request was sent to")
 		})
 	}
+}
+
+// simInstr notes the clock calls a test case's simulation makes.
+type simInstr struct {
+	Instrumentation
+	frozen, real, after []string
+	realErr             error
+}
+
+func (s *simInstr) AfterSimulate(_ context.Context, tc string, _ string) error {
+	s.after = append(s.after, tc)
+	return nil
+}
+
+func (s *simInstr) BeforeSimulate(_ context.Context, _ *time.Time, _ string, tc string) error {
+	s.frozen = append(s.frozen, tc)
+	return nil
+}
+
+func (s *simInstr) BeforeSimulateReal(_ context.Context, _ *time.Time, _ string, tc string, _ []string) error {
+	s.real = append(s.real, tc)
+	return s.realErr
+}
+
+// Under the switch a test case whose recording lists mock.real destinations
+// runs on the real clock, never frozen at its recorded request (F3), and a
+// real clock that cannot be had fails the case; any other case is frozen as
+// before, its hook's failure only logged.
+func TestBeforeSimulatePutsARealTestCaseOnTheRealClock(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Now()
+	s := &simInstr{}
+	h := &Hooks{logger: zap.NewNop(), instrumentation: s}
+	real := &models.TestCase{Name: "real", Real: []string{"db:5432"}}
+	plain := &models.TestCase{Name: "plain"}
+	require.NoError(t, h.beforeSimulate(context.Background(), real, &at, "set"))
+	require.NoError(t, h.beforeSimulate(context.Background(), plain, &at, "set"))
+	require.Equal(t, []string{"real"}, s.real)
+	require.Equal(t, []string{"plain"}, s.frozen)
+
+	s.realErr = errors.New("501")
+	require.ErrorContains(t, h.beforeSimulate(context.Background(), real, &at, "set"), "501")
+	require.Equal(t, []string{"real"}, s.after, "what the hook began ends when the real clock cannot be had")
+	h.instrumentation = struct{ Instrumentation }{}
+	require.ErrorContains(t, h.beforeSimulate(context.Background(), real, &at, "set"), "real clock")
+
+	t.Setenv(provenswitch.Env, "")
+	s = &simInstr{}
+	h.instrumentation = s
+	require.NoError(t, h.beforeSimulate(context.Background(), real, &at, "set"))
+	require.Equal(t, []string{"real"}, s.frozen, "without the switch the list is not read")
+}
+
+// A run-level AfterTestRun whose run has no agent left (withoutAgent) does its
+// own work and leaves out only the agent's hook; without the mark it calls it.
+func TestAfterTestRunWithoutAgentLeavesOutOnlyTheAgent(t *testing.T) {
+	agent := &bpNoAgent{}
+	h := newHooks(zap.NewNop(), &config.Config{}, agent, false)
+	require.NoError(t, h.AfterTestRun(context.Background(), "test-run-0", nil, models.TestCoverage{}))
+	require.EqualValues(t, 1, agent.afterTestRuns.Load())
+	require.NoError(t, h.AfterTestRun(withoutAgent(context.Background()), "test-run-0", nil, models.TestCoverage{}))
+	require.EqualValues(t, 1, agent.afterTestRuns.Load(), "the agent's hook was called with no agent left")
 }

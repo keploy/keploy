@@ -3,6 +3,7 @@ package utils
 import (
 	"errors"
 	"strings"
+	"sync"
 )
 
 // Keploy's own exit codes.
@@ -10,9 +11,27 @@ import (
 // THE CONTRACT, and the reason it is narrow:
 //
 //	0        the wrapped test command succeeded (or there was none)
-//	<runner> the wrapped test command's OWN exit code, propagated verbatim.
-//	         Every CI job depends on this, so Keploy must never overwrite it —
-//	         see mock.propagateExit.
+//	<runner> the wrapped command's OWN exit code, propagated verbatim: the
+//	         test command of `keploy mock` (mock.propagateExit), and the app
+//	         `keploy record` runs, when it dies while it is recorded (128+N
+//	         for signal N; record.recordExitCode). Three exceptions, all
+//	         `keploy record`'s: an app that SIGTERM or SIGINT stopped (143,
+//	         130) ends it normally, with 0 (record.appStoppedBySignal); under
+//	         docker compose a run the keploy agent's crash ended (compose
+//	         stops the app over it, or never starts it) is not the app's own
+//	         end but keploy's failure, 1; and a compose project that stopped
+//	         before the app ever started fails with 1 though compose reported
+//	         0 (both record.composeEnd).
+//	         Otherwise Keploy never overwrites it: every CI job depends on
+//	         this. A wrapped command's own 1, 3, 4, 5, 6 or 8 reads the same
+//	         as Keploy's codes below: that is the price of passing it
+//	         through untouched.
+//	128+N    a run the user's signal N stopped before it had its verdict
+//	         (SIGINT 130, SIGHUP 129, SIGTERM 143), with no failure armed
+//	         first: `keploy mock replay` (keploy#4700), and `keploy test`
+//	         under KEPLOY_PROVEN=1 (replay.armStoppedRunExitCode). With the
+//	         switch off, a stopped `keploy test` exits 0 unless what it
+//	         reached already fails it.
 //	1        a generic Keploy-side failure
 //	3,4,6    a SPECIFIC Keploy-side failure, listed below (5 is the enterprise
 //	         build's: a command that needs a session it cannot use)
@@ -144,10 +163,19 @@ func ExitCodeFor(err error) int {
 	}
 }
 
+// exitCodeMu makes SetExitCodeOnce's check and set one step against other
+// SetExitCodeOnce calls: a library caller (k8s-proxy) runs recordings
+// concurrently, and each failing one arms a code. It does not cover the
+// places that write ErrCode directly (keploy mock's), nor main's read, which
+// comes once the command has returned.
+var exitCodeMu sync.Mutex
+
 // SetExitCodeOnce records a specific Keploy-side exit code, but never clobbers
 // a code already set — in particular the wrapped runner's own code, which
 // propagateExit may have installed first and which outranks ours.
 func SetExitCodeOnce(code int) {
+	exitCodeMu.Lock()
+	defer exitCodeMu.Unlock()
 	if ErrCode == 0 {
 		ErrCode = code
 	}

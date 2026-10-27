@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"strconv"
+	"strings"
+	"syscall"
 )
 
 // The process tree InterruptProcessTree signals, read from /proc.
@@ -68,4 +70,64 @@ func readProcTable(proc fs.FS) (procTable, error) {
 		table.add(pid, stat.PPID, stat.PGRP)
 	}
 	return table, nil
+}
+
+// groupReached is each process of process group pgid as /proc shows it now,
+// and whether it ignores sig: what a signal sent to the group next reaches.
+// A process that exits as /proc is read, a zombie, and a process whose
+// dispositions cannot be read are not among them.
+func groupReached(pgid int, sig syscall.Signal) []Reached {
+	return groupReachedIn(os.DirFS("/proc"), pgid, sig)
+}
+
+// groupReachedIn is groupReached over proc, a /proc.
+func groupReachedIn(proc fs.FS, pgid int, sig syscall.Signal) []Reached {
+	entries, err := fs.ReadDir(proc, ".")
+	if err != nil {
+		return nil
+	}
+	buf := make([]byte, statBufSize)
+	var reached []Reached
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || !entry.IsDir() {
+			continue
+		}
+		line, err := readStat(proc, entry.Name(), buf)
+		if err != nil {
+			continue
+		}
+		stat, ok := ParseProcStat(line)
+		if !ok || stat.PGRP != pgid || stat.State == 'Z' {
+			continue
+		}
+		ignores, ok := ignoresSignal(proc, entry.Name(), sig)
+		if !ok {
+			continue
+		}
+		reached = append(reached, Reached{PID: pid, Start: stat.StartTime, Ignores: ignores})
+	}
+	return reached
+}
+
+// ignoresSignal reads whether process pid of proc, a /proc, ignores sig: the
+// SigIgn mask of its status file (proc_pid_status(5)), one bit for each
+// signal, sig's at bit sig-1.
+func ignoresSignal(proc fs.FS, pid string, sig syscall.Signal) (ignores, ok bool) {
+	status, err := fs.ReadFile(proc, pid+"/status")
+	if err != nil {
+		return false, false
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		mask, found := strings.CutPrefix(line, "SigIgn:")
+		if !found {
+			continue
+		}
+		bits, err := strconv.ParseUint(strings.TrimSpace(mask), 16, 64)
+		if err != nil || sig < 1 || sig > 64 {
+			return false, false
+		}
+		return bits&(1<<(uint(sig)-1)) != 0, true
+	}
+	return false, false
 }

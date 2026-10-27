@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "${BASH_SOURCE[0]}")/../../go-retry.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
 
 # This script automates the testing of the risk profile identification feature.
 # It records test cases, validates the initial failure report, then tests the
@@ -61,7 +62,9 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for critical errors in $logfile..."
   if [ -f "$logfile" ]; then
-    if grep "ERROR" "$logfile" | grep "Keploy:"; then
+    # Keploy's own lines, the CLI's ("Keploy:") and the agent's and its other
+    # modes' ("Keploy(agent):"). Matching "Keploy:" alone let every agent ERROR by.
+    if grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:'; then
       echo "::error::Critical error found in $logfile. Failing the build."
       exit 1
     fi
@@ -92,6 +95,10 @@ wait_for_http() {
 
 check_report_for_risk_profiles() {
     echo "validating the Keploy test report against expected risk profiles and categories"
+    # "no-autopass": the run is known not to auto-pass an additive change (the
+    # proven switch is on), so the expectations are those of a binary without
+    # the auto-pass whatever REPLAY_BIN is.
+    local mode="${1:-}"
 
     # Detect whether the replay binary supports SCHEMA_ADDED auto-pass by
     # checking if the binary is a local build or by probing the test report
@@ -100,8 +107,10 @@ check_report_for_risk_profiles() {
     # failures when schema-addition auto-pass is active, 12 otherwise. We
     # check the actual report to decide rather than hard-coding.
     local replay_supports_schema_addition_autopass=false
-    case "${REPLAY_BIN:-}" in
-        */build/keploy)
+    case "${mode}:${REPLAY_BIN:-}" in
+        no-autopass:*)
+            ;;
+        *:*/build/keploy)
             replay_supports_schema_addition_autopass="true"
             ;;
         *)
@@ -383,6 +392,7 @@ section "Record Test Cases"
 echo "Starting Keploy in record mode..."
 $RECORD_BIN record -c "./my-app" 2>&1 | tee record.log &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 wait_for_http 8080
 endsec
 
@@ -392,11 +402,15 @@ sleep 5
 endsec
 
 section "Stopping Keploy record process (PID: $KEPLOY_PID)..."
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 echo "Killing keploy"
 sudo kill -INT "$REC_PID" 2>/dev/null || true
-sleep 5
+# Wait for the recording to end, not for a fixed time: keploy drains what it
+# captured before it exits, and that takes as long as the runner's load makes
+# it. The next recording reuses :8080 and the agent's ports. KEPLOY_PID is
+# tee's, which ends once keploy and everything it started have exited.
+wait_recording_end "$KEPLOY_PID" record.log || exit 1
 check_for_errors "record.log"
 endsec
 
@@ -407,12 +421,13 @@ if json_pass_supported; then
     section "Record Test Cases (json)"
     $RECORD_BIN record --storage-format json -c "./my-app" 2>&1 | tee record_json.log &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     wait_for_http 8080
     bash ./curl.sh
     sleep 5
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    sleep 5
+    wait_recording_end "$KEPLOY_PID" record_json.log || exit 1
     check_for_errors "record_json.log"
     endsec
 fi
@@ -425,6 +440,25 @@ $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee te
 check_for_errors "test.log"
 check_report_for_risk_profiles
 endsec
+
+# The proven switch (KEPLOY_PROVEN=1, the proven model's staging gate) asserts
+# every response field: /users-low-risk, whose response only GAINED a field and
+# which the run above auto-passes, must fail with its LOW risk and SCHEMA_ADDED
+# category, and every other verdict stays as it was. Only a replay binary built
+# from this tree has the switch. Its reports are removed afterwards, so the
+# normalize steps below read the default run exactly as before.
+case "${REPLAY_BIN:-}" in
+    */build/keploy|*/build-no-race/keploy)
+        section "Run Keploy Tests under the proven switch (no additive auto-pass)"
+        KEPLOY_PROVEN=1 $REPLAY_BIN test -c "./my-app" --skip-coverage=false 2>&1 --compare-all | tee test_proven.log || true
+        check_for_errors "test_proven.log"
+        check_report_for_risk_profiles no-autopass
+        proven_run_dir=$(ls -td ./keploy/reports/test-run-* | head -n 1)
+        rm -rf "$proven_run_dir"
+        echo "✅ Under KEPLOY_PROVEN=1 the additive change fails like any other difference."
+        endsec
+        ;;
+esac
 
 section "Attempt Safe Normalization (Expected to Warn)"
 echo "Running normalize without force flag. Expecting warnings for high-risk failures..."

@@ -351,56 +351,66 @@ func TestHandleHttp1ZeroCopy_EndsTheWindowOfAnExchangeItDoesNotCapture(t *testin
 
 // An Upgrade (a WebSocket) becomes a raw tunnel that nothing will ever decide
 // as an HTTP exchange: it opens no window, however long the tunnel lasts.
+// One that comes during a pause of the memory guard is not counted as a request
+// the pause cost.
 func TestHandleHttp1ZeroCopy_OpensNoWindowForAnUpgradeTunnel(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-	mgr := syncMock.New(zap.NewNop())
-	up, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for _, paused := range []bool{false, true} {
+		t.Run(map[bool]string{false: "recording", true: "paused"}[paused], func(t *testing.T) {
+			stubIngressPaused(t, func() bool { return paused })
+			mgr := syncMock.New(zap.NewNop())
+			up, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = up.Close() })
+			go func() {
+				c, aerr := up.Accept()
+				if aerr != nil {
+					return
+				}
+				defer c.Close()
+				r := bufio.NewReader(c)
+				if _, rerr := http.ReadRequest(r); rerr != nil {
+					return
+				}
+				_, _ = c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+				_, _ = io.Copy(c, r) // echo the tunnel
+			}()
+			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+				t.Error("an Upgrade tunnel was captured")
+			})
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipe(t, ctx, pm, up.Addr().String())
+			br := bufio.NewReader(client)
+			if _, err := client.Write([]byte("GET /ws HTTP/1.1\r\nHost: app.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(br, nil)
+			if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+				t.Fatalf("upgrade: %v %v", resp, err)
+			}
+			if _, err := client.Write([]byte("ping")); err != nil {
+				t.Fatal(err)
+			}
+			echo := make([]byte, 4)
+			if _, err := io.ReadFull(br, echo); err != nil || string(echo) != "ping" {
+				t.Fatalf("tunnel echo %q %v", echo, err)
+			}
+			if n := mgr.OpenWindows(); n != 0 {
+				t.Fatalf("%d windows open while an Upgrade tunnel runs, want none", n)
+			}
+			// A tunnel is not recorded, paused or not: a pause costs it nothing.
+			if n := mgr.NotRecordedUnderPressure().Total; n != 0 {
+				t.Fatalf("an Upgrade tunnel counted %d requests not recorded under pressure, want none", n)
+			}
+			_ = client.Close()
+			<-done
+		})
 	}
-	t.Cleanup(func() { _ = up.Close() })
-	go func() {
-		c, aerr := up.Accept()
-		if aerr != nil {
-			return
-		}
-		defer c.Close()
-		r := bufio.NewReader(c)
-		if _, rerr := http.ReadRequest(r); rerr != nil {
-			return
-		}
-		_, _ = c.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-		_, _ = io.Copy(c, r) // echo the tunnel
-	}()
-	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
-		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
-		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
-		t.Error("an Upgrade tunnel was captured")
-	})
-	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
-	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
-	defer cancel()
-	client, done := ingressPipe(t, ctx, pm, up.Addr().String())
-	br := bufio.NewReader(client)
-	if _, err := client.Write([]byte("GET /ws HTTP/1.1\r\nHost: app.local\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.ReadResponse(br, nil)
-	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("upgrade: %v %v", resp, err)
-	}
-	if _, err := client.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	echo := make([]byte, 4)
-	if _, err := io.ReadFull(br, echo); err != nil || string(echo) != "ping" {
-		t.Fatalf("tunnel echo %q %v", echo, err)
-	}
-	if n := mgr.OpenWindows(); n != 0 {
-		t.Fatalf("%d windows open while an Upgrade tunnel runs, want none", n)
-	}
-	_ = client.Close()
-	<-done
 }
 
 // An exchange that ends early — the upstream closes without a response —
@@ -1664,4 +1674,250 @@ func TestHandleHttp1Connection_SyncWindowYieldsAtItsLastByte(t *testing.T) {
 		t.Fatal("the first request was not recorded once its capture went on")
 	}
 	waitOpenWindows(t, mgr, 0, "after both were decided")
+}
+
+// heldAfterEndConn is the ingress's end of a client connection that hands the
+// client every byte at once, but whose write (or close) that lets the client
+// see the response's end returns only once gate opens: the ingress goroutine
+// descheduled just after it gave its client the whole answer, as on a loaded
+// host. end is what, written, ends the response for the client; empty, the
+// connection's close does.
+type heldAfterEndConn struct {
+	net.Conn
+	end  string
+	gate <-chan struct{}
+
+	mu   sync.Mutex
+	sent []byte
+	held bool
+}
+
+func (c *heldAfterEndConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.mu.Lock()
+	c.sent = append(c.sent, p[:n]...)
+	hold := c.end != "" && !c.held && strings.HasSuffix(string(c.sent), c.end)
+	c.held = c.held || hold
+	c.mu.Unlock()
+	if hold {
+		<-c.gate
+	}
+	return n, err
+}
+
+func (c *heldAfterEndConn) Close() error {
+	err := c.Conn.Close()
+	c.mu.Lock()
+	hold := c.end == "" && !c.held
+	c.held = c.held || hold
+	c.mu.Unlock()
+	if hold {
+		<-c.gate
+	}
+	return err
+}
+
+// A client that sends its next request only once it has the whole of the
+// previous answer (on a new connection: Go's client after a body it closed
+// unread, or any client that is done with one) is sequential, and so are the
+// app's calls for the two requests. The zero-copy loop (a recording made
+// without --sync) stamped a response's time after its write to the client had
+// returned: a goroutine descheduled there, once its client had the answer,
+// stamped it late, and the exchange's window ran into the next request's.
+// Under the proven switch the record derives each test's calls from those
+// windows (models.DeriveWindowMappings), and a call made while two windows are
+// open goes to the one that opened first: the next request's dependency call
+// went to the previous test, which replay then judged for a call it never made,
+// and the next test was recorded without it (a false unmocked_call, no_mocks).
+//
+// The end is stamped as it is found, before what ends it is forwarded: the
+// window holds every call the app made for the answer, and the client sees the
+// end only once the clock reads past it (waitPastYield), so nothing it does on
+// the answer reads the instant the window ends at, on a clock as coarse as
+// Windows' too. Every way a response can end: its last bytes of a known
+// length, its last chunk, its headers (no content, an answer to HEAD), and the
+// close of a body that ends there, where a call the app makes after its last
+// data and before its close is the exchange's own. The close is a guard, not
+// the bug: on the system clock the stamp after the write already came before
+// the close; it fails if the end is stamped at the last data instead.
+func TestHandleHttp1ZeroCopy_AResponseEndsBeforeItsClientCanSeeIt(t *testing.T) {
+	framings := []struct {
+		name   string
+		method string
+		resp   string // the app's answer to the first request
+		end    string // what ends it for the client; "" the close
+		later  bool   // the app calls out again after its answer's data, before its close
+	}{
+		{"a known length", http.MethodPost, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"accepted\":3}", `{"accepted":3}`, false},
+		{"chunks", http.MethodPost, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\ne\r\n{\"accepted\":3}\r\n0\r\n\r\n", "0\r\n\r\n", false},
+		{"no content", http.MethodPost, "HTTP/1.1 204 No Content\r\n\r\n", "\r\n\r\n", false},
+		{"an answer to HEAD", http.MethodHead, "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n", "\r\n\r\n", false},
+		{"a close", http.MethodPost, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nok", "", true},
+	}
+	for _, tick := range []time.Duration{0, windowsTick, time.Millisecond} {
+		for _, f := range framings {
+			t.Run(f.name+", "+clockName(tick), func(t *testing.T) {
+				stubIngressPaused(t, func() bool { return false })
+				if tick != 0 {
+					stubQuantizedClock(t, tick)
+				}
+				mgr := syncMock.New(zap.NewNop())
+				calls := make(chan models.WindowedMock, 3)
+				call := func(path string) { // stamped as a parser stamps it: by the clock the ingress reads
+					at := clockNow()
+					calls <- models.WindowedMock{Name: path, Kind: models.HTTP, At: at, Res: at, TestMock: true}
+				}
+
+				up, err := net.Listen("tcp4", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = up.Close() })
+				go func() {
+					for {
+						c, aerr := up.Accept()
+						if aerr != nil {
+							return
+						}
+						go func(c net.Conn) {
+							defer c.Close()
+							req, rerr := http.ReadRequest(bufio.NewReader(c))
+							if rerr != nil {
+								return
+							}
+							// Read whole, as an app does: a close with
+							// unread bytes would reset the connection, not
+							// end the body that ends at it.
+							_, _ = io.Copy(io.Discard, req.Body)
+							call(req.URL.Path)
+							if req.URL.Path == "/first" {
+								_, _ = c.Write([]byte(f.resp))
+								if f.later {
+									time.Sleep(time.Millisecond) // its data is read
+									awaitTickStart(tick)
+									call("/first")
+								}
+								return
+							}
+							_, _ = c.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+						}(c)
+					}
+				}()
+
+				type exchange struct{ reqTS, respTS time.Time }
+				captured := make(chan struct {
+					path string
+					exchange
+				}, 2)
+				stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+					req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+					opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+					captured <- struct {
+						path string
+						exchange
+					}{req.URL.Path, exchange{reqTS, respTS}}
+				})
+				pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+				ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+				defer cancel()
+
+				gate := make(chan struct{})
+				released := false
+				release := func() {
+					if !released {
+						released = true
+						close(gate)
+					}
+				}
+				defer release()
+				awaitTickStart(tick)
+				c1, done1 := ingressPipeOn(t, ctx, pm, up.Addr().String(), make(chan struct{}, 1), func(c net.Conn) net.Conn {
+					return &heldAfterEndConn{Conn: c, end: f.end, gate: gate}
+				})
+				first := f.method + " /first HTTP/1.1\r\nHost: app.local\r\nContent-Length: 2\r\n\r\n{}"
+				if f.method == http.MethodHead {
+					first = "HEAD /first HTTP/1.1\r\nHost: app.local\r\n\r\n"
+				}
+				if _, err := c1.Write([]byte(first)); err != nil {
+					t.Fatal(err)
+				}
+				_ = c1.SetReadDeadline(time.Now().Add(5 * time.Second))
+				resp, err := http.ReadResponse(bufio.NewReader(c1), &http.Request{Method: f.method})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+					t.Fatalf("the first answer did not end for its client: %v", err)
+				}
+				resp.Body.Close()
+				sawEnd := clockNow()
+				_ = c1.Close() // the client is done with it
+
+				// The client has the whole first answer: its next request.
+				c2, done2 := ingressPipe(t, ctx, pm, up.Addr().String())
+				if _, err := c2.Write([]byte("GET /next HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\n\r\n")); err != nil {
+					t.Fatal(err)
+				}
+				_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+				resp, err = http.ReadResponse(bufio.NewReader(c2), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				<-done2
+				release()
+				<-done1
+
+				got := map[string]exchange{}
+				for i := 0; i < 2; i++ {
+					select {
+					case e := <-captured:
+						got[e.path] = e.exchange
+					case <-time.After(5 * time.Second):
+						t.Fatalf("an exchange was not captured (captured: %v)", got)
+					}
+				}
+				firstEx, nextEx := got["/first"], got["/next"]
+				const ts = "15:04:05.000000"
+				if !firstEx.respTS.Before(sawEnd) {
+					t.Errorf("the first exchange's window ends at %s, not before its client had read its whole answer (%s)",
+						firstEx.respTS.Format(ts), sawEnd.Format(ts))
+				}
+				if !firstEx.respTS.Before(nextEx.reqTS) {
+					t.Errorf("the first exchange's window ends at %s, not before the next request's begins (%s), though that request was sent only once the first was answered",
+						firstEx.respTS.Format(ts), nextEx.reqTS.Format(ts))
+				}
+
+				// What a recording made without --sync maps each test to.
+				var made []models.WindowedMock
+				want := map[string]int{}
+				for len(calls) > 0 {
+					m := <-calls
+					made = append(made, m)
+					want[m.Name]++
+				}
+				derived := models.DeriveWindowMappings([]models.TestWindow{
+					{TestCase: "/first", Start: firstEx.reqTS, End: firstEx.respTS},
+					{TestCase: "/next", Start: nextEx.reqTS, End: nextEx.respTS},
+				}, made)
+				for _, tc := range derived.Tests {
+					var owns []string
+					for _, m := range tc.Mocks {
+						owns = append(owns, m.Name)
+					}
+					mine := len(owns) == want[tc.ID]
+					for _, name := range owns {
+						mine = mine && name == tc.ID
+					}
+					if !mine {
+						t.Errorf("%s's test owns the calls %v, want the %d its own request made", tc.ID, owns, want[tc.ID])
+					}
+				}
+				if len(derived.Concurrent) > 0 {
+					t.Errorf("%v were recorded as open together, though the client sent one request at a time", derived.Concurrent)
+				}
+			})
+		}
+	}
 }

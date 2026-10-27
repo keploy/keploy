@@ -20,6 +20,10 @@ type Capture struct {
 	Value string
 	// Where names the place: "body.items[0].id", "header Set-Cookie.sid".
 	Where string
+	// Type is the placeholder's: TypeString, TypeInt or TypeFloat. Two
+	// numbers are one value when their values are (1.50 is 1.5); a string is
+	// its text.
+	Type string
 }
 
 // Failure is a variable place that the app's answer does not satisfy: a
@@ -139,7 +143,7 @@ func (r *Run) Expected(exp, answer models.HTTPResp, opts ExpectOptions) Resolved
 			}
 			r.set(p.Key, value)
 			overrides[i] = a.Raw(answer.Body)
-			res.Captures = append(res.Captures, Capture{Key: p.Key, Value: value, Where: where})
+			res.Captures = append(res.Captures, Capture{Key: p.Key, Value: value, Where: where, Type: p.Type})
 		}
 	}
 	headerEdits := map[string][]edit{}
@@ -297,7 +301,7 @@ func (r *Run) headerCapture(name, v string, answer map[string]string) ([]edit, [
 		return nil, nil, []Failure{{Where: where, Placeholder: p.Text, Why: fmt.Sprintf("needs a non-empty %s; the answer holds %q there", p.Type, span)}}
 	}
 	r.set(p.Key, value)
-	return []edit{{start: p.Start, end: p.End, text: span}}, []Capture{{Key: p.Key, Value: value, Where: where}}, nil
+	return []edit{{start: p.Start, end: p.End, text: span}}, []Capture{{Key: p.Key, Value: value, Where: where, Type: p.Type}}, nil
 }
 
 // setCookieCaptures resolves a Set-Cookie value cookie by cookie. A cookie is
@@ -365,7 +369,7 @@ func (r *Run) setCookieCaptures(name, v string, exp, answer models.HTTPResp, now
 			default:
 				r.set(p.Key, lv)
 				es = append(es, edit{start: c.ValueStart, end: c.ValueEnd, text: live[lc.ValueStart:lc.ValueEnd]})
-				caps = append(caps, Capture{Key: p.Key, Value: lv, Where: where})
+				caps = append(caps, Capture{Key: p.Key, Value: lv, Where: where, Type: p.Type})
 			}
 		}
 		if !has {
@@ -1308,6 +1312,49 @@ func matchesAny(want, answer string, candidates []Leaf) string {
 		}
 	}
 	return "the answer holds " + candidates[0].Raw(answer)
+}
+
+// ExpectedStart is exp's headers made ready to judge the start of an answer
+// whose body never came: answer holds the status and headers that did. Each
+// header that holds a placeholder is resolved as Expected resolves it
+// against answer's headers, its captures first and then its uses at each
+// key's value after them, on a copy of the run, so r moves no value. A
+// header that uses a key exp's body captures is taken as the answer has it:
+// the value that use stands for is in the body that never came, so the
+// header cannot be judged. Only the headers that hold a placeholder are
+// returned, by their name as Expected reads it (a secret in a name at its
+// value); a header the answer lacks keeps its expected value.
+func (r *Run) ExpectedStart(exp, answer models.HTTPResp, opts ExpectOptions) map[string]string {
+	if r.Empty() {
+		return nil
+	}
+	answer.Body = ""
+	f := r.fork()
+	resolved := f.Expected(exp, answer, opts).Resp.Header
+	bodyCaptures := map[string]bool{}
+	for _, p := range Find(exp.Body) {
+		if p.Capture {
+			bodyCaptures[p.Key] = true
+		}
+	}
+	out := map[string]string{}
+	for name, v := range f.renamed(exp.Header) {
+		ps := Find(v)
+		if len(ps) == 0 {
+			continue
+		}
+		out[name] = resolved[name]
+		for _, p := range ps {
+			if p.Capture || !bodyCaptures[p.Key] {
+				continue
+			}
+			if live, found := headerLookup(answer.Header, name); found {
+				out[name] = live
+			}
+			break
+		}
+	}
+	return out
 }
 
 // ExpectedNoAnswer is exp with each use placeholder holding this run's value,

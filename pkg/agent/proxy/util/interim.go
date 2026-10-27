@@ -8,14 +8,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
-// IsInterimStatus reports whether code is an interim response's (RFC 9110
-// 15.2): a 1xx other than 101 (Switching Protocols). An interim response has
-// no body, and the final response to the same request comes after it on the
-// connection. After a 101 the connection speaks another protocol: it is final.
+// IsInterimStatus reports whether code is an interim response's
+// (models.IsInterimHTTPStatus): a 1xx other than 101.
 func IsInterimStatus(code int) bool {
-	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+	return models.IsInterimHTTPStatus(code)
 }
 
 // ReadFinalResponse reads the response to req from r: the final one, past the

@@ -1125,32 +1125,6 @@ func TestResolveTestOutcome_DefaultsAreBackwardCompatible(t *testing.T) {
 	}
 }
 
-// A diverged mock set normally suppresses the response diff as "re-record
-// noise". Under --assert-dependencies the same test is about to be marked
-// FAILED, so suppressing its diff hands the user a red test with nothing to
-// look at.
-func TestShouldEmitFailureLogs(t *testing.T) {
-	tests := []struct {
-		name               string
-		mockSetMismatch    bool
-		assertDependencies bool
-		want               bool
-	}{
-		{name: "no divergence: diffs as always", want: true},
-		{name: "no divergence, knob on", assertDependencies: true, want: true},
-		{name: "divergence, knob off: historical suppression", mockSetMismatch: true, want: false},
-		{
-			name:            "divergence, knob on: the test is going red, so show the diff",
-			mockSetMismatch: true, assertDependencies: true, want: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, shouldEmitFailureLogs(tt.mockSetMismatch, tt.assertDependencies))
-		})
-	}
-}
-
 // recordUnexercised is the single writer of the set warnUnexercisedDependencies
 // reports on. Emptying that set is otherwise an invisible mutation: the wiring
 // test pins the CALL to the summary, but a summary over an empty map is a
@@ -1652,7 +1626,7 @@ func TestWarnDependencyAssertionInert(t *testing.T) {
 			// the assertion ran normally for every non-streaming test, and
 			// the set-wide sentence would be a false alarm about those.
 			wantMsg:    "does not run for this test set's streaming test cases",
-			wantReason: "streaming (SSE/chunked) test cases",
+			wantReason: "streaming test cases (server-sent events, NDJSON or multipart by their Content-Type",
 		},
 		{
 			name:       "knob OFF and streaming tests deferred: silence",

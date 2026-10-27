@@ -142,6 +142,10 @@ type Session struct {
 	// / monotonic-timestamp normalisation — they only differ on the
 	// final handoff.
 	RouteMocksViaSyncMock bool
+	// endedWhereClientStopped: the destination's stream ended where the
+	// client stopped taking it (MarkEndedWhereClientStopped). Internal; here,
+	// in the padding after the bools, so a Session stays in its size class.
+	endedWhereClientStopped atomic.Bool
 
 	// --- Backward-compatibility (populated by the migration shim) ---
 
@@ -199,7 +203,11 @@ type Session struct {
 	// moment the stop is stamped, before any of those logs it: a test case
 	// checked from then on overlaps it. It runs on the goroutine of the event
 	// that stamped the stop, so it must not block, and must not call
-	// StoppedAt. Set it before the parser runs.
+	// StoppedAt; the dispatcher's takes only its connection's ledger lock
+	// (pkg/agent/proxy's parserReads), which is held for a bounded time: to
+	// open a span, or, once, while the parser's return records the spans of
+	// what it never read.
+	// Set it before the parser runs.
 	OnStop func(at time.Time)
 
 	// RecordingDone is closed once the recording this connection is captured
@@ -348,6 +356,32 @@ func (s *Session) EndedWithConnection(dir fakeconn.Direction) bool {
 		return false
 	}
 	return s.endedWithConnection[dir].Load()
+}
+
+// MarkEndedWhereClientStopped says the destination's stream ended where the
+// client stopped taking it: a chunk was written to the client once a look had
+// found its FIN at the proxy's socket, and the connection then closed with
+// nothing acknowledged since that look, as it does for a client that closed
+// its socket, so the capture gives the parser nothing from there on
+// (relay.Config.ClientStopped). A message the stream ends in the middle of was
+// cut there by the client's close, not by the destination. It says nothing
+// exact of how much of the stream the application read: the stream before the
+// cut can hold bytes the client's stack never took (written while its FIN was
+// still on its way to the proxy) and bytes its stack took that the application
+// never read, and a half-closed client that reset before its acknowledgement
+// went out may have read some of what was cut. The caller calls it before the
+// stream ends, so a parser that reaches the end sees it. Nil-safe.
+func (s *Session) MarkEndedWhereClientStopped() {
+	if s == nil {
+		return
+	}
+	s.endedWhereClientStopped.Store(true)
+}
+
+// EndedWhereClientStopped reports whether the destination's stream ended where
+// the client stopped taking it (MarkEndedWhereClientStopped). Nil-safe.
+func (s *Session) EndedWhereClientStopped() bool {
+	return s != nil && s.endedWhereClientStopped.Load()
 }
 
 // MarkEndedAtHole says dir's stream ended at a capture hole: a chunk of it was
@@ -604,8 +638,8 @@ func (s *Session) OpenOrphanWindow(start time.Time) func() {
 //     before calling mgr.AddMock. If ctx was already cancelled,
 //     EmitMock returns ctx.Err() without touching the manager. If ctx
 //     cancels AFTER the AddMock call starts, AddMock runs to completion
-//     (buffers the mock, or blocks in its own bounded sendToOutChan
-//     up to sendBudget) and EmitMock returns nil. AddMock may also
+//     (buffers the mock, or hands it to the manager's out queue, which
+//     never blocks it) and EmitMock returns nil. AddMock may also
 //     drop the mock under backpressure/memory-pause without signalling
 //     the caller — the drop is recorded on the manager's drop counter
 //     instead. This is a deliberate asymmetry: the syncMock manager
@@ -635,8 +669,8 @@ func (s *Session) EmitMock(m *models.Mock) error {
 //
 //   - SyncMock path: skip the s.Ctx pre-check and call mgr.AddMock
 //     unconditionally. AddMock owns its own lifecycle (memory-pause,
-//     drop accounting, sendBudget) and remains the right place to
-//     enforce shutdown-time backpressure.
+//     drop accounting, its out queue's bounds) and remains the right
+//     place to enforce shutdown-time backpressure.
 //
 //   - Direct-channel path: replace the select-against-ctx with a
 //     non-blocking best-effort send. If the channel is full at
@@ -650,6 +684,17 @@ func (s *Session) EmitMock(m *models.Mock) error {
 // chain, OnPendingCleared) match EmitMock byte-for-byte.
 func (s *Session) EmitMockOnShutdown(m *models.Mock) error {
 	return s.emitMockCore(m, true)
+}
+
+// MockHeld tells the session its parser holds a mock it made instead of
+// emitting it now, to emit it once it knows what the mock is: the parser has
+// consumed the input, so the session's pending work is cleared
+// (OnPendingCleared), as an emitted mock clears it. Work left pending through
+// the next idle spell is taken for a hung parser. Nil-safe.
+func (s *Session) MockHeld() {
+	if s != nil && s.OnPendingCleared != nil {
+		s.OnPendingCleared()
+	}
 }
 
 func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
@@ -677,6 +722,10 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if m.ConnectionID == "" && s.ClientConnID != "" {
 		m.ConnectionID = s.ClientConnID
 	}
+
+	// A mock its parser stamped answered before it was asked is left out of
+	// the replay: said here, as it is recorded (warnAnsweredBeforeAsked).
+	s.warnAnsweredBeforeAsked(m)
 
 	// Enforce per-session ReqTimestampMock monotonicity (I5). In
 	// debug builds, a regression panics the test so parser bugs
@@ -716,12 +765,11 @@ func (s *Session) emitMockCore(m *models.Mock, shutdown bool) error {
 	if s.RouteMocksViaSyncMock {
 		mgr := s.manager()
 		// Best-effort ctx probe. mgr.AddMock doesn't observe
-		// s.Ctx — it takes its own mutex and may sit
-		// in sendToOutChan up to the manager's internal
-		// sendBudget without signalling cancellation back to
-		// us. A pre-check at least catches the "already
-		// cancelled" case so we don't spend mgr.AddMock's
-		// bounded wait on work the parser already abandoned.
+		// s.Ctx — it takes its own mutex and hands the mock
+		// on without signalling cancellation back to us. A
+		// pre-check at least catches the "already cancelled"
+		// case so we don't spend mgr.AddMock's work on a mock
+		// the parser already abandoned.
 		// Post-call cancellation during mgr.AddMock's send is
 		// documented as a semantic difference from the
 		// direct-channel branch (see the EmitMock doc comment
@@ -1022,8 +1070,12 @@ func (s *Session) StoppedAt() time.Time {
 // capture hole (OnCaptureDesync answers whether it costs the recording
 // anything), the dispatcher's "parser retired", and the one a parser that
 // reports its own stop (ErrReported) logs in its place: the MySQL recorder's
-// for lost framing. A recording that has stopped does not resume. A nil
-// Session's is false.
+// for lost framing. The requests a parser never read by the time its Run
+// returned are judged by the instant the recording stopped instead
+// (pkg/agent/proxy's parserReads): those captured before it are a loss,
+// however late the return (their spans cover the test cases not streamed by
+// then). A recording that has stopped does not resume. A
+// nil Session's is false.
 func (s *Session) RecordingStopping() bool {
 	if s == nil {
 		return false
@@ -1058,6 +1110,18 @@ const (
 	LeftOutResetByServer = "http2 stream reset by the server"
 )
 
+// LeftOutClientClosedPartway is the cause an HTTP/1 recorder leaves an
+// exchange out for when the client closed the connection partway through its
+// response: the relay ended the response's stream where the client stopped
+// taking it (EndedWhereClientStopped), and the response had not ended there.
+// The client gave up on the call (its timeout, a cancelled call) or wanted no
+// more of it, and the capture cannot tell which. Recorded as far as the client
+// had it, replay would serve a complete-looking shorter response to a call
+// that saw a timeout at record. Neither is a capture loss: the call itself did
+// not complete, so there is no whole exchange to record. Of class
+// leftOutClientClosed.
+const LeftOutClientClosedPartway = "the client closed the connection partway through the response"
+
 // maxLeftOutCause is the longest cause leftOutCause keeps of a reason.
 const maxLeftOutCause = 64
 
@@ -1088,8 +1152,10 @@ func leftOutCause(reason string) string {
 // (relay.DropMemoryPressure, relay.DropPerConnCap, relay.DropDesynced), which
 // it hands MarkMockIncomplete verbatim; the fourth is NextRequest's.
 // leftOutReset is an HTTP/2 stream's reset (LeftOutResetByClient,
-// LeftOutResetByServer). A class also keys the WARN limit for a cause past the
-// first maxOpenKinds (WarnLimiters.AllowOr).
+// LeftOutResetByServer), and leftOutClientClosed an HTTP/1 response its client
+// closed the connection partway through (LeftOutClientClosedPartway). A class
+// also keys the WARN limit for a cause past the first maxOpenKinds
+// (WarnLimiters.AllowOr).
 const (
 	leftOutMemoryPressure = "memory_pressure"
 	leftOutPerConnCap     = "per_conn_cap"
@@ -1108,7 +1174,10 @@ const (
 	// recording's settings caused it.
 	leftOutUnansweredCause = "server bytes that answer no captured request"
 	leftOutReset           = "reset"
-	leftOutOther           = "other"
+	// leftOutClientClosed is an exchange whose client closed the connection
+	// partway through the response (LeftOutClientClosedPartway).
+	leftOutClientClosed = "client_closed"
+	leftOutOther        = "other"
 )
 
 // leftOutClass is the class of a cause (leftOutCause) a mock was left out
@@ -1119,6 +1188,8 @@ func leftOutClass(cause string) string {
 		return cause
 	case LeftOutResetByClient, LeftOutResetByServer:
 		return leftOutReset
+	case LeftOutClientClosedPartway:
+		return leftOutClientClosed
 	}
 	return leftOutOther
 }
@@ -1168,6 +1239,11 @@ func leftOutNextStep(class string, spanned bool) string {
 			"whole exchange to record, and a replay cannot reproduce the reset; the capture lost nothing. The reason " +
 			"says who reset the call, with the code, and which half of it had not ended. A client's CANCEL is usually " +
 			"its deadline: raise it and re-record. A server's reset is a call it failed or abandoned: its logs say why"
+	case leftOutClientClosed:
+		return next + "reason=the client closed partway: the app closed the connection before it had read the whole " +
+			"response (its timeout, a cancelled call, or it wanted only the start), so there is no whole exchange to " +
+			"record, and a replay cannot reproduce the cut; the capture lost nothing. If the call timed out, raise the " +
+			"app's timeout for it and re-record"
 	}
 	return next + "Re-run with --debug to see each mock left out and why it could not be recorded"
 }
@@ -1237,6 +1313,48 @@ func (s *Session) enforceReqMonotonic(m *models.Mock) {
 		req = clamped
 	}
 	s.lastReqTimestamp = req
+}
+
+// AnsweredBeforeAskedMsg is the warning EmitMock logs for a mock its parser
+// stamped answered before it was asked (warnAnsweredBeforeAsked).
+const AnsweredBeforeAskedMsg = "a parser recorded a mock answered before it was asked: it stamped the mock's response before its request"
+
+// answeredBeforeAskedWarnEvery is how often warnAnsweredBeforeAsked's WARN
+// may be logged for each kind.
+const answeredBeforeAskedWarnEvery = 10 * time.Second
+
+// answeredBeforeAskedWarns limits warnAnsweredBeforeAsked's WARN,
+// process-wide, keyed by the mock's kind: a parser that stamps its requests
+// from the wrong clock does it on every connection.
+var answeredBeforeAskedWarns = NewWarnLimiters(answeredBeforeAskedWarnEvery)
+
+// warnAnsweredBeforeAsked says, as m is recorded, that its parser stamped it
+// answered before it was asked: its response time before its request time. A
+// correct parser never does: its request is read before its answer is
+// written. The stamps are the parser's (enforceReqMonotonic, which runs after,
+// says of an inversion it makes itself). What it costs depends on the replay:
+// one without the proven switch leaves a per-test mock like this out
+// (pkg.LeaveOutAnsweredBeforeAsked), so a call it recorded is answered by
+// another mock or by none, and said only there it is found as a miss, a
+// recording later, far from the parser that stamped it.
+func (s *Session) warnAnsweredBeforeAsked(m *models.Mock) {
+	req, res := m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock
+	if s.Logger == nil || req.IsZero() || res.IsZero() || !res.Before(req) {
+		return
+	}
+	fields := []zap.Field{zap.String("connID", s.ClientConnID), zap.String("mockName", m.Name),
+		zap.String("kind", string(m.Kind)), zap.Time("reqTimestampMock", req), zap.Time("resTimestampMock", res),
+		zap.Duration("answeredBeforeAskedBy", req.Sub(res))}
+	ok, held := answeredBeforeAskedWarns.Allow(string(m.Kind))
+	if !ok {
+		s.Logger.Debug(AnsweredBeforeAskedMsg, fields...)
+		return
+	}
+	if held > 0 {
+		fields = append(fields, zap.Uint64("sameWarningsHeldBack", held))
+	}
+	s.Logger.Warn(AnsweredBeforeAskedMsg, append(fields, zap.String("next_step",
+		"this kind's recorder stamped the request after its answer, a keploy bug: report it with this line. A replay without KEPLOY_PROVEN leaves a per-test mock like this out, and answers the call it recorded with another mock or with none"))...)
 }
 
 // debugMonotonic, when true, causes enforceReqMonotonic to panic on

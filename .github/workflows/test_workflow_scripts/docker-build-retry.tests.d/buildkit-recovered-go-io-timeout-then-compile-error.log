@@ -1,0 +1,44 @@
+#1 [internal] load local bake definitions
+#1 reading from stdin 760B done
+#1 DONE 0.0s
+
+#2 [internal] load build definition from Dockerfile
+#2 transferring dockerfile: 788B done
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/golang:1.20-bookworm
+#3 DONE 0.7s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/5] FROM docker.io/library/golang:1.20-bookworm@sha256:9fa9101141c01e9440216d32eb2b380b3c3079bea07aeab3546020cc91b3662c
+#5 resolve docker.io/library/golang:1.20-bookworm@sha256:9fa9101141c01e9440216d32eb2b380b3c3079bea07aeab3546020cc91b3662c 0.0s done
+#5 DONE 0.0s
+
+#6 [internal] load build context
+#6 transferring context: 515.34kB 0.0s done
+#6 DONE 0.0s
+
+#7 [2/5] WORKDIR /app
+#7 CACHED
+
+#8 [3/5] COPY . .
+#8 DONE 0.0s
+
+#9 [4/5] RUN n=0; until go mod download; do n=$((n+1)); [ "$n" -lt 5 ] || exit 1; echo "go mod download failed (attempt $n), retrying in $((n*5))s"; sleep $((n*5)); done
+#9 30.21 go: github.com/labstack/echo/v4@v4.11.4: Get "https://proxy.golang.org/github.com/labstack/echo/v4/@v/v4.11.4.zip": dial tcp 192.0.2.1:443: i/o timeout
+#9 30.22 go mod download failed (attempt 1), retrying in 5s
+#9 DONE 37.4s
+
+#10 [5/5] RUN go build -o main .
+#10 2.103 # app
+#10 2.103 ./main.go:7:1: syntax error: unexpected EOF, expected }
+#10 ERROR: process "/bin/sh -c go build -o main ." did not complete successfully: exit code: 1
+------
+ > [5/5] RUN go build -o main .:
+2.103 # app
+2.103 ./main.go:7:1: syntax error: unexpected EOF, expected }
+------
+failed to solve: process "/bin/sh -c go build -o main ." did not complete successfully: exit code: 1

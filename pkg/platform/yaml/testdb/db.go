@@ -351,7 +351,10 @@ type testCaseFileRef struct {
 
 // testCaseFiles lists the test case files of a test set that GetTestCases
 // reads, in the order it reads them, and the directory they are in. ok is
-// false when the set has no tests directory.
+// false when the set has no tests directory. A tests directory that is there
+// but cannot be looked at (permission denied, I/O error, symlink loop) is an
+// error, not "no tests": reading it as empty would report a recorded set as
+// having nothing to run.
 func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCaseFileRef, ok bool, err error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 
@@ -360,9 +363,13 @@ func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCase
 		return "", nil, false, err
 	}
 	_, err = os.Stat(TestPath)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
 		return TestPath, nil, false, nil
+	}
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to look at the directory containing yaml testcases", zap.String("path", TestPath))
+		return TestPath, nil, false, err
 	}
 	d, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
@@ -412,11 +419,14 @@ func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCase
 		default:
 			continue
 		}
-		if strings.Contains(j.Name(), "mocks") {
-			continue
-		}
 
 		name := strings.TrimSuffix(j.Name(), fileExt)
+		// Skip a stray mocks.yaml / mocks.json by its exact name only. A
+		// substring match also dropped every test case whose name merely
+		// contains "mocks" (e.g. get-k8s-proxy-mocks-download-1).
+		if name == "mocks" {
+			continue
+		}
 		// First-wins: pre-sort guarantees the format-matching file is
 		// processed before its sibling, so any later occurrence of the
 		// same basename is by definition the non-preferred format.
@@ -547,7 +557,16 @@ func (ts *TestYaml) ReplaceFiles(ctx context.Context, files []yaml.File) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return replaceFiles(ts.logger, files)
+	// The recordings the group replaces, named before it is stored, for
+	// the re-key rule (rekey.go).
+	rks := ts.beginRekeys(files)
+	if err := replaceFiles(ts.logger, files); err != nil {
+		return err
+	}
+	for _, k := range rks {
+		k.done(ts.logger)
+	}
+	return nil
 }
 
 func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
@@ -727,6 +746,14 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		}
 	}()
 
+	// The recording this write replaces, named before anything of it (its
+	// assets included) is replaced, for the re-key rule (rekey.go). A name
+	// just claimed replaces none.
+	var rk *rekey
+	if !reservedPlaceholder {
+		rk = ts.beginRekey(testSetID, tcsName, filepath.Join(tcsPath, tcsName+"."+ts.Format.FileExtension()))
+	}
+
 	err = ts.saveAssets(testSetID, tc, tcsName)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
@@ -816,6 +843,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	writeSucceeded = true
+	rk.done(ts.logger)
 	// Propagate the auto-assigned name back onto tc so callers can observe
 	// what was actually persisted. Wrappers around InsertTestCase (e.g.
 	// k8s-proxy's testDBWrapper) key per-session dedupe and broadcast state
@@ -1021,6 +1049,18 @@ func (ts *TestYaml) ChangePath(path string) {
 }
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// The test case file is rewritten where it lies, outside upsert: it is
+	// re-keyed once, after (SetRewrite).
+	rw, err := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to update the assertions of the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+		return err
+	}
+	defer rw.Done()
+	return ts.updateAssertions(ctx, testCaseID, testSetID, assertions)
+}
+
+func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	// Read whichever format the testcase was recorded in.
 	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
@@ -1297,6 +1337,14 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					} else {
 						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
 					}
+				} else if j < len(form.FileContents) && form.FileContents[j] != nil {
+					// Case 1b: File content travelled with the test case (captured
+					// in another process, e.g. the DaemonSet agent)
+					if err := os.WriteFile(destPath, form.FileContents[j], 0o644); err != nil {
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						return err
+					}
+					wroteFile = true
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
@@ -1325,6 +1373,8 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 			}
 
 			tc.HTTPReq.Form[i].Paths = newPaths
+			// Written to the assets above; never stored in the test case.
+			tc.HTTPReq.Form[i].FileContents = nil
 			if allFilesPersisted {
 				tc.HTTPReq.Form[i].Values = nil
 			}

@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/models"
 	httpclient "go.keploy.io/server/v3/pkg/platform/http"
@@ -68,5 +71,43 @@ func TestRunTestSet_ComposeRefusesAnAgentWithAnotherProvenSwitch(t *testing.T) {
 	}
 	if len(h.report.results) != 0 {
 		t.Fatalf("ran %d tests against an agent with another proven switch", len(h.report.results))
+	}
+}
+
+// stalledStartInstr is the compose harness's agent, whose start the watch
+// gives up on (pkg.AgentStartWatcher).
+type stalledStartInstr struct {
+	*composeAgentInstr
+}
+
+func (*stalledStartInstr) WatchAgentStart(context.Context) <-chan error {
+	out := make(chan error, 1)
+	out <- fmt.Errorf("%w: its start took no step across 30 of its beats", pkg.ErrAgentNotReady)
+	return out
+}
+
+// keploy test's per-set wait for the agent docker compose starts follows the
+// agent's start: a start that stopped fails the set, saying so, where its
+// health check never answers; no budget of wall time does.
+func TestRunTestSet_ComposeEndsOnTheAgentsStalledStart(t *testing.T) {
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := "http://" + closed.Addr().String() + "/agent"
+	_ = closed.Close()
+	h := newPartialRunHarness(t, 2, 0)
+	h.replayer.config.CommandType = string(utils.DockerCompose)
+	h.replayer.config.Agent.AgentURI = uri
+	h.replayer.instrumentation = &stalledStartInstr{&composeAgentInstr{prInstr: h.instr, client: httpclient.New(zap.NewNop(), nil, h.replayer.config)}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), prTimeout)
+	defer cancel()
+	status, err := h.replayer.RunTestSet(ctx, "test-set-0", "test-run-0", false)
+	if !errors.Is(err, pkg.ErrAgentNotReady) || !strings.Contains(err.Error(), "did not come up") || status != models.TestSetStatusFailed {
+		t.Fatalf("RunTestSet = (%s, %v); want FAILED and the agent's stalled start", status, err)
+	}
+	if len(h.report.results) != 0 {
+		t.Fatalf("ran %d tests on an agent that never came up", len(h.report.results))
 	}
 }

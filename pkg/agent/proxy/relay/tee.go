@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -38,8 +39,18 @@ import (
 // branch on them in tests and assertions without importing internal
 // types. Also forwarded verbatim into OnMarkMockIncomplete.
 const (
-	// DropMemoryPressure — [Config.MemoryGuardCheck] returned true
-	// at tee time.
+	// DropMemoryPressure is no longer emitted. The tee used to refuse every
+	// chunk while the memory guard paused recording, which cut the parser's
+	// byte stream mid-frame: a framed parser (MySQL, Postgres, Mongo) that
+	// cannot re-anchor after a hole then desynced for good, and a pause of
+	// half a second ended capture on every pooled connection for the rest of
+	// the recording. A pause is temporary, so the stream is now always
+	// delivered whole; the mock manager drops, and counts, the mocks whose
+	// request fell inside a pause (syncMock.SyncMockManager.AddMock), and the
+	// recording suppresses the test cases that overlap one. Retained so
+	// existing callers and dashboards that reference the string still compile.
+	//
+	// Deprecated: no longer produced.
 	DropMemoryPressure = "memory_pressure"
 
 	// DropPerConnCap — the per-connection byte cap would be exceeded
@@ -74,7 +85,7 @@ const (
 	// its framer after a hole, so there is nothing left worth delivering.
 	//
 	// This is a CONSEQUENCE reason, not a cause: the loss that mattered was
-	// reported once as [DropPerConnCap] or [DropMemoryPressure], and
+	// reported once as [DropPerConnCap], and
 	// [tee.onDesync] already fired for it. Everything after that would be
 	// framed from the wrong offset — a length header read out of the middle
 	// of a body — which yields no mocks and, in the postgres case that
@@ -122,11 +133,10 @@ const (
 // Lifetime: created by [newTee], started by [tee.start], stopped by
 // [tee.close]. close is idempotent; callers typically defer it in Run.
 type tee struct {
-	dir      fakeconn.Direction
-	logger   *zap.Logger
-	cap      int64
-	memCheck func() bool
-	onDrop   func(reason string)
+	dir    fakeconn.Direction
+	logger *zap.Logger
+	cap    int64
+	onDrop func(reason string)
 
 	// onDesync fires exactly once per tee, on the first dropped chunk.
 	// Set by [New] from [Config.OnCaptureDesync]; nil is safe.
@@ -190,6 +200,19 @@ type tee struct {
 	// closed is set by close(); push refuses afterwards and drain exits
 	// once q is empty.
 	closed bool
+	// awaiting is the destination chunks the forwarder wrote to a client
+	// after its FIN that wait for the client's answer before they are
+	// pushed or refused (client_took.go), oldest first. They are newer than
+	// every chunk on q, and count as unconsumed for the capture watermark
+	// (oldestUnconsumed). They are not counted against the tee's cap or
+	// memory check until they are pushed, which is where a chunk dropped for
+	// either is stamped: when the client's answer came. What waits is
+	// bounded by what the client's socket takes before the client answers:
+	// a client that reads acknowledges within a delayed acknowledgement
+	// (sooner for bulk data), a closed one resets on the first chunk, and
+	// for one that answers nothing the forwarder's Write blocks once the
+	// socket's send buffer is full.
+	awaiting []fakeconn.Chunk
 
 	// wake is a capacity-1 doorbell. push signals it non-blockingly after
 	// appending; drain waits on it when q is empty. A signal can be
@@ -206,9 +229,9 @@ type tee struct {
 	// [Config.ConsumerStallGrace]; see DefaultConsumerStallGrace for why it
 	// bounds stalled time rather than total teardown time.
 	stallGrace time.Duration
-	// clock measures the stall window (see stallMeter): realStallClock
-	// outside tests.
-	clock stallClock
+	// clock measures the stall window (stall.Meter): nil, the process's own
+	// runnable clock, outside tests.
+	clock stall.Clock
 
 	// consumerGone is the FakeConn's close signal, supplied to [tee.start].
 	// It fires only when the parser itself abandons the connection, which
@@ -260,20 +283,37 @@ type tee struct {
 	// at random between delivering and discarding an already-recorded
 	// chunk.
 	shutdown chan struct{}
+
+	// progress is how far this direction's capture has got, for the
+	// capture watermark (watermark.go).
+	progress teeProgress
+
+	// consumed is how many bytes of this direction's stream have left the
+	// FakeConn its parser reads (fakeconn.FakeConn.Consumed). Set by [New]
+	// before the drain starts.
+	consumed func() int64
+
+	// readerLag, when positive, delays each chunk's delivery to the parser
+	// until this long after it was read ([Config.ReaderLag]). Read-only
+	// after construction.
+	readerLag time.Duration
+
+	// pushStart, when set, runs as push begins to admit a chunk: a test's
+	// view of the tee at that instant. Nil outside tests. Read-only after
+	// construction.
+	pushStart func()
 }
 
 // newTee builds a tee. The drain goroutine does not run until [tee.start]
 // is called with the consumer's close signal — the FakeConn that consumes
 // readCh cannot be constructed until this tee exists, so binding the two
 // is necessarily a second step.
-func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, memCheck func() bool, onDrop func(reason string), logger *zap.Logger) *tee {
+func newTee(dir fakeconn.Direction, capBytes int64, chanBuf int, stallGrace time.Duration, onDrop func(reason string), logger *zap.Logger) *tee {
 	return &tee{
 		dir:        dir,
 		logger:     logger,
 		cap:        capBytes,
 		stallGrace: stallGrace,
-		clock:      realStallClock{},
-		memCheck:   memCheck,
 		onDrop:     onDrop,
 		out:        make(chan fakeconn.Chunk, chanBuf),
 		wake:       make(chan struct{}, 1),
@@ -347,9 +387,9 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 	// Ordered AFTER the pause check so a paused tee keeps reporting
 	// DropPaused exactly as before — a pause is requested, and the
 	// SessionOnAbort path depends on that cheap reason — and BEFORE the
-	// memory and cap checks so the remainder of a dead connection is
-	// attributed to the desync that killed it instead of re-reporting
-	// per_conn_cap / memory_pressure for every later chunk.
+	// cap check so the remainder of a dead connection is attributed to the
+	// desync that killed it instead of re-reporting per_conn_cap for every
+	// later chunk.
 	//
 	// The check is per DIRECTION, because a tee is: a hole in C2D corrupts
 	// only the request framer, and the response direction of the same
@@ -359,10 +399,14 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 		t.drop(DropDesynced)
 		return false
 	}
-	if t.memCheck != nil && t.memCheck() {
-		t.drop(DropMemoryPressure)
-		return false
+	if t.pushStart != nil {
+		t.pushStart()
 	}
+	// No memory-pressure check here, on purpose: a pause is temporary, and
+	// a chunk refused during one would be a hole in a framed stream that
+	// most parsers cannot step over, ending the connection's capture for
+	// the rest of the recording (see [DropMemoryPressure]). The cap below
+	// bounds what one connection can queue whatever the pressure.
 	n := int64(len(c.Bytes))
 
 	t.mu.Lock()
@@ -408,13 +452,12 @@ func (t *tee) push(c fakeconn.Chunk) bool {
 // downstream parser stranded mid-frame.
 //
 // The test is "did the capture pipeline lose bytes the parser was going to
-// need", not "was a mock affected". [DropPerConnCap] and
-// [DropMemoryPressure] are both unilateral: the parser is mid-stream and
-// simply never receives those bytes. [DropPaused] is not — see the caller.
+// need", not "was a mock affected". [DropPerConnCap] is unilateral: the
+// parser is mid-stream and simply never receives those bytes. [DropPaused] is not — see the caller.
 // Nor is [DropDesynced]: that one is emitted BECAUSE the tee is already
 // desynced, so counting it here would make the predicate self-feeding.
 func isDesyncingDrop(reason string) bool {
-	return reason == DropPerConnCap || reason == DropMemoryPressure
+	return reason == DropPerConnCap
 }
 
 // firstHole reports whether a drop for reason is this tee's hole: its first
@@ -575,7 +618,15 @@ func (t *tee) drain() {
 			// not pin its high-water-mark allocation for its whole life.
 			t.q = nil
 		}
+		// Off the queue and not yet consumed by the parser: the watermark
+		// follows it from here (teeProgress.delivered), under the same
+		// lock, so no look finds it in neither place.
+		t.noteDeliveringLocked(c)
 		t.mu.Unlock()
+
+		if t.readerLag > 0 && !t.lagDelivery(c) {
+			return
+		}
 
 		// Fast path: deliver without blocking whenever out has room. This
 		// is the overwhelmingly common case, and doing it first means the
@@ -625,15 +676,15 @@ func (t *tee) drain() {
 		// comes back a wall-clock timer has long expired and wins the race
 		// against a consumer that is about to take the chunk. That abandoned
 		// a live consumer's chunks (TestTee_SlowConsumerLosesNothing, at
-		// host load 9). See stallMeter for how the time is measured.
+		// host load 9). See utils/stall for how the time is measured.
 	deliver:
 		for {
-			var stall *stallMeter
+			var meter *stall.Meter
 			var stallC <-chan time.Time
 			var closing <-chan struct{}
 			if t.closedFlag.Load() {
-				stall = newStallMeter(t.clock, t.stallGrace)
-				stallC = stall.wait()
+				meter = stall.NewMeter(t.clock, t.stallGrace)
+				stallC = meter.Wait()
 			} else {
 				// Still open, so no bound — but a drain parked here must still
 				// learn that close() happened, or it would block forever and
@@ -644,20 +695,20 @@ func (t *tee) drain() {
 			for {
 				select {
 				case t.out <- c:
-					stall.stop()
+					meter.Stop()
 					break deliver
 
 				case <-t.consumerGone:
 					// The parser closed its FakeConn: nothing will read this,
 					// and the verdict covers the whole connection, not just
 					// the chunk in hand.
-					stall.stop()
+					meter.Stop()
 					t.abandon(c)
 					return
 
 				case <-stallC:
-					if !stall.expired() {
-						stallC = stall.wait()
+					if !meter.Expired() {
+						stallC = meter.Wait()
 						continue
 					}
 					// Out full, and the consumer freed nothing, for a whole
@@ -668,6 +719,7 @@ func (t *tee) drain() {
 					// flush tempting in the first place. Deciding once gets
 					// both: a progressing consumer never trips the window, a
 					// stopped one costs one window total.
+					meter.Stop()
 					t.abandon(c)
 					return
 
@@ -680,137 +732,6 @@ func (t *tee) drain() {
 			}
 		}
 	}
-}
-
-// stallTick is how often the drain samples a stall window (see stallMeter).
-const stallTick = 10 * time.Millisecond
-
-// stallMeter measures, for the drain's stall window, how long the process
-// could have run since the window began: the time a consumer that is still
-// reading had to take a chunk.
-//
-// It samples every tick (stallTick, or the grace when shorter).
-//   - A process can run for at most its CPU limit (a container's --cpus, a
-//     pod's CPU limit: processCPULimit) of each second of wall time, and one
-//     consumer for at most one CPU's worth: the interval counts scaled by
-//     that share. At --cpus 0.1 the window is ten times the grace in wall
-//     time. Without a limit, or at one CPU or more, it is wall time, as it
-//     was before, for a process with CPU to spare, busy or idle.
-//   - A sample that comes late, more than a tick after it was due, shows the
-//     process was held off the CPU for part of the interval (frozen, stopped,
-//     or waiting behind other work on an overloaded host): only what it ran
-//     then counts, its CPU time, and never more than the scaled interval. A
-//     freeze of any length counts as the CPU the process used before it froze.
-//
-// A sample that comes on time does not show that the process could run the
-// whole interval when it has a CPU limit: CFS hands out the quota in per-CPU
-// slices, so the drain's thread can wake on time while the consumer's thread
-// is throttled. Hence the scaling. And counting samples (a ticker, a tick per
-// sample) overcounts a starved process: the tick pending across a freeze is
-// delivered at once when it resumes, and counts a whole tick for the few
-// milliseconds it ran.
-type stallMeter struct {
-	clk          stallClock
-	grace, tick  time.Duration
-	lastWall     time.Time
-	lastCPU, ran time.Duration
-	cpuOK        bool
-	share        float64 // of wall time the process can run: its CPU limit, at most 1
-	timerC       <-chan time.Time
-	stopTimer    func() bool
-	samples      int
-}
-
-func newStallMeter(clk stallClock, grace time.Duration) *stallMeter {
-	m := &stallMeter{clk: clk, grace: grace, tick: min(stallTick, max(grace, time.Millisecond)), share: 1}
-	if l, ok := clk.cpuLimit(); ok && l > 0 && l < 1 {
-		m.share = l
-	}
-	m.lastWall, m.lastCPU, m.cpuOK = clk.now()
-	return m
-}
-
-// wait arms the next sample.
-func (m *stallMeter) wait() <-chan time.Time {
-	m.timerC, m.stopTimer = m.clk.after(m.tick)
-	return m.timerC
-}
-
-// stop releases the pending sample's timer. Nil-safe.
-func (m *stallMeter) stop() {
-	if m != nil && m.stopTimer != nil {
-		m.stopTimer()
-	}
-}
-
-// expired takes a sample, and reports whether the process has had the whole
-// grace to run.
-func (m *stallMeter) expired() bool {
-	m.samples++
-	wall, cpu, cpuOK := m.clk.now()
-	iv := max(wall.Sub(m.lastWall), 0)
-	could := time.Duration(float64(iv) * m.share)
-	switch {
-	case iv <= 2*m.tick || !m.cpuOK || !cpuOK:
-		// On time (or no CPU clock to tell).
-		m.ran += could
-	default:
-		m.ran += min(could, max(cpu-m.lastCPU, 0))
-	}
-	m.lastWall, m.lastCPU, m.cpuOK = wall, cpu, cpuOK
-	return m.ran >= m.grace
-}
-
-// stallClock is what a stall window is measured with: the wall clock, this
-// process's CPU time (ok false when it cannot be read), its CPU limit, and a
-// timer. A field of the tee (tee.clock) so tests can drive it.
-type stallClock interface {
-	now() (wall time.Time, cpu time.Duration, ok bool)
-	cpuLimit() (cpus float64, ok bool)
-	after(d time.Duration) (<-chan time.Time, func() bool)
-}
-
-// realStallClock is the process's own clocks.
-type realStallClock struct{}
-
-func (realStallClock) now() (time.Time, time.Duration, bool) {
-	cpu, ok := processCPUTime()
-	return time.Now(), cpu, ok
-}
-
-// cpuLimit is processCPULimit, read at most once per cpuLimitRefresh: a stall
-// meter is made for each chunk a teardown waits on, and reading the cgroup
-// files each time would cost a starved process the CPU it lacks. A limit
-// changes rarely (a pod resized in place); the window follows it within the
-// refresh.
-func (realStallClock) cpuLimit() (float64, bool) {
-	c := &cpuLimitCache
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.at.IsZero() || time.Since(c.at) >= cpuLimitRefresh {
-		c.cpus, c.ok = readCPULimit()
-		c.at = time.Now()
-	}
-	return c.cpus, c.ok
-}
-
-// cpuLimitRefresh is how long realStallClock keeps a CPU limit it read.
-const cpuLimitRefresh = 10 * time.Second
-
-// readCPULimit reads the process's CPU limit (processCPULimit; tests count
-// the reads).
-var readCPULimit = processCPULimit
-
-var cpuLimitCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	cpus float64
-	ok   bool
-}
-
-func (realStallClock) after(d time.Duration) (<-chan time.Time, func() bool) {
-	t := time.NewTimer(d)
-	return t.C, t.Stop
 }
 
 // abandon gives up on a chunk that could not be delivered plus everything
@@ -830,6 +751,8 @@ func (t *tee) abandon(held fakeconn.Chunk) {
 	// first would only add an O(n) pass under the same mutex push contends on.
 	t.q = nil
 	t.qBytes = 0
+	// Nothing will consume what was delivered either: its parser is gone.
+	t.progress.delivered = nil
 	// Mark the tee dead. drain is about to return, so from here on NOTHING
 	// will deliver a queued chunk — a push that kept succeeding would append
 	// to a queue with no consumer and report success for a chunk that is
@@ -864,6 +787,50 @@ func (t *tee) close() {
 		// Wake a drain parked on an empty queue so it can observe closed.
 		close(t.shutdown)
 	})
+}
+
+// await sets c aside until the client's answer decides it (client_took.go):
+// it is neither queued nor refused yet, and the capture watermark counts it as
+// unconsumed. Called on the forwarder, which still holds c (its held stamp),
+// so a look that misses it here finds it held.
+func (t *tee) await(c fakeconn.Chunk) {
+	t.mu.Lock()
+	t.awaiting = append(t.awaiting, c)
+	t.mu.Unlock()
+}
+
+// awaitingLen is how many chunks wait for the client's answer.
+func (t *tee) awaitingLen() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.awaiting)
+}
+
+// firstAwaiting is the oldest chunk waiting for the client's answer; ok is
+// false when none is.
+func (t *tee) firstAwaiting() (c fakeconn.Chunk, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.awaiting) == 0 {
+		return fakeconn.Chunk{}, false
+	}
+	return t.awaiting[0], true
+}
+
+// doneAwaiting lets go of the oldest chunk waiting for the client's answer,
+// once it was pushed (it is on the queue now) or refused. The backing array
+// is let go of with the last one.
+func (t *tee) doneAwaiting() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.awaiting) == 0 {
+		return
+	}
+	t.awaiting[0] = fakeconn.Chunk{}
+	t.awaiting = t.awaiting[1:]
+	if len(t.awaiting) == 0 {
+		t.awaiting = nil
+	}
 }
 
 // waitDone blocks until the drain goroutine has exited. Used by the relay

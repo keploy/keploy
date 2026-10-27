@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	matcherUtils "go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -152,11 +154,21 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		// `keploy report --test-case <obsolete>` announce a pass for a test
 		// that was demoted, and the dependency notice below then printed
 		// directly under a line asserting it passed.
-		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, testStatusLabel(t.Status), t.TimeTaken)
+		fmt.Fprintf(r.out, "Testcase %q (%s) %s (%s)\n", t.TestCaseID, t.Name, resultLabel(t), t.TimeTaken)
+		// A test keploy could not judge says why, right under its status:
+		// whatever its row's status, nothing vouches for it.
+		fmt.Fprint(r.out, notJudgedLines(t))
+		// A test keploy skipped for a reason says why, right under its status.
+		if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+			fmt.Fprintf(r.out, "  %s\n", quarantinedLine(models.SkipReasonOneLine(t.SkipReason)))
+		}
 		// ... but a PASSED test can still have stopped making a recorded
 		// outgoing call. That is the silent-green case; it gets one line here
 		// whether or not --assert-dependencies was passed.
 		fmt.Fprint(r.out, models.FormatDepNotice(t.Result.DepResult))
+		// Background writes its window answered by their kind, unchecked: a
+		// report without answers prints nothing more.
+		fmt.Fprint(r.out, uncheckedLines(t))
 		fmt.Fprintln(r.out, "\n--------------------------------------------------------------------")
 	}
 	err := r.out.Flush()
@@ -164,6 +176,15 @@ func (r *Report) printTests(ctx context.Context, tests []models.TestResult) erro
 		return fmt.Errorf("failed while flushing in printTests: %w", err)
 	}
 	return nil
+}
+
+// resultLabel is testStatusLabel for t, a test keploy could not judge
+// (TestResult.VerdictUnknown) said so: its row's status is no verdict.
+func resultLabel(t models.TestResult) string {
+	if len(t.VerdictUnknown()) > 0 {
+		return "NOT JUDGED ⚠️ (" + string(t.Status) + ")"
+	}
+	return testStatusLabel(t.Status)
 }
 
 // testStatusLabel renders a status for the one-line, no-diff form of
@@ -280,6 +301,13 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 	fmt.Fprintf(r.out, "\tTotal test failed: %d\n", failed)
 	if obsolete > 0 {
 		fmt.Fprintf(r.out, "\tTotal test obsolete: %d\n", obsolete)
+	}
+	// Tests keploy quarantined, with their reasons. Only a run under the
+	// proven switch writes a reason (TestResult.SkipReason), so a report
+	// without one prints exactly what it printed before.
+	quarantined := quarantinedTests(reports)
+	if len(quarantined) > 0 {
+		fmt.Fprintf(r.out, "\tTotal test quarantined: %d\n", len(quarantined))
 	}
 
 	// Dependencies that the recording says a test exercises but that the test
@@ -417,12 +445,45 @@ func (r *Report) printSummary(reports map[string]*models.TestReport) error {
 		}
 	}
 
+	if len(quarantined) > 0 {
+		fmt.Fprintln(r.out, "\nQUARANTINED TEST CASES:")
+		for _, q := range quarantined {
+			fmt.Fprintf(r.out, "\t- %s/%s: %s\n", q.set, q.test, models.SkipReasonOneLine(q.reason))
+		}
+	}
+
 	fmt.Fprintln(r.out, "<=========================================>")
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in printSummary: %w", err)
 	}
 	return nil
+}
+
+// quarantinedTest is a test keploy skipped for a reason.
+type quarantinedTest struct{ set, test, reason string }
+
+// quarantinedTests are the IGNORED tests of the reports that carry a skip
+// reason, by test set and then in report order.
+func quarantinedTests(reports map[string]*models.TestReport) []quarantinedTest {
+	names := make([]string, 0, len(reports))
+	for name := range reports {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []quarantinedTest
+	for _, name := range names {
+		rep := reports[name]
+		if rep == nil {
+			continue
+		}
+		for _, t := range rep.Tests {
+			if t.Status == models.TestStatusIgnored && t.SkipReason != "" {
+				out = append(out, quarantinedTest{set: name, test: t.TestCaseID, reason: t.SkipReason})
+			}
+		}
+	}
+	return out
 }
 
 func (r *Report) filterTestsByIDs(tests []models.TestResult, ids []string) []models.TestResult {
@@ -490,14 +551,20 @@ func (r *Report) GenerateReport(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to collect reports for JUnit output: %w", err)
 		}
+		// explained names the sets a case of which failed or has no verdict,
+		// shown or not: --test-case can leave such a set no case, and its
+		// failure is still a case's, not one no case explains.
+		var explained map[string]bool
 		if len(r.config.Report.TestCaseIDs) > 0 {
+			explained = make(map[string]bool, len(reports))
 			for name, rep := range reports {
+				explained[name] = slices.ContainsFunc(rep.Tests, redCase)
 				rep.Tests = r.filterTestsByIDs(rep.Tests, r.config.Report.TestCaseIDs)
 				rep.Total = len(rep.Tests)
 				reports[name] = rep
 			}
 		}
-		return r.generateJUnit(reports)
+		return r.generateJUnit(reports, explained)
 	}
 
 	// --format json (NDJSON, one object per test result). Deliberately placed
@@ -690,11 +757,20 @@ func (r *Report) parseAndProcessLegacyReportFormat(ctx context.Context, reportPa
 
 // processLegacySummary generates a summary report for legacy format
 func (r *Report) processLegacySummary(tests []models.TestResult) error {
-	total, pass, fail, obsolete := len(tests), 0, 0, 0
+	total, pass, fail, obsolete, ignored := len(tests), 0, 0, 0, 0
 	var failedCases []string
 
 	for _, t := range tests {
 		switch t.Status {
+		case models.TestStatusIgnored:
+			// Under the proven switch a skipped test is counted as skipped:
+			// it did not pass. With the switch off it is counted as passed,
+			// as before.
+			if provenswitch.On() {
+				ignored++
+				continue
+			}
+			pass++
 		case models.TestStatusFailed:
 			fail++
 			label := t.TestCaseID
@@ -710,7 +786,7 @@ func (r *Report) processLegacySummary(tests []models.TestResult) error {
 	}
 
 	totalTime := estimateDuration(tests)
-	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, totalTime, failedCases)
+	printSingleSummaryTo(r.out, "file", total, pass, fail, obsolete, ignored, totalTime, failedCases)
 	err := r.out.Flush()
 	if err != nil {
 		return fmt.Errorf("failed while flushing in processLegacySummary: %w", err)
@@ -830,9 +906,18 @@ func (r *Report) extractFailedTestsFromResults(tests []models.TestResult) []mode
 
 // shouldRenderDiff reports whether a test result is admitted to the per-test
 // detail renderer at all. A test case that failed on a template variable is
-// FAILED: keploy test never demotes it to OBSOLETE.
+// FAILED: keploy test never demotes it to OBSOLETE. A wrong answer demoted to
+// OBSOLETE (FailureInfo.MappingStale) is admitted too: it is not judged, and
+// fails its run.
 func shouldRenderDiff(result models.TestResult) bool {
-	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps()
+	return result.Status == models.TestStatusFailed || result.Result.HasMissingDeps() || demotedWrongAnswer(result)
+}
+
+// demotedWrongAnswer reports whether t is a wrong answer keploy test demoted to
+// OBSOLETE and left not judged (FailureInfo.MappingStale): its answer differed,
+// so it has a diff to show.
+func demotedWrongAnswer(t models.TestResult) bool {
+	return t.Status == models.TestStatusObsolete && t.FailureInfo.MappingStale != ""
 }
 
 // rendersDepNoticeOnly reports whether an admitted result is summarised in the
@@ -847,8 +932,12 @@ func shouldRenderDiff(result models.TestResult) bool {
 // meant 100% of obsolete tests grew a failure block where before this slice
 // they rendered nothing at all in `keploy report`. The brief asked for a
 // compact notice; this is that, for every non-FAILED status.
+//
+// A wrong answer demoted to OBSOLETE and left not judged (demotedWrongAnswer)
+// is the exception: its answer differed, and the diff is what its user reads
+// before re-recording.
 func rendersDepNoticeOnly(result models.TestResult) bool {
-	return result.Status != models.TestStatusFailed
+	return result.Status != models.TestStatusFailed && !demotedWrongAnswer(result)
 }
 
 // partitionDepNotices splits the admitted results into the ones that get the
@@ -977,9 +1066,10 @@ func (r *Report) writeDepNoticeSummary(notices, admitted []models.TestResult) er
 
 // renderSingleFailedTest writes the failed test report into sb (non-full-body mode).
 func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, test models.TestResult) error {
-	// Header with risk level and categories. Unconditionally "failed":
-	// partitionDepNotices keeps every non-FAILED status out of this renderer.
-	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+	// Header with risk level and categories. "failed", or "not judged" for a
+	// demoted wrong answer: partitionDepNotices keeps every other non-FAILED
+	// status out of this renderer.
+	header := failedTestHeading(test)
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -996,11 +1086,13 @@ func (r *Report) renderSingleFailedTest(_ context.Context, sb *strings.Builder, 
 	}
 
 	sb.WriteString(header + "\n")
+	sb.WriteString(demotedLines(test))
 
 	// Mock-miss diagnostics FIRST: when an outgoing call had no matching
 	// mock, the response diff below is usually a downstream symptom (the app
 	// reacting to keploy's synthetic error), so lead with the root cause.
 	renderUnmatchedCalls(sb, test)
+	sb.WriteString(uncheckedLines(test))
 
 	// Template variable places the answer did not satisfy. Each fails the
 	// test case on its own, so a test case can fail here with every row of
@@ -1154,9 +1246,15 @@ func renderUnmatchedCalls(sb *strings.Builder, test models.TestResult) {
 					sb.WriteString(fmt.Sprintf("      %s: live %q, absent in recording\n", d.Path, d.Actual))
 				case models.DiffKindTypeChanged:
 					sb.WriteString(fmt.Sprintf("      %s: type changed (recorded %s, live %s)\n", d.Path, d.Expected, d.Actual))
+				case models.DiffKindVariable:
+					sb.WriteString(fmt.Sprintf("      %s: the test's variable is %q, the call sent %q\n", d.Path, d.Expected, d.Actual))
 				default:
 					sb.WriteString(fmt.Sprintf("      %s: recorded %q, live %q\n", d.Path, d.Expected, d.Actual))
 				}
+			}
+			if uc.MatchPhase == models.MatchPhaseVariable && uc.Diff != "" {
+				// It names the variable and where the test bound it.
+				sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
 			}
 		} else if uc.Diff != "" {
 			sb.WriteString(fmt.Sprintf("    diff: %s\n", uc.Diff))
@@ -1298,7 +1396,7 @@ func (r *Report) renderSingleFullBodyFailedTest(ctx context.Context, sb *strings
 
 // createFormattedPrinter: use r.printer (initialized in New)
 func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPrinter) string {
-	header := fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+	header := failedTestHeading(test)
 
 	// Add risk level if available and not NONE
 	if test.FailureInfo.Risk != "" && test.FailureInfo.Risk != models.None {
@@ -1314,7 +1412,36 @@ func (r *Report) generateTestHeader(test models.TestResult, printer *pp.PrettyPr
 		header += fmt.Sprintf(" [%s]", strings.Join(categories, ", "))
 	}
 
-	return printer.Sprintf(header + "\n")
+	return printer.Sprintf(header+"\n") + demotedLines(test)
+}
+
+// failedTestHeading is the first words of a rendered test's header: "Testrun
+// failed", or "Testrun not judged" for a wrong answer demoted to OBSOLETE
+// (demotedWrongAnswer), which has no verdict.
+func failedTestHeading(test models.TestResult) string {
+	if demotedWrongAnswer(test) {
+		return fmt.Sprintf("Testrun not judged for %s/%s", test.Name, test.TestCaseID)
+	}
+	return fmt.Sprintf("Testrun failed for %s/%s", test.Name, test.TestCaseID)
+}
+
+// demotedLines is notJudgedLines for a demoted wrong answer's rendered diff,
+// under its header; "" for any other test.
+func demotedLines(test models.TestResult) string {
+	if !demotedWrongAnswer(test) {
+		return ""
+	}
+	return notJudgedLines(test)
+}
+
+// notJudgedLines says, under a rendered test's header, why it has no verdict
+// (TestResult.VerdictUnknown), one line each; "" for a judged test.
+func notJudgedLines(test models.TestResult) string {
+	var sb strings.Builder
+	for _, why := range test.VerdictUnknown() {
+		fmt.Fprintf(&sb, "  not judged: %s\n", strings.TrimPrefix(why, "not judged: "))
+	}
+	return sb.String()
 }
 
 // addStatusCodeDiffs adds status code differences to the diff printer
@@ -1366,13 +1493,17 @@ func (r *Report) addBodyDiffs(_ context.Context, test models.TestResult, logDiff
 // renderTemplateFailures writes one line per template variable place a test
 // case failed on: where, the placeholder, and why. A placeholder refused when
 // the set loaded is said under its own heading: the test case was never sent,
-// so no answer was compared.
+// so no answer was compared. So is a test set refused whole, which is no
+// placeholder's refusal (wholeSetRefusal).
 func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
-	var failed, refused []models.TemplateFailure
+	var failed, refused, set []models.TemplateFailure
 	for _, f := range fs {
-		if f.Refused {
+		switch {
+		case wholeSetRefusal(f):
+			set = append(set, f)
+		case f.Refused:
 			refused = append(refused, f)
-		} else {
+		default:
 			failed = append(failed, f)
 		}
 	}
@@ -1382,6 +1513,7 @@ func renderTemplateFailures(sb *strings.Builder, fs []models.TemplateFailure) {
 	}{
 		{"=== TEMPLATE VARIABLES THE ANSWER DID NOT SATISFY ===", failed},
 		{"=== TEMPLATE PLACEHOLDERS REFUSED WHEN THE TEST SET LOADED (THE TEST CASE WAS NOT SENT) ===", refused},
+		{"=== TEST SET REFUSED WHEN IT LOADED (THE TEST CASE WAS NOT SENT) ===", set},
 	} {
 		if len(s.fs) == 0 {
 			continue
@@ -1456,4 +1588,16 @@ func (r *Report) printDefaultBodyDiff(bodyResult models.BodyResult) error {
 		return fmt.Errorf("failed to render default body diffs: %w", err)
 	}
 	return nil
+}
+
+// uncheckedLines is test's line for the background writes its window, or the
+// gap before it, answered by their kind, unchecked (models.UncheckedLine),
+// indented under its status and newline-ended; "" for a test with
+// none, as every report written without the proven switch has.
+func uncheckedLines(test models.TestResult) string {
+	line := models.UncheckedLine(test.TestCaseID, test.Answers)
+	if line == "" {
+		return ""
+	}
+	return "  " + line + "\n"
 }

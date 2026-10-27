@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	setfile "go.keploy.io/server/v3/pkg/platform/yaml"
 	"go.keploy.io/server/v3/pkg/platform/yaml/testdb"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/tools"
 	"go.keploy.io/server/v3/pkg/templates"
 	"go.uber.org/zap"
@@ -2991,6 +2993,7 @@ func TestRunTestSet_AUseInAnArrayNoiseUntiesIsRefused(t *testing.T) {
 		refusedAt, refusedWhy string
 		edit                  string
 		failsAt               string
+		proven                bool
 	}{
 		{name: "R1 noise over the use's field", recorded: rec, answer: moved, noise: noise("id"), ignoreOrdering: true, want: models.TestStatusFailed,
 			refusedAt: "response body.orders[0].id", refusedWhy: "the noise entry body.id (globalNoise) covers its place",
@@ -3052,8 +3055,19 @@ func TestRunTestSet_AUseInAnArrayNoiseUntiesIsRefused(t *testing.T) {
 		{name: "ignoreOrdering off: the use is asserted at its own index", recorded: rec, answer: moved, noise: noise("id"), want: models.TestStatusFailed, failsAt: "body.orders[0].id"},
 		{name: "a use outside any array is asserted at its path under noise, not refused", recorded: `{"first":"{{string .orderA}}"}`, answer: `{"first":"ord_OTHER"}`,
 			noise: noise("first"), ignoreOrdering: true, want: models.TestStatusFailed, failsAt: "body.first"},
+		// Under the proven switch the comparison reads arrays in order
+		// whatever ignoreOrdering says (matcher.ResponseIgnoreOrdering), so
+		// noise over the use's field unties nothing: the use is asserted at
+		// its own index, as with ignoreOrdering off, and not refused.
+		{name: "proven: noise over the use's field, a moved id fails at its own index", recorded: rec, answer: moved, noise: noise("id"), ignoreOrdering: true, proven: true, want: models.TestStatusFailed, failsAt: "body.orders[0].id"},
+		{name: "proven: noise over the use's field, the answer as recorded", recorded: rec, answer: paid, noise: noise("id"), ignoreOrdering: true, proven: true, want: models.TestStatusPassed},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if c.proven {
+				t.Setenv(provenswitch.Env, "1")
+			} else {
+				t.Setenv(provenswitch.Env, "")
+			}
 			app := newTmplApp(t, func(a *tmplApp, mux *http.ServeMux) {
 				mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
 					a.record(r)
@@ -3518,6 +3532,12 @@ func TestRunTestSet_ASetAnInterruptedTemplatizeLeftIsRefused(t *testing.T) {
 		res.TemplateFailures[0].Where != "test set test-set-0" || !strings.Contains(res.TemplateFailures[0].Why, steps) || res.FailureInfo.Risk != models.High {
 		t.Fatalf("test-1's result %+v; want FAILED, refused, at test set test-set-0, with the steps, HIGH", res)
 	}
+	// A refused set is no template variable's failure: its own category, so
+	// a report or dashboard grouping by category does not file it there.
+	if !slices.Equal(res.FailureInfo.Category, []models.FailureCategory{models.TestSetRefused}) ||
+		!slices.Equal(res.Result.FailureInfo.Category, []models.FailureCategory{models.TestSetRefused}) {
+		t.Fatalf("test-1's categories %v (result %v); want only TEST_SET_REFUSED", res.FailureInfo.Category, res.Result.FailureInfo.Category)
+	}
 	if len(rep.Tests) != 1 || rep.Tests[0].TestCaseID != "test-1" || rep.HighRisk != 1 {
 		t.Fatalf("the set's report holds %d result(s), high risk %d; want test-1's, high risk 1", len(rep.Tests), rep.HighRisk)
 	}
@@ -3854,5 +3874,18 @@ func TestMustPass_RemovesTheFailingAndStopsAtTheRefused(t *testing.T) {
 				t.Fatalf("a run with a refused test case exited %d, want 1", code)
 			}
 		})
+	}
+}
+
+// A test case's request lists every header either side holds, each once,
+// sorted: one the sent request alone holds is a part of it as one the
+// recording alone holds is, "" on the other side.
+func TestHeaderNames(t *testing.T) {
+	got := headerNames(map[string]string{"X-B": "1", "X-A": "2"}, map[string]string{"X-A": "3", "X-C": "4"})
+	if want := []string{"X-A", "X-B", "X-C"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("names %v; want %v", got, want)
+	}
+	if got := headerNames(nil, nil); len(got) != 0 {
+		t.Fatalf("no headers: %v", got)
 	}
 }

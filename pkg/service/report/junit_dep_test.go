@@ -2,8 +2,10 @@ package report
 
 import (
 	"encoding/xml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -319,4 +321,133 @@ func TestBuildJUnitSuite_NonFailureBodyIsEmptyWhenNothingIsMissing(t *testing.T)
 		!strings.Contains(string(data), `<skipped message="obsolete test case"></skipped>`) {
 		t.Errorf("the obsolete skip element changed:\n%s", data)
 	}
+}
+
+// Under the proven switch a test failed by its calls says which: each call
+// that got no recorded answer (DNS left out) and each recorded call it did not
+// make, by mock, with the sibling that made it when one did. With the switch
+// off the body is as before.
+func TestBuildFailureNamesTheProvenEvidence(t *testing.T) {
+	r := models.TestResult{
+		Kind:   models.HTTP,
+		Status: models.TestStatusFailed,
+		Result: models.Result{StatusCode: models.IntResult{Normal: true}},
+		FailureInfo: models.FailureInfo{
+			UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charges", Destination: "pay:443"}, {Protocol: "DNS", ActualSummary: "A x.internal"}},
+			UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-7", Kind: "Http", ConsumedBy: "test-2"}},
+		},
+	}
+	t.Setenv(provenswitch.Env, "")
+	if body := buildFailure(r).Text; strings.Contains(body, "no recorded answer") || strings.Contains(body, "mock-7") {
+		t.Fatalf("switch off: the body changed:\n%s", body)
+	}
+	t.Setenv(provenswitch.Env, "1")
+	body := buildFailure(r).Text
+	for _, want := range []string{"call with no recorded answer: HTTP POST /charges (to pay:443)", "recorded call not made: mock mock-7 (Http); test-2 consumed it"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body does not say %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "x.internal") {
+		t.Fatalf("a DNS miss is named, though it fails nothing:\n%s", body)
+	}
+}
+
+// Under the proven switch a call is named in the JUnit body by its shape, as
+// the proven model's evidence names it: a gRPC call by its RPC, and no ID,
+// email or token of a URL that its look or a variable's place marks, no query
+// value, and no SQL literal reaches the CI artifact.
+func TestBuildFailureNamesACallByItsShape(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	r := models.TestResult{
+		Kind:   models.HTTP,
+		Status: models.TestStatusFailed,
+		Result: models.Result{StatusCode: models.IntResult{Normal: true}},
+		FailureInfo: models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+			{Protocol: "HTTP", ActualSummary: "GET /users/alice@example.com/orders/12345?token=s3cret", Destination: "api:8080"},
+			{Protocol: "MySQL", ActualSummary: "COM_QUERY SELECT * FROM cards WHERE number = '4111111111111111'", Destination: "db:3306"},
+			{Protocol: "Redis", ActualSummary: "GET session:550e8400-e29b-41d4-a716-446655440000", Destination: "cache:6379"},
+			{Protocol: "gRPC", ActualSummary: "/orders.v1.OrderService/PlaceOrder", Destination: "orders:9090"},
+			{Protocol: "HTTP", ActualSummary: "GET /carts/kqzxwvbn", Destination: "api:8080", FieldDiffs: []models.MockFieldDiff{{Path: "url.path[1]"}}},
+		},
+			CaptureIncomplete: models.CaptureLosses{{Kind: models.CaptureLossDropped, Count: 1, What: "per_conn_cap on a connection to api:8080/users/alice@example.com?token=s3cret"}}},
+	}
+	body := buildFailure(r).Text
+	for _, want := range []string{
+		"call with no recorded answer: HTTP GET /users/{}/orders/{}?token={} (to api:8080)",
+		"call with no recorded answer: MySQL COM_QUERY SELECT * FROM cards WHERE number = ? (to db:3306)",
+		"call with no recorded answer: Redis (to cache:6379)",
+		"call with no recorded answer: gRPC /orders.v1.OrderService/PlaceOrder (to orders:9090)",
+		"call with no recorded answer: HTTP GET /carts/{} (to api:8080)",
+		"(per_conn_cap on a connection to api:8080/users/{}?token={})",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body does not say %q:\n%s", want, body)
+		}
+	}
+	for _, v := range []string{"alice@example.com", "12345", "s3cret", "4111111111111111", "550e8400-e29b-41d4-a716-446655440000", "kqzxwvbn"} {
+		if strings.Contains(body, v) {
+			t.Fatalf("body holds the value %q the app sent:\n%s", v, body)
+		}
+	}
+}
+
+// Under the switch a gRPC failure's assessment reasons are in the JUnit body:
+// a protoscope reorder says so, with the proto-files way out for a map. With
+// the switch off the body is as before.
+func TestBuildFailureSaysWhyAGRPCBodyFailedUnderTheSwitch(t *testing.T) {
+	const reason = "decoded data mismatch: a repeated field's elements came back in another order (KEPLOY_PROVEN=1 compares them in order); if the field is a map, configure --proto-file or --proto-dir so it is compared as a map"
+	res := models.TestResult{Kind: models.GRPC_EXPORT, Status: models.TestStatusFailed, FailureInfo: models.FailureInfo{Assessment: &models.FailureAssessment{Reasons: []string{reason}}}}
+	for _, on := range []bool{false, true} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "")
+		}
+		if got := strings.Contains(buildFailure(res).Text, "--proto-file"); got != on {
+			t.Fatalf("switch %v: the body names the proto-files way out %v, want %v", on, got, on)
+		}
+	}
+}
+
+// A connection whose client sent nothing (models.MatchPhaseNoRequest) is no
+// call with no recorded answer: the JUnit evidence leaves it out, as the
+// verdict does.
+func TestProvenEvidenceLeavesOutAConnectionThatSentNothing(t *testing.T) {
+	lines := provenEvidenceLines(models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{Protocol: "MySQL", Destination: "10.9.9.9:13306", MatchPhase: models.MatchPhaseNoRequest},
+	}})
+	if len(lines) != 0 {
+		t.Fatalf("evidence lines = %q, want none", lines)
+	}
+}
+
+// A call that repeats an earlier test's identical recording, and a recorded
+// call not made that mirrors one, say so in their evidence lines: the
+// recording, the test it answered, and both gaps.
+func TestProvenEvidenceNamesARepeatedCall(t *testing.T) {
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	miss := anchoredNote("mock-2", at, at, at.Add(6*time.Second), at.Add(2*time.Second))
+	miss.Test = "test-2"
+	unmade := anchoredNote("mock-1", at, at, at.Add(time.Second), at.Add(70*time.Second))
+	unmade.Test = "test-1"
+	lines := provenEvidenceLines(models.FailureInfo{
+		UnmatchedCalls:  []models.UnmatchedCall{{Protocol: "HTTP", Repeat: miss}},
+		UnconsumedMocks: []models.UnconsumedMock{{Name: "mock-9", Kind: "Http", RepeatOf: unmade}},
+	})
+	if len(lines) != 2 ||
+		!strings.HasSuffix(lines[0], "; identical to mock mock-2, which answered test test-2's call 6.00s earlier at replay and 2.00s earlier at record: likely an answer the application keeps for a span of elapsed time") ||
+		!strings.HasSuffix(lines[1], "; identical to mock mock-1, which answered test test-1's call 1.00s earlier at replay and 70.00s earlier at record: likely an answer the application keeps for a span of elapsed time") {
+		t.Fatalf("evidence lines = %q", lines)
+	}
+}
+
+// anchoredNote is the note of a call identical to mock, which answered at
+// answered and was recorded at rec, in a test that began at replayStart at
+// this replay and at recordStart at record, measured from mock itself
+// (models.RepeatNote.Anchor).
+func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time) *models.RepeatNote {
+	n := models.NewRepeatNote(mock, answered, rec, time.Time{})
+	n.Anchor(replayStart, recordStart, mock, rec)
+	return n
 }

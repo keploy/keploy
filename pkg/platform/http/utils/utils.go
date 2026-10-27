@@ -37,6 +37,21 @@ func ExtractDockerFlags(cmd string) (cleanedCmd string, ports []string, networks
 	return
 }
 
+// addHostRegex matches a `docker run` host entry flag, --add-host NAME:IP or
+// --add-host=NAME:IP, its entry quoted or not.
+var addHostRegex = regexp.MustCompile(`\s+--add-host(?:=|\s+)("[^"]*"|'[^']*'|[^\s]+)`)
+
+// ExtractAddHosts takes the app's host entries (--add-host) out of its
+// `docker run` command: under keploy the app joins the agent container's
+// network namespace, where Docker refuses entries of the app's own, so the
+// agent container carries them (models.SetupOptions.AppExtraHosts).
+func ExtractAddHosts(cmd string) (cleanedCmd string, hosts []string) {
+	for _, m := range addHostRegex.FindAllStringSubmatch(cmd, -1) {
+		hosts = append(hosts, strings.Trim(m[1], `"'`))
+	}
+	return addHostRegex.ReplaceAllString(cmd, ""), hosts
+}
+
 func GenerateRandomContainerName(logger *zap.Logger, prefix string) string {
 	randomBytes := make([]byte, 2)
 	if _, err := rand.Read(randomBytes); err != nil {

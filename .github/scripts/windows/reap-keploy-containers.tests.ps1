@@ -2,7 +2,8 @@
 # runners' shared Docker daemon: reap-keploy-containers.ps1,
 # cleanup-windows.ps1, take-docker-job-lock.ps1, remove-job-containers.ps1 (with
 # register-job-compose-project.ps1), ensure-docker.ps1 and
-# recover-runner-state.ps1. Plain PowerShell, no
+# recover-runner-state.ps1; and the download-image action's Windows check of
+# the image tarball. Plain PowerShell, no
 # Pester, so it runs unchanged under Windows PowerShell 5.1 (what the
 # self-hosted runners use) and PowerShell 7 on Linux (what the ubuntu CI job
 # uses):
@@ -32,6 +33,32 @@ $register = Join-Path $here 'register-job-compose-project.ps1'
 $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $here))
 $work = Join-Path ([IO.Path]::GetTempPath()) ("reap-tests-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $work | Out-Null
+# PowerShell 7 on Linux and macOS keeps a JIT startup profile in
+# $XDG_CACHE_HOME/powershell (~/.cache/powershell by default). Every
+# PowerShell process reads it as it starts and writes it again as it exits,
+# in place: it truncates the file and writes thousands of small records into
+# it, with no lock. Two processes that exit at the same moment can interleave
+# their records, and PowerShells started on the file they leave then die
+# before they run a line ("Unhandled exception. System.IO.FileLoadException:
+# The given assembly name was invalid", exit 134), until one exits cleanly
+# and writes the file whole again (PowerShell/PowerShell#26528). The
+# fake docker is a PowerShell process per call, and the race cases below
+# start two runners side by side, whose first calls start and end together
+# (in run 38612607763 and run 38433217356 their last lines carry the same
+# millisecond). Both runs failed so: every docker call either runner made
+# for the next minute died that way, and the runner that restarted the fake
+# Docker Desktop failed "Docker did not become ready". So the processes this
+# file starts get a cache directory of their own, here, and so does each
+# runner that Start-Ensure starts in a process of its own, for it and its
+# docker calls. The processes that share one then never write it at once: a
+# runner's own PowerShell reads it before its first docker call starts and
+# writes it after its last one has ended, and its calls run one after
+# another (one that hangs is killed first, and a killed PowerShell writes
+# nothing). On Windows, PowerShell reads no XDG_CACHE_HOME, and the runtime
+# there opens that file so that no other process can open it while it is
+# written.
+$savedCacheHome = $env:XDG_CACHE_HOME
+$env:XDG_CACHE_HOME = Join-Path $work 'cache'
 $fake = Join-Path $work 'fake-docker.ps1'
 $stateFile = Join-Path $work 'state.json'
 
@@ -80,12 +107,14 @@ Set-Content -Path $fake -Encoding ASCII -Value @'
 # drops docker's stderr. Anything that throws here ends the call the same
 # way, with exit 3.
 # FAKE_DOCKER_CALLS, when set, gets a line per call as it starts (the call,
-# its process, and whether <state>.up was there) and an indented one as it
-# ends: its exit code, the daemonDown and psDown it read from the state, and
-# why when it failed. A failing case can then tell a call that found the
-# daemon down from one that threw, and a call with no end line died on the
-# way: killed, or its PowerShell never got that far. A case may be reading
-# that file as a call writes it, hence Add-Line, from the file beside this.
+# its process, whether <state>.up was there, and its XDG_CACHE_HOME, which
+# in a process of its own on Linux or macOS is the cache its PowerShell
+# started on) and an indented one as it ends: its exit code, the daemonDown
+# and psDown it read from the state, and why when it failed. A failing case
+# can then tell a call that found the daemon down from one that threw, and a
+# call with no end line died on the way: killed, or its PowerShell never got
+# that far. A case may be reading that file as a call writes it, hence
+# Add-Line, from the file beside this.
 $ownProcess = $MyInvocation.CommandOrigin -eq 'Runspace'
 . (Join-Path $PSScriptRoot 'add-line.ps1')
 # Not read yet. Run inside the calling script, an unset $state would be the
@@ -106,7 +135,7 @@ function Exit-Fake([int]$code, [string]$why = '') {
 }
 trap { Exit-Fake 3 "fake docker threw: $_" }
 if ($env:FAKE_DOCKER_CALLS) {
-    Add-Line $env:FAKE_DOCKER_CALLS ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"))
+    Add-Line $env:FAKE_DOCKER_CALLS ("{0} (pid {1} at {2:HH:mm:ss.fff}, .up {3}, cache {4})" -f "$args", $PID, [DateTime]::UtcNow, (Test-Path -LiteralPath "$env:FAKE_DOCKER_STATE.up"), $env:XDG_CACHE_HOME)
 }
 $state = Get-Content -Raw -Path $env:FAKE_DOCKER_STATE | ConvertFrom-Json
 function Save { $state | ConvertTo-Json -Depth 5 | Set-Content -Path $env:FAKE_DOCKER_STATE -Encoding ASCII }
@@ -1574,7 +1603,16 @@ exit $drvCode
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
-        $p = [System.Diagnostics.Process]::Start($psi)
+        # A PowerShell startup cache of this runner's own, for it and the
+        # docker calls it makes: see XDG_CACHE_HOME at the top. Put in this
+        # process's environment for the start, which the new process
+        # inherits, not in $psi.EnvironmentVariables: under Windows
+        # PowerShell 5.1, .NET Framework fills that from the environment on
+        # first use with Add, which throws when two names differ only in case
+        # (Path and PATH).
+        $sharedCache = $env:XDG_CACHE_HOME
+        $env:XDG_CACHE_HOME = Join-Path $dir 'cache'
+        try { $p = [System.Diagnostics.Process]::Start($psi) } finally { $env:XDG_CACHE_HOME = $sharedCache }
         [pscustomobject]@{ Proc = $p; Log = $log; StdOut = $p.StandardOutput.ReadToEndAsync(); Err = $p.StandardError.ReadToEndAsync() }
     }
     function Get-Events([string]$file) { @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ }) }
@@ -1845,6 +1883,15 @@ function Set-Content {
             if (($ev -join ',') -ne $race.Want) { $problems += "together did [$($ev -join ',')], want [$($race.Want)]" }
             $left = Get-Markers $lockDir
             if ($left.Count) { $problems += "left $($left -join ', ')" }
+            # Each run's docker calls started on a PowerShell startup cache of
+            # that run's own, never on the other's (XDG_CACHE_HOME at the top).
+            $cacheOf = @{}
+            foreach ($id in 'a', 'b') {
+                $c = @(Get-Calls (Join-Path $barrierDir "calls-$id") | ForEach-Object { if ($_ -match ', cache (.*)\)$') { $Matches[1] } } | Sort-Object -Unique)
+                if (($c.Count -ne 1) -or (-not $c[0])) { $problems += "run $id's docker calls started on PowerShell caches [$($c -join ', ')], want one of its own" }
+                else { $cacheOf[$id] = $c[0] }
+            }
+            if (($cacheOf.Count -eq 2) -and ($cacheOf['a'] -eq $cacheOf['b'])) { $problems += "both runs' docker calls started on one PowerShell cache ($($cacheOf['a']))" }
         } finally {
             foreach ($bg in $bgs) { Stop-Background $bg }
         }
@@ -2368,8 +2415,113 @@ jobs:
     )
     $bp = @(Get-BudgetProblems (Join-Path $repoRoot '.github/workflows'))
     Report "ensure-docker.ps1 gives up on other runners in time to fail precheck-windows with its remediation" ([pscustomobject]@{ Output = '' }) @($bp)
+
+    # ---- download-image: the Windows check of the image tarball -------------
+
+    # A step's run: text from the download-image action, as the runner runs a
+    # `shell: powershell` step: `$ErrorActionPreference = 'stop'` before it,
+    # `exit $LASTEXITCODE` after it, in a PowerShell of its own (this one's
+    # executable: Windows PowerShell 5.1 in precheck-windows, pwsh in the
+    # ubuntu job). Under 5.1 a native command's redirected stderr is error
+    # records, which 'stop' makes terminating; pwsh 7.2 and later no longer do
+    # that, so only precheck-windows would see a check that let tar's stderr
+    # end the step.
+    $action = Join-Path $repoRoot '.github/actions/download-image/action.yml'
+    function Get-ActionRun([string]$step) {
+        $lines = @(Get-Content -LiteralPath $action)
+        $at = [array]::IndexOf([string[]]$lines, "    - name: $step")
+        if ($at -lt 0) { throw "no step '$step' in $action" }
+        for ($i = $at + 1; $i -lt $lines.Count -and $lines[$i] -notmatch '^\s*run: \|\s*$'; $i++) {
+            if ($lines[$i] -match '^    - ') { throw "step '$step' in $action has no run: | block" }
+        }
+        $indent = $lines[$i].Length - $lines[$i].TrimStart().Length
+        $body = New-Object System.Collections.ArrayList
+        for ($i++; $i -lt $lines.Count; $i++) {
+            $l = $lines[$i]
+            if ($l.Trim() -and ($l.Length - $l.TrimStart().Length) -le $indent) { break }
+            [void]$body.Add($(if ($l.Length -gt $indent + 2) { $l.Substring($indent + 2) } else { '' }))
+        }
+        $body -join "`n"
+    }
+    function Invoke-ActionRun([string]$step, [string]$temp) {
+        $text = (Get-ActionRun $step).Replace('${{ runner.temp }}', $temp).Replace('${{ inputs.artifact_name }}', 'docker-image-test')
+        $dir = New-Dir 'step'
+        $file = Join-Path $dir 'step.ps1'
+        Set-Content -LiteralPath $file -Encoding ASCII -Value ("`$ErrorActionPreference = 'stop'`n" + $text + "`nif ((Test-Path -LiteralPath variable:\LASTEXITCODE)) { exit `$LASTEXITCODE }")
+        $exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        # Its stderr is read here as records too: 'Continue', or the first
+        # line it writes would end this run instead. The step consumes tar's
+        # stderr itself, so a line on the step's own stderr is a PowerShell
+        # error: kept apart, as STDERR lines.
+        $log = & {
+            $ErrorActionPreference = 'Continue'
+            & $exe -NoProfile -NonInteractive -Command ". '$file'" 2>&1 | ForEach-Object {
+                if ($_ -is [System.Management.Automation.ErrorRecord]) { "STDERR: $_" } else { "$_" }
+            }
+        }
+        $code = $LASTEXITCODE
+        [pscustomobject]@{
+            Output = (@($log) -join "`n")
+            Code   = $code
+        }
+    }
+    # An image tarball, whole or cut short in a member's data, as a broken
+    # upload would leave it.
+    function New-ImageTemp([ValidateSet('complete', 'truncated', 'missing')][string]$kind) {
+        $temp = New-Dir 'runner-temp'
+        $img = Join-Path $temp 'keploy-image'
+        New-Item -ItemType Directory -Path $img | Out-Null
+        if ($kind -eq 'missing') { return $temp }
+        $src = New-Dir 'image-src'
+        $rng = New-Object System.Random 7
+        foreach ($f in @(@('layer-a', 200000), @('layer-b', 300000))) {
+            $bytes = New-Object byte[] $f[1]
+            $rng.NextBytes($bytes)
+            [IO.File]::WriteAllBytes((Join-Path $src $f[0]), $bytes)
+        }
+        $tar = Join-Path $img 'image.tar'
+        & {
+            $ErrorActionPreference = 'Continue'
+            tar -cf $tar -C $src . 2>&1 | ForEach-Object { Write-Host "tar: $_" }
+        }
+        if ($LASTEXITCODE -ne 0) { throw "tar -cf $tar exited $LASTEXITCODE" }
+        if ($kind -eq 'truncated') {
+            $fs = [IO.File]::Open($tar, [IO.FileMode]::Open)
+            try { $fs.SetLength($fs.Length - 100000) } finally { $fs.Dispose() }
+        }
+        $temp
+    }
+    function NoNativeError($result) {
+        $err = @($result.Output -split "`n" | Where-Object { $_ -like 'STDERR: *' })
+        if ($err.Count) { "the step wrote to its own stderr, a PowerShell error: $($err -join ' | ')" }
+    }
+    $check = 'Check the image tarball is complete (Windows)'
+    $failed = '::error::image\.tar in the docker-image-test artifact is missing or not a whole tar archive'
+
+    $temp = New-ImageTemp complete
+    $r = Invoke-ActionRun $check $temp
+    Report "the image check passes a complete tarball and keeps it" $r @(
+        (Code $r 0), (NoNativeError $r),
+        $(if (-not (Test-Path -LiteralPath (Join-Path $temp 'keploy-image/image.tar'))) { 'removed the tarball' }),
+        $(if ($r.Output -match '::(warning|error)::') { 'warned about a complete tarball' })
+    )
+    # Run 38739210530: the truncated tarball's tar.exe stderr ended the step
+    # as a NativeCommandError, not with the step's own error.
+    $temp = New-ImageTemp truncated
+    $r = Invoke-ActionRun $check $temp
+    Report "the image check fails a truncated tarball (run 38739210530) with its own error: no PowerShell error, exit 1" $r @(
+        (Code $r 1), (NoNativeError $r),
+        (Says $r ($failed + ' \(tar -tf exit [1-9]\d*: [^)]*\S') "the error naming the artifact, with tar's exit code and its reason")
+    )
+    $temp = New-ImageTemp missing
+    $r = Invoke-ActionRun $check $temp
+    Report "the image check fails a download with no image.tar with its own error" $r @(
+        (Code $r 1), (NoNativeError $r),
+        (Says $r ($failed + ' \(no image\.tar\)') 'the error that there is no image.tar')
+    )
 } finally {
     $env:KEPLOY_WINDOWS_SCRIPT_TESTS = $savedTestsFlag
+    $env:XDG_CACHE_HOME = $savedCacheHome
     Remove-Item -Recurse -Force -Path $work -ErrorAction SilentlyContinue
 }
 

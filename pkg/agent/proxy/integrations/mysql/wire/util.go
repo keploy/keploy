@@ -47,13 +47,42 @@ type DecodeContext struct {
 	// so the entry is cleared at both points.
 	LongDataParams map[uint32]map[uint16]bool
 
-	//runtime stmt-id → query mapping set when COM_STMT_PREP matches
+	// StmtParamTypes holds, per prepared statement (by ID), the types of
+	// its placeholders from its last COM_STMT_EXECUTE that sent them
+	// (new_params_bind_flag 1): an EXECUTE with the flag 0 sends none, and
+	// the server, and the decoder, read its values with these
+	// (preparedstmt.DecodeStmtExecute). A COM_STMT_CLOSE forgets them.
+	StmtParamTypes map[uint32][]mysql.Parameter
+
+	// StmtIDToQuery maps the connection's prepared statements, by ID, to
+	// their queries. Replay sets it when a COM_STMT_PREPARE matches; record
+	// sets it when a COM_STMT_PREPARE_OK answers one, and records the query
+	// on each command that names the statement (mysql.MetaQuery).
 	StmtIDToQuery map[uint32]string
 	// Statement ID counter for generating unique statement IDs during replay
 	NextStmtID uint32
 }
 
 const CLIENT_DEPRECATE_EOF = 0x01000000
+
+// rememberParamTypes notes the types params were sent with, for the
+// statement's EXECUTEs that send none (StmtParamTypes). It keeps no value,
+// and no name: a flag-0 EXECUTE sends none. The server keeps the types of the
+// statement's placeholders only, not of the query attributes sent after them
+// (a flag-0 EXECUTE may still carry NULL ones), so neither does this.
+func (d *DecodeContext) rememberParamTypes(stmtID uint32, params []mysql.Parameter) {
+	if ps := d.PreparedStatements[stmtID]; ps != nil && int(ps.NumParams) < len(params) {
+		params = params[:ps.NumParams]
+	}
+	types := make([]mysql.Parameter, len(params))
+	for i, p := range params {
+		types[i] = mysql.Parameter{Type: p.Type, Unsigned: p.Unsigned}
+	}
+	if d.StmtParamTypes == nil {
+		d.StmtParamTypes = make(map[uint32][]mysql.Parameter)
+	}
+	d.StmtParamTypes[stmtID] = types
+}
 
 func (d *DecodeContext) effectiveClientCaps() uint32 {
 	if d.PreferRecordedCaps && d.RecordedClientCaps != 0 {
