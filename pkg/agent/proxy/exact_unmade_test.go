@@ -394,6 +394,132 @@ func TestUnmadeWrite_ARecordingNotTheTestsOwnMadeAfterTheWriteIsNoAnswer(t *test
 	}
 }
 
+// A read before a write the replay has not made is never answered from
+// before a write the replay has made (Made): the open test's own, made in
+// this attempt, or any other recording a call of the set consumed (an
+// earlier test's, one a test shares). test-1 read the list; test-2
+// recorded block c1, block c2, then the list. With no read recorded
+// between the made write and the unmade one, the read misses, naming both.
+func TestUnmadeWrite_NeverFromBeforeAWriteTheReplayHasMade(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block0 := unmadeRecording("block-c0", models.Mongo, 500, "write", "block-c0")
+	blockC1 := unmadeRecording("block-c1", models.Mongo, 1000, "write", "block-c1")
+	blockC2 := unmadeRecording("block-c2", models.Mongo, 2000, "write", "block-c2")
+	listC1C2 := unmadeRecording("list-c1c2", models.Mongo, 2010, "read", "list")
+	use := func(t *testing.T, mm *MockManager, name string) {
+		t.Helper()
+		if !mm.MarkMockAsUsed(*viewCopy(t, mm, name)) {
+			t.Fatalf("%s was refused", name)
+		}
+	}
+	miss := func(t *testing.T, db integrations.MockMemDb, made, unmade string) {
+		t.Helper()
+		got := answer(t, db, viewCopy(t, db, "list-c1c2"), "list")
+		if !got.Applies() || got.Write.Name != unmade || got.Answer != nil {
+			t.Fatalf("got write %v answer %q; want a miss before %s", got.Write, answerName(got), unmade)
+		}
+		if got.Made == nil || got.Made.Name != made {
+			t.Fatalf("made = %v; want %s", got.Made, made)
+		}
+		if want := "no read was recorded between " + made + " and " + unmade + "."; !strings.Contains(got.Note(), want) {
+			t.Fatalf("Note() = %q; want it to say %q", got.Note(), want)
+		}
+	}
+	t.Run("the test's own write, made", func(t *testing.T) {
+		mm := unmadeStage(t, []*models.Mock{list1, blockC1, blockC2, listC1C2}, "test-2", blockC1, blockC2, listC1C2)
+		use(t, mm, "block-c1")
+		miss(t, mm, "block-c1", "block-c2")
+	})
+	t.Run("through a connection's scoped view", func(t *testing.T) {
+		mm := unmadeStage(t, []*models.Mock{list1, blockC1, blockC2, listC1C2}, "test-2", blockC1, blockC2, listC1C2)
+		use(t, mm, "block-c1")
+		miss(t, &scopedMockDb{MockMemDb: mm, live: true}, "block-c1", "block-c2")
+	})
+	t.Run("an earlier test's write, made", func(t *testing.T) {
+		mm := unmadeStage(t, []*models.Mock{list1, block0, blockC2, listC1C2}, "test-1", list1, block0)
+		use(t, mm, "list-t1")
+		use(t, mm, "block-c0")
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTest("test-2", []*models.Mock{blockC2, listC1C2})
+		miss(t, mm, "block-c0", "block-c2")
+	})
+	t.Run("an earlier test's write the replay never made bounds nothing", func(t *testing.T) {
+		mm := unmadeStage(t, []*models.Mock{list1, block0, blockC2, listC1C2}, "test-1", list1, block0)
+		use(t, mm, "list-t1")
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTest("test-2", []*models.Mock{blockC2, listC1C2})
+		if got := answer(t, mm, viewCopy(t, mm, "list-c1c2"), "list"); answerName(got) != "list-t1" || got.Made != nil {
+			t.Fatalf("answered by %q, made %v; want list-t1 and no made write", answerName(got), got.Made)
+		}
+	})
+	t.Run("a write a test shares, made by the test beside", func(t *testing.T) {
+		mm := NewMockManager(nil, nil, zap.NewNop())
+		t.Cleanup(mm.Close)
+		mm.SetMocksWithWindowThreeTier([]*models.Mock{list1, block0, blockC2, listC1C2}, nil, nil, models.BaseTime, time.Now())
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTestConcurrent("test-1", []*models.Mock{list1}, []*models.Mock{block0})
+		use(t, mm, "list-t1")
+		use(t, mm, "block-c0")
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTestConcurrent("test-2", []*models.Mock{blockC2, listC1C2}, []*models.Mock{block0})
+		miss(t, mm, "block-c0", "block-c2")
+	})
+	t.Run("the test's own write made by an earlier attempt only is unmade", func(t *testing.T) {
+		list2 := unmadeRecording("list-c1c2", models.Mongo, 1010, "read", "list")
+		mm := unmadeStage(t, []*models.Mock{list1, blockC1, list2}, "test-2", blockC1, list2)
+		use(t, mm, "block-c1")
+		mm.ServeExactPool(models.PoolKeyNone, nil)
+		mm.ServeExactTest("test-2", []*models.Mock{blockC1, list2})
+		got := answer(t, mm, viewCopy(t, mm, "list-c1c2"), "list")
+		if got.Write == nil || got.Write.Name != "block-c1" || answerName(got) != "list-t1" || got.Made != nil {
+			t.Fatalf("got write %v answer %q made %v; want block-c1 unmade in this attempt and list-t1 to answer", got.Write, answerName(got), got.Made)
+		}
+	})
+}
+
+// The recordings the manager keeps on disk (an earlier test's, once its
+// test ended) are read for the answer and the made writes alike: the whole
+// staged set, whatever request time the disk keeps in nanoseconds.
+func TestUnmadeWrite_TheRecordingsKeptOnDiskAreRead(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block0 := unmadeRecording("block-c0", models.Mongo, 500, "write", "block-c0")
+	blockC2 := unmadeRecording("block-c2", models.Mongo, 2000, "write", "block-c2")
+	listC2 := unmadeRecording("list-c2", models.Mongo, 2010, "read", "list")
+	stage := func(t *testing.T, onDisk ...*models.Mock) *MockManager {
+		t.Helper()
+		disk, err := NewDiskMocks(zap.NewNop())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = disk.Close() })
+		for _, mk := range onDisk {
+			if err := disk.Add(mk); err != nil {
+				t.Fatal(err)
+			}
+		}
+		disk.Finalize()
+		mm := unmadeStage(t, []*models.Mock{blockC2, listC2}, "test-2", blockC2, listC2)
+		mm.SetRecordedBefore(disk.RangeRecordedBefore)
+		return mm
+	}
+	t.Run("the answer", func(t *testing.T) {
+		mm := stage(t, list1)
+		if got := answer(t, mm, viewCopy(t, mm, "list-c2"), "list"); answerName(got) != "list-t1" {
+			t.Fatalf("answered by %q (note %q); want list-t1, kept on disk", answerName(got), got.Note())
+		}
+	})
+	t.Run("a made write", func(t *testing.T) {
+		mm := stage(t, list1, block0)
+		if err := mm.flagMockAsUsed(exactUsedState(block0), 0); err != nil {
+			t.Fatal(err)
+		}
+		got := answer(t, mm, viewCopy(t, mm, "list-c2"), "list")
+		if got.Answer != nil || got.Made == nil || got.Made.Name != "block-c0" {
+			t.Fatalf("answered by %q, made %v; want a miss after block-c0, kept on disk and made", answerName(got), got.Made)
+		}
+	})
+}
+
 // A connection's scoped view forwards the rule to the manager.
 func TestUnmadeWrite_AScopedViewForwardsTheRule(t *testing.T) {
 	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")

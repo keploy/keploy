@@ -11,18 +11,22 @@ import (
 )
 
 // unmadeStore serves exactly and says write is unmade before any read; it
-// holds consumed as the open test's answered recordings and, when before is
-// set, every recording made before an instant.
+// holds consumed as the open test's answered recordings, made as the
+// recordings the replay has made the call of, and, when before is set,
+// every recording made before an instant.
 type unmadeStore struct {
 	exactStore
 	write    *models.Mock
 	consumed []*models.Mock
 	before   []*models.Mock
+	made     map[string]bool
 }
 
 func (s unmadeStore) UnmadeWriteBefore(*models.Mock, func(*models.Mock) bool) (*models.Mock, bool) {
 	return s.write, s.write != nil
 }
+
+func (s unmadeStore) Made(mk *models.Mock) bool { return s.made[mk.Name] }
 
 func (s unmadeStore) ConsumedTestMocks() []*models.Mock { return s.consumed }
 
@@ -95,7 +99,8 @@ func TestReadBeforeUnmadeWrite_WhatTheStoreCannotTellKeepsTheChoiceOrFails(t *te
 		{name: "no comparison", db: rangingStore{exact}, chosen: chosen, gates: isWriteRec},
 		{name: "a store that cannot read what was recorded before", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, err: errNoEarlierRecordings},
 		{name: "a store whose read of what was recorded before fails", db: failingRangeStore{rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, err: errRangeRead},
-		{name: "the test's own answered recording, read without the recording", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
+		{name: "the test's own answered recording, from a store that cannot read the set (which writes the replay made)", db: unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: []*models.Mock{earlier}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, err: errNoEarlierRecordings},
+		{name: "the test's own answered recording", db: rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: []*models.Mock{earlier}, before: []*models.Mock{earlier}}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
 		{name: "the recording's", db: rangingStore{unmadeStore{exactStore: exactStore{exact: true}, write: write, before: []*models.Mock{earlier}}}, chosen: chosen, gates: isWriteRec, same: sameRead, applies: true, answer: "r0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,6 +129,86 @@ func TestReadBeforeUnmadeWrite_WhatTheStoreCannotTellKeepsTheChoiceOrFails(t *te
 			}
 		})
 	}
+}
+
+// A read before an unmade write is answered from after the newest write the
+// replay has made that can change it, never from before it: a state the
+// replay has moved past, which the database could not answer. With no
+// recording of the request between the two writes, it is a miss naming
+// both.
+func TestReadBeforeUnmadeWrite_NeverFromBeforeAWriteTheReplayHasMade(t *testing.T) {
+	write, chosen := unmadeRec("w", 100, "write"), unmadeRec("r", 110, "read")
+	r0, r1, r2 := unmadeRec("r0", 10, "read"), unmadeRec("r1", 60, "read"), unmadeRec("r2", 70, "read")
+	m, m2 := unmadeRec("m", 50, "write"), unmadeRec("m2", 80, "write")
+	atM := unmadeRec("r-at-m", 50, "read")
+	later := unmadeRec("m-later", 150, "write")
+	elsewhere := unmadeRec("m-elsewhere", 50, "write-elsewhere")
+	other := unmadeRec("m-http", 50, "write")
+	other.Kind = models.HTTP
+	store := func(consumed []*models.Mock, made []string, before ...*models.Mock) MockMemDb {
+		s := unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: consumed, before: before, made: map[string]bool{}}
+		for _, n := range made {
+			s.made[n] = true
+		}
+		return rangingStore{s}
+	}
+	for _, tc := range []struct {
+		name         string
+		db           MockMemDb
+		answer, made string
+	}{
+		{name: "a write the replay made between the newest read and the unmade write: a miss", db: store(nil, []string{"m"}, r0, m, write), made: "m"},
+		{name: "a read between the made write and the unmade write answers", db: store(nil, []string{"m"}, r0, m, r1, write), answer: "r1", made: "m"},
+		{name: "the test's own read from before the made write gives way to a recording after it", db: store([]*models.Mock{r0}, []string{"m"}, r0, m, r1, write), answer: "r1", made: "m"},
+		{name: "the test's own read after the made write answers before a newer recording", db: store([]*models.Mock{r1}, []string{"m"}, r0, m, r1, r2, write), answer: "r1", made: "m"},
+		{name: "a write the replay made that the recording made after the unmade one: a miss", db: store(nil, []string{"m-later"}, r0, r1, write, later), made: "m-later"},
+		{name: "the newest of two made writes bounds the answer", db: store(nil, []string{"m", "m2"}, r0, m, r2, m2, write), made: "m2"},
+		{name: "a read at the made write's instant is no answer", db: store(nil, []string{"m"}, r0, atM, m, write), made: "m"},
+		{name: "a write the replay has not made bounds nothing", db: store(nil, nil, r0, m, write), answer: "r0"},
+		{name: "a made recording that cannot change the read bounds nothing", db: store(nil, []string{"m-elsewhere"}, r0, elsewhere, write), answer: "r0"},
+		{name: "a made write of another kind bounds nothing", db: store(nil, []string{"m-http"}, r0, other, write), answer: "r0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ReadBeforeUnmadeWrite(tc.db, chosen, isWriteRec, sameRead)
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if !got.Applies() || got.Write != write {
+				t.Fatalf("write = %v; want w, unmade", got.Write)
+			}
+			if name := answerOf(got); name != tc.answer {
+				t.Fatalf("answer = %q; want %q", name, tc.answer)
+			}
+			made := ""
+			if got.Made != nil {
+				made = got.Made.Name
+			}
+			if made != tc.made {
+				t.Fatalf("made = %q; want %q", made, tc.made)
+			}
+			note := got.Note()
+			if tc.answer != "" {
+				if note != "" {
+					t.Fatalf("an answered read notes a miss: %q", note)
+				}
+				return
+			}
+			if want := "an extra read before w, after " + tc.made + ": no read was recorded between " + tc.made + " and w."; !strings.HasPrefix(note, want) {
+				t.Fatalf("Note() = %q; want it to begin %q", note, want)
+			}
+		})
+	}
+	says := BeforeUnmadeWrite{Write: write, WriteSays: "an update of oauth.blocklist", Made: m, MadeSays: "an update of oauth.blocklist"}
+	if want := "an extra read before w (an update of oauth.blocklist), after m (an update of oauth.blocklist): no read was recorded between m (an update of oauth.blocklist) and w (an update of oauth.blocklist)."; !strings.HasPrefix(says.Note(), want) {
+		t.Fatalf("Note() = %q; want it to begin %q", says.Note(), want)
+	}
+}
+
+func answerOf(b BeforeUnmadeWrite) string {
+	if b.Answer == nil {
+		return ""
+	}
+	return b.Answer.Name
 }
 
 // A read answered from before the write is reported as an answer that
