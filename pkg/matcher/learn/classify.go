@@ -1139,13 +1139,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	out := make([]Learned, 0, len(drift))
 	// leaf classifies one changed leaf, r as recorded and l as F saw it, as
-	// a value of the call whose window is w.
-	leaf := func(r, l Leaf, w *Window) Learned {
+	// a value of the call whose window is w. noSource: as a value no
+	// earlier place is the source of (no variable's search), every other
+	// rule as it stands.
+	leaf := func(r, l Leaf, w *Window, noSource bool) Learned {
 		if unreadRaw != "" {
 			return Learned{Kind: KindUnaccounted, Recorded: r, Live: l, Why: unreadRaw}
 		}
 		if r.Type == Instant || l.Type == Instant {
-			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places)
+			return dc.classifyInstant(r, l, at, served, raw, resp, w, unreadReq, places, noSource)
 		}
 		ln := Learned{Kind: KindNoise, Recorded: r, Live: l}
 		var fol *follows
@@ -1153,7 +1155,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			fol = &follows{dc: dc, rec: r.Value, live: l.Value, at: at}
 		}
 		if r.Value != "" {
-			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok {
+			if from, ok := appearedIn(dc, dc.ofIn(r.Value, l.Value, w, at), at, served, raw, fol); ok && !noSource {
 				ln.Kind, ln.From = KindVariable, from
 				if from.Side == "" || from.Echo {
 					ln.Why = evidence(dc.ofIn(r.Value, l.Value, w, at), from)
@@ -1363,7 +1365,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	}
 	for _, p := range drift {
 		r, l := rec.Leaves[p], live.Leaves[p]
-		ln := leaf(r, l, w)
+		ln := leaf(r, l, w, false)
 		// A read made before its call's window: in keploy mock's client
 		// tests (the only calls whose window knows each run's test begin),
 		// a value refused in its call's window is classified again in the
@@ -1377,9 +1379,34 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// stands: the wider window turns a refusal into a checked read,
 		// never into noise.
 		if wb := w.sinceBegin(); ln.Kind == KindUnaccounted && wb != nil {
-			if early := leaf(r, l, wb); early.Kind == KindClockRead && early.Read != nil {
+			if early := leaf(r, l, wb, false); early.Kind == KindClockRead && early.Read != nil {
 				early.Read.Since = models.SinceTestBegin
 				ln = early
+			}
+		}
+		// A copy of an earlier read of the clock that is a read in its own
+		// call's window too: under the rule a copy follows its source
+		// (follow), in keploy mock's client tests (the only calls whose
+		// window knows each run's test begin), a value learned as a
+		// variable of an earlier place (a copy of what the test's earlier
+		// call sent, which held it in both runs) that, read as a value no
+		// earlier place is the source of, is a plain read of the clock its
+		// call's window holds in both runs, is learned as a read of the
+		// clock since its test began (models.SinceTestBegin), never as the
+		// variable. Both explanations hold in the rounds, and that read
+		// holds under both: the earlier place's read was made after the
+		// test began too. Learned as a variable, a full round that made the
+		// two reads in one second would bind the value to the earlier
+		// place, and one that made them a second apart would learn a read,
+		// so a replay whose reads land a second apart would miss, or not,
+		// by the full round's timing. A copy its own window does not hold
+		// stays the variable (the copy alone explains it), and so does
+		// anything else learned as a value with no source (noise, an echo,
+		// a read plus an offset, a refusal).
+		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil {
+			if own := leaf(r, l, w, true); own.Kind == KindClockRead && own.Read != nil {
+				own.Read.Since = models.SinceTestBegin
+				ln = own
 			}
 		}
 		out = append(out, ln)
