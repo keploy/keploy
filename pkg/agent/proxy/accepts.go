@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"syscall"
 
@@ -152,6 +153,14 @@ func (p *Proxy) warnUncounted(err error) {
 // still installed.
 func (p *Proxy) canary(ctx context.Context, ln net.Listener) {
 	if _, err := p.markedListener(); err != nil {
+		return
+	}
+	// On darwin, connection counting is done in userspace by the shim's
+	// CONNECT messages (ProxyConnsReporter), not by the kernel. The canary
+	// verifies kernel-level counting by dialing the proxy's own listener,
+	// which hangs on darwin because the self-dial can be intercepted by
+	// the shim or fail to reach the listener. Skip it.
+	if runtime.GOOS == "darwin" {
 		return
 	}
 	defer context.AfterFunc(ctx, func() { _ = ln.Close() })()
