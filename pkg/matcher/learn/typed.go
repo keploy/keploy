@@ -1157,13 +1157,8 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		if !x.earlierThan(at) {
 			continue
 		}
-		for _, f := range x.fields {
-			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
-				return Place{Mock: x.mock, Field: f.describe(), Echo: true}, true
-			}
-		}
-		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
-			return Place{Mock: x.mock, Echo: true}, true
+		if from, ok := dc.echoRaw(x, echoed); ok {
+			return from, true
 		}
 	}
 	return Place{}, false

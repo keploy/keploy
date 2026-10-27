@@ -551,6 +551,19 @@ func (dc *DriftCache) holdsRecorded(text string, ms []echoMatch) bool {
 	return false
 }
 
+// holdsRecordedIn is holdsRecorded of a text whose keyed instants are held
+// (payloadMoments, fieldMoments).
+func holdsRecordedIn(held []moment, ms []echoMatch) bool {
+	for _, m := range ms {
+		for _, h := range held {
+			if namesMomentApart(h, m.rec, m.live, m.rules) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // holdsLive reports whether text holds the moment F saw of one of ms, by one
 // of its rules (any, where it has none), by which it does not name the
 // recorded moment too.
