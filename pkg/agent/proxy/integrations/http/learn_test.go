@@ -4575,6 +4575,8 @@ func TestALearnRefusalSaysWhenKeployCannotFollowTheValue(t *testing.T) {
 		{"from a form field that held it", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.user", Value: "abc"}, Live: learn.Leaf{Path: "body.user", Value: "xyz"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "id", Whole: true, Live: "xyz", Own: true}}, learn.CauseNotFollowed},
 		{"not what a form field held", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.user", Value: "abc"}, Live: learn.Leaf{Path: "body.user", Value: "qqq"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "id", Whole: true, Live: "xyz", Own: true}}, ""},
 		{"read two ways that disagree", learn.Learned{Kind: learn.KindVariable, Recorded: rec, From: learn.Place{Mock: "mock-1", AtCall: true}, Doubted: true}, ""},
+		{"picked by the clock from a field", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.at", Value: "10:00"}, Live: learn.Leaf{Path: "body.at", Value: "11:00"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "body.at", Var: "body.at", Whole: true, Echo: true, Live: "10:00", Own: true}}, learn.CauseNotFollowed},
+		{"picked by the clock from a form field", learn.Learned{Kind: learn.KindVariable, Recorded: learn.Leaf{Path: "body.at", Value: "10:00"}, Live: learn.Leaf{Path: "body.at", Value: "11:00"}, From: learn.Place{Mock: "mock-1", Side: learn.Request, Path: "at", Whole: true, Echo: true, Live: "10:00", Own: true}}, learn.CauseNotFollowed},
 	} {
 		_, why, cause := learnPlan(nil, 0, m, learn.Shape{}, true, []learn.Learned{c.l}, nil, nil)
 		if why == "" {

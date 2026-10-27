@@ -2001,6 +2001,17 @@ func learnPlan(tracker *learn.Tracker, test uint64, m *models.Mock, rec learn.Sh
 				}
 				limit(why)
 				continue
+			case from.Echo:
+				// A moment the app picked by its clock from what an earlier
+				// call sent (the echo: learn.evidence), where F saw the
+				// recorded moment: no copy of the value there, so nothing
+				// to compare with what F saw, and no variable binds it.
+				why := r.Path + " carries a moment picked by the clock from what " + from.Mock + " sent earlier in the test at " + from.Path + ", which keploy cannot follow yet"
+				if l.Why != "" {
+					why += "; " + l.Why
+				}
+				limit(why)
+				continue
 			case !from.Whole || from.Var == "":
 				// A request place that held the value whole, where keploy
 				// binds no variable (a form field, a text body): the call
