@@ -498,3 +498,87 @@ func TestABackgroundMarkLeavesAnEntryUnassertedOnlyUnderTheSwitch(t *testing.T) 
 		t.Fatal("without the switch a marked entry is not asserted")
 	}
 }
+
+// Under the switch keploy test names, per test, the recordings marked as the
+// application's background work that the test did not use (unused_background),
+// so judging can take out of the recording what no round used; a marked
+// recording the test used is not named, and neither fails the test. With the
+// switch off nothing is named, whatever the marks.
+func TestATestNamesTheMarkedRecordingsItDidNotUse(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(switchName(on), func(t *testing.T) {
+			setSwitch(t, on)
+			h := newPartialRunHarness(t, 1, 0)
+			pinWindows(h)
+			h.mocks.filtered = []*models.Mock{httpAt("mock-a", 1010), httpAt("mock-tick", 1020), httpAt("mock-sweep", 1030)}
+			mappingFile(t, h, map[string][]models.MockEntry{"test-1": {
+				{Name: "mock-a", Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(attrAt(1010))},
+				{Name: "mock-tick", Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(attrAt(1020)), Background: "a timer's call"},
+				{Name: "mock-sweep", Kind: string(models.HTTP), ReqTimestampMock: models.FormatMockTimestamp(attrAt(1030)), Background: "a sweep's call"},
+			}})
+			// The timer's call is made; the sweep's is not.
+			h.replayer.hookImpl = prHooks{consumedFor: consumedByWindow(h, map[string][]models.MockState{"test-1": {mongoAt("mock-a", 1010), mongoAt("mock-tick", 1020)}})}
+			h.run(t)
+			r := resultOf(t, h, "test-1")
+			var want []models.UnconsumedMock
+			if on {
+				want = []models.UnconsumedMock{{Name: "mock-sweep", Kind: string(models.HTTP)}}
+				if r.Status != models.TestStatusPassed {
+					t.Fatalf("status %s; a marked recording the test did not use fails nothing", r.Status)
+				}
+			}
+			if !reflect.DeepEqual(r.FailureInfo.UnusedBackground, want) {
+				t.Fatalf("unused_background %+v; want %+v", r.FailureInfo.UnusedBackground, want)
+			}
+		})
+	}
+}
+
+// A test whose every recording is marked has nothing the assertion may check,
+// and still names the marked ones it did not use; one whose consumption was
+// not read names none (nothing says it did not use them).
+func TestUnusedBackgroundIsNamedWithNothingEligibleAndNotWhenConsumptionWasUnread(t *testing.T) {
+	setSwitch(t, true)
+	expected := []models.MockEntry{
+		{Name: "tick", Kind: string(models.Mongo), Background: "a timer's call"},
+		{Name: "tick", Kind: string(models.Mongo), Background: "a timer's call"},
+		{Name: "sweep", Kind: string(models.Mongo), Background: "a sweep's call"},
+	}
+	// The sweep was used, by a call the assertion leaves out of its consumed
+	// side (a connection mock that is not data plane): still used.
+	consumed := []models.MockState{{Name: "sweep", Kind: models.Mongo, Type: "connection"}}
+	got := buildDepResults(expected, consumed, true, nil, nil, nil)
+	if got.Checked || !reflect.DeepEqual(got.UnusedBackground, []models.UnconsumedMock{{Name: "tick", Kind: string(models.Mongo)}}) {
+		t.Fatalf("got %+v; want not checked, tick named once as unused", got)
+	}
+	if got := buildDepResults(expected, nil, false, nil, nil, nil); got.UnusedBackground != nil {
+		t.Fatalf("consumption unread: %+v; want nothing named", got)
+	}
+	var res models.TestResult
+	attachDepResults(&res, models.TestStatusPassed, got, true)
+	if !reflect.DeepEqual(res.FailureInfo.UnusedBackground, []models.UnconsumedMock{{Name: "tick", Kind: string(models.Mongo)}}) {
+		t.Fatalf("attached %+v", res.FailureInfo.UnusedBackground)
+	}
+	setSwitch(t, false)
+	if got := buildDepResults(expected, consumed, true, nil, nil, nil); got.UnusedBackground != nil {
+		t.Fatalf("switch off: %+v; want nothing named", got)
+	}
+}
+
+// A marked recording one test left unused that a sibling consumed is named
+// with the sibling (the call was made, so judging keeps it), and is no
+// failure pair: it fails nothing.
+func TestMarkConsumedByNamesTheSiblingThatUsedABackgroundRecording(t *testing.T) {
+	results := []models.TestResult{
+		{TestCaseID: "test-1", FailureInfo: models.FailureInfo{UnusedBackground: []models.UnconsumedMock{{Name: "tick"}, {Name: "sweep"}}}},
+		{TestCaseID: "test-2"},
+	}
+	consumers := map[string][]string{}
+	noteConsumers(consumers, "test-1", []models.MockState{{Name: "sweep"}})
+	noteConsumers(consumers, "test-2", []models.MockState{{Name: "tick"}})
+	pairs := markConsumedBy(results, consumers)
+	got := results[0].FailureInfo.UnusedBackground
+	if got[0].ConsumedBy != "test-2" || got[1].ConsumedBy != "" || len(pairs) != 0 {
+		t.Fatalf("unused %+v, pairs %v; want tick consumed by test-2, sweep by no other test, no pair", got, pairs)
+	}
+}
