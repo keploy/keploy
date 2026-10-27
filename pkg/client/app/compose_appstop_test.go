@@ -34,6 +34,12 @@ type composeDocker struct {
 	exitsOnInt bool
 	signals    []string
 	starts     int
+	// runs counts the starts that ran the container (of one that was not
+	// running); the inspect gives it as the run's start time.
+	runs int
+	// startErr, set, is what each start says, though the daemon carries
+	// it out (a start told failed, as a bounded call on a loaded daemon).
+	startErr error
 	// nextExit is closed at the container's next exit, as the daemon
 	// records it, and made anew at once.
 	nextExit   chan struct{}
@@ -170,13 +176,16 @@ func (d *composeDocker) ContainerStart(context.Context, string, container.StartO
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.starts++
-	d.running = true
-	return nil
+	if !d.running {
+		d.running = true
+		d.runs++
+	}
+	return d.startErr
 }
 
 func (d *composeDocker) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
 	d.mu.Lock()
-	running, project, pid, id, code := d.running, d.project, d.pid, d.id, d.exitCode
+	running, project, pid, id, code, run := d.running, d.project, d.pid, d.id, d.exitCode, d.runs
 	after := d.afterInspect
 	d.afterInspect = nil
 	d.mu.Unlock()
@@ -185,7 +194,7 @@ func (d *composeDocker) ContainerInspect(context.Context, string) (container.Ins
 	}
 	defer func() { d.inspected <- struct{}{} }()
 	return container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code}},
+		ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Pid: pid, ExitCode: code, StartedAt: strconv.Itoa(run)}},
 		Config:            &container.Config{Labels: map[string]string{"com.docker.compose.project": project}},
 	}, nil
 }
