@@ -36,8 +36,9 @@ type forcedPauseKnob struct {
 	logger   *zap.Logger
 }
 
-// forcedPause is nil unless ForcePauseEnv is set, so that, unset, an ingress
-// request costs one atomic load.
+// forcedPause is nil unless ForcePauseEnv is set, so that, unset, the knob
+// costs an ingress request one atomic load, on top of the atomic add that
+// counts it (IngressRequest).
 var forcedPause atomic.Pointer[forcedPauseKnob]
 
 // parseForcedPause reads a ForcePauseEnv value: two request numbers,
