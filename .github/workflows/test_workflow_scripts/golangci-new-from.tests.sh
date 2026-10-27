@@ -7,9 +7,12 @@
 # made on b0, before main moved to b1. A checkout of the whole history picks
 # --new-from-merge-base=origin/main for the pull request, whose merge base is
 # b0: git's diff from it names pr.go and not base.go, so main's later commits
-# are never taken for the pull request's. A push picks --new-from-rev=<before>,
-# and a push that creates the branch (before all zeros) the merge base with
-# the default branch. Each of these fails, names what is missing and writes
+# are never taken for the pull request's. A pull request onto another branch
+# (fix/stack-base, a stacked one) picks that branch. A push picks
+# --new-from-rev=<before>, and a push that creates the branch (before all
+# zeros) the merge base with the default branch, whichever branch that is
+# (develop). A before commit that only starts with zeros is a real one and is
+# looked up. Each of these fails, names what is missing and writes
 # no flag: a checkout one commit deep (actions/checkout's default), a base
 # branch or before commit the checkout lacks, a base branch with no history in
 # common with HEAD (an orphan branch), an empty GITHUB_BASE_REF, BEFORE
@@ -37,6 +40,8 @@ git init -q -b main "$up"
   printf 'package p\n\nfunc B() {}\n' >pr.go
   git add -A && git commit -qm b0
   git tag b0
+  git branch fix/stack-base
+  git branch develop
   git checkout -qb pr
   printf 'package p\n\nfunc B() { _ = 1 }\n' >pr.go
   git commit -qam p1
@@ -108,10 +113,15 @@ changed=$(git -C "$tmp/full" diff --name-only "$mb" --)
 if [[ $mb == "$b0" && $changed == pr.go ]]; then ok "pull request: main's later commit is not in its diff"; else
   bad "pull request: merge base $mb (want b0 $b0), diff names '$changed' (want pr.go)"; fi
 
+expect "pull request onto another branch: merge base with that branch" "--new-from-merge-base=origin/fix/stack-base" \
+  "$tmp/full" GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=fix/stack-base
+
 expect "push: from the before commit" "--new-from-rev=$b0" \
   "$tmp/full" GITHUB_EVENT_NAME=push BEFORE="$b0" DEFAULT_BRANCH=main
 expect "push creating the branch: merge base with the default branch" "--new-from-merge-base=origin/main" \
   "$tmp/full" GITHUB_EVENT_NAME=push BEFORE=0000000000000000000000000000000000000000 DEFAULT_BRANCH=main
+expect "push creating the branch, default branch not main: merge base with it" "--new-from-merge-base=origin/develop" \
+  "$tmp/full" GITHUB_EVENT_NAME=push BEFORE=0000000000000000000000000000000000000000 DEFAULT_BRANCH=develop
 
 refuse "pull request, checkout one commit deep" "fetch-depth: 0" \
   "$tmp/shallow" GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main
@@ -123,6 +133,12 @@ refuse "pull request, empty GITHUB_BASE_REF" "GITHUB_BASE_REF is empty" \
   "$tmp/full" GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=
 refuse "push, before commit not in the checkout" "1234567890123456789012345678901234567890 is not in the checkout" \
   "$tmp/full" GITHUB_EVENT_NAME=push BEFORE=1234567890123456789012345678901234567890 DEFAULT_BRANCH=main
+# One push in 16 has a before commit starting with 0. Taken for a branch-
+# creating push's all-zero before, a push to main would be linted from its
+# merge base with main, which is HEAD itself: nothing. This before starts and
+# ends with 0, so it is looked up even if the all-zero match loses an anchor.
+refuse "push, before commit starting with 0 not in the checkout" "0000000000000000000000000000000000000010 is not in the checkout" \
+  "$tmp/full" GITHUB_EVENT_NAME=push BEFORE=0000000000000000000000000000000000000010 DEFAULT_BRANCH=main
 refuse "push, empty BEFORE" "BEFORE (github.event.before) is empty" \
   "$tmp/full" GITHUB_EVENT_NAME=push BEFORE= DEFAULT_BRANCH=main
 refuse "push creating the branch, empty DEFAULT_BRANCH" "DEFAULT_BRANCH is empty" \
