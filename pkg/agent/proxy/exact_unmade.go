@@ -55,6 +55,27 @@ func (m *MockManager) UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock
 	return nil, false
 }
 
+// Made implements integrations.UnmadeWriteReader: whether the replay has
+// made mk's call. One of the open test's own recordings (not one it shares)
+// has when it answered in the view in force, this attempt of the test: an
+// earlier attempt's answer made nothing the retry has made. Any other
+// recording of the staged set has when a call of the set consumed it
+// (consumedInSet): an earlier test's, the background's, the start-up
+// window's, a shared one.
+func (m *MockManager) Made(mk *models.Mock) bool {
+	if mk == nil {
+		return false
+	}
+	if v := m.exactView(); v != nil && v.test != "" {
+		if i, own := v.index[mk.Name]; own && !v.isCand(i) {
+			v.mu.Lock()
+			defer v.mu.Unlock()
+			return v.consumed[i]
+		}
+	}
+	return m.consumedInSet(mk.Name)
+}
+
 var _ integrations.UnmadeWriteReader = (*MockManager)(nil)
 
 // UnmadeWriteBefore is the manager's (integrations.UnmadeWriteReader) while
@@ -77,6 +98,15 @@ func (s *scopedMockDb) UnmadeWriteBefore(mk *models.Mock, gates func(*models.Moc
 		return ur.UnmadeWriteBefore(mk, gates)
 	}
 	return nil, false
+}
+
+// Made forwards the store's (integrations.UnmadeWriteReader); false when it
+// keeps no such reader, which then says no write is unmade either.
+func (s *scopedMockDb) Made(mk *models.Mock) bool {
+	if ur, ok := s.MockMemDb.(integrations.UnmadeWriteReader); ok {
+		return ur.Made(mk)
+	}
+	return false
 }
 
 var _ integrations.UnmadeWriteReader = (*scopedMockDb)(nil)

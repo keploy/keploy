@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 )
@@ -25,13 +27,18 @@ import (
 //
 // The rule: a read an answer step would answer with a recording made after
 // one of the open test's own writes the replay has not made yet, of a write
-// that can change what the read reads, is answered with the newest recording of the same request made
-// before that write: from earlier in the test, else from earlier in the
-// recording (an earlier test, the start-up window, the background). Never
-// with a recording made after a write the replay has not made, whoever
-// recorded it: the open test (after the write, in recorded order), another
-// test, or the background (a request time after the write's). With none,
-// it is a miss that says so (BeforeUnmadeWrite.Note).
+// that can change what the read reads, is answered with the newest recording
+// of the same request made before that write and after the newest write the
+// replay has made that can change it too: from earlier in the test, else
+// from earlier in the recording (an earlier test, the start-up window, the
+// background). Never with a recording made after a write the replay has not
+// made, whoever recorded it: the open test (after the write, in recorded
+// order), another test, or the background (a request time after the
+// write's). Never with one made before a write the replay has made either
+// (the open test's, an earlier test's, the background's): that is a state
+// the replay has moved past, which the database could not answer. With none
+// in between, it is a miss that says so (BeforeUnmadeWrite.Note), naming
+// the unmade write, and the made one when there is one.
 // Serving the earlier recording consumes nothing: the read the test recorded
 // after the write still answers the call made after it. The read is still
 // that recording's call, made at another point than the recording made it:
@@ -46,7 +53,8 @@ import (
 // same request as the call (same), as it compares them when it serves
 // exactly. A write it cannot tell the reach of holds every read. The store says which of the open test's writes
 // the replay has not made (UnmadeWriteReader) and holds the recordings made
-// before them (ExactConsumedReader, RecordedBeforeReader).
+// before them (ExactConsumedReader, RecordedBeforeReader), and which
+// recordings the replay has made the call of (UnmadeWriteReader.Made).
 
 // UnmadeWriteReader is an optional MockMemDb capability under exact serving:
 // whether a recording of the open test's own is recorded after a write of
@@ -64,6 +72,14 @@ type UnmadeWriteReader interface {
 	// own that answered already, or no test is open. gates is called
 	// without the store's locks held.
 	UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock) bool) (*models.Mock, bool)
+	// Made reports whether the replay has made mk's call: for one of the
+	// open test's own recordings, that it answered a call in the test's
+	// view in force (this attempt of the test); for any other recording
+	// (another test's, the background's, the start-up window's, one the
+	// test shares), that a call of the staged set consumed it. A write
+	// made is one whose state a later read is answered from or after,
+	// never from before.
+	Made(mk *models.Mock) bool
 }
 
 // OwnRecordingStandIn is an optional MockMemDb capability under exact
@@ -112,9 +128,15 @@ type BeforeUnmadeWrite struct {
 	// the report: what it is and what it changes (Mongo: "an insert into
 	// db.coll"); "" names Write by its recording alone.
 	WriteSays string
+	// Made is, with Write set, the newest write by request time the replay
+	// has made (UnmadeWriteReader.Made) that can change what the read reads:
+	// the answer is made after it. nil when the replay has made none.
+	Made *models.Mock
+	// MadeSays is the parser's account of Made, as WriteSays is of Write.
+	MadeSays string
 	// Answer is, with Write set, the newest recording of the same request
-	// made before Write, a copy, to answer the read with without consuming
-	// anything: nil for none, a miss (Note).
+	// made before Write and after Made, a copy, to answer the read with
+	// without consuming anything: nil for none, a miss (Note).
 	Answer *models.Mock
 }
 
@@ -123,10 +145,17 @@ type BeforeUnmadeWrite struct {
 func (b BeforeUnmadeWrite) Applies() bool { return b.Write != nil }
 
 // Note is the reason of the miss when no recording of the request was made
-// before the write: "" when the rule does not apply or Answer answers.
+// before the write (and after the made one, Made): "" when the rule does
+// not apply or Answer answers.
 func (b BeforeUnmadeWrite) Note() string {
 	if b.Write == nil || b.Answer != nil {
 		return ""
+	}
+	if b.Made != nil {
+		return fmt.Sprintf("an extra read before %s, after %s: no read was recorded between %s and %s. "+
+			"The first is a write the replay has made, the second one the test recorded before this read's recording that the replay has not made yet; both can change what this read reads. "+
+			"Under exact serving (KEPLOY_PROVEN) a read is never answered with a recording made after a write the replay has not made, nor with one made before a write it has made",
+			b.writeName(), b.madeName(), b.madeName(), b.writeName())
 	}
 	return fmt.Sprintf("an extra read before %s (a write the test recorded before this read's recording, which the replay has not made yet, and which can change what this read reads); "+
 		"the recording has no answer from before it. Under exact serving (KEPLOY_PROVEN) a read is never answered with a recording made after a write the replay has not made",
@@ -154,6 +183,14 @@ func (b BeforeUnmadeWrite) writeName() string {
 	return b.Write.Name + " (" + b.WriteSays + ")"
 }
 
+// madeName is Made's name, with the parser's account of it (MadeSays).
+func (b BeforeUnmadeWrite) madeName() string {
+	if b.MadeSays == "" {
+		return b.Made.Name
+	}
+	return b.Made.Name + " (" + b.MadeSays + ")"
+}
+
 // ReportAnswered reports a read b answers from before the write
 // (models.AnswerBeforeUnmadeWrite) through the reporter misses take
 // (models.ReportAnswer), so the run report names it, the write and the
@@ -175,19 +212,29 @@ func ReportAnswered(ctx context.Context, b BeforeUnmadeWrite, r *models.MockMism
 // says a write is unmade but cannot read the recordings made before it.
 var errNoEarlierRecordings = errors.New("the mock store cannot read the recordings made before a write")
 
+// everRecorded is a request time after every recording's: RangeRecordedBefore
+// up to it visits the whole staged set. It is the latest instant whose Unix
+// time in nanoseconds an int64 holds (in 2262), as a store that keeps request
+// times in nanoseconds compares them: a later one has no such value.
+var everRecorded = time.Unix(0, math.MaxInt64)
+
 // ReadBeforeUnmadeWrite decides, under exact serving, whether chosen, the
 // recording an answer step would answer a read with, was recorded after a write
 // of the open test the replay has not made (UnmadeWriteReader) that can
-// change what chosen reads (gates), and if so
-// which recording answers the read instead: the newest one made before
-// that write that same accepts, of chosen's kind, of the test's own that
+// change what chosen reads (gates), and if so which recording answers the
+// read instead: the newest one that same accepts, of chosen's kind, made
+// before that write and after the newest write the replay has made that
+// gates says can change what chosen reads (UnmadeWriteReader.Made, at any
+// request time, of the whole staged set: Made), of the test's own that
 // answered (ExactConsumedReader), else of the whole recording
 // (RecordedBeforeReader). gates is the parser's, built for chosen: whether a
 // recording of the kind is a write that can change what chosen reads; nil
 // when chosen reads nothing a write changes (a write is no read), and chosen
 // keeps its choice. With exact serving off, for a store that cannot tell,
 // and for a recording no unmade write it gates on precedes, the zero value:
-// the parser serves chosen as before.
+// the parser serves chosen as before. A store that tells of an unmade write
+// but cannot read the staged set, or fails to, fails the read: it cannot
+// tell which writes the replay has made.
 //
 // A parser asks it of the recording a step will answer the read with, and
 // answers the read with Answer when it is set: chosen is then filed with the
@@ -206,34 +253,55 @@ func ReadBeforeUnmadeWrite(db MockMemDb, chosen *models.Mock, gates, same func(*
 	}
 	out := BeforeUnmadeWrite{Write: w}
 	before := w.Spec.ReqTimestampMock
-	// earlier keeps the newest recording made before the write that is the
-	// read's request; the first of equal request times, as recorded order
-	// files them.
-	var answer *models.Mock
-	earlier := func(mk *models.Mock) bool {
+	rb, ok := db.(RecordedBeforeReader)
+	if !ok {
+		return out, errNoEarlierRecordings
+	}
+	// newestOf keeps, in *kept, the newest recording made before the write
+	// that is the read's request; the first of equal request times, as
+	// recorded order files them.
+	newestOf := func(kept **models.Mock, mk *models.Mock) {
 		if mk == nil || mk.Kind != chosen.Kind || !mk.Spec.ReqTimestampMock.Before(before) || !same(mk) {
+			return
+		}
+		if *kept == nil || mk.Spec.ReqTimestampMock.After((*kept).Spec.ReqTimestampMock) {
+			*kept = mk
+		}
+	}
+	// The whole set: the newest write the replay has made that can change
+	// what chosen reads (Made is asked first: it is the store's map, gates
+	// the parser's decode), and the newest recording of the request before
+	// the write.
+	var recorded *models.Mock
+	err := rb.RangeRecordedBefore(everRecorded, func(mk *models.Mock) bool {
+		if mk == nil || mk.Kind != chosen.Kind {
 			return true
 		}
-		if answer == nil || mk.Spec.ReqTimestampMock.After(answer.Spec.ReqTimestampMock) {
-			answer = mk
+		if ur.Made(mk) && gates(mk) && (out.Made == nil || mk.Spec.ReqTimestampMock.After(out.Made.Spec.ReqTimestampMock)) {
+			out.Made = mk
 		}
+		newestOf(&recorded, mk)
 		return true
+	})
+	if err != nil {
+		return out, err
 	}
+	// after says whether mk was made after the newest write the replay has
+	// made: a state that write is in.
+	after := func(mk *models.Mock) bool {
+		return mk != nil && (out.Made == nil || mk.Spec.ReqTimestampMock.After(out.Made.Spec.ReqTimestampMock))
+	}
+	var own *models.Mock
 	if er, ok := db.(ExactConsumedReader); ok {
 		for _, mk := range er.ConsumedTestMocks() {
-			earlier(mk)
+			newestOf(&own, mk)
 		}
 	}
-	if answer == nil {
-		rb, ok := db.(RecordedBeforeReader)
-		if !ok {
-			return out, errNoEarlierRecordings
-		}
-		if err := rb.RangeRecordedBefore(before, earlier); err != nil {
-			return out, err
-		}
+	answer := own
+	if !after(answer) {
+		answer = recorded
 	}
-	if answer != nil {
+	if after(answer) {
 		out.Answer = answer.DeepCopy()
 		if si, ok := db.(OwnRecordingStandIn); ok {
 			si.StandIn(chosen)
