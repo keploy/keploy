@@ -94,6 +94,10 @@ type provenWire struct {
 	// read (settle).
 	drops      uint64
 	dropsKnown bool
+	// owned is the work the last window's end cut (settledSince), nil when
+	// it cut none (its proxy cannot, or the switch is off): all a begin
+	// waits for (settleBegin).
+	owned coreAgent.InFlightScope
 	// refusals are what the wire refused, and what an integration refused
 	// and told the agent, in order, as windows (models.ScopeWindow.Refused).
 	refusals []models.ScopeWindow
@@ -532,12 +536,12 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 		capture = c
 	}
-	// The calls the application made before this begin are settled first
-	// (settle_proven.go): they are the pool's, or the previous test's, never
-	// this test's.
+	// The previous test's calls are settled first (settleBegin): they are
+	// never this test's. Calls made since its end are this test's or
+	// background work, and do not hold the begin.
 	// A connection whose held requests cannot be told does not stop the
 	// begin: the test's end finds it, and the test is not verified.
-	drops, err := a.settle(ctx, a.replaying())
+	drops, err := a.settleBegin(ctx, a.replaying())
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")

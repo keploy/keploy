@@ -589,7 +589,8 @@ func TestTheSettleWatchdogWeighsTheAcceptsTheEndWaitsFor(t *testing.T) {
 // says, whatever the proxy's whole count (settledProxy.pending) is.
 // stuck are the connections its scope's PendingProgress names, each with its
 // progress, until GiveUp gives up on them; behind is what its Behind says,
-// until charged.
+// until charged. With ownCuts each scope holds what scopePending said when
+// it was cut (cuts, in order), not what it says later.
 type scopedProxy struct {
 	*settleProxy
 	scopePending atomic.Int32
@@ -599,19 +600,37 @@ type scopedProxy struct {
 	gaveUp       []uint64
 	behind       []string
 	charged      int
+	ownCuts      bool
+	cuts         []*atomic.Int32
 }
 
 func (s *scopedProxy) InFlightScope() coreAgent.InFlightScope {
 	s.fmu.Lock()
+	defer s.fmu.Unlock()
 	s.scopes++
-	s.fmu.Unlock()
-	return proxyScope{s}
+	n := &s.scopePending
+	if s.ownCuts {
+		n = new(atomic.Int32)
+		n.Store(s.scopePending.Load())
+		s.cuts = append(s.cuts, n)
+	}
+	return proxyScope{s: s, n: n}
 }
 
-type proxyScope struct{ s *scopedProxy }
+// cut is the i-th scope's pending work (ownCuts).
+func (s *scopedProxy) cut(i int) *atomic.Int32 {
+	s.fmu.Lock()
+	defer s.fmu.Unlock()
+	return s.cuts[i]
+}
+
+type proxyScope struct {
+	s *scopedProxy
+	n *atomic.Int32
+}
 
 func (f proxyScope) State(bool) (int, []string) {
-	n := int(f.s.scopePending.Load())
+	n := int(f.n.Load())
 	if n > 0 {
 		blockedHere()
 	}
@@ -636,7 +655,7 @@ func (f proxyScope) GiveUp(ids []uint64, _ bool) []string {
 		if _, ok := f.s.stuck[id]; ok {
 			f.s.gaveUp = append(f.s.gaveUp, id)
 			delete(f.s.stuck, id)
-			f.s.scopePending.Add(-1)
+			f.n.Add(-1)
 			out = append(out, fmt.Sprintf("connection %d held 1 request(s) its parser had read and not answered", id))
 		}
 	}
@@ -732,14 +751,14 @@ func TestAnEndThatGivesUpOnAConnectionCarriesItAndTheNextBeginGoesOn(t *testing.
 	require.Equal(t, []uint64{7}, sp.gaveUp, "the watchdog gave up on the connection it found stuck")
 	sp.fmu.Unlock()
 	// The next test's begin: the connection given up on holds nothing.
-	wakes, err = w.run(func() error { _, err := a.settle(context.Background(), true); return err }, nil)
+	wakes, err = w.run(func() error { _, err := a.settleBegin(context.Background(), true); return err }, nil)
 	require.NoError(t, err)
 	require.Zero(t, wakes, "a begin with nothing to wait for needs no wake-up")
 }
 
 // Calls the application queued behind work a settle gave up on cannot be
-// told answered: a begin goes on and leaves them to the next end, which is
-// not verified with them and charges them, once.
+// told answered: a begin does not wait for them and leaves them to the next
+// end, which is not verified with them and charges them, once.
 func TestCallsQueuedBehindLostWorkAreTheNextEndsLoss(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	_ = manualWake(t)
@@ -748,8 +767,8 @@ func TestCallsQueuedBehindLostWorkAreTheNextEndsLoss(t *testing.T) {
 	a.Proxy = sp
 	h.established = 1
 	p.set(1, 0)
-	_, err := a.settle(context.Background(), true)
-	require.ErrorIs(t, err, errHoldsUnknown, "a begin goes on, as for a connection whose held requests cannot be told")
+	_, err := a.settleBegin(context.Background(), true)
+	require.NoError(t, err, "a begin goes on")
 	sp.fmu.Lock()
 	require.Zero(t, sp.charged, "a begin charges nobody")
 	sp.fmu.Unlock()
@@ -835,36 +854,60 @@ func (w *settleWaker) run(fn func() error, moved func()) (wakes int, err error) 
 	}
 }
 
-// A test's begin whose watchdog gives up on a connection it found stuck
-// fails that begin (that test is not judged), naming the connection and
-// what it held; the give-up is per connection, so the test's end does not
-// wait for it again.
-func TestABeginThatGivesUpOnAConnectionFailsItAndTheEndGoesOn(t *testing.T) {
+// cancelledEnd runs a test's end until it blocks (blockedHere) and then
+// cancels its request, as a test process that gives up on it does; it
+// returns the end's error.
+func cancelledEnd(w *settleWaker, a *Agent) error {
+	select {
+	case <-w.blocked: // an earlier settle's
+	default:
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- a.settledSince(ctx, true, "TestEnd") }()
+	<-w.blocked
+	cancel()
+	err := <-done
+	select {
+	case <-w.blocked: // the end's own, before it saw the cancel
+	default:
+	}
+	return err
+}
+
+// A test's end that returned before its connections settled (its request
+// was cancelled) leaves them to the next begin, which waits for them: they
+// are that test's. One the begin's watchdog finds stuck is given up on, and
+// the begin goes on (the test whose end failed carried it); the end after
+// does not wait for it again.
+func TestABeginThatGivesUpOnThePreviousTestsWorkGoesOn(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	w := stallWake(t)
 	a, h, p := settleAgent()
-	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}}
+	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}, ownCuts: true}
 	sp.scopePending.Store(1)
 	a.Proxy = sp
 	h.established = 1
 	p.set(1, 0)
-	wakes, err := w.run(func() error { _, err := a.settle(context.Background(), true); return err }, nil)
-	require.ErrorIs(t, err, errNoProgress)
+	require.ErrorIs(t, cancelledEnd(w, a), context.Canceled)
+	sp.scopePending.Store(0)
+	wakes, err := w.run(func() error { _, err := a.settleBegin(context.Background(), true); return err }, nil)
+	require.NoError(t, err, "the begin goes on past the previous test's stuck work")
 	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
-	require.False(t, errors.Is(err, errHoldsUnknown), "a begin goes on only past connections whose requests cannot be told: %v", err)
-	require.Contains(t, err.Error(), "connection 7 held 1 request(s) its parser had read and not answered")
 	sp.fmu.Lock()
 	require.Equal(t, []uint64{7}, sp.gaveUp, "the begin's watchdog gave up on the connection it found stuck")
+	require.Equal(t, 1, sp.scopes, "the begin cut no scope of its own")
 	sp.fmu.Unlock()
-	wakes, err = w.run(func() error { return a.settledSince(context.Background(), true, "TestEnd") }, nil)
+	wakes, err = w.run(func() error { return a.settledSince(context.Background(), true, "TestNext") }, nil)
 	require.NoError(t, err, "the end does not wait for what the begin gave up on")
 	require.Zero(t, wakes, "an end with nothing to wait for needs no wake-up")
 }
 
 // A wait still in its first part (an application connection the kernel
 // counted that the proxy never paired) has no connection to give up on: its
-// watchdog fails the settle as a whole, takes no scope, and the next settle
-// reads fresh counts, so it waits for that connection again (a stated
+// watchdog fails the settle as a whole, and the end cuts as it fails (here
+// nothing is held). The next begin waits for that cut only, and the next
+// end reads fresh counts, so it waits for that connection again (a stated
 // limit) until it is paired.
 func TestAGiveUpBeforeTheCountsSettleIsNotPerConnection(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
@@ -880,11 +923,14 @@ func TestAGiveUpBeforeTheCountsSettleIsNotPerConnection(t *testing.T) {
 	require.ErrorIs(t, err, errNoProgress)
 	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
 	require.NotContains(t, err.Error(), "gave up on", "no connection to give up on before the counts settle")
-	wakes, err = w.run(func() error { _, err := a.settle(context.Background(), true); return err }, nil)
-	require.ErrorIs(t, err, errNoProgress, "the next begin waits for the unpaired connection again")
+	wakes, err = w.run(func() error { _, err := a.settleBegin(context.Background(), true); return err }, nil)
+	require.NoError(t, err, "the next begin waits for nothing")
+	require.Zero(t, wakes, "a begin with nothing to wait for needs no wake-up")
+	wakes, err = w.run(end, nil)
+	require.ErrorIs(t, err, errNoProgress, "the next end waits for the unpaired connection again")
 	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
 	sp.fmu.Lock()
-	require.Zero(t, sp.scopes, "neither wait got to the connections' work")
+	require.Equal(t, 2, sp.scopes, "each end cut as it failed, and the begin cut none")
 	sp.fmu.Unlock()
 	h.setApp(2, 2)
 	wakes, err = w.run(end, nil)
@@ -917,4 +963,153 @@ func TestAGiveUpKeepsTheConnectionsThatMoved(t *testing.T) {
 	defer sp.fmu.Unlock()
 	require.Equal(t, []uint64{7}, sp.gaveUp, "the watchdog gave up on the connection that did not move only")
 	require.Contains(t, sp.stuck, uint64(8), "the connection that moved is kept")
+}
+
+// A test's begin waits only for what the previous test's end cut: an
+// application that keeps calling after it (a timer whose calls are held,
+// on new connections or on ones the end kept, one not yet paired) never
+// holds a begin, nor does one before the first test; the ending test's own
+// last call still holds its end.
+func TestABeginDoesNotWaitForCallsMadeAfterThePreviousEndsCut(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, ownCuts: true}
+	a.Proxy = sp
+	background := func(n uint64) {
+		h.mu.Lock()
+		h.established = n + 1
+		h.mu.Unlock()
+		h.setApp(n+1, n)
+		sp.scopePending.Store(1)
+		p.set(n, 1)
+	}
+	// Before the first test the application's timer already calls.
+	background(1)
+	begin := func() error { _, err := a.settleBegin(context.Background(), true); return err }
+	wakes, err := w.run(begin, nil)
+	require.NoError(t, err)
+	require.Zero(t, wakes, "the first begin waits for nothing")
+	// The test's own last call is in flight as it ends: the end waits for
+	// it (its timer's calls paired by then, so the cut holds it alone).
+	h.mu.Lock()
+	h.established = 2
+	h.mu.Unlock()
+	h.setApp(2, 2)
+	p.set(2, 1)
+	ended := make(chan error, 1)
+	go func() { ended <- a.settledSince(context.Background(), true, "TestEnd") }()
+	<-w.blocked
+	select {
+	case err := <-ended:
+		t.Fatalf("the end went on while the test's own call was held: %v", err)
+	default:
+	}
+	sp.cut(0).Store(0)
+	p.set(2, 0)
+	require.NoError(t, <-ended, "the end settles the test's own call")
+	// The timer keeps calling after the end's cut.
+	background(3)
+	wakes, err = w.run(begin, nil)
+	require.NoError(t, err)
+	require.Zero(t, wakes, "the next begin does not wait for the timer's calls")
+	sp.fmu.Lock()
+	defer sp.fmu.Unlock()
+	require.Equal(t, 1, sp.scopes, "a begin cuts no scope")
+	require.Empty(t, sp.gaveUp, "nothing was given up on")
+}
+
+// A test's end that returned before its connections settled (its request
+// was cancelled) leaves them to the next begin, which waits until they
+// settle.
+func TestABeginWaitsForWhatThePreviousEndLeftHeld(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, ownCuts: true}
+	sp.scopePending.Store(1)
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 1)
+	require.ErrorIs(t, cancelledEnd(w, a), context.Canceled)
+	begun := make(chan error, 1)
+	go func() {
+		_, err := a.settleBegin(context.Background(), true)
+		begun <- err
+	}()
+	<-w.blocked
+	select {
+	case err := <-begun:
+		t.Fatalf("the begin went on while the previous test's call was held: %v", err)
+	default:
+	}
+	sp.cut(0).Store(0)
+	p.set(1, 0)
+	require.NoError(t, <-begun)
+	sp.fmu.Lock()
+	defer sp.fmu.Unlock()
+	require.Equal(t, 1, sp.scopes, "the begin cut no scope of its own")
+}
+
+// A test's end that fails before its cut (its request cancelled while an
+// application connection was still on its way to the proxy) cuts as it
+// fails: the next begin waits for the work its connections then held.
+func TestABeginWaitsForWhatAnEndThatFailedBeforeItsCutLeft(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, ownCuts: true}
+	sp.scopePending.Store(1)
+	a.Proxy = sp
+	h.established = 1
+	h.setApp(2, 1)
+	p.set(1, 1)
+	require.ErrorIs(t, cancelledEnd(w, a), context.Canceled)
+	begun := make(chan error, 1)
+	go func() {
+		_, err := a.settleBegin(context.Background(), true)
+		begun <- err
+	}()
+	<-w.blocked
+	select {
+	case err := <-begun:
+		t.Fatalf("the begin went on while the previous test's call was held: %v", err)
+	default:
+	}
+	sp.cut(0).Store(0)
+	p.set(1, 0)
+	require.NoError(t, <-begun)
+	sp.fmu.Lock()
+	defer sp.fmu.Unlock()
+	require.Equal(t, 1, sp.scopes, "the end cut as it failed, and the begin cut none")
+}
+
+// With the proven switch off a begin settles as it always did: it waits for
+// every connection the proxy keeps, and keeps to no scope.
+func TestWithTheSwitchOffABeginWaitsForEveryConnection(t *testing.T) {
+	t.Setenv(provenswitch.Env, "")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p}
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 0)
+	require.NoError(t, a.settledSince(context.Background(), true, "TestEnd"))
+	p.set(1, 1)
+	begun := make(chan error, 1)
+	go func() {
+		_, err := a.settleBegin(context.Background(), true)
+		begun <- err
+	}()
+	<-w.blocked
+	select {
+	case err := <-begun:
+		t.Fatalf("the begin went on while a connection the proxy keeps held work: %v", err)
+	default:
+	}
+	p.set(1, 0)
+	require.NoError(t, <-begun)
+	sp.fmu.Lock()
+	defer sp.fmu.Unlock()
+	require.Zero(t, sp.scopes, "with the switch off a settle keeps to no scope")
 }

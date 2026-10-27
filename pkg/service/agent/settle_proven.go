@@ -12,14 +12,17 @@ import (
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // A test's end count (design v14 §5.2; release1-cut §5.1 item 5; verify-v14
 // M1 and M2), under the proven switch; with it off, the same settle before a
 // read of a test's misses, for an agent started settling reads whose calls
-// are counted (Agent.settlesReads). Before a test is judged at its end, and
-// before one opens at its begin, every call the application made must be in
-// the proxy's hands, and in a replay answered:
+// are counted (Agent.settlesReads). Before a test is judged at its end, and,
+// with the switch off, before one opens at its begin, every call the
+// application made must be in the proxy's hands, and in a replay answered
+// (under the switch a begin waits only for what the previous end cut:
+// settleBegin):
 //
 //  1. every connection the application had made is in the proxy's hands:
 //     each of its own connections numbered up to the AppConns read is paired
@@ -157,6 +160,24 @@ func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
 // with its begin's (settledDrops). An error says keploy cannot tell: the test
 // is not judged. holdsUnknown comes with the drops.
 func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
+	return a.settleKeeping(ctx, answers, nil)
+}
+
+// settleKeeping is settle; keep, when set, is given the scope the settle
+// cuts (coreAgent.InFlightScope) as it cuts it: what a window's end owned
+// (settledSince), which the next begin waits for (settleBegin). Under the
+// proven switch a settle that fails before its cut cuts as it fails: the
+// work its connections then held is still the window's, and a call of it
+// answered later is never the next test's.
+func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreAgent.InFlightScope)) (uint64, error) {
+	cut := false
+	if keep != nil && provenswitch.On() {
+		defer func() {
+			if sr, ok := a.Proxy.(coreAgent.InFlightScoper); ok && !cut {
+				keep(sr.InFlightScope())
+			}
+		}()
+	}
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
 	if !ok || a.Proxy == nil {
 		return 0, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
@@ -246,6 +267,10 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 		sc := sr.InFlightScope()
 		scoped.Store(&sc)
 		view = scopeView{sc}
+		if keep != nil {
+			keep(sc)
+		}
+		cut = true
 	}
 	working.Store(true)
 	for {
@@ -415,7 +440,13 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	a.provenMu.Lock()
 	was, known := a.proven.drops, a.proven.dropsKnown
 	a.provenMu.Unlock()
-	drops, err := a.settle(ctx, answers)
+	// What the window owned at its cut is what the next begin waits for
+	// (settleBegin).
+	var owned coreAgent.InFlightScope
+	drops, err := a.settleKeeping(ctx, answers, func(sc coreAgent.InFlightScope) { owned = sc })
+	a.provenMu.Lock()
+	a.proven.owned = owned
+	a.provenMu.Unlock()
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
 		return err
 	}
@@ -431,4 +462,97 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 		}
 	}
 	return err
+}
+
+// settleBegin settles, before a test's begin (or a test case's open) opens
+// its window, what the test before it owned. Under the proven switch that
+// is the work the previous end cut (settledSince) that its connections
+// still hold, which only an end that returned unsettled leaves (its request
+// was cancelled, it failed before its cut and cut as it failed, or its
+// watchdog gave up on others), and nothing else: a
+// call the application made after that cut is the new test's, or
+// background work, so an application that keeps calling (a timer whose
+// calls a slow handler holds) never holds a begin, and neither does a call
+// made before the first test. A connection of that work the begin's own
+// watchdog finds stuck is given up on (InFlightScope.GiveUp: no later wait
+// waits for it) and logged, and the begin goes on: it was the previous
+// test's, whose end has already failed. With the switch off a begin
+// settles as it always did (settle). It returns the proxy listener's drops,
+// read once settled, which the test's end compares.
+func (a *Agent) settleBegin(ctx context.Context, answers bool) (uint64, error) {
+	if !provenswitch.On() {
+		return a.settle(ctx, answers)
+	}
+	ir, ok := a.Proxy.(coreAgent.InFlightReader)
+	if !ok || a.Proxy == nil {
+		return 0, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
+	}
+	a.provenMu.Lock()
+	owned := a.proven.owned
+	a.provenMu.Unlock()
+	if owned != nil {
+		if err := a.settleOwned(ctx, ir, owned, answers); err != nil {
+			return 0, err
+		}
+	}
+	c, err := a.ProxyConns(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
+	}
+	return c.ListenDrops, nil
+}
+
+// settleOwned waits until sc, a previous end's scope, holds no work, its
+// watchdog weighing each connection that still holds some. One the watchdog
+// finds stuck is given up on, and the wait goes on for the others.
+func (a *Agent) settleOwned(ctx context.Context, ir coreAgent.InFlightReader, sc coreAgent.InFlightScope, answers bool) error {
+	for {
+		settled, stalled, err := a.settleOwnedOnce(ctx, ir, sc, answers)
+		if settled || err != nil {
+			return err
+		}
+		ids := make([]uint64, 0, len(stalled))
+		for _, k := range stalled {
+			if id, err := strconv.ParseUint(k, 10, 64); err == nil {
+				ids = append(ids, id)
+			}
+		}
+		if held := sc.GiveUp(ids, answers); len(held) > 0 {
+			a.logger.Warn("keploy's agent made no progress settling the previous test's calls before the next test began; it gave up on them (that test's end had already failed)", zap.Strings("connections", held))
+		}
+	}
+}
+
+// settleOwnedOnce is one watched wait of settleOwned: settled once sc holds
+// no work, else the keys its watchdog found stuck. Work already settled
+// needs no watchdog.
+func (a *Agent) settleOwnedOnce(ctx context.Context, ir coreAgent.InFlightReader, sc coreAgent.InFlightScope, answers bool) (settled bool, stalled []string, err error) {
+	if pending, _ := sc.State(answers); pending == 0 {
+		return true, nil, nil
+	}
+	wctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	stop := a.watchSettle(wctx, cancel, func() map[string]uint64 {
+		out := map[string]uint64{}
+		for id, n := range sc.PendingProgress(answers) {
+			out[strconv.FormatUint(id, 10)] = n
+		}
+		return out
+	})
+	defer stop()
+	for {
+		changed := ir.InFlightChanged()
+		if pending, _ := sc.State(answers); pending == 0 {
+			return true, nil, nil
+		}
+		select {
+		case <-changed:
+		case <-wctx.Done():
+			var np noProgress
+			if cause := context.Cause(wctx); errors.As(cause, &np) {
+				return false, np.stalled, nil
+			}
+			return false, nil, context.Cause(wctx)
+		}
+	}
 }

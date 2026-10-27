@@ -148,27 +148,43 @@ func TestATestDuringWhichTheListenerDroppedPacketsIsNotVerified(t *testing.T) {
 	require.ErrorIs(t, err, errDropped)
 }
 
-// A test's begin, and keploy test's open of a test case, wait until the calls
-// made before are settled: one still in the proxy's hands is the pool's or
-// the previous test's, never this one's.
-func TestABeginWaitsForTheCallsMadeBefore(t *testing.T) {
+// A test's begin waits only for what the previous test's end left
+// unsettled (settleBegin), never for a call made since that end: it is
+// background work or the new test's, and the new test's end waits for it.
+func TestABeginDoesNotWaitForTheCallsMadeSinceThePreviousEnd(t *testing.T) {
+	w := stallWake(t)
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	ctx := context.Background()
+	p.set(0, 1) // a call made since the previous end is in the proxy's hands
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr, "the begin went on while it was in flight")
+	ended := make(chan *models.ScopeEndResp, 1)
+	go func() {
+		e, serr := a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+		require.Nil(t, serr)
+		ended <- &e
+	}()
+	<-w.blocked
+	select {
+	case e := <-ended:
+		t.Fatalf("the test ended while a call in its window was in flight: %+v", e)
+	default:
+	}
+	p.set(0, 0)
+	<-ended
+}
+
+// keploy test's open of a test case waits until the calls made before are
+// settled: one still in the proxy's hands is the pool's or the previous test
+// case's, never this one's (the application gets the test case's request
+// only once its view is installed).
+func TestKeployTestsOpenWaitsForTheCallsMadeBefore(t *testing.T) {
 	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
 	ctx := context.Background()
 	for _, open := range []struct {
 		name string
 		do   func() error
 	}{
-		{"the wire's begin", func() error {
-			_, serr := a.ProvenBegin(ctx, begin("TestA"))
-			if serr != nil {
-				return serr
-			}
-			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
-			if serr != nil {
-				return serr
-			}
-			return nil
-		}},
 		{"keploy test's open", func() error {
 			return a.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil)
 		}},
