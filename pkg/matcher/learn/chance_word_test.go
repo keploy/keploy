@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -128,6 +129,100 @@ func TestChanceWordsOfTwoOtherTestsInAnUnknownServeOrderAreRefused(t *testing.T)
 		}
 		if ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, "keploy does not know where record's full round served mock-32 among the other earlier answers it served") {
 			t.Errorf("set %v: %s (%s); want it refused for the order", viaSet, ln.Kind, ln.Why)
+		}
+	}
+}
+
+// A word both runs gave the application at the same field of another test's
+// answer, which one of the two values lacks, shows the value no copy only
+// where the value that lacks it holds no other word of that payload: as the
+// recording gave it, as record's full round gave it (its view), its stamps
+// read as any text (the mirror rule's recordedTook evidence). A field is a
+// whole payload field (an HTTP body), so a view that gave the same ids in
+// another order (a queue receive of two messages, which the queue does not
+// order) holds each id's words at the same field in both runs: an
+// application that copied the first message's id holds one id in each run,
+// each a word of that payload, and stays refused, naming why. keploy test
+// (ClassifyGiven) refuses each as before. Nothing reads the id's shape.
+func TestAChanceWordStaysRefusedWhereTheValueLackingItHoldsAnotherWordOfThatPayload(t *testing.T) {
+	const p = "body.message_id"
+	const (
+		idA    = "bb7ed9ee-670e-48d1-982f-b54b2b73982f" // the first message's id at record
+		idB    = "5c0e9a7b-1f2d-4c3e-9a3b-c4d5e6f70812" // the second message's id
+		idC    = "e1f2a3b4-c5d6-4e7f-8a9b-0c1d2e3f4a5b" // a third message's id
+		chance = "0c1d2e3f-4a5b-48d1-8e9f-a0b1c2d3e4f5" // the value F saw: "48d1" by chance
+		other  = "9a8b7c6d-5e4f-4a3b-9c2d-1e0f9a8b7c6d" // the value at record
+	)
+	before := r1Insert.Add(-time.Minute)
+	two := func(first, second string) *models.Mock {
+		m := receiveOf("mock-31", first, before)
+		m.Spec.ResTimestampMock = before.Add(time.Second)
+		m.Spec.HTTPResp.Body = `{"Messages": [{"MessageId": "` + first + `", "Body": "m1"}, {"MessageId": "` + second + `", "Body": "m2"}]}`
+		return m
+	}
+	// The answer's own stamp, its Date header in the span it was asked and
+	// answered in: at record, and in record's full round a day later.
+	stamped := func(m *models.Mock, day time.Duration) *models.Mock {
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = m.Spec.ReqTimestampMock.Add(day), m.Spec.ResTimestampMock.Add(day)
+		m.Spec.HTTPResp.Header = map[string]string{"Content-Type": "application/x-amz-json-1.0", "Date": m.Spec.ResTimestampMock.Format(http.TimeFormat)}
+		return m
+	}
+	recStamp, viewStamp := stamped(receiveOf("mock-31", idA, before), 0), stamped(receiveOf("mock-31", idA, before), 24*time.Hour)
+	if !strings.HasPrefix(recStamp.Spec.HTTPResp.Header["Date"], "Thu, ") || !strings.HasPrefix(viewStamp.Spec.HTTPResp.Header["Date"], "Fri, ") {
+		t.Fatalf("the stamps %q and %q are not a Thursday's and a Friday's", recStamp.Spec.HTTPResp.Header["Date"], viewStamp.Spec.HTTPResp.Header["Date"])
+	}
+	if x := RawOf(recStamp, true); len(x.stamps) != 1 {
+		t.Fatalf("the recording's Date header is not its one stamp")
+	}
+	if x := RawOf(viewStamp, true); len(x.stamps) != 1 {
+		t.Fatalf("the view's Date header is not its one stamp")
+	}
+	asRecorded := func(dc *DriftCache, m *models.Mock) Raw { return dc.RawOf(m, true).ServedAs(3).ServedAsRecorded() }
+	viewOf := func(live *models.Mock) func(dc *DriftCache, m *models.Mock) Raw {
+		return func(dc *DriftCache, m *models.Mock) Raw {
+			return dc.RawOf(m, true).ServedAs(3).ServedLive(dc.RawOf(live, true))
+		}
+	}
+	const recorded, gave = "stands in mock-31's answer as the recording gave it", "stands in mock-31's answer as record's full round gave it"
+	for _, row := range []struct {
+		name      string
+		m         *models.Mock
+		raw       func(dc *DriftCache, m *models.Mock) Raw
+		rec, live string
+		want      string
+	}{
+		{"its view gave the two ids in the other order", two(idA, idB), viewOf(two(idB, idA)), idA, idB, recorded},
+		{"served as recorded, the value F saw is the answer's other id", two(idA, idB), asRecorded, idA, idB, recorded},
+		{"the recorded value's word stands only in what record's full round gave there", two(idB, idC), viewOf(two(idB, idA)), idA, idB, gave},
+		{"the recorded value's word stands only in the recording's stamp", recStamp, asRecorded, other + "-Thu", chance, recorded},
+		{"the recorded value's word stands only in the view's stamp", recStamp, viewOf(viewStamp), other + "-Fri", chance, gave},
+		{"the word of the value F saw stands only in the recording's stamp", recStamp, asRecorded, chance, other + "-Thu", recorded},
+		{"the word of the value F saw stands only in the view's stamp", recStamp, viewOf(viewStamp), chance, other + "-Fri", gave},
+	} {
+		for _, viaSet := range []bool{false, true} {
+			for _, follow := range []bool{false, true} {
+				dc := clockedDrifts()
+				x := row.raw(dc, row.m)
+				classify := ClassifyGiven
+				if follow {
+					classify = ClassifyFollowing
+				}
+				var ln Learned
+				if viaSet {
+					ln = classify(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, nil, nil, nil, func() ([]GivenPlaces, error) {
+						return []GivenPlaces{PlacesOf(x)}, nil
+					})[0]
+				} else {
+					ln = classify(dc, []string{p}, strLeaf(p, row.live), strLeaf(p, row.rec), r1Insert, nil, []Raw{x.OfAnotherTest()}, nil, nil, nil)[0]
+				}
+				refused := "appears in mock-31, a recording record's full round gave the application before the call that is another test's"
+				switch {
+				case follow && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused) || !strings.Contains(ln.Why, row.want) || !strings.Contains(ln.Why, "the value that lacks that word")):
+					t.Errorf("%s (set %v): %s (%s); want it refused: %s", row.name, viaSet, ln.Kind, ln.Why, row.want)
+				case !follow && (ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, refused)):
+					t.Errorf("%s (set %v), keploy test: %s (%s); want it refused as before", row.name, viaSet, ln.Kind, ln.Why)
+				}
+			}
 		}
 	}
 }

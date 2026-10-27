@@ -652,6 +652,13 @@ type givenWords struct {
 	// (sameWords): what the rule a copy follows its source reads as a word
 	// both runs gave there (follows.excusedGiven).
 	same [][]string
+	// gave are the words of its answer, in each reading, as record's full
+	// round gave the application them where F served it changed and gave
+	// its view (ServedLive), stamps read as any text; none otherwise (served
+	// as recorded, F gave words and stamped). Where the value that lacks a
+	// word both runs gave holds another word of the payload, as either run
+	// gave it (inAnswer), the word shows nothing (follows.givenTook).
+	gave [][]string
 	// answered, conn and pos are the recording's (Raw), first and last F's
 	// serves of it: where the rule lets a word of it go, they place it in
 	// the order the recording and F gave the application the value's
@@ -684,6 +691,11 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 	}
 	for _, same := range dc.sameWords(x, plain) {
 		g.same = append(g.same, sortedWords(same, nil))
+	}
+	if x.Live() {
+		for _, gave := range dc.answerWords(*x.live, true) {
+			g.gave = append(g.gave, sortedWords(gave, nil))
+		}
 	}
 	return g
 }
@@ -801,6 +813,23 @@ func (g givenWords) holds(i int, t string, keep bool) bool {
 		}
 	}
 	return false
+}
+
+// inAnswer says how t stands in g's answer in reading i, "" where it does
+// not: as the recording gave it (its words and the words only its stamps
+// hold), or as record's full round gave it (its view's words, stamps too).
+func (g givenWords) inAnswer(i int, t string) string {
+	for _, l := range []struct {
+		list [][]string
+		as   string
+	}{{g.words, "as the recording gave it"}, {g.stamped, "as the recording gave it"}, {g.gave, "as record's full round gave it"}} {
+		if i < len(l.list) {
+			if k := sort.SearchStrings(l.list[i], t); k < len(l.list[i]) && l.list[i][k] == t {
+				return l.as
+			}
+		}
+	}
+	return ""
 }
 
 // answerWords are the words of x's answer in every declared form, by
