@@ -1107,8 +1107,18 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 	proxy.learnTracker.SetClientTests(opts.Agent.MockMode)
 	// The application runs beside the agent, and writes a wall clock of no
 	// zone in its local zone, the agent's own, or in UTC
-	// (learn.Tracker.SetAppZone).
-	proxy.learnTracker.SetAppZone(time.Local)
+	// (learn.Tracker.SetAppZone), read with its name where the agent's TZ or
+	// /etc/localtime gives one, so a learning that depends on it names it
+	// (models.ClockOffset.AppZone). Where keploy cannot read it (a TZ of a
+	// POSIX rule, which Go reads as UTC; a link to no zone file), Go's own
+	// reading, and no learning names it (SetAppZoneUnnamed), as before.
+	tz, tzSet := os.LookupEnv("TZ")
+	if loc, err := learn.ReadZone("/", tz, tzSet); err == nil {
+		proxy.learnTracker.SetAppZone(loc)
+	} else {
+		logger.Debug("keploy cannot read the agent's zone; a learning that depends on the application's zone names no zone, and a replay reads its own", zap.Error(err))
+		proxy.learnTracker.SetAppZoneUnnamed(time.Local)
+	}
 	proxy.sayLearnWaits()
 
 	// Upstream TLS verification (record.upstreamTls). Only the PRECEDENCE is
