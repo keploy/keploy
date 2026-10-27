@@ -23,6 +23,16 @@ var keyedExamined, shownBuilds atomic.Uint64
 // hands them what the view shows of the tier (shownOf), never its values.
 var viewNarrowed atomic.Uint64
 
+// unansweredVisited counts the owned positions an exact view's per-test reads
+// looked at (unanswered, rangeUnanswered): consumed ones included, each run of
+// them once (liveList). Read by the rows that pin it.
+var unansweredVisited atomic.Uint64
+
+// liveReadsWalk, set only by this package's rows, makes a per-test read look
+// at every consumed position, as it did before the view kept its links: the
+// oracle a row fails against.
+var liveReadsWalk atomic.Bool
+
 // tierReadsWalk, set only by this package's rows, makes shownOf hand a tier's
 // values of the kind, as the view's reads were handed them before it: the
 // oracle a row compares each read with.

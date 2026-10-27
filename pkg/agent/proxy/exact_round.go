@@ -997,6 +997,18 @@ func (h *heldScope) GetPerTestMocksInWindow() ([]*models.Mock, error) {
 	return h.held(h.MockManager.GetPerTestMocksInWindow())
 }
 
+// RangePerTestMocksInWindow is the manager's per-test walk
+// (integrations.PerTestRanger), each mock checked after it is read: the walk
+// stops once the staging moved.
+func (h *heldScope) RangePerTestMocksInWindow(fn func(*models.Mock) bool) error {
+	if h.moved() {
+		return nil
+	}
+	return h.MockManager.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+		return !h.moved() && fn(mk)
+	})
+}
+
 func (h *heldScope) GetSessionMocks() ([]*models.Mock, error) {
 	return h.held(h.MockManager.GetSessionMocks())
 }
