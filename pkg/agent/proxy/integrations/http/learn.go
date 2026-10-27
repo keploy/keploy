@@ -10,9 +10,11 @@ import (
 	"mime/multipart"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
@@ -173,7 +175,18 @@ func destOf(live, rec httpParts) string {
 
 // segments is a path's segments, with what url noise matches masked.
 func (n learnNoise) segments(path string) []string {
-	return strings.Split(strings.TrimPrefix(maskURLNoise(path, n.url), "/"), "/")
+	return strings.Split(n.maskedPath(path), "/")
+}
+
+// maskedPath is a path as segments splits it: what url noise matches masked,
+// without its leading slash.
+func (n learnNoise) maskedPath(path string) string {
+	return strings.TrimPrefix(maskURLNoise(path, n.url), "/")
+}
+
+// segmentCount is len(strings.Split(masked, "/")), without the split.
+func segmentCount(masked string) int {
+	return strings.Count(masked, "/") + 1
 }
 
 func operationKey(method, dest string, segments int) string {
@@ -659,15 +672,24 @@ func (sc scope) owner() func(*models.Mock) bool {
 // the pool, and in a view that scopes the pool to a test
 // (integrations.TestOwnership), only the mocks it says are the test's.
 func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker, live httpParts, liveShape learn.Shape, n learnNoise, pool bool) (scope, error) {
+	r, err := h.learnReads(mockDb, tracker)
+	if err != nil {
+		return scope{}, err
+	}
+	return r.scope(live, liveShape, n, pool), nil
+}
+
+// learnReads are the store's reads learnScope builds a request's scope from.
+func (h *HTTP) learnReads(mockDb integrations.MockMemDb, tracker *learn.Tracker) (scopeReads, error) {
 	perTest, err := mockDb.GetPerTestMocksInWindow()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get per-test mocks")
-		return scope{}, errors.New("error while matching the request with the mocks")
+		return scopeReads{}, errors.New("error while matching the request with the mocks")
 	}
 	session, err := mockDb.GetSessionMocks()
 	if err != nil {
 		utils.LogError(h.Logger, err, "failed to get session mocks")
-		return scope{}, errors.New("error while matching the request with the mocks")
+		return scopeReads{}, errors.New("error while matching the request with the mocks")
 	}
 	r := scopeReads{perTest: perTest, session: session, open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
 	r.owner, _ = mockDb.(integrations.TestOwnership)
@@ -688,7 +710,7 @@ func (h *HTTP) learnScope(mockDb integrations.MockMemDb, tracker *learn.Tracker,
 	// test's is learned onto a background recording. The pool is learned
 	// from between tests only.
 	r.exactBackground = r.open && integrations.S12Background(mockDb)
-	return r.scope(live, liveShape, n, pool), nil
+	return r, nil
 }
 
 // learnScopeIn is learnScope read from one snapshot of the store's round
@@ -752,6 +774,10 @@ type scopeReads struct {
 	// mocks.
 	answered      func(name string) bool
 	answeredMocks func() []*models.Mock
+	// sieve, when set, shapes only the candidates that may match the live
+	// request exactly and may answer it (learnSieve): the scope is then
+	// exactGroup's and owner's, not learn.Pair's.
+	sieve *learnSieve
 }
 
 // scope is the scope r reads.
@@ -774,8 +800,9 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		}
 		rp := recordedParts(m)
 		d := destOf(live, rp)
+		masked := n.maskedPath(rp.path)
 		// The key first: a body is decoded only for a candidate.
-		if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
+		if operationKey(rp.method, d, segmentCount(masked)) != liveShape.Key {
 			continue
 		}
 		own, poolsOwn := ownership(m, i < len(httpPerTest), r.owner, r.windows, r.inFlight, r.pools)
@@ -783,13 +810,16 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		// test's own: the pool's, answering any number of the test's
 		// requests (design §5.2), and never paired.
 		own = own && open && !m.IsProtocolPhase()
+		spent := own && r.answered(m.Name)
 		c := learn.Candidate{
-			Shape:    n.shape(rp, d),
 			Known:    n.known(m),
 			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
 		}
+		if r.sieve.shapes(m, masked, spent) {
+			c.Shape = n.shape(rp, d)
+		}
 		inScope[m.Name] = true
-		if own && r.answered(m.Name) {
+		if spent {
 			// Each of the test's own mocks answers one request of it
 			// (design §5.2), whatever lifetime the store gives it: one
 			// that answered is spent. It still competes, as the recording
@@ -817,10 +847,15 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		for _, m := range inRecordedOrder(gone) {
 			rp := recordedParts(m)
 			d := destOf(live, rp)
-			if operationKey(rp.method, d, len(n.segments(rp.path))) != liveShape.Key {
+			masked := n.maskedPath(rp.path)
+			if operationKey(rp.method, d, segmentCount(masked)) != liveShape.Key {
 				continue
 			}
-			sc.cands = append(sc.cands, learn.Candidate{Shape: n.shape(rp, d), Known: n.knownAsRecorded(m), Spent: true})
+			c := learn.Candidate{Known: n.knownAsRecorded(m), Spent: true}
+			if r.sieve.shapes(m, masked, true) {
+				c.Shape = n.shape(rp, d)
+			}
+			sc.cands = append(sc.cands, c)
 			sc.mocks, sc.own = append(sc.mocks, m), append(sc.own, true)
 		}
 	}
@@ -907,6 +942,91 @@ func exactGroup(live learn.Shape, sc scope, poolOnly bool) []*models.Mock {
 		}
 	}
 	return out
+}
+
+// learnSieve tells, from a recording's path alone, that the learn step's
+// comparison (learn.Compare) cannot find the recording the live request
+// exactly, so its shape need not be built for exactGroup. It never says so of
+// a recording Compare finds the request exactly, modulo what is known.
+type learnSieve struct {
+	// masked is the live path as the learn step reads it (maskedPath).
+	masked string
+}
+
+// learnSieveOf is the sieve for the live request live.
+func (n learnNoise) learnSieveOf(live httpParts) *learnSieve {
+	return &learnSieve{masked: n.maskedPath(live.path)}
+}
+
+// shapes reports whether the scope builds the shape of the candidate m, its
+// path masked as masked; spent says it may not answer. With no sieve, every
+// candidate is shaped (learn.Pair compares them all). With one, a spent
+// candidate is not (exactGroup never takes it), nor one whose masked path is
+// not the live one's, unless a segment of it may be excused: a learned place
+// of its URL or a read of the clock at one (learnsURL, read wide), or a value
+// the recording's obfuscation noise (Mock.Noise) matches. Each segment is a
+// leaf (url.path.<i>) of both shapes: a segment that differs and is not
+// excused is a drift, and two masked paths that split into the same segments
+// are the same string.
+func (s *learnSieve) shapes(m *models.Mock, masked string, spent bool) bool {
+	if s == nil {
+		learnShapes.Add(1)
+		return true
+	}
+	if spent || masked != s.masked && !learnsURL(m) && len(m.Noise) == 0 {
+		return false
+	}
+	learnShapes.Add(1)
+	return true
+}
+
+// learnShapes counts the candidates the learn step's scope shaped: what the
+// rows count to see that a served call shapes only the recordings that may be
+// it.
+var learnShapes atomic.Int64
+
+// learnedGroup is exactGroup over r's scope for the live request and that
+// scope's owner, for learnedMatch, with only the candidates sieve passes
+// shaped (learnSieve). In the exact view's verify mode every candidate is
+// shaped too, and a different group panics.
+func (r scopeReads) learnedGroup(live httpParts, liveShape learn.Shape, n learnNoise, sieve *learnSieve) ([]*models.Mock, func(*models.Mock) bool) {
+	verify := integrations.ExactViewVerify.Load()
+	if verify {
+		// Both scopes read one account of what the test's own answered.
+		r = r.answersOnce()
+	}
+	r.sieve = sieve
+	sc := r.scope(live, liveShape, n, true)
+	group := exactGroup(liveShape, sc, false)
+	if verify {
+		r.sieve = nil
+		all := exactGroup(liveShape, r.scope(live, liveShape, n, true), false)
+		if !slices.Equal(all, group) {
+			panic(fmt.Sprintf("exact view verify: learned group of %s %s: sieved %v, compared %v", live.method, live.path, strictNames(group), strictNames(all)))
+		}
+	}
+	return group, sc.owner()
+}
+
+// answersOnce is r reading what the test's own answered once: each name's
+// first answer and the first list of them, whatever the tracker says later.
+func (r scopeReads) answersOnce() scopeReads {
+	answered, read := r.answered, map[string]bool{}
+	r.answered = func(name string) bool {
+		if a, ok := read[name]; ok {
+			return a
+		}
+		read[name] = answered(name)
+		return read[name]
+	}
+	mocks, list, listed := r.answeredMocks, []*models.Mock(nil), false
+	r.answeredMocks = func() []*models.Mock {
+		if !listed {
+			list, listed = mocks(), true
+		}
+		return list
+	}
+	return r
 }
 
 // earlierThan are the exchanges F served earlier in the test but those of
@@ -2415,11 +2535,11 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		sc, err := h.learnScope(mockDb, learn.TrackerFrom(ctx), live, liveShape, n, true)
+		r, err := h.learnReads(mockDb, learn.TrackerFrom(ctx))
 		if err != nil {
 			return nil, nil
 		}
-		group := exactGroup(liveShape, sc, false)
+		group, owner := r.learnedGroup(live, liveShape, n, n.learnSieveOf(live))
 		if len(group) == 0 {
 			return nil, nil
 		}
@@ -2427,7 +2547,7 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 		if len(hit.Spec.ReqBodyNoise) == 0 {
 			return nil, nil
 		}
-		picked, commit, answered := h.cursorPick(hit, group, sc.owner(), mockDb, !opts.DisableStatefulMocks)
+		picked, commit, answered := h.cursorPick(hit, group, owner, mockDb, !opts.DisableStatefulMocks)
 		if answered != nil {
 			// Each recording the walk holds has answered: the strict pass
 			// decides the call, and misses it the same way.
@@ -2439,7 +2559,7 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 			// decision 25), so this call is its to decide.
 			return nil, nil
 		}
-		served, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, sc.owner()), picked, mockDb, nil, nil)
+		served, claimed, err := h.claim(context.WithValue(ctx, ownedKey{}, owner), picked, mockDb, nil, nil)
 		if err != nil {
 			return nil, err
 		}
