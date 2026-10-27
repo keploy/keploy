@@ -24,11 +24,12 @@ import (
 // 10 ms); 45 ms back or 55 ms on, less r (100 ms); 455 ms on or 545 ms back,
 // less r (a second: 355 ms on or 445 ms back for a writer of tenths);
 // 1.545 s back or 58.455 s on, less r (a minute: 545 ms back for a writer
-// of seconds). So the learn step, which refuses a cut coarser than a millisecond both values
-// show (cutWhy), never refuses the pair of a fast call by chance: one whose
-// read in F lies within 5 ms less r of the recording's (4 ms on a clock of
-// milliseconds, 4.99 ms for five fraction digits, 4.999 ms for six or on a
-// clock of microseconds; a writer of 10 ms or coarser has no step nearer
+// of seconds). So the learn step, which learns a cut both values show
+// (readRes) and checks a replay value at it (CheckClockRead), never learns
+// the pair of a fast call at a cut by chance, which would loosen its check:
+// one whose read in F lies within 5 ms less r of the recording's (4 ms on a
+// clock of milliseconds, 4.99 ms for five fraction digits, 4.999 ms for six
+// or on a clock of microseconds; a writer of 10 ms or coarser has no step nearer
 // than 355 ms). A lead that is a whole number of a step (61.5 s, of 10 and
 // 100 ms) kept a millisecond clock's value on a whole 10 ms on one in F:
 // one recording in twelve with F's read within 0.3 ms of the recording's,

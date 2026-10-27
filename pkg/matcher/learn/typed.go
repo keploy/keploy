@@ -595,15 +595,11 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	}
 	// A read of the clock, checked at every replay (KindClockRead, never
 	// noise): one that names its moment as it names it, a wall clock of no
-	// zone in the zone the learn step read it in (wallZone). One whose two
-	// values show a cut coarser than a millisecond is refused (cutWhy).
+	// zone in the zone the learn step read it in (wallZone), at the cut its
+	// two values show (readRes), which a replay checks it at
+	// (CheckClockRead).
 	if ln.Kind == KindNoise && rt.names == lt.names && rt.names != namesTimeOfDay {
-		enc := max(rt.res, lt.res)
-		res := readRes(enc, sharedGrain(rt.at, lt.at))
-		if why := cutWhy(res, enc); why != "" {
-			ln.Kind, ln.Why = KindUnaccounted, why
-			return ln
-		}
+		res := readRes(max(rt.res, lt.res), sharedGrain(rt.at, lt.at))
 		ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
 		if noWindow != "" {
 			ln.Why = noWindow
@@ -617,16 +613,12 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 	// window holds it: a read of the clock all the same, which every replay
 	// checks modulo a day in its call's span, in the zone the learn step
 	// read it in (todRead, clockReadIn), never noise that lets any value
-	// pass; refused where its two values show a cut coarser than a
-	// millisecond (cutWhy).
+	// pass; at the cut its two values show (todRead), which a replay checks
+	// it at.
 	if ln.Kind == KindNoise && rt.names == namesTimeOfDay && lt.names == namesTimeOfDay {
 		day := time.Duration(nsPerDay)
 		rtod, ltod := rt.at.Sub(timeOfDayDay)%day, lt.at.Sub(timeOfDayDay)%day
 		read := dc.todRead(rtod, ltod, rt.res, lt.res, models.LayoutTypedTimeOfDay, models.LayoutTypedTimeOfDay, w, at)
-		if why := cutWhy(read.Res, min(rt.res, lt.res)); why != "" {
-			ln.Kind, ln.Why = KindUnaccounted, why
-			return ln
-		}
 		ln.Kind, ln.Why, ln.Read = KindClockRead, clockReadUncheckedWhy, read
 	}
 	return ln
@@ -756,10 +748,17 @@ func sharedGrain(a, b time.Time) time.Duration {
 // value record's full round read, and a replay's window is never wider for
 // it. Where both are whole multiples of a step above enc (a unit, or a
 // decimal step between units: models.CutOf), the coarsest such step: the
-// cut the application made, or one both values happened to fall on. One
-// coarser than a millisecond the learn step refuses (cutWhy); one of a
-// millisecond or finer a replay reads by its own value (CheckClockRead).
-// Above a day no step is above enc and no cut is told: enc.
+// cut the application made, or one both values happened to fall on, which
+// a replay reads by its own value (CheckClockRead): a value that shows the
+// cut is checked at it, so it may stand up to one cut stale. Two values of
+// a writer that does not cut fall on such a step by chance only where F's
+// read moved against the recording's by more than FullRoundLead keeps a
+// fast call's within; where it did, over a spread a whole number of steps
+// wide (or many steps), each value falls on it in one recording in step/r
+// (r: the resolution the values carry, the clock's or the writer's, the
+// coarser) and both in the square of that, and that recording's replays
+// are checked at the step, never refused for it. Above a day no step is
+// above enc and no cut is told: enc.
 func readRes(enc, grain time.Duration) time.Duration {
 	if grain <= enc {
 		return enc
@@ -768,40 +767,6 @@ func readRes(enc, grain time.Duration) time.Duration {
 		return u
 	}
 	return enc
-}
-
-// cutWhy is why the learn step refuses a plain read of the clock learned at
-// res (readRes) from two values whose encodings write enc, read after
-// "<field> changed, and ", where res is a cut coarser than a millisecond:
-// above enc and above a millisecond, both values whole multiples of it. ""
-// where res is enc, or a cut of a millisecond or finer, which a replay
-// checks at the cut its own value shows (CheckClockRead). Checked at its
-// encoding's resolution, a value cut coarser would pass or fail by where its
-// read fell in the cut, which no verdict may turn on; checked at the cut, it
-// could stand a whole cut stale. So the recording is refused, whatever value
-// a replay would carry: the same verdict at every replay, the confirming
-// round's first, never one that flips. Two values of a writer that does not
-// cut fall on such a cut by chance, and are refused the same: a false red,
-// which recording the test again clears. FullRoundLead keeps a fast call's
-// two values off every such step: F's read within 5 ms of the recording's
-// against its call, less r, the resolution the values carry (the clock's or
-// the writer's, the coarser: 4 ms on a clock of milliseconds, 4.99 ms for
-// five fraction digits). Where F's read moved further, over a spread a
-// whole number of steps wide (or many steps), each value falls on it in one
-// recording in step/r and both in the square of that: on a clock of milliseconds, five to
-// nine fraction digits, epoch micro- or nanoseconds and a typed microsecond
-// in one recording in a hundred (a whole 10 ms); four digits, and a writer
-// of two digits, in one in 10,000 (a whole 100 ms, a whole second); three
-// digits and a typed millisecond (a BSON date) in one in a million (a whole
-// second); a writer of tenths in one in a hundred (a whole second); a writer
-// of seconds in one in 3,600 (a whole minute). Measured counts, F's read
-// spread over 10 ms up to two minutes, agree.
-func cutWhy(res, enc time.Duration) string {
-	if res <= enc || res <= time.Millisecond {
-		return ""
-	}
-	cut := models.ShortDuration(res)
-	return "it is a read of the application's clock, but both of its values (as recorded and in record's full round) are whole multiples of " + cut + ", coarser than the " + models.ShortDuration(enc) + " their encoding writes: the application cuts its value to " + cut + " (or both values fell on a whole " + cut + " by chance), and a replay could check it neither at its encoding's resolution, where it would pass or fail by where its read fell in the cut, nor at the cut, where a value a whole " + cut + " stale would pass, so keploy refuses it. Record the test again (two values that fell on the cut by chance are not likely to again); if the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
 }
 
 // offsetBounds are the offsets d, from lo up to, not including, hi, that put
