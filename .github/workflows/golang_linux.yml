@@ -655,7 +655,9 @@ jobs:
   # lifetimes, a later test misses them, the miss names keploy.yaml's
   # sessionCalls, and declaring the token call there serves it; a recording
   # made before replays as it always did; a connection's setup and the
-  # startup traffic stay shared. The app is in this repo
+  # startup traffic stay shared. Under the proven switch, a pool of eight
+  # connections runs one prepared statement at once, and the app checks that
+  # each call read its own row. The app is in this repo
   # (test_workflow_scripts/golang/lifetime_tags). The script judges a release
   # replayer's outcome only where it holds for every replayer.
   lifetime_tags:
