@@ -155,3 +155,41 @@ func TestExactOwnedIndexesStayBounded(t *testing.T) {
 		}
 	}
 }
+
+// A shared recording another test answered with is in no keyed read of the
+// open test, as it is in none of its other reads (exactView.takenByOther),
+// and one the open test answered with leaves its keyed reads too.
+func TestExactKeyedWalkLeavesOutASharedRecordingAnotherTestTook(t *testing.T) {
+	ix := &integrations.MockIndex{Keys: func(m *models.Mock) []string { return m.Noise }}
+	c1 := exactMock("c1", 0, models.LifetimePerTest)
+	c2 := exactMock("c2", time.Second, models.LifetimePerTest)
+	own := exactMock("own", 2*time.Second, models.LifetimePerTest)
+	for _, mk := range []*models.Mock{c1, c2, own} {
+		mk.Noise = []string{"k"}
+	}
+	mm := stagedManager(t, []*models.Mock{c1, c2, own}, nil)
+	keyed := func() []*models.Mock {
+		var got []*models.Mock
+		if err := mm.RangeSessionMocksWithKey(ix, "k", func(mk *models.Mock) bool {
+			got = append(got, mk)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTestConcurrent("A", nil, []*models.Mock{c1, c2})
+	equalNames(t, "A's keyed read", keyed(), "c1", "c2")
+	pt, _ := mm.GetPerTestMocksInWindow()
+	equalNames(t, "A's view", pt, "c1", "c2")
+	if !mm.DeleteFilteredMock(*pt[1]) {
+		t.Fatal("A's call of c2 was refused")
+	}
+	equalNames(t, "A's keyed read after its call of c2", keyed(), "c1")
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTestConcurrent("B", []*models.Mock{own}, []*models.Mock{c1, c2})
+	pt, _ = mm.GetPerTestMocksInWindow()
+	equalNames(t, "B's view", pt, "own", "c1")
+	equalNames(t, "B's keyed read", keyed(), "own", "c1")
+}
