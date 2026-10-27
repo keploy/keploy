@@ -691,7 +691,16 @@ func (h *HTTP) learnReads(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 		utils.LogError(h.Logger, err, "failed to get session mocks")
 		return scopeReads{}, errors.New("error while matching the request with the mocks")
 	}
-	r := scopeReads{perTest: perTest, session: session, open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
+	r := h.learnRules(mockDb, tracker)
+	r.perTest, r.session = perTest, session
+	return r, nil
+}
+
+// learnRules is learnReads without the store's reads: how the store tells
+// whose a recording is, whether a test is open, and which of its own
+// answered.
+func (h *HTTP) learnRules(mockDb integrations.MockMemDb, tracker *learn.Tracker) scopeReads {
+	r := scopeReads{open: tracker.Open(), answered: tracker.Answered, answeredMocks: tracker.AnsweredMocks}
 	r.owner, _ = mockDb.(integrations.TestOwnership)
 	if integrations.ExactServing(mockDb) {
 		// Under exact serving the store alone says what the open test owns:
@@ -710,7 +719,7 @@ func (h *HTTP) learnReads(mockDb integrations.MockMemDb, tracker *learn.Tracker)
 	// test's is learned onto a background recording. The pool is learned
 	// from between tests only.
 	r.exactBackground = r.open && integrations.S12Background(mockDb)
-	return r, nil
+	return r
 }
 
 // learnScopeIn is learnScope read from one snapshot of the store's round
@@ -798,6 +807,7 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		if m == nil || m.Spec.HTTPReq == nil || hasVariables(m) {
 			continue
 		}
+		learnVisits.Add(1)
 		rp := recordedParts(m)
 		d := destOf(live, rp)
 		masked := n.maskedPath(rp.path)
@@ -805,30 +815,8 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		if operationKey(rp.method, d, segmentCount(masked)) != liveShape.Key {
 			continue
 		}
-		own, poolsOwn := ownership(m, i < len(httpPerTest), r.owner, r.windows, r.inFlight, r.pools)
-		// A protocol-phase mock (a handshake, a token fetch) is never a
-		// test's own: the pool's, answering any number of the test's
-		// requests (design §5.2), and never paired.
-		own = own && open && !m.IsProtocolPhase()
-		spent := own && r.answered(m.Name)
-		c := learn.Candidate{
-			Known:    n.known(m),
-			Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
-		}
-		if r.sieve.shapes(m, masked, spent) {
-			c.Shape = n.shape(rp, d)
-		}
+		c, own := r.candidateOf(m, i < len(httpPerTest), rp, d, masked, n, pool)
 		inScope[m.Name] = true
-		if spent {
-			// Each of the test's own mocks answers one request of it
-			// (design §5.2), whatever lifetime the store gives it: one
-			// that answered is spent. It still competes, as the recording
-			// it is: compared without the noise this round learned onto it
-			// (the pool's copy carries it), so the next recording of the
-			// same call is paired, not hidden behind it, and a call it
-			// still matches exactly is one more than recorded.
-			c.Known, c.Pairable, c.Spent = n.knownAsRecorded(m), false, true
-		}
 		if own {
 			sc.cands, sc.mocks, sc.own = append(sc.cands, c), append(sc.mocks, m), append(sc.own, true)
 		} else {
@@ -864,6 +852,36 @@ func (r scopeReads) scope(live httpParts, liveShape learn.Shape, n learnNoise, p
 		sc.own = append(sc.own, false)
 	}
 	return sc
+}
+
+// candidateOf is m's candidate in r's scope, its parts rp, its destination d
+// and its path masked as the learn step reads them, and whether it is the
+// open test's own; perTestTier says the per-test read holds it.
+func (r scopeReads) candidateOf(m *models.Mock, perTestTier bool, rp httpParts, d, masked string, n learnNoise, pool bool) (learn.Candidate, bool) {
+	own, poolsOwn := ownership(m, perTestTier, r.owner, r.windows, r.inFlight, r.pools)
+	// A protocol-phase mock (a handshake, a token fetch) is never a
+	// test's own: the pool's, answering any number of the test's
+	// requests (design §5.2), and never paired.
+	own = own && r.open && !m.IsProtocolPhase()
+	spent := own && r.answered(m.Name)
+	c := learn.Candidate{
+		Known:    n.known(m),
+		Pairable: !m.IsProtocolPhase() && (own || pool && poolsOwn && !r.exactBackground),
+	}
+	if r.sieve.shapes(m, masked, spent) {
+		c.Shape = n.shape(rp, d)
+	}
+	if spent {
+		// Each of the test's own mocks answers one request of it
+		// (design §5.2), whatever lifetime the store gives it: one
+		// that answered is spent. It still competes, as the recording
+		// it is: compared without the noise this round learned onto it
+		// (the pool's copy carries it), so the next recording of the
+		// same call is paired, not hidden behind it, and a call it
+		// still matches exactly is one more than recorded.
+		c.Known, c.Pairable, c.Spent = n.knownAsRecorded(m), false, true
+	}
+	return c, own
 }
 
 // ownership says whether a recorded mock is the open test's own and whether
@@ -2529,17 +2547,29 @@ func withExcused(e learn.Earlier, n learnNoise, live, rec httpParts) learn.Earli
 // the matcher as before, and so does every recording that declares
 // variables: the matcher's variable pass serves it (variables.go).
 func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, error) {
+	return h.learnedMatchOf(ctx, input, mockDb, mockDb, n, opts)
+}
+
+// learnedMatchOf is learnedMatch reading mockDb, held to the call from base
+// (integrations.HoldToRound), or base itself: the learn step's index of a
+// staging generation is kept for base, which every call's held store shares
+// the reads of while its staging is the call's (learnIndexes.of).
+func (h *HTTP) learnedMatchOf(ctx context.Context, input *req, mockDb, base integrations.MockMemDb, n learnNoise, opts models.OutgoingOptions) (*models.Mock, error) {
 	live := liveParts(ctx, input)
 	liveShape := n.shape(live, sameDest)
+	// reread: a claim of the pass before failed (another call took the
+	// recording first): the call reads the store itself from then on, so a
+	// recording the index still lists and the store no longer hands out is
+	// never chosen again.
+	reread := false
 	for {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		r, err := h.learnReads(mockDb, learn.TrackerFrom(ctx))
+		group, owner, err := h.learnedGroupOf(base, mockDb, learn.TrackerFrom(ctx), live, liveShape, n, reread)
 		if err != nil {
 			return nil, nil
 		}
-		group, owner := r.learnedGroup(live, liveShape, n, n.learnSieveOf(live))
 		if len(group) == 0 {
 			return nil, nil
 		}
@@ -2569,6 +2599,7 @@ func (h *HTTP) learnedMatch(ctx context.Context, input *req, mockDb integrations
 			}
 			return served, nil
 		}
+		reread = true
 	}
 }
 
