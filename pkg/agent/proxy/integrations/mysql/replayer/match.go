@@ -823,7 +823,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// what the first pass already computed for its candidates.
 	//
 	// While no test window is active, COM_QUERY and COM_STMT_EXECUTE are
-	// matched through preparedIndex too. That is under exact serving (keploy
+	// matched through the store's index too, each through its own
+	// (queryIndex, executeIndex). That is under exact serving (keploy
 	// mock replay), whose store reports no window, and in keploy test only
 	// before a set's first test: a test's window is opened as the test is
 	// staged and stays open until the next test is staged. Then:
@@ -841,18 +842,21 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	//     rank below both. So a pass over the candidates filed under the live
 	//     query settles it when it finds either. A recorded EXECUTE's query is
 	//     its own (mysql.PacketBundle.StoredQuery) or its PREPARE's in the
-	//     pool, which no key of its own can say: while the session tier holds
-	//     an EXECUTE that recorded no query (keyExecuteUnnamed, looked up
-	//     through unnamedExecIndex, which computes no statement identity), the
-	//     full scan matches it.
+	//     pool, which no key of its own can say: while the staged mocks of
+	//     the session tier hold an EXECUTE that recorded no query
+	//     (keyExecuteUnnamed, looked up through unnamedExecIndex, which
+	//     computes no statement identity), the full scan matches it.
 	//
 	// Under exact serving the per-test tier leads with every mock the open
 	// test owns, and the keyed pass walks that tier whole before the session
-	// tier: preparedIndex files the test's own mocks under no key (its
+	// tier: every index here files the test's own mocks under no key (their
 	// OwnedKeys), so the keyed walks of the session tier read the staged mocks
 	// only, and no command computes a statement identity of the mocks the test
-	// owns. The staged trees' preparedIndex is built by the first keyed walk
-	// that reaches the session tier, not by the look-up of keyExecuteUnnamed.
+	// owns. An EXECUTE the test owns that recorded no query is read in that
+	// tier too, ahead of every staged mock, as the full scan reads it. The
+	// staged trees build each index on the first keyed walk that reaches the
+	// session tier through it, so that walk computes the keys of its own kind
+	// of command alone, once per staging.
 	keyReader, _ := mockDb.(integrations.SessionKeyReader)
 	if opts.fullScan {
 		keyReader = nil
@@ -865,7 +869,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	if act, _ := req.Message.(*mysql.StmtExecutePacket); act != nil && decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
 		liveExec = newLiveExecStatement(strings.TrimSpace(decodeCtx.StmtIDToQuery[act.StatementID]))
 	}
-	scanKey := ""
+	// scanKey is the key the keyed pass reads the session tier under, and
+	// scanIndex the index that files it.
+	scanKey, scanIndex := "", preparedIndex
 	switch req.Header.Type {
 	case sCOM_STMT_PREP:
 		scanKey = keyPrepare + liveStatement
@@ -873,7 +879,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		scanKey = keyClose
 	case sCOM_QUERY:
 		if qp, _ := req.Message.(*mysql.QueryPacket); !windowActive && qp != nil && !readsLegacy(qp) {
-			scanKey = keyQuery + liveStatement
+			scanKey, scanIndex = keyQuery+liveStatement, queryIndex
 		}
 	case sCOM_STMT_EXEC:
 		if !windowActive && liveExec.identity != "" && keyReader != nil {
@@ -882,7 +888,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				unnamed = true
 				return false
 			}); err == nil && !unnamed {
-				scanKey = keyExecute + foldKey(liveExec.identity)
+				scanKey, scanIndex = keyExecute+foldKey(liveExec.identity), executeIndex
 			}
 		}
 	}
@@ -900,7 +906,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		if err := readTiers(); err != nil {
 			return nil, false, nil, err
 		}
-		key := scanKey
+		key, index := scanKey, scanIndex
 		// The per-test and connection tiers are walked whole. Under exact
 		// serving the per-test tier leads with the open test's unanswered
 		// mocks, which the keyed walk of the session tier leaves out.
@@ -911,7 +917,7 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				}
 			}
 			stopped := false
-			if err := keyReader.RangeSessionMocksWithKey(preparedIndex, key, func(mk *models.Mock) bool {
+			if err := keyReader.RangeSessionMocksWithKey(index, key, func(mk *models.Mock) bool {
 				stopped = !yield(mk)
 				return !stopped
 			}); err != nil {
