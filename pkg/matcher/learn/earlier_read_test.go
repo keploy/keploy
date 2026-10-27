@@ -80,6 +80,10 @@ func TestAClientTestLearnsAReadMadeBeforeItsCallsWindowAsAReadSinceItsTestBegan(
 		{"no begin known", nanosText(earlierRec.read), nanosText(earlierF.read), noBegin, false, "its characters 1 to 19"},
 		{"no begin known in the recording", nanosText(earlierRec.read), nanosText(earlierF.read), &Window{Rec: noBegin.Rec, F: w.F}, false, "its characters 1 to 19"},
 		{"no begin known in full round", nanosText(earlierRec.read), nanosText(earlierF.read), &Window{Rec: w.Rec, F: noBegin.F}, false, "its characters 1 to 19"},
+		// One run read in its call's window, the other before it, where the
+		// other's begin is not known: no window from both begins holds it.
+		{"no begin known in full round, read in its call's window there", nanosText(earlierRec.read), nanosText(earlierF.prev.Add(100 * time.Millisecond)), &Window{Rec: w.Rec, F: noBegin.F}, false, "its characters 1 to 19"},
+		{"no begin known in the recording, read in its call's window there", nanosText(earlierRec.prev.Add(100 * time.Millisecond)), nanosText(earlierF.read), &Window{Rec: noBegin.Rec, F: w.F}, false, "its characters 1 to 19"},
 		{"read before the recording's test began", nanosText(before(earlierRec).read), nanosText(earlierF.read), w, false, "its characters 1 to 19"},
 		{"read before full round's test began", nanosText(earlierRec.read), nanosText(before(earlierF).read), w, false, "its characters 1 to 19"},
 		{"inside a longer value", "audited " + nanosText(earlierRec.read), "audited " + nanosText(earlierF.read), w, false, "its characters 9 to 27"},
