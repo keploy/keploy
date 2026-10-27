@@ -10,6 +10,8 @@ import (
 	"go.uber.org/zap"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // MarkBackground writes a judging's background mark on the named test's
@@ -138,8 +140,8 @@ func TestRemoveBackgroundTakesOnlyAMarkedEntryOffItsTestsList(t *testing.T) {
 	}
 
 	// sweep carries no mark: it stays. mock-3 is test-2's, not test-1's.
-	removed, unlisted, err := db.RemoveBackground(ctx, "test-set-0", map[string][]string{
-		"test-1": {"tick", "shared", "sweep", "w-1", "mock-3"},
+	removed, unlisted, err := db.RemoveBackground(ctx, "test-set-0", map[string]map[string]string{
+		"test-1": {"tick": "no round called it", "shared": "no round called it", "sweep": "no round called it", "w-1": "no round called it", "mock-3": "no round called it"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +156,29 @@ func TestRemoveBackgroundTakesOnlyAMarkedEntryOffItsTestsList(t *testing.T) {
 	if got := lists(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("after removing: %v, want %v", got, want)
 	}
+	// Each one taken off is noted on its test's entry, with the mark it
+	// carried and the reason; nothing is noted on test-2, whose entries stay.
+	notes := func() map[string][]models.RemovedMock {
+		t.Helper()
+		m, err := db.GetMapping(ctx, "test-set-0")
+		if err != nil || m == nil {
+			t.Fatalf("GetMapping = %v, %v", m, err)
+		}
+		got := map[string][]models.RemovedMock{}
+		for _, tc := range m.TestCases {
+			if len(tc.Removed) > 0 {
+				got[tc.ID] = tc.Removed
+			}
+		}
+		return got
+	}
+	note := func(name, kind string) models.RemovedMock {
+		return models.RemovedMock{Name: name, Kind: kind, Background: "a timer", Reason: "no round called it"}
+	}
+	wantNotes := map[string][]models.RemovedMock{"test-1": {note("tick", "Mongo"), note("shared", "Mongo"), note("w-1", "Http")}}
+	if got := notes(); !reflect.DeepEqual(got, wantNotes) {
+		t.Fatalf("removal notes %+v, want %+v", got, wantNotes)
+	}
 
 	// Nothing marked to take off: the file is not written.
 	path := filepath.Join(dir, "test-set-0", "mappings.yaml")
@@ -161,15 +186,28 @@ func TestRemoveBackgroundTakesOnlyAMarkedEntryOffItsTestsList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	removed, unlisted, err = db.RemoveBackground(ctx, "test-set-0", map[string][]string{"test-1": {"sweep", "tick"}})
+	removed, unlisted, err = db.RemoveBackground(ctx, "test-set-0", map[string]map[string]string{"test-1": {"sweep": "again", "tick": "again"}})
 	if err != nil || removed != nil || unlisted != nil {
 		t.Fatalf("removing again: %v, %v, %v; want nothing", removed, unlisted, err)
 	}
 	if after, err := os.Stat(path); err != nil || !os.SameFile(before, after) {
 		t.Fatalf("removing nothing rewrote the file (err %v)", err)
 	}
+	if got := notes(); !reflect.DeepEqual(got, wantNotes) {
+		t.Fatalf("removing nothing changed the notes: %+v, want %+v", got, wantNotes)
+	}
 
-	if _, _, err := db.RemoveBackground(ctx, "test-set-missing", map[string][]string{"test-1": {"tick"}}); err == nil {
+	// A record that lists tick on test-1 again brought it back: its note
+	// comes off, and the others stay.
+	if err := db.UpsertBatch(ctx, "test-set-0", map[string][]models.MockEntry{"test-1": {{Name: "tick", Kind: "Mongo"}}}); err != nil {
+		t.Fatal(err)
+	}
+	wantNotes = map[string][]models.RemovedMock{"test-1": {note("shared", "Mongo"), note("w-1", "Http")}}
+	if got := notes(); !reflect.DeepEqual(got, wantNotes) {
+		t.Fatalf("after listing tick again: notes %+v, want %+v", got, wantNotes)
+	}
+
+	if _, _, err := db.RemoveBackground(ctx, "test-set-missing", map[string]map[string]string{"test-1": {"tick": "gone"}}); err == nil {
 		t.Fatal("removing from a set with no mappings file: no error")
 	}
 }
@@ -204,12 +242,98 @@ func TestRemoveBackgroundKeepsARecordingAnyListStillNames(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "test-set-0", "mappings.yaml"), data, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			removed, unlisted, err := New(zap.NewNop(), dir, "mappings").RemoveBackground(ctx, "test-set-0", map[string][]string{"test-1": {"tick"}})
+			removed, unlisted, err := New(zap.NewNop(), dir, "mappings").RemoveBackground(ctx, "test-set-0", map[string]map[string]string{"test-1": {"tick": "gone"}})
 			if err != nil || !reflect.DeepEqual(removed, map[string][]string{"test-1": {"tick"}}) {
 				t.Fatalf("removed %v, err %v; want test-1's tick", removed, err)
 			}
 			if want := name == "none"; (len(unlisted) == 1) != want {
 				t.Fatalf("unlisted %v: the %s list still names tick, so the mock file must keep it", unlisted, name)
+			}
+		})
+	}
+}
+
+// A removal note (models.MappedTestCase.Removed) is read and kept by every
+// rewrite of mappings.yaml, whatever the switch, in YAML and in JSON; a note
+// taken out again for the same recording replaces the first.
+func TestRemovalNoteIsKeptByEveryRewrite(t *testing.T) {
+	for _, f := range []yaml.Format{yaml.FormatYAML, yaml.FormatJSON} {
+		for _, proven := range []string{"1", ""} {
+			t.Run(string(f)+"/proven="+proven, func(t *testing.T) {
+				t.Setenv(provenswitch.Env, proven)
+				ctx := context.Background()
+				dir := t.TempDir()
+				m := &models.Mapping{Version: string(models.GetVersion()), Kind: models.MappingKind, TestSetID: "test-set-0",
+					TestCases: []models.MappedTestCase{{ID: "test-1", Mocks: []models.MockEntry{{Name: "tick", Kind: "Mongo", Background: "a timer"}, {Name: "mock-1", Kind: "Http"}}}}}
+				data, err := EncodeMappingF(m, zap.NewNop(), f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(dir, "test-set-0"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "test-set-0", "mappings."+f.FileExtension()), data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				db := NewWithFormat(zap.NewNop(), dir, "mappings", f)
+				if _, _, err := db.RemoveBackground(ctx, "test-set-0", map[string]map[string]string{"test-1": {"tick": "first"}}); err != nil {
+					t.Fatal(err)
+				}
+				// Another rewrite, of another section, keeps the note.
+				if err := db.UpsertWorker(ctx, "test-set-0", []models.MockEntry{{Name: "w-1", Kind: "Http"}}); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.UpsertBatch(ctx, "test-set-0", map[string][]models.MockEntry{"test-1": {{Name: "mock-2", Kind: "Http"}}}); err != nil {
+					t.Fatal(err)
+				}
+				got, err := db.GetMapping(ctx, "test-set-0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := []models.RemovedMock{{Name: "tick", Kind: "Mongo", Background: "a timer", Reason: "first"}}
+				if len(got.TestCases) != 1 || !reflect.DeepEqual(got.TestCases[0].Removed, want) {
+					t.Fatalf("after two rewrites: %+v, want test-1's note %+v", got.TestCases, want)
+				}
+				// Listed and marked again, then taken out again: one note, the
+				// second reason.
+				got.TestCases[0].Mocks = append(got.TestCases[0].Mocks, models.MockEntry{Name: "tick", Kind: "Mongo", Background: "a timer"})
+				got.TestCases[0].Removed = want
+				data, err = EncodeMappingF(got, zap.NewNop(), f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "test-set-0", "mappings."+f.FileExtension()), data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := db.RemoveBackground(ctx, "test-set-0", map[string]map[string]string{"test-1": {"tick": "second"}}); err != nil {
+					t.Fatal(err)
+				}
+				got, err = db.GetMapping(ctx, "test-set-0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				want[0].Reason = "second"
+				if !reflect.DeepEqual(got.TestCases[0].Removed, want) {
+					t.Fatalf("taken out again: %+v, want %+v", got.TestCases[0].Removed, want)
+				}
+			})
+		}
+	}
+}
+
+// A removal note that is not a list of removed recordings (a hand edit gone
+// wrong) is an error, never dropped by the next rewrite unsaid.
+func TestRemovalNoteThatIsNotAListIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		format yaml.Format
+		body   string
+	}{
+		{yaml.FormatYAML, "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: test-set-0\ntests:\n  - id: test-1\n    mock_entries:\n      - name: mock-1\n        kind: Http\n    removed: tick\n"},
+		{yaml.FormatJSON, `{"version":"api.keploy.io/v1beta1","kind":"TestMocksMapping","testSetId":"test-set-0","tests":[{"id":"test-1","mock_entries":[{"name":"mock-1","kind":"Http"}],"removed":"tick"}]}`},
+	} {
+		t.Run(string(tc.format), func(t *testing.T) {
+			if _, err := DecodeMappingF([]byte(tc.body), zap.NewNop(), tc.format); err == nil {
+				t.Fatal("a removed: that is not a list read without an error")
 			}
 		})
 	}
