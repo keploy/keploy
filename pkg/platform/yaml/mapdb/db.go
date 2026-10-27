@@ -582,6 +582,43 @@ func (db *MappingDb) MarkRecordedWith(ctx context.Context, testSetID, feature st
 	return yaml.WriteFileF(ctx, db.logger, mappingPath, fileName, encodedData, false, effFormat)
 }
 
+// MarkBackground writes keploy judging's background marks
+// (models.MockEntry.Background) onto the set's mappings.yaml: marks holds,
+// by test, the line each of its recordings is to carry, by recording name.
+// A recording is marked only on the list of the test that names it: another
+// test listing the same recording keeps its entry as it was. An empty line
+// takes a mark off. Every other section and entry is kept as it is, and a
+// file the marks do not change is not written. It returns, sorted, the
+// recordings whose entry it changed. A set with no mapping file is an error:
+// there is nothing to mark.
+func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks map[string]map[string]string) ([]string, error) {
+	var changed []string
+	if len(marks) == 0 {
+		return nil, nil
+	}
+	err := db.rewrite(ctx, testSetID, false, true, func(m *models.Mapping) bool {
+		for i := range m.TestCases {
+			byName, ok := marks[m.TestCases[i].ID]
+			if !ok {
+				continue
+			}
+			for j := range m.TestCases[i].Mocks {
+				e := &m.TestCases[i].Mocks[j]
+				if why, ok := byName[e.Name]; ok && e.Background != why {
+					e.Background = why
+					changed = append(changed, e.Name)
+				}
+			}
+		}
+		return len(changed) > 0
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(changed)
+	return changed, nil
+}
+
 // workerAt is when a worker-scope entry's request was recorded, for its
 // order (models.MockEntry.RecordedAt).
 func workerAt(e models.MockEntry) time.Time { return e.RecordedAt() }
