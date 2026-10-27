@@ -405,12 +405,17 @@ func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
 		{"a read inside the window", from.Add(5 * ms), ms, o, from, to, true},
 		{"a read at the window's start", from, ms, o, from, to, true},
 		{"a read at the window's end", to, ms, o, from, to, true},
-		{"a read a resolution past the end", to.Add(ms), ms, o, from, to, false},
-		{"a read a resolution before the start", from.Add(-ms), ms, o, from, to, false},
+		{"a read a resolution past the end (a writer that rounds)", to.Add(ms), ms, o, from, to, true},
+		{"a read a resolution before the start", from.Add(-ms), ms, o, from, to, true},
+		{"a read two resolutions past the end", to.Add(2 * ms), ms, o, from, to, false},
+		{"a read two resolutions before the start", from.Add(-2 * ms), ms, o, from, to, false},
 		{"m10: thirty days before", from.Add(-30 * 24 * time.Hour), ms, o, from, to, false},
 		{"m10b: the epoch", time.Unix(0, 0), ms, o, from, to, false},
 		{"a second's value whose second meets the window", from.Truncate(time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, true},
-		{"a second's value a second later", from.Truncate(time.Second).Add(time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, false},
+		{"a second's value a second later (rounded up)", from.Truncate(time.Second).Add(time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, true},
+		{"a second's value a second stale", from.Truncate(time.Second).Add(-time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, true},
+		{"a second's value two seconds later", from.Truncate(time.Second).Add(2 * time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, false},
+		{"a second's value two seconds stale", from.Truncate(time.Second).Add(-2 * time.Second), time.Second, ClockOffset{Res: time.Second}, from, to, false},
 		{"no Res", from.Add(5 * ms), ms, ClockOffset{}, from, to, false},
 		{"no res", from.Add(5 * ms), 0, o, from, to, false},
 		{"a window with no start", from.Add(5 * ms), ms, o, time.Time{}, to, false},
@@ -428,6 +433,59 @@ func TestAPlainClockReadHoldsOnlyAReadOfItsOwnWindow(t *testing.T) {
 		if got := row.o.Holds(row.at, row.res, row.from, row.to); got != row.want {
 			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
 		}
+	}
+}
+
+// A plain read checked at a cut of an hour or a day reads the cut in the
+// zone its value carries (the zone its cut is read in), and a day is one of
+// that zone's calendar: in UTC+05:30 an hour starts at :30 in UTC, and in
+// Berlin the day the clocks go back (2026-10-25) is 25 hours long, so a read
+// late in it still holds that day's date and yesterday's, and the day
+// before yesterday's never does; the morning after, yesterday's date (its
+// day began 25 hours before today's) holds; and late on 2026-03-28, the day
+// before a day of 23 hours, the next day's date holds and the one after it
+// never does (24 hours later is already past its midnight).
+func TestAPlainClockReadIsCheckedAtItsCutInItsZone(t *testing.T) {
+	ist := time.FixedZone("", 5*3600+1800)
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("no zone data: %v", err)
+	}
+	h, d := time.Hour, 24*time.Hour
+	o := ClockOffset{Res: h}
+	from := time.Date(2026, 10, 27, 10, 50, 0, 0, ist)
+	to := from.Add(time.Minute)
+	late := time.Date(2026, 10, 25, 23, 40, 0, 0, berlin)
+	morning := time.Date(2026, 10, 26, 8, 0, 0, 0, berlin)
+	spring := time.Date(2026, 3, 28, 23, 30, 0, 0, berlin)
+	for _, row := range []struct {
+		what     string
+		at       time.Time
+		res      time.Duration
+		o        ClockOffset
+		from, to time.Time
+		want     bool
+	}{
+		{"the IST hour of the read", time.Date(2026, 10, 27, 10, 0, 0, 0, ist), h, o, from, to, true},
+		{"the IST hour before it", time.Date(2026, 10, 27, 9, 0, 0, 0, ist), h, o, from, to, true},
+		{"two IST hours before it", time.Date(2026, 10, 27, 8, 0, 0, 0, ist), h, o, from, to, false},
+		{"the next IST hour (rounded up)", time.Date(2026, 10, 27, 11, 0, 0, 0, ist), h, o, from, to, true},
+		{"two IST hours after it", time.Date(2026, 10, 27, 12, 0, 0, 0, ist), h, o, from, to, false},
+		{"the day the clocks go back, read late in it", time.Date(2026, 10, 25, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, late, late.Add(time.Minute), true},
+		{"the day before it", time.Date(2026, 10, 24, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, late, late.Add(time.Minute), true},
+		{"two days before it", time.Date(2026, 10, 23, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, late, late.Add(time.Minute), false},
+		{"the next day", time.Date(2026, 10, 26, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, late, late.Add(time.Minute), true},
+		{"two days after it", time.Date(2026, 10, 27, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, late, late.Add(time.Minute), false},
+		{"yesterday's date the morning after the clocks went back (25 hours before the day's start)", time.Date(2026, 10, 25, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, morning, morning.Add(time.Minute), true},
+		{"the date two days ahead, late on the day before the clocks go forward (a day of 23 hours)", time.Date(2026, 3, 30, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, spring.Add(-time.Minute), spring, false},
+		{"the next day's date, late on the day before the clocks go forward", time.Date(2026, 3, 29, 0, 0, 0, 0, berlin), d, ClockOffset{Res: d}, spring.Add(-time.Minute), spring, true},
+	} {
+		if got := row.o.Holds(row.at, row.res, row.from, row.to); got != row.want {
+			t.Errorf("%s: Holds = %v, want %v", row.what, got, row.want)
+		}
+	}
+	if got, want := ReadCut(late, d, berlin), time.Date(2026, 10, 25, 0, 0, 0, 0, berlin); !got.Equal(want) || late.Sub(got) != 24*time.Hour+40*time.Minute {
+		t.Errorf("ReadCut of %v to a day in Berlin = %v (%v before), want %v, 24h40m (23h40m of wall clock and the hour the clocks went back)", late, got, late.Sub(got), want)
 	}
 }
 

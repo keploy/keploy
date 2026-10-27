@@ -1208,7 +1208,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// A time of day whole (textTimeOfDay), which names no day, is a
 		// read modulo a day (textTodRead), checked so at every replay.
 		if ln.Kind == KindNoise && dc.ofIn(r.Value, l.Value, w, at).clock.whole {
-			ln.Read = textClockRead(r.Value, l.Value)
+			ln.Read = textClockReadIn(r.Value, l.Value, dc.zone)
 			if ln.Read == nil {
 				ln.Read = dc.textTodRead(r.Value, l.Value, w, at)
 			}
@@ -1249,7 +1249,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				} else {
 					ln.Read = read
 				}
-			} else if read := textClockRead(r.Value, l.Value); read != nil {
+			} else if read := textClockReadIn(r.Value, l.Value, dc.zone); read != nil {
 				switch {
 				case w == nil && !dc.appClock:
 					ln.Kind, ln.Why = KindUnaccounted, noAppClockWhy
