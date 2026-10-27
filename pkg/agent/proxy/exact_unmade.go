@@ -7,7 +7,8 @@ import (
 
 // UnmadeWriteBefore implements integrations.UnmadeWriteReader: the first of
 // the open test's own recordings of mk's kind that has not answered, that
-// isWrite says is a write, and that was recorded before mk. For one of the
+// gates says is a write that can change what mk reads (the parser's: a
+// write elsewhere holds no read), and that was recorded before mk. For one of the
 // test's own recordings, this view's copy, that has not answered, "before"
 // is filed before it (recorded order). For any other recording (another
 // test's, the background's, the start-up window's, one the test shares with
@@ -18,9 +19,9 @@ import (
 // is a write the test must make. A copy of one of the test's own that an
 // earlier view served says none: its claim is refused, and the parser reads
 // this view's copy again.
-func (m *MockManager) UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mock) bool) (*models.Mock, bool) {
+func (m *MockManager) UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock) bool) (*models.Mock, bool) {
 	v := m.exactView()
-	if v == nil || v.test == "" || mk == nil || isWrite == nil {
+	if v == nil || v.test == "" || mk == nil || gates == nil {
 		return nil, false
 	}
 	i, own := v.index[mk.Name]
@@ -46,7 +47,7 @@ func (m *MockManager) UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mo
 	}
 	v.mu.Unlock()
 	for _, w := range unmade {
-		if isWrite(w) {
+		if gates(w) {
 			return w, true
 		}
 	}
@@ -58,8 +59,8 @@ var _ integrations.UnmadeWriteReader = (*MockManager)(nil)
 // UnmadeWriteBefore is the manager's (integrations.UnmadeWriteReader) while
 // the staging is still h's call's: a write of another staging's test says
 // nothing of what this call's test has made.
-func (h *heldScope) UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mock) bool) (*models.Mock, bool) {
-	w, ok := h.MockManager.UnmadeWriteBefore(mk, isWrite)
+func (h *heldScope) UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock) bool) (*models.Mock, bool) {
+	w, ok := h.MockManager.UnmadeWriteBefore(mk, gates)
 	if h.moved() {
 		return nil, false
 	}
@@ -70,9 +71,9 @@ func (h *heldScope) UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mock
 // (integrations.UnmadeWriteReader), none when it keeps no such reader, so a
 // parser on a scoped view answers a read before a write the replay has not
 // made as it would on the bare manager.
-func (s *scopedMockDb) UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mock) bool) (*models.Mock, bool) {
+func (s *scopedMockDb) UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock) bool) (*models.Mock, bool) {
 	if ur, ok := s.MockMemDb.(integrations.UnmadeWriteReader); ok {
-		return ur.UnmadeWriteBefore(mk, isWrite)
+		return ur.UnmadeWriteBefore(mk, gates)
 	}
 	return nil, false
 }

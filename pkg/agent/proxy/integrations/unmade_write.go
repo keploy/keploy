@@ -24,8 +24,8 @@ import (
 // test fails, or passes on a state it never reached.
 //
 // The rule: a read an answer step would answer with a recording made after
-// one of the open test's own writes of the same kind the replay has not
-// made yet is answered with the newest recording of the same request made
+// one of the open test's own writes the replay has not made yet, of a write
+// that can change what the read reads, is answered with the newest recording of the same request made
 // before that write: from earlier in the test, else from earlier in the
 // recording (an earlier test, the start-up window, the background). Never
 // with a recording made after a write the replay has not made, whoever
@@ -35,9 +35,12 @@ import (
 // Serving the earlier recording consumes nothing: the read the test recorded
 // after the write still answers the call made after it.
 //
-// The parser says which of its calls are writes (isWrite) and which
-// recordings are the same request as the call (same), as it compares them
-// when it serves exactly. The store says which of the open test's writes
+// The parser says which of its recordings are writes that can change what
+// the read reads (gates: Mongo's of the same collection, of its database as
+// a whole, or of a collection an aggregate's stages read; a write to
+// another collection never holds the read) and which recordings are the
+// same request as the call (same), as it compares them when it serves
+// exactly. A write it cannot tell the reach of holds every read. The store says which of the open test's writes
 // the replay has not made (UnmadeWriteReader) and holds the recordings made
 // before them (ExactConsumedReader, RecordedBeforeReader).
 
@@ -49,22 +52,27 @@ import (
 // recording made after it.
 type UnmadeWriteReader interface {
 	// UnmadeWriteBefore is the first of the open test's own recordings of
-	// mk's kind recorded before mk that has not answered and that isWrite
-	// says is a write: before in recorded order when mk is one of the test's
+	// mk's kind recorded before mk that has not answered and that gates
+	// says is a write that can change what mk reads: before in recorded order when mk is one of the test's
 	// own recordings that has not answered, at an earlier request time when
 	// mk is any other recording (another test's, the background's, the
 	// start-up window's). False when there is none, mk is one of the test's
-	// own that answered already, or no test is open. isWrite is called
+	// own that answered already, or no test is open. gates is called
 	// without the store's locks held.
-	UnmadeWriteBefore(mk *models.Mock, isWrite func(*models.Mock) bool) (*models.Mock, bool)
+	UnmadeWriteBefore(mk *models.Mock, gates func(*models.Mock) bool) (*models.Mock, bool)
 }
 
 // BeforeUnmadeWrite is what ReadBeforeUnmadeWrite decided for a read.
 type BeforeUnmadeWrite struct {
 	// Write is the open test's write, recorded before the recording the
-	// matcher chose, that the replay has not made: nil when the rule does
-	// not apply, and the parser serves its choice as before.
+	// matcher chose, that the replay has not made and that can change what
+	// the read reads: nil when the rule does not apply, and the parser
+	// serves its choice as before.
 	Write *models.Mock
+	// WriteSays is the parser's account of Write, for the miss's note and
+	// the report: what it is and what it changes (Mongo: "an insert into
+	// db.coll"); "" names Write by its recording alone.
+	WriteSays string
 	// Answer is, with Write set, the newest recording of the same request
 	// made before Write, a copy, to answer the read with without consuming
 	// anything: nil for none, a miss (Note).
@@ -81,9 +89,9 @@ func (b BeforeUnmadeWrite) Note() string {
 	if b.Write == nil || b.Answer != nil {
 		return ""
 	}
-	return fmt.Sprintf("an extra read before %s (a write the test recorded before this read's recording, which the replay has not made yet); "+
+	return fmt.Sprintf("an extra read before %s (a write the test recorded before this read's recording, which the replay has not made yet, and which can change what this read reads); "+
 		"the recording has no answer from before it. Under exact serving (KEPLOY_PROVEN) a read is never answered with a recording made after a write the replay has not made",
-		b.Write.Name)
+		b.writeName())
 }
 
 // Answered is the sentence the run report names a read answered from
@@ -95,7 +103,16 @@ func (b BeforeUnmadeWrite) Answered() string {
 	}
 	return fmt.Sprintf("an extra read before %s, answered from %s: the newest recording of this request made before that write, which the replay had not made yet. "+
 		"The recording made after the write still answers the read made after it, and nothing is learned from this answer",
-		b.Write.Name, b.Answer.Name)
+		b.writeName(), b.Answer.Name)
+}
+
+// writeName is Write's name, with the parser's account of it (WriteSays)
+// when it gives one: "mock-7 (an insert into db.coll)".
+func (b BeforeUnmadeWrite) writeName() string {
+	if b.WriteSays == "" {
+		return b.Write.Name
+	}
+	return b.Write.Name + " (" + b.WriteSays + ")"
 }
 
 // ReportAnswered reports a read b answers from before the write
@@ -121,23 +138,26 @@ var errNoEarlierRecordings = errors.New("the mock store cannot read the recordin
 
 // ReadBeforeUnmadeWrite decides, under exact serving, whether chosen, the
 // recording an answer step would answer a read with, was recorded after a write
-// of the open test the replay has not made (UnmadeWriteReader), and if so
+// of the open test the replay has not made (UnmadeWriteReader) that can
+// change what chosen reads (gates), and if so
 // which recording answers the read instead: the newest one made before
 // that write that same accepts, of chosen's kind, of the test's own that
 // answered (ExactConsumedReader), else of the whole recording
-// (RecordedBeforeReader). isWrite says which of the kind's recordings are
-// writes; a write chosen is no read and keeps its choice. With exact serving
-// off, for a store that cannot tell, and for a recording no unmade write
-// precedes, the zero value: the parser serves chosen as before.
-func ReadBeforeUnmadeWrite(db MockMemDb, chosen *models.Mock, isWrite, same func(*models.Mock) bool) (BeforeUnmadeWrite, error) {
-	if chosen == nil || isWrite == nil || same == nil || !ExactServing(db) || isWrite(chosen) {
+// (RecordedBeforeReader). gates is the parser's, built for chosen: whether a
+// recording of the kind is a write that can change what chosen reads; nil
+// when chosen reads nothing a write changes (a write is no read), and chosen
+// keeps its choice. With exact serving off, for a store that cannot tell,
+// and for a recording no unmade write it gates on precedes, the zero value:
+// the parser serves chosen as before.
+func ReadBeforeUnmadeWrite(db MockMemDb, chosen *models.Mock, gates, same func(*models.Mock) bool) (BeforeUnmadeWrite, error) {
+	if chosen == nil || gates == nil || same == nil || !ExactServing(db) {
 		return BeforeUnmadeWrite{}, nil
 	}
 	ur, ok := db.(UnmadeWriteReader)
 	if !ok {
 		return BeforeUnmadeWrite{}, nil
 	}
-	w, ok := ur.UnmadeWriteBefore(chosen, isWrite)
+	w, ok := ur.UnmadeWriteBefore(chosen, gates)
 	if !ok || w == nil {
 		return BeforeUnmadeWrite{}, nil
 	}
