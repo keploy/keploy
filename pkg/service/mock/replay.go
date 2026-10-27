@@ -1117,6 +1117,13 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	refuse := func(why string) error {
 		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
 	}
+	// unreadable is refuse for a mappings file keploy cannot read, which a
+	// hand edit may have made so (a test entry with both mock lists): a
+	// record would replace the edit, so correcting it comes first. err is
+	// kept (models.BothMockListsError names the test).
+	unreadable := func(err error) error {
+		return fmt.Errorf("keploy cannot judge each test of mock set %q: its mappings cannot be read: %w; if you edited the set's mappings file, correct that edit (a record would replace it), otherwise record the set again with keploy mock record", name, err)
+	}
 	if m.mappingDB == nil {
 		return refuse("this keploy reads no per-test mappings")
 	}
@@ -1126,14 +1133,14 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	mp, err := reader.GetMapping(ctx, name)
 	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
+		return unreadable(err)
 	}
 	if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
 		return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
 	}
 	mappings, _, err := m.mappingDB.Get(ctx, name)
 	if err != nil {
-		return refuse("its mappings cannot be read: " + err.Error())
+		return unreadable(err)
 	}
 	pp, ok := m.instrumentation.(ProvenTablePusher)
 	if !ok {

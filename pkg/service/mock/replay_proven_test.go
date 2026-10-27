@@ -436,6 +436,11 @@ func TestAMappingWithBothMockListsIsRefusedUnderTheSwitch(t *testing.T) {
 	err := New(zap.NewNop(), instr, named("mock-0", "mock-1"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
 	require.ErrorContains(t, err, "its mappings cannot be read")
 	require.ErrorContains(t, err, "test \"o::TestA\" in mappings has both `mocks` and `mock_entries`")
+	// The edit comes first: a record would replace it. The typed refusal is
+	// kept for a caller.
+	require.ErrorContains(t, err, "if you edited the set's mappings file, correct that edit (a record would replace it)")
+	var both *models.BothMockListsError
+	require.ErrorAs(t, err, &both)
 	runs, _ := instr.counts()
 	require.Zero(t, runs, "the test command ran")
 }
