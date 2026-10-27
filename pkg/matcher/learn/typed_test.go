@@ -827,8 +827,8 @@ func TestATimeOfDayIsAClockReadWhereTheLeadMovedIt(t *testing.T) {
 	if r, l := tod(read), tod(read.Add(FullRoundLead)); r.Value != "T23:59:30.115000" || l.Value != "T00:00:31.615000" {
 		t.Fatalf("the times as written: %q and %q", r.Value, l.Value)
 	}
-	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil); ln.Kind != KindNoise {
-		t.Errorf("moved by the lead across midnight: %s (%s); want noise", ln.Kind, ln.Why)
+	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(FullRoundLead+37*time.Millisecond)), call, nil); !todRead(ln, models.ZoneUTC) || ln.Read.Layout != models.LayoutTypedTimeOfDay {
+		t.Errorf("moved by the lead across midnight: %s Read=%+v (%s); want a read of the clock modulo a day, typed, in UTC", ln.Kind, ln.Read, ln.Why)
 	}
 	if ln := classifyZoned(nil, false, p, tod(read), tod(read.Add(time.Hour)), call, nil); ln.Kind != KindUnaccounted || ln.Why != instantNotClock {
 		t.Errorf("moved by an hour: %s (%s); want it refused: %s", ln.Kind, ln.Why, instantNotClock)

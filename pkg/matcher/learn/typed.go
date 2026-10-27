@@ -112,7 +112,8 @@ func WallClockLeaf(path, noise string, wall time.Time, res time.Duration) Leaf {
 // compared whole; a time of day names no day, so no call's window holds it
 // and no call bounds it: the learn step reads it as a read of the clock only
 // where it moved by FullRoundLead, read modulo a day, as it reads a text's
-// time of day (moved). Outside 0 to 24 hours it is written as it is, a text
+// time of day (moved), and learns it so (todRead), which a replay checks
+// modulo a day in its call's span (clockReadIn). Outside 0 to 24 hours it is written as it is, a text
 // InstantOf does not read, and the learn step refuses it where it changed.
 func TimeOfDayLeaf(path, noise string, tod, res time.Duration) Leaf {
 	if res > 0 {
@@ -604,6 +605,17 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		if rt.names == namesWall {
 			ln.Read.Zone = dc.wallZone(rt.at, lt.at, rt.res, lt.res, w, at)
 		}
+	}
+	// A time of day the lead moved (instantClock) names no day, so no
+	// window holds it: a read of the clock all the same, which every replay
+	// checks modulo a day in its call's span, in the zone the learn step
+	// read it in (todRead, clockReadIn), never noise that lets any value
+	// pass.
+	if ln.Kind == KindNoise && rt.names == namesTimeOfDay && lt.names == namesTimeOfDay {
+		day := time.Duration(nsPerDay)
+		rtod, ltod := rt.at.Sub(timeOfDayDay)%day, lt.at.Sub(timeOfDayDay)%day
+		ln.Kind, ln.Why = KindClockRead, clockReadUncheckedWhy
+		ln.Read = dc.todRead(rtod, ltod, rt.res, lt.res, models.LayoutTypedTimeOfDay, models.LayoutTypedTimeOfDay, w, at)
 	}
 	return ln
 }
