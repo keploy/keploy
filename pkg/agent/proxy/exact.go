@@ -249,10 +249,11 @@ type exactState struct {
 	// cached for one revision of the trees (each exact serve bumps it), one
 	// scope table and one key.
 	teardownLast atomic.Pointer[teardownBound]
-	// unrequired are the recordings of the staged set that a test is served
-	// in its window but never required to make (SetUnrequired), with why:
-	// nil until a replay sent them, which requires every test mock.
-	unrequired atomic.Pointer[map[string]string]
+	// unrequired are, per test of the staged set, the recordings of its own
+	// list it is served in its window but never required to make
+	// (SetUnrequired), with why: nil until a replay sent them, which
+	// requires every test mock.
+	unrequired atomic.Pointer[models.BackgroundMarks]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -1568,13 +1569,15 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	// Only the test's own: a shared recording is never required of it, nor
-	// one judging marked as the application's background work (SetUnrequired).
+	// one judging marked, on this test's own entry, as the application's
+	// background work (SetUnrequired): another test's mark on the same
+	// recording does not reach it.
 	for _, i := range v.order {
 		if !v.isCand(i) {
 			consumed = append(consumed, v.owned[i].Name)
 		}
 	}
-	unrequired := m.unrequiredNames()
+	unrequired := m.unrequiredOf(v.test)
 	for i, done := range v.consumed {
 		if !done && !v.isCand(i) {
 			if _, bg := unrequired[v.owned[i].Name]; bg {
