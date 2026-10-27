@@ -429,6 +429,44 @@ func resolveProbeTarget(ctx context.Context, testCfg config.Test, tc *models.Tes
 	return scheme, host, port, true
 }
 
+func resolveGRPCDialTarget(ctx context.Context, testCfg config.Test, tc *models.TestCase, testSetID string, logger *zap.Logger, published func(context.Context, string, uint16) uint16) (host, port string, ok bool) {
+	authority := tc.GrpcReq.Headers.PseudoHeaders[":authority"]
+	if authority == "" {
+		return "", "", false
+	}
+	hostToUse := testCfg.Host
+	if hostToUse == "" {
+		hostToUse = "localhost"
+	}
+	configPort := testCfg.GRPCPort
+	if ps, ok := testCfg.Protocol["grpc"]; ok && ps.Port > 0 {
+		configPort = ps.Port
+	}
+	urlReplacements, portMappings := mergeReplaceWith(testCfg, testSetID)
+	target, err := pkg.ResolveTestTarget(authority, urlReplacements, portMappings, hostToUse, tc.AppPort, configPort, false, logger)
+	if err != nil {
+		return "", "", false
+	}
+	target = pkg.PublishedTarget(ctx, pkg.SimulationConfig{ConfigPort: configPort, URLReplacements: urlReplacements, PortMappings: portMappings, PublishedPort: published}, authority, target, tc.AppPort, false)
+	host, port, err = net.SplitHostPort(target)
+	if err != nil || port == "" {
+		return "", "", false
+	}
+	return host, port, true
+}
+
+func resolveTestSetGRPCTarget(ctx context.Context, testCfg config.Test, testCases []*models.TestCase, testSetID string, logger *zap.Logger, published func(context.Context, string, uint16) uint16) httpProbeTarget {
+	for _, tc := range testCases {
+		if tc == nil || tc.Kind != models.GRPC_EXPORT {
+			continue
+		}
+		if host, port, ok := resolveGRPCDialTarget(ctx, testCfg, tc, testSetID, logger, published); ok {
+			return httpProbeTarget{host: host, port: port, appPort: tc.AppPort, ok: true}
+		}
+	}
+	return httpProbeTarget{}
+}
+
 // isTLSVerificationError reports whether err is the TLS handshake failing on
 // certificate VERIFICATION, as opposed to the connection never getting that far.
 //
@@ -616,7 +654,7 @@ func gateOnAppAddress(ctx context.Context, logger *zap.Logger, cfg *config.Confi
 		return true
 	}
 
-	if !probe.ok {
+	if !probe.servesHTTP() {
 		return true
 	}
 
@@ -687,8 +725,9 @@ func healthProbePathForLog(configured string) string {
 	return configured
 }
 
-// httpProbeTarget is the address a recorded HTTP test case actually dials, used
-// as the target of the readiness gate's HTTP stage.
+// httpProbeTarget is the address a recorded test case actually dials, used as
+// the target of the readiness gate's HTTP stage when it has a scheme (an HTTP
+// test's), and of its TCP-accept stage only when it has none (a gRPC test's).
 type httpProbeTarget struct {
 	scheme, host, port string
 	// appPort is the app's port the test was recorded on, which port leads
@@ -699,6 +738,10 @@ type httpProbeTarget struct {
 	// while probing, and takes the set's next target from it when the host
 	// turns out unable to reach this one.
 	src *probeTargetSource
+}
+
+func (t httpProbeTarget) servesHTTP() bool {
+	return t.ok && t.scheme != ""
 }
 
 // resolveTestSetProbeTarget returns the address the readiness gate should complete
