@@ -149,8 +149,15 @@ func (p *Proxy) hasDNSUpstream() bool {
 // emitted by the caller. Keeping this function stateless makes it
 // trivially safe to call concurrently from the UDP and TCP DNS servers.
 func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
+	resp, _, err := p.forwardDNSUpstreamVia(question)
+	return resp, err
+}
+
+// forwardDNSUpstreamVia is forwardDNSUpstream, with the address (host:port)
+// of the resolver whose answer it returns.
+func (p *Proxy) forwardDNSUpstreamVia(question dns.Question) (*dns.Msg, string, error) {
 	if !p.hasDNSUpstream() {
-		return nil, fmt.Errorf("no upstream DNS resolver configured")
+		return nil, "", fmt.Errorf("no upstream DNS resolver configured")
 	}
 
 	// Only forward types we know how to relay sensibly. Everything
@@ -165,9 +172,9 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	// accidentally start answering DNSSEC queries we can't sign.
 	if !isForwardableQType(question.Qtype) {
 		if qtypeName, ok := dns.TypeToString[question.Qtype]; ok && qtypeName != "" {
-			return nil, fmt.Errorf("qtype %s not forwarded", qtypeName)
+			return nil, "", fmt.Errorf("qtype %s not forwarded", qtypeName)
 		}
-		return nil, fmt.Errorf("qtype %d not forwarded", question.Qtype)
+		return nil, "", fmt.Errorf("qtype %d not forwarded", question.Qtype)
 	}
 
 	m := new(dns.Msg)
@@ -178,11 +185,11 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	waits := p.dnsStub().waitsWithin(len(p.dnsUpstreamServers), p.dnsForwardTimeout)
 	// Not ended by the proxy's stop: dnsForwardTimeout bounds it, as it
 	// did before the exchange resent, so a stop waits no longer than that.
-	resp, err := exchangeDNSUpstream(context.Background(), p.logger, m, p.askOrder(p.dnsUpstreamServers), p.dnsUpstreamPort, waits)
+	resp, resolver, err := exchangeDNSUpstream(context.Background(), p.logger, m, p.askOrder(p.dnsUpstreamServers), p.dnsUpstreamPort, waits)
 	if err != nil {
-		return nil, fmt.Errorf("no upstream DNS server answered %s: %w", question.Name, err)
+		return nil, "", fmt.Errorf("no upstream DNS server answered %s: %w", question.Name, err)
 	}
-	return resp, nil
+	return resp, resolver, nil
 }
 
 // isForwardableQType is the allowlist of DNS query types the

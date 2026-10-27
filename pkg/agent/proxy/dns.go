@@ -959,7 +959,7 @@ func (p *Proxy) recordDNSMock(ctx context.Context, question dns.Question, reqTim
 	// Asked as the app's stub resolver would have asked: resends on loss,
 	// every server in turn, TCP when the answer is truncated. A lost packet
 	// must not become a SERVFAIL the app sees while the upstream answers.
-	in, err := exchangeDNSUpstream(ctx, p.logger, m, p.askOrder(servers), port, p.dnsStub().waits(len(servers)))
+	in, _, err := exchangeDNSUpstream(ctx, p.logger, m, p.askOrder(servers), port, p.dnsStub().waits(len(servers)))
 	if err != nil {
 		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, err)
 	}

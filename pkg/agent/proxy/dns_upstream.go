@@ -176,7 +176,10 @@ func (wallDNSClock) After(d time.Duration) (<-chan time.Time, func()) {
 }
 
 // exchangeDNSUpstream asks servers (each at port) for m as a stub resolver
-// does, and returns the first answer, whatever its rcode.
+// does, and returns the first answer, whatever its rcode, with the address
+// (host:port) of the server that gave it: the server whose socket the answer
+// came in on (for a truncated one, the server asked again over TCP), which is
+// not always the server asked last.
 //
 //   - It walks waits in order: entry k sends m to server k%len(servers) and
 //     listens until the sum of waits[0..k] has passed since the start before
@@ -189,20 +192,20 @@ func (wallDNSClock) After(d time.Duration) (<-chan time.Time, func()) {
 //   - It ends when ctx does: the proxy's stop never waits out its schedule.
 //
 // The exchange lasts at most the sum of waits.
-func exchangeDNSUpstream(ctx context.Context, logger *zap.Logger, m *dns.Msg, servers []string, port string, waits []time.Duration) (*dns.Msg, error) {
+func exchangeDNSUpstream(ctx context.Context, logger *zap.Logger, m *dns.Msg, servers []string, port string, waits []time.Duration) (*dns.Msg, string, error) {
 	return exchangeDNSUpstreamOn(ctx, wallDNSClock{}, logger, m, servers, port, waits)
 }
 
-func exchangeDNSUpstreamOn(ctx context.Context, clock dnsClock, logger *zap.Logger, m *dns.Msg, servers []string, port string, waits []time.Duration) (*dns.Msg, error) {
+func exchangeDNSUpstreamOn(ctx context.Context, clock dnsClock, logger *zap.Logger, m *dns.Msg, servers []string, port string, waits []time.Duration) (*dns.Msg, string, error) {
 	if len(servers) == 0 {
-		return nil, errors.New("no upstream DNS server to ask")
+		return nil, "", errors.New("no upstream DNS server to ask")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	wire, err := m.Pack()
 	if err != nil {
-		return nil, fmt.Errorf("pack DNS query: %w", err)
+		return nil, "", fmt.Errorf("pack DNS query: %w", err)
 	}
 	// The schedule is absolute: send k is due at the sum of the waits before
 	// it, so time spent on a TCP retry or a late wake-up comes out of the
@@ -253,7 +256,7 @@ func exchangeDNSUpstreamOn(ctx context.Context, clock dnsClock, logger *zap.Logg
 			select {
 			case <-ctx.Done():
 				stop()
-				return nil, ctx.Err()
+				return nil, "", ctx.Err()
 			case rep := <-replies:
 				from := net.JoinHostPort(servers[rep.server], port)
 				if rep.err == nil && rep.msg.Truncated {
@@ -263,11 +266,11 @@ func exchangeDNSUpstreamOn(ctx context.Context, clock dnsClock, logger *zap.Logg
 				}
 				if rep.err == nil {
 					stop()
-					return rep.msg, nil
+					return rep.msg, from, nil
 				}
 				if ctx.Err() != nil {
 					stop()
-					return nil, ctx.Err()
+					return nil, "", ctx.Err()
 				}
 				lastErr = rep.err
 				logger.Debug("upstream DNS server failed",
@@ -287,7 +290,7 @@ func exchangeDNSUpstreamOn(ctx context.Context, clock dnsClock, logger *zap.Logg
 	if lastErr == nil {
 		lastErr = errors.New("no upstream DNS server answered")
 	}
-	return nil, lastErr
+	return nil, "", lastErr
 }
 
 // readDNSUpstreamReplies hands the exchange every answer to id that arrives

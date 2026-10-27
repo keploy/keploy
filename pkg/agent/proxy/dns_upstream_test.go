@@ -256,7 +256,8 @@ func TestARefusingUpstreamIsPassedOverAtOnce(t *testing.T) {
 	}
 }
 
-// A truncated UDP answer is asked again over TCP, on both paths.
+// A truncated UDP answer is asked again over TCP, on both paths, and the
+// forward names the server it asked over TCP as the resolver that answered.
 func TestATruncatedAnswerIsAskedAgainOverTCP(t *testing.T) {
 	u := startLossyUpstream(t, "127.0.0.1", func(u *lossyUpstream, seq int, q lossyQuery) {
 		m := new(dns.Msg)
@@ -295,9 +296,12 @@ func TestATruncatedAnswerIsAskedAgainOverTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recordDNSMock: %v", err)
 	}
-	fwd, err := p.forwardDNSUpstream(q)
+	fwd, resolver, err := p.forwardDNSUpstreamVia(q)
 	if err != nil {
-		t.Fatalf("forwardDNSUpstream: %v", err)
+		t.Fatalf("forwardDNSUpstreamVia: %v", err)
+	}
+	if resolver != u.addr {
+		t.Errorf("the forward says %q answered, want %q, the server asked over TCP", resolver, u.addr)
 	}
 	for name, resp := range map[string]*dns.Msg{"record": rec.Msg, "forward": fwd} {
 		if resp.Truncated || len(resp.Answer) != 3 {
@@ -433,8 +437,9 @@ func (c *stepClock) next(t *testing.T, ended <-chan struct{}) *stepTimer {
 }
 
 type exchangeResult struct {
-	msg *dns.Msg
-	err error
+	msg      *dns.Msg
+	resolver string
+	err      error
 }
 
 // runExchange runs one exchange on clock in the background; ended closes when
@@ -446,8 +451,8 @@ func runExchange(ctx context.Context, clock dnsClock, name string, servers []str
 	ended := make(chan struct{})
 	go func() {
 		defer close(ended)
-		msg, err := exchangeDNSUpstreamOn(ctx, clock, zap.NewNop(), m, servers, port, waits)
-		res <- exchangeResult{msg, err}
+		msg, resolver, err := exchangeDNSUpstreamOn(ctx, clock, zap.NewNop(), m, servers, port, waits)
+		res <- exchangeResult{msg, resolver, err}
 	}()
 	return res, ended
 }
@@ -598,8 +603,10 @@ func TestAServersSocketReadsOnAfterARefusal(t *testing.T) {
 // A late answer from an earlier server counts while a later server is
 // awaited. Server 0 answers only once server 1 has been asked (an event), and
 // server 1 never answers; the wait for server 1 never ends unless the row
-// ends it, so only taking server 0's answer ends the exchange. The backstop
-// only bounds how long a broken exchange takes to fail.
+// ends it, so only taking server 0's answer ends the exchange. The exchange
+// names server 0 as the resolver that answered, not server 1, the one it
+// asked last. The backstop only bounds how long a broken exchange takes to
+// fail.
 func TestALateAnswerFromAnEarlierServerCounts(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("127.0.0.2 is a loopback address on Linux only")
@@ -645,6 +652,43 @@ func TestALateAnswerFromAnEarlierServerCounts(t *testing.T) {
 		t.Fatalf("exchange: %v: server 0's answer, arriving while server 1 was awaited, was not taken", got.err)
 	}
 	answeredA(t, got.msg, "10.0.2.1")
+	if want := net.JoinHostPort("127.0.0.1", port); got.resolver != want {
+		t.Errorf("the exchange says %q answered, want %q: server 0's answer is named by the server asked last", got.resolver, want)
+	}
+}
+
+// The exchange names the server whose answer it returns: here server 1, the
+// second asked, because server 0 never answers. Server 0's wait ends when the
+// row ends it (an event), so server 1 is asked only then.
+func TestTheExchangeNamesTheServerThatAnswered(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("127.0.0.2 is a loopback address on Linux only")
+	}
+	s1 := startLossyUpstream(t, "127.0.0.2", func(u *lossyUpstream, seq int, q lossyQuery) {
+		u.answerA(t, q.msg, q.from, "10.0.4.2")
+	})
+	_, port, _ := net.SplitHostPort(s1.addr)
+	silent, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		t.Skipf("the port's 127.0.0.1 twin is taken: %v", err)
+	}
+	defer func() { _ = silent.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backstop := time.AfterFunc(time.Minute, cancel)
+	defer backstop.Stop()
+	clock := newStepClock()
+	res, ended := runExchange(ctx, clock, "second.example.", []string{"127.0.0.1", "127.0.0.2"}, port, []time.Duration{time.Second, time.Second})
+	clock.next(t, ended).fire <- time.Time{} // server 0's wait ends: server 1 is asked
+	got := <-res
+	if got.err != nil {
+		t.Fatalf("exchange: %v", got.err)
+	}
+	answeredA(t, got.msg, "10.0.4.2")
+	if want := net.JoinHostPort("127.0.0.2", port); got.resolver != want {
+		t.Errorf("the exchange says %q answered, want %q, the server whose answer it returned", got.resolver, want)
+	}
 }
 
 // The schedule is absolute: a wait that ended late (the agent was slow to
@@ -743,7 +787,8 @@ func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
 // resolv.conf's "options rotate" starts each query at the next server in
 // turn, as glibc does, on the record path and the test-mode forward alike;
 // without it every query starts at the first server.
-// Both servers answer at once, each with its own address.
+// Both servers answer at once, each with its own address. The forward names
+// the server whose answer it returns as the resolver that answered.
 func TestRotateStartsEachQueryAtTheNextServer(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("127.0.0.2 is a loopback address on Linux only")
@@ -785,13 +830,14 @@ func TestRotateStartsEachQueryAtTheNextServer(t *testing.T) {
 			// The first three are record mode's, the last the test-mode
 			// forward's: both paths take their turn from one count.
 			var resp *dns.Msg
+			var resolver string
 			var err error
 			if k < 3 {
 				var entry dnsCacheEntry
 				entry, err = p.recordDNSMock(context.Background(), q, time.Now(), nil)
 				resp = entry.Msg
 			} else {
-				resp, err = p.forwardDNSUpstream(q)
+				resp, resolver, err = p.forwardDNSUpstreamVia(q)
 			}
 			if err != nil {
 				t.Fatalf("options %q, query %d: %v", tc.options, k, err)
@@ -799,6 +845,12 @@ func TestRotateStartsEachQueryAtTheNextServer(t *testing.T) {
 			a, ok := resp.Answer[0].(*dns.A)
 			if !ok || a.A.String() != want {
 				t.Errorf("options %q, query %d answered by %v, want %s", tc.options, k, resp.Answer[0], want)
+			}
+			if k >= 3 {
+				wantResolver := net.JoinHostPort(map[string]string{"10.0.3.1": "127.0.0.1", "10.0.3.2": "127.0.0.2"}[want], port)
+				if resolver != wantResolver {
+					t.Errorf("options %q, query %d: the forward says %q answered, want %q", tc.options, k, resolver, wantResolver)
+				}
 			}
 		}
 	}
