@@ -8,6 +8,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
 )
@@ -94,5 +95,20 @@ func ConfigTagReadsForTest(fn func()) int {
 	configTagReadHook.Store(&h)
 	defer configTagReadHook.Store(nil)
 	fn()
+	return int(n.Load())
+}
+
+// CountPreparedKeysForTest runs f and returns how many times a mock's
+// preparedIndex keys were computed meanwhile, by the store's indexes or by a
+// walk. f must not run matches on other goroutines past its return.
+func CountPreparedKeysForTest(f func()) int {
+	var n atomic.Int64
+	keys := preparedIndex.Keys
+	preparedIndex.Keys = func(m *models.Mock) []string {
+		n.Add(1)
+		return keys(m)
+	}
+	defer func() { preparedIndex.Keys = keys }()
+	f()
 	return int(n.Load())
 }
