@@ -979,6 +979,9 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.filtered
 	m.treesMu.RUnlock()
+	if v := m.exactView(); v != nil {
+		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
+	}
 	results := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -986,9 +989,6 @@ func (m *MockManager) GetFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return m.exactPerTest(v, "", results), nil
-	}
 	return results, nil
 }
 
@@ -1152,6 +1152,11 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 	m.windowMu.RUnlock()
 	m.swapMu.RUnlock()
 
+	// Under exact serving the test's mapping decides, not a recorded time,
+	// over what the view shows of the tier (shownOf).
+	if v := m.exactView(); v != nil {
+		return m.exactPerTest(v, "", v.shownOf(tree, "")), nil
+	}
 	all := make([]*models.Mock, 0, 64)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -1159,11 +1164,6 @@ func (m *MockManager) GetFilteredMocksInWindow() ([]*models.Mock, error) {
 		}
 		return true
 	})
-
-	// Under exact serving the test's mapping decides, not a recorded time.
-	if v := m.exactView(); v != nil {
-		return m.exactPerTest(v, "", all), nil
-	}
 	if start.IsZero() || end.IsZero() {
 		return all, nil
 	}
@@ -1977,6 +1977,11 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 	m.treesMu.RLock()
 	tree := m.unfiltered
 	m.treesMu.RUnlock()
+	// Under exact serving only what the view shows of each tier is read
+	// (shownOf): reusable narrows it as it narrowed the tier's values.
+	if v := m.exactView(); v != nil {
+		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.startupTree(), "")), nil
+	}
 	results := make([]*models.Mock, 0, 128)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -1984,9 +1989,6 @@ func (m *MockManager) GetUnFilteredMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable("", results, m.treeValues(m.startupTree(), "")), nil
-	}
 	return results, nil
 }
 
@@ -2572,6 +2574,9 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 	if tree == nil {
 		return nil, nil
 	}
+	if v := m.exactView(); v != nil {
+		return v.reusable("", v.shownOf(tree, ""), v.shownOf(m.unfilteredTree(), "")), nil
+	}
 	results := make([]*models.Mock, 0, 32)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -2579,9 +2584,6 @@ func (m *MockManager) GetStartupMocks() ([]*models.Mock, error) {
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable("", results, m.treeValues(m.unfilteredTree(), "")), nil
-	}
 	return results, nil
 }
 
@@ -2605,6 +2607,9 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 	if tree == nil {
 		return nil, nil
 	}
+	if v := m.exactView(); v != nil {
+		return v.reusable(kind, v.shownOf(tree, kind), v.shownOf(m.unfilteredTree(), kind)), nil
+	}
 	results := make([]*models.Mock, 0, 16)
 	tree.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil && mock.Kind == kind {
@@ -2612,9 +2617,6 @@ func (m *MockManager) GetStartupMocksByKind(kind models.Kind) ([]*models.Mock, e
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable(kind, results, m.treeValues(m.unfilteredTree(), kind)), nil
-	}
 	return results, nil
 }
 
@@ -3173,6 +3175,9 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		flt, _ = m.ensureKindTrees(kind)
 	}
 
+	if v := m.exactView(); v != nil {
+		return m.exactPerTest(v, kind, v.shownOf(flt, "")), nil
+	}
 	results := make([]*models.Mock, 0, 64)
 	flt.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -3180,9 +3185,6 @@ func (m *MockManager) GetFilteredMocksByKind(kind models.Kind) ([]*models.Mock, 
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return m.exactPerTest(v, kind, results), nil
-	}
 	return results, nil
 }
 
@@ -3194,6 +3196,9 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		_, unf = m.ensureKindTrees(kind)
 	}
 
+	if v := m.exactView(); v != nil {
+		return v.reusable(kind, v.shownOf(unf, ""), v.shownOf(m.startupTree(), kind)), nil
+	}
 	results := make([]*models.Mock, 0, 128)
 	unf.rangeValues(func(v interface{}) bool {
 		if mock, ok := v.(*models.Mock); ok && mock != nil {
@@ -3201,9 +3206,6 @@ func (m *MockManager) GetUnFilteredMocksByKind(kind models.Kind) ([]*models.Mock
 		}
 		return true
 	})
-	if v := m.exactView(); v != nil {
-		return v.reusable(kind, results, m.treeValues(m.startupTree(), kind)), nil
-	}
 	return results, nil
 }
 

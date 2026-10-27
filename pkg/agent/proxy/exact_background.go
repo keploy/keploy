@@ -353,10 +353,7 @@ var _ integrations.ByKindBackground = (*MockManager)(nil)
 // spentBackground reports whether name, one of the background's recordings,
 // is spent: consumed in the view, or for the staging.
 func (v *exactView) spentBackground(name string) bool {
-	v.mu.Lock()
-	spent := v.spent[name]
-	v.mu.Unlock()
-	return spent || v.spentOutside(name)
+	return v.spentIn(name) || v.spentOutside(name)
 }
 
 // BackgroundCursor is, under the background rules, the stateful cursor of

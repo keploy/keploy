@@ -145,8 +145,10 @@ type exactView struct {
 	// through a delete door in its test, or a protocol-phase mock one
 	// evicted outside every test: gone until the view changes. The staged
 	// trees keep them. A data-plane recording consumed outside every test is
-	// the staging's (outside), not the view's.
-	spent map[string]bool
+	// the staging's (outside), not the view's. Keyed by name; written under mu
+	// (exactConsumeIn), read without it, so a read of a tier takes no lock
+	// per mock (unspentNow).
+	spent sync.Map
 	// outside is the manager's outsideAnswers, and epoch its stagingEpoch.
 	outside *outsideAnswers
 	epoch   *atomic.Uint64
@@ -1824,8 +1826,8 @@ var _ integrations.StagingGenerations = (*MockManager)(nil)
 // unanswered drops it; a staged mock spent in v, or consumed outside every
 // test in the staging, as shows and unspent drop it.
 func (v *exactView) spentNow(name string) bool {
+	_, gone := v.spent.Load(name)
 	v.mu.Lock()
-	gone := v.spent[name]
 	if i, own := v.index[name]; own && !gone {
 		gone = v.consumed[i] || v.takenByOther(i)
 	}
@@ -1844,7 +1846,7 @@ func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
 	}
 	var out []*models.Mock
 	for i, mk := range in {
-		gone := mk != nil && (v.spent[mk.Name] || v.spentOutside(mk.Name))
+		gone := mk != nil && (v.spentIn(mk.Name) || v.spentOutside(mk.Name))
 		if gone && out == nil {
 			out = append(make([]*models.Mock, 0, len(in)), in[:i]...)
 		}
@@ -1861,6 +1863,7 @@ func (v *exactView) unspent(in []*models.Mock) []*models.Mock {
 // keep narrows staged mocks to those the view shows, in their order, each
 // as the view hands it out (learned).
 func (v *exactView) keep(in []*models.Mock) []*models.Mock {
+	viewNarrowed.Add(uint64(len(in)))
 	out := make([]*models.Mock, 0, len(in))
 	if v.bg != nil {
 		return v.backgroundOrder(out, in)
@@ -1949,6 +1952,7 @@ func (m *MockManager) teardown(key string, startup []*models.Mock) []*models.Moc
 	if after == nil {
 		return nil
 	}
+	viewNarrowed.Add(uint64(len(startup)))
 	var out []*models.Mock
 	for _, mk := range startup {
 		if mk != nil && mk.TestModeInfo.Lifetime == models.LifetimePerTest && after(mk.Spec.ReqTimestampMock) {
@@ -2066,7 +2070,8 @@ func (b *teardownBound) after() func(time.Time) bool {
 func (m *MockManager) exactPerTest(v *exactView, kind models.Kind, staged []*models.Mock) []*models.Mock {
 	var teardown []*models.Mock
 	if v.afterTests(m.exact.fired.Load()) {
-		teardown = m.teardown(v.poolKey, m.treeValues(m.startupTree(), kind))
+		// What the view shows of the startup tier: perTest keeps only those.
+		teardown = m.teardown(v.poolKey, v.shownOf(m.startupTree(), kind))
 	}
 	return v.perTest(kind, staged, teardown)
 }
@@ -2088,6 +2093,7 @@ func (v *exactView) reusable(kind models.Kind, staged ...[]*models.Mock) []*mode
 		// One order across the tiers (backgroundOrder), each mock once.
 		var all []*models.Mock
 		for _, list := range staged {
+			viewNarrowed.Add(uint64(len(list)))
 			for _, mk := range list {
 				if _, dup := seen[mk]; dup || (kind != "" && mk.Kind != kind) {
 					continue
@@ -2302,14 +2308,10 @@ func (m *MockManager) exactConsumeIn(v *exactView, mk *models.Mock, evicts bool)
 		v.mu.Unlock()
 		return exactRefused, wait, nil
 	}
-	if v.spent[mk.Name] {
+	if _, dup := v.spent.LoadOrStore(mk.Name, true); dup {
 		v.mu.Unlock()
 		return exactRefused, nil, nil
 	}
-	if v.spent == nil {
-		v.spent = map[string]bool{}
-	}
-	v.spent[mk.Name] = true
 	v.mu.Unlock()
 	m.takeLocked(integrations.Take{Mock: m.stagedRecording(mk), How: integrations.TakeSpent, Gen: v.round, Test: v.test, ForView: true})
 	return exactServed, nil, func() { m.noteExactSpent(mk) }

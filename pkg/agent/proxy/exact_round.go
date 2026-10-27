@@ -642,7 +642,9 @@ func (m *MockManager) RoundSnapshot(q integrations.RoundQuery) (integrations.Rou
 	m.treesMu.RLock()
 	filtered, unfiltered, startup := m.filtered, m.unfiltered, m.startup
 	m.treesMu.RUnlock()
-	filteredVals, unfilteredVals, startupVals := m.treeValues(filtered, ""), m.treeValues(unfiltered, ""), m.treeValues(startup, "")
+	// What the view shows of each tier (shownOf): perTest and reusable keep
+	// only those, so the snapshot never walks every test's recordings.
+	filteredVals, unfilteredVals, startupVals := v.shownOf(filtered, ""), v.shownOf(unfiltered, ""), v.shownOf(startup, "")
 	var teardown []*models.Mock
 	if v.afterTests(s.Fired) {
 		teardown = m.teardown(v.poolKey, startupVals)
