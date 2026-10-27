@@ -107,6 +107,14 @@ func leftOutAlone(err error) error {
 		strings.TrimPrefix(err.Error(), ErrFramingLost.Error()+": "))
 }
 
+// holeLeftOut is why an exchange a capture hole cut (fakeconn.ErrCaptureHole)
+// is left out: what of it was lost, then what follows. It is counted as every
+// exchange the recorder leaves out is (leaveOut); the hole itself is reported
+// where the capture lost the bytes.
+func holeLeftOut(lost string) error {
+	return fmt.Errorf("%s were lost to a capture hole; it is left out, and the connection's recording goes on from the client's next command", lost)
+}
+
 // answered reports whether the server answers a command (the command's first
 // byte): all but COM_QUIT, COM_STMT_CLOSE and COM_STMT_SEND_LONG_DATA
 // (wire.IsNoResponseCommand).
@@ -140,16 +148,41 @@ func answered(command byte) bool {
 // NextRequest found and has not taken is whole). One that does not (in the
 // middle of a chunk) is not where the client's stream can be taken up again:
 // lost framing.
-func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session) (cmdBuf []byte, respFirst byte, joined bool, err error) {
+//
+// After a capture hole on the client's stream (afterHole, or one met here:
+// fakeconn.ErrCaptureHole), where the bytes before the next chunk were lost,
+// no packet header can be trusted until a chunk proves one: the chunk after
+// the hole may start in the middle of a packet, and a header read there
+// claims any length. So chunks are passed over whole until one starts a
+// command the client sent on its own (provesCommand): the reading goes on
+// from there, as from any command.
+func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *supervisor.Session, afterHole bool) (cmdBuf []byte, respFirst byte, joined bool, err error) {
 	// prevSeq and prevData: the last packet passed over ended at sequence id
 	// prevSeq, and carried data (one has been passed over: passed).
 	var prevSeq byte
 	prevData, passed := false, false
 	for {
-		if _, err := sess.NextRequest(models.MySQL, false); err != nil {
+		c, err := sess.NextRequest(models.MySQL, false)
+		if errors.Is(err, fakeconn.ErrCaptureHole) {
+			afterHole = true
+			continue
+		}
+		if err != nil {
 			return nil, 0, false, err
 		}
 		atChunk := sess.ClientStream.AtChunkBoundary()
+		if afterHole {
+			if !atChunk || !provesCommand(c.Bytes) {
+				if _, err := sess.ClientStream.ReadChunk(); err != nil && !errors.Is(err, fakeconn.ErrCaptureHole) {
+					return nil, 0, false, err
+				}
+				clearPending(sess)
+				continue
+			}
+			// A command starts this chunk: what came before it is passed
+			// over, whatever exchange it was in.
+			afterHole, passed = false, false
+		}
 		var cs commandSeq
 		inExchange := false
 		var lastSeq byte
@@ -163,6 +196,11 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 			}
 			return cs.take(header)
 		})
+		if errors.Is(err, fakeconn.ErrCaptureHole) {
+			afterHole = true
+			clearPending(sess)
+			continue
+		}
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -176,6 +214,58 @@ func nextCommandAfterFault(ctx context.Context, logger *zap.Logger, sess *superv
 		}
 		return buf, cs.next, cs.joined, nil
 	}
+}
+
+// commandPayload is the payload length a command a client sends on its own
+// can have, by its first byte: exactly n (n > 0), or at least -n (n < 0).
+// Only commands an app's driver sends are here: a chunk that starts with any
+// other is not where the client's stream is taken up after a hole, and the
+// answer to one passed over is skipped with the exchange the hole cut.
+var commandPayload = map[byte]int{
+	mysql.COM_QUIT:                1,
+	mysql.COM_INIT_DB:             -1,
+	mysql.COM_QUERY:               -1,
+	mysql.COM_FIELD_LIST:          -2,
+	mysql.COM_PING:                1,
+	mysql.COM_CHANGE_USER:         -2,
+	mysql.COM_STMT_PREPARE:        -1,
+	mysql.COM_STMT_EXECUTE:        -10,
+	mysql.COM_STMT_SEND_LONG_DATA: -7,
+	mysql.COM_STMT_CLOSE:          5,
+	mysql.COM_STMT_RESET:          5,
+	0x1b:                          3, // COM_SET_OPTION (comSetOption)
+	comStmtFetch:                  9,
+	mysql.COM_RESET_CONNECTION:    1,
+}
+
+// provesCommand reports whether a chunk of the client's stream, read from its
+// start, is one or more whole commands, the last of which may go on in later
+// chunks: each a packet of sequence id 0 whose first byte names a command and
+// whose length is one that command can have (commandPayload). It is how the
+// client's stream is taken up after a capture hole: a chunk that starts in
+// the middle of a packet, or inside an exchange (a LOCAL INFILE upload), fails
+// it but for a chance of well under one in a hundred thousand, and the answer
+// to a packet taken for a command by that chance is checked by its sequence
+// ids as any answer is.
+func provesCommand(b []byte) bool {
+	if len(b) < 5 {
+		return false
+	}
+	for len(b) > 0 {
+		if len(b) < 5 || b[3] != 0 {
+			return false
+		}
+		n := int(b[0]) | int(b[1])<<8 | int(b[2])<<16
+		want, ok := commandPayload[b[4]]
+		if !ok || want > 0 && n != want || want < 0 && n < -want {
+			return false
+		}
+		if 4+n >= len(b) {
+			return true
+		}
+		b = b[4+n:]
+	}
+	return true
 }
 
 // packetSeq checks the sequence id of every packet of one exchange.

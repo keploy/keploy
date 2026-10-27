@@ -151,8 +151,10 @@ type IntegrationsV2 interface {
 // a monotonic fakeconn.Chunk.SeqNo per direction, and a dropped chunk
 // still consumes its ordinal, so a gap is visible as a SeqNo discontinuity)
 // and re-anchors on a real message boundary before framing resumes. mongo/v2
-// is the in-tree example: resyncReassemblyOnGap → beginResync →
-// resyncToNextHeader. Such a parser MUST keep receiving bytes after the
+// is one example: resyncReassemblyOnGap → beginResync → resyncToNextHeader.
+// mysql is another: its streams report each hole (fakeconn.ErrCaptureHole,
+// FakeConn.ReportHoles), and its recorder leaves out the exchanges the hole
+// cut and takes the client's stream up at a chunk that proves a command. Such a parser MUST keep receiving bytes after the
 // hole — that is the only way it can find the next boundary — so the relay
 // keeps feeding it.
 //

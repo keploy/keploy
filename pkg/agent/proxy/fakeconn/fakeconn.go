@@ -52,6 +52,17 @@ var ErrDeadlineExceeded net.Error = deadlineError{}
 // mispairing the number exists to prevent, so the chunk is refused instead.
 var ErrUnnumbered = errors.New("fakeconn: a chunk without a capture sequence (ConnSeq 0): its producer must number every chunk (fakeconn.ConnSeqOf)")
 
+// ErrCaptureHole is returned once by Read, ReadChunk or Peek of a FakeConn
+// that reports holes (ReportHoles) where the next chunk does not follow the
+// last one taken from the stream: its SeqNo skips one or more. The producer
+// saw bytes between them that never reached the stream (a capture that
+// dropped a chunk, a send whose bytes the capture could not read). Nothing is
+// delivered with it, and the call after it reads on from the chunk after the
+// hole, so a reader that frames a byte stream can re-align there instead of
+// reading the bytes after the hole as if they followed the ones before it.
+// A chunk with no SeqNo (0) neither opens nor closes a hole.
+var ErrCaptureHole = errors.New("fakeconn: capture hole: bytes were lost from the stream before the next chunk")
+
 // FakeConn is a read-only net.Conn driven by a Chunk channel owned
 // by the proxy relay. Reads take what is left of the chunk the reader is
 // in the middle of first, then fetch the next Chunk from the channel.
@@ -147,6 +158,15 @@ type FakeConn struct {
 	first   uint32
 	closeCh chan struct{}
 
+	// lastSeqNo is the SeqNo of the last chunk taken from ch that had one, and
+	// holeAhead says SeqNos were skipped right before the pending chunk: a
+	// hole not reported yet (ErrCaptureHole). Both are kept whether or not
+	// holes are reported (reportHoles: ReportHoles), so a reader that asks
+	// for them late misses none that is still ahead of it. Guarded by mu.
+	lastSeqNo   uint64
+	holeAhead   bool
+	reportHoles bool
+
 	deadlineMu        sync.Mutex
 	deadlineCh        chan struct{}
 	deadlineT         *time.Timer
@@ -219,6 +239,9 @@ func (f *FakeConn) Read(p []byte) (int, error) {
 	if err := f.fill(); err != nil {
 		return 0, err
 	}
+	if f.takeHole() {
+		return 0, ErrCaptureHole
+	}
 	f.mu.Lock()
 	n := copy(p, f.pending.Bytes)
 	f.deliverLocked(f.pending, n)
@@ -246,6 +269,9 @@ func (f *FakeConn) ReadChunk() (Chunk, error) {
 	if err := f.fill(); err != nil {
 		return Chunk{}, err
 	}
+	if f.takeHole() {
+		return Chunk{}, ErrCaptureHole
+	}
 	f.mu.Lock()
 	c := f.pending
 	f.deliverLocked(c, len(c.Bytes))
@@ -262,6 +288,9 @@ func (f *FakeConn) Peek() (Chunk, error) {
 	if err := f.fill(); err != nil {
 		return Chunk{}, err
 	}
+	if f.takeHole() {
+		return Chunk{}, ErrCaptureHole
+	}
 	f.mu.Lock()
 	c := f.pending
 	f.mu.Unlock()
@@ -271,6 +300,28 @@ func (f *FakeConn) Peek() (Chunk, error) {
 // skipLocked moves past the next n bytes of pending, and lets go of the chunk
 // once none of it is left. What is left of it otherwise is a chunk in part
 // (partial). Caller holds mu.
+// ReportHoles makes Read, ReadChunk and Peek return ErrCaptureHole, once
+// each, where SeqNos were skipped right before the next chunk. A reader asks
+// for it when it re-aligns its framing after a hole; any other reads across
+// one, as every reader always has.
+func (f *FakeConn) ReportHoles() {
+	f.mu.Lock()
+	f.reportHoles = true
+	f.mu.Unlock()
+}
+
+// takeHole reports whether a hole lies right before the pending chunk, not
+// reported yet, on a FakeConn that reports holes; it is reported by then.
+func (f *FakeConn) takeHole() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.reportHoles || !f.holeAhead {
+		return false
+	}
+	f.holeAhead = false
+	return true
+}
+
 func (f *FakeConn) skipLocked(n int) {
 	if n >= len(f.pending.Bytes) {
 		f.pending, f.hasPending, f.partial = Chunk{}, false, false
@@ -325,6 +376,13 @@ func (f *FakeConn) next() error {
 		}
 		f.mu.Lock()
 		f.pending, f.hasPending, f.partial = c, true, false
+		// A chunk dropped or skipped before it is read takes its hole with
+		// it: what the hole lost came before that chunk, so the reader would
+		// have dropped or skipped it too.
+		f.holeAhead = c.SeqNo != 0 && f.lastSeqNo != 0 && c.SeqNo > f.lastSeqNo+1
+		if c.SeqNo != 0 {
+			f.lastSeqNo = c.SeqNo
+		}
 		report, run := f.startLocked(c)
 		f.mu.Unlock()
 		report(run)

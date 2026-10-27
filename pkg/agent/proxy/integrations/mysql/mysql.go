@@ -270,3 +270,12 @@ func (m *MySQL) MockOutgoing(ctx context.Context, src net.Conn, dstCfg *models.C
 	}
 	return nil
 }
+
+// CanResyncAfterGap opts MySQL into being fed on across a capture hole
+// (integrations.GapResyncCapable). Its recorder is told of each hole
+// (fakeconn.ErrCaptureHole), leaves out the exchanges the hole cut, counted
+// as every exchange it leaves out is, and re-aligns at the client's next
+// command, which a chunk of the client's stream must prove before it is read
+// (recorder.handleCommandsV2): one hole costs the exchanges it cut, not the
+// rest of a pooled connection's recording.
+func (m *MySQL) CanResyncAfterGap() bool { return true }

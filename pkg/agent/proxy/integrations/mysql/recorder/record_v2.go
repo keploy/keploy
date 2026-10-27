@@ -92,6 +92,12 @@ func RecordV2(ctx context.Context, logger *zap.Logger, sess *supervisor.Session)
 	var clientKeyNetConn net.Conn = clientKey
 	decodeCtx.LastOp.Store(clientKeyNetConn, wire.RESET)
 
+	// No read of this recorder runs across a capture hole: it is told of each
+	// one (fakeconn.ErrCaptureHole), and the command loop re-aligns there
+	// (handleCommandsV2) where it can prove where the next command starts.
+	sess.ClientStream.ReportHoles()
+	sess.DestStream.ReportHoles()
+
 	// Post-TLS mode: this is a decrypted (uprobe) tls-* stream. Its server
 	// greeting was sent in plaintext BEFORE the TLS handshake and captured on
 	// the separate raw stream (stashed in TLSHandshakeStore) — there is none to
@@ -1560,6 +1566,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 	// joined the connection is reported once all the same, over its own bytes
 	// (Session.NextRequest), and the response is the exchange left out here.
 	clientRealign, serverRealign := false, false
+	// holeFrom is set while the command loop re-aligns after a capture hole
+	// on the client's stream: when the last exchange handled before it ended
+	// (lastEnd). The exchanges the hole cut ran from then to the client's
+	// next command, and are left out over that span once it is found.
+	var holeFrom time.Time
 	// lastAnswerEnd is when the last byte of the last answer read was
 	// captured. pipelined: the client once sent a command not after that, so
 	// its answers cannot be told to start after their commands, and a
@@ -1581,7 +1592,8 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		if err == nil || streamEnded(err) {
 			return err
 		}
-		if !errors.Is(err, ErrFramingLost) || pipelined {
+		hole := errors.Is(err, fakeconn.ErrCaptureHole)
+		if !hole && !errors.Is(err, ErrFramingLost) || pipelined {
 			reportFault(logger, sess, err, false)
 			return leaveOutInFlight(sess, reqTs, err)
 		}
@@ -1594,7 +1606,11 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		}
 		carry = nil
 		decodeCtx.LastOp.Store(clientKey, wire.RESET)
-		leaveOut(sess, reqTs, later(reqTs, sess.DestStream.LastReadTime()), leftOutAlone(err))
+		why := leftOutAlone(err)
+		if hole {
+			why = holeLeftOut("bytes of its response")
+		}
+		leaveOut(sess, reqTs, later(reqTs, sess.DestStream.LastReadTime()), why)
 		reportFault(logger, sess, err, true)
 		lastEnd = later(lastEnd, reqTs)
 		clientRealign, serverRealign = true, true
@@ -1646,7 +1662,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 			joined = continues(cmdBuf)
 		} else if clientRealign {
 			clientRealign = false
-			cmdBuf, respFirst, joined, err = nextCommandAfterFault(ctx, logger, sess)
+			cmdBuf, respFirst, joined, err = nextCommandAfterFault(ctx, logger, sess, !holeFrom.IsZero())
+			if err != nil && !holeFrom.IsZero() {
+				// The exchange the hole cut is lost all the same: it ran
+				// before the client's chunks passed over after the hole.
+				leaveOut(sess, holeFrom, later(later(holeFrom, sess.ClientStream.LastReadTime()), sess.DestStream.LastReadTime()), holeLeftOut("bytes the client sent"))
+				holeFrom = time.Time{}
+			}
 			if err != nil {
 				if errors.Is(err, ErrFramingLost) {
 					warnFramingLost(logger, sess, "V2: mysql client stream cannot be taken up after a response left out; the connection is no longer recorded", err)
@@ -1677,7 +1699,28 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 						return endErr
 					}
 				}
-				if errors.Is(err, ErrFramingLost) {
+				if errors.Is(err, fakeconn.ErrCaptureHole) && !pipelined {
+					// The client's bytes before its next chunk were lost:
+					// a command, its answer's bytes still on the server's
+					// stream, or more of one read in part here. That
+					// exchange, or those, are left out, from the last one
+					// handled, once the client's next command is found
+					// (holeFrom), and the recording goes on from there, as
+					// after a response left out.
+					if held != nil {
+						h := held
+						held = nil
+						h.leaveOut(sess, notRecorded("the client's next command after the %s response was lost to a capture hole, so nothing settles its framing", h.what))
+					}
+					carry = nil
+					decodeCtx.LastOp.Store(clientKey, wire.RESET)
+					if holeFrom.IsZero() {
+						holeFrom = lastEnd
+					}
+					clientRealign, serverRealign = true, true
+					continue
+				}
+				if errors.Is(err, ErrFramingLost) || errors.Is(err, fakeconn.ErrCaptureHole) {
 					warnFramingLost(logger, sess, "V2: mysql client packet out of sequence; the connection is no longer recorded", err)
 					// The command whose bytes were lost was sent after the
 					// last exchange (or the handshake) ended: its exchange
@@ -1692,6 +1735,13 @@ func handleCommandsV2(ctx context.Context, logger *zap.Logger, sess *supervisor.
 		// prefetch read in the handshake, or the read just above), so at least
 		// one chunk has been consumed and LastReadTime is set.
 		reqTs := sess.ClientStream.LastReadTime()
+		if !holeFrom.IsZero() {
+			// What the hole cut ran between the last exchange handled and
+			// this command: the client waits for each answer before its
+			// next command.
+			leaveOut(sess, holeFrom, later(holeFrom, reqTs), holeLeftOut("bytes the client sent"))
+			holeFrom = time.Time{}
+		}
 		if !serverRealign && !lastAnswerEnd.IsZero() && !reqTs.After(lastAnswerEnd) {
 			// Sent before the last answer was read, or not known to be after
 			// it (no capture time, or a clock that stamped the two alike).

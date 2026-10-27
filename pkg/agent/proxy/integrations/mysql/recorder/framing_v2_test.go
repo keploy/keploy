@@ -248,8 +248,9 @@ func (o *orphanSpans) last() ([2]time.Time, bool) {
 
 // handshakeChunks is how many chunks recordChunks' handshake takes: the
 // server's greeting, the client's response and the server's OK, numbered 1 to
-// 3 as they were captured (fakeconn.Chunk.ConnSeq). The chunks its caller
-// hands it are numbered on from them.
+// 3 as they were captured (fakeconn.Chunk.ConnSeq), and per direction as the
+// producer stamps them (fakeconn.Chunk.SeqNo: the client's 1, the server's 1
+// and 2). The chunks its caller hands it are numbered on from them.
 const handshakeChunks = 3
 
 // recordConn runs RecordV2 over a connection: its handshake, then client and
@@ -376,7 +377,7 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	pushers.Add(2)
 	go func() {
 		defer pushers.Done()
-		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 2, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at()}
+		h.clientCh <- fakeconn.Chunk{Dir: fakeconn.FromClient, ConnSeq: 2, Bytes: cannedHandshakeResponse41(t, 1, false), ReadAt: at(), SeqNo: 1}
 		for _, c := range client {
 			if c.ReadAt.IsZero() {
 				c.ReadAt = at()
@@ -390,8 +391,8 @@ func recordChunks(t *testing.T, client, server []fakeconn.Chunk, closeAtEnd bool
 	}()
 	go func() {
 		defer pushers.Done()
-		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: greetingBuf, ReadAt: at()}
-		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: handshakeChunks, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at()}
+		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: 1, Bytes: greetingBuf, ReadAt: at(), SeqNo: 1}
+		h.destCh <- fakeconn.Chunk{Dir: fakeconn.FromDest, ConnSeq: handshakeChunks, Bytes: cannedOK(t, 2, greeting.CapabilityFlags), ReadAt: at(), SeqNo: 2}
 		for _, c := range server {
 			if c.ReadAt.IsZero() {
 				c.ReadAt = at()
