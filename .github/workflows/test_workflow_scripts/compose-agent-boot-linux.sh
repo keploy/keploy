@@ -457,11 +457,11 @@ unstarve_agent() {
 # record NAME EVENT ACTION CMD CONTAINER [AFTER]: keploy records CMD (the app,
 # in CONTAINER), its agent's container met by ACTION at its EVENT (watch_agent;
 # none when both are empty), while the lane makes the app's N calls; the app
-# then exits, and keploy must exit 0 on its own. The calls go once the app
-# listens and keploy's agent forwards its port ("Started ingress forwarding":
-# a call before that is reset, the record ingress race keploy knows of), after
-# AFTER runs, when given, its output in AFTER.out. A call that fails stops
-# keploy, so a failed leg ends.
+# then exits, and keploy must exit 0 on its own. The calls go as soon as the
+# app says it listens (keploy holds the app's port from its bind until its own
+# forwarder listens there, so a call in between is answered and recorded),
+# after AFTER runs, when given, its output in AFTER.out. A call that fails
+# stops keploy, so a failed leg ends.
 record() {
   local name=$1 event=$2 action=$3 cmd=$4 container=$5 after=${6:-} log="$1.log" pid rc i before=$FAIL t0 took failed=0
   sudo rm -rf keploy
@@ -472,9 +472,9 @@ record() {
   sudo -E env PATH="$PATH" KEPLOY_AGENT_READY_TIMEOUT="$BUDGET_S" "$RECORD_BIN" record -c "$cmd" --container-name "$container" \
     --disable-tele --debug > "$log" 2>&1 &
   pid=$!
-  if await "$log" "$pid" "APP LISTENING" && await "$log" "$pid" "Started ingress forwarding"; then
+  if await "$log" "$pid" "APP LISTENING"; then
     took=$(( $(date +%s) - t0 ))
-    echo "$name: the app listened, its port forwarded, ${took}s after keploy started (a wait bounded by the budget gives up at ${BUDGET_S}s)"
+    echo "$name: the app listened ${took}s after keploy started (a wait bounded by the budget gives up at ${BUDGET_S}s)"
     # The leg's premise: keploy's wait for the agent held past the budget
     # (this counts from keploy's own start, so it bounds that wait from
     # above). A wait over within it would pass a keploy the budget bounds as
