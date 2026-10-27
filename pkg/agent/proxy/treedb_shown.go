@@ -17,6 +17,17 @@ import (
 // view, tree generation and key, never on a call.
 var keyedExamined, shownBuilds atomic.Uint64
 
+// viewNarrowed counts the staged mocks an exact view's reads were handed to
+// narrow to what it shows (keep, reusable, teardown): what an unkeyed read
+// costs beside the tree's split, read by the rows that pin it. A tier read
+// hands them what the view shows of the tier (shownOf), never its values.
+var viewNarrowed atomic.Uint64
+
+// tierReadsWalk, set only by this package's rows, makes shownOf hand a tier's
+// values of the kind, as the view's reads were handed them before it: the
+// oracle a row compares each read with.
+var tierReadsWalk atomic.Bool
+
 // keyParts is a tree's split, at one generation (TreeDb.gen), of the entries a
 // MockIndex files under each key a walk asked for. Built under the tree's
 // write lock, read under its read lock, and dropped whole when the generation
@@ -149,10 +160,14 @@ func (v *exactView) showsStaticRest(mk *models.Mock) bool {
 // outside every test in the staging: the part of shows that changes while the
 // view is in force.
 func (v *exactView) unspentNow(mk *models.Mock) bool {
-	v.mu.Lock()
-	spent := v.spent[mk.Name]
-	v.mu.Unlock()
-	return !spent && !v.spentOutside(mk.Name)
+	return !v.spentIn(mk.Name) && !v.spentOutside(mk.Name)
+}
+
+// spentIn reports whether a parser spent name in v (exactView.spent). It takes
+// no lock.
+func (v *exactView) spentIn(name string) bool {
+	_, spent := v.spent.Load(name)
+	return spent
 }
 
 // extraLocked returns what v shows of p.rest, the part of db's entries under
@@ -307,4 +322,77 @@ func (v *exactView) recomputeShownLocked(db *TreeDb, ix *integrations.MockIndex,
 		}
 	}
 	return want, got
+}
+
+// kindIndex files every mock under "" and under its kind, so an exact view's
+// unkeyed read of a tier (shownOf) goes through the split its keyed reads use
+// (keyPart, extraLocked): what it examines is what the view shows of the
+// tier, never the whole tier, whose values under keploy mock replay are every
+// test's recordings.
+var kindIndex = &integrations.MockIndex{Keys: func(mk *models.Mock) []string {
+	return []string{"", string(mk.Kind)}
+}}
+
+// shownOf is, of db's values of kind (every kind for ""), in tree order, those
+// v shows for what each is and what v was installed with (showsStatic): the
+// protocol-phase ones, and the few of its own names (its worker scope, its
+// pool). The spends are not read here: the view's reads (keep, reusable,
+// perTest) narrow the list with shows, as they narrowed the tier's values, and
+// get the same list from it, since shows is showsStatic and unspentNow. nil
+// for a nil tree.
+//
+// It examines the protocol-phase entries the tree split out at its generation
+// and the view's extras, built once per view and generation (extraLocked);
+// the tree's split is built once per generation, on the first read, by one
+// walk of the tree. In the verify mode the read is recomputed by that walk,
+// under the same lock, and a difference panics.
+func (v *exactView) shownOf(db *TreeDb, kind models.Kind) []*models.Mock {
+	if db == nil {
+		return nil
+	}
+	if tierReadsWalk.Load() {
+		var all []*models.Mock
+		db.rangeValues(func(x interface{}) bool {
+			if mk, ok := x.(*models.Mock); ok && mk != nil && (kind == "" || mk.Kind == kind) {
+				all = append(all, mk)
+			}
+			return true
+		})
+		return all
+	}
+	key := string(kind)
+	p := db.rlockPart(kindIndex, key)
+	extra := v.extraLocked(db, kindIndex, key, p, db.gen)
+	out := make([]*models.Mock, 0, len(p.phase)+len(extra))
+	cmp := db.rbt.Comparator
+	i, j := 0, 0
+	for i < len(p.phase) || j < len(extra) {
+		var e keyedEntry
+		if j >= len(extra) || (i < len(p.phase) && cmp(p.phase[i].key, extra[j].key) < 0) {
+			e = p.phase[i]
+			i++
+		} else {
+			e = extra[j]
+			j++
+		}
+		if db.liveLocked(e) {
+			out = append(out, e.mk)
+		}
+	}
+	var want []*models.Mock
+	verify := exactViewVerify.Load()
+	if verify {
+		it := db.rbt.Iterator()
+		for it.Next() {
+			if mk, ok := it.Value().(*models.Mock); ok && mk != nil && (kind == "" || mk.Kind == kind) && v.showsStatic(mk) {
+				want = append(want, mk)
+			}
+		}
+	}
+	db.mu.RUnlock()
+	keyedExamined.Add(uint64(len(p.phase) + len(extra)))
+	if verify {
+		verifyExactRead("the staged mocks of kind "+strconv.Quote(key)+" the view shows", want, out)
+	}
+	return out
 }

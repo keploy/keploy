@@ -362,10 +362,7 @@ func TestAShownKeyedReadIsTheWalkBeforeTheSplitUnderRandomChanges(t *testing.T) 
 		case op < 18:
 			mk := pick()
 			v.mu.Lock()
-			if v.spent == nil {
-				v.spent = map[string]bool{}
-			}
-			v.spent[mk.Name] = true
+			v.spent.Store(mk.Name, true)
 			v.mu.Unlock()
 		default:
 			v = newView()
