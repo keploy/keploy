@@ -14,6 +14,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -106,6 +107,15 @@ func decodeGeneric(ctx context.Context, logger *zap.Logger, reqBuf []byte, clien
 			matched, genericResponses, err := fuzzyMatch(ctx, logger, genericRequests, db)
 			if err != nil {
 				utils.LogError(logger, err, "error while matching generic mocks")
+			}
+			if !matched && err == nil && provenswitch.On() {
+				// The application's background work made again in the
+				// test's window, after its marked recording answered
+				// there: answered again with it, unchecked, not a miss.
+				if again := backgroundAgain(genericRequests, db); again != nil {
+					reportBackgroundAgain(ctx, genericRequests, again)
+					matched, genericResponses = true, again.Spec.GenericResponses
+				}
 			}
 
 			if !matched {
