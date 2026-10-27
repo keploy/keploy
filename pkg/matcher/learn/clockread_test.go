@@ -104,14 +104,15 @@ func TestAnEmptyClockReadIsRefusedAtReplaySayingTheLearningsDisagree(t *testing.
 }
 
 // A value the application cuts coarser than its encoding (a millisecond
-// value written in nanoseconds) is learned with that cut as its Res, and a
-// replay refuses it whatever it is, saying so: checked at the nanosecond, it
-// would pass or fail by where its read fell in its millisecond.
+// value written in nanoseconds) is learned as a cut, at the unit above its
+// encoding (readRes: a microsecond above a nanosecond), and a replay refuses
+// it whatever it is, saying so: checked at the nanosecond, it would pass or
+// fail by where its read fell in its millisecond.
 func TestACutClockReadIsRefusedAtReplayNamingTheCut(t *testing.T) {
 	rec := time.Date(2026, 10, 26, 9, 0, 0, 123000000, time.UTC)
 	live := rec.Add(FullRoundLead + 7*time.Millisecond)
-	if r := textClockRead(strconv.FormatInt(rec.UnixNano(), 10), strconv.FormatInt(live.UnixNano(), 10)); r == nil || r.Res < time.Millisecond {
-		t.Fatalf("textClockRead = %+v; want a Res of the millisecond cut", r)
+	if r := textClockRead(strconv.FormatInt(rec.UnixNano(), 10), strconv.FormatInt(live.UnixNano(), 10)); r == nil || r.Res != time.Microsecond {
+		t.Fatalf("textClockRead = %+v; want a Res of the microsecond above the nanosecond, a cut", r)
 	} else {
 		from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 		ok, why := CheckClockRead("createdAt", *r, Leaf{Type: String, Value: strconv.FormatInt(from.UnixNano(), 10)}, Span{From: from, To: from.Add(time.Second)}, true)

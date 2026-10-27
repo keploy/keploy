@@ -1990,3 +1990,85 @@ func TestATypedInstantWithNoCallWindowIsAClockReadCheckedAtReplay(t *testing.T) 
 		t.Errorf("a $date with no window in a client test: %s Read=%+v (%s); want refused", ln.Kind, ln.Read, ln.Why)
 	}
 }
+
+// A plain read of the clock is learned at its encoding's resolution (a
+// $date's millisecond), never at the granularity its two values happen to
+// share (readRes): two millisecond values both whole multiples of 492 ms by
+// chance, and the same recording with a value of record's full round that
+// shares only a millisecond, learn the same resolution, so a replay's
+// window is the same whichever value the full round read, and a stamp
+// 400 ms before its call's span is refused under each. A text one and a
+// time of day the same. A value the application cut to the second (both
+// whole seconds) is learned at the second, the unit above its encoding,
+// whatever more the two share (7 s, or 2 s), and every replay refuses it,
+// naming the cut.
+func TestAPlainClockReadsResolutionIsItsEncodingsNotAChanceGrain(t *testing.T) {
+	const p = "body.u.processed_at"
+	ms := time.Millisecond
+	base := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	rec := time.UnixMilli(base.UnixMilli()/492*492 + 492).UTC()
+	chance, fine := rec.Add(126*492*ms), rec.Add(126*492*ms+ms)
+	if g, f := sharedGrain(rec, chance), sharedGrain(rec, fine); g < 492*ms || f >= 492*ms {
+		t.Fatalf("the values share %v and %v; want at least 492ms and less", g, f)
+	}
+	shape := func(l Leaf) Shape { return Shape{Leaves: map[string]Leaf{p: l}} }
+	typed := func(at time.Time) Leaf { return InstantLeaf(p, p, at, ms) }
+	learn := func(r, l time.Time) models.ClockOffset {
+		t.Helper()
+		ln := ClassifyIn(clockedDrifts(), []string{p}, shape(typed(l)), shape(typed(r)), r.Add(ms), nil, nil, nil, nil)[0]
+		o, ok := ln.Clock()
+		if !plainRead(ln) || !ok {
+			t.Fatalf("a $date with no window, %v then %v: %s Read=%+v (%s); want a plain read of the clock", r, l, ln.Kind, ln.Read, ln.Why)
+		}
+		return o
+	}
+	now := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+	span := Span{From: now, To: now.Add(20 * ms)}
+	for _, row := range []struct {
+		what string
+		l    time.Time
+	}{{"sharing 492ms by chance", chance}, {"sharing a millisecond", fine}} {
+		o := learn(rec, row.l)
+		if o.Res != ms {
+			t.Errorf("%s: Res = %v; want the 1ms a $date writes", row.what, o.Res)
+		}
+		if ok, why := CheckClockRead(p, o, typed(now.Add(-400*ms)), span, true); ok || !strings.Contains(why, "it changed") {
+			t.Errorf("%s, a stamp 400ms before the call's span: %v (%s); want refused", row.what, ok, why)
+		}
+		if ok, why := CheckClockRead(p, o, typed(now.Add(5*ms)), span, true); !ok {
+			t.Errorf("%s, a read in the call's span: refused (%s); want it passed", row.what, why)
+		}
+	}
+	const lay = "2006-01-02T15:04:05.000Z"
+	for _, l := range []time.Time{chance, fine} {
+		if r := textClockRead(rec.Format(lay), l.Format(lay)); r == nil || r.Res != ms {
+			t.Errorf("a text read, %v then %v: %+v; want a Res of 1ms", rec, l, r)
+		}
+	}
+	rtod := 9*time.Hour + 960*ms
+	for _, ltod := range []time.Duration{rtod + 129*480*ms, rtod + 129*480*ms + ms} {
+		if r := clockedDrifts().todRead(rtod, ltod, ms, ms, models.LayoutTypedTimeOfDay, models.LayoutTypedTimeOfDay, nil, rec); r.Res != ms {
+			t.Errorf("a time of day, %v then %v (sharing %v): Res = %v; want 1ms", rtod, ltod, todGrain(rtod, ltod), r.Res)
+		}
+	}
+	if g := todGrain(rtod, rtod+129*480*ms); g < 480*ms {
+		t.Fatalf("the times of day share %v; want at least 480ms", g)
+	}
+	// Above a day no unit is above the encoding, so two dates that share
+	// two days by chance are no cut: read at the day.
+	if got := readRes(24*time.Hour, 48*time.Hour); got != 24*time.Hour {
+		t.Errorf("readRes of a day's encoding sharing two days = %v; want the day", got)
+	}
+	// Cut to the second: 7 s shared, or 2 s, learned at the second alike,
+	// and refused at replay naming the cut.
+	sec := time.Unix(base.Unix()/7*7+7, 0).UTC()
+	for _, l := range []time.Time{sec.Add(63 * time.Second), sec.Add(62 * time.Second)} {
+		o := learn(sec, l)
+		if o.Res != time.Second {
+			t.Errorf("cut to the second, %v then %v (sharing %v): Res = %v; want 1s", sec, l, sharedGrain(sec, l), o.Res)
+		}
+		if ok, why := CheckClockRead(p, o, typed(now.Add(time.Second)), Span{From: now.Add(time.Second - 5*ms), To: now.Add(time.Second + 5*ms)}, true); ok || !strings.Contains(why, "the application cuts its value") {
+			t.Errorf("cut to the second, at replay: %v (%s); want refused naming the cut", ok, why)
+		}
+	}
+}
