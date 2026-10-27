@@ -581,6 +581,8 @@ func TestASetsFirstServerCallStartsItsSpanAtTheSetsBegin(t *testing.T) {
 // began at the last move, so the span starts there, wherever the call lands
 // in it, and a read made in the first stretch is refused. Without the run
 // told, the span from that serve runs across the frozen stretch, as before.
+// A client test's begin in the first stretch is carried from the run's
+// begin too, for a read since its test began.
 func TestALiveSpanDoesNotRunAcrossAStretchTheClockLeftAndCameBackTo(t *testing.T) {
 	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
 	w := func(at time.Duration, off time.Duration) runWrite {
@@ -617,11 +619,41 @@ func TestALiveSpanDoesNotRunAcrossAStretchTheClockLeftAndCameBackTo(t *testing.T
 	if s, ok := tr.LiveSpan(base.Add(3900 * time.Millisecond)); ok {
 		t.Fatalf("span = %+v where the run cannot be told; want none", s)
 	}
+
+	// A client test that began in the first real stretch: the clock reads
+	// the same offset at its begin and at its call, but its begin on the
+	// app's clock (Span.Began) is where the run began, so a read since the
+	// test began made in the first stretch is refused, and one made in the
+	// last run is checked there.
+	since := models.ClockOffset{Res: time.Millisecond, Since: models.SinceTestBegin}
+	fresh := Leaf{Path: p, Noise: p, Type: String, Value: base.Add(3700 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")}
+	for _, served := range []bool{false, true} {
+		tr := NewTracker()
+		tr.SetClientTests(true)
+		tr.SetAppClock(clock.at)
+		tr.SetAppClockRun(clock.began)
+		if served {
+			tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base.Add(1700*time.Millisecond))
+		}
+		tr.BeginAt(base.Add(1550 * time.Millisecond))
+		s, ok := tr.LiveSpan(base.Add(3900 * time.Millisecond))
+		if !ok || !s.Began.Equal(last.to) {
+			t.Fatalf("served %v: span = %+v,%v; want it to carry the test's begin at the run's begin %v", served, s, ok, last.to)
+		}
+		if ok, why := CheckClockRead(p, since, stale, s, true); ok {
+			t.Fatalf("served %v: a read since the test began made before the frozen stretch passed (%s)", served, why)
+		}
+		if ok, why := CheckClockRead(p, since, fresh, s, true); !ok {
+			t.Fatalf("served %v: a read since the test began made in the clock's last run was refused: %s", served, why)
+		}
+	}
 }
 
 // In a client test the test's begin bounds a span where the clock's run
 // began before it; where the run began after the begin, the span starts at
-// the run, with or without a serve before the call.
+// the run, with or without a serve before the call. The span carries that
+// start as the test's begin on the app's clock (Span.Began), and none for a
+// begin after the call.
 func TestAClientTestsSpanStartsAtTheLaterOfItsBeginAndTheClocksRun(t *testing.T) {
 	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
 	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: time.Hour}
@@ -650,6 +682,11 @@ func TestAClientTestsSpanStartsAtTheLaterOfItsBeginAndTheClocksRun(t *testing.T)
 			}
 			tr.BeginAt(tc.began)
 			want := Span{From: tc.from.Add(time.Hour), To: arrival.Add(time.Hour)}
+			if tc.began.Before(arrival) {
+				// The test's begin on the app's clock, or the run's
+				// where that began after it (Span.Began).
+				want.Began = tc.from.Add(time.Hour)
+			}
 			if s, ok := tr.LiveSpan(arrival); !ok || s != want {
 				t.Fatalf("span = %+v,%v; want %+v", s, ok, want)
 			}
