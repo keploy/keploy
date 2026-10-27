@@ -285,10 +285,11 @@ type exactState struct {
 	// recordings the trees do not hold (SetRecordingTimes): nil until the
 	// agent set one.
 	times atomic.Pointer[recordingTimes]
-	// unrequired are the recordings of the staged set that a test is served
-	// in its window but never required to make (SetUnrequired), with why:
-	// nil until a replay sent them, which requires every test mock.
-	unrequired atomic.Pointer[map[string]string]
+	// unrequired are, per test of the staged set, the recordings of its own
+	// list it is served in its window but never required to make
+	// (SetUnrequired), with why: nil until a replay sent them, which
+	// requires every test mock.
+	unrequired atomic.Pointer[models.BackgroundMarks]
 	// fired: a test has begun since exact serving was turned on. It is what
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
@@ -1575,7 +1576,7 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 		prev.closed = true
 		// Closed, its outcome is final: no consume reaches it any more.
 		if prev.test != "" && m.exact.last.Load() == prev {
-			m.exact.ended.Store(prev.outcomeLocked(m.unrequiredNames()))
+			m.exact.ended.Store(prev.outcomeLocked(m.unrequiredOf(prev.test)))
 			m.exact.last.Store(nil)
 		}
 		prev.mu.Unlock()
@@ -1670,7 +1671,7 @@ func (m *MockManager) latestOutcome() *testOutcome {
 	if v == nil {
 		return m.exact.ended.Load()
 	}
-	unrequired := m.unrequiredNames()
+	unrequired := m.unrequiredOf(v.test)
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.outcomeLocked(unrequired)
@@ -1690,8 +1691,9 @@ type testOutcome struct {
 // outcomeLocked is v's outcome, v.mu held: which of its test mocks have
 // answered (in the order they did) and which have not (in recorded order).
 // Only the test's own: a shared recording is never required of it, nor one
-// judging marked as the application's background work (unrequired, as
-// SetUnrequired installed them).
+// judging marked, on this test's own entry, as the application's background
+// work (unrequired, as SetUnrequired installed them): another test's mark on
+// the same recording does not reach it.
 func (v *exactView) outcomeLocked(unrequired map[string]string) *testOutcome {
 	o := &testOutcome{test: v.test}
 	for _, i := range v.order {

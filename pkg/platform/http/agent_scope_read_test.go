@@ -91,10 +91,14 @@ func TestAgentClient_PushProvenTable(t *testing.T) {
 	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {}}, nil, []models.TestWindow{{TestCase: "o::TestA", Start: t0, End: t0.Add(time.Second)}}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := a.PushProvenTable(ctx, map[string][]string{"o::TestA": {"mock-3"}}, nil, nil, models.BackgroundMarks{"o::TestA": {"mock-3": "a timer"}}); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{
 		`{"mappings":{"o::TestA":["mock-3"]},"pool":{"o":["mock-1"]}}`,
 		`{"mappings":{"o::TestA":[]},"pool":{}}`,
 		`{"mappings":{"o::TestA":[]},"pool":{},"windows":[{"testCase":"o::TestA","start":"2026-01-02T03:04:05Z","end":"2026-01-02T03:04:06Z"}]}`,
+		`{"mappings":{"o::TestA":["mock-3"]},"pool":{},"background_by_test":{"o::TestA":{"mock-3":"a timer"}}}`,
 	}
 	if !slices.Equal(bodies, want) {
 		t.Fatalf("posted %q, want %q", bodies, want)

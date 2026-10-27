@@ -134,7 +134,7 @@ type SetPusher interface {
 // of the set (models.ScopeTableReq.Windows) and the tests' recordings judging
 // marked as background work (models.ScopeTableReq.Background) in one request.
 type ProvenTablePusher interface {
-	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, background map[string]string) error
+	PushProvenTable(ctx context.Context, table, pool map[string][]string, windows []models.TestWindow, background models.BackgroundMarks) error
 }
 
 type MappingReader interface {
