@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -487,6 +489,9 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 	if err := verdict.checkPlaces(); err != nil {
 		return st, err
 	}
+	if verdict.track && st.pruned == 0 {
+		return st, nil
+	}
 	return st, rw.commit()
 }
 
@@ -602,7 +607,70 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 	if err := verdict.checkPlaces(); err != nil {
 		return st, err
 	}
+	if verdict.track && st.pruned == 0 {
+		return st, nil
+	}
 	return st, rw.commit()
+}
+
+// DeleteMocks takes the named mocks out of the set's mock file, in the
+// format it is stored in (yaml, json or gob), and keeps every other mock as
+// it is. As UpdateMocks does, it keeps a named mock that a kept mock requires
+// or that a replay serves as an async epoch (prune_deps.go): taking it out
+// would break a recording that stays. It returns, sorted, the named mocks it
+// took out. A set with no mock file, or one it takes none of names out of,
+// is not written, and nothing is returned.
+func (ys *MockYaml) DeleteMocks(ctx context.Context, testSetID string, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	named := make(map[string]bool, len(names))
+	for _, n := range names {
+		named[n] = true
+	}
+	mockFileName := "mocks"
+	if ys.MockName != "" {
+		mockFileName = ys.MockName
+	}
+	path := filepath.Join(ys.MockPath, testSetID)
+	lock := getMockFileLock(mockFileLockKey(path, mockFileName, ys.Format))
+	lock.Lock()
+	defer lock.Unlock()
+
+	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool { return !named[m.Name] }, track: true}
+	gobPath := filepath.Join(path, mockFileName+".gob")
+	var err error
+	if _, statErr := os.Stat(gobPath); statErr == nil {
+		// As updateMocksGob: an async gob writer of this MockYaml is
+		// quiesced before its file is rewritten.
+		if err := ys.Close(); err != nil {
+			return nil, err
+		}
+		var st pruneStats
+		st, err = ys.prunePassGob(ctx, gobPath, verdict)
+		if err == nil && st.again {
+			_, err = ys.prunePassGob(ctx, gobPath, verdict)
+		}
+	} else {
+		existsAny, format, statErr := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !existsAny {
+			return nil, nil
+		}
+		var st pruneStats
+		st, err = ys.prunePass(ctx, path, mockFileName, format, verdict)
+		if err == nil && st.again {
+			_, err = ys.prunePass(ctx, path, mockFileName, format, verdict)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := slices.Clone(verdict.dropped)
+	sort.Strings(out)
+	return out, nil
 }
 
 // PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -617,6 +618,67 @@ func (db *MappingDb) MarkBackground(ctx context.Context, testSetID string, marks
 	}
 	sort.Strings(changed)
 	return changed, nil
+}
+
+// RemoveBackground takes, by test, the named recordings off that test's list
+// in the set's mappings.yaml, each only while its entry there still carries
+// a background mark (models.MockEntry.Background): an entry whose mark was
+// taken off is required again and stays, and another test listing the same
+// recording keeps its entry. Every other section and entry is kept as it is,
+// and a file it does not change is not written. It returns, sorted, the
+// recordings it took off a list (once each), and of those the ones no list
+// of the file names any more (a test's, or the startup, runner, worker or
+// shared list): only those may leave the set's mock file, whose every other
+// recording a list still serves. A set with no mapping file is an error.
+func (db *MappingDb) RemoveBackground(ctx context.Context, testSetID string, byTest map[string][]string) (removed, unlisted []string, err error) {
+	if len(byTest) == 0 {
+		return nil, nil, nil
+	}
+	took := map[string]bool{}
+	err = db.rewrite(ctx, testSetID, false, true, func(m *models.Mapping) bool {
+		for i := range m.TestCases {
+			names := byTest[m.TestCases[i].ID]
+			if len(names) == 0 {
+				continue
+			}
+			kept := m.TestCases[i].Mocks[:0:0]
+			for _, e := range m.TestCases[i].Mocks {
+				if e.Background != "" && slices.Contains(names, e.Name) {
+					took[e.Name] = true
+					continue
+				}
+				kept = append(kept, e)
+			}
+			m.TestCases[i].Mocks = kept
+		}
+		if len(took) == 0 {
+			return false
+		}
+		listed := map[string]bool{}
+		for _, tc := range m.TestCases {
+			for _, e := range tc.Mocks {
+				listed[e.Name] = true
+			}
+		}
+		for _, list := range [][]models.MockEntry{m.Startup, m.Runner, m.Worker, m.Shared} {
+			for _, e := range list {
+				listed[e.Name] = true
+			}
+		}
+		for n := range took {
+			removed = append(removed, n)
+			if !listed[n] {
+				unlisted = append(unlisted, n)
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Strings(removed)
+	sort.Strings(unlisted)
+	return removed, unlisted, nil
 }
 
 // workerAt is when a worker-scope entry's request was recorded, for its
