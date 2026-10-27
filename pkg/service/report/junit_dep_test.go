@@ -451,3 +451,20 @@ func anchoredNote(mock string, answered, rec, replayStart, recordStart time.Time
 	n.Anchor(replayStart, recordStart, mock, rec)
 	return n
 }
+
+// A MongoDB call with no recorded answer is named in the JUnit evidence by
+// its command and the names it ran on, a value-looking one written {}, as
+// the test's reason names it.
+func TestProvenEvidenceNamesAMongoCall(t *testing.T) {
+	lines := provenEvidenceLines(models.FailureInfo{UnmatchedCalls: []models.UnmatchedCall{
+		{Protocol: "MongoDB", Destination: "[::1]:27017", ActualSummary: "update on app.docs", MatchPhase: models.MatchPhaseBody},
+		{Protocol: "MongoDB", Destination: "[::1]:27017", ActualSummary: "find on app.events_5e246614", MatchPhase: models.MatchPhaseBody},
+	}})
+	want := []string{
+		"call with no recorded answer: MongoDB update on app.docs (to [::1]:27017)",
+		"call with no recorded answer: MongoDB find on app.{} (to [::1]:27017)",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("evidence lines = %q, want %q", lines, want)
+	}
+}

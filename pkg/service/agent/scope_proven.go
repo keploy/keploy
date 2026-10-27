@@ -1320,7 +1320,9 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 // nextStepOf is a miss's next step as evidence keeps it. Every matcher
 // writes fixed advice, but one lists the fields that differed, and a map's
 // keys can be values (an email, a user ID): a next step that names any of
-// the miss's field paths is replaced by fixed advice that counts them. Why
+// the miss's field paths is replaced by fixed advice: it names the fields
+// the miss differs in (Differs) in their shape (models.FieldShape), as the
+// miss's reason does, or, with none named, counts the field paths. Why
 // a replay refused a field for a reason of its own (a learned read of the
 // application's clock the call does not carry: models.UnmatchedCall.FieldReasons)
 // is added to it, as the miss's reason says it (missDiffersText), so the
@@ -1333,6 +1335,11 @@ func nextStepOf(m models.UnmatchedCall) string {
 		}
 		if strings.Contains(m.NextSteps, d.Path) || strings.Contains(m.NextSteps, strings.TrimPrefix(d.Path, "body.")) {
 			next = fmt.Sprintf("%d field(s) of the call differ from the recording; if the change is expected, re-record the mock set with 'keploy mock record'", len(m.FieldDiffs))
+			if fields := models.FieldShapes(m.Differs); len(fields) > 0 {
+				// The fields the miss's reason names (missDiffersText):
+				// the matcher's own names for them, in their shape.
+				next = differsPhrase(fields) + " from the recording; if the change is expected, re-record the mock set with 'keploy mock record'"
+			}
 			break
 		}
 	}
@@ -1418,7 +1425,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+missDiffersText(m)+missClosestText(m))
 			continue
 		}
 		switch m.Kind {
@@ -1430,12 +1437,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+missDiffersText(m)+missClosestText(m))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+missDiffersText(m)+missClosestText(m))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m))
+			what = append(what, missText(m)+" had no recorded answer"+missDiffersText(m)+missClosestText(m))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -1481,18 +1488,24 @@ func shellQuote(s string) string {
 }
 
 // missText names a miss: an HTTP or gRPC call by its method and target
-// shape (models.MissShape); any other protocol by itself and its destination
-// only, as one line of the reason (a SQL statement's shape is in the
-// evidence).
+// shape (models.MissShape), a MongoDB call by its protocol, its command and
+// the names it ran on ("MongoDB update on app.docs"); any other protocol by
+// itself and its destination only, as one line of the reason (a SQL
+// statement's shape is in the evidence).
 func missText(m models.UnmatchedCall) string {
 	proto := strings.TrimSpace(m.Protocol)
 	s := "a call"
 	if proto != "" {
 		s = "a " + proto + " call"
 	}
-	if models.IsPathProtocol(proto) {
+	switch {
+	case models.IsPathProtocol(proto):
 		if shape := models.MissShape(m); shape != "" {
 			s = shape
+		}
+	case isMongoMiss(m):
+		if shape := models.MissShape(m); shape != "" {
+			s = proto + " " + shape
 		}
 	}
 	if m.Destination != "" {
@@ -1525,17 +1538,46 @@ func missDiffersText(m models.UnmatchedCall) string {
 // differed from its closest recording: " (body.amount differs)", " (host and
 // header.accept differ)", " (a, b, c and 2 more differ)"; "" for none.
 func differsText(fields []string) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	return " (" + differsPhrase(fields) + ")"
+}
+
+// differsPhrase says which fields differ: "body.amount differs", "host and
+// header.accept differ", "a, b, c and 2 more differ"; "" for none.
+func differsPhrase(fields []string) string {
 	const most = 3
 	switch n := len(fields); {
 	case n == 0:
 		return ""
 	case n == 1:
-		return " (" + fields[0] + " differs)"
+		return fields[0] + " differs"
 	case n <= most:
-		return " (" + strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ)"
+		return strings.Join(fields[:n-1], ", ") + " and " + fields[n-1] + " differ"
 	default:
-		return fmt.Sprintf(" (%s and %d more differ)", strings.Join(fields[:most], ", "), n-most)
+		return fmt.Sprintf("%s and %d more differ", strings.Join(fields[:most], ", "), n-most)
 	}
+}
+
+// isMongoMiss reports whether m is a MongoDB call's miss.
+func isMongoMiss(m models.UnmatchedCall) bool {
+	return models.IsMongoProtocol(strings.TrimSpace(m.Protocol))
+}
+
+// missClosestText is what a reason says of a MongoDB miss's closest
+// recording (models.ClosestText): ", closest recording mock-12 (a call of
+// the same shape, its request body differs)"; "" for any other protocol's
+// miss, whose reason names its fields alone, and for one that names no
+// closest recording.
+func missClosestText(m models.UnmatchedCall) string {
+	if !isMongoMiss(m) {
+		return ""
+	}
+	if t := models.ClosestText(m); t != "" {
+		return ", " + t
+	}
+	return ""
 }
 
 func mockText(name string, m *models.Mock) string {

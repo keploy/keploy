@@ -36,20 +36,90 @@ func MissShape(m UnmatchedCall) string {
 	return holePathPlaces(shape, places)
 }
 
+// ClosestText names the recorded mock a miss's matcher found closest to the
+// call, and why it was closest in fixed words of how far the matcher got
+// (MatchPhase): "closest recording mock-12 (a call of the same shape, its
+// request body differs)". A phase whose words would claim more than the
+// phase says (no candidate of the call's shape, a protocol error) names the
+// mock alone; "" for a miss that names none. The mock's name is keploy's
+// own; no value of the call is in it.
+func ClosestText(m UnmatchedCall) string {
+	if m.ClosestMock == "" {
+		return ""
+	}
+	s := "closest recording " + m.ClosestMock
+	if why := closestWhy[m.MatchPhase]; why != "" {
+		s += " (" + why + ")"
+	}
+	return s
+}
+
+// closestWhy is why a matcher's closest mock was closest, by the phase its
+// matching ended in (MatchPhase*'s own definitions).
+var closestWhy = map[string]string{
+	MatchPhaseBody:      "a call of the same shape, its request body differs",
+	MatchPhaseStrict:    "a call of the same shape, a field it checks strictly differs",
+	MatchPhaseExhausted: "the nearest the matcher found",
+	MatchPhaseVariable:  "a test variable it declares did not hold",
+}
+
 // CallShape is a miss's summary in its shape: for HTTP and gRPC the method
 // and the target's shape ("GET /users/{}/orders", "/pkg.v1.Service/Method"),
-// for SQL the statement with its literals written "?" (SQLShape), and "" for
-// any other protocol, whose summary may hold the values it sent (a cache key,
-// a document) and which keploy has no shape for. An HTTP or gRPC shape is its
-// own shape; a SQL statement cut at its bound may shape again shorter.
+// for SQL the statement with its literals written "?" (SQLShape), for MongoDB
+// the command and the names it ran on (mongoCallShape: "update on app.docs"),
+// and "" for any other protocol, whose summary may hold the values it sent (a
+// cache key, a document) and which keploy has no shape for. An HTTP, gRPC or
+// MongoDB shape is its own shape; a SQL statement cut at its bound may shape
+// again shorter.
 func CallShape(protocol, summary string) string {
 	switch {
 	case IsPathProtocol(protocol):
 		return methodTargetShape(summary)
 	case isSQLCall(protocol):
 		return SQLShape(summary)
+	case IsMongoProtocol(protocol):
+		return mongoCallShape(summary)
 	}
 	return ""
+}
+
+// IsMongoProtocol reports whether a miss's protocol is MongoDB, whose summary
+// is a command and the namespace it ran on.
+func IsMongoProtocol(protocol string) bool {
+	return strings.EqualFold(protocol, "MongoDB") || strings.EqualFold(protocol, "Mongo")
+}
+
+// mongoCallShape is a MongoDB miss's summary in its shape. The summary is
+// "<command> on <database>.<collection>", "<command> on <collection>" for a
+// request that names no database, and "<command> on " for a command on no
+// collection (a ping), which is the command alone, as the command alone is
+// itself. The command is kept when
+// it reads as a name, and so is each of the database and the collection, by
+// PathShape's segment rule; any other is {}: a collection named after a
+// tenant's ID ("events_5e246614") is "app.{}". A collection's dotted parts
+// (fs.chunks) read as one name. A summary of any other form is "": keploy has
+// no shape for it.
+func mongoCallShape(summary string) string {
+	cmd, ns, ok := strings.Cut(summary, " on ")
+	if !ok {
+		// A command alone, as its shape names one on no collection.
+		if summary != "" && pathNamePart(summary) {
+			return summary
+		}
+		return ""
+	}
+	if cmd == "" || !pathNamePart(cmd) {
+		cmd = pathHole
+	}
+	ns = strings.TrimSpace(ns)
+	if ns == "" {
+		return cmd
+	}
+	db, coll, hasDB := strings.Cut(ns, ".")
+	if !hasDB {
+		return cmd + " on " + pathSegmentShape(ns)
+	}
+	return cmd + " on " + pathSegmentShape(db) + "." + pathSegmentShape(coll)
 }
 
 // isHTTPProtocol reports whether a miss's protocol is HTTP, whose summary is
@@ -157,11 +227,14 @@ func FieldShapes(fields []string) []string {
 // dot-separated part by PathShape's segment rule, with its indexes ([], [0],
 // up to four digits) kept, so a part that may be a value the app sent (a map
 // key that is an ID, an email address, a token) is {}. By that rule any key
-// that does not read as a name is {} too (line1, $set, iOS, café), and an
-// API version (v1) is kept. A header's name is kept whole: it names the
-// field (header.Authorization). A raw dotted key is shaped part by part
-// (alice.smith@example.com keeps "alice"), so a producer shapes its keys
-// first (KeyShape), as the strict comparison does.
+// that does not read as a name is {} too (line1, iOS, café), and an API
+// version (v1) is kept. An operator key, '$' and one part that reads as a
+// name (a MongoDB update's $set, a filter's $in, extended JSON's $oid), is
+// kept: it is as safe as the name after it, which the rule keeps alone. A
+// header's name is kept whole: it names the field (header.Authorization). A
+// raw dotted key is shaped part by part (alice.smith@example.com keeps
+// "alice"), so a producer shapes its keys first (KeyShape), as the strict
+// comparison does.
 func FieldShape(f string) string {
 	if name, ok := strings.CutPrefix(f, "header."); ok && name != "" && !strings.Contains(name, ".") {
 		return f
@@ -171,6 +244,10 @@ func FieldShape(f string) string {
 		base, index := p, ""
 		if j := strings.IndexByte(p, '['); j >= 0 && fieldIndexes.MatchString(p[j:]) {
 			base, index = p[:j], p[j:]
+		}
+		if op, ok := strings.CutPrefix(base, "$"); ok && op != "" && pathNamePart(op) {
+			parts[i] = base + index
+			continue
 		}
 		parts[i] = KeyShape(base) + index
 	}
