@@ -310,11 +310,11 @@ type recordedWindowsSetter interface {
 	SetRecordedWindows(ctx context.Context, ws []models.TestWindow) error
 }
 
-// scopeBackgroundSetter installs the tests' recordings judging marked as the
-// application's background work, each with why (proven wire,
-// models.ScopeTableReq.Background).
+// scopeBackgroundSetter installs, per test, the recordings of its own list
+// judging marked as the application's background work, each with why (proven
+// wire, models.ScopeTableReq.Background).
 type scopeBackgroundSetter interface {
-	SetScopeBackground(ctx context.Context, names map[string]string) error
+	SetScopeBackground(ctx context.Context, marks models.BackgroundMarks) error
 }
 
 // HandleScopeGate installs the replay's gate: the only tests that should run

@@ -629,27 +629,28 @@ func (a *Agent) recordedStart(id string, starts map[string]time.Time) (start tim
 	return start, known
 }
 
-// SetScopeBackground installs, for a replay, the tests' recordings judging
-// marked as the application's own background work (models.MockEntry.Background),
-// each with why: a test is served one in its window when it makes the call,
-// and is never failed for not making it (coreAgent.UnrequiredSetter). nil
-// clears the previous table's marks. A proxy that cannot take them requires
-// every test mock, which is never looser.
-func (a *Agent) SetScopeBackground(ctx context.Context, names map[string]string) error {
+// SetScopeBackground installs, for a replay, per test, the recordings of its
+// own list judging marked as the application's own background work
+// (models.MockEntry.Background), each with why: the test is served one in its
+// window when it makes the call, and is never failed for not making it
+// (coreAgent.UnrequiredSetter); another test listing the same recording
+// without a mark still must. nil clears the previous table's marks. A proxy
+// that cannot take them requires every test mock, which is never looser.
+func (a *Agent) SetScopeBackground(ctx context.Context, marks models.BackgroundMarks) error {
 	if err := a.wire.lock(ctx); err != nil {
 		return err
 	}
 	defer a.wire.unlock()
 	us, ok := a.Proxy.(coreAgent.UnrequiredSetter)
 	if !ok {
-		if len(names) > 0 {
+		if n := marks.Len(); n > 0 {
 			a.logger.Info("this keploy agent's proxy cannot serve a test's background recordings without requiring them: each test is required to make them",
-				zap.Int("background recordings", len(names)),
+				zap.Int("background recordings", n),
 				zap.String("next_step", "replay with a keploy agent of the same release as this keploy"))
 		}
 		return nil
 	}
-	return us.SetUnrequired(names)
+	return us.SetUnrequired(marks)
 }
 
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
