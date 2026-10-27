@@ -14,6 +14,7 @@ import (
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -82,15 +83,23 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 			h.Logger.Debug("on-miss passthrough: failed to close upstream conn", zap.Error(cerr))
 		}
 	}()
+	// The upstream's answer is read with no deadline: the call's end ends
+	// that read, as it ends decodeHTTP's reads of the client, so decodeHTTP,
+	// which waits for its goroutine, is not held by an upstream that does
+	// not answer.
+	defer pUtil.InterruptOnDone(ctx, dstConn)()
 
 	// Forward the exact request bytes upstream.
 	if _, err := dstConn.Write(reqBuf); err != nil {
 		return false, err
 	}
 
-	// Read the upstream response.
+	// Read the upstream's final response: an interim one (the 100 Continue
+	// to an upload, a 103 Early Hints) is not its answer, and is not relayed.
+	// The app had its 100 from the decoder already, and a matched mock
+	// serves the final response alone too.
 	respReader := bufio.NewReader(dstConn)
-	respParsed, err := http.ReadResponse(respReader, request)
+	respParsed, err := pUtil.ReadFinalResponse(respReader, request, nil)
 	if err != nil {
 		return false, err
 	}
@@ -120,7 +129,7 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 
 	// record policy: capture the exchange for the CLI to persist.
 	if opts.OnMiss.RecordsOnMiss() {
-		appendCaptured(&models.Mock{
+		captured := &models.Mock{
 			Version: models.GetVersion(),
 			Name:    "mocks",
 			Kind:    models.HTTP,
@@ -148,7 +157,12 @@ func (h *HTTP) serveOnMiss(ctx context.Context, clientConn net.Conn, reqBuf []by
 				ReqTimestampMock: reqTs,
 				ResTimestampMock: resTs,
 			},
-		})
+		}
+		// A capture never passes the sync manager, which stamps every other
+		// recorded mock with its connection's container (containerkey): its
+		// key, instance and scope, as a recorded mock carries them.
+		containerkey.StampFromContext(ctx, captured)
+		appendCaptured(captured)
 	}
 	return true, nil
 }

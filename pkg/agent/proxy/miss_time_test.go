@@ -70,6 +70,12 @@ func fillEveryField(v reflect.Value) {
 			f.SetString(v.Type().Field(i).Name)
 		case f.Kind() == reflect.Int:
 			f.SetInt(int64(i + 1))
+		case f.Kind() == reflect.Uint64, f.Kind() == reflect.Uint32, f.Kind() == reflect.Uint8:
+			f.SetUint(uint64(i + 1))
+		case f.Kind() == reflect.Bool:
+			f.SetBool(true)
+		case f.Kind() == reflect.Float64:
+			f.SetFloat(float64(i) + 0.5)
 		case f.Kind() == reflect.Slice:
 			s := reflect.MakeSlice(f.Type(), 1, 1)
 			if s.Index(0).Kind() == reflect.Struct {
@@ -78,6 +84,10 @@ func fillEveryField(v reflect.Value) {
 			f.Set(s)
 		case f.Kind() == reflect.Struct:
 			fillEveryField(f)
+		case f.Kind() == reflect.Pointer && f.Type().Elem().Kind() == reflect.Struct:
+			p := reflect.New(f.Type().Elem())
+			fillEveryField(p.Elem())
+			f.Set(p)
 		default:
 			panic("fillEveryField: a field of kind " + f.Kind().String() + " (" + v.Type().Field(i).Name + "): teach it")
 		}

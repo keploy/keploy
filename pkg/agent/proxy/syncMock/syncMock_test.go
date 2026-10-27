@@ -2,13 +2,18 @@ package manager
 
 import (
 	"context"
+	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/starts"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -53,6 +58,76 @@ func TestMemoryPressureKeepsCalmCapturedMocksDropsPressureRequestMocks(t *testin
 	mgr.AddMock(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
 	if len(mgr.buffer) != 4 {
 		t.Fatalf("expected buffer to accept mocks after recovery, got %d", len(mgr.buffer))
+	}
+}
+
+// TestAPauseCostsTheMocksOfRequestsMadeDuringItWhenEverTheyAreDecoded pins
+// that a memory-guard pause costs the per-test mocks whose request was made
+// during it, however late the parser decodes them, and nothing else.
+//
+// The relay hands a parser the whole stream through a pause, so a parser that
+// lags can decode a request made during the pause after it has ended. The
+// ingress captured no test for that request, so such a mock is dropped and
+// counted, not buffered for no test to own. A mock of the connection's
+// lifetime (a prepared statement, a handshake) is kept whenever it was made:
+// the tests the connection serves after the pause need it.
+func TestAPauseCostsTheMocksOfRequestsMadeDuringItWhenEverTheyAreDecoded(t *testing.T) {
+	t.Parallel()
+	perTest := func(at time.Time) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at}}
+	}
+	ofConnection := func(at time.Time) *models.Mock {
+		return &models.Mock{Spec: models.MockSpec{ReqTimestampMock: at, Metadata: map[string]string{"type": "connection"}}}
+	}
+	mgr := &SyncMockManager{}
+
+	mgr.SetMemoryPressure(true)
+	during := time.Now()
+	mgr.AddMock(ofConnection(during))
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("a connection's mock made during the pause was dropped (buffer %d): the tests the connection serves after it need it", len(mgr.buffer))
+	}
+	mgr.SetMemoryPressure(false)
+
+	mgr.AddMock(perTest(during))
+	if len(mgr.buffer) != 1 {
+		t.Fatalf("a per-test mock of a request made during the pause, decoded after it, was kept (buffer %d): no test owns it", len(mgr.buffer))
+	}
+	if _, dropped, _, _ := mgr.GetDropStats(); dropped != 1 {
+		t.Fatalf("mocks dropped by pressure = %d, want 1: what a pause costs is counted", dropped)
+	}
+	mgr.AddMock(ofConnection(during))
+	mgr.AddMock(perTest(time.Now()))
+	if len(mgr.buffer) != 3 {
+		t.Fatalf("buffer %d after a connection's mock of the pause and a per-test mock after it, want 3", len(mgr.buffer))
+	}
+}
+
+// TestTheBufferWipeOfAPauseKeepsAConnectionsMocksOfAnEarlierPause pins the
+// same rule in the wipe a pause starts with: a connection's mock whose request
+// was made during an earlier pause stays buffered, and a per-test one made
+// then is wiped (it can only be there if it was buffered before that pause's
+// rule reached AddMock, which the row above pins it no longer is).
+func TestTheBufferWipeOfAPauseKeepsAConnectionsMocksOfAnEarlierPause(t *testing.T) {
+	t.Parallel()
+	// Past the startup window, whose mocks every wipe keeps whatever else.
+	mgr := &SyncMockManager{firstReqSeen: true, resolvedTestCount: models.StartupMockTestCaseWindow}
+	mgr.SetMemoryPressure(true)
+	during := time.Now()
+	mgr.SetMemoryPressure(false)
+	ofConnection := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: during, Metadata: map[string]string{"type": "connection"}}}
+	ofConnection.DeriveLifetime()
+	perTest := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: during}}
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, ofConnection, perTest)
+	mgr.mu.Unlock()
+
+	mgr.SetMemoryPressure(true)
+	defer mgr.SetMemoryPressure(false)
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.buffer) != 1 || mgr.buffer[0] != ofConnection {
+		t.Fatalf("the wipe left %d mocks, want only the connection's mock of the earlier pause", len(mgr.buffer))
 	}
 }
 
@@ -748,14 +823,12 @@ func TestResolveRangeRetainsSessionMocksWhenOutChanUnbound(t *testing.T) {
 	}
 }
 
-// TestSendToOutChanNoDropWhenDrainedWithinBudget exercises the
-// fast-then-bounded-block path: once the fast-path slot is taken,
-// a consumer that drains within sendBudget must let the blocked
-// sender complete without bumping dropCount. This is the "normal
-// scheduling jitter" case the bounded block was introduced for —
-// the pre-fix silent-drop shipped a recording-loss flake in
-// exactly this scenario, so the test lives to prevent regression.
-func TestSendToOutChanNoDropWhenDrainedWithinBudget(t *testing.T) {
+// TestSendToOutChanNoDropWhenDrainedLater: a consumer behind by a full
+// channel that takes again later loses nothing: the send is queued, and
+// delivered once it does, without bumping dropCount. Before, the send waited
+// 200 ms and dropped; the silent drop before that shipped a recording-loss
+// flake in exactly this scenario.
+func TestSendToOutChanNoDropWhenDrainedLater(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 1)
@@ -764,75 +837,55 @@ func TestSendToOutChanNoDropWhenDrainedWithinBudget(t *testing.T) {
 	}
 	mgr.SetOutputChannel(ch)
 
-	// Prime the buffer slot so the next send goes down the
-	// bounded-block branch rather than the fast path.
+	// Prime the buffer slot so the next send is queued rather than sent
+	// at once.
 	ch <- &models.Mock{}
-
-	// Drain one slot well inside sendBudget so the blocked send
-	// succeeds. 50ms is comfortably under the 200ms budget while
-	// still giving the goroutine time to park on the send.
-	done := make(chan struct{})
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		<-ch // drop the primer
-		close(done)
-	}()
 
 	mock := &models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}}
 	mgr.sendToOutChan(mock)
-	<-done
+	time.Sleep(300 * time.Millisecond) // past the old 200 ms budget
+	<-ch                               // the primer: the consumer takes again
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 0 {
-		t.Fatalf("expected zero drops when consumer drains within budget, got %d", got)
+		t.Fatalf("expected zero drops when the consumer drains later, got %d", got)
 	}
-
-	// Real mock should have landed on the channel.
 	select {
 	case got := <-ch:
 		if got != mock {
-			t.Fatalf("expected bounded-block send to deliver mock; got different pointer")
+			t.Fatalf("expected the queued send to deliver mock; got different pointer")
 		}
 	default:
-		t.Fatalf("bounded-block send should have delivered the mock after the primer was drained")
+		t.Fatalf("the queued send should have delivered the mock after the primer was drained")
 	}
 }
 
-// TestSendToOutChanDropsAfterBudget is the inverse: a consumer that
-// never drains must cause exactly one drop per send after the
-// budget, and dropCount must increment accordingly. Also asserts
-// the first drop emits an Error log (the sampled, immediately-
-// visible signal the pre-fix code lacked).
-func TestSendToOutChanDropsAfterBudget(t *testing.T) {
+// TestSendToOutChanDropsOnAStalledConsumer is the inverse: a consumer that
+// takes nothing for the stall bound loses the queued mock, dropCount counts
+// it, and the first drop emits an Error log (the sampled, immediately-visible
+// signal the pre-fix code lacked).
+func TestSendToOutChanDropsOnAStalledConsumer(t *testing.T) {
 	t.Parallel()
 
 	ch := make(chan *models.Mock, 1)
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 
-	// Capture log output so we can verify the first-drop Error
-	// actually fires — the whole point of promoting Warn->Error.
 	core, logs := observer.New(zap.ErrorLevel)
 	mgr.SetLogger(zap.New(core))
 
-	// Fill the buffered slot; subsequent sends must exhaust the
-	// budget and drop.
+	// Fill the buffered slot; the next send is queued, and its drainer
+	// gives it up.
 	ch <- &models.Mock{}
 
-	// Use a tight send budget override via measuring elapsed time —
-	// we can't stub sendBudget directly without adding a knob, so
-	// just accept the 200ms wall-clock cost on a single send and
-	// validate the semantics. 200ms * 1 send is fine for unit tests.
-	start := time.Now()
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
-	elapsed := time.Since(start)
+	waitOutQueue(t, mgr)
 
-	if elapsed < sendBudget {
-		t.Fatalf("bounded-block send returned in %v, expected >= sendBudget (%v)", elapsed, sendBudget)
-	}
 	if got := mgr.DropCount(); got != 1 {
-		t.Fatalf("expected dropCount=1 after budget exhaustion, got %d", got)
+		t.Fatalf("expected dropCount=1 after the consumer stalled, got %d", got)
 	}
 	if logs.Len() != 1 {
 		t.Fatalf("expected exactly one Error log on first drop, got %d", logs.Len())
@@ -858,15 +911,17 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	mgr := &SyncMockManager{
 		buffer: make([]*models.Mock, 0, defaultMockBufferCapacity),
 	}
+	stalledOutClock(mgr)
 	mgr.SetOutputChannel(ch)
 
 	core, logs := observer.New(zap.ErrorLevel)
 	mgr.SetLogger(zap.New(core))
 
-	// Fill the slot so the next send hits the drop branch.
+	// Fill the slot so the next send is queued and given up.
 	ch <- &models.Mock{}
 
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	waitOutQueue(t, mgr)
 
 	if got := mgr.DropCount(); got != 1 {
 		t.Fatalf("expected dropCount=1, got %d", got)
@@ -888,13 +943,14 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 	}
 
 	// Now drive dropCount up to the next sampler milestone (1024)
-	// without paying the per-drop wall-clock cost, then walk
+	// without a drained send per drop, then walk
 	// sendToOutChan once more to fire the n==1024 branch. The
 	// emitted message must be the TERSE default — without "LOSSY"
 	// — so the sampled telemetry doesn't drown a stuck consumer's
 	// goroutine in the long actionable string.
 	mgr.dropCount.Store(sendDropSampleRate - 1) // next Add brings n to 1024
 	mgr.sendToOutChan(&models.Mock{Spec: models.MockSpec{ReqTimestampMock: time.Now()}})
+	waitOutQueue(t, mgr)
 	if logs.Len() != 2 {
 		t.Fatalf("expected a second Error log at n==%d, got total=%d",
 			sendDropSampleRate, logs.Len())
@@ -913,8 +969,8 @@ func TestSendToOutChanLoudOnFirstDrop(t *testing.T) {
 // sendDropSampleRate entries. Without the sampling, a stuck
 // consumer would flood the log and further starve the producer
 // — the specific anti-pattern the windows-redirector work
-// surfaced. Uses direct atomic writes to avoid 200ms * N real
-// timeouts in the test.
+// surfaced. Uses direct atomic writes to avoid a drained send per
+// drop in the test.
 func TestSendToOutChanDropSampling(t *testing.T) {
 	t.Parallel()
 
@@ -2122,5 +2178,332 @@ func TestLateMockInOverlappingWindowsGoesToTheKeptOne(t *testing.T) {
 				t.Fatal("a mock inside a kept window was pruned because an overlapping duplicate window resolved first")
 			}
 		})
+	}
+}
+
+// oneContainerAt names one address a container, as the agent's index of the
+// local Docker daemon would.
+type oneContainerAt string
+
+func (a oneContainerAt) Lookup(dst netip.AddrPort) (containerkey.Container, bool, error) {
+	return containerkey.Container{ID: "c1", Image: "redis:7", Port: 6379, Fingerprint: "0123456789ab"}, dst.String() == string(a), nil
+}
+
+func (oneContainerAt) Fingerprint(context.Context, string) (string, bool) { return "", false }
+func (oneContainerAt) Pending(netip.AddrPort) ([]string, bool)            { return nil, true }
+func (oneContainerAt) AwaitReadsOf(context.Context, []string)             {}
+
+func (oneContainerAt) Bind(context.Context)               {}
+func (oneContainerAt) Watch(context.Context, *zap.Logger) {}
+func (oneContainerAt) Endpoint() string                   { return "unix:///fake.sock" }
+
+// Under the proven switch a mock a parser hands over is stamped with its
+// connection's container key, while that connection is still open; without
+// the switch the mock is handed on as it came.
+func TestAddMockStampsTheConnectionsContainerKey(t *testing.T) {
+	saved := containerkey.Default
+	containerkey.Default = containerkey.NewKeyer(oneContainerAt("127.0.0.1:49153"))
+	t.Cleanup(func() { containerkey.Default = saved })
+	containerkey.Default.Name(zap.NewNop(), "7", "127.0.0.1:49153")
+
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		mgr := New(zap.NewNop())
+		ch := make(chan *models.Mock, 1)
+		mgr.SetOutputChannel(ch)
+		mgr.AddMock(&models.Mock{Kind: models.REDIS, ConnectionID: "7"})
+		got := (<-ch).Spec.Metadata[containerkey.MetadataKey]
+		want := ""
+		if on {
+			want = "container:redis:6379@0123456789ab"
+		}
+		if got != want {
+			t.Fatalf("proven=%v: the mock's container key = %q, want %q", on, got, want)
+		}
+	}
+}
+
+// Every mock a parser hands over is stamped with the address its connection
+// reached, with the proven switch on or off (keploy record as keploy mock
+// record), while that connection is still open: a replay tells by it what a
+// built-in default MySQL port held. A recorder's own destAddr stays.
+func TestAddMockStampsTheAddressItsConnectionReached(t *testing.T) {
+	const conn = "add-mock-dest-4000"
+	starts.Default.Dest(conn, "127.0.0.1:4000")
+	t.Cleanup(func() { starts.Default.ForgetDest(conn) })
+
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv("KEPLOY_PROVEN", "1")
+		} else {
+			t.Setenv("KEPLOY_PROVEN", "")
+		}
+		mgr := New(zap.NewNop())
+		ch := make(chan *models.Mock, 2)
+		mgr.SetOutputChannel(ch)
+		mgr.AddMock(&models.Mock{Kind: models.HTTP, ConnectionID: conn})
+		if got := (<-ch).Spec.Metadata["destAddr"]; got != "127.0.0.1:4000" {
+			t.Fatalf("proven=%v: the HTTP mock's destAddr = %q, want 127.0.0.1:4000", on, got)
+		}
+		mgr.AddMock(&models.Mock{Kind: models.MySQL, ConnectionID: conn, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "db:3306"}}})
+		if got := (<-ch).Spec.Metadata["destAddr"]; got != "db:3306" {
+			t.Fatalf("proven=%v: a recorder's own destAddr = %q, want db:3306 kept", on, got)
+		}
+	}
+}
+
+// A mock reusable only by its recorder's statement (a MySQL SET stated
+// session, tagged "mocks") is attributed as a per-test mock is: a kept test's
+// window owns it (named as its mocks are), and a duplicate's window prunes it
+// with the duplicate's mocks. A mock reusable by its tag (the handshake,
+// "config") is flushed unowned in either, as before.
+func TestResolveRangeAttributesStatementOnlyReusableMocksAsPerTest(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	mysqlMock := func(typ, stated string) *models.Mock {
+		md := map[string]string{"type": typ, "connID": "c1"}
+		if stated != "" {
+			md[models.MetadataLifetimeKey] = stated
+		}
+		m := &models.Mock{Kind: models.MySQL, Name: typ, Spec: models.MockSpec{Metadata: md, ReqTimestampMock: now}}
+		m.DeriveLifetime()
+		return m
+	}
+	for _, keep := range []bool{true, false} {
+		ch := make(chan *models.Mock, 4)
+		mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		mgr.SetOutputChannel(ch)
+		set := mysqlMock("mocks", models.MetadataLifetimeSession)
+		handshake := mysqlMock("config", models.MetadataLifetimeSession)
+		if !set.ReusableByStatementOnly() || handshake.ReusableByStatementOnly() {
+			t.Fatalf("fixture: SET reusable by statement only %v, handshake %v; want true, false", set.ReusableByStatementOnly(), handshake.ReusableByStatementOnly())
+		}
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, set, handshake)
+		mgr.mu.Unlock()
+
+		mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "test-1", keep, false)
+		close(ch)
+		var names []string
+		for m := range ch {
+			names = append(names, m.Name)
+		}
+		switch {
+		case keep && (len(names) != 2 || !containsPrefix(names, "mock-") || !contains(names, "config")):
+			t.Fatalf("a kept window flushed %v; want the SET owned (renamed mock-...) and the handshake as is", names)
+		case !keep && (len(names) != 1 || names[0] != "config"):
+			t.Fatalf("a duplicate's window flushed %v; want the handshake only, the SET pruned with the duplicate's mocks", names)
+		}
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPrefix(ss []string, prefix string) bool {
+	for _, s := range ss {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// Under the proven switch a Generic exchange its recorder stated per-test is a
+// test mock (models.Mock.IsProtocolPhase), so a --sync recording owns it by
+// its window and maps it to the test, though it is served from the session
+// tier; the connection's preamble, stated session, stays reusable. With the
+// switch off both are reusable, as every Generic exchange was.
+func TestResolveRangeOwnsAGenericTestMockUnderTheSwitch(t *testing.T) {
+	now := time.Now()
+	generic := func(name, stated string) *models.Mock {
+		return &models.Mock{Kind: models.GENERIC, Name: name, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "config", "connID": "c1", models.MetadataLifetimeKey: stated},
+			ReqTimestampMock: now,
+		}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}}
+	}
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "0")
+		}
+		ch := make(chan *models.Mock, 4)
+		mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		mgr.SetOutputChannel(ch)
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, generic("hello", models.MetadataLifetimeSession), generic("get", models.MetadataLifetimePerTest))
+		mgr.mu.Unlock()
+		mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "test-1", true, false)
+		close(ch)
+		var names []string
+		for m := range ch {
+			names = append(names, m.Name)
+		}
+		switch {
+		case on && (len(names) != 2 || !contains(names, "hello") || !containsPrefix(names, "mock-")):
+			t.Fatalf("switch on: flushed %v; want the preamble as is and the exchange owned (renamed mock-...)", names)
+		case !on && (len(names) != 2 || !contains(names, "hello") || !contains(names, "get")):
+			t.Fatalf("switch off: flushed %v; want both reusable, as is", names)
+		}
+
+		// The other two sites read the same rule. A flush with no resolved
+		// window sends a reusable mock at once and keeps a test mock for its
+		// window; a duplicate's cleanup keeps a reusable mock and drops a test
+		// mock with the duplicate's.
+		flushed := func(run func(*SyncMockManager)) []string {
+			ch := make(chan *models.Mock, 4)
+			mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+			mgr.SetOutputChannel(ch)
+			mgr.mu.Lock()
+			mgr.buffer = append(mgr.buffer, generic("hello", models.MetadataLifetimeSession), generic("get", models.MetadataLifetimePerTest))
+			mgr.mu.Unlock()
+			run(mgr)
+			close(ch)
+			var out []string
+			for m := range ch {
+				out = append(out, m.Name)
+			}
+			return out
+		}
+		want := []string{"hello", "get"}
+		if on {
+			want = []string{"hello"}
+		}
+		if got := flushed(func(m *SyncMockManager) { m.FlushOwnedWindows() }); !reflect.DeepEqual(got, want) {
+			t.Fatalf("switch %v: a flush with no window sent %v, want %v", on, got, want)
+		}
+		if got := flushed(func(m *SyncMockManager) { m.DeleteMocksStrictlyBefore(now.Add(time.Second)) }); !reflect.DeepEqual(got, want) {
+			t.Fatalf("switch %v: a duplicate's cleanup sent %v, want %v", on, got, want)
+		}
+	}
+}
+
+// Under the proven switch every test mock (not models.Mock.IsProtocolPhase)
+// is owned by its window in a --sync recording, whatever tier serving gives it:
+// a Postgres v1/v2 data mock the lax kind fallback serves from the session
+// tier included. Its handshake (type config) and an async-egress mock stay
+// reusable. With the switch off all are reusable, as before.
+func TestResolveRangeOwnsEveryTestMockUnderTheSwitch(t *testing.T) {
+	now := time.Now()
+	mk := func(name string, kind models.Kind, typ string, async bool) *models.Mock {
+		m := &models.Mock{Kind: kind, Name: name, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": typ, "connID": "c1"},
+			ReqTimestampMock: now,
+		}}
+		if async {
+			m.Spec.Async = &models.AsyncMeta{}
+		}
+		m.DeriveLifetime()
+		return m
+	}
+	for _, on := range []bool{true, false} {
+		if on {
+			t.Setenv(provenswitch.Env, "1")
+		} else {
+			t.Setenv(provenswitch.Env, "0")
+		}
+		pool := []*models.Mock{
+			mk("pg-handshake", models.PostgresV2, "config", false),
+			mk("pg-select", models.PostgresV2, "mocks", false),
+			mk("pg1-select", models.Postgres, "mocks", false),
+			mk("async", models.PostgresV2, "mocks", true),
+		}
+		if pool[1].TestModeInfo.Lifetime != models.LifetimeSession {
+			t.Skip("the lax kind fallback is off (KEPLOY_STRICT_MOCK_WINDOW): the data mocks are per-test already")
+		}
+		ch := make(chan *models.Mock, 8)
+		mgr := &SyncMockManager{buffer: make([]*models.Mock, 0, defaultMockBufferCapacity)}
+		mgr.SetOutputChannel(ch)
+		mgr.mu.Lock()
+		mgr.buffer = append(mgr.buffer, pool...)
+		mgr.mu.Unlock()
+		mgr.ResolveRange(now.Add(-time.Second), now.Add(time.Second), "test-1", true, false)
+		close(ch)
+		var names []string
+		for m := range ch {
+			names = append(names, m.Name)
+		}
+		owned := 0
+		for _, n := range names {
+			if strings.HasPrefix(n, "mock-") {
+				owned++
+			}
+		}
+		switch {
+		case on && (len(names) != 4 || owned != 2 || !contains(names, "pg-handshake") || !contains(names, "async")):
+			t.Fatalf("switch on: flushed %v; want both data mocks owned (renamed mock-...), the handshake and the async mock as is", names)
+		case !on && (len(names) != 4 || owned != 0):
+			t.Fatalf("switch off: flushed %v; want all four reusable, as is", names)
+		}
+	}
+}
+
+// Under the proven switch a Generic exchange stated per-test that reaches the
+// manager after its window resolved (one held behind its connection's first
+// exchange) is owned by that window on the late path, and mapped to its test.
+func TestALateGenericTestMockIsOwnedByItsResolvedWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	ch := make(chan *models.Mock, 8)
+	mapCh := make(chan models.TestMockMapping, 8)
+	mgr := &SyncMockManager{}
+	mgr.SetOutputChannel(ch)
+	mgr.SetMappingChannel(context.Background(), mapCh)
+	mgr.SetFirstRequestSignaled()
+	base := time.Now().Add(-time.Second)
+	mgr.ResolveRange(base, base.Add(5*time.Millisecond), "test-1", true, true)
+	mgr.mu.Lock()
+	mgr.buffer = append(mgr.buffer, &models.Mock{Kind: models.GENERIC, Spec: models.MockSpec{
+		Metadata:         map[string]string{"type": "config", models.MetadataLifetimeKey: models.MetadataLifetimePerTest},
+		ReqTimestampMock: base.Add(2 * time.Millisecond),
+	}, TestModeInfo: models.TestModeInfo{Lifetime: models.LifetimeSession, LifetimeDerived: true}})
+	mgr.mu.Unlock()
+	mgr.FlushOwnedWindows()
+	select {
+	case m := <-ch:
+		if !strings.HasPrefix(m.Name, "mock-") {
+			t.Fatalf("the late exchange was flushed as %q, want owned (renamed mock-...)", m.Name)
+		}
+		select {
+		case mp := <-mapCh:
+			if mp.TestName != "test-1" || len(mp.MockIDs) != 1 || mp.MockIDs[0] != m.Name {
+				t.Fatalf("mapped %+v, want test-1 owning %s", mp, m.Name)
+			}
+		default:
+			t.Fatal("the late exchange was not mapped to its test")
+		}
+	default:
+		t.Fatal("the late exchange was not flushed")
+	}
+}
+
+// A record session starts before its first request, with its startup window
+// ahead of it, whatever the session before it on the same manager left.
+func TestARecordSessionStartsBeforeItsFirstRequest(t *testing.T) {
+	m := New(zap.NewNop())
+	m.SetFirstRequestSignaled()
+	m.mu.Lock()
+	m.resolvedTestCount = models.StartupMockTestCaseWindow + 3
+	m.mu.Unlock()
+
+	m.StartRecordSession()
+	if m.GetFirstReqSeen() {
+		t.Fatal("the new session starts with the earlier one's first request seen")
+	}
+	m.mu.Lock()
+	n := m.resolvedTestCount
+	m.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("the new session starts %d test cases into its startup window, want 0", n)
 	}
 }

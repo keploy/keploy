@@ -181,6 +181,10 @@ jobs:
     # Native windows/amd64 cgo build on self-hosted runner.
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: [self-hosted, Windows, X64]
+    outputs:
+      # keploy.exe's SHA-256, as kept on this machine: what the Windows lanes
+      # take it from the machine cache by. Empty when the put failed.
+      keploy_exe_sha256: ${{ steps.keep_windows_binary.outputs.sha256 }}
     # Bound wall-clock so a hung build cannot sit on a self-hosted Windows
     # runner for 6h. Healthy runs are ~5 min; 30 gives 6x headroom.
     timeout-minutes: 30
@@ -574,6 +578,20 @@ jobs:
           $env:CGO_ENABLED = "1"
           go build -tags=viper_bind_struct -ldflags="-X main.version=${{ github.sha }}" -o keploy.exe ./main.go
 
+      # The Windows lanes run on this same machine: they copy keploy.exe from
+      # here, by its SHA-256 (this job's keploy_exe_sha256), instead of
+      # downloading the artifact below back
+      # (.github/scripts/windows/machine-cache.ps1). A put that fails costs
+      # them the download, not this build.
+      - name: Keep the Windows binary on this machine
+        id: keep_windows_binary
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          $out = & "$env:GITHUB_WORKSPACE\.github\scripts\windows\machine-cache.ps1" -Put -Name build-windows -File keploy.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @($out)[-1] | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Upload build artifact (Windows CLI)
         uses: actions/upload-artifact@v4
         with:
@@ -644,7 +662,7 @@ jobs:
       # proxy-stress-test both rely on docker binaries not carrying
       # race-runtime overhead (memory baseline / data-race noise).
       - name: Download linux/amd64 binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build-no-race
           path: dist/keploy-linux-amd64
@@ -683,7 +701,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download linux/arm64 binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: build-no-race-linux-arm64
           path: dist/keploy-linux-arm64
@@ -714,6 +732,16 @@ jobs:
   # Linux test jobs
   # -------------------------------------------------------------------
 
+  # The hooks' eBPF objects are one tested keploy/ebpf main commit's
+  # (ebpf-objects.yml). Needs no build: seconds, beside the builds. It reads
+  # the private keploy/ebpf with PRO_ACCESS_TOKEN; a pull request from a fork
+  # gets no secrets, and from-fork tells the check so.
+  run_ebpf_objects:
+    uses: ./.github/workflows/ebpf-objects.yml
+    with:
+      from-fork: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
+    secrets:
+      PRO_ACCESS_TOKEN: ${{ secrets.PRO_ACCESS_TOKEN }}
   run_golang_linux:
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/golang_linux.yml
@@ -799,14 +827,26 @@ jobs:
     uses: ./.github/workflows/startup-mock-capture-linux.yml
   run_repeated_headers_linux:
     # Guard: replay sends a recorded header on the lines it arrived on
-    # (a tenant header sent twice; a mock's two Set-Cookie lines).
+    # (a tenant header sent twice; a mock's two Set-Cookie lines), and an
+    # HTTP dependency on 4000, a MySQL default port, records and replays.
     needs: [build-and-upload, upload-latest]
     uses: ./.github/workflows/repeated-headers-linux.yml
+  run_interim_responses_linux:
+    # Guard: an app's interim (1xx) responses are forwarded to the client and
+    # the final response is recorded, in default and --sync record.
+    needs: [build-and-upload, upload-latest]
+    uses: ./.github/workflows/interim-responses-linux.yml
   run_unpublished_port_docker:
     # Guard: a test recorded on an app port the docker command does not
     # publish is named at record time and fails at replay saying so.
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/unpublished-port-docker.yml
+  run_proven_setend_docker:
+    # Guard: under KEPLOY_PROVEN=1 the stop at a set's end and a recording's
+    # end waits for a starved Docker's container to stop, and kills only on
+    # the stall rule.
+    needs: [build-and-upload, upload-latest, build-docker-image-amd64]
+    uses: ./.github/workflows/proven-setend-docker.yml
   run_golang_docker:
     needs: [build-and-upload, upload-latest, build-docker-image-amd64]
     uses: ./.github/workflows/golang_docker.yml
@@ -1234,6 +1274,8 @@ jobs:
   run_golang_docker_windows:
     needs: [build-windows-amd64, build-docker-image-amd64, precheck-windows]
     uses: ./.github/workflows/golang_docker_windows.yml
+    with:
+      windows_binary_sha256: ${{ needs.build-windows-amd64.outputs.keploy_exe_sha256 }}
 
   cleanup_windows:
     if: ${{ always() && ((github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
@@ -1379,6 +1421,32 @@ jobs:
             exit 1
           }
 
+      # The Windows binaries kept on this machine (machine-cache.ps1), 140 MB
+      # each: a day at most, the 16 newest and any younger than 3 hours. The
+      # policy is for speed only: an entry a lane still needs and loses costs
+      # it a download, not the job (machine-cache.ps1 says why). Before the
+      # cases below, and whatever came before: a red case must not stop the
+      # pruning.
+      - name: Prune the machine cache
+        if: always()
+        continue-on-error: true
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\machine-cache.ps1" -Prune -MaxEntries 16 -KeepHours 3 -MaxAgeDays 1
+
+      # machine-cache.ps1's cases on this machine: its Windows PowerShell, and
+      # its runner's temp directory, on the drive the cache is on (Windows CI
+      # scripts runs them under pwsh 7 on Linux and under 5.1 on
+      # windows-latest). Here, after the lanes: a case that fails fails this
+      # job, and gate_windows with it, and leaves the lanes' run alone. Each
+      # case uses a root of its own.
+      - name: Test the Windows machine cache (Windows PowerShell)
+        timeout-minutes: 4
+        shell: 'powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -Command ". ''{0}''"'
+        run: |
+          & "$env:GITHUB_WORKSPACE\.github\scripts\windows\machine-cache.tests.ps1"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Prune stale git isolation dirs
         if: always()
         continue-on-error: true
@@ -1418,12 +1486,14 @@ jobs:
       - run_upstream_refusal_linux_extended
       - run_startup_mock_capture_linux
       - run_repeated_headers_linux
+      - run_interim_responses_linux
       - run_unpublished_port_docker
       - run_golang_docker
       - run_fuzzer_linux
       - run_grpc_linux
       - run_schema_match_linux
       - run_sample_tls_pcap
+      - run_ebpf_objects
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
@@ -1448,12 +1518,14 @@ jobs:
             "${{ needs.run_upstream_refusal_linux_extended.result }}" \
             "${{ needs.run_startup_mock_capture_linux.result }}" \
             "${{ needs.run_repeated_headers_linux.result }}" \
+            "${{ needs.run_interim_responses_linux.result }}" \
             "${{ needs.run_unpublished_port_docker.result }}" \
             "${{ needs.run_golang_docker.result }}" \
             "${{ needs.run_fuzzer_linux.result }}" \
             "${{ needs.run_grpc_linux.result }}" \
             "${{ needs.run_schema_match_linux.result }}" \
             "${{ needs.run_sample_tls_pcap.result }}" \
+            "${{ needs.run_ebpf_objects.result }}" \
           )
           for r in "${results[@]}"; do
             if [[ "$r" != "success" && "$r" != "skipped" ]]; then

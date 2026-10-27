@@ -19,4 +19,20 @@ type TestSetMocks struct {
 	// values Filtered holds or was copied from, so read it and do not change
 	// it.
 	AllPerTest []*Mock
+	// Skipped is the documents of the mock file the decoders skipped (a kind
+	// this keploy cannot read, a connection failure it cannot replay, the
+	// file's incomplete last document), by name, with their kinds. A document
+	// whose name is not known is not listed. A mapping entry, or the name of a
+	// mock appended to the set, can still refer to one.
+	Skipped map[string]Kind
+	// SkippedWindowed is the documents of Skipped whose request time could be
+	// read, as test windows see them (NewWindowedMock of their name, kind,
+	// metadata and times, async-egress ones not test mocks): a test owns, from
+	// its window, a recorded call this keploy cannot serve, and is judged for
+	// it. A store that reads gob files lists none.
+	SkippedWindowed []WindowedMock
+	// Payloads is the mock file the read left the mocks' payloads in
+	// (Mock.LeavePayloadOnDisk), nil when it left none and every mock is
+	// whole. Its mutator changes each payload read back before it is sent.
+	Payloads PayloadSource
 }

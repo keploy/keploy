@@ -35,7 +35,9 @@ func fmtDuration(d time.Duration) string {
 }
 
 // printSingleSummaryTo is the buffered variant used internally.
-func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail, obsolete int, dur time.Duration, failedCases []string) {
+// ignored is the tests counted as skipped, not passed (only under the proven
+// switch); a line says it when there are any.
+func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail, obsolete, ignored int, dur time.Duration, failedCases []string) {
 	if models.IsAnsiDisabled {
 		fmt.Fprintln(w, "<=========================================>")
 		fmt.Fprintln(w, " COMPLETE TESTRUN SUMMARY.")
@@ -44,6 +46,9 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail, obsol
 		fmt.Fprintf(w, "\tTotal test failed: %d\n", fail)
 		if obsolete > 0 {
 			fmt.Fprintf(w, "\tTotal test obsolete: %d\n", obsolete)
+		}
+		if ignored > 0 {
+			fmt.Fprintf(w, "\tTotal test ignored: %d\n", ignored)
 		}
 		if dur > 0 {
 			fmt.Fprintf(w, "\tTotal time taken: %q\n", fmtDuration(dur))
@@ -98,6 +103,9 @@ func printSingleSummaryTo(w *bufio.Writer, name string, total, pass, fail, obsol
 	fmt.Fprintf(w, "\tTotal test failed: %s%d%s\n", blue, fail, reset)
 	if obsolete > 0 {
 		fmt.Fprintf(w, "\tTotal test obsolete: %s%d%s\n", blue, obsolete, reset)
+	}
+	if ignored > 0 {
+		fmt.Fprintf(w, "\tTotal test ignored: %s%d%s\n", blue, ignored, reset)
 	}
 
 	fmt.Fprintf(w, "\tTotal time taken:  %s%s%s\n", red, timeStr, reset)

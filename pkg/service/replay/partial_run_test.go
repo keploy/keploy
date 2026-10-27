@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -83,13 +84,18 @@ func TestCycleIncomplete(t *testing.T) {
 func TestRewindConsumedForRetryCycleMarksAgentHistoryStale(t *testing.T) {
 	r := &Replayer{}
 	baseline := map[string]models.MockState{"mock-1": {Name: "mock-1"}}
-	total := map[string]models.MockState{
+	total := models.ConsumedHistoryOf(map[string]models.MockState{
 		"mock-1": {Name: "mock-1"},
 		"mock-2": {Name: "mock-2", Usage: models.Deleted}, // consumed during cycle 1
-	}
+	})
 	across := map[string]models.MockState{}
 
-	rewound := r.rewindConsumedForRetryCycle(total, baseline, across)
+	next := r.rewindConsumedForRetryCycle(total, baseline, across)
+	if next == total {
+		t.Fatal("the rewind handed back the cycle's own history; an agent that keeps it is only ever " +
+			"sent entries added to it, so it would keep every per-test mock the cycle consumed")
+	}
+	rewound := next.Map()
 
 	if !r.agentHistoryStaleForSet.Load() {
 		t.Fatal("the retry rewind did not mark the agent's history stale; cycle 2 would be filtered " +
@@ -183,7 +189,7 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 	t.Run("a retry rewind is cleared by the next set's MockOutgoing", func(t *testing.T) {
 		r := &Replayer{logger: zap.NewNop(), instrumentation: &latchInstr{}}
 		r.rewindConsumedForRetryCycle(
-			map[string]models.MockState{}, map[string]models.MockState{}, map[string]models.MockState{})
+			models.NewConsumedHistory(0), map[string]models.MockState{}, map[string]models.MockState{})
 
 		if !r.agentConsumedHistoryUnusable() {
 			t.Fatal("the rewind did not disqualify the agent's history; cycle 2 would be filtered " +
@@ -230,6 +236,25 @@ func TestAgentHistoryLatchesHaveSeparateLifetimes(t *testing.T) {
 type latchInstr struct {
 	Instrumentation
 	err error
+	// opts is what the last MockOutgoing was sent.
+	opts models.OutgoingOptions
 }
 
-func (f *latchInstr) MockOutgoing(context.Context, models.OutgoingOptions) error { return f.err }
+func (f *latchInstr) MockOutgoing(_ context.Context, opts models.OutgoingOptions) error {
+	f.opts = opts
+	return f.err
+}
+
+// A set's MockOutgoing tells the agent it starts a test set, so the agent's
+// staging of the set drops what the previous set's pool was consumed of and
+// nobody drained (models.OutgoingOptions.StartsTestSet).
+func TestMockOutgoingForTestSetSaysItStartsATestSet(t *testing.T) {
+	f := &latchInstr{}
+	r := &Replayer{logger: zap.NewNop(), instrumentation: f}
+	if err := r.mockOutgoingForTestSet(context.Background(), models.OutgoingOptions{SQLDelay: time.Second}); err != nil {
+		t.Fatalf("MockOutgoing: %v", err)
+	}
+	if !f.opts.StartsTestSet || f.opts.SQLDelay != time.Second {
+		t.Fatalf("the set's MockOutgoing was sent %+v; want the caller's options with StartsTestSet", f.opts)
+	}
+}

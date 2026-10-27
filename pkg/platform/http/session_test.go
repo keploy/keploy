@@ -94,6 +94,33 @@ func TestSessionKeepsNothingItWillNotUse(t *testing.T) {
 	}
 }
 
+// A restarted agent is not sent the mocks of a test set that has run, whose
+// mock file was rewritten once it ended (models.ErrPayloadFileReplaced): the
+// set being set up stores its own. The rest of the setup is made again.
+func TestSessionReapplyGoesOnPastStoredMocksOfASetThatHasRun(t *testing.T) {
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepMockOutgoing, noteStep(&got, &mu, "outgoing"))
+	s.record(stepStoreMocks, func(context.Context) error {
+		return fmt.Errorf("failed to send the mocks to the agent: %w", models.ErrPayloadFileReplaced)
+	})
+	s.record(stepMockParams, noteStep(&got, &mu, "params"))
+	s.record(stepAgentReady, noteStep(&got, &mu, "ready"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatalf("reapply: %v", err)
+	}
+	if want := "outgoing params ready"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+
+	// Any other failure to store the mocks still fails the setup.
+	s.record(stepStoreMocks, func(context.Context) error { return fmt.Errorf("agent down") })
+	if err := s.reapply(context.Background(), zap.NewNop()); err == nil {
+		t.Fatal("a store that failed for another reason did not fail the setup")
+	}
+}
+
 // The replayer goes on changing the consumed-mocks map it hands over; the
 // copy recorded is the call as it was made.
 func TestCopyMockParamsSharesNothing(t *testing.T) {
@@ -102,7 +129,7 @@ func TestCopyMockParamsSharesNothing(t *testing.T) {
 		MockMapping:        []string{"m1"},
 		RecordedWindows:    []models.TestWindow{{}},
 	}
-	c := copyMockParams(params)
+	c, _ := copyMockParams(params)
 	params.TotalConsumedMocks["b"] = models.MockState{}
 	params.MockMapping[0] = "changed"
 	params.RecordedWindows[0].Start = time.Now()
@@ -297,12 +324,19 @@ type restartingAgent struct {
 	// the calls other than health checks that met it.
 	down      bool
 	downCalls int
-	// refuse answers a path's nth connection 503; hang keeps it open after
-	// its item, as an agent that vanished without closing it, until release
-	// is closed; slow answers it slowBy late.
+	// refuse answers a path's nth connection 503 (the agent's readiness,
+	// with the CA setup failure an agent latches until it is started
+	// again); hang keeps it open after its item, as an agent that vanished
+	// without closing it, until release is closed; slow answers it slowBy
+	// late.
 	refuse, hang, slow map[string]int
 	release            chan struct{}
 	slowBy             time.Duration
+	// order is every call that met the agent up, as "METHOD path".
+	order []string
+	// instance, when set, names the agent process in every answer, as an
+	// agent with the proven switch on does (models.AgentInstanceHeader).
+	instance string
 }
 
 func (r *restartingAgent) handler(t *testing.T) http.Handler {
@@ -321,12 +355,23 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 		}
 		r.conns[req.URL.Path]++
 		n := r.conns[req.URL.Path]
+		r.order = append(r.order, req.Method+" "+req.URL.Path)
 		if req.URL.Path == "/agent/agent/ready" { // the agent's /agent/ready, under its /agent prefix
 			r.ready++
 		}
+		if r.instance != "" {
+			w.Header().Set(models.AgentInstanceHeader, r.instance)
+		}
 		r.mu.Unlock()
 		switch req.URL.Path {
-		case "/agent/agent/ready", "/agent/health":
+		case "/agent/agent/ready":
+			if r.refuse[req.URL.Path] == n {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "%s the agent could not set its CA up", agentCASetupFailed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/agent/health":
 			w.WriteHeader(http.StatusOK)
 		case "/agent/outgoing":
 			if r.refuse[req.URL.Path] == n {
@@ -351,6 +396,15 @@ func (r *restartingAgent) handler(t *testing.T) http.Handler {
 			_ = json.NewEncoder(w).Encode(models.TestMockMapping{TestName: fmt.Sprintf("mapping-%d", n)})
 		case "/agent/pcap/traffic", "/agent/pcap/keylog":
 			_, _ = fmt.Fprintf(w, "%s#%d\n", req.URL.Path, n)
+		case "/agent/containers": // a docker-mode agent: it takes container lists
+			_, _ = io.Copy(io.Discard, req.Body)
+			w.WriteHeader(http.StatusNoContent)
+		case "/agent/containers/settle":
+			// The CLI's ask for settles, held open: this agent's first uses
+			// ask none, so it ends when the CLI's session does.
+			<-req.Context().Done()
+		case "/agent/mock":
+			_ = json.NewEncoder(w).Encode(models.AgentResp{IsSuccess: true})
 		default:
 			t.Errorf("unexpected request %s", req.URL.Path)
 		}
@@ -673,5 +727,44 @@ func TestStreamCaughtUpOnlyToTheAgentItReached(t *testing.T) {
 	st.caughtUp(conn)
 	if !restarts(t, st) {
 		t.Fatal("a stream on a replaced agent did not reconnect to the newest")
+	}
+}
+
+// Under exact serving a set's staging is a step of its own: the filters that
+// open a test case or serve the pool after it replace each other, never the
+// staging, and a restarted agent is staged before it is told what to serve.
+func TestSessionKeepsTheExactStagingBeforeWhatIsServed(t *testing.T) {
+	stage := models.MockFilterParams{Exact: &models.ExactServing{Stage: true, Pool: []string{"mock-9"}}}
+	open := models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1", Owned: []string{"mock-1"}}}
+	pool := models.MockFilterParams{Exact: &models.ExactServing{}}
+	if mockParamsStep(stage) != stepExactStage || mockParamsStep(open) != stepMockParams || mockParamsStep(pool) != stepMockParams || mockParamsStep(models.MockFilterParams{}) != stepMockParams {
+		t.Fatal("a filter is recorded under the wrong step")
+	}
+	s := newSession(t, true)
+	var mu sync.Mutex
+	var got []string
+	s.record(stepStoreMocks, noteStep(&got, &mu, "store"))
+	s.record(mockParamsStep(stage), noteStep(&got, &mu, "stage"))
+	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-1"))
+	s.record(mockParamsStep(pool), noteStep(&got, &mu, "pool"))
+	s.record(mockParamsStep(open), noteStep(&got, &mu, "open test-2"))
+	if err := s.reapply(context.Background(), zap.NewNop()); err != nil {
+		t.Fatal(err)
+	}
+	if want := "store stage open test-2"; strings.Join(got, " ") != want {
+		t.Fatalf("set up again with %v, want %s", got, want)
+	}
+	// The copy recorded shares nothing with the call's exact serving.
+	c, _ := copyMockParams(stage)
+	stage.Exact.Pool[0] = "changed"
+	if c.Exact.Pool[0] != "mock-9" {
+		t.Fatalf("the copy changed with the original: %+v", c.Exact)
+	}
+	// Nor with a pool call's calls in flight (models.ExactServing.Ahead).
+	poolCall := models.MockFilterParams{Exact: &models.ExactServing{Ahead: []string{"mock-3"}}}
+	pc, _ := copyMockParams(poolCall)
+	poolCall.Exact.Ahead[0] = "changed"
+	if pc.Exact.Ahead[0] != "mock-3" {
+		t.Fatalf("the copy's calls in flight changed with the original: %+v", pc.Exact)
 	}
 }

@@ -82,14 +82,58 @@ const noMockAnswer = "HTTP/1.1 502 Bad Gateway"
 // decodeHTTP returns ErrMockNotMatched.
 func startDecode(t *testing.T, first string, proxy net.Conn) <-chan error {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
+	return runDecode(t, proxy, func(ctx context.Context) error {
+		return h.decodeHTTP(ctx, []byte(first), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
+	})
+}
+
+// runDecode runs decode, a decodeHTTP serving the proxy's end of a connection,
+// and returns what it returns. The test's cleanup stops it
+// (startDecodeUntilStopped) before the test ends, whether the test read its
+// result or failed first, and then closes that end.
+func runDecode(t *testing.T, proxy net.Conn, decode func(ctx context.Context) error) <-chan error {
+	t.Helper()
 	done := make(chan error, 1)
-	go func() {
-		done <- h.decodeHTTP(ctx, []byte(first), proxy, nil, &mockMemDb{}, models.OutgoingOptions{})
-	}()
+	stop := startDecodeUntilStopped(t, func(ctx context.Context) error {
+		err := decode(ctx)
+		done <- err
+		return err
+	})
+	t.Cleanup(func() {
+		stop()
+		_ = proxy.Close()
+	})
 	return done
+}
+
+// startDecodeUntilStopped runs decode, a decodeHTTP, and returns what stops it:
+// it cancels decode's context and returns once decodeHTTP has returned. That is
+// once the goroutine decodeHTTP started has ended too, its read of the
+// connection ended by the context's end, so nothing it started logs through
+// the test's logger after the test. A test that only cancelled the context,
+// and did not wait, left decodeHTTP to log after the test had ended, racing
+// testing's cleanup (a DATA RACE under go test -race); decodeHTTP itself
+// returned at once then, and left that goroutine blocked on the connection.
+// The test's cleanup stops it too, for a test that fails before it does.
+func startDecodeUntilStopped(t *testing.T, decode func(ctx context.Context) error) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		_ = decode(ctx)
+	}()
+	stop = func() {
+		cancel()
+		select {
+		case <-returned:
+		case <-time.After(time.Minute): // the bound only turns a hang into a failure
+			t.Error("decodeHTTP did not return once its context was cancelled")
+		}
+	}
+	t.Cleanup(stop)
+	return stop
 }
 
 func wantMockMiss(t *testing.T, done <-chan error) {
@@ -324,9 +368,23 @@ func encodeHarness(t *testing.T, first string, upstream func(net.Conn)) (app net
 	gctx = context.WithValue(gctx, models.ClientConnectionIDKey, "test-conn")
 	h := &HTTP{Logger: zaptest.NewLogger(t)}
 	d := make(chan error, 1)
+	returned := make(chan struct{})
 	go func() {
+		defer close(returned)
 		d <- h.encodeHTTP(gctx, []byte(first), proxyClient, proxyDest, out, models.OutgoingOptions{}, nil)
 	}()
+	// As in runDecode, and registered after cancel so it runs before it: the
+	// proxy's ends are closed and encodeHTTP waited for with its context
+	// live, whether the test read its result or failed first. encodeHTTP
+	// returns on the result its forwarding goroutine sends before that
+	// goroutine drains its recorder, which logs through the test's logger, so
+	// the errgroup that goroutine runs in is waited for as well.
+	t.Cleanup(func() {
+		_ = proxyClient.Close()
+		_ = proxyDest.Close()
+		<-returned
+		_ = g.Wait()
+	})
 	return app, d, out
 }
 

@@ -11,8 +11,10 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/record"
 	"go.keploy.io/server/v3/utils"
+	stallclock "go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
@@ -20,6 +22,10 @@ import (
 // mockService implements Service for the `keploy mock record|replay` flow.
 type mockService struct {
 	ids *ids.Map
+	// drainClock is the clock the run's end measures its drain's stall on
+	// (teardownDrain): nil, keploy's own runnable time; a test drives its
+	// own.
+	drainClock stallclock.Clock
 	// servedAnnounced remembers which mocks have already been reported as
 	// served, so the poll loop and the end-of-run flush cannot announce the
 	// same mock twice. Guarded because the two run on different goroutines.
@@ -41,6 +47,26 @@ type mockService struct {
 	// command: recorded in the replay receipt it leaked a temp path, and
 	// `keploy mock status` handed it back to agents as the command to run.
 	userCommand string
+	// claims are, under the proven switch, the run's claims (windows with
+	// Claim set), which readWindows takes out of the windows it returns: a
+	// record tags each pool mock with the key of the claim it was made
+	// under (claimKeyAt).
+	claims []models.ScopeWindow
+	// refusals are, under the proven switch, what the run's wire refused
+	// (windows with Refused set), which readWindows takes out of the
+	// windows it returns: the replay's receipt names them.
+	refusals []models.RunRefusal
+	// live and mocked are, under the proven switch, where the run's calls
+	// to local listeners went (windows with Live or Mocked set), which
+	// readWindows takes out of the windows it returns: the per-test
+	// receipts carry them to keploy's summary.
+	live   []models.LiveRow
+	mocked []models.MockedRow
+	// realListed is, under the proven switch, the mock.real destinations
+	// each test's recording lists (mappings.yaml real:), by test ID, read
+	// as a replay pushes the tests' clocks: the replay's receipt carries
+	// them, for the verdict's rule 4 and UNFROZEN rows.
+	realListed map[string][]string
 }
 
 // New constructs the mock record/replay service. mappingDB and hooks may be nil
@@ -111,9 +137,13 @@ func (m *mockService) setName() string {
 	return name
 }
 
-// agentEpilogueTimeout bounds every agent read made AFTER the wrapped runner
-// has exited: the consumed/missed outcome, the per-test scope windows, and the
-// captured-on-miss drain.
+// agentEpilogueTimeout bounds, with the proven switch off, every agent read
+// made AFTER the wrapped runner has exited: the consumed/missed outcome, the
+// PID-map count and the captured-on-miss drain (epilogueRead), and the
+// per-test scope windows (readWindows). Under the switch those reads are what
+// keploy's verdict rests on, and none has a deadline (design rule 15): the
+// agent's answer, the connection's close or the run's context ends each, and
+// the user ends the epilogueRead ones at a second interrupt.
 //
 // Natively the agent is keploy's own sibling and is alive right through
 // teardown, so those reads always answer. Under compose the runner exiting is
@@ -126,18 +156,24 @@ func (m *mockService) setName() string {
 // never answers would hang the run: forever on the record side, whose reads sit
 // on a context.WithoutCancel that not even Ctrl+C reaches.
 //
-// These are all best-effort epilogue reads — losing one costs a summary line or
-// a mappings file, never a recorded mock — so a short bound is the right trade.
+// With the switch off these are all best-effort epilogue reads — losing one
+// costs a summary line or a mappings file, never a recorded mock — so a short
+// bound is the right trade.
 const agentEpilogueTimeout = 10 * time.Second
 
-// composeReleaseTimeout bounds the /agent/ready POST that releases the app.
-// MakeAgentReadyForDockerCompose retries for the whole of pkg.AgentReadyTimeout
-// (5m30s) because its other callers use it as a bring-up wait. Here the agent
-// answered /agent/health seconds ago, so there is nothing left to wait out: the
-// only 503 still reachable is a latched CA-install failure, which never clears.
-// Without a bound, an agent that dies between the two calls stalls the run for
-// five and a half minutes.
-const composeReleaseTimeout = 30 * time.Second
+// refuseProvenDocker refuses a docker command (docker compose, docker run,
+// docker start) under the proven switch, before anything starts. Inside a
+// container keploy cannot tell which process runs the tests (a test
+// process's claim is refused), and under compose the agent stops with the
+// project, before a record can read what each test did: a run that could
+// only end unjudged is refused up front instead.
+func (m *mockService) refuseProvenDocker(verb string) error {
+	if !provenswitch.On() || !utils.IsDockerCmd(utils.CmdType(m.config.CommandType)) {
+		return nil
+	}
+	return fmt.Errorf("keploy mock %[1]s with %[2]s runs the test command natively in this release: inside a container keploy cannot tell which process runs the tests, or read what each of them did. "+
+		"Run the test command itself through keploy (keploy mock %[1]s -c \"go test -p 1 -json ./...\"), or unset %[2]s", verb, provenswitch.Env)
+}
 
 // isDockerCompose reports whether the wrapped command is a compose project.
 // Compose inverts the usual startup order — see startComposeApp.
@@ -192,26 +228,31 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 	m.logger.Info("waiting for the keploy-agent compose service to come up",
 		zap.String("agent-uri", m.config.Agent.AgentURI))
 
-	// The budget for agent container BOOT, which is exactly what this waits on
-	// — the same constant pkg/service/record/record.go gives the same wait, and
-	// tunable through KEPLOY_AGENT_READY_TIMEOUT. It is NOT the compose
-	// ready-file healthcheck's budget; that has its own, longer start_period
+	// The wait follows the agent container's BOOT, which is exactly what this
+	// waits on, as keploy record's same wait does: it lasts while the start
+	// makes progress (and while the engine has not run the container yet:
+	// compose starts it in its own time), and ends once the start fails or
+	// stops making progress (pkg.WatchAgentStart). It is NOT the compose
+	// ready-file healthcheck's budget; that has its own start_period
 	// (agentHealthcheckStartPeriod in pkg/platform/docker).
-	agentCtx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+	agentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	agentReadyCh := make(chan bool, 1)
 	go pkg.AgentHealthTicker(agentCtx, m.logger, m.config.Agent.AgentURI, agentReadyCh, time.Second)
+	agentStart := pkg.WatchAgentStart(agentCtx, m.instrumentation)
 
 	select {
 	case ready, ok := <-agentReadyCh:
 		if ok && ready {
 			return appExit, nil
 		}
-		// The ticker closes its channel when agentCtx expires.
+		// The ticker closes its channel unready only once ctx ends.
+		return nil, ctx.Err()
+	case err := <-agentStart:
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("keploy-agent did not become ready within %s", pkg.AgentReadyTimeout())
+		return nil, fmt.Errorf("the keploy-agent docker compose started did not come up: %w", err)
 	case appErr := <-appExit:
 		// The agent first. It is a service in the project, and when it is the
 		// one that stopped -- it could not start: no tracefs on the machine
@@ -224,9 +265,8 @@ func (m *mockService) startComposeApp(ctx context.Context, errGrp *errgroup.Grou
 			return nil, err
 		}
 		// Otherwise the project died on its own — a bad compose file, a failed
-		// build, a port already taken. Report that now rather than sitting out
-		// the full agent budget waiting for an agent that is never going to
-		// start.
+		// build, a port already taken. Report that now rather than wait on for
+		// an agent that is never going to start.
 		//
 		// Mirror its exit code on the way out. `keploy mock` promises to
 		// propagate the wrapped runner's code, and that promise was kept only
@@ -275,13 +315,19 @@ func (m *mockService) releaseComposeApp(ctx context.Context) error {
 		return nil
 	}
 	m.logger.Debug("marking the keploy-agent ready; the compose app service is released now")
-	releaseCtx, cancel := context.WithTimeout(ctx, composeReleaseTimeout)
-	defer cancel()
-	return m.instrumentation.MakeAgentReadyForDockerCompose(releaseCtx)
+	// The release follows the agent, not a clock: it ends at once on the
+	// latched CA-install failure the agent answers, and once the agent's
+	// container has exited or its start has stopped making progress
+	// (MakeAgentReadyForDockerCompose), so an agent that dies between the
+	// health check and this call does not stall the run.
+	return m.instrumentation.MakeAgentReadyForDockerCompose(ctx)
 }
 
 // notifyShutdown tells the agent the session is ending so connection errors are
-// logged at debug level. Bounded so an unresponsive agent can't hang teardown.
+// logged at debug level. The notification is bounded so an unresponsive agent
+// can't hang teardown; with --from-container, restoring the user's container
+// afterwards waits for the agent container to exit, or for a second Ctrl+C
+// (AgentClient.RestoreFromContainer).
 func (m *mockService) notifyShutdown() {
 	notifyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

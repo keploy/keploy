@@ -2,6 +2,7 @@ package replay
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -28,6 +29,13 @@ import (
 //     before every window, to the startup section. The window filter that
 //     drops out-of-window mocks from the running test's list would otherwise
 //     leave it mapped nowhere.
+//
+// A flagged mock consumed before the set's first test is not attributed
+// here: RunTestSet keeps it and maps it to the startup section, whatever its
+// window (splitCarriedConsumed). An unflagged per-test mock the app's startup
+// asked for (requested before the set's first test) is the startup section's,
+// whichever drain caught it (bootBand), unless that drain is the test whose
+// window its answer came in: that test's window filter keeps it there.
 type carryOverAttribution struct {
 	sched *models.WindowSchedule
 	// mapped holds the tests whose consumed mocks this run has already put in
@@ -41,14 +49,142 @@ type carryOverAttribution struct {
 	// are added to the owner's entry when the owner is mapped, and to none if
 	// it never is.
 	early map[string][]models.MockState
+	// bootEnd is the set's first recorded test's start
+	// (firstRecordedTestStart): a mock requested before it is the app's
+	// startup traffic (bootBand). The agent stages the startup band by it,
+	// or by an earlier cutoff when the replay reports the first test deleted
+	// (recordedSetShape); a mock between the two is listed, never staged.
+	bootEnd time.Time
+	// bootListed: the startup section lists startup traffic of the app's
+	// (bootBand), which it writes in recorded order (sortByRecordedTime).
+	bootListed bool
 }
 
 func newCarryOverAttribution(testCases []*models.TestCase) *carryOverAttribution {
 	return &carryOverAttribution{
-		sched:  models.NewWindowSchedule(recordedTestWindows(testCases)),
-		mapped: make(map[string]struct{}),
-		early:  make(map[string][]models.MockState),
+		sched:   models.NewWindowSchedule(recordedTestWindows(testCases)),
+		mapped:  make(map[string]struct{}),
+		early:   make(map[string][]models.MockState),
+		bootEnd: firstRecordedTestStart(testCases),
 	}
+}
+
+// bootBand is the per-test mocks of consumed, caught by the drain of the
+// running test, that the app's startup asked for and that the startup section
+// must list whatever their lifetime, as it lists the reusable ones: a boot
+// consumer's fetches (bootBandOf). A replay that loads by name (a
+// mapping-mode test, a fetch of the mapped mocks alone) reaches no other: the
+// window filter maps such a mock to no test, and nothing re-stages it by its
+// recorded time.
+func (a *carryOverAttribution) bootBand(consumed []models.MockState, running string) []models.MockState {
+	if a == nil {
+		return nil
+	}
+	return bootBandOf(consumed, a.sched, a.bootEnd, running)
+}
+
+// bootBandOf is the per-test mocks of consumed the app's startup asked for
+// (requested before bootEnd, the set's first recorded test's start; not
+// reusable, not flagged carry-over, not DNS) that the drain that caught them
+// does not own. drain is the test whose drain this is, "" for the set's setup
+// drain before any test. A replay answers such a fetch as soon as the app asks
+// for it, whenever its answer came at record, so the drain that caught it is
+// when a replay asks for it: the startup section's, unless the drain is the
+// test whose window its answer came in, whose window filter keeps it in that
+// test's list. Listing it under that test from another drain would expect the
+// test to consume what a replay serves before it. Nothing when bootEnd is zero.
+//
+// Left out:
+//   - the reusable tiers, as before (the window filter keeps them in each
+//     test's list);
+//   - a per-test mock recorded inside a test's window and consumed before
+//     the first test (a readiness gate's). It is its test's. The startup
+//     band is staged by recorded time (DiskMocks.LoadBefore), so listing it
+//     there would not serve it at boot either, and it would drop it from its
+//     test's report (dropStartupMockInfos, report-only).
+func bootBandOf(consumed []models.MockState, sched *models.WindowSchedule, bootEnd time.Time, drain string) []models.MockState {
+	if bootEnd.IsZero() {
+		return nil
+	}
+	var out []models.MockState
+	for _, st := range consumed {
+		if !bootAsked(st, bootEnd) {
+			continue
+		}
+		if drain != "" && answerOwner(st, sched) == drain {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// withoutStartupTraffic is what running consumed less the app's startup
+// traffic: what the mapping's startup section lists (startupNames) and the
+// boot band of running's drain (bootBand). A streaming test's mismatch
+// compares what it consumed with its own entry, and startup traffic it
+// consumed (a boot consumer still catching up, which the startup section's
+// names, merged into its load, let it reach) is no other test's: it is no
+// divergence of its mapping, as the regular path drops startup names from both
+// sides (dropStartupMockInfos). Without that, a wrong answer was demoted to
+// OBSOLETE for it. consumed itself when there is nothing to drop.
+func (a *carryOverAttribution) withoutStartupTraffic(consumed []models.MockState, startupNames []string, running string) []models.MockState {
+	drop := make(map[string]bool, len(startupNames))
+	for _, n := range startupNames {
+		drop[n] = true
+	}
+	for _, st := range a.bootBand(consumed, running) {
+		drop[st.Name] = true
+	}
+	if len(drop) == 0 {
+		return consumed
+	}
+	out := make([]models.MockState, 0, len(consumed))
+	for _, st := range consumed {
+		if !drop[st.Name] {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// sortByRecordedTime orders entries by recorded request time, stably (an
+// entry without one first, as recorded).
+func sortByRecordedTime(entries []models.MockEntry) {
+	at := func(e models.MockEntry) time.Time {
+		t, _ := models.ParseMockTimestamp(e.ReqTimestampMock)
+		return t
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return at(entries[i]).Before(at(entries[j])) })
+}
+
+// bootAsked reports whether st is a per-test mock the app's startup asked
+// for: placed before bootEnd (requested, or answered for a mock placed at its
+// answer, MockState.AnswerPlaced), not reusable, not flagged carry-over, not
+// DNS.
+func bootAsked(st models.MockState, bootEnd time.Time) bool {
+	if isReusableTierState(st) || st.CarryOver || strings.EqualFold(string(st.Kind), string(models.DNS)) || st.ReqTimestampMock == "" {
+		return false
+	}
+	placed := st.ReqTimestampMock
+	if st.AnswerPlaced && st.ResTimestampMock != "" {
+		placed = st.ResTimestampMock
+	}
+	at, err := models.ParseMockTimestamp(placed)
+	return err == nil && !at.IsZero() && at.Before(bootEnd)
+}
+
+// answerOwner is the test of the earliest recorded window st's answer came in,
+// "" for none.
+func answerOwner(st models.MockState, sched *models.WindowSchedule) string {
+	res, err := models.ParseMockTimestamp(st.ResTimestampMock)
+	if err != nil || res.IsZero() {
+		return ""
+	}
+	if idx := sched.IndexOf(res); idx >= 0 {
+		return sched.Window(idx).TestCase
+	}
+	return ""
 }
 
 // releaseIndex is the recorded window st belongs to (-1: before every window).
@@ -58,7 +194,11 @@ func (a *carryOverAttribution) releaseIndex(st models.MockState) (int, bool) {
 	if a == nil || !st.CarryOver || a.sched.Len() == 0 || st.ReqTimestampMock == "" {
 		return 0, false
 	}
-	t, err := models.ParseMockTimestamp(st.ReqTimestampMock)
+	placed := st.ReqTimestampMock // a mock placed at its answer, by its answer
+	if st.AnswerPlaced && st.ResTimestampMock != "" {
+		placed = st.ResTimestampMock
+	}
+	t, err := models.ParseMockTimestamp(placed)
 	if err != nil || t.IsZero() {
 		return 0, false
 	}
@@ -125,7 +265,21 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 			byOwner[idx] = append(byOwner[idx], st)
 		}
 	}
+	// A startup mock the running test's drain caught (a boot consumer still
+	// fetching what the app's startup was recorded fetching) is the startup
+	// section's, unless its answer came in the running test's window: the
+	// window filter below keeps that one in the test's list.
+	if boot := a.bootBand(own, running); len(boot) > 0 {
+		startup = append(startup, boot...)
+		a.bootListed = true
+	}
 	upsertActualTestMockMapping(mapping, running, own, tcReq, tcResp)
+	// A call in flight when the running test began (sent in the gap before
+	// it, answered after it ended) is its own, though the window filter
+	// above drops it: no request or response time of it is in the window.
+	if late := a.inFlightAnsweredLate(own, tcReq, tcResp); len(late) > 0 {
+		upsertActualTestMockMapping(mapping, running, late, time.Time{}, time.Time{})
+	}
 	if held := a.early[running]; len(held) > 0 {
 		// Zero window: no filter. These are the running test's own by the
 		// release rule, consumed while an earlier test ran.
@@ -143,6 +297,40 @@ func (a *carryOverAttribution) mapConsumed(mapping *models.Mapping, running stri
 		upsertActualTestMockMapping(mapping, a.sched.Window(idx).TestCase, byOwner[idx], time.Time{}, time.Time{})
 	}
 	addStartupMocks(mapping, startup)
+}
+
+// inFlightAnsweredLate is the unflagged per-test mocks of consumed that were in
+// flight when the test of window [tcReq, tcResp] began (models.WindowSchedule.
+// InFlightInto) and answered after it ended: the test's own, which the window
+// filter drops. One answered within the window the filter keeps, as it keeps
+// every DNS, session and connection mock (upsertActualTestMockMapping), so
+// none of those is listed twice. A connection failure is no test's but its
+// own window's (models.InFlightEligible).
+func (a *carryOverAttribution) inFlightAnsweredLate(consumed []models.MockState, tcReq, tcResp time.Time) []models.MockState {
+	if a == nil || a.sched.Len() == 0 || tcReq.IsZero() || tcResp.IsZero() {
+		return nil
+	}
+	var out []models.MockState
+	for _, st := range consumed {
+		// A mock placed at its answer (MockState.AnswerPlaced) is its
+		// answer's window's, wherever it was sent: the in-flight rule is not
+		// its own (models.InFlightEligible).
+		if st.CarryOver || st.AnswerPlaced || st.ReqTimestampMock == "" || st.ResTimestampMock == "" {
+			continue
+		}
+		if st.Lifetime != models.LifetimePerTest || strings.EqualFold(string(st.Kind), string(models.DNS)) || models.WindowBound(st.Kind) {
+			continue
+		}
+		req, rerr := models.ParseMockTimestamp(st.ReqTimestampMock)
+		res, serr := models.ParseMockTimestamp(st.ResTimestampMock)
+		if rerr != nil || serr != nil {
+			continue
+		}
+		if res.After(tcResp) && a.sched.InFlightInto(req, res, tcReq) {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 // addStartupMocks appends to the startup section the mocks it does not list yet.

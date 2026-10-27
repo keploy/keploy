@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -329,16 +330,29 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			unwantLogs: []string{"incomplete"},
 		},
 		{
+			// Under the proven switch the agent's read of the misses can be
+			// incomplete; the account says so. Missed is then unknown, not
+			// the partial count: a short list that happens to be empty would
+			// pass --strict and claim the run isolated.
+			name:       "an account whose miss read was incomplete: missed unknown, and --strict fails as keploy's own error",
+			left:       models.MockOutcome{Consumed: twoConsumed, MissedUnread: "keploy's error drain stopped before this read"},
+			wantExit:   1,
+			wantErr:    true,
+			wantFields: map[string]any{"consumed": int64(2), "missed": "unknown", "reason": models.ErrUnmatchedCallsUnread.Error() + ": keploy's error drain stopped before this read"},
+			// --strict names why the read was incomplete, not a guess at it.
+			wantLogs:   []string{"incomplete", "could not read every call no mock answered", "could not be proven", "why:keploy's error drain stopped before this read"},
+			unwantLogs: []string{"writes what it served and missed as compose stops it", "check the agent logs for why it stopped"},
+		},
+		{
 			name:       "no account: unknown, and why, and --strict fails as keploy's own error",
 			leftErr:    errors.New("the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"),
 			wantExit:   1,
 			wantErr:    true,
 			wantFields: map[string]any{"consumed": "unknown", "missed": "unknown", "reason": "the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
-			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven"},
+			wantLogs:   []string{"incomplete", "writes what it served and missed as compose stops it", "could not be proven", "why:the keploy-agent container keploy-v3-test left no /tmp/keploy-mock-outcome.json"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortAgentBudget(t)
 			core, logs := observer.New(zapcore.DebugLevel)
 			instr := newInstr(t, agentUpAfterRun, false, models.AppError{AppErrorType: models.ErrAppStopped})
 			instr.runUntilReady = true
@@ -406,9 +420,102 @@ func TestComposeReplayIsJudgedOnWhatTheStoppedAgentLeft(t *testing.T) {
 			if tc.leftErr != nil {
 				wantConsumed, wantMissed = -1, -1
 			}
+			if tc.left.MissedUnread != "" {
+				wantMissed = -1
+			}
 			if r.Consumed != wantConsumed || r.Missed != wantMissed {
 				t.Errorf("receipt consumed/missed = %d/%d, want %d/%d", r.Consumed, r.Missed, wantConsumed, wantMissed)
 			}
 		})
+	}
+}
+
+// cfOnlyMockDB is a set whose mocks are all connection failures, which this
+// keploy reads but does not replay, and never sends to the agent.
+type cfOnlyMockDB struct{ stubMockDB }
+
+func (cfOnlyMockDB) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return []*models.Mock{{Name: "mock-0", Kind: models.ConnectionFailure}, {Name: "mock-1", Kind: models.ConnectionFailure}}, nil
+}
+
+// A replay counts as loaded what the agent holds. A set whose mocks are all
+// connection failures loads nothing, as it did when this keploy could not
+// read the kind: it is warned about as empty, and is not failed as a replay
+// that verified nothing.
+func TestAReplayOfOnlyConnectionFailuresLoadsNothing(t *testing.T) {
+	core, logs := observer.New(zapcore.DebugLevel)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "pytest -q")
+	cfg.Mock.OnMiss = string(models.MissFail)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	if err := New(zap.New(core), instr, cfOnlyMockDB{}, nil, nil, nil, cfg).Replay(context.Background()); err != nil {
+		t.Fatalf("Replay returned an unexpected error: %v", err)
+	}
+	if utils.ErrCode != 0 {
+		t.Errorf("exit code %d, want 0: nothing was loaded, so nothing was left unverified", utils.ErrCode)
+	}
+	if logs.FilterMessageSnippet("the mock set is empty").Len() != 1 {
+		t.Errorf("want the empty-set WARN, got %v", logs.All())
+	}
+	if logs.FilterMessageSnippet("verified nothing").Len() != 0 {
+		t.Errorf("a set the agent holds nothing of is not a replay that verified nothing: %v", logs.All())
+	}
+	if !slices.Contains(instr.seq(), "store") {
+		t.Fatalf("precondition: the set was stored on the agent, events %v", instr.seq())
+	}
+	instr.mu.Lock()
+	defer instr.mu.Unlock()
+	if len(instr.stored) != 0 {
+		t.Errorf("the agent was sent %d connection failures; it is sent what is counted as loaded, none", len(instr.stored))
+	}
+}
+
+// Each miss is told with the next step its matcher gave it, which knows what
+// would fix it (a MySQL endpoint that moved names the port to list in
+// mysqlPorts, and re-recording would not help it); only a miss that carries
+// none is told to record the call. A connection whose client sent nothing is
+// said to have made no call.
+func TestReplayTellsEachMissItsOwnNextStep(t *testing.T) {
+	const listPort = "if 172.17.0.1:3307 is MySQL, add 3307 to mysqlPorts in keploy.yml"
+	misses := []models.UnmatchedCall{
+		{Protocol: "MySQL", ActualSummary: "connection phase: server greeting", Destination: "172.17.0.1:3307",
+			MatchPhase: models.MatchPhaseNoRequest, NextSteps: listPort},
+		{Protocol: "HTTP", ActualSummary: "GET /a", Destination: "dep:80", MatchPhase: models.MatchPhaseBody,
+			NextSteps: "Only values drifted (body.id)."},
+		{Protocol: "Generic", ActualSummary: "bytes", Destination: "dep:9000"},
+	}
+	core, logs := observer.New(zapcore.DebugLevel)
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	instr.consumedMocks = []models.MockState{{Name: "mock-0"}}
+	instr.mockErrors = misses
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+
+	if err := New(zap.New(core), instr, stubMockDB{}, nil, nil, nil, instrConfig(instr, utils.Native, "pytest -q")).Replay(context.Background()); err != nil {
+		t.Fatalf("Replay returned an unexpected error: %v", err)
+	}
+	var told []map[string]any
+	var messages []string
+	for _, e := range logs.All() {
+		if f := e.ContextMap(); f["destination"] != nil && f["next_step"] != nil {
+			told = append(told, f)
+			messages = append(messages, e.Message)
+		}
+	}
+	if len(told) != len(misses) {
+		t.Fatalf("%d misses were told, want %d: %v", len(told), len(misses), messages)
+	}
+	for i, want := range []string{listPort, "Only values drifted (body.id).", "record this call with --on-miss record, or re-record the set"} {
+		if got := told[i]["next_step"]; got != want {
+			t.Errorf("miss %d (%v): next step %q, want %q", i, told[i]["destination"], got, want)
+		}
+	}
+	if !strings.Contains(messages[0], "nothing sent") || strings.Contains(messages[0], "outgoing call") {
+		t.Errorf("the connection that sent nothing is told as %q", messages[0])
+	}
+	if messages[1] != "no recorded mock matched an outgoing call" {
+		t.Errorf("a call that missed is told as %q", messages[1])
 	}
 }

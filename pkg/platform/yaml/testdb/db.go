@@ -3,6 +3,7 @@ package testdb
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -341,28 +342,47 @@ func (ts *TestYaml) GetTestCase(ctx context.Context, testSetID string, testCaseN
 	return Decode(doc, ts.logger)
 }
 
-func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
+// testCaseFileRef names one test case file of a test set: its name without
+// the extension, and the storage format the extension says.
+type testCaseFileRef struct {
+	name   string
+	format yaml.Format
+}
+
+// testCaseFiles lists the test case files of a test set that GetTestCases
+// reads, in the order it reads them, and the directory they are in. ok is
+// false when the set has no tests directory. A tests directory that is there
+// but cannot be looked at (permission denied, I/O error, symlink loop) is an
+// error, not "no tests": reading it as empty would report a recorded set as
+// having nothing to run.
+func (ts *TestYaml) testCaseFiles(testSetID string) (dir string, refs []testCaseFileRef, ok bool, err error) {
 	path := filepath.Join(ts.TcsPath, testSetID, "tests")
 
-	tcs := []*models.TestCase{}
 	TestPath, err := yaml.ValidatePath(path)
 	if err != nil {
-		return nil, err
+		return "", nil, false, err
 	}
 	_, err = os.Stat(TestPath)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		ts.logger.Debug("no tests are recorded for the session", zap.String("index", testSetID))
-		return nil, nil
+		return TestPath, nil, false, nil
 	}
-	dir, err := yaml.ReadDir(TestPath, fs.ModePerm)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to look at the directory containing yaml testcases", zap.String("path", TestPath))
+		return TestPath, nil, false, err
+	}
+	d, err := yaml.ReadDir(TestPath, fs.ModePerm)
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to open the directory containing yaml testcases", zap.String("path", TestPath))
-		return nil, err
+		return TestPath, nil, false, err
 	}
-	files, err := dir.ReadDir(0)
+	files, err := d.ReadDir(0)
+	if closeErr := d.Close(); closeErr != nil {
+		ts.logger.Debug("failed to close the directory containing yaml testcases", zap.String("path", TestPath), zap.Error(closeErr))
+	}
 	if err != nil {
 		utils.LogError(ts.logger, err, "failed to read the file names of yaml testcases", zap.String("path", TestPath))
-		return nil, err
+		return TestPath, nil, false, err
 	}
 	// Accept both .yaml and .json so a directory containing a mix of
 	// formats (e.g. mid-migration, or a yaml-default `keploy normalize`
@@ -399,11 +419,14 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 		default:
 			continue
 		}
-		if strings.Contains(j.Name(), "mocks") {
-			continue
-		}
 
 		name := strings.TrimSuffix(j.Name(), fileExt)
+		// Skip a stray mocks.yaml / mocks.json by its exact name only. A
+		// substring match also dropped every test case whose name merely
+		// contains "mocks" (e.g. get-k8s-proxy-mocks-download-1).
+		if name == "mocks" {
+			continue
+		}
 		// First-wins: pre-sort guarantees the format-matching file is
 		// processed before its sibling, so any later occurrence of the
 		// same basename is by definition the non-preferred format.
@@ -411,6 +434,152 @@ func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*mode
 			continue
 		}
 		seen[name] = fileFormat
+		refs = append(refs, testCaseFileRef{name: name, format: fileFormat})
+	}
+	return TestPath, refs, true, nil
+}
+
+// TestCaseFiles returns the test case files of a test set as they are
+// stored: every file GetTestCases reads and no other (an empty one left out,
+// as it leaves it out), by test case number, then name. It fails as
+// Interrupted does when the set holds files an interrupted ReplaceFiles left.
+func (ts *TestYaml) TestCaseFiles(ctx context.Context, testSetID string) ([]yaml.File, error) {
+	dir, refs, ok, err := ts.testCaseFiles(testSetID)
+	if err != nil || !ok {
+		return nil, err
+	}
+	if err := leftoversIn(filepath.Dir(dir), testSetID); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(refs, func(i, j int) bool {
+		if ni, nj := extractTestNumber(refs[i].name), extractTestNumber(refs[j].name); ni != nj {
+			return ni < nj
+		}
+		return refs[i].name < refs[j].name
+	})
+	out := make([]yaml.File, 0, len(refs))
+	for _, ref := range refs {
+		data, err := yaml.ReadFileF(ctx, ts.logger, dir, ref.name, ref.format)
+		if err != nil {
+			return nil, err
+		}
+		if len(data) == 0 {
+			continue
+		}
+		out = append(out, yaml.File{Path: filepath.Join(dir, ref.name+"."+ref.format.FileExtension()), Data: data})
+	}
+	return out, nil
+}
+
+// Interrupted fails with yaml.ErrReplaceInterrupted when the test set holds
+// files an interrupted ReplaceFiles left (a keploy templatize killed while it
+// replaced the set's files): the set is then not what one writer wrote, and
+// may be half-written. The error names each file and the steps that leave the
+// set in one state (yaml.Leftovers.Steps): put back as it was when the run
+// had not replaced every file, else as it wrote it, its copies deleted. keploy
+// test refuses such a set, and keploy templatize changes nothing in it.
+func (ts *TestYaml) Interrupted(_ context.Context, testSetID string) error {
+	if err := validateNameComponent("testSetID", testSetID); err != nil {
+		return err
+	}
+	setDir, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID))
+	if err != nil {
+		return err
+	}
+	return leftoversIn(setDir, testSetID)
+}
+
+// leftoversIn is Interrupted for the test set in setDir: what an interrupted
+// ReplaceFiles left beside config.yaml or beside a test case.
+func leftoversIn(setDir, testSetID string) error {
+	left, err := yaml.FindLeftovers(setDir, filepath.Join(setDir, "tests"))
+	if err != nil {
+		return err
+	}
+	if len(left.Files) == 0 {
+		return nil
+	}
+	// Each file named from the set's directory: tests/test-1.yaml.
+	name := func(p string) string {
+		if rel, relErr := filepath.Rel(setDir, p); relErr == nil {
+			return filepath.ToSlash(rel)
+		}
+		return p
+	}
+	names := make([]string, 0, len(left.Files))
+	for _, l := range left.Files {
+		names = append(names, name(l))
+	}
+	return fmt.Errorf("%w in test set %s (%s): an earlier run was stopped while it replaced the set's files; %s; then run the command again",
+		yaml.ErrReplaceInterrupted, testSetID, strings.Join(names, ", "), left.Steps(name))
+}
+
+// TestCaseFile returns the file UpdateTestCase stores tc in and tc's bytes
+// from the encoder UpdateTestCase writes with, and writes nothing. tc is
+// encoded as it is given: the recorder's asset step (saveAssets), which
+// UpdateTestCase runs before it encodes, is not run, so no body is moved into
+// the assets directory or dropped for its size, and no asset's path is
+// rewritten. That step is for a test case just recorded; one read back from
+// its set names its assets where they already are. tc must have a name.
+func (ts *TestYaml) TestCaseFile(_ context.Context, tc *models.TestCase, testSetID string) (yaml.File, error) {
+	if err := validateNameComponent("testSetID", testSetID); err != nil {
+		return yaml.File{}, err
+	}
+	if tc.Name == "" {
+		return yaml.File{}, errors.New("a test case without a name has no file")
+	}
+	if err := validateNameComponent("test case name", tc.Name); err != nil {
+		return yaml.File{}, err
+	}
+	outPath, err := yaml.ValidatePath(filepath.Join(ts.TcsPath, testSetID, "tests", tc.Name+"."+ts.Format.FileExtension()))
+	if err != nil {
+		return yaml.File{}, fmt.Errorf("invalid testcase path: %w", err)
+	}
+	enc, err := ts.encodeTestCase(tc, tc.Name)
+	if err != nil {
+		return yaml.File{}, err
+	}
+	var buf bytes.Buffer
+	if err := ts.writeEncoded(bufio.NewWriter(&buf), enc); err != nil {
+		return yaml.File{}, err
+	}
+	return yaml.File{Path: outPath, Data: buf.Bytes()}, nil
+}
+
+// replaceFiles stores a group of files, all or none (yaml.ReplaceFiles);
+// tests swap it to make a replace fail.
+var replaceFiles = yaml.ReplaceFiles
+
+// ReplaceFiles stores every file of files, or none of them
+// (yaml.ReplaceFiles): the files TestCaseFile returned, and any other file of
+// the test set that must change with them.
+func (ts *TestYaml) ReplaceFiles(ctx context.Context, files []yaml.File) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The recordings the group replaces, named before it is stored, for
+	// the re-key rule (rekey.go).
+	rks := ts.beginRekeys(files)
+	if err := replaceFiles(ts.logger, files); err != nil {
+		return err
+	}
+	for _, k := range rks {
+		k.done(ts.logger)
+	}
+	return nil
+}
+
+func (ts *TestYaml) GetTestCases(ctx context.Context, testSetID string) ([]*models.TestCase, error) {
+	tcs := []*models.TestCase{}
+	TestPath, refs, ok, err := ts.testCaseFiles(testSetID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	for _, ref := range refs {
+		name, fileFormat := ref.name, ref.format
 
 		data, err := yaml.ReadFileF(ctx, ts.logger, TestPath, name, fileFormat)
 		if err != nil {
@@ -577,29 +746,22 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		}
 	}()
 
+	// The recording this write replaces, named before anything of it (its
+	// assets included) is replaced, for the re-key rule (rekey.go). A name
+	// just claimed replaces none.
+	var rk *rekey
+	if !reservedPlaceholder {
+		rk = ts.beginRekey(testSetID, tcsName, filepath.Join(tcsPath, tcsName+"."+ts.Format.FileExtension()))
+	}
+
 	err = ts.saveAssets(testSetID, tc, tcsName)
 	if err != nil {
 		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
-	// For YAML we build a NetworkTrafficDoc (whose Spec is a yaml.Node);
-	// for JSON we build a NetworkTrafficDocJSON directly (Spec is
-	// json.RawMessage). The JSON path skips the yaml.Node intermediate
-	// entirely — this is where the big win comes from.
-	var yamlTc *yaml.NetworkTrafficDoc
-	var jsonTc *yaml.NetworkTrafficDocJSON
-	if ts.Format == yaml.FormatJSON {
-		jsonTc, err = EncodeTestcaseJSON(*tc, ts.logger)
-		if err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, err
-		}
-		jsonTc.Name = tcsName
-	} else {
-		yamlTc, err = EncodeTestcase(*tc, ts.logger)
-		if err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, err
-		}
-		yamlTc.Name = tcsName
+	enc, err := ts.encodeTestCase(tc, tcsName)
+	if err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 
 	// Stream the encoded testcase directly to disk via a temp file + rename
@@ -632,41 +794,8 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		}
 	}()
 
-	writer := bufio.NewWriter(tmpFile)
-
-	// Version comment is a YAML-only concept (JSON has no comment syntax).
-	if ts.Format == yaml.FormatYAML {
-		if version := utils.GetVersionAsComment(); version != "" {
-			if _, err := writer.WriteString(version); err != nil {
-				return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to write version comment: %w", err)
-			}
-		}
-	}
-
-	switch ts.Format {
-	case yaml.FormatJSON:
-		// Pretty-print testcases so they're human-editable; json.Encoder
-		// streams directly to writer with no intermediate []byte. jsonTc
-		// was built via EncodeTestcaseJSON which skips the yaml.Node
-		// intermediate (no yaml_emitter_emit, no yaml parse-back).
-		enc := json.NewEncoder(writer)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(jsonTc); err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase json: %w", err)
-		}
-	default:
-		encoder := yamlLib.NewEncoder(writer)
-		encoder.SetIndent(2)
-		if err := encoder.Encode(&yamlTc); err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to encode testcase yaml: %w", err)
-		}
-		if err := encoder.Close(); err != nil {
-			return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to close yaml encoder: %w", err)
-		}
-	}
-
-	if err := writer.Flush(); err != nil {
-		return tcsInfo{name: tcsName, path: tcsPath}, fmt.Errorf("failed to flush writer: %w", err)
+	if err := ts.writeEncoded(bufio.NewWriter(tmpFile), enc); err != nil {
+		return tcsInfo{name: tcsName, path: tcsPath}, err
 	}
 	// Match the 0o644 file mode used by the hardened CreateYamlFile —
 	// os.CreateTemp creates with 0o600 by default, so explicitly chmod
@@ -714,6 +843,7 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 	}
 
 	writeSucceeded = true
+	rk.done(ts.logger)
 	// Propagate the auto-assigned name back onto tc so callers can observe
 	// what was actually persisted. Wrappers around InsertTestCase (e.g.
 	// k8s-proxy's testDBWrapper) key per-session dedupe and broadcast state
@@ -727,6 +857,76 @@ func (ts *TestYaml) upsert(ctx context.Context, testSetID string, tc *models.Tes
 		tc.Name = tcsName
 	}
 	return tcsInfo{name: tcsName, path: tcsPath}, nil
+}
+
+// encodedTestCase is a test case as its file holds it, in the one storage
+// format it was encoded for.
+type encodedTestCase struct {
+	yaml *yaml.NetworkTrafficDoc
+	json *yaml.NetworkTrafficDocJSON
+}
+
+// encodeTestCase builds the document tc's file holds under the name name, in
+// ts.Format. For YAML it is a NetworkTrafficDoc (whose Spec is a yaml.Node);
+// for JSON a NetworkTrafficDocJSON built directly (Spec is json.RawMessage).
+// The JSON path skips the yaml.Node intermediate entirely — this is where the
+// big win comes from.
+func (ts *TestYaml) encodeTestCase(tc *models.TestCase, name string) (encodedTestCase, error) {
+	if ts.Format == yaml.FormatJSON {
+		jsonTc, err := EncodeTestcaseJSON(*tc, ts.logger)
+		if err != nil {
+			return encodedTestCase{}, err
+		}
+		jsonTc.Name = name
+		return encodedTestCase{json: jsonTc}, nil
+	}
+	yamlTc, err := EncodeTestcase(*tc, ts.logger)
+	if err != nil {
+		return encodedTestCase{}, err
+	}
+	yamlTc.Name = name
+	return encodedTestCase{yaml: yamlTc}, nil
+}
+
+// writeEncoded writes a test case's file to writer and flushes it: the one
+// place that says what a test case file holds, for the file UpdateTestCase
+// writes and the bytes TestCaseFile returns.
+func (ts *TestYaml) writeEncoded(writer *bufio.Writer, enc encodedTestCase) error {
+	// Version comment is a YAML-only concept (JSON has no comment syntax).
+	if ts.Format == yaml.FormatYAML {
+		if version := utils.GetVersionAsComment(); version != "" {
+			if _, err := writer.WriteString(version); err != nil {
+				return fmt.Errorf("failed to write version comment: %w", err)
+			}
+		}
+	}
+
+	switch ts.Format {
+	case yaml.FormatJSON:
+		// Pretty-print testcases so they're human-editable; json.Encoder
+		// streams directly to writer with no intermediate []byte. The
+		// document was built via EncodeTestcaseJSON which skips the yaml.Node
+		// intermediate (no yaml_emitter_emit, no yaml parse-back).
+		encoder := json.NewEncoder(writer)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(enc.json); err != nil {
+			return fmt.Errorf("failed to encode testcase json: %w", err)
+		}
+	default:
+		encoder := yamlLib.NewEncoder(writer)
+		encoder.SetIndent(2)
+		if err := encoder.Encode(&enc.yaml); err != nil {
+			return fmt.Errorf("failed to encode testcase yaml: %w", err)
+		}
+		if err := encoder.Close(); err != nil {
+			return fmt.Errorf("failed to close yaml encoder: %w", err)
+		}
+	}
+
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush writer: %w", err)
+	}
+	return nil
 }
 
 // generateName produces a default filename for a recorded test case
@@ -849,6 +1049,18 @@ func (ts *TestYaml) ChangePath(path string) {
 }
 
 func (ts *TestYaml) UpdateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
+	// The test case file is rewritten where it lies, outside upsert: it is
+	// re-keyed once, after (SetRewrite).
+	rw, err := BeginSetRewrite(ts.logger, ts.TcsPath, testSetID)
+	if err != nil {
+		utils.LogError(ts.logger, err, "failed to update the assertions of the testcase", zap.String("testcase id", testCaseID), zap.String("testset id", testSetID))
+		return err
+	}
+	defer rw.Done()
+	return ts.updateAssertions(ctx, testCaseID, testSetID, assertions)
+}
+
+func (ts *TestYaml) updateAssertions(ctx context.Context, testCaseID string, testSetID string, assertions map[models.AssertionType]interface{}) error {
 	tcsPath := filepath.Join(ts.TcsPath, testSetID, "tests")
 	// Read whichever format the testcase was recorded in.
 	data, detected, err := yaml.ReadFileAny(ctx, ts.logger, tcsPath, testCaseID, ts.Format)
@@ -1125,6 +1337,14 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 					} else {
 						utils.LogError(ts.logger, fmt.Errorf("asset source file not found: %s", srcPath), "failed to persist form file - ensure the temp file exists before saving", zap.String("path", srcPath))
 					}
+				} else if j < len(form.FileContents) && form.FileContents[j] != nil {
+					// Case 1b: File content travelled with the test case (captured
+					// in another process, e.g. the DaemonSet agent)
+					if err := os.WriteFile(destPath, form.FileContents[j], 0o644); err != nil {
+						utils.LogError(ts.logger, err, "failed to write asset file", zap.String("path", destPath))
+						return err
+					}
+					wroteFile = true
 				} else if j < len(form.Values) {
 					// Case 2: File content is in Values (legacy/text fallback)
 					content := []byte(form.Values[j])
@@ -1153,6 +1373,8 @@ func (ts *TestYaml) saveAssets(testSetID string, tc *models.TestCase, tcsName st
 			}
 
 			tc.HTTPReq.Form[i].Paths = newPaths
+			// Written to the assets above; never stored in the test case.
+			tc.HTTPReq.Form[i].FileContents = nil
 			if allFilesPersisted {
 				tc.HTTPReq.Form[i].Values = nil
 			}

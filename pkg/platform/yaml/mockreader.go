@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
@@ -27,6 +28,13 @@ type MockReader struct {
 	lineNum int
 	done    bool
 	format  Format
+	// unterminated is whether the document last read ended at the end of
+	// the file part-way through a line (see Unterminated).
+	unterminated bool
+	// pos is how many of the file's bytes have been read; docStart, where
+	// the document last read starts (see DocOffset).
+	pos      int64
+	docStart int64
 }
 
 // NewMockReader creates a reader that accumulates lines until "---" delimiter.
@@ -81,6 +89,7 @@ func NewMockReaderAny(ctx context.Context, logger *zap.Logger, path, name string
 // ReadNextDocument reads lines until it encounters "---" or EOF (YAML),
 // or reads one line for NDJSON (JSON format).
 func (r *MockReader) ReadNextDocument() ([]byte, error) {
+	r.unterminated = false
 	if r.done {
 		return nil, io.EOF
 	}
@@ -101,12 +110,16 @@ func (r *MockReader) readNextJSONLine() ([]byte, error) {
 
 		line, err := r.reader.ReadString('\n')
 		r.lineNum++
+		lineStart := r.pos
+		r.pos += int64(len(line))
 
 		if err != nil {
 			if err == io.EOF {
 				r.done = true
 				trimmed := strings.TrimSpace(line)
 				if len(trimmed) > 0 {
+					r.unterminated = true
+					r.docStart = lineStart + leadingSpace(line)
 					return []byte(trimmed), nil
 				}
 				return nil, io.EOF
@@ -118,6 +131,7 @@ func (r *MockReader) readNextJSONLine() ([]byte, error) {
 		if len(trimmed) == 0 {
 			continue // skip empty lines
 		}
+		r.docStart = lineStart + leadingSpace(line)
 		return []byte(trimmed), nil
 	}
 }
@@ -133,35 +147,57 @@ func (r *MockReader) readNextYAMLDocument() ([]byte, error) {
 		default:
 		}
 
+		// At io.EOF, line is the file's last line when the file does not end
+		// with a newline (and "" when it does). That line is still part of
+		// the document, so it is handled like any other before EOF ends it.
 		line, err := r.reader.ReadString('\n')
 		r.lineNum++
-
-		if err != nil {
-			if err == io.EOF {
-				r.done = true
-				if buffer.Len() > 0 {
-					return buffer.Bytes(), nil
-				}
-				return nil, io.EOF
-			}
+		lineStart := r.pos
+		r.pos += int64(len(line))
+		if err != nil && err != io.EOF {
 			return nil, fmt.Errorf("failed to read line %d: %w", r.lineNum, err)
 		}
+		atEOF := err == io.EOF
 
 		trimmedLine := strings.TrimSpace(line)
 
-		if trimmedLine == "---" {
+		if isDocumentMarker(line) {
 			if buffer.Len() == 0 {
 				continue
 			}
 			return buffer.Bytes(), nil
 		}
 
-		if isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(trimmedLine, "#") {
-			continue
+		if !(isFirstDoc && buffer.Len() == 0 && strings.HasPrefix(trimmedLine, "#")) {
+			if buffer.Len() == 0 {
+				r.docStart = lineStart
+			}
+			buffer.WriteString(line)
+			r.unterminated = atEOF && line != ""
 		}
 
-		buffer.WriteString(line)
+		if atEOF {
+			r.done = true
+			if buffer.Len() > 0 {
+				return buffer.Bytes(), nil
+			}
+			return nil, io.EOF
+		}
 	}
+}
+
+// leadingSpace is how many bytes of line strings.TrimSpace takes off its start.
+func leadingSpace(line string) int64 {
+	return int64(len(line) - len(strings.TrimLeftFunc(line, unicode.IsSpace)))
+}
+
+// isDocumentMarker reports whether line (with its line break, if it has one)
+// is a YAML document marker: "---" at column 0, followed only by spaces, tabs
+// or the line break, as the mock writers emit it. An indented "---" is part of
+// the document — a line of a block scalar, e.g. a response body that is itself
+// a multi-document YAML file — and must not end the mock.
+func isDocumentMarker(line string) bool {
+	return strings.TrimRight(line, " \t\r\n") == "---"
 }
 
 // Format returns the format the reader is decoding. Callers can use this to
@@ -179,29 +215,40 @@ func (r *MockReader) Format() Format {
 // NetworkTrafficDoc.Spec.Decode(&concreteSpec) keep working. Hot paths that
 // want to stay yaml-free on JSON files should use ReadNextDocJSON instead.
 func (r *MockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
+	doc, _, err := r.ReadNextDocBytes()
+	return doc, err
+}
+
+// ReadNextDocBytes is ReadNextDoc that also returns the document's bytes as
+// they were read (a YAML document without its "---" separator, or one NDJSON
+// line without its newline), for a caller that has to write a document back
+// unchanged. The last YAML document of a file that does not end with a
+// newline ends without one. A document that does not parse is returned as
+// read, with the error.
+func (r *MockReader) ReadNextDocBytes() (*NetworkTrafficDoc, []byte, error) {
 	data, err := r.ReadNextDocument()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if len(bytes.TrimSpace(data)) == 0 {
-		return r.ReadNextDoc()
+		return r.ReadNextDocBytes()
 	}
 
 	if r.format == FormatJSON {
 		doc, err := UnmarshalDoc(FormatJSON, data)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode JSON at line %d: %w", r.lineNum, err)
+			return nil, data, fmt.Errorf("failed to decode JSON at line %d: %w", r.lineNum, err)
 		}
-		return doc, nil
+		return doc, data, nil
 	}
 
 	var doc NetworkTrafficDoc
 	if err := yamlLib.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("failed to decode YAML at line %d: %w", r.lineNum, err)
+		return nil, data, fmt.Errorf("failed to decode YAML at line %d: %w", r.lineNum, err)
 	}
 
-	return &doc, nil
+	return &doc, data, nil
 }
 
 // ReadNextDocJSON reads the next NDJSON line and returns it as a
@@ -212,21 +259,51 @@ func (r *MockReader) ReadNextDoc() (*NetworkTrafficDoc, error) {
 // for a JSON mocks file can now stay on encoding/json with no yaml.Node
 // allocation or gopkg.in/yaml.v3 emit/parse.
 func (r *MockReader) ReadNextDocJSON() (*NetworkTrafficDocJSON, error) {
+	doc, _, err := r.ReadNextDocJSONBytes()
+	return doc, err
+}
+
+// ReadNextDocJSONBytes is ReadNextDocJSON that also returns the line as it
+// was read, without its newline, also when it does not parse (see
+// ReadNextDocBytes).
+func (r *MockReader) ReadNextDocJSONBytes() (*NetworkTrafficDocJSON, []byte, error) {
 	if r.format != FormatJSON {
-		return nil, fmt.Errorf("mockreader: ReadNextDocJSON called on %s reader", r.format)
+		return nil, nil, fmt.Errorf("mockreader: ReadNextDocJSON called on %s reader", r.format)
 	}
 	data, err := r.ReadNextDocument()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
-		return r.ReadNextDocJSON()
+		return r.ReadNextDocJSONBytes()
 	}
 	var doc NetworkTrafficDocJSON
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("failed to decode JSON at line %d: %w", r.lineNum, err)
+		return nil, data, fmt.Errorf("failed to decode JSON at line %d: %w", r.lineNum, err)
 	}
-	return &doc, nil
+	return &doc, data, nil
+}
+
+// Unterminated reports whether the document last read is the file's last and
+// its last line has no newline: the file ends part-way through a line, as a
+// write that was interrupted (the recorder killed, the disk full) leaves it, or
+// was saved without a final newline. Such a document may be incomplete.
+func (r *MockReader) Unterminated() bool {
+	return r.unterminated
+}
+
+// DocOffset is where, in the file, the document last read starts: the bytes
+// ReadNextDocument (or ReadNextDocBytes, ReadNextDocJSONBytes) returned for it
+// are the file's bytes from there on. A read of the document again takes them
+// from there, without reading the file up to it.
+func (r *MockReader) DocOffset() int64 {
+	return r.docStart
+}
+
+// Stat is the file the reader reads, as os.SameFile tells it from a file put
+// in its place since.
+func (r *MockReader) Stat() (os.FileInfo, error) {
+	return r.file.Stat()
 }
 
 // Path returns the path of the file the reader reads.

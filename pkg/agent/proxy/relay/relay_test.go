@@ -6,14 +6,18 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -41,6 +45,14 @@ type relayHarness struct {
 
 func newHarness(t *testing.T, cfg Config) *relayHarness {
 	t.Helper()
+	return newHarnessOver(t, cfg, nil)
+}
+
+// newHarnessOver is newHarness with the relay reading the client's socket
+// through src(srcProxy), for a row that needs that socket to do more than a
+// pipe does (nil: srcProxy itself).
+func newHarnessOver(t *testing.T, cfg Config, src func(net.Conn) net.Conn) *relayHarness {
+	t.Helper()
 	clientApp, srcProxy := net.Pipe()
 	dstProxy, destSvc := net.Pipe()
 
@@ -49,7 +61,11 @@ func newHarness(t *testing.T, cfg Config) *relayHarness {
 		cfg.Logger = zap.NewNop()
 	}
 
-	r := New(cfg, srcProxy, connseq.NewUpstream(dstProxy))
+	relaySrc := srcProxy
+	if src != nil {
+		relaySrc = src(srcProxy)
+	}
+	r := New(cfg, relaySrc, connseq.NewUpstream(dstProxy))
 	ctx, cancel := context.WithCancel(context.Background())
 
 	h := &relayHarness{
@@ -216,38 +232,77 @@ func TestTimestampsStampedAtRealBoundary(t *testing.T) {
 	if c.SeqNo == 0 {
 		t.Fatalf("expected non-zero SeqNo, got 0")
 	}
+	// The relay took the stamp itself: it is on the proxy's clock, which
+	// is named for the run.
+	if c.ReadClock != fakeconn.ClockProxy {
+		t.Fatalf("the chunk's clock is %s; want proxy", c.ReadClock)
+	}
+	if id := fakeconn.ClockID(c.ReadClock); !strings.HasPrefix(id, "proxy:") {
+		t.Fatalf("the proxy's clock is named %q; want proxy:<run>", id)
+	}
 }
 
-func TestTeeDropOnMemoryGuard(t *testing.T) {
-	t.Parallel()
-	var pressure atomic.Bool
-	pressure.Store(true)
+// TestAMemoryGuardPauseKeepsTheCapturedStreamWhole pins that a memory-guard
+// pause does not cut a connection's captured byte stream.
+//
+// The tee used to refuse every chunk while the guard paused recording. A pooled
+// MySQL connection that carried one command during a half-second pause then
+// had a hole in its stream; the MySQL parser cannot re-anchor after one, so the
+// connection was never captured again, and every test it served for the rest
+// of the recording was suppressed. Not parallel: the pause is the process's.
+func TestAMemoryGuardPauseKeepsTheCapturedStreamWhole(t *testing.T) {
 	drops := newDropSink()
-
+	var desyncs atomic.Int32
+	// The relay forwards a chunk before it tees it, so the destination having
+	// it does not say the tee has seen it: OnCarried, after the tee, does.
+	carried := make(chan bool, 4)
 	h := newHarness(t, Config{
-		MemoryGuardCheck:     pressure.Load,
 		OnMarkMockIncomplete: drops.record,
+		OnCaptureDesync:      func(string) bool { desyncs.Add(1); return true },
+		OnCarried: func(dir fakeconn.Direction, _ time.Time, teed bool, _ int64) {
+			if dir == fakeconn.FromClient {
+				carried <- teed
+			}
+		},
 	})
 
-	// Forward traffic under memory pressure. Real traffic still flows.
-	go h.writeClient([]byte("visible"))
-	got := h.readDest(len("visible"))
-	if string(got) != "visible" {
-		t.Fatalf("dest got %q, want %q", got, "visible")
+	restore := memoryguard.SetRecordingPausedForTest(true)
+	t.Cleanup(restore)
+	go h.writeClient([]byte("during"))
+	if got := h.readDest(len("during")); string(got) != "during" {
+		t.Fatalf("dest got %q, want %q", got, "during")
+	}
+	if teed := <-carried; !teed {
+		t.Fatal("the chunk sent during the pause was not teed")
+	}
+	restore()
+	go h.writeClient([]byte("after"))
+	if got := h.readDest(len("after")); string(got) != "after" {
+		t.Fatalf("dest got %q, want %q", got, "after")
+	}
+	if teed := <-carried; !teed {
+		t.Fatal("the chunk sent after the pause was not teed")
 	}
 
-	// But the FakeConn does not receive the chunk.
-	_ = h.r.ClientStream().SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	_, err := h.r.ClientStream().ReadChunk()
-	if err == nil {
-		t.Fatalf("ClientStream should have timed out, got chunk")
+	// The parser is handed both, in order: the one sent during the pause and
+	// the one after it. The mock manager, not the tee, decides what a pause
+	// costs (syncMock.SyncMockManager.AddMock).
+	var got []byte
+	for len(got) < len("duringafter") {
+		c, err := h.r.ClientStream().ReadChunk()
+		if err != nil {
+			t.Fatalf("the parser's stream ended after %q: %v", got, err)
+		}
+		got = append(got, c.Bytes...)
 	}
-	if !errors.Is(err, fakeconn.ErrDeadlineExceeded) && err.(net.Error).Timeout() != true {
-		t.Fatalf("expected deadline error, got %v", err)
+	if string(got) != "duringafter" {
+		t.Fatalf("the parser read %q, want %q", got, "duringafter")
 	}
-
-	if drops.count(DropMemoryPressure) == 0 {
-		t.Fatalf("expected memory_pressure drop reason, got %v", drops.snapshot())
+	if snap := drops.snapshot(); len(snap) != 0 {
+		t.Fatalf("the tee dropped %v during a memory-guard pause", snap)
+	}
+	if n := desyncs.Load(); n != 0 {
+		t.Fatalf("the connection's capture desynced %d times over a memory-guard pause", n)
 	}
 }
 
@@ -296,7 +351,7 @@ func TestTeeSpillsOnChannelFull(t *testing.T) {
 		// window, which is time the process could run: on a starved host
 		// many times its length in wall time. The harness bounds teardown in
 		// wall time, so the window runs on an injected clock.
-		stallClock: newFakeStallClock(onTime),
+		stallClock: &stall.ManualClock{Step: stall.OnTime},
 	})
 
 	// Send many small chunks while NOT draining the FakeConn — this used to
@@ -833,6 +888,80 @@ func TestBumpActivityInvoked(t *testing.T) {
 	}
 }
 
+// carriedEvent is one call of Config.OnCarried.
+type carriedEvent struct {
+	dir     fakeconn.Direction
+	at      time.Time
+	teed    bool
+	through int64
+}
+
+// OnCarried tells of each chunk as the forwarder hands it to the tee, with
+// where it ends in the parser's stream, in the offsets the parser's FakeConn
+// counts what it has taken in (Consumed): what tells a chunk the parser read
+// from one it never did once it has stopped reading. A chunk the tee refuses
+// is told of as not teed, and moves no position. Teed is the position past
+// the last chunk teed.
+func TestOnCarriedTellsWhereEachChunkEndsInTheParsersStream(t *testing.T) {
+	t.Parallel()
+	events := make(chan carriedEvent, 16)
+	h := newHarness(t, Config{
+		TeeChanBuf: 64,
+		OnCarried: func(dir fakeconn.Direction, at time.Time, teed bool, through int64) {
+			events <- carriedEvent{dir, at, teed, through}
+		},
+	})
+	next := func(what string) carriedEvent {
+		t.Helper()
+		select {
+		case e := <-events:
+			return e
+		case <-time.After(5 * time.Second):
+			t.Fatalf("OnCarried never told of %s", what)
+			return carriedEvent{}
+		}
+	}
+
+	go h.writeClient([]byte("abc"))
+	_ = h.readDest(3)
+	first := next("the first chunk")
+	if first.dir != fakeconn.FromClient || !first.teed || first.through != 3 {
+		t.Fatalf("first chunk told of as %+v, want a teed client chunk through 3", first)
+	}
+	c, err := h.r.ClientStream().ReadChunk()
+	if err != nil {
+		t.Fatalf("ReadChunk: %v", err)
+	}
+	if got := h.r.ClientStream().Consumed(); got != first.through {
+		t.Fatalf("the parser took the whole chunk and stands at %d, told it ends at %d", got, first.through)
+	}
+	if !c.ReadAt.Equal(first.at) {
+		t.Fatalf("chunk told of as read at %v, the parser's chunk says %v", first.at, c.ReadAt)
+	}
+
+	go h.writeClient([]byte("defg"))
+	_ = h.readDest(4)
+	if e := next("the second chunk"); !e.teed || e.through != 7 {
+		t.Fatalf("second chunk told of as %+v, want teed through 7", e)
+	}
+
+	go h.writeDest([]byte("xy"))
+	_ = h.readClient(2)
+	if e := next("the destination's chunk"); e.dir != fakeconn.FromDest || !e.teed || e.through != 2 {
+		t.Fatalf("destination chunk told of as %+v, want a teed dest chunk through 2 of its own stream", e)
+	}
+
+	h.r.teeC2D.setPaused(true)
+	go h.writeClient([]byte("hij"))
+	_ = h.readDest(3)
+	if e := next("the refused chunk"); e.teed || e.through != 7 {
+		t.Fatalf("refused chunk told of as %+v, want not teed, the stream still through 7", e)
+	}
+	if c, d := h.r.Teed(fakeconn.FromClient), h.r.Teed(fakeconn.FromDest); c != 7 || d != 2 {
+		t.Fatalf("Teed = %d client, %d dest, want 7 and 2: where the last teed chunk of each stream ends", c, d)
+	}
+}
+
 // dropSink mirrors dropRecorder in tee_test.go but lives here so the
 // relay tests stay self-contained; kept separate to avoid exporting
 // test helpers across files.
@@ -1232,5 +1361,144 @@ func TestDesyncedRelayKeepsFeedingAResyncCapableParser(t *testing.T) {
 	if got := drops.count(DropDesynced); got != 0 {
 		t.Fatalf("%s drops = %d, want 0 for a resync-capable parser; reasons=%v",
 			DropDesynced, got, drops.snapshot())
+	}
+}
+
+// A TLS upgrade the relay could not make is a capture loss: what follows on
+// the connection is not parsed, so the relay says so, once per failed upgrade.
+func TestAFailedTLSUpgradeIsACaptureLoss(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var kinds []models.CaptureLossKind
+	h := newHarness(t, Config{OnCaptureLoss: func(k models.CaptureLossKind, _ string) {
+		mu.Lock()
+		kinds = append(kinds, k)
+		mu.Unlock()
+	}}) // no TLSUpgradeFn: the upgrade cannot be made
+	h.r.Directives() <- directive.UpgradeTLS(&tls.Config{}, &tls.Config{}, "no-upgrader")
+	// No deadline of its own: the test binary's -timeout bounds it.
+	if ack := <-h.r.Acks(); ack.OK {
+		t.Fatal("expected OK=false without an upgrader")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(kinds) != 1 || kinds[0] != models.CaptureLossSTARTTLS {
+		t.Fatalf("capture losses %v, want one %s", kinds, models.CaptureLossSTARTTLS)
+	}
+}
+
+// A chunk is on the proxy's clock only when the relay took its stamp itself:
+// its time.Now, or a read time one of the relay's own wrappers took so, over
+// a conn that tells none. A read time another producer stamped (a conn that
+// tells its own) is on no clock the relay can name, however it is wrapped.
+func TestObservedReadTrustsOnlyTheRelaysOwnStamp(t *testing.T) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	now := time.Unix(100, 0)
+	foreignAt := time.Unix(50, 0)
+	foreign := fixedReadAtConn{Conn: a, readAt: foreignAt}
+	tracked := newReadTrackingConn(a, nil)
+	tracked.lastReadNano.Store(time.Unix(90, 0).UnixNano())
+	trackedForeign := newReadTrackingConn(foreign, nil)
+	trackedForeign.lastReadNano.Store(foreignAt.UnixNano())
+	for _, tc := range []struct {
+		name  string
+		conn  net.Conn
+		at    time.Time
+		clock fakeconn.Clock
+	}{
+		{"a conn that tells no read time", a, now, fakeconn.ClockProxy},
+		{"the relay's tracker over it", tracked, time.Unix(90, 0), fakeconn.ClockProxy},
+		{"a reporter over the tracker", newReadTimeReportingConn(a, tracked), time.Unix(90, 0), fakeconn.ClockProxy},
+		{"a prefix over the tracker", newPrependingConnWithReadAt(tracked, []byte("x"), time.Unix(80, 0)), now, fakeconn.ClockProxy},
+		{"a conn that tells its own", foreign, foreignAt, fakeconn.ClockUnset},
+		{"the relay's tracker over that", trackedForeign, foreignAt, fakeconn.ClockUnset},
+		{"a reporter over a foreign source", newReadTimeReportingConn(a, foreign), foreignAt, fakeconn.ClockUnset},
+		{"a foreign teller that told no time yet", fixedReadAtConn{Conn: a}, now, fakeconn.ClockUnset},
+	} {
+		at, clock := observedRead(tc.conn, now)
+		if !at.Equal(tc.at) || clock != tc.clock {
+			t.Errorf("%s: observedRead = %v, %v; want %v, %v", tc.name, at, clock, tc.at, tc.clock)
+		}
+	}
+}
+
+// A parser that reads a connection's capture only once the relay has ended
+// (a parser behind its capture) reads each stream to its end and then io.EOF,
+// as one keeping up does. A parser tells a stream that ran out (io.EOF) from
+// its reader being closed while the capture could still send
+// (fakeconn.ErrClosed), so the relay's teardown must not close a FakeConn
+// before its stream has ended: as the relay closes each FakeConn, the tee
+// that feeds it has closed its channel and its drain has returned. The row
+// checks that at the moment of each Close (fakeconn.SetCloseHookForTest).
+func TestAParserBehindTheRelayReadsTheEndOfAStreamAsEOF(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, Config{})
+	followed := map[*fakeconn.FakeConn]struct {
+		name string
+		t    *tee
+	}{
+		h.r.ClientStream(): {"client", h.r.teeC2D},
+		h.r.DestStream():   {"destination", h.r.teeD2C},
+	}
+	var mu sync.Mutex
+	closes := map[string]bool{}
+	var early []string
+	restore := fakeconn.SetCloseHookForTest(func(fc *fakeconn.FakeConn) {
+		s, ok := followed[fc]
+		if !ok {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if closes[s.name] {
+			return
+		}
+		closes[s.name] = true
+		select {
+		case <-s.t.done:
+		default:
+			early = append(early, "the relay closed the "+s.name+"'s FakeConn before the tee feeding it had ended its stream")
+		}
+	})
+	defer restore()
+	read := make(chan error, 1)
+	go func() {
+		b := make([]byte, len("response"))
+		_, err := io.ReadFull(h.clientApp, b)
+		read <- err
+	}()
+	if _, err := h.destSvc.Write([]byte("response")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-read; err != nil {
+		t.Fatalf("the client did not get the response: %v", err)
+	}
+	_ = h.destSvc.Close()
+	_ = h.clientApp.Close()
+	select {
+	case <-h.runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the relay did not end once both peers had closed")
+	}
+	c, err := h.r.DestStream().ReadChunk()
+	if err != nil || string(c.Bytes) != "response" {
+		t.Fatalf("the destination's stream read %q, %v once the relay had ended, want the response", c.Bytes, err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := h.r.DestStream().ReadChunk(); err != io.EOF {
+			t.Fatalf("after the response, the destination's stream read %v, want io.EOF", err)
+		}
+	}
+	if _, err := h.r.ClientStream().ReadChunk(); err != io.EOF {
+		t.Fatalf("the client's stream, which carried nothing, read %v, want io.EOF", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(closes) != 2 {
+		t.Errorf("the relay closed %d of its two FakeConns", len(closes))
+	}
+	for _, e := range early {
+		t.Error(e)
 	}
 }

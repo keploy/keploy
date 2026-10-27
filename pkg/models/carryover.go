@@ -22,8 +22,11 @@ const CarryOverLookahead = time.Second
 // window of its recorded time minus CarryOverLookahead until it is consumed,
 // instead of only inside its own window: it is loaded ahead of its window, and
 // when its window closes unconsumed it moves to the carry-over tier rather than
-// being dropped. Consuming it there (DeleteFilteredMock falls back per-test,
-// then startup, then carry-over) is reported with MockState.CarryOver.
+// being dropped. The set's staging also loads those the app's startup reaches
+// (recorded within CarryOverLookahead after the first test began). It is
+// consumed once, from whichever tier serves it (DeleteFilteredMock falls back
+// per-test, then startup, then carry-over), and the consume is reported with
+// MockState.CarryOver.
 //
 // Registering a kind also marks the other per-test mocks of that kind that it
 // consumes outside the current window through MarkMockAsUsed (a server push
@@ -45,21 +48,38 @@ func RegisterCarryOver(kind Kind, isCarryOver func(*Mock) bool) (unregister func
 var carryOverHooks mockPredicates
 
 // IsCarryOver reports whether m is a per-test mock that a RegisterCarryOver
-// predicate accepts. The mock's lifetime must already be derived.
+// predicate, or a StagingRelease need's Match, accepts: a mock the carry-over
+// tier keeps reachable outside its own window. The mock's lifetime must
+// already be derived. A window-bound kind (WindowBound) never carries over,
+// whatever is registered for it: carrying it into a later window is serving
+// it in a test it does not belong to.
 func IsCarryOver(m *Mock) bool {
-	return m != nil && m.TestModeInfo.Lifetime == LifetimePerTest && carryOverHooks.match(m)
+	return m != nil && !WindowBound(m.Kind) && m.TestModeInfo.Lifetime == LifetimePerTest &&
+		(carryOverHooks.match(m) || releaseHooks.match(m))
 }
 
-// CarryOverKind reports whether any RegisterCarryOver predicate is registered
-// for kind.
+// MarksOutOfWindow reports whether m, a per-test mock consumed outside the
+// window current then, is flagged CarryOver (MockState.CarryOver), so the
+// replay attributes it to its own window. A RegisterCarryOver kind marks every
+// per-test mock of its kind so (a server push delivered after its window,
+// which is not itself carry-over); a StagingRelease need marks only the mocks
+// its Match accepts, and the kind's others are untouched.
+func MarksOutOfWindow(m *Mock) bool {
+	return m != nil && !WindowBound(m.Kind) && m.TestModeInfo.Lifetime == LifetimePerTest &&
+		(carryOverHooks.hasKind(m.Kind) || releaseHooks.match(m))
+}
+
+// CarryOverKind reports whether any RegisterCarryOver predicate, or any
+// StagingRelease need, is registered for kind: whether the carry-over tier can
+// hold a mock of it. Never for a window-bound kind (see IsCarryOver).
 func CarryOverKind(kind Kind) bool {
-	return carryOverHooks.hasKind(kind)
+	return !WindowBound(kind) && (carryOverHooks.hasKind(kind) || releaseHooks.hasKind(kind))
 }
 
 // CarryOverRegistered reports whether any kind registered a carry-over
-// predicate. When none did, every carry-over code path is skipped, and the
-// agent does not keep the recorded windows of the set being replayed
-// (MockFilterParams.RecordedWindows).
+// predicate or a StagingRelease need. When none did, every carry-over code
+// path is skipped, and the agent does not keep the recorded windows of the set
+// being replayed (MockFilterParams.RecordedWindows).
 func CarryOverRegistered() bool {
-	return carryOverHooks.any()
+	return carryOverHooks.any() || releaseHooks.any()
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -16,6 +17,8 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/routes"
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -38,10 +41,9 @@ func guardedAgent(t *testing.T, token string) (*AgentClient, *[]string) {
 	t.Cleanup(srv.Close)
 
 	return &AgentClient{
-		logger:     zap.NewNop(),
-		client:     agentHTTPClient(token),
-		hookClient: agentHTTPClientWithTimeout(token, agentHookTimeout),
-		conf:       &config.Config{Agent: config.Agent{AgentURI: srv.URL}},
+		logger: zap.NewNop(),
+		client: agentHTTPClient(token),
+		conf:   &config.Config{Agent: config.Agent{AgentURI: srv.URL}},
 	}, &seen
 }
 
@@ -79,9 +81,8 @@ func TestAgentHooks_AuthenticateAgainstAGuardedAgent(t *testing.T) {
 	for _, h := range hooks {
 		t.Run(h.name, func(t *testing.T) {
 			client, seen := guardedAgent(t, token)
-			// The hook methods swallow transport errors and return nil, so a
-			// nil error alone proves nothing. What proves it is that the
-			// request reached the handler behind the middleware.
+			// The request reached the handler behind the middleware: the
+			// agent's auth let it through.
 			require.NoError(t, client.call(h.call))
 			require.Equal(t, []string{h.path}, *seen,
 				"the request never got past the agent's auth middleware")
@@ -97,7 +98,7 @@ func (a *AgentClient) call(f func(*AgentClient) error) error { return f(a) }
 func TestAgentHooks_SurfaceARejectionRatherThanPassingSilently(t *testing.T) {
 	client, seen := guardedAgent(t, "the-agents-token")
 	// A client holding the wrong token is what a botched handoff looks like.
-	client.hookClient = agentHTTPClientWithTimeout("a-different-token", agentHookTimeout)
+	client.client = agentHTTPClient("a-different-token")
 
 	now := time.Now()
 	err := client.BeforeSimulate(context.Background(), &now, "test-set-0", "test-1")
@@ -156,13 +157,6 @@ func TestBearerTransport_DoesNotMutateTheCallersRequest(t *testing.T) {
 
 	require.Empty(t, req.Header.Get("Authorization"),
 		"RoundTrip mutated the request it was given")
-}
-
-func TestAgentHookTimeout_IsPreservedByTheAuthenticatedClient(t *testing.T) {
-	// The bare clients this replaced carried a 50s deadline. Dropping it while
-	// adding the token would turn a hung agent into a hung test run.
-	require.Equal(t, agentHookTimeout, agentHTTPClientWithTimeout("tok", agentHookTimeout).Timeout)
-	require.Equal(t, 50*time.Second, agentHookTimeout)
 }
 
 func TestAppendTokenFileArg_PassesThePathAndNeverTheToken(t *testing.T) {
@@ -250,13 +244,13 @@ func TestNew_BuildsClientsThatCarryTheSessionToken(t *testing.T) {
 	a := New(zap.NewNop(), nil, &config.Config{Agent: config.Agent{AgentURI: srv.URL}})
 	_, err := a.GetMockErrors(context.Background()) // a.client
 	require.NoError(t, err)
-	require.NoError(t, a.BeforeTestRun(context.Background(), "test-run-0")) // a.hookClient
+	require.NoError(t, a.BeforeTestRun(context.Background(), "test-run-0"))
 
 	mu.Lock()
 	defer mu.Unlock()
 	want := "Bearer " + token.Session()
 	require.Equal(t, want, seen["/mockerrors"], "the client's requests do not carry the session token")
-	require.Equal(t, want, seen["/hooks/before-test-run"], "the hook client's requests do not carry the session token")
+	require.Equal(t, want, seen["/hooks/before-test-run"], "the hook requests do not carry the session token")
 }
 
 // TestExportMockScopeEnv_HandsTheTokenOnlyToAMockRunner pins the guard around
@@ -281,6 +275,27 @@ func TestExportMockScopeEnv_HandsTheTokenOnlyToAMockRunner(t *testing.T) {
 	require.Equal(t, "http://localhost:16789", os.Getenv("KEPLOY_MOCK_AGENT"))
 	require.Equal(t, token.Session(), os.Getenv(token.MockAgentTokenEnv),
 		"a mock-mode runner gets no credential, so every scope call it makes is a 401")
+}
+
+// A keploy started from a test of another keploy run inherits that run's
+// claim marker; its own test processes must still claim, so a mock-mode
+// command never sees it.
+func TestExportMockScopeEnv_DropsAnInheritedClaimMarker(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_AGENT", "")
+	t.Setenv(token.MockAgentTokenEnv, "")
+	t.Setenv("KEPLOY_MOCK_SESSION", "")
+	t.Setenv(models.TestPIDEnv, "4242")
+	t.Setenv(provenswitch.Env, "1")
+	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_TEST}, 16789)
+	_, set := os.LookupEnv(models.TestPIDEnv)
+	require.False(t, set, "the enclosing run's claim marker reached this run's command")
+
+	// With the switch off there are no claims, and the environment is left
+	// as it was.
+	t.Setenv(models.TestPIDEnv, "4242")
+	t.Setenv(provenswitch.Env, "")
+	exportMockScopeEnv(zap.NewNop(), models.SetupOptions{MockMode: true, Mode: models.MODE_TEST}, 16789)
+	require.Equal(t, "4242", os.Getenv(models.TestPIDEnv))
 }
 
 func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
@@ -317,4 +332,28 @@ func TestRedactToken_KeepsTheTokenOutOfLogs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A native agent is told where to report its teardown's progress, in a
+// directory of its start's own that only this user may write to, which its
+// stop reads to tell a teardown still making progress from one that has
+// stopped; the directory is removed once the agent has exited.
+func TestNativeAgentLaunch_TellsTheAgentWhereToReportItsTeardown(t *testing.T) {
+	t.Cleanup(func() { _ = token.Cleanup() })
+	a := New(zap.NewNop(), nil, &config.Config{})
+	args, progress, remove := a.nativeAgentLaunch(models.SetupOptions{AgentPort: 26795, ProxyPort: 26796, DnsPort: 26797,
+		AgentURI: "http://localhost:26795/agent", Mode: models.MODE_RECORD})
+	i := slices.Index(args, "--teardown-progress-file")
+	require.GreaterOrEqual(t, i, 0, "the native agent is not told where to report its teardown: %v", args)
+	require.Less(t, i+1, len(args))
+	require.Equal(t, progress, args[i+1])
+	require.Equal(t, utils.TeardownProgressFileName, filepath.Base(progress))
+	st, err := os.Stat(filepath.Dir(progress))
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		require.Zero(t, st.Mode().Perm()&0o077, "others may write where the agent, root under sudo, reports")
+	}
+	remove()
+	_, err = os.Stat(filepath.Dir(progress))
+	require.True(t, os.IsNotExist(err), "the directory outlives the agent: %v", err)
 }

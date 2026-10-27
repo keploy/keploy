@@ -36,6 +36,9 @@ jobs:
           - name: mock-mismatch
             path: http-pokeapi
             script_dir: mock_mismatch
+          - name: proven-record-mappings
+            path: http-pokeapi
+            script_dir: proven_record_mappings
           - name: mock-mismatch-streaming
             path: sse-redis
             script_dir: mock_mismatch_streaming
@@ -172,6 +175,52 @@ jobs:
           cd samples-go/${{ matrix.app.path }}
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/${{ matrix.app.script_dir }}/golang-linux.sh
 
+  # A reply MongoDB sends after the app closed its connection is not recorded
+  # as a mock the app read. The app stops while its driver's streaming monitor
+  # has its first awaitable hello waiting (the sample's URI sets
+  # heartbeatFrequencyMS=60000, so it waits 60 s); mongod answers the app's FIN
+  # with ok:0, code 279 ClientDisconnect, which the closed client refuses.
+  # Recorded, replay served it to the app's monitor hello and the driver
+  # cleared its pool. The stock gin-mongo lane stops after the first hello was
+  # answered and passes either way; this one fails a run that stopped too late
+  # to check anything (a recorded awaitable hello). Private parsers (the Mongo
+  # recorder), so not on forks; build binaries only: the released keploy
+  # records the reply.
+  gin_mongo_after_client_close:
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    name: gin-mongo reply after the app closed (record_build_replay_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: build
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+          ref: native-linux
+      - name: Record gin-mongo stopped while its monitor's hello waits, and replay
+        env:
+          RECORD_BIN: ${{ steps.build.outputs.path }}
+          REPLAY_BIN: ${{ steps.build.outputs.path }}
+        run: |
+          cd samples-go/gin-mongo
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/gin_mongo_after_client_close/golang-linux.sh"
+
   dns_dedup_test:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
     # The longest healthy job in this repo runs ~32 min, so this is ~2x
@@ -227,6 +276,299 @@ jobs:
         run: |
           cd samples-go/dns-dedup
           source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/dns_dedup/golang-linux.sh
+
+  # keploy #4810: the mock prune kept a MySQL COM_STMT_EXECUTE and deleted the
+  # COM_STMT_PREPARE of its statement, so the next replay answered it with
+  # another test's EXECUTE. An app on go-sql-driver/mysql's default DSN
+  # prepares the same INSERT again for every order on one connection, and one
+  # order fails on a duplicate key (500). Record, keploy test
+  # --remove-unused-mocks, keploy test again: every test must pass both times,
+  # the pruned mocks must hold the PREPARE of every statement a kept mock
+  # names, and no test may be served another test's COM_STMT_EXECUTE. A copy
+  # of the recording damaged as an older keploy's prune left it must fail,
+  # say why, and serve no test another test's COM_STMT_EXECUTE. The app is in
+  # this repo (test_workflow_scripts/golang/mysql_prune_prepared). Not
+  # record_build_replay_latest: the released prune is the bug.
+  mysql_prune_prepared:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: mysql prune keeps prepared statements (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, prune, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/mysql_prune_prepared/golang-linux.sh"
+
+  # keploy test does not hold a test set's mocks in memory: it reads the set's
+  # mocks.yaml into a small entry per mock and reads each payload back only to
+  # send it to the agent. A keploy that loads the set whole held about twice
+  # the file, and recordings of a few GB were Killed (exit 137). The lane
+  # records http-pokeapi, adds 600 unused 1 MiB mocks to each test set's
+  # mocks.yaml, and replays: every set must pass, the agent must be sent every
+  # mock, and keploy test's peak RSS must stay under 300 MiB. Against
+  # build-no-race, whose memory is the one shipped (the race build's is
+  # several times it). Not replay_latest: the released replay is the bug.
+  client_mock_memory:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build-no-race
+          - job: record_build_replay_build
+            record_src: build-no-race
+            replay_src: build-no-race
+    name: keploy test holds no test set in memory (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Checkout the samples-go repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/samples-go
+          path: samples-go
+
+      - name: Record, inflate, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          cd samples-go/http-pokeapi
+          source $GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/client_mock_memory/golang-linux.sh
+
+  # Decision 27: keploy test --remove-unused-mocks keeps a stateful dependency's
+  # recordings whole. The app (test_workflow_scripts/golang/stateful_prune)
+  # answers GET /tick with a counter's next value; eight are recorded, test 6
+  # is made to fail in a pruning run (its mocks are not kept), then put back.
+  # A recording that states no lifetimes (record_latest while the release
+  # states none, and always record_build_strip_lifetimes, whose lifetimes are
+  # removed) replays GET /next as one sequence across tests: the prune used to
+  # drop the failed test's recording, and every later test was answered with
+  # the one after its own. A recording that states lifetimes (record_build)
+  # serves each test its own: the later tests must still be answered with
+  # theirs.
+  stateful_prune:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+          - job: record_build_strip_lifetimes_replay_build
+            record_src: build
+            replay_src: build
+            strip_lifetimes: true
+    name: prune keeps a stateful sequence whole (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads test cases and reports with yq, which the runner
+          # image ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, fail a test in a pruning run, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          STRIP_LIFETIMES: ${{ matrix.config.strip_lifetimes }}
+          WORK: ${{ runner.temp }}/stateful_prune
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/stateful_prune/golang-linux.sh"
+
+      - name: Upload stateful_prune recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stateful-prune-${{ matrix.config.job }}
+          path: |
+            ${{ runner.temp }}/stateful_prune/keploy/
+            ${{ runner.temp }}/stateful_prune/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  # An async lane (keploy.yml async.lanes) whose value changes mid-recording.
+  # The app (test_workflow_scripts/golang/async_value_flip) polls a config
+  # service in the background; the value flips after the 7th GET /value. The
+  # replay served every epoch one test early (the test set's staging counted
+  # as a test window), and the prune deleted every epoch recorded after the
+  # first tests (no async epoch is ever consumed). keploy test, keploy test
+  # --remove-unused-mocks, keploy test again: every test must pass each time,
+  # and the prune must keep every epoch a replay serves, for an http and an
+  # httpPoll lane. record_latest_replay_build: the recorder is unchanged, so a
+  # released keploy's recording must replay and prune right.
+  async_value_flip:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: async lane value flip (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, replay, prune, replay
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+          WORK: ${{ runner.temp }}/async_value_flip
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/async_value_flip/golang-linux.sh"
+
+      - name: Upload async_value_flip recordings and keploy logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: async-value-flip-${{ matrix.config.job }}
+          path: |
+            ${{ runner.temp }}/async_value_flip/*/keploy/
+            ${{ runner.temp }}/async_value_flip/*/*.log
+            ${{ runner.temp }}/async_value_flip/*/mocks.recorded.yaml
+          if-no-files-found: warn
+          retention-days: 7
 
   golang_linux_replay:
     # Bounds a hung step to an hour instead of GitHub's 6-hour job ceiling.
@@ -305,3 +647,75 @@ jobs:
         run: |
           cd samples-go/${{ matrix.app.path }}
           SKIP_PING_SERVER=1 $REPLAY_BIN test --test-sets port-mapping-test --api-timeout 200 --delay 30
+
+  # A test is served the HTTP and MySQL calls it recorded, by the lifetime the
+  # recorder states for each mock (Spec.Metadata["lifetime"]). An app over
+  # MySQL fetches an auth token and a tax rate once and caches them, so only
+  # the first test records them. Replayed alone on a recording that states
+  # lifetimes, a later test misses them, the miss names keploy.yaml's
+  # sessionCalls, and declaring the token call there serves it; a recording
+  # made before replays as it always did; a connection's setup and the
+  # startup traffic stay shared. Under the proven switch, a pool of eight
+  # connections runs one prepared statement at once, and the app checks that
+  # each call read its own row. The app is in this repo
+  # (test_workflow_scripts/golang/lifetime_tags). The script judges a release
+  # replayer's outcome only where it holds for every replayer.
+  lifetime_tags:
+    timeout-minutes: 30
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - job: record_latest_replay_build
+            record_src: latest
+            replay_src: build
+          - job: record_build_replay_latest
+            record_src: build
+            replay_src: latest
+          - job: record_build_replay_build
+            record_src: build
+            replay_src: build
+    name: mock lifetimes (${{ matrix.config.job }})
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Ensure yq
+        run: |
+          # The script reads mocks and reports with yq, which the runner image
+          # ships; install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.record_src }}
+
+      - id: replay
+        uses: ./.github/actions/download-binary
+        with:
+          src: ${{ matrix.config.replay_src }}
+
+      - name: Record, replay each test alone
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.replay.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/lifetime_tags/golang-linux.sh"

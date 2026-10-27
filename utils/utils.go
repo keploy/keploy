@@ -2,7 +2,6 @@ package utils
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -27,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"text/template"
 	"time"
 
 	"golang.org/x/text/cases"
@@ -38,14 +36,12 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.keploy.io/server/v3/pkg/models"
+	keployLog "go.keploy.io/server/v3/utils/log"
 	"go.uber.org/zap"
 	"helm.sh/helm/v3/pkg/strvals"
 )
 
 var WarningSign = "\U000026A0"
-
-var TemplatizedValues = map[string]interface{}{}
-var SecretValues = map[string]interface{}{}
 
 var ErrCode = 0
 
@@ -317,20 +313,6 @@ func LogError(logger *zap.Logger, err error, msg string, fields ...zap.Field) {
 	}
 }
 
-// RemoveDoubleQuotes removes all double quotes from the values in the provided template map.
-// This function handles cases where the templating engine fails to parse values containing both single and double quotes.
-// For example:
-// Input: '"Not/A)Brand";v="8", "Chromium";v="126", "Brave";v="126"'
-// Output: Not/A)Brand;v=8, Chromium;v=126, Brave;v=126
-func RemoveDoubleQuotes(tempMap map[string]interface{}) {
-	// Remove double quotes
-	for key, val := range tempMap {
-		if str, ok := val.(string); ok {
-			tempMap[key] = strings.ReplaceAll(str, `"`, "")
-		}
-	}
-}
-
 func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 	//Check if file exists
 	_, err = os.Stat(name)
@@ -352,8 +334,16 @@ func DeleteFileIfExists(logger *zap.Logger, name string) (err error) {
 }
 
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
+	TagName string               `json:"tag_name"`
+	Body    string               `json:"body"`
+	Assets  []GitHubReleaseAsset `json:"assets"`
+}
+
+// GitHubReleaseAsset is one file of a release. Digest is GitHub's own
+// "sha256:<hex>" of it, which `keploy update` checks the download against.
+type GitHubReleaseAsset struct {
+	Name   string `json:"name"`
+	Digest string `json:"digest"`
 }
 
 var ErrGitHubAPIUnresponsive = errors.New("GitHub API is unresponsive")
@@ -457,18 +447,12 @@ func ConfigHeader() string {
 		"#   keploy config defaults -o FILE    # save them\n"
 }
 
-func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
-	file, err := os.Open(logFilePath)
-	if err != nil {
-		return fmt.Errorf("error opening log file: %s", err.Error())
-	}
-	defer func() {
-		if err := file.Close(); err != nil {
-			LogError(logger, err, "Error closing log file")
-		}
-	}()
-
-	content, err := io.ReadAll(file)
+// attachLogFileToSentry attaches logFile, this run's log, to the crash report:
+// read through its name only while that is still this run's log, never
+// whatever a symlink there points at (a root run's crash would otherwise send
+// the link's target).
+func attachLogFileToSentry(logFile *os.File) error {
+	content, err := keployLog.ReadLogFile(logFile)
 	if err != nil {
 		return fmt.Errorf("error reading log file: %s", err.Error())
 	}
@@ -482,7 +466,7 @@ func attachLogFileToSentry(logger *zap.Logger, logFilePath string) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(logger, "./keploy-logs.txt")
+	err := attachLogFileToSentry(LogFile)
 	if err != nil {
 		LogError(logger, err, "failed to attach log file to sentry")
 	}
@@ -562,8 +546,13 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 	repoOwner := "keploy"
 	repoName := "keploy"
 
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName)
+	return getGitHubRelease(ctx, logger, fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", repoOwner, repoName))
+}
 
+// getGitHubRelease reads the release at apiURL. Anything but a 200 carrying a
+// tag is an error: a rate-limited answer decodes to an empty release, which
+// read as a version other than the running one -- an update to "".
+func getGitHubRelease(ctx context.Context, logger *zap.Logger, apiURL string) (GitHubRelease, error) {
 	client := http.Client{
 		Timeout: 4 * time.Second,
 	}
@@ -587,9 +576,15 @@ func GetLatestGitHubRelease(ctx context.Context, logger *zap.Logger) (GitHubRele
 		}
 	}()
 
+	if resp.StatusCode != http.StatusOK {
+		return GitHubRelease{}, fmt.Errorf("GitHub answered %s for %s", resp.Status, apiURL)
+	}
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return GitHubRelease{}, err
+	}
+	if release.TagName == "" {
+		return GitHubRelease{}, fmt.Errorf("GitHub's answer for %s names no release", apiURL)
 	}
 	return release, nil
 }
@@ -778,74 +773,6 @@ const (
 	Empty         CmdType = ""
 )
 
-func ToInt(value interface{}) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case int32:
-		return int(v)
-	case float32:
-		return int(v)
-	case string:
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			fmt.Printf("failed to convert string to int: %v", err)
-			return 0
-		}
-		return i
-	case float64:
-		return int(v)
-	case json.Number:
-		// Try int64 first
-		if i, err := v.Int64(); err == nil {
-			return int(i)
-		}
-		if f, err := v.Float64(); err == nil {
-			return int(f)
-		}
-
-	}
-	return 0
-}
-
-// ToString remove all types of value to strings for comparison.
-func ToString(val interface{}) string {
-	switch v := val.(type) {
-	case int:
-		return strconv.Itoa(v)
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
-	case int64:
-		return strconv.FormatInt(v, 10)
-	case int32:
-		return strconv.FormatInt(int64(v), 10)
-	case string:
-		return v
-	}
-	return ""
-}
-
-func ToFloat(value interface{}) float64 {
-	switch v := value.(type) {
-	case float64:
-		return v
-	case string:
-		f, err := strconv.ParseFloat(v, 64)
-		if err != nil {
-			fmt.Printf("failed to convert string to float: %v", err)
-			return 0
-		}
-		return f
-	case int:
-		return float64(v)
-	}
-	return 0
-}
-
 // Keys returns an array containing the keys of the given map.
 func Keys(m map[string][]string) []string {
 	keys := make([]string, 0, len(m))
@@ -992,6 +919,78 @@ type CmdError struct {
 
 // InterruptProcessTree interrupts an entire process tree using the given signal
 func InterruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal) error {
+	_, _, err := interruptProcessTree(logger, ppid, sig, nil, false, nil)
+	return err
+}
+
+// InterruptProcessTreeKilled is InterruptProcessTree, and says why it had to
+// kill, "" when it did not: a process group's leader had not exited
+// TreeInterruptGrace after sig, and the group was sent SIGKILL; or, on
+// Windows, the tree had not exited windowsInterruptGrace after its
+// CTRL_BREAK, and was force-killed (taskkill /F). A stop that could not tell
+// that the tree had exited without a kill says so too: one whose signal could
+// not be sent, whose force-kill failed, or whose state it could not read. As
+// InterruptProcessTree, it waits for each group's leader, not for the rest of
+// the group.
+func InterruptProcessTreeKilled(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, err error) {
+	killed, _, err = interruptProcessTree(logger, ppid, sig, nil, false, nil)
+	return killed, err
+}
+
+// Reached is a process that a signal sent to its process group reached: its
+// pid and its start time (in clock ticks after boot, as /proc/<pid>/stat
+// gives it), which together name it while it runs, and whether it ignored
+// the signal when the signal was sent.
+type Reached struct {
+	PID     int
+	Start   uint64
+	Ignores bool
+}
+
+// InterruptProcessTreeReached is InterruptProcessTreeKilled, and also says
+// which processes its signals reached: each process of a group it signalled,
+// as /proc showed that group just before its signal, and whether the process
+// ignored the signal then. A process the group gained as /proc was read is
+// not among them. Off Linux it says none.
+func InterruptProcessTreeReached(logger *zap.Logger, ppid int, sig syscall.Signal) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached, false, nil)
+}
+
+// InterruptProcessTreeStop is InterruptProcessTreeReached for a stop that
+// waits on the app's exit, not for a number of seconds (a test set's end, a
+// recording's end, under the proven switch): it waits for each group's
+// leader to exit, on its exit event (Linux, stop_events_linux.go), and kills
+// a group only when it made no progress on its way out for StopStallBudget
+// of the time both it and keploy could run (ExitClock). A starved group,
+// whether the host is or only the group is, takes as long as it takes.
+// Elsewhere it is InterruptProcessTreeReached, with its grace.
+//
+// Each step a group takes on its way out is a movement of moved, the
+// teardown scope of the run whose app it stops (nil: none).
+func InterruptProcessTreeStop(logger *zap.Logger, ppid int, sig syscall.Signal, moved *TeardownScope) (killed string, reached []Reached, err error) {
+	return interruptProcessTree(logger, ppid, sig, groupReached, true, moved)
+}
+
+// groupStopByEvents, where it is set (Linux), is how InterruptProcessTreeStop
+// waits for a group it signalled: until its leader exits, while its members
+// (as the signal reached them) make progress. It kills the group on a stall,
+// or at the user's Ctrl+C, and says why ("" when it did not kill).
+// Each step the group takes on its way out is a movement of moved.
+var groupStopByEvents func(logger *zap.Logger, leader int, members []Reached, moved *TeardownScope) (killed string)
+
+// TreeInterruptGrace is how long InterruptProcessTree waits for each process
+// group of the tree to exit after its signal before it sends SIGKILL.
+const TreeInterruptGrace = 3 * time.Second
+
+// windowsInterruptGrace is how long InterruptProcessTree waits on Windows for
+// the tree to exit after its CTRL_BREAK before it ends it with taskkill.
+const windowsInterruptGrace = 10 * time.Second
+
+// interruptProcessTree is the work of the four above. snapshot, when set,
+// reads which processes a group's signal is about to reach; byEvents (with
+// snapshot) has it wait for each group on its exit event, under the stall
+// rule, rather than for TreeInterruptGrace.
+func interruptProcessTree(logger *zap.Logger, ppid int, sig syscall.Signal, snapshot func(pgid int, sig syscall.Signal) []Reached, byEvents bool, moved *TeardownScope) (killed string, reached []Reached, err error) {
 	// Windows: /proc and process group semantics don't exist. Prefer console ctrl events, fallback to taskkill.
 	if runtime.GOOS == "windows" {
 		logger.Debug("Interrupting process tree on windows", zap.Int("pid", ppid), zap.String("signal", sig.String()))
@@ -1015,17 +1014,22 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 		}
 
 		// Prefer a console Ctrl+Break event so the app can exit cleanly.
+		// why is what a kill from here on is said with.
+		why := fmt.Sprintf("it had not exited %s after keploy's CTRL_BREAK (the grace keploy's stop gives it on Windows), so keploy killed it", windowsInterruptGrace)
 		if sig == syscall.SIGINT {
 			if err := SendSignal(logger, -ppid, sig); err == nil {
-				if err := waitForProcessExit(ppid, 10*time.Second, logger); err != nil {
+				if err := waitForProcessExit(ppid, windowsInterruptGrace, logger); err != nil {
 					logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 				}
 				if running, err := isProcessRunning(ppid); err == nil && !running {
-					return nil
+					return "", nil, nil
 				}
 			} else {
 				logger.Debug("failed to send console ctrl event", zap.Int("pid", ppid), zap.Error(err))
+				why = fmt.Sprintf("keploy could not send it a CTRL_BREAK (%v), so keploy killed it", err)
 			}
+		} else {
+			why = fmt.Sprintf("keploy cannot send %s on Windows, so keploy killed it", sig)
 		}
 
 		// Try graceful taskkill as a fallback (without /F).
@@ -1036,13 +1040,21 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name, Com
 			logger.Debug("taskkill graceful succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
 		}
 
-		// Force kill as the last resort if the process tree is still alive.
-		if running, err := isProcessRunning(ppid); err != nil {
+		// Force kill as the last resort if the process tree is still alive,
+		// or its state cannot be read: either way the stop says it killed,
+		// as it cannot tell that the tree exited on its own. So does a force
+		// kill that failed.
+		running, err := isProcessRunning(ppid)
+		if err != nil {
 			logger.Debug("failed to check process state after graceful taskkill", zap.Int("pid", ppid), zap.Error(err))
-		} else if running {
+			why = fmt.Sprintf("%s; and keploy could not read whether it had exited (%v)", strings.TrimSuffix(why, ", so keploy killed it"), err) + ", so keploy killed it"
+		}
+		if running || err != nil {
+			killed = why
 			forcedCmd := exec.Command("taskkill", "/PID", strconv.Itoa(ppid), "/T", "/F")
-			if output, err := forcedCmd.CombinedOutput(); err != nil {
-				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(err), zap.String("output", string(output)))
+			if output, ferr := forcedCmd.CombinedOutput(); ferr != nil {
+				logger.Error("taskkill forced failed", zap.Int("pid", ppid), zap.Error(ferr), zap.String("output", string(output)))
+				killed = fmt.Sprintf("%s, and its taskkill /F failed (%v)", why, ferr)
 			} else {
 				logger.Debug("taskkill forced succeeded", zap.Int("pid", ppid), zap.String("output", string(output)))
 			}
@@ -1068,38 +1080,65 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 		if err := waitForProcessExit(ppid, 3*time.Second, logger); err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", ppid), zap.Error(err))
 		}
-		return nil
+		return killed, nil, nil
 	}
 
 	// Non-windows (existing logic)
 	logger.Debug("Interrupting process tree", zap.Int("pid", ppid), zap.String("signal", sig.String()))
 
-	children, groupOf, err := findChildPIDs(ppid)
+	var uniqueProcess []int
+	children, groupOf, err := processTree(ppid)
 	if err != nil {
-		return err
-	}
+		// The tree cannot be read: its leader's own group (keploy starts
+		// the app in a group of its own) is still interrupted, waited for
+		// and, if need be, killed, as below. Returning here sent no signal
+		// at all, and the app was killed when the command's WaitDelay ran
+		// out, unsaid. A process of the tree in a group of its own is then
+		// not interrupted.
+		logger.Warn("keploy could not read the application's process tree; it interrupts the application's own process group only",
+			zap.Int("pid", ppid), zap.Error(err))
+		uniqueProcess = []int{ppid}
+	} else {
+		children = append(children, ppid)
 
-	children = append(children, ppid)
+		logger.Debug("Found child PIDs", zap.Ints("children", children))
 
-	logger.Debug("Found child PIDs", zap.Ints("children", children))
-
-	uniqueProcess, err := uniqueProcessGroups(children, groupOf)
-	if err != nil {
-		logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
-		uniqueProcess = children
+		uniqueProcess, err = uniqueProcessGroups(children, groupOf)
+		if err != nil {
+			logger.Error("failed to find unique process groups", zap.Int("pid", ppid), zap.Error(err))
+			uniqueProcess = children
+		}
 	}
 
 	logger.Debug("Unique process groups", zap.Ints("uniqueProcess", uniqueProcess))
 
 	// Send signal to interrupt each process and wait for them to exit one by one
 	for _, pid := range uniqueProcess {
-		err := SendSignal(logger, -pid, sig)
+		var members []Reached
+		if snapshot != nil {
+			members = snapshot(pid, sig)
+		}
+		err := signalGroup(logger, -pid, sig)
 		if err != nil {
 			logger.Error("error sending signal to the process group id", zap.Int("pgid", pid), zap.Error(err))
+			// The group was not asked to stop: what ends it now (the
+			// command's WaitDelay kills it) is no exit of its own.
+			if killed == "" {
+				killed = fmt.Sprintf("its process group %d could not be signalled (%v), so keploy could not let it stop on its own", pid, err)
+			}
+			continue
+		}
+		reached = append(reached, members...)
+		// A stop that waits on the app's exit kills only a group that
+		// stopped making progress on its way out.
+		if byEvents && snapshot != nil && groupStopByEvents != nil {
+			if why := groupStopByEvents(logger, pid, members, moved); why != "" && killed == "" {
+				killed = why
+			}
 			continue
 		}
 		// Wait for this particular process to exit with a timeout of 3 seconds
-		err = waitForProcessExit(pid, 3*time.Second, logger)
+		err = waitForProcessExit(pid, TreeInterruptGrace, logger)
 		if err != nil {
 			logger.Error("error waiting for process to exit", zap.Int("pid", pid), zap.Error(err))
 		}
@@ -1111,6 +1150,9 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			logger.Debug("could not verify process state after graceful signal", zap.Int("pid", pid), zap.Error(rerr))
 		} else if running {
 			logger.Debug("process still alive after graceful signal; escalating to SIGKILL", zap.Int("pgid", pid))
+			if killed == "" {
+				killed = fmt.Sprintf("a process of it had not exited %s later (the grace keploy's stop gives each of its process groups), so keploy killed it", TreeInterruptGrace)
+			}
 			if killErr := SendSignal(logger, -pid, syscall.SIGKILL); killErr != nil {
 				logger.Error("error sending SIGKILL to the process group id", zap.Int("pgid", pid), zap.Error(killErr))
 			} else {
@@ -1118,8 +1160,15 @@ Get-ChildProcesses $parent | Select-Object ProcessId, ParentProcessId, Name | Fo
 			}
 		}
 	}
-	return nil
+	return killed, reached, nil
 }
+
+// processTree and signalGroup are the tree interrupt's reads of the process
+// tree and its signals to a process group; a test fails them.
+var (
+	processTree = findChildPIDs
+	signalGroup = SendSignal
+)
 
 // waitForProcessExit waits for the process to exit or times out after the specified duration
 func waitForProcessExit(pid int, timeout time.Duration, logger *zap.Logger) error {
@@ -1686,90 +1735,6 @@ func ParseMetadata(metadataStr string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("cannot parse metadata: %w", err)
 	}
 	return m, nil
-}
-
-// RenderTemplatesInString finds all template placeholders (e.g., {{.name}} or {{string .name}}) in a string,
-// executes them with the provided data, and replaces them with the result.
-// It is robust against strings that contain non-template curly braces by using a strict regex.
-func RenderTemplatesInString(logger *zap.Logger, input string, templateData map[string]interface{}) (string, error) {
-	// This regex is specifically designed to match valid Keploy templates:
-	// - It must start with {{ and optional whitespace.
-	// - It can optionally have a function call ("string", "int", "float") followed by whitespace.
-	// - It MUST contain a dot (.) to indicate a field access.
-	// - It non-greedily matches characters until the closing braces.
-	// This prevents it from matching invalid syntax like {{u^2}}.
-	re := regexp.MustCompile(`\{\{\s*(?:string\s+|int\s+|float\s+)?\.[^{}]*?\}\}`)
-
-	funcMap := template.FuncMap{
-		"int":    ToInt,
-		"string": ToString,
-		"float":  ToFloat,
-	}
-
-	var firstErr error
-
-	// Check if the entire input string is a single template placeholder.
-	// This is more efficient than using MatchString and FindString separately.
-	matchIndexes := re.FindStringIndex(input)
-	isExactPlaceholderMatch := matchIndexes != nil && matchIndexes[0] == 0 && matchIndexes[1] == len(input)
-
-	result := re.ReplaceAllStringFunc(input, func(match string) string {
-		// Only parse and execute the matched placeholder, not the entire string.
-		tmpl, err := template.New("sub").Funcs(funcMap).Parse(match)
-		if err != nil {
-
-			logger.Debug("failed to parse a valid-looking template placeholder", zap.String("placeholder", match), zap.Error(err))
-			return match
-		}
-
-		var output bytes.Buffer
-		err = tmpl.Execute(&output, templateData)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("failed to execute template placeholder '%s': %v", match, err)
-			}
-			return match
-		}
-
-		if isExactPlaceholderMatch {
-			return output.String()
-		}
-
-		// Ensure the placeholder result is safe to embed inside JSON strings by
-		// escaping control characters like newlines, quotes, and backslashes.
-		// This prevents errors such as `invalid character '\n' in string literal`
-		// when we later json.Unmarshal the rendered testcase.
-		return jsonEscapeString(logger, output.String())
-	})
-
-	return result, firstErr
-}
-
-// jsonEscapeString returns a JSON-safe representation of s suitable for
-// embedding directly inside a JSON string literal. It escapes characters
-// that must not appear unescaped in JSON strings (newlines, quotes, etc.)
-// but does not add surrounding quotes.
-func jsonEscapeString(logger *zap.Logger, s string) string {
-	if s == "" {
-		return ""
-	}
-	b, err := json.Marshal(s)
-	// json.Marshal on a string should rarely fail, but if it does, log it
-	// and return the original string to avoid breaking the flow.
-	if err != nil {
-		LogError(logger, err, "failed to marshal string for JSON escaping, returning original unescaped string", zap.String("string", s))
-		return s
-	}
-
-	// The result of marshaling a string is a JSON string literal, which includes
-	// surrounding quotes. We need to strip them.
-	if len(b) < 2 || b[0] != '"' || b[len(b)-1] != '"' {
-		// This case is highly unlikely if json.Marshal succeeded without error.
-		LogError(logger, fmt.Errorf("json.Marshal returned unexpected format: %s", string(b)), "unexpected output from json.Marshal for a string", zap.String("string", s))
-		return s
-	}
-	// Strip the surrounding quotes added by json.Marshal.
-	return string(b[1 : len(b)-1])
 }
 
 // // XMLToMap converts an XML string into a map[string]interface{}

@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 const (
@@ -59,21 +61,46 @@ func correlationMock(recorded string, withCorrelation bool) *models.Mock {
 
 // TestMatch_CorrelationHonorsLiveValue: a correlated mock matches a live request
 // that carries a NEW uuid, and the served response echoes the NEW uuid, not the
-// recorded one.
+// recorded one. With the proven switch off: under it, no value is honored for
+// what it looks like (an echo is a variable of its call, written by the learn
+// step), so the live uuid is never rendered from the shape-detected
+// correlation. Each case sets the switch: left to the environment, the
+// switch-on run failed the switch-off expectation.
 func TestMatch_CorrelationHonorsLiveValue(t *testing.T) {
-	h := newHTTP()
-	db := &mockMemDb{mocks: []*models.Mock{correlationMock(recUUID, true)}, updateUnFilteredReturn: true}
-	live := jsonReq("POST", "/pay", `{"amount":10,"idempotencyKey":"`+newUUID+`"}`)
+	for _, proven := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			setProven(t, proven)
+			h := newHTTP()
+			db := &mockMemDb{mocks: []*models.Mock{correlationMock(recUUID, true)}, updateUnFilteredReturn: true}
+			live := jsonReq("POST", "/pay", `{"amount":10,"idempotencyKey":"`+newUUID+`"}`)
 
-	ok, stub, _, err := h.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
-	if err != nil || !ok || stub == nil {
-		t.Fatalf("correlated mock should match a new-uuid request: ok=%v stub=%v err=%v", ok, stub, err)
+			ok, stub, _, err := h.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+			if proven {
+				if err == nil && ok && stub != nil && strings.Contains(stub.Spec.HTTPResp.Body, newUUID) {
+					t.Fatalf("under the switch a shape-detected correlation must not render the live uuid; got %q", stub.Spec.HTTPResp.Body)
+				}
+				return
+			}
+			if err != nil || !ok || stub == nil {
+				t.Fatalf("correlated mock should match a new-uuid request: ok=%v stub=%v err=%v", ok, stub, err)
+			}
+			if !strings.Contains(stub.Spec.HTTPResp.Body, newUUID) {
+				t.Fatalf("served response must carry the LIVE uuid %q; got %q", newUUID, stub.Spec.HTTPResp.Body)
+			}
+			if strings.Contains(stub.Spec.HTTPResp.Body, recUUID) {
+				t.Fatalf("served response must NOT carry the recorded uuid %q; got %q", recUUID, stub.Spec.HTTPResp.Body)
+			}
+		})
 	}
-	if !strings.Contains(stub.Spec.HTTPResp.Body, newUUID) {
-		t.Fatalf("served response must carry the LIVE uuid %q; got %q", newUUID, stub.Spec.HTTPResp.Body)
-	}
-	if strings.Contains(stub.Spec.HTTPResp.Body, recUUID) {
-		t.Fatalf("served response must NOT carry the recorded uuid %q; got %q", recUUID, stub.Spec.HTTPResp.Body)
+}
+
+// setProven sets the proven switch for one test case.
+func setProven(t *testing.T, on bool) {
+	t.Helper()
+	if on {
+		t.Setenv(provenswitch.Env, "1")
+	} else {
+		t.Setenv(provenswitch.Env, "")
 	}
 }
 
@@ -97,20 +124,37 @@ func TestMatch_CorrelationDisabledServesStale(t *testing.T) {
 
 // TestMatch_DetectThenHonor: a mock with only raw bodies (no correlation
 // annotation) is run through the replay-ingest detector (MaterializeCorrelations),
-// then honored — tying the detector to the matcher end-to-end.
+// then honored — tying the detector to the matcher end-to-end. With the proven
+// switch off; under it nothing is detected, so nothing live is rendered.
 func TestMatch_DetectThenHonor(t *testing.T) {
-	h := newHTTP()
-	m := correlationMock(recUUID, false) // no Correlations annotation
-	mocknoise.MaterializeCorrelations(m) // the replay-ingest step populates it
-	db := &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}
-	live := jsonReq("POST", "/pay", `{"amount":10,"idempotencyKey":"`+newUUID+`"}`)
+	for _, proven := range []bool{false, true} {
+		t.Run(fmt.Sprintf("proven=%v", proven), func(t *testing.T) {
+			setProven(t, proven)
+			h := newHTTP()
+			m := correlationMock(recUUID, false) // no Correlations annotation
+			mocknoise.MaterializeCorrelations(m) // the replay-ingest step populates it
+			if proven {
+				if len(m.Spec.Correlations) != 0 {
+					t.Fatalf("a correlation was detected under the switch: %+v", m.Spec.Correlations)
+				}
+			}
+			db := &mockMemDb{mocks: []*models.Mock{m}, updateUnFilteredReturn: true}
+			live := jsonReq("POST", "/pay", `{"amount":10,"idempotencyKey":"`+newUUID+`"}`)
 
-	ok, stub, _, err := h.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
-	if err != nil || !ok || stub == nil {
-		t.Fatalf("detect+honor should match: ok=%v stub=%v err=%v", ok, stub, err)
-	}
-	if !strings.Contains(stub.Spec.HTTPResp.Body, newUUID) || strings.Contains(stub.Spec.HTTPResp.Body, recUUID) {
-		t.Fatalf("detect+honor must render the live uuid; got %q", stub.Spec.HTTPResp.Body)
+			ok, stub, _, err := h.match(context.Background(), live, db, nil, nil, nil, true, false, false, true, true)
+			if proven {
+				if err == nil && ok && stub != nil && strings.Contains(stub.Spec.HTTPResp.Body, newUUID) {
+					t.Fatalf("under the switch nothing detected may render the live uuid; got %q", stub.Spec.HTTPResp.Body)
+				}
+				return
+			}
+			if err != nil || !ok || stub == nil {
+				t.Fatalf("detect+honor should match: ok=%v stub=%v err=%v", ok, stub, err)
+			}
+			if !strings.Contains(stub.Spec.HTTPResp.Body, newUUID) || strings.Contains(stub.Spec.HTTPResp.Body, recUUID) {
+				t.Fatalf("detect+honor must render the live uuid; got %q", stub.Spec.HTTPResp.Body)
+			}
+		})
 	}
 }
 

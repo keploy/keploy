@@ -16,16 +16,21 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
+// mismatchLogFields is the fields of the one mock-mismatch line a miss logs.
+// Its level is the proven switch's to decide (a WARN with the switch off; at
+// Debug under it, where keploy's verdict names each miss): its fields are the
+// same either way, so the line is found by its message, at any level, whatever
+// switch the test runs under.
 func mismatchLogFields(t *testing.T, report *models.MockMismatchReport) map[string]any {
 	t.Helper()
-	core, logs := observer.New(zap.WarnLevel)
+	core, logs := observer.New(zap.DebugLevel)
 	p := &Proxy{logger: zap.New(core), errChannel: make(chan error, 4)}
 
 	p.sendMockNotFoundError(models.NewMockMismatchError(models.ErrNoMockMatched, report))
 
-	entries := logs.All()
+	entries := logs.FilterMessageSnippet("mock mismatch: no matching mock for outgoing call").All()
 	if len(entries) != 1 {
-		t.Fatalf("expected exactly one mismatch log entry, got %d", len(entries))
+		t.Fatalf("expected exactly one mismatch log entry, got %d: %v", len(entries), logs.All())
 	}
 	return entries[0].ContextMap()
 }

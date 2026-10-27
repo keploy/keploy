@@ -184,11 +184,55 @@ func TestShouldPrune_WiresTheGuardIntoTheDecision(t *testing.T) {
 			why: "without instrumentation there is no trustworthy consumed-mock set at all",
 		},
 		{
+			name: "a capture-incomplete run never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureIncomplete = true }),
+			reason: "capture_incomplete",
+			why: "a process the agent could not track made its calls to the real dependency, so the mocks " +
+				"recorded for them look unused although every test passed",
+		},
+		{
+			name: "a capture-unverified run never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureUnverified = true }),
+			reason: "capture_unverified",
+			why: "the agent counts processes it could not track, but the count could not be read, so nothing " +
+				"shows the consumed-mock set is complete",
+		},
+		{
+			name: "a stopped run whose count was lost names the stop, not the lost count", removeUnusedMocks: true, instrument: true,
+			run: with(complete(3, 0, healthy), func(r *pruneRun) {
+				r.allTestsGotAVerdict, r.captureUnverified, r.noAnswer = false, true, true
+			}),
+			reason: "not_every_test_got_a_verdict",
+			why: "an agent stopped mid-run loses its count too; an unread count is no evidence of a loss, so the " +
+				"rules that name what did go wrong (the stop, a request with no answer) keep their names",
+		},
+		{
+			name: "a request with no answer is named ahead of a lost count", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.captureUnverified, r.noAnswer = true, true }),
+			reason: "no_answer",
+			why:    "an unread count is the weakest evidence; the request that got no answer is what happened",
+		},
+		{
+			name: "a capture-incomplete run is named ahead of the stop", removeUnusedMocks: true, instrument: true,
+			run: with(complete(3, 0, healthy), func(r *pruneRun) {
+				r.captureIncomplete, r.allTestsGotAVerdict = true, false
+			}),
+			reason: "capture_incomplete",
+			why:    "a refused process is positive evidence that calls went live; it outranks every other reason",
+		},
+		{
 			name: "a run that did not score every test never prunes", removeUnusedMocks: true, instrument: true,
 			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.allTestsGotAVerdict = false }),
 			reason: "not_every_test_got_a_verdict",
 			why: "the tests the run never scored consumed nothing, and without mappings.yaml nothing " +
 				"else keeps their mocks out of the delete",
+		},
+		{
+			name: "a run with a test not judged for a stale mapping never prunes", removeUnusedMocks: true, instrument: true,
+			run:    with(complete(3, 0, healthy), func(r *pruneRun) { r.mappingStale = true; r.internalErr = true }),
+			reason: "mapping_stale",
+			why: "a wrong answer whose calls diverged from its mapping is no verdict: the mapped mock it left " +
+				"unconsumed may be what a re-record shows it still needs",
 		},
 		{
 			name: "an INTERNAL_ERR run never prunes", removeUnusedMocks: true, instrument: true,

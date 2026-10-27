@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/token"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/engine"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -71,6 +72,33 @@ func buildUpstreamTLSFlags(opts models.SetupOptions) (string, error) {
 	}
 
 	return flags + " --upstream-tls-ca-cert=" + shellQuote(opts.UpstreamTLSCACert), nil
+}
+
+// windowsCmdOperators are the characters cmd.exe acts on in the windows
+// docker alias, which the windows runner (util_windows.go) splits on spaces
+// and runs through cmd.exe with no quoting layer any escaping would survive:
+// & and | end the docker command and start another, < and > redirect it, ^
+// escapes the next character, % expands a variable, and a line break ends the
+// command. A value holding one would run as cmd.exe syntax.
+const windowsCmdOperators = "&|<>^%\r\n"
+
+// aliasWord renders s, a value the agent is handed as one argument (what
+// names it in an error), as one word of the docker alias, so it reaches the
+// agent as it was given whatever it holds: a space, a quote, JSON, a $ or a
+// backtick. Elsewhere than windows it is quoted for the shell the alias runs
+// through (shellQuote), so none of it runs as shell code. On windows it goes
+// in as it is, and a value holding one of windowsCmdOperators is refused: it
+// would run as cmd.exe syntax. (The runner's split on spaces still splits a
+// value with a space there, as it always has: only a runner that hands docker
+// its arguments as a list, with no cmd.exe, ends that.)
+func aliasWord(what, s string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return shellQuote(s), nil
+	}
+	if strings.ContainsAny(s, windowsCmdOperators) {
+		return "", fmt.Errorf("%s %q cannot be forwarded to the keploy agent container on windows: the docker alias is run by cmd.exe, which would act on its %q", what, s, windowsCmdOperators)
+	}
+	return s, nil
 }
 
 func GenerateDockerEnvs(config DockerConfigStruct) string {
@@ -258,6 +286,15 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		}
 	}
 
+	// The app's own host entries, and host.docker.internal at host-gateway:
+	// the app joins this container's network namespace and reads its
+	// /etc/hosts (extra_hosts.go).
+	appHostsStr, err := agentHostFlags(opts.AppExtraHosts, opts.HostGateway)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
+
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
 	agentMemoryLimitFlag := ""
 	if opts.MemoryLimit > 0 {
@@ -307,7 +344,30 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 
 	Volumes = Volumes + tlsVolumeMount
 
-	extraArgs := opts.ExtraArgs
+	// The agent's config path and its own arguments a caller hands it
+	// (ExtraArgs: the enterprise startup hook's, JSON among them), each one
+	// word of the alias as it was given (aliasWord). Every arm appends both
+	// (TestGetAlias_EveryPlatformBranchHandsTheAgentItsArgumentsAsWords).
+	configPathFlag := ""
+	if opts.ConfigPath != "" && opts.ConfigPath != "." {
+		if w, err := aliasWord("the config path", opts.ConfigPath); err == nil {
+			configPathFlag = " --config-path " + w
+		} else {
+			// The agent container reads no file at a host path (no arm
+			// mounts the project), so leaving it out changes nothing the
+			// agent does, where refusing would stop the run.
+			logger.Debug("not handing the keploy agent container the config path, which cmd.exe would act on", zap.String("configPath", opts.ConfigPath), zap.Error(err))
+		}
+	}
+	extraArgWords := ""
+	for _, a := range opts.ExtraArgs {
+		w, err := aliasWord("the keploy agent argument", a)
+		if err != nil {
+			utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+			return "", err
+		}
+		extraArgWords += " " + w
+	}
 	// Skip publishing the proxy port when it's zero. Docker rejects
 	// `-p 0:0` outright, so a caller that intentionally sets
 	// ProxyPort=0 (e.g. to run the agent without a listening proxy
@@ -325,12 +385,12 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 	switch osName {
 	case "linux":
 
-		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := linuxDockerClient(os.Geteuid() == 0, passToken) + " container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -372,18 +432,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if debug {
 			alias += " --debug"
 		}
-		if opts.ConfigPath != "" && opts.ConfigPath != "." {
-			alias += " --config-path " + opts.ConfigPath
-		}
+		alias += configPathFlag
 		if opts.Synchronous {
 			alias += " --sync"
 		}
 		if opts.EnableSampling > 0 {
 			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
-		if len(extraArgs) > 0 {
-			alias += " " + strings.Join(extraArgs, " ")
-		}
+		alias += extraArgWords
 		return alias, nil
 	case "windows":
 
@@ -404,13 +460,13 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
 			// return alias, nil
 
-			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 				agentPortPublish(opts.AgentPort) +
 				proxyPortStr + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -453,30 +509,26 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if debug {
 				alias += " --debug"
 			}
-			if opts.ConfigPath != "" && opts.ConfigPath != "." {
-				alias += " --config-path " + opts.ConfigPath
-			}
+			alias += configPathFlag
 			if opts.Synchronous {
 				alias += " --sync"
 			}
 			if opts.EnableSampling > 0 {
 				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 			}
-			if len(extraArgs) > 0 {
-				alias += " " + strings.Join(extraArgs, " ")
-			}
+			alias += extraArgWords
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
 		// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + pwd + ":" + dpwd + " -w " + dpwd + " -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("USERPROFILE") + "\\.keploy-config:/root/.keploy-config -v " + os.Getenv("USERPROFILE") + "\\.keploy:/root/.keploy --rm " + img
-		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -519,18 +571,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if debug {
 			alias += " --debug"
 		}
-		if opts.ConfigPath != "" && opts.ConfigPath != "." {
-			alias += " --config-path " + opts.ConfigPath
-		}
+		alias += configPathFlag
 		if opts.Synchronous {
 			alias += " --sync"
 		}
 		if opts.EnableSampling > 0 {
 			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
-		if len(extraArgs) > 0 {
-			alias += " " + strings.Join(extraArgs, " ")
-		}
+		alias += extraArgWords
 		return alias, nil
 
 	case "darwin":
@@ -551,13 +599,13 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			// alias := "docker container run --name keploy-v2 " + envs + "-e BINARY_TO_DOCKER=true -p 36789:36789 -p 8096:8096 --privileged --pid=host" + "-v " + os.Getenv("PWD") + ":" + os.Getenv("PWD") + " -w " + os.Getenv("PWD") + " -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf -v /var/run/docker.sock:/var/run/docker.sock -v " + os.Getenv("HOME") + "/.keploy-config:/root/.keploy-config -v " + os.Getenv("HOME") + "/.keploy:/root/.keploy --rm " + img
 			// return alias, nil
 			logger.Info("Starting keploy in docker with colima context, as that is the current context.")
-			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+			alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 				agentPortPublish(opts.AgentPort) +
 				proxyPortStr + appPortsStr +
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -600,29 +648,25 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			if debug {
 				alias += " --debug"
 			}
-			if opts.ConfigPath != "" && opts.ConfigPath != "." {
-				alias += " --config-path " + opts.ConfigPath
-			}
+			alias += configPathFlag
 			if opts.Synchronous {
 				alias += " --sync"
 			}
 			if opts.EnableSampling > 0 {
 				alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 			}
-			if len(extraArgs) > 0 {
-				alias += " " + strings.Join(extraArgs, " ")
-			}
+			alias += extraArgWords
 			return alias, nil
 		}
 		// if default docker context is used
 		logger.Info("Starting keploy in docker with default context, as that is the current context.")
-		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
+		alias := "docker container run --name " + opts.KeployContainer + appNetworkStr + appHostsStr + " " + envs + "-e BINARY_TO_DOCKER=true" +
 			agentPortPublish(opts.AgentPort) +
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts)
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -665,18 +709,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		if debug {
 			alias += " --debug"
 		}
-		if opts.ConfigPath != "" && opts.ConfigPath != "." {
-			alias += " --config-path " + opts.ConfigPath
-		}
+		alias += configPathFlag
 		if opts.Synchronous {
 			alias += " --sync"
 		}
 		if opts.EnableSampling > 0 {
 			alias += fmt.Sprintf(" --enable-sampling=%d", opts.EnableSampling)
 		}
-		if len(extraArgs) > 0 {
-			alias += " " + strings.Join(extraArgs, " ")
-		}
+		alias += extraArgWords
 		return alias, nil
 	}
 	return "", errors.New("failed to get alias")
@@ -717,6 +757,39 @@ func ParseDockerCmd(cmd string, kind utils.CmdType, idc Client) (string, string,
 	}
 
 	return containerName, networkName, nil
+}
+
+// clientPIDNSSuffix says, beside --client-pid, the pid namespace that pid is
+// this CLI's in (utils.OwnPIDNamespace: digits, a boot id's hex and dashes,
+// or "none", so nothing to quote). The agent container runs in a pid
+// namespace of its own, so it never takes the pid for a process of its own
+// (utils.ClientPIDHere).
+func clientPIDNSSuffix() string {
+	if ns := utils.OwnPIDNamespace(); ns != "" {
+		return " --client-pid-ns " + ns
+	}
+	return ""
+}
+
+// provenSuffix carries the proven model's staging switch into the agent
+// container, which is not given KEPLOY_PROVEN: " --proven" when the switch is
+// on, "" otherwise, so the alias is byte-identical to before with it off.
+func provenSuffix() string {
+	args := provenswitch.AgentArgs()
+	if len(args) == 0 {
+		return ""
+	}
+	return " " + strings.Join(args, " ")
+}
+
+// settleReadsSuffix returns " --settle-reads" for a run that learns noise
+// (models.SetupOptions.SettleReads), "" otherwise, so the alias is
+// byte-identical to before for every other run.
+func settleReadsSuffix(opts models.SetupOptions) string {
+	if !opts.SettleReads {
+		return ""
+	}
+	return " --settle-reads"
 }
 
 // mockModeSuffix returns " --mock-mode" when the session is a `keploy mock`

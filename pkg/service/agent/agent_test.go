@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -141,6 +142,27 @@ func TestHookAnswersDNSWithWhereTheHooksReachTheProxy(t *testing.T) {
 	}
 }
 
+// The agent's teardown records each of its stages as a step of its progress
+// (utils.TeardownStep), which the CLI that stopped it reads: a teardown that
+// records none is taken for one that has stopped making progress, and killed.
+func TestHookTeardownRecordsItsStages(t *testing.T) {
+	a := &Agent{logger: zap.NewNop(), Hooks: loadedHooks{}, Proxy: &startedProxy{}, config: &config.Config{}}
+	grp, ctx := errgroup.WithContext(context.Background())
+	ctx, cancel := context.WithCancel(context.WithValue(ctx, models.ErrGroupKey, grp))
+	if err := a.Hook(ctx, models.HookOptions{Mode: models.MODE_TEST}); err != nil {
+		cancel()
+		t.Fatalf("the agent did not start: %v", err)
+	}
+	before := utils.TeardownSteps()
+	cancel()
+	if err := grp.Wait(); err != nil {
+		t.Fatalf("the teardown failed: %v", err)
+	}
+	if steps := utils.TeardownSteps() - before; steps < 3 {
+		t.Fatalf("the teardown recorded %d steps, want one as it begins and one after each of the proxy and the hooks", steps)
+	}
+}
+
 // captureProxy can begin a test's capture window; continuingProxy can also
 // continue one.
 type captureProxy struct {
@@ -153,6 +175,7 @@ func (p captureProxy) BeginTestErrorCapture() { *p.opened = append(*p.opened, "b
 type continuingProxy struct{ captureProxy }
 
 func (p continuingProxy) ContinueTestErrorCapture() { *p.opened = append(*p.opened, "continue") }
+func (p continuingProxy) WithdrawTestErrorCapture() { *p.opened = append(*p.opened, "withdraw") }
 
 // ContinueTestErrorCapture continues the proxy's capture, and opens the window
 // as Begin does on a proxy that predates continue.
@@ -166,5 +189,114 @@ func TestContinueTestErrorCaptureFallsBackToBegin(t *testing.T) {
 	a = &Agent{logger: zap.NewNop(), Proxy: captureProxy{opened: &opened}}
 	if err := a.ContinueTestErrorCapture(context.Background()); err != nil || len(opened) != 1 || opened[0] != "begin" {
 		t.Fatalf("older proxy: err %v, opened %v; want [begin]", err, opened)
+	}
+}
+
+// stoppingIngress is an IncomingProxy that can be told the recording it serves
+// is stopping (the ingress manager's SetStopping).
+type stoppingIngress struct {
+	tc       chan *models.TestCase
+	stopping atomic.Bool
+}
+
+func (s *stoppingIngress) Start(context.Context, models.IncomingOptions) chan *models.TestCase {
+	return s.tc
+}
+func (s *stoppingIngress) SetStopping(v bool) { s.stopping.Store(v) }
+
+// gracefulProxy is a Proxy whose graceful shutdown does nothing more.
+type gracefulProxy struct{ coreAgent.Proxy }
+
+func (gracefulProxy) SetGracefulShutdown(context.Context) error { return nil }
+
+// A recording's graceful shutdown tells the ingress the recording is stopping
+// (its app is stopped on purpose before the agent, so what reaches the
+// ingress then finds no app and is not an ERROR); a recording's incoming
+// stream attaching tells it a recording has begun.
+func TestSetGracefulShutdownTellsTheIngressItIsStopping(t *testing.T) {
+	ing := &stoppingIngress{tc: make(chan *models.TestCase)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := &Agent{logger: zap.NewNop(), Proxy: gracefulProxy{}, IncomingProxy: ing, setupCtx: ctx}
+	// A client that does not stop the app (docker compose, a k8s sidecar's
+	// session): its app goes on running, and a refusal is a real failure.
+	if err := a.SetGracefulShutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ing.stopping.Load() {
+		t.Fatal("a graceful shutdown from a client that does not stop the app told the ingress the app is going")
+	}
+	// One that drains after its stop stops the app it started first.
+	if err := a.SetGracefulShutdown(models.WithDrainsAfterStop(ctx)); err != nil {
+		t.Fatal(err)
+	}
+	if !ing.stopping.Load() {
+		t.Fatal("graceful shutdown did not tell the ingress the recording is stopping")
+	}
+	if _, err := a.StartIncomingProxy(ctx, models.IncomingOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if ing.stopping.Load() {
+		t.Fatal("a recording that began is still taken for one stopping")
+	}
+}
+
+// countingHooks count the inserts into their PID maps the kernel refused, as
+// the Linux hooks do.
+type countingHooks struct {
+	loadedHooks
+	noConns
+	refusals models.PIDMapRefusals
+	err      error
+}
+
+func (h countingHooks) PIDMapRefusals(context.Context) (models.PIDMapRefusals, error) {
+	return h.refusals, h.err
+}
+
+// uncountedHooks are hooks that count no PID-map refusals (other platforms',
+// an older build's) but do count the connections completed to the proxy, so
+// a test's end settles (settle_proven.go) and only the capture-loss check
+// cannot tell.
+type uncountedHooks struct {
+	loadedHooks
+	noConns
+}
+
+// noConns are hooks that count the connections to the proxy
+// (coreAgent.ProxyConnsReporter), and none was made: a test's end settles at
+// once (countHooks counts some).
+type noConns struct{}
+
+func (noConns) MarkProxyListener(syscall.RawConn) error { return nil }
+func (noConns) ProxyConnPair(syscall.RawConn) (coreAgent.ProxyConnPairing, error) {
+	return coreAgent.ProxyConnPairing{}, errors.New("no connection was counted")
+}
+func (noConns) ProxyConnsEstablished(context.Context) (uint64, error) { return 0, nil }
+func (noConns) AppConnsEstablished(context.Context) (uint64, error)   { return 0, nil }
+func (noConns) AppConnsSettled() (uint64, error)                      { return 0, nil }
+func (noConns) WaitAppConnsSettled(context.Context, uint64) error     { return nil }
+
+// The agent answers what its hooks counted. With hooks that do not count
+// (other platforms', an older build's) it answers "unknown": a zero count from
+// it would say that every process was tracked, and pass a session nobody
+// checked.
+func TestPIDMapRefusalsAreTheHooksCountOrUnknown(t *testing.T) {
+	ctx := context.Background()
+	want := models.PIDMapRefusals{Target: 271, LastTargetTGID: 1481467, TargetCapacity: 10240, ExcludedCapacity: 10240}
+	a := &Agent{logger: zap.NewNop(), Hooks: countingHooks{refusals: want}}
+	if got, err := a.PIDMapRefusals(ctx); err != nil || got != want {
+		t.Fatalf("hooks that count: got %+v, %v; want %+v", got, err, want)
+	}
+
+	a = &Agent{logger: zap.NewNop(), Hooks: loadedHooks{}}
+	if got, err := a.PIDMapRefusals(ctx); !errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
+		t.Fatalf("hooks that do not count: got %+v, %v; want ErrPIDMapRefusalsUnsupported", got, err)
+	}
+
+	readFailed := errors.New("read pid_map_insert_failures[target_namespace_pids]: bad file descriptor")
+	a = &Agent{logger: zap.NewNop(), Hooks: countingHooks{err: readFailed}}
+	if _, err := a.PIDMapRefusals(ctx); !errors.Is(err, readFailed) || errors.Is(err, models.ErrPIDMapRefusalsUnsupported) {
+		t.Fatalf("a read that failed: got %v; want that error, not \"unsupported\"", err)
 	}
 }

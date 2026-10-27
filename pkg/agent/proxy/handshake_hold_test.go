@@ -11,6 +11,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/proxy/connseq"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -132,12 +133,7 @@ func TestDecideHandshakeDiscardsWhatItDialledForAnAbandonedHandshake(t *testing.
 // TestDecideHandshakeAnswersAsTheDestinationDid: a destination that refuses
 // makes the application's connect fail the same way, and nothing is kept.
 func TestDecideHandshakeAnswersAsTheDestinationDid(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	refused := l.Addr().String()
-	_ = l.Close() // nothing listens there now
+	refused := testnet.RefusedAddr(t, "tcp")
 
 	p := &Proxy{logger: zap.NewNop()}
 	p.setSession(&agent.Session{Mode: models.MODE_RECORD})
@@ -365,5 +361,60 @@ func TestHoldStartsWithTheFirstSessionThatDials(t *testing.T) {
 	p.ensureHandshakeHold(&agent.Session{Mode: models.MODE_RECORD})
 	if n := attempts(); n != 2 {
 		t.Fatal("the hold was started after the listener closed")
+	}
+}
+
+func TestDecideHandshakeRefusesALoopbackPortNothingOwnsInMockMode(t *testing.T) {
+	recorded.reset()
+	t.Cleanup(recorded.reset)
+	addr, _ := listenCounting(t)
+	free := testnet.RefusedAddr(t, "tcp")
+
+	mocked := &agent.Session{Mode: models.MODE_TEST}
+	mocked.Mocking = true
+	p := &Proxy{logger: zap.NewNop(), mockMode: true, appPID: 1}
+	p.setSession(mocked)
+	decide := func(dest string) synhold.Outcome {
+		return p.decideHandshake(fakeHandshakeDest{dest: ipv4Dest(t, dest)})(context.Background(), appEnd, proxyEnd).Outcome
+	}
+	if got := decide(free); got != synhold.Refuse {
+		t.Fatalf("a loopback port nothing listens on: %v, want refuse", got)
+	}
+	if got := decide(addr); got != synhold.Accept {
+		t.Fatalf("a loopback port something listens on: %v, want accept", got)
+	}
+	if got := decide("10.1.2.3:5432"); got != synhold.Accept {
+		t.Fatalf("a dependency that is not local: %v, want accept", got)
+	}
+	_, port, _ := net.SplitHostPort(free)
+	recorded.add([]*models.Mock{{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:" + port}}}})
+	if got := decide(free); got != synhold.Accept {
+		t.Fatalf("a recorded destination: %v, want accept", got)
+	}
+	p.mockMode = false
+	recorded.reset()
+	if got := decide(free); got != synhold.Accept {
+		t.Fatalf("outside mock mode: %v, want accept", got)
+	}
+}
+
+func TestHoldStartsForANativeMockReplay(t *testing.T) {
+	var checks atomic.Int32
+	core, logs := observer.New(zapcore.InfoLevel)
+	p := &Proxy{logger: zap.New(core), DestInfo: fakeHandshakeDest{checkErr: errors.New("no tcp_diag"), checks: &checks}, Port: 16789, mockMode: true, appPID: 1}
+	mocked := &agent.Session{Mode: models.MODE_TEST}
+	mocked.Mocking = true
+	p.armHandshakeHold(context.Background())
+	p.ensureHandshakeHold(mocked)
+	if n := checks.Load(); n != 1 {
+		t.Fatalf("a native mock replay tried to hold handshakes %d times, want once", n)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a mock replay on a host that cannot hold handshakes logged %v", logs.All())
+	}
+	p.IsDocker = true
+	p.ensureHandshakeHold(&agent.Session{Mode: models.MODE_TEST, OutgoingOptions: mocked.OutgoingOptions})
+	if n := checks.Load(); n != 1 {
+		t.Fatal("a docker mock replay tried to hold handshakes")
 	}
 }

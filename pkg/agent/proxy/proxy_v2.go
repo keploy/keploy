@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/directive"
@@ -181,10 +182,14 @@ func (p *Proxy) recordViaSupervisor(
 	// then on is left out: the tee's for a capture hole (OnCaptureDesync), the
 	// "parser retired" one below, and the one a parser that reports its own
 	// stop logs in its place (supervisor.ErrReported: the MySQL recorder's for
-	// lost framing). The spans read it in one place, openSpan, as each opens:
-	// at the stop (OnStop), from the connection's next bytes after its parser
-	// returns (StopFromNextBytes, below), or on the connection's traffic after
-	// a span closed for idleness (UnrecordedConn.Note). Read where a stop is
+	// lost framing). The followed spans read it in one place, openSpan, as
+	// each opens: at the stop (OnStop), from the connection's next bytes after
+	// its parser returns (StopFromNextBytes, below), or on the connection's
+	// traffic after a span closed for idleness (UnrecordedConn.Note). The
+	// closed spans of the requests a parser returned without reading go by
+	// the recording's stop instant instead (parserReads): those captured
+	// before it are a loss, whenever the return comes (and cover the test
+	// cases not streamed by then). Read where a stop is
 	// armed instead, it would let a span open after the recording had
 	// stopped, from a write the relay finishes once an app slow to read an
 	// answer reads it: the write would reopen a span closed for idleness after
@@ -209,31 +214,43 @@ func (p *Proxy) recordViaSupervisor(
 	}
 	unrecorded := syncMock.NewUnrecordedConn(openSpan, syncMock.UnrecordedIdleGrace, syncMock.UnrecordedIdleCheck)
 	defer unrecorded.End()
-	svSess.OnStop = func(at time.Time) { unrecorded.Stop(at) }
+	// What the connection carries is noted through what its parser read
+	// (parserReads): once the parser's Run has returned, a request it read is
+	// recorded, whenever the relay gets to tell of it, and one it never read
+	// is not, whenever it was told of. Every stop goes through it,
+	// so the return knows whether one came first, and when.
+	reads := newParserReads(unrecorded, svSess.RecordOrphanWindow, svSess.RecordingStopping, syncMock.UnrecordedIdleGrace, logger)
+	svSess.OnStop = reads.stop
+	stopRecordingStamp := context.AfterFunc(ctx, func() { reads.recordingStopped(time.Now()) })
+	defer stopRecordingStamp()
 
 	relayCfg := relay.Config{
-		Logger: logger,
-		// verify / rootCAs / srcConn come from record.upstreamTls.* and are
-		// captured once per connection: the relay calls the returned fn with
-		// no options in hand. With the flag unset this is the historic
+		Logger:        logger,
+		OnCaptureLoss: p.losses.Add,
+		// A client-side upgrade's failed handshake is charged as any
+		// client-side handshake with the proxy, not as starttls_failed.
+		OnClientHandshakeFailed: p.relayClientHandshake(dstConn),
+		// verify / rootCAs come from record.upstreamTls.* and are captured
+		// once per connection: the relay calls the returned fn with no
+		// options in hand. With the flag unset this is the historic
 		// InsecureSkipVerify=true dial, unchanged.
-		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs, srcConn),
+		TLSUpgradeFn: newProxyTLSUpgradeFn(logger, opts.UpstreamTLSVerify, opts.UpstreamTLSRootCAs),
 		// Only when verification is on: run the client-side handshake first so
 		// the application's SNI is captured before keploy dials the upstream it
 		// has to verify. Off (the default) keeps the historic dest-first order
 		// untouched — a dest-side failure is survivable there. See
 		// relay.Config.ClientTLSFirst.
 		ClientTLSFirst: opts.UpstreamTLSVerify,
-		// Wrapped to also stamp when this connection last carried bytes.
+		BumpActivity:   sv.BumpActivity,
+		// Each chunk the forwarders hand to the tees (not those only stashed
+		// across a pause), to stamp when the connection last carried bytes.
 		// After a parser is retired the relay keeps forwarding, so this is
-		// the signal that says WHEN the dead connection was actually in
-		// use — which is what bounds the suppression window below to the
-		// periods that can really have cost a mock.
-		BumpActivity: func() {
-			sv.BumpActivity()
-			unrecorded.Note(time.Time{}) // on the wire now
-		},
-		OnMarkMockIncomplete: svSess.MarkMockIncomplete,
+		// the signal that says WHEN the dead connection was actually in use
+		// — which is what bounds the suppression window below to the periods
+		// that can really have cost a mock. Once the parser's Run has
+		// returned, it also says which chunks it had read (parserReads).
+		OnCarried:            reads.carried,
+		OnMarkMockIncomplete: p.teeDropped(svSess.MarkMockIncomplete, func() string { return fmt.Sprintf("%s", dstConn.RemoteAddr()) }, svSess.RecordingStopping),
 		OnClientChunkTeed:    sv.MarkPendingWork,
 		RealCertHook:         realCertHook,
 		// A hole in this connection's capture: every test case recorded while
@@ -255,6 +272,12 @@ func (p *Proxy) recordViaSupervisor(
 			svSess.StoppedAt()
 			return !svSess.RecordingStopping()
 		},
+		// The destination's stream ends where the client stopped taking it
+		// (it closed its socket, and refused what came after): a parser
+		// that reaches that end mid-message knows the client's close cut
+		// the message there, not the destination (the HTTP recorder leaves
+		// that exchange out, and says why).
+		ClientStopped: svSess.MarkEndedWhereClientStopped,
 		// User-tunable record-buffer caps. Snapshotted onto the Proxy
 		// at startup from config.Record.RecordBuffer (yaml/flag/env).
 		// Zero values fall through to relay package defaults via
@@ -271,6 +294,8 @@ func (p *Proxy) recordViaSupervisor(
 		// "cannot resync" is the safe default for everything that has not
 		// explicitly claimed otherwise.
 		ParserCanResyncAfterGap: canResyncAfterGap,
+		// Zero unless KEPLOY_DEBUG_PARSER_LAG is set (debugParserLag).
+		ReaderLag: p.parserLag,
 	}
 
 	// One call sets the relay's client-direction brake AND the parser's
@@ -290,14 +315,28 @@ func (p *Proxy) recordViaSupervisor(
 
 	svSess.ClientStream = r.ClientStream()
 	svSess.DestStream = r.DestStream()
+	reads.follow(svSess.ClientStream, r.Teed)
 	svSess.Directives = r.Directives()
 	svSess.Acks = r.Acks()
+
+	// The recording's capture watermark follows this connection while its
+	// parser runs (capture_watermark.go): a test case it carried bytes for
+	// is held until the parser is done with them, and a stop drains until
+	// the parser is past it. Once the parser has returned, and what it never
+	// read is left out (parserReads), nothing it parses can hand over a mock
+	// or open a span; what the connection carries after is the
+	// UnrecordedConn's.
+	untrack := p.capture.Track(r, fmt.Sprintf("connection %s to %s (%s parser)",
+		svSess.ClientConnID, dstConn.RemoteAddr(), parserType))
+	defer untrack()
 
 	// Run the relay in its own goroutine under the supervisor's lifetime.
 	// The supervisor's Close (via sv.SessionOnAbort below) closes the
 	// FakeConns so the parser's reads unblock on abort.
 	relayDone := make(chan error, 1)
-	relayCtx, relayCancel := context.WithCancel(ctx)
+	// A client-side TLS upgrade the relay makes is charged as every
+	// client-side handshake is (clientTLS), to this connection's destination.
+	relayCtx, relayCancel := context.WithCancel(p.withClientTLS(ctx, remoteOf(dstConn)))
 	defer relayCancel()
 	go func() { relayDone <- r.Run(relayCtx) }()
 
@@ -491,14 +530,28 @@ func (p *Proxy) recordViaSupervisor(
 	// the parser can report (ReportStoppedOn), and those queued behind it. A
 	// parser that returned on its own recorded what it read, so the
 	// connection is left out from the next bytes it carries, if any (a parser
-	// that returns at its connection's end leaves no span). The first stop
-	// counts, so this is a no-op after a stamped one, a capture hole's
-	// included (OnCaptureDesync). Whether those next bytes cost the recording
-	// anything is decided as their span opens (openSpan), not here: they can
-	// come after the recording stopped, whether the parser returned before
-	// the stop or as it, from a write the relay finishes once an app slow to
-	// read an answer reads it, and they open no span then.
-	unrecorded.StopFromNextBytes()
+	// that returns at its connection's end leaves no span). What it never
+	// read is decided by where its streams stood as it returned, not by
+	// whether the relay told of a chunk before now (parserReads): the relay
+	// tells of a chunk once it has teed it, so the parser can have read it
+	// and returned by then, and it can have returned with requests in its
+	// stream it never took, told of before now. Those requests are left out
+	// here, in closed spans, up to the first stop if one came before, or the
+	// recording's stop. The first stop counts, so the return stops nothing
+	// after a stamped one, a capture hole's included (OnCaptureDesync).
+	// Whether the bytes after the return cost the recording anything is
+	// decided as their span opens (openSpan), not here: they can come after
+	// the recording stopped, whether the parser returned before the stop or
+	// as it, from a write the relay finishes once an app slow to read an
+	// answer reads it, and they open no span then. Called before the tees are
+	// paused below: a chunk a paused tee refuses is told of as after the
+	// return.
+	reads.parserReturned()
+	// Only now does the watermark stop following the connection: a test case
+	// held for what its parser never read is let go once that is left out
+	// (above), not before, when it would be checked against no span and
+	// saved without its mocks.
+	untrack()
 
 	// The teardown, the same whether the parser returned on its own or was
 	// retired. A parser's return never ends the relay (invariant I1): the
@@ -552,16 +605,18 @@ func (p *Proxy) recordViaSupervisor(
 // They are captured at closure-construction time because the relay
 // calls this fn per connection with no options in hand.
 //
-// srcConn is the application-facing socket for THIS connection. It is
-// held only to recover the client's source port, which is the key
-// CertForClient files the application's SNI under; the fn never reads
-// or writes it (the relay owns it). Nil is safe.
+// The fn returned is this connection's alone: it keeps the SNI the
+// application sent in the client-side handshake it serves, for the
+// destination-side dial it makes after (relay.Config.ClientTLSFirst).
 //
 // The conn pointer update (so the forwarders switch to the upgraded
 // conn on subsequent iterations) is the relay's responsibility; this
 // fn only performs the handshake and returns the new net.Conn —
 // hence it does not need the caller's *net.Conn handles.
-func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool, srcConn net.Conn) relay.TLSUpgradeFn {
+func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPool) relay.TLSUpgradeFn {
+	// The name the application asked for in this connection's client-side
+	// handshake: its SNI, once that handshake is done.
+	var clientSNI atomic.Pointer[string]
 	return func(ctx context.Context, conn net.Conn, isClient bool, cfg *tls.Config) (net.Conn, error) {
 		if cfg == nil {
 			return conn, nil
@@ -614,8 +669,11 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 				}
 				// ServerName, in descending order of trustworthiness:
 				//
-				//  1. The SNI the APPLICATION sent. Parsers derive their
-				//     ServerName from the destination ADDRESS — e.g.
+				//  1. The name the APPLICATION asked for: the SNI it sent
+				//     in this connection's client-side handshake, else its
+				//     CONNECT target (pTls.ConnectTargetFrom). Parsers
+				//     derive their ServerName from the destination
+				//     ADDRESS — e.g.
 				//     mysql/recorder.buildDestTLSConfigV2 takes the host of
 				//     sess.Opts.DstCfg.Addr, which the proxy always sets to
 				//     the `ip:port` eBPF reported, never the hostname the
@@ -642,7 +700,11 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 				//
 				// The whole ladder is guarded by `verify` so the default
 				// path never gains an SNI the application did not send.
-				if sni := capturedSNIForSrc(srcConn); sni != "" {
+				sni := pTls.ConnectTargetFrom(ctx)
+				if s := clientSNI.Load(); s != nil && *s != "" {
+					sni = *s
+				}
+				if sni != "" {
 					dialCfg.ServerName = sni
 				}
 				if dialCfg.ServerName == "" {
@@ -665,31 +727,10 @@ func newProxyTLSUpgradeFn(logger *zap.Logger, verify bool, rootCAs *x509.CertPoo
 		if err != nil {
 			return nil, fmt.Errorf("client TLS handshake failed: %w", err)
 		}
+		sni := util.ClientServerName(wrapped)
+		clientSNI.Store(&sni)
 		return wrapped, nil
 	}
-}
-
-// capturedSNIForSrc returns the SNI the application sent on srcConn's
-// connection, as filed by CertForClient under the client's source port
-// (pTls.SrcPortToDstURL). "" when the app sent none — the normal case for an
-// IP-literal destination, which RFC 6066 forbids in SNI — or when the value
-// has not been captured yet.
-//
-// srcConn is only ever asked for its RemoteAddr; the relay owns the socket.
-func capturedSNIForSrc(srcConn net.Conn) string {
-	if srcConn == nil {
-		return ""
-	}
-	tcpAddr, ok := srcConn.RemoteAddr().(*net.TCPAddr)
-	if !ok || tcpAddr == nil {
-		return ""
-	}
-	v, ok := pTls.SrcPortToDstURL.Load(tcpAddr.Port)
-	if !ok {
-		return ""
-	}
-	sni, _ := v.(string)
-	return sni
 }
 
 // Compile-time sanity: ensure the dispatcher-side V2 call site can be

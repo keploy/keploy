@@ -795,6 +795,9 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					logger.Debug("failed to decode MySQL command in async decoder", zap.Error(err))
 					continue
 				}
+				// Stamped as it is decoded, before a pipelined COM_STMT_CLOSE
+				// behind it ends its statement.
+				stampStatementQuery(decodeCtx, commandPkt)
 
 				// Handle no-response commands — record mock with empty
 				// responses, matching the synchronous recorder behavior.
@@ -908,6 +911,12 @@ func asyncMySQLDecode(ctx context.Context, logger *zap.Logger, decodeChan <-chan
 					state = processFirstResponse(ctx, logger, pkt, decodeCtx, clientConn, lastOp,
 						&pendingRespBundle, &textResultSet, &binaryResultSet, &stmtPrepareOk,
 						&remainingCols, &remainingParams)
+					// Noted from its COM_STMT_PREPARE_OK, before the rest of the
+					// response: the client may send the statement's first
+					// command before the decoder reads that rest.
+					if stmtPrepareOk != nil {
+						rememberPrepared(decodeCtx, pendingCommand, pendingRespBundle)
+					}
 					if state == stateExpectCommand {
 						resTimestamp = item.ts
 						if pendingRespBundle == nil {

@@ -32,7 +32,9 @@ env:
 #     ships with the hosted runner is the supported path.
 #
 # Job graph:
-#   build-linux   (matrix amd64/arm64, native linux, plain `go build`)
+#   build-linux   (matrix amd64/arm64, native linux; cgo linked fully
+#                  static against musl by zig cc, checked to start on
+#                  Debian 11, Ubuntu 20.04, Amazon Linux 2, Rocky Linux 8)
 #   build-darwin  (macos-latest, Apple-silicon runner; native clang
 #                  builds the single darwin/arm64 binary, gon signs
 #                  and notarizes it before archiving)
@@ -98,30 +100,36 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # The pinned zig (zig cc, with musl) the linux binaries link with,
+      # cached on its pin so ziglang.org is asked once per version.
+      - name: Cache zig
+        uses: actions/cache@v4
+        with:
+          path: .zig
+          key: zig-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/scripts/linux/zig-toolchain.sh') }}
+
+      - name: Stage zig
+        run: |
+          sh .github/scripts/linux/zig-toolchain.sh "$GITHUB_WORKSPACE/.zig"
+          echo "KEPLOY_ZIG=$GITHUB_WORKSPACE/.zig/zig/zig" >> "$GITHUB_ENV"
+          echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-cache" >> "$GITHUB_ENV"
+
       - name: Build keploy (public binary)
-        # CGO_ENABLED=1 for pg_query_go / libpg_query. gcc ships with
-        # both ubuntu-latest (amd64) and ubuntu-24.04-arm (arm64) so
-        # no toolchain install is required.
+        # cgo for pg_query_go / libpg_query, linked FULLY STATIC against
+        # musl by zig cc, so the binary runs on any Linux whatever its libc:
+        # linked by the runner's gcc against its glibc, v3.6.164 needed
+        # GLIBC_2.34 and did not start on Debian 11, Ubuntu 20.04, RHEL 8 or
+        # Amazon Linux 2. build-linux-release.sh is the recipe (and checks
+        # the binary is static and stripped).
         env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
           SENTRY_DSN_BINARY: ${{ secrets.SENTRY_DSN_BINARY }}
           SERVER_URL: https://api.keploy.io
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euxo pipefail
           mkdir -p out/public
-          version="${{ steps.ver.outputs.version }}"
-          go build \
-            -tags=viper_bind_struct \
-            -ldflags="-s -w \
-              -X main.dsn=${SENTRY_DSN_BINARY} \
-              -X main.version=${version} \
-              -X main.apiServerURI=${SERVER_URL} \
-              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
-            -o out/public/keploy \
-            ./main.go
+          sh .github/scripts/linux/build-linux-release.sh binary "${{ matrix.arch }}" out/public/keploy "${SENTRY_DSN_BINARY}"
 
       - name: Package keploy_linux_${{ matrix.arch }}.tar.gz
         run: |
@@ -141,26 +149,25 @@ jobs:
 
       - name: Build keploy-docker (docker sentry dsn)
         env:
-          CGO_ENABLED: "1"
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
           SENTRY_DSN_DOCKER: ${{ secrets.SENTRY_DSN_DOCKER }}
           SERVER_URL: https://api.keploy.io
           GITHUB_APP_CLIENT_ID: ${{ secrets.CLIENT_ID_GITHUB_APP }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euxo pipefail
           mkdir -p out/docker
-          version="${{ steps.ver.outputs.version }}"
-          go build \
-            -tags=viper_bind_struct \
-            -ldflags="-s -w \
-              -X main.dsn=${SENTRY_DSN_DOCKER} \
-              -X main.version=${version} \
-              -X main.apiServerURI=${SERVER_URL} \
-              -X main.gitHubClientID=${GITHUB_APP_CLIENT_ID}" \
-            -o out/docker/keploy \
-            ./main.go
+          sh .github/scripts/linux/build-linux-release.sh binary "${{ matrix.arch }}" out/docker/keploy "${SENTRY_DSN_DOCKER}"
           chmod +x out/docker/keploy
+
+      # Before anything is published: both binaries start, and the Postgres
+      # parser (the C code), linked the release's way, passes its tests, on
+      # the oldest distributions keploy supports (glibc 2.26 to 2.31).
+      - name: Run on Debian 11, Ubuntu 20.04, Amazon Linux 2 and Rocky Linux 8
+        run: |
+          set -euxo pipefail
+          sh .github/scripts/linux/build-linux-release.sh pgtest "${{ matrix.arch }}" out/pgparse.test
+          sh .github/scripts/linux/check-linux-release-distros.sh out/public/keploy "${{ matrix.arch }}" out/pgparse.test
+          sh .github/scripts/linux/check-linux-release-distros.sh out/docker/keploy "${{ matrix.arch }}" out/pgparse.test
 
       # Artifact name matches the previous build-go output so the
       # build-docker matrix legs below download exactly what they did
@@ -405,25 +412,25 @@ jobs:
           fetch-depth: 0
 
       - name: Download linux amd64 archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-linux-amd64
           path: release-assets
 
       - name: Download linux arm64 archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-linux-arm64
           path: release-assets
 
       - name: Download darwin archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-darwin-arm64
           path: release-assets
 
       - name: Download windows binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-archive-windows-amd64
           path: release-assets
@@ -530,7 +537,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
 
       - name: Download prebuilt binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.artifact }}
           path: dist/keploy-linux-${{ matrix.arch }}
@@ -600,7 +607,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
 
       - name: Download per-arch digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*

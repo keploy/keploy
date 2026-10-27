@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,8 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // outcomeProxy answers the two end-of-run reads. block makes the consumed read
@@ -238,5 +241,116 @@ func TestWriteStopOutcomeCarriesTheTestsWindows(t *testing.T) {
 	}
 	if len(got.Windows) != 1 || got.Windows[0].Name != "TestOrders" || got.Windows[0].Outcome != models.ScopeOutcomePassed {
 		t.Fatalf("the outcome carries windows %+v, want TestOrders passed", got.Windows)
+	}
+}
+
+// partialMissProxy is an outcomeProxy whose read of the calls no mock answered
+// was incomplete (the proven switch): it returns what it read, and says so.
+type partialMissProxy struct{ outcomeProxy }
+
+func (p *partialMissProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return p.missed, fmt.Errorf("%w: keploy's error drain stopped", models.ErrUnmatchedCallsUnread)
+}
+
+// An incomplete read of the misses is kept, with what was read and why it may
+// be short, rather than throwing away the whole account (what was served
+// included).
+func TestWriteStopOutcomeKeepsAnIncompleteMissRead(t *testing.T) {
+	proxy := &partialMissProxy{outcomeProxy{
+		consumed: []models.MockState{{Name: "mock-0", Kind: models.HTTP}},
+		missed:   []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /a"}},
+	}}
+	a := &Agent{Proxy: proxy, logger: zap.NewNop()}
+	path := filepath.Join(t.TempDir(), "outcome.json")
+	if err := a.writeStopOutcome(context.Background(), path); err != nil {
+		t.Fatalf("writeStopOutcome: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no outcome left: %v", err)
+	}
+	var got models.MockOutcome
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("not a models.MockOutcome: %v", err)
+	}
+	// The cause alone: whoever reads the account names the incomplete read
+	// itself, so the sentinel's text is not said twice.
+	if len(got.Consumed) != 1 || len(got.Missed) != 1 || got.MissedUnread != "keploy's error drain stopped" {
+		t.Fatalf("left %+v; want what was served, what was read of the misses, and why that may be short", got)
+	}
+}
+
+// Nor can the CLI ask a stopped agent whether its hooks tracked every process,
+// so the account carries what the kernel refused them: a compose replay fails
+// on it (pkg/service/mock). "None refused" is written out, as zeros; an agent
+// that cannot count leaves the field out, which the CLI reads as "unknown". A
+// zero from it would vouch for a capture nobody checked.
+func TestWriteStopOutcomeCarriesWhatTheHooksCouldNotTrack(t *testing.T) {
+	// leave has an agent with those hooks write its outcome, and returns it
+	// with what the agent logged at WARN or above.
+	leave := func(t *testing.T, hooks coreAgent.Hooks) ([]byte, models.MockOutcome, []observer.LoggedEntry) {
+		t.Helper()
+		core, logs := observer.New(zapcore.WarnLevel)
+		a := &Agent{Proxy: &outcomeProxy{consumed: []models.MockState{{Name: "mock-0"}}}, Hooks: hooks, logger: zap.New(core)}
+		path := filepath.Join(t.TempDir(), "outcome.json")
+		if err := a.writeStopOutcome(context.Background(), path); err != nil {
+			t.Fatalf("writeStopOutcome: %v", err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("no outcome left: %v", err)
+		}
+		var got models.MockOutcome
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("the outcome is not a models.MockOutcome: %v\n%s", err, raw)
+		}
+		if len(got.Consumed) != 1 || got.Consumed[0].Name != "mock-0" {
+			t.Fatalf("left %s, without the mocks this replay served", raw)
+		}
+		return raw, got, logs.All()
+	}
+
+	for _, want := range []models.PIDMapRefusals{
+		{TargetCapacity: 10240, ExcludedCapacity: 10240}, // none refused
+		{Target: 265, Excluded: 2, LastTargetTGID: 1496394, TargetCapacity: 10240, ExcludedCapacity: 10240},
+	} {
+		raw, got, warned := leave(t, countingHooks{refusals: want})
+		if got.PIDMapRefusals == nil || *got.PIDMapRefusals != want {
+			t.Fatalf("hooks that counted %+v left %s", want, raw)
+		}
+		if len(warned) != 0 {
+			t.Fatalf("hooks that counted %+v: the agent warned %q", want, warned[0].Message)
+		}
+	}
+
+	// Hooks that never count leave no count and no error: "unknown", which
+	// the CLI lets pass. A count that could not be read leaves no count but
+	// its error, so the CLI can tell the loss (completeness unproven, which
+	// --strict fails) from an agent that never counts; and the agent says it,
+	// its log being the one place left that can.
+	for _, tc := range []struct {
+		name    string
+		hooks   coreAgent.Hooks
+		wantErr string
+		warns   int
+	}{
+		{"hooks that do not count", loadedHooks{}, "", 0},
+		{"an agent without any hook", nil, "", 0},
+		{"hooks whose read failed", countingHooks{err: errors.New("bad file descriptor")}, "bad file descriptor", 1},
+	} {
+		raw, got, warned := leave(t, tc.hooks)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, there := fields["pidMapRefusals"]; there || got.PIDMapRefusals != nil {
+			t.Fatalf("%s: left %s; want no pidMapRefusals: there is no count to leave", tc.name, raw)
+		}
+		if got.PIDMapRefusalsError != tc.wantErr {
+			t.Fatalf("%s: left pidMapRefusalsError %q, want %q: %s", tc.name, got.PIDMapRefusalsError, tc.wantErr, raw)
+		}
+		if len(warned) != tc.warns {
+			t.Fatalf("%s: the agent logged %d line(s) at WARN or above, want %d: %+v", tc.name, len(warned), tc.warns, warned)
+		}
 	}
 }

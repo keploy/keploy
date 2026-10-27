@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +19,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/ids"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/coverage/report"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -26,10 +30,14 @@ import (
 // the runner drives the requests, Keploy answers the outgoing calls from the
 // set. On a miss it applies the configured policy (fail / passthrough /
 // record). It propagates the runner's exit code, and with --strict also exits
-// non-zero when any recorded mock was missed. It returns an error for a
+// non-zero when a call missed its recorded mock (one that counts against a
+// test, models.UnmatchedCall.CountsAgainstTest). It returns an error for a
 // failure of keploy's own -- one that stopped the run, or left --strict unable
 // to verify it -- which a failing test command never is.
 func (m *mockService) Replay(ctx context.Context) (err error) {
+	// The replay's own teardown scope: what keploy sees its stops do moves
+	// it, and the drain below waits while it moves (teardownDrain).
+	ctx, teardown := utils.NewTeardownScope(ctx)
 	m.ids = nil
 	name := m.setName()
 	requests := m.requests()
@@ -41,6 +49,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// repeat. A user interrupt is not a failure and leaves the last receipt,
 	// which still truthfully describes the last completed run.
 	finished := false
+	// ran is the test command's own exit once it ran (step 8): a failure
+	// after it is keploy's, never "the test command never ran". nil before.
+	var ran *int
 	defer func() {
 		if finished || err == nil || parent.Err() != nil {
 			return
@@ -56,6 +67,20 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		code, runner, note := utils.ErrCode, -1, "the test command never ran"
 		failed := FailedBySetup
 		switch {
+		case ran != nil:
+			// The test command ran, and keploy could not read, or judge,
+			// what it did (its agent's windows, or what the run saw of
+			// mock.real): keploy's failure, after the command, whose own
+			// exit is kept.
+			runner, failed = *ran, FailedByKeploy
+			note = "the test command ran; keploy could not read what it did"
+			if *ran < 0 {
+				// Keploy failed under the command (its agent died).
+				note = "the test command ran; keploy did not complete the run"
+			}
+			if code == 0 {
+				code = 1
+			}
 		case code == 0:
 			code = 1
 		case code != utils.ExitKeployError && code == utils.ExitCodeFor(err):
@@ -77,14 +102,39 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 			Loaded:         -1,
 			Consumed:       -1,
 			Missed:         -1,
+			MissedData:     provenCount(-1),
 			IsolationNote:  note,
 			MocksDigest:    MocksDigest(m.config.Path, name),
 			MinCoverage:    m.config.Mock.MinCoverage,
 			Version:        utils.Version,
 		})
-		// No test ran: an earlier run's per-test results must not stand next
-		// to this receipt as though they were its.
-		writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{Set: name})
+		// No test ran, or keploy could not read what they did: an earlier
+		// run's per-test results must not stand next to this receipt as
+		// though they were its.
+		writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{Set: name, At: started.UTC().Truncate(time.Second)})
+	}()
+	// A replay the user stopped before keploy judged it did not verify the
+	// suite, wherever the stop came: while the agent started, while the test
+	// command ran, or after it exited, while keploy read what the run did.
+	// It exits 128+N for the signal (SIGINT 130, SIGHUP 129, SIGTERM 143),
+	// never the test command's code -- 0 for a suite that passed -- and it is
+	// not keploy's failure, so it returns nil, and the last receipt stands
+	// (above). Every return before the verdict ends here, so no stop can slip
+	// past it: one that came while keploy read the windows or mock.real
+	// returned the read's error, which the CLI drops on a cancelled context,
+	// and the replay exited 0, unjudged. While Replay runs only NewCtx's
+	// handler cancels parent (the CLI's own ExecCancel comes after it
+	// returns). A code already armed is kept (SetExitCodeOnce): the runner's
+	// own, or keploy's 3 or 6, is non-zero too. A cancel that is no signal's
+	// arms nothing (InterruptExitCode is 0).
+	defer func() {
+		if finished || parent.Err() == nil {
+			return
+		}
+		if code := utils.InterruptExitCode(); code != 0 {
+			utils.SetExitCodeOnce(code)
+		}
+		err = nil
 	}()
 	// Coverage is read from a report the runner writes during THIS run. What
 	// the report files looked like beforehand is what tells that report from
@@ -92,15 +142,35 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	workDir, _ := os.Getwd()
 	coverageBefore := report.Snapshot(workDir, m.config.Mock.CoverageReport, m.userCommand)
 
+	if provenswitch.On() && !replaysJudged.Load() {
+		return fmt.Errorf("keploy mock replay under %s needs a keploy build that judges each test (keploy enterprise): this one exits with the test command's code, so a test keploy failed after it ended, or a call no test made that got no recorded answer, would pass", provenswitch.Env)
+	}
 	// 0. Materialise the set locally (registry download in enterprise; no-op on files).
 	if err := m.store.Pull(ctx, name); err != nil {
 		utils.LogError(m.logger, err, "failed to fetch the mock set", zap.String("mock-set", name))
 		return err
 	}
 
+	if provenswitch.On() && len(m.config.Mock.RunOnly) > 0 {
+		return errors.New("--run-only is not used with KEPLOY_PROVEN: select the tests with your own test command; keploy skips only the tests verdicts.yaml quarantines")
+	}
+	if provenswitch.On() && m.config.Mock.Strict {
+		return errors.New("--strict is not used with KEPLOY_PROVEN: keploy's verdict fails a run on every call the recording did not answer, charged to a test or not")
+	}
+	if err := m.refuseProvenDocker("replay"); err != nil {
+		return err
+	}
+	if err := m.checkRealDeps(); err != nil {
+		return err
+	}
 	policy := models.MissPolicy(m.config.Mock.OnMiss)
 	if !policy.Valid() {
 		return fmt.Errorf("invalid --on-miss value %q: allowed values are fail, passthrough, record", m.config.Mock.OnMiss)
+	}
+	if provenswitch.On() && policy != models.MissFail {
+		// A call served live is not a miss, so it would reach no test's
+		// evidence and no verdict: a test that called real infra would pass.
+		return fmt.Errorf("--on-miss %s is not used with %s: keploy judges each test by the calls the recording answers, so a miss must fail it (--on-miss fail)", policy, provenswitch.Env)
 	}
 
 	m.logger.Info("Replaying mocks for your test command",
@@ -116,13 +186,17 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		m.notifyShutdown()
 		// Cancel so agent-monitor / app-runner goroutines unwind before drain.
 		cancel()
-		if err := utils.DrainErrGroup(m.logger, "mock-replay", errGrp, 30*time.Second); err != nil {
+		if err := m.teardownDrain("mock-replay", errGrp, teardown); err != nil {
 			utils.LogError(m.logger, err, "failed to drain mock-replay goroutines")
 		}
 	}()
 
 	// 1. Instrument in mock (test) mode — no ingress port relocation.
-	if err := m.instrumentation.Setup(ctx, m.config.Command, models.SetupOptions{
+	//    A start the agent stops making progress in is given up on
+	//    (pkg.ErrAgentNotReady) and retried with a fresh agent, as record and
+	//    test retry it (pkg.RetryAgentSetup). Any other failure is not
+	//    retried.
+	opts := models.SetupOptions{
 		Container:        m.config.ContainerName,
 		FromContainer:    m.config.FromContainer,
 		CommandType:      m.config.CommandType,
@@ -135,6 +209,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		PassThroughPorts: config.GetByPassPorts(m.config),
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
+	}
+	if err := pkg.RetryAgentSetup(ctx, m.logger, func(c context.Context, _ int) error {
+		return m.instrumentation.Setup(c, m.config.Command, opts)
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -174,8 +251,21 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		return err
 	}
 
+	// The run's mock.real (proven switch only), before the proxy serves:
+	// those destinations are reached for real from the first connection.
+	if err := m.pushRealDeps(ctx); err != nil {
+		if parent.Err() != nil {
+			return nil
+		}
+		utils.LogError(m.logger, err, "keploy could not hand its agent mock.real")
+		return err
+	}
+
 	// 3. Put the proxy in mock-serving mode with the miss policy.
 	if err := m.instrumentation.MockOutgoing(ctx, models.OutgoingOptions{
+		// A session of its own: what an agent kept from an earlier one
+		// recorded consumed is that session's.
+		StartsTestSet:             true,
 		Rules:                     m.config.BypassRules,
 		MongoPassword:             m.config.Test.MongoPassword,
 		SQLDelay:                  time.Duration(m.config.Test.Delay) * time.Second,
@@ -185,10 +275,13 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		MysqlPorts:                m.config.MysqlPorts,
 		DisableMysqlAutoDetect:    m.config.DisableMysqlAutoDetect,
 		DisableMysqlEndpointDrift: m.config.DisableMysqlEndpointDrift,
+		DisablePgTimeSliceCohort:  m.config.DisablePgTimeSliceCohort,
 		PassThroughPorts:          m.config.Record.PassThroughPorts,
 		PassThroughHosts:          m.config.Record.PassThroughHosts,
-		DisableStatefulMocks:      m.config.Test.DisableStatefulMocks,
+		DisableStatefulMocks:      m.statefulMocksDisabled(),
 		DisableMockCorrelation:    m.config.Test.DisableMockCorrelation,
+		Learn:                     m.learning(),
+		LearnPool:                 m.learningPool(),
 	}); err != nil {
 		if parent.Err() != nil {
 			// The user's Ctrl+C. An errgroup-derived cancel is NOT that: the
@@ -205,13 +298,28 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// 4. Load the whole set and push it into the proxy.
 	watchCtx, stopWatch := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopWatch()
-	actual := m.watchIncoming(watchCtx, requests)
+	// The watch's stream ends by the agent's marker when it can
+	// (round_end.go): its token names it to the agent.
+	watchRound := newRoundEnd(m.instrumentation)
+	actual := m.watchIncoming(watchRound.on(watchCtx), requests)
 	empty := map[string]bool{}
 	filtered, unfiltered, failedPool, err := m.loadMocks(ctx, name, empty)
 	if err != nil {
 		utils.LogError(m.logger, err, "failed to load "+failedPool+" mocks", zap.String("mock-set", name))
 		return err
 	}
+	// What the agent holds: the pools less what this keploy never sends it
+	// (models.AgentBound: the connection failures, which it does not replay).
+	// loaded counts exactly that, for the empty-set WARN, the "verified
+	// nothing" exit, the receipt and the metered count.
+	// Under the proven switch, every mock the set decoded, before what the
+	// agent never holds is left out: what a mapping may name
+	// (pushProvenTable).
+	var decoded []*models.Mock
+	if provenswitch.On() {
+		decoded = append(append([]*models.Mock(nil), filtered...), unfiltered...)
+	}
+	filtered, unfiltered = models.AgentBound(filtered), models.AgentBound(unfiltered)
 	loaded := len(filtered) + len(unfiltered)
 	// The recording this run replays, for the receipt: read after Pull, so in
 	// enterprise it is the registry's copy that was actually served.
@@ -227,19 +335,48 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 5. Hand the agent the per-test table so the runner's /agent/scope/begin
-	//    calls can narrow the served pool per test (best-effort / optional).
-	m.pushScopeTable(ctx, name)
-	gate := m.pushScopeGate(ctx, name, digest)
-
-	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
-	//    mapping) — same call RunTestSet makes before the first test.
-	if err := m.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
-		AfterTime:  models.BaseTime,
-		BeforeTime: time.Now(),
-	}); err != nil {
-		utils.LogError(m.logger, err, "failed to arm the mock pool")
+	//    calls can narrow the served pool per test (best-effort / optional;
+	//    under the proven switch each test is judged by it, so required).
+	if err := m.pushScopeTable(ctx, name, filtered, unfiltered, decoded); err != nil {
 		return err
 	}
+	if provenswitch.On() {
+		if err := m.pushTestBegins(ctx, name); err != nil {
+			utils.LogError(m.logger, err, "keploy cannot run the tests on the clocks they were recorded on", zap.String("mock-set", name))
+			return err
+		}
+	}
+	// Under the proven switch the deny list is the only gate: a run list
+	// (--run-only, or a wrapping build's ScopeGateSource) is not pushed.
+	var gate requestedGate
+	if !provenswitch.On() {
+		gate = m.pushScopeGate(ctx, name, digest)
+	}
+	if err := m.pushScopeSkips(ctx, name, digest); err != nil {
+		utils.LogError(m.logger, err, "refusing to replay", zap.String("mock-set", name))
+		return err
+	}
+
+	// 6. Stage the whole pool as the initial serving window (BaseTime..now, no
+	//    mapping) — same call RunTestSet makes before the first test. Under
+	//    the proven switch the table push (step 5) already armed the pool
+	//    slice of calls made before any claim; arming the whole pool would
+	//    let any test's mock answer them.
+	if !provenswitch.On() {
+		if err := m.instrumentation.UpdateMockParams(ctx, models.MockFilterParams{
+			AfterTime:  models.BaseTime,
+			BeforeTime: time.Now(),
+		}); err != nil {
+			utils.LogError(m.logger, err, "failed to arm the mock pool")
+			return err
+		}
+	}
+
+	// 6a. What the agent had already refused a place in its PID maps before
+	//     the test command runs: the run's own refusals are what it grows by
+	//     (PIDMapReader). Read here, with the compose app still parked.
+	pidBase := m.pidMapBaseline(ctx, "replay")
+	lossesBase := m.captureLossBaseline(ctx)
 
 	// 7. Release the compose app now that the mock pool is armed. This is the
 	//    post-arm half of step 2 — see releaseComposeApp.
@@ -279,15 +416,9 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	if parent.Err() != nil { // user Ctrl+C / a signal interrupted the replay
-		// A replay stopped by a signal before it finished did not verify the
-		// suite, so it must not exit 0 (a pass). Exit 128+N for the signal that
-		// stopped it (SIGINT→130, SIGHUP→129, SIGTERM→143); a non-signal cancel
-		// leaves the code alone (InterruptExitCode returns 0, SetExitCodeOnce is
-		// a no-op). Record is unaffected -- a stopped recording is a finish, and
+		// Stopped before it finished: not judged, 128+N (the deferred rule
+		// above). Record is unaffected -- a stopped recording is a finish, and
 		// it returns 0 from its own path, not here.
-		if code := utils.InterruptExitCode(); code != 0 {
-			utils.SetExitCodeOnce(code)
-		}
 		return nil
 	}
 	// Either way the cause is returned as keploy's own failure (see
@@ -306,11 +437,68 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// suite that never finished.
 		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: context.Cause(ctx)}
 	}
+	ran = new(int)
+	switch appErr.AppErrorType {
+	case models.ErrAppStopped, models.ErrCtxCanceled, "":
+	case models.ErrUnExpected, models.ErrCommandError:
+		*ran = max(appErr.ExitCode, 1)
+	default:
+		// Keploy's own failure under the test command: it has no exit of
+		// its own to report.
+		*ran = -1
+	}
+	stoppedNow := false
+	// requestsShort says why the requests this run compares are short of
+	// what the agent captured, the user not having stopped it: keploy's own
+	// failure, said at ERROR where it was found, and the run's (below).
+	requestsShort := ""
 	if actual != nil {
-		m.drainTrailingMocks(actual.done, time.Now(), func() (uint64, bool) { return uint64(actual.seen.Load()), false })
+		// Unconfirmed (the stream closed on its own) is not said: under
+		// compose this stream closes so on every run, and what it carries
+		// feeds the run's report, not a recording.
+		lost, _ := m.drainTrailingMocks(actual.done, time.Now(), false, func() (uint64, bool) { return uint64(actual.seen.Load()), false },
+			func() uint64 { return uint64(actual.seen.Load()) }, replayDrainWords, watchRound)
+		if !lost && watchRound.endsByMarkers() {
+			// The agent said it holds nothing more from before the run
+			// ended: the watch ends on its marker, every request the agent
+			// had put on the stream read, not when the stream is ended here
+			// (round_end.go). An agent this client started is there until
+			// keploy stops it, so its stream closing before its marker
+			// leaves the run short of requests; one compose or the user
+			// stops is said at WARN, as before markers.
+			// Not once the user stopped the run, by the time a stream is
+			// judged: a stop that reached the agent too ends its stream (a
+			// replay's agent does not hold its stop for the watch), and the
+			// run ends unjudged, 128+N.
+			ownAgent := !m.isDockerCompose() && startedAgent(m.instrumentation)
+			strict := func() bool { return ownAgent && !utils.Interrupted() }
+			lost = m.endRound(watchRound, strict, []roundStream{{kind: models.TestCaseStream, done: actual.done}}, replayDrainWords)
+		}
+		if lost {
+			select {
+			case <-utils.StopNow():
+				stoppedNow = true
+			default:
+				// The drain gave up on an agent that made no progress, or
+				// the agent left the watch before its marker: said at
+				// ERROR, by the drain or endRound.
+				requestsShort = "keploy could not read every request the app served from its agent"
+			}
+		}
 	}
 	stopWatch()
 	actual.wait(mockDrainStall)
+	if stoppedNow {
+		// The user's Ctrl+C, at the drain's offer, gave up the requests the
+		// agent still held: what this run would judge is short of them, and
+		// a verdict on part of the run could pass a suite that did not. It
+		// ends as a replay the user stopped before it finished does (above):
+		// 128+N, unjudged, the last run's receipt left standing.
+		if code := utils.InterruptExitCode(); code != 0 {
+			utils.SetExitCodeOnce(code)
+		}
+		return nil
+	}
 
 	// 9. Under --on-miss record, append any calls served live-from-upstream to
 	//    the set so the next replay serves them from the mock (VCR new_episodes).
@@ -319,18 +507,53 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	}
 
 	// 10. Summarise what was served and missed.
-	all := m.replayWindows(ctx)
+	all, werr := m.replayWindows(ctx)
+	if werr != nil {
+		// Under the proven switch what each test did decides keploy's
+		// verdict: a replay that cannot read it did not complete. When keploy
+		// had already failed under the test command (its agent died), that is
+		// the reason, and the read failed because of it.
+		if appErr.AppErrorType == models.ErrInternal && appErr.Err != nil {
+			return fmt.Errorf("keploy did not complete the run: %w", appErr.Err)
+		}
+		return fmt.Errorf("keploy could not read what each test did from its agent: %w", werr)
+	}
+	// What the run saw of mock.real beyond its tests (proven switch only),
+	// once its last test ended: rule 4's reached destinations, and evidence
+	// charged to no test, which the verdict needs as much as the windows.
+	realRun, rerr := m.realRun(ctx)
+	if rerr != nil {
+		return fmt.Errorf("keploy could not read the run's mock.real destinations from its agent: %w", rerr)
+	}
+	if parent.Err() != nil {
+		// The user's Ctrl+C came while keploy read what the run did, and
+		// the read may be short of it (with the switch off, a failed read is
+		// no windows): a verdict on part of a run could pass a suite that did
+		// not. Not judged: 128+N (the deferred rule above).
+		return nil
+	}
 	detail := replayDetail{
+		set:      name,
 		windows:  testWindows(all),
 		starts:   appStarts(all),
 		expected: m.expectedMocks(ctx, name),
 		recorded: m.recordedCases(ctx, name),
 		actual:   actual.list(),
-	}
-	counts := m.reportOutcome(ctx, loaded, detail)
-	missed, missesKnown := counts.missed, counts.missed >= 0
 
-	// 11. Exit code: mirror the runner; with --strict also fail on any miss.
+		actualShort: requestsShort,
+	}
+	counts := m.reportOutcome(ctx, loaded, detail, func() bool { return parent.Err() != nil })
+	missesKnown := counts.missed >= 0
+
+	// 11. Exit code: mirror the runner; with --strict also fail on a miss
+	//     that counts against a test.
+	// The learn step's findings not kept means keploy did not complete the
+	// round, whatever the test command did: that is the exit, and the
+	// receipt's.
+	if counts.learnErr != nil && appErr.AppErrorType != models.ErrInternal {
+		utils.LogError(m.logger, counts.learnErr, "keploy did not complete this round of the record")
+		appErr = models.AppError{AppErrorType: models.ErrInternal, Err: counts.learnErr}
+	}
 	m.propagateExit(appErr, "replay")
 	// WHOSE failure this is, from what the runner reported -- not from the
 	// global exit code. keploy's own internal failure (a panic in the app
@@ -350,6 +573,73 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// that passed.
 		runnerExit, failedBy = -1, FailedByKeploy
 	}
+	// What the run compares is short of requests the agent captured: keploy
+	// did not complete it, whatever the test command did (its exit is kept),
+	// and a verdict on part of it is not one on the run.
+	requestsOnly := requestsShort != "" && failedBy != FailedByKeploy
+	if requestsOnly {
+		failedBy = FailedByKeploy
+	}
+	// A process the agent could not track -- the kernel refused it a place in
+	// its PID map -- made calls the agent never saw: not mocked, not
+	// counted as missed, answered by the real dependency if it was up. Nothing
+	// else in this run can show that, and every other gate passes on it, so it
+	// fails the run first and is what the receipt names, ahead even of a
+	// failing runner, which it may be the cause of (the runner's own exit code
+	// is kept, and stays in RunnerExitCode). Keploy's failure, not the
+	// suite's: returned, like an unverifiable --strict run.
+	var keployFailure error
+	captureIncomplete, captureUnverified := "", ""
+	pidCheck := m.pidMapRefusedDuring(ctx, pidBase, "replay")
+	if refused := pidCheck.refused; pidCheck.known && refused.Any() {
+		captureIncomplete = refused.CaptureIncomplete()
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy != FailedByKeploy {
+			failedBy = FailedByCaptureIncomplete
+		}
+		keployFailure = errors.New(captureIncomplete)
+		msg := "replay failed: the agent could not track every process the test command ran, so their calls were not mocked"
+		if refused.Target == 0 {
+			msg = "replay failed: the agent could not exclude every process that predates the test command, so their children's calls may have been mocked as the test command's"
+		}
+		m.logger.Error(msg, append(pidMapFields(refused), zap.String("mock-set", name), zap.String("reason", captureIncomplete))...)
+	}
+	// Under the proven switch, every other loss of capture during the run
+	// fails it the same way: the test running at it already failed with it
+	// (and each later one, but for a failed TLS handshake), and this covers
+	// a loss outside every test too.
+	lostAll, lostErr := m.captureLossesDuring(ctx, lossesBase)
+	if parent.Err() != nil {
+		// The user's Ctrl+C came while keploy read the agent's counts (what
+		// it served and missed, its PID maps, its capture losses): a read it
+		// cut short is no agent failure, and no gate below may fail the run
+		// on it -- --strict's "never reported which calls were missed" did,
+		// exit 1 -- nor pass a verdict on part of it. No read of the agent
+		// comes after this one. Not judged: 128+N (the deferred rule above).
+		return nil
+	}
+	// A call keploy cannot capture at all (decision 20) does not fail the
+	// run: it leaves it unverified, below.
+	lost, lostNotJudged := lostAll.Split()
+	if t := lost.Text(); t != "" {
+		if captureIncomplete == "" {
+			captureIncomplete = t
+		} else {
+			captureIncomplete += "; " + t
+		}
+		if utils.ErrCode == 0 {
+			utils.ErrCode = 1
+		}
+		if failedBy != FailedByKeploy {
+			failedBy = FailedByCaptureIncomplete
+		}
+		keployFailure = errors.New(captureIncomplete)
+		m.logger.Error("replay failed: keploy could not capture every call the test command made ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t))
+	}
+
 	// --strict means "fail unless every recorded call was matched". An
 	// unreadable miss list is not proof of that, so it fails too: a
 	// verification flag that passes when it could not verify is worse than no
@@ -359,20 +649,26 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// returned error is how a caller -- the enterprise run result, and the
 	// editor reading it -- tells keploy's own 1 from a test command's. Left as
 	// a bare exit 1, an unverifiable run read as a failing suite.
-	var keployFailure error
 	if m.config.Mock.Strict && !missesKnown && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
-		keployFailure = errors.New("--strict could not verify this replay: the agent never reported which recorded calls were missed")
-		m.logger.Error("replay failed under --strict: the agent never reported which calls were missed, so a clean run could not be proven",
-			zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why it stopped before the run ended"))
+		keployFailure = errors.New("--strict could not verify this replay: the agent could not report every call no recorded mock answered")
+		m.logger.Error("replay failed under --strict: the agent could not report every call no recorded mock answered, so a clean run could not be proven",
+			zap.String("why", counts.missesUnread),
+			zap.String("next_step", "drop --strict to accept an unverified run, or remove the cause named in why and replay again"))
 	}
 	// Misses that WERE reported fail the run whatever else went unread.
-	if m.config.Mock.Strict && missed > 0 && utils.ErrCode == 0 {
+	// Only a miss that counts against a test (models.UnmatchedCall.
+	// CountsAgainstTest): not a DNS lookup's, which the proxy answers itself,
+	// nor one on a connection whose client sent nothing, which made no call (a
+	// MySQL client waiting at a port keploy could not tie to the recording, or
+	// a dependency's TCP health check). Each is still told, with its next
+	// step, above.
+	if m.config.Mock.Strict && counts.missedData > 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByStrict
 		m.logger.Error("replay failed under --strict: recorded dependency calls were missed",
-			zap.Int("missed", missed),
+			zap.Int("missed", counts.missedData),
 			zap.String("next_step", "a dependency contract drifted; re-record the set (keploy mock record) or add the new calls with --on-miss record"))
 	}
 
@@ -392,13 +688,61 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	// already failed the run (a crashed runner keeps its own, more useful
 	// reason). Like a reported miss, it is the suite's contract, not keploy's own
 	// failure, so it sets the exit code but is not returned as a keployFailure.
-	if policy == models.MissFail && loaded > 0 && counts.consumed == 0 && utils.ErrCode == 0 {
+	// Under the proven switch the verdict's first rule (no test ran) takes
+	// its place: a test recorded with no call serves nothing, and passes.
+	if !provenswitch.On() && policy == models.MissFail && loaded > 0 && counts.consumed == 0 && utils.ErrCode == 0 {
 		utils.ErrCode = 1
 		failedBy = FailedByNothingVerified
 		m.logger.Error("replay verified nothing: the test command served none of the recorded calls",
 			zap.String("mock-set", name),
 			zap.Int("loaded", loaded),
 			zap.String("next_step", "check the test command actually makes the recorded dependency calls, and that the recording is not stale -- re-record it with keploy mock record if it is"))
+	}
+
+	// Last, because it is the weakest evidence: a count of untracked
+	// processes that could not be read, from an agent that counts them (one
+	// that never does is "unknown" and passes, as before), proves neither a
+	// loss nor its absence. A reported miss or a run that verified nothing
+	// claims the failure first and keeps its name. Only --strict fails on it;
+	// without --strict it is said, and the receipt does not certify the run
+	// as isolated (below).
+	// Under the proven switch, a capture-loss count that could not be read
+	// is the same verdict as a lost PID-map count, said as what it is.
+	lossesUnread := false
+	if pidCheck.unreadable == nil && lostErr != nil && captureIncomplete == "" {
+		pidCheck.unreadable, lossesUnread = lostErr, true
+	}
+	if pidCheck.unreadable != nil {
+		captureUnverified = models.CaptureUnverified(pidCheck.unreadable)
+		unread, next := "tracked every process the test command ran", "check the agent logs for why its count could not be read, and for a WARN about its PID maps"
+		if lossesUnread {
+			captureUnverified = models.CaptureLossesUnverified(pidCheck.unreadable)
+			unread, next = "captured every call the test command made", "check the agent logs for why its count could not be read"
+		}
+		if m.config.Mock.Strict && utils.ErrCode == 0 { // a failure already decided keeps its name
+			utils.ErrCode = 1
+			failedBy = FailedByStrict
+			keployFailure = errors.New("--strict could not verify this replay: " + captureUnverified)
+			m.logger.Error("replay failed under --strict: keploy could not read whether the agent "+unread+", so a clean run could not be proven",
+				zap.String("mock-set", name), zap.Error(pidCheck.unreadable),
+				zap.String("next_step", "drop --strict to accept an unverified run, or check the agent logs for why its count could not be read"))
+		} else {
+			if !m.config.Mock.Strict {
+				next += "; --strict fails such a run"
+			}
+			m.logger.Warn("this replay is not verified: keploy could not read whether the agent "+unread+", so a call may have reached the real dependency unmocked",
+				zap.String("mock-set", name), zap.Error(pidCheck.unreadable), zap.String("next_step", next))
+		}
+	}
+	// The test command called what keploy cannot capture at all (decision
+	// 20: a Unix socket; only counted under the proven switch, where the
+	// tests it served are not judged): no loss of what keploy saw, so not a
+	// failure, but nothing proves the run isolated either.
+	if t := lostNotJudged.NotJudgedText(); t != "" && captureIncomplete == "" && captureUnverified == "" {
+		captureUnverified = t
+		m.logger.Warn("this replay is not verified: the test command called what keploy cannot capture, a TLS client abandoned its handshake, or the Docker daemon did not answer keploy's read of a container a call reached ("+provenswitch.Env+"=1)",
+			zap.String("mock-set", name), zap.String("reason", t),
+			zap.String("next_step", lostNotJudged.NotJudgedRemedy()))
 	}
 
 	// 12. What the run proved -- decided once, so the log line below and the
@@ -420,8 +764,18 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		// nothing about the tests that did not run.
 		isolationNote = fmt.Sprintf("isolated for the tests that ran: %d test(s) were gated and did not run", tests.Gated)
 	}
+	if captureIncomplete != "" {
+		// Calls of an untracked process reached the real dependency.
+		isolated, isolationNote = false, captureIncomplete
+	} else if captureUnverified != "" && isolated {
+		// Nothing shows they did, and nothing shows they did not.
+		isolated, isolationNote = false, captureUnverified
+	}
 	var keployErr string
-	if failedBy == FailedByKeploy {
+	if failedBy == FailedByKeploy && requestsOnly {
+		isolated, isolationNote = false, "keploy did not complete the run: "+requestsShort
+		keployFailure, keployErr = errors.New(isolationNote), requestsShort
+	} else if failedBy == FailedByKeploy {
 		isolated, isolationNote = false, "keploy did not complete the run: "+string(appErr.AppErrorType)
 		keployFailure = errors.New(isolationNote)
 		if appErr.Err != nil {
@@ -461,6 +815,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		Loaded:         loaded,
 		Consumed:       counts.consumed,
 		Missed:         counts.missed,
+		MissedData:     provenCount(counts.missedData),
 		Tests:          tests,
 		Bypass:         bypass,
 		Isolated:       isolated,
@@ -470,12 +825,19 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		CoverageNote:   covNote,
 		MinCoverage:    m.config.Mock.MinCoverage,
 		Version:        utils.Version,
+		Refusals:       m.refusals,
+		CannotCapture:  lostNotJudged,
 	})
 	writeTestsReceipt(m.logger, m.config.Path, TestsReceipt{
-		Set:         name,
-		At:          started.UTC().Truncate(time.Second),
-		MocksDigest: digest,
-		Tests:       counts.tests,
+		Set:           name,
+		At:            started.UTC().Truncate(time.Second),
+		MocksDigest:   digest,
+		Tests:         counts.tests,
+		Live:          m.live,
+		Mocked:        m.mocked,
+		Real:          realRun,
+		CannotCapture: lostNotJudged,
+		Learned:       counts.learnedPool,
 	})
 	return keployFailure
 }
@@ -558,9 +920,17 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	if !ok {
 		return
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-	defer cancel()
-	captured, err := drainer.DrainCapturedMocks(drainCtx)
+	// An epilogue read: no deadline under the proven switch (epilogueRead),
+	// should --on-miss record ever run under it (it is refused there today).
+	var captured []*models.Mock
+	err := epilogueRead(ctx, m.logger,
+		"waiting for keploy's agent to hand over the calls it captured on miss",
+		"press Ctrl+C again to stop now: they are then not added to the mock set",
+		func(ctx context.Context) error {
+			var err error
+			captured, err = drainer.DrainCapturedMocks(ctx)
+			return err
+		})
 	if err != nil {
 		m.logger.Debug("failed to drain captured-on-miss mocks", zap.Error(err))
 		return
@@ -573,14 +943,27 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 	// without this the replay-side counter starts at 0 and appended mocks reuse
 	// mock-0, mock-1, … colliding with the recorded set (consumed-mock tracking
 	// and mappings both key on name).
-	m.mockDB.SetCounterID(m.highestMockIndex(ctx, name))
+	//
+	// A set that cannot be read cannot be numbered: numbering from the start
+	// would give the appended mocks names already in the file, so nothing is
+	// appended.
+	highest, err := m.highestMockIndex(ctx, name)
+	if err != nil {
+		utils.LogError(m.logger, err, "the calls captured on miss were not added to the mock set: it could not be read to number them, and numbering from the start would reuse the names of mocks already in it",
+			zap.String("mock-set", name), zap.Int("captured", len(captured)),
+			zap.String("next_step", "fix the mock set so it loads (the error says why), then run again with --on-miss record to capture these calls"))
+		return
+	}
+	m.mockDB.SetCounterID(highest)
 	appended := 0
 	for _, mk := range captured {
 		if mk == nil {
 			continue
 		}
 		if err := m.mockDB.InsertMock(ctx, mk, name); err != nil {
-			m.logger.Debug("failed to append a captured-on-miss mock", zap.Error(err))
+			utils.LogError(m.logger, err, "failed to add a call captured on miss to the mock set; it is not saved",
+				zap.String("mock-set", name),
+				zap.String("next_step", "run again with --on-miss record to capture it"))
 			continue
 		}
 		appended++
@@ -593,6 +976,21 @@ func (m *mockService) persistCaptured(ctx context.Context, name string) {
 			m.logger.Warn("failed to publish the refreshed mock set", zap.Error(err))
 		}
 	}
+}
+
+// statefulMocksDisabled is test.disableStatefulMocks, ignored under the proven
+// switch (design v14 §10, a U18 row): a test's own mocks answer once
+// each in recorded order, and the pool keeps its cursors. The flip deletes it.
+func (m *mockService) statefulMocksDisabled() bool {
+	if !m.config.Test.DisableStatefulMocks {
+		return false
+	}
+	if provenswitch.On() {
+		m.logger.Warn("disableStatefulMocks is ignored under KEPLOY_PROVEN: a test's own mocks answer once each, in recorded order",
+			zap.String("next_step", "remove it from the configuration"))
+		return false
+	}
+	return true
 }
 
 // loadMocks reads the mock set's per-test and session pools over the widest
@@ -621,51 +1019,72 @@ func (m *mockService) loadMocks(ctx context.Context, name string, mapped map[str
 
 // highestMockIndex returns the largest N across the set's existing "mock-N"
 // names, or -1 when the set is empty / has no mock-N names. Seeding the counter
-// to this value makes the next InsertMock name its mock "mock-<N+1>".
-func (m *mockService) highestMockIndex(ctx context.Context, name string) int64 {
+// to this value makes the next InsertMock name its mock "mock-<N+1>". It fails
+// when the set cannot be read.
+func (m *mockService) highestMockIndex(ctx context.Context, name string) (int64, error) {
 	all := map[string]bool{}
 	var filtered, unfiltered []*models.Mock
+	var skipped map[string]models.Kind
 	if reader, ok := m.mockDB.(pkg.TestSetMocksReader); ok {
-		set, _ := reader.GetTestSetMocks(ctx, name, models.BaseTime, time.Now(), all, all)
-		filtered, unfiltered = set.Filtered, set.Unfiltered
+		set, err := reader.GetTestSetMocks(ctx, name, models.BaseTime, time.Now(), all, all)
+		if err != nil {
+			return -1, err
+		}
+		filtered, unfiltered, skipped = set.Filtered, set.Unfiltered, set.Skipped
 	} else {
-		filtered, _ = m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
-		unfiltered, _ = m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all)
+		var err error
+		if filtered, err = m.mockDB.GetFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all); err != nil {
+			return -1, err
+		}
+		if unfiltered, err = m.mockDB.GetUnFilteredMocks(ctx, name, models.BaseTime, time.Now(), all, all); err != nil {
+			return -1, err
+		}
 	}
 	highest := int64(-1)
-	consider := func(mocks []*models.Mock) {
-		for _, mk := range mocks {
-			if mk == nil {
-				continue
-			}
-			if n, ok := strings.CutPrefix(mk.Name, "mock-"); ok {
-				if idx, err := strconv.ParseInt(n, 10, 64); err == nil && idx > highest {
-					highest = idx
-				}
+	consider := func(name string) {
+		if n, ok := strings.CutPrefix(name, "mock-"); ok {
+			if idx, err := strconv.ParseInt(n, 10, 64); err == nil && idx > highest {
+				highest = idx
 			}
 		}
 	}
-	consider(filtered)
-	consider(unfiltered)
-	return highest
+	for _, mocks := range [][]*models.Mock{filtered, unfiltered} {
+		for _, mk := range mocks {
+			if mk != nil {
+				consider(mk.Name)
+			}
+		}
+	}
+	// A document the decoders skipped (a kind this keploy cannot read, a
+	// connection failure it cannot replay) is still in the file under its
+	// name, which an appended mock must not take.
+	for name := range skipped {
+		consider(name)
+	}
+	return highest, nil
 }
 
 // pushScopeTable reads mappings.yaml for the set (if per-test mappings exist)
 // and hands the agent the name→mock-names table so per-test scoping works.
-func (m *mockService) pushScopeTable(ctx context.Context, name string) {
+// Under the proven switch it is pushProvenTable: loaded are the mocks the
+// agent holds, and decoded every mock the set decoded.
+func (m *mockService) pushScopeTable(ctx context.Context, name string, filtered, unfiltered, decoded []*models.Mock) error {
+	if provenswitch.On() {
+		return m.pushProvenTable(ctx, name, append(append([]*models.Mock(nil), filtered...), unfiltered...), decoded)
+	}
 	if m.mappingDB == nil {
-		return
+		return nil
 	}
 	if m.pushSetTable(ctx, name) {
-		return
+		return nil
 	}
 	pusher, ok := m.instrumentation.(ScopePusher)
 	if !ok {
-		return
+		return nil
 	}
 	mappings, meaningful, err := m.mappingDB.Get(ctx, name)
-	if err != nil || !meaningful || len(mappings) == 0 {
-		return
+	if err != nil || len(mappings) == 0 || !meaningful {
+		return nil
 	}
 	table := make(map[string][]string, len(mappings))
 	for testName, entries := range mappings {
@@ -677,24 +1096,269 @@ func (m *mockService) pushScopeTable(ctx context.Context, name string) {
 	}
 	if err := pusher.PushScopeTable(ctx, table); err != nil {
 		m.logger.Debug("failed to push per-test scope table; per-test scoping disabled for this run", zap.Error(err))
-		return
+		return nil
 	}
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.String("mock-set", name))
+	return nil
+}
+
+// pushProvenTable hands the agent, under the proven switch, what each test
+// owns and each key's pool slice (design v14 §5.2): the one view the agent
+// serves a replay from. A test owns exactly the mocks its mapping lists (the
+// agent keeps the data-plane ones); a test the mapping omits, or a set with
+// no mapping file or an all-empty one, owns none, so a dependency-free set
+// stays green and every other call misses with its reason. Every mock no
+// test lists is the pool's: under the key it was recorded with (mappings'
+// startup:), else models.PoolKeyNone. A mapping that cannot be read, or that
+// names a mock the recording does not have, refuses, and so does an agent
+// that refuses the table: nothing is served from a whole pool instead.
+func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, decoded []*models.Mock) error {
+	refuse := func(why string) error {
+		return fmt.Errorf("keploy cannot judge each test of mock set %q: %s; record it again with keploy mock record", name, why)
+	}
+	if m.mappingDB == nil {
+		return refuse("this keploy reads no per-test mappings")
+	}
+	reader, ok := m.mappingDB.(MappingReader)
+	if !ok {
+		return refuse("this keploy cannot read the calls the set recorded outside its tests")
+	}
+	mp, err := reader.GetMapping(ctx, name)
+	if err != nil {
+		return refuse("its mappings cannot be read: " + err.Error())
+	}
+	if mp != nil && (len(mp.Boots) > 0 || len(mp.Suites) > 0) {
+		return refuse("its tests start apps of their own (boots), which this release does not judge test by test")
+	}
+	mappings, _, err := m.mappingDB.Get(ctx, name)
+	if err != nil {
+		return refuse("its mappings cannot be read: " + err.Error())
+	}
+	pp, ok := m.instrumentation.(ProvenTablePusher)
+	if !ok {
+		return refuse("this keploy's agent takes no per-test table with pool slices")
+	}
+	table := make(map[string][]string, len(mappings))
+	for testName, entries := range mappings {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name)
+		}
+		table[testName] = names
+	}
+	pool, unknown := poolSlices(mp, table, loaded, decoded)
+	if len(unknown) > 0 {
+		return refuse("its mappings name mocks the recording does not have: " + strings.Join(unknown, ", "))
+	}
+	table = heldOnly(table, loaded)
+	if !ownsTestMocks(table, loaded) {
+		m.logger.Warn("under KEPLOY_PROVEN no test of this mock set owns a recorded call: it has no mappings.yaml, or its mapping lists no data-plane mock the agent holds, so every call a test makes to a dependency misses",
+			zap.String("mock-set", name),
+			zap.String("next_step", "record the set again with this keploy: keploy mock record writes mappings.yaml"))
+	}
+	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
+		return refuse("its agent refused the per-test table: " + err.Error())
+	}
+	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
+	return nil
+}
+
+// ownsTestMocks reports whether a test of table owns a test mock: a
+// data-plane mock of loaded (a protocol-phase mock is the pool's).
+func ownsTestMocks(table map[string][]string, loaded []*models.Mock) bool {
+	test := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			test[mk.Name] = !mk.IsProtocolPhase()
+		}
+	}
+	for _, names := range table {
+		for _, n := range names {
+			if test[n] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// heldOnly is table less the names the agent does not hold: a mock the set
+// decoded that keploy never hands the agent (models.AgentBound: a connection
+// failure) is no test's, and the call it recorded misses. The agent would
+// refuse the begin of a test that owns one.
+func heldOnly(table map[string][]string, loaded []*models.Mock) map[string][]string {
+	held := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			held[mk.Name] = true
+		}
+	}
+	out := make(map[string][]string, len(table))
+	for test, names := range table {
+		kept := make([]string, 0, len(names))
+		for _, n := range names {
+			if held[n] {
+				kept = append(kept, n)
+			}
+		}
+		out[test] = kept
+	}
+	return out
+}
+
+// poolSlices is each key's pool slice of a recording (design v14 §5.2): every
+// loaded mock no test's mapping lists, under the key its mappings' startup:
+// entry gives it, else models.PoolKeyNone (an older recording's, or one made
+// outside every claim). unknown lists, sorted, the names the table or the
+// startup entries give that no decoded mock has (a mock the agent never holds,
+// a connection failure, is decoded, and in no slice).
+func poolSlices(mp *models.Mapping, table map[string][]string, loaded, decoded []*models.Mock) (pool map[string][]string, unknown []string) {
+	have := make(map[string]bool, len(decoded))
+	for _, mk := range decoded {
+		if mk != nil && mk.Name != "" {
+			have[mk.Name] = true
+		}
+	}
+	held := make(map[string]bool, len(loaded))
+	for _, mk := range loaded {
+		if mk != nil && mk.Name != "" {
+			held[mk.Name] = true
+		}
+	}
+	missing := map[string]bool{}
+	mapped := map[string]bool{}
+	for _, names := range table {
+		for _, n := range names {
+			mapped[n] = true
+			if !have[n] {
+				missing[n] = true
+			}
+		}
+	}
+	pool = map[string][]string{}
+	keyed := map[string]bool{}
+	if mp != nil {
+		for _, e := range mp.Startup {
+			if e.Name == "" || mapped[e.Name] || keyed[e.Name] {
+				continue
+			}
+			if !have[e.Name] {
+				missing[e.Name] = true
+				continue
+			}
+			if !held[e.Name] {
+				continue
+			}
+			key := e.Key
+			if key == "" {
+				key = models.PoolKeyNone
+			}
+			keyed[e.Name] = true
+			pool[key] = append(pool[key], e.Name)
+		}
+	}
+	for _, mk := range loaded {
+		if mk == nil || mk.Name == "" || mapped[mk.Name] || keyed[mk.Name] {
+			continue
+		}
+		keyed[mk.Name] = true
+		pool[models.PoolKeyNone] = append(pool[models.PoolKeyNone], mk.Name)
+	}
+	for n := range missing {
+		unknown = append(unknown, n)
+	}
+	sort.Strings(unknown)
+	return pool, unknown
+}
+
+// pushTestBegins hands the agent when each test of the recording began
+// (mappings.yaml), so the agent moves the run's clock to a test's begin while
+// it is open, and back to the run's start time after it (design v14 §3.4). A
+// recording without per-test begins gives none, and its tests run at the
+// start time. A keploy that cannot read the recording's mappings refuses: its
+// tests would all run at the start time with no word.
+func (m *mockService) pushTestBegins(ctx context.Context, name string) error {
+	pusher, ok := m.instrumentation.(TestBeginsPusher)
+	if !ok {
+		return errors.New("this keploy's agent client cannot move the clock per test")
+	}
+	reader, ok := m.mappingDB.(MappingReader)
+	if !ok {
+		return errors.New("this keploy cannot read when the recording's tests began (its mappings)")
+	}
+	mapping, err := reader.GetMapping(ctx, name)
+	if err != nil {
+		return fmt.Errorf("read when the tests of %s began: %w", name, err)
+	}
+	begins := testBegins(mapping)
+	real := testReal(mapping)
+	if err := pusher.PushTestBegins(ctx, begins, real); err != nil {
+		return err
+	}
+	m.realListed = real
+	for _, id := range slices.Sorted(maps.Keys(real)) {
+		// F3: the test runs on the real clock, so what its recording built
+		// on the recorded time ages; the summary lists it UNFROZEN.
+		m.logger.Info("a test that uses mock.real runs on the real clock, not at its recorded time: re-record it when its recording ages",
+			zap.String("test", id), zap.Strings("real", real[id]))
+	}
+	m.logger.Info("sent the agent when each test began in its recording", zap.Int("tests", len(begins)), zap.String("mock-set", name))
+	return nil
+}
+
+// testReal is, by test ID, the mock.real destinations each test of mapping
+// lists: those tests run on the real clock (design v14 §3.4, F3).
+func testReal(mapping *models.Mapping) map[string][]string {
+	if mapping == nil {
+		return nil
+	}
+	var out map[string][]string
+	for _, tc := range mapping.TestCases {
+		if len(tc.Real) == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string][]string{}
+		}
+		out[tc.ID] = mergeSorted(out[tc.ID], tc.Real)
+	}
+	return out
+}
+
+// testBegins is when each test of mapping began, by test ID.
+func testBegins(mapping *models.Mapping) map[string]time.Time {
+	begins := map[string]time.Time{}
+	if mapping == nil {
+		return begins
+	}
+	for _, tc := range mapping.TestCases {
+		if !tc.At.IsZero() {
+			begins[tc.ID] = tc.At
+		}
+	}
+	return begins
 }
 
 // replayWindows are the per-test windows of this replay. Under docker compose
 // the agent was stopped with the runner, so they come from the account it left
 // as it stopped (see reportOutcome); otherwise from the agent itself.
-func (m *mockService) replayWindows(ctx context.Context) []models.ScopeWindow {
+// With the proven switch on a failed read is an error; off, it is no windows.
+func (m *mockService) replayWindows(ctx context.Context) ([]models.ScopeWindow, error) {
 	if r, ok := m.instrumentation.(ComposeOutcomeReader); ok && m.isDockerCompose() {
 		outcome, err := r.ComposeAgentOutcome()
 		if err != nil {
+			if provenswitch.On() {
+				return nil, err
+			}
 			m.logger.Debug("no per-test windows: the keploy-agent container left no replay outcome", zap.Error(err))
-			return nil
+			return nil, nil
 		}
-		return outcome.Windows
+		return m.takeRunWindows(outcome.Windows), nil
 	}
-	return m.agentWindows(ctx)
+	if provenswitch.On() {
+		return m.readWindows(ctx)
+	}
+	return m.agentWindows(ctx), nil
 }
 
 // ScopeGateRequest is what a ScopeGateSource is told about the replay it gates.
@@ -705,6 +1369,8 @@ type ScopeGateRequest struct {
 	// Receipt.MocksDigest), so a source can tell a list proven against this
 	// recording from one proven against a recording since replaced.
 	MocksDigest string
+	// Path is the keploy folder the set lives in.
+	Path string
 }
 
 // ScopeGateSource names the tests a replay should run, and why the rest
@@ -719,6 +1385,57 @@ var scopeGateSource ScopeGateSource
 // RegisterScopeGateSource installs the gate source. A nil fn removes it.
 func RegisterScopeGateSource(fn ScopeGateSource) {
 	scopeGateSource = fn
+}
+
+// ScopeSkipSource is the proven model's gate (design v14 §6.1): the tests a
+// replay skips, by ID, each with the reason its harness skips it with. It is
+// a deny list: every test it does not name runs. A wrapping build
+// (enterprise) installs one that reads the set's verdicts.yaml. An error
+// refuses the replay: running a test the list quarantines, or skipping one
+// it does not, would make the run something other than CI's.
+type ScopeSkipSource func(ctx context.Context, req ScopeGateRequest) (map[string]string, error)
+
+var scopeSkipSource ScopeSkipSource
+
+// RegisterScopeSkipSource installs the skip source, read under the proven
+// switch. A nil fn removes it.
+func RegisterScopeSkipSource(fn ScopeSkipSource) {
+	scopeSkipSource = fn
+}
+
+// ScopeSkipPusher is an optional Instrumentation extension: under the proven
+// switch, Replay hands the agent the tests to skip with it.
+type ScopeSkipPusher interface {
+	PushScopeSkips(ctx context.Context, skip map[string]string) error
+}
+
+// pushScopeSkips hands the agent the proven gate, under the proven switch and
+// when a skip source is installed. Its failure refuses the replay.
+func (m *mockService) pushScopeSkips(ctx context.Context, name, digest string) error {
+	if !provenswitch.On() || scopeSkipSource == nil {
+		return nil
+	}
+	skip, err := scopeSkipSource(ctx, ScopeGateRequest{Set: name, MocksDigest: digest, Path: m.config.Path})
+	if err != nil {
+		return fmt.Errorf("could not read which tests this replay skips: %w", err)
+	}
+	pusher, ok := m.instrumentation.(ScopeSkipPusher)
+	if !ok {
+		if len(skip) == 0 {
+			return nil
+		}
+		return errors.New("this keploy cannot tell its agent which tests to skip")
+	}
+	if skip == nil {
+		skip = map[string]string{}
+	}
+	if err := pusher.PushScopeSkips(ctx, skip); err != nil {
+		return fmt.Errorf("could not tell the agent which tests to skip: %w", err)
+	}
+	if len(skip) > 0 {
+		m.logger.Info("tests keploy skips this replay, each with its reason", zap.Int("tests", len(skip)), zap.String("mock-set", name))
+	}
+	return nil
 }
 
 // requestedGate is the gate a replay asked the agent for: the tests to run
@@ -847,16 +1564,16 @@ func (m *mockService) pushSetTable(ctx context.Context, name string) bool {
 		return false
 	}
 	mapping, err := reader.GetMapping(ctx, name)
-	if err != nil || mapping == nil || len(mapping.Boots) == 0 {
+	if err != nil || mapping == nil || (len(mapping.Boots) == 0 && len(mapping.Suites) == 0) {
 		return false
 	}
 	root := gitTop()
 	sets := setTable(mapping, root)
 	if err := pusher.PushSetTable(ctx, root, sets); err != nil {
-		m.logger.Warn("could not install the app start table; app starts are not kept apart in this run", zap.Error(err))
+		m.logger.Warn("could not send the agent each set's mocks and recorded start; using the per-test mocks instead", zap.Error(err))
 		return false
 	}
-	m.logger.Info("app starts kept apart", zap.Int("sets", len(sets)), zap.String("mock-set", name))
+	m.logger.Info("sent the agent each set's mocks and recorded start", zap.Int("sets", len(sets)), zap.String("mock-set", name))
 	return true
 }
 
@@ -891,6 +1608,13 @@ func setTable(mapping *models.Mapping, root string) map[string]models.SetTable {
 		}
 		st.Tests[tc.ID] = owned
 		sets[setName(tc.Dir, root)] = st
+	}
+	for _, su := range mapping.Suites {
+		k := setName(su.Dir, root)
+		if st, ok := sets[k]; ok && !su.Start.IsZero() && (st.Start.IsZero() || su.Start.Before(st.Start)) {
+			st.Start = su.Start
+			sets[k] = st
+		}
 	}
 	return sets
 }
@@ -973,20 +1697,31 @@ func RegisterReplayOutcomeReporter(fn func(context.Context, ReplayOutcome)) {
 // replayCounts are the agent's end-of-run counts. -1 means that read failed:
 // unknown, which is not the same as zero.
 type replayCounts struct {
-	consumed int
-	missed   int
-	tests    []TestReceipt
+	consumed   int
+	missed     int
+	missedData int
+	// missesUnread is why the read of the calls no mock answered was
+	// incomplete (models.UnreadCause), when missed is -1.
+	missesUnread string
+	tests        []TestReceipt
+	// learnedPool is what the learn step wrote onto mocks no test consumed.
+	learnedPool []string
+	// learnErr is why what the learn step learned could not be written: the
+	// round did not complete.
+	learnErr error
 }
 
 // reportOutcome logs which mocks were consumed and which outgoing calls matched
 // nothing. It returns the consumed and missed counts, each -1 when its read
 // failed; whether the MISSES specifically were readable is the only half
-// --strict turns on.
+// --strict turns on. stopped reports whether the user's interrupt stopped the
+// replay: a read it cut short is not the agent's failure, and the replay ends
+// unjudged on it (Replay).
 //
 // The two reads are tracked apart on purpose. Collapsing them into one "did the
 // agent answer" flag makes a half-answer indistinguishable from no answer, and
 // then reports a run whose misses were never read as a clean one.
-func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail) replayCounts {
+func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail replayDetail, stopped func() bool) replayCounts {
 	var consumed []models.MockState
 	var misses []models.UnmatchedCall
 	var consumedErr, missesErr error
@@ -999,19 +1734,32 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if fromCompose {
 		outcome, err := composeOutcome.ComposeAgentOutcome()
 		consumed, misses, consumedErr, missesErr = outcome.Consumed, outcome.Missed, err, err
-	} else {
-		outcomeCtx, cancel := context.WithTimeout(ctx, agentEpilogueTimeout)
-		defer cancel()
-		consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
-		misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
-		if reader, ok := m.instrumentation.(idPairReader); ok {
-			if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
-				m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
-				m.ids = ids.New(pairs)
-			} else {
-				m.logger.Debug("failed to read the ids this run made", zap.Error(err))
-			}
+		if err == nil && outcome.MissedUnread != "" {
+			// As the agent's own read would have said it: incomplete, with
+			// what was read.
+			missesErr = fmt.Errorf("%w: %s", models.ErrUnmatchedCallsUnread, outcome.MissedUnread)
 		}
+	} else {
+		// Epilogue reads: no deadline under the proven switch, where they are
+		// what keploy's verdict rests on (epilogueRead). Each read's error is
+		// its own; the user's interrupt that gives them up is the run's
+		// (stopped).
+		_ = epilogueRead(ctx, m.logger,
+			"waiting for keploy's agent to report what it served and missed",
+			replayDrainWords.stopNow,
+			func(outcomeCtx context.Context) error {
+				consumed, consumedErr = m.instrumentation.GetConsumedMocks(outcomeCtx)
+				misses, missesErr = m.instrumentation.GetMockErrors(outcomeCtx)
+				if reader, ok := m.instrumentation.(idPairReader); ok {
+					if pairs, err := reader.GetIDPairs(outcomeCtx); err == nil {
+						m.logger.Debug("ids this run made in place of recorded ones", zap.Any("pairs", pairs))
+						m.ids = ids.New(pairs)
+					} else {
+						m.logger.Debug("failed to read the ids this run made", zap.Error(err))
+					}
+				}
+				return nil
+			})
 	}
 	if consumedErr == nil && m.config.Mock.EmitMockEvents {
 		// Flush the tail. The poll loop stops when the runner exits, so
@@ -1052,9 +1800,18 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 	if consumedErr == nil && missesErr == nil {
 		m.logger.Info("mock replay summary", summary...)
+	} else if stopped() {
+		// The user's Ctrl+C cut the reads short, not the agent: nothing here
+		// is the agent's to explain, and the run ends unjudged (Replay).
+		m.logger.Debug("mock replay summary (incomplete: the user stopped the replay while keploy read it)", summary...)
 	} else {
 		next := "check the agent logs for why it stopped before the run ended"
-		if fromCompose {
+		if fromCompose && consumedErr == nil {
+			// The agent left its account, but its read of the calls no mock
+			// answered was incomplete: that is what to look into.
+			summary = append(summary, zap.NamedError("reason", missesErr))
+			next = "the keploy-agent container could not read every call no mock answered as compose stopped it; check its logs above for why"
+		} else if fromCompose {
 			// Compose stopping the agent is the normal end of the run, not
 			// the thing to look into: the agent writes its account as it
 			// stops, and what needs explaining is why this one did not.
@@ -1066,16 +1823,22 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	}
 
 	for _, miss := range misses {
-		m.logger.Warn("no recorded mock matched an outgoing call",
-			zap.String("protocol", miss.Protocol),
-			zap.String("call", miss.ActualSummary),
-			zap.String("destination", miss.Destination),
-			zap.String("next_step", "record this call with --on-miss record, or re-record the set"))
+		logMiss(m.logger, miss)
 	}
 
 	// What each test used and missed, and its verdict: for the receipt, and
 	// for the reporter below.
 	flows := attributeMocks(detail.windows, detail.expected, consumed, misses)
+	// What the learn step learned goes onto the recording, before the record
+	// that runs this round commits it. A round whose learning cannot be read
+	// or kept did not complete: its record would judge recordings that lack
+	// what this round served.
+	var learned map[string][]string
+	var learnedPool []string
+	var learnErr error
+	if m.learning() {
+		learned, learnedPool, learnErr = m.keepLearned(ctx, detail.set, consumed, consumedErr, flows, detail.expected)
+	}
 
 	// Metering LAST: it may do network I/O, and the miss warnings above are what
 	// the user actually needs to see first. Never for --local — that is the free
@@ -1088,6 +1851,8 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 	if replayOutcomeReporter != nil && !m.config.Mock.Local {
 		if consumedErr != nil || missesErr != nil {
 			m.logger.Info("not metering this replay: the agent did not report the whole outcome, and a run counted as zero is worse than one left uncounted")
+		} else if detail.actualShort != "" {
+			m.logger.Info("not metering this replay: " + detail.actualShort + ", and a request it lost would be reported as one the app did not make")
 		} else {
 			replayOutcomeReporter(ctx, ReplayOutcome{
 				SetName:  m.setName(),
@@ -1102,14 +1867,130 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		}
 	}
 	counts := replayCounts{consumed: len(consumed), missed: len(misses)}
+	for _, miss := range misses {
+		if miss.CountsAgainstTest() {
+			counts.missedData++
+		}
+	}
 	if consumedErr != nil {
 		counts.consumed = -1
 	}
 	if missesErr != nil {
-		counts.missed = -1
+		counts.missed, counts.missedData = -1, -1
+		counts.missesUnread = models.UnreadCause(missesErr)
 	}
-	counts.tests = testReceipts(flows, consumedErr == nil, missesErr == nil)
+	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	for i := range counts.tests {
+		counts.tests[i].Learned = learned[counts.tests[i].Name]
+	}
+	counts.learnedPool = learnedPool
+	counts.learnErr = learnErr
 	return counts
+}
+
+// logMiss warns of a call no recorded mock answered, with the next step its
+// matcher gave it (a MySQL endpoint that moved names the port to list, a value
+// drift the fields), and, where it gave none, to record the call. A
+// connection whose client sent nothing made no call: it is said as such, and
+// as what it was if its client waited for its server to speak first (a TCP
+// health check closes the same way).
+func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
+	next := miss.NextSteps
+	if next == "" {
+		next = "record this call with --on-miss record, or re-record the set"
+	}
+	msg := "no recorded mock matched an outgoing call"
+	if miss.MatchPhase == models.MatchPhaseNoRequest {
+		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
+	}
+	logger.Warn(msg,
+		zap.String("protocol", miss.Protocol),
+		zap.String("call", miss.ActualSummary),
+		zap.String("destination", miss.Destination),
+		zap.String("next_step", next))
+}
+
+// provenCount is n under the proven switch, and nothing with it off, so a
+// receipt written with the switch off is exactly what it was before it.
+func provenCount(n int) *int {
+	if !provenswitch.On() {
+		return nil
+	}
+	return &n
+}
+
+// mergeCaptureLosses is a and b, one entry per kind: the one with the larger
+// count (the counts are since the run began, so the later attempt's), but for
+// a test's own kind (models.CaptureLossKind.PerTest: a TLS handshake that
+// failed or was abandoned), which each attempt was charged its own of, so
+// the two added.
+func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
+	out := append(models.CaptureLosses(nil), a...)
+	for _, l := range b {
+		found := false
+		for i := range out {
+			if out[i].Kind == l.Kind {
+				found = true
+				switch {
+				case l.Kind.PerTest():
+					out[i].Count += l.Count
+					if l.What != "" {
+						out[i].What = l.What
+					}
+				case l.Count > out[i].Count:
+					out[i] = l
+				}
+			}
+		}
+		if !found {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// withEvidence puts on each test's line the evidence the proven wire charged
+// to it at its end (models.ScopeWindow.Evidence). A test that ran more than
+// once keeps the evidence of every attempt: one failed attempt fails it.
+func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
+	var byName map[string]*models.ScopeEvidence
+	for _, w := range windows {
+		// Evidence with only a reason (a test whose process exited, or
+		// whose evidence could not be read) is keploy's verdict too.
+		if w.Evidence == nil || (w.Evidence.Empty() && w.Evidence.Reason == "") {
+			continue
+		}
+		if byName == nil {
+			byName = map[string]*models.ScopeEvidence{}
+		}
+		ev := byName[w.Name]
+		if ev == nil {
+			ev = &models.ScopeEvidence{Reason: w.Evidence.Reason}
+			byName[w.Name] = ev
+		}
+		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
+		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
+		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
+		// One attempt keploy could not read leaves the test unread, with
+		// that attempt's reason.
+		if w.Evidence.Unread && !ev.Unread {
+			ev.Unread, ev.Reason = true, w.Evidence.Reason
+		}
+		// Counts since the run began: each attempt carries the run's, so
+		// keep one per kind, the latest (largest); a test's own kinds,
+		// each attempt's, added.
+		ev.CaptureIncomplete = mergeCaptureLosses(ev.CaptureIncomplete, w.Evidence.CaptureIncomplete)
+		// What keploy cannot capture at all leaves the test not judged,
+		// never failed: a line that dropped it would read as keploy's
+		// failure with no call to name.
+		ev.CannotCapture = mergeCaptureLosses(ev.CannotCapture, w.Evidence.CannotCapture)
+	}
+	for i := range tests {
+		if ev := byName[tests[i].Name]; ev != nil {
+			tests[i].Evidence = ev
+		}
+	}
+	return tests
 }
 
 // testReceipts is each test's line in the receipt: its verdict and what it

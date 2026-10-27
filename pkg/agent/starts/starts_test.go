@@ -1,6 +1,7 @@
 package starts
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -181,6 +182,44 @@ func TestReplayBindsEachStartToItsOwnBootAndHidesTheOthers(t *testing.T) {
 	}
 }
 
+// A call owns the recordings its open test's mapping names, from whichever
+// start: not a boot's, not another test's, and none with no test open.
+func TestOwnsIsTheOpenTestsMapping(t *testing.T) {
+	f := newFake()
+	r := New(f, 0)
+	if _, known := r.Owns(101, "pen-old"); known {
+		t.Fatal("a registry with no table knows no view")
+	}
+	r.SetTable("/r", map[string]models.SetTable{
+		"e2e/orders": {
+			Boots: map[string][]string{"shop#1": {"boot-inr"}},
+			Tests: map[string][]models.Owned{
+				"orders.TestReload": {{Name: "pen-old", Start: "shop#1"}, {Name: "pen-new", Start: "shop#1@orders.TestReload"}},
+				"orders.TestCreate": {{Name: "book", Start: "shop#1"}},
+			},
+		},
+	})
+	f.spawn(100, 1, at(0), "orders.test")
+	r.Begin(100, "e2e/orders", "/r/e2e/orders", true, at(10))
+	f.spawn(101, 100, at(20), "shop")
+	if owned, known := r.Owns(101, "pen-old"); owned || !known {
+		t.Fatalf("no test open: owned %v known %v; want not owned, known", owned, known)
+	}
+	r.Begin(100, "orders.TestReload", "/r/e2e/orders", false, at(100))
+	for name, want := range map[string]bool{"pen-old": true, "pen-new": true, "boot-inr": false, "book": false, "unmapped": false} {
+		if owned, known := r.Owns(101, name); owned != want || !known {
+			t.Errorf("Owns(%q) = %v, %v; want %v, true", name, owned, known, want)
+		}
+	}
+	if _, known := r.Owns(999, "pen-old"); known {
+		t.Fatal("a pid of no worker has no view")
+	}
+	r.End(100, "orders.TestReload", false, at(150))
+	if owned, _ := r.Owns(101, "pen-old"); owned {
+		t.Fatal("an ended test owns nothing")
+	}
+}
+
 func TestAnUnrecordedStartFallsBackToTheSuiteStartOfTheSameProgram(t *testing.T) {
 	f := newFake()
 	r := New(f, 0)
@@ -296,5 +335,70 @@ func TestOnMarkRunsOnceWhenTheFirstAppIsMarked(t *testing.T) {
 	case <-calls:
 		t.Fatal("the hook runs only for the first mark")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestStartIsTheRecordedStartOfTheMarksSet(t *testing.T) {
+	r := New(newFake(), time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {Start: t0}, "b": {}})
+	r.Begin(7, "s", "/r/a", true, at(0))
+	if set, got := r.Start(7, ""); set != "a" || !got.Equal(t0) {
+		t.Fatalf("worker's set start = %q %v", set, got)
+	}
+	if set, got := r.Start(0, "/r/a"); set != "a" || !got.Equal(t0) {
+		t.Fatalf("dir's set start = %q %v", set, got)
+	}
+	if set, got := r.Start(0, "/r/b"); set != "b" || !got.IsZero() {
+		t.Fatalf("set without a start = %q %v", set, got)
+	}
+	if set, got := r.Start(9, "/elsewhere"); set != "" || !got.IsZero() {
+		t.Fatalf("no set = %q %v", set, got)
+	}
+}
+
+func TestLiveNamesTheSetsWithASuiteOrATestOpen(t *testing.T) {
+	r := New(newFake(), time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {}, "b": {}, "c": {}})
+	if got := r.Live(); len(got) != 0 {
+		t.Fatalf("live before any mark: %v", got)
+	}
+	r.Begin(7, "/r/a", "/r/a", true, at(0))
+	r.Begin(8, "t1", "/r/b", false, at(1))
+	r.Begin(9, "t2", "/elsewhere", false, at(1))
+	if got := r.Live(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("live = %v", got)
+	}
+	r.End(8, "t1", false, at(2))
+	if got := r.Live(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("a set whose only test ended is still live: %v", got)
+	}
+	r.Begin(7, "t3", "", false, at(3))
+	r.End(7, "t3", false, at(4))
+	if got := r.Live(); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("a set whose suite is open is not live: %v", got)
+	}
+	r.End(7, "/r/a", true, at(5))
+	if got := r.Live(); len(got) != 0 {
+		t.Fatalf("live after every suite ended: %v", got)
+	}
+}
+
+func TestLiveLeavesOutASetWhoseRunnerDiedMidSuite(t *testing.T) {
+	f := newFake()
+	r := New(f, time.Second)
+	r.SetTable("/r", map[string]models.SetTable{"a": {}, "b": {}})
+	f.spawn(7, 1, at(0), "/tmp/a.test")
+	r.Begin(7, "/r/a", "/r/a", true, at(1))
+	r.Begin(8, "/r/b", "/r/b", true, at(1))
+	if got := r.Live(); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("live = %v", got)
+	}
+	delete(f.born, 7)
+	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("a runner that died without ending its suite still holds its set: %v", got)
+	}
+	f.spawn(7, 1, at(5), "/tmp/other")
+	if got := r.Live(); !slices.Equal(got, []string{"b"}) {
+		t.Fatalf("a new process with the dead runner's pid holds its set: %v", got)
 	}
 }

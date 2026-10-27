@@ -24,7 +24,17 @@
 #      always, so it must be set up again;
 #   4. test (replay) of 3's recording, `up --always-recreate-deps app`, with
 #      the dependency crashing once again: the recreated agent must get the
-#      test set's mocks, their filters and its readiness again.
+#      test set's mocks, their filters and its readiness again;
+#   5. 3 under the proven switch (KEPLOY_PROVEN=1): the recreated agent, which
+#      runs in a container with no Docker socket, must be given keploy's list
+#      of the daemon's containers again before its session is made again, so
+#      the app's calls to the dependency carry its container key;
+#   6. test (replay) of 5's recording under the proven switch, the dependency
+#      crashing once again: the retry recreates the agent while the app's
+#      container is only created, so the agent keploy sets up again is the
+#      one the app runs against from its start. The set must be judged, and
+#      pass, with no test charged agent_started_again (that kind is for an
+#      agent started again while the application ran on).
 #
 # Env: RECORD_BIN and REPLAY_BIN (the keploy binaries under test). The agent
 # image must be loaded as ghcr.io/keploy/keploy:v3-dev
@@ -91,12 +101,25 @@ volumes:
   flaky: {}
 EOF
 
+# pid_running PID: whether PID still runs, by its state in /proc, which shows
+# root's processes to this user too: gone, or a zombie, is not running. Not
+# kill -0: keploy runs under sudo here, and while sudo checks its policy it
+# holds every uid as root, so kill -0 from this user fails (EPERM) on a sudo
+# that is alive, and keploy would be taken for ended before it started.
+pid_running() {
+  local st
+  case $1 in "" | *[!0-9]*) return 1 ;; esac
+  { read -r st <"/proc/$1/stat"; } 2>/dev/null || return 1
+  st=${st##*) }
+  [ "${st%% *}" != Z ]
+}
+
 # requests: three requests once the app answers, while keploy runs as $1.
 requests() {
   local pid=$1 i
   for i in $(seq 1 120); do
     if curl -s -m 2 -o /dev/null http://localhost:8080/ 2>/dev/null; then break; fi
-    kill -0 "$pid" 2>/dev/null || return
+    pid_running "$pid" || return
     sleep 1
   done
   for i in 1 2 3; do curl -s -m 5 -o /dev/null "http://localhost:8080/?r=$i" 2>/dev/null; done
@@ -124,7 +147,7 @@ record() {
   cleanup
   sudo rm -rf keploy
   # shellcheck disable=SC2024 # the log is this user's, so the shell redirects
-  sudo -E env PATH="$PATH" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
+  sudo -E env PATH="$PATH" KEPLOY_PROVEN="${KEPLOY_PROVEN:-}" timeout -k 10 180 "$RECORD_BIN" record -c "$cmd" --container-name retryapp \
     --record-timer 60s --disable-tele > "$name.log" 2>&1 &
   local pid=$!
   requests "$pid"
@@ -171,6 +194,48 @@ if [ "$FAIL" -ne "$before" ]; then
   tail -80 replay.log
 else
   echo "ok: replay: $how; $summary"
+fi
+
+# 5. The recreated agent under the proven switch.
+before=$FAIL
+KEPLOY_PROVEN=1 record recreated-proven "docker compose up --always-recreate-deps app"
+setup_again recreated-proven || fail "recreated-proven: the agent compose recreated was not set up again"
+mocks=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -c '^kind: Http')
+# The dependency's key: its repository (no tag), its port and its
+# configuration's fingerprint; one key on every mock.
+keys=$( (sudo cat keploy/test-set-0/mocks.yaml 2>/dev/null || true) | grep -oE 'containerKey: container:python:8000@s[0-9a-f]{12}$')
+keyed=$(grep -c . <<<"$keys")
+if [ "$mocks" -lt 3 ] || [ "$keyed" -ne "$mocks" ] || [ "$(sort -u <<<"$keys" | wc -l)" -ne 1 ]; then
+  fail "recreated-proven: $keyed of $mocks HTTP mocks carry the dependency's container key, want all"
+fi
+[ "$FAIL" -eq "$before" ] && echo "ok: recreated-proven: all $mocks mocks carry the dependency's container key"
+
+# 6. Replay 5's recording under the proven switch, the dependency crashing
+# once again (a new volume) and the agent recreated by the retry before the
+# app starts.
+cleanup
+before=$FAIL
+# shellcheck disable=SC2024 # the log is this user's, so the shell redirects
+sudo -E env PATH="$PATH" KEPLOY_PROVEN=1 timeout -k 10 300 "$REPLAY_BIN" test -c "docker compose up --always-recreate-deps app" \
+  --container-name retryapp --delay 10 --disable-tele > replay-proven.log 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "replay-proven: keploy test exited $rc"
+how=$(retried replay-proven) || fail "replay-proven: the dependency crash was not retried"
+setup_again replay-proven || fail "replay-proven: the agent compose recreated was not set up again"
+summary=$(sed -E 's/\x1b\[[0-9;]*m//g' replay-proven.log | { grep -E 'Total test (passed|failed):' || true; } | tr -s ' \t' ' ' | tr '\n' ' ')
+if ! grep -q 'Total test failed: 0' <<<"$summary" || grep -q 'Total test passed: 0' <<<"$summary"; then
+  fail "replay-proven: want every test passed on the recreated agent: ${summary:-no summary}"
+fi
+report=$(sudo sh -c 'ls -1dt keploy/reports/test-run-*/test-set-0-report.yaml 2>/dev/null | head -n1')
+status=$( (sudo grep -m1 '^status:' "${report:-/nonexistent}" 2>/dev/null || true) | awk '{print $2}')
+charged=$( (sudo grep -c 'kind: agent_started_again' "${report:-/nonexistent}" 2>/dev/null || true) | head -n1)
+[ "$status" = PASSED ] || fail "replay-proven: test-set-0's report ${report:-(none)} says status ${status:-(none)}, want PASSED: the retry's agent is the one the app ran against"
+[ "${charged:-0}" -eq 0 ] || fail "replay-proven: $charged test(s) charged agent_started_again, want none: the agent was recreated before the app started"
+if [ "$FAIL" -ne "$before" ]; then
+  [ -z "$report" ] || sudo grep -m1 '^failure_reason:' "$report" | cut -c1-700
+  tail -80 replay-proven.log
+else
+  echo "ok: replay-proven: $how; $summary; test-set-0 $status, none charged agent_started_again"
 fi
 
 if [ "$FAIL" -ne 0 ]; then

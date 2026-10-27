@@ -1,0 +1,76 @@
+# Keeps the agent's fallback trust store current. pkg/agent/proxy/tls builds it
+# from golang.org/x/crypto/x509roots/fallback (Mozilla's NSS roots). That module
+# only publishes pseudo-versions, which Dependabot never proposes, so this job
+# bumps it to @latest weekly and opens a PR. A vendored copy that nobody
+# refreshed kept trusting roots Mozilla had distrusted (Oct 2026 eMudhra/emSign).
+name: Refresh Mozilla NSS roots
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: refresh-nss-roots
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Bump golang.org/x/crypto/x509roots/fallback
+        id: bump
+        run: |
+          set -euo pipefail
+          mod=golang.org/x/crypto/x509roots/fallback
+          old=$(go list -m -f '{{.Version}}' "$mod")
+          go get "$mod@latest"
+          go mod tidy
+          new=$(go list -m -f '{{.Version}}' "$mod")
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          if [ "$old" = "$new" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+          echo "x509roots/fallback: $old -> $new"
+
+      # PRs opened with GITHUB_TOKEN do not trigger other workflows, so the
+      # root-store tests run here before anything is proposed.
+      - name: Test the root store
+        if: steps.bump.outputs.changed == 'true'
+        run: go test ./pkg/agent/proxy/tls/ -run 'TestLoadSystemCABundle|TestLoadUpstreamRootCAs' -count=1
+
+      - name: Open a PR (an issue if Actions may not open PRs)
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLD: ${{ steps.bump.outputs.old }}
+          NEW: ${{ steps.bump.outputs.new }}
+        run: |
+          set -euo pipefail
+          branch="chore/nss-roots-${NEW}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "already proposed on $branch"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -s -am "fix(tls): refresh Mozilla NSS roots (x509roots/fallback ${NEW})"
+          git push origin "$branch"
+          body="Bumps golang.org/x/crypto/x509roots/fallback ${OLD} -> ${NEW}: the Mozilla NSS roots the agent hands to recorded apps without a trust store and uses for upstream verification in distroless images. The root-store tests passed in the workflow run (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+
+          This PR was opened with GITHUB_TOKEN, so CI does not start on its own: close and reopen it (or push to the branch) to run the full checks."
+          gh pr create --base main --head "$branch" --title "fix(tls): refresh Mozilla NSS roots (x509roots/fallback ${NEW})" --body "$body" \
+            || gh issue create --title "Refresh Mozilla NSS roots: x509roots/fallback ${NEW} is available" \
+                 --body "${body}
+
+          Opening the PR failed (Actions may not be allowed to create PRs in this repo); branch ${branch} holds the change."

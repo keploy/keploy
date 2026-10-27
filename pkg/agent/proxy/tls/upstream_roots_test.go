@@ -1,17 +1,25 @@
 package tls
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"iter"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	nssbundle "golang.org/x/crypto/x509roots/fallback/bundle"
 )
 
 // stubSystemCertPool replaces the x509.SystemCertPool seam for the duration of
@@ -369,4 +377,113 @@ func concat(parts ...[]byte) []byte {
 		out = append(out, p...)
 	}
 	return out
+}
+
+// With the real compiled-in bundle as the fallback, the upstream pool is built
+// from the NSS root set itself and holds every NSS root.
+func TestLoadUpstreamRootCAs_RealEmbeddedRoots_UsesNSSRootPool(t *testing.T) {
+	stubSystemCertPool(t, x509.NewCertPool(), nil)
+	stubSystemCABundle(t, embeddedFallbackRoots, systemCABundleSourceEmbedded)
+
+	pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+	if err != nil {
+		t.Fatalf("LoadUpstreamRootCAs: unexpected error: %v", err)
+	}
+	want, n := nssRootPool(nssRoots())
+	if n < 100 {
+		t.Fatalf("NSS bundle has only %d roots; expected >=100", n)
+	}
+	if pool == nil || !pool.Equal(want) {
+		t.Error("upstream pool does not hold exactly the NSS roots")
+	}
+}
+
+// An NSS root's constraint (e.g. distrust-after, which a PEM file cannot carry)
+// must be enforced on keploy's own upstream verification when the compiled-in
+// bundle is the fallback: a chain to a root whose constraint rejects must fail.
+func TestLoadUpstreamRootCAs_RealEmbeddedRoots_EnforcesNSSConstraints(t *testing.T) {
+	ca, caKey := newTestCA(t, "nss-constrained-root")
+	leaf := newTestLeaf(t, ca, caKey, "upstream.example")
+
+	for _, tc := range []struct {
+		name       string
+		constraint func([]*x509.Certificate) error
+		wantOK     bool
+	}{
+		{"unconstrained root verifies", nil, true},
+		{"constraint rejects the chain", func([]*x509.Certificate) error { return errors.New("distrusted after date") }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := nssRoots
+			nssRoots = func() iter.Seq[nssbundle.Root] {
+				return func(yield func(nssbundle.Root) bool) {
+					yield(nssbundle.Root{Certificate: ca.Raw, Constraint: tc.constraint})
+				}
+			}
+			t.Cleanup(func() { nssRoots = old })
+			stubSystemCertPool(t, x509.NewCertPool(), nil)
+			stubSystemCABundle(t, embeddedFallbackRoots, systemCABundleSourceEmbedded)
+
+			pool, err := LoadUpstreamRootCAs(zap.NewNop(), "")
+			if err != nil || pool == nil {
+				t.Fatalf("LoadUpstreamRootCAs: pool=%v err=%v", pool, err)
+			}
+			_, verr := leaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "upstream.example"})
+			if (verr == nil) != tc.wantOK {
+				t.Fatalf("leaf.Verify error = %v, want ok=%v", verr, tc.wantOK)
+			}
+		})
+	}
+}
+
+func newTestCA(t *testing.T, cn string) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert, key
+}
+
+func newTestLeaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, dns string) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: dns},
+		DNSNames:     []string{dns},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cert
 }

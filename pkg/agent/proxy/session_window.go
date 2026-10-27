@@ -181,6 +181,13 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 	m.treesMu.RUnlock()
 
 	session := tree.valuesInWindow(start, end)
+	if v := m.exactView(); v != nil {
+		// What GetSessionMocks shows under exact serving, narrowed alike.
+		session = v.keep(session)
+		if owned := v.unanswered(""); len(owned) > 0 {
+			startup = append(owned, startup...)
+		}
+	}
 
 	// The same union GetSessionMocks builds, over the narrowed halves: the
 	// predicate is per mock, so filtering before or after the union keeps the
@@ -209,6 +216,17 @@ func (m *MockManager) GetSessionMocksInWindow(start, end time.Time) ([]*models.M
 // GetSessionMocks snapshot narrowed to the mocks ix files under key, in the
 // same order, found through the startup and session trees' key indexes.
 func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) error {
+	if v := m.exactView(); v != nil {
+		// What GetSessionMocks shows under exact serving: the open test's
+		// unanswered mocks first, then the staged ones the view shows.
+		for _, mk := range v.unanswered("") {
+			if slices.Contains(ix.Keys(mk), key) && !fn(mk) {
+				return nil
+			}
+		}
+		inner := fn
+		fn = func(mk *models.Mock) bool { return !v.shows(mk) || inner(mk) }
+	}
 	m.treesMu.RLock()
 	startup, session := m.startup, m.unfiltered
 	m.treesMu.RUnlock()

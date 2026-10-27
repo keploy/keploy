@@ -16,6 +16,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent"
 	grpc "go.keploy.io/server/v3/pkg/agent/proxy/incoming/gRPC"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -36,6 +37,9 @@ type IngressHook interface {
 }
 
 type IngressProxyManager struct {
+	// stopping: the recording it serves is stopping, and its app is
+	// stopped on purpose (SetStopping, stopping.go).
+	stopping atomic.Bool
 	mu       sync.Mutex
 	active   map[uint16]proxyStop
 	logger   *zap.Logger
@@ -511,9 +515,8 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 
 		upConn, err := dialIngressTarget(ctx, finalAppAddr, ingressTargetListenTimeout)
 		if err != nil {
-			logger.Error("Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
-				zap.String("final_app_addr", finalAppAddr),
-				zap.Error(err))
+			pm.logAppDialFailure(logger, "Failed to connect to upstream gRPC server. Verify that the application is listening on the resolved address and port, and that ingress redirection is configured correctly.",
+				err, zap.String("final_app_addr", finalAppAddr))
 			clientConn.Close() // Close the client connection as we can't proceed
 			return
 		}
@@ -521,8 +524,11 @@ func (pm *IngressProxyManager) handleConnection(ctx context.Context, clientConn 
 		// Pass replayConn so RecordIncoming sees the full byte stream including
 		// the preface. RecordIncoming's forwardAndTee will forward everything
 		// (including the preface) to the upstream app, which is what cmux needs
-		// to see the original handshake.
-		grpc.RecordIncoming(ctx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
+		// to see the original handshake. The context names the connection
+		// for the count of the calls a pause of the memory guard costs
+		// (hooksUtils.SkipGRPCUnderPressure).
+		grpcCtx := syncMock.WithIngressConn(ctx, ingressConnName(clientConn, finalAppAddr))
+		grpc.RecordIncoming(grpcCtx, logger, newReplayConn(preface, clientConn), upConn, t, actualPort, finalAppAddr, pm.synchronous, pm.mapping)
 	} else {
 		pm.handleHttp1Connection(ctx, newReplayConn(preface, clientConn), newAppAddr, logger, t, sem, appPort)
 	}
@@ -542,6 +548,14 @@ func newReplayConn(initial []byte, c net.Conn) net.Conn {
 
 func (r *replayConn) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
+}
+
+// CloseWrite half-closes the connection underneath: net.Conn, embedded as an
+// interface, does not promote it. The HTTP/1 ingress ends what it sends with
+// it before it closes a connection whose client may still be sending
+// (lingerClose).
+func (r *replayConn) CloseWrite() error {
+	return util.CloseWriteIfPossible(r.Conn)
 }
 
 func (pm *IngressProxyManager) ServeLive(ctx context.Context, conn net.Conn, upstream string, port uint16) {

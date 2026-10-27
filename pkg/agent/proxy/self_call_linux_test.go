@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -55,7 +56,7 @@ func TestServeTreeListenerKeepsRecordedDepOnMockPath(t *testing.T) {
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 	if served || err != nil {
 		t.Fatalf("a recorded outside dependency must stay on the mock path (served=false), got served=%v err=%v", served, err)
 	}
@@ -93,7 +94,7 @@ func TestServeTreeListenerPassesSelfCallToRealHandler(t *testing.T) {
 
 	servedCh := make(chan bool, 1)
 	go func() {
-		served, _ := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		served, _, _ := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 		servedCh <- served
 	}()
 
@@ -123,18 +124,13 @@ func TestServeTreeListenerClosesDownUnrecordedLocalPort(t *testing.T) {
 	recorded.reset()
 	defer recorded.reset()
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := uint32(l.Addr().(*net.TCPAddr).Port)
-	_ = l.Close() // nothing listens there now
+	port := uint32(mustPort(t, testnet.RefusedAddr(t, "tcp")))
 
 	p := selfCallProxy()
 	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
 	_, srv := net.Pipe()
 	defer srv.Close()
-	served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+	served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 	if !served || err != nil {
 		t.Fatalf("a down, unrecorded local port is closed (served=true, nil err), got served=%v err=%v", served, err)
 	}
@@ -173,7 +169,7 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 		_ = cli.Close()
 		done := make(chan error, 1)
 		go func() {
-			served, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+			served, _, err := p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
 			if err == nil && !served {
 				err = fmt.Errorf("not passed through")
 			}
@@ -228,4 +224,45 @@ func TestServeTreeListenerSaysTheFirstAndCountsTheRest(t *testing.T) {
 	if got := counts(); len(got) != 2 || got[1].ContextMap()["calls"] != int64(calls+1) {
 		t.Fatalf("a count that moved is said again: want a second line with %d, got %+v", calls+1, got)
 	}
+}
+
+// Under the proven switch, serveTreeListener tells OnProcess the owner of a
+// listener of the run's own tree a connection is addressed to.
+func TestServeTreeListenerTellsTheBuildTheOwner(t *testing.T) {
+	recorded.reset()
+	defer recorded.reset()
+	prev := OnProcess
+	t.Cleanup(func() { OnProcess = prev })
+	t.Setenv("KEPLOY_PROVEN", "1")
+	seen := make(chan uint32, 4)
+	OnProcess = func(pid uint32) { seen <- pid }
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	port := uint32(l.Addr().(*net.TCPAddr).Port)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}()
+
+	p := selfCallProxy()
+	dest := &agent.NetworkAddress{Version: 4, Port: port, KernelPid: uint32(os.Getpid())}
+	cli, srv := net.Pipe()
+	defer cli.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = p.serveTreeListener(context.Background(), srv, dest, fmt.Sprintf("127.0.0.1:%d", port), "1")
+		close(done)
+	}()
+	if pid := awaitEvent(t, seen, "OnProcess being told the listener's owner"); pid != uint32(os.Getpid()) {
+		t.Fatalf("OnProcess was told %d, want the listener's owner %d", pid, os.Getpid())
+	}
+	_ = cli.Close()
+	<-done
 }

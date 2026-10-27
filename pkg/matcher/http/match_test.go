@@ -4,12 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"errors"
-
+	"github.com/k0kubun/pp/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // TestMatch_HeaderNoiseUpdate_123 ensures a test case's "header.<name>" noise is
@@ -181,9 +182,10 @@ func TestMatch_InvalidJSONBody_321(t *testing.T) {
 	assert.Equal(t, models.Plain, res.BodyResult[0].Type)
 }
 
-// TestMatch_JsonMarshalErrorInDiff_987 simulates a failure in json.Marshal when generating
-// diffs for a failed test case to ensure the error is handled gracefully.
-func TestMatch_JsonMarshalErrorInDiff_987(t *testing.T) {
+// TestMatch_ABodyDifferenceFailsWithItsResult_987: the failure branch only
+// explains a verdict, so a body difference fails with the result that says
+// what differs, never with a nil result the report cannot show.
+func TestMatch_ABodyDifferenceFailsWithItsResult_987(t *testing.T) {
 	logger := zap.NewNop()
 	tc := &models.TestCase{
 		Name: "test-marshal-error",
@@ -196,20 +198,10 @@ func TestMatch_JsonMarshalErrorInDiff_987(t *testing.T) {
 		StatusCode: 200,
 		Body:       `{"id": 1, "value": "actual"}`,
 	}
-	noiseConfig := map[string]map[string][]string{}
-
-	originalJSONMarshal := jsonMarshal234
-	jsonMarshal234 = func(v interface{}) ([]byte, error) {
-		// This mock will fail the first time json.Marshal is called within the diffing logic.
-		return nil, errors.New("mock marshal error")
-	}
-	defer func() { jsonMarshal234 = originalJSONMarshal }()
-
-	pass, res := Match(tc, actualResponse, noiseConfig, false, false, logger, true)
-
-	// The function returns (false, nil) on this specific error path
+	pass, res := Match(tc, actualResponse, map[string]map[string][]string{}, false, false, logger, true)
 	assert.False(t, pass)
-	assert.Nil(t, res)
+	require.NotNil(t, res)
+	assert.False(t, res.BodyResult[0].Normal)
 }
 
 // TestMatch_BodyNoiseWildcard_789 tests the scenario where a global noise configuration
@@ -744,4 +736,371 @@ func TestAssertionMatch_StatusCodeClass_ActualNon2xxFailsAgainst2xx_3843(t *test
 	// Assert
 	assert.False(t, pass, "Should fail because the actual status code 500 is not in the 2xx class")
 	require.NotNil(t, result)
+}
+
+// THE ASSERTIONS PREDICATE is the one Match judges by and the one keploy test
+// and keploy templatize refuse an untied array use by: a test case whose
+// assertions hold anything but its noise is judged by AssertionMatch alone,
+// and unless json_equal is among them no whole body is read. A noise
+// assertion alone, an empty one included, judges nothing: the comparison
+// does.
+func TestAssertionsUntieBody(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		assertions map[models.AssertionType]interface{}
+		replace    bool
+		untie      string
+	}{
+		{"none", nil, false, ""},
+		{"a noise assertion alone", map[models.AssertionType]interface{}{models.NoiseAssertion: map[string]interface{}{"body.id": []string{}}}, false, ""},
+		{"an empty noise assertion alone", map[models.AssertionType]interface{}{models.NoiseAssertion: nil}, false, ""},
+		{"status_code", map[models.AssertionType]interface{}{models.StatusCode: 200}, true, "status_code"},
+		{"status_code beside noise", map[models.AssertionType]interface{}{models.StatusCode: 200, models.NoiseAssertion: map[string]interface{}{}}, true, "status_code"},
+		{"header_exists and json_contains", map[models.AssertionType]interface{}{models.JsonContains: map[string]interface{}{}, models.HeaderExists: []interface{}{"X"}}, true, "header_exists, json_contains"},
+		{"json_equal", map[models.AssertionType]interface{}{models.JsonEqual: true}, true, ""},
+		{"json_equal beside status_code", map[models.AssertionType]interface{}{models.JsonEqual: true, models.StatusCode: 200}, true, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Assertions: c.assertions}
+			assert.Equal(t, c.replace, AssertionsReplaceComparison(tc))
+			assert.Equal(t, c.untie, AssertionsUntieBody(tc))
+		})
+	}
+
+	// Match judges by the same predicate: a status_code assertion passes an
+	// answer whose body differs, and without it the body is compared.
+	tc := &models.TestCase{Name: "t", HTTPResp: models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{"id":"a"}`}}
+	answer := &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{"id":"b"}`}
+	pass, _ := Match(tc, answer, nil, true, false, zap.NewNop(), false)
+	assert.False(t, pass, "the comparison reads the body")
+	tc.Assertions = map[models.AssertionType]interface{}{models.StatusCode: 200}
+	pass, _ = Match(tc, answer, nil, true, false, zap.NewNop(), false)
+	assert.True(t, pass, "the assertions judge alone")
+	// An empty noise assertion (a YAML "noise:" left with no entries) judged
+	// alone passed any answer, a status 0 "no answer" one included.
+	tc.Assertions = map[models.AssertionType]interface{}{models.NoiseAssertion: nil}
+	pass, _ = Match(tc, answer, nil, true, false, zap.NewNop(), false)
+	assert.False(t, pass, "an empty noise assertion judged the answer")
+	pass, _ = Match(tc, &models.HTTPResp{StatusCode: 0, Body: "connection refused"}, nil, true, false, zap.NewNop(), false)
+	assert.False(t, pass, "an empty noise assertion passed no answer")
+}
+
+// A caller that failed the test case on its own (WithoutPassLine) gets no
+// pass line from the assertions that pass its answer either, and still the
+// failure line from those that fail it.
+func TestMatchAssertionsHonourWithoutPassLine(t *testing.T) {
+	var out strings.Builder
+	saved := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetOutput(&out)
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = saved })
+	for _, asserted := range []int{500, 201} {
+		out.Reset()
+		tc := &models.TestCase{
+			Name:       "test-1",
+			HTTPResp:   models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+			Assertions: map[models.AssertionType]interface{}{models.StatusCode: asserted},
+		}
+		pass, _ := Match(tc, &models.HTTPResp{StatusCode: 500, Body: `{"ok":true}`}, nil, false, false, zap.NewNop(), true, WithoutPassLine())
+		require.Equal(t, asserted == 500, pass, "the verdict is the assertions'")
+		require.NotContains(t, out.String(), "Testrun passed", "asserted %d", asserted)
+		if pass {
+			require.Empty(t, out.String(), "asserted %d", asserted)
+		} else {
+			require.Contains(t, out.String(), "Testrun failed", "asserted %d", asserted)
+		}
+	}
+}
+
+// When a test case's assertions judge its answer in place of the comparison
+// (AssertionsReplaceComparison), Match's console says what they say. A
+// comparison that matches printed "Testrun passed" for a test its failed
+// assertion fails, and one that differs printed "Testrun failed", with its
+// diff, for a test its assertions pass. What a failed assertion says is
+// printed under the line, as a diff is. Compared quietly, it prints nothing,
+// an assertion's failure included.
+func TestMatchConsoleSaysWhatTheAssertionsThatJudgeItSay(t *testing.T) {
+	var out strings.Builder
+	saved := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetOutput(&out)
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = saved })
+	for _, c := range []struct {
+		name     string
+		status   int
+		asserted int
+		wantPass bool
+		want     string
+	}{
+		{"the answer matches, its assertion fails", 200, 201, false, "Testrun failed"},
+		{"the answer differs, its assertion passes", 500, 500, true, "Testrun passed"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{
+				Name:       "test-1",
+				HTTPResp:   models.HTTPResp{StatusCode: 200, Body: `{"ok":true}`},
+				Assertions: map[models.AssertionType]interface{}{models.StatusCode: c.asserted},
+			}
+			actual := func() *models.HTTPResp { return &models.HTTPResp{StatusCode: c.status, Body: `{"ok":true}`} }
+			for _, loud := range []bool{true, false} {
+				out.Reset()
+				core, logs := observer.New(zap.ErrorLevel)
+				// The log lines go where the lines go, so their order shows.
+				console := zapcore.NewCore(zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()), zapcore.AddSync(&out), zap.ErrorLevel)
+				pass, _ := Match(tc, actual(), nil, false, false, zap.New(zapcore.NewTee(core, console)), loud)
+				require.Equal(t, c.wantPass, pass, "the verdict is the assertions'")
+				printed := out.String()
+				if !loud {
+					require.Empty(t, printed, "a quiet comparison printed")
+					require.Zero(t, logs.Len(), "a quiet comparison logged %v", logs.All())
+					continue
+				}
+				require.Contains(t, printed, c.want)
+				require.NotContains(t, printed, map[bool]string{true: "Testrun failed", false: "Testrun passed"}[c.wantPass])
+				require.Equal(t, !c.wantPass, logs.FilterMessage("status_code assertion failed").Len() == 1, "the failed assertion is said once, when it fails")
+				if !c.wantPass {
+					require.Less(t, strings.Index(printed, "Testrun failed"), strings.Index(printed, "status_code assertion failed"), "what the failed assertion says is under its line")
+				}
+			}
+		})
+	}
+}
+
+// An assertion keploy cannot judge fails its test case: one whose name this
+// keploy does not implement, the keploy/tests (test-suite) types among them,
+// and one whose value it cannot read. Each passed any answer, a status 0 "no
+// answer" one included: the name fell to a Debug line, and a value of another
+// shape, or a json_contains that is not JSON, compared against nothing.
+func TestAssertionMatchFailsWhatItCannotJudge(t *testing.T) {
+	noAnswer := &models.HTTPResp{StatusCode: 0, Body: "connection refused"}
+	answer := &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"id":"abc"}`}
+	for _, c := range []struct {
+		name       string
+		assertions map[models.AssertionType]interface{}
+		actual     *models.HTTPResp
+		said       string
+	}{
+		{"json_path, a keploy/tests type", map[models.AssertionType]interface{}{"json_path": "$.id"}, noAnswer, "keploy/tests"},
+		{"custom_functions, a keploy/tests type", map[models.AssertionType]interface{}{"CUSTOM_FUNCTIONS": "function(){return true}"}, answer, "keploy/tests"},
+		{"a name keploy does not know", map[models.AssertionType]interface{}{"STATUS_CODE": 200}, answer, "status_code"},
+		{"header_equal that is not a map", map[models.AssertionType]interface{}{models.HeaderEqual: []interface{}{"Content-Type"}}, answer, "header_equal"},
+		{"header_contains that is not a map", map[models.AssertionType]interface{}{models.HeaderContains: "json"}, answer, "header_contains"},
+		{"header_matches that is not a map", map[models.AssertionType]interface{}{models.HeaderMatches: "application/.*"}, answer, "header_matches"},
+		{"json_contains that is not JSON", map[models.AssertionType]interface{}{models.JsonContains: "id: abc"}, answer, "json_contains"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Name: "test-1", HTTPResp: models.HTTPResp{StatusCode: 200, Body: `{"id":"abc"}`}, Assertions: c.assertions}
+			core, logs := observer.New(zap.ErrorLevel)
+			pass, _ := AssertionMatch(tc, c.actual, zap.New(core))
+			require.False(t, pass, "an assertion keploy cannot judge passed the answer")
+			var said []string
+			for _, e := range logs.All() {
+				said = append(said, e.Message)
+				for _, f := range e.Context {
+					said = append(said, f.String)
+				}
+			}
+			require.Contains(t, strings.Join(said, " | "), c.said)
+		})
+	}
+}
+
+// A test case whose recording kept no body (over 1 MB, BodySkipped) is judged
+// by its assertions on the answer's body as it came: json_contains reads it,
+// and json_equal, which has no recorded body to compare it with, fails. Match
+// cleared the answer's body first, so json_contains failed every answer and
+// json_equal passed every one (empty against empty). As for any test case its
+// assertions judge, they replace the whole comparison, the body-size check
+// included; the result keeps no body the recording did not.
+func TestMatchJudgesASkippedBodyByItsAssertions(t *testing.T) {
+	recorded := models.HTTPResp{StatusCode: 200, BodySkipped: true, BodySize: 2 << 20}
+	body := `{"id":"abc","pad":"` + strings.Repeat("x", 64) + `"}`
+	for _, c := range []struct {
+		name       string
+		assertions map[models.AssertionType]interface{}
+		answer     string
+		want       bool
+	}{
+		{"json_contains reads the answer's body", map[models.AssertionType]interface{}{models.JsonContains: map[string]interface{}{"id": "abc"}}, body, true},
+		{"json_contains fails a body without it", map[models.AssertionType]interface{}{models.JsonContains: map[string]interface{}{"id": "xyz"}}, body, false},
+		{"json_equal has no recorded body", map[models.AssertionType]interface{}{models.JsonEqual: true}, body, false},
+		// The recorded body is empty too: compared as written, an empty
+		// answer would pass.
+		{"json_equal has no recorded body, for an empty answer too", map[models.AssertionType]interface{}{models.JsonEqual: true}, "", false},
+		{"status_code judges alone, whatever the body's size", map[models.AssertionType]interface{}{models.StatusCode: 200}, body, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Name: "test-1", HTTPResp: recorded, Assertions: c.assertions}
+			pass, res := Match(tc, &models.HTTPResp{StatusCode: 200, Body: c.answer}, nil, false, false, zap.NewNop(), false)
+			require.Equal(t, c.want, pass)
+			require.Empty(t, res.BodyResult[0].Actual, "the result kept the body the recording skipped")
+		})
+	}
+}
+
+// When the assertions fail a test case whose recording kept no body, what
+// Match says of them is what they found in the body as it came: an assertion
+// that body satisfies is not said to fail.
+func TestMatchSaysWhatTheAssertionsFoundInASkippedBody(t *testing.T) {
+	saved := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetOutput(&strings.Builder{})
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = saved })
+	tc := &models.TestCase{Name: "test-1", HTTPResp: models.HTTPResp{StatusCode: 200, BodySkipped: true, BodySize: 2 << 20}, Assertions: map[models.AssertionType]interface{}{
+		models.StatusCode:   201,
+		models.JsonContains: map[string]interface{}{"id": "abc"},
+	}}
+	core, logs := observer.New(zap.ErrorLevel)
+	pass, _ := Match(tc, &models.HTTPResp{StatusCode: 200, Body: `{"id":"abc"}`}, nil, false, false, zap.New(core), true)
+	require.False(t, pass)
+	require.Equal(t, 1, logs.FilterMessageSnippet("status_code assertion failed").Len(), "%v", logs.All())
+	require.Zero(t, logs.FilterMessageSnippet("json_contains").Len(), "json_contains, which the body as it came satisfies, was said to fail: %v", logs.All())
+}
+
+// A recording that kept no body says "comparing body size" only when Match
+// emits its logs and the size is compared: never when compared quietly, nor
+// when assertions judge the answer in its place.
+func TestMatchSaysItComparesABodySizeOnlyWhenItDoes(t *testing.T) {
+	saved := ppNew234
+	ppNew234 = func() *pp.PrettyPrinter {
+		p := pp.New()
+		p.SetOutput(&strings.Builder{})
+		return p
+	}
+	t.Cleanup(func() { ppNew234 = saved })
+	for _, c := range []struct {
+		name       string
+		assertions map[models.AssertionType]interface{}
+		loud, said bool
+	}{
+		{"compared, with its logs", nil, true, true},
+		{"compared quietly", nil, false, false},
+		{"judged by its assertions", map[models.AssertionType]interface{}{models.StatusCode: 200}, true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Name: "test-1", HTTPResp: models.HTTPResp{StatusCode: 200, BodySkipped: true, BodySize: 2 << 20}, Assertions: c.assertions}
+			core, logs := observer.New(zap.InfoLevel)
+			Match(tc, &models.HTTPResp{StatusCode: 200, Body: `{"id":"abc"}`}, nil, false, false, zap.New(core), c.loud)
+			require.Equal(t, c.said, logs.FilterMessageSnippet("comparing body size").Len() == 1, "%v", logs.All())
+		})
+	}
+}
+
+// header_equal says a header failed only when it did.
+func TestHeaderEqualLogsOnlyAFailure(t *testing.T) {
+	tc := &models.TestCase{Name: "test-1", HTTPResp: models.HTTPResp{StatusCode: 200}, Assertions: map[models.AssertionType]interface{}{
+		models.HeaderEqual: map[string]interface{}{"Content-Type": "application/json"},
+	}}
+	core, logs := observer.New(zap.DebugLevel)
+	pass, _ := AssertionMatch(tc, &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}}, zap.New(core))
+	require.True(t, pass)
+	require.Zero(t, logs.FilterMessageSnippet("assertion failed").Len(), "a header that matched was logged as failed: %v", logs.All())
+}
+
+// The header assertions read each map shape a test case's file decodes to,
+// now that a shape they do not read fails the test case: YAML keys a map by
+// the assertions' key type (map[models.AssertionType]interface{}), or, when
+// its keys are not all strings, map[interface{}]interface{}; JSON gives
+// map[string]interface{}; a Go caller may hand map[string]string. And the
+// noise beside them, as keploy record writes it, is noise: it fails nothing.
+func TestAssertionMatchReadsEveryDecodedShape(t *testing.T) {
+	right := &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"id":"abc"}`}
+	wrong := &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "text/plain"}, Body: `{"id":"abc"}`}
+	shapes := []struct {
+		name string
+		mk   func(k, v string) interface{}
+	}{
+		{"YAML", func(k, v string) interface{} { return map[models.AssertionType]interface{}{models.AssertionType(k): v} }},
+		{"YAML, keys not all strings", func(k, v string) interface{} { return map[interface{}]interface{}{k: v} }},
+		{"JSON", func(k, v string) interface{} { return map[string]interface{}{k: v} }},
+		{"Go", func(k, v string) interface{} { return map[string]string{k: v} }},
+	}
+	for _, shape := range shapes {
+		for _, a := range []struct {
+			name models.AssertionType
+			want string
+		}{
+			{models.HeaderEqual, "application/json"},
+			{models.HeaderContains, "json"},
+			{models.HeaderMatches, "^application/.*$"},
+		} {
+			t.Run(shape.name+"/"+string(a.name), func(t *testing.T) {
+				tc := &models.TestCase{Name: "test-1", HTTPResp: models.HTTPResp{StatusCode: 200}, Assertions: map[models.AssertionType]interface{}{
+					a.name:                shape.mk("Content-Type", a.want),
+					models.NoiseAssertion: map[models.AssertionType]interface{}{"header.Date": []interface{}{}},
+				}}
+				pass, _ := Match(tc, right, nil, false, false, zap.NewNop(), false)
+				require.True(t, pass, "it failed the right answer")
+				pass, _ = Match(tc, wrong, nil, false, false, zap.NewNop(), false)
+				require.False(t, pass, "it passed the wrong answer")
+			})
+		}
+	}
+}
+
+// json_contains reads the object it names in each shape a test case's file
+// decodes to: YAML keys a map, nested ones included, by the assertions' key
+// type, and gives a whole number as an int, where the answer's body, read as
+// JSON, holds a float64. Read as map[string]interface{} only, the YAML form
+// failed every answer.
+func TestJsonContainsReadsEveryDecodedShape(t *testing.T) {
+	answer := &models.HTTPResp{StatusCode: 200, Body: `{"id":"abc","n":{"k":1},"tags":["a"]}`}
+	for _, c := range []struct {
+		name  string
+		value interface{}
+		want  bool
+	}{
+		{"YAML", map[models.AssertionType]interface{}{"id": "abc", "n": map[models.AssertionType]interface{}{"k": 1}}, true},
+		{"YAML, a value the body does not hold", map[models.AssertionType]interface{}{"n": map[models.AssertionType]interface{}{"k": 2}}, false},
+		{"YAML, keys not all strings", map[interface{}]interface{}{"tags": []interface{}{"a"}}, true},
+		{"JSON", map[string]interface{}{"id": "abc", "n": map[string]interface{}{"k": float64(1)}}, true},
+		{"a JSON string", `{"n":{"k":1}}`, true},
+		{"a JSON string the body does not hold", `{"id":"xyz"}`, false},
+		{"a list", []interface{}{"id"}, false},
+		{"a number", 1, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Name: "test-1", Assertions: map[models.AssertionType]interface{}{models.JsonContains: c.value}}
+			pass, _ := AssertionMatch(tc, answer, zap.NewNop())
+			require.Equal(t, c.want, pass)
+		})
+	}
+}
+
+// status_code_in reads one code as well as a list, as YAML (int) and JSON
+// (float64) decode it, and a value with no code in it says it cannot be read.
+func TestStatusCodeInReadsEveryShape(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		value interface{}
+		want  bool
+		said  string
+	}{
+		{"a list", []interface{}{200, 201}, true, ""},
+		{"a string", "200, 201", true, ""},
+		{"one code, from YAML", 200, true, ""},
+		{"one code, from JSON", float64(200), true, ""},
+		{"another code", 404, false, "status_code_in assertion failed"},
+		{"an empty list", []interface{}{}, false, "cannot be read"},
+		{"no code", "ok", false, "cannot be read"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tc := &models.TestCase{Name: "test-1", Assertions: map[models.AssertionType]interface{}{models.StatusCodeIn: c.value}}
+			core, logs := observer.New(zap.ErrorLevel)
+			pass, _ := AssertionMatch(tc, &models.HTTPResp{StatusCode: 200}, zap.New(core))
+			require.Equal(t, c.want, pass)
+			if c.said != "" {
+				require.Equal(t, 1, logs.FilterMessageSnippet(c.said).Len(), "%v", logs.All())
+			}
+		})
+	}
 }

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -12,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -68,14 +68,24 @@ type sessionStep struct {
 // They are made again in the order the kinds were first made in, except
 // readiness, which releases the app and so goes last.
 const (
+	stepRealDeps     = "real-deps"
 	stepTestSetHook  = "before-test-set-compose"
 	stepMockOutgoing = "mock-outgoing"
 	stepStoreMocks   = "store-mocks"
 	stepMockParams   = "update-mock-params"
 	stepScopeTable   = "scope-table"
+	stepSetTable     = "set-table"
 	stepScopeGate    = "scope-gate"
+	stepTestBegins   = "test-begins"
 	stepAgentReady   = "agent-ready"
 )
+
+// stepExactStage is a set's staging under exact serving (KEPLOY_PROVEN,
+// models.ExactServing.Stage): it stages the set's mocks once, and each test
+// case's filter after it only says what is served. It is a kind of its own,
+// so the latest of those filters does not replace it, and a restarted agent
+// is staged before it is told what to serve.
+const stepExactStage = "exact-stage"
 
 // staleStreamGrace is how long setting a restarted agent up waits for the
 // streams to see their old agent gone (its connection closing) before it cuts
@@ -365,6 +375,20 @@ func (s *agentSession) reapply(ctx context.Context, logger *zap.Logger) error {
 	}
 	for _, step := range append(steps, ready...) {
 		if err := step.apply(ctx); err != nil {
+			if step.kind == stepTestSetHook {
+				// As on the agent before it: a set hook that fails is
+				// logged and the run goes on (the replay's hooks), and
+				// the mocks and readiness after it still matter.
+				logger.Warn("keploy's restarted agent: its test set's hook failed; setting the rest of it up", zap.Error(err))
+				continue
+			}
+			if step.kind == stepStoreMocks && errors.Is(err, models.ErrPayloadFileReplaced) {
+				// The stored mocks are of a set that has run: its mock
+				// file was rewritten once it ended, and the set being set
+				// up stores its own.
+				logger.Debug("keploy's restarted agent: not storing the mocks of a test set that has run; the next set stores its own", zap.Error(err))
+				continue
+			}
 			return fmt.Errorf("failed to set keploy's restarted agent up again (%s): %w", step.kind, err)
 		}
 	}
@@ -385,14 +409,36 @@ func (a *AgentClient) setUpRestartedAgent(ctx context.Context) error {
 	if err := a.awaitAgentAnswers(ctx); err != nil {
 		return err
 	}
-	return a.session().reapply(ctx, a.logger)
+	// The process that answers was started in place of the agent while the
+	// app's container had never started: compose's retry runs only then
+	// (shouldRetryComposeUp), and its watch takes an agent found started
+	// again for one only before it finds the app's container running
+	// (App.retryComposeUp). So the app ran against none of the process it
+	// replaced, whether or not the setup below takes: the replay counts
+	// what this one counts from its start (AgentStartedBeforeApp).
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).startedBeforeApp()
+	// A docker-mode agent that restarted holds no container list.
+	a.pushContainers(ctx)
+	if err := a.session().reapply(ctx, a.logger); err != nil {
+		return err
+	}
+	// The agent compose started again holds the whole setup again, and the
+	// app has not run against the one it replaced: compose's retry runs only
+	// while the app's container was never started (shouldRetryComposeUp),
+	// and the app starts behind this agent's readiness, put back last. So
+	// what a watch of the agent's process keeps to (a test set's evidence)
+	// is all on this one.
+	instancesAt(agentHost(a.conf.Agent.AgentURI)).accept()
+	return nil
 }
 
-// awaitAgentAnswers waits, up to the agent's readiness budget, for its health
-// endpoint to answer.
+// awaitAgentAnswers waits for the agent's health endpoint to answer while its
+// start makes progress (WatchAgentStart), as long as that takes, and ends once
+// the start fails or stops making progress.
 func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, pkg.AgentReadyTimeout())
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	start := a.WatchAgentStart(ctx)
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -412,6 +458,9 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 		case <-ctx.Done():
 			return fmt.Errorf("keploy's agent, started again by docker compose, did not answer at %s: %w",
 				a.conf.Agent.AgentURI, ctx.Err())
+		case err := <-start:
+			return fmt.Errorf("keploy's agent, started again by docker compose, did not come up at %s: %w",
+				a.conf.Agent.AgentURI, err)
 		case <-tick.C:
 		}
 	}
@@ -419,11 +468,42 @@ func (a *AgentClient) awaitAgentAnswers(ctx context.Context) error {
 
 // copyMockParams is params sharing no memory with it: the replayer goes on
 // changing the consumed-mocks map it hands over.
-func copyMockParams(params models.MockFilterParams) models.MockFilterParams {
+//
+// A consumed history (models.ConsumedHistory) is not copied: it is marked, at
+// no cost, and rebuild puts the history as it was at the call back into the
+// copy, when the call is made again. A copy of the whole history at every
+// test made a replay's cost grow with the square of its tests.
+func copyMockParams(params models.MockFilterParams) (_ models.MockFilterParams, rebuild func(models.MockFilterParams) models.MockFilterParams) {
+	rebuild = func(p models.MockFilterParams) models.MockFilterParams { return p }
+	if h := params.ConsumedHistory; h != nil && params.TotalConsumedMocks != nil {
+		mark := h.Mark()
+		params.ConsumedHistory, params.TotalConsumedMocks = nil, nil
+		rebuild = func(p models.MockFilterParams) models.MockFilterParams {
+			p.TotalConsumedMocks = mark.State()
+			return p
+		}
+	}
 	params.TotalConsumedMocks = maps.Clone(params.TotalConsumedMocks)
 	params.RecordedWindows = slices.Clone(params.RecordedWindows)
 	params.MockMapping = slices.Clone(params.MockMapping)
-	return params
+	params.Variables = slices.Clone(params.Variables)
+	if params.Exact != nil {
+		ex := *params.Exact
+		ex.Pool = slices.Clone(ex.Pool)
+		ex.Owned = slices.Clone(ex.Owned)
+		ex.Ahead = slices.Clone(ex.Ahead)
+		params.Exact = &ex
+	}
+	return params, rebuild
+}
+
+// mockParamsStep is the step kind a mock filter is recorded under: a set's
+// staging under exact serving is its own (stepExactStage).
+func mockParamsStep(params models.MockFilterParams) string {
+	if params.Exact != nil && params.Exact.Stage {
+		return stepExactStage
+	}
+	return stepMockParams
 }
 
 // resumeStream is called when a stream's connection ended. Once the session
@@ -477,6 +557,7 @@ func (a *AgentClient) reopenStream(ctx context.Context, name, method, path strin
 		if method == http.MethodPost {
 			req.Header.Set("Content-Type", "application/json")
 		}
+		a.markDrainsAfterStop(ctx, req)
 		res, err := a.client.Do(req)
 		if err == nil {
 			if err := agentStreamStatus(name, res); err != nil {

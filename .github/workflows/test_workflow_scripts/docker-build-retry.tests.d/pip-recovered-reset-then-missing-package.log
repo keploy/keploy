@@ -1,0 +1,6 @@
+Looking in indexes: http://127.0.0.1:36201/reset/
+WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ProtocolError('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))': /reset/flask/
+Collecting flask==3.1.2
+  Downloading http://127.0.0.1:43985/packages/flask-3.1.2-py3-none-any.whl (103 kB)
+ERROR: Could not find a version that satisfies the requirement nosuchpkg==0.0.0 (from versions: none)
+ERROR: No matching distribution found for nosuchpkg==0.0.0

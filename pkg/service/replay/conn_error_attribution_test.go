@@ -12,6 +12,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -72,6 +73,28 @@ func TestCreateFailedTestResultLabelsAnAppConnectionErrorByTheError(t *testing.T
 			}
 		})
 	}
+}
+
+// A gRPC test with no answer is reported as an answer with no status: under
+// the proven switch, a recording that has its grpc-status differs from the
+// stand-in's none (-1, a StatusCodeChanged), as an HTTP test with no answer
+// reports status 0. With the switch off the stand-in's absent status is read
+// as 0, as it was: the same as the recording's OK.
+func TestCreateFailedTestResultReportsAGRPCTestWithNoAnswerAsNoStatus(t *testing.T) {
+	tc := &models.TestCase{Name: "grpc-echo-1", Kind: models.GRPC_EXPORT}
+	tc.GrpcResp.Trailers = models.GrpcHeaders{OrdinaryHeaders: map[string]string{"grpc-status": "0"}}
+	noAnswer := errors.New("the app sent no answer")
+
+	t.Setenv(provenswitch.Env, "")
+	off := failedWith(tc, noAnswer)
+	assert.Equal(t, models.IntResult{Normal: true, Expected: 0, Actual: 0}, off.Result.StatusCode, "switch off: unchanged")
+	assert.NotContains(t, off.FailureInfo.Category, models.StatusCodeChanged, "switch off: unchanged")
+
+	t.Setenv(provenswitch.Env, "1")
+	on := failedWith(tc, noAnswer)
+	assert.Equal(t, models.IntResult{Normal: false, Expected: 0, Actual: -1}, on.Result.StatusCode, "KEPLOY_PROVEN=1: no answer is no status")
+	assert.Contains(t, on.FailureInfo.Category, models.StatusCodeChanged, "KEPLOY_PROVEN=1")
+	assert.Empty(t, on.GrpcRes.Trailers.OrdinaryHeaders, "KEPLOY_PROVEN=1: the stand-in carries no status")
 }
 
 func TestAppendCategoryUnique(t *testing.T) {

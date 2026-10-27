@@ -208,6 +208,27 @@ type OutgoingOptions struct {
 	// so a field placed where it takes a word of its own grows the Session of
 	// every connection.
 	SkipTLSMITM bool
+	// Learn turns the learn step on (design v14 §7.2, row L; package
+	// matcher/learn): the agent pairs a request no recorded mock answers
+	// exactly with the mock it drifted from and learns what drifted, and a
+	// miss carries its reason. Only record's full round sets it, under the
+	// proven switch: the round that replays the build that was just
+	// recorded. Like SkipTLSMITM it sits in the padding after the TLS
+	// switches.
+	Learn bool `json:"Learn,omitempty"`
+	// LearnPool lets the learn step pair pool mocks too, not only the test's
+	// own: a full record replaces the pool, a partial one never changes it
+	// (design §7.2 step 10, §7.5).
+	LearnPool bool `json:"LearnPool,omitempty"`
+	// StartsTestSet says this session starts a test set of the replay
+	// (another set, or the run's first on an agent kept from an earlier
+	// one), not a re-registration of the current set with an agent the
+	// replay took for replaced. What the agent recorded consumed and nobody
+	// drained was then consumed of the previous set's pool, under its mock
+	// names, which every set numbers afresh: the set's staging drops it
+	// (MockManager.ArmSetFence). Like Learn it sits in the padding after the
+	// TLS switches.
+	StartsTestSet bool `json:"StartsTestSet,omitempty"`
 	// MysqlPorts lists destination ports that the proxy should treat as
 	// MySQL (or wire-compatible variants like TiDB) — i.e. dial the
 	// upstream eagerly on connection accept so the server's Initial
@@ -218,7 +239,12 @@ type OutgoingOptions struct {
 	//
 	// Since automatic detection landed this list is an optimisation and
 	// an escape hatch rather than a requirement: a port listed here
-	// skips the detection probe entirely. See DisableMysqlAutoDetect.
+	// skips the detection probe entirely, pinned to MySQL, so an HTTP
+	// service on a listed port gets no answer. The built-in defaults are
+	// only a hint: at record whichever end speaks first decides (a client
+	// that speaks first is not MySQL), and at replay the recording does.
+	// With DisableMysqlAutoDetect the defaults are pinned as listed ports
+	// are.
 	MysqlPorts []uint32
 	// PassThroughPorts / PassThroughHosts mark telemetry / noisy egress that
 	// keploy should not record normally (see PassThroughRule). Ports gate on the
@@ -245,9 +271,14 @@ type OutgoingOptions struct {
 	DisableMysqlAutoDetect bool
 	// DisableMysqlEndpointDrift stops replay from serving recorded MySQL
 	// mocks on a port the recording never saw. Detection still runs; only the
-	// inference that covers a moved endpoint is turned off. See
-	// Config.DisableMysqlEndpointDrift.
+	// judgement that covers a moved endpoint (by its container or host) is
+	// turned off. See Config.DisableMysqlEndpointDrift.
 	DisableMysqlEndpointDrift bool
+	// DisablePgTimeSliceCohort turns off the PostgreSQL v3 replayer's
+	// time-slice fallback: a query that matches no recording on its
+	// parameter types and values is then a miss, not served the query's
+	// recordings in record order. See Config.DisablePgTimeSliceCohort.
+	DisablePgTimeSliceCohort bool
 	// SupportsDroppedRevoke is a capability flag set by the CLI on the
 	// /outgoing request: when true, the CLI understands the reserved
 	// Kind=RevokedTests control frame (it diverts it into a revoke set and
@@ -338,6 +369,12 @@ type IncomingOptions struct {
 
 type SetupOptions struct {
 	ClientNSPID uint32
+	// ClientPIDNS is the pid namespace keploy's CLI said it runs in, beside
+	// its pid (--client-pid-ns, utils.OwnPIDNamespace): "<inode>@<boot_id>",
+	// utils.ClientPIDNSNone for a CLI in no Linux pid namespace, or "" when
+	// the CLI did not say it. What reads ClientNSPID as a pid of the agent's
+	// own /proc reads it through utils.ClientPIDHere with this.
+	ClientPIDNS string
 	Container   string
 	// FromContainer is the already-running container to re-create under
 	// keploy's namespaces. Set only for utils.FromContainer runs.
@@ -367,7 +404,18 @@ type SetupOptions struct {
 	// (record) or served (replay). Forwarded to the agent via --mock-mode.
 	MockMode bool
 	// RecordRequests keeps the ingress hooks on in mock mode so the app's incoming requests become test cases; forwarded as --record-requests.
-	RecordRequests    bool
+	RecordRequests bool
+	// SettleReads has the agent settle a test's calls before a replay reads
+	// its misses, as the proven switch always does: from the agent's start its
+	// proxy listens marked for the kernel's count of the connections waiting
+	// for it, keeps each connection from its accept, and each read waits until
+	// every call the application made is in its hands and answered
+	// (Agent.GetMockErrors). Set for a run that learns noise from the misses
+	// it reads (config.Test.LearnsNoise): a miss
+	// decided after the app answered its test is then read with that test.
+	// The agent's, from its start: its proxy's listener is marked for the
+	// kernel's count before it listens. Forwarded as --settle-reads.
+	SettleReads       bool
 	GlobalPassthrough bool
 	// DisableHandshakeHold turns off holding each redirected connection's
 	// handshake until its destination answers (pkg/agent/proxy/synhold), so
@@ -403,6 +451,18 @@ type SetupOptions struct {
 	PassThroughPorts  []uint
 	MemoryLimit       uint64
 	ConfigPath        string
+	// AppExtraHosts are the app's own host entries, "name:address" (docker
+	// run --add-host, a container's ExtraHosts). The app joins the agent
+	// container's network namespace, where Docker refuses host entries of the
+	// app's own, so the agent container carries them, and the app reads them
+	// from the /etc/hosts it shares with it. A compose service's extra_hosts
+	// are moved onto the keploy-agent service instead (ModifyComposeForAgent).
+	AppExtraHosts []string
+	// HostGateway says the daemon resolves the address host-gateway (Docker
+	// Engine 20.10, API 1.41; Podman 4.7): the agent container then maps
+	// host.docker.internal to it, as Docker Desktop does for every container,
+	// unless the app maps that name itself.
+	HostGateway bool
 	// RecordBufferMaxMemoryPerConn mirrors config.Record.RecordBuffer.MaxMemoryPerConnection.
 	// Forwarded from orchestrator → agent so containerised agents (docker-compose,
 	// k8s sidecar) honour the user's tuning; the agent's filesystem doesn't have
@@ -452,12 +512,6 @@ type SetupOptions struct {
 	// environment variables to disk. When non-nil, SetupCompose uses this content
 	// directly instead of reading from a file path extracted from the command.
 	InMemoryCompose []byte
-	// AgentReadyTimeout, when > 0, overrides pkg.AgentReadyTimeout() for this
-	// bring-up. A retry after a stalled agent sets a shorter window than the
-	// generous first-attempt slow-start budget: a fresh agent reports healthy in
-	// a second or two, so a wedged retry should be cut short rather than re-wait
-	// minutes.
-	AgentReadyTimeout time.Duration
 }
 
 type RunOptions struct {

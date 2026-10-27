@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
+	"go.keploy.io/server/v3/pkg/bodydigest"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -28,11 +31,21 @@ import (
 var ErrMockNotMatched = models.ErrNoMockMatched
 
 // Decodes the mocks in test mode so that they can be sent to the user application.
+//
+// The requests are read and answered on a goroutine, and decodeHTTP returns
+// only once that goroutine has returned, ctx's end included: then its read or
+// write of clientConn is ended (pUtil.InterruptOnDone), and it is waited for
+// (pUtil.JoinParser). decodeHTTP used to return ctx's error at once and leave
+// the goroutine blocked reading clientConn for the next request; once the
+// client closed, it logged its failed read after decodeHTTP had returned (in a
+// parser test, through the test's logger after the test had ended: a DATA RACE
+// under go test -race).
 func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, mockDb integrations.MockMemDb, opts models.OutgoingOptions) error {
+	defer pUtil.InterruptOnDone(ctx, clientConn)()
 	errCh := make(chan error, 1)
 	go func(errCh chan error, reqBuf []byte, opts models.OutgoingOptions) {
-		defer pUtil.Recover(h.Logger, clientConn, nil)
 		defer close(errCh)
+		defer integrations.RecoverIntoCtx(ctx, h.Logger, clientConn, nil, errCh)
 		for {
 			// The whole header section first: only then is it known whether
 			// the client is waiting for a 100 (Continue) before its body.
@@ -63,6 +76,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				return
 			}
 
+			arrived := time.Now()
 			h.Logger.Debug(fmt.Sprintf("This is the complete request:\n%v", string(reqBuf)))
 
 			//Parse the request buffer
@@ -94,14 +108,24 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			}
 
 			input := &req{
-				method: request.Method,
-				url:    request.URL,
-				header: request.Header,
-				body:   reqBody,
-				raw:    reqBuf,
+				method:  request.Method,
+				url:     request.URL,
+				header:  request.Header,
+				body:    reqBody,
+				raw:     reqBuf,
+				arrived: arrived,
+			}
+
+			// Under the proven switch the request's destination is read once,
+			// as it comes: a use of its connection's container in the scope
+			// open now (containerkey), which every match of it then reads.
+			reqCtx := ctx
+			if provenswitch.On() {
+				reqCtx = withLiveDestination(ctx, liveDestination(ctx, input))
 			}
 
 			if input.header.Get("Content-Encoding") != "" {
+				input.encoded = input.body
 				input.body, err = pkg.Decompress(h.Logger, input.header.Get("Content-Encoding"), input.body, pkg.MaxDecompressedSize)
 				if err != nil {
 					utils.LogError(h.Logger, err, "failed to decode the http request body", zap.Any("metadata", utils.GetReqMeta(request)))
@@ -117,92 +141,8 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				zap.Any("body", string(input.body)),
 				zap.Any("raw", string(input.raw)))
 
-			// Extract header noise from noise configuration.
-			// We make a shallow copy so that injecting default flaky headers
-			// below does not mutate the shared opts.NoiseConfig map, which
-			// may be accessed concurrently by other outgoing requests.
-			// Keys are lowercased during copy because HeadersContainKeys
-			// compares against lowercased keys.
-			var headerNoise map[string][]string
-			if opts.NoiseConfig != nil {
-				if hn, ok := opts.NoiseConfig["header"]; ok {
-					headerNoise = make(map[string][]string, len(hn))
-					for k, v := range hn {
-						lk := strings.ToLower(k)
-						if existing, ok := headerNoise[lk]; ok {
-							// Merge value slices on case-variant collision
-							// to keep behaviour deterministic.
-							headerNoise[lk] = append(existing, v...)
-						} else {
-							headerNoise[lk] = v
-						}
-					}
-				}
-			}
-
-			// Auto-inject known flaky headers (e.g. AWS SigV4) into the
-			// per-request copy so they are ignored during mock matching.
-			// This prevents mismatches caused by headers whose values or
-			// presence change on every request due to timestamps, signatures,
-			// or credential rotation (e.g. X-Amz-Security-Token from IRSA).
-			// Disable with --disableAutoHeaderNoise for strict matching.
-			if !opts.DisableAutoHeaderNoise {
-				if headerNoise == nil {
-					headerNoise = make(map[string][]string)
-				}
-				for hdr, noise := range flakyHeaderNoise() {
-					if _, exists := headerNoise[hdr]; !exists {
-						headerNoise[hdr] = noise
-					}
-				}
-			}
-
-			// User request-body noise from test.globalNoise.requestBody
-			// (root-relative dotted paths). This is a DEDICATED bucket,
-			// distinct from the "body" bucket that governs RESPONSE
-			// assertions: request-matching noise and response-assertion noise
-			// are separate axes. Reusing the response "body" bucket here would
-			// let a field noised only because it is dynamic in the response
-			// silently soften request matching too (e.g. excusing a wrong
-			// user-id under --schema-noise-strict). Keeping them separate makes
-			// strict matching a real guarantee — a path can only weaken request
-			// matching if the user puts it under requestBody on purpose.
-			//
-			// Lowercased copy for the same reason as headerNoise: the matcher's
-			// noise index matches lowercased paths. Entries are normalized to
-			// presence-only (empty regex list): request-body mock matching and
-			// drift detection are path-based, so a value-regex cannot gate here.
-			var bodyNoise map[string][]string
-			if opts.NoiseConfig != nil {
-				if bn, ok := opts.NoiseConfig["requestbody"]; ok {
-					bodyNoise = make(map[string][]string, len(bn))
-					for k, v := range bn {
-						if len(v) > 0 {
-							h.Logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
-								zap.String("field", k))
-						}
-						bodyNoise[strings.ToLower(k)] = []string{}
-					}
-				}
-			}
-
-			// User URL-path noise from test.globalNoise.url. The URL path is the
-			// one request field matched by EXACT value with no noise hook, so a
-			// non-deterministic path segment (id/uuid/timestamp/object key) made
-			// the recorded mock unmatchable and produced a "no matching mock -> 502"
-			// on replay. Each key here is a regex that wildcards the matching
-			// segment in both the mock and request paths (see MatchURLPath). The
-			// value slice is unused — like requestbody, matching is by pattern, not
-			// by a value-regex — so an entry is presence-only.
-			var urlNoise []string
-			if opts.NoiseConfig != nil {
-				if un, ok := opts.NoiseConfig["url"]; ok {
-					urlNoise = make([]string, 0, len(un))
-					for k := range un {
-						urlNoise = append(urlNoise, k)
-					}
-				}
-			}
+			noise := NewRequestNoise(h.Logger, opts)
+			headerNoise, bodyNoise, urlNoise := noise.Header, noise.Body, noise.URL
 
 			h.Logger.Debug("header noise", zap.Any("header noise", headerNoise))
 			h.Logger.Debug("body noise", zap.Any("body noise", bodyNoise))
@@ -231,7 +171,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if dstCfg != nil {
 				ptPort = uint32(dstCfg.Port)
 			}
-			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url); matched {
+			if rule, matched := passThroughEgressDecision(opts, ptHost, ptPort, input.method, input.url, request.Header); matched {
 				mode := rule.Mode
 				out := []byte("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
 				served := "synthetic-200"
@@ -312,7 +252,86 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 			}
 
-			ok, stub, diag, err := h.match(ctx, input, mockDb, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableStatefulMocks, !opts.DisableMockCorrelation) // calling match function to match mocks
+			var (
+				ok    bool
+				stub  *models.Mock
+				diag  *matchDiag
+				lmiss *learnMiss
+				// call is where the request's first read of the round
+				// found it made (integrations.CallRound): a miss's lookup
+				// of a recording made elsewhere is asked of that round.
+				call integrations.CallRound
+				// db is the store the request's matcher and its miss read:
+				// under the switch held to call's staging
+				// (integrations.HoldToRound), so a request is never answered
+				// with, nor diagnosed against, a recording of a set the
+				// replay staged after its first read. The miss's lookup of a
+				// recording made elsewhere (notOwnedRecording) checks the
+				// staging last, and says that it moved.
+				db = mockDb
+			)
+			switch {
+			case provenswitch.On() && opts.Learn && !integrations.LearnEnded(mockDb):
+				// Record's full round: the learn step decides every request
+				// (design v14 §7.2), and its first pass is the request's
+				// first read of the round. Once the set's learn step ended
+				// (a retry cycle, integrations.LearnEnder) a request is
+				// served as a replay serves it, below: nothing is paired,
+				// nor learned.
+				stub, lmiss, err = h.learnMatchIn(reqCtx, input, mockDb, h.newLearnNoise(opts, bodyNoise, urlNoise), opts, &call)
+				ok = stub != nil
+				if !ok && err == nil {
+					// Then the pairing, under the background rules:
+					// a call that is exactly another test's recording is
+					// answered with it, reported for judging, not missed.
+					strict := h.newStrictNoise(headerNoise, bodyNoise, urlNoise)
+					if answer, x := h.pairExactlyFrom(reqCtx, input, mockDb, strict, call); answer != nil {
+						// Its repeat note is asked as a miss's is: of the
+						// store held to the round the call first read
+						// (HoldToRound), and none for a call one more than
+						// the test recorded (repeatNoteOf).
+						held, _ := integrations.HoldToRound(mockDb, call)
+						extra := h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+						a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
+						reportPairing(reqCtx, input, x, a, repeat)
+						stub, ok, lmiss = answer, true, nil
+					}
+				}
+				if !ok {
+					// The miss is diagnosed in the round the learn step's
+					// first pass read.
+					db, _ = integrations.HoldToRound(mockDb, call)
+				}
+			default:
+				// Under the switch a replay first honours what the learn step
+				// learned onto the recording; anything else goes on to the
+				// matcher as before.
+				proven := provenswitch.On()
+				if proven {
+					// The request's first read of the round, before any
+					// matcher reads the store: its staging and view, kept
+					// in O(1) for a miss to be asked of.
+					call = integrations.MarkCallRound(mockDb)
+					// Every matcher reads the store held to it: once the
+					// replay stages another set, the request finds nothing
+					// to be answered with, and misses saying so.
+					db, _ = integrations.HoldToRound(mockDb, call)
+					stub, err = h.learnedMatch(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise), opts)
+					ok = stub != nil
+				}
+				if !ok && err == nil {
+					// Under the switch the learn step of record's full round
+					// is the one request-noise learner, and what it learned is
+					// always followed (design v14 §7.2 step 10; U18): no other
+					// replay learns noise, and a learned correlation is never
+					// switched off.
+					detect, correlate := opts.NoiseDetection(), !opts.DisableMockCorrelation
+					if proven {
+						detect, correlate = false, true
+					}
+					ok, stub, diag, err = h.match(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, detect, opts.NoiseStrict(), !opts.DisableStatefulMocks, correlate) // calling match function to match mocks
+				}
+			}
 			if err != nil {
 				utils.LogError(h.Logger, err, "error while matching http mocks", zap.Any("metadata", utils.GetReqMeta(request)))
 				errCh <- err
@@ -323,7 +342,74 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			if !ok {
 				// Build mismatch report for the user (surfaced in the mismatch
 				// table, the report yaml and `keploy report`).
-				report := h.buildHTTPMismatchReport(request, input.body, mockDb, nil, headerNoise, bodyNoise, diag)
+				if lmiss == nil && provenswitch.On() {
+					// A call that came with an array in another order is
+					// unstable_order in every round, not only the full one.
+					lmiss = h.orderMiss(reqCtx, input, db, h.newLearnNoise(opts, bodyNoise, urlNoise))
+				}
+				if lmiss != nil {
+					diag = lmiss.diag()
+				}
+				// Under exact serving: one call more than the test recorded?
+				// Any other miss is diagnosed against the test's answered
+				// recordings too (answeredDiag): they are in no read now.
+				// Both read the request's destination as it came (reqCtx): a
+				// reading now would be a use of its connection's container in
+				// the scope open now, the next test's once a test ended.
+				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				if n == 0 && lmiss == nil {
+					// (A learn-step miss names the candidate it refused.)
+					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
+				}
+				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
+				if n > 0 && report != nil {
+					report.MissKind, report.Recorded = models.MissExtraCall, n
+				}
+				// The miss was decided where the request first read the
+				// round: whether that read found a staging is told from it.
+				integrations.StampMark(report, call)
+				// A call that is a recording made elsewhere (another test's,
+				// or a worker-scope one not reached yet) is named as that
+				// recording: it did not change, so no learn-step reason
+				// explains it.
+				// It is asked of the round the request's first read found it
+				// made in (notOwnedRecording): never a recording that read
+				// held as its view's own, nor one of a set the replay staged
+				// under the request, which the miss then says.
+				var elsewhere *models.Mock
+				restaged := false
+				if n == 0 && report != nil && provenswitch.On() {
+					elsewhere, restaged = notOwnedRecording(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), call)
+				}
+				if elsewhere != nil {
+					markNotOwned(report, elsewhere)
+				} else if lmiss != nil {
+					lmiss.explain(report)
+				}
+				if restaged {
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + restagedNote)
+				} else if why := integrations.UnheldWhy(db); why != "" && report != nil {
+					// The store marked the request's round but could not
+					// hold it: its matcher read nothing (HoldToRound).
+					report.NextSteps = strings.TrimSpace(report.NextSteps + " " + why)
+				}
+				// A call identical to one an earlier test made, whose
+				// recording already answered: the application asked again
+				// where its recording did not (models.RepeatNote). In
+				// record's full round the learn step finds no recorded call
+				// of the test for it (unmocked_call), which the note keeps
+				// as judging's code and explains; a learn reason that names
+				// a recorded call of the test the request changed from is
+				// kept as it is. A call made elsewhere keeps that reason and
+				// its closest and gets the note beside it (markRepeat): at
+				// record a test in between refilled the cache with the same
+				// call, which this replay, inside the cache's span there,
+				// never made, so its recording is what the call matches.
+				if n == 0 && report != nil && (elsewhere != nil || lmiss == nil || lmiss.res.Reason == models.MissUnmockedCall) {
+					if a, ok := repeatNoteOf(reqCtx, input, db, h.newStrictNoise(headerNoise, bodyNoise, urlNoise), n); ok {
+						markRepeat(report, a)
+					}
+				}
 				if report != nil {
 					// Per-call HTTP detail at Debug; the canonical, protocol-
 					// agnostic mock-mismatch WARN is emitted once in
@@ -346,6 +432,13 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// captures it for the CLI to append to the set at end-of-run.
 				if opts.OnMiss.PassesThroughOnMiss() {
 					handled, phErr := h.serveOnMiss(ctx, clientConn, reqBuf, request, input.body, dstCfg, opts)
+					if phErr != nil && ctx.Err() != nil {
+						// The call's end cut the passthrough short (its
+						// dial, the dependency's answer, which
+						// pUtil.InterruptOnDone ends then, or the write to
+						// the client): no answer is owed, and it is no miss.
+						return
+					}
 					if phErr != nil {
 						h.Logger.Debug("on-miss passthrough failed; falling back to hard miss", zap.Error(phErr), zap.Any("metadata", utils.GetReqMeta(request)))
 					} else if handled {
@@ -366,11 +459,35 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				noMockBody := "keploy: no matching mock found for this HTTP request\n"
 				noMock := fmt.Sprintf("HTTP/%d.%d 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 					request.ProtoMajor, request.ProtoMinor, len(noMockBody), noMockBody)
+				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
+				missErr := models.NewMockMismatchError(baseErr, report)
+				// The miss is queued for the test that made it before the app
+				// sees the 502. The replay reads a test's misses once the app
+				// has answered it (proxy.GetMockErrors), and the app answers
+				// only after it has read the 502, so a test that ends as soon
+				// as it reads the 502 still has its miss, and the next test is
+				// never charged with it. That holds with the proven switch off
+				// as well. Queued after the 502, as it was there, the miss
+				// raced the app's answer: an app that answered first had its
+				// miss charged to the test after it (enterprise pipeline
+				// 11651: get-quote-1's GET /fx filed under get-rates-1, and
+				// get-quote-1's difference learned as noise).
+				reported := models.ReportMockMismatch(ctx, missErr)
 				if _, err := clientConn.Write([]byte(noMock)); err != nil {
 					h.Logger.Debug("failed to write 502 response to client", zap.Error(err), zap.Any("metadata", utils.GetReqMeta(request)))
 				}
-				baseErr := fmt.Errorf("%w for %s %s", ErrMockNotMatched, request.Method, request.URL.Path)
-				errCh <- models.NewMockMismatchError(baseErr, report)
+				switch {
+				case reported && provenswitch.On():
+					// Reported, it is not returned again.
+					errCh <- nil
+				case reported:
+					// Returned as well, as reported: the connection ends and
+					// the miss is logged as they always were with the switch
+					// off, and it is not reported a second time.
+					errCh <- models.MismatchReported{Err: missErr}
+				default:
+					errCh <- missErr
+				}
 				return
 			}
 
@@ -412,15 +529,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 		}
 	}(errCh, reqBuf, opts)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		if err == io.EOF {
-			return nil
-		}
-		return err
-	}
+	return pUtil.JoinParser(ctx, errCh)
 }
 
 // withResponse returns m with its recorded response in Spec: m itself, or, when
@@ -445,6 +554,9 @@ func withResponse(m *models.Mock) (*models.Mock, error) {
 // async.go) because it is the shared serializer for BOTH the ordinary
 // matched-mock path and the async serving branch.
 // A response still kept apart from its mock is loaded first (withResponse).
+// A response with no body by rule (to a HEAD, a 1xx, 204 or 304) keeps the
+// Content-Length it was recorded with: a HEAD's is the size of the body a GET
+// gets, which the client takes for that size (an S3 client's Stat).
 func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	name := ""
 	if stub != nil {
@@ -458,8 +570,10 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 		return nil, fmt.Errorf("http: mock %q has no response to serialize", name)
 	}
 	protoMajor, protoMinor := 1, 1
+	method := ""
 	if stub.Spec.HTTPReq != nil {
 		protoMajor, protoMinor = stub.Spec.HTTPReq.ProtoMajor, stub.Spec.HTTPReq.ProtoMinor
+		method = string(stub.Spec.HTTPReq.Method)
 	}
 	statusLine := fmt.Sprintf("HTTP/%d.%d %d %s\r\n", protoMajor, protoMinor,
 		stub.Spec.HTTPResp.StatusCode, http.StatusText(stub.Spec.HTTPResp.StatusCode))
@@ -475,9 +589,15 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 	} else {
 		respBody = body
 	}
+	// The digests the recorded body matched as its server sent it, over the
+	// bytes sent now (models.MetadataBodyDigestsKey): obfuscation, encryption
+	// and a variable rewrite a body, and keploy's compressor is not the
+	// server's. Those it did not match are sent as recorded.
+	bodydigest.Apply(stub.Spec.Metadata[models.MetadataBodyDigestsKey], header, body, respBody)
+	noBody := responseHasNoBody(method, stub.Spec.HTTPResp.StatusCode)
 	var headers string
 	for key, values := range header {
-		if key == "Content-Length" {
+		if key == "Content-Length" && !noBody {
 			values = []string{strconv.Itoa(len(respBody))}
 		}
 		for _, value := range values {
@@ -485,4 +605,110 @@ func (h *HTTP) buildMockResponseBytes(stub *models.Mock) ([]byte, error) {
 		}
 	}
 	return []byte(statusLine + headers + "\r\n" + respBody), nil
+}
+
+// RequestNoise is what of a request may differ from its recording when it is
+// matched (decodeHTTP), from the run's options: header noise (the configured
+// header noise and, unless --disableAutoHeaderNoise, the headers known to
+// change on every call: SigV4's date and signature, an SDK's invocation id,
+// a rotating security token), request-body noise (test.globalNoise
+// .requestBody) and URL-path noise (test.globalNoise.url). Every parser of
+// HTTP calls reads it from here (NewRequestNoise), so none drifts from
+// another: the SQS parser's variable pass (VariableMatch) compared every
+// header by value, and no signed SDK call fit a recording.
+type RequestNoise struct {
+	Header map[string][]string
+	Body   map[string][]string
+	URL    []string
+}
+
+// NewRequestNoise is the request noise of a call under opts.
+func NewRequestNoise(logger *zap.Logger, opts models.OutgoingOptions) RequestNoise {
+	// Extract header noise from noise configuration.
+	// We make a shallow copy so that injecting default flaky headers
+	// below does not mutate the shared opts.NoiseConfig map, which
+	// may be accessed concurrently by other outgoing requests.
+	// Keys are lowercased during copy because HeadersContainKeys
+	// compares against lowercased keys.
+	var headerNoise map[string][]string
+	if opts.NoiseConfig != nil {
+		if hn, ok := opts.NoiseConfig["header"]; ok {
+			headerNoise = make(map[string][]string, len(hn))
+			for k, v := range hn {
+				lk := strings.ToLower(k)
+				if existing, ok := headerNoise[lk]; ok {
+					// Merge value slices on case-variant collision
+					// to keep behaviour deterministic.
+					headerNoise[lk] = append(existing, v...)
+				} else {
+					headerNoise[lk] = v
+				}
+			}
+		}
+	}
+
+	// Auto-inject known flaky headers (e.g. AWS SigV4) into the
+	// per-request copy so they are ignored during mock matching.
+	// This prevents mismatches caused by headers whose values or
+	// presence change on every request due to timestamps, signatures,
+	// or credential rotation (e.g. X-Amz-Security-Token from IRSA).
+	// Disable with --disableAutoHeaderNoise for strict matching.
+	if !opts.DisableAutoHeaderNoise {
+		if headerNoise == nil {
+			headerNoise = make(map[string][]string)
+		}
+		for hdr, noise := range flakyHeaderNoise() {
+			if _, exists := headerNoise[hdr]; !exists {
+				headerNoise[hdr] = noise
+			}
+		}
+	}
+
+	// User request-body noise from test.globalNoise.requestBody
+	// (root-relative dotted paths). This is a DEDICATED bucket,
+	// distinct from the "body" bucket that governs RESPONSE
+	// assertions: request-matching noise and response-assertion noise
+	// are separate axes. Reusing the response "body" bucket here would
+	// let a field noised only because it is dynamic in the response
+	// silently soften request matching too (e.g. excusing a wrong
+	// user-id under --schema-noise-strict). Keeping them separate makes
+	// strict matching a real guarantee — a path can only weaken request
+	// matching if the user puts it under requestBody on purpose.
+	//
+	// Lowercased copy for the same reason as headerNoise: the matcher's
+	// noise index matches lowercased paths. Entries are normalized to
+	// presence-only (empty regex list): request-body mock matching and
+	// drift detection are path-based, so a value-regex cannot gate here.
+	var bodyNoise map[string][]string
+	if opts.NoiseConfig != nil {
+		if bn, ok := opts.NoiseConfig["requestbody"]; ok {
+			bodyNoise = make(map[string][]string, len(bn))
+			for k, v := range bn {
+				if len(v) > 0 {
+					logger.Debug("body-noise value regexes are ignored for mock matching; the field is skipped by path",
+						zap.String("field", k))
+				}
+				bodyNoise[strings.ToLower(k)] = []string{}
+			}
+		}
+	}
+
+	// User URL-path noise from test.globalNoise.url. The URL path is the
+	// one request field matched by EXACT value with no noise hook, so a
+	// non-deterministic path segment (id/uuid/timestamp/object key) made
+	// the recorded mock unmatchable and produced a "no matching mock -> 502"
+	// on replay. Each key here is a regex that wildcards the matching
+	// segment in both the mock and request paths (see MatchURLPath). The
+	// value slice is unused — like requestbody, matching is by pattern, not
+	// by a value-regex — so an entry is presence-only.
+	var urlNoise []string
+	if opts.NoiseConfig != nil {
+		if un, ok := opts.NoiseConfig["url"]; ok {
+			urlNoise = make([]string, 0, len(un))
+			for k := range un {
+				urlNoise = append(urlNoise, k)
+			}
+		}
+	}
+	return RequestNoise{Header: headerNoise, Body: bodyNoise, URL: urlNoise}
 }

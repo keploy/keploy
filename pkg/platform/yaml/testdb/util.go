@@ -14,31 +14,21 @@ import (
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	yamlLib "gopkg.in/yaml.v3"
 )
 
 // buildHTTPSchema assembles the HTTPSchema that will live in a doc's Spec,
-// plus performs the noisy-field detection that mutates tc.Noise. This is the
+// plus, with the proven switch off, performs the time-shaped noisy-field
+// detection that mutates tc.Noise (addTimeShapedNoise). This is the
 // "meaningful work" shared between the YAML and JSON encode paths; it does
 // not touch any yaml.Node or produce any serialized bytes.
 func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
-	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
-	if err != nil {
-		utils.LogError(logger, err, "error in flattening http response")
-	}
 	noise := tc.Noise
-	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
-		for _, v := range vals {
-			if pkg.IsTime(v) {
-				return true
-			}
-		}
-		return pkg.IsTime(strings.Join(vals, ", "))
-	})
-	for _, v := range noiseFieldsFound {
-		noise[v] = []string{}
+	if !provenswitch.On() {
+		addTimeShapedNoise(tc, noise, logger)
 	}
 
 	httpSchema := models.HTTPSchema{
@@ -59,6 +49,40 @@ func buildHTTPSchema(tc models.TestCase, logger *zap.Logger) models.HTTPSchema {
 	}
 	httpSchema.Metadata = specMetadata(tc.Description)
 	return httpSchema
+}
+
+// addTimeShapedNoise adds to noise every response header and body field whose
+// value reads as a time (pkg.IsTime), as match-anything noise. It goes by the
+// value's shape alone: a date-formatted string, or any number within a day of
+// now read as epoch nanoseconds.
+//
+// With the proven switch off, every test case keploy writes (at record, and
+// each time a test case is written again) gets this noise, as it always has.
+// Under the switch it gets none: a field is noise only when it is declared, or
+// when the learn step of record's full round F saw it drift (F replays every
+// test 61.5 s past its recording, so a value the app reads from its clock
+// drifts there and is learned from the drift). A date-shaped value that stays
+// the same from record to replay (a created_at read back from a mocked
+// database) is then asserted. Noised by its shape, a change to it would pass.
+// The Date header a server mints on every answer is not asserted either way:
+// the replay forgives it by its name (models.IsVolatileResponseHeader, unless
+// --disableAutoHeaderNoise), never by its value.
+func addTimeShapedNoise(tc models.TestCase, noise map[string][]string, logger *zap.Logger) {
+	m, err := FlattenHTTPResponse(pkg.ToHTTPHeader(tc.HTTPResp.Header), tc.HTTPResp.Body)
+	if err != nil {
+		utils.LogError(logger, err, "error in flattening http response")
+	}
+	noiseFieldsFound := FindNoisyFields(m, func(_ string, vals []string) bool {
+		for _, v := range vals {
+			if pkg.IsTime(v) {
+				return true
+			}
+		}
+		return pkg.IsTime(strings.Join(vals, ", "))
+	})
+	for _, v := range noiseFieldsFound {
+		noise[v] = []string{}
+	}
 }
 
 // specMetadata builds the spec-level Metadata map carrying the fields that
@@ -110,6 +134,8 @@ func EncodeTestcaseJSON(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTr
 		Kind:        tc.Kind,
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
+		Real:        tc.Real,
+		Origin:      tc.Origin.Persisted(),
 	}
 	switch tc.Kind {
 	case models.HTTP:
@@ -144,6 +170,8 @@ func EncodeTestcase(tc models.TestCase, logger *zap.Logger) (*yaml.NetworkTraffi
 		Kind:        tc.Kind,
 		Name:        tc.Name,
 		LastUpdated: tc.LastUpdated,
+		Real:        tc.Real,
+		Origin:      tc.Origin.Persisted(),
 	}
 
 	switch tc.Kind {
@@ -346,6 +374,15 @@ func Decode(yamlTestcase *yaml.NetworkTrafficDoc, logger *zap.Logger) (*models.T
 		LastUpdated: yamlTestcase.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+		// The clock its window start is on: read whatever the
+		// switch, so a rewrite of the case (templatize, normalize, an
+		// update) keeps it; only the proven switch uses it.
+		Origin: yamlTestcase.Origin,
+	}
+	if provenswitch.On() {
+		// The mock.real destinations the case's recording used (design v14
+		// §4): not read without the switch.
+		tc.Real = yamlTestcase.Real
 	}
 
 	switch tc.Kind {
@@ -446,6 +483,10 @@ func DecodeJSON(doc *yaml.NetworkTrafficDocJSON, logger *zap.Logger) (*models.Te
 		LastUpdated: doc.LastUpdated,
 		Noise:       make(map[string][]string),
 		Assertions:  make(map[models.AssertionType]interface{}),
+		Origin:      doc.Origin, // as Decode reads it: whatever the switch
+	}
+	if provenswitch.On() {
+		tc.Real = doc.Real
 	}
 
 	switch tc.Kind {

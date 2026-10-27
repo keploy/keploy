@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 type Proc interface {
@@ -46,6 +48,8 @@ type worker struct {
 	pid    uint32
 	dir    string
 	frames []*frame
+	suite  bool
+	born   time.Time
 }
 
 type procKey struct {
@@ -63,7 +67,6 @@ type Registry struct {
 	byProc   map[procKey]*Start
 	byPID    map[uint32]*Start
 	conns    map[string]uint32
-	dests    map[string]string
 	child    map[string]bool
 	root     string
 	sets     map[string]models.SetTable
@@ -71,6 +74,12 @@ type Registry struct {
 	marked   bool
 	onMark   []func()
 	begins   uint64 // Begin calls so far; numbers test frames
+	// origin is, under the proven switch, the process each recorded
+	// connection came from (origin.go).
+	origin origins
+	// dest is each connection's address, which every recorded mock names
+	// (dest.go).
+	dest destinations
 }
 
 func New(p Proc, slack time.Duration) *Registry {
@@ -86,12 +95,13 @@ func (r *Registry) Reset() {
 	r.byProc = nil
 	r.byPID = nil
 	r.conns = nil
-	r.dests = nil
 	r.child = nil
 	r.root = ""
 	r.sets = nil
 	r.universe = nil
 	r.marked = false
+	r.resetOrigins()
+	r.resetDests()
 }
 
 func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time) {
@@ -106,6 +116,7 @@ func (r *Registry) Begin(pid uint32, name, dir string, suite bool, at time.Time)
 	}
 	if suite {
 		w.frames = []*frame{{place: "", opened: at, counts: map[string]int{}}}
+		w.suite = true
 		return
 	}
 	if len(w.frames) == 0 {
@@ -127,6 +138,7 @@ func (r *Registry) End(pid uint32, name string, suite bool, at time.Time) {
 	}
 	if suite {
 		w.frames = nil
+		w.suite = false
 		return
 	}
 	for i := len(w.frames) - 1; i >= 1; i-- {
@@ -147,6 +159,9 @@ func (r *Registry) worker(pid uint32) *worker {
 	w, ok := r.workers[pid]
 	if !ok {
 		w = &worker{pid: pid}
+		if r.proc != nil {
+			w.born, _ = r.proc.Birth(pid)
+		}
 		r.workers[pid] = w
 	}
 	return w
@@ -165,18 +180,6 @@ func (r *Registry) Note(conn string, pid uint32, at time.Time) {
 		r.conns[conn] = pid
 	}
 	r.startOf(pid, at)
-}
-
-func (r *Registry) Dest(conn, addr string) {
-	if conn == "" || addr == "" {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.dests == nil {
-		r.dests = map[string]string{}
-	}
-	r.dests[conn] = addr
 }
 
 func (r *Registry) Child(conn string) {
@@ -262,17 +265,19 @@ func (r *Registry) Stamp(m *models.Mock) {
 	if m == nil {
 		return
 	}
+	// The process its call came from (proven switch): the
+	// sync manager stamped it as its parser handed it over, else here.
+	if provenswitch.On() {
+		r.StampOrigin(m)
+	}
+	// The address its connection reached, for a mock no parser handed the
+	// sync manager, which stamps it as it is handed over (StampDest).
+	r.StampDest(m)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	id := m.ConnectionID
 	if id == "" && m.Spec.Metadata != nil {
 		id = m.Spec.Metadata["connID"]
-	}
-	if addr := r.dests[id]; addr != "" && m.Spec.Metadata["destAddr"] == "" {
-		if m.Spec.Metadata == nil {
-			m.Spec.Metadata = map[string]string{}
-		}
-		m.Spec.Metadata["destAddr"] = addr
 	}
 	if r.child[id] {
 		if m.Spec.Metadata == nil {
@@ -475,6 +480,38 @@ func (r *Registry) Active() bool {
 	return r.sets != nil
 }
 
+func (r *Registry) Start(pid uint32, dir string) (string, time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w, ok := r.workers[pid]; ok && dir == "" {
+		dir = w.dir
+	}
+	set := r.setOf(dir)
+	return set, r.sets[set].Start
+}
+
+func (r *Registry) Live() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, w := range r.workers {
+		if !w.suite && len(w.frames) < 2 {
+			continue
+		}
+		if !w.born.IsZero() {
+			if b, ok := r.proc.Birth(w.pid); !ok || !b.Equal(w.born) {
+				continue
+			}
+		}
+		set := r.setOf(w.dir)
+		if _, ok := r.sets[set]; ok && !slices.Contains(out, set) {
+			out = append(out, set)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 func (r *Registry) setOf(dir string) string {
 	if dir == "" {
 		return ""
@@ -542,6 +579,40 @@ func (r *Registry) currentFrame(w *worker) *frame {
 		return open
 	}
 	return nil
+}
+
+// Owns reports whether the named mock is a recording of the test open to a
+// call from pid, resolved as View resolves it (currentTest): whether that
+// test's mapping names it. A boot, runner or unmapped mock, which View also
+// shows the call, is no test's own, and with no test open to pid nothing is.
+// known is false when pid has no view (View's ok), and owned is then false.
+func (r *Registry) Owns(pid uint32, name string) (owned, known bool) {
+	if pid == 0 {
+		return false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sets == nil {
+		return false, false
+	}
+	_, w := r.chain(pid)
+	if w == nil {
+		return false, false
+	}
+	st, ok := r.sets[r.setOf(w.dir)]
+	if !ok {
+		return false, false
+	}
+	test := r.currentTest(w)
+	if test == "" {
+		return false, true
+	}
+	for _, o := range st.Tests[test] {
+		if o.Name == name {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 func (r *Registry) View(pid uint32, at time.Time) (map[string]int, map[string]struct{}, bool) {

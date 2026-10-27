@@ -1,12 +1,17 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestContainerNameFromDockerRun(t *testing.T) {
@@ -358,5 +363,38 @@ func TestRunSubcommandEnd(t *testing.T) {
 		if got != want {
 			t.Errorf("RunSubcommandEnd(%q) ends after %q, want after %q", cmd, got, want)
 		}
+	}
+}
+
+// A release lookup that GitHub did not answer with a release is an error, not
+// an empty release: a rate-limited answer decoded to a tag of "", which read
+// as a newer version than the running one, and the update went ahead.
+func TestGetGitHubRelease_RefusesAnythingButARelease(t *testing.T) {
+	for name, answer := range map[string]func(http.ResponseWriter){
+		"rate limited": func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		},
+		"no tag": func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"body":"notes"}`)) },
+		"an error that looks like a release": func(w http.ResponseWriter) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"tag_name":"v9.9.9"}`))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { answer(w) }))
+			defer srv.Close()
+			if got, err := getGitHubRelease(context.Background(), zap.NewNop(), srv.URL); err == nil {
+				t.Errorf("getGitHubRelease = %+v; want an error", got)
+			}
+		})
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v3.6.200","assets":[{"name":"keploy_linux_amd64.tar.gz","digest":"sha256:ab"}]}`))
+	}))
+	defer srv.Close()
+	got, err := getGitHubRelease(context.Background(), zap.NewNop(), srv.URL)
+	if err != nil || got.TagName != "v3.6.200" || len(got.Assets) != 1 || got.Assets[0].Digest != "sha256:ab" {
+		t.Errorf("getGitHubRelease = %+v, %v; want the release with its asset digest", got, err)
 	}
 }

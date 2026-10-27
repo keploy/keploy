@@ -15,7 +15,6 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	phase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase"
 	connPhase "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire/phase/conn"
-	intgUtils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	pUtils "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -216,21 +215,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 		clientConn = upgradedConn
 		if isTLS {
 			// Upgrade destination side via TLSUpgrader.
-			remoteAddr := clientConn.RemoteAddr().(*net.TCPAddr)
-			sourcePort := remoteAddr.Port
-
-			url, ok := pTls.SrcPortToDstURL.Load(sourcePort)
-			if !ok {
-				return res, fmt.Errorf("failed to fetch destination url for source port %d", sourcePort)
-			}
-			dstURL, ok := url.(string)
-			if !ok {
-				return res, fmt.Errorf("failed to type cast destination url for source port %d", sourcePort)
-			}
-
-			// dstURL is the client's own SNI and is empty for every
+			//
+			// dstURL is the client's own SNI, read off the handshake it
+			// just made with keploy, and is empty for every
 			// IP-dialled MySQL — see resolveDestServerName for why that
 			// blocks verification and what it falls back to.
+			dstURL := pUtils.ClientServerName(clientConn)
 			serverName := resolveDestServerName(dstURL, destConn, opts.UpstreamTLSVerify)
 
 			tlsConfig := &tls.Config{
@@ -387,18 +377,10 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 			return res, err
 		}
 
-		authSwithRespPkt := &mysql.PacketBundle{
-			Header: &mysql.PacketInfo{
-				Header: &authSwithResp.Header,
-				Type:   mysql.AuthSwithResponse, // there is no specific identifier for AuthSwitchResponse
-			},
-			Message: intgUtils.EncodeBase64(authSwithResp.Payload),
-		}
-
-		// save the auth switch response packet
-		res.req = append(res.req, mysql.Request{
-			PacketBundle: *authSwithRespPkt,
-		})
+		// save the auth switch response packet: its length, not the
+		// credential it carries (clientAuthData). There is no specific
+		// identifier for AuthSwitchResponse.
+		res.req = append(res.req, clientAuthData(authSwithResp, mysql.AuthSwithResponse))
 
 		logger.Debug("Auth mechanism is switched successfully")
 
@@ -455,13 +437,12 @@ func handleInitialHandshake(ctx context.Context, logger *zap.Logger, clientConn,
 // resolveDestServerName decides the ServerName keploy puts on its own TLS
 // dial to the real MySQL server.
 //
-// capturedSNI is the SNI CertForClient recovered from the client's
-// ClientHello (pTls.SrcPortToDstURL). SrcPortToDstURL stores it
-// unconditionally — the empty string included — and MySQL clients
-// overwhelmingly dial by IP (keploy's own e2e uses tcp(127.0.0.1:3306)),
-// while RFC 6066 forbids IP literals in SNI so the client sends none. Empty
-// is therefore the NORMAL case here, not an edge case, and this site has
-// never had any fallback at all.
+// capturedSNI is the SNI of the client's ClientHello, as its completed
+// handshake with keploy reports it (pUtils.ClientServerName), the empty
+// string included. MySQL clients overwhelmingly dial by IP (keploy's own
+// e2e uses tcp(127.0.0.1:3306)), while RFC 6066 forbids IP literals in SNI
+// so the client sends none. Empty is therefore the NORMAL case here, not an
+// edge case, and this site has never had any fallback at all.
 //
 // That is fatal the moment verification is on: crypto/tls rejects a config
 // with an empty ServerName and InsecureSkipVerify=false outright ("either
@@ -649,74 +630,78 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, nil
 	}
 
-	// read the public key request from the client
-	publicKeyRequest, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+	// The client asks for the server's public key, or, holding the key
+	// already, sends its password encrypted with it at once
+	// (mysqlUtils.IsPublicKeyRequest).
+	clientAuth, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
 	if err != nil {
-		utils.LogError(logger, err, "failed to read public key request from client")
+		utils.LogError(logger, err, "failed to read the public key request or the encrypted password from client")
 		return res, err
 	}
-	_, err = destConn.Write(publicKeyRequest)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
-		}
-		utils.LogError(logger, err, "failed to write public key request to server")
-		return res, err
-	}
-
-	publicKeyReqPkt, err := wire.DecodePayload(ctx, logger, publicKeyRequest, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to decode public key request packet")
-		return res, err
-	}
-
-	res.req = append(res.req, mysql.Request{
-		PacketBundle: *publicKeyReqPkt,
-	})
-
-	// read the "public key" as response from the server
-	pubKey, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read public key from server")
-		return res, err
-	}
-	_, err = clientConn.Write(pubKey)
+	_, err = destConn.Write(clientAuth)
 	if err != nil {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		utils.LogError(logger, err, "failed to write public key response to client")
+		utils.LogError(logger, err, "failed to write the public key request or the encrypted password to server")
 		return res, err
 	}
 
-	pubKeyPkt, err := wire.DecodePayload(ctx, logger, pubKey, clientConn, decodeCtx)
-	if err != nil {
-		utils.LogError(logger, err, "failed to decode public key packet")
-		return res, err
-	}
-
-	pubKeyPkt.Meta = map[string]string{
-		"auth operation": "public key response",
-	}
-
-	res.resp = append(res.resp, mysql.Response{
-		PacketBundle: *pubKeyPkt,
-	})
-
-	// read the encrypted password from the client
-	encryptPass, err := mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
-	if err != nil {
-		utils.LogError(logger, err, "failed to read encrypted password from client")
-
-		return res, err
-	}
-	_, err = destConn.Write(encryptPass)
-	if err != nil {
-		if ctx.Err() != nil {
-			return res, ctx.Err()
+	encryptPass := clientAuth
+	if mysqlUtils.IsPublicKeyRequest(clientAuth) {
+		publicKeyReqPkt, err := wire.DecodePayload(ctx, logger, clientAuth, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode public key request packet")
+			return res, err
 		}
-		utils.LogError(logger, err, "failed to write encrypted password to server")
-		return res, err
+
+		res.req = append(res.req, mysql.Request{
+			PacketBundle: *publicKeyReqPkt,
+		})
+
+		// read the "public key" as response from the server
+		pubKey, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read public key from server")
+			return res, err
+		}
+		_, err = clientConn.Write(pubKey)
+		if err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write public key response to client")
+			return res, err
+		}
+
+		pubKeyPkt, err := wire.DecodePayload(ctx, logger, pubKey, clientConn, decodeCtx)
+		if err != nil {
+			utils.LogError(logger, err, "failed to decode public key packet")
+			return res, err
+		}
+
+		pubKeyPkt.Meta = map[string]string{
+			"auth operation": "public key response",
+		}
+
+		res.resp = append(res.resp, mysql.Response{
+			PacketBundle: *pubKeyPkt,
+		})
+
+		// read the encrypted password from the client
+		encryptPass, err = mysqlUtils.ReadPacketBuffer(ctx, logger, clientConn)
+		if err != nil {
+			utils.LogError(logger, err, "failed to read encrypted password from client")
+			return res, err
+		}
+		_, err = destConn.Write(encryptPass)
+		if err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			utils.LogError(logger, err, "failed to write encrypted password to server")
+			return res, err
+		}
 	}
 
 	encPass, err := mysqlUtils.BytesToMySQLPacket(encryptPass)
@@ -725,17 +710,7 @@ func handleFullAuth(ctx context.Context, logger *zap.Logger, clientConn, destCon
 		return res, err
 	}
 
-	encryptPassPkt := &mysql.PacketBundle{
-		Header: &mysql.PacketInfo{
-			Header: &encPass.Header,
-			Type:   mysql.EncryptedPassword,
-		},
-		Message: intgUtils.EncodeBase64(encPass.Payload),
-	}
-
-	res.req = append(res.req, mysql.Request{
-		PacketBundle: *encryptPassPkt,
-	})
+	res.req = append(res.req, clientAuthData(encPass, mysql.EncryptedPassword))
 
 	// read the final response from the server (ok or error)
 	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -798,17 +773,8 @@ func handlePlainPassword(ctx context.Context, logger *zap.Logger, clientConn, de
 		return res, err
 	}
 
-	plainPassPkt := &mysql.PacketBundle{
-		Header: &mysql.PacketInfo{
-			Header: &plainPass.Header,
-			Type:   mysql.PlainPassword,
-		},
-		Message: intgUtils.EncodeBase64(plainPass.Payload),
-	}
-
-	res.req = append(res.req, mysql.Request{
-		PacketBundle: *plainPassPkt,
-	})
+	// The password is recorded by its length only (clientAuthData).
+	res.req = append(res.req, clientAuthData(plainPass, mysql.PlainPassword))
 
 	// read the final response from the server (ok or error)
 	finalServerResponse, err := mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)
@@ -1161,12 +1127,7 @@ func handlePostTLSRecord(ctx context.Context, logger *zap.Logger, clientConn, de
 		if err != nil {
 			return fmt.Errorf("failed to parse post-TLS auth switch response: %w", err)
 		}
-		requests = append(requests, mysql.Request{
-			PacketBundle: mysql.PacketBundle{
-				Header:  &mysql.PacketInfo{Header: &switchPkt.Header, Type: mysql.AuthSwithResponse},
-				Message: intgUtils.EncodeBase64(switchPkt.Payload),
-			},
-		})
+		requests = append(requests, clientAuthData(switchPkt, mysql.AuthSwithResponse))
 
 		// Read next auth response after switch.
 		authData, err = mysqlUtils.ReadPacketBuffer(ctx, logger, destConn)

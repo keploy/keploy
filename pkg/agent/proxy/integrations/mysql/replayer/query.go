@@ -18,7 +18,10 @@ import (
 	"go.uber.org/zap"
 )
 
-func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
+// simulateCommandPhase serves the client's commands from the mocks until the
+// client leaves, or a command misses. dst is the upstream the client dialled,
+// named in a miss's report ("" when unknown).
+func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dst string, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, opts models.OutgoingOptions) error {
 
 	// Log initial mock state at the start of command phase
 	total, cfg, data := mockDb.GetMySQLCounts()
@@ -180,17 +183,24 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				if actualQuery != "" || closestQuery != "" {
 					diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
 				}
+				if miss.why != "" {
+					diff = strings.TrimSpace(diff + "\n" + miss.why)
+				}
 				// Under schemaNoiseStrict a rejection is a drift verdict, not a
 				// missing recording — say WHICH fields drifted (FieldDiffs) and
 				// how to mark them, instead of the generic re-record hint.
 				nextSteps := "Re-record mocks if the SQL query has changed."
-				if miss.strictRejected > 0 {
+				switch {
+				case miss.nextSteps != "":
+					nextSteps = miss.nextSteps
+				case miss.strictRejected > 0:
 					nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
 				}
 				report := &models.MockMismatchReport{
 					At:            time.Now(),
 					Protocol:      "MySQL",
 					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 160))),
+					Destination:   dst,
 					ClosestMock:   miss.closestMock,
 					Diff:          diff,
 					FieldDiffs:    miss.fieldDiffs,
@@ -202,16 +212,23 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// from an empty mock pool.
 					CandidateCount: miss.candidateCount,
 				}
-				if miss.matchPhase == models.MatchPhaseNoMocks {
+				// The miss was decided where the command first read the
+				// round: whether that read found a staging is told from it.
+				integrations.StampMark(report, miss.call)
+				if miss.matchPhase == models.MatchPhaseNoMocks && !miss.restaged {
 					// The pool held no data mock for the command phase to compare
-					// against — only handshake/config mocks survived the lifetime
-					// filter. That is a recording-side shortfall, not a content
-					// mismatch.
+					// against — at most handshake/config mocks survived the
+					// lifetime filter, or the pool was empty. That is a
+					// recording-side shortfall, not a content mismatch.
 					//
 					// This is asserted on the MEASURED phase, never on an empty
 					// closest_mock: nothing scoring is the NORMAL shape of a query
 					// that merely drifted from its recording, and reporting that as
 					// a lost mock sends the reader hunting for the wrong bug.
+					//
+					// Nor is a command the replay staged a test set again under
+					// (restaged): its matcher, held to its first read, read
+					// nothing, and the miss says so.
 					logger.Error("REPLAY-ORPHAN: TC failing — no data mock available for this query, so it was never recorded or was dropped at record time",
 						zap.String("sql_query", truncate(actualQuery, 300)),
 						zap.String("request_type", req.Header.Type),

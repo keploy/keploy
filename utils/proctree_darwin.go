@@ -3,6 +3,8 @@
 package utils
 
 import (
+	"syscall"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -38,3 +40,7 @@ func findChildPIDs(parentPID int) ([]int, func(pid int) (int, error), error) {
 	children, groupOf := table.tree(parentPID)
 	return children, groupOf, nil
 }
+
+// groupReached reads no process on macOS, which has no /proc:
+// InterruptProcessTreeReached says none there.
+func groupReached(int, syscall.Signal) []Reached { return nil }

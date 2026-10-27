@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -29,8 +30,13 @@ const EffectsSchemaVersion = "1"
 //	  "kind":           "Http",              // models.Kind
 //	  "status":         "FAILED",            // models.TestStatus
 //	  "failure_categories": ["DEPENDENCY_MISSING"],   // omitted when empty
+//	  "template_failures": [                          // omitted when empty
+//	    {"where": "body.id", "placeholder": "{{string .id}}", "why": "must equal ..."}
+//	  ],
 //	  "dependencies_checked":  true,
 //	  "dependencies_consumed": 7,
+//	  "capture_verification":        "incomplete",  // omitted when nothing was found
+//	  "capture_verification_reason": "capture incomplete: ...",
 //	  "effects": [
 //	    {
 //	      "name":     "deps[0] postgres PostgreSQL INSERT (presence)",
@@ -42,6 +48,34 @@ const EffectsSchemaVersion = "1"
 //	    }
 //	  ]
 //	}
+//
+// `verdict_unknown` and `verdict_unknown_reason` (optional, added within
+// schema_version "1"): `verdict_unknown: true` says keploy could not judge the
+// test, whatever "status" says: what it needed could not be read or checked
+// (the calls no mock answered, the recorded calls the test made, what it
+// captured, or whether every call was captured; KEPLOY_PROVEN=1). Its set is
+// not judged, and the run exits non-zero. The reason says what, one clause
+// each, joined by "; ". A consumer that reads "status" must read this first:
+// such a test's status can still say PASSED or OBSOLETE, and is no verdict.
+// Absent for a judged test, for a FAILED one (what could not be read can
+// only add to why it failed) and for an IGNORED one. A set run under the
+// switch that keploy could not judge for a reason no test carries
+// (INTERNAL_ERR) marks each of its other tests so, with the set's reason, as
+// its JUnit suite carries a "keploy verdict" error.
+//
+// `capture_verification` and `capture_verification_reason` (optional, added
+// within schema_version "1") are set-scoped and repeated on each of the set's
+// verdicts: "incomplete" when the agent could not track a process of the set
+// (the set is FAILED for it, while each test's own "status" may still say
+// PASSED: keploy cannot tell whose calls the untracked process made), or
+// "unverified" when the count could not be read. Absent when nothing was
+// checked or nothing was found.
+//
+// `template_failures` (optional, added within schema_version "1") names each
+// template variable place the test case failed on (TEMPLATE_VARIABLE): where
+// in the response, the placeholder, and why; for a test case refused when its
+// set loaded, the refusal. A test set refused whole (TEST_SET_REFUSED) gives
+// each test case one refusal with an empty placeholder.
 //
 // One `effects` entry per models.DepMetaResult, flattened with its parent row's
 // name and type so a consumer never has to walk a nested structure. `effects`
@@ -161,6 +195,14 @@ type testVerdict struct {
 	Kind              string   `json:"kind"`
 	Status            string   `json:"status"`
 	FailureCategories []string `json:"failure_categories,omitempty"`
+	// VerdictUnknown says keploy could not judge the test, whatever Status
+	// says (models.FailureInfo.NotJudged); VerdictUnknownReason says why.
+	// Optional, so no schema bump.
+	VerdictUnknown       bool   `json:"verdict_unknown,omitempty"`
+	VerdictUnknownReason string `json:"verdict_unknown_reason,omitempty"`
+	// TemplateFailures are the template variable places the test case failed
+	// on (models.TestResult.TemplateFailures). Optional, so no schema bump.
+	TemplateFailures []models.TemplateFailure `json:"template_failures,omitempty"`
 	// DependenciesChecked says whether the per-test dependency assertion RAN
 	// for this test. Without it `effects: []` is ambiguous — see the contract
 	// note above.
@@ -171,6 +213,11 @@ type testVerdict struct {
 	// "zero" on a field whose whole job is to be a magnitude.
 	DependenciesConsumed int         `json:"dependencies_consumed"`
 	Effects              []effectRow `json:"effects"`
+	// CaptureVerification is set-scoped: whether keploy confirmed the agent
+	// tracked every process of this test set ("incomplete"/"unverified").
+	// Repeated on each of the set's verdicts; absent when it was not checked.
+	CaptureVerification       string `json:"capture_verification,omitempty"`
+	CaptureVerificationReason string `json:"capture_verification_reason,omitempty"`
 }
 
 // buildEffectRows flattens a test's dependency rows into the wire shape. Pure
@@ -198,12 +245,12 @@ func buildEffectRows(t models.TestResult) []effectRow {
 }
 
 // buildTestVerdict projects one persisted test result onto the NDJSON schema.
-func buildTestVerdict(runID, testSetID string, t models.TestResult) testVerdict {
+func buildTestVerdict(runID, testSetID string, t models.TestResult, cv *models.CaptureVerification) testVerdict {
 	var categories []string
 	for _, c := range t.FailureInfo.Category {
 		categories = append(categories, string(c))
 	}
-	return testVerdict{
+	v := testVerdict{
 		SchemaVersion:        EffectsSchemaVersion,
 		TestRunID:            runID,
 		TestSetID:            testSetID,
@@ -211,10 +258,19 @@ func buildTestVerdict(runID, testSetID string, t models.TestResult) testVerdict 
 		Kind:                 string(t.Kind),
 		Status:               string(t.Status),
 		FailureCategories:    categories,
+		TemplateFailures:     t.TemplateFailures,
 		DependenciesChecked:  t.Result.DependenciesChecked(),
 		DependenciesConsumed: t.Result.DepsConsumed,
 		Effects:              buildEffectRows(t),
 	}
+	if why := t.VerdictUnknown(); len(why) > 0 {
+		v.VerdictUnknown, v.VerdictUnknownReason = true, strings.Join(why, "; ")
+	}
+	if cv != nil {
+		v.CaptureVerification = string(cv.Status)
+		v.CaptureVerificationReason = cv.Reason
+	}
+	return v
 }
 
 // buildTestVerdicts projects a whole run. Test-set names are sorted so the
@@ -238,8 +294,13 @@ func buildTestVerdicts(runID string, reports map[string]*models.TestReport) []te
 		if testSetID == "" {
 			testSetID = name
 		}
+		setUnjudged := rep.Proven && rep.Status == string(models.TestSetStatusInternalErr)
 		for _, t := range rep.Tests {
-			out = append(out, buildTestVerdict(runID, testSetID, t))
+			v := buildTestVerdict(runID, testSetID, t, rep.CaptureVerification)
+			if setUnjudged && !v.VerdictUnknown && t.Status != models.TestStatusFailed && t.Status != models.TestStatusIgnored {
+				v.VerdictUnknown, v.VerdictUnknownReason = true, rep.FailureReason
+			}
+			out = append(out, v)
 		}
 	}
 	return out

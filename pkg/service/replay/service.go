@@ -46,6 +46,21 @@ type Instrumentation interface {
 	ComposeDownOnSetupFailure(ctx context.Context) error
 }
 
+// AppContainerExitReader is an optional Instrumentation extension for an app
+// run in docker: it says whether the app's container still runs.
+//
+// Under docker compose keploy's agent is a service in the app's project, and
+// compose stops it the moment the app exits, so an agent that stops answering
+// during the bring-up can be one that went with the app rather than one that
+// was replaced. ensureAgentHoldsStoredMocks asks this before it says the
+// agent was replaced.
+type AppContainerExitReader interface {
+	// AppContainerExit returns the app's container no longer running --
+	// exited, dead, or restarting after an exit -- as an error naming it and
+	// how it ended, and nil while it runs or when it cannot tell.
+	AppContainerExit(ctx context.Context) error
+}
+
 type Service interface {
 	Start(ctx context.Context) error
 	Instrument(ctx context.Context) (*InstrumentState, error)
@@ -55,11 +70,6 @@ type Service interface {
 	GetTestSetStatus(ctx context.Context, testRunID string, testSetID string) (models.TestSetStatus, error)
 	GetTestCases(ctx context.Context, testID string) ([]*models.TestCase, error)
 	GetTestSetConf(ctx context.Context, testSetID string) (*models.TestSet, error)
-	// UpdateTestSetTemplate persists the (possibly updated) template map for a test-set.
-	// Used during replay to dynamically refresh values like JWTs/IDs as soon as
-	// their producing API responses are observed, so subsequent test cases use the
-	// latest values rather than stale ones from the previous run.
-	UpdateTestSetTemplate(ctx context.Context, testSetID string, template map[string]interface{}) error
 	RunApplication(ctx context.Context, opts models.RunOptions) models.AppError
 	DenoiseTestCases(ctx context.Context, testSetID string, noiseParams []*models.NoiseParams) ([]*models.NoiseParams, error)
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
@@ -79,6 +89,21 @@ type TestDB interface {
 	UpdateTestCase(ctx context.Context, testCase *models.TestCase, testSetID string, enableLog bool) error
 	DeleteTests(ctx context.Context, testSetID string, testCaseIDs []string) error
 	DeleteTestSet(ctx context.Context, testSetID string) error
+}
+
+// RecordedStartReader is an optional TestDB capability: the request time of the
+// earliest test case a test set ever recorded, which can predate every test case
+// the set holds now. A zero time means the TestDB does not know it.
+//
+// A set's startup traffic is what was recorded before its first test, and the
+// replayer otherwise takes that test from the test cases it is handed. That is
+// wrong when the set's earlier test cases are gone while its mock file is not:
+// k8s-proxy's auto-replay deletes a round's test cases from the recording's set
+// once they are written back, and keeps adding to the same mock file. The next
+// round's first test is then a late one, everything recorded before it counts
+// as startup traffic, and the agent stages most of the recording.
+type RecordedStartReader interface {
+	RecordedFirstTestStart(ctx context.Context, testSetID string) (time.Time, error)
 }
 
 type MockDB interface {
@@ -144,15 +169,27 @@ type TestCaseMutator interface {
 	BeforeTestCaseRun(ctx context.Context, tc *models.TestCase, testSetID string) error
 }
 
-// MockMutator is an optional extension to TestHooks.
-// RunTestSet detects it via type assertion after GetMocks returns and before
-// StoreMocks pushes mocks to the proxy. Implementations may mutate mocks
-// in-place (e.g. decrypt ENC: fields) so the proxy always receives plaintext
-// values without ever writing plaintext to disk.
-type MockMutator interface {
-	// AfterGetMocks is invoked once per test set, after all mocks are loaded
-	// from disk and before they are sent to the proxy. Both slices may be
-	// mutated in-place; nil slices are a no-op.
+// MockPayloadMutator is an optional extension to TestHooks: it changes each
+// mock's payload before the mock is sent to the agent (e.g. decrypts ENC:
+// fields), so the agent receives plaintext values without plaintext ever being
+// written to disk.
+//
+// A test set's mocks are not loaded whole: a read of a yaml or json mock file
+// leaves each mock's payload in the file (models.Mock.LeavePayloadOnDisk), and
+// the payload is read back, one mock at a time, only to be sent. The mutator
+// is handed each mock whole as it is, and may change its payload only
+// (models.MutatePayload): what decides a mock's pool was read before its
+// payload was. It runs again on a mock sent again (a restarted agent's), on
+// the payload as recorded.
+type MockPayloadMutator interface {
+	MutateMockPayload(ctx context.Context, m *models.Mock) error
+}
+
+// wholeSetMockMutator is the hook a replay called with a test set's mocks
+// loaded whole, which it no longer loads (MockPayloadMutator). Hooks that
+// still implement it are refused, loudly, rather than left uncalled: a
+// decryption among them would otherwise silently stop.
+type wholeSetMockMutator interface {
 	AfterGetMocks(ctx context.Context, filtered []*models.Mock, unfiltered []*models.Mock) error
 }
 

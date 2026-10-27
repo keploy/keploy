@@ -280,6 +280,63 @@ if grep "WARNING: DATA RACE" "test_logs.txt"; then
     exit 1
 fi
 
+# Before the app starts, each test set is staged with the window BaseTime to
+# now. The agent must read from its on-disk store only the mocks recorded before
+# the set's first test, not the whole recording: reading it all OOM-killed the
+# replay agent of a long prod recording before its app started. The agent logs
+# what it staged and what its store holds, for every set. A build without that
+# change logs nothing, so the released binary is not held to it.
+case "${REPLAY_BIN:-}" in
+  */build/keploy|*/build-no-race/keploy) replay_is_build=true ;;
+  *) replay_is_build=false ;;
+esac
+if [ "$replay_is_build" = true ]; then
+    staged_lines="$(grep -F "staged the set's app-startup mocks from the on-disk store" test_logs.txt || true)"
+    if [ -z "$staged_lines" ]; then
+        echo "::error::The agent logged no staging of a set's app-startup mocks: it read the whole recording from disk before the app started"
+        cat test_logs.txt
+        exit 1
+    fi
+    windowed_sets=0
+    while IFS= read -r line; do
+        startup="$(printf '%s\n' "$line" | grep -o '"startupMocks": [0-9]*' | grep -o '[0-9]*$' || true)"
+        declared="$(printf '%s\n' "$line" | grep -o '"declaredMocks": [0-9]*' | grep -o '[0-9]*$' || true)"
+        pool="$(printf '%s\n' "$line" | grep -o '"poolMocks": [0-9]*' | grep -o '[0-9]*$' || true)"
+        on_disk="$(printf '%s\n' "$line" | grep -o '"onDisk": [0-9]*' | grep -o '[0-9]*$' || true)"
+        # The mocks a parser declares it needs staged (declaredMocks) are
+        # read too, and under the proven switch the exact staging's pool
+        # (poolMocks: what no test owns, beside what the two read already);
+        # a build from before they were logged counts none.
+        staged=$(( ${startup:-0} + ${declared:-0} + ${pool:-0} ))
+        echo "staging read ${startup:-?} startup, ${declared:-0} declared and ${pool:-0} pool of ${on_disk:-?} on-disk mocks"
+        if [ -z "$startup" ] || [ -z "$on_disk" ]; then
+            echo "::error::Cannot read startupMocks/onDisk from: $line"
+            exit 1
+        fi
+        if [ "$on_disk" -gt 0 ]; then
+            if [ "$staged" -ge "$on_disk" ]; then
+                echo "::error::A set's staging read all ${on_disk} on-disk mocks; it must read only those recorded before its first test, those a parser declares, and the exact staging's pool"
+                exit 1
+            fi
+            windowed_sets=$((windowed_sets + 1))
+        fi
+    done <<< "$staged_lines"
+    # gin-mongo's data calls reach the disk store as per-test Mongo mocks. A
+    # build without keploy's private parsers (a fork's) records them as
+    # Generic session mocks instead, which stay in RAM, so its sets have
+    # nothing on disk to stage and only the staging line above applies.
+    if grep -qs '^kind: Mongo$' keploy/test-set-*/mocks.yaml; then
+        if [ "$windowed_sets" -eq 0 ]; then
+            echo "::error::No test set kept any per-test Mongo mock on disk, so the staging load was not exercised"
+            cat test_logs.txt
+            exit 1
+        fi
+        echo "✅ ${windowed_sets} test set(s) staged only their app-startup mocks"
+    else
+        echo "No Mongo mocks were recorded (a build without the private parsers), so no set has per-test mocks on disk to stage"
+    fi
+fi
+
 all_passed=true
 
 # Default-format (yaml) report scan. Glob picks up reports for every

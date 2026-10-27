@@ -9,6 +9,8 @@
 # --- Script Configuration and Safety ---
 set -Eeuo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/../../wait-recording.sh"
+
 # --- Helper Functions for Logging and Error Handling ---
 
 # Creates a collapsible group in the GitHub Actions log
@@ -52,12 +54,14 @@ check_for_errors() {
   local logfile=$1
   echo "Checking for errors in $logfile..."
   if [ -f "$logfile" ]; then
+    # Keploy's own lines, the CLI's ("Keploy:") and the agent's and its other
+    # modes' ("Keploy(agent):"). Matching "Keploy:" alone let every agent ERROR by.
     # Find critical Keploy errors, but exclude specific non-critical ones.
-    if grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"; then
+    if grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:' | grep -v "failed to read symbols, skipping coverage calculation"; then
       echo "::error::Critical error found in $logfile. Failing the build."
       # Print the specific errors that caused the failure
       echo "--- Failing Errors ---"
-      grep "ERROR" "$logfile" | grep "Keploy:" | grep -v "failed to read symbols, skipping coverage calculation"
+      grep "ERROR" "$logfile" | grep -E 'Keploy(\([^)]*\))?:' | grep -v "failed to read symbols, skipping coverage calculation"
       echo "----------------------"
       exit 1
     fi
@@ -190,7 +194,23 @@ endsec
 section "Cloning go-fuzzers Repository"
 echo "Cloning keploy/go-fuzzers using PRO_ACCESS_TOKEN..."
 if [ -n "${PRO_ACCESS_TOKEN:-}" ]; then
-  git clone https://${PRO_ACCESS_TOKEN}@github.com/keploy/go-fuzzers.git
+  # git gets the token from a credential helper that reads it from the
+  # environment, never from the userinfo of the clone URL. git decides that
+  # the server redirected it by comparing the URL it asked for with the one
+  # libcurl says it reached (CURLINFO_EFFECTIVE_URL), and libcurl leaves the
+  # credentials out of that URL since its fix for CVE-2026-94266 (Ubuntu
+  # curl 8.5.0-2ubuntu10.16, runner image ubuntu24/20261018.339). With the
+  # token as the URL's username every clone looked redirected: git moved to
+  # the URL without it, sent the next request with no credentials and died
+  # on "could not read Username for 'https://github.com'". The helper is
+  # asked whatever URL git ends up on, and the token stays out of the
+  # command line and out of go-fuzzers/.git/config. The empty helper first
+  # drops any helper the runner configured, so this token is the one that
+  # answers.
+  GIT_TERMINAL_PROMPT=0 PRO_ACCESS_TOKEN="${PRO_ACCESS_TOKEN}" git \
+    -c credential.helper= \
+    -c 'credential.helper=!f() { if [ "$1" = get ]; then printf "username=x-access-token\npassword=%s\n" "$PRO_ACCESS_TOKEN"; fi; }; f' \
+    clone https://github.com/keploy/go-fuzzers.git
 else
   echo "::warning::PRO_ACCESS_TOKEN not set, attempting clone without auth (will fail for private repo)"
   git clone https://github.com/keploy/go-fuzzers.git
@@ -225,6 +245,7 @@ section "Start Recording Server"
 # The command includes the fuzzer binary and its specific arguments
 GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record -c "$MONGO_FUZZER_BIN" 2>&1 | tee record.txt &
 KEPLOY_PID=$!
+rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
 echo "Keploy record process started with PID: $KEPLOY_PID"
 endsec
 
@@ -236,28 +257,16 @@ endsec
 section "Stop Recording"
 echo "Stopping Keploy record process..."
 
-REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
 echo "$REC_PID Keploy PID"
 
 echo "Sending SIGINT to keploy..."
 sudo kill -INT "$REC_PID" 2>/dev/null || true
 
-# Wait up to 15 seconds for graceful shutdown
-SHUTDOWN_TIMEOUT=15
-for i in $(seq 1 $SHUTDOWN_TIMEOUT); do
-  if ! kill -0 "$REC_PID" 2>/dev/null; then
-    echo "Keploy exited after ${i}s"
-    break
-  fi
-  sleep 1
-done
-
-# Force kill if still alive
-if kill -0 "$REC_PID" 2>/dev/null; then
-  echo "::error::Keploy did not exit within ${SHUTDOWN_TIMEOUT}s, force killing..."
-  sudo kill -9 "$REC_PID" 2>/dev/null || true
-  sleep 1
-fi
+# Wait for the recording to end, not for a fixed time: it drains what the
+# agent captured before it exits, and a stop killed 15 s in lost what it still
+# held (wait-recording.sh; it fails the lane on a hang).
+wait_recording_end "$KEPLOY_PID" record.txt || exit 1
 
 check_for_errors "record.txt"
 echo "Recording stopped."
@@ -275,6 +284,7 @@ if json_pass_supported; then
     section "Start Recording (json)"
     GOTRACEBACK=all "$RECORD_KEPLOY_BIN" record --storage-format json -c "$MONGO_FUZZER_BIN" 2>&1 | tee record_json.txt &
     KEPLOY_PID=$!
+    rec_keploy=$(jobs -p %%) # the pipeline's keploy: the one to signal
     endsec
 
     section "Generate Fuzzer Traffic (json)"
@@ -283,16 +293,9 @@ if json_pass_supported; then
     endsec
 
     section "Stop Recording (json)"
-    REC_PID="$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)"
+    REC_PID="${rec_keploy:-$(pgrep -n -f "$(basename "${RECORD_BIN:-keploy}") record" || true)}"
     sudo kill -INT "$REC_PID" 2>/dev/null || true
-    for i in $(seq 1 15); do
-        kill -0 "$REC_PID" 2>/dev/null || break
-        sleep 1
-    done
-    if kill -0 "$REC_PID" 2>/dev/null; then
-        sudo kill -9 "$REC_PID" 2>/dev/null || true
-        sleep 1
-    fi
+    wait_recording_end "$KEPLOY_PID" record_json.txt || exit 1
     check_for_errors "record_json.txt"
     endsec
 fi
@@ -313,6 +316,9 @@ cd $GO_FUZZERS_PATH
 TEST_PID=$!
 echo "Keploy test process started with PID: $TEST_PID"
 wait $TEST_PID
+# The replay is where a mock the agent cannot answer shows: its log is checked
+# too, as the record's are.
+check_for_errors "test.txt"
 check_test_report
 endsec
 
@@ -321,6 +327,7 @@ if json_pass_supported; then
     "$REPLAY_KEPLOY_BIN" test --storage-format json -c "$MONGO_FUZZER_BIN" --mongoPassword "password" --delay 10 --api-timeout=3000 2>&1 | tee test_json.txt &
     TEST_PID=$!
     wait $TEST_PID
+    check_for_errors "test_json.txt"
     if ! json_scan_reports; then
         cat test_json.txt
         exit 1

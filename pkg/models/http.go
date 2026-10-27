@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"net/http"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -51,6 +52,11 @@ type HTTPReq struct {
 	// a recording without a repeated header is unchanged.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
 
+	// URLRendered marks a URL a replay rendered from its test set's
+	// templates (pkg/templates): each value in it is escaped for its place,
+	// so it is sent as it stands. Never stored.
+	URLRendered bool `json:"-" yaml:"-" bson:"-"`
+
 	// NOTE: schema-noise (req_body_noise) is NOT stored here. It lives on the
 	// kind-agnostic MockSpec.ReqBodyNoise for every parser, HTTP included, so the
 	// learn/enforce flow is uniform across protocols (see pkg/agent/proxy/
@@ -74,8 +80,24 @@ type FormData struct {
 	Values    []string `json:"values" bson:"values,omitempty" yaml:"values,omitempty"`
 	Paths     []string `json:"paths" bson:"paths,omitempty" yaml:"paths,omitempty"`
 	FileNames []string `json:"file_names,omitempty" bson:"file_names,omitempty" yaml:"-"`
+	// FileContents carries a file part's bytes, index-aligned with FileNames
+	// and Paths, for a test case persisted by another process than the one
+	// that captured it: the DaemonSet agent streams its test cases to
+	// k8s-proxy's control plane, where the capture's temp file in Paths does
+	// not exist (see conn.InlineFormFiles). []byte so JSON carries binary
+	// content intact, which a string in Values does not. It rides only that
+	// JSON upload: the persister writes it to the test case's assets and
+	// clears it, and yaml/bson "-" keep it out of stored test cases.
+	FileContents [][]byte `json:"file_contents,omitempty" bson:"-" yaml:"-"`
 }
 
+// HTTPResp is an HTTP response. StreamBody is a streamed body's frames, as a
+// recording keeps them in YAML (MarshalYAML). JSON carries the body alone, one
+// form of the stream: Keploy Cloud receives and serves a test case as JSON and
+// edits its Body (the golden body), so frames carried beside it would go stale
+// and outvote the edit. A test case read from frames has a Body that splits back
+// into them (streamChunksToLegacyBody), and the replay compares a stream that
+// kept no frames with its Body, read as the app's stream is read.
 type HTTPResp struct {
 	StatusCode    int               `json:"status_code" yaml:"status_code"` // e.g. 200
 	Header        map[string]string `json:"header" yaml:"header"`
@@ -92,6 +114,24 @@ type HTTPResp struct {
 	// HeaderLineLengths: as on HTTPReq. Recorded for a mock's response, the
 	// one recorded response keploy sends back out at replay.
 	HeaderLineLengths HeaderLineLengths `json:"header_line_lengths,omitempty" yaml:"header_line_lengths,omitempty"`
+}
+
+// HTTPResponseHasNoBody reports whether a response carries no body whatever
+// its headers say (RFC 9112 §6.3): the answer to a HEAD, an interim 1xx, 204
+// or 304. Not a 101, nor a 2xx to a CONNECT: their message has no body either,
+// but the connection then carries another protocol, which is no next HTTP
+// message. It is the one rule for this, the proxy's framing and the replay's
+// stream detection alike.
+func HTTPResponseHasNoBody(reqMethod string, status int) bool {
+	return reqMethod == http.MethodHead || IsInterimHTTPStatus(status) || status == http.StatusNoContent || status == http.StatusNotModified
+}
+
+// IsInterimHTTPStatus reports whether code is an interim response's (RFC 9110
+// 15.2): a 1xx other than 101 (Switching Protocols). An interim response has
+// no body, and the final response to the same request comes after it on the
+// connection. After a 101 the connection speaks another protocol: it is final.
+func IsInterimHTTPStatus(code int) bool {
+	return code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
 }
 
 // MongoDB's BSON DateTime is an int64 count of milliseconds, so the default

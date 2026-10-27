@@ -1,0 +1,63 @@
+name: Proven set-end stop (Docker)
+# Guard, under KEPLOY_PROVEN=1: keploy's stop of a `docker run` app at a test
+# set's end, and at a recording's end, waits for the app's container to stop
+# (the daemon's wait, an event), however long a starved Docker takes, and
+# kills only when the container made no progress on its way out for the stall
+# bound of the time both it and keploy could run (utils.ExitClock: a container
+# held off the CPU, or waiting on a disk that serves others, accrues no
+# stall). Docker is starved of CPU (the daemon,
+# containerd and its shims at 5%, the container at --cpus 0.05) while the
+# app's shutdown works 400 ms of CPU, some 8 s at that share: longer than the
+# 5 s grace keploy's stop used to give it, which then killed it and left the
+# set not judged. Recorded once and replayed 20 times, every set must pass
+# with no kill; an app that ignores SIGINT must still be killed on the stall
+# rule, and its set not judged.
+#
+# Runs only the `build` (PR) binary and image: the switch's stop is not in
+# the published `latest`.
+on:
+  workflow_call:
+
+jobs:
+  proven_setend_docker:
+    # The PR's agent image is only built for non-fork runs.
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: proven set-end stop, Docker starved (record_build_replay_build)
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/workflows/test_workflow_scripts/golang/fire-and-forget/go.mod
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run the starved set-end stop e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+          LANE_WORK: ${{ runner.temp }}/proven-setend-docker
+          RUNS: "20"
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-setend-docker-linux.sh"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proven-setend-docker-logs
+          path: ${{ runner.temp }}/proven-setend-docker/
+          if-no-files-found: warn
+          retention-days: 7

@@ -170,13 +170,17 @@ func forEachAliasReturningBranch(t *testing.T, fn func(*testing.T, token.Positio
 	}
 }
 
-// stmtCallsFunc reports whether stmt contains a call to the named function.
-// Unlike the literal checks below this deliberately descends into nested
-// blocks: a call is unambiguous, and a nested arm is walked as its own list
-// anyway.
+// stmtCallsFunc reports whether stmt contains a call to the named function,
+// outside any block nested in it. A nested arm (the colima `if` inside the
+// windows and darwin cases) is walked as its own list, so descending into it
+// let that arm's call answer for the default arm around it: deleting the call
+// from either Docker Desktop default arm went unnoticed.
 func stmtCallsFunc(stmt ast.Stmt, name string) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BlockStmt); ok && ast.Node(b) != ast.Node(stmt) {
+			return false
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true

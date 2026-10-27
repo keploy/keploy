@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"syscall"
+	"os"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -24,12 +26,13 @@ import (
 // the agent's readiness file unwritten and the container healthcheck fails for
 // its full ceiling (~300s) before the run aborts. The budget is kept well under
 // that ceiling (see pkg/platform/docker) so the retry always has room to land.
-const bindRetryBudget = 90 * time.Second
+// A variable for tests.
+var bindRetryBudget = 90 * time.Second
 
 // bindRetryInterval is the delay between bind attempts. A departing agent's port
 // frees within a second or two, so a sub-second cadence recovers quickly without
-// busy-spinning.
-const bindRetryInterval = 500 * time.Millisecond
+// busy-spinning. A variable for tests.
+var bindRetryInterval = 500 * time.Millisecond
 
 // StartAgentServer binds the agent's control-plane HTTP server. Its routes are
 // guarded by a bearer token (see Authenticate); what it serves —
@@ -48,7 +51,7 @@ const bindRetryInterval = 500 * time.Millisecond
 // loopback).
 func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocker bool, router http.Handler) {
 	addr := agentBindAddr(port, isDocker)
-	logger.Info("Starting Agent's HTTP server", zap.String("addr", addr))
+	logger.Info("Starting Agent's HTTP server", serverStartFields(addr)...)
 	srv := newAgentHTTPServer(router)
 
 	// Derive a context tied to both the parent context and the lifetime of this function,
@@ -75,14 +78,46 @@ func StartAgentServer(ctx context.Context, logger *zap.Logger, port int, isDocke
 	listener, err := listenWithRetry(srvCtx, logger, addr, bindRetryBudget, bindRetryInterval)
 	if err != nil {
 		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.String("addr", addr), zap.Error(err))
+		// The agent's start has failed: it lives on without its server, and
+		// the CLI that waits for it fails the start with this at once. Not
+		// for a port still held when the retries' budget ran out: that is no
+		// failure a fresh start (which the CLI's retry is, on ports of its
+		// own) would meet again, and the start, taking no step while it
+		// waits for the port, is given up on as stalled, which retries.
+		if srvCtx.Err() == nil && !isAddrInUse(err) {
+			utils.FailBoot(fmt.Errorf("failed to start the agent's HTTP server on %s: %w", addr, err))
+		}
 		return
 	}
+	// The agent's start is over: its health check answers from here
+	// (utils.BootProgress.Ready).
+	utils.MarkBootReady()
 
 	if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 		logger.Error("failed to start HTTP server; verify port availability and network configuration", zap.String("addr", addr), zap.Error(err))
 		return
 	}
 	logger.Info("HTTP server stopped")
+}
+
+// serverStartFields are the fields of the line the agent's HTTP server logs as
+// it starts: its address and, under the proven switch, the name this agent
+// process gives itself in every answer (processInstance,
+// models.AgentInstanceHeader) and its pid. A verdict that says keploy's agent
+// was started again under the running application names the process before
+// and the one after by that name ("agent process X, then Y",
+// models.CaptureLossAgentStartedAgain); this line, once per start in the
+// agent's log, says which start each was, so a user can find both starts in
+// the log and match each one's time to a restart of the agent or of its
+// container. The pid is the one in the agent's own PID namespace: under
+// docker that is not the host's pid a kernel log line names. With the switch
+// off the line is as it was: no answer names the process then.
+func serverStartFields(addr string) []zap.Field {
+	fields := []zap.Field{zap.String("addr", addr)}
+	if provenswitch.On() {
+		fields = append(fields, zap.String("agent process", processInstance), zap.Int("pid", os.Getpid()))
+	}
+	return fields
 }
 
 // newAgentHTTPServer builds the control-plane HTTP server around router.
@@ -137,7 +172,7 @@ func listenWithRetry(ctx context.Context, logger *zap.Logger, addr string, budge
 		}
 		// Only "address already in use" is transient here; anything else is a
 		// real failure the operator must see now.
-		if !errors.Is(err, syscall.EADDRINUSE) || !time.Now().Before(deadline) {
+		if !isAddrInUse(err) || !time.Now().Before(deadline) {
 			return nil, err
 		}
 		logger.Warn("agent HTTP port is transiently in use (a previous session's agent is likely still releasing it); retrying bind",

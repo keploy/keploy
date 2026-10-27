@@ -12,11 +12,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
 	hooksUtils "go.keploy.io/server/v3/pkg/agent/hooks/conn"
+	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -28,142 +31,6 @@ func stubIngressPaused(t *testing.T, fn func() bool) {
 	t.Cleanup(func() {
 		isIngressRecordingPaused = prev
 	})
-}
-
-// TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk locks in the contract
-// that LastReadTime, when called after a successful Read, returns the readAt
-// of the chunk whose data the most recent Read returned bytes from — never
-// a chunk that is queued but not yet consumed.
-//
-// This is the exact race that broke listmonk-postgres on PR #4130's first
-// pass: the previous bridge+pipe design stored chunk N+1's ts BEFORE
-// pipe.Write blocked, so a parser that finished consuming chunk N and
-// queried LastReadTime before the bridge advanced past pipe.Write would
-// observe the next chunk's ts as the current request's reqTimestamp,
-// pushing per-test postgres mocks out of the window. Empty-body GETs
-// hit it deterministically because the parser never re-entered Read
-// between ReadRequest and LastReadTime.
-func TestAsyncPipeFeederLastReadTimeMatchesConsumedChunk(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-
-	f := newAsyncPipeFeeder(0, zap.NewNop())
-
-	// Enqueue three chunks at distinct times.
-	t1 := time.Now()
-	t2 := t1.Add(15 * time.Millisecond)
-	t3 := t2.Add(15 * time.Millisecond)
-	f.ch <- timedChunk{data: []byte("AAA"), readAt: t1}
-	f.ch <- timedChunk{data: []byte("BBB"), readAt: t2}
-	f.ch <- timedChunk{data: []byte("CCC"), readAt: t3}
-	close(f.ch)
-
-	// Before any Read, LastReadTime is zero.
-	if !f.LastReadTime().IsZero() {
-		t.Fatalf("expected zero LastReadTime before any Read, got %v", f.LastReadTime())
-	}
-
-	read := func(n int) string {
-		buf := make([]byte, n)
-		got, err := f.Read(buf)
-		if err != nil && err != io.EOF {
-			t.Fatalf("unexpected Read error: %v", err)
-		}
-		return string(buf[:got])
-	}
-
-	// Consume chunk 1 fully. LastReadTime should equal t1, NOT t2 — even
-	// though chunk 2 is already queued.
-	if got := read(3); got != "AAA" {
-		t.Fatalf("first read: want AAA, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t1) {
-		t.Fatalf("after chunk 1: want %v, got %v (overshoot to next chunk)", t1, f.LastReadTime())
-	}
-
-	// Consume chunk 2 fully. LastReadTime should equal t2.
-	if got := read(3); got != "BBB" {
-		t.Fatalf("second read: want BBB, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t2) {
-		t.Fatalf("after chunk 2: want %v, got %v", t2, f.LastReadTime())
-	}
-
-	// Partial read of chunk 3 still updates LastReadTime to t3 (the
-	// chunk was popped on the partial read; subsequent reads draw
-	// from the same chunk).
-	if got := read(2); got != "CC" {
-		t.Fatalf("third read partial: want CC, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t3) {
-		t.Fatalf("after partial chunk 3: want %v, got %v", t3, f.LastReadTime())
-	}
-	// Drain the rest from the same chunk.
-	if got := read(8); got != "C" {
-		t.Fatalf("third read drain: want C, got %q", got)
-	}
-	if !f.LastReadTime().Equal(t3) {
-		t.Fatalf("after full chunk 3: want %v, got %v", t3, f.LastReadTime())
-	}
-
-	// Channel closed, no more chunks. EOF.
-	buf := make([]byte, 4)
-	if _, err := f.Read(buf); err != io.EOF {
-		t.Fatalf("expected EOF after drain, got %v", err)
-	}
-}
-
-// TestAsyncPipeFeederShutdownDrainWaitsForParser guards the regression
-// fixed alongside python-schema-match's missing /edge/nested_null capture:
-// shutdown's residual-chunk drain MUST wait for the parser goroutine to
-// exit before it consumes anything from the channel. Otherwise the drain
-// races the parser's Read for closed-channel data and silently steals
-// chunks the parser has not yet seen.
-//
-// Repro shape: short-lived HTTP/1.0 + Connection: close exchange where the
-// upstream socket EOFs immediately after the response, triggering Close
-// (and thus shutdown) on the feeder before the parser goroutine has been
-// scheduled. The parser then reads from a channel the drain has already
-// emptied, returns EOF, and emits nothing.
-func TestAsyncPipeFeederShutdownDrainWaitsForParser(t *testing.T) {
-	stubIngressPaused(t, func() bool { return false })
-
-	f := newAsyncPipeFeeder(0, zap.NewNop())
-
-	// Enqueue a chunk, mimicking io.Copy's Write of a single response.
-	if _, err := f.Write([]byte("HELLO")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-
-	// Forwarder finished — close the feeder. This used to spawn a drain
-	// goroutine that started consuming f.ch immediately, racing with the
-	// not-yet-scheduled parser.
-	f.Close()
-
-	// Give the (pre-fix) drain goroutine ample time to win the race and
-	// empty the channel. With the fix in place the drain blocks on the
-	// parserExited signal and stays out of the channel.
-	time.Sleep(20 * time.Millisecond)
-
-	// Now play parser: read the chunk. With the fix this must succeed —
-	// the chunk is still in the channel waiting for us. Pre-fix the
-	// channel is empty and Read returns EOF.
-	buf := make([]byte, 8)
-	n, err := f.Read(buf)
-	if err != nil && err != io.EOF {
-		t.Fatalf("Read: unexpected error %v", err)
-	}
-	if string(buf[:n]) != "HELLO" {
-		t.Fatalf("parser was supposed to consume HELLO before drain — got %q (drain raced and stole the chunk)", string(buf[:n]))
-	}
-
-	// Signal parser exit so shutdown's drain can proceed and the goroutine
-	// doesn't leak past test end.
-	f.signalParserExit()
-
-	// EOF after drain.
-	if _, err := f.Read(buf); err != io.EOF {
-		t.Fatalf("expected EOF after drain, got %v", err)
-	}
 }
 
 // TestCaptureHookSemaphoreMatchesConcurrencyConstant guards the link
@@ -180,101 +47,185 @@ func TestCaptureHookSemaphoreMatchesConcurrencyConstant(t *testing.T) {
 }
 
 // TestCaptureHookSemaphoreBackpressuresParser verifies that once
-// captureHookConcurrency permits are held, a further send on
-// captureHookSem blocks — i.e. the parser goroutine in
-// parseStreamingHTTP would block before launching another CaptureHook
-// goroutine. Without this backpressure the unbounded `go
+// captureHookConcurrency slots are held, a further takeCaptureSlot waits:
+// a handler waits there for a slot before it starts another CaptureHook
+// goroutine, and takes the next slot given back. A take whose context ends
+// first gives up then, so a handler is not pinned to a saturated semaphore
+// through shutdown. Without this backpressure the unbounded `go
 // hooksUtils.CaptureHook(...)` call piled goroutines (each holding ~10MB
 // in body buffers) past the 250 MiB go-memory-load CI threshold.
 func TestCaptureHookSemaphoreBackpressuresParser(t *testing.T) {
 	// Save and restore the global so this test doesn't poison sibling
-	// tests that may run before parseStreamingHTTP fires CaptureHook.
+	// tests. No capture of another test is running to read it: each test
+	// that starts captures waits for them (pm.captures) before it returns.
 	saved := captureHookSem
 	t.Cleanup(func() { captureHookSem = saved })
-	captureHookSem = make(chan struct{}, captureHookConcurrency)
+	sem := make(chan struct{}, captureHookConcurrency)
+	captureHookSem = sem
 
+	// Bounds every wait below: a take that never returns fails the test in
+	// seconds instead of hanging it until go test's timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	releases := make([]func(), 0, captureHookConcurrency)
 	for i := 0; i < captureHookConcurrency; i++ {
-		select {
-		case captureHookSem <- struct{}{}:
-		default:
-			t.Fatalf("acquire %d unexpectedly blocked before reaching capacity", i)
+		release, ok := takeCaptureSlot(ctx)
+		if !ok {
+			t.Fatalf("take %d failed before reaching capacity", i)
 		}
+		releases = append(releases, release)
 	}
 
-	// One more acquire must NOT succeed in non-blocking mode — that's
-	// the backpressure the parser relies on.
+	type take struct {
+		release func()
+		ok      bool
+	}
+	// A take still running when the test fails has read captureHookSem, and
+	// the restore above would race with it. This cleanup runs first and lets
+	// every such take end.
+	var takes sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()           // a take that honours its context gives up,
+		for len(sem) > 0 { // and one that does not gets a slot.
+			<-sem
+		}
+		ended := make(chan struct{})
+		go func() { takes.Wait(); close(ended) }()
+		select {
+		case <-ended:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	takeInBackground := func(ctx context.Context) <-chan take {
+		got := make(chan take, 1)
+		takes.Add(1)
+		go func() {
+			defer takes.Done()
+			release, ok := takeCaptureSlot(ctx)
+			got <- take{release, ok}
+		}()
+		return got
+	}
+
+	// A take past capacity waits for a slot: that's the backpressure the
+	// handler relies on.
+	waiting := takeInBackground(ctx)
 	select {
-	case captureHookSem <- struct{}{}:
-		t.Fatal("acquire past captureHookConcurrency succeeded; semaphore is not backpressuring")
-	default:
+	case got := <-waiting:
+		if got.ok {
+			got.release()
+		}
+		t.Fatalf("a take past captureHookConcurrency returned (ok=%v) while every slot was held; it must wait for one", got.ok)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// It takes the next slot given back.
+	releases[0]()
+	select {
+	case got := <-waiting:
+		if !got.ok {
+			t.Fatal("the waiting take gave up instead of taking the slot given back")
+		}
+		releases[0] = got.release
+	case <-ctx.Done():
+		t.Fatal("the waiting take did not take the slot given back")
 	}
 
-	// Drain so the channel is left empty for any later subtests.
-	for i := 0; i < captureHookConcurrency; i++ {
-		<-captureHookSem
+	// A take past capacity whose context ends gives up then, and not before.
+	ending, cancelEnding := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancelEnding()
+	select {
+	case got := <-takeInBackground(ending):
+		if got.ok {
+			got.release()
+			t.Fatal("a take past captureHookConcurrency succeeded; the semaphore is not backpressuring")
+		}
+		if ending.Err() == nil {
+			t.Fatal("a take past captureHookConcurrency gave up before its context ended; it must wait for a slot until then")
+		}
+	case <-ctx.Done():
+		t.Fatal("a take past captureHookConcurrency did not give up when its context ended")
+	}
+
+	for _, release := range releases {
+		release()
+	}
+	if n := len(sem); n != 0 {
+		t.Fatalf("%d slots still held after every slot taken was given back", n)
 	}
 }
 
-func TestHTTPBodyCaptureBufferStopsWhenPaused(t *testing.T) {
-	paused := false
-	stubIngressPaused(t, func() bool { return paused })
-
-	state := newHTTPCaptureState(32)
-	capture := &httpBodyCaptureBuffer{state: state}
-
-	n, err := capture.Write([]byte("hello"))
-	if err != nil {
-		t.Fatalf("unexpected write error before pause: %v", err)
-	}
-	if n != len("hello") {
-		t.Fatalf("expected to report %d bytes written, got %d", len("hello"), n)
-	}
-	if got := string(capture.Bytes()); got != "hello" {
-		t.Fatalf("expected capture buffer to contain %q, got %q", "hello", got)
-	}
-
-	paused = true
-	n, err = capture.Write([]byte(" world"))
-	if err != nil {
-		t.Fatalf("unexpected write error after pause: %v", err)
-	}
-	if n != len(" world") {
-		t.Fatalf("expected to report %d bytes written after pause, got %d", len(" world"), n)
-	}
-	if !state.isAborted() {
-		t.Fatal("expected capture state to abort after pause")
-	}
-	if got := len(capture.Bytes()); got != 0 {
-		t.Fatalf("expected paused capture buffer to be cleared, got %d bytes", got)
-	}
-}
-
-func TestHTTPBodyCaptureBufferStopsAtBudget(t *testing.T) {
+// A capture gives its slot back to the semaphore it took it from. Read again
+// when the capture ended, captureHookSem freed a slot of whatever had replaced
+// it by then (TestCaptureHookSemaphoreBackpressuresParser replaces it): the
+// slot taken stayed held for good, and a slot its holder still had was freed.
+// A capture that outlived its test also raced with that replacement.
+func TestHandleHttp1ZeroCopy_CaptureGivesBackTheSlotItTook(t *testing.T) {
 	stubIngressPaused(t, func() bool { return false })
+	upstream := oneShotUpstream(t, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	var enterOnce, proceedOnce sync.Once
+	letCaptureEnd := func() { proceedOnce.Do(func() { close(proceed) }) }
+	stubCaptureHook(t, func(context.Context, *zap.Logger, chan *models.TestCase,
+		*http.Request, *http.Response, time.Time, time.Time,
+		models.IncomingOptions, bool, bool, uint16) {
+		enterOnce.Do(func() { close(entered) })
+		<-proceed
+	})
+	// Registered before ingressPipe's pm.captures.Wait, so it runs after it.
+	saved := captureHookSem
+	t.Cleanup(func() { captureHookSem = saved })
+	took := make(chan struct{}, captureHookConcurrency)
+	captureHookSem = took
 
-	state := newHTTPCaptureState(5)
-	capture := &httpBodyCaptureBuffer{state: state}
+	// Neither synchronous nor sampled: the zero-copy path.
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())), 10*time.Second)
+	defer cancel()
+	client, done := ingressPipe(t, ctx, pm, upstream)
+	t.Cleanup(letCaptureEnd) // runs before ingressPipe's cleanups: a failure still lets the capture end
 
-	n, err := capture.Write([]byte("hello"))
+	if _, err := io.WriteString(client, "GET / HTTP/1.1\r\nHost: app\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(client), nil)
 	if err != nil {
-		t.Fatalf("unexpected write error before limit: %v", err)
+		t.Fatal(err)
 	}
-	if n != 5 {
-		t.Fatalf("expected to report 5 bytes written, got %d", n)
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("the exchange was not captured")
+	}
+	if n := len(took); n != 1 {
+		t.Fatalf("captureHookSem holds %d slots while the capture runs, want the 1 it took", n)
 	}
 
-	n, err = capture.Write([]byte("!"))
-	if err != nil {
-		t.Fatalf("unexpected write error after limit: %v", err)
+	// While the capture holds its slot, captureHookSem is replaced by a
+	// semaphore one slot of which its holder still has.
+	replacement := make(chan struct{}, captureHookConcurrency)
+	replacement <- struct{}{}
+	captureHookSem = replacement
+	letCaptureEnd()
+
+	captured := make(chan struct{})
+	go func() { pm.captures.Wait(); close(captured) }()
+	select {
+	case <-captured:
+	case <-ctx.Done():
+		t.Fatal("the capture did not end")
 	}
-	if n != 1 {
-		t.Fatalf("expected to report 1 byte written after limit, got %d", n)
+	if n := len(took); n != 0 {
+		t.Errorf("the semaphore the capture took its slot from still holds %d, want it given back", n)
 	}
-	if !state.isAborted() {
-		t.Fatal("expected capture state to abort once the budget is exceeded")
+	if n := len(replacement); n != 1 {
+		t.Errorf("the semaphore that replaced it holds %d slots, want its holder's 1: the capture gave back a slot it never took there", n)
 	}
-	if got := len(capture.Bytes()); got != 0 {
-		t.Fatalf("expected over-budget capture buffer to be cleared, got %d bytes", got)
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("handleHttp1Connection did not return")
 	}
 }
 
@@ -620,6 +571,7 @@ func TestHandleHttp1Connection_ChunkedExchangeIsCaptured(t *testing.T) {
 		synchronous: true,
 		samplingSem: make(chan struct{}, 1),
 	}
+	t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
 
 	// Dial the client side via a TCP pipe. handleHttp1Connection dials
 	// upstream itself (so it needs a real TCP listener), but the client
@@ -773,6 +725,7 @@ func TestHandleHttp1Connection_ChunkedRequestIsCaptured(t *testing.T) {
 		synchronous: true,
 		samplingSem: make(chan struct{}, 1),
 	}
+	t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
 
 	clientListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -927,6 +880,7 @@ func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
 				sampling:    mode == "sampled",
 				samplingSem: make(chan struct{}, 1),
 			}
+			t.Cleanup(pm.captures.Wait) // every capture it started is over before the next test swaps a hook or a semaphore
 
 			ln, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {
@@ -989,5 +943,405 @@ func TestHandleHttp1Connection_ForcedCloseIsNotRecorded(t *testing.T) {
 				t.Fatal("handleHttp1Connection did not return")
 			}
 		})
+	}
+}
+
+// pausedExchange sends one GET for path on client (closing the connection
+// after it when last) and reads its response whole.
+func pausedExchange(t *testing.T, client net.Conn, br *bufio.Reader, path string, last bool) {
+	t.Helper()
+	hdr := ""
+	if last {
+		hdr = "Connection: close\r\n"
+	}
+	if _, err := client.Write([]byte("GET " + path + " HTTP/1.1\r\nHost: app.local\r\n" + hdr + "\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+}
+
+// A pause of the memory guard costs the exchanges that come while it lasts and
+// no more: the keep-alive connection's next exchange after it is captured, and
+// the one that came during it is counted, on its connection, as not recorded.
+// Latched for the connection's life (captureEnabled cleared at the loop's top
+// and never set again), one half-second pause stopped the capture of every
+// keep-alive connection open through it, a load generator's included, for the
+// rest of the recording, and the recording did not say so.
+func TestHandleHttp1ZeroCopy_AKeepAliveConnectionIsCapturedAgainAfterAPause(t *testing.T) {
+	var paused atomic.Bool
+	stubIngressPaused(t, paused.Load)
+	mgr := syncMock.New(zap.NewNop())
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	captured := make(chan string, 4)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+		captured <- req.URL.Path
+	})
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), samplingSem: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+	defer cancel()
+	app := strings.TrimPrefix(upstream.URL, "http://")
+	client, done := ingressPipe(t, ctx, pm, app)
+	br := bufio.NewReader(client)
+	next := func(what string) string {
+		t.Helper()
+		select {
+		case p := <-captured:
+			return p
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s was not captured", what)
+			return ""
+		}
+	}
+
+	pausedExchange(t, client, br, "/before", false)
+	if p := next("the exchange before the pause"); p != "/before" {
+		t.Fatalf("captured %s, want /before", p)
+	}
+	paused.Store(true)
+	pausedExchange(t, client, br, "/during", false)
+	paused.Store(false)
+	pausedExchange(t, client, br, "/after", true)
+	if p := next("the exchange after the pause, on the same keep-alive connection"); p != "/after" {
+		t.Fatalf("captured %s, want /after", p)
+	}
+	<-done
+	pm.captures.Wait()
+	if len(captured) != 0 {
+		t.Fatalf("captured %s too: the exchange that came during the pause is not recorded", <-captured)
+	}
+
+	got := mgr.NotRecordedUnderPressure()
+	if got.Total != 1 || len(got.ByConn) != 1 {
+		t.Fatalf("not recorded under pressure: %+v, want the one exchange that came during the pause, on its connection", got)
+	}
+	for conn := range got.ByConn {
+		if !strings.HasSuffix(conn, " -> "+app) || !strings.HasPrefix(conn, "127.0.0.1:") {
+			t.Fatalf("the connection is named %q, want <client address> -> %s", conn, app)
+		}
+	}
+}
+
+// In the synchronous loop an exchange whose capture a pause decided against is
+// counted as not recorded, once, whichever of the exchange's five reads of the
+// pause saw it: the one as its request is read, or one of those that read a
+// pause that began mid-exchange (before its request is forwarded, after its
+// response's headers, the capture buffer's as the response body is captured,
+// and the loop's own after the response). One that came while recording ran
+// is captured and counts nothing. A pause that began mid-exchange and that a
+// check read without its count was a request lost without a word.
+func TestHandleHttp1Connection_SyncCountsAnExchangeAPauseCost(t *testing.T) {
+	// The pause begins at the loop's from-th check of it, and stays: what
+	// the n-th check reads, in the order the exchange reads them; never
+	// for from 0.
+	var checks atomic.Int32
+	var from atomic.Int32
+	stubIngressPaused(t, func() bool {
+		n := checks.Add(1)
+		return from.Load() > 0 && n >= from.Load()
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	captured := make(chan string, 8)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+		captured <- req.URL.Path
+	})
+	app := strings.TrimPrefix(upstream.URL, "http://")
+	for _, c := range []struct {
+		what string
+		from int32
+	}{
+		{what: "a pause as the request is read", from: 1},
+		{what: "a pause that begins before the request is forwarded", from: 2},
+		{what: "a pause that begins after the response's headers", from: 3},
+		{what: "a pause that begins as the response body is captured", from: 4},
+		{what: "a pause that begins after the response", from: 5},
+		{what: "no pause"},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			checks.Store(0)
+			from.Store(c.from)
+			mgr := syncMock.New(zap.NewNop())
+			pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: true}
+			ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+			defer cancel()
+			client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
+			pausedExchange(t, client, bufio.NewReader(client), "/x", true)
+			<-done
+			pm.captures.Wait()
+			if got := checks.Load(); c.from > got {
+				t.Fatalf("the exchange read the pause %d times: check %d is never made", got, c.from)
+			}
+			wantCaptured, wantCounted := 0, uint64(1)
+			if c.from == 0 {
+				wantCaptured, wantCounted = 1, 0
+			}
+			if n := len(captured); n != wantCaptured {
+				t.Fatalf("captured %d exchanges, want %d", n, wantCaptured)
+			}
+			for len(captured) > 0 {
+				<-captured
+			}
+			if got := mgr.NotRecordedUnderPressure(); got.Total != wantCounted || got.Connections() != int(wantCounted) {
+				t.Fatalf("not recorded under pressure: %+v, want %d", got, wantCounted)
+			}
+		})
+	}
+}
+
+// The debug knob that forces a pause by request count
+// (memoryguard.ForcePauseEnv) is driven by both ingress loops: each counts the
+// request it has read before it reads the pause for it, so with "2:3" the
+// second request comes during the pause and is counted as not recorded, and
+// the first and third are captured.
+func TestBothIngressLoopsDriveTheForcedPause(t *testing.T) {
+	for _, synchronous := range []bool{false, true} {
+		name := "zero-copy"
+		if synchronous {
+			name = "synchronous"
+		}
+		t.Run(name, func(t *testing.T) {
+			stubIngressPaused(t, memoryguard.IsRecordingPaused)
+			t.Cleanup(memoryguard.SetForcedPauseForTest("2:3"))
+			mgr := syncMock.New(zap.NewNop())
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("ok"))
+			}))
+			t.Cleanup(upstream.Close)
+			captured := make(chan string, 4)
+			stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+				req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+				opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+				captured <- req.URL.Path
+			})
+			app := strings.TrimPrefix(upstream.URL, "http://")
+			for _, path := range []string{"/1", "/2", "/3"} {
+				pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+				ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+				client, done := ingressPipeOn(t, ctx, pm, app, make(chan struct{}, 1), nil)
+				pausedExchange(t, client, bufio.NewReader(client), path, true)
+				<-done
+				pm.captures.Wait()
+				cancel()
+			}
+			close(captured)
+			var got []string
+			for p := range captured {
+				got = append(got, p)
+			}
+			if !slices.Equal(got, []string{"/1", "/3"}) {
+				t.Fatalf("captured %v, want /1 and /3: the second request came during the forced pause", got)
+			}
+			if n := mgr.NotRecordedUnderPressure(); n.Total != 1 {
+				t.Fatalf("not recorded under pressure: %+v, want the second request", n)
+			}
+			if memoryguard.IsRecordingPaused() {
+				t.Fatal("recording is still paused after the third request")
+			}
+		})
+	}
+}
+
+// firstReadConn is a connection that says when it was first read.
+type firstReadConn struct {
+	net.Conn
+	read *atomic.Bool
+}
+
+func (c firstReadConn) Read(p []byte) (int, error) {
+	c.read.Store(true)
+	return c.Conn.Read(p)
+}
+
+// A sampled connection (one the handler closes after its exchange) is decided
+// as its request comes, not as it opens: a pause that was on when it opened and
+// is over before its request is read costs it nothing. Read at the open, the
+// pause demoted the connection out of the sample, and its request was neither
+// recorded nor counted.
+func TestHandleHttp1ZeroCopy_ASampledConnectionReadsThePauseAsItsRequestComes(t *testing.T) {
+	var read atomic.Bool
+	stubIngressPaused(t, func() bool { return !read.Load() }) // paused until the client's side is first read
+	mgr := syncMock.New(zap.NewNop())
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(upstream.Close)
+	captured := make(chan string, 2)
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+		captured <- req.URL.Path
+	})
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 2)}
+	t.Cleanup(pm.captures.Wait)
+	ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+	defer cancel()
+	upConn, err := net.Dial("tcp4", strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pm.handleHttp1ZeroCopy(ctx, firstReadConn{Conn: server, read: &read}, upConn, pm.logger, pm.tcChan, 8080, true, func() {})
+	}()
+	pausedExchange(t, client, bufio.NewReader(client), "/sampled", true)
+	<-done
+	pm.captures.Wait()
+	select {
+	case p := <-captured:
+		if p != "/sampled" {
+			t.Fatalf("captured %s, want /sampled", p)
+		}
+	default:
+		t.Fatal("the sampled exchange was not captured: the pause over before its request came cost it")
+	}
+	if n := mgr.NotRecordedUnderPressure().Total; n != 0 {
+		t.Fatalf("counted %d requests not recorded under pressure, want none", n)
+	}
+}
+
+// A pause that starts while a body is being forwarded and ends before its
+// exchange does cuts that body's capture: the exchange is not recorded, and it
+// is counted as not recorded under pressure, in both loops. Every check the
+// loops make of the pause itself comes before the pause (the zero-copy loop
+// reads it once, as the request comes) or after it, so only the cut capture
+// says the pause cost the exchange; read as the size budget, the exchange was
+// dropped and nothing said so.
+func TestBothIngressLoopsCountAnExchangeAPauseCutMidBody(t *testing.T) {
+	parts := []string{strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)}
+	for _, synchronous := range []bool{false, true} {
+		for _, side := range []string{"request", "response"} {
+			name := "zero-copy/" + side
+			if synchronous {
+				name = "synchronous/" + side
+			}
+			t.Run(name, func(t *testing.T) {
+				var paused atomic.Bool
+				stubIngressPaused(t, paused.Load)
+				mgr := syncMock.New(zap.NewNop())
+				ctx, cancel := context.WithTimeout(syncMock.NewContext(context.Background(), mgr), 10*time.Second)
+				defer cancel()
+				// step hands each body part on: the app takes the next one
+				// (request) or writes it (response) only once the test says.
+				step, took := make(chan struct{}), make(chan struct{})
+				wait := func(ch chan struct{}, what string) {
+					t.Helper()
+					select {
+					case <-ch:
+					case <-ctx.Done():
+						t.Fatalf("%s: %v", what, ctx.Err())
+					}
+				}
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if side == "request" {
+						buf := make([]byte, len(parts[0]))
+						for range parts {
+							if _, err := io.ReadFull(r.Body, buf); err != nil {
+								return
+							}
+							select {
+							case took <- struct{}{}:
+							case <-ctx.Done():
+								return
+							}
+						}
+						_, _ = w.Write([]byte("ok"))
+						return
+					}
+					for i, part := range parts {
+						if i > 0 {
+							select {
+							case <-step:
+							case <-ctx.Done():
+								return
+							}
+						}
+						_, _ = w.Write([]byte(part))
+						w.(http.Flusher).Flush()
+					}
+				}))
+				t.Cleanup(upstream.Close)
+				captured := make(chan string, 4)
+				stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+					req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+					opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+					captured <- req.URL.Path
+				})
+				pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 4), synchronous: synchronous}
+				client, done := ingressPipeOn(t, ctx, pm, strings.TrimPrefix(upstream.URL, "http://"), make(chan struct{}, 1), nil)
+				br := bufio.NewReader(client)
+
+				if side == "request" {
+					head := fmt.Sprintf("POST /cut HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\nContent-Length: %d\r\n\r\n", 3*len(parts[0]))
+					for i, part := range parts {
+						if i == 0 {
+							part = head + part
+						}
+						if _, err := client.Write([]byte(part)); err != nil {
+							t.Fatal(err)
+						}
+						// The app has the part, so its capture has seen it:
+						// the pause covers the second part only.
+						wait(took, "the app did not get part "+fmt.Sprint(i+1))
+						paused.Store(i == 0)
+					}
+					resp, err := http.ReadResponse(br, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, _ = io.ReadAll(resp.Body)
+					resp.Body.Close()
+				} else {
+					if _, err := client.Write([]byte("GET /cut HTTP/1.1\r\nHost: app.local\r\nConnection: close\r\n\r\n")); err != nil {
+						t.Fatal(err)
+					}
+					resp, err := http.ReadResponse(br, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					buf := make([]byte, len(parts[0]))
+					for i := range parts {
+						if i > 0 {
+							select {
+							case step <- struct{}{}:
+							case <-ctx.Done():
+								t.Fatal(ctx.Err())
+							}
+						}
+						// The client has the part, so its capture has seen
+						// it: the pause covers the second part only.
+						if _, err := io.ReadFull(resp.Body, buf); err != nil {
+							t.Fatalf("part %d: %v", i+1, err)
+						}
+						paused.Store(i == 0)
+					}
+					_, _ = io.ReadAll(resp.Body)
+					resp.Body.Close()
+				}
+				wait(done, "the ingress loop did not return")
+				pm.captures.Wait()
+				if len(captured) != 0 {
+					t.Fatalf("captured %s: a pause cut its %s body's capture", <-captured, side)
+				}
+				if got := mgr.NotRecordedUnderPressure(); got.Total != 1 || got.Connections() != 1 {
+					t.Fatalf("not recorded under pressure: %+v, want the exchange whose %s body the pause cut", got, side)
+				}
+			})
+		}
 	}
 }

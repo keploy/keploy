@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent/proxy/synhold"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -152,6 +153,28 @@ func (p *Proxy) dialsUpstream(rule *agent.Session) bool {
 	return p.GlobalPassthrough || rule.OpportunisticTLSIntercept || !rule.Mocking
 }
 
+func (p *Proxy) refusesLocal() bool {
+	return p.mockMode && !p.IsDocker && p.appPID != 0
+}
+
+func unowned(dest *agent.NetworkAddress) bool {
+	host, _, err := net.SplitHostPort(destAddr(dest))
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip.IsUnspecified() {
+		ip = net.IPv4(127, 0, 0, 1)
+		if dest.Version == 6 {
+			ip = net.IPv6loopback
+		}
+	}
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return !listening(ip, dest.Port) && (!recorded.has(dest.Port) || recorded.child(dest.Port))
+}
+
 // decideHandshake is synhold's Decide for this proxy: it dials the held
 // connection's destination, keeps the connection for handleConnection, and
 // answers the application's handshake the way the destination answered.
@@ -161,8 +184,31 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 		// connection's.
 		p.predials.drop(client)
 		rule := p.getSession()
-		if rule == nil || !p.dialsUpstream(rule) {
+		if rule == nil {
 			return synhold.Decision{Outcome: synhold.Accept}
+		}
+		if !p.dialsUpstream(rule) {
+			// A replay serves its calls from mocks, so nothing is dialled at
+			// the handshake: except, under the proven switch, a mock.real
+			// destination known from the address alone, which the app
+			// reaches for real, so its connect must answer as the real one
+			// does.
+			if !p.refusesLocal() && p.realList() == nil {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			dest, err := lookup.GetForHandshake(ctx, client, proxy)
+			if err != nil {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			if label, ok := p.realAtHandshake(dest); ok {
+				return p.dialHeld(ctx, lookup, client, proxy, dest, label)
+			}
+			if !p.refusesLocal() || !unowned(dest) {
+				return synhold.Decision{Outcome: synhold.Accept}
+			}
+			p.logger.Debug("nothing listens at the local destination; refusing the connect",
+				zap.String("client", client.String()), zap.String("destination", destAddr(dest)))
+			return synhold.Decision{Outcome: synhold.Refuse}
 		}
 		dest, err := lookup.GetForHandshake(ctx, client, proxy)
 		if err != nil {
@@ -172,41 +218,64 @@ func (p *Proxy) decideHandshake(lookup agent.HandshakeDestInfo) synhold.Decide {
 				zap.String("client", client.String()), zap.Error(err))
 			return synhold.Decision{Outcome: synhold.Accept}
 		}
-		addr := destAddr(dest)
-		conn, err := p.dialWhileHeld(ctx, lookup, client, proxy, addr)
-		if errors.Is(err, errHandshakeAbandoned) {
-			if p.failedDests.first("gave up "+addr, time.Now()) {
-				p.logger.Info("the application gave up connecting to a dependency before the dependency's answer "+
-					"reached it (its connect timed out or was cancelled), as it would without keploy; nothing is recorded for it",
-					zap.String("destination", addr))
+		label, _ := p.realAtHandshake(dest)
+		return p.dialHeld(ctx, lookup, client, proxy, dest, label)
+	}
+}
+
+// dialHeld dials a held handshake's destination and answers the application's
+// handshake the way the destination answered, keeping the connection for
+// handleConnection. label is the mock.real destination dest is, "" for a
+// dependency: a REAL destination that does not accept counts as a failed
+// connection of the open test's REAL row, as the app sees it fail.
+func (p *Proxy) dialHeld(ctx context.Context, lookup agent.HandshakeDestInfo, client, proxy netip.AddrPort, dest *agent.NetworkAddress, label string) synhold.Decision {
+	addr := destAddr(dest)
+	conn, err := p.dialWhileHeld(ctx, lookup, client, proxy, addr)
+	if errors.Is(err, errHandshakeAbandoned) {
+		// The app's connect to its real destination failed.
+		_, _ = p.realDialFailed(addr, label)
+		if p.failedDests.first("gave up "+addr, time.Now()) {
+			p.logger.Info("the application gave up connecting to a dependency before the dependency's answer "+
+				"reached it (its connect timed out or was cancelled), as it would without keploy; nothing is recorded for it",
+				zap.String("destination", addr))
+		}
+		return synhold.Decision{Outcome: synhold.Drop}
+	}
+	if err != nil {
+		// A dial error with no network-level counterpart (the proxy's own
+		// limits) is answered with Accept: the connection completes and
+		// fails in handleConnection's own dial, which reports it, as
+		// before handshakes were held.
+		out := synhold.OutcomeFor(err)
+		p.logger.Debug("destination did not accept; answering the application's handshake the same way",
+			zap.String("client", client.String()), zap.String("destination", addr),
+			zap.Stringer("answer", out), zap.Error(err))
+		telling := false
+		if out != synhold.Accept {
+			label, telling = p.realDialFailed(addr, label)
+		}
+		if out != synhold.Accept && p.failedDests.first("refused "+addr, time.Now()) {
+			what, recorded := "a dependency", "nothing is recorded for that attempt"
+			switch {
+			case label != "":
+				what, recorded = "a mock.real destination ("+label+")", "the test's REAL row counts it failed"
+			case telling:
+				what, recorded = "a destination Docker is still starting a container at", "if that container is one mock.real lists, the test's REAL row counts it failed once keploy can tell"
 			}
-			return synhold.Decision{Outcome: synhold.Drop}
+			p.logger.Info(what+" did not accept the application's connection; the application's connect "+
+				"failed the same way, as it would without keploy (an application that tries another address of the "+
+				"same name, IPv4 after IPv6 say, may still connect), and "+recorded,
+				zap.String("destination", addr), zap.Stringer("answer", out), zap.Error(err))
 		}
-		if err != nil {
-			// A dial error with no network-level counterpart (the proxy's own
-			// limits) is answered with Accept: the connection completes and
-			// fails in handleConnection's own dial, which reports it, as
-			// before handshakes were held.
-			out := synhold.OutcomeFor(err)
-			p.logger.Debug("destination did not accept; answering the application's handshake the same way",
-				zap.String("client", client.String()), zap.String("destination", addr),
-				zap.Stringer("answer", out), zap.Error(err))
-			if out != synhold.Accept && p.failedDests.first("refused "+addr, time.Now()) {
-				p.logger.Info("a dependency did not accept the application's connection; the application's connect "+
-					"failed the same way, as it would without keploy (an application that tries another address of the "+
-					"same name, IPv4 after IPv6 say, may still connect), and nothing is recorded for that attempt",
-					zap.String("destination", addr), zap.Stringer("answer", out), zap.Error(err))
-			}
-			return synhold.Decision{Outcome: out}
-		}
-		pre := util.NewPredialed(addr, conn)
-		return synhold.Decision{
-			Outcome: synhold.Accept,
-			// Published before the SYN is let through, so handleConnection
-			// finds it when the connection arrives.
-			Keep:    func() { p.predials.put(client, pre) },
-			Discard: pre.CloseIfUnused,
-		}
+		return synhold.Decision{Outcome: out}
+	}
+	pre := util.NewPredialed(addr, conn)
+	return synhold.Decision{
+		Outcome: synhold.Accept,
+		// Published before the SYN is let through, so handleConnection
+		// finds it when the connection arrives.
+		Keep:    func() { p.predials.put(client, pre) },
+		Discard: pre.CloseIfUnused,
 	}
 }
 
@@ -274,9 +343,7 @@ func (p *Proxy) dialWhileHeld(ctx context.Context, lookup agent.HandshakeDestInf
 // holdState is the handshake hold's lifecycle on a proxy: armed with the
 // listener's context when the listener opens, started by the first session
 // whose connections dial their destination, stopped when the listener
-// closes. A replay served from mocks never dials, so it never loads the
-// netfilter modules or adds a hook, and its handshakes complete in the
-// kernel as before.
+// closes.
 type holdState struct {
 	mu   sync.Mutex
 	ctx  context.Context // nil until armed, and again once stopped
@@ -303,7 +370,9 @@ func (p *Proxy) armHandshakeHold(ctx context.Context) {
 // to take effect, if its connections dial their destination and the
 // listener is open.
 func (p *Proxy) ensureHandshakeHold(rule *agent.Session) {
-	if rule == nil || !p.dialsUpstream(rule) {
+	// A replay with mock.real destinations holds too: a REAL connect must
+	// answer as the real destination does (decideHandshake).
+	if rule == nil || !(p.dialsUpstream(rule) || p.refusesLocal() || p.realList() != nil) {
 		return
 	}
 	p.hold.mu.Lock()
@@ -312,9 +381,16 @@ func (p *Proxy) ensureHandshakeHold(rule *agent.Session) {
 		return
 	}
 	p.hold.tried = rule
-	p.hold.stop = p.startHandshakeHold(p.hold.ctx, !p.hold.reported)
-	if p.hold.stop == nil {
-		p.hold.reported = true // tried again with the next session
+	// A replay holds only for its REAL connects: without the hold, the app's
+	// connect to a REAL destination that refuses is accepted and then reset,
+	// which the user must be able to tell, so it is said at Info too.
+	report := !p.hold.reported && (p.dialsUpstream(rule) || p.realList() != nil)
+	p.hold.stop = p.startHandshakeHold(p.hold.ctx, report)
+	// Tried again with the next session, and said at Debug: under the proven
+	// switch only once it was said at Info, so a replay's quiet try does not
+	// silence a later record's.
+	if p.hold.stop == nil && (report || !provenswitch.On()) {
+		p.hold.reported = true
 	}
 }
 

@@ -18,10 +18,13 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.keploy.io/server/v3/utils/pathsafe"
+	"go.keploy.io/server/v3/utils/stall"
 	"go.uber.org/zap"
 )
 
@@ -100,21 +103,27 @@ type MockYaml struct {
 	// The writer lifecycle is restartable across Close/InsertMock
 	// cycles so that re-record flows (same Recorder / same mockDB,
 	// multiple Start calls) flush+close between sessions but still
-	// accept mocks for the next session. gobLifecycleMu guards the
-	// transition between "running" and "quiesced"; gobRunning tracks
-	// which state we are in. Do not use sync.Once here — it cannot be
-	// reset, which was the original re-record bug.
-	gobLifecycleMu sync.Mutex
-	gobRunning     bool
-	gobQueue       chan gobWriteJob
-	gobStop        chan struct{}
-	gobDone        chan struct{}
-	gobMu          sync.Mutex
-	gobFilePath    string
-	gobFile        *os.File
-	gobBufw        *bufio.Writer
-	gobEnc         *gob.Encoder
-	gobOverflows   atomic.Uint64
+	// accept mocks for the next session. The lifecycle lock
+	// (gobLifecycle) guards the transition between "running" and
+	// "quiesced"; gobRunning tracks which state we are in. Do not start
+	// the writer under a sync.Once — it cannot be reset, which was the
+	// original re-record bug (gobLifecycleInit only makes the lock).
+	//
+	// The lock is a one-slot channel, not a mutex, so Close can stop
+	// waiting for it: an insert on the overflow path holds it while it
+	// writes, and on a stuck disk waits for as long as the disk does.
+	gobLifecycle     chan struct{}
+	gobLifecycleInit sync.Once
+	gobRunning       bool
+	gobQueue         chan gobWriteJob
+	gobStop          chan struct{}
+	gobDone          chan struct{}
+	gobMu            sync.Mutex
+	gobFilePath      string
+	gobFile          *os.File
+	gobBufw          *bufio.Writer
+	gobEnc           *gob.Encoder
+	gobOverflows     atomic.Uint64
 	// gobStopClosed is true after Close() has invoked close(gobStop).
 	// A subsequent Close() that arrives after the first one timed out
 	// waiting for gobDone must not close the channel a second time
@@ -127,6 +136,50 @@ type MockYaml struct {
 	// instead of silently losing the tail of mocks.gob on a disk-full
 	// or permission-change shutdown.
 	gobFlushErr error
+	// gobProgress moves with every mock the writer encodes and every byte
+	// the file takes: Close waits for the writer for as long as it moves
+	// (gobStallAfter), so a slow disk is waited for and a stuck one is not.
+	gobProgress atomic.Uint64
+	// gobQueued and gobEncoded count the session's mocks handed to the
+	// writer and those it encoded (or failed to): what a Close that gives up
+	// on a stuck writer says was not written.
+	gobQueued, gobEncoded atomic.Uint64
+	// gobPathSeen is gobFilePath, for a Close that cannot take gobMu.
+	gobPathSeen atomic.Value
+}
+
+// gobStallAfter is how long the gob writer may go without progress
+// (MockYaml.gobProgress) before Close stops waiting for it and says what it
+// had not written. A var so tests need not wait it out.
+var gobStallAfter = 30 * time.Second
+
+// progressWriter is the gob file as the writer's buffer writes to it: each
+// write is handed on in pieces of at most progressChunk, and the bytes the
+// file took counted in n, so a write a slow disk takes long over is progress
+// while it goes, not only once it returns.
+type progressWriter struct {
+	w io.Writer
+	n *atomic.Uint64
+}
+
+const progressChunk = 32 << 10
+
+func (p progressWriter) Write(b []byte) (int, error) {
+	written := 0
+	for len(b) > 0 {
+		chunk := b
+		if len(chunk) > progressChunk {
+			chunk = chunk[:progressChunk]
+		}
+		n, err := p.w.Write(chunk)
+		written += n
+		p.n.Add(uint64(n))
+		if err != nil {
+			return written, err
+		}
+		b = b[n:]
+	}
+	return written, nil
 }
 
 // prunedMockInfo is the structured per-mock entry logged when
@@ -199,31 +252,18 @@ func resolveMockFileMode(targetPath string) (os.FileMode, error) {
 	return 0, err
 }
 
+// The merge of what the learn step learned onto a recording is the learn
+// package's, which the agent shares for a test set's retry cycles
+// (learn.KeptLearning).
+var (
+	mergeLearned      = learn.MergeLearned
+	mergeVariable     = learn.MergeVariable
+	mergeReqBodyNoise = learn.MergeReqBodyNoise
+)
+
 // replaceFile puts a rewritten mock file in place (yaml.ReplaceFile); tests
 // swap it to make the replace fail.
 var replaceFile = yaml.ReplaceFile
-
-// mergeReqBodyNoise returns a fresh map combining the existing on-disk
-// request-body noise with newly-detected noise carried on the MockState.
-// Existing entries win on key collision (noise is monotonic), and every slice
-// is copied so the result shares no backing storage with its inputs.
-func mergeReqBodyNoise(existing, detected map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(existing)+len(detected))
-	for k, v := range existing {
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	for k, v := range detected {
-		if _, ok := out[k]; ok {
-			continue
-		}
-		vc := make([]string, len(v))
-		copy(vc, v)
-		out[k] = vc
-	}
-	return out
-}
 
 // UpdateMocks prunes unused mocks from the mock file and keeps required ones.
 //
@@ -275,78 +315,138 @@ func (ys *MockYaml) UpdateMocks(ctx context.Context, testSetID string, mockNames
 		zap.String("detectedFormat", string(detectedFormat)),
 		zap.Time("pruneBefore", pruneBefore))
 
-	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
-	if err != nil {
-		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-		return err
-	}
-	defer reader.Close()
-
 	// One mock at a time: read, decode, judge, and write the ones that stay
 	// to the replacement before reading the next (see rewrite.go). Written
 	// back in the format read, so a prune never migrates the file's format.
-	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
+	// A second pass keeps what a kept mock requires, and the async epochs a
+	// replay serves (see prune_deps.go).
+	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
+		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
+	}}
+	st, err := ys.prunePass(ctx, path, mockFileName, detectedFormat, verdict)
+	if err == nil && st.again {
+		st, err = ys.prunePass(ctx, path, mockFileName, detectedFormat, verdict)
+	}
+	if err != nil {
+		return err
+	}
+
+	ys.Logger.Debug("pruned mocks successfully",
+		zap.String("testSetID", testSetID),
+		zap.Int("total", st.total),
+		zap.Int("kept", st.kept),
+		zap.Int("pruned", st.pruned),
+		zap.Int("copiedVerbatim", st.copied),
+		zap.Int("keptAsDependency", verdict.asDependency),
+		zap.Strings("keptAsDependencyMocks", verdict.asDependencyNames),
+		zap.Int("keptAsAsyncEpoch", verdict.asTimeline),
+		zap.Strings("keptAsAsyncEpochMocks", verdict.asTimelineNames),
+		zap.Any("prunedMocks", st.prunedMocks),
+		zap.Bool("prunedMocksTruncated", st.pruned > len(st.prunedMocks)),
+		zap.Time("pruneBefore", pruneBefore))
+
+	return nil
+}
+
+// pruneStats are what one pass of the prune did, for its log.
+type pruneStats struct {
+	total, kept, pruned, copied int
+	prunedMocks                 []prunedMockInfo
+	// again says the pass was discarded: it dropped a mock that a mock it
+	// kept requires, and the verdict is set up for the pass that keeps it.
+	again bool
+}
+
+// recordPruned counts a mock the pass drops, and names it in the log's
+// list while that has room. Only when debug logging is enabled: on large
+// test sets the allocation and reflection cost of collecting
+// names/kinds/metadata is a significant overhead if the emitted log will be
+// dropped by the logger anyway.
+func (st *pruneStats) recordPruned(mock *models.Mock, debugEnabled bool) {
+	st.pruned++
+	if debugEnabled && len(st.prunedMocks) < maxPrunedMocksLogged {
+		if st.prunedMocks == nil {
+			st.prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
+		}
+		st.prunedMocks = append(st.prunedMocks, prunedMockInfo{
+			Name:     mock.Name,
+			Kind:     string(mock.Kind),
+			Metadata: mock.Spec.Metadata,
+		})
+	}
+}
+
+// prunePass reads the yaml/json mock file once, judging each mock with
+// verdict, and puts the mocks it keeps in place of the file; or, in a first
+// pass that dropped a mock a kept one requires, discards what it wrote and
+// says so (pruneStats.again).
+func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, format yaml.Format, verdict *pruneVerdict) (pruneStats, error) {
+	var st pruneStats
+	ext := "." + format.FileExtension()
+	reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, format)
+	if err != nil {
+		utils.LogError(ys.Logger, err, "failed to read the mocks from file", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
+		return st, err
+	}
+	defer reader.Close()
+
+	rw := newMockFileRewriter(ys.Logger, path, mockFileName, format)
 	defer rw.discard()
 
-	// Only build the per-mock log slice when debug logging is enabled
-	// — on large test sets the allocation and reflection cost of
-	// collecting names/kinds/metadata is a significant overhead if
-	// the emitted log will be dropped by the logger anyway.
 	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	total, kept, prunedCount := 0, 0, 0
-	var prunedMocks []prunedMockInfo
-	if debugEnabled {
-		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
-	}
+	fileLogger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 	for {
-		mocks, readErr, decodeErr := nextMocks(reader, ys.Logger)
+		doc, readErr, decodeErr := nextDoc(reader, fileLogger, true)
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 		if readErr != nil {
 			utils.LogError(ys.Logger, readErr, "failed to decode the file documents", zap.String("at_path", filepath.Join(path, mockFileName+ext)))
-			return fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
+			return st, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
 		}
 		if decodeErr != nil {
-			return fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
+			return st, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
 		}
-		for _, mock := range mocks {
-			total++
-			if pruneKeeps(mock, mockNames, pruneBefore, startupCutoffTime) {
+		if doc.verbatim {
+			// A document this keploy cannot decode is not one it can judge,
+			// and a connection failure is not one it changes: copied through
+			// as it is (see fileDoc.verbatim).
+			if err := rw.copyDoc(doc); err != nil {
+				return st, err
+			}
+			if !doc.incomplete {
+				st.copied++
+			}
+			continue
+		}
+		for _, mock := range doc.mocks {
+			st.total++
+			keep, err := verdict.judge(mock)
+			if err != nil {
+				return st, err
+			}
+			if keep {
 				if err := rw.write(mock); err != nil {
-					return err
+					return st, err
 				}
-				kept++
+				st.kept++
 				continue
 			}
-			prunedCount++
-			if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
-				prunedMocks = append(prunedMocks, prunedMockInfo{
-					Name:     mock.Name,
-					Kind:     string(mock.Kind),
-					Metadata: mock.Spec.Metadata,
-				})
-			}
+			st.recordPruned(mock, debugEnabled)
 		}
 	}
 
 	// Done reading: close before the replace, which some platforms refuse
 	// over a file that is still open.
 	_ = reader.Close()
-	if err := rw.commit(); err != nil {
-		return err
+	if verdict.secondPass() {
+		st.again = true
+		return st, nil
 	}
-
-	ys.Logger.Debug("pruned mocks successfully",
-		zap.String("testSetID", testSetID),
-		zap.Int("total", total),
-		zap.Int("kept", kept),
-		zap.Int("pruned", prunedCount),
-		zap.Any("prunedMocks", prunedMocks),
-		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
-		zap.Time("pruneBefore", pruneBefore))
-
-	return nil
+	if err := verdict.checkPlaces(); err != nil {
+		return st, err
+	}
+	return st, rw.commit()
 }
 
 // updateMocksGob implements RemoveUnusedMocks for mocks.gob. The
@@ -385,43 +485,15 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
-	rw, err := newGobFileRewriter(gobPath)
-	if err != nil {
-		return err
+	// A second pass keeps what a kept mock requires, and the async epochs a
+	// replay serves (see prune_deps.go).
+	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool {
+		return pruneKeeps(m, mockNames, pruneBefore, startupCutoffTime)
+	}}
+	st, err := ys.prunePassGob(ctx, gobPath, verdict)
+	if err == nil && st.again {
+		st, err = ys.prunePassGob(ctx, gobPath, verdict)
 	}
-	defer rw.discard()
-
-	// See the YAML path above for why per-mock collection is gated on
-	// debug level — the gob path is the one most likely to hit
-	// ~10^5-mock test sets, so skipping the allocation when the log
-	// is a no-op matters more here.
-	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
-	total, kept, prunedCount := 0, 0, 0
-	var prunedMocks []prunedMockInfo
-	if debugEnabled {
-		prunedMocks = make([]prunedMockInfo, 0, maxPrunedMocksLogged)
-	}
-	err = forEachGobMock(gobPath, func(mock *models.Mock) error {
-		// The gob stream has no per-line reader watching ctx, so a very
-		// large set checks it every ctxCheckEvery mocks.
-		if err := ctxErrEvery(ctx, total); err != nil {
-			return err
-		}
-		total++
-		if pruneKeeps(mock, mockNames, pruneBefore, startupCutoffTime) {
-			kept++
-			return rw.write(mock)
-		}
-		prunedCount++
-		if debugEnabled && len(prunedMocks) < maxPrunedMocksLogged {
-			prunedMocks = append(prunedMocks, prunedMockInfo{
-				Name:     mock.Name,
-				Kind:     string(mock.Kind),
-				Metadata: mock.Spec.Metadata,
-			})
-		}
-		return nil
-	})
 	if err != nil {
 		if ctx.Err() == nil {
 			utils.LogError(ys.Logger, err, "failed to prune gob mocks", zap.String("path", gobPath))
@@ -429,19 +501,65 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 		return err
 	}
 
-	if err := rw.commit(); err != nil {
-		return err
-	}
-
 	ys.Logger.Debug("pruned mocks successfully (gob)",
 		zap.String("testSetID", testSetID),
-		zap.Int("total", total),
-		zap.Int("kept", kept),
-		zap.Int("pruned", prunedCount),
-		zap.Any("prunedMocks", prunedMocks),
-		zap.Bool("prunedMocksTruncated", prunedCount > len(prunedMocks)),
+		zap.Int("total", st.total),
+		zap.Int("kept", st.kept),
+		zap.Int("pruned", st.pruned),
+		zap.Int("keptAsDependency", verdict.asDependency),
+		zap.Strings("keptAsDependencyMocks", verdict.asDependencyNames),
+		zap.Int("keptAsAsyncEpoch", verdict.asTimeline),
+		zap.Strings("keptAsAsyncEpochMocks", verdict.asTimelineNames),
+		zap.Any("prunedMocks", st.prunedMocks),
+		zap.Bool("prunedMocksTruncated", st.pruned > len(st.prunedMocks)),
 		zap.Time("pruneBefore", pruneBefore))
 	return nil
+}
+
+// prunePassGob is prunePass for mocks.gob: the kept mocks are streamed into a
+// fresh single-encoder stream, which replaces the file once complete, unless
+// the pass is a first one to do again (pruneStats.again).
+func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *pruneVerdict) (pruneStats, error) {
+	var st pruneStats
+	rw, err := newGobFileRewriter(gobPath)
+	if err != nil {
+		return st, err
+	}
+	defer rw.discard()
+
+	// See prunePass for why per-mock collection is gated on debug level —
+	// the gob path is the one most likely to hit ~10^5-mock test sets, so
+	// skipping the allocation when the log is a no-op matters more here.
+	debugEnabled := ys.Logger.Core().Enabled(zap.DebugLevel)
+	err = forEachGobMock(gobPath, func(mock *models.Mock) error {
+		// The gob stream has no per-line reader watching ctx, so a very
+		// large set checks it every ctxCheckEvery mocks.
+		if err := ctxErrEvery(ctx, st.total); err != nil {
+			return err
+		}
+		st.total++
+		keep, err := verdict.judge(mock)
+		if err != nil {
+			return err
+		}
+		if keep {
+			st.kept++
+			return rw.write(mock)
+		}
+		st.recordPruned(mock, debugEnabled)
+		return nil
+	})
+	if err != nil {
+		return st, err
+	}
+	if verdict.secondPass() {
+		st.again = true
+		return st, nil
+	}
+	if err := verdict.checkPlaces(); err != nil {
+		return st, err
+	}
+	return st, rw.commit()
 }
 
 // PersistMockNoise merges learned request-body noise (MockState.ReqBodyNoise,
@@ -451,16 +569,27 @@ func (ys *MockYaml) updateMocksGob(ctx context.Context, testSetID, gobPath strin
 // only inside UpdateMocks, so running detection without pruning silently
 // discarded everything that was learned at process exit.
 func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mockStates map[string]models.MockState) error {
-	// Only mocks that actually carry learned noise matter.
-	withNoise := make(map[string]map[string][]string)
-	for name, st := range mockStates {
-		if len(st.ReqBodyNoise) > 0 {
-			withNoise[name] = st.ReqBodyNoise
-		}
-	}
+	_, err := ys.persistLearned(ctx, testSetID, mockStates)
+	return err
+}
+
+// PersistLearned writes what the learn step of record's full round learned
+// (MockState.ReqBodyNoise, Variables and Binds; package matcher/learn) onto
+// the set's mocks, without pruning anything, as PersistMockNoise does, and
+// returns by mock name what it added (mergeLearned), sorted. What a mock
+// already carried is not added again.
+func (ys *MockYaml) PersistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
+	return ys.persistLearned(ctx, testSetID, mockStates)
+}
+
+func (ys *MockYaml) persistLearned(ctx context.Context, testSetID string, mockStates map[string]models.MockState) (map[string][]string, error) {
+	// Only mocks that carry learned noise or variables matter, and the
+	// earlier mocks other mocks' variables are bound at (Binds).
+	withNoise, binds := learn.FoldLearned(mockStates)
 	if len(withNoise) == 0 {
-		return nil
+		return nil, nil
 	}
+	added := map[string][]string{}
 
 	mockFileName := "mocks"
 	if ys.MockName != "" {
@@ -478,14 +607,21 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	// non-HTTP mock, so learning under --schema-noise-detection WITHOUT
 	// --remove-unused-mocks silently discarded the learned noise at exit.
 	merge := func(mock *models.Mock) bool {
-		noise, ok := withNoise[mock.Name]
+		st, ok := withNoise[mock.Name]
 		if !ok {
 			return false
 		}
-		merged := mergeReqBodyNoise(mock.Spec.ReqBodyNoise, noise)
-		changed := len(merged) != len(mock.Spec.ReqBodyNoise)
-		mock.Spec.ReqBodyNoise = merged
-		return changed
+		return len(mergeLearned(mock, st, binds[mock.Name])) > 0
+	}
+	// record is merge for the pass that writes: it keeps what it added.
+	record := func(mock *models.Mock) {
+		st, ok := withNoise[mock.Name]
+		if !ok {
+			return
+		}
+		if a := mergeLearned(mock, st, binds[mock.Name]); len(a) > 0 {
+			added[mock.Name] = a
+		}
 	}
 
 	logPersisted := func(total int) {
@@ -506,7 +642,7 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 		// same reasoning as updateMocksGob.
 		if err := ys.Close(); err != nil {
 			utils.LogError(ys.Logger, err, "failed to quiesce async gob writer before noise persistence", zap.String("path", gobPath))
-			return err
+			return nil, err
 		}
 		scanned, changes := 0, false
 		err := forEachGobMock(gobPath, func(mock *models.Mock) error {
@@ -521,14 +657,14 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 			return nil
 		})
 		if err != nil && !errors.Is(err, errStopScan) {
-			return err
+			return nil, err
 		}
 		if !changes {
-			return nil
+			return nil, nil
 		}
 		rw, err := newGobFileRewriter(gobPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer rw.discard()
 		total := 0
@@ -537,37 +673,39 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 				return err
 			}
 			total++
-			merge(mock)
+			record(mock)
 			return rw.write(mock)
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := rw.commit(); err != nil {
-			return err
+			return nil, err
 		}
 		logPersisted(total)
-		return nil
+		return added, nil
 	}
 
 	existsAny, detectedFormat, err := yaml.FileExistsAny(ctx, ys.Logger, path, mockFileName, ys.Format)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !existsAny {
-		return nil
+		return nil, nil
 	}
 
-	// eachMock streams the file's mocks to fn, closing the file before it
-	// returns.
-	eachMock := func(fn func(*models.Mock) error) error {
+	// eachMock streams the file's mocks to fn, and the documents a rewrite
+	// does not re-encode (see fileDoc.verbatim) to onRaw when that is set,
+	// closing the file before it returns.
+	eachMock := func(fn func(*models.Mock) error, onRaw func(doc fileDoc) error) error {
 		reader, err := yaml.NewMockReaderF(ctx, ys.Logger, path, mockFileName, detectedFormat)
 		if err != nil {
 			return err
 		}
 		defer reader.Close()
+		fileLogger := ys.Logger.With(zap.String("mock_file", reader.Path()))
 		for {
-			mocks, readErr, decodeErr := nextMocks(reader, ys.Logger)
+			doc, readErr, decodeErr := nextDoc(reader, fileLogger, true)
 			if errors.Is(readErr, io.EOF) {
 				return nil
 			}
@@ -577,7 +715,15 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 			if decodeErr != nil {
 				return fmt.Errorf("failed to decode the mocks in %s for noise persistence: %w", reader.Path(), decodeErr)
 			}
-			for _, mock := range mocks {
+			if doc.verbatim {
+				if onRaw != nil {
+					if err := onRaw(doc); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			for _, mock := range doc.mocks {
 				if err := fn(mock); err != nil {
 					return err
 				}
@@ -592,12 +738,12 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 			return errStopScan
 		}
 		return nil
-	})
+	}, nil)
 	if err != nil && !errors.Is(err, errStopScan) {
-		return err
+		return nil, err
 	}
 	if !changes {
-		return nil
+		return nil, nil
 	}
 
 	rw := newMockFileRewriter(ys.Logger, path, mockFileName, detectedFormat)
@@ -605,16 +751,16 @@ func (ys *MockYaml) PersistMockNoise(ctx context.Context, testSetID string, mock
 	total := 0
 	if err := eachMock(func(mock *models.Mock) error {
 		total++
-		merge(mock)
+		record(mock)
 		return rw.write(mock)
-	}); err != nil {
-		return err
+	}, rw.copyDoc); err != nil {
+		return nil, err
 	}
 	if err := rw.commit(); err != nil {
-		return err
+		return nil, err
 	}
 	logPersisted(total)
-	return nil
+	return added, nil
 }
 
 func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID string) error {
@@ -628,6 +774,22 @@ func (ys *MockYaml) InsertMock(ctx context.Context, mock *models.Mock, testSetID
 	// over yaml). When selected it is mutually exclusive with yaml/json,
 	// so it gets to short-circuit before the format-detection block.
 	if ys.useGobFormat() {
+		// gob writes the struct as it is, with no per-kind encoder to refuse
+		// a connection failure the readers would skip (see
+		// connFailureSchemaOf), so refuse it here.
+		//
+		// The keploy that records the kind must never write it to gob at
+		// all: a gob reader up to v3.6.107 has no kind check and reads it as
+		// a mock with no metadata.destAddr, which sets recorded.unknown and
+		// turns loopback refusal off for the whole test set; and gob cannot
+		// refuse a field it does not know, so every keploy's gob prune would
+		// drop what a later format adds (see the ConnectionFailure kind).
+		if mock.Kind == models.ConnectionFailure {
+			if err := mock.ValidateConnFailure(); err != nil {
+				utils.LogError(ys.Logger, err, "refusing to write an invalid connection failure mock", zap.String("mock_name", mock.Name))
+				return fmt.Errorf("%w (gob): %w", models.ErrMockEncode, err)
+			}
+		}
 		return ys.insertMockGob(ctx, mock, mockPath, mockFileName)
 	}
 
@@ -833,9 +995,9 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 // and our send, so any job we enqueue is guaranteed to be drained
 // by the current writer (or by its drainAndClose on the way out).
 func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
-	ys.gobLifecycleMu.Lock()
+	ys.lifecycle() <- struct{}{}
 	if ys.gobStopClosed {
-		ys.gobLifecycleMu.Unlock()
+		ys.unlockLifecycle()
 		return fmt.Errorf("gob mock writer is closing; the recording session must complete its shutdown before new mocks can be accepted")
 	}
 	if !ys.gobRunning {
@@ -870,10 +1032,11 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 	job := gobWriteJob{mock: gobMock, testSetPath: mockPath, filename: mockFileName}
 	select {
 	case ys.gobQueue <- job:
-		ys.gobLifecycleMu.Unlock()
+		ys.gobQueued.Add(1)
+		ys.unlockLifecycle()
 		return nil
 	case <-ctx.Done():
-		ys.gobLifecycleMu.Unlock()
+		ys.unlockLifecycle()
 		return ctx.Err()
 	default:
 		ys.gobOverflows.Add(1)
@@ -888,10 +1051,19 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 		// 4096-slot queue is already full, which is already a
 		// degraded-throughput mode.
 		err := ys.gobWriteSync(ctx, mock, mockPath, mockFileName)
-		ys.gobLifecycleMu.Unlock()
+		ys.unlockLifecycle()
 		return err
 	}
 }
+
+// lifecycle is the gob writer's lifecycle lock (gobLifecycle): send to take
+// it, unlockLifecycle to give it back.
+func (ys *MockYaml) lifecycle() chan struct{} {
+	ys.gobLifecycleInit.Do(func() { ys.gobLifecycle = make(chan struct{}, 1) })
+	return ys.gobLifecycle
+}
+
+func (ys *MockYaml) unlockLifecycle() { <-ys.lifecycle() }
 
 func (ys *MockYaml) gobWriterLoop() {
 	defer close(ys.gobDone)
@@ -948,16 +1120,37 @@ func (ys *MockYaml) drainAndClose() {
 	}
 }
 
+// persisted is mock as a mocks.gob holds it: its origin as a file holds one
+// (models.Origin.Persisted, without what only travels), on a copy when that
+// differs; mock itself otherwise. gob writes every field a mock has.
+func persisted(mock *models.Mock) *models.Mock {
+	if mock == nil {
+		return nil
+	}
+	if p := mock.Origin.Persisted(); p != mock.Origin {
+		c := mock.ShallowCopy()
+		c.Origin = p
+		return c
+	}
+	return mock
+}
+
 func (ys *MockYaml) gobWriteOne(job gobWriteJob) error {
 	ys.gobMu.Lock()
 	defer ys.gobMu.Unlock()
+	defer func() {
+		// Progress first: whoever sees a mock counted as encoded sees its
+		// progress.
+		ys.gobProgress.Add(1)
+		ys.gobEncoded.Add(1)
+	}()
 	want := filepath.Join(job.testSetPath, job.filename+".gob")
 	if ys.gobFilePath != want || ys.gobFile == nil {
 		if err := ys.gobReopenLocked(job.testSetPath, job.filename); err != nil {
 			return err
 		}
 	}
-	return ys.gobEnc.Encode(job.mock)
+	return ys.gobEnc.Encode(persisted(job.mock))
 }
 
 func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
@@ -988,7 +1181,7 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 	ys.gobFile = f
 	// 256 KB buffer holds dozens of mocks before a syscall; bufio
 	// autoflushes at fill. Shutdown drains explicitly.
-	ys.gobBufw = bufio.NewWriterSize(f, 256*1024)
+	ys.gobBufw = bufio.NewWriterSize(progressWriter{w: f, n: &ys.gobProgress}, 256*1024)
 	if _, werr := ys.gobBufw.WriteString(gobMockMagic); werr != nil {
 		_ = f.Close()
 		ys.gobFile = nil
@@ -997,6 +1190,7 @@ func (ys *MockYaml) gobReopenLocked(mockPath, mockFileName string) error {
 	}
 	ys.gobEnc = gob.NewEncoder(ys.gobBufw)
 	ys.gobFilePath = filePath
+	ys.gobPathSeen.Store(filePath)
 	return nil
 }
 
@@ -1048,7 +1242,7 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 			return err
 		}
 	}
-	if err := ys.gobEnc.Encode(mock); err != nil {
+	if err := ys.gobEnc.Encode(persisted(mock)); err != nil {
 		return fmt.Errorf("failed to encode mock gob: %w", err)
 	}
 	// Flush immediately so the "sync" semantics hold — by the time
@@ -1063,7 +1257,22 @@ func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPat
 // insertMockGob). This is what makes re-record cycles (multiple
 // Recorder.Start on the same mockDB instance) work without dropping
 // mocks.
-func (ys *MockYaml) Close() error {
+//
+// It waits for the writer for as long as the writer makes progress (a mock
+// encoded, bytes the file took), however long a slow disk takes: it used to
+// give up after a fixed 5 s, and a recording that ended then lost every mock
+// the writer had not written yet, with only a log line to say so. A writer
+// that makes no progress for gobStallAfter is stuck; Close then says how
+// many of the session's mocks were not written, as models.ErrMocksNotWritten
+// (a capture loss), and a later Close waits for it again. That holds for the
+// wait for the writer's lifecycle lock too, which an insert on the overflow
+// path holds while it writes.
+func (ys *MockYaml) Close() error { return ys.CloseUnless(nil) }
+
+// CloseUnless is Close that also stops waiting once stop is closed (a user's
+// second interrupt): the mocks not written yet are then
+// models.ErrMocksNotWritten, as for a stuck writer.
+func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	// Hold the lifecycle lock for the entire teardown. While we wait
 	// for the writer goroutine to drain, no concurrent InsertMock
 	// can start a new writer — ys.gobRunning stays true and
@@ -1072,8 +1281,10 @@ func (ys *MockYaml) Close() error {
 	// blocks on this same lock and observes gobRunning=false after
 	// the first Close completes, so close(gobStop) is never called
 	// twice.
-	ys.gobLifecycleMu.Lock()
-	defer ys.gobLifecycleMu.Unlock()
+	if !ys.whileWriting(ys.lifecycle(), nil, stop) {
+		return ys.notWritten(stop)
+	}
+	defer ys.unlockLifecycle()
 	if !ys.gobRunning {
 		return nil
 	}
@@ -1085,16 +1296,16 @@ func (ys *MockYaml) Close() error {
 		close(ys.gobStop)
 		ys.gobStopClosed = true
 	}
-	select {
-	case <-ys.gobDone:
-	case <-time.After(5 * time.Second):
+	if !ys.whileWriting(nil, ys.gobDone, stop) {
 		// Leave gobRunning=true + gobStopClosed=true so a retry of
 		// Close enters this function, skips the already-closed stop,
 		// and just waits on gobDone again.
-		return fmt.Errorf("timed out waiting for gob writer to flush")
+		return ys.notWritten(stop)
 	}
 	ys.gobRunning = false
 	ys.gobStopClosed = false
+	ys.gobQueued.Store(0)
+	ys.gobEncoded.Store(0)
 	// Operator visibility: if the async queue filled up during the
 	// session and the sync fallback fired, report the count so disk
 	// stalls / undersized queues are caught at post-run review
@@ -1119,20 +1330,91 @@ func (ys *MockYaml) Close() error {
 	ys.gobFlushErr = nil
 	ys.gobMu.Unlock()
 	if flushErr != nil {
-		return fmt.Errorf("gob writer flush/close during shutdown: %w", flushErr)
+		return fmt.Errorf("%w: gob writer flush/close during shutdown: %w", models.ErrMocksNotWritten, flushErr)
 	}
 	return nil
+}
+
+// whileWriting waits, for as long as the gob writer makes progress
+// (gobProgress) and stop is not closed, to take lock (a send; nil: none) or
+// for done to close (nil: none). It reports whether it got what it waited for.
+func (ys *MockYaml) whileWriting(lock chan struct{}, done, stop <-chan struct{}) bool {
+	m := stall.NewMeter(nil, gobStallAfter)
+	defer m.Stop()
+	last := ys.gobProgress.Load()
+	for {
+		// What it waits for wins over a stop that came with it.
+		select {
+		case lock <- struct{}{}:
+			return true
+		case <-done:
+			return true
+		default:
+		}
+		select {
+		case lock <- struct{}{}:
+			return true
+		case <-done:
+			return true
+		case <-stop:
+			return false
+		case <-m.Wait():
+			if p := ys.gobProgress.Load(); p != last {
+				last = p
+				m.Reset()
+			} else if m.Expired() {
+				return false
+			}
+		}
+	}
+}
+
+// notWritten is what a Close that stopped waiting for the gob writer says:
+// how many of the session's mocks it had not written, as
+// models.ErrMocksNotWritten. Read without the writer's locks, which a stuck
+// writer holds.
+func (ys *MockYaml) notWritten(stop <-chan struct{}) error {
+	why := fmt.Sprintf("the gob mock writer made no progress for %s", gobStallAfter)
+	select {
+	case <-stop:
+		why = "the stop was asked to end now"
+	default:
+	}
+	queued := ys.gobQueued.Load()
+	return fmt.Errorf("%w: %s; %d of the %d mocks handed to it were not encoded, and what it encoded since its last write to %s may not be on disk",
+		models.ErrMocksNotWritten, why, ys.MocksLeft(), queued, ys.gobFilePathSnapshot())
+}
+
+// MocksLeft is how many of the session's mocks the gob writer has yet to
+// encode.
+func (ys *MockYaml) MocksLeft() uint64 {
+	queued, encoded := ys.gobQueued.Load(), ys.gobEncoded.Load()
+	return queued - min(encoded, queued)
+}
+
+// gobFilePathSnapshot is the gob file the writer last opened. Read without
+// gobMu, which a writer stuck in a write holds.
+func (ys *MockYaml) gobFilePathSnapshot() string {
+	p, _ := ys.gobPathSeen.Load().(string)
+	return p
 }
 
 // readGobMocks decodes every mock in a mocks.gob file (see forEachGobMock).
 // On a decode error it returns the mocks decoded before it with the error.
 func readGobMocks(path string) ([]*models.Mock, error) {
+	out, _, err := readGobMocksCut(path)
+	return out, err
+}
+
+// readGobMocksCut is readGobMocks that also says whether the file ended
+// part-way through a mock (see forEachGobMockCut).
+func readGobMocksCut(path string) ([]*models.Mock, bool, error) {
 	var out []*models.Mock
-	err := forEachGobMock(path, func(m *models.Mock) error {
+	cut, err := forEachGobMockCut(path, func(m *models.Mock) error {
 		out = append(out, m)
 		return nil
 	})
-	return out, err
+	return out, cut, err
 }
 
 // GetFilteredMocks returns the test set's per-test pool: every mock whose
@@ -1174,6 +1456,18 @@ func (ys *MockYaml) GetTestSetMocks(ctx context.Context, testSetID string, after
 // that drifted from it would silently send them back to one read per pool.
 var _ pkg.TestSetMocksReader = (*MockYaml)(nil)
 
+// IndexTestSetMocks is GetTestSetMocks that leaves every mock's payload in a
+// yaml or json mock file (models.Mock.LeavePayloadOnDisk): what it returns
+// holds a small entry per mock, and TestSetMocks.Payloads reads each payload
+// back, one mock at a time, when the mock is sent. A mocks.gob is one gob
+// stream, whose mocks cannot be read back one at a time: its mocks are
+// returned whole, and Payloads is nil.
+func (ys *MockYaml) IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error) {
+	return ys.readMockPools(ctx, testSetID, afterTime, beforeTime, mocksThatHaveMappings, mocksWeNeed, poolPerTest|poolSession|poolAllSession|poolAllPerTest|payloadsOnDisk)
+}
+
+var _ pkg.TestSetMockIndexReader = (*MockYaml)(nil)
+
 // mockPools selects the pools readMockPools builds.
 type mockPools uint8
 
@@ -1186,6 +1480,9 @@ const (
 	poolAllSession
 	// poolAllPerTest builds TestSetMocks.AllPerTest.
 	poolAllPerTest
+	// payloadsOnDisk is no pool: it has a yaml or json file's mocks leave
+	// their payloads in it (IndexTestSetMocks).
+	payloadsOnDisk
 )
 
 // mockRouter sorts a mock file's mocks into the candidate lists of the pools
@@ -1207,18 +1504,37 @@ type mockRouter struct {
 	allPerTest []*models.Mock
 }
 
-// pruned reports whether the mapping prune drops the named mock: it is mapped
-// to a specific test and this run does not need it.
-func (r *mockRouter) pruned(name string) bool {
-	_, isMappedToSpecificTest := r.mocksThatHaveMappings[name]
-	_, isNeededForCurrentRun := r.mocksWeNeed[name]
-	return isMappedToSpecificTest && !isNeededForCurrentRun
+// pruned reports whether the mapping prune drops the mock: it is mapped to a
+// specific test and this run does not need it. A mock that is every test's by
+// statement is kept, whichever test's mapping names it (sharedByStatement).
+func (r *mockRouter) pruned(mock *models.Mock) bool {
+	_, isMappedToSpecificTest := r.mocksThatHaveMappings[mock.Name]
+	_, isNeededForCurrentRun := r.mocksWeNeed[mock.Name]
+	return isMappedToSpecificTest && !isNeededForCurrentRun && !sharedByStatement(mock)
+}
+
+// sharedByStatement reports whether a mock is served to every test because a
+// statement says so: its recorder stated it session or connection lifetime,
+// or it is a call the recorder stated per-test that keploy.yaml declares
+// shared (sessionCalls). A replay's mapping names it under the test that
+// consumed it, but it is not that test's alone: a run of other tests needs it
+// too (a connection's setup, a token another test fetched). A mock recorded
+// before lifetimes were stated is pruned by the mapping as it always was, but
+// for a MySQL prepared statement's lifecycle (PREPARE, CLOSE, RESET), which
+// is its connection's whenever it was recorded (models.DeriveLifetime).
+func sharedByStatement(mock *models.Mock) bool {
+	if !mock.StatesLifetime() {
+		return mock.IsMySQLStatementLifecycle()
+	}
+	mock.DeriveLifetime()
+	lt := mock.TestModeInfo.Lifetime
+	return lt == models.LifetimeSession || lt == models.LifetimeConnection
 }
 
 // route classifies one decoded mock. fromGob marks a mock read from mocks.gob,
 // whose per-test pool keeps the PostgresV2 dual-pool quirk.
 func (r *mockRouter) route(mock *models.Mock, fromGob bool) {
-	pruned := r.pruned(mock.Name)
+	pruned := r.pruned(mock)
 	if pruned && r.want&(poolAllSession|poolAllPerTest) == 0 {
 		return
 	}
@@ -1319,7 +1635,7 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 	if r.want&poolSession != 0 {
 		out.Unfiltered = make([]*models.Mock, 0, len(out.AllSession))
 		for _, m := range out.AllSession {
-			if !r.pruned(m.Name) {
+			if !r.pruned(m) {
 				out.Unfiltered = append(out.Unfiltered, m)
 			}
 		}
@@ -1330,7 +1646,8 @@ func (r *mockRouter) sessionPools(ctx context.Context, logger *zap.Logger, after
 // wanted pools from it:
 //
 //   - Filtered (poolPerTest): the per-test mocks, in file order. From a gob
-//     file, PostgresV2 mocks too, through the lax window filter.
+//     file, PostgresV2 mocks too, through the lax window filter, which the
+//     proven switch skips (a test owns what its mapping lists).
 //   - Unfiltered (poolSession): the session and connection mocks, through the
 //     lax FilterConfigMocks.
 //   - AllSession (poolAllSession): Unfiltered without the mapping prune.
@@ -1364,15 +1681,50 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// short-circuit and return before the auto-detect reader runs.
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	if _, err := os.Stat(gobPath); err == nil {
-		mocks, err := readGobMocks(gobPath)
+		mocks, cut, err := readGobMocksCut(gobPath)
 		if err != nil {
 			return models.TestSetMocks{}, err
 		}
-		for _, mock := range mocks {
-			r.route(mock, true)
+		logger := ys.Logger.With(zap.String("mock_file", gobPath))
+		if cut {
+			logger.Warn("the mock file ends part-way through its last mock, probably because a write was interrupted (the recorder stopped, or the disk filled), and that mock was not read",
+				zap.String("next_step", "re-record the test set"))
 		}
+		connFailures := 0
+		var deps models.MockDepsCheck
+		for _, mock := range mocks {
+			if mock.Kind == models.ConnectionFailure {
+				// gob has no per-kind decoder: a connection failure is
+				// validated here, as DecodeMocks and DecodeMocksJSON validate
+				// theirs.
+				if !connFailureSupported(mock, logger, false) {
+					addSkipped(&out, mock.Name, mock.Kind)
+					continue
+				}
+				connFailures++
+			}
+			r.route(mock, true)
+			// After routing, which derives the mock's lifetime unless the
+			// mapping prune drops it first: its links are then read without
+			// deriving it again on a copy.
+			deps.Add(mock)
+		}
+		warnConnFailuresNotReplayed(logger, testSetID, connFailures)
+		warnUnmetRequirements(logger, testSetID, gobPath, deps.Unmet())
 		if want&poolPerTest != 0 {
-			out.Filtered = pkg.FilterTcsMocks(ctx, ys.Logger, r.perTest, afterTime, beforeTime, false)
+			if provenswitch.On() {
+				// Under the proven switch a test owns the mocks its mapping
+				// lists, whatever their recorded times say, so the per-test
+				// pool is read whole, as a yaml or json file's is, for the
+				// agent to serve by mapping. The window filter left out a mock
+				// whose response is stamped before its request (a recorder's
+				// bad stamp, not a bad answer) before the agent saw it: the
+				// test that owns it was judged for a recorded call it did not
+				// make, and its call to that dependency missed.
+				out.Filtered = r.perTest
+			} else {
+				out.Filtered = pkg.FilterTcsMocks(ctx, logger, r.perTest, afterTime, beforeTime, false)
+			}
 		}
 		if err := r.separateSharedMocks(out.Filtered); err != nil {
 			return models.TestSetMocks{}, err
@@ -1413,43 +1765,53 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	// existing recordings.
 	readerIsJSON := reader.Format() == yaml.FormatJSON
 
-	hasContent := false
-	for {
-		var mocks []*models.Mock
-		if readerIsJSON {
-			jsonDoc, err := reader.ReadNextDocJSON()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			hasContent = true
-			mocks, err = DecodeMocksJSON([]*yaml.NetworkTrafficDocJSON{jsonDoc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from json doc", zap.String("session", filepath.Base(path)))
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
-			}
-		} else {
-			doc, err := reader.ReadNextDoc()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", err.Error())
-			}
-			hasContent = true
-			mocks, err = DecodeMocks([]*yaml.NetworkTrafficDoc{doc}, ys.Logger)
-			if err != nil {
-				utils.LogError(ys.Logger, err, "failed to decode the config mocks from doc", zap.String("session", filepath.Base(path)))
-				return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), err)
-			}
+	// The decoders' skip ERRORs name the mock, and mock names repeat in every
+	// test set, so they say which file.
+	logger := ys.Logger.With(zap.String("mock_file", reader.Path()))
+	var src *payloadSource
+	if want&payloadsOnDisk != 0 {
+		if src, err = newPayloadSource(reader); err != nil {
+			return models.TestSetMocks{}, err
 		}
-
-		for _, mock := range mocks {
+		out.Payloads = src
+	}
+	hasContent := false
+	connFailures := 0
+	var deps models.MockDepsCheck
+	for {
+		doc, readErr, decodeErr := nextDoc(reader, logger, false)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return models.TestSetMocks{}, fmt.Errorf("failed to decode the file documents. error: %v", readErr.Error())
+		}
+		hasContent = true
+		if decodeErr != nil {
+			msg := "failed to decode the config mocks from doc"
+			if readerIsJSON {
+				msg = "failed to decode the config mocks from json doc"
+			}
+			utils.LogError(ys.Logger, decodeErr, msg, zap.String("session", filepath.Base(path)))
+			return models.TestSetMocks{}, fmt.Errorf("failed to decode the mocks in %s: %w", reader.Path(), decodeErr)
+		}
+		if len(doc.mocks) == 0 {
+			addSkippedDoc(&out, doc.raw, readerIsJSON, doc.incomplete, doc.name, doc.kind)
+		}
+		for _, mock := range doc.mocks {
+			if mock.Kind == models.ConnectionFailure {
+				connFailures++
+			}
 			r.route(mock, false)
+			deps.Add(mock) // after routing, as the gob reader
+			if src != nil {
+				// Last: routing and the links read the payload.
+				mock.LeavePayloadOnDisk(src, models.PayloadAt{Offset: doc.off, Length: doc.n, Name: mock.Name})
+			}
 		}
 	}
+	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
+	warnUnmetRequirements(logger, testSetID, reader.Path(), deps.Unmet())
 
 	if want&poolPerTest != 0 {
 		if !hasContent {
@@ -1493,6 +1855,18 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	r.sessionPools(ctx, ys.Logger, afterTime, beforeTime, &out)
 	out.AllPerTest = r.allPerTest
 	return out, nil
+}
+
+// addSkipped lists a document the decoders skipped in out.Skipped (see
+// models.TestSetMocks).
+func addSkipped(out *models.TestSetMocks, name string, kind models.Kind) {
+	if name == "" {
+		return
+	}
+	if out.Skipped == nil {
+		out.Skipped = map[string]models.Kind{}
+	}
+	out.Skipped[name] = kind
 }
 
 func (ys *MockYaml) getNextID() int64 {

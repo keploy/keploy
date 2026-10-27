@@ -11,6 +11,8 @@ name: Windows CI scripts
 # cases pin the self-hosted Windows jobs' timeouts, the go-dedup script's
 # compose-project hand-off, and the text of every "Recover stale runner state"
 # step), and under Windows PowerShell 5.1 in prepare_and_run's precheck-windows.
+# So does the download-image action's Windows check of the image tarball: only
+# 5.1 there shows a check that lets tar's stderr end the step.
 
 on:
   push:
@@ -19,10 +21,14 @@ on:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
+      - '.github/actions/download-image/**'
+      - '.github/actions/windows-binary/**'
   pull_request:
     paths:
       - '.github/scripts/windows/**'
       - '.github/workflows/**'
+      - '.github/actions/download-image/**'
+      - '.github/actions/windows-binary/**'
 
 permissions:
   contents: read
@@ -37,3 +43,140 @@ jobs:
       - name: Test the Windows Docker cleanup scripts (pwsh)
         shell: pwsh
         run: ./.github/scripts/windows/reap-keploy-containers.tests.ps1
+
+      - name: Test the Windows machine cache (pwsh)
+        shell: pwsh
+        run: ./.github/scripts/windows/machine-cache.tests.ps1
+
+  # machine-cache.ps1 runs under Windows PowerShell 5.1 in the jobs that use
+  # it; its cases run here under that PowerShell too, on NTFS.
+  machine-cache-windows-powershell:
+    timeout-minutes: 10
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the Windows machine cache (Windows PowerShell)
+        shell: powershell
+        run: |
+          & .\.github\scripts\windows\machine-cache.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # The Windows lane's way to keploy.exe (.github/actions/windows-binary), end
+  # to end under the Actions runner and Windows PowerShell 5.1, with a stand-in
+  # binary: an entry that is gone costs a download, never the job. The cache
+  # is this VM's own (D:\keploy-ci-cache), empty at the start.
+  windows-binary-fallback:
+    timeout-minutes: 10
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Make a stand-in keploy.exe and its artifact
+        id: bin
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path stand-in -Force | Out-Null
+          $bytes = New-Object byte[] 65536
+          (New-Object Random).NextBytes($bytes)
+          [IO.File]::WriteAllBytes((Join-Path $PWD 'stand-in\keploy.exe'), $bytes)
+          $sum = (Get-FileHash -LiteralPath stand-in\keploy.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "sha256=$sum" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary-stand-in
+          path: stand-in/keploy.exe
+          overwrite: true
+
+      # Case 1: put, then evicted (pruned for its age) before the lane's get.
+      - name: Evict the stand-in's entry
+        shell: powershell
+        env:
+          SUM: ${{ steps.bin.outputs.sha256 }}
+        run: |
+          $mc = Join-Path $env:GITHUB_WORKSPACE '.github\scripts\windows\machine-cache.ps1'
+          & $mc -Put -Name windows-binary-stand-in -File stand-in\keploy.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $entry = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) "keploy-ci-cache\windows-binary-stand-in\$env:SUM"
+          (Get-Item -LiteralPath $entry).LastWriteTime = (Get-Date).AddDays(-2)
+          & $mc -Prune -MaxAgeDays 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath $entry) { throw "the prune left $entry" }
+
+      - name: "Case 1: an entry evicted before the get"
+        id: evicted
+        uses: ./.github/actions/windows-binary
+        with:
+          name: windows-binary-stand-in
+          sha256: ${{ steps.bin.outputs.sha256 }}
+          path: got-evicted
+
+      # Case 1 kept the download: the next get copies it.
+      - name: "Case 2: a whole entry"
+        id: hit
+        uses: ./.github/actions/windows-binary
+        with:
+          name: windows-binary-stand-in
+          sha256: ${{ steps.bin.outputs.sha256 }}
+          path: got-hit
+
+      # Case 3: the entry is there when the get looks, and its copy fails.
+      # Another process holds the file shut; a prune or a replacing put that
+      # removes it between the look and the copy fails the copy the same way.
+      - name: Hold the stand-in's entry shut
+        shell: powershell
+        env:
+          SUM: ${{ steps.bin.outputs.sha256 }}
+        run: |
+          $file = Join-Path ([IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)) "keploy-ci-cache\windows-binary-stand-in\$env:SUM\keploy.exe"
+          $held = Join-Path $env:RUNNER_TEMP 'stand-in.held'
+          $release = Join-Path $env:RUNNER_TEMP 'stand-in.release'
+          $hold = Join-Path $env:RUNNER_TEMP 'hold.ps1'
+          Set-Content -LiteralPath $hold -Value @'
+          param($File, $Held, $Release)
+          $f = [IO.File]::Open($File, 'Open', 'Read', 'None')
+          New-Item -ItemType File -Path $Held | Out-Null
+          while (-not (Test-Path -LiteralPath $Release)) { Start-Sleep -Milliseconds 200 }
+          $f.Dispose()
+          '@
+          $holder = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$hold`"", "`"$file`"", "`"$held`"", "`"$release`""
+          $null = $holder.Handle
+          while (-not (Test-Path -LiteralPath $held)) {
+            if ($holder.HasExited) { throw "the holder exited ($($holder.ExitCode)) without holding $file" }
+            Start-Sleep -Milliseconds 100
+          }
+          "HOLDER_PID=$($holder.Id)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: "Case 3: an entry that cannot be read mid-copy"
+        id: midcopy
+        uses: ./.github/actions/windows-binary
+        with:
+          name: windows-binary-stand-in
+          sha256: ${{ steps.bin.outputs.sha256 }}
+          path: got-midcopy
+
+      - name: Let go of the entry
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType File -Path (Join-Path $env:RUNNER_TEMP 'stand-in.release') -Force | Out-Null
+          if ($env:HOLDER_PID) { Wait-Process -Id $env:HOLDER_PID -ErrorAction SilentlyContinue }
+
+      - name: Check that each case has the artifact's keploy.exe
+        shell: powershell
+        env:
+          SUM: ${{ steps.bin.outputs.sha256 }}
+          EVICTED: ${{ steps.evicted.outputs.hit }}
+          HIT: ${{ steps.hit.outputs.hit }}
+          MIDCOPY: ${{ steps.midcopy.outputs.hit }}
+        run: |
+          $p = @()
+          foreach ($c in @(@('got-evicted', $env:EVICTED, 'false'), @('got-hit', $env:HIT, 'true'), @('got-midcopy', $env:MIDCOPY, 'false'))) {
+            $f = Join-Path $env:GITHUB_WORKSPACE "$($c[0])\keploy.exe"
+            if ($c[1] -ne $c[2]) { $p += "$($c[0]): hit='$($c[1])', want $($c[2])" }
+            if (-not (Test-Path -LiteralPath $f)) { $p += "$($c[0]): no keploy.exe" }
+            elseif ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:SUM) { $p += "$($c[0]): keploy.exe is not the artifact's" }
+          }
+          if ($p.Count -gt 0) { $p | ForEach-Object { Write-Host "FAIL - $_" }; exit 1 }
+          Write-Host 'ok - an entry evicted before the get, and one unreadable mid-copy, are downloaded; a whole one is copied'

@@ -4,25 +4,39 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
-// PendingBefore asks the agent's /record/pending, with the time in Unix
-// nanoseconds, and reads its answer; an agent that cannot tell (501), or
-// predates the route (404), is known not to.
-func TestAgentClient_PendingBefore(t *testing.T) {
+// BacklogBefore asks the agent's /record/pending, with the time in Unix
+// nanoseconds, and reads its answer into one of three verdicts, or a fourth for
+// an agent that can never tell (501: no watermark; 404: it predates the
+// route). An answer that did not come (an error status, a body that does not
+// decode, a timeout) is "cannot tell", with the error: never "clear".
+func TestAgentClient_BacklogBefore(t *testing.T) {
 	var status int
 	var body, gotBefore string
+	var stall chan struct{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/record/pending" {
 			http.NotFound(w, r)
 			return
 		}
 		gotBefore = r.URL.Query().Get("before")
+		if stall != nil {
+			select {
+			case <-stall:
+			case <-r.Context().Done():
+			}
+			return
+		}
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
@@ -30,22 +44,214 @@ func TestAgentClient_PendingBefore(t *testing.T) {
 	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
 	before := time.Unix(0, 1234567890)
 	for _, tc := range []struct {
-		status         int
-		body           string
-		pending, known bool
+		status  int
+		body    string
+		want    models.AgentBacklog
+		wantErr bool
 	}{
-		{http.StatusOK, `{"pending":true}`, true, true},
-		{http.StatusOK, `{"pending":false}`, false, true},
-		{http.StatusNotImplemented, "cannot tell", false, false},
-		{http.StatusNotFound, "", false, false},
+		{http.StatusOK, `{"pending":true,"progress":42,"waitingOn":"connection 7"}`, models.AgentBacklog{Verdict: models.BacklogPending, Progress: 42, WaitingOn: "connection 7"}, false},
+		{http.StatusOK, `{"pending":true}`, models.AgentBacklog{Verdict: models.BacklogPending}, false},
+		{http.StatusOK, `{"pending":false,"progress":9}`, models.AgentBacklog{Verdict: models.BacklogClear, Progress: 9}, false},
+		{http.StatusNotImplemented, "cannot tell", models.AgentBacklog{Verdict: models.BacklogUnsupported}, false},
+		{http.StatusNotFound, "", models.AgentBacklog{Verdict: models.BacklogUnsupported}, false},
+		{http.StatusInternalServerError, "boom", models.AgentBacklog{Verdict: models.BacklogCannotTell}, true},
+		{http.StatusOK, `{"pending":`, models.AgentBacklog{Verdict: models.BacklogCannotTell}, true},
 	} {
 		status, body = tc.status, tc.body
-		pending, known, err := a.PendingBefore(context.Background(), before)
-		if err != nil || pending != tc.pending || known != tc.known {
-			t.Errorf("status %d: (%v, %v, %v), want (%v, %v)", tc.status, pending, known, err, tc.pending, tc.known)
+		got, err := a.BacklogBefore(context.Background(), before)
+		if (err != nil) != tc.wantErr || got != tc.want {
+			t.Errorf("status %d %q: (%+v, %v), want %+v (error %v)", tc.status, tc.body, got, err, tc.want, tc.wantErr)
 		}
 	}
 	if gotBefore != "1234567890" {
 		t.Fatalf("asked before=%q, want the stop in Unix nanoseconds", gotBefore)
+	}
+
+	// An agent that does not answer within the look's bound: cannot tell.
+	stall = make(chan struct{})
+	defer close(stall)
+	got, err := a.BacklogBefore(context.Background(), before)
+	if err == nil || got.Verdict != models.BacklogCannotTell {
+		t.Fatalf("a look the agent did not answer: (%+v, %v), want cannot tell with its error", got, err)
+	}
+}
+
+// The frame streams a recording opens on a context marked
+// models.WithDrainsAfterStop carry DrainsAfterStopHeader, so the agent holds a
+// stop signal for them; others (keploy mock's) do not.
+func TestAgentClient_StreamsSayTheyDrainAfterTheStop(t *testing.T) {
+	seen := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path + "=" + r.Header.Get(models.DrainsAfterStopHeader)
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	a.startedAgent.Store(true) // this client started the agent
+	open := func(ctx context.Context) []string {
+		grp, gctx := errgroup.WithContext(ctx)
+		ctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+		_, _ = a.GetIncoming(ctx, models.IncomingOptions{})
+		_, _ = a.GetOutgoing(ctx, models.OutgoingOptions{})
+		if ch, err := a.GetMappings(ctx, models.IncomingOptions{}); err == nil {
+			for range ch {
+			}
+		}
+		var got []string
+		for len(seen) > 0 {
+			got = append(got, <-seen)
+		}
+		return got
+	}
+	for _, g := range open(models.WithDrainsAfterStop(context.Background())) {
+		if !strings.HasSuffix(g, "=true") {
+			t.Errorf("a recording's stream went without the header: %s", g)
+		}
+	}
+	plain := open(context.Background())
+	if len(plain) == 0 {
+		t.Fatal("no stream reached the agent")
+	}
+	for _, g := range plain {
+		if !strings.HasSuffix(g, "=") {
+			t.Errorf("a stream not marked to drain carried the header: %s", g)
+		}
+	}
+
+	// An agent something else started (docker compose, a k8s sidecar) is
+	// stopped by that, not by this client: asked to hold for the client, it
+	// would wait out that stop's timeout and be killed.
+	a.startedAgent.Store(false)
+	for _, g := range open(models.WithDrainsAfterStop(context.Background())) {
+		if !strings.HasSuffix(g, "=") {
+			t.Errorf("a stream to an agent this client did not start carried the header: %s", g)
+		}
+	}
+	a.startedAgent.Store(true)
+
+	// A stream that reconnects to a restarted agent asks it to hold for it
+	// again; one not marked does not.
+	reopen := func(ctx context.Context) string {
+		if _, err := a.reopenStream(ctx, "incoming", http.MethodPost, "/incoming", []byte("{}")); err == nil {
+			t.Fatal("the agent answered 404, yet the stream reopened")
+		}
+		return <-seen
+	}
+	if g := reopen(models.WithDrainsAfterStop(context.Background())); g != "/incoming=true" {
+		t.Errorf("a recording's stream reconnected without the header: %s", g)
+	}
+	if g := reopen(context.Background()); g != "/incoming=" {
+		t.Errorf("a stream not marked to drain reconnected with the header: %s", g)
+	}
+}
+
+// The frame streams of a recording that watches for the agent's word of a stop
+// (models.WithAgentStopNotice: keploy record under docker compose) ask an agent
+// this client did not start to hold a stop for them
+// (models.DrainsOnAgentStopHeader), a reconnection too. A stream to an agent
+// this client started asks for the hold its own stop drains under instead.
+func TestAgentClient_StreamsAskAComposeAgentForItsWordOfAStop(t *testing.T) {
+	seen := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.URL.Path + "=" + r.Header.Get(models.DrainsOnAgentStopHeader) + "/" + r.Header.Get(models.DrainsAfterStopHeader)
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	open := func(ctx context.Context) []string {
+		grp, gctx := errgroup.WithContext(ctx)
+		ctx = context.WithValue(gctx, models.ErrGroupKey, grp)
+		_, _ = a.GetIncoming(ctx, models.IncomingOptions{})
+		_, _ = a.GetOutgoing(ctx, models.OutgoingOptions{})
+		if ch, err := a.GetMappings(ctx, models.IncomingOptions{}); err == nil {
+			for range ch {
+			}
+		}
+		if _, err := a.reopenStream(ctx, "incoming", http.MethodPost, "/incoming", []byte("{}")); err == nil {
+			t.Fatal("the agent answered 404, yet the stream reopened")
+		}
+		var got []string
+		for len(seen) > 0 {
+			got = append(got, <-seen)
+		}
+		return got
+	}
+	marked := models.WithAgentStopNotice(models.WithDrainsAfterStop(context.Background()))
+	got := open(marked)
+	if len(got) < 3 {
+		t.Fatalf("streams %v, want the three and a reconnection", got)
+	}
+	for _, g := range got {
+		if !strings.HasSuffix(g, "=true/") {
+			t.Errorf("a stream to a compose agent did not ask for its word of a stop: %s", g)
+		}
+	}
+	for _, g := range open(models.WithDrainsAfterStop(context.Background())) {
+		if !strings.HasSuffix(g, "=/") {
+			t.Errorf("a stream not watching for the agent's word asked for it: %s", g)
+		}
+	}
+	a.startedAgent.Store(true)
+	for _, g := range open(marked) {
+		if !strings.HasSuffix(g, "=/true") {
+			t.Errorf("a stream to an agent this client started: %s, want only the after-stop hold", g)
+		}
+	}
+}
+
+// WatchAgentStop closes once the agent answers its wait (204): a stop reached
+// it and it waits for this client. A request that fails is made again (an
+// agent compose starts again); an agent without the route (404) is not asked
+// again, and the watch never closes.
+func TestWatchAgentStopClosesOnTheAgentsWord(t *testing.T) {
+	saved := agentStopNoticeRetry
+	agentStopNoticeRetry = time.Millisecond
+	defer func() { agentStopNoticeRetry = saved }()
+
+	var asks atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != models.StopNoticePath {
+			http.NotFound(w, r)
+			return
+		}
+		if asks.Add(1) == 1 {
+			// The first wait fails as an agent going away mid-request does.
+			http.Error(w, "going away", http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	a := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: srv.URL}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	select {
+	case <-a.WatchAgentStop(ctx):
+	case <-time.After(30 * time.Second): // only turns a hang into a failure
+		t.Fatal("the watch did not close on the agent's word")
+	}
+	if n := asks.Load(); n != 2 {
+		t.Fatalf("asked %d times, want the failed wait and the answered one", n)
+	}
+
+	var old atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		old.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer legacy.Close()
+	b := &AgentClient{logger: zap.NewNop(), client: http.Client{}, conf: &config.Config{Agent: config.Agent{AgentURI: legacy.URL}}}
+	watch := b.WatchAgentStop(ctx)
+	deadline := time.Now().Add(30 * time.Second)
+	for old.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-watch:
+		t.Fatal("the watch closed for an agent that predates the route")
+	default:
+	}
+	if n := old.Load(); n != 1 {
+		t.Fatalf("an agent without the route was asked %d times, want once", n)
 	}
 }

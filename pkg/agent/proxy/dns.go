@@ -38,6 +38,10 @@ type dnsServer struct {
 
 	stopOnce sync.Once
 	stopErr  error
+
+	// endBind ends the stage of the agent's start that is the bind (serve),
+	// on the goroutine that serves: nil until serve begins it.
+	endBind func()
 }
 
 // newDNSServer builds the DNS server for network ("tcp" or "udp") on
@@ -52,7 +56,10 @@ func (p *Proxy) newDNSServer(network string) *dnsServer {
 		// miekg/dns calls it once the socket is bound, just before it serves,
 		// on the goroutine that called ListenAndServe. A failed bind never
 		// calls it.
-		NotifyStartedFunc: func() { s.settleAs(true, nil) },
+		NotifyStartedFunc: func() {
+			s.bindOver()
+			s.settleAs(true, nil)
+		},
 	}
 	return s
 }
@@ -69,14 +76,32 @@ func (s *dnsServer) settleAs(bound bool, err error) {
 	})
 }
 
+// bindOver ends the bind's stage of the agent's start, once (endBind).
+func (s *dnsServer) bindOver() {
+	if s.endBind != nil {
+		s.endBind()
+	}
+}
+
 // serve binds s's socket and serves on it until s is stopped, and returns: nil
 // once stopped, else the error, a failed bind's included, which it also logs,
 // in one line that is true of both (the error says which). Return it, never
 // swallow it: a DNS listener that died silently looks healthy.
+//
+// The bind is the agent's start's own work, done here while startDNSServers
+// waits for it (settled): a stage of the start of its own, on this goroutine,
+// so the CLI that waits for the agent sees it make progress
+// (utils.BeginBootWork); the wait alone shows none. It ends as s settles, on
+// this goroutine either way: once bound, just before it serves
+// (NotifyStartedFunc), or as serve returns without binding.
 func (s *dnsServer) serve() (err error) {
+	s.endBind = beginBootWork(fmt.Sprintf("the %s DNS server's bind", s.name()))
 	// A serve call that bound has settled s already. This settles one that
 	// returned, or panicked, before it bound, so stop never waits on it.
-	defer func() { s.settleAs(false, err) }()
+	defer func() {
+		s.bindOver()
+		s.settleAs(false, err)
+	}()
 	s.logger.Info(fmt.Sprintf("starting %s DNS server at addr %v", s.name(), s.srv.Addr))
 	err = s.srv.ListenAndServe()
 	if err != nil {
@@ -315,12 +340,22 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	flagsSet := false
+	// The run's mock.real (proven switch only): a name entry's questions are
+	// answered live, and every answer is booked, so a connection to an
+	// address can be named by the one name keploy's DNS gave it.
+	rd := p.realList()
 
 	for _, question := range r.Question {
 		key := generateCacheKey(question.Name, question.Qtype)
 		reqTimestamp := time.Now().UTC()
 
-		resp, found := p.dnsCache.Get(key)
+		var resp dnsCacheEntry
+		found := false
+		if _, listed := rd.listedNameOf(question.Name); listed {
+			resp, found = p.realDNS(question), true
+		} else {
+			resp, found = p.dnsCache.Get(key)
+		}
 		if !found {
 			// No per-cache-miss log: the dnsCache TTL is 30s, so any
 			// unique query (including NXDOMAIN-heavy search-domain
@@ -335,6 +370,9 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
 				p.dnsCache.Add(key, cached)
 			}
+		}
+		if rd != nil {
+			rd.bookDNSAnswer(question, resp.Answer)
 		}
 
 		// Apply flags from the first response (DNS messages normally contain a single question)
@@ -353,10 +391,30 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		msg.Extra = append(msg.Extra, resp.Extra...)
 	}
 
+	// Over UDP an answer may be no larger than the client takes: 512 bytes,
+	// or the size it advertised with EDNS0 (RFC 1035 4.2.1, RFC 6891 6.2.5).
+	// Written whole, a larger one -- gmail.com's MX answer with its extra
+	// records -- was cut off by the client's read and failed to parse ("dns:
+	// overflowing header size"), while recording and when its mock was
+	// replayed. Truncate drops what does not fit, extra records first, and
+	// sets TC when it drops any record, so the client can ask over TCP.
+	if addr := w.RemoteAddr(); addr != nil && addr.Network() == "udp" {
+		msg.Truncate(udpAnswerSize(r))
+	}
+
 	err := w.WriteMsg(msg)
 	if err != nil {
 		utils.LogError(p.logger, err, "failed to write dns info back to the client")
 	}
+}
+
+// udpAnswerSize is the most a UDP answer to r may be: the EDNS0 buffer size r
+// advertises, or 512 bytes.
+func udpAnswerSize(r *dns.Msg) int {
+	if opt := r.IsEdns0(); opt != nil && int(opt.UDPSize()) > dns.MinMsgSize {
+		return int(opt.UDPSize())
+	}
+	return dns.MinMsgSize
 }
 
 // isRedundantSearchExpansion reports whether name is a search-list expansion

@@ -2,15 +2,21 @@ package mock
 
 import (
 	"context"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zaptest/observer"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
@@ -204,6 +210,88 @@ func TestReplayWaitsForTheLastRequestBeforeComparing(t *testing.T) {
 	require.Len(t, got.Cases, 1)
 	require.NotNil(t, got.Cases[0].Actual, "the request that arrived after the runner exited is still compared")
 	require.True(t, got.Cases[0].Passed)
+}
+
+// heldIncoming is a replay whose agent still holds requests from before the
+// test command exited, and says so, while the stop's signal comes as the
+// command ends: the drain waits on the agent and offers to stop now.
+type heldIncoming struct{ *runnerInstr }
+
+func (h heldIncoming) Run(ctx context.Context, opts models.RunOptions) models.AppError {
+	res := h.runnerInstr.Run(ctx, opts)
+	utils.MarkInterrupted() // the user's Ctrl+C, as the command ends
+	return res
+}
+
+func (heldIncoming) GetIncoming(ctx context.Context, _ models.IncomingOptions) (<-chan *models.TestCase, error) {
+	out := make(chan *models.TestCase)
+	go func() { <-ctx.Done(); close(out) }()
+	return out, nil
+}
+
+func (heldIncoming) BacklogBefore(context.Context, time.Time) (models.AgentBacklog, error) {
+	return models.AgentBacklog{Verdict: models.BacklogPending}, nil
+}
+
+// A replay whose drain the user ends -- a press after it offered to stop now
+// -- is judged on part of the run if it is judged at all, and a verdict on
+// part of a run can pass a suite that did not. It ends as a replay the user
+// stopped before it finished does: 128+N, no verdict, the last receipt left
+// standing.
+func TestReplayTheUserStoppedWhileItCollectedRequestsIsNotJudged(t *testing.T) {
+	defer func(d time.Duration) { mockDrainNotice = d }(mockDrainNotice)
+	mockDrainNotice = 20 * time.Millisecond
+	utils.ResetInterruptedAgain()
+	utils.ClearInterrupted()
+	t.Cleanup(func() { utils.ResetInterruptedAgain(); utils.ClearInterrupted() })
+	defer utils.SetInterruptSignalForTest(2)() // SIGINT
+	instr := heldIncoming{newRunnerInstr(t, sequentialMarks()...)}
+	dir := t.TempDir()
+	mapDB := mapdb.New(zap.NewNop(), dir, "")
+	require.NoError(t, mapDB.UpsertCases(context.Background(), "set", map[string]models.MappedTestCase{"orders/e2e.TestA": {Cases: []string{"post-orders-1"}}}, nil, nil))
+	db := &memTestDB{existing: []*models.TestCase{httpCase("post-orders-1", "POST", "http://localhost:8080/orders", 201, `{}`, runnerT0)}}
+	judged := false
+	RegisterReplayOutcomeReporter(func(context.Context, ReplayOutcome) { judged = true })
+	t.Cleanup(func() { RegisterReplayOutcomeReporter(nil) })
+	cfg := instrConfig(instr.composeInstr, utils.Native, "./shop.test -test.v")
+	cfg.Path = dir
+	withRequests(cfg)
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	core, logs := observer.New(zapcore.InfoLevel)
+	svc := New(zap.New(core), instr, stubMockDB{}, mapDB, nil, nil, cfg)
+	svc.(TestDBSetter).SetTestDB(db)
+	returned := make(chan error, 1)
+	go func() { returned <- svc.Replay(context.Background()) }()
+	offered := replayDrainWords.saving + "; " + replayDrainWords.stopNow
+	within := time.After(time.Minute) // only turns a hang into a failure
+	for logs.FilterMessage(offered).Len() == 0 {
+		select {
+		case err := <-returned:
+			t.Fatalf("the replay returned (%v) before its drain offered to stop now: %v", err, logs.All())
+		case <-within:
+			t.Fatalf("the drain never offered to stop now: %v", logs.All())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if !utils.MarkInterruptedAgain() { // the user, as told
+		t.Fatal("setup: no offer standing")
+	}
+	select {
+	case err := <-returned:
+		require.NoError(t, err, "a replay the user stopped is not keploy's failure")
+	case <-within:
+		t.Fatal("the user's press did not end the replay")
+	}
+	if judged {
+		t.Fatal("a replay the user stopped while it collected the requests was judged on part of them")
+	}
+	if utils.ErrCode != 130 {
+		t.Fatalf("a replay the user stopped exits %d, want 130", utils.ErrCode)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "set", ReceiptFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a replay the user stopped wrote a receipt (%v)", err)
+	}
 }
 
 func TestPairCasesDoesNotCompareGRPCAsHTTP(t *testing.T) {
@@ -405,4 +493,134 @@ func TestPushScopeGateToAnAgentThatCannot(t *testing.T) {
 	t.Cleanup(func() { RegisterScopeGateSource(nil) })
 	m.pushScopeGate(context.Background(), "set", "")
 	require.Equal(t, 1, logs.FilterMessageSnippet("every test runs this replay").Len())
+}
+
+// An --on-miss record run appends mocks to the set, naming each past the
+// highest "mock-N" in the file. A document this keploy's decoders skipped (a
+// kind it cannot read, a connection failure it cannot replay) is still in the
+// file under its name, so an appended mock must not take that name either.
+func TestAnAppendedMockNeverTakesASkippedDocumentsName(t *testing.T) {
+	dir := t.TempDir()
+	set := filepath.Join(dir, "set-0")
+	require.NoError(t, os.MkdirAll(set, 0o755))
+	const doc = "version: api.keploy.io/v1beta1\nkind: %s\nname: %s\nspec:\n    metadata:\n        type: mocks\n    reqTimestampMock: 2026-10-08T11:12:00.01Z\n    resTimestampMock: 2026-10-08T11:12:00.041Z\n"
+	file := fmt.Sprintf(doc, "Generic", "mock-1") +
+		"---\n" + fmt.Sprintf(doc, "ConnectionFailure", "mock-7") +
+		"---\n" + fmt.Sprintf(doc, "FutureKind", "mock-9")
+	require.NoError(t, os.WriteFile(filepath.Join(set, "mocks.yaml"), []byte(file), 0o644))
+
+	m := &mockService{logger: zap.NewNop(), mockDB: mockdb.New(zap.NewNop(), dir, "mocks")}
+	highest, err := m.highestMockIndex(context.Background(), "set-0")
+	require.NoError(t, err)
+	require.Equal(t, int64(9), highest,
+		"mock-9 (a kind this keploy cannot read) and mock-7 (a connection failure it cannot replay) are in the file")
+}
+
+// capturingInstr is an agent connection that captured these calls on miss.
+type capturingInstr struct {
+	Instrumentation
+	captured []*models.Mock
+}
+
+func (c capturingInstr) DrainCapturedMocks(context.Context) ([]*models.Mock, error) {
+	return c.captured, nil
+}
+
+// appendStore is a mock set that is read (or fails to be, readErr) and
+// appended to (or fails to be, insertErr), counting the appends.
+type appendStore struct {
+	stubMockDB
+	readErr, insertErr error
+	// failInserts is how many appends, from the first, fail with
+	// insertErr (all of them when 0).
+	failInserts int
+	calls       int
+	inserts     int
+}
+
+func (s *appendStore) GetTestSetMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) (models.TestSetMocks, error) {
+	return models.TestSetMocks{}, s.readErr
+}
+
+func (s *appendStore) InsertMock(context.Context, *models.Mock, string) error {
+	s.calls++
+	if s.insertErr != nil && (s.failInserts == 0 || s.calls <= s.failInserts) {
+		return s.insertErr
+	}
+	s.inserts++
+	return nil
+}
+
+// listStore is a mock set without the one-pass read (pkg.TestSetMocksReader),
+// read one pool at a time (or failing to be, readErr), counting the appends.
+type listStore struct {
+	stubMockDB
+	readErr error
+	inserts int
+}
+
+func (s *listStore) GetFilteredMocks(context.Context, string, time.Time, time.Time, map[string]bool, map[string]bool) ([]*models.Mock, error) {
+	return []*models.Mock{{Name: "mock-4", Kind: models.HTTP}}, s.readErr
+}
+
+func (s *listStore) InsertMock(context.Context, *models.Mock, string) error {
+	s.inserts++
+	return nil
+}
+
+// --on-miss record appends what it captured to the set, numbered past the
+// mocks already in it. A set it cannot read cannot be numbered: rather than
+// number from mock-0 again, over names already in the file, it appends
+// nothing, and says so at ERROR. An append that fails says so at ERROR too.
+func TestCapturedCallsAreAppendedOnlyWhenTheSetCanBeNumbered(t *testing.T) {
+	captured := []*models.Mock{{Kind: models.HTTP}, {Kind: models.HTTP}}
+	for _, tc := range []struct {
+		name        string
+		store       *appendStore
+		wantInserts int
+		wantError   string
+	}{
+		{"the set reads", &appendStore{}, 2, ""},
+		{"the set does not read", &appendStore{readErr: errors.New("failed to decode the mocks")}, 0, "could not be read to number them"},
+		{"an append fails, the next is made", &appendStore{insertErr: errors.New("disk full"), failInserts: 1}, 1, "failed to add a call captured on miss"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			m := &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: captured}, mockDB: tc.store, store: FileStore{}}
+			m.persistCaptured(context.Background(), "set-0")
+			require.Equal(t, tc.wantInserts, tc.store.inserts)
+			errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
+			if tc.wantError == "" {
+				require.Empty(t, errs)
+				return
+			}
+			require.NotEmpty(t, errs)
+			require.Contains(t, errs[0].Message, tc.wantError)
+		})
+	}
+	// A store without the one-pass read is numbered from its pools, and is
+	// not appended to when they cannot be read.
+	for _, tc := range []struct {
+		name        string
+		readErr     error
+		wantInserts int
+	}{
+		{"read one pool at a time", nil, 2},
+		{"a pool does not read", errors.New("failed to decode the mocks"), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			store := &listStore{readErr: tc.readErr}
+			m := &mockService{logger: zap.New(core), instrumentation: capturingInstr{captured: captured}, mockDB: store, store: FileStore{}}
+			m.persistCaptured(context.Background(), "set-0")
+			require.Equal(t, tc.wantInserts, store.inserts)
+			errs := logs.FilterLevelExact(zapcore.ErrorLevel).All()
+			if tc.readErr == nil {
+				require.Empty(t, errs)
+				return
+			}
+			require.Len(t, errs, 1)
+			require.Contains(t, errs[0].Message, "could not be read to number them")
+		})
+	}
 }

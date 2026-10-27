@@ -8,10 +8,13 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 )
 
@@ -63,6 +66,40 @@ func newHooks(logger *zap.Logger, cfg *config.Config, instrumentation Instrument
 	return h
 }
 
+// realSimulator is an agent client that puts a mock.real test case on the
+// real clock (AgentClient.BeforeSimulateReal).
+type realSimulator interface {
+	BeforeSimulateReal(ctx context.Context, timestamp *time.Time, testSetID, tcName string, real []string) error
+}
+
+// beforeSimulate runs the before-simulate hook, which puts the run's clock at
+// the test case's recorded request (at), or, under the proven switch for a
+// test case whose recording lists mock.real destinations, then on real time
+// (design v14 §3.4, F3). A freeze that fails is logged, as before; a real
+// clock that cannot be had fails the case: it must not run at its recorded
+// time against a dependency that answers at real time.
+func (h *Hooks) beforeSimulate(ctx context.Context, tc *models.TestCase, at *time.Time, testSetID string) error {
+	if provenswitch.On() && len(tc.Real) > 0 {
+		rs, ok := h.instrumentation.(realSimulator)
+		if !ok {
+			return fmt.Errorf("test case %s uses mock.real (%s), and this keploy's agent client cannot put it on the real clock", tc.Name, strings.Join(tc.Real, ", "))
+		}
+		if err := rs.BeforeSimulateReal(ctx, at, testSetID, tc.Name, tc.Real); err != nil {
+			// Whatever the hook began (a freeze, a coverage window) ends,
+			// as after any case.
+			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
+				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
+			}
+			return err
+		}
+		return nil
+	}
+	if err := h.instrumentation.BeforeSimulate(ctx, at, testSetID, tc.Name); err != nil {
+		utils.LogError(h.logger, err, "failed to call BeforeSimulate hook")
+	}
+	return nil
+}
+
 func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSetID string) (interface{}, error) {
 
 	// Extract URL replacements and port mappings: merge global + per-test-set
@@ -71,8 +108,8 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 
 	switch tc.Kind {
 	case models.HTTP:
-		if err := h.instrumentation.BeforeSimulate(ctx, &tc.HTTPReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		if err := h.beforeSimulate(ctx, tc, &tc.HTTPReq.Timestamp, testSetID); err != nil {
+			return nil, err
 		}
 
 		hostToUse := h.cfg.Test.Host
@@ -96,7 +133,10 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		}
 
 		cfg := pkg.SimulationConfig{
-			APITimeout:      h.cfg.Test.APITimeout,
+			APITimeout: h.cfg.Test.APITimeout,
+			// Under the switch only the user's own apiTimeout bounds the
+			// app's answer (rule 15, row W1).
+			Unbounded:       provenswitch.On() && !h.cfg.Test.APITimeoutSet,
 			ConfigPort:      configPort,
 			KeployPath:      h.cfg.Path,
 			ConfigHost:      hostToUse,
@@ -106,6 +146,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			TLSConfig:       h.tlsConfig,
 
 			AppPortReachability: h.appPortReachability(),
+			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		}
 		if h.appAt != nil {
 			cfg.SentTo = h.noteWhereSent
@@ -117,7 +158,7 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 			resp, err := pkg.SimulateHTTPStreaming(ctx, tc, testSetID, h.logger, cfg)
 
 			if afterErr := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); afterErr != nil {
-				h.logger.Error("failed to call AfterSimulate hook", zap.Error(afterErr))
+				utils.LogError(h.logger, afterErr, "failed to call AfterSimulate hook")
 			}
 
 			return resp, err
@@ -127,14 +168,14 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		resp, err := pkg.SimulateHTTP(ctx, tc, testSetID, h.logger, cfg)
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
 	case models.GRPC_EXPORT:
 
-		if err := h.instrumentation.BeforeSimulate(ctx, &tc.GrpcReq.Timestamp, testSetID, tc.Name); err != nil {
-			h.logger.Error("failed to call BeforeSimulate hook", zap.Error(err))
+		if err := h.beforeSimulate(ctx, tc, &tc.GrpcReq.Timestamp, testSetID); err != nil {
+			return nil, err
 		}
 
 		h.logger.Debug("Simulating gRPC request", zap.Any("Test case", tc))
@@ -160,17 +201,23 @@ func (h *Hooks) SimulateRequest(ctx context.Context, tc *models.TestCase, testSe
 		resp, err := pkg.SimulateGRPC(ctx, tc, testSetID, h.logger, pkg.SimulationConfig{
 			// Bounds the response drain. Without it a bidi stream the server
 			// holds open hangs the whole test set instead of failing one case.
-			APITimeout:      h.cfg.Test.APITimeout,
+			APITimeout: h.cfg.Test.APITimeout,
+			// Under the switch only the user's own apiTimeout bounds the
+			// app's answer (rule 15, row W1); a stream the app holds open
+			// past its recording ends on its keepalives, not judged
+			// (pkg.ErrStreamHeldOpen).
+			Unbounded:       provenswitch.On() && !h.cfg.Test.APITimeoutSet,
 			ConfigPort:      configPort,
 			ConfigHost:      hostToUse,
 			URLReplacements: urlReplacements,
 			PortMappings:    portMappings,
 
 			AppPortReachability: h.appPortReachability(),
+			PublishedPort:       publishedPortsOf(h.logger, h.instrumentation).of(testSetID),
 		})
 
 		if err := h.instrumentation.AfterSimulate(ctx, tc.Name, testSetID); err != nil {
-			h.logger.Error("failed to call AfterSimulate hook", zap.Error(err))
+			utils.LogError(h.logger, err, "failed to call AfterSimulate hook")
 		}
 
 		return resp, err
@@ -315,7 +362,7 @@ func (h *Hooks) BeforeTestRun(ctx context.Context, testRunID string) error {
 	h.logger.Debug("BeforeTestRun hook executed", zap.String("testRunID", testRunID))
 
 	if err := h.instrumentation.BeforeTestRun(ctx, testRunID); err != nil {
-		h.logger.Error("failed to call BeforeTestRun hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeTestRun hook")
 	}
 
 	return nil
@@ -330,7 +377,7 @@ func (h *Hooks) BeforeTestSetCompose(ctx context.Context, testRunID string, test
 	// (handled by HandleBeforeTestSetCompose in the agent process).
 
 	if err := h.instrumentation.BeforeTestSetCompose(ctx, testRunID, testSetID, firstRun); err != nil {
-		h.logger.Error("failed to call BeforeTestSetCompose hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call BeforeTestSetCompose hook")
 	}
 
 	return nil
@@ -354,11 +401,33 @@ func (h *Hooks) BeforeTestSetRun(ctx context.Context, testSetID string) error {
 	return nil
 }
 
+// agentGoneKey marks a context whose run has no agent left to call
+// (withoutAgent).
+type agentGoneKey struct{}
+
+// withoutAgent is ctx for a run-level hook whose run's agent has gone: under
+// docker compose without a kept stack it goes down with each test set's
+// stack. The hook's own work still runs; only its call to the agent is left
+// out, which nothing would answer.
+func withoutAgent(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentGoneKey{}, true)
+}
+
+// agentGone reports whether ctx says its run's agent has gone (withoutAgent).
+func agentGone(ctx context.Context) bool {
+	gone, _ := ctx.Value(agentGoneKey{}).(bool)
+	return gone
+}
+
 func (h *Hooks) AfterTestRun(ctx context.Context, testRunID string, testSetIDs []string, coverage models.TestCoverage) error {
 	h.logger.Debug("AfterTestRun hook executed", zap.String("testRunID", testRunID), zap.Any("testSetIDs", testSetIDs), zap.Any("coverage", coverage))
+	if agentGone(ctx) {
+		h.logger.Debug("not calling the agent's after-test-run hook: under docker compose it went down with the last test set's stack")
+		return nil
+	}
 
 	if err := h.instrumentation.AfterTestRun(ctx, testRunID, testSetIDs, coverage); err != nil {
-		h.logger.Error("failed to call AfterTestRun hook", zap.Error(err))
+		utils.LogError(h.logger, err, "failed to call AfterTestRun hook")
 	}
 	return nil
 }

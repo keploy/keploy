@@ -150,6 +150,16 @@ func SetRedactor(r Redactor) {
 	globalRedactor.Store(redactorHolder{r: r})
 }
 
+// RedactText is text as a log line carries it: through the active redactor's
+// pass over encoded text (Redactor.RedactEncoded), or as it is with none. For
+// text that leaves the process outside a log line, as a log line would.
+func RedactText(text string) string {
+	if r := loadRedactor(); r != nil {
+		return r.RedactEncoded(text)
+	}
+	return text
+}
+
 func loadRedactor() Redactor {
 	v := globalRedactor.Load()
 	if v == nil {
@@ -205,7 +215,49 @@ func (c *redactingCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 			r.RedactField(&fields[i])
 		}
 	}
+	if ent.Level >= zapcore.ErrorLevel {
+		observeError(ent)
+	}
 	return c.Core.Write(ent, fields)
+}
+
+// errorObserver is what ObserveErrors set: told of each entry logged at ERROR
+// or above.
+var errorObserver atomic.Pointer[func(msg string)]
+
+// lastObserved is the entry errorObserver was last told of: an entry a logger
+// writes to two of its cores (the console and the debug file) is one entry.
+var lastObserved struct {
+	sync.Mutex
+	at  time.Time
+	msg string
+}
+
+// ObserveErrors has fn told the message of every entry logged at ERROR or above
+// from now on, by any logger this package builds (each writes through a
+// redacting core), once per entry, as redacted: the agent counts the
+// ERRORs of its start for the CLI that waits for it (utils.NoteBootError). A
+// nil fn stops it.
+func ObserveErrors(fn func(msg string)) {
+	if fn == nil {
+		errorObserver.Store(nil)
+		return
+	}
+	errorObserver.Store(&fn)
+}
+
+func observeError(ent zapcore.Entry) {
+	fn := errorObserver.Load()
+	if fn == nil {
+		return
+	}
+	lastObserved.Lock()
+	same := ent.Time.Equal(lastObserved.at) && ent.Message == lastObserved.msg
+	lastObserved.at, lastObserved.msg = ent.Time, ent.Message
+	lastObserved.Unlock()
+	if !same {
+		(*fn)(ent.Message)
+	}
 }
 
 // redactingWriter wraps a zapcore.WriteSyncer and runs the active Redactor's
@@ -319,22 +371,31 @@ func New() (*zap.Logger, *os.File, error) {
 		return NewANSIConsoleEncoder(config), nil
 	})
 
-	logFile, err := os.OpenFile("keploy-logs.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0777)
+	// The log file is this run's only when it is safely so (LogFileName); a
+	// run that refuses the file there logs to the console, and says why.
+	// A run that cannot open it at all (a read-only mount, a directory it may
+	// not write, one removed under it) loses the file, not the command: it
+	// logs to the console only, and says so once at debug (ChangeLogLevel).
+	logFile, refused, err := openLogFile()
+	note := ""
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open log file: %v", err)
+		note = err.Error()
 	}
-
-	err = os.Chmod("keploy-logs.txt", 0777)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to set the log file permission to 777: %v", err)
-	}
+	setLogFileNote(note)
 
 	LogCfg = defaultLogCfg()
 
 	// Build the core with our custom encoder
-	core := consoleCore(LogCfg, zapcore.NewMultiWriteSyncer(primarySyncer(), zapcore.AddSync(logFile)), LogCfg.Level)
+	sink := primarySyncer()
+	if logFile != nil {
+		sink = zapcore.NewMultiWriteSyncer(sink, zapcore.AddSync(logFile))
+	}
+	core := consoleCore(LogCfg, sink, LogCfg.Level)
 
 	logger := zap.New(newRedactingCore(core))
+	if refused != "" {
+		logger.Warn("not writing "+LogFileName+" in this directory; logging to the console only", zap.String("reason", refused))
+	}
 	return logger, logFile, nil
 }
 
@@ -376,8 +437,36 @@ func ChangeLogLevel(level zapcore.Level) (*zap.Logger, error) {
 	// Use our custom encoder when building
 	core := consoleCore(LogCfg, primarySyncer(), LogCfg.Level)
 
-	logger := zap.New(newRedactingCore(core))
-	return reattachDebugFileSink(logger), nil
+	logger := reattachDebugFileSink(zap.New(newRedactingCore(core)))
+	if level == zap.DebugLevel {
+		if note := takeLogFileNote(); note != "" {
+			logger.Debug("not writing "+LogFileName+" in this directory; logging to the console only", zap.String("reason", note))
+		}
+	}
+	return logger, nil
+}
+
+// logFileNote is why New could not open LogFileName, kept for the first
+// debug-level logger (ChangeLogLevel) to say, once: New runs at info level,
+// before --debug is read, so a debug line of its own would never show.
+var (
+	logFileNoteMu sync.Mutex
+	logFileNote   string
+)
+
+func setLogFileNote(note string) {
+	logFileNoteMu.Lock()
+	defer logFileNoteMu.Unlock()
+	logFileNote = note
+}
+
+// takeLogFileNote returns the note and clears it, so it is said only once.
+func takeLogFileNote() string {
+	logFileNoteMu.Lock()
+	defer logFileNoteMu.Unlock()
+	note := logFileNote
+	logFileNote = ""
+	return note
 }
 
 // RedirectToStderr re-creates the logger writing to stderr instead of stdout,

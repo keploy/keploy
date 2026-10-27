@@ -4,21 +4,26 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	glamour "charm.land/glamour/v2"
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/pkg/service/export"
 	postmanimport "go.keploy.io/server/v3/pkg/service/import"
 	"go.keploy.io/server/v3/utils"
@@ -91,12 +96,16 @@ func (t *Tools) Update(ctx context.Context) error {
 	}
 
 	t.logger.Info("Updating to Version: " + latestVersion)
-	downloadURL, err := updateDownloadURL(runtime.GOOS, runtime.GOARCH)
+	assetName, err := updateAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	wantSHA256, err := releaseAssetSHA256(releaseInfo, assetName)
 	if err != nil {
 		return err
 	}
 
-	err = t.downloadAndUpdate(ctx, t.logger, downloadURL)
+	err = t.downloadAndUpdate(ctx, t.logger, releaseAssetURL(latestVersion, assetName), wantSHA256)
 	if err != nil {
 		return err
 	}
@@ -123,21 +132,20 @@ func (t *Tools) Update(ctx context.Context) error {
 	return nil
 }
 
-// updateDownloadURL picks the latest-release archive for the running
-// platform. Asset names follow release.yml's keploy_<os>_<arch>.tar.gz.
-// macOS is published for arm64 only, so an Intel Mac gets an error rather
-// than a download that cannot run. That refusal also sets the process exit
-// code here, at the point where the platform is judged unsupported:
-// cli/update.go logs and returns nil on every Update error, so without it
-// `keploy update` on an Intel Mac would print the refusal and exit 0.
-func updateDownloadURL(goos, goarch string) (string, error) {
-	const base = "https://github.com/keploy/keploy/releases/latest/download/"
+// updateAssetName picks the release archive for the running platform. Asset
+// names follow release.yml's keploy_<os>_<arch>.tar.gz. macOS is published for
+// arm64 only, so an Intel Mac gets an error rather than a download that cannot
+// run, and so does a platform the update has no archive for. The refusal also
+// sets the process exit code here, at the point where the platform is judged
+// unsupported: cli/update.go logs and returns nil on every Update error, so
+// without it `keploy update` would print the refusal and exit 0.
+func updateAssetName(goos, goarch string) (string, error) {
 	switch goos {
 	case "linux":
 		if goarch == "amd64" {
-			return base + "keploy_linux_amd64.tar.gz", nil
+			return "keploy_linux_amd64.tar.gz", nil
 		}
-		return base + "keploy_linux_arm64.tar.gz", nil
+		return "keploy_linux_arm64.tar.gz", nil
 	case "darwin":
 		if goarch != "arm64" {
 			// Retrying cannot help -- there is no asset for this OS/arch -- so
@@ -145,12 +153,51 @@ func updateDownloadURL(goos, goarch string) (string, error) {
 			utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
 			return "", fmt.Errorf("keploy's native macOS build is Apple Silicon (arm64) only; this Mac is %s. On an Intel Mac, run Keploy inside Lima: https://keploy.io/docs/installation/macos-installation/#option-2-install-keploy-with-lima", goarch)
 		}
-		return base + "keploy_darwin_arm64.tar.gz", nil
+		return "keploy_darwin_arm64.tar.gz", nil
 	}
-	return "", nil
+	utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+	return "", fmt.Errorf("`keploy update` has no release archive for %s/%s; install the new version the way you installed this one", goos, goarch)
 }
 
-func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL string) error {
+// releaseAssetURL is where asset name of release tag downloads from: that
+// release's own, not latest/, so the bytes installed are the release whose
+// version was announced and whose digest is checked -- latest/ can move to a
+// newer release in between.
+func releaseAssetURL(tag, name string) string {
+	return "https://github.com/keploy/keploy/releases/download/" + url.PathEscape(tag) + "/" + url.PathEscape(name)
+}
+
+// releaseAssetSHA256 is the sha256 GitHub publishes for asset name of release,
+// as lower-case hex. A release without one is refused: an update that cannot
+// be checked is not installed.
+func releaseAssetSHA256(release utils.GitHubRelease, name string) (string, error) {
+	for _, a := range release.Assets {
+		if a.Name != name {
+			continue
+		}
+		sum, ok := strings.CutPrefix(a.Digest, "sha256:")
+		if !ok || len(sum) != sha256.Size*2 {
+			return "", fmt.Errorf("release %s publishes no sha256 for %s (digest %q); refusing to install bytes that cannot be checked", release.TagName, name, a.Digest)
+		}
+		if _, err := hex.DecodeString(sum); err != nil {
+			return "", fmt.Errorf("release %s publishes a malformed sha256 for %s (%q); refusing to install bytes that cannot be checked", release.TagName, name, a.Digest)
+		}
+		return strings.ToLower(sum), nil
+	}
+	utils.SetExitCodeOnce(utils.ExitUnsupportedPlatform)
+	return "", fmt.Errorf("release %s has no %s -- it may not publish a binary for this platform", release.TagName, name)
+}
+
+// downloadAndUpdate replaces the installed keploy with the archive at
+// downloadURL, whose sha256 must be wantSHA256.
+//
+// The new binary is written to a file of its own, created next to the one it
+// replaces with an unpredictable name, made 0755 through that file, and
+// renamed over it: an atomic replace on one filesystem. This used to extract
+// to the fixed /tmp/keploy -- a path anyone on the host can plant first -- and
+// then chmod the installed binary 0777, so after a `sudo keploy update` any
+// local user could replace a binary root runs.
+func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downloadURL, wantSHA256 string) error {
 	// Create a new request with context
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
@@ -182,7 +229,8 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 			downloadURL, resp.Status, runtime.GOOS, runtime.GOARCH)
 	}
 
-	// Create a temporary file to store the downloaded tar.gz
+	// The archive, in a file of its own (os.CreateTemp: a random name, created
+	// exclusively, 0600), hashed as it is written.
 	tmpFile, err := os.CreateTemp("", "keploy-download-*.tar.gz")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %v", err)
@@ -195,47 +243,68 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 			utils.LogError(logger, err, "failed to remove temporary file")
 		}
 	}()
+	hash := sha256.New()
+	if err := copyCapped(io.MultiWriter(tmpFile, hash), resp.Body, maxDownloadBytes); err != nil {
+		return fmt.Errorf("failed to download %s: %v", downloadURL, err)
+	}
+	if got := hex.EncodeToString(hash.Sum(nil)); got != wantSHA256 {
+		return fmt.Errorf("the download of %s hashed to sha256 %s, but the release publishes %s; refusing to install it", downloadURL, got, wantSHA256)
+	}
 
-	// Write the downloaded content to the temporary file
-	_, err = io.Copy(tmpFile, resp.Body)
+	target, err := updateTarget()
 	if err != nil {
-		return fmt.Errorf("failed to write to temporary file: %v", err)
+		return err
 	}
-
-	// Extract the tar.gz file
-	if err := extractTarGz(tmpFile.Name(), "/tmp"); err != nil {
-		return fmt.Errorf("failed to extract tar.gz file: %v", err)
+	staged, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create the new binary beside %s: %v", target, err)
 	}
-
-	// Determine the path based on the alias "keploy"
-	aliasPath := "/usr/local/bin/keploy" // Default path
-
-	keployPath, err := exec.LookPath("keploy")
-	if err == nil && keployPath != "" {
-		aliasPath = keployPath
+	installed := false
+	defer func() {
+		if !installed {
+			_ = staged.Close()
+			_ = os.Remove(staged.Name())
+		}
+	}()
+	// Extracted from the file just hashed, through the same handle: opened
+	// again by name, it could be another file by then.
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to read the download back: %v", err)
 	}
-
-	// Check if the aliasPath is a valid path
-	_, err = os.Stat(aliasPath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("alias path %s does not exist", aliasPath)
+	if err := extractBinary(tmpFile, "keploy", staged); err != nil {
+		return fmt.Errorf("failed to extract the keploy binary: %v", err)
 	}
-
-	// Check if the aliasPath is a directory
-	if fileInfo, err := os.Stat(aliasPath); err == nil && fileInfo.IsDir() {
-		return fmt.Errorf("alias path %s is a directory, not a file", aliasPath)
+	if err := staged.Chmod(0o755); err != nil {
+		return fmt.Errorf("failed to make the new binary executable: %v", err)
 	}
-
-	// Move the extracted binary to the alias path
-	if err := os.Rename("/tmp/keploy", aliasPath); err != nil {
-		return fmt.Errorf("failed to move keploy binary to %s: %v", aliasPath, err)
+	if err := staged.Sync(); err != nil {
+		return fmt.Errorf("failed to write the new binary: %v", err)
 	}
-
-	if err := os.Chmod(aliasPath, 0777); err != nil {
-		return fmt.Errorf("failed to set execute permission on %s: %v", aliasPath, err)
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("failed to write the new binary: %v", err)
 	}
-
+	if err := os.Rename(staged.Name(), target); err != nil {
+		return fmt.Errorf("failed to move keploy binary to %s: %v", target, err)
+	}
+	installed = true
 	return nil
+}
+
+// updateTarget is the installed keploy the update replaces: the one on PATH,
+// or /usr/local/bin/keploy.
+func updateTarget() (string, error) {
+	target := "/usr/local/bin/keploy" // Default path
+	if keployPath, err := exec.LookPath("keploy"); err == nil && keployPath != "" {
+		target = keployPath
+	}
+	fi, err := os.Stat(target)
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("alias path %s does not exist", target)
+	}
+	if err == nil && fi.IsDir() {
+		return "", fmt.Errorf("alias path %s is a directory, not a file", target)
+	}
+	return target, nil
 }
 
 // maxExtractedArchiveBytes caps the decompressed size of the self-update
@@ -243,79 +312,63 @@ func (t *Tools) downloadAndUpdate(ctx context.Context, logger *zap.Logger, downl
 // crafted artifact from exhausting disk or RAM (#3867).
 const maxExtractedArchiveBytes = 1 << 30 // 1 GiB
 
-func extractTarGz(gzipPath, destDir string) error {
-	return extractTarGzWithLimit(gzipPath, destDir, maxExtractedArchiveBytes)
+// maxDownloadBytes caps the self-update download itself, which is written
+// out in full before its digest can be checked. A release archive is tens of
+// megabytes.
+const maxDownloadBytes = 256 << 20 // 256 MiB
+
+// copyCapped copies src to dst, failing once more than limit bytes come.
+func copyCapped(dst io.Writer, src io.Reader, limit int64) error {
+	n, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err != nil {
+		return err
+	}
+	if n > limit {
+		return fmt.Errorf("it is larger than %d bytes, which no release archive is", limit)
+	}
+	return nil
 }
 
-// extractTarGzWithLimit is the testable seam: the production cap stays a
+// extractBinary copies the regular file called name out of the tar.gz read
+// from archive into dst. Nothing else in the archive is written anywhere.
+func extractBinary(archive io.Reader, name string, dst io.Writer) error {
+	return extractBinaryWithLimit(archive, name, dst, maxExtractedArchiveBytes)
+}
+
+// extractBinaryWithLimit is the testable seam: the production cap stays a
 // constant while tests exercise the bound without gigabyte archives.
-func extractTarGzWithLimit(gzipPath, destDir string, limit int64) error {
-	file, err := os.Open(gzipPath)
+func extractBinaryWithLimit(archive io.Reader, name string, dst io.Writer, limit int64) error {
+	gzipReader, err := gzip.NewReader(archive)
 	if err != nil {
 		return err
 	}
-
-	defer func() {
-		if err := file.Close(); err != nil {
-			utils.LogError(nil, err, "failed to close file")
-		}
-	}()
-
-	gzipReader, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-
 	defer func() {
 		if err := gzipReader.Close(); err != nil {
 			utils.LogError(nil, err, "failed to close gzip reader")
 		}
 	}()
 
-	// Cap total decompressed output: the update artifact is a keploy
-	// release tarball (well under the cap), and without a bound a crafted
-	// archive can exhaust disk/RAM via io.Copy below (#3867). Note /tmp is
-	// commonly tmpfs, so the copy target may be RAM-backed.
+	// Cap total decompressed output: the update artifact is a keploy release
+	// tarball (well under the cap), and without a bound a crafted archive can
+	// exhaust disk/RAM via io.Copy below (#3867).
 	tarReader := tar.NewReader(pkg.NewCappedReader(gzipReader, limit))
-
 	for {
 		header, err := tarReader.Next()
 		if err == io.EOF {
-			break
+			return fmt.Errorf("the archive holds no %s", name)
 		}
 		if err != nil {
 			return err
 		}
-
-		fileName := filepath.Clean(header.Name)
-		if strings.Contains(fileName, "..") {
-			return fmt.Errorf("invalid file path: %s", fileName)
+		if filepath.Clean(header.Name) != name {
+			continue
 		}
-
-		target := filepath.Join(destDir, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0777); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			outFile, err := os.Create(target)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(outFile, tarReader); err != nil {
-				if err := outFile.Close(); err != nil {
-					return err
-				}
-				return err
-			}
-			if err := outFile.Close(); err != nil {
-				return err
-			}
+		if header.Typeflag != tar.TypeReg {
+			return fmt.Errorf("%s in the archive is not a regular file", name)
 		}
+		_, err = io.Copy(dst, tarReader)
+		return err
 	}
-	return nil
 }
 
 // WriteMinimalConfig writes a keploy.yml holding only what a developer
@@ -777,14 +830,43 @@ func (t *Tools) IgnoreTestSet(_ context.Context, _ string) error {
 
 func (t *Tools) Templatize(ctx context.Context) error {
 
+	all, err := t.testDB.GetAllTestSetIDs(ctx)
+	if err != nil {
+		utils.LogError(t.logger, err, "failed to get all test sets")
+		return err
+	}
 	testSets := t.config.Templatize.TestSets
 	if len(testSets) == 0 {
-		all, err := t.testDB.GetAllTestSetIDs(ctx)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to get all test sets")
+		testSets = all
+	}
+	// A named set that is not recorded was skipped as empty: -t
+	// "test-set-1,test-set-3" templatized test-set-1 alone and exited 0. It
+	// is refused, naming it, under the proven switch and, with the switch
+	// off, when the command line named it; with the switch off, one
+	// keploy.yml's templatize.testSets inherited is left out with a warning
+	// naming it, as keploy test leaves one out (Replayer.selectTestSets).
+	var unknown, known []string
+	for _, name := range testSets {
+		if slices.Contains(all, name) {
+			known = append(known, name)
+		} else {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		if provenswitch.On() || t.config.Templatize.TestSetsFromCommandLine {
+			err := fmt.Errorf("the test set(s) %s named for keploy templatize are not recorded", strings.Join(unknown, ", "))
+			utils.LogError(t.logger, err, "keploy templatize names a test set that is not recorded, so it templatizes none",
+				zap.Strings("notRecorded", unknown),
+				zap.Strings("recorded", all),
+				zap.String("next_step", "name only recorded test sets in -t/--testsets (comma-separated) or in templatize.testSets in keploy.yml"))
 			return err
 		}
-		testSets = all
+		t.logger.Warn("keploy.yml's templatize.testSets names a test set that is not recorded, so keploy templatize leaves it out",
+			zap.Strings("notRecorded", unknown),
+			zap.Strings("recorded", all),
+			zap.String("next_step", "remove the set from templatize.testSets in keploy.yml, or record it with keploy record; named with -t, or with the proven switch on, a set that is not recorded fails the run"))
+		testSets = known
 	}
 
 	if len(testSets) == 0 {
@@ -792,26 +874,12 @@ func (t *Tools) Templatize(ctx context.Context) error {
 		return nil
 	}
 
-	for _, testSetID := range testSets {
-
-		testSet, err := t.testSetConf.Read(ctx, testSetID)
-		if err == nil && (testSet != nil && testSet.Template != nil) {
-			utils.TemplatizedValues = testSet.Template
-		} else {
-			utils.TemplatizedValues = make(map[string]interface{})
-		}
-
-		if err == nil && (testSet != nil && testSet.Secret != nil) {
-			utils.SecretValues = testSet.Secret
-		} else {
-			utils.SecretValues = make(map[string]interface{})
-		}
-
+	for i, testSetID := range testSets {
 		// Get test cases from the database
 		tcs, err := t.testDB.GetTestCases(ctx, testSetID)
 		if err != nil {
-			utils.LogError(t.logger, err, "failed to get test cases")
-			return err
+			utils.LogError(t.logger, err, "failed to get test cases", zap.String("testSet", testSetID))
+			return t.templatizeStopped(testSetID, testSets[i+1:], err)
 		}
 
 		if len(tcs) == 0 {
@@ -819,11 +887,22 @@ func (t *Tools) Templatize(ctx context.Context) error {
 			continue
 		}
 
-		err = t.ProcessTestCasesV2(ctx, tcs, testSetID)
-		if err != nil {
-			utils.LogError(t.logger, err, "failed to process test cases")
-			return err
+		// ProcessTestCasesV2 logs what stopped it, with its next step.
+		if err := t.ProcessTestCasesV2(ctx, tcs, testSetID); err != nil {
+			return t.templatizeStopped(testSetID, testSets[i+1:], err)
 		}
 	}
 	return nil
+}
+
+// templatizeStopped is the error keploy templatize returns when it stops at
+// testSetID, whose own line said why: the test sets after it, not
+// templatized in this run, are named, and the command exits non-zero.
+func (t *Tools) templatizeStopped(testSetID string, rest []string, err error) error {
+	if len(rest) > 0 {
+		t.logger.Warn(fmt.Sprintf("keploy templatize stopped at test set %s, so it did not templatize the test sets after it", testSetID),
+			zap.Strings("notTemplatized", rest),
+			zap.String("next_step", "fix what the error for "+testSetID+" says, then run keploy templatize again: it leaves every set it already wrote as it is"))
+	}
+	return fmt.Errorf("keploy templatize stopped at test set %s: %w", testSetID, err)
 }

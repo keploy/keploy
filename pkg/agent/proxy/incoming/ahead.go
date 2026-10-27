@@ -107,7 +107,7 @@ func (a *aheadReader) run() {
 		a.mu.Unlock()
 
 		n, err := a.conn.Read(buf)
-		at := time.Now()
+		at := clockNow()
 
 		a.mu.Lock()
 		if n > 0 && !a.closed {

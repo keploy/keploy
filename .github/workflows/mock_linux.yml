@@ -6,14 +6,40 @@ name: Mock Mode Regression (Linux)
 # and asserts (a) the suite still passes entirely from mocks, (b) per-test
 # mappings are written via the scope API, and (c) a failing runner propagates a
 # non-zero exit code. Runs the PR `build` binary for both record and replay.
-# Another replays two concurrent workers under different named scopes and
-# asserts each is served only its own scope's mocks. Another replays a stateful
+# The lanes run their keploy commands both ways: without the proven switch
+# (today's default) and under KEPLOY_PROVEN=1, which the flip makes the default;
+# their harnesses speak scope protocol v1 (mock/keploy_v1.py). Each way runs in
+# a job of its own (MOCK_LANE_SWITCH, mock/lane_switch.sh): mock_linux without
+# the switch, mock_linux_proven under it, so neither's length decides whether
+# the other finishes. (The record exit-codes lane is not one of them: it runs
+# `keploy record` without the switch only, in mock_linux.) Under the switch
+# this build refuses a replay (it does not judge each test) and a docker
+# command, and the lanes assert those refusals.
+# Another, under the switch, asserts a second test process and a second open
+# test are refused (one_test_process_at_a_time, one_test_at_a_time) until
+# release 2; without it, replays two concurrent workers under different named
+# scopes and asserts each is served only its own scope's mocks. Another replays a stateful
 # dependency (one request recorded several times) and asserts record order,
-# per worker and per scope. Another replays with the
+# per worker and per scope, and, with consume-once mocks, that a mock a test
+# consumed is not served again after that test's end (on the worker's pid). Another runs more short-lived processes than the
+# agent's PID map holds between two calls and asserts both are recorded, then
+# replayed without reaching the dependency. Another records, under the
+# proven switch, three containers of one image, configured apart, on random
+# published ports and asserts each call's mock names its container by its
+# key (repository, port and configuration's fingerprint), the same again with
+# new containers on new ports, and for one test alone.
+# Another holds more LIVE processes than the agent's PID map holds while a
+# call is made, and asserts record keeps nothing and replay fails, both saying
+# the agent could not track a process (and the pid_map_overflow job runs the
+# hooks' side of that against keploy's BPF object, as root). Another does the
+# same to `keploy test --remove-unused-mocks`, and asserts the test set fails
+# and the recording loses no mock for the calls the agent did not see.
+# Another replays with the
 # network off (loopback only), as on a laptop with its Wi-Fi off, and records a
 # dependency on loopback the same way. Another runs the same binary where its
 # agent cannot start, and asserts the run fails at once with the code that
-# names why, the test never run. Another gives it a keploy.yml, an override
+# names why, the test never run: `keploy mock record|replay`, `keploy record`
+# and `keploy test` alike. Another gives it a keploy.yml, an override
 # and reports that are not regular files (a FIFO, or a symlink to /dev/zero:
 # git stores the symlink, not a FIFO) and asserts each is refused fast, saying
 # why. Another hangs up on a recording's terminal, as the VS Code extension's
@@ -21,6 +47,29 @@ name: Mock Mode Regression (Linux)
 # a recording with `keploy test --base-path` against an app that is already
 # running, which uses no agent and no mocks at all, and asserts the tests are
 # sent to the base path and the report and the exit code follow their result.
+# Another records an app that mints ids and cookies, templatizes the set and
+# asserts it replays with each run's values, that a wrong id in an answer
+# fails, and that keploy normalize keeps the placeholders; once recorded by
+# this build and once by the released keploy. Another follows a test variable
+# (an id an app mints) through its dependency calls under the proven switch,
+# and asserts a read-back of another id fails with the variable as evidence.
+# Another replays keploy #4686's request-drift app under the proven switch and
+# asserts a call to another host or container fails naming it, while a
+# container configured the same on a new random port is matched by its key;
+# and an aws-sdk-go-v2 S3 app against LocalStack, whose SigV4-signed calls
+# replay under the switch while another region or key id fails naming it.
+# Another (proven_fire_and_forget_linux) replays an app's fire-and-forget
+# publish, on a connection it opens and on one it keeps, with tc netem holding
+# every packet to keploy's proxy 1 s, and asserts the call is judged in its
+# own test: never in the next one, never not at all. The same job replays a
+# publish the app makes after it answered a test (P101), and asserts it is
+# judged in the test it was made in, failing the set and keploy test.
+# Another replays an app that passes keploy's own plain-text "no matching mock"
+# on with its 200 where JSON was recorded, and asserts the test fails on its
+# body, with the switch on and off.
+# Another records and replays an app whose request starts a daemon (a child
+# that starts it in a session of its own and exits), and asserts the daemon's
+# call is recorded and replayed from its mock, never sent to the real upstream.
 on:
   workflow_call:
     inputs:
@@ -40,7 +89,11 @@ jobs:
     if: ${{ inputs.jobs_to_run == 'all' }}
     runs-on: ${{ inputs.runner }}
     name: mock-mode (record_replay_build)
-    timeout-minutes: 20
+    timeout-minutes: 30
+    # The mock lanes' runs without the proven switch; mock_linux_proven runs
+    # their runs under it.
+    env:
+      MOCK_LANE_SWITCH: 'off'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -83,6 +136,9 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
 
+      # Parallel test workers, without the switch: two concurrent pid-scoped
+      # workers are each served only their own scope's mocks. (Its switched
+      # half, the refusal check, runs in mock_linux_proven.)
       - name: Run mock-mode parallel-scope e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -92,7 +148,11 @@ jobs:
 
       # A stateful dependency (the same request recorded several times) must
       # replay in record order then saturate — unscoped, per concurrent scoped
-      # worker, and from the start again for a re-run of a test.
+      # worker, and from the start again for a re-run of a test. With
+      # consume-once mocks (KEPLOY_STRICT_MOCK_WINDOW=1), a mock a test
+      # consumed must not be served again after that test's end, on the
+      # worker's pid; a control shows the same call is answered while the
+      # mock is unconsumed.
       - name: Run mock-mode stateful-dependency e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
@@ -100,17 +160,97 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
 
+      # A test command that runs more short-lived processes than the agent's
+      # PID map holds (10240) must still have the calls of every later process
+      # recorded, and replayed without reaching the real dependency. The map
+      # used to keep every process that ever called socket(), so once it was
+      # full later calls went live, silently.
+      - name: Run mock-mode process-churn e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
+
+      # Container keys, without the switch: a recording made without it
+      # carries none. (Its switched half runs in mock_linux_proven: the proven
+      # model names a dependency that runs in a container by the container,
+      # container:<repository>:<port>@<fingerprint of its configuration>,
+      # the same on new ports or for one test alone.)
+      - name: Run mock-mode container-keys e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-container-keys-linux.sh"
+
+      # More LIVE processes than the agent's PID map holds (10240) leave the
+      # next process untracked: its calls go to the real dependency. Record
+      # must keep nothing and replay must fail, both exiting non-zero and
+      # saying why, where both used to exit 0 with nothing said.
+      - name: Run mock-mode PID map overflow e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-pid-map-overflow-linux.sh"
+
+      # The same overflow under `keploy test --remove-unused-mocks`: the app's
+      # dependency calls are made by processes the full map refuses, so they
+      # reach the real dependency and their tests pass. The test set must fail
+      # as capture incomplete, and the mocks recorded for those calls, which
+      # nobody consumed, must not be pruned from the recording (they were, and
+      # the run exited 0).
+      - name: Run test-mode PID map overflow e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/test-pid-map-overflow-linux.sh"
+
+      # The proven model's mock.real (KEPLOY_PROVEN=1, design v14 §4): an
+      # address entry and a name entry only the hosts file maps are reached
+      # for real and never recorded, and each test's recording lists the ones
+      # it used; another name at the same address is recorded, and a
+      # connection to it whose name keploy cannot read is closed as
+      # capture_incomplete. Without the switch the list is not read.
+      - name: Run mock-mode mock.real e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-real-deps-linux.sh"
+
+      # mock.real in keploy record and keploy test: a test case lists the REAL
+      # destination its request used and replays with it reached for real (a
+      # REAL case on the real clock); with it down, the run fails, saying the
+      # destination its recordings list was never reached.
+      - name: Run record/test mock.real e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/real-deps-record-test-linux.sh"
+
       - name: Run mock-mode offline e2e
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-offline-linux.sh"
 
-      - name: Run mock-mode agent-cannot-start e2e
+      - name: Run agent-cannot-start e2e (mock record/replay, record, test)
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
+
+      # `keploy record`'s exit code says how the recording ended: an app that
+      # exits 0 or is stopped (SIGTERM, SIGINT), the record timer and an
+      # interrupt to keploy are 0; an app that dies otherwise (its own code,
+      # SIGKILL) is its own code (#4772). The real binary, agent and signals.
+      - name: Run record exit-codes e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/record-exit-codes-linux.sh"
 
       # A command that runs in Podman is refused at once by this build, with
       # exit code 4 and where to get a keploy that records it, and never after
@@ -158,3 +298,437 @@ jobs:
           REPLAY_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/base-path-linux.sh"
+
+      # keploy record / keploy templatize / keploy test for values an app makes
+      # on every run: templatize writes {{capture ...}} where the create answers
+      # an id and a seven-digit order number and where the login sets two
+      # cookies (one with an Expires date), a use of the id in the create's own
+      # Location, and a use placeholder at each later request that sends them.
+      # The set must pass with this run's values sent (the number as its
+      # digits, both cookies), templatize must be idempotent, an answer naming
+      # another id must fail even when the create answers the recorded id and
+      # even under noise on that field, keploy test must never write
+      # config.yaml (--update-template included), keploy normalize must keep
+      # the placeholders, and no log may hold an ERROR or a data race. The
+      # only e2e of keploy templatize.
+      - name: Run templates record/templatize/test e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/templates-test-linux.sh"
+
+      # keploy record / keploy test with KEPLOY_PROVEN=1 for a test variable
+      # followed through dependency calls: an app mints an order id, sends it
+      # to an HTTP dependency and reads the order back twice by it. With the
+      # variables the learn step writes on the mocks (the script writes them,
+      # as it would), the set must pass: the id is bound where the app first
+      # sends it, asserted at each read-back, answered in record order and
+      # named in every answer. A read-back of another id, of the recorded id,
+      # one made before the create, and an id sent as a number must each fail
+      # with the variable as evidence; with the switch off the block must
+      # change no verdict.
+      - name: Run variables record/test e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
+
+      # The same, recorded by the released keploy and templatized and tested by
+      # this build: what an upgrading user has. The recording format did not
+      # change.
+      - id: latest
+        uses: ./.github/actions/download-binary
+        with:
+          src: latest
+
+      - name: Run templates e2e (record latest, templatize and test build)
+        env:
+          RECORD_BIN: ${{ steps.latest.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/templates-test-linux.sh"
+
+      # The variables e2e on a recording the released keploy made: the block is
+      # written on mocks an older keploy recorded, as the learn step will do
+      # for a user who upgrades.
+      - name: Run variables e2e (record latest, test build)
+        env:
+          RECORD_BIN: ${{ steps.latest.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/variables-test-linux.sh"
+
+  # The mock lanes' runs under the proven switch (KEPLOY_PROVEN=1), which the
+  # flip makes the default: each lane's record under the switch, and the
+  # refusals this build makes there (a replay, a docker command, a second test
+  # process or open test). A job of its own, beside mock_linux's runs without
+  # the switch.
+  mock_linux_proven:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: mock-mode (record_replay_build, KEPLOY_PROVEN)
+    timeout-minutes: 30
+    env:
+      MOCK_LANE_SWITCH: 'on'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run mock-mode e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-linux.sh"
+
+      - name: Run mock-mode non-destructive-record e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-nondestructive-linux.sh"
+
+      - name: Run mock CLI exit-codes e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-cli-exit-codes-linux.sh"
+
+      # Until release 2: a second test process claiming the run, and a test
+      # begun while another is open, are refused (422
+      # one_test_process_at_a_time, one_test_at_a_time); the run does not pass.
+      - name: Run mock-mode parallel refusal e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-parallel-linux.sh"
+
+      - name: Run mock-mode stateful-dependency e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-stateful-linux.sh"
+
+      - name: Run mock-mode process-churn e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-process-churn-linux.sh"
+
+      - name: Run mock-mode container-keys e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-container-keys-linux.sh"
+
+      - name: Run mock-mode offline e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-offline-linux.sh"
+
+      - name: Run mock-mode agent-cannot-start e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-agent-cannot-start-linux.sh"
+
+      - name: Run mock-mode config-guard e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-config-guard-linux.sh"
+
+      - name: Run mock-mode hang-up e2e (KEPLOY_PROVEN)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/mock/mock-hangup-linux.sh"
+
+  # Strict HTTP matching under the proven switch (row S1), on keploy #4686's
+  # request-drift app: its response never shows where or what its dependency
+  # call sent, so only the call can show it. Replayed under the switch, a call
+  # to another host, to a container configured otherwise or of another
+  # repository, or with another body value must fail the test naming the
+  # field, while a container configured the same on a new random port is
+  # matched by its key; without the switch every case passes, as on main. Its
+  # own job: the mock-mode job above is near its timeout. Then an AWS SDK's
+  # SigV4-signed calls (founder decision 25): the Authorization header is
+  # compared by its parts, its signature not at all, so the set replays under
+  # the switch, and fails naming the part when the region or key id differs.
+  proven_strict_http_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: proven strict-HTTP (record_replay_build)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Ensure yq
+        run: |
+          # The script reads its reports with yq, which the runner image ships;
+          # install it only if a future image drops it.
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      - name: Run proven strict-HTTP e2e (request drift)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
+
+      # Container keys a release recorded in the legacy form (v3.6.126 to
+      # v3.6.130 hashed a container's configuration with its secrets),
+      # replayed by this build: each recorded key is compared in its own form,
+      # so a container configured the same matches its recording and one
+      # configured otherwise misses. Pinned to the last release that wrote
+      # that form: a later one writes the current form. Should the leg break
+      # for a reason that is not the legacy form (the recorder and this build
+      # drift apart), either keep supporting recordings v3.6.130 and earlier
+      # made under the switch, or retire the legacy form whole
+      # (containerkey's legacyFingerprint, SameKey's legacy branch,
+      # LegacyKeyFromContext, and this leg) -- never weaken the leg.
+      - name: Download keploy v3.6.130 (the last release that wrote legacy container keys)
+        id: legacy
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p legacy-keploy
+          URL="https://github.com/keploy/keploy/releases/download/v3.6.130/keploy_linux_amd64.tar.gz"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 "$URL" -o legacy-keploy/keploy.tar.gz
+          tar -xzf legacy-keploy/keploy.tar.gz -C legacy-keploy
+          chmod +x legacy-keploy/keploy
+          echo "path=$PWD/legacy-keploy/keploy" >> "$GITHUB_OUTPUT"
+
+      - name: Run proven strict-HTTP e2e (container keys recorded in the legacy form)
+        if: ${{ !cancelled() && steps.legacy.outcome == 'success' }}
+        env:
+          RECORD_BIN: ${{ steps.legacy.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+          LEGACY_KEYS: "1"
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/request-drift/proven-strict-http-linux.sh"
+
+      - name: Run proven strict-HTTP e2e (AWS SigV4 against LocalStack)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/aws-sigv4/proven-aws-sigv4-linux.sh"
+
+      # A response body of another kind than the recorded one fails its test,
+      # with the switch on or off (O-K): an app that answers keploy's own
+      # plain-text "no matching mock" with its 200, where the test recorded
+      # JSON, passed as a non-JSON body that is not compared.
+      - name: Run body-kind e2e (a response body of another kind fails)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/body-kind/body-kind-linux.sh"
+
+      # A daemon the app starts (a child that starts it in a session of its
+      # own and exits, as pg_ctl start does) stays a member of the run under
+      # the proven switch (P146): its call is recorded, and replayed from its
+      # mock, never sent to the real upstream unseen.
+      - name: Run daemonized-members e2e (a daemon the app starts is the run's)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/daemonized/proven-daemonized-linux.sh"
+
+  # A fire-and-forget call is the test's own under the proven switch, however
+  # late its bytes reach keploy's proxy (design v14 §5.2): on a connection the
+  # application opens for it (the agent's count of the application's
+  # connections) and on one it opened at startup and keeps (the bytes on the
+  # connections the proxy holds). Every non-SYN packet to the proxy's port is
+  # held 1 s with tc netem, so a test's end reads while the call is still on
+  # its way: the call must be judged in its own test, never in the next one or
+  # not at all. Its own job: the mock-mode jobs above are near their timeouts.
+  proven_fire_and_forget_linux:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    runs-on: ${{ inputs.runner }}
+    name: proven fire-and-forget (record_replay_build)
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          repository: keploy/keploy
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Ensure yq
+        run: |
+          if command -v yq >/dev/null 2>&1; then
+            echo "using preinstalled $(yq --version)"
+            exit 0
+          fi
+          echo "yq not present on this image; installing"
+          curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          chmod +x yq
+          sudo mv yq /usr/bin/
+
+      # netem holds the packets; the runner's kernel ships it in
+      # linux-modules-extra, which the image may not have installed.
+      - name: Ensure sch_netem
+        run: |
+          if sudo modprobe sch_netem 2>/dev/null; then
+            echo "sch_netem loaded"
+            exit 0
+          fi
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/apt-install.sh" "linux-modules-extra-$(uname -r)"
+          sudo modprobe sch_netem
+
+      # The bytes wait's target under local transmit drops: a segment dropped
+      # on its way out is counted twice in tcpi_bytes_sent, once in the target
+      # (pairbytes_localdrop_linux_test.go), in a network namespace of its own,
+      # a netfilter rule dropping every 20th segment (deterministic).
+      # And the clean close whose FIN the wait finds unacknowledged, and the
+      # orphan whose FIN is held unacknowledged, then let through
+      # (pairbytes_closes_linux_test.go), which need a socket filter.
+      - name: Run the bytes wait's root tests (local drops, unacknowledged FINs)
+        run: |
+          set -o pipefail
+          go test -c -tags viper_bind_struct -o /tmp/proxy.test ./pkg/agent/proxy/
+          sudo unshare -n sh -c 'ip link set lo up && KEPLOY_LOCAL_DROP_TEST=1 /tmp/proxy.test -test.run "^TestTheTargetCountsALocallyDroppedSegmentOnce$" -test.count=5 -test.v' | tee /tmp/localdrop.out
+          grep -q -- "--- PASS: TestTheTargetCountsALocallyDroppedSegmentOnce" /tmp/localdrop.out
+          if grep -q -- "--- SKIP" /tmp/localdrop.out; then echo "::error::the local-drop test skipped"; exit 1; fi
+          # As root, which any kernel lets attach a socket filter to a TCP
+          # socket (Linux 7 refuses an unprivileged one, and the test skips).
+          sudo /tmp/proxy.test -test.run "^TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss$" -test.count=5 -test.v | tee /tmp/lastack.out
+          grep -q -- "--- PASS: TestTheProxysCloseThenTheApplicationsUnacknowledgedFINIsNoLoss" /tmp/lastack.out
+          if grep -q -- "--- SKIP" /tmp/lastack.out; then echo "::error::the LAST_ACK test skipped"; exit 1; fi
+          # The bytes wait on a closed connection whose orphan the filter
+          # holds from the application's FIN, or from the ACK of its own.
+          sudo /tmp/proxy.test -test.run "^(TestAnOrphansMoveRestartsTheBytesWaitsBudget|TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor)$" -test.count=5 -test.v | tee /tmp/orphanfin.out
+          grep -q -- "--- PASS: TestAnOrphansMoveRestartsTheBytesWaitsBudget" /tmp/orphanfin.out
+          grep -q -- "--- PASS: TestAFINStillOnItsWayToAClosedConnectionIsWaitedFor" /tmp/orphanfin.out
+          if grep -q -- "--- SKIP" /tmp/orphanfin.out; then echo "::error::an orphan-FIN test skipped"; exit 1; fi
+
+      - name: Run proven fire-and-forget e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-fire-and-forget-linux.sh"
+
+      # A publish the app makes after it answered a test is judged in the test
+      # open when it is made (P101): a changed one fails that test, the set,
+      # and keploy test; so does one the app no longer makes, on a connection
+      # of its own opened and closed inside the test (P091). One it makes as
+      # it starts, before the set's first test, fails the set (F2).
+      - name: Run proven after-answer e2e
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/fire-and-forget/proven-after-answer-linux.sh"
+
+  # The hooks' side of a full PID map, against keploy's own BPF object on the
+  # runner's kernel: live processes fill target_namespace_pids (loaded small,
+  # so the test's own processes fill it), the kernel refuses the next one, and
+  # the hooks count it (GET /agent/pidmaps) and WARN once. And the kernel's
+  # count of the connections completed to the proxy's listener agrees with the
+  # proxy's count of its accepts, through the proxy's real accept loop and the
+  # agent's wait (what a test's end waits on). Root-only, so they are
+  # behind the pidmap_integration and proxyconns_integration tags (two
+  # binaries) and never in `go test ./...`. amd64 and arm64: each runs its
+  # own architecture's object.
+  pid_map_overflow:
+    if: ${{ inputs.jobs_to_run == 'all' }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    name: mock-mode PID map overflow (hooks, root, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install dependencies
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry mod download
+
+      # Compiled as the runner user, run as root: the test loads BPF programs
+      # and creates a PID namespace.
+      - name: Build the PID map integration test
+        run: go test -c -tags 'viper_bind_struct pidmap_integration' -o /tmp/pidmap.test ./pkg/agent/hooks/linux/
+
+      # The proxy's counts against the same object, in a binary of their own:
+      # it links the proxy, whose package initialisation opens sockets that
+      # the PID-map test's count would see.
+      - name: Build the proxy connection integration test
+        run: go test -c -tags 'viper_bind_struct proxyconns_integration' -o /tmp/proxyconns.test ./pkg/agent/hooks/linux/
+
+      # A -run that matches nothing exits 0, so each test's PASS line is
+      # required explicitly.
+      - name: Run the PID map and proxy connection integration tests (root)
+        run: |
+          set -o pipefail
+          # Both binaries run, whichever fails: one's failure does not hide
+          # the other's results.
+          rc=0
+          sudo /tmp/pidmap.test -test.run 'TestAProcessThePIDMapRefusesIsReported|TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss|TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt|TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer|TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss|TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest|TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive|TestUnderTheSwitchABoundClientsAnswerIsCounted|TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff|TestUnderTheSwitchTheAgentSeesTheApplicationListen|TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime|TestUnderTheSwitchTheAgentCountsARestartAndNamesIt|TestARunTheMarkClearsAroundIsLetGoOfAtItsExit|TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday|TestClearingAMapItsKeysChurnInGoesOn|TestTheSweepDeletesTheEntriesOfProcessesThatAreGone|TestTheSweepKeepsAZombiesEntriesUntilItIsReaped|TestTheKernelSaysWhetherItCountsSkippedRuns' -test.v | tee /tmp/pidmap.out || rc=1
+          sudo /tmp/proxyconns.test -test.run 'TestProxyConnsMatchWhatTheProxyAccepts|TestTheProxysRealLoopSettlesOnTheKernelsCount|TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt|TestANATedConnectionIsNotVerified|TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff|TestTCPDNSNeverStopsTheProxyRouting|TestTwoConnectionsOnOnePortReachTheirOwnDependencies|TestADroppedAppConnEventEndsAParkedWait' -test.v | tee -a /tmp/pidmap.out || rc=1
+          for t in TestAProcessThePIDMapRefusesIsReported TestAnAppConnectToAUnixSocketNoMemberOwnsIsACaptureLoss TestAReadWaitsForTheUnixReportsTheKernelMadeBeforeIt TestAnAbandonedDrainsFlushIsNotTheNextDrainsAnswer TestUnderTheSwitchAReplyToTheAppsUDPIsACaptureLoss TestAReplyBetweenAReadsEpochMoveAndItsCountTaintsTheNextTest TestUnderTheSwitchAnAppsUDPServerIsNotAnsweredLive TestUnderTheSwitchABoundClientsAnswerIsCounted TestTheHooksObjectLoadsWithTheUDPWatchsMapsAtTheirSmallestWhenOff TestUnderTheSwitchTheAgentSeesTheApplicationListen TestUnderTheSwitchACPUOnlyStartMovesTheApplicationsCPUTime TestUnderTheSwitchTheAgentCountsARestartAndNamesIt TestARunTheMarkClearsAroundIsLetGoOfAtItsExit TestAWindowRunOutlivingAFreshRunIsAFalseRestartToday TestClearingAMapItsKeysChurnInGoesOn TestTheSweepDeletesTheEntriesOfProcessesThatAreGone TestTheSweepKeepsAZombiesEntriesUntilItIsReaped TestTheKernelSaysWhetherItCountsSkippedRuns TestProxyConnsMatchWhatTheProxyAccepts TestTheProxysRealLoopSettlesOnTheKernelsCount TestTheApplicationsConnectionIsWaitedForBeforeTheProxySeesIt TestANATedConnectionIsNotVerified TestANATedConnectionDropsASettlingRunToNotCountedWithTheSwitchOff TestTCPDNSNeverStopsTheProxyRouting TestTwoConnectionsOnOnePortReachTheirOwnDependencies TestADroppedAppConnEventEndsAParkedWait; do
+            grep -q -- "--- PASS: $t" /tmp/pidmap.out || { echo "::error::$t did not pass"; rc=1; }
+          done
+          exit $rc

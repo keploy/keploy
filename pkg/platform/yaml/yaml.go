@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -61,6 +63,23 @@ type NetworkTrafficDoc struct {
 	Curl         string              `json:"curl" yaml:"curl,omitempty"`
 	ConnectionID string              `json:"connectionId" yaml:"connectionId,omitempty"`
 	Start        string              `json:"start,omitempty" yaml:"start,omitempty"`
+
+	// Variables, when present, names the places of the call that hold a test
+	// variable's value (models.MockVariables): a kind-agnostic top-level block,
+	// like noise, kept off the per-kind spec.
+	Variables models.MockVariables `json:"variables,omitempty" yaml:"variables,omitempty"`
+
+	// Real, on a test case, is the mock.real destinations its request used in
+	// its recording (models.TestCase.Real); written and read only under the
+	// proven switch.
+	Real []string `json:"real,omitempty" yaml:"real,omitempty"`
+
+	// Origin is, under the proven switch, where the recorded call or test
+	// came from (models.Mock.Origin, models.TestCase.Origin): the clock its
+	// opening stamp is on and, on a mock, the process that made it. Read and
+	// written whatever the switch, so a rewrite keeps it (models.Origin); nil,
+	// so omitted, for a record that has none.
+	Origin *models.Origin `json:"origin,omitempty" yaml:"origin,omitempty"`
 }
 
 // DocNoise is the unified on-disk representation of a mock's noise, written under
@@ -220,14 +239,14 @@ func WriteFile(ctx context.Context, logger *zap.Logger, path, fileName string, d
 }
 
 func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, docData []byte, isAppend bool, format Format) error {
-	isFileEmpty, err := CreateFileF(ctx, logger, path, fileName, format)
-	if err != nil {
-		utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
-		return err
-	}
 	filePath := filepath.Join(path, fileName+"."+format.FileExtension())
 
 	if isAppend {
+		isFileEmpty, err := CreateFileF(ctx, logger, path, fileName, format)
+		if err != nil {
+			utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
+			return err
+		}
 		var sep []byte
 		if !isFileEmpty {
 			if format == FormatJSON {
@@ -266,8 +285,15 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	// exactly that window — on overlay/NFS/container-mounted volumes a reader could
 	// catch the file empty or half-written and either hard-fail or silently decode a
 	// partial document. The mock rewrites in mockdb replace their files the
-	// same way.
-	tmpFile, err := os.CreateTemp(path, fileName+".*.tmp")
+	// same way. The destination is never created ahead of the rename (only
+	// its directory, fileDirF): a new file comes into being whole, with no
+	// empty file before it for a reader to find.
+	_, exists, err := fileDirF(ctx, logger, path, fileName, format)
+	if err != nil {
+		utils.LogError(logger, err, "failed to create file", zap.String("path directory", path), zap.String("file", fileName))
+		return err
+	}
+	tmpFile, err := newReplaceTemp(path, fileName, replaceTempPerm(exists))
 	if err != nil {
 		utils.LogError(logger, err, "failed to create temp file for atomic write", zap.String("path directory", path), zap.String("file", fileName))
 		return err
@@ -298,12 +324,13 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	if err = tmpFile.Close(); err != nil {
 		return err
 	}
-	mode := os.FileMode(0o644)
+	// The replaced file's mode is kept (replaceTempPerm). A new file keeps
+	// the temp file's, which was created as the file itself would have been
+	// (0o644 less the umask).
 	if info, statErr := os.Stat(filePath); statErr == nil {
-		mode = info.Mode().Perm()
-	}
-	if err = os.Chmod(tmpPath, mode); err != nil {
-		return err
+		if err = os.Chmod(tmpPath, info.Mode().Perm()); err != nil {
+			return err
+		}
 	}
 	if err = ReplaceFile(logger, tmpPath, filePath); err != nil {
 		utils.LogError(logger, err, "failed to atomically replace the file", zap.String("file", filePath))
@@ -311,6 +338,44 @@ func WriteFileF(ctx context.Context, logger *zap.Logger, path, fileName string, 
 	}
 	cleanup = false
 	return nil
+}
+
+// replaceTempPerm is the mode WriteFileF creates its temp file with. While an
+// existing file is replaced, 0o600: the content is no more readable than the
+// file it replaces at any moment, and the file's own mode is given to the
+// temp file just before the rename. A new file's temp file is created as the
+// file itself would be, 0o644 less the umask, and keeps that mode.
+func replaceTempPerm(exists bool) os.FileMode {
+	if exists {
+		return 0o600
+	}
+	return 0o644
+}
+
+// newReplaceTemp creates WriteFileF's temp file: createTempFile, a variable
+// so a test can see the file it creates.
+var newReplaceTemp = createTempFile
+
+// createTempFile creates a new file in dir for WriteFileF to write and rename
+// over fileName: os.CreateTemp's name (fileName, a random number, ".tmp"),
+// with perm as os.OpenFile takes it, so the umask applies as it would to the
+// file itself. os.CreateTemp's 0o600 would otherwise become the mode of a
+// file that is new. Like os.CreateTemp it refuses a fileName holding a path
+// separator; unlike it, an empty dir is the working directory, where the file
+// it replaces is, not os.TempDir().
+func createTempFile(dir, fileName string, perm os.FileMode) (*os.File, error) {
+	if strings.ContainsAny(fileName, "/"+string(os.PathSeparator)) {
+		return nil, &fs.PathError{Op: "createtemp", Path: fileName, Err: errors.New("pattern contains path separator")}
+	}
+	for try := 0; try < 10000; try++ {
+		name := filepath.Join(dir, fileName+"."+strconv.FormatUint(uint64(rand.Uint32()), 10)+".tmp")
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		return f, err
+	}
+	return nil, &fs.PathError{Op: "createtemp", Path: filepath.Join(dir, fileName+".*.tmp"), Err: fs.ErrExist}
 }
 
 // ReplaceFile puts src in place of dst. A rename atomically replaces an
@@ -480,10 +545,30 @@ func CreateYamlFile(ctx context.Context, Logger *zap.Logger, path string, fileNa
 }
 
 func CreateFileF(ctx context.Context, Logger *zap.Logger, path string, fileName string, format Format) (bool, error) {
-	filePath, err := ValidatePath(filepath.Join(path, fileName+"."+format.FileExtension()))
+	filePath, exists, err := fileDirF(ctx, Logger, path, fileName, format)
+	if err != nil || exists {
+		return false, err
+	}
+	file, err := os.OpenFile(filePath, os.O_CREATE, 0o644)
+	if err != nil {
+		utils.LogError(Logger, err, "failed to create the file", zap.String("path directory", path), zap.String("file", fileName))
+		return false, err
+	}
+	if err := file.Close(); err != nil {
+		utils.LogError(Logger, err, "failed to close the file", zap.String("path directory", path), zap.String("file", fileName))
+		return false, err
+	}
+	return true, nil
+}
+
+// fileDirF is CreateFileF short of creating the file: it validates the file's
+// path and, when the file does not exist, makes its directory. exists reports
+// whether the file was there.
+func fileDirF(ctx context.Context, Logger *zap.Logger, path string, fileName string, format Format) (filePath string, exists bool, err error) {
+	filePath, err = ValidatePath(filepath.Join(path, fileName+"."+format.FileExtension()))
 	if err != nil {
 		utils.LogError(Logger, err, "failed to validate the file path", zap.String("path directory", path), zap.String("file", fileName))
-		return false, err
+		return "", false, err
 	}
 
 	if _, err := os.Stat(filePath); err != nil {
@@ -492,7 +577,7 @@ func CreateFileF(ctx context.Context, Logger *zap.Logger, path string, fileName 
 				"failed to stat file — check filesystem permissions and that the configured keploy path is readable/writable by this process",
 				zap.String("path directory", path),
 				zap.String("file", fileName))
-			return false, err
+			return "", false, err
 		}
 		// Honour context cancellation/deadline before doing any
 		// filesystem mutations. Previously the check was
@@ -502,27 +587,78 @@ func CreateFileF(ctx context.Context, Logger *zap.Logger, path string, fileName 
 		// returning the surrounding os.Stat error instead of
 		// ctx.Err().
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return false, ctxErr
+			return "", false, ctxErr
 		}
 		// 0o755/0o644 rather than the historical 0o777 — nothing
 		// in the keploy tree needs world-writable perms and the
 		// stricter modes match the rest of the new testdb code.
 		if err := os.MkdirAll(filepath.Join(path), 0o755); err != nil {
 			utils.LogError(Logger, err, "failed to create a directory for the file", zap.String("path directory", path), zap.String("file", fileName))
-			return false, err
+			return "", false, err
 		}
-		file, err := os.OpenFile(filePath, os.O_CREATE, 0o644)
-		if err != nil {
-			utils.LogError(Logger, err, "failed to create the file", zap.String("path directory", path), zap.String("file", fileName))
-			return false, err
-		}
-		if err := file.Close(); err != nil {
-			utils.LogError(Logger, err, "failed to close the file", zap.String("path directory", path), zap.String("file", fileName))
-			return false, err
-		}
+		return filePath, false, nil
+	}
+	return filePath, true, nil
+}
+
+// openIndexDir opens the folder ReadSessionIndicesF / ReadSessionIndicesAny
+// list. A folder that does not exist yet is empty (empty is true, err nil):
+// the first recording, or a reports folder no run has written. Any other
+// failure to open it -- permission denied, an I/O error, a symlink loop, a
+// path that is not a directory -- is returned: the folder may well hold test
+// sets, and reading it as empty makes `keploy record` pick test-set-0 again
+// and record into the user's existing test-set-0.
+func openIndexDir(path string, logger *zap.Logger) (*os.File, bool, error) {
+	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
+	if err == nil {
+		return dir, false, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		logger.Debug("folder does not exist yet; nothing to list", zap.String("path", path))
+		return nil, true, nil
+	}
+	return nil, false, err
+}
+
+// listedDir reports whether v, an entry of the folder at path that
+// ReadSessionIndicesF / ReadSessionIndicesAny list in ModeDir, is one of its
+// folders: a test set, or a test run's reports. A link to a folder -- a
+// symbolic link, or a junction on Windows -- is refused, neither listed nor
+// passed over: keploy writes into these folders (record, the replay's
+// denoise, normalize, templatize, a run's reports), often under sudo, and a
+// link, which a cloned repository can carry, would have it write wherever
+// the link points. Passed over, the link's own name could be handed out as
+// the next test set's, and keploy record would write into the set it points
+// to. A link keploy cannot follow is refused too: keploy cannot rule out
+// that it points to a folder. A link to a file is no folder, like a file.
+func listedDir(path string, v fs.DirEntry) (bool, error) {
+	if v.IsDir() {
 		return true, nil
 	}
-	return false, nil
+	// Anything else but a regular file may be a link: a symbolic link, or on
+	// Windows a junction, which the listing reports as irregular, not as a
+	// link. os.Stat follows both, and tells a FIFO or a socket for no folder.
+	if v.Type().IsRegular() {
+		return false, nil
+	}
+	p := filepath.Join(path, v.Name())
+	info, err := os.Stat(p)
+	if err == nil && !info.IsDir() {
+		return false, nil
+	}
+	const why = "keploy does not follow a link among the folders it writes into (test sets, test runs)"
+	if err != nil {
+		if _, lerr := os.Lstat(p); errors.Is(lerr, fs.ErrNotExist) {
+			// Gone since the listing: no entry at all.
+			return false, nil
+		}
+		return false, fmt.Errorf("%s is a link keploy cannot follow (%w), and %s: remove it, or replace the link with a real folder", p, err, why)
+	}
+	target := ""
+	if t, rerr := os.Readlink(p); rerr == nil {
+		target = " (" + t + ")"
+	}
+	return false, fmt.Errorf("%s is a link to a folder%s, and %s: replace the link with a real folder holding what it points to", p, target, why)
 }
 
 func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
@@ -532,14 +668,9 @@ func ReadSessionIndices(ctx context.Context, path string, logger *zap.Logger, mo
 func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, mode IndexMode, format Format) ([]string, error) {
 	var indices []string
 
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if errors.Is(err, safeyaml.ErrNotDir) {
-		// There, and not a directory: an error, as listing it always was.
+	dir, empty, err := openIndexDir(path, logger)
+	if empty || err != nil {
 		return indices, err
-	}
-	if err != nil {
-		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
 	}
 	defer func() { _ = dir.Close() }()
 
@@ -563,7 +694,11 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 
 		switch mode {
 		case ModeDir:
-			if v.IsDir() {
+			isDir, err := listedDir(path, v)
+			if err != nil {
+				return nil, err
+			}
+			if isDir {
 				indices = append(indices, name)
 			}
 		case ModeFile:
@@ -586,14 +721,9 @@ func ReadSessionIndicesF(ctx context.Context, path string, logger *zap.Logger, m
 func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger, mode IndexMode) ([]string, error) {
 	var indices []string
 
-	dir, err := ReadDir(path, fs.FileMode(os.O_RDONLY))
-	if errors.Is(err, safeyaml.ErrNotDir) {
-		// There, and not a directory: an error, as listing it always was.
+	dir, empty, err := openIndexDir(path, logger)
+	if empty || err != nil {
 		return indices, err
-	}
-	if err != nil {
-		logger.Debug("creating a folder for the keploy generated testcases", zap.Error(err))
-		return indices, nil
 	}
 	defer func() { _ = dir.Close() }()
 
@@ -616,7 +746,11 @@ func ReadSessionIndicesAny(ctx context.Context, path string, logger *zap.Logger,
 
 		switch mode {
 		case ModeDir:
-			if v.IsDir() {
+			isDir, err := listedDir(path, v)
+			if err != nil {
+				return nil, err
+			}
+			if isDir {
 				if _, ok := seen[name]; !ok {
 					seen[name] = struct{}{}
 					indices = append(indices, name)

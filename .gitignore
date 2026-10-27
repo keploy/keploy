@@ -74,6 +74,17 @@ testdata
 # in-place YAML encoder must write them byte for byte as EncodeMock did.
 !pkg/platform/yaml/mockdb/testdata/
 !pkg/platform/yaml/mockdb/testdata/**
+# What keploy writes without the proven switch, generated before the switch's
+# fields existed: a test case, mappings.yaml, a report and the agent's JSON
+# must stay byte for byte what they were.
+!pkg/models/testdata/
+!pkg/models/testdata/**
+!pkg/platform/yaml/mapdb/testdata/
+!pkg/platform/yaml/mapdb/testdata/**
+!pkg/platform/yaml/testdb/testdata/
+!pkg/platform/yaml/testdb/testdata/**
+!pkg/platform/yaml/reportdb/testdata/
+!pkg/platform/yaml/reportdb/testdata/**
 
 #Ignore the c and header files
 *.c

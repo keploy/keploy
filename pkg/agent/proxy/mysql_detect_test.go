@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -38,6 +39,11 @@ func testProxy(t *testing.T) *Proxy {
 	return &Proxy{
 		logger:     zap.NewNop(),
 		mysqlPorts: newMysqlPortRegistry(),
+		// No address of the test's machine, nor its gateway, decides a verdict.
+		readNetns:      func() (own, gateways []netip.Addr) { return nil, nil },
+		dockerHostAddr: func(netip.Addr) bool { return false },
+		// Nor does this machine's /etc/hosts.
+		readDockerHostNames: func() map[netip.Addr]string { return nil },
 		// Built the way proxy.New does, so tests can drive SetMocksWithWindow —
 		// the call a stock agent actually makes to publish a test set's mocks.
 		dnsCache: newDNSCache(),
@@ -157,8 +163,9 @@ func TestProbeDetectsMysqlOnUnconfiguredPort(t *testing.T) {
 	}
 }
 
-// Second connection to a learned port must take the fast path — no
-// probe, no latency, no upstream dial.
+// In a replay, a learned port takes the fast path — no probe, no latency,
+// no upstream dial. (In a record it is a hint the connection's first speaker
+// confirms: mysql_detect_hint_test.go.)
 func TestProbeFastPathAfterLearning(t *testing.T) {
 	p := testProxy(t)
 	p.mysqlPorts.Learn(7777)
@@ -166,7 +173,7 @@ func TestProbeFastPathAfterLearning(t *testing.T) {
 	_, srcConn := clientPair(t)
 	start := time.Now()
 	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:7777", nil, 7777,
-		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
+		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -183,13 +190,14 @@ func TestProbeFastPathAfterLearning(t *testing.T) {
 	}
 }
 
-// Configured / default ports keep their exact pre-existing behaviour.
+// Ports listed in mysqlPorts keep their exact pre-existing behaviour. (The
+// built-in defaults are a hint: mysql_detect_hint_test.go.)
 func TestProbeConfiguredPortsUnchanged(t *testing.T) {
 	p := testProxy(t)
 	_, srcConn := clientPair(t)
 
 	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:3306", nil, 3306,
-		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
+		models.MODE_RECORD, models.OutgoingOptions{MysqlPorts: []uint32{3306, 4000}}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -209,7 +217,9 @@ func TestProbeClientSpeaksFirstPreservesBytes(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9999", nil, 9999,
+	// A client-speaks-first destination the test controls, silent until asked.
+	dstAddr, _, _ := acceptingServer(t, silentUntilAsked)
+	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, nil, uint32(mustPort(t, dstAddr)),
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
@@ -217,11 +227,12 @@ func TestProbeClientSpeaksFirstPreservesBytes(t *testing.T) {
 	if probe.IsMySQL {
 		t.Fatal("HTTP request classified as MySQL")
 	}
+	defer probe.Predialed.CloseIfUnused()
 	if probe.Reason != "client-spoke-first" {
 		t.Errorf("reason = %q, want client-spoke-first", probe.Reason)
 	}
 	if probe.DstConn != nil {
-		t.Error("must not dial upstream once the client has spoken")
+		t.Error("a negative verdict must not hand its upstream over as DstConn")
 	}
 
 	got := make([]byte, len(payload))
@@ -233,8 +244,10 @@ func TestProbeClientSpeaksFirstPreservesBytes(t *testing.T) {
 	}
 }
 
-// A silent client in front of a non-MySQL server must fall through to
-// generic dispatch with the upstream conn and its bytes intact.
+// A silent client in front of a non-MySQL server that greets first, a
+// server-first protocol (SMTP), is said to be one (reasonServerFirst, which
+// handleConnection relays from the greeting, P250), with the upstream conn
+// and its bytes intact, with the switch off or on.
 func TestProbeSilentClientNonMysqlServer(t *testing.T) {
 	p := testProxy(t)
 	banner := []byte("220 smtp.example.com ESMTP Postfix\r\n")
@@ -250,32 +263,49 @@ func TestProbeSilentClientNonMysqlServer(t *testing.T) {
 	if probe.IsMySQL {
 		t.Fatal("SMTP banner classified as MySQL")
 	}
-	if probe.Reason != "greeting-not-mysql" {
-		t.Errorf("reason = %q, want greeting-not-mysql", probe.Reason)
+	if probe.Reason != reasonServerFirst {
+		t.Errorf("reason = %q, want %s", probe.Reason, reasonServerFirst)
 	}
 	if p.mysqlPorts.Has(port) {
 		t.Error("non-MySQL port must not be learned as MySQL")
 	}
-	// The probe connection must NOT be handed to the caller on a
-	// negative verdict. Generic dispatch reassigns dstConn on its TLS /
-	// CONNECT / Postgres-SSL branches without closing what was there, so
-	// a handed-over socket would leak; and it dials just-in-time, so a
-	// socket opened while waiting on a slow client can go stale before
-	// the first byte is written. The upstream re-greets on the fresh
-	// dial, so nothing is lost by dropping this one.
+	// The probe's connection is not DstConn on a negative verdict:
+	// generic dispatch reassigns dstConn on its TLS / CONNECT /
+	// Postgres-SSL branches without closing what was there, so a socket
+	// handed over that way would leak. It is handed on as the
+	// connection's pre-dialled one instead, which every one of those
+	// branches dials through, banner first.
 	if probe.DstConn != nil {
-		t.Error("probe must not hand its upstream conn to the caller on a negative verdict")
+		t.Error("probe must not hand its upstream conn to the caller as DstConn on a negative verdict")
+	}
+	if probe.Predialed == nil {
+		t.Fatal("the probe dropped its upstream; the connection's dial would open a second one")
+	}
+	next, err := util.DialRaw(context.Background(), nil, "tcp", dstAddr, probe.Predialed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	got := make([]byte, len(banner))
+	if _, err := io.ReadFull(next, got); err != nil || string(got) != string(banner) {
+		t.Fatalf("the next dial read %q, %v; want the banner the probe already read", got, err)
 	}
 	// And the verdict is cached, so the next connection to this port
-	// skips the probe entirely rather than re-paying the wait + dial.
+	// skips the probe entirely rather than re-paying the wait + dial; the
+	// destination is marked, so that connection is relayed too (P250).
 	if !p.mysqlPorts.IsKnownNotMysql(port) {
 		t.Error("negative verdict was not cached")
+	}
+	if !p.serverFirstDests.has(dstAddr) {
+		t.Error("the server-first destination was not marked")
 	}
 }
 
 // Regression test for the leak the negative-verdict path used to have:
-// probeMysql dials upstream, and on a non-MySQL verdict that socket
-// must be closed by the probe itself.
+// probeMysql dials upstream, and on a non-MySQL verdict that socket must
+// not be left unreferenced. It is handed on (mysqlProbe.Predialed), and
+// closed when no dial takes it (CloseIfUnused, which handleConnection
+// defers).
 func TestProbeClosesUpstreamOnNegativeVerdict(t *testing.T) {
 	p := testProxy(t)
 
@@ -309,6 +339,10 @@ func TestProbeClosesUpstreamOnNegativeVerdict(t *testing.T) {
 	if probe.IsMySQL {
 		t.Fatal("SMTP classified as MySQL")
 	}
+	if probe.Predialed == nil {
+		t.Fatal("the probe's upstream was neither kept nor handed on")
+	}
+	probe.Predialed.CloseIfUnused()
 
 	select {
 	case <-closed:
@@ -403,15 +437,18 @@ func TestProbeCachesClientSpokeFirstAsNegative(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9443", nil, 9443,
+	dstAddr, _, _ := acceptingServer(t, silentUntilAsked)
+	port := uint32(mustPort(t, dstAddr))
+	probe, err := p.probeMysql(context.Background(), srcConn, dstAddr, nil, port,
 		models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
+	defer probe.Predialed.CloseIfUnused()
 	if probe.IsMySQL {
 		t.Fatal("HTTP classified as MySQL")
 	}
-	if !p.mysqlPorts.IsKnownNotMysql(9443) {
+	if !p.mysqlPorts.IsKnownNotMysql(port) {
 		t.Error("client-spoke-first verdict was not cached")
 	}
 }
@@ -518,7 +555,6 @@ func TestReplayNeverDials(t *testing.T) {
 // connection arriving in that gap must park until derivation lands
 // rather than guess wrong.
 func TestReplayWaitsForMockDerivation(t *testing.T) {
-	t.Setenv("KEPLOY_MYSQL_MOCK_DERIVE_WAIT", "5s")
 	p := testProxy(t)
 
 	go func() {
@@ -545,31 +581,6 @@ func TestReplayWaitsForMockDerivation(t *testing.T) {
 	}
 	if elapsed > 3*time.Second {
 		t.Errorf("waited %v, expected to wake as soon as mocks landed", elapsed)
-	}
-}
-
-// The wait is bounded — a run with no mocks at all must not hang.
-func TestReplayDeriveWaitIsBounded(t *testing.T) {
-	t.Setenv("KEPLOY_MYSQL_MOCK_DERIVE_WAIT", "300ms")
-	p := testProxy(t)
-
-	_, srcConn := clientPair(t)
-	start := time.Now()
-	probe, err := p.probeMysql(context.Background(), srcConn, "127.0.0.1:9", nil, 9,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if probe.IsMySQL {
-		t.Fatal("classified as MySQL with no mocks at all")
-	}
-	if probe.Reason != "mocks-not-derived" {
-		t.Errorf("reason = %q, want mocks-not-derived", probe.Reason)
-	}
-	if elapsed > 2*time.Second {
-		t.Errorf("wait was not bounded: %v", elapsed)
 	}
 }
 
@@ -617,131 +628,6 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 	}
 }
 
-// shortWindows shrinks the detection windows for tests that would otherwise
-// spend seconds asleep. It also widens the margin for the timing-sensitive
-// ones: with the production 250ms/2s pair, a test that writes at 400ms is only
-// 150ms clear of the silence window, and a GC pause or a loaded CI runner can
-// close that gap — which would land the write inside window 1 and fail the
-// assertion for a reason that has nothing to do with the behaviour under test.
-func shortWindows(t *testing.T) {
-	t.Helper()
-	t.Setenv("KEPLOY_MYSQL_CLIENT_SILENCE_WINDOW", "50ms")
-	t.Setenv("KEPLOY_MYSQL_SERVER_GREETING_WINDOW", "1s")
-}
-
-// The replayed application can be handed a different dependency endpoint than
-// it had at record time — a reconstructed environment materialises config that
-// a live cluster resolves by reference, so host AND port can drift. The client
-// still opens the connection and waits for a server greeting, which is the
-// signature this probe recognises. keploy is the server in replay, so declining
-// leaves nobody to answer: the app blocks to its own timeout, the test records
-// status_code 0, and the recorded MySQL mocks go unused.
-func TestReplayServesMocksWhenAppEndpointPortDrifted(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	_, srcConn := clientPair(t)
-	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	if err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if probe.DstConn != nil {
-		t.Fatal("replay probe dialed upstream")
-	}
-	if !probe.IsMySQL || probe.Reason != "inferred-endpoint-drift" {
-		t.Fatalf("IsMySQL=%v reason=%q, want true/inferred-endpoint-drift", probe.IsMySQL, probe.Reason)
-	}
-}
-
-// An inference is per-connection evidence and must never become a property of
-// the port. If it did, one slow client would put the port on the fast path and
-// every later connection — including one that speaks first — would be handed a
-// MySQL handshake, converting a working dependency into a dead one.
-func TestInferredPortDoesNotHijackLaterClientSpeaksFirst(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	_, silent := clientPair(t)
-	first, err := p.probeMysql(context.Background(), silent, "172.20.0.2:8288", nil, 8288,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	if err != nil || !first.IsMySQL {
-		t.Fatalf("first probe: err=%v IsMySQL=%v", err, first.IsMySQL)
-	}
-	if p.mysqlPorts.Has(8288) {
-		t.Fatal("an inferred port must not enter the fast-path set")
-	}
-
-	// Same port, but this client sends a TLS ClientHello immediately.
-	client, srcConn := clientPair(t)
-	if _, err := client.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x2f}); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	second, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:8288", nil, 8288,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	if err != nil {
-		t.Fatalf("second probe: %v", err)
-	}
-	if second.IsMySQL {
-		t.Fatalf("IsMySQL=true reason=%q: a client that speaks first must never be served a MySQL handshake", second.Reason)
-	}
-}
-
-// The registry outlives a single mode — one agent process serves both Record
-// and Mock on the same *Proxy — so a replay-only inference must not leak into
-// record, where it would drive MySQL.RecordOutgoing over a non-MySQL stream.
-func TestInferredPortDoesNotLeakIntoRecordMode(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	_, silent := clientPair(t)
-	if _, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop()); err != nil {
-		t.Fatalf("replay probe: %v", err)
-	}
-	if p.mysqlPorts.Has(283) {
-		t.Fatal("inference leaked into the shared port set that record mode consults")
-	}
-}
-
-// 250ms of silence is a weak signal by itself: a slow TLS client can be quiet
-// that long and only then send its ClientHello. The confirmation window has to
-// catch that, and the port must not be demoted either — the next connection on
-// it still deserves the same evidence-based decision.
-func TestClientSpeakingLateIsNotInferredAsMysql(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	client, srcConn := clientPair(t)
-	go func() {
-		time.Sleep(150 * time.Millisecond) // past the silence window (50ms), inside the confirm window (1s)
-		_, _ = client.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x2f})
-	}()
-	probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	if err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if probe.IsMySQL {
-		t.Fatalf("IsMySQL=true reason=%q: a client that speaks within the confirm window is not MySQL", probe.Reason)
-	}
-	if p.mysqlPorts.IsKnownNotMysql(283) {
-		t.Error("a late-speaking client must not demote the port for later connections")
-	}
-}
-
 // The inference is gated on the RECORDING holding MySQL mocks. The registry
 // also accumulates ports learned by probing during a record session, and the
 // agent is one long-lived process that does not reset it between sessions — so
@@ -768,7 +654,6 @@ func TestReplayDoesNotInventMysqlWithoutMocks(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortWindows(t)
 			p := testProxy(t)
 			tc.arrange(p)
 
@@ -785,41 +670,9 @@ func TestReplayDoesNotInventMysqlWithoutMocks(t *testing.T) {
 	}
 }
 
-// The confirmation wait is paid once per port, not once per connection. A pool
-// opening many connections to a moved endpoint would otherwise add it to every
-// one of them — 103 times in the bundle that motivated this change. The
-// silence check still runs on each connection, which is what actually rejects
-// a client that speaks first.
-func TestInferredPortConfirmsOnlyOnce(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	var elapsed []time.Duration
-	for i := 0; i < 2; i++ {
-		_, srcConn := clientPair(t)
-		start := time.Now()
-		probe, err := p.probeMysql(context.Background(), srcConn, "172.20.0.2:283", nil, 283,
-			models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-		elapsed = append(elapsed, time.Since(start))
-		if err != nil || !probe.IsMySQL {
-			t.Fatalf("probe %d: err=%v IsMySQL=%v reason=%q", i, err, probe.IsMySQL, probe.Reason)
-		}
-	}
-	if elapsed[1] >= serverGreetingWindow() {
-		t.Errorf("second connection paid the confirmation window again (%v); it must only re-run the silence check", elapsed[1])
-	}
-	if elapsed[1] < clientSilenceWindow() {
-		t.Errorf("second connection skipped the silence check (%v): a client that speaks first would be hijacked", elapsed[1])
-	}
-}
-
 // The escape hatch has to work without also turning off record-time detection,
 // which is what disableMysqlAutoDetect would cost.
 func TestEndpointDriftCanBeDisabled(t *testing.T) {
-	shortWindows(t)
 	p := testProxy(t)
 	p.deriveMysqlPorts([]*models.Mock{
 		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
@@ -839,38 +692,6 @@ func TestEndpointDriftCanBeDisabled(t *testing.T) {
 	}
 }
 
-// A cancelled run must not sit through the confirmation window on every silent
-// connection still in flight — the wait is several times the silence window,
-// and a read deadline is not cancellable on its own.
-func TestProbeUnblocksOnContextCancel(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(clientSilenceWindow() + 50*time.Millisecond)
-		cancel()
-	}()
-
-	_, srcConn := clientPair(t)
-	start := time.Now()
-	probe, err := p.probeMysql(ctx, srcConn, "172.20.0.2:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	took := time.Since(start)
-	if err != nil {
-		t.Fatalf("probe: %v", err)
-	}
-	if took >= clientSilenceWindow()+serverGreetingWindow() {
-		t.Errorf("probe ignored cancellation and waited the whole window (%v)", took)
-	}
-	if probe.IsMySQL {
-		t.Errorf("IsMySQL=true reason=%q: a cancelled probe must not produce a positive verdict", probe.Reason)
-	}
-}
-
 // A replay session must be judged on its OWN recording. The agent is one
 // long-lived process and the registry is allocated once, so without a per
 // session reset the drift gate would mean "any recording this process has ever
@@ -885,7 +706,6 @@ func TestProbeUnblocksOnContextCancel(t *testing.T) {
 // green while the production path leaked; TestProxyTakesTheWindowedMocksPath
 // below keeps that mistake from being made again.
 func TestDriftGateIsScopedToTheCurrentRecording(t *testing.T) {
-	shortWindows(t)
 	p := testProxy(t)
 
 	// Session 1: a recording that does contain MySQL.
@@ -942,114 +762,21 @@ func TestProxyTakesTheWindowedMocksPath(t *testing.T) {
 	}
 }
 
-// The confirmation shortcut is keyed by endpoint, not by port number. Two
-// unrelated services routinely share a port, and one inference must not lower
-// the bar for the other — the shortcut skips the long wait, so a client that is
-// merely slow would be answered with a handshake it never asked for.
-func TestInferredShortcutIsPerEndpoint(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	// First endpoint: silent client, inferred.
-	_, silent := clientPair(t)
-	first, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	if err != nil || !first.IsMySQL {
-		t.Fatalf("first probe: err=%v IsMySQL=%v reason=%q", err, first.IsMySQL, first.Reason)
-	}
-
-	// A different host on the same port, speaking after the silence window but
-	// well inside the confirmation window the first endpoint had to pass.
-	client, srcConn := clientPair(t)
-	go func() {
-		time.Sleep(clientSilenceWindow() * 3)
-		_, _ = client.Write([]byte{0x16, 0x03, 0x01, 0x00, 0x2f})
-	}()
-	second, err := p.probeMysql(context.Background(), srcConn, "10.9.9.9:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop())
-	if err != nil {
-		t.Fatalf("second probe: %v", err)
-	}
-	if second.IsMySQL {
-		t.Fatalf("IsMySQL=true reason=%q: a different host on the same port inherited the shortcut", second.Reason)
-	}
-}
-
-// readWithin must not leave a deadline in the past on a connection it hands
-// back. context.AfterFunc reports that its function has started without waiting
-// for it, and that function runs on its own goroutine — so a cancelled probe
-// can land SetReadDeadline(now) after the reset and break the next read for
-// whoever gets the connection, surfacing as "i/o timeout" with data waiting.
-func TestReadWithinLeavesNoDeadlineBehind(t *testing.T) {
-	for i := 0; i < 200; i++ {
-		client, srcConn := clientPair(t)
-		if _, err := client.Write([]byte{0x42}); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // already cancelled: AfterFunc fires immediately
-		_, _ = readWithin(ctx, srcConn, time.Second)
-
-		if _, err := client.Write([]byte{0x43}); err != nil {
-			t.Fatalf("write 2: %v", err)
-		}
-		buf := make([]byte, 8)
-		if err := srcConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			t.Fatalf("set deadline: %v", err)
-		}
-		if _, err := srcConn.Read(buf); err != nil {
-			t.Fatalf("iteration %d: a later read failed on a connection readWithin handed back: %v", i, err)
-		}
-		_ = srcConn.Close()
-		_ = client.Close()
-	}
-}
-
-// The session swap has to clear the inferred endpoints too, not just the ports.
-// An inference is evidence about the previous recording's environment; carrying
-// it into the next test set would let one connection's guess shorten the
-// confirmation for an endpoint the new recording never mentioned.
-func TestSessionSwapClearsInferredEndpoints(t *testing.T) {
-	shortWindows(t)
-	p := testProxy(t)
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-
-	_, silent := clientPair(t)
-	if probe, err := p.probeMysql(context.Background(), silent, "172.20.0.2:283", nil, 283,
-		models.MODE_TEST, models.OutgoingOptions{}, zap.NewNop()); err != nil || !probe.IsMySQL {
-		t.Fatalf("setup probe: err=%v IsMySQL=%v", err, probe.IsMySQL)
-	}
-	if !p.mysqlPorts.IsInferred("172.20.0.2:283") {
-		t.Fatal("setup: endpoint should have been recorded as inferred")
-	}
-
-	p.mysqlPorts.MarkSessionStale()
-	p.deriveMysqlPorts([]*models.Mock{
-		{Kind: models.MySQL, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": "127.0.0.1:3306"}}},
-	})
-	if p.mysqlPorts.IsInferred("172.20.0.2:283") {
-		t.Error("an inference from the previous recording survived the session swap")
-	}
-}
-
 // Deferring the swap to derive time is what keeps derivedCh close-once. If a
 // future change re-armed it at the boundary instead, a connection already
-// parked in WaitDerived would be left on the orphaned channel: the derive
-// closes the replacement, the waiter sleeps out the whole deadline and is then
-// told the mocks never arrived — the connection gets no MySQL and the test
-// reports status_code 0, which is the failure this mechanism exists to prevent.
+// waiting on derivedSignal would be left on the orphaned channel: the derive
+// closes the replacement, and the waiter is never released by the mocks it
+// waits for — the connection gets no MySQL and the test reports status_code 0,
+// which is the failure this mechanism exists to prevent.
 func TestSessionSwapDoesNotStrandDerivedWaiters(t *testing.T) {
 	p := testProxy(t)
 
-	parked := make(chan bool, 1)
-	go func() { parked <- p.mysqlPorts.WaitDerived(context.Background(), 5*time.Second) }()
-	time.Sleep(50 * time.Millisecond) // let it park on the current channel
+	parked := make(chan struct{})
+	signal := p.mysqlPorts.derivedSignal() // what a connection arriving now waits on
+	go func() {
+		<-signal
+		close(parked)
+	}()
 
 	p.mysqlPorts.MarkSessionStale()
 	p.deriveMysqlPorts([]*models.Mock{
@@ -1057,10 +784,7 @@ func TestSessionSwapDoesNotStrandDerivedWaiters(t *testing.T) {
 	})
 
 	select {
-	case ok := <-parked:
-		if !ok {
-			t.Fatal("waiter woke reporting the mocks never derived")
-		}
+	case <-parked:
 	case <-time.After(2 * time.Second):
 		t.Fatal("waiter stranded across the session boundary: it is still parked on a channel nothing will close")
 	}
@@ -1096,30 +820,29 @@ func predialProbeServer(t *testing.T, serve func(c net.Conn)) (addr string, conn
 // destination sees one connection; and a destination that closed it while
 // the application was still silent closes the application's end too.
 func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
-	t.Setenv("KEPLOY_MYSQL_CLIENT_SILENCE_WINDOW", "50ms")
-	t.Setenv("KEPLOY_MYSQL_SERVER_GREETING_WINDOW", "200ms")
-
 	type outcome struct {
 		greeting     string // what the next dial reads first
 		appEndClosed bool
 	}
 	for _, tc := range []struct {
-		name  string
-		serve func(c net.Conn)
-		want  outcome
+		name      string
+		serve     func(c net.Conn)
+		clientSay string // what the application sends first, if anything
+		want      outcome
 	}{
-		{"silent upstream", func(c net.Conn) {
+		// Both ends silent decide nothing: the client speaking does.
+		{"silent upstream, the client speaks", func(c net.Conn) {
 			defer c.Close()
 			_, _ = io.Copy(io.Discard, c)
-		}, outcome{}},
+		}, "GET / HTTP/1.1\r\n\r\n", outcome{}},
 		{"a greeting that is not MySQL", func(c net.Conn) {
 			defer c.Close()
 			_, _ = c.Write([]byte("220 smtp.example.com ESMTP\r\n"))
 			_, _ = io.Copy(io.Discard, c)
-		}, outcome{greeting: "220 smtp.example.com ESMTP\r\n"}},
+		}, "", outcome{greeting: "220 smtp.example.com ESMTP\r\n"}},
 		{"upstream closes first", func(c net.Conn) {
 			_ = c.Close()
-		}, outcome{appEndClosed: true}},
+		}, "", outcome{appEndClosed: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			addr, conns := predialProbeServer(t, tc.serve)
@@ -1139,6 +862,11 @@ func TestProbeHandsTheApplicationsOwnUpstreamBack(t *testing.T) {
 				}
 			})
 			port := uint32(upstream.RemoteAddr().(*net.TCPAddr).Port)
+			if tc.clientSay != "" {
+				if _, err := io.WriteString(app, tc.clientSay); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			probe, err := p.probeMysql(context.Background(), srcConn, addr, pre, port,
 				models.MODE_RECORD, models.OutgoingOptions{}, zap.NewNop())

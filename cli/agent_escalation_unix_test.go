@@ -1,0 +1,146 @@
+//go:build unix
+
+package cli
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
+	"go.keploy.io/server/v3/config"
+	"go.keploy.io/server/v3/utils"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
+)
+
+// The agent's CLI forces a stop with utils.EscalationSignal: the agent
+// command's PreRunE makes it kill a stopping agent once no teardown work in
+// progress is making progress (utils.DieOnEscalation).
+func TestAgentDiesOfTheEscalationSignal(t *testing.T) {
+	dir, agent, out, exited := startHangupAgent(t, true)
+	if err := agent.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	waitForMark(t, dir, "stopping", exited, out)
+	if err := agent.Process.Signal(utils.EscalationSignal); err != nil {
+		t.Fatal(err)
+	}
+	if st := awaitAgentEnd(t, agent, exited, out); !st.Signaled() || st.Signal() != syscall.SIGKILL {
+		t.Fatalf("the agent ended with %v, want it killed (SIGKILL)\n%s", agent.ProcessState, out.String())
+	}
+}
+
+// The agent reports its teardown's progress where the CLI said
+// (--teardown-progress-file) once its root context is cancelled, if that path
+// is one a keploy CLI gives; one that is not, it does not touch.
+func TestTheAgentReportsItsTeardownWhereTheCLISaid(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "keploy-agent-stop-test")
+	// Before the directory is removed: the reporter writes every beat until
+	// the process exits, and a write as it is removed puts the report back.
+	t.Cleanup(utils.StopTeardownReporting)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, utils.TeardownProgressFileName)
+	ctx, cancel := context.WithCancel(context.Background())
+	reportTeardown(ctx, zap.NewNop(), path, false)
+	cancel()
+	hung := time.After(time.Minute) // only turns a hang into a failure
+	for {
+		if b, err := os.ReadFile(path); err == nil {
+			if _, err := utils.ParseTeardownProgress(b); err != nil {
+				t.Fatalf("the agent's report does not parse: %v (%q)", err, b)
+			}
+			break
+		}
+		select {
+		case <-hung:
+			t.Fatal("the agent never reported its teardown where the CLI said")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	open := t.TempDir()
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zap.WarnLevel)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	reportTeardown(ctx2, zap.New(core), filepath.Join(open, utils.TeardownProgressFileName), false)
+	cancel2()
+	if logs.FilterMessageSnippet("not reporting the agent's teardown progress").Len() != 1 {
+		t.Fatal("a path others may write to was not refused")
+	}
+}
+
+// progressFlag is a CmdConfigurator that gives the agent command its
+// --teardown-progress-file, set to path, and its --is-docker, set to docker.
+type progressFlag struct {
+	noFlags
+	path   string
+	docker bool
+}
+
+func (f progressFlag) AddFlags(cmd *cobra.Command) error {
+	cmd.Flags().String("teardown-progress-file", f.path, "")
+	cmd.Flags().Bool("is-docker", f.docker, "")
+	return nil
+}
+
+// The agent command reports its teardown, once it is stopped: a native agent
+// where its --teardown-progress-file says, a containerised one (--is-docker,
+// given no such path) at its container's path -- here pointed at the test's
+// own directory.
+func TestTheAgentCommandReportsItsTeardown(t *testing.T) {
+	for _, docker := range []bool{false, true} {
+		name := "where --teardown-progress-file says"
+		if docker {
+			name = "a containerised agent at its container's path"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "keploy-agent-stop-cmd")
+			t.Cleanup(utils.StopTeardownReporting) // see TestTheAgentReportsItsTeardownWhereTheCLISaid
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, utils.TeardownProgressFileName)
+			flags := progressFlag{path: path}
+			if docker {
+				orig := containerTeardownProgressFile
+				containerTeardownProgressFile = path
+				t.Cleanup(func() { containerTeardownProgressFile = orig })
+				flags = progressFlag{docker: true}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			factory := agentSvcFactory{svc: agentSvc{setup: func(context.Context) error {
+				cancel() // stopped while serving
+				return context.Canceled
+			}}}
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			cmd := Agent(ctx, zap.NewNop(), &config.Config{}, factory, flags)
+			if err := cmd.RunE(cmd, nil); err != nil {
+				t.Fatalf("RunE: %v", err)
+			}
+			hung := time.After(time.Minute) // only turns a hang into a failure
+			for {
+				if b, err := os.ReadFile(path); err == nil {
+					if _, err := utils.ParseTeardownProgress(b); err != nil {
+						t.Fatalf("the agent's report does not parse: %v (%q)", err, b)
+					}
+					return
+				}
+				select {
+				case <-hung:
+					t.Fatalf("the agent command never reported its teardown %s", name)
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+		})
+	}
+}
