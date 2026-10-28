@@ -23,6 +23,10 @@
 #      KEPLOY_TELEMETRY_URL (a local port; the agent container is not given
 #      it), so only the agent container's lookup, forwarded by dockerd, can
 #      count. This leg sends keploy's usual telemetry.
+#   3. --disable-tele --debug: the agent takes the CLI's other root settings
+#      from the same launcher words (pkg/platform/agentargs), so it logs DEBUG
+#      lines of its own, which leg 1 (no --debug) has none of; and still no
+#      query names telemetry.keploy.io.
 # Natively, two more pairs crash keploy on purpose, once in the CLI (record)
 # and once in the agent: a build of this tree with the keploy_e2e_crash tag
 # (cli/forced_crash_e2e.go) panics in the command KEPLOY_E2E_CRASH names, after
@@ -32,8 +36,8 @@
 # a connection attempt reaches Sentry's address. A crash report carries
 # the run's whole log; until the fix the client started before the flags were
 # read and sent it under --disable-tele too.
-#   3. --disable-tele: no query names a sentry.io host.
-#   4. Control, no flag: some query does.
+#   4. --disable-tele: no query names a sentry.io host.
+#   5. Control, no flag: some query does.
 # Docker's agent image is not a crash build, so its crash legs are not run.
 # Readiness is the app's answer, keploy's test file and the watcher's marker.
 # The script stops only the processes it started. Port: 8098 (app).
@@ -168,6 +172,18 @@ record control "${CONTROL_ENV[@]}" --
 n="$(tele_lookups "$LEG_FROM" "$LEG_TO")"
 echo "$TELE_HOST lookups: $n"
 [ "$n" -gt 0 ] || fail "the watcher saw no $TELE_HOST lookup from keploy record without --disable-tele, so the --disable-tele leg proves nothing"
+
+# agent_debug_lines LEG: the DEBUG lines the agent logged in that leg.
+agent_debug_lines() { grep -a -c -E 'Keploy\(agent\):.*DEBUG' "$WORK/$1/record.log"; }
+echo "== $MODE: keploy record --disable-tele --debug"
+record debug -- --disable-tele --debug
+n="$(tele_lookups "$LEG_FROM" "$LEG_TO")"
+d="$(agent_debug_lines debug)"
+d0="$(agent_debug_lines flag)"
+echo "$TELE_HOST lookups: $n; agent DEBUG lines: $d (leg 1, no --debug: $d0)"
+[ "$n" = 0 ] || fail "keploy record --disable-tele --debug looked $TELE_HOST up $n times"
+[ "$d" -gt 0 ] || fail "keploy record --debug: the agent logged no DEBUG line, so the CLI's --debug did not reach it"
+[ "$d0" = 0 ] || fail "keploy record without --debug: the agent logged $d0 DEBUG lines, so the --debug leg proves nothing"
 
 # sentry_lookups FROM TO: the distinct queries in the window that name a host
 # under sentry.io.

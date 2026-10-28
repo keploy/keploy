@@ -43,6 +43,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
@@ -2200,27 +2201,14 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if len(extraArgs) > 0 {
 		args = append(args, extraArgs...)
 	}
-	if a.conf.Debug {
-		args = append(args, "--debug")
-	}
+	// The CLI's root-level settings (--debug, --disable-tele, --disable-ansi,
+	// --disable-mapping), each with its value: the native agent reads the same
+	// keploy.yml (--config-path), and only an explicit value keeps the
+	// flag > yaml > default the CLI resolved.
+	args = append(args, agentargs.Root(a.conf)...)
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
-	// Forward the operator's --disable-mapping (root-level config) so
-	// the native agent process — even though it inherits the same
-	// keploy.yml via --config-path — sees an explicit override on
-	// invocations where the host CLI mutated the in-memory config
-	// after viper load (e.g. --disable-mapping=false on the test
-	// subcommand path that drove this agent start).
-	args = append(args, fmt.Sprintf("--disable-mapping=%t", a.conf.DisableMapping))
-	// And the operator's --disable-tele. The agent is a keploy process of its
-	// own that pings telemetry at its start from its own config
-	// (provider.GetService), so unless the CLI's resolved value reaches it,
-	// `keploy record --disable-tele` still resolves and contacts the telemetry
-	// host from the agent. Unconditional, as --disable-mapping above: the
-	// agent reads the same keploy.yml, and only an explicit value keeps the
-	// flag > yaml > default the CLI resolved.
-	args = append(args, fmt.Sprintf("--disable-tele=%t", a.conf.DisableTele))
 	if a.conf.Record.EnableSampling > 0 {
 		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}
@@ -2258,7 +2246,7 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
-	// pattern (and for the same reason) as --disable-mapping above: the
+	// pattern (and for the same reason) as the root settings above: the
 	// orchestrator has already applied flag > yaml > default, and the native
 	// agent inherits the very same keploy.yml through --config-path below. If
 	// we only sent the flag when it was true, an explicit
@@ -2273,9 +2261,6 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	args = append(args, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
-	}
-	if models.IsAnsiDisabled == true {
-		args = append(args, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
@@ -3684,7 +3669,7 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
 	// The CLI's own config: the alias forwards the root flags the agent
-	// container must share with the CLI (--debug, --disable-tele) from it.
+	// container must share with the CLI (agentargs.Root) from it.
 	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.conf, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
