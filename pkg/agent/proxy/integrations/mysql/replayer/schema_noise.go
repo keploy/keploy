@@ -25,9 +25,9 @@ import (
 // canonical JSON document by mysqlRequestBodyJSON and diffed with the shared
 // JSON kernel. Field-path vocabulary per packet:
 //
-//	COM_QUERY               -> body.query.{template,literals.N,comments} [, body.parameters.N.* query attributes]
+//	COM_QUERY               -> body.query.{template,literals.N,comments} [, body.attributes.<name>.* query attributes]
 //	COM_STMT_PREPARE        -> body.query.{template,literals.N,comments}
-//	COM_STMT_EXECUTE        -> body.parameters.N.{type,value,unsigned}
+//	COM_STMT_EXECUTE        -> body.parameters.N.{type,value,unsigned} [, body.attributes.<name>.*]
 //	COM_STMT_SEND_LONG_DATA -> body.data (field-level body.data.* when the chunk is standalone JSON)
 //
 // SQL texts are literal-split (see queryBodyValue): inline static values
@@ -583,18 +583,21 @@ func maskAttributeDiffs(diffs []models.MockFieldDiff, mock *models.Mock, live *m
 		recorded = &mock.Spec.MySQLRequests[0].PacketBundle
 	}
 	for i := range diffs {
-		rest, ok := strings.CutPrefix(diffs[i].Path, "body.parameters.")
-		if !ok {
-			continue
-		}
-		idx, field, _ := strings.Cut(rest, ".")
-		n, err := strconv.Atoi(idx)
-		if err != nil || field == "name" || field == "type" || field == "unsigned" {
+		var attribute bool
+		if p := diffs[i].Path; p == "body.attributes" || strings.HasPrefix(p, "body.attributes.") {
+			// Every one is an attribute (readAttributes), keyed by its
+			// name, which may hold dots: all but a change of its type are
+			// masked (one side without it holds it whole, its value too).
+			field := p[strings.LastIndexByte(p, '.')+1:]
+			attribute = diffs[i].Kind != models.DiffKindValueChanged || (field != "type" && field != "unsigned")
+		} else if rest, ok := strings.CutPrefix(diffs[i].Path, "body.parameters."); ok {
+			idx, field, _ := strings.Cut(rest, ".")
+			n, err := strconv.Atoi(idx)
 			// Everything else under the parameter is its value, an
 			// enveloped one ($bin, $ts) included.
-			continue
+			attribute = err == nil && field != "name" && field != "type" && field != "unsigned" && (named(live, n) || named(recorded, n))
 		}
-		if named(live, n) || named(recorded, n) {
+		if attribute {
 			// The side the field is absent from stays empty.
 			if diffs[i].Kind != models.DiffKindMissingInMock {
 				diffs[i].Expected = maskedAttributeValue
@@ -636,8 +639,8 @@ func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
 // statement's own parameter count when known (a live packet's), -1 when not
 // (executeAttributesFrom), and its statement (query, empty when not known):
 // when that reads its attributes and the count is known, the body holds
-// the statement's own parameters and then the attributes it reads, by name
-// (executeBodyParameters).
+// the statement's own parameters, by position, and the attributes it
+// reads, by name (body.attributes, executeBodyParameters).
 func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query string) ([]byte, bool) {
 	if bundle == nil || bundle.Header == nil {
 		return nil, false
@@ -652,7 +655,7 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query str
 		if readsQueryAttributes(msg.Query) {
 			// A COM_QUERY's parameters are all query attributes.
 			if names, ok := attributesRead(msg.Query); ok {
-				doc["parameters"] = parametersByIndex(readAttributes(msg.Parameters, names))
+				doc["attributes"] = readAttributes(msg.Parameters, names)
 			} else if len(msg.Parameters) > 0 {
 				doc["parameters"] = parametersByIndex(msg.Parameters)
 			}
@@ -666,7 +669,11 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query str
 		if msg == nil {
 			return nil, false
 		}
-		doc = map[string]any{"parameters": parametersByIndex(executeBodyParameters(msg, statementParams, query))}
+		params, attrs := executeBodyParameters(msg, statementParams, query)
+		doc = map[string]any{"parameters": parametersByIndex(params)}
+		if attrs != nil {
+			doc["attributes"] = attrs
+		}
 	case *mysql.StmtSendLongDataPacket:
 		if msg == nil {
 			return nil, false
@@ -759,47 +766,86 @@ func unquoteSQLString(s, quote string) string {
 }
 
 // readAttributes is, of the query attributes a client sent (attrs), the
-// ones a statement reads (names, attributesRead), by name: for each name, in
-// that order, the first attribute sent with it, or, when none was, a NULL
-// of that name (mysql_query_attribute_string reads NULL then). The others
-// cannot change the statement's answer: a client sends ones that differ on
-// every call (Connector/J 8.1+, the caller's OpenTelemetry traceparent), so
-// compared, a statement that reads only 'tenant' never matched its
-// recording. By name, so the order the client sends them in, and the
-// others it sends, do not move a read one's field
-// (body.parameters.N.value: the Nth name the statement reads).
-func readAttributes(attrs []mysql.Parameter, names []string) []mysql.Parameter {
-	out := make([]mysql.Parameter, 0, len(names))
+// ones a statement reads (names, attributesRead), keyed by name
+// (body.attributes.<name>.value, the name in lower case). MySQL looks a
+// name up in the connection's collation, and the first attribute sent with
+// it wins: on 8.4 a statement reading 'tenant' reads one sent as 'Tenant'
+// or 'TENANT', and under utf8mb4 one sent as 'ténant'. So for each name it
+// reads, the first one sent whose name is the same but for case, or, when
+// none is, a NULL (mysql_query_attribute_string reads NULL then); and,
+// under its own name, each one sent whose name a collation may fold onto
+// another though its case does not (foldableAttributeName). Compared with
+// those, an attribute the statement does not read can make a call miss,
+// never another tenant's rows answer it. The others are left out: a client
+// sends ones that differ on every call (Connector/J 8.1+, the caller's
+// OpenTelemetry traceparent), and compared, a statement that reads only
+// 'tenant' never matched its recording. Keyed by name, the order the client
+// sends them in moves no field, and noise written on the layout older
+// versions compared (body.parameters.N: every attribute sent, by position,
+// a traceparent sent first at 0) unchecks none of them.
+func readAttributes(attrs []mysql.Parameter, names []string) map[string]mysql.Parameter {
+	out := make(map[string]mysql.Parameter, len(names))
 	for _, name := range names {
-		read := mysql.Parameter{Type: uint16(mysql.FieldTypeNULL), Name: name}
+		key := strings.ToLower(name)
+		if _, dup := out[key]; dup {
+			continue
+		}
+		read := mysql.Parameter{Type: uint16(mysql.FieldTypeNULL)}
 		for _, a := range attrs {
-			if a.Name == name {
+			if strings.EqualFold(a.Name, name) {
 				read = a
 				break
 			}
 		}
-		out = append(out, read)
+		// The key names it: sent as Tenant or tenant, it is the same read.
+		read.Name = key
+		out[key] = read
+	}
+	for _, a := range attrs {
+		key := strings.ToLower(a.Name)
+		if _, seen := out[key]; seen || !foldableAttributeName(a.Name) {
+			continue
+		}
+		a.Name = key
+		out[key] = a
 	}
 	return out
 }
 
+// foldableAttributeName reports whether a collation may make name equal to
+// a name it differs from in more than case: one with a byte outside
+// printable ASCII (an accent, which utf8mb4_0900_ai_ci ignores; a control
+// character, which the Unicode collations ignore) or that ends in a space
+// (which PAD SPACE collations, latin1's default, ignore).
+func foldableAttributeName(name string) bool {
+	if strings.HasSuffix(name, " ") {
+		return true
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < 0x20 || name[i] > 0x7e {
+			return true
+		}
+	}
+	return false
+}
+
 // executeBodyParameters is the parameters of a COM_STMT_EXECUTE (p) its body
 // holds: its statement's own (executeOwnParameters), and when the statement
-// (query) reads its query attributes, the ones it reads, by name
-// (readAttributes). That needs where its own end, its statement's count
+// (query) reads its query attributes, the ones it reads, by name (attrs,
+// readAttributes). That needs where its own end, its statement's count
 // (statementParams), and the names it reads (attributesRead), and a packet
 // sent with its types (the one that sends their names); without them every
-// one of its parameters is held.
-func executeBodyParameters(p *mysql.StmtExecutePacket, statementParams int, query string) []mysql.Parameter {
+// one of its parameters is held, by position, and attrs is nil.
+func executeBodyParameters(p *mysql.StmtExecutePacket, statementParams int, query string) (params []mysql.Parameter, attrs map[string]mysql.Parameter) {
 	own := executeOwnParameters(p, statementParams)
 	if !readsQueryAttributes(query) {
-		return own
+		return own, nil
 	}
 	names, ok := attributesRead(query)
 	if !ok || statementParams < 0 || p.NewParamsBindFlag != 1 {
-		return p.Parameters
+		return p.Parameters, nil
 	}
-	return append(append(make([]mysql.Parameter, 0, len(own)+len(names)), own...), readAttributes(p.Parameters[len(own):], names)...)
+	return own, readAttributes(p.Parameters[len(own):], names)
 }
 
 // parametersByIndex converts a parameter slice to an index-keyed map (see

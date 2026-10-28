@@ -310,7 +310,7 @@ func TestAQueryReadingItsAttributeWithAnotherValueIsAMiss(t *testing.T) {
 		{name: "the same text, another value of its attribute", req: withTenant(queryReq(readsAttr), "b"), notExact: "query-read-attr", nearest: "query-read-attr"},
 		{name: "the same text, the same value", req: withTenant(queryReq(readsAttr), "a"), exact: "query-read-attr", notExact: "query-read-attr"},
 		{name: "the same text with a comment, the same value", req: withTenant(queryReq(traceReader+readsAttr), "a"), exact: "query-read-attr", notExact: "query-read-attr"},
-		{name: "the same text, another value of its attribute, configured noise", req: withTenant(queryReq(readsAttr), "b"), noise: requestBody("parameters.0.value"), exact: "query-read-attr", notExact: "query-read-attr"},
+		{name: "the same text, another value of its attribute, configured noise", req: withTenant(queryReq(readsAttr), "b"), noise: requestBody("attributes.tenant.value"), exact: "query-read-attr", notExact: "query-read-attr"},
 	})
 	runOtherStatementCases(t, []*models.Mock{plain}, []*models.Mock{plain}, []otherStatementCase{
 		{name: "a statement that does not read it, another value", req: withTenant(queryReq("SELECT id, name FROM small WHERE id = 7"), "b"), exact: "query-read-plain", notExact: "query-read-plain"},
@@ -338,7 +338,7 @@ func TestAQueryReadingItsAttributeWithAnotherValueIsAMiss(t *testing.T) {
 	})
 	t.Run("a recording whose attribute is learned noise", func(t *testing.T) {
 		noisy := diffMock("query-read-attr-noisy", "c1", []mysql.Request{withTenant(queryReq(readsAttr), "a")}, ts, models.LifetimePerTest, "mocks")
-		noisy.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
+		noisy.Spec.ReqBodyNoise = map[string][]string{"body.attributes.tenant.value": {}}
 		runOtherStatementCases(t, []*models.Mock{noisy}, []*models.Mock{noisy}, []otherStatementCase{
 			{name: "the same text, another value of its attribute", req: withTenant(queryReq(readsAttr), "b"), exact: "query-read-attr-noisy", notExact: "query-read-attr-noisy"},
 		})
@@ -350,9 +350,100 @@ func TestAQueryReadingItsAttributeWithAnotherValueIsAMiss(t *testing.T) {
 		if err != nil || ok {
 			t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
 		}
-		for _, want := range []string{"closestMock:query-read-attr ", "body.parameters.0.value", "query attributes", "not noise"} {
+		for _, want := range []string{"closestMock:query-read-attr ", "body.attributes.tenant.value", "query attributes", "not noise"} {
 			if !strings.Contains(miss, want) {
 				t.Errorf("the miss (%s) does not say %q", miss, want)
+			}
+		}
+	})
+}
+
+// MySQL looks a query attribute up by name in the connection's collation,
+// the first one sent with that name winning: on 8.4 a statement reading
+// 'tenant' reads one sent as 'Tenant' or 'TENANT', and under utf8mb4 one
+// sent as 'ténant'. Compared by exact name, two calls sending 'Tenant' were
+// both read as a NULL tenant, and tenant b's read got tenant a's rows. And
+// the body keys the ones it reads by name (body.attributes.<name>): noise
+// written on the positional layout older versions compared
+// (body.parameters.N, every attribute sent, in the order sent: a
+// traceparent sent first at 0) must not uncheck the tenant.
+func TestAQueryReadingAnAttributeReadsItAsMySQLDoes(t *testing.T) {
+	const readsAttr = "SELECT mysql_query_attribute_string('tenant') AS t, name FROM small WHERE id = 7"
+	ts := diffBase.Add(time.Millisecond)
+	cased := diffMock("query-read-attr-case", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "Tenant", "a")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{cased}, []*models.Mock{cased}, []otherStatementCase{
+		{name: "sent as Tenant, another value", req: withAttributes(queryReq(readsAttr), "Tenant", "b"), notExact: "query-read-attr-case", nearest: "query-read-attr-case"},
+		{name: "sent as TENANT, another value", req: withAttributes(queryReq(readsAttr), "TENANT", "b"), notExact: "query-read-attr-case", nearest: "query-read-attr-case"},
+		{name: "sent as Tenant, the same value", req: withAttributes(queryReq(readsAttr), "Tenant", "a"), exact: "query-read-attr-case", notExact: "query-read-attr-case"},
+		{name: "sent as tenant, the same value", req: withAttributes(queryReq(readsAttr), "tenant", "a"), exact: "query-read-attr-case", notExact: "query-read-attr-case"},
+		{name: "sent as Tenant after the same value as tenant", req: withAttributes(queryReq(readsAttr), "Tenant", "b", "tenant", "a"), notExact: "query-read-attr-case", nearest: "query-read-attr-case"},
+	})
+	// A name a collation may fold onto the read one though its case does
+	// not (an accent, a control character, a trailing space) is compared.
+	accent := diffMock("query-read-attr-accent", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "ténant", "a")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{accent}, []*models.Mock{accent}, []otherStatementCase{
+		{name: "sent as ténant, another value", req: withAttributes(queryReq(readsAttr), "ténant", "b"), notExact: "query-read-attr-accent", nearest: "query-read-attr-accent"},
+		{name: "sent as ténant, the same value", req: withAttributes(queryReq(readsAttr), "ténant", "a"), exact: "query-read-attr-accent", notExact: "query-read-attr-accent"},
+	})
+	padded := diffMock("query-read-attr-pad", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "tenant ", "a")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{padded}, []*models.Mock{padded}, []otherStatementCase{
+		{name: "sent as 'tenant ', another value", req: withAttributes(queryReq(readsAttr), "tenant ", "b"), notExact: "query-read-attr-pad", nearest: "query-read-attr-pad"},
+	})
+	// One named by a variable: which it reads is not known, so every one
+	// sent is compared, by position.
+	const readsVar = "SELECT mysql_query_attribute_string(@attr) AS t, name FROM small WHERE id = 7"
+	byVar := diffMock("query-read-attr-var", "c1", []mysql.Request{withAttributes(queryReq(readsVar), "tenant", "a")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{byVar}, []*models.Mock{byVar}, []otherStatementCase{
+		{name: "named by a variable, another value", req: withAttributes(queryReq(readsVar), "tenant", "b"), notExact: "query-read-attr-var", nearest: "query-read-attr-var"},
+		{name: "named by a variable, the same value", req: withAttributes(queryReq(readsVar), "tenant", "a"), exact: "query-read-attr-var", notExact: "query-read-attr-var"},
+	})
+	t.Run("noise on the positional layout", func(t *testing.T) {
+		stale := diffMock("query-read-attr-stale", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "traceparent", "00-1111-01", "tenant", "a")}, ts, models.LifetimePerTest, "mocks")
+		stale.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
+		runOtherStatementCases(t, []*models.Mock{stale}, []*models.Mock{stale}, []otherStatementCase{
+			{name: "learned at the traceparent's place, another tenant", req: withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "tenant", "b"), notExact: "query-read-attr-stale", nearest: "query-read-attr-stale"},
+		})
+		plain := diffMock("query-read-attr-stale2", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "traceparent", "00-1111-01", "tenant", "a")}, ts, models.LifetimePerTest, "mocks")
+		runOtherStatementCases(t, []*models.Mock{plain}, []*models.Mock{plain}, []otherStatementCase{
+			{name: "configured at the traceparent's place, another tenant", req: withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "tenant", "b"), noise: requestBody("parameters.0.value", "body.parameters.0.value"), notExact: "query-read-attr-stale2", nearest: "query-read-attr-stale2"},
+			{name: "configured by name, another tenant", req: withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "Tenant", "b"), noise: requestBody("attributes.tenant.value"), exact: "query-read-attr-stale2", notExact: "query-read-attr-stale2"},
+			{name: "configured by name as listed, another tenant", req: withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "tenant", "b"), noise: requestBody("body.attributes.tenant.value"), exact: "query-read-attr-stale2", notExact: "query-read-attr-stale2"},
+		})
+	})
+	t.Run("the miss", func(t *testing.T) {
+		mm := stageOwn(t, []*models.Mock{cased}, []*models.Mock{cased}, true)
+		ctx, dctx := poolConn("c1")
+		_, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "TENANT", "secret-b"), mm, dctx)
+		if err != nil || ok {
+			t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
+		}
+		for _, want := range []string{"closestMock:query-read-attr-case ", "body.attributes.tenant.value", "query attributes", "not noise"} {
+			if !strings.Contains(miss, want) {
+				t.Errorf("the miss (%s) does not say %q", miss, want)
+			}
+		}
+		// An attribute's value may be a secret: the miss shows neither side.
+		for _, leak := range []string{"secret-b", "00-2222-01"} {
+			if strings.Contains(miss, leak) {
+				t.Errorf("the miss (%s) shows the attribute value %q", miss, leak)
+			}
+		}
+	})
+	t.Run("the miss, the second of two read attributes sent alone", func(t *testing.T) {
+		const reads2 = "SELECT mysql_query_attribute_string('a') AS a, mysql_query_attribute_string('token') AS t FROM small WHERE id = 7"
+		two := diffMock("query-read-two", "c1", []mysql.Request{withAttributes(queryReq(reads2), "token", "secret-x")}, ts, models.LifetimePerTest, "mocks")
+		mm := stageOwn(t, []*models.Mock{two}, []*models.Mock{two}, true)
+		ctx, dctx := poolConn("c1")
+		_, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), withAttributes(queryReq(reads2), "token", "secret-y"), mm, dctx)
+		if err != nil || ok {
+			t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
+		}
+		if !strings.Contains(miss, "body.attributes.token.value") {
+			t.Errorf("the miss (%s) does not name body.attributes.token.value", miss)
+		}
+		for _, leak := range []string{"secret-x", "secret-y"} {
+			if strings.Contains(miss, leak) {
+				t.Errorf("the miss (%s) shows the attribute value %q", miss, leak)
 			}
 		}
 	})

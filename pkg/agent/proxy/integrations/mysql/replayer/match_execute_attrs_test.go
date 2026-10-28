@@ -256,7 +256,7 @@ func TestMatchCommand_StrictComparesTheAttributesAnExecuteReads(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("strict served %v (%v): the statement reads a traceparent the replay changed", resp, err)
 	}
-	if miss == nil || len(miss.fieldDiffs) != 1 || miss.fieldDiffs[0].Path != "body.parameters.1.value" {
+	if miss == nil || len(miss.fieldDiffs) != 1 || miss.fieldDiffs[0].Path != "body.attributes.traceparent.value" {
 		t.Errorf("the miss %+v does not name the attribute's drift", miss)
 	}
 }
@@ -278,9 +278,13 @@ func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *tes
 		{name: "the same tenant, another traceparent", attrs: []mysql.Parameter{tenant("a"), traceparentAttr(replayTraceparent)}, served: true},
 		{name: "the same tenant after another traceparent", attrs: []mysql.Parameter{traceparentAttr(replayTraceparent), tenant("a")}, served: true},
 		{name: "the same tenant, no traceparent", attrs: []mysql.Parameter{tenant("a")}, served: true},
-		{name: "another tenant, the same traceparent", attrs: []mysql.Parameter{tenant("b"), traceparentAttr(recordedTraceparent)}, drift: "body.parameters.1.value"},
-		{name: "another tenant after the same traceparent", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent), tenant("b")}, drift: "body.parameters.1.value"},
-		{name: "no tenant", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent)}, drift: "body.parameters.1.value"},
+		{name: "another tenant, the same traceparent", attrs: []mysql.Parameter{tenant("b"), traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
+		{name: "another tenant after the same traceparent", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent), tenant("b")}, drift: "body.attributes.tenant.value"},
+		{name: "no tenant", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
+		// MySQL looks the name up in the connection's collation:
+		// case-insensitive.
+		{name: "the same tenant sent as Tenant", attrs: []mysql.Parameter{traceparentAttr(replayTraceparent), {Type: uint16(mysql.FieldTypeString), Name: "Tenant", Value: "a"}}, served: true},
+		{name: "another tenant sent as TENANT", attrs: []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "TENANT", Value: "b"}, traceparentAttr(recordedTraceparent)}, drift: "body.attributes.tenant.value"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -306,7 +310,7 @@ func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *tes
 			named := false
 			for _, d := range miss.fieldDiffs {
 				named = named || d.Path == c.drift
-				if !strings.HasPrefix(d.Path, "body.parameters.1.") {
+				if !strings.HasPrefix(d.Path, "body.attributes.tenant.") {
 					t.Errorf("the miss names %s: only the read attribute is compared", d.Path)
 				}
 			}
@@ -314,6 +318,34 @@ func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *tes
 				t.Errorf("the miss %+v does not name the read attribute's drift (%s)", miss, c.drift)
 			}
 		})
+	}
+}
+
+// Noise learned on the layout older versions compared, where an EXECUTE's
+// body held every attribute sent after its own parameters, by position (a
+// traceparent sent first at 1, after k), unchecks no attribute it reads: the
+// body keys those by name (body.attributes.<name>).
+func TestMatchCommand_StrictPositionalNoiseUnchecksNoReadAttribute(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string('tenant') AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	for _, key := range []string{"body.parameters.1.value", "body.parameters.2.value"} {
+		at := stmtT0.Add(time.Second)
+		m := executedMock("mock-reads", 1, at, "row", reads, "k1")
+		withAttrs(m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket), traceparentAttr(recordedTraceparent), tenant("a"))
+		m.Spec.ReqBodyNoise = map[string][]string{key: {}}
+		db := &fakeMockDb{session: []*models.Mock{m}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+		req := liveExecute("k1")
+		withAttrs(req.Message.(*mysql.StmtExecutePacket), traceparentAttr(replayTraceparent), tenant("b"))
+		dctx := newDecodeCtx()
+		dctx.StmtIDToQuery[33] = reads
+		dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 1}
+		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+		resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+		if err != nil || ok {
+			t.Errorf("noise %s: strict served %v (%v): tenant b got tenant a's rows", key, resp, err)
+		}
 	}
 }
 
@@ -511,8 +543,8 @@ func TestMatchCommand_LearnsTheDriftOfAnAttributeAnExecuteReads(t *testing.T) {
 	if _, _, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, schemanoise.New(mysqlNoiseAdapter{}, true, false), nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := db.learned["body.parameters.1.value"]; !ok {
-		t.Errorf("learned %v, want the read attribute's drift (body.parameters.1.value)", db.learned)
+	if _, ok := db.learned["body.attributes.traceparent.value"]; !ok {
+		t.Errorf("learned %v, want the read attribute's drift (body.attributes.traceparent.value)", db.learned)
 	}
 }
 
@@ -560,7 +592,7 @@ func TestMatchCommand_AnAutoReplayLearnsTheDriftStrictCompares(t *testing.T) {
 				withAttrs(r.Message.(*mysql.StmtExecutePacket), traceparentAttr(replayTraceparent))
 				return r
 			},
-			query: reads, params: 1, want: "body.parameters.1.value",
+			query: reads, params: 1, want: "body.attributes.traceparent.value",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
