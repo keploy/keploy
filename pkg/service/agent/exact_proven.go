@@ -259,7 +259,8 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 	case ex.Test != "":
 		// A test case opens all the same with a connection whose held
 		// requests cannot be told: its end finds it. The listener's drops
-		// read now are what its end compares.
+		// read now close the gap's window, whose drops are this test case's
+		// (markDrops), and open its own: they are what its end compares.
 		drops, err := a.settle(ctx, true)
 		if err != nil && !errors.Is(err, errHoldsUnknown) {
 			return err

@@ -565,7 +565,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 	}
 	// The test's end waits only for the requests opened from here.
 	a.beginWindow()
-	// The test's end compares the listener's drops with these.
+	// The drops read now close the gap's window, whose drops are the
+	// beginning test's (markDrops), and open the test's: its end compares
+	// the listener's drops with these.
 	a.markDrops(ctx, drops)
 	a.NoteScope(id, 0, dir, false)
 	// opened: the test's capture window opened (open), so a begin that

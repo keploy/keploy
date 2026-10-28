@@ -891,6 +891,34 @@ func TestCallsQueuedBehindLostWorkAreTheNextEndsLoss(t *testing.T) {
 	require.NoError(t, a.settledSince(context.Background(), true, "TestAfter"), "charged once")
 }
 
+// An end whose settle found calls queued behind lost work (behindLost) is
+// not verified, but it read the listener's drops when it settled, and that
+// read closes the test's drops' window: the next window opens at it, so
+// abandoned connects (the listener's count alone) after it charge nothing.
+func TestAnEndWithCallsBehindLostWorkStillClosesItsDropsWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	_ = manualWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, behind: []string{"connection 7 received 20 byte(s) after keploy gave up on it"}}
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 0)
+	p.smu.Lock()
+	p.drops = 5 // abandoned connects
+	p.smu.Unlock()
+	d, err := a.settleBegin(context.Background(), true)
+	require.NoError(t, err)
+	a.windowDrops(d, true, true)
+	err = a.settledSince(context.Background(), true, "TestNext")
+	require.Error(t, err, "the end is not verified")
+	a.provenMu.Lock()
+	got := a.proven.drops
+	a.provenMu.Unlock()
+	require.Equal(t, models.ListenDrops{Listener: 5, NetKnown: true}, got, "the end's read closes the window")
+	n, _, _ := a.windowDrops(models.ListenDrops{Listener: 8, NetKnown: true}, true, true)
+	require.Zero(t, n, "abandoned connects after it charge nothing")
+}
+
 // settleBlocked, when set, is told by the doubles that a settle is blocked
 // at a step only an event or its watchdog can end (blockedHere).
 var settleBlocked func()

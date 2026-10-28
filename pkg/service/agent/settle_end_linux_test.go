@@ -548,6 +548,47 @@ func TestADropInATestWhoseEndFailedIsTheGaps(t *testing.T) {
 	}
 }
 
+// An end left not verified by a connection whose parser cannot tell which
+// requests it holds (holdsUnknown) still read the listener's drops when it
+// settled, and that read closes the test's drops' window: the test is
+// charged no drop it did not have, and the next window opens at that read,
+// so the next test is charged only its own drops. Abandoned connects (the
+// listener's count alone, before the first test and in the next one) charge
+// neither test.
+func TestAnEndThatCannotTellItsHeldRequestsStillClosesItsDropsWindow(t *testing.T) {
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}, "o::TestB": {}}, map[string][]string{})
+	ctx := context.Background()
+	p.smu.Lock()
+	p.drops = 5 // abandoned connects before the first test
+	p.smu.Unlock()
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	p.smu.Lock()
+	p.unknown = []string{"grpc"}
+	p.smu.Unlock()
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.NotNil(t, serr, "TestA is not verified")
+	p.smu.Lock()
+	p.unknown = nil
+	p.smu.Unlock()
+	_, serr = a.ProvenBegin(ctx, begin("TestB"))
+	require.Nil(t, serr)
+	p.smu.Lock()
+	p.drops += 3 // abandoned connects in TestB
+	p.smu.Unlock()
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestB", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	if w := windowOf(t, a, "o::TestB"); w.Evidence != nil {
+		t.Errorf("TestB is charged for abandoned connects: %+v", w.Evidence.CannotCapture)
+	}
+	w := windowOf(t, a, "o::TestA")
+	require.NotNil(t, w.Evidence)
+	require.True(t, w.Evidence.Unread, "TestA is not verified")
+	for _, c := range w.Evidence.CannotCapture {
+		require.NotEqual(t, models.CaptureLossListenerDropped, c.Kind, "TestA is charged no drop")
+	}
+}
+
 // A session's drops are counted from its start: one after a test process's
 // claim and before its first begin is its first test's, as a miss there is.
 // One before the claim is the run's
