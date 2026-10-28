@@ -52,17 +52,24 @@ func (c *starvedConn) Read(b []byte) (int, error) {
 //
 // The handshake is handed the tracked connection itself, and, as the proxy
 // hands it (handleConnection, the CONNECT path, opportunistic TLS), in its
-// util.Conn wrapper: the hold is found through the wrapper's NetConn.
+// util.Conn wrapper: the hold is found through the wrapper's NetConn; in two
+// of them, one around the other, as the proxy hands it when it wraps a
+// connection a probe or serveReal had wrapped already (the MySQL TLS
+// upgrader's replayConn): the hold is found past the first hop; and in a
+// SafeConn, a wrapper that exposes only Unwrap. No path of the proxy's hands
+// a handshake a SafeConn today (the upgrader unwraps one first), but the
+// walk says it sees through Unwrap, so a row holds it to that.
 func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	wrap := func(c net.Conn) net.Conn { return &util.Conn{Conn: c, Reader: c, Logger: zap.NewNop()} }
 	hands := []struct {
 		name string
 		conn func(tracked net.Conn) net.Conn
 	}{
 		{"", func(c net.Conn) net.Conn { return c }},
-		{", handed in the proxy's util.Conn wrapper", func(c net.Conn) net.Conn {
-			return &util.Conn{Conn: c, Reader: c, Logger: zap.NewNop()}
-		}},
+		{", handed in the proxy's util.Conn wrapper", wrap},
+		{", handed in a util.Conn wrapping a util.Conn", func(c net.Conn) net.Conn { return wrap(wrap(c)) }},
+		{", handed in a SafeConn", func(c net.Conn) net.Conn { return util.NewSafeConn(c, zap.NewNop()) }},
 	}
 	for _, tc := range []struct {
 		name string
@@ -97,10 +104,10 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 					starved := &starvedConn{TCPConn: side, eof: make(chan struct{}), run: make(chan struct{})}
 					var runOnce sync.Once
 					run := func() { runOnce.Do(func() { close(starved.run) }) }
-					t.Cleanup(run)
 					tracked := p.inflight.track(starved)
 
 					ck.BeginTest() // the test the client's call is made in
+					inTest := ck.Scope()
 					handled := make(chan struct{})
 					go func() {
 						defer close(handled)
@@ -111,13 +118,23 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 							_, _ = c.Read(make([]byte, 1)) // the client's first request
 						}
 					}()
+					// A row that fails leaves no handler behind: it is run,
+					// its client gone, and waited for.
+					t.Cleanup(func() {
+						run()
+						_ = app.Close()
+						<-handled
+					})
 					tc.hangUp(t, app)
 					_ = app.Close() // no alert, no close_notify
 					<-starved.eof   // the handler's read took the hang-up; it is not run since
 
 					// The test's end, as the agent's (endTest, closeOpen):
 					// its calls settled, by events, then what it lost read,
-					// then its scope closed.
+					// then its scope closed; and only then is what it read
+					// told, the end's last step. Told first, the scope
+					// could close as late as the scheduler runs the end:
+					// in a later row's test, whose abandon it then drops.
 					waiting := make(chan struct{})
 					lost := make(chan uint64, 1)
 					go func() {
@@ -133,8 +150,9 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 							}
 							<-changed
 						}
-						lost <- lossesOf(p, models.CaptureLossTLSAbandoned)
+						n := lossesOf(p, models.CaptureLossTLSAbandoned)
 						ck.EndTest()
+						lost <- n
 					}()
 					select {
 					case <-waiting:
@@ -142,7 +160,11 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 						t.Fatalf("the test's end did not wait for a hang-up its handler had not told: it read %d abandoned, and closed the test's scope", n)
 					}
 					run() // the host runs the handler at last
-					if n := <-lost; n != 1 {
+					n := <-lost
+					if ck.Scope() == inTest {
+						t.Fatal("the test's end told what it read before it closed the test's scope: a row after this one could have its scope closed by this end")
+					}
+					if n != 1 {
 						t.Fatalf("the test's end read %d tls_handshake_abandoned, want 1: the hang-up is the test's", n)
 					}
 					<-handled
