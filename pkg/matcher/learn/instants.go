@@ -2,7 +2,6 @@ package learn
 
 import (
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,11 +126,12 @@ import (
 // ClassifyIn with instant slots: it keeps these rules.
 
 // instantRes are clockLayouts' patterns in either case: a case-folded form of
-// a text holds its instants folded.
-var instantRes = func() []*regexp.Regexp {
-	out := make([]*regexp.Regexp, len(clockLayouts))
+// a text holds its instants folded. Each reads a text only in the windows of
+// it that can hold a match (layoutRe).
+var instantRes = func() []*layoutRe {
+	out := make([]*layoutRe, len(clockLayouts))
 	for i, lay := range clockLayouts {
-		out[i] = regexp.MustCompile("(?i)" + lay.re.String())
+		out[i] = newLayoutRe(lay)
 	}
 	return out
 }()
