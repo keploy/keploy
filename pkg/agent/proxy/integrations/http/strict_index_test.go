@@ -199,6 +199,17 @@ func (d *exactGenDb) UpdateUnFilteredMock(old, _ *models.Mock) bool {
 	return false
 }
 
+// randomStrictSeeds is how many random pools the strict-index rows draw:
+// six, or two under -race (one under url noise, one without), where the rows
+// test no concurrency and six take most of a minute of the race step; the
+// plain run (go test ./...) draws all six.
+func randomStrictSeeds() int64 {
+	if raceOn {
+		return 2
+	}
+	return 6
+}
+
 // Over random pools and calls, under url noise or none, a call answered
 // through the index is answered with the recording a read answers it with,
 // and misses where a read misses; verify mode, on for the indexed side,
@@ -207,7 +218,7 @@ func TestAnIndexedStrictMatchIsTheOneAReadGives(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	was := integrations.ExactViewVerify.Load()
 	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
-	for seed := int64(1); seed <= 6; seed++ {
+	for seed := int64(1); seed <= randomStrictSeeds(); seed++ {
 		var noise []string
 		if seed%2 == 0 {
 			noise = []string{`/q/[0-9]+`}

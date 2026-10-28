@@ -69,7 +69,7 @@ func TestAnOwnedIndexedStrictMatchIsTheOneAReadGives(t *testing.T) {
 	was := integrations.ExactViewVerify.Load()
 	t.Cleanup(func() { integrations.ExactViewVerify.Store(was) })
 	interleaved := 0
-	for seed := int64(1); seed <= 6; seed++ {
+	for seed := int64(1); seed <= randomStrictSeeds(); seed++ {
 		var noise []string
 		if seed%2 == 0 {
 			noise = []string{`/q/[0-9]+`}
@@ -102,8 +102,8 @@ func TestAnOwnedIndexedStrictMatchIsTheOneAReadGives(t *testing.T) {
 			t.Fatalf("seed %d: no index of the test's own was built, or it offered %d recordings the store refused", seed, ixDb.refused)
 		}
 	}
-	if interleaved < 100 {
-		t.Fatalf("only %d calls had their own bucket and a URL learner out of the list's order: the row compares too little", interleaved)
+	if want := int(100 * randomStrictSeeds() / 6); interleaved < want {
+		t.Fatalf("only %d calls had their own bucket and a URL learner out of the list's order, want %d: the row compares too little", interleaved, want)
 	}
 }
 
