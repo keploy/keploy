@@ -354,6 +354,12 @@ func (r *Runner) setupTestSet(parentCtx context.Context, testSetID string, backd
 			BuildDelay:  r.config.BuildDelay,
 			Mode:        models.MODE_TEST,
 
+			// The same real-egress opt-ins keploy test hands its agent
+			// (replay.go): this agent replays too, so it opens only what the
+			// user named, and DNS stays inside the replay without them.
+			GlobalPassthrough: r.config.Record.GlobalPassthrough,
+			AllowEgress:       r.config.Test.AllowEgress,
+
 			DisableHandshakeHold: r.config.Record.DisableHandshakeHold,
 		}); err != nil {
 			return nil, fmt.Errorf("setup failed: %w", err)
