@@ -78,6 +78,7 @@ func keyedSetReq(i int) mysql.Request {
 // command, every mock the test had not answered yet, so a command's cost grew
 // with the set.
 func TestAWholeSetsCommandReadsTheTestsMocksOnlyUpToItsOwnRecording(t *testing.T) {
+	withoutViewVerify(t) // the verify mode reads each per-test read again: counted alone
 	sizes := []int{1000, 10000}
 	if testing.Short() || raceEnabled {
 		sizes = []int{100, 1000}

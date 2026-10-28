@@ -265,6 +265,7 @@ func TestNoWindowCommandAllocationsDoNotGrowWithOtherStatements(t *testing.T) {
 // an EXECUTE (its index keys, then the scan's filter): 18% of the agent's CPU
 // at 10,000 mocks.
 func TestExactServedCommandReadsNoTierOfAOneCommandCandidate(t *testing.T) {
+	withoutViewVerify(t) // the verify mode reads each keyed read again: counted alone
 	readsFor := func(n int) []int {
 		// First, a bundle of two requests tagged config, which every command's
 		// filter must classify (and skip): the count is not zero by a hook
@@ -389,6 +390,7 @@ func TestExactServingWholeSetServesWhatTheFullScanServes(t *testing.T) {
 //     It computes each staged mock's unnamedExecIndex keys once, and none of
 //     the mocks the test owns.
 func TestExactServingOwnedSetCommandCosts(t *testing.T) {
+	withoutViewVerify(t) // the verify mode reads each keyed read again: counted alone
 	sizes := []int{1000, 10000}
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:1]
@@ -490,6 +492,7 @@ func TestExactServingOwnedSetCommandCosts(t *testing.T) {
 // build is once per staging: a second such command computes no key. Each
 // command serves what the full scan serves.
 func TestStagingsFirstUnsettledCommandComputesOnlyItsOwnKeys(t *testing.T) {
+	withoutViewVerify(t) // the verify mode reads each keyed read again: counted alone
 	sizes := []int{1000, 10000}
 	if testing.Short() || raceEnabled {
 		sizes = sizes[:1]
