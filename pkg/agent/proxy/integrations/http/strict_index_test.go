@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -350,14 +351,14 @@ func (d *genVarDb) MockSpent(name string) bool                 { return d.consum
 // OwnedByOpenTest: the open test's own are the per-test read's.
 func (d *genVarDb) OwnedByOpenTest(m *models.Mock) bool { return slices.Contains(d.perTest, m) }
 
-// A generation that stages a recording declaring variables is never served
-// through the strict index: the variable pass serves those first, from a
-// read. Here a reusable recording is the very create too, and the create,
-// the generation's second call (the one that builds its index), is still
-// answered by the recording that binds its variable.
-func TestAGenerationWithVariablesIsNotServedThroughTheStrictIndex(t *testing.T) {
+// A generation that stages a recording declaring variables keeps it aside
+// in its strict index, and the variable pass serves it before the strict
+// pass, as from a read. Here a reusable recording is the very create too,
+// and the create, the generation's second call (the one that builds its
+// index), is still answered by the recording that binds its variable, with
+// the verify mode comparing what the variable pass read with a read's.
+func TestAGenerationsRecordingWithVariablesIsServedBeforeItsStrictIndex(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	verifyOff(t)
 	h := newHTTP()
 	body := `{"id":"ord-live-9","item":"pen"}`
 	db := &genVarDb{varDb: &varDb{
@@ -374,8 +375,101 @@ func TestAGenerationWithVariablesIsNotServedThroughTheStrictIndex(t *testing.T) 
 			t.Fatalf("%s %s: served %v (ok %v, err %v); want %s", c.method, c.path, stub, ok, err, c.want)
 		}
 	}
-	if !h.strictIx.has || !h.strictIx.last.vars {
-		t.Fatal("the generation's index was not built, or does not say it holds variables")
+	if !h.strictIx.has || len(h.strictIx.last.vars) != 1 || h.strictIx.last.vars[0].Name != "bind" {
+		t.Fatal("the generation's index was not built, or does not keep its recording with variables aside")
+	}
+}
+
+// exactVarDb is genVarDb under exact serving's sequence view: the open
+// test's view (SequenceViewer), every recording the store stages, spent ones
+// included (StagedReader), and the background's cursor (BackgroundCursor),
+// as the manager offers them in a test.
+type exactVarDb struct {
+	*genVarDb
+	view   integrations.SequenceView
+	staged []*models.Mock
+	bg     *mockMemDb
+	reads  int
+}
+
+func (d *exactVarDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	d.reads++
+	return d.genVarDb.GetPerTestMocksInWindow()
+}
+func (d *exactVarDb) SequenceView() (integrations.SequenceView, bool) { return d.view, true }
+func (d *exactVarDb) StagedMocks() []*models.Mock                     { return d.staged }
+func (d *exactVarDb) BackgroundCursor() (integrations.MockCursor, bool) {
+	return d.bg, true
+}
+
+// A background poll whose recordings declare variables walks its recorded
+// sequence through the staging generation's index as through a read: each
+// call the next recording, in record order. Once the last recording can
+// answer no more (here another call spent it), the poll's next call is a
+// miss that names it, as a read reports it: the index serves no answer for
+// an answered walk, and never an earlier recording again. With the verify
+// mode on and off; the verify mode reads the store on every indexed call, so
+// the reads are counted with it off.
+func TestAnAnsweredWalkOfRecordingsWithVariablesIsAMissThroughTheIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, verify := range []bool{true, false} {
+		t.Run(fmt.Sprintf("verify=%v", verify), func(t *testing.T) {
+			if !verify {
+				verifyOff(t)
+			}
+			answeredWalkThroughTheIndex(t, !verify)
+		})
+	}
+}
+
+func answeredWalkThroughTheIndex(t *testing.T, countReads bool) {
+	h := newHTTP()
+	polls := []*models.Mock{
+		pollAt("poll-1", 1, "pending", models.MockVariables{"token": bindV("T", "body.token")}),
+		pollAt("poll-2", 2, "pending", models.MockVariables{"token": useV("T", []string{"body.token"})}),
+		pollAt("poll-3", 3, "running", models.MockVariables{"token": useV("T", []string{"body.token"})}),
+		pollAt("poll-4", 4, "done", models.MockVariables{"token": useV("T", []string{"body.token"})}),
+	}
+	db := &exactVarDb{
+		genVarDb: &genVarDb{varDb: &varDb{session: slices.Clone(polls)}, gen: 1},
+		view:     integrations.SequenceView{Cursor: &mockMemDb{}, Test: "test-1", Start: recordedAt.Add(10 * time.Second)},
+		staged:   slices.Clone(polls),
+		bg:       &mockMemDb{},
+	}
+	call := func() (bool, *models.Mock, *matchDiag) {
+		t.Helper()
+		ok, stub, diag, err := h.matchOf(context.Background(), liveReq("POST", "http://svc/poll", `{"token":"L"}`), db, db, nil, nil, nil, true, false, false, true, true)
+		if err != nil {
+			t.Fatalf("match: %v", err)
+		}
+		return ok, stub, diag
+	}
+	for i, want := range []string{"poll-1", "poll-2", "poll-3"} {
+		reads := db.reads
+		if ok, stub, diag := call(); !ok || stub.Name != want {
+			t.Fatalf("poll %d: served %v (ok %v, diag %+v); want %s", i+1, stub, ok, diag, want)
+		}
+		// The generation's second call builds its index; the third reads it.
+		if countReads && i == 2 && db.reads != reads {
+			t.Fatalf("poll 3 read the store %d times; want it served through the index", db.reads-reads)
+		}
+	}
+	if !h.strictIx.has || len(h.strictIx.last.vars) != len(polls) {
+		t.Fatal("the generation's index was not built, or does not keep the polls with variables aside")
+	}
+	// Another call spent poll-4: the store no longer offers it, but stages it.
+	db.session = db.session[:3]
+	db.consumed = map[string]bool{"poll-4": true}
+	reads := db.reads
+	ok, stub, diag := call()
+	if ok {
+		t.Fatalf("once poll-4 is spent the poll was answered %s; want a miss, never an earlier recording again", stub.Name)
+	}
+	if diag == nil || diag.answered == nil || diag.answered.last != "poll-4" {
+		t.Fatalf("the miss %+v does not report the answered walk ending at poll-4", diag)
+	}
+	if countReads && db.reads == reads {
+		t.Fatal("the answered walk was reported without a read; the read path reports it")
 	}
 }
 
@@ -405,13 +499,13 @@ func (d *sharedVarDb) GetSessionMocks() ([]*models.Mock, error) {
 	return out, nil
 }
 
-// An open test's own recording that declares variables keeps the test's
-// calls off the strict index of the shared part of its reads, as one in the
-// staged set keeps its generation's: the variable pass serves it first, from
-// a read (here the create, which the shared part's plain recording would
-// answer too). The learn step's index never places it: a call that is it
-// exactly finds the group a read gives (the verify mode panics otherwise).
-func TestAnOwnedRecordingWithVariablesIsNotServedThroughTheSharedIndex(t *testing.T) {
+// An open test's own recording that declares variables is served before the
+// strict index of the shared part of its reads, as one in the staged set is
+// before its generation's: the variable pass reads it first (here the
+// create, which the shared part's plain recording would answer too). The
+// learn step's index never places it: a call that is it exactly finds the
+// group a read gives (the verify mode panics otherwise).
+func TestAnOwnedRecordingWithVariablesIsServedBeforeTheSharedIndex(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
 	body, recorded := `{"id":"ord-live-9","item":"pen"}`, `{"id":"ord-rec-1","item":"pen"}`
 	newDb := func() *sharedVarDb {
@@ -424,7 +518,6 @@ func TestAnOwnedRecordingWithVariablesIsNotServedThroughTheSharedIndex(t *testin
 			session: []*models.Mock{reusable(at(varMock("plain", "POST", "http://store/orders", body, 200, `{}`, nil), 3))},
 		}, gen: 1}}
 	}
-	verifyOff(t)
 	h, db := newHTTP(), newDb()
 	for _, c := range []struct{ method, path, body, want string }{{"GET", "/ping", "", "ping"}, {"POST", "/orders", body, "bind"}} {
 		ok, stub, _, err := h.matchOf(context.Background(), liveReq(c.method, c.path, c.body), db, db, nil, nil, nil, true, false, false, true, true)
@@ -442,6 +535,225 @@ func TestAnOwnedRecordingWithVariablesIsNotServedThroughTheSharedIndex(t *testin
 	}
 	if !hl.learnIx.shared.has {
 		t.Fatal("no learn index of the shared part was built")
+	}
+}
+
+// readCountedVarDb is genVarDb that counts its per-test reads.
+type readCountedVarDb struct {
+	*genVarDb
+	reads int
+}
+
+func (d *readCountedVarDb) GetPerTestMocksInWindow() ([]*models.Mock, error) {
+	d.reads++
+	return d.genVarDb.GetPerTestMocksInWindow()
+}
+
+// orderBind is a per-test recording of POST /orders on the strict index's
+// host that binds variable orderId at its body's id.
+func orderBind() *models.Mock {
+	v := at(varMock("bind", "POST", "http://"+strictIxHost+"/orders", `{"id":"ord-rec-1"}`, 201, `{"id":"ord-rec-1"}`,
+		models.MockVariables{"orderId": bindV("ord-rec-1", "body.id", "body.id")}), 1)
+	v.TestModeInfo.Lifetime = models.LifetimePerTest
+	return v
+}
+
+// One recording that declares variables, staged or the open test's own,
+// keeps every other call on the strict index: the variable pass reads the
+// index's recordings with variables (here that one), and a call none of them
+// fits compares only its bucket and reads no store, at 100 recordings as at
+// 2000 (its own path in each read through the shared part's index).
+func TestARecordingWithVariablesKeepsTheOtherCallsOnTheStrictIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	for _, size := range []int{100, 2000} {
+		for _, shared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d recordings, shared %v", size, shared), func(t *testing.T) {
+				h := newHTTP()
+				own := newOwnGenDb(append(strictItems("mock", size), orderBind()), nil)
+				var db integrations.MockMemDb = own
+				want := int64(1)
+				if shared {
+					db, want = &sharedOwnDb{ownGenDb: own}, 2
+				}
+				strictMatchOf(t, h, strictCall(0), db, db, nil)
+				strictMatchOf(t, h, strictCall(1), db, db, nil)
+				reads := own.reads
+				visits := strictVisitsOf(func() {
+					if m := strictMatchOf(t, h, strictCall(2), db, db, nil); m == nil || m.Name != "mock-2" {
+						t.Fatalf("served %v; want mock-2", m)
+					}
+				})
+				if visits != want || own.reads != reads {
+					t.Fatalf("a strict call compared %d recordings and read the store %d times; want %d and 0", visits, own.reads-reads, want)
+				}
+			})
+		}
+	}
+}
+
+// A call a generation's recording with variables answers is served through
+// the index too: the variable pass reads the index's recordings with
+// variables, and the store is not read.
+func TestARecordingWithVariablesIsServedThroughTheIndexWithoutARead(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	h := newHTTP()
+	db := &readCountedVarDb{genVarDb: &genVarDb{varDb: &varDb{perTest: append(strictItems("mock", 50), orderBind())}, gen: 1}}
+	strictMatchOf(t, h, strictCall(0), db, db, nil)
+	strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+	reads := db.reads
+	ok, stub, _, err := h.matchOf(context.Background(), liveReq("POST", "http://"+strictIxHost+"/orders", `{"id":"ord-live-9"}`), db, db, nil, nil, nil, true, false, false, true, true)
+	if err != nil || !ok || stub.Name != "bind" {
+		t.Fatalf("served %v (ok %v, err %v); want bind", stub, ok, err)
+	}
+	if db.reads != reads {
+		t.Fatalf("the call read the store %d times; want 0", db.reads-reads)
+	}
+	if v, _ := db.table.Lookup("orderId"); v.Value != "ord-live-9" {
+		t.Fatalf("orderId bound to %q; want ord-live-9", v.Value)
+	}
+}
+
+// An index that lost a recording with variables (here the generation's one)
+// is caught in verify mode: what the call's variable pass reads through the
+// index differs from a read's, and it panics.
+func TestAStrictIndexThatLostAVariableRecordingPanicsInVerifyMode(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	h := newHTTP()
+	db := newOwnGenDb(append(strictItems("mock", 10), orderBind()), nil)
+	strictMatchOf(t, h, strictCall(0), db, db, nil)
+	strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+	h.strictIx.last.vars, h.strictIx.last.varSplit = nil, 0
+	integrations.ExactViewVerify.Store(true)
+	defer func() {
+		if r, _ := recover().(string); !strings.Contains(r, "exact view verify: indexed variable recordings") {
+			t.Fatalf("verify mode did not catch an index that lost a recording with variables (recovered %q)", r)
+		}
+	}()
+	strictMatchOf(t, h, strictCall(5), db, db, nil)
+}
+
+// spentVarDb is genVarDb that tells which recordings a test kept for its
+// repeats and is over with (integrations.SpentReader): still staged, never
+// served.
+type spentVarDb struct {
+	*genVarDb
+	over map[string]bool
+}
+
+func (d *spentVarDb) Spent(m *models.Mock) bool { return d.over[m.Name] }
+
+// A recording with variables a test kept for its repeats and is over with is
+// not served through the index, as a read drops it (integrations.WithoutSpent):
+// the call it would answer is a miss, and the calls the index serves go on.
+func TestASpentRecordingWithVariablesIsNotServedThroughTheStrictIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	h := newHTTP()
+	db := &spentVarDb{genVarDb: &genVarDb{varDb: &varDb{perTest: append(strictItems("mock", 10), orderBind())}, gen: 1}, over: map[string]bool{}}
+	strictMatchOf(t, h, strictCall(0), db, db, nil)
+	strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+	db.over["bind"] = true
+	if s := strictMatchOf(t, h, liveReq("POST", "http://"+strictIxHost+"/orders", `{"id":"ord-live-9"}`), db, db, nil); s != nil {
+		t.Fatalf("served %s, which its test is over with", s.Name)
+	}
+	if s := strictMatchOf(t, h, strictCall(6), db, db, nil); s == nil || s.Name != "mock-6" {
+		t.Fatalf("served %v; want mock-6", s)
+	}
+}
+
+// claimCountedVarDb is genVarDb that counts the claims of its per-test
+// recordings.
+type claimCountedVarDb struct {
+	*genVarDb
+	claims int
+}
+
+func (d *claimCountedVarDb) DeleteFilteredMock(m models.Mock) bool {
+	d.claims++
+	return d.genVarDb.DeleteFilteredMock(m)
+}
+
+// A recording with variables the store handed out is not claimed again
+// through the index, which still lists it while its generation holds: the
+// call it fitted, made again, misses with no claim.
+func TestARecordingWithVariablesTheStoreHandedOutIsNotClaimedAgainThroughTheIndex(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	verifyOff(t)
+	h := newHTTP()
+	db := &claimCountedVarDb{genVarDb: &genVarDb{varDb: &varDb{perTest: append(strictItems("mock", 10), orderBind())}, gen: 1}}
+	strictMatchOf(t, h, strictCall(0), db, db, nil)
+	strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+	create := func() *req { return liveReq("POST", "http://"+strictIxHost+"/orders", `{"id":"ord-live-9"}`) }
+	if s := strictMatchOf(t, h, create(), db, db, nil); s == nil || s.Name != "bind" {
+		t.Fatalf("served %v; want bind", s)
+	}
+	claims := db.claims
+	if s := strictMatchOf(t, h, create(), db, db, nil); s != nil {
+		t.Fatalf("served %s again", s.Name)
+	}
+	if db.claims != claims {
+		t.Fatalf("the call made again claimed %d recordings; want none", db.claims-claims)
+	}
+}
+
+// beginDb is genVarDb on which the next test begins once, armed, as the
+// strict pass reads its index (strictIndexes.of): that read is of the
+// previous test's pool and gives its generation, and then the next test's
+// pool is swapped in, its variables reset and the generation moved.
+type beginDb struct {
+	*genVarDb
+	armed bool
+	next  []*models.Mock
+}
+
+func (d *beginDb) StagingGenerationByKind(k models.Kind) uint64 {
+	gen := d.genVarDb.StagingGenerationByKind(k)
+	if d.armed && calledFrom("(*strictIndexes).of") {
+		d.armed = false
+		d.perTest, d.gen = d.next, d.gen+1
+		d.table.Reset()
+	}
+	return gen
+}
+
+// calledFrom reports whether a function whose name ends in fn is on the
+// caller's stack.
+func calledFrom(fn string) bool {
+	pcs := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.HasSuffix(f.Function, fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// A call the variable pass checks through the index of the previous test's
+// pool binds nothing in the test that began as the index was read: the
+// variables' scope is read before the index, so the bind is stale and the
+// call reads the store again, which holds the next test's pool (none here).
+func TestACallThroughTheIndexOfThePreviousPoolBindsNothingInTheNextTest(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	h := newHTTP()
+	db := &beginDb{genVarDb: &genVarDb{varDb: &varDb{perTest: append(strictItems("mock", 10), orderBind())}, gen: 1}}
+	strictMatchOf(t, h, strictCall(0), db, db, nil)
+	strictMatchOf(t, h, strictCall(1), db, db, nil) // the generation's second call builds its index
+	db.armed = true
+	if s := strictMatchOf(t, h, liveReq("POST", "http://"+strictIxHost+"/orders", `{"id":"straggler"}`), db, db, nil); s != nil {
+		t.Fatalf("the straggler was served %s, the previous test's", s.Name)
+	}
+	if db.armed {
+		t.Fatal("the next test did not begin as the index was read")
+	}
+	if got := db.table.Snapshot(); len(got) != 0 {
+		t.Fatalf("the straggler bound %+v in the next test", got)
 	}
 }
 

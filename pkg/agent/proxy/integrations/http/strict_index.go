@@ -27,6 +27,12 @@ import (
 // While a test is open the index is of the shared part of its reads, beside
 // the test's unanswered recordings read for each call (learnIndex,
 // strictLook).
+//
+// A recording that declares variables is the variable pass's, which serves
+// those before the strict pass: the index keeps them aside (vars), so a call
+// runs the variable pass over them and the test's own, less what is spent,
+// as it would over a read, and goes on to the strict pass's bucket only when
+// none fits (strictIndexed).
 type strictIndex struct {
 	gen     uint64
 	entries []*models.Mock
@@ -35,10 +41,11 @@ type strictIndex struct {
 	split  int
 	byPath map[string][]int
 	wild   map[string][]int
-	// vars: a read held a recording that declares variables. The variable
-	// pass serves those before the strict pass, from the whole read, so no
-	// call of the generation is served through the index.
-	vars bool
+	// vars are the reads' HTTP recordings that declare variables, in their
+	// order: vars[:varSplit] the per-test read's, the rest the session
+	// read's.
+	vars     []*models.Mock
+	varSplit int
 }
 
 // strictIndexBuilds counts the strict indexes built, and strictVisits the
@@ -56,11 +63,11 @@ func buildStrictIndex(gen uint64, perTest, session []*models.Mock, n strictNoise
 	ix := &strictIndex{gen: gen, byPath: map[string][]int{}, wild: map[string][]int{}}
 	for i, mocks := range [][]*models.Mock{perTest, session} {
 		if i == 1 {
-			ix.split = len(ix.entries)
+			ix.split, ix.varSplit = len(ix.entries), len(ix.vars)
 		}
 		for _, m := range FilterHTTPMocks(mocks) {
 			if hasVariables(m) {
-				ix.vars = true
+				ix.vars = append(ix.vars, m)
 				continue
 			}
 			r := m.Spec.HTTPReq
@@ -111,15 +118,15 @@ type strictIndexes struct {
 // strictLook is the strict pass's indexed read for one call (learnLook's
 // kind): an index, and for an index of the shared part of an open test's
 // reads, the test's unanswered HTTP recordings of a request read for the
-// call (owned), in their order, which lead each read. vars: a recording
-// the call reads declares variables (strictIndex.vars). gen is the staging
+// call (owned), in their order, which lead each read; ownedVars are those
+// of them that declare variables (strictIndex.vars). gen is the staging
 // generation the read is of.
 type strictLook struct {
-	ix     *strictIndex
-	shared bool
-	owned  []*models.Mock
-	vars   bool
-	gen    uint64
+	ix        *strictIndex
+	shared    bool
+	owned     []*models.Mock
+	ownedVars []*models.Mock
+	gen       uint64
 }
 
 // of is the strict pass's indexed read of what db reads now, for base, or
@@ -142,10 +149,10 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise) (stri
 			if !ok {
 				return strictLook{}, false
 			}
-			look := strictLook{ix: ix, shared: true, gen: gen, vars: ix.vars}
+			look := strictLook{ix: ix, shared: true, gen: gen}
 			for _, m := range FilterHTTPMocks(owned) {
 				if hasVariables(m) {
-					look.vars = true
+					look.ownedVars = append(look.ownedVars, m)
 					continue
 				}
 				if m.Spec.HTTPReq != nil {
@@ -166,7 +173,33 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise) (stri
 	if !ok {
 		return strictLook{}, false
 	}
-	return strictLook{ix: ix, gen: ix.gen, vars: ix.vars}, true
+	return strictLook{ix: ix, gen: ix.gen}, true
+}
+
+// variables are the recordings the variable pass reads for a call, as
+// splitVariableMocks orders them out of a read's pool (the per-test read,
+// then the session read, the test's own leading each, as candidates reads
+// them), less what spent reports and, of the index, what mockSpent reports
+// the store dropped since the generation began.
+func (l strictLook) variables(mockSpent func(string) bool, spent func(*models.Mock) bool) []*models.Mock {
+	if len(l.ix.vars) == 0 && len(l.ownedVars) == 0 {
+		return nil
+	}
+	pool := make([]*models.Mock, 0, 2*len(l.ownedVars)+len(l.ix.vars))
+	for _, part := range [][]*models.Mock{l.ix.vars[:l.ix.varSplit], l.ix.vars[l.ix.varSplit:]} {
+		for _, m := range l.ownedVars {
+			if !spent(m) {
+				pool = append(pool, m)
+			}
+		}
+		for _, m := range part {
+			if !mockSpent(m.Name) && !spent(m) {
+				pool = append(pool, m)
+			}
+		}
+	}
+	withVars, _ := splitVariableMocks(pool)
+	return withVars
 }
 
 // candidates are the recordings a call of the sieve's method and masked path
@@ -234,24 +267,68 @@ func strictPool(db integrations.MockMemDb) (perTest, session, pool []*models.Moc
 // store db is held from: genIndexes.of), as strictServe would from a read.
 // served nil and retry false is no answer here: there is no index, the store
 // does not tell whose a recording is (integrations.TestOwner: every store
-// that serves under the switch does), the generation holds a recording that
-// declares variables, or the call is a miss or a stateful walk's miss, which
-// a read decides (and names the closest recording of: strictServe). retry is true when another connection
-// took the recording first; the caller then reads the store. In the exact
-// view's verify mode the fits found through the index are compared with
-// those of a read while the generation holds, and a difference panics.
-func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrations.MockMemDb, n strictNoise, statefulMocks bool) (served *models.Mock, retry bool, err error) {
+// that serves under the switch does), or the call is a miss or a stateful
+// walk's miss, which a read decides (and names the closest recording of:
+// strictServe).
+//
+// The recordings that declare variables (strictLook.variables) go through
+// the variable pass first, as matchCascade's read does: a hit is served as
+// there, and an answered stateful walk is the read's to report (no answer
+// here). A call no recording with variables answers goes on to the strict
+// pass's bucket, which a call whose variables did not hold in the recording
+// it fit may still find (exactOnly's comparison). scope is read before the
+// index, as matchCascade reads it before the pool.
+//
+// retry is true when another connection took the recording first, or a
+// variable's bind met another's; the caller then reads the store. In the
+// exact view's verify mode the fits found through the index, and the
+// recordings the variable pass read, are compared with those of a read while
+// the generation holds, and a difference panics.
+func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrations.MockMemDb, n strictNoise, headerNoise, userBodyNoise map[string][]string, urlNoise []string, statefulMocks bool) (served *models.Mock, retry bool, err error) {
 	owner, tells := db.(integrations.TestOwner)
 	if !tells {
 		return nil, false, nil
 	}
+	scope := readVarScope(db)
 	look, ok := h.strictIx.of(base, db, n)
-	if !ok || look.vars {
+	if !ok {
 		return nil, false, nil
+	}
+	own := owner.OwnedByOpenTest
+	ctx = context.WithValue(ctx, ownedKey{}, own)
+	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
+	withVars := look.variables(mockSpent, spent)
+	if integrations.ExactViewVerify.Load() {
+		if err := verifyIndexedVariables(db, look.gen, withVars); err != nil {
+			return nil, false, err
+		}
+	}
+	if len(withVars) > 0 {
+		// A recording that fits the call but whose variables do not hold
+		// (the pass's problem) leaves the call to the strict pass alone, as
+		// exactOnly does after a read: the bucket below is that comparison.
+		hits, _, err := h.variablePass(ctx, input, withVars, scope, headerNoise, userBodyNoise, urlNoise)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(hits) > 0 {
+			hit, commitCursor, answered := h.pickHit(hits, own, db, statefulMocks, h.variableMember(ctx, input, scope, headerNoise, userBodyNoise, urlNoise))
+			if answered != nil {
+				return nil, false, nil
+			}
+			served, problem, retry, err := h.serveVariables(ctx, hit, db)
+			if err != nil || retry || problem != nil {
+				return nil, retry, err
+			}
+			if commitCursor != nil {
+				commitCursor()
+			}
+			return served, false, nil
+		}
 	}
 	live := liveDestination(ctx, input)
 	sieve := newStrictSieve(input, n)
-	cands := look.candidates(sieve, n, mockSpentOf(db), spentReaderOf(db))
+	cands := look.candidates(sieve, n, mockSpent, spent)
 	strictVisits.Add(int64(len(cands)))
 	var fits []*models.Mock
 	for _, m := range cands {
@@ -270,12 +347,35 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 	if len(fits) == 0 {
 		return nil, false, nil
 	}
-	own := owner.OwnedByOpenTest
-	served, answered, retry, err := h.strictServeFits(context.WithValue(ctx, ownedKey{}, own), input, live, fits, own, db, n, statefulMocks)
+	served, answered, retry, err := h.strictServeFits(ctx, input, live, fits, own, db, n, statefulMocks)
 	if answered != nil {
 		return nil, false, err
 	}
 	return served, retry, err
+}
+
+// verifyIndexedVariables compares the recordings the variable pass reads for
+// a call through an indexed read of staging generation gen (withVars) with
+// those it reads from a read's pool (splitVariableMocks), both less what the
+// store reports spent after the read, while gen still holds, and panics on a
+// difference.
+func verifyIndexedVariables(db integrations.MockMemDb, gen uint64, withVars []*models.Mock) error {
+	_, _, pool, err := strictPool(db)
+	if err != nil {
+		return err
+	}
+	if again, _ := integrations.StagingGenerationOf(db, models.HTTP); again != gen {
+		return nil
+	}
+	read, _ := splitVariableMocks(pool)
+	mockSpent, spent := mockSpentOf(db), spentReaderOf(db)
+	unspent := func(ms []*models.Mock) []*models.Mock {
+		return slices.DeleteFunc(slices.Clone(ms), func(m *models.Mock) bool { return mockSpent(m.Name) || spent(m) })
+	}
+	if got, want := unspent(withVars), unspent(read); !slices.Equal(got, want) {
+		panic(fmt.Sprintf("exact view verify: indexed variable recordings: indexed %v, read %v", strictNames(got), strictNames(want)))
+	}
+	return nil
 }
 
 // verifyStrictIndexed compares the fits a strict call found through an
