@@ -765,6 +765,13 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
 	}
+	// A CORS preflight the server allowed, under the proven switch, is a
+	// phase of the call it guards (corsPreflightPhase): protocol-phase, served
+	// to any test as often as asked, owned by none.
+	preflight := corsPreflightPhase(req, respParsed.StatusCode)
+	if preflight {
+		meta["type"] = "config"
+	}
 
 	// The digest headers the body matched as the server sent it, which a
 	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
@@ -778,10 +785,11 @@ func (h *HTTP) buildHTTPMock(m *FinalHTTP, destPort uint, connID string, opts mo
 
 	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
 	// type tag older replayers read: an exchange is the data of the test it
-	// was made in, a recordOne representative is served to every test.
+	// was made in, a recordOne representative and an allowed CORS preflight
+	// (corsPreflightPhase) are served to every test.
 	ptLifetime := models.LifetimePerTest
 	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
-	if ptRecordOne {
+	if ptRecordOne || preflight {
 		ptLifetime = models.LifetimeSession
 		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}

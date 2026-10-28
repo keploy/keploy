@@ -819,6 +819,19 @@ func (s *scopedMockDb) InPool(m *models.Mock) (bool, bool) {
 	return integrations.InPool(s.MockMemDb, m)
 }
 
+// RecordedWindowIndex forwards integrations.RecordedWindowIndex.
+func (s *scopedMockDb) RecordedWindowIndex(t time.Time) (int, bool) {
+	if w, ok := s.MockMemDb.(integrations.RecordedWindowIndex); ok {
+		return w.RecordedWindowIndex(t)
+	}
+	return -1, false
+}
+
+var (
+	_ integrations.RecordedWindowIndex = (*MockManager)(nil)
+	_ integrations.RecordedWindowIndex = (*scopedMockDb)(nil)
+)
+
 // SameRecordedTestWindow forwards integrations.TestWindows.
 func (s *scopedMockDb) SameRecordedTestWindow(a, b time.Time) (bool, bool) {
 	if w, ok := s.MockMemDb.(integrations.TestWindows); ok {
