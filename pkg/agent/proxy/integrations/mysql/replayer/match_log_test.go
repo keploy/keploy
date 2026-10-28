@@ -33,7 +33,7 @@ func TestMatchCommand_TheDebugLogMasksAnExecutesAttributeValues(t *testing.T) {
 	dctx.StmtIDToQuery[33] = ordersInsert
 	core, logs := observer.New(zapcore.DebugLevel)
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	if _, _, _, err := matchCommand(ctx, zap.New(core), req, db, dctx, nil, nil); err != nil {
+	if _, _, _, err := matchCommand(ctx, zap.New(core), req, db, dctx, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	entries := logs.FilterMessage("Trying to match the mock with com-stmt-execute request").All()
@@ -121,7 +121,7 @@ func TestMatchCommand_AStrictMissMasksAttributeValues(t *testing.T) {
 		dctx := newDecodeCtx()
 		dctx.StmtIDToQuery[33] = readsExec
 		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-		_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
+		_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
 		if err != nil || ok {
 			t.Fatalf("strict served the EXECUTE (%v)", err)
 		}
@@ -137,7 +137,7 @@ func TestMatchCommand_AStrictMissMasksAttributeValues(t *testing.T) {
 		req := comQueryReq(sql)
 		req.PacketBundle.Message.(*mysql.QueryPacket).Parameters = []mysql.Parameter{password(secret)}
 		db := &fakeMockDb{session: []*models.Mock{m}}
-		_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
+		_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), "", schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
 		if err != nil || ok {
 			t.Fatalf("strict served the COM_QUERY (%v)", err)
 		}
@@ -163,7 +163,7 @@ func TestMatchCommand_AStrictMissMasksAttributeValues(t *testing.T) {
 			req := comQueryReq(sql)
 			req.PacketBundle.Message.(*mysql.QueryPacket).Parameters = sides[1]
 			db := &fakeMockDb{session: []*models.Mock{m}}
-			_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
+			_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), "", schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
 			if err != nil || ok {
 				t.Fatalf("strict served the COM_QUERY (%v)", err)
 			}

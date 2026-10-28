@@ -330,6 +330,13 @@ type matchOptions struct {
 	// refused are the copies whose consume the store refused on this
 	// command's earlier matches (matchCommand): the scan passes over them.
 	refused map[*models.Mock]struct{}
+	// again, when set, answers a command no recording matched exactly that
+	// repeats a marked background recording of the open test
+	// (backgroundAgain): it names the recording and reports the answer, or
+	// returns nil. The matcher asks it before an answer by score or by
+	// another parameter's recording: such an answer would spend a recording
+	// of the test's own that a later command needs.
+	again func() *models.Mock
 }
 
 // matchCommand matches one live command-phase request against the mock pool.
@@ -346,10 +353,31 @@ type matchOptions struct {
 // with, nor compared with, and misses saying so (restagedCommandNote). A
 // store that marks the command's round but cannot hold it reads nothing for
 // it, and the miss says why (integrations.UnheldWhy).
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
+//
+// A command the matcher answered nothing for, under exact serving, that
+// repeats a recording of the open test that judging marked as the
+// application's background work and that already answered in its window, is
+// answered again with that recording, unchecked, and reported to dst's
+// report as such (backgroundAgain): not a miss.
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, dst string, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
 	var opts matchOptions
+	// The application's background work run again in the test's window,
+	// after its marked recording answered there: answered again with it,
+	// unchecked, not a miss. Only from the store held to the command's
+	// round: a store that staged again under the command, or could not hold
+	// it, answers nothing again, and the command misses saying so (below).
+	opts.again = func() *models.Mock {
+		if restaged() || integrations.UnheldWhy(db) != "" {
+			return nil
+		}
+		again := backgroundAgain(logger, req, db, decodeCtx)
+		if again != nil {
+			reportBackgroundAgain(ctx, req, decodeCtx, dst, again)
+		}
+		return again
+	}
 	resp, ok, miss, err := matchCommandWith(ctx, logger, req, db, decodeCtx, noiseEngine, userBodyNoise, opts)
 	// A consume the store refused (integrations.ConsumeRefused: under exact
 	// serving, a test mock that already answered, perhaps on another
@@ -377,6 +405,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// nothing for it (integrations.HoldToRound fails closed): the miss says
 	// why.
 	unheld := integrations.UnheldWhy(db)
+	// A miss the matcher decided before its answers by score (no candidate
+	// left, say) is asked the same.
+	if !ok && err == nil {
+		if again := opts.again(); again != nil {
+			return answerAgain(again), true, nil, nil
+		}
+	}
 	if !ok && (err == nil || errors.Is(err, errConsumeRefused)) && (restaged() || unheld != "") {
 		// A consume the hold refused is the restage's miss too.
 		err = nil
@@ -1703,6 +1738,18 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// candidate rather than dropping to the score-based partial pick.
 	if req.Header.Type == sCOM_QUERY && !queryMatched && queryExactMock != nil {
 		matchedResp, matchedMock, queryMatched = queryExactResp, queryExactMock, true
+	}
+
+	// A COM_QUERY no recording matched exactly, and a COM_STMT_EXECUTE no
+	// recording matched with its statement and parameters anywhere, that
+	// repeats a marked background recording of the open test, is answered
+	// again with it, before an answer by score or by another parameter's
+	// recording (matchOptions.again).
+	if opts.again != nil && ((req.Header.Type == sCOM_QUERY && !queryMatched) ||
+		(req.Header.Type == sCOM_STMT_EXEC && !stmtMatched && defExecMock == nil && defExecMockTest == nil)) {
+		if again := opts.again(); again != nil {
+			return answerAgain(again), true, nil, nil
+		}
 	}
 
 	// COM_STMT_EXECUTE FIFO fallback. If the scan found no definitive
