@@ -171,12 +171,18 @@ func instantLabel(t string, spans []instant, i int) string {
 }
 
 // offsetPlaces are the places a call's offset rule reads (offsetPlacesOf):
-// the answers' instants by place (byPlace), each place's sorted by moment,
+// the answers' instants by place and moment, the set's (snap, read once for
+// the set: offsetIndex) as the call reads them (view, by the index's
+// recording: offsetView), and what F served at the leaves of a late
+// exchange's answer (moves, the call's own), each place's sorted by moment;
 // and the test case's request's moved instants (given), each as recorded and
-// as keploy test sent it.
+// as keploy test sent it. at is when the call was recorded.
 type offsetPlaces struct {
-	byPlace map[offsetKey][]offsetPlace
-	given   [][2]offsetPlace
+	at    time.Time
+	snap  offsetSnap
+	view  []offsetView
+	moves map[offsetKey][]offsetPlace
+	given [][2]offsetPlace
 	// unread names a place F gave the application that could not be read
 	// (GivenEarlier, or the payload of an exchange served leaf by leaf:
 	// payloadUnread): every changed instant the rule reads is refused with
@@ -204,19 +210,14 @@ type offsetPlaces struct {
 // and the parts of the test case's own request keploy test sent with
 // another value than recorded.
 func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, set []GivenPlaces) *offsetPlaces {
-	op := &offsetPlaces{byPlace: map[offsetKey][]offsetPlace{}}
+	op := &offsetPlaces{at: at}
 	// One recording read once, whether F gave it the application before
 	// the call as any of its readings says: a payload a leaf-by-leaf
-	// exchange gives, the same recording among raw, and among set are one.
-	// Its serves, where two readings of it number them, span both: an order
-	// read wider than it is fails closed (inRecordedOrder).
-	type payload struct {
-		x           Raw
-		given       bool
-		first, last int
-	}
-	var payloads []*payload
-	byID := map[string]*payload{}
+	// exchange gives, the same recording among raw, and among set are one
+	// (offsetSource.key). Its serves, where two readings of it number them,
+	// span both: an order read wider than it is fails closed
+	// (inRecordedOrder).
+	var srcs []offsetSource
 	// What F served at the leaves of an exchange's answer with another value
 	// than recorded (a template value: Raw.moves), each where the payload
 	// holds it, of each exchange: places F gave the application, never the
@@ -228,30 +229,8 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 		moves       []servedMove
 	}
 	var moves []moved
-	merge := func(p *payload, given bool, first, last int) {
-		if !given {
-			first, last = 0, 0
-		}
-		p.given = p.given || given
-		switch {
-		case p.first == 0:
-			p.first, p.last = first, last
-		case first > 0:
-			p.first, p.last = min(p.first, first), max(p.last, last)
-		}
-	}
-	add := func(x Raw, given bool) {
-		id := x.mock + "\x00" + x.at.String()
-		if p, ok := byID[id]; ok {
-			merge(p, given, x.first, x.last)
-			return
-		}
-		p := &payload{x: x}
-		merge(p, given, x.first, x.last)
-		byID[id] = p
-		payloads = append(payloads, p)
-	}
-	for _, x := range raw {
+	for i := range raw {
+		x := &raw[i]
 		if !x.isRead() || !x.earlierThan(at) {
 			continue
 		}
@@ -262,9 +241,10 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			moves = append(moves, moved{mock: x.mock, call: x.call, at: x.at, first: x.first, last: x.last, moves: x.moves})
 			continue
 		}
-		add(x, x.served)
+		srcs = append(srcs, offsetSource{key: offsetKeyOf(x.mock, x.at), x: x, given: x.served, first: x.first, last: x.last})
 	}
-	for _, e := range served {
+	for i := range served {
+		e := &served[i]
 		if e.Given {
 			if e.Unread != "" {
 				continue
@@ -283,15 +263,16 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			continue
 		}
 		if e.Payload.isRead() {
-			add(e.Payload, true)
+			x := &e.Payload
+			srcs = append(srcs, offsetSource{key: offsetKeyOf(x.mock, x.at), x: x, given: true, first: x.first, last: x.last})
 			if mv := e.servedMoves(); len(mv) > 0 {
-				moves = append(moves, moved{mock: e.Mock, call: e.Payload.call, at: e.At, first: e.Payload.first, last: e.Payload.last, moves: mv})
+				moves = append(moves, moved{mock: e.Mock, call: x.call, at: e.At, first: x.first, last: x.last, moves: mv})
 			}
 		} else if op.unread == "" {
 			// What RawOf could not read, and an exchange that came with no
 			// payload at all, is no place the rule can search: a value
 			// built on its answer would pass as the lead's move.
-			op.unread = payloadUnread(e)
+			op.unread = payloadUnread(*e)
 		}
 	}
 	for _, x := range raw {
@@ -300,53 +281,87 @@ func (dc *DriftCache) offsetPlacesOf(at time.Time, served []Earlier, raw []Raw, 
 			op.answers = append(op.answers, dc.answerMoments(x)...)
 		}
 	}
-	var others []GivenPlaces
-	for _, g := range set {
-		if !g.read {
-			continue
+	payloads := len(srcs)
+	for i := range set {
+		if g := &set[i]; g.read {
+			srcs = append(srcs, offsetSource{key: offsetKeyOf(g.mock, g.at), g: g, given: true, first: g.first, last: g.last})
 		}
-		if p, ok := byID[g.mock+"\x00"+g.at.String()]; ok {
+	}
+	// The set's index, shared by its handlers; past its budget, one of the
+	// call's own, taking the places the set's holds as they are.
+	ix := dc.offsetIndex()
+	snap, recs, ok := ix.take(dc, srcs)
+	if !ok {
+		for i, r := range recs {
+			if r >= 0 && !srcs[i].read {
+				srcs[i].places, srcs[i].kept, srcs[i].read = snap.recs[r].places, true, true
+			}
+		}
+		snap, recs, _ = newOffsetIndex(0).take(dc, srcs)
+	}
+	op.snap = snap
+	op.view = make([]offsetView, len(snap.recs))
+	merge := func(v *offsetView, given bool, first, last int) {
+		if !given {
+			first, last = 0, 0
+		}
+		v.given = v.given || given
+		switch {
+		case v.first == 0:
+			v.first, v.last = int32(first), int32(last)
+		case first > 0:
+			v.first, v.last = min(v.first, int32(first)), max(v.last, int32(last))
+		}
+	}
+	for i, s := range srcs {
+		v := &op.view[recs[i]]
+		switch {
+		case i < payloads:
+			if !v.in {
+				v.in, v.noTime = true, s.x.noTime
+			}
+			merge(v, s.given, s.first, s.last)
+		case v.in && !v.other:
 			// Read among raw already: as an earlier place of the call's own
 			// test, which every rule reads (unaccounted), or as another
 			// test's, whose words are read above.
-			merge(p, true, g.first, g.last)
-			continue
-		}
-		w := g.words
-		w.set = true
-		op.words = append(op.words, w)
-		op.answers = append(op.answers, g.answer...)
-		others = append(others, g)
-	}
-	// A place recorded at the call's own instant is read as the recording
-	// gave it before the call, as every rule reads the equal instant: the
-	// fail-closed reading, which an offset on it refuses.
-	put := func(kp keyedPlace, mock, call string, rat time.Time, given, noTime bool, first, last int) {
-		op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mock, where: kp.where, call: call, recorded: !rat.After(at), given: given, atCall: rat.Equal(at), noTime: noTime, at: rat, first: first, last: last})
-	}
-	for _, p := range payloads {
-		for _, kp := range dc.keyedPlaces(p.x) {
-			put(kp, p.x.mock, p.x.call, p.x.at, p.given, p.x.noTime, p.first, p.last)
+			merge(v, true, s.first, s.last)
+		case !v.in:
+			v.in, v.other, v.given = true, true, true
+			v.first, v.last = int32(s.first), int32(s.last)
+			w := s.g.words
+			w.set = true
+			op.words = append(op.words, w)
+			op.answers = append(op.answers, s.g.answer...)
 		}
 	}
-	for _, g := range others {
-		for _, kp := range g.places {
-			put(kp, g.mock, g.call, g.at, true, false, g.first, g.last)
+	if len(moves) > 0 {
+		op.moves = map[offsetKey][]offsetPlace{}
+		for _, mv := range moves {
+			for _, kp := range dc.movePlaces(mv.mock, mv.moves) {
+				op.moves[kp.k] = append(op.moves[kp.k], offsetPlace{m: kp.m, mock: mv.mock, where: kp.where, call: mv.call, given: true, at: mv.at, first: mv.first, last: mv.last})
+			}
 		}
-	}
-	for _, mv := range moves {
-		for _, kp := range dc.movePlaces(mv.mock, mv.moves) {
-			op.byPlace[kp.k] = append(op.byPlace[kp.k], offsetPlace{m: kp.m, mock: mv.mock, where: kp.where, call: mv.call, given: true, at: mv.at, first: mv.first, last: mv.last})
+		for _, list := range op.moves {
+			sort.SliceStable(list, func(i, j int) bool { return list[i].m.key.at < list[j].m.key.at })
 		}
-	}
-	for k, list := range op.byPlace {
-		if len(list) < 2 {
-			delete(op.byPlace, k)
-			continue
-		}
-		sort.SliceStable(list, func(i, j int) bool { return list[i].m.key.at < list[j].m.key.at })
 	}
 	return op
+}
+
+// placeOf is the place r of the index as the call reads it (offsetPlace),
+// ok false where the call does not read its recording. A place recorded at
+// the call's own instant is read as the recording gave it before the call,
+// as every rule reads the equal instant: the fail-closed reading, which an
+// offset on it refuses.
+func (op *offsetPlaces) placeOf(r offsetRef) (offsetPlace, bool) {
+	if int(r.rec) >= len(op.view) || !op.view[r.rec].in {
+		return offsetPlace{}, false
+	}
+	v := op.view[r.rec]
+	rec := &op.snap.recs[r.rec]
+	kp := &rec.places[r.i]
+	return offsetPlace{m: kp.m, mock: rec.mock, where: kp.where, call: rec.call, recorded: !rec.at.After(op.at), given: v.given, atCall: rec.at.Equal(op.at), noTime: v.noTime, at: rec.at, first: int(v.first), last: int(v.last)}, true
 }
 
 // keyedPlace is an instant of a recording where the offset rule reads it:
@@ -1054,61 +1069,58 @@ func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 	if op.unread != "" && len(pairs) > 0 {
 		return offsetMatch{unread: op.unread}, true
 	}
-	keys := make([]offsetKey, 0, len(op.byPlace))
-	for k := range op.byPlace {
-		keys = append(keys, k)
+	// pass reports whether hf is no place F gave the application in hr's
+	// place: hf given by F, an answer to hr's call, and not both what both
+	// runs gave the application in the order the recording did: two
+	// recordings F gave in the test and the recording gave before the call,
+	// in one order, are no place F gave in another's (and neither is one
+	// recording's two instants). A recording made at the call's own instant
+	// the recording may never have given before the call, so F's serving it
+	// after the other is no order both runs gave: the pair stays.
+	pass := func(hr, hf offsetPlace) bool {
+		return !hf.given || hf.call != hr.call || hr.given && !hr.atCall && hf.recorded && !hf.atCall && inRecordedOrder(hr, hf)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		a, b := keys[i], keys[j]
-		if a.path != b.path {
-			return a.path < b.path
-		}
-		if a.form != b.form {
-			return a.form < b.form
-		}
-		if a.layout != b.layout {
-			return a.layout < b.layout
-		}
-		return a.label < b.label
-	})
 	for _, p := range pairs {
 		for _, g := range op.given {
 			if m, ok := offsetBetween(p, g[0], g[1]); ok {
 				return m, true
 			}
 		}
-		for _, k := range keys {
-			list := op.byPlace[k]
-			for i := range list {
-				// list[i] as the recording gave it, list[j] as F did.
-				if !list[i].recorded {
+		for _, l := range op.snap.lists {
+			refs, moved := l.refs, op.moves[l.k]
+			for i := range refs {
+				// refs[i] as the recording gave it, a place of refs or moved
+				// as F did.
+				hr, ok := op.placeOf(refs[i])
+				if !ok || !hr.recorded {
 					continue
 				}
 				// A dated value: only a place F gave the application within
 				// the value's move of hr, give or take a unit of the value
-				// (offsetOf), can be one; list is sorted by moment.
-				from, to := 0, len(list)
+				// (offsetOf), can be one; each list is sorted by moment.
+				from, to, mfrom, mto := 0, len(refs), 0, len(moved)
 				if !p.rec.key.day {
 					d := p.live.key.at - p.rec.key.at
-					lo, hi := list[i].m.key.at+d-int64(p.rec.res), list[i].m.key.at+d+int64(p.live.res)
-					from = sort.Search(len(list), func(j int) bool { return list[j].m.key.at > lo })
-					to = sort.Search(len(list), func(j int) bool { return list[j].m.key.at >= hi })
+					lo, hi := hr.m.key.at+d-int64(p.rec.res), hr.m.key.at+d+int64(p.live.res)
+					from = sort.Search(len(refs), func(j int) bool { return op.snap.momentOf(refs[j]) > lo })
+					to = sort.Search(len(refs), func(j int) bool { return op.snap.momentOf(refs[j]) >= hi })
+					mfrom = sort.Search(len(moved), func(j int) bool { return moved[j].m.key.at > lo })
+					mto = sort.Search(len(moved), func(j int) bool { return moved[j].m.key.at >= hi })
 				}
 				for j := from; j < to; j++ {
-					// hf given by F, an answer to hr's call, and not both
-					// what both runs gave the application in the order the
-					// recording did: two recordings F gave in the test and
-					// the recording gave before the call, in one order, are
-					// no place F gave in another's (and neither is one
-					// recording's two instants). A recording made at the
-					// call's own instant the recording may never have
-					// given before the call, so F's serving it after the
-					// other is no order both runs gave: the pair stays.
-					hr, hf := list[i], list[j]
-					if !hf.given || hf.call != hr.call || hr.given && !hr.atCall && hf.recorded && !hf.atCall && inRecordedOrder(hr, hf) {
+					hf, ok := op.placeOf(refs[j])
+					if !ok || pass(hr, hf) {
 						continue
 					}
-					if m, ok := offsetBetween(p, list[i], list[j]); ok {
+					if m, ok := offsetBetween(p, hr, hf); ok {
+						return m, true
+					}
+				}
+				for j := mfrom; j < mto; j++ {
+					if pass(hr, moved[j]) {
+						continue
+					}
+					if m, ok := offsetBetween(p, hr, moved[j]); ok {
 						return m, true
 					}
 				}
