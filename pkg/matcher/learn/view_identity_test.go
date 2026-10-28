@@ -50,7 +50,7 @@ func TestFsViewOfAServedRecordingIsNotReadAsTheRecording(t *testing.T) {
 		if MockID(src) != MockID(view) {
 			t.Fatalf("the row's view has another identity than its recording: it pins nothing")
 		}
-		want := ClassifyFollowing(clockedDrifts(), []string{path}, live, rec, eRecAt, nil, jobsServed(chanceSrcRec, c.srcN, RawOf(view, true)), nil, nil, nil)
+		want := ClassifyFollowing(noSet(clockedDrifts()), []string{path}, live, rec, eRecAt, nil, jobsServed(chanceSrcRec, c.srcN, RawOf(view, true)), nil, nil, nil)
 		for _, lazy := range []bool{false, true} {
 			for _, budget := range []int64{64 << 20, 0} {
 				bodyBudget = budget

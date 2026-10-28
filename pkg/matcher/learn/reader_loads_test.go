@@ -105,8 +105,8 @@ func TestEveryReaderOfAnEarlierPayloadReadsItOnceForTheSet(t *testing.T) {
 	for i, m := range mocks {
 		eager[i] = place(i, RawOf(m, i%2 == 0))
 	}
-	want := run(clockedDrifts(), eager)
-	hits(clockedDrifts(), eager, &want)
+	want := run(noSet(clockedDrifts()), eager)
+	hits(noSet(clockedDrifts()), eager, &want)
 	if !want.echoOk || want.held == "" || want.echoNOk || want.heldNone != "" || !strings.Contains(want.heldUnescaped, "mock-4 at ") {
 		t.Fatalf("the row's echo finds %v (%v), %q and %q, none %v and %q: it pins nothing", want.echoOk, want.echo, want.held, want.heldUnescaped, want.echoNOk, want.heldNone)
 	}

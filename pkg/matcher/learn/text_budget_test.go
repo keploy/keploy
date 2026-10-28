@@ -51,7 +51,7 @@ func TestATestsCacheKeepsNoEarlierPayloadsText(t *testing.T) {
 		for i := range raw {
 			raw[i] = RawOf(bigFiller(i, n, size, at), true).ServedAs(i + 1).ServedAsRecorded()
 		}
-		return classify(NewDriftCache(), raw)
+		return classify(noSet(NewDriftCache()), raw)
 	}()
 
 	tr := NewTracker()
@@ -207,7 +207,7 @@ func TestATestsTextCacheKeepsWithinItsBudget(t *testing.T) {
 	x := sd.LazyRawOf(m, true, nil)
 	for _, keep := range []bool{false, true} {
 		got := sd.searched(x, keep)
-		if want := NewDriftCache().searched(RawOf(m, true), keep); got != want {
+		if want := noSet(NewDriftCache()).searched(RawOf(m, true), keep); got != want {
 			t.Errorf("keep %v: searched %q, want %q (a cache of no tracker's)", keep, got, want)
 		}
 		e := tr.derived.by[x.id]

@@ -77,7 +77,7 @@ func TestASetsSecondTestReadsNoEarlierPayloadAgain(t *testing.T) {
 		return words(forms)
 	}
 
-	want := classify(NewDriftCache())
+	want := classify(noSet(NewDriftCache()))
 	tr := NewTracker()
 	tr.NewSet()
 	tr.Begin()
@@ -137,7 +137,7 @@ func TestASetKeepsEachRecordingsOwnReads(t *testing.T) {
 	dc := tr.Drifts()
 	for _, m := range []*models.Mock{first, other, parked} {
 		x := RawOf(m, true)
-		own := NewDriftCache()
+		own := noSet(NewDriftCache())
 		for _, keep := range []bool{false, true} {
 			if got, want := dc.searchedTokens(x, keep), own.searchedTokens(x, keep); !reflect.DeepEqual(got, want) {
 				t.Errorf("%s at %s, stamps kept %v: the set's words differ from the recording's own", m.Name, m.Spec.ReqTimestampMock, keep)
@@ -217,7 +217,7 @@ func TestTheWordSearchReadsNoPayloadWithoutTheValuesWords(t *testing.T) {
 	}
 
 	read = 0
-	want := classify(NewDriftCache())
+	want := classify(noSet(NewDriftCache()))
 	if read == 0 {
 		t.Fatalf("a cache of no tracker searched no payload's text: the row searches nothing")
 	}
@@ -287,7 +287,7 @@ func echoesAcrossTests(t *testing.T, inField bool, mocks []*models.Mock, sent, g
 		}
 		return ClassifyIn(dc, []string{p}, processedAt(got, false), processedAt(sent, false), r1Insert, nil, raw, nil, nil)[0]
 	}
-	want := classify(NewDriftCache())
+	want := classify(noSet(NewDriftCache()))
 	if want.Kind != KindVariable || want.From.Mock != "mock-4" || !want.From.Echo || (want.From.Field != "") != inField {
 		t.Fatalf("in a field %v: learned %s from %q at %q (echo %v) with a cache of no tracker, want the echo of mock-4: the row reads no field of the fillers", inField, want.Kind, want.From.Mock, want.From.Field, want.From.Echo)
 	}
@@ -360,7 +360,7 @@ func TestTheWordSearchFindsWhatReadingEveryPayloadFinds(t *testing.T) {
 			dc.appClock = true
 			return ClassifyFollowing(dc, []string{p}, live, rec, at, nil, raw, nil, nil, nil)
 		}
-		want := classify(NewDriftCache())
+		want := classify(noSet(NewDriftCache()))
 		if found := len(want) == 1 && (want[0].From.Mock == "src" || strings.Contains(want[0].Why, " in src ")); found != c.found {
 			t.Errorf("%s: a cache of no tracker learned %v, want the value found in src %v", c.name, want, c.found)
 		}
@@ -397,7 +397,7 @@ func TestTheWordSearchFindsWhatReadingEveryPayloadFinds(t *testing.T) {
 			dc.appClock = true
 			return appeared(dc, read[0], read[1], clock, nil, raw)
 		}
-		want, ok := find(NewDriftCache())
+		want, ok := find(noSet(NewDriftCache()))
 		if !ok || want.Mock != "src" {
 			t.Fatalf("a whole clock read %q: a cache of no tracker found %v at %q, want src", read[0], ok, want.Mock)
 		}
@@ -445,7 +445,7 @@ func TestTheSetsDerivedDataIsKeptWithinABudget(t *testing.T) {
 	classify := func(dc *DriftCache) []Learned {
 		return ClassifyFollowing(dc, []string{word}, live, rec, at, nil, rawOf(), nil, nil, nil)
 	}
-	want := classify(NewDriftCache())
+	want := classify(noSet(NewDriftCache()))
 	var whole int64
 	for _, budget := range []int64{1 << 40, 64 << 10, 0} {
 		derivedBudget = budget

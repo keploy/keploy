@@ -129,6 +129,21 @@ jobs:
       - name: Running Unit Tests
         run: go test ./...
 
+      # Most of the learn package's rows read a cache no tracker made, and
+      # payloads read whole, while keploy reads a set's caches (setDerived)
+      # and lazy payloads (LazyRawOf). Its TestMain runs every row in those
+      # shapes too: KEPLOY_LEARN_SET_EVERY_CACHE gives every NewDriftCache a
+      # set cache of its own, KEPLOY_LEARN_LAZY_EVERY_RAW makes every RawOf a
+      # lazy Raw read again at each use. A part of a recording the set keeps
+      # under another part's key, or a rule reading a payload past its
+      # accessor, passes the plain run above and fails one of these. Under
+      # the proven switch, as keploy's learn step runs (the plain run above
+      # has it off).
+      - name: Running Unit Tests (learn, every cache a set's, every payload lazy)
+        run: |
+          KEPLOY_PROVEN=1 KEPLOY_LEARN_SET_EVERY_CACHE=1 go test -count=1 ./pkg/matcher/learn/
+          KEPLOY_PROVEN=1 KEPLOY_LEARN_LAZY_EVERY_RAW=1 go test -count=1 ./pkg/matcher/learn/
+
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
       # objects against this kernel's BTF, as the agent does, and
