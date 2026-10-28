@@ -69,9 +69,12 @@
 #  12. Under the proven switch, the recording of step 9 replayed by an app
 #      whose GET /pool prepares another statement in place of the one it
 #      recorded (SHOP_ITEM_QUERY): one of the same shape (another table),
-#      then one of another (a condition more). No recording ran it, so each
-#      EXECUTE of it is a miss, reported with its statement, and test-5
-#      fails, keploy test exiting non-zero; the other tests still pass. A
+#      then one of another (a condition more). No recording ran it: its
+#      PREPARE gets the PREPARE_OK keploy makes, framed as the connection
+#      negotiated (go-sql-driver reads an EOF after the parameter
+#      definitions; without it the app hung in PREPARE), and each EXECUTE
+#      of it is a miss, which the report names as test-5's unmatched call.
+#      test-5 fails, keploy test exiting non-zero; the other tests pass. A
 #      replayer that answered an EXECUTE with another statement's recording
 #      (scored on the packet's header and parameters, or on the statement's
 #      shape) served each call the row recorded for its id, and test-5
@@ -493,8 +496,13 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
         export SHOP_ITEM_QUERY="$changed"
         PROVEN_REPLAY=1 replay "proven-changed-$n" mapped
         unset SHOP_ITEM_QUERY
-        expect_miss "under the proven switch, GET /pool running '$changed'" test-5 FAILED "proven-changed-$n.log" \
-            "no matching mock for outgoing call.*COM_STMT_EXECUTE $(printf '%s' "$changed" | sed 's/[]?*+.()[]/\\&/g')"
+        # Under the proven switch a miss is logged at debug only: the report
+        # names it, as test-5's unmatched call.
+        [ "$(test_status test-5)" = FAILED ] ||
+            fail "under the proven switch, GET /pool running '$changed': test-5 must be FAILED (exit $RC, status $(test_status test-5))"
+        [ "$RC" -ne 0 ] || fail "under the proven switch, GET /pool running '$changed': keploy test exited 0"
+        T=test-5 S="COM_STMT_EXECUTE $changed" yq -e '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary] | any_c(contains(strenv(S)))' "$(REPORT)" >/dev/null ||
+            fail "under the proven switch, GET /pool running '$changed': the report names no unmatched call of test-5 running it ($(T=test-5 yq -N -o=json -I=0 '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary]' "$(REPORT)" 2>/dev/null))"
         for t in test-1 test-2 test-3 test-4; do
             [ "$(test_status "$t")" = PASSED ] ||
                 fail "under the proven switch, with GET /pool's read changed, $t must still pass (status $(test_status "$t"))"
