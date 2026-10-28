@@ -23,7 +23,6 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-	"gopkg.in/yaml.v3"
 )
 
 // Replay runs the wrapped test command with the configured named mock set
@@ -1157,7 +1156,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	}
 	pool, unknown := poolSlices(mp, table, loaded, decoded)
 	if unknown = append(unknown, unknownBesideTests(mp, decoded, unknown)...); len(unknown) > 0 {
-		return m.refuseUnknownMocks(name, mp, unknown)
+		return m.refuseUnknownMocks(ctx, name, mp, unknown)
 	}
 	table = heldOnly(table, loaded)
 	if !ownsTestMocks(table, loaded) {
@@ -1207,12 +1206,23 @@ func unknownBesideTests(mp *models.Mapping, decoded []*models.Mock, seen []strin
 // (unknown) its recording does not have: each with where the file names it
 // (models.Mapping.MockPlaces), and what to do, for a hand edit and for a
 // recording that lost them alike.
-func (m *mockService) refuseUnknownMocks(name string, mp *models.Mapping, unknown []string) error {
+func (m *mockService) refuseUnknownMocks(ctx context.Context, name string, mp *models.Mapping, unknown []string) error {
 	places := mp.MockPlaces()
 	sort.Strings(unknown)
 	dir := filepath.Base(m.config.Path)
+	// The file the replay's read took the set's mocks from, and the named
+	// documents of it the read skipped, with the read's own reasons: such a
+	// name is not a wrong one, the edit to correct is in the mocks file. Nil
+	// when the file could not be read again: then no name is called absent.
+	var file string
+	var unread map[string]models.SkippedMock
+	if m.mockDB != nil {
+		file, unread = m.mockDB.SkippedMocks(ctx, name)
+	}
+	if file == "" {
+		file = MocksFile(m.config.Path, name)
+	}
 	mocks := "mocks.yaml"
-	file := MocksFile(m.config.Path, name)
 	if file != "" {
 		mocks = filepath.Base(file)
 	}
@@ -1223,77 +1233,77 @@ func (m *mockService) refuseUnknownMocks(name string, mp *models.Mapping, unknow
 			break
 		}
 	}
-	// A name whose document the mocks file has, under a kind keploy skips
-	// (mockdb logs each), is not a wrong name: the edit to correct is in the
-	// mocks file.
-	unread := unreadDocs(file, unknown)
-	var absent, skipped []string
+	var absent, unchecked, skipped []string
+	var cutShort, edited, newer, connFailure, yamlOnly bool
 	for _, n := range unknown {
 		where := ""
 		if w := places[n]; len(w) > 0 {
 			where = " (under " + strings.Join(w, ", ") + ")"
 		}
-		kind, ok := unread[n]
+		d, ok := unread[n]
 		switch {
+		case unread == nil:
+			unchecked = append(unchecked, n+where)
 		case !ok:
 			absent = append(absent, n+where)
-		case kind == "":
+		case d.Why == models.MockSkipCutShort && d.Cause != "":
+			// An NDJSON line: whole JSON, with a spec that does not decode.
+			cutShort = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, the file's last line, which has no newline and whose spec does not decode (%s): keploy reads it as a write cut short", n, where, d.Cause))
+		case d.Why == models.MockSkipCutShort:
+			cutShort = true
+			skipped = append(skipped, n+where+", the file's last document, whose last line has no newline: keploy reads it as a write cut short")
+		case d.Why == models.MockSkipNoKind:
+			edited = true
 			skipped = append(skipped, n+where+", which has no kind")
+		case d.Why == models.MockSkipConnFailure:
+			connFailure = true
+			skipped = append(skipped, n+where+", a connection failure this keploy cannot replay")
+		case d.Why == models.MockSkipYAMLOnlyKind:
+			yamlOnly = true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which keploy reads only from a YAML mock file", n, where, d.Kind))
 		default:
-			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q", n, where, kind))
+			edited, newer = true, true
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q, which this keploy cannot read", n, where, d.Kind))
 		}
 	}
 	var why, fix []string
 	if len(skipped) > 0 {
-		why = append(why, fmt.Sprintf("%s/%s/%s has mocks %s/%s/%s names that this keploy cannot read, so it skipped them (it logged why for each): %s",
+		why = append(why, fmt.Sprintf("%s/%s/%s has mocks %s/%s/%s names that this keploy skips: %s",
 			dir, name, mocks, dir, name, mappings, strings.Join(skipped, "; ")))
-		fix = append(fix, fmt.Sprintf("If you edited %s, give each of those back the kind and spec keploy wrote", mocks))
+		if cutShort {
+			if filepath.Ext(mocks) == ".json" {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, give its last line the spec keploy wrote and end the line with a newline", mocks))
+			} else {
+				fix = append(fix, fmt.Sprintf("If you saved %s by hand, end it with a newline once its last mock is whole", mocks))
+			}
+		}
+		if edited {
+			fix = append(fix, fmt.Sprintf("If you edited %s, give each mock this keploy cannot read back the kind and spec keploy wrote", mocks))
+		}
+		if newer {
+			fix = append(fix, "If a newer keploy or keploy enterprise recorded them, upgrade keploy or use keploy enterprise")
+		}
+		if connFailure {
+			fix = append(fix, fmt.Sprintf("If a newer keploy recorded a connection failure, upgrade keploy to replay it; if you edited one in %s, give it back the fields keploy wrote", mocks))
+		}
+		if yamlOnly {
+			fix = append(fix, fmt.Sprintf("Keploy reads a mock of such a kind only from a YAML mock file, and one with a \"-\" in its kind only with keploy enterprise: record the set again in YAML, not as %s", mocks))
+		}
 	}
 	if len(absent) > 0 {
 		why = append(why, fmt.Sprintf("%s/%s/%s names mocks %s/%s/%s does not have: %s",
 			dir, name, mappings, dir, name, mocks, strings.Join(absent, ", ")))
 		fix = append(fix, fmt.Sprintf("If you edited %s, correct those names", mappings))
 	}
+	if len(unchecked) > 0 {
+		// The file was not read again, so nothing says whether it has them.
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks the replay did not read from %s/%s/%s: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(unchecked, ", ")))
+		fix = append(fix, fmt.Sprintf("Check that %s has each of them, and that keploy can read it", mocks))
+	}
 	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s. %s; otherwise record the set again with keploy mock record",
 		name, strings.Join(why, "; "), strings.Join(fix, ". "))
-}
-
-// unreadDocs is, for each of names that a document of the YAML mocks file
-// at path has, that document's kind ("" when it has none): the documents
-// mockdb skips when the set's mocks are read. Nil for no file, or one not
-// YAML; a document it cannot parse as YAML ends the scan.
-func unreadDocs(path string, names []string) map[string]string {
-	if path == "" || filepath.Ext(path) != ".yaml" || len(names) == 0 {
-		return nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	want := make(map[string]bool, len(names))
-	for _, n := range names {
-		want[n] = true
-	}
-	out := map[string]string{}
-	dec := yaml.NewDecoder(f)
-	for len(out) < len(want) {
-		var doc struct {
-			Name string `yaml:"name"`
-			Kind string `yaml:"kind"`
-		}
-		if err := dec.Decode(&doc); err != nil {
-			var typed *yaml.TypeError
-			if errors.As(err, &typed) {
-				continue // a document that is no mapping
-			}
-			break
-		}
-		if _, seen := out[doc.Name]; want[doc.Name] && !seen {
-			out[doc.Name] = doc.Kind
-		}
-	}
-	return out
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a

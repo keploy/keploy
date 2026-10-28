@@ -49,6 +49,18 @@ type fileDoc struct {
 	// the decoders skipped, they say what was skipped.
 	name string
 	kind models.Kind
+	// doc is a YAML document as parsed (of an incomplete one, its whole
+	// lines); nil for NDJSON, or when it does not parse.
+	doc *yaml.NetworkTrafficDoc
+	// separator says raw is no document: only the start of the separator
+	// the file ends in (see nextDoc).
+	separator bool
+	// parseErr is, when the document before that separator does not parse,
+	// the parse's error, which nextDoc's readErr does not carry.
+	parseErr error
+	// cutErr is, of an incomplete NDJSON line whose JSON parses, why its
+	// spec does not decode.
+	cutErr error
 	// verbatim says a rewrite copies raw rather than re-encoding mocks:
 	//   - the decoders skipped the document (an enterprise-only kind with no
 	//     mapper registered, a kind, a connection-failure field or value this
@@ -101,7 +113,10 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 		}
 		d.raw, d.unterminated = raw, reader.Unterminated()
 		d.off, d.n = reader.DocOffset(), len(raw)
-		if d.unterminated && (err != nil || !jsonDocDecodes(doc)) {
+		if d.unterminated && err == nil {
+			d.cutErr = jsonDocDecodeErr(doc)
+		}
+		if d.unterminated && (err != nil || d.cutErr != nil) {
 			d.verbatim, d.incomplete = true, true
 			if err == nil {
 				d.name, d.kind = doc.Name, doc.Kind
@@ -127,20 +142,21 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 				d.verbatim, d.incomplete = true, true
 				// Named from its whole lines only: the unfinished one may be
 				// the name, cut short.
-				if whole, ok := parseYAMLDoc(raw[:lastLine]); ok {
-					d.name, d.kind = whole.Name, whole.Kind
+				if whole, err := parseYAMLDoc(raw[:lastLine]); err == nil {
+					d.name, d.kind, d.doc = whole.Name, whole.Kind, whole
 				}
 				reportIncompleteTail(logger, rewrite, yaml.FormatYAML, d.name)
 				return d, nil, nil
 			}
 			// The document before the unfinished separator is complete.
-			whole, ok := parseYAMLDoc(raw[:lastLine])
-			if !ok {
-				if len(bytes.TrimSpace(raw[:lastLine])) == 0 {
-					// Nothing but the start of a separator: no document.
-					d.verbatim = true
-					return d, nil, nil
-				}
+			if len(bytes.TrimSpace(raw[:lastLine])) == 0 {
+				// Nothing but the start of a separator: no document.
+				d.verbatim, d.separator = true, true
+				return d, nil, nil
+			}
+			whole, perr := parseYAMLDoc(raw[:lastLine])
+			if perr != nil {
+				d.parseErr = perr
 				return d, errors.New("failed to decode the mock document before the unfinished separator at the end of the file"), nil
 			}
 			doc, err, d.n = whole, nil, lastLine
@@ -148,11 +164,13 @@ func nextDoc(reader *yaml.MockReader, logger *zap.Logger, rewrite bool) (d fileD
 		if err != nil {
 			return d, err, nil
 		}
-		d.name, d.kind = doc.Name, doc.Kind
+		d.name, d.kind, d.doc = doc.Name, doc.Kind, doc
 		d.mocks, decodeErr = decodeMocks([]*yaml.NetworkTrafficDoc{doc}, logger, rewrite)
 	}
 	if decodeErr != nil {
-		return fileDoc{}, nil, decodeErr
+		// Named, for MockFileReader; every other caller fails on decodeErr.
+		d.mocks = nil
+		return d, nil, decodeErr
 	}
 	d.verbatim = len(d.mocks) == 0 || copiedVerbatim(d.mocks)
 	return d, nil, nil
@@ -165,24 +183,25 @@ func separatorPrefix(line []byte) bool {
 	return len(line) > 0 && len(line) < 3 && bytes.HasPrefix([]byte("---"), line)
 }
 
-// parseYAMLDoc parses one YAML mock document; ok is false when it does not
-// parse or is empty.
-func parseYAMLDoc(data []byte) (*yaml.NetworkTrafficDoc, bool) {
+// parseYAMLDoc parses one YAML mock document; the error is the parse's, or
+// says it is empty.
+func parseYAMLDoc(data []byte) (*yaml.NetworkTrafficDoc, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, false
+		return nil, errors.New("the document is empty")
 	}
 	var doc yaml.NetworkTrafficDoc
-	if yamlLib.Unmarshal(data, &doc) != nil {
-		return nil, false
+	if err := yamlLib.Unmarshal(data, &doc); err != nil {
+		return nil, err
 	}
-	return &doc, true
+	return &doc, nil
 }
 
-// jsonDocDecodes reports, without logging, whether the decoders take an NDJSON
-// document (skipping it counts: that is not an error).
-func jsonDocDecodes(doc *yaml.NetworkTrafficDocJSON) bool {
+// jsonDocDecodeErr is, without logging, the error the decoders return for an
+// NDJSON document: nil when they take it (skipping it counts: that is not an
+// error).
+func jsonDocDecodeErr(doc *yaml.NetworkTrafficDocJSON) error {
 	_, err := decodeMocksJSON([]*yaml.NetworkTrafficDocJSON{doc}, zap.NewNop(), true)
-	return err == nil
+	return err
 }
 
 // reportIncompleteTail says that the mock file's last mock does not end with

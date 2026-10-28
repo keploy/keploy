@@ -295,6 +295,11 @@ type stubMockDB struct {
 }
 
 func (stubMockDB) InsertMock(context.Context, *models.Mock, string) error { return nil }
+
+// SkippedMocks: the stub has no mock file, so its read skips nothing.
+func (stubMockDB) SkippedMocks(context.Context, string) (string, map[string]models.SkippedMock) {
+	return "", map[string]models.SkippedMock{}
+}
 func (stubMockDB) DeleteMocksForSet(context.Context, string) error        { return nil }
 func (stubMockDB) PromoteStagedSet(context.Context, string, string) error { return nil }
 func (stubMockDB) DiscardStagedSet(context.Context, string) error         { return nil }
