@@ -143,28 +143,26 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // and Unit coarser than a second for any offset the learn step finds.
 //
 // Res is the resolution the learn step read the value at. Of an offset, the
-// coarser of the one its encoding writes and the granularity both runs'
-// values share (the greatest duration both are whole multiples of, from the
-// Unix epoch). An application that cuts its value coarser than its
-// encoding (Truncate(time.Second) stored as a millisecond $date) shows that
-// cut in both values, and the sums that decide whether a replay can compare
-// the offset (Within, at the learn step and in Holds) count it, never the
-// encoding's finer one: a value cut to the minute, its time to live thirty
-// minutes, read late in its minute stands only thirty minutes and a
-// fraction of a second from its read even with a time to live of
-// thirty-one, and a resolution of a millisecond would hold it. An offset's
-// Res is read only in those sums and in the refusal of a cut
-// (CutCoarserThan), so only to refuse more: two values that happen to share
-// a coarser granularity make it coarser, never finer, the learn step bounds
-// Min and Max at the encoding's resolution, not at Res, and Holds reads the
-// replay's value at the replay's own resolution, not at Res. An offset
-// whose Res is a cut the application made (CutCoarserThan: a whole number
-// of the unit above the encoding's, a value cut to the second stored at the
-// millisecond) is never learned: read at its encoding's resolution, a
-// replay's value cut so would hold only where its read falls early in its
-// cut, by when the replay ran. Nor are two values a whole number of that
-// unit apart (learn's apartByUnits): a cut to it plus a time to live that
-// is no whole number of cuts, which Res does not show.
+// one its encoding writes, or the cut its two values show (founder decision,
+// 2026-10-27; a clock read plus a constant offset, then cut, is a clock
+// read, 2026-10-28): the coarsest step of CutOf above the encoding that both
+// values, or the gap between them, are whole multiples of (an application
+// that cuts its value and then adds a time to live that is no whole number
+// of cuts, 30m30s after a minute's start, puts its two values a whole number
+// of cuts apart, though neither is a whole cut), no coarser than a minute
+// (learn's offsetReading: a cut to an hour or a day, which a zone's offset
+// moves, shows no offset). The learn step bounds Min and Max at it, as
+// standing for its whole cut (truncated: a value v stands for reads from v
+// up to v plus Res), and the sums that decide whether a replay can compare
+// the offset (Within, at the learn step and in Holds) count it, so thirty
+// minutes cut to the minute, which a replay could not tell from thirty-one,
+// is refused as too wide, and thirty days cut to the second is learned.
+// Holds checks a replay's value at Res where it is such a step coarser than
+// the value's own encoding (a cut), as standing for its whole cut, within
+// one Res of the call's span plus the offset on either side, as a plain
+// read's; at the value's own resolution otherwise. A Res learned before
+// cuts were (the granularity two values shared by chance, 500 ms or 2 s) is
+// no step: Holds reads it only in its sums, to refuse more.
 //
 // Of a Plain read, Res is the resolution its encoding writes, or, where both
 // values are whole multiples of a step above it (CutOf: a unit, or a
@@ -526,42 +524,35 @@ func (o ClockOffset) Unit() time.Duration {
 	return 0
 }
 
-// CutCoarserThan reports whether o's Res is a cut the application made
-// coarser than an encoding that writes enc: above enc and a whole number of
-// the next unit of offsetUnits above enc (a second above a millisecond, a
-// millisecond above a microsecond, a minute above a second, an hour above a
-// minute), or above an enc no unit is above. Both runs' values cut to the
-// second and stored at the millisecond share a whole number of seconds;
-// two values the application does not cut share one by chance only where
-// record's full round read its clock about half a second or more off the
-// recording's read against its call (learn's FullRoundLead is 545 ms past
-// a whole second and 1.545 s past a whole minute), and an offset's are
-// refused the same (learn's clockOffset). A Res above enc that is no whole
-// number of the next unit (half a second two millisecond values share by
-// chance, or 2 s two second values do) is none: the sums count it, and the
-// replay's value is read at its own resolution. A Res of enc itself (an
-// hour's time to live at a minute's encoding) is none either. A Plain
-// read's Res is read by its steps (CutOf), not by this (learn's
-// CheckClockRead).
-func (o ClockOffset) CutCoarserThan(enc time.Duration) bool {
-	if o.Res <= enc {
-		return false
+// CheckedAt is the resolution Holds checks a replay's value of an offset
+// o at, a value whose own encoding writes res: o.Res where it is a step of
+// cutSteps coarser than res that CutOf would read as a cut at res (a unit,
+// a millisecond or finer, or a decimal step at least 1,000 times res: the
+// cut the learn step read in both of its values or their gap, or an
+// encoding coarser than the replay's), as standing for its whole cut,
+// whatever cut the value itself shows (one whose time to live is no whole
+// number of cuts shows a finer one, and its verdict must not turn on
+// that); res otherwise: a Res learned before cuts were (a granularity two
+// values shared by chance: 500 ms, 2 s, or 10 ms or 100 ms at a
+// millisecond's encoding) is read only in the sums.
+func (o ClockOffset) CheckedAt(res time.Duration) time.Duration {
+	if o.Res > res && CutOf(int64(o.Res), res, o.Res) == o.Res {
+		return o.Res
 	}
-	u := UnitAbove(enc)
-	return u == 0 || o.Res%u == 0
+	return res
 }
 
-// UnitAbove is the finest of the units an offset reads in (a day, an hour,
-// a minute, a second, a millisecond, a microsecond, a nanosecond) coarser
-// than enc, an encoding's resolution: a second above a millisecond, a minute
-// above a second. 0 above a day.
-func UnitAbove(enc time.Duration) time.Duration {
-	for i := len(offsetUnits) - 1; i >= 0; i-- {
-		if u := offsetUnits[i]; u > enc {
-			return u
-		}
+// Checkable reports whether a replay can check a value of the offset o,
+// written at res, in a call's window from from to to (Holds): the window,
+// o's width and three of the coarser of the resolution it checks the value
+// at (CheckedAt) and o.Res are narrower than o's Unit (Within), so a time
+// to live changed by a unit cannot hold. A Plain o is always checkable.
+func (o ClockOffset) Checkable(res time.Duration, from, to time.Time) bool {
+	if o.Plain() {
+		return true
 	}
-	return 0
+	m := max(o.CheckedAt(res), o.Res)
+	return o.Within(to.Sub(from), o.Max-o.Min, m, m, m)
 }
 
 // cutSteps are the steps a Plain read's cut is read in, coarsest first:
@@ -608,19 +599,17 @@ func ceilTo(d, u time.Duration) time.Duration {
 }
 
 // Within reports whether spans, each at least zero, add up to less than o's
-// Unit. The learn step learns o only where its width and its resolution are
-// (o.Within(o.Max-o.Min, o.Res)), so it holds one multiple of its unit, the
-// one String names; Holds asks the same of the replay's window with them,
+// Unit. The learn step learns o only where its width and three of its
+// resolution do (o.Within(o.Max-o.Min, o.Res, o.Res, o.Res)), so it holds
+// one multiple of its unit, the one String names; Holds asks the same of
+// the replay's window with them, at the resolution it checks the value at,
 // so a time to live changed by a unit or more never holds, however the
-// replay's read falls in its window, as long as the application cuts its
-// value no coarser at the replay than in the two runs the learn step read,
-// and no coarser than Res there: a value cut to a whole number of the unit
-// above its encoding the learn step refuses (CutCoarserThan, and learn's
-// apartByUnits), but one cut finer than that unit (10 ms at a
-// millisecond's encoding) plus a time to live that is no whole number of
-// cuts stands up to a whole cut from its read, which Res does not count. A
-// time to live changed by less than that sum may hold, by where the read
-// falls.
+// replay's read falls in its window: a value checked at a cut c is held
+// from the start of the cut that holds the earliest read plus Min, less c,
+// up to the latest plus Max, plus c (holdsRead), up to the window, the
+// width and three cuts wide, and one whose time to live changed by a unit
+// lies outside that. A time to live changed by less than that sum may
+// hold, by where the read falls.
 func (o ClockOffset) Within(spans ...time.Duration) bool {
 	left := o.Unit()
 	for _, s := range spans {
@@ -632,35 +621,36 @@ func (o ClockOffset) Within(spans ...time.Duration) bool {
 	return true
 }
 
-// Holds reports whether at, a value cut to resolution res (truncated: it
-// stands for [at, at+res)), is a read of the clock made from from to to (a
-// call's window on the application's clock) plus an offset of o; of a Plain
-// o (a zero offset, a plain read of the clock), a read made there itself
-// (holdsRead). Of any other o: some read
-// t in [from, to] and offset d in [o.Min, o.Max) put t+d in [at, at+res),
-// so [from+o.Min, to+o.Max) and [at, at+res) meet. It reads at at res, the
-// replay's own resolution, never at o.Res, so a granularity the learn step
-// read in both runs' values accepts nothing more. It holds nothing where
-// the window, o's width and the coarser of res and o.Res add up to o's Unit
-// or more (Within): there a value whose time to live changed by a unit
-// could hold, by where the read fell, and the replay fails closed. Nor for
-// an o whose Unit is a second or finer: an application that cuts its value
-// to that unit makes a time to live changed by one look the same. Nor for
-// an o whose Res is a cut coarser than res's encoding (CutCoarserThan),
-// which the learn step never learns, or one it learned at an encoding
-// coarser than the replay's (a millisecond's Res at a nanosecond's
-// replay): the replay's value, read at res, would hold by where its read
-// fell in the cut. Nor for an o whose Zone a replay reads no value in
-// (ZoneKnown: ZoneApart, or one this keploy does not read). at is the
-// value's instant as read in o's Zone: the caller reads a wall clock of no
-// zone there (learn.CheckClockRead), and under ZoneEither in each of UTC and
-// the application's zone, passing the value where either holds. A window with no start (a zero to
-// is before any from), one that ends before it starts, a res of none or an
-// empty o (it has no Unit) holds nothing, and so does an o the learn step
-// never finds (a Min of zero or below, a Max not above Min, or a Res of
-// none or below: one built without the resolution it was learned at could
-// have its sums read finer than the application cuts its value), whose
-// width could overflow or whose Unit could swallow the sign of the offset.
+// Holds reports whether at, a value written at resolution res (its own
+// encoding's), is a read of the clock made from from to to (a call's window
+// on the application's clock) plus an offset of o; of a Plain o (a zero
+// offset, a plain read of the clock), a read made there itself (holdsRead).
+// Of any other o, a read of the clock plus an offset, then cut, is a clock
+// read (2026-10-28): at is checked as a plain read of the span from
+// from+o.Min to to+o.Max, at c, the cut o.Res where it is one coarser than
+// res (CheckedAt), else res: it holds within one c of that span on
+// either side (holdsRead: from the start of the c that holds from+o.Min,
+// less c, up to to+o.Max plus c), so a value a read in the window plus the
+// offset writes holds wherever the read fell in its cut, cut down or
+// rounded, and so does one up to one cut stale or ahead; one more than a
+// cut past either side never does, however the replay's read falls. It
+// holds nothing where the window, o's width and three of the coarser of c
+// and o.Res add up to o's Unit or more (Within): there a value whose time
+// to live changed by a unit could hold, and the replay fails closed. Nor
+// for an o whose Unit is a second or finer: an application that cuts its
+// value to that unit makes a time to live changed by one look the same.
+// Nor for an o whose Zone a replay reads no value in (ZoneKnown: ZoneApart,
+// or one this keploy does not read). at is the value's instant as read in
+// o's Zone: the caller reads a wall clock of no zone there
+// (learn.CheckClockRead), and under ZoneEither in each of UTC and the
+// application's zone, passing the value where either holds. A window with
+// no start (a zero to is before any from), one that ends before it starts,
+// a res of none or an empty o (it has no Unit) holds nothing, and so does an
+// o the learn step never finds (a Min of zero or below, a Max not above
+// Min, or a Res of none or below: one built without the resolution it was
+// learned at could have its sums read finer than the application cuts its
+// value), whose width could overflow or whose Unit could swallow the sign
+// of the offset.
 func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) bool {
 	if !o.ZoneKnown() || !o.LayoutKnown() {
 		return false
@@ -668,13 +658,14 @@ func (o ClockOffset) Holds(at time.Time, res time.Duration, from, to time.Time) 
 	if o.Plain() {
 		return o.holdsRead(at, res, from, to)
 	}
-	if o.Min <= 0 || o.Max <= o.Min || o.Res <= 0 || o.Unit() <= time.Second || from.IsZero() || to.Before(from) || res <= 0 || o.CutCoarserThan(res) {
+	if o.Min <= 0 || o.Max <= o.Min || o.Res <= 0 || o.Unit() <= time.Second || from.IsZero() || to.Before(from) || res <= 0 {
 		return false
 	}
-	if !o.Within(to.Sub(from), o.Max-o.Min, max(res, o.Res)) {
+	if !o.Checkable(res, from, to) {
 		return false
 	}
-	return from.Add(o.Min).Before(at.Add(res)) && at.Before(to.Add(o.Max))
+	c := o.CheckedAt(res)
+	return ClockOffset{Res: c}.holdsRead(at, c, from.Add(o.Min), to.Add(o.Max))
 }
 
 // Plain reports whether o is a zero offset: a plain read of the
@@ -687,10 +678,10 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // offsets both hold (from the later Min up to the earlier Max: a Plain o
 // holds the offset zero alone) at the coarser of their resolutions. Each
 // holds the true offset of a read its learn step saw, so the one place's
-// value holds it only where both do; of an offset, a Res read coarser
-// refuses more, never less; of a Plain read, a coarser Res is a cut (or an
-// encoding's resolution), at which a replay checks a value that shows it, a
-// read within one cut of its span on either side (CheckClockRead in learn). Two that
+// value holds it only where both do; a coarser Res is a cut (or an
+// encoding's resolution), at which a replay checks a value, of a Plain read
+// one that shows it, of an offset any (Holds), a read within one cut of its
+// span on either side (CheckClockRead in learn). Two that
 // share no offset (a Plain and one with an offset, or
 // two offsets apart), or that read it in zones no one zone holds (UTC and
 // the application's: ZoneApart, meetZones), meet as an Empty one, which
