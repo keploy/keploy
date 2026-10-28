@@ -23,6 +23,7 @@ import (
 	cliflags "github.com/docker/cli/cli/flags"
 	"github.com/docker/compose/v5/pkg/api"
 	"github.com/moby/moby/client"
+	keployLog "go.keploy.io/server/v3/utils/log"
 )
 
 // composeProjectNameEnv is the variable compose itself consults when no
@@ -54,17 +55,21 @@ func (r *ComposeRunner) service() (api.Compose, error) {
 // The CLI prefixes each line with the service name; reproduce that, because
 // both the sample-app CI scripts and recentAppLogs read this output, and a
 // silent reformat would look like a behaviour change in the app itself.
+//
+// Each message is one line a container printed, and is cut of the values the
+// log redactor holds (log.RedactChildOutput), as a child process's output is
+// on the shell-out path (utils.ChildConsole).
 type composeLogConsumer struct {
 	out io.Writer
 	err io.Writer
 }
 
 func (c composeLogConsumer) Log(containerName, message string) {
-	fmt.Fprintf(c.out, "%s  | %s\n", containerName, message)
+	fmt.Fprintf(c.out, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
 }
 
 func (c composeLogConsumer) Err(containerName, message string) {
-	fmt.Fprintf(c.err, "%s  | %s\n", containerName, message)
+	fmt.Fprintf(c.err, "%s  | %s\n", containerName, keployLog.RedactChildOutput(message))
 }
 
 func (c composeLogConsumer) Status(container, msg string) {
