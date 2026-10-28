@@ -519,9 +519,15 @@ type recMockDB struct {
 	mu          sync.Mutex
 	unencodable map[string]bool
 	inserted    []string
+	// gate, when set before the recording starts, holds the insert of each
+	// mock it names until its channel is closed: a save the test releases.
+	gate map[string]chan struct{}
 }
 
 func (d *recMockDB) InsertMock(_ context.Context, m *models.Mock, _ string) error {
+	if ch := d.gate[m.Name]; ch != nil {
+		<-ch
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.unencodable[m.Name] {
@@ -537,6 +543,8 @@ func (d *recMockDB) ResetCounterID()                                 {}
 type recMappingDB struct {
 	mu      sync.Mutex
 	batches []map[string][]models.MockEntry
+	// upserted, when set, is signalled (without blocking) after each batch.
+	upserted chan struct{}
 	// worker is the worker scope written last (UpsertWorker), and workers
 	// how many times it was.
 	worker  []models.MockEntry
@@ -561,6 +569,12 @@ func (d *recMappingDB) UpsertBatch(_ context.Context, _ string, byTest map[strin
 		cp[k] = append([]models.MockEntry(nil), v...)
 	}
 	d.batches = append(d.batches, cp)
+	if d.upserted != nil {
+		select {
+		case d.upserted <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -991,7 +1005,7 @@ func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {
 // The trap: AsyncRecorder sets info.Skip and returns BEFORE assigning
 // Spec.Async, so a skipped mock reports IsAsync()==false. Gating the marker on
 // mock.IsAsync() — the obvious thing to write — makes the guard a silent no-op,
-// and the skipped tempID then burns the full ~500ms correlation spin and is
+// and the skipped tempID then waits for a save that never comes and is
 // reported as an incomplete mock set on a healthy test. This test drives the
 // real hook rather than a fake so that trap cannot be re-introduced.
 func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
@@ -1002,14 +1016,6 @@ func TestStart_HookSkippedMockIsExcludedFromMappings(t *testing.T) {
 	}
 	testDB := &recTestDB{}
 	tele := &recTelemetry{}
-
-	// Force the BEST-EFFORT half (droppedMockSet's benign cache) to decline
-	// every entry, which is the steady state of a long poll-heavy recording.
-	// What remains is the unconditional asyncMockIDs marker — the correctness
-	// guarantee — and this test exists to prove it carries the load alone.
-	prevCap := maxLiveBenignMockIDs
-	maxLiveBenignMockIDs = 0
-	t.Cleanup(func() { maxLiveBenignMockIDs = prevCap })
 
 	r := &Recorder{
 		logger:          zap.NewNop(),

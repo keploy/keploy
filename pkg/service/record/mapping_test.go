@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +36,7 @@ func TestResolveMappingEntriesExcludesAsyncMocks(t *testing.T) {
 		MockIDs:  []string{"sync-1", "async-1", "async-2"},
 	}
 
-	got, _, _ := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs, &droppedMockSet{})
+	got, _, _ := r.resolveMappingEntries(mapping, &correlationMap, &asyncMockIDs, &droppedMockSet{}, nil)
 
 	if len(got) != 1 {
 		t.Fatalf("want exactly the 1 sync mock in the mapping, got %d: %+v", len(got), got)
@@ -63,24 +62,19 @@ func TestResolveMappingEntriesKeepsAllSyncMocks(t *testing.T) {
 
 	got, _, _ := r.resolveMappingEntries(
 		models.TestMockMapping{TestName: "t", MockIDs: []string{"m1", "m2"}},
-		&correlationMap, &asyncMockIDs, &droppedMockSet{},
+		&correlationMap, &asyncMockIDs, &droppedMockSet{}, nil,
 	)
 	if len(got) != 2 {
 		t.Fatalf("want both sync mocks mapped, got %d: %+v", len(got), got)
 	}
 }
 
-// TestResolveMappingEntries_DroppedMockSkipsSpinAndRevokesOwner guards the two
-// consequences of letting a recording SURVIVE an unencodable mock.
-//
-// Dropping a mock means its correlationMap entry never arrives. Without the
-// droppedMockIDs short-circuit, resolveMappingEntries burns its full ~500ms
-// retry per dropped mock, serialized in the single mapping consumer — and the
-// agent DROPS mappings it cannot hand over, so a systematic encode failure
-// (one upstream gzipping every response) would corrupt mappings for unrelated,
-// healthy tests. And the test that owned the mock must be revoked, or it
-// replays with a short pool and fails for reasons that look like a product bug.
-func TestResolveMappingEntries_DroppedMockSkipsSpinAndRevokesOwner(t *testing.T) {
+// TestResolveMappingEntries_DroppedMockRevokesOwner guards the consequence of
+// letting a recording SURVIVE an unencodable mock: dropping a mock means its
+// correlationMap entry never arrives, and the test that owned it must be
+// revoked, or it replays with a short pool and fails for reasons that look like
+// a product bug.
+func TestResolveMappingEntries_DroppedMockRevokesOwner(t *testing.T) {
 	r := &Recorder{logger: zap.NewNop()}
 	var correlationMap, asyncMockIDs sync.Map
 	var droppedMockIDs droppedMockSet
@@ -89,12 +83,10 @@ func TestResolveMappingEntries_DroppedMockSkipsSpinAndRevokesOwner(t *testing.T)
 	droppedMockIDs.add("dropped-1")
 	droppedMockIDs.add("dropped-2")
 
-	start := time.Now()
 	got, lostMock, _ := r.resolveMappingEntries(
 		models.TestMockMapping{TestName: "t", MockIDs: []string{"dropped-1", "good", "dropped-2"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, nil,
 	)
-	elapsed := time.Since(start)
 
 	if !lostMock {
 		t.Error("the owning test was not flagged as having lost a mock, so it will not be revoked " +
@@ -103,60 +95,10 @@ func TestResolveMappingEntries_DroppedMockSkipsSpinAndRevokesOwner(t *testing.T)
 	if len(got) != 1 || got[0].Name != "good" {
 		t.Fatalf("want only the resolvable mock, got %+v", got)
 	}
-	// Each un-short-circuited dropped ID costs ~500ms. Two of them would be ~1s.
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("resolving 2 dropped mocks took %v — the correlation spin was not skipped. "+
-			"That stall is serialized in the mapping consumer and makes the agent drop "+
-			"mappings for unrelated healthy tests", elapsed)
-	}
 	// Consuming the IDs must free them: mocks and drops accumulate for the whole
 	// recording, and a set that only ever grows is a leak on a multi-day session.
-	if live := droppedMockIDs.liveLost.Load(); live != 0 {
+	if live := droppedMockIDs.live.Load(); live != 0 {
 		t.Errorf("droppedMockSet still holds %d consumed entries; it grows unbounded over a long recording", live)
-	}
-}
-
-// TestResolveMappingEntries_DropRecordedAfterMappingArrives is the ordering the
-// short-circuit actually has to survive.
-//
-// Mocks and mappings arrive on two independent channels drained by two
-// independent goroutines — that race is the whole reason the correlation spin
-// exists — so a mapping routinely reaches resolveMappingEntries BEFORE the mock
-// goroutine has even attempted its insert. A drop check that runs once up front
-// therefore loses every time: it sees nothing, spins the full ~500ms anyway, and
-// then persists the test with a silently short mock pool. Both failures are the
-// exact ones the change claims to remove, so this drives the drop from a
-// separate goroutine that fires only after the resolve is already in its spin.
-func TestResolveMappingEntries_DropRecordedAfterMappingArrives(t *testing.T) {
-	r := &Recorder{logger: zap.NewNop()}
-	var correlationMap, asyncMockIDs sync.Map
-	var droppedMockIDs droppedMockSet
-
-	correlationMap.Store("good", models.MockEntry{Name: "good"})
-
-	// The mock loop gives up on "slow-drop" only after the mapping is in flight.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		droppedMockIDs.add("slow-drop")
-	}()
-
-	start := time.Now()
-	got, lostMock, _ := r.resolveMappingEntries(
-		models.TestMockMapping{TestName: "t", MockIDs: []string{"slow-drop", "good"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
-	)
-	elapsed := time.Since(start)
-
-	if !lostMock {
-		t.Error("a drop recorded WHILE the mapping was resolving did not revoke the owning test — " +
-			"it is persisted with a short mock pool, which is the data loss this is meant to prevent")
-	}
-	if len(got) != 1 || got[0].Name != "good" {
-		t.Fatalf("want only the resolvable mock, got %+v", got)
-	}
-	if elapsed > 300*time.Millisecond {
-		t.Fatalf("resolve took %v — the spin ran to its full ~500ms timeout instead of "+
-			"noticing the concurrent drop", elapsed)
 	}
 }
 
@@ -169,7 +111,7 @@ func TestDroppedMockSet_BoundedWhenNothingConsumes(t *testing.T) {
 	for i := 0; i < maxLiveDroppedMockIDs+500; i++ {
 		d.add("orphan-" + strconv.Itoa(i))
 	}
-	if live := d.liveLost.Load(); live > maxLiveDroppedMockIDs {
+	if live := d.live.Load(); live > maxLiveDroppedMockIDs {
 		t.Fatalf("droppedMockSet grew to %d entries, past the %d cap", live, maxLiveDroppedMockIDs)
 	}
 	// Past the cap add() must say so, so the caller can report that further
@@ -182,10 +124,9 @@ func TestDroppedMockSet_BoundedWhenNothingConsumes(t *testing.T) {
 // TestConsumeMappings_CountsShortPoolTests pins the accounting for the one
 // data-loss path this change deliberately does NOT revoke.
 //
-// A mock that never correlates within the ~500ms spin is not the same fact as a
-// mock we know was dropped: it may well have been persisted and simply not
-// observed in time. Revoking on that inference would turn a latency event into
-// deterministic deletion of a customer's recorded test, so the test is still
+// A mock the mock stream never delivered is not the same fact as a mock we
+// know was dropped: this recorder does not know it was lost. Revoking on that
+// inference would delete a customer's recorded test, so the test is still
 // persisted with a short pool — exactly as before this change.
 //
 // What was missing is the total. The loss used to surface only as scattered
@@ -257,23 +198,28 @@ func TestResolveMappingEntries_DroppedAsyncMockDoesNotRevoke(t *testing.T) {
 
 	correlationMap.Store("good", models.MockEntry{Name: "good"})
 
-	// Drive the mock loop's real ordering from a goroutine: the marker is
-	// stored, then the insert is attempted, then the drop is recorded — all
-	// while this mapping is already spinning. Pre-populating both maps before
-	// the call would miss the ordering entirely, which is how an earlier
-	// revision passed its own test while still deleting healthy tests.
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		asyncMockIDs.Store("async-bad", struct{}{})
-		time.Sleep(20 * time.Millisecond)
-		droppedMockIDs.add("async-bad") // the async mock failed to encode
-	}()
-
-	start := time.Now()
+	// The mock loop's real ordering, after the mapping is already held: the
+	// marker is stored, then the insert is attempted, then the drop is
+	// recorded and told. Pre-populating both maps before the call would miss
+	// the ordering entirely, which is how an earlier revision passed its own
+	// test while still deleting healthy tests.
+	waits := newMappingWaits()
 	got, lostMock, uncorrelated := r.resolveMappingEntries(
 		models.TestMockMapping{TestName: "t", MockIDs: []string{"async-bad", "good"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, waits,
 	)
+	require.Equal(t, 1, waits.heldCount(), "the async mock has no outcome yet: its entry must wait")
+	asyncMockIDs.Store("async-bad", struct{}{})
+	droppedMockIDs.add("async-bad") // the async mock failed to encode
+	waits.arrived("async-bad")
+	var late mappingResolution
+	for _, e := range waits.takeReady() {
+		entry, fate := settleMock(e.tempID, &correlationMap, &asyncMockIDs, &droppedMockIDs)
+		r.addSettled(&late, e.test, e.tempID, entry, fate, &asyncMockIDs)
+	}
+	lostMock = lostMock || late.lost
+	uncorrelated += late.uncorrelated
+	got = append(got, late.entries...)
 
 	if lostMock {
 		t.Error("a dropped ASYNC mock revoked the test whose window it fell in. Async mocks are " +
@@ -286,64 +232,13 @@ func TestResolveMappingEntries_DroppedAsyncMockDoesNotRevoke(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "good" {
 		t.Fatalf("want only the sync mock, got %+v", got)
 	}
-	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
-		t.Fatalf("resolving a dropped async mock took %v — the drop did not short-circuit the spin", elapsed)
-	}
 }
 
-// TestResolveMappingEntries_AsyncMarkerSetDuringSpin is the mirror image of the
-// dropped-async case, and the reason the async decision cannot be made at a
-// single point in time.
-//
-// The mock loop publishes the async marker and then does file I/O before the
-// tempID reaches correlationMap, so a mapping routinely arrives while the
-// marker is still unset. An implementation that only checks async BEFORE the
-// spin therefore sees "not async", resolves the mock normally, and appends it
-// to the per-test mapping — leaking a background-egress mock into a test's mock
-// pool while the async engine also serves it from the corpus. That is exactly
-// what the exclusion exists to prevent, so the check has to happen at the point
-// the tempID's fate is actually settled.
-func TestResolveMappingEntries_AsyncMarkerSetDuringSpin(t *testing.T) {
-	r := &Recorder{logger: zap.NewNop()}
-	var correlationMap, asyncMockIDs sync.Map
-	var droppedMockIDs droppedMockSet
-
-	correlationMap.Store("good", models.MockEntry{Name: "good"})
-
-	// The mock loop's real ordering: mark async, then (later) publish the
-	// correlation entry — both after this mapping is already in the spin.
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		asyncMockIDs.Store("async-late", struct{}{})
-		time.Sleep(30 * time.Millisecond)
-		correlationMap.Store("async-late", models.MockEntry{Name: "async-late"})
-	}()
-
-	got, lostMock, uncorrelated := r.resolveMappingEntries(
-		models.TestMockMapping{TestName: "t", MockIDs: []string{"async-late", "good"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
-	)
-
-	if lostMock || uncorrelated != 0 {
-		t.Errorf("a resolved async mock was treated as loss: lostMock=%v uncorrelated=%d", lostMock, uncorrelated)
-	}
-	for _, e := range got {
-		if e.Name == "async-late" {
-			t.Fatalf("an ASYNC mock leaked into the per-test mapping: %+v\n"+
-				"  replay serves async egress from the complete corpus, so a test that also lists it "+
-				"replays the same interaction twice", got)
-		}
-	}
-	if len(got) != 1 || got[0].Name != "good" {
-		t.Fatalf("want only the sync mock, got %+v", got)
-	}
-}
-
-// TestResolveMappingEntries_AsyncMockNeverCountsAsShortPool covers the timeout
-// settle point. An async mock that never correlates is not an incomplete mock
+// TestResolveMappingEntries_AsyncMockNeverCountsAsShortPool covers the
+// never-arrived settle point. An async mock that never correlates is not an incomplete mock
 // set for anyone — its absence is the design — so it must not inflate the
 // short-pool counters whose credibility is the justification for leaving the
-// correlation-timeout path unrevoked.
+// never-arrived path unrevoked.
 func TestResolveMappingEntries_AsyncMockNeverCountsAsShortPool(t *testing.T) {
 	r := &Recorder{logger: zap.NewNop()}
 	var correlationMap, asyncMockIDs sync.Map
@@ -354,7 +249,7 @@ func TestResolveMappingEntries_AsyncMockNeverCountsAsShortPool(t *testing.T) {
 
 	got, lostMock, uncorrelated := r.resolveMappingEntries(
 		models.TestMockMapping{TestName: "t", MockIDs: []string{"async-never", "good"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, nil,
 	)
 
 	if lostMock {
@@ -371,7 +266,7 @@ func TestResolveMappingEntries_AsyncMockNeverCountsAsShortPool(t *testing.T) {
 // TestResolveMappingEntries_BenignSkipDoesNotRevokeOrCount covers the mocks a
 // RecordHook intentionally drops (a collapsed async poll no-change cycle). The
 // agent does not know about the skip, so the tempID still arrives in a mapping.
-// Short-circuiting the spin for it is right; revoking the test or counting it as
+// The skip settles its entry at once; revoking the test or counting it as
 // an incomplete mock set is not — poll lanes collapse most cycles by design, so
 // that would fire a data-loss alarm on every async-poll recording.
 func TestResolveMappingEntries_BenignSkipDoesNotRevokeOrCount(t *testing.T) {
@@ -380,14 +275,14 @@ func TestResolveMappingEntries_BenignSkipDoesNotRevokeOrCount(t *testing.T) {
 	var droppedMockIDs droppedMockSet
 
 	correlationMap.Store("good", models.MockEntry{Name: "good"})
-	droppedMockIDs.addBenign("hook-skipped")
+	markSkippedMock(&asyncMockIDs, "hook-skipped")
 
-	start := time.Now()
+	// A live mock stream: the skip must settle the entry, not leave it waiting.
+	waits := newMappingWaits()
 	got, lostMock, uncorrelated := r.resolveMappingEntries(
 		models.TestMockMapping{TestName: "t", MockIDs: []string{"hook-skipped", "good"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, waits,
 	)
-	elapsed := time.Since(start)
 
 	if lostMock {
 		t.Error("a hook-skipped mock revoked its test; the skip is normal operation, not data loss")
@@ -398,8 +293,8 @@ func TestResolveMappingEntries_BenignSkipDoesNotRevokeOrCount(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "good" {
 		t.Fatalf("want only the real mock, got %+v", got)
 	}
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("resolving a hook-skipped mock took %v — the spin was not short-circuited", elapsed)
+	if n := waits.heldCount(); n != 0 {
+		t.Fatalf("a hook-skipped mock left %d entries waiting for a save that never comes", n)
 	}
 }
 
@@ -473,35 +368,6 @@ func TestConsumeMappings_RevokeRollsBackShortPoolCounts(t *testing.T) {
 		"the uncorrelated mock of a revoked test still inflates mocks-uncorrelated")
 }
 
-// TestDroppedMockSet_BenignSkipsDoNotStarveDataLoss guards the budget split.
-//
-// Benign entries come from the highest-frequency path in the recorder — a poll
-// lane collapses most of its cycles by design — while data-loss entries are
-// rare. On a shared cap the benign traffic fills the set within minutes and
-// add() then fails closed for real drops: their owning tests stop being
-// revoked and their mappings go back to burning the full ~500ms spin, i.e. the
-// fix for the 46-hour bug quietly stops working with only a log field to show
-// for it. Benign entries are also not reliably consumed — several classes of
-// mock reach the recorder with no mapping referencing them at all — so they
-// accumulate permanently.
-func TestDroppedMockSet_BenignSkipsDoNotStarveDataLoss(t *testing.T) {
-	var d droppedMockSet
-	for i := int64(0); i < maxLiveBenignMockIDs+500; i++ {
-		d.addBenign("benign-" + strconv.FormatInt(i, 10))
-	}
-	if !d.add("a-real-drop") {
-		t.Fatal("benign hook-skips exhausted the data-loss budget: a genuinely dropped mock is no " +
-			"longer tracked, so its owning test is never revoked and its mapping spins the full ~500ms")
-	}
-	present, lost := d.take("a-real-drop")
-	if !present || !lost {
-		t.Fatalf("the real drop did not round-trip as data loss: present=%v lost=%v", present, lost)
-	}
-	if live := d.liveBenign.Load(); live > maxLiveBenignMockIDs {
-		t.Errorf("benign entries grew to %d, past their own %d cap", live, maxLiveBenignMockIDs)
-	}
-}
-
 // totalShortPool mirrors the aggregation Start's teardown does over
 // shortPoolByTest, so these tests assert on the numbers an operator actually
 // sees rather than on the intermediate map.
@@ -536,13 +402,12 @@ func TestResolveMappingEntries_SkippedMockEntryIsFreed(t *testing.T) {
 	correlationMap.Store("good", models.MockEntry{Name: "good"})
 	// A hook-skipped mock (never persisted) and a real async mock (persisted).
 	asyncMockIDs.Store("hook-skipped", skippedMockMarker)
-	droppedMockIDs.addBenign("hook-skipped")
 	asyncMockIDs.Store("real-async", struct{}{})
 	correlationMap.Store("real-async", models.MockEntry{Name: "real-async"})
 
 	got, lostMock, uncorrelated := r.resolveMappingEntries(
 		models.TestMockMapping{TestName: "t", MockIDs: []string{"hook-skipped", "real-async", "good"}},
-		&correlationMap, &asyncMockIDs, &droppedMockIDs,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, nil,
 	)
 	if lostMock || uncorrelated != 0 {
 		t.Errorf("unexpected loss: lostMock=%v uncorrelated=%d", lostMock, uncorrelated)
@@ -571,9 +436,8 @@ func TestResolveMappingEntries_SkippedMockEntryIsFreed(t *testing.T) {
 // OOM risk. So assert the stored value directly.
 func TestMarkSkippedMock_TagsTheEntryAsReleasable(t *testing.T) {
 	var asyncMockIDs sync.Map
-	var dropped droppedMockSet
 
-	markSkippedMock(&asyncMockIDs, &dropped, "hook-skipped")
+	markSkippedMock(&asyncMockIDs, "hook-skipped")
 
 	v, ok := asyncMockIDs.Load("hook-skipped")
 	if !ok {
@@ -583,10 +447,6 @@ func TestMarkSkippedMock_TagsTheEntryAsReleasable(t *testing.T) {
 	if _, releasable := v.(skippedMock); !releasable {
 		t.Errorf("the entry is marked but NOT as releasable (%T). releaseSkippedMock will skip it, "+
 			"so it is retained for the whole session — the OOM risk returns with every test green", v)
-	}
-	if present, lost := dropped.take("hook-skipped"); !present || lost {
-		t.Errorf("the skip was not registered as a BENIGN drop (present=%v lost=%v); it would either "+
-			"burn the ~500ms correlation spin or, if lost, revoke a healthy test", present, lost)
 	}
 }
 
@@ -606,7 +466,7 @@ func TestConsumeMappingsTellsEachTestsResolvedMocks(t *testing.T) {
 	close(mappings)
 	var told []string
 	require.NoError(t, r.consumeMappingsFor(context.Background(), "set-0", mappings,
-		&correlationMap, &asyncMockIDs, &droppedMockIDs, nil, &shortPoolByTest,
+		&correlationMap, &asyncMockIDs, &droppedMockIDs, nil, nil, &shortPoolByTest,
 		func(test string, entries []models.MockEntry) {
 			for _, e := range entries {
 				told = append(told, test+"/"+e.Name)
