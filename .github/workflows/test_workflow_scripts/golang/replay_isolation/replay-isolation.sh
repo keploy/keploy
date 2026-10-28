@@ -1,5 +1,5 @@
 #!/bin/bash
-# replay-isolation.sh [MODE...]   MODE: native docker internal (default: native docker)
+# replay-isolation.sh [MODE...]   MODE: native docker compose internal (default: native docker)
 #
 # Replay network isolation lane. An app (probe/) tries every way out of a
 # keploy replay against a sink that counts what arrives, and the lane asserts
@@ -35,6 +35,9 @@
 # sink first: whatever 127.0.0.11 forwards is then counted at the sink too. The
 # sink answers REFUSED to every other name, so the runner's own lookups, and
 # 127.0.0.11's for them, move on to the runner's resolver listed after it.
+# A compose app shares the keploy-agent service's netns
+# (network_mode: service:keploy-agent), on the project's own user-defined
+# network, so the same bind makes its 127.0.0.11 countable as well.
 #
 # Per mode: baseline (no keploy: each path must reach the sink, so a zero in
 # replay means keploy kept it in), record, replay, and the opt-in rows.
@@ -71,6 +74,8 @@ die() { echo "FATAL: $*"; FAILED=1; exit 1; }
 cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
 	[ -z "$DOCKER_RESOLV" ] || $S umount "$DOCKER_RESOLV" 2>/dev/null
+	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
+	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
 	docker rm -f riso-app riso-base riso-int-c >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
@@ -98,6 +103,28 @@ waitfor() {
 docker_resolv_conf() {
 	echo "nameserver 198.18.0.10"
 	cat /etc/resolv.conf
+}
+# Binds that copy over /etc/resolv.conf for one docker or compose mode; the
+# mode unbinds it at its end (cleanup does too).
+docker_resolv_bind() {
+	docker_resolv_conf > "$W/resolv-docker.conf" || die "read /etc/resolv.conf"
+	$S mount --bind "$W/resolv-docker.conf" /etc/resolv.conf || die "bind the sink-first resolv.conf over /etc/resolv.conf"
+	DOCKER_RESOLV=/etc/resolv.conf
+	log "docker's 127.0.0.11 forwards to the sink first ($(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf | paste -sd' '))"
+}
+docker_resolv_unbind() { $S umount "$DOCKER_RESOLV" && DOCKER_RESOLV=""; }
+
+# compose_yml NAME HOSTPORT: a compose file whose one service is the probe,
+# container NAME, its 8080 published on HOSTPORT.
+compose_yml() {
+	cat > docker-compose.yml <<YML
+services:
+  $1:
+    image: riso-probe:local
+    container_name: $1
+    command: [$(printf '"%s", ' $APPARGS | sed 's/, $//')]
+    ports: ["$2:8080"]
+YML
 }
 
 # A port-only bypass rule for 7002 (the sink's bypass port), in keploy.yml.
@@ -150,13 +177,14 @@ replay() {
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
 	grep -h 'status:' keploy/reports/test-run-*/*.yaml 2>/dev/null | sort | uniq -c
 	docker rm -f riso-app >/dev/null 2>&1
+	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
 	sink_stop
 }
 
 log "builds"
 if [ -n "${KEPLOY_BIN:-}" ]; then
 	KEPLOY=$KEPLOY_BIN
-	docker image inspect "$IMAGE" >/dev/null 2>&1 || [[ " ${MODES[*]} " != *" docker "* ]] || die "KEPLOY_BIN is set but the agent image $IMAGE is not loaded"
+	docker image inspect "$IMAGE" >/dev/null 2>&1 || [[ " ${MODES[*]} " != *" docker "* && " ${MODES[*]} " != *" compose "* ]] || die "KEPLOY_BIN is set but the agent image $IMAGE is not loaded"
 else
 	KEPLOY=$W/keploy
 	(cd "$KEPLOY_SRC" && CGO_ENABLED=0 go build -tags=viper_bind_struct -o "$KEPLOY" .) || die "keploy build"
@@ -239,10 +267,7 @@ for mode in "${MODES[@]}"; do
 		cd "$W" || die cd
 		;;
 	docker)
-		docker_resolv_conf > "$W/resolv-docker.conf" || die "read /etc/resolv.conf"
-		$S mount --bind "$W/resolv-docker.conf" /etc/resolv.conf || die "bind the sink-first resolv.conf over /etc/resolv.conf"
-		DOCKER_RESOLV=/etc/resolv.conf
-		log "docker's 127.0.0.11 forwards to the sink first ($(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf | paste -sd' '))"
+		docker_resolv_bind
 		log "baseline-docker"
 		sink_start base-docker
 		docker run -d --name riso-base -p 18082:8080 --net keploy-network riso-probe:local $APPARGS >/dev/null || die "baseline container"
@@ -271,7 +296,47 @@ for mode in "${MODES[@]}"; do
 		RUNNER=($S)
 		replay replay-docker -c "$RUN" --containerName riso-app --delay 10
 		replay replay-docker-dns -c "$RUN" --containerName riso-app --delay 10 --allow-egress dns
-		$S umount "$DOCKER_RESOLV" && DOCKER_RESOLV=""
+		docker_resolv_unbind
+		cd "$W" || die cd
+		;;
+	compose)
+		docker_resolv_bind
+		# Baseline: the same compose app with no keploy, on its project's own
+		# network, so a zero in replay-compose means keploy kept the name in.
+		log "baseline-compose"
+		sink_start base-compose
+		mkdir -p "$W/compose-base" && cd "$W/compose-base" || die cd
+		compose_yml riso-cbase 18083
+		docker compose up -d >/dev/null 2>&1 || die "baseline compose"
+		waitfor 30 curl -sf localhost:18083/health || echo "baseline compose app not up"
+		curl -s --max-time 120 localhost:18083/fire > /dev/null
+		waitfor 15 sh -c 'docker logs riso-cbase 2>&1 | grep -q "probe fork-tcp"'
+		docker logs riso-cbase > "$W/out/base-compose/app.log" 2>&1
+		docker compose down --remove-orphans >/dev/null 2>&1
+		sink_stop
+
+		mkdir -p "$W/compose" && cd "$W/compose" || die cd
+		compose_yml riso-app 8080
+		bypass_yml
+		log "record-compose"
+		sink_start record-compose
+		$S "$KEPLOY" record -c "docker compose up" --container-name riso-app --disable-tele --disableANSI > "$W/out/record-compose/keploy.log" 2>&1 &
+		KP=$!
+		# A call before keploy's agent holds the published port is reset
+		# (record-bind-race), so the probe is fired once it does.
+		waitfor 300 sh -c "curl -sf localhost:8080/health && grep -q 'Started ingress forwarding' '$W/out/record-compose/keploy.log'" ||
+			{ echo "record compose app not up"; docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'; }
+		fire http://localhost:8080 "$W/out/record-compose/keploy.log"
+		waitfor 60 sh -c 'ls keploy/test-set-*/tests/*.yaml' || { echo "no test recorded"; FAILED=1; }
+		$S kill -INT $KP 2>/dev/null
+		waitfor 120 sh -c "! $S kill -0 $KP" || { echo "record did not stop"; $S kill -9 $KP 2>/dev/null; }
+		docker compose down --remove-orphans >/dev/null 2>&1
+		sink_stop
+
+		RUNNER=($S)
+		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
+		replay replay-compose-dns -c "docker compose up" --containerName riso-app --delay 10 --allow-egress dns
+		docker_resolv_unbind
 		cd "$W" || die cd
 		;;
 	internal)
@@ -362,6 +427,21 @@ for mode in "${MODES[@]}"; do
 		# The opt-in sends the miss on, through 127.0.0.11 to its upstream.
 		rows_reach replay-docker-dns dns-udp
 		;;
+	compose)
+		# dns-udp at the baseline: the project network's 127.0.0.11 forwards
+		# the unrecorded outside name to its upstream, the sink.
+		rows_reach base-compose tcp fork-tcp tfo imds-tcp dns-udp
+		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
+		# keploy answers that name itself, so it never reaches 127.0.0.11's upstream.
+		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-tcp
+		row_log "replay-compose reports the DNS name it answered itself" "$W/out/replay-compose/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
+		row_nolog "replay-compose opens no DNS egress" "$W/out/replay-compose/keploy.log" "$EGRESS_DNS"
+		row_log "replay-compose names the port-only bypass rule" "$W/out/replay-compose/keploy.log" 'real egress opened by bypassRules.*7002'
+		row_log "replay-compose reports the IMDS call it kept inside" "$W/out/replay-compose/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
+		row "replay-compose-dns passes" "$([ "$(cat "$W/out/replay-compose-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose-dns/exit" 2>/dev/null)"
+		row_log "replay-compose-dns: the agent gets the opt-in" "$W/out/replay-compose-dns/keploy.log" "$EGRESS_DNS"
+		rows_reach replay-compose-dns dns-udp
+		;;
 	esac
 done
 # Reported, not asserted: what only a kernel-level deny (parked) can close.
@@ -376,7 +456,7 @@ for p in $phases; do
 done
 
 if [ -d /keep ]; then
-	tar -C "$W" -czf /keep/riso-out.tgz out $(cd "$W" && ls -d native/keploy docker/keploy 2>/dev/null)
+	tar -C "$W" -czf /keep/riso-out.tgz out $(cd "$W" && ls -d native/keploy docker/keploy compose/keploy 2>/dev/null)
 	echo "artifact: /keep/riso-out.tgz (the box's ~/lane-keep/<run>/riso-out.tgz)"
 fi
 [ "$FAILED" = 0 ] && echo "replay isolation: every row passed" || echo "replay isolation: a row FAILED"
