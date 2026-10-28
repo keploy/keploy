@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -330,8 +331,18 @@ func TestMockReplayHoldsAsMuchWithTheStrictWindowOff(t *testing.T) {
 		}
 	})
 	t.Run("env", func(t *testing.T) {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestMockReplayHoldsAsMuchWithTheStrictWindowOff$", "-test.count=1", "-test.v")
+		// The child is bounded: its own -test.timeout, the row's context, and
+		// its own process group, killed whole when the row ends, so a parent
+		// that dies early leaves nothing running.
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMockReplayHoldsAsMuchWithTheStrictWindowOff$", "-test.count=1", "-test.v", "-test.timeout=5m")
 		cmd.Env = append(os.Environ(), child+"=1", "KEPLOY_STRICT_MOCK_WINDOW=0")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		t.Cleanup(func() {
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		})
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "%s", out)
 		// A child that ran no row would exit 0 as well.
