@@ -370,6 +370,51 @@ func TestAnEndJudgesAgainstTheCountsAtItsBegin(t *testing.T) {
 	require.Contains(t, e.Reason, "recorded call POST 127.0.0.1:18282/audit (mock-1) was never made")
 }
 
+// A replayed test keploy fails for a recording it left unmade keeps, on its
+// evidence, the verdict its harness reported: judging tells a test whose own
+// assertions passed from one that failed them. A record fails no test and
+// says nothing of it, nor does a test with no evidence.
+func TestAFailedTestsEvidenceKeepsWhatItsHarnessReported(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mode     models.Mode
+		served   uint64
+		reported string
+		outcome  string
+		want     string
+	}{
+		"replay, harness passed": {mode: models.MODE_TEST, reported: "passed", outcome: models.ScopeOutcomeFailed, want: "passed"},
+		"replay, harness failed": {mode: models.MODE_TEST, reported: "failed", outcome: models.ScopeOutcomeFailed, want: "failed"},
+		"replay, nothing unmade": {mode: models.MODE_TEST, served: 1, reported: "passed", outcome: models.ScopeOutcomePassed},
+		"record":                 {mode: models.MODE_RECORD, reported: "passed", outcome: models.ScopeOutcomePassed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, p := wireAgent(t, tc.mode)
+			ctx := context.Background()
+			storeMocks(a, httpMock("mock-1", "POST", "http://127.0.0.1:18282/audit"))
+			a.scopeTable = map[string][]string{"o::TestA": {"mock-1"}}
+			claimSelf(t, a)
+			_, serr := a.ProvenBegin(ctx, begin("TestA"))
+			require.Nil(t, serr)
+			if tc.served > 0 {
+				p.mu.Lock()
+				p.served = map[string]uint64{"mock-1": tc.served}
+				p.mu.Unlock()
+			}
+			_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", Outcome: tc.reported})
+			require.Nil(t, serr)
+			w := windowOf(t, a, "o::TestA")
+			require.Equal(t, tc.outcome, w.Outcome)
+			if tc.want == "" {
+				require.True(t, w.Evidence == nil || w.Evidence.Reported == "", "%+v", w.Evidence)
+				return
+			}
+			require.NotNil(t, w.Evidence)
+			require.Equal(t, []string{"mock-1"}, w.Evidence.Unconsumed)
+			require.Equal(t, tc.want, w.Evidence.Reported)
+		})
+	}
+}
+
 // A wire operation waiting for another ends with its caller's context: the
 // CLI's final read is never stuck behind an operation it cannot see.
 func TestAWaitForTheWireEndsWithItsContext(t *testing.T) {
