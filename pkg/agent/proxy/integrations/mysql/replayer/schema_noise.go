@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
@@ -264,7 +265,7 @@ type gateVerdict struct {
 // newStrictGate is the gate for the live command live, whose body holds
 // liveBodyParams of an EXECUTE's parameters (-1: all of them, see
 // mysqlRequestBody).
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBodyParams int, userBodyNoise map[string][]string) *strictGate {
+func newStrictGate(engine *mocknoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBodyParams int, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
 		engine:         engine,
 		logger:         logger,
