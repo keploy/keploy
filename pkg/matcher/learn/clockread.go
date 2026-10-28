@@ -727,8 +727,25 @@ func spanOf(o models.ClockOffset, s Span) (Span, string) {
 // step named (models.ClockOffset.AppZone: a wall clock of no zone read in
 // it, a value that names its moment cut coarser than a minute), on any
 // machine, never the agent's own, and a name this keploy cannot read
-// refuses the value, naming it. Where neither is known, a plain read cut to
-// an hour or coarser, whose cut the zone moves, is refused, saying so,
+// refuses the value, naming it; there a wall clock of no zone
+// (models.ZoneApp) checked at a cut of an hour or coarser holds only where
+// it holds read in UTC too, at the cut it was checked at (utcTooWhy says
+// what passes and the limits), as one read in the stored zone alone passes
+// a date two days stale where the application now writes in UTC; and one
+// checked at an hour is refused whatever it is where the stored zone stands
+// more than an hour from UTC at either end of the span (hourFarWhy: there,
+// for a call's window inside one hour, no hour that an application writing
+// in that zone or in UTC writes at the call holds in both readings, in
+// every zone in use today, and a fixed offset such as +01:30, where both
+// can, is refused too; a span that crosses enough starts of an hour, one
+// in Berlin in summer, can hold one either wrote in it).
+// keploy takes this path in its docker
+// and compose modes, in a pod without hostPID, and on the first call of a
+// process that exits or runs another program as keploy reads its zone
+// (ProcZones keeps a zone it read for each program a process runs, so a
+// long-lived application's later calls are read in its own). Where
+// neither is known, a plain read cut to an hour or coarser, whose cut the
+// zone moves, is refused, saying so,
 // except a wall clock either zone held (models.ZoneEither), which is
 // checked at its cut in UTC and in s.Zone, passing where either reading
 // holds (a cut read is checked, never refused for its cut, 2026-10-28); any
@@ -763,7 +780,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if why != "" {
 		return false, learned + why
 	}
-	hint := ""
+	hint, utcToo, stored := "", false, (*time.Location)(nil)
 	switch {
 	case s.Own:
 		// The zone the application writes its clock in in this run, read
@@ -793,6 +810,13 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 			return false, learned + ", which a replay reads in " + o.AppZone + ", the application's zone the learn step read it in, but this keploy cannot read that zone (" + err.Error() + "), so it refuses the value rather than read it in another zone. Record the test again with this keploy"
 		}
 		s.Zone = loc
+		// A wall clock of no zone read in the stored zone alone, checked at
+		// a cut of an hour or coarser, passes a value stale by as much as the
+		// zone the application now writes in stands from it (a recording
+		// made natively in New York, replayed in docker by an application in
+		// UTC: a date two days stale), so it must hold read in UTC too, at
+		// that cut (2026-10-29). See utcTooWhy for what passes.
+		stored, utcToo = loc, o.Zone == models.ZoneApp
 	case o.Zone == models.ZoneEither && o.Plain() && o.Res >= time.Hour && s.Zone != nil:
 		// A wall clock either zone held, cut to an hour or coarser, neither
 		// zone known: checked, never refused for its cut. clockReadIn reads
@@ -803,9 +827,155 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	case o.AppZoneMatters() && o.Zone != models.ZoneEither && o.Plain() && o.Res >= time.Hour:
 		return false, learned + ", cut to " + models.ShortDuration(o.Res) + ", which a replay checks in the application's zone, but keploy could not read the zone of the process that made this call, and the learn step named none, so it refuses the value rather than check its cut in another zone. Record the test again where keploy reads the application's zone (keploy in the host PID namespace, the application's process and its files readable; the agent's debug log says why it could not)"
 	}
+	ok, cut, why := checkReadIn(o, live, s, learned, read, hint, 0)
+	if !utcToo || cut < time.Hour {
+		return ok, why
+	}
+	if cut < 24*time.Hour {
+		if off, atEnd, far := farFromUTC(stored, s); far {
+			when := " at this call"
+			if !atEnd {
+				when = " as this call's window began"
+				if o.Since == models.SinceTestBegin {
+					when = " when this test began"
+				}
+			}
+			return false, learned + hourFarWhy(o.AppZone, off, when)
+		}
+	}
+	if !ok {
+		return false, why
+	}
+	u := s
+	u.Zone = time.UTC
+	if ok, _, _ := checkReadIn(o, live, u, learned, read, "", cut); ok {
+		return true, ""
+	}
+	return false, learned + utcTooWhy(o.AppZone, cut)
+}
+
+// farFromUTC reports whether loc, the zone the learn step stored, stands
+// more than an hour from UTC at either end of s (an hour learned there is
+// refused whatever it is: hourFarWhy), its offset ("+05:30") at s's end
+// where it stands that far there, else at s's start, and whether that is
+// s's end (atEnd: false where only s's start, a test's begin for a read
+// learned before its call's window, stood that far). True for no loc: it
+// fails closed.
+func farFromUTC(loc *time.Location, s Span) (off string, atEnd, far bool) {
+	if loc == nil {
+		return "", true, true
+	}
+	for _, end := range []bool{true, false} {
+		t := s.From
+		if end {
+			t = s.To
+		}
+		if _, o := t.In(loc).Zone(); o > 3600 || o < -3600 {
+			return t.In(loc).Format("-07:00"), end, true
+		}
+	}
+	return "", false, false
+}
+
+// zoneLabel names name, a zone the learn step stored
+// (models.ClockOffset.AppZone), for a person: its name ("Asia/Kolkata"), or
+// "a zone at UTC+05:30" for a fixed offset.
+func zoneLabel(name string) string {
+	if name != "" && (name[0] == '+' || name[0] == '-') {
+		return "a zone at UTC" + name
+	}
+	return name
+}
+
+// storedWhere and storedRun open and end a refusal of a wall clock of no
+// zone (models.ZoneApp) read in name, the zone the learn step stored,
+// because keploy could not read the zone of the process that made the call
+// (utcTooWhy, hourFarWhy): where it was read, and what to do.
+func storedWhere(name string) string {
+	return ", read in " + zoneLabel(name) + ", the application's zone the learn step read it in, since keploy could not read the zone of the process that made this call. "
+}
+
+const storedRun = " Run keploy where it reads the application's zone (keploy in the host PID namespace, --pid=host or hostPID, the application's process and its files readable; the agent's debug log says why it could not). Where it cannot (keploy's own docker and compose modes), record and replay the application in UTC (TZ=UTC), where the two readings agree, or declare the field noise in keploy.yml"
+
+// hourFarWhy is what a refusal of a wall clock of no zone (models.ZoneApp)
+// checked at an hour in name, the zone the learn step stored, adds where
+// name stands more than an hour from UTC (off, its offset when: at this
+// call, or as its span began: farFromUTC). Each reading admits the span's
+// hours and one on either side. With k how many hours the value stands
+// behind name's hour at the call (below zero: ahead) and E how many hours
+// name's wall hour stands ahead of UTC's at the call (name's offset at a
+// whole hour; at a half or quarter hour, that offset rounded up or down by
+// where in the hour the call fell), for a call's window inside one hour of
+// each zone the reading in name admits k from -1 to 1 and the one in UTC k
+// from E-1 to E+1: two hours ahead of UTC only k = 1 holds in both (the hour
+// before name's), two behind only k = -1 (the hour after), three or more
+// hours from UTC none. So, for such a window, where |E| is two or more (in
+// every zone in use today that stands more than an hour from UTC), the hour
+// that an application writing in name or in UTC writes at the call never
+// holds in both; at a fixed offset between one and two hours (+01:30), where
+// |E| is 1 for part of each hour, both can, and keploy refuses it all the
+// same. A span that crosses enough starts of an hour can hold an hour either
+// wrote in it, the one at the call too (a read checked from its test's
+// begin, or a call's window across an hour's start: in Berlin in summer one
+// crossing is enough, at any length; a zone further from UTC needs more
+// crossings, or a longer span). keploy refuses an hour checked there
+// whatever it is, rather than pass a stale one and refuse the current one.
+func hourFarWhy(name, off, when string) string {
+	far := zoneLabel(name) + " does not"
+	if name != "" && name[0] != '+' && name[0] != '-' {
+		far = name + " stood at UTC" + off + when
+	}
+	return storedWhere(name) + "An hour read in a zone the application may no longer write its clock in would pass there stale or ahead by as much as the two zones stand apart, so keploy checks such an hour in UTC too, and only where the zone stands within an hour of UTC: " + far + ", so keploy refuses the value whatever it is." + storedRun
+}
+
+// utcTooWhy is what a refusal of a wall clock of no zone (models.ZoneApp)
+// adds where keploy could not read the zone of the process that made the
+// call and checked it at the cut cut in name, the zone the learn step
+// stored, where it held, and in UTC, at that cut, where it did not. Read in
+// name alone, a value would pass stale or ahead by as much as the zone the
+// application now writes in stands from name, so it must hold in both: the
+// check admits only what both readings admit. So:
+//   - a date: the application's own passes, and so does the day before in
+//     a call's window that crosses its midnight, each wherever the reading
+//     in name alone passes it (no zone's date is more than a day from
+//     UTC's, and the window is a day wide on either side). The one-day
+//     allowance is lost on one side in the hours name's date and UTC's
+//     differ: for an application still writing in name, in New York's
+//     evening (its date behind UTC's) a date a day stale is refused, in
+//     Tokyo's morning (ahead) one a day ahead is, so a cached date's
+//     verdict there turns on the hour of the day (for one now in UTC it is
+//     the other side, which the reading in name alone refuses already);
+//   - an hour, where name stands within an hour of UTC (hourFarWhy refuses
+//     the rest): the application's own passes; for an application still
+//     writing in name, at UTC+01:00 one an hour ahead (a writer that rounds
+//     to the hour, past the half hour) is refused, at UTC-01:00 one an hour
+//     stale, so such a writer's verdict turns on when in the hour it ran
+//     (for one now in UTC, the other side again: at UTC+01:00 a cached hour
+//     is refused, as the reading in name alone refuses it);
+//   - the stated limit: an application now in a zone beyond both readings
+//     (further from UTC than name, or on its other side) passes a value as
+//     far off as its zone stands beyond them: a date two days stale where
+//     its zone's date is a day ahead of both (Kolkata or Tokyo, late in
+//     UTC's day, name New York), or two days ahead where a day behind both
+//     (Honolulu, name New York, in UTC's morning), or an hour two stale
+//     (Istanbul, name Berlin in winter). zone: either keeps its own.
+func utcTooWhy(name string, cut time.Duration) string {
+	return storedWhere(name) + "A value cut to " + models.ShortDuration(cut) + " read in a zone the application may no longer write its clock in would pass there stale or ahead by as much as the two zones stand apart, so keploy checks it in UTC too: the value this call carries passes in " + zoneLabel(name) + " but not in UTC, so keploy refuses it." + storedRun
+}
+
+// checkReadIn is CheckClockRead past its choice of zone: whether o holds
+// live, the leaf a replay's call carries, read in s (its zone s.Zone), the
+// cut it checked the value at (held or not; 0 where it read no value), and
+// why not, learned and read naming o and hint ending the reason. A plain
+// read is checked at the cut the value shows, or at force where force is
+// above none (CheckClockRead's check in UTC, at the cut its check in the
+// stored zone read, never coarser nor finer: a date's first
+// instant on a day whose midnight that zone skips, 01:00, is an hour's in
+// UTC but stands for its day).
+func checkReadIn(o models.ClockOffset, live Leaf, s Span, learned, read, hint string, force time.Duration) (bool, time.Duration, string) {
 	ats, res, why := clockReadIn(o, live, s)
 	if why != "" {
-		return false, learned + why + hint
+		return false, 0, learned + why + hint
 	}
 	made := " made in this call's window"
 	if o.Since == models.SinceTestBegin {
@@ -813,23 +983,25 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	}
 	if !o.Plain() {
 		if holdsAny(o, ats, res, s.From, s.To) {
-			return true, ""
+			return true, o.CheckedAt(res), ""
 		}
 		if !o.Checkable(res, s.From, s.To) {
-			return false, learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell " + offsetNamed(o) + " changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint
+			return false, o.CheckedAt(res), learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell " + offsetNamed(o) + " changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint
 		}
 		cut := ""
 		if c := o.CheckedAt(res); c > res {
 			cut = " (checked as standing for the whole " + models.ShortDuration(c) + " the learn step read it cut to)"
 		}
-		return false, learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
+		return false, o.CheckedAt(res), learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
 	}
 	// A cut the value shows is checked at that cut, read in the zone it
 	// shows it in; a value that shows none, at its own resolution.
-	cut := ""
+	cut, checked := "", time.Duration(0)
 	for _, at := range ats {
 		c, in := res, at
-		if o.Res > res {
+		if force > 0 {
+			c = force
+		} else if o.Res > res {
 			if ci, ati := readCut(at, cutZones(o, at, s), res, o.Res); ci > res {
 				c, in = ci, ati
 				if cut == "" {
@@ -840,10 +1012,11 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		p := o
 		p.Res = c
 		if p.Holds(in, c, s.From, s.To) {
-			return true, ""
+			return true, c, ""
 		}
+		checked = max(checked, c)
 	}
-	return false, learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
+	return false, checked, learned + ", and the value this call carries is not " + read + made + ": it changed" + cut + hint
 }
 
 // appZoneHint is what a refusal of a value at a place learned with the

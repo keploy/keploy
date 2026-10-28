@@ -792,14 +792,17 @@ func TestTheReplayApplicationsOwnZoneWinsOverTheOneLearned(t *testing.T) {
 		t.Errorf("learned in IST, the application now writing in UTC: its IST hour %v %q; want refused, naming both zones", ok, why)
 	}
 	// The application's zone unread at replay (the agent's own is UTC):
-	// the zone learned is read.
+	// the zone learned is read, and an hour's cut must hold in UTC too
+	// (2026-10-29): one learned at UTC+05:30, more than an hour from UTC, is
+	// refused whatever it is, saying so, the IST hour and the UTC hour alike
+	// (TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo).
 	agent := own
 	agent.Own = false
-	if ok, why := CheckClockRead(wp, o, istHour, agent, true); !ok {
-		t.Errorf("learned in IST, the application's zone unread: its IST hour refused (%s); want checked in the zone learned", why)
+	if ok, why := CheckClockRead(wp, o, istHour, agent, true); ok || !strings.Contains(why, "read in a zone at UTC+05:30, the application's zone the learn step read it in") || !strings.Contains(why, "within an hour of UTC: a zone at UTC+05:30 does not, so keploy refuses the value whatever it is") || strings.Contains(why, "+05:30 stands") {
+		t.Errorf("learned in IST, the application's zone unread: its IST hour %v %q; want checked in the zone learned and in UTC, and refused, saying so", ok, why)
 	}
-	if ok, _ := CheckClockRead(wp, o, utcHour, agent, true); ok {
-		t.Errorf("learned in IST, the application's zone unread: its UTC hour passed; want checked in IST")
+	if ok, why := CheckClockRead(wp, o, utcHour, agent, true); ok || !strings.Contains(why, "keploy refuses the value whatever it is") || strings.Contains(why, "run it in a zone at UTC+05:30") {
+		t.Errorf("learned in IST, the application's zone unread: its UTC hour %v %q; want refused whatever it is, never told to run in IST (which a replay refuses too)", ok, why)
 	}
 	// Neither known: an hour's cut refused, saying so; a second's read as
 	// before, in the agent's zone.

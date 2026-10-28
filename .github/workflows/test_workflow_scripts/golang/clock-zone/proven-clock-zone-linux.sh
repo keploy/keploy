@@ -57,7 +57,11 @@
 #      not answer.
 #   6. No data race in any log.
 # A replay that cannot read the application's zone checks the cut in the
-# stored one (learn's CheckClockRead rows): a native run always reads it.
+# stored one, and a wall clock of zone app cut to an hour or a day in UTC
+# too, refusing an hour where the stored zone stands more than an hour from
+# UTC (learn's CheckClockRead rows). This lane's native run reads the zone
+# of the application's long-lived process; keploy reads it once for each
+# program a process runs.
 #
 # Readiness is the app's listening port while recording and keploy's own
 # probe of the app (--health-path) while replaying. The script stops only

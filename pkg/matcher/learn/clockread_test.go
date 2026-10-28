@@ -1783,7 +1783,10 @@ func TestATimeOfDayBothZonesWindowsHoldIsLearnedInEither(t *testing.T) {
 // zone for that day is its first instant, 01:00, as Java and JavaScript
 // read it (wallIn), never 23:00 the day before (Go's time.Date). So the
 // day after, that date is one day stale and passes, the date before it is
-// two and is refused, whatever hour the replay runs.
+// two and is refused, whatever hour the replay runs, in the application's
+// zone read from its process (Span.Own; one read in the zone the learn step
+// stored must hold in UTC too:
+// TestADateOfNoZoneCheckedInTheStoredZoneHoldsOnlyWhereItHoldsInUTCToo).
 func TestADateOfNoZoneOnADayWithNoMidnightIsThatDaysFirstInstant(t *testing.T) {
 	const p = "body.day"
 	santiago, err := time.LoadLocation("America/Santiago")
@@ -1824,7 +1827,7 @@ func TestADateOfNoZoneOnADayWithNoMidnightIsThatDaysFirstInstant(t *testing.T) {
 	}
 	for h := 0; h < 24; h++ {
 		from := time.Date(2026, 9, 7, h, 10, 0, 0, santiago)
-		s := Span{From: from, To: from.Add(time.Minute), Zone: santiago}
+		s := Span{From: from, To: from.Add(time.Minute), Zone: santiago, Own: true}
 		for _, row := range []struct {
 			v    string
 			want bool
