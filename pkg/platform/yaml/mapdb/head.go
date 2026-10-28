@@ -47,7 +47,7 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 		}
 		return data, nil
 	}
-	data, unkept, err := encodeYAMLOver(mapping, old, h)
+	data, unkept, err := encodeYAMLOver(mapping, old, nil, h)
 	if err != nil {
 		db.logger.Error("failed to marshal mapping", zap.Error(err))
 		return nil, err
@@ -55,22 +55,33 @@ func (db *MappingDb) encodeOver(mapping *models.Mapping, format yaml.Format, old
 	if unkept.Comments > 0 {
 		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d comment line(s) it could not place again", unkept.Comments),
 			zap.String("testSetID", testSetID),
-			zap.String("next_step", "keploy keeps the comment lines a mappings file starts with, comments on the keys it writes, and every field it does not know; move a note to the top of the file"))
+			zap.String("next_step", "keploy keeps the comment lines a mappings file starts with, comments on the keys it writes, and every field it does not know on the entries it writes; move a note to the top of the file"))
 	}
 	if len(unkept.Fields) > 0 {
 		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and could not keep %d field(s) a hand edit added: each brings in more than %d YAML nodes through aliases", len(unkept.Fields), maxAliasNodes),
 			zap.String("testSetID", testSetID), zap.Strings("fields", unkept.Fields),
 			zap.String("next_step", "write the field's value out without aliases (*name), and keploy keeps it"))
 	}
+	if len(unkept.Dropped) > 0 {
+		db.logger.Warn(fmt.Sprintf("keploy rewrote the set's mappings file and dropped %d field(s) a hand edit added to entries the new file does not have", len(unkept.Dropped)),
+			zap.String("testSetID", testSetID), zap.Strings("fields", unkept.Dropped),
+			zap.String("next_step", "the entry each field was on is gone from the file (removed, or its call recorded anew): add the field again where it belongs now"))
+	}
 	return data, nil
 }
 
 // Unkept is what a rewrite of a mapping file could not keep of the file it
-// replaced (EncodeOver): how many of its comment lines, and which of the
-// fields a hand edit added, each named by where it was.
+// replaced (EncodeOver): how many of its comment lines; Fields, the fields a
+// hand edit added that keploy could not write again (aliases bring in too
+// much); and Dropped, the fields a hand edit added to items the new file
+// does not have (a test it removed, a mock entry whose call it removed or
+// recorded anew), which have nowhere to go. A mock entry the rewrite moved
+// to another list keeps its fields there. Each field is named by where it
+// was, as tests[o::TestB].mock_entries[mock-1].note.
 type Unkept struct {
 	Comments int
 	Fields   []string
+	Dropped  []string
 }
 
 // EncodeOver is mapping encoded as YAML to replace old, the mapping file's
@@ -80,19 +91,30 @@ type Unkept struct {
 // to this keploy, or this keploy's line when old starts with none. A writer
 // outside this package that builds the file anew (enterprise's per-test
 // commit) writes it with this, and says what it could not keep.
-func EncodeOver(mapping *models.Mapping, old []byte) ([]byte, Unkept, error) {
-	return encodeYAMLOver(mapping, old, headerAlways)
+//
+// renames is how the rewrite named the mocks of old in the new file: nil
+// when each mock keeps its name, so an old entry is the new entry of its
+// name. Otherwise it names every mock the rewrite carried, one that keeps
+// its name too (mock-2 to mock-2): an old entry naming mock n is the new
+// entry naming renames[n], and an old entry whose mock renames lacks has no
+// new entry: the rewrite did not carry that call, and a new entry that holds
+// the name n now is another call, so a hand edit never moves to it
+// (Unkept.Dropped). enterprise's per-test commit passes the map it renames
+// the carried mocks with, {"mock-1": "mock-3"} for a call recorded as mock-1
+// it carries past a new recording's mock-0 to mock-2.
+func EncodeOver(mapping *models.Mapping, old []byte, renames map[string]string) ([]byte, Unkept, error) {
+	return encodeYAMLOver(mapping, old, renames, headerAlways)
 }
 
 // encodeYAMLOver is EncodeOver with keploy's line where h puts it when old
 // starts with no comment.
-func encodeYAMLOver(mapping *models.Mapping, old []byte, h header) ([]byte, Unkept, error) {
+func encodeYAMLOver(mapping *models.Mapping, old []byte, renames map[string]string, h header) ([]byte, Unkept, error) {
 	data, err := yaml.MarshalGeneric(yaml.FormatYAML, mapping)
 	if err != nil {
 		return nil, Unkept{}, err
 	}
 	var unkept Unkept
-	data, unkept.Fields = keepEdits(old, data)
+	data, unkept.Fields, unkept.Dropped = keepEdits(old, data, renames)
 	head := commentHead(old)
 	switch {
 	case len(head) > 0:
