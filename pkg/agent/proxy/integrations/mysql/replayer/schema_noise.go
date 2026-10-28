@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	lru "github.com/hashicorp/golang-lru/v2"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/matcher"
 	"go.keploy.io/server/v3/pkg/models"
@@ -17,7 +17,7 @@ import (
 	"vitess.io/vitess/go/vt/sqlparser"
 )
 
-// mysqlNoiseAdapter is the MySQL implementation of schemanoise.Adapter, making
+// mysqlNoiseAdapter is the MySQL implementation of mocknoise.Adapter, making
 // the MySQL parser a client of the same shared schema-noise engine HTTP uses.
 // MySQL has no single "request body": the drift-carrying content depends on the
 // command packet, so both sides of every comparison are first serialized into a
@@ -42,7 +42,7 @@ import (
 // is merged onto a fresh copy in updateMock so the shared pooled mock is never
 // mutated. SetLearnedNoise is implemented for interface completeness.
 type mysqlNoiseAdapter struct {
-	schemanoise.JSONDiffer
+	mocknoise.JSONDiffer
 }
 
 // RecordedBody returns the canonical JSON body of the mock's recorded request.
@@ -146,7 +146,7 @@ func executeBodyNoise(noise map[string][]string, recorded *models.Mock, live *my
 // the lenient score/FIFO behaviour so the auto-replay detection path can
 // still learn.
 type strictGate struct {
-	engine        *schemanoise.Engine
+	engine        *mocknoise.Engine
 	logger        *zap.Logger
 	requestType   string
 	live          *mysql.PacketBundle
@@ -184,7 +184,7 @@ type strictGate struct {
 	// driftEngine compares a candidate for allowsDrift as strict
 	// enforcement does, when the engine the gate was given does not
 	// (driftVerdicts keeps its answers, as verdicts keeps the engine's).
-	driftEngine   *schemanoise.Engine
+	driftEngine   *mocknoise.Engine
 	driftVerdicts map[*models.Mock]gateVerdict
 
 	// verdicts keeps StrictReject's answer per candidate. The verdict depends
@@ -242,7 +242,7 @@ type gateVerdict struct {
 	drift   map[string][]string
 }
 
-func newStrictGate(engine *schemanoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
+func newStrictGate(engine *mocknoise.Engine, logger *zap.Logger, requestType string, live *mysql.PacketBundle, liveBody []byte, liveBodyOK bool, userBodyNoise map[string][]string) *strictGate {
 	return &strictGate{
 		engine:        engine,
 		logger:        logger,
@@ -312,7 +312,7 @@ func (g *strictGate) allowsDrift(mock *models.Mock) bool {
 		return false
 	}
 	if g.driftEngine == nil {
-		g.driftEngine = schemanoise.New(mysqlNoiseAdapter{}, false, true)
+		g.driftEngine = mocknoise.New(mysqlNoiseAdapter{}, false, true)
 	}
 	if g.compare(g.driftEngine, &g.driftVerdicts, mock) {
 		return true
@@ -323,7 +323,7 @@ func (g *strictGate) allowsDrift(mock *models.Mock) bool {
 
 // compare is strict enforcement's verdict on mock by engine, cached in
 // verdicts, recording the rejection diagnostics when it is no.
-func (g *strictGate) compare(engine *schemanoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock) bool {
+func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock) bool {
 	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
 	body, _ := g.bodyFor(mock)
 	v, seen := (*verdicts)[mock]
