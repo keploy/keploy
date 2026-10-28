@@ -810,7 +810,7 @@ func TestAClientTestsWindowReadsAWallClockOfNoZoneInTheApplicationsZone(t *testi
 	if ln := classifyZoned(ist, true, p, recJST, liveJST, call, w); ln.Kind != KindUnaccounted || ln.Why != clientTestWhy("", true) {
 		t.Errorf("read in JST within the window, the application's zone IST: %s (%s); want it refused: %s", ln.Kind, ln.Why, clientTestWhy("", true))
 	}
-	if !(&DriftCache{zone: ist, clientTests: true}).InstantClockRead(rec, live, w) || InstantClockRead(rec, live, w) {
+	if !clientDriftsIn(ist).InstantClockRead(rec, live, w) || InstantClockRead(rec, live, w) {
 		t.Errorf("InstantClockRead: the cache's reads the zone, the bare one UTC alone")
 	}
 }
@@ -1002,7 +1002,7 @@ func TestAnInstantThatNamesItsMomentIsReadInUTCAloneInItsWindow(t *testing.T) {
 			t.Errorf("client test %v: the clock plus 5h30m as an instant naming its moment, the application's zone IST: %s (%s); want it refused", client, ln.Kind, ln.Why)
 		}
 	}
-	if (&DriftCache{zone: ist, clientTests: true}).InstantClockRead(rec, live, w) {
+	if clientDriftsIn(ist).InstantClockRead(rec, live, w) {
 		t.Errorf("DriftCache.InstantClockRead reads an instant that names its moment in the application's zone")
 	}
 }
@@ -2167,7 +2167,7 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	// on a whole hour at the hour, and one that is no whole minute shows no
 	// cut above its second and is checked at it.
 	hour := models.ClockOffset{Res: time.Hour, Layout: "iso-second"}
-	late := Span{From: now.Add(time.Second + 5*time.Millisecond), To: now.Add(time.Second + 25*time.Millisecond)}
+	late := Span{From: now.Add(time.Second + 5*time.Millisecond), To: now.Add(time.Second + 25*time.Millisecond), Zone: time.UTC, Own: true}
 	for _, c := range []struct {
 		v, why string
 		ok     bool
@@ -2211,7 +2211,7 @@ func TestATextClockReadsFractionDigitsAreNoEvidenceOfItsResolution(t *testing.T)
 	// one that is no whole second is checked at its own millisecond.
 	cutAt("a time of day cut to the second, three digits then six", "03:30:00.000", "03:31:02.000000", time.Second)
 	cutAt("a time of day cut to the second, six digits then three", "03:30:00.000000", "03:31:02.000", time.Second)
-	tods := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: time.UTC}
+	tods := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: time.UTC, Own: true}
 	for _, pr := range [][2]time.Duration{{time.Millisecond, time.Microsecond}, {time.Microsecond, time.Millisecond}} {
 		r := clockedDrifts().todRead(3*time.Hour+30*time.Minute, 3*time.Hour+31*time.Minute+2*time.Second, pr[0], pr[1], "time-second", "time-second", nil, call)
 		if r.Res != time.Second {
@@ -2565,7 +2565,7 @@ func TestAChanceCutIsOneVerdictPerRecordingNeverPerReplay(t *testing.T) {
 			}
 			for k := int64(0); k < 3*per && k < 5000; k++ {
 				v := now.Add(time.Duration(k) * f.enc)
-				span := Span{From: v.Add(-f.enc / 2), To: v.Add(f.enc / 2), Zone: time.UTC}
+				span := Span{From: v.Add(-f.enc / 2), To: v.Add(f.enc / 2), Zone: time.UTC, Own: true}
 				if ok, why := CheckClockRead(p, o, str(f.w(v)), span, true); !ok {
 					t.Errorf("%s, %s, replay %s: refused (%s); want every replay passed", f.name, c.what, f.w(v), why)
 					break
@@ -2643,7 +2643,7 @@ func TestACoarseCutIsCheckedAtTheCut(t *testing.T) {
 			}
 		}
 		k := time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC).Add(5 * f.cut)
-		span := Span{From: k.Add(f.enc), To: k.Add(f.cut + f.cut/2), Zone: time.UTC}
+		span := Span{From: k.Add(f.enc), To: k.Add(f.cut + f.cut/2), Zone: time.UTC, Own: true}
 		check("the cut the span starts in", k, span, true)
 		check("one cut stale", k.Add(-f.cut), span, true)
 		check("two cuts stale", k.Add(-2*f.cut), span, false)
@@ -2664,7 +2664,7 @@ func TestACoarseCutIsCheckedAtTheCut(t *testing.T) {
 		rng := rand.New(rand.NewSource(41))
 		for i := 0; i < 2000; i++ {
 			from := k.Add(time.Duration(rng.Int63n(int64(24 * time.Hour))))
-			s := Span{From: from, To: from.Add(time.Duration(rng.Int63n(int64(f.cut)))), Zone: time.UTC}
+			s := Span{From: from, To: from.Add(time.Duration(rng.Int63n(int64(f.cut)))), Zone: time.UTC, Own: true}
 			read := s.From.Add(time.Duration(rng.Int63n(int64(s.To.Sub(s.From)) + 1)))
 			check("a read in its span", read, s, true)
 			check("a read in its span, rounded up", read.Truncate(f.cut).Add(f.cut), s, true)
@@ -2833,7 +2833,7 @@ func TestACutIsReadInTheZoneTheApplicationCutsIn(t *testing.T) {
 		}
 		for i := 0; i < 2000; i++ {
 			from := base.Add(time.Duration(rng.Int63n(int64(min(10*24*time.Hour, 2000*f.cut)))))
-			s := Span{From: from, To: from.Add(time.Duration(rng.Int63n(int64(min(f.cut, 10*time.Minute))))), Zone: f.app}
+			s := Span{From: from, To: from.Add(time.Duration(rng.Int63n(int64(min(f.cut, 10*time.Minute))))), Zone: f.app, Own: true}
 			read := s.From.Add(time.Duration(rng.Int63n(int64(s.To.Sub(s.From)) + 1)))
 			check("a read in its span", f.cutOf(read), s, true)
 			check("one cut stale", shift(f.cutOf(read), -1), s, true)
@@ -2854,13 +2854,13 @@ func TestACutIsReadInTheZoneTheApplicationCutsIn(t *testing.T) {
 			check("two cuts past the span", past, s, false)
 		}
 		if f.name == "a typed $date cut to Lord Howe's hour" {
-			s := Span{From: time.Date(2026, 10, 4, 2, 50, 0, 0, f.app), Zone: f.app}
+			s := Span{From: time.Date(2026, 10, 4, 2, 50, 0, 0, f.app), Zone: f.app, Own: true}
 			s.To = s.From.Add(time.Minute)
 			check("the hour that starts at 02:30", f.cutOf(s.From), s, true)
 		}
 		if f.days > 0 && f.app == berlin && f.name == "a typed $date cut to Berlin's day" {
 			late := time.Date(2026, 10, 25, 23, 40, 0, 0, berlin)
-			s := Span{From: late, To: late.Add(time.Minute), Zone: berlin}
+			s := Span{From: late, To: late.Add(time.Minute), Zone: berlin, Own: true}
 			check("the day the clocks go back, read late in it", f.cutOf(late), s, true)
 			check("the day before it", shift(f.cutOf(late), -1), s, true)
 			check("two days before it", shift(f.cutOf(late), -2), s, false)
@@ -2885,7 +2885,7 @@ func TestAWallClocksCutIsReadOnItsDigits(t *testing.T) {
 	}
 	o := models.ClockOffset{Res: 24 * time.Hour, Zone: models.ZoneApp, Layout: "iso-second-space"}
 	now := time.Date(2026, 10, 27, 20, 0, 0, 0, ist)
-	s := Span{From: now, To: now.Add(time.Minute), Zone: ist}
+	s := Span{From: now, To: now.Add(time.Minute), Zone: ist, Own: true}
 	if ok, why := CheckClockRead(p, o, wall("2026-10-27 05:30:00"), s, true); ok {
 		t.Errorf("a wall clock of 05:30 in IST (00:00 in UTC), read at 20:00: passed (%s); want checked at its minute and refused", why)
 	}
@@ -3246,4 +3246,12 @@ func TestAnIsoformatTenthsColumnLearnedOnWholeSecondsPassesEveryReplayInItsSpan(
 			}
 		}
 	}
+}
+
+// clientDriftsIn is an empty DriftCache of keploy mock's client tests in
+// zone.
+func clientDriftsIn(zone *time.Location) *DriftCache {
+	dc := NewDriftCache()
+	dc.zone, dc.clientTests = zone, true
+	return dc
 }
