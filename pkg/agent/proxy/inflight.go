@@ -95,12 +95,14 @@ type trackedConn struct {
 	began, beganSeq uint64
 	hasBegun        bool
 	waiting         []boundWait
-	// floor is the holds its parser had taken by the time its reads passed
-	// the cut of the latest test window's begin (inflight.beginWindow):
-	// requests whose opening it read before that window began (an HTTP/2
-	// or gRPC stream held from its opening frame), which a scope cut later
-	// leaves out (holdBound.floor). nil: no window began while it was kept,
-	// so each of its holds is of a request opened since. Under mu.
+	// floor is the holds its parser had taken by the time its reads reached
+	// the cut of the latest test window's begin (inflight.beginWindow), or,
+	// where one read spans that cut, as that read began (boundWait):
+	// requests whose opening it read from bytes received before that window
+	// began (an HTTP/2 or gRPC stream held from its opening frame), which a
+	// scope cut later leaves out (holdBound.floor). nil: no window began
+	// while it was kept, so each of its holds is of a request opened since.
+	// Under mu.
 	floor *holdBound
 	// delivered counts the bytes its reads have returned, and eof says one
 	// returned the end of the stream: changed with reading as a read
@@ -164,6 +166,13 @@ type trackedConn struct {
 	// lostBound is the holds the work given up at lost covers (holdBound):
 	// the bound of the settle that gave up; under mu.
 	lostBound *holdBound
+	// lostHolds are the holds a settle's watchdog gave up on where its cut
+	// covered only those (scope.GiveUp on a bounded view): a parser that
+	// holds each request until it answers it and reads on (HTTP/2's and
+	// gRPC's streams) tells every later request apart, so no later scope
+	// counts these (scopedView) and none leaves the connection out. Each
+	// leaves as it is released; under mu.
+	lostHolds map[uint64]struct{}
 	// flights, under the proven switch, is the learn step's tracker its
 	// requests are told to (learn.Flight): a read that returns bytes while
 	// none is aloft lifts one (flight), and the first write after it lands
@@ -515,20 +524,27 @@ func (c *trackedConn) endUntold(ground bool) {
 }
 
 // beginRead counts a read of c in progress, and notes what c's reads had
-// delivered and the holds its parser had taken as it began (began).
+// delivered and the holds its parser had taken as it began (began). It fixes
+// each bound waiting for a read to begin past its cut (boundWait): a scope's
+// at the holds taken by now, and a window's floor at the holds taken by now
+// if the reads so far end at its cut, else (the read before this one spans
+// it) at those taken as that read began.
 func (c *trackedConn) beginRead() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.reading.Add(1)
 	if !c.closing.Load() {
-		d := c.delivered.Load()
+		d, spannedFrom := c.delivered.Load(), c.beganSeq
 		c.began, c.beganSeq, c.hasBegun = d, c.holdSeq, true
 		kept := c.waiting[:0]
 		for _, w := range c.waiting {
-			if d >= w.cut {
-				w.b.seq, w.b.fixed = c.holdSeq, true
-			} else {
+			switch {
+			case d < w.cut:
 				kept = append(kept, w)
+			case w.floor && d > w.cut:
+				w.b.seq, w.b.fixed = spannedFrom, true
+			default:
+				w.b.seq, w.b.fixed = c.holdSeq, true
 			}
 		}
 		clear(c.waiting[len(kept):])
@@ -646,24 +662,46 @@ func (c *trackedConn) hungUp(v connView) bool {
 // from the bytes up to the cut was held by then. A hold taken later is of
 // bytes received after the cut: a request the application made after the
 // settle began, on a connection that answers several at once (HTTP/2's
-// streams), which the settle does not wait for. Under the connection's mu.
+// streams), which the settle does not wait for. Where one read spans the cut,
+// a request from its bytes after the cut is held by then too, and the settle
+// waits for it as well (boundWait). Under the connection's mu.
 //
 // floor, when set, is the connection's bound at the latest window's begin
 // as the scope was cut (trackedConn.floor): the holds numbered floor.seq or
 // lower are of requests opened before the test's window began, which are
-// not the test's, and the scope leaves them out. It is fixed by the time
-// the scope's own bound is (its cut is no later), and while it is not, none
-// is left out.
+// not the test's, and the scope leaves them out; a request read in the read
+// that spans the window's begin is not under it. It is fixed by the time the
+// scope's own bound is (its cut is no later), and while it is not, none is
+// left out.
 type holdBound struct {
 	seq   uint64
 	fixed bool
 	floor *holdBound
 }
 
-// boundWait is a bound its connection fixes as a read begins past cut.
+// covers is whether hold seq is one b covers, b fixed: numbered b.seq or
+// lower, and above its floor once that is fixed.
+func (b *holdBound) covers(seq uint64) bool {
+	var lo uint64
+	if f := b.floor; f != nil && f.fixed {
+		lo = f.seq
+	}
+	return lo < seq && seq <= b.seq
+}
+
+// boundWait is a bound its connection fixes as a read begins past cut
+// (beginRead). A scope's bound (floor false) is fixed at the holds its
+// parser had taken by then: every request read from the bytes up to the cut
+// was held by then, and so may be one read with them from bytes after it
+// (one read spans the cut), which the scope then waits for too. A window's
+// floor (floor true) leaves out what it covers, so where one read spans its
+// cut it is fixed at the holds taken as that read began: each was read from
+// bytes before the cut. A stream whose opening frame was in that read, sent
+// before the window began or after, is then the window's.
 type boundWait struct {
-	cut uint64
-	b   *holdBound
+	cut   uint64
+	b     *holdBound
+	floor bool
 }
 
 // cutNow is c's cut for a scope that begins now (what its socket has
@@ -674,19 +712,19 @@ func (c *trackedConn) cutNow() (cut uint64, b *holdBound) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cut = c.received(c.viewLocked())
-	b = c.boundLocked(cut)
+	b = c.boundLocked(cut, false)
 	b.floor = c.floor
 	return cut, b
 }
 
 // boundLocked is, under c.mu, the bound of the holds that cover what c's
-// socket had received at cut (cutNow).
-func (c *trackedConn) boundLocked(cut uint64) *holdBound {
+// socket had received at cut (cutNow), or a window's floor (boundWait).
+func (c *trackedConn) boundLocked(cut uint64, floor bool) *holdBound {
 	b := &holdBound{}
 	if c.hasBegun && c.began >= cut {
 		b.seq, b.fixed = c.beganSeq, true
 	} else {
-		c.waiting = append(c.waiting, boundWait{cut: cut, b: b})
+		c.waiting = append(c.waiting, boundWait{cut: cut, b: b, floor: floor})
 	}
 	return b
 }
@@ -704,7 +742,7 @@ func (t *inflight) beginWindow() {
 	t.mu.Unlock()
 	for _, c := range conns {
 		c.mu.Lock()
-		c.floor = c.boundLocked(c.received(c.viewLocked()))
+		c.floor = c.boundLocked(c.received(c.viewLocked()), true)
 		c.mu.Unlock()
 	}
 }
@@ -716,13 +754,9 @@ func (c *trackedConn) scopedView(b *holdBound) connView {
 	defer c.mu.Unlock()
 	v := c.viewLocked()
 	if b != nil && b.fixed {
-		var lo uint64
-		if f := b.floor; f != nil && f.fixed {
-			lo = f.seq
-		}
 		var n int32
 		for seq := range c.holding {
-			if lo < seq && seq <= b.seq {
+			if _, lost := c.lostHolds[seq]; !lost && b.covers(seq) {
 				n++
 			}
 		}
@@ -756,6 +790,7 @@ func (c *trackedConn) Hold() (release func()) {
 		once.Do(func() {
 			c.mu.Lock()
 			delete(c.holding, seq)
+			delete(c.lostHolds, seq)
 			c.held.Add(-1)
 			c.noteSettled()
 			c.mu.Unlock()
@@ -973,7 +1008,11 @@ func (s *scope) leftOut(tc *trackedConn, cut uint64, answers bool) bool {
 // work: that work, up to its cut, is charged to the settle (its test is not
 // verified, with the words returned, one per connection, saying what it
 // held), and no later scope waits for it while its handler has not passed
-// it (leftOut).
+// it (leftOut). On one whose holds the cut covers are fixed (holdBound) and
+// that holds only those, it gives up on those holds alone (lostHolds): the
+// requests its parser holds later are told apart from them, so a later
+// scope waits for its own, each until it is answered, and is not charged
+// for the lost ones (Behind).
 func (s *scope) GiveUp(ids []uint64, answers bool) []string {
 	want := make(map[uint64]bool, len(ids))
 	for _, id := range ids {
@@ -992,12 +1031,30 @@ func (s *scope) GiveUp(ids []uint64, answers bool) []string {
 			continue
 		}
 		out = append(out, tc.name()+", which held "+heldWords(tc, v, cut, answers))
+		holdsOnly := v.bounded && v.held > 0 && !tc.hungUp(v)
 		tc.mu.Lock()
-		tc.lost, tc.charged, tc.hasLost, tc.lostBound = cut, max(tc.charged, cut), true, b
+		if holdsOnly {
+			tc.loseHoldsLocked(b)
+		} else {
+			tc.lost, tc.charged, tc.hasLost, tc.lostBound = cut, max(tc.charged, cut), true, b
+		}
 		tc.mu.Unlock()
 	}
 	sort.Strings(out)
 	return out
+}
+
+// loseHoldsLocked notes, under c.mu, each hold b covers that c still holds
+// as given up on (lostHolds).
+func (c *trackedConn) loseHoldsLocked(b *holdBound) {
+	for seq := range c.holding {
+		if b.covers(seq) {
+			if c.lostHolds == nil {
+				c.lostHolds = map[uint64]struct{}{}
+			}
+			c.lostHolds[seq] = struct{}{}
+		}
+	}
 }
 
 // Behind is, for each connection the scope left out (leftOut) that has
@@ -1050,6 +1107,9 @@ func heldWords(tc *trackedConn, v connView, cut uint64, answers bool) string {
 	if tc.closing.Load() {
 		what = append(what, "a close its handler was not done with")
 	}
+	if tc.hungUp(v) {
+		what = append(what, "its client's hang-up its handler had not told")
+	}
 	if answers && !v.bounded && v.reading == 0 && v.idle == 0 {
 		what = append(what, "a request its handler had read and not answered (it had not gone back to reading)")
 	}
@@ -1060,8 +1120,10 @@ func heldWords(tc *trackedConn, v connView, cut uint64, answers bool) string {
 }
 
 // holds is whether tc still holds the scope's work, cut its cut: bytes up
-// to it its reads have not delivered, or, in a replay, a request read from
-// them not answered. Its handler answered them once, after its reads
+// to it its reads have not delivered, its client's hang-up its handler has
+// not told (hungUp, in a record as in a replay: the losses the test's end
+// reads include it), or, in a replay, a request read from them not
+// answered. Its handler answered them once, after its reads
 // delivered them, it held no request (settled). Once a read began past the
 // cut (b fixed: holdBound), what its parser read up to the cut was held by
 // then: it holds the scope's work while it holds any of those holds, and
@@ -1071,7 +1133,7 @@ func heldWords(tc *trackedConn, v connView, cut uint64, answers bool) string {
 // unknown mark stood when it was found holding none. v is the view read.
 func (s *scope) holds(tc *trackedConn, cut uint64, answers bool, b *holdBound) (held, marked bool, v connView) {
 	v = tc.scopedView(b)
-	if v.delivered < cut {
+	if v.delivered < cut || tc.hungUp(v) {
 		return true, false, v
 	}
 	if !answers {
