@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -121,7 +121,7 @@ func TestMatchCommand_AStrictMissMasksAttributeValues(t *testing.T) {
 		dctx := newDecodeCtx()
 		dctx.StmtIDToQuery[33] = readsExec
 		ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-		_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
+		_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
 		if err != nil || ok {
 			t.Fatalf("strict served the EXECUTE (%v)", err)
 		}
@@ -137,7 +137,7 @@ func TestMatchCommand_AStrictMissMasksAttributeValues(t *testing.T) {
 		req := comQueryReq(sql)
 		req.PacketBundle.Message.(*mysql.QueryPacket).Parameters = []mysql.Parameter{password(secret)}
 		db := &fakeMockDb{session: []*models.Mock{m}}
-		_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), "", schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
+		_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), "", mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
 		if err != nil || ok {
 			t.Fatalf("strict served the COM_QUERY (%v)", err)
 		}
@@ -163,7 +163,7 @@ func TestMatchCommand_AStrictMissMasksAttributeValues(t *testing.T) {
 			req := comQueryReq(sql)
 			req.PacketBundle.Message.(*mysql.QueryPacket).Parameters = sides[1]
 			db := &fakeMockDb{session: []*models.Mock{m}}
-			_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), "", schemanoise.New(mysqlNoiseAdapter{}, false, true), nil)
+			_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, db, newDecodeCtx(), "", mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
 			if err != nil || ok {
 				t.Fatalf("strict served the COM_QUERY (%v)", err)
 			}
