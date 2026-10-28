@@ -776,6 +776,8 @@ func javaZoneinfoMatch(root string, data []byte) (string, error) {
 			return nil
 		}
 		seen[r] = true
+		// os.ReadDir opens with O_DIRECTORY: a device or a FIFO in a
+		// directory's place is refused (ENOTDIR) before its open runs.
 		ents, err := os.ReadDir(under(root, r))
 		if err != nil {
 			return unread(p, err)
@@ -1140,7 +1142,7 @@ func readZoneFile(root, p string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	data, err := readRegular(under(root, real))
+	data, err := readRegular(root, real)
 	return data, real, err
 }
 
@@ -1155,22 +1157,17 @@ func (e errNotRegular) Error() string {
 	return "no regular file (" + e.mode.Type().String() + ")"
 }
 
-// readRegular reads the regular file at name, of at most zoneFileCap
-// bytes: an error of any other (a FIFO, which would hold the read, a
-// device, a directory), never read, or a longer one.
-func readRegular(name string) ([]byte, error) {
-	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+// readRegular reads the regular file at p, a path in the process's own
+// view with its links resolved (resolveUnder), under root, of at most
+// zoneFileCap bytes: an error of any other (a FIFO, which would hold the
+// read, a device, whose driver's open would run, a directory), never
+// opened for reading (openRegular), or of a longer one.
+func readRegular(root, p string) ([]byte, error) {
+	f, err := openRegular(root, p)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, lasting(errNotRegular{fi.Mode()})
-	}
 	data, err := io.ReadAll(io.LimitReader(f, zoneFileCap+1))
 	if err == nil && len(data) > zoneFileCap {
 		err = lasting(fmt.Errorf("more than %d bytes, more than keploy reads of a zone file, an /etc/timezone or an argfile", zoneFileCap))

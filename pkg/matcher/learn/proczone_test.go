@@ -566,8 +566,10 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 		}
 	}
 	// A name only a host's zone directory holds is refused as no zone a JVM
-	// reads, whatever the host holds, never read from the host's files.
-	for _, id := range []string{"localtime", "posixrules", "Factory", "posix/Asia/Kolkata", "right/UTC", "+05:30", "-08:00"} {
+	// reads, whatever the host holds, never read from the host's files; so
+	// is a name whose part starts with no letter, as no region of Java's
+	// starts.
+	for _, id := range []string{"localtime", "posixrules", "Factory", "posix/Asia/Kolkata", "right/UTC", "+05:30", "-08:00", "+0530", "Etc/_UTC"} {
 		if loc, err := javaZone(id); err == nil || loc != nil || !strings.Contains(err.Error(), "is no zone a JVM reads") {
 			t.Errorf("user.timezone %q: %v %v; want refused as no zone a JVM reads", id, loc, err)
 		}
