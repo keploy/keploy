@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"syscall"
@@ -109,6 +110,19 @@ type ListenerCounter interface {
 	// the application connection it pairs with, with that one's original
 	// destination. A connection with no number is an error.
 	ProxyConnPair(rc syscall.RawConn) (ProxyConnPairing, error)
+}
+
+// AcceptedPeerPairer is the optional extension implemented by hooks that pair
+// an accepted connection by the address it came from (macOS: the source port
+// the shim pinned) rather than by what the kernel wrote into its socket. The
+// proxy hands it the peer address accept() returned: a connection the
+// application reset before the proxy took it still has that address, while
+// its socket no longer answers getpeername. Hooks that do not implement it
+// (Linux, whose kernel numbers the socket itself) are asked ProxyConnPair.
+type AcceptedPeerPairer interface {
+	// ProxyConnPairPeer is ProxyConnPair for the connection rc, accepted from
+	// peer.
+	ProxyConnPairPeer(rc syscall.RawConn, peer *net.TCPAddr) (ProxyConnPairing, error)
 }
 
 // ProxyConnPairing is an accepted connection of the proxy's marked listener,

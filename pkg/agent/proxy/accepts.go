@@ -278,7 +278,15 @@ func (p *Proxy) countAccept(conn net.Conn) bool {
 		p.failCount(fmt.Errorf("reach an accepted connection's socket: %w", err))
 		return false
 	}
-	pairing, err := p.listenerCounter.ProxyConnPair(rc)
+	var pairing agent.ProxyConnPairing
+	if ap, ok := p.listenerCounter.(agent.AcceptedPeerPairer); ok {
+		// The address accept() returned, kept by the conn: a connection
+		// reset before the accept still has it.
+		peer, _ := tc.RemoteAddr().(*net.TCPAddr)
+		pairing, err = ap.ProxyConnPairPeer(rc, peer)
+	} else {
+		pairing, err = p.listenerCounter.ProxyConnPair(rc)
+	}
 	if err != nil {
 		p.failCount(err)
 		return false
