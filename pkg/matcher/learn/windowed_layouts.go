@@ -54,14 +54,10 @@ func newLayoutRe(lay clockLayout) *layoutRe {
 	return l
 }
 
-// FindAllStringIndex is the pattern's FindAllStringIndex(s, n), read only in
-// the windows of s that can hold a match. n is -1 (every match), as
-// instantSpans asks; any other n reads the whole text.
-func (l *layoutRe) FindAllStringIndex(s string, n int) [][]int {
-	if l.anchors == nil || l.pad < 0 || n >= 0 {
-		if n >= 0 {
-			return l.re.FindAllStringIndex(s, n)
-		}
+// FindAllStringIndex is the pattern's FindAllStringIndex(s, -1), every match,
+// read only in the windows of s that can hold one.
+func (l *layoutRe) FindAllStringIndex(s string) [][]int {
+	if l.anchors == nil || l.pad < 0 {
 		return layoutScan(l.re, s)
 	}
 	var out [][]int

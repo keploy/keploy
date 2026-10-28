@@ -282,7 +282,7 @@ func instantSpans(s string) []instant {
 	var taken []bool
 	for k, re := range instantRes {
 		lay := clockLayouts[k]
-		for _, m := range re.FindAllStringIndex(s, -1) {
+		for _, m := range re.FindAllStringIndex(s) {
 			if m[0] > 0 && isWord(s[m[0]-1]) && isWord(s[m[0]]) || m[1] < len(s) && isWord(s[m[1]-1]) && isWord(s[m[1]]) {
 				continue
 			}

@@ -45,7 +45,7 @@ func TestALayoutReadInWindowsFindsWhatTheWholeTextHolds(t *testing.T) {
 	for iter := 0; iter < 3000; iter++ {
 		s := genText(r, 1+r.Intn(60))
 		for k, l := range instantRes {
-			got, want := l.FindAllStringIndex(s, -1), l.re.FindAllStringIndex(s, -1)
+			got, want := l.FindAllStringIndex(s), l.re.FindAllStringIndex(s, -1)
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("layout %d over %q: windows found %v, the whole text %v", k, s, got, want)
 			}
@@ -93,20 +93,14 @@ func TestALongScriptIsReadOnlyAroundItsInstants(t *testing.T) {
 	}
 }
 
-// A layout whose match is unbounded (pad -1), or a read that asks for fewer
-// than every match (n >= 0), is read over the whole text: windows would cut
-// the unbounded match short and give a limited read another count.
-func TestAnUnboundedLayoutOrALimitedReadIsReadWhole(t *testing.T) {
+// A layout whose match is unbounded (pad -1) is read over the whole text:
+// windows would cut the unbounded match short.
+func TestAnUnboundedLayoutIsReadWhole(t *testing.T) {
 	digits := strings.Repeat("1761635781", 3)
 	s := "id " + digits + " at 1761635782 and 1761635783"
 	unbounded := &layoutRe{re: regexp.MustCompile(`\d{10}\d*`), anchors: digitRuns(10), pad: -1}
-	if got, want := unbounded.FindAllStringIndex(s, -1), unbounded.re.FindAllStringIndex(s, -1); !reflect.DeepEqual(got, want) {
+	if got, want := unbounded.FindAllStringIndex(s), unbounded.re.FindAllStringIndex(s, -1); !reflect.DeepEqual(got, want) {
 		t.Errorf("unbounded layout over %q: found %v, the whole text holds %v", s, got, want)
-	}
-	for k, l := range instantRes {
-		if got, want := l.FindAllStringIndex(s, 1), l.re.FindAllStringIndex(s, 1); !reflect.DeepEqual(got, want) {
-			t.Errorf("layout %d's first match over %q: found %v, the pattern's is %v", k, s, got, want)
-		}
 	}
 }
 
@@ -128,7 +122,7 @@ func TestEachAnchorFindsOnlyItsShape(t *testing.T) {
 		{"digit T digit", digitTDigit, "1T2 1t2", [][2]int{{0, 3}, {4, 7}}},
 		{"digit T digit", digitTDigit, "T2 1T aTb xT2 1X2", nil},
 		{"uuid version", uuidVersionGroup, "-1abc- -7ABC-", [][2]int{{0, 6}, {7, 13}}},
-		{"uuid version", uuidVersionGroup, "-2abc- -1abg- -1ab- -1abc", nil},
+		{"uuid version", uuidVersionGroup, "-2abc- -1abg- -1ab- -1abcx -1abc", nil},
 		{"digit runs", digitRuns(10), "a12345678901b 1234567890", [][2]int{{1, 12}, {14, 24}}},
 		{"digit runs", digitRuns(10), "123456789 12345.67890", nil},
 	} {
@@ -139,7 +133,7 @@ func TestEachAnchorFindsOnlyItsShape(t *testing.T) {
 }
 
 // maxMatchLen counts bytes, a case-folded letter at its longest form ("s"
-// also matches "ſ", two bytes, and a class [a-z] also matches "K", U+212A,
+// also matches "ſ", two bytes, and a class [a-z] also matches "K", U+212A,
 // three), counts a group as what it holds, and refuses an unbounded pattern,
 // an alternative with one unbounded branch, or an empty-width assertion.
 func TestMaxMatchLenCountsBytesAndRefusesTheUnbounded(t *testing.T) {
@@ -172,7 +166,7 @@ func BenchmarkInstantSpansLongScript(b *testing.B) {
 		b.SetBytes(int64(len(s)))
 		for i := 0; i < b.N; i++ {
 			for _, l := range instantRes {
-				l.FindAllStringIndex(s, -1)
+				l.FindAllStringIndex(s)
 			}
 		}
 	})
