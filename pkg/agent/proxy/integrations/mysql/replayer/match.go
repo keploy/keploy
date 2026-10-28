@@ -650,6 +650,38 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	//
 	// With tiersRead set (the in-window pass already holds the per-test and
 	// connection tiers), only the session tier is read.
+	//
+	// fetchConnectionTier is the connection tier's read.
+	//
+	// Unification Phase 2.5: prepared-statement setup mocks are tagged
+	// type=connection by the recorder (see
+	// pkg/agent/proxy/integrations/mysql/recorder/query.go) and live in
+	// their own per-connID pool. Fetch them explicitly here so
+	// buildRecordedPrepIndex can include them; GetConnectionMocks
+	// returns an empty slice when no connection-scoped mocks exist, so
+	// this is a no-op for apps that don't use PREPARE.
+	fetchConnectionTier := func() ([]*models.Mock, error) {
+		if connID == "" {
+			return nil, nil
+		}
+		cm, cerr := mockDb.GetConnectionMocks(connID)
+		if cerr != nil {
+			// Hard-fail for prepared-statement traffic: without the
+			// connection pool we can't resolve PREPARE↔EXECUTE pairs
+			// and the later "no matching mock" would mask the real
+			// root cause. Other command types tolerate the failure
+			// (connection pool is advisory for them) — log + continue.
+			if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
+				utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
+				return nil, fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
+			}
+			logger.Debug("failed to get mysql connection mocks; proceeding without per-connID pool",
+				zap.String("connID", connID),
+				zap.Error(cerr))
+			return nil, nil
+		}
+		return cm, nil
+	}
 	fetchTiers := func(sessionOf func() ([]*models.Mock, error)) (perTestMocks, sessionMocks, connectionMocks []*models.Mock, err error) {
 		if !tiersRead {
 			perTestMocks, err = mockDb.GetPerTestMocksInWindow()
@@ -670,30 +702,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			return nil, nil, nil, err
 		}
 
-		// Unification Phase 2.5: prepared-statement setup mocks are tagged
-		// type=connection by the recorder (see
-		// pkg/agent/proxy/integrations/mysql/recorder/query.go) and live in
-		// their own per-connID pool. Fetch them explicitly here so
-		// buildRecordedPrepIndex can include them; GetConnectionMocks
-		// returns an empty slice when no connection-scoped mocks exist, so
-		// this is a no-op for apps that don't use PREPARE.
-		if connID != "" && !tiersRead {
-			cm, cerr := mockDb.GetConnectionMocks(connID)
-			if cerr != nil {
-				// Hard-fail for prepared-statement traffic: without the
-				// connection pool we can't resolve PREPARE↔EXECUTE pairs
-				// and the later "no matching mock" would mask the real
-				// root cause. Other command types tolerate the failure
-				// (connection pool is advisory for them) — log + continue.
-				if req.Header.Type == sCOM_STMT_PREP || req.Header.Type == sCOM_STMT_EXEC {
-					utils.LogError(logger, cerr, "failed to get mysql connection mocks", zap.String("connID", connID))
-					return nil, nil, nil, fmt.Errorf("failed to get mysql connection mocks for connID %q: %w", connID, cerr)
-				}
-				logger.Debug("failed to get mysql connection mocks; proceeding without per-connID pool",
-					zap.String("connID", connID),
-					zap.Error(cerr))
-			} else {
-				connectionMocks = cm
+		if !tiersRead {
+			if connectionMocks, err = fetchConnectionTier(); err != nil {
+				return nil, nil, nil, err
 			}
 		}
 		return perTestMocks, sessionMocks, connectionMocks, nil
@@ -848,8 +859,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	//     computes no statement identity), the full scan matches it.
 	//
 	// Under exact serving the per-test tier leads with every mock the open
-	// test owns, and the keyed pass walks that tier whole before the session
-	// tier: every index here files the test's own mocks under no key (their
+	// test owns, and the keyed pass walks that tier before the session tier
+	// (whole, or, through a store that hands it over one mock at a time,
+	// until the command settles): every index here files the test's own mocks under no key (their
 	// OwnedKeys), so the keyed walks of the session tier read the staged mocks
 	// only, and no command computes a statement identity of the mocks the test
 	// owns. An EXECUTE the test owns that recorded no query is read in that
@@ -903,20 +915,46 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	windowReader, hasWindowReader := mockDb.(integrations.SessionWindowReader)
 	switch {
 	case keyedPass:
-		if err := readTiers(); err != nil {
+		// A store that hands the per-test tier over one mock at a time
+		// (integrations.PerTestRanger) is read that way, and the walk stops
+		// where the command settles: under exact serving, at the open test's
+		// next recording, so a test that owns thousands of mocks costs each
+		// of its commands what a test that owns a few does. Another store's
+		// per-test tier is read whole, once per command.
+		ranger, ranges := mockDb.(integrations.PerTestRanger)
+		if ranges {
+			var err error
+			if connectionTier, err = fetchConnectionTier(); err != nil {
+				return nil, false, nil, err
+			}
+		} else if err := readTiers(); err != nil {
 			return nil, false, nil, err
 		}
 		key, index := scanKey, scanIndex
-		// The per-test and connection tiers are walked whole. Under exact
-		// serving the per-test tier leads with the open test's unanswered
-		// mocks, which the keyed walk of the session tier leaves out.
+		// The per-test and connection tiers are walked whole, unless the
+		// command settles first. Under exact serving the per-test tier leads
+		// with the open test's unanswered mocks, which the keyed walk of the
+		// session tier leaves out.
 		candidates = func(yield func(*models.Mock) bool) {
-			for _, mk := range perTestTier {
-				if !yield(mk) {
+			stopped := false
+			if ranges {
+				if err := ranger.RangePerTestMocksInWindow(func(mk *models.Mock) bool {
+					stopped = !yield(mk)
+					return !stopped
+				}); err != nil {
+					walkErr = err
 					return
 				}
+			} else {
+				for _, mk := range perTestTier {
+					if stopped = !yield(mk); stopped {
+						break
+					}
+				}
 			}
-			stopped := false
+			if stopped {
+				return
+			}
 			if err := keyReader.RangeSessionMocksWithKey(index, key, func(mk *models.Mock) bool {
 				stopped = !yield(mk)
 				return !stopped
