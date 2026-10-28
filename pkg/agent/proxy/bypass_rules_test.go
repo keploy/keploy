@@ -555,7 +555,10 @@ func greetThenRead(greeting string) func(c net.Conn) {
 // client, or a server whose first bytes are a client-first protocol's (an idle
 // HTTP server's 408), sends it on to dispatch, the server reached handed on
 // (Predialed), with what it sent. A port at which the recording holds a mock
-// is not looked at, nor is a port no such rule names, and a server that
+// is not looked at, nor is one where it holds a mock that names no port and
+// the rule's host or none (a path rule names every host), nor a port no such
+// rule names; a port-less mock of another host does not stop the look. A
+// server that
 // cannot be reached fails the connection. The mocks may be stored after the
 // connection came.
 func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
@@ -569,8 +572,18 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 		noMock mockAt = iota
 		atThePort
 		// a mock of a client-first protocol that names no port (recorded
-		// before mocks carried their destination): it may be at any port.
-		portless
+		// before mocks carried their destination) and a host the rule
+		// names: it may be at any port of that host. A stated limit: a
+		// server-first service there is not looked at, and waits.
+		portlessRuleHost
+		// one that names neither a port nor a host: it may be anywhere.
+		portlessNoHost
+		// one that names another host: it is not at the rule's port, so a
+		// server-first service there in an older test set does not hang.
+		portlessOtherHost
+		// one that names another host, for a rule with a path and no host,
+		// which names every host on its port.
+		portlessPathRule
 	)
 	for _, tc := range []struct {
 		name      string
@@ -589,7 +602,10 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 		{"the client speaks first", silentUntilAsked, noMock, false, false, true, dispatched, 1, ""},
 		{"an idle HTTP server's 408 first", greetThenRead("HTTP/1.1 408 Request Timeout\r\n"), noMock, false, false, true, dispatched, 1, "HTTP/1.1 408 Request Timeout\r\n"},
 		{"a mock at the port", greetThenRead("220 ready\r\n"), atThePort, false, false, false, dispatched, 0, ""},
-		{"a port-less client-first mock", greetThenRead("220 ready\r\n"), portless, false, false, false, dispatched, 0, ""},
+		{"a port-less mock of the rule's host", greetThenRead("220 ready\r\n"), portlessRuleHost, false, false, false, dispatched, 0, ""},
+		{"a port-less mock with no host", greetThenRead("220 ready\r\n"), portlessNoHost, false, false, false, dispatched, 0, ""},
+		{"a port-less mock of another host", greetThenRead("220 ready\r\n"), portlessOtherHost, false, false, false, passed, 1, "220 ready\r\n"},
+		{"a port-less mock of another host, a path rule", greetThenRead("220 ready\r\n"), portlessPathRule, false, false, false, dispatched, 0, ""},
 		{"a rule for another port", greetThenRead("220 ready\r\n"), noMock, true, false, false, dispatched, 0, ""},
 		{"the server cannot be reached", nil, noMock, false, false, false, failed, 0, ""},
 	} {
@@ -618,18 +634,29 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 			if tc.otherPort {
 				rulePort++
 			}
-			rules := []models.BypassRule{{Host: "mail.internal", Port: rulePort}}
+			rules := []models.BypassRule{{Host: `^mail\.internal$`, Port: rulePort}}
+			if tc.mocked == portlessPathRule {
+				rules = []models.BypassRule{{Path: "^/admin", Port: rulePort}}
+			}
 			p := replayProxyTo(t, addr, models.OutgoingOptions{Rules: rules})
 			var mocks []*models.Mock
 			switch tc.mocked {
 			case atThePort:
 				mocks = append(mocks, &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": addr}}})
-			case portless:
+			case portlessRuleHost, portlessOtherHost, portlessPathRule:
 				// An HTTP mock with no destAddr whose request names a host
 				// with no port; a DNS mock with no port names no dependency.
+				host := "api.internal"
+				if tc.mocked == portlessRuleHost {
+					host = "mail.internal"
+				}
 				mocks = append(mocks,
-					&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "http://api.internal/v1", Header: map[string]string{"Host": "api.internal"}}}},
+					&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "/v1", Header: map[string]string{"Host": host}}}},
 					&models.Mock{Kind: models.DNS})
+			case portlessNoHost:
+				// A Postgres mock recorded before mocks carried their
+				// destination: it names neither.
+				mocks = append(mocks, &models.Mock{Kind: models.Postgres})
 			}
 			if !tc.late {
 				p.deriveMysqlPorts(mocks)

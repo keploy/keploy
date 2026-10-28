@@ -3713,9 +3713,19 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// §3.1). Not before: a connection a bypassRule passes through (above),
 	// or a server-first one a record relays (relayServerFirst), is reached
 	// for real, and listing it would claim an isolation that did not
-	// happen.
+	// happen. An HTTP connection a bypassRule with a host or a path may
+	// pass calls of through is listed at its first call the parser records
+	// or mocks (integrations.CallServed), so one whose every call the rule
+	// passes through is not listed.
 	if proven {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		if httpParsed && callRulesAt(outgoingOpts.Rules, uint(destInfo.Port)) {
+			var listed sync.Once
+			parserCtx = integrations.WithCallServed(parserCtx, func() {
+				listed.Do(func() { p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey) })
+			})
+		} else {
+			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		}
 	}
 
 	// Record-mode parsing kill switch: if record-time parsing has been

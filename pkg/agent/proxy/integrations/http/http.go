@@ -399,6 +399,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		return nil
 	}
 
+	// Recorded, not passed through: under the proven switch the connection's
+	// local destination is listed mocked (integrations.CallServed).
+	integrations.CallServed(ctx)
 	if onMockRecorded != nil {
 		onMockRecorded(newMock)
 	}

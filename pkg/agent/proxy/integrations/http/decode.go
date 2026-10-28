@@ -137,6 +137,10 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				}
 				continue
 			}
+			// Answered from mocks, not passed through: under the proven
+			// switch the connection's local destination is listed mocked
+			// (integrations.CallServed).
+			integrations.CallServed(ctx)
 
 			reqBody, err := io.ReadAll(request.Body)
 			if err != nil {

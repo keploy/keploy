@@ -80,6 +80,19 @@ func hostRulesAt(rules []models.BypassRule, port uint) bool {
 	return false
 }
 
+// callRulesAt reports whether a bypassRule with a host or a path applies to a
+// connection to port (it names the port, or any port): one by which the HTTP
+// parser may pass some of the connection's calls through
+// (utils.IsPassThrough) and record or mock the others.
+func callRulesAt(rules []models.BypassRule, port uint) bool {
+	for _, rule := range rules {
+		if (rule.Host != "" || rule.Path != "") && (rule.Port == 0 || rule.Port == port) {
+			return true
+		}
+	}
+	return false
+}
+
 // bypassRulesUndecided is the rules for this port (the rules that name it, not
 // those for any port) that a connection to it cannot decide, and so passes
 // through: one with a host, when the connection shows keploy no host, and one
@@ -200,7 +213,9 @@ type replayLook struct {
 //
 // So once the test set's mocks are stored, a connection whose client has not
 // spoken, to a port at which the recording holds no mock
-// (mysqlPortRegistry.recordedAt), has its server reached and both ends read,
+// (mysqlPortRegistry.recordedAt; a mock that names no port counts only where
+// it names no host either, or a host the rules may name: rulesMayName), has
+// its server reached and both ends read,
 // and whichever speaks first decides, as in a record (probeMysqlRecord):
 //
 //   - the server, or its closing without a word: passed through (Dst), as
@@ -237,7 +252,7 @@ func (p *Proxy) lookUndecidedReplay(ctx context.Context, logger *zap.Logger, src
 	case <-ctx.Done():
 	}
 	var up *serverLook
-	if !ended(client.done) && ctx.Err() == nil && !p.mysqlPorts.recordedAt(uint32(port)) {
+	if !ended(client.done) && ctx.Err() == nil && !p.mysqlPorts.recordedAt(uint32(port), func(host string) bool { return rulesMayName(undecided, host) }) {
 		up = startServerLook(ctx, logger, dstAddr, pre)
 		select {
 		case <-client.done:
@@ -288,6 +303,23 @@ func (p *Proxy) lookUndecidedReplay(ctx context.Context, logger *zap.Logger, src
 	look.Dst = replayConn(conn, first, logger)
 	look.Undecided = undecided
 	return look, nil
+}
+
+// rulesMayName reports whether a connection to host may be one that rules, the
+// rules a look is for (bypassRulesUndecided), name: one of them names no host
+// (a path-only rule names every host on its port), or its host pattern
+// matches host. A recording's port-less mock of another host is not at the
+// rules' port (mysqlPortRegistry.recordedAt).
+func rulesMayName(rules []models.BypassRule, host string) bool {
+	for _, rule := range rules {
+		if rule.Host == "" {
+			return true
+		}
+		if re, err := compileRuleHost(rule.Host); err == nil && re.MatchString(host) {
+			return true
+		}
+	}
+	return false
 }
 
 // testHookLookWaitsForClient, set only by a test, is called when

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"slices"
@@ -21,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
 	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
@@ -1071,6 +1074,107 @@ func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t 
 			case r := <-sink.mocked:
 				t.Fatalf("a destination a bypassRule passed through was listed mocked: %+v", r)
 			default:
+			}
+		})
+	}
+}
+
+// Under the proven switch an HTTP connection whose every call a bypassRule
+// with a path passes through is reached for real, so it is never listed
+// mocked, in a record as in a replay. One with a call the rule does not name
+// (recorded, or answered from mocks) is listed, at that call.
+func TestHandleConnectionListsAnHTTPConnectionAPathRulePassesThroughOnlyForACallItServes(t *testing.T) {
+	for _, tc := range []struct {
+		mode   models.Mode
+		paths  []string // the client's calls, in order, on one connection
+		listed bool
+	}{
+		{models.MODE_TEST, []string{"/health", "/health"}, false},
+		{models.MODE_TEST, []string{"/health", "/orders"}, true},
+		{models.MODE_RECORD, []string{"/health", "/health"}, false},
+		{models.MODE_RECORD, []string{"/health", "/orders"}, true},
+	} {
+		t.Run(fmt.Sprintf("%s/%v", tc.mode, tc.paths), func(t *testing.T) {
+			recorded.reset()
+			t.Cleanup(recorded.reset)
+			resetBypassRulesWarned(t)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, "real:"+r.URL.Path)
+			}))
+			t.Cleanup(srv.Close)
+			upstream := srv.Listener.Addr().String()
+			_, portText, _ := net.SplitHostPort(upstream)
+			port, _ := strconv.Atoi(portText)
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			containerkey.Default = containerkey.NewKeyer(containerAt{})
+			cfg := config.New()
+			cfg.Agent.Mode = tc.mode
+			cfg.Agent.MockMode = true
+			// The run's tree is another process's, so this test process's
+			// listener is outside it.
+			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+				integrations.HTTP: httpint.New(zap.NewNop()),
+			}
+			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
+			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
+			p.SetTopologySink(sink)
+			opts := models.OutgoingOptions{Rules: []models.BypassRule{{Path: "^/health$", Port: uint(port)}}, DisableMysqlAutoDetect: true}
+			if tc.mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				opts.Mocking = true
+				if err := p.Mock(context.Background(), opts); err != nil {
+					t.Fatal(err)
+				}
+			}
+			app, src := acceptedConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			r := bufio.NewReader(app)
+			for _, path := range tc.paths {
+				if _, err := fmt.Fprintf(app, "GET %s HTTP/1.1\r\nHost: api.internal\r\n\r\n", path); err != nil {
+					t.Fatal(err)
+				}
+				if path != "/health" {
+					// Not the rule's: recorded, or (with no mock) missed;
+					// either way the connection is listed at this call.
+					break
+				}
+				resp, err := http.ReadResponse(r, nil)
+				if err != nil {
+					t.Fatalf("the call %s passed through got no answer: %v", path, err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if string(body) != "real:"+path {
+					t.Fatalf("the call %s passed through got %q, want the server's", path, body)
+				}
+			}
+			if tc.listed {
+				row := awaitEvent(t, sink.mocked, "the mocked-local row of a connection with a call the rule does not name")
+				if int(row.Port) != port {
+					t.Fatalf("listed %+v, want port %d", row, port)
+				}
+			}
+			_ = app.Close()
+			cancel()
+			_ = awaitEvent(t, done, "handleConnection returning")
+			if !tc.listed {
+				select {
+				case row := <-sink.mocked:
+					t.Fatalf("a connection whose every call a path rule passed through was listed mocked: %+v", row)
+				default:
+				}
 			}
 		})
 	}

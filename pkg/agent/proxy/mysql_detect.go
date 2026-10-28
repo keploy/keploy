@@ -84,6 +84,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -174,12 +175,14 @@ type mysqlPortRegistry struct {
 	// Swapped with fromMocks at a session's derive.
 	otherPorts map[uint32]struct{}
 	portless   bool
-	// otherPortless says a mock of a dependency other than MySQL names no
-	// port either (otherDependencyPort): a recording made before mocks
-	// carried their destination (#4928) may hold such a mock for any port,
-	// of a protocol whose client speaks first (keploy records nothing of a
-	// server-first one but MySQL). Only recordedAt reads it.
-	otherPortless bool
+	// portlessHosts holds the host each mock that names no port reached
+	// (portlessHost), "" for one that names no host either: a MySQL mock
+	// (portless) or another dependency's (otherDependencyPort). A
+	// recording made before mocks carried their destination (#4928) may hold
+	// such a mock for any port of a host it names (or, naming none, of any
+	// host), of a protocol whose client speaks first (keploy records nothing
+	// of a server-first one but MySQL). Only recordedAt reads it.
+	portlessHosts map[string]struct{}
 	// sessionStale is set when a new replay session begins and consumed by the
 	// next DeriveFromMocks. See MarkSessionStale for why the swap is deferred
 	// to derive time rather than done eagerly.
@@ -203,6 +206,7 @@ func newMysqlPortRegistry() *mysqlPortRegistry {
 		containerHosts: make(map[netip.Addr]struct{}),
 		fromMocks:      make(map[uint32]struct{}),
 		otherPorts:     make(map[uint32]struct{}),
+		portlessHosts:  make(map[string]struct{}),
 		derivedCh:      make(chan struct{}),
 	}
 }
@@ -449,7 +453,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 		r.containerHosts = make(map[netip.Addr]struct{})
 		r.otherPorts = make(map[uint32]struct{})
 		r.portless = false
-		r.otherPortless = false
+		r.portlessHosts = make(map[string]struct{})
 		r.sessionStale = false
 	}
 	for _, mocks := range mockSets {
@@ -461,7 +465,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 				if port, ok := otherDependencyPort(m); ok {
 					r.otherPorts[port] = struct{}{}
 				} else if m.Kind != models.DNS && m.Kind != models.ConnectionFailure {
-					r.otherPortless = true
+					r.portlessHosts[portlessHost(m)] = struct{}{}
 				}
 				continue
 			}
@@ -472,6 +476,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 			port, ok := portFromAddr(destAddr)
 			if !ok {
 				r.portless = true
+				r.portlessHosts[portlessHost(m)] = struct{}{}
 				continue
 			}
 			if ap, err := containerkey.ParseAddrPort(destAddr); err == nil {
@@ -514,6 +519,19 @@ func otherDependencyAddr(m *models.Mock) string {
 	if m == nil || m.Kind == models.MySQL || m.Kind == models.DNS || m.Kind == models.ConnectionFailure {
 		return ""
 	}
+	for _, addr := range recordedDestinations(m) {
+		if _, ok := portFromAddr(addr); ok {
+			return addr
+		}
+	}
+	return ""
+}
+
+// recordedDestinations is where a recorded mock says it reached, first to
+// last as otherDependencyAddr reads them: its destAddr, then the destination
+// its request names (an HTTP mock's Host, an HTTP/2 mock's authority, a gRPC
+// mock's :authority). Any may be "".
+func recordedDestinations(m *models.Mock) []string {
 	cands := []string{m.Spec.Metadata["destAddr"]}
 	switch m.Kind {
 	case models.HTTP:
@@ -528,12 +546,7 @@ func otherDependencyAddr(m *models.Mock) string {
 			cands = append(cands, m.Spec.GRPCReq.Headers.PseudoHeaders[":authority"])
 		}
 	}
-	for _, addr := range cands {
-		if _, ok := portFromAddr(addr); ok {
-			return addr
-		}
-	}
-	return ""
+	return cands
 }
 
 // otherDependencyPort is the port of otherDependencyAddr.
@@ -554,14 +567,40 @@ func (r *mysqlPortRegistry) recordedNotMysql(port uint32) bool {
 
 // recordedAt reports whether the recording may hold a mock at port: one of its
 // MySQL mocks names the port, a mock of another dependency reached it
-// (otherDependencyPort), or a mock names no port (portless, otherPortless),
-// and so may be at any.
-func (r *mysqlPortRegistry) recordedAt(port uint32) bool {
+// (otherDependencyPort), or a mock names no port (portlessHosts) and so may be
+// at any port of its host: one that names no host either, or whose host
+// hostAt says may be at port (the host a bypassRule on port names). A
+// port-less mock of another host is not at port.
+func (r *mysqlPortRegistry) recordedAt(port uint32, hostAt func(host string) bool) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	_, other := r.otherPorts[port]
-	_, mysql := r.fromMocks[port]
-	return other || mysql || r.portless || r.otherPortless
+	if _, other := r.otherPorts[port]; other {
+		return true
+	}
+	if _, mysql := r.fromMocks[port]; mysql {
+		return true
+	}
+	for host := range r.portlessHosts {
+		if host == "" || hostAt(host) {
+			return true
+		}
+	}
+	return false
+}
+
+// portlessHost is the host a mock that names no port reached: the first
+// host its recordedDestinations name, "" for none.
+func portlessHost(m *models.Mock) string {
+	for _, addr := range recordedDestinations(m) {
+		if addr == "" {
+			continue
+		}
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			return host
+		}
+		return strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	}
+	return ""
 }
 
 // derivedSignal is closed once DeriveFromMocks has run: a replay connection
