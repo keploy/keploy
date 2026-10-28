@@ -554,3 +554,35 @@ func TestAnAgentStartedAgainLeavesTheTestsWithoutAVerdict(t *testing.T) {
 		t.Fatalf("NotJudgedRemedy = %q, want %q", remedy, AgentStartedAgainRemedy)
 	}
 }
+
+// A program of the run keploy's shim is not in (macOS: a platform binary
+// such as /usr/bin/curl) leaves each test it ran in without a verdict, named,
+// with the remedy, and taints no test after it ends: its count grows in each
+// test it runs in (PerTest), never from the run's base.
+func TestAProgramWithoutTheShimLeavesItsTestsNotJudged(t *testing.T) {
+	k := CaptureLossProcessUnshimmed
+	if !k.NotJudged() || !k.PerTest() || k.runScoped() || k.AppLife() || k.runLife() || k.Evidence() {
+		t.Fatal("a program without the shim is a test's own and not judged")
+	}
+	at := func(n uint64) CaptureLosses {
+		return CaptureLosses{{Kind: k, Count: n, What: "the latest: /usr/bin/curl (pid 7)"}}
+	}
+	b := SameBases(at(1))
+	if got := at(2).Charged(b, at(1)); len(got) != 1 || got[0].Count != 1 {
+		t.Fatalf("the test it ran in: charged %+v, want 1", got)
+	}
+	if got := at(2).Charged(b, at(2)); len(got) != 0 {
+		t.Fatalf("a test after it ended: charged %+v, want nothing", got)
+	}
+	judged, notJudged := at(1).Split()
+	if len(judged) != 0 || len(notJudged) != 1 {
+		t.Fatalf("Split = %+v, %+v: want it not judged", judged, notJudged)
+	}
+	text := notJudged.NotJudgedText()
+	if !strings.Contains(text, "keploy's shim is not in") || !strings.Contains(text, "/usr/bin/curl (pid 7)") || !strings.HasPrefix(text, "not judged: ") {
+		t.Fatalf("NotJudgedText = %q: want the program named, not judged", text)
+	}
+	if r := notJudged.NotJudgedRemedy(); r != ProcessUnshimmedRemedy {
+		t.Fatalf("NotJudgedRemedy = %q", r)
+	}
+}
