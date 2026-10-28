@@ -62,7 +62,7 @@ func TestGetAlias_EveryAgentArgumentReachesTheAgentAsGiven(t *testing.T) {
 		Mode:            models.MODE_RECORD,
 		ConfigPath:      configPath,
 		ExtraArgs:       extra,
-	}, false)
+	}, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias: %v", err)
 	}

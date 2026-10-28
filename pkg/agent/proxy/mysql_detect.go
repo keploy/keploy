@@ -84,6 +84,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -174,6 +175,14 @@ type mysqlPortRegistry struct {
 	// Swapped with fromMocks at a session's derive.
 	otherPorts map[uint32]struct{}
 	portless   bool
+	// portlessHosts holds the host each mock that names no port reached
+	// (portlessHost), "" for one that names no host either: a MySQL mock
+	// (portless) or another dependency's (otherDependencyPort). A
+	// recording made before mocks carried their destination (#4928) may hold
+	// such a mock for any port of a host it names (or, naming none, of any
+	// host), of a protocol whose client speaks first (keploy records nothing
+	// of a server-first one but MySQL). Only recordedAt reads it.
+	portlessHosts map[string]struct{}
 	// sessionStale is set when a new replay session begins and consumed by the
 	// next DeriveFromMocks. See MarkSessionStale for why the swap is deferred
 	// to derive time rather than done eagerly.
@@ -197,6 +206,7 @@ func newMysqlPortRegistry() *mysqlPortRegistry {
 		containerHosts: make(map[netip.Addr]struct{}),
 		fromMocks:      make(map[uint32]struct{}),
 		otherPorts:     make(map[uint32]struct{}),
+		portlessHosts:  make(map[string]struct{}),
 		derivedCh:      make(chan struct{}),
 	}
 }
@@ -443,6 +453,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 		r.containerHosts = make(map[netip.Addr]struct{})
 		r.otherPorts = make(map[uint32]struct{})
 		r.portless = false
+		r.portlessHosts = make(map[string]struct{})
 		r.sessionStale = false
 	}
 	for _, mocks := range mockSets {
@@ -453,6 +464,8 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 			if m.Kind != models.MySQL {
 				if port, ok := otherDependencyPort(m); ok {
 					r.otherPorts[port] = struct{}{}
+				} else if m.Kind != models.DNS && m.Kind != models.ConnectionFailure {
+					r.portlessHosts[portlessHost(m)] = struct{}{}
 				}
 				continue
 			}
@@ -463,6 +476,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 			port, ok := portFromAddr(destAddr)
 			if !ok {
 				r.portless = true
+				r.portlessHosts[portlessHost(m)] = struct{}{}
 				continue
 			}
 			if ap, err := containerkey.ParseAddrPort(destAddr); err == nil {
@@ -505,6 +519,19 @@ func otherDependencyAddr(m *models.Mock) string {
 	if m == nil || m.Kind == models.MySQL || m.Kind == models.DNS || m.Kind == models.ConnectionFailure {
 		return ""
 	}
+	for _, addr := range recordedDestinations(m) {
+		if _, ok := portFromAddr(addr); ok {
+			return addr
+		}
+	}
+	return ""
+}
+
+// recordedDestinations is where a recorded mock says it reached, first to
+// last as otherDependencyAddr reads them: its destAddr, then the destination
+// its request names (an HTTP mock's Host, an HTTP/2 mock's authority, a gRPC
+// mock's :authority). Any may be "".
+func recordedDestinations(m *models.Mock) []string {
 	cands := []string{m.Spec.Metadata["destAddr"]}
 	switch m.Kind {
 	case models.HTTP:
@@ -519,12 +546,7 @@ func otherDependencyAddr(m *models.Mock) string {
 			cands = append(cands, m.Spec.GRPCReq.Headers.PseudoHeaders[":authority"])
 		}
 	}
-	for _, addr := range cands {
-		if _, ok := portFromAddr(addr); ok {
-			return addr
-		}
-	}
-	return ""
+	return cands
 }
 
 // otherDependencyPort is the port of otherDependencyAddr.
@@ -541,6 +563,44 @@ func (r *mysqlPortRegistry) recordedNotMysql(port uint32) bool {
 	_, other := r.otherPorts[port]
 	_, mysql := r.fromMocks[port]
 	return other && !mysql && !r.portless
+}
+
+// recordedAt reports whether the recording may hold a mock at port: one of its
+// MySQL mocks names the port, a mock of another dependency reached it
+// (otherDependencyPort), or a mock names no port (portlessHosts) and so may be
+// at any port of its host: one that names no host either, or whose host
+// hostAt says may be at port (the host a bypassRule on port names). A
+// port-less mock of another host is not at port.
+func (r *mysqlPortRegistry) recordedAt(port uint32, hostAt func(host string) bool) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, other := r.otherPorts[port]; other {
+		return true
+	}
+	if _, mysql := r.fromMocks[port]; mysql {
+		return true
+	}
+	for host := range r.portlessHosts {
+		if host == "" || hostAt(host) {
+			return true
+		}
+	}
+	return false
+}
+
+// portlessHost is the host a mock that names no port reached: the first
+// host its recordedDestinations name, "" for none.
+func portlessHost(m *models.Mock) string {
+	for _, addr := range recordedDestinations(m) {
+		if addr == "" {
+			continue
+		}
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			return host
+		}
+		return strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	}
+	return ""
 }
 
 // derivedSignal is closed once DeriveFromMocks has run: a replay connection
@@ -679,14 +739,24 @@ func (p *Proxy) probeMysql(
 	// speak a server-first protocol (serverFirstDests) is looked at again
 	// instead: the address may be another service's by now (a container's
 	// port reused), and a client-first one is dispatched as on main.
-	if p.mysqlPorts.IsKnownNotMysql(port) && (mode == models.MODE_TEST || !p.serverFirstDests.has(dstAddr)) {
+	//
+	// A record connection to a port a bypassRule with a host or a path names
+	// is looked at whatever was learned of the port, and with detection
+	// turned off: one whose server speaks first shows keploy no host, and is
+	// passed through (bypassRulesUndecided), as the kernel passed the rule's
+	// whole port before. Dispatched on its client's bytes, it would wait for
+	// a greeting that never comes, as a second server of the rule's host (a
+	// name with more than one address) on a port learned not to speak MySQL
+	// would. Its verdict leads there and nowhere else: a MySQL one too.
+	ruled := mode != models.MODE_TEST && len(bypassRulesUndecided(zap.NewNop(), opts.Rules, uint(port), "", false)) > 0
+	if p.mysqlPorts.IsKnownNotMysql(port) && !ruled && (mode == models.MODE_TEST || !p.serverFirstDests.has(dstAddr)) {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "known-not-mysql"}, nil
 	}
 
 	// Auto-detection is opt-out: when disabled we behave exactly as
 	// before — unknown ports fall through to generic dispatch (and, for
 	// a real MySQL server, deadlock as they always did).
-	if opts.DisableMysqlAutoDetect {
+	if opts.DisableMysqlAutoDetect && !ruled {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "auto-detect-disabled"}, nil
 	}
 

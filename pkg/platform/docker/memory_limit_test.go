@@ -27,7 +27,7 @@ func TestGetAliasIncludesMemoryLimit(t *testing.T) {
 		ClientNSPID:     4242,
 		Mode:            models.MODE_RECORD,
 		MemoryLimit:     512,
-	}, false)
+	}, &config.Config{})
 	if err != nil {
 		t.Fatalf("getAlias returned error: %v", err)
 	}

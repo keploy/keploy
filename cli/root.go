@@ -79,6 +79,7 @@ func Root(ctx context.Context, logger *zap.Logger, svcFactory ServiceFactory, cm
 	// tagged as usage errors, in one place.
 	HardenUnknownSubcommands(rootCmd)
 	TagUsageErrors(rootCmd)
+	armForcedCrash(rootCmd)
 
 	return rootCmd
 }

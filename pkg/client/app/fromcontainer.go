@@ -178,8 +178,9 @@ func replicaConfig(src container.InspectResponse, agentContainer string) (*conta
 	hostCfg.NetworkMode = container.NetworkMode("container:" + agentContainer)
 	// Network-scoped settings. The bindings, DNS servers and extra hosts are
 	// refused outright; the resolver options and search list are accepted but
-	// belong to the agent's namespace, so they are dropped rather than
-	// half-applied.
+	// belong to the agent's namespace. None is lost: the agent container was
+	// started with the source's published ports, host entries and resolver
+	// settings (appNetworkingFromContainer in pkg/platform/http).
 	hostCfg.PortBindings = nil
 	hostCfg.PublishAllPorts = false
 	hostCfg.DNS = nil

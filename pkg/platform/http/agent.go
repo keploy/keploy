@@ -43,6 +43,7 @@ import (
 	"go.keploy.io/server/v3/pkg/client/app"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/neterr"
+	"go.keploy.io/server/v3/pkg/platform/agentargs"
 	kdocker "go.keploy.io/server/v3/pkg/platform/docker"
 	"go.keploy.io/server/v3/pkg/platform/engine"
 	agentUtils "go.keploy.io/server/v3/pkg/platform/http/utils"
@@ -2200,19 +2201,14 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if len(extraArgs) > 0 {
 		args = append(args, extraArgs...)
 	}
-	if a.conf.Debug {
-		args = append(args, "--debug")
-	}
+	// The CLI's root-level settings (--debug, --disable-tele, --disable-ansi,
+	// --disable-mapping), each with its value: the native agent reads the same
+	// keploy.yml (--config-path), and only an explicit value keeps the
+	// flag > yaml > default the CLI resolved.
+	args = append(args, agentargs.Root(a.conf)...)
 	if a.conf.Record.Synchronous {
 		args = append(args, "--sync")
 	}
-	// Forward the operator's --disable-mapping (root-level config) so
-	// the native agent process — even though it inherits the same
-	// keploy.yml via --config-path — sees an explicit override on
-	// invocations where the host CLI mutated the in-memory config
-	// after viper load (e.g. --disable-mapping=false on the test
-	// subcommand path that drove this agent start).
-	args = append(args, fmt.Sprintf("--disable-mapping=%t", a.conf.DisableMapping))
 	if a.conf.Record.EnableSampling > 0 {
 		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}
@@ -2250,7 +2246,7 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// too, so the agent can name container destinations (containerkey).
 	args = append(args, containerkey.AgentArgs()...)
 	// Upstream TLS verification. Forwarded UNCONDITIONALLY as =%t, the same
-	// pattern (and for the same reason) as --disable-mapping above: the
+	// pattern (and for the same reason) as the root settings above: the
 	// orchestrator has already applied flag > yaml > default, and the native
 	// agent inherits the very same keploy.yml through --config-path below. If
 	// we only sent the flag when it was true, an explicit
@@ -2265,9 +2261,6 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	args = append(args, fmt.Sprintf("--upstream-tls-ca-cert=%s", opts.UpstreamTLSCACert))
 	if opts.BuildDelay > 0 {
 		args = append(args, "--build-delay", strconv.FormatUint(opts.BuildDelay, 10))
-	}
-	if models.IsAnsiDisabled == true {
-		args = append(args, "--disable-ansi")
 	}
 	if len(opts.PassThroughPorts) > 0 {
 		// Convert []uint32 to []string
@@ -3202,13 +3195,30 @@ func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 // directory's project instead of the one they named, and every tool that
 // resolved the project from the command, the user's own `docker compose -p`
 // included, then missed the stack keploy started.
-func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string) {
+func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string, dns models.AppDNS) {
 	if kind == utils.DockerCompose {
-		return cmd, nil, nil, nil
+		return cmd, nil, nil, nil, models.AppDNS{}
 	}
 	cmd, ports, networks = agentUtils.ExtractDockerFlags(cmd)
 	cmd, hosts = agentUtils.ExtractAddHosts(cmd)
-	return cmd, ports, networks, hosts
+	cmd, dns = agentUtils.ExtractDNSFlags(cmd)
+	return cmd, ports, networks, hosts, dns
+}
+
+// withAppRunSettings hands the agent container what keploy took out of the
+// app's own docker command (runFlagsOf) or read off the --from-container
+// container: the app joins the agent container's network namespace, where
+// docker refuses or ignores its own ports, networks, host entries and
+// resolver settings, so the agent container publishes, joins and takes them
+// on its behalf (GetKeployDockerAlias).
+func withAppRunSettings(opts models.SetupOptions, ports, networks, hosts []string, dns models.AppDNS) models.SetupOptions {
+	opts.AppPorts = ports
+	opts.AppExtraHosts = hosts
+	opts.AppDNS = dns
+	if len(networks) > 0 {
+		opts.AppNetworks = networks
+	}
+	return opts
 }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
@@ -3296,6 +3306,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		var appPorts, appNetworks, appHosts []string
+		var appDNS models.AppDNS
 		if utils.CmdType(opts.CommandType) == utils.FromContainer {
 			// No command to scrape. The container itself is the source of
 			// truth, and it answers with published ports and networks the
@@ -3303,7 +3314,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// space-separated spelling, so `--network=foo` and `-p=8080:80`
 			// slip past it today and then collide with the `--network=container:`
 			// keploy splices in.
-			appPorts, appNetworks, appHosts, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
+			appPorts, appNetworks, appHosts, appDNS, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
 			if err != nil {
 				return fmt.Errorf("failed to read the networking of %q: %w", opts.FromContainer, err)
 			}
@@ -3339,13 +3350,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				}
 			}()
 		} else {
-			cmd, appPorts, appNetworks, appHosts = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
+			cmd, appPorts, appNetworks, appHosts, appDNS = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
 		}
-		opts.AppExtraHosts = appHosts
-
-		opts.AppPorts = appPorts
+		opts = withAppRunSettings(opts, appPorts, appNetworks, appHosts, appDNS)
 		if len(appNetworks) > 0 {
-			opts.AppNetworks = appNetworks
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 
@@ -3675,9 +3683,9 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 }
 
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
-	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
-		InstallationID: a.conf.InstallationID,
-	}, opts)
+	// The CLI's own config: the alias forwards the root flags the agent
+	// container must share with the CLI (agentargs.Root) from it.
+	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.conf, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err
@@ -4864,7 +4872,8 @@ const fromContainerRestoreBudget = 90 * time.Second
 // appNetworkingFromContainer reads the published ports, user networks and host
 // entries off an already-running container, in the shapes GenerateDockerCommand
 // expects: AppPorts as whole `-p …` flags, AppNetworks as bare names,
-// AppExtraHosts as NAME:ADDRESS.
+// AppExtraHosts as NAME:ADDRESS, AppDNS as the container's own resolver
+// settings.
 //
 // The agent publishes on the app's behalf, because the app shares the agent's
 // network namespace and therefore cannot publish anything itself. That is true
@@ -4875,15 +4884,21 @@ const fromContainerRestoreBudget = 90 * time.Second
 // Network ALIASES are not carried over yet - they are attached per-network with
 // a separate flag - so a dependency that resolves the app by alias rather than
 // by container name still needs that alias set by hand.
-func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, err error) {
+func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, dns models.AppDNS, err error) {
 	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, models.AppDNS{}, err
 	}
-	// Its host entries, which its replacement cannot carry under the agent's
-	// network mode: the agent container carries them (AppExtraHosts).
+	// Its host entries and resolver settings, which its replacement cannot
+	// carry under the agent's network mode (replicaConfig): the agent
+	// container carries them (AppExtraHosts, AppDNS).
 	if inspect.HostConfig != nil {
 		hosts = append(hosts, inspect.HostConfig.ExtraHosts...)
+		dns = models.AppDNS{
+			Servers: append([]string(nil), inspect.HostConfig.DNS...),
+			Search:  append([]string(nil), inspect.HostConfig.DNSSearch...),
+			Options: append([]string(nil), inspect.HostConfig.DNSOptions...),
+		}
 	}
 
 	// PortBindings is the REQUEST ("-p 8080" -> HostPort ""), which is what to
@@ -4933,7 +4948,7 @@ func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name strin
 		}
 	}
 	sort.Strings(networks)
-	return ports, networks, hosts, nil
+	return ports, networks, hosts, dns, nil
 }
 
 // RestoreFromContainer removes keploy's copy of the user's container and starts
