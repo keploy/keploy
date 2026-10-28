@@ -4,34 +4,34 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"go.keploy.io/server/v3/pkg/models"
 )
 
-// WaitPairedBytes returns nil on darwin: the full byte-level settlement
-// tracking (Linux's WaitPairedBytes) relies on sock_diag — a netlink-based
-// kernel interface that enumerates TCP sockets by address pair and reads their
-// byte counters (tcpi_bytes_received, tcpi_bytes_acked). macOS has no
-// sock_diag; the closest alternative (net.inet.tcp.pcblist_n sysctl) uses
-// private, ABI-unstable structures gated by code-signing on macOS 15+.
-//
-// The connection-level settlement (ProxyConnsReporter, in enterprise
-// proxyconns.go) and the TCP state visibility (inflight_darwin.go, via
-// TCP_CONNECTION_INFO) are both active on darwin. Together they ensure every
-// connection is paired and its TCP state is visible. What is missing is the
-// per-connection byte-count wait: on Linux, the wait ensures that bytes
-// written to a pooled (keep-alive) connection by the app have reached the
-// proxy's side before the test's end reads. On localhost this gap is
-// effectively zero (loopback delivery is synchronous within the kernel), so
-// skipping the byte-level wait has no practical impact for local recordings.
-func (p *Proxy) WaitPairedBytes(context.Context, uint64) error { return nil }
+// errPairedBytesDarwin is why no bytes wait can be answered on darwin yet.
+// Linux reads, for each paired connection, how much the application had
+// written to its socket (sock_diag) and waits until the proxy's side has
+// received it. macOS has no sock_diag, and nothing here reads the
+// application's socket yet: a pooled connection's call written just before
+// a test's end can still sit in the application's send buffer, or on
+// loopback's input queue (XNU's lo_output queues to the DLIL input thread,
+// so delivery is not synchronous), when the end reads. The wait cannot
+// vouch for those bytes, so it says it cannot tell
+// (models.ErrProxyConnsUnsupported): under the proven switch no test is
+// judged verified on darwin until it can.
+var errPairedBytesDarwin = fmt.Errorf("%w: keploy cannot yet read, on macOS, how much the application wrote to the connections its proxy holds", models.ErrProxyConnsUnsupported)
 
-// PairedBytesErr returns nil on darwin: byte counting is not broken, it is
-// skipped because sock_diag is unavailable. The proxy still tracks connection
-// state via TCP_CONNECTION_INFO (inflight_darwin.go).
-func (p *Proxy) PairedBytesErr() error { return nil }
+// WaitPairedBytes cannot tell on darwin (errPairedBytesDarwin).
+func (p *Proxy) WaitPairedBytes(context.Context, uint64) error { return errPairedBytesDarwin }
+
+// PairedBytesErr says the bytes cannot be counted on darwin
+// (errPairedBytesDarwin).
+func (p *Proxy) PairedBytesErr() error { return errPairedBytesDarwin }
 
 // checkPairedBytes on Linux proves, on the canary's connection, that
 // sock_diag gives the byte counts the wait reads. On darwin sock_diag does
@@ -44,14 +44,6 @@ func (p *Proxy) checkPairedBytes(net.Conn, net.Conn) {}
 // share one namespace (no containers), so visibility is always true; there is
 // nothing to prove.
 func (p *Proxy) proveAppVisible(*net.TCPConn) {}
-
-// pairClosing notes a paired connection's close. On darwin, readUnread
-// returns the unread byte count via SO_NREAD, so the closing path can detect
-// bytes the proxy never read. The capture-loss charging (pairLost) is wired
-// through the shared paired.closing path.
-func (p *Proxy) pairClosing(_ context.Context, conn net.Conn, _ *trackedConn) {
-	_, _, _ = p.paired.closing(conn)
-}
 
 // readUnread returns the number of bytes in conn's receive buffer that the
 // application wrote but the proxy has not yet read. On macOS, SO_NREAD

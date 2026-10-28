@@ -40,13 +40,15 @@ func socketReceived(raw syscall.RawConn) (received uint64, state uint8, ok bool)
 	return received, state, ok
 }
 
-// finReceived reports whether a socket in TCP state state has received the
-// application's FIN: CLOSE_WAIT, LAST_ACK and CLOSING are reached only by one
+// finCounted reports whether the count socketReceived gives
+// (tcpi_bytes_received, which counts the application's FIN as one) holds the
+// FIN: whether a socket in TCP state state has received it. CLOSE_WAIT,
+// LAST_ACK and CLOSING are reached only by one
 // (a socket a handler holds never reports TIME_WAIT: the FIN_WAIT2 or
 // CLOSING that would reach it leaves it in TCP_CLOSE). One in TCP_CLOSE (a
 // reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK ended) has received
 // one for sure only when a read returned the end of the stream (eof).
-func finReceived(state uint8, eof bool) bool {
+func finCounted(state uint8, eof bool) bool {
 	switch state {
 	case tcpCloseWait, tcpLastAck, tcpClosing:
 		return true
