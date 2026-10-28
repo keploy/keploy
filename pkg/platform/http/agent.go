@@ -2392,6 +2392,7 @@ func (a *AgentClient) startNativeAgent(ctx context.Context, opts models.SetupOpt
 	go func() {
 		defer utils.Recover(a.logger)
 		err := cmd.Wait()
+		flushAgentOutput(cmd)
 		run.exited()
 		removeProgress()
 		// Reported BEFORE the group goroutine below can return it: returning
@@ -3718,6 +3719,7 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	// the run's keploy.log, its warnings and errors to the console.
 	cmd.Stdout = keployLog.RunLogWriter(os.Stdout)
 	cmd.Stderr = keployLog.RunLogWriter(os.Stderr)
+	defer flushAgentOutput(cmd)
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() == context.Canceled {
@@ -3730,6 +3732,14 @@ func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opt
 	}
 
 	return nil
+}
+
+// flushAgentOutput writes out the last line of the exited agent's output
+// that had no line break (keployLog.FlushRunLogWriter): the console's when
+// it is the end of a crash.
+func flushAgentOutput(cmd *exec.Cmd) {
+	_ = keployLog.FlushRunLogWriter(cmd.Stdout)
+	_ = keployLog.FlushRunLogWriter(cmd.Stderr)
 }
 
 // dockerAgentCancel is the `docker run` command's Cancel: it stops the agent's

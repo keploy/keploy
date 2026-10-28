@@ -57,8 +57,11 @@ func RouteToRunLog(logger *zap.Logger, file *os.File, quiet bool) (routed *zap.L
 // RunLogWriter is where a keploy agent's output goes: console, but while a
 // run log holds (RouteToRunLog), a writer that sends the agent's info and
 // debug lines to the run log and the rest (warnings, errors, anything not a
-// log line) to console. A line with no level (a log entry's next line) goes
-// where the line before it went.
+// log line) to console. An indented line with no level (a log entry's next
+// line, a stack frame) goes where the line before it went; any other line
+// with no level (a panic, a fatal error, a goroutine's header) goes to
+// console. FlushRunLogWriter writes out a last line with no line break, once
+// the agent has exited.
 func RunLogWriter(console io.Writer) io.Writer {
 	runLog.Lock()
 	f := runLog.file
@@ -94,18 +97,7 @@ func (s *levelSplitter) Write(p []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		line := s.partial[:i+1]
-		if m := logLevel.FindSubmatch(line); m != nil {
-			lvl := string(m[1])
-			s.toFile = lvl == "DEBUG" || lvl == "INFO"
-		}
-		var err error
-		if s.toFile {
-			_, err = s.file.Write(ansiCode.ReplaceAll(line, nil))
-		} else {
-			_, err = s.console.Write(line)
-		}
-		if err != nil {
+		if err := s.writeLine(s.partial[:i+1]); err != nil {
 			return len(p), err
 		}
 		s.partial = s.partial[i+1:]
@@ -114,4 +106,40 @@ func (s *levelSplitter) Write(p []byte) (int, error) {
 		s.partial = nil
 	}
 	return len(p), nil
+}
+
+// writeLine writes one line where it goes (RunLogWriter).
+func (s *levelSplitter) writeLine(line []byte) error {
+	switch m := logLevel.FindSubmatch(line); {
+	case m != nil:
+		lvl := string(m[1])
+		s.toFile = lvl == "DEBUG" || lvl == "INFO"
+	case len(bytes.TrimRight(line, "\r\n")) > 0 && line[0] != ' ' && line[0] != '\t':
+		s.toFile = false
+	}
+	var err error
+	if s.toFile {
+		_, err = s.file.Write(ansiCode.ReplaceAll(line, nil))
+	} else {
+		_, err = s.console.Write(line)
+	}
+	return err
+}
+
+// FlushRunLogWriter writes out what w (a RunLogWriter) holds of a last line
+// with no line break: a process that dies mid-line ("fatal error: …") ends
+// its output so. A no-op on any other writer.
+func FlushRunLogWriter(w io.Writer) error {
+	s, ok := w.(*levelSplitter)
+	if !ok {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.partial) == 0 {
+		return nil
+	}
+	line := append(s.partial, '\n')
+	s.partial = nil
+	return s.writeLine(line)
 }
