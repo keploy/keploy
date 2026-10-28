@@ -173,11 +173,26 @@ type SharedGen struct {
 // SharedMocks before its first sample may file the trees a staging is
 // replacing under the generation that staging moves to, and keep serving
 // them until the next move.
+//
+// The open test's own part can be indexed too: OwnedRecordings is all of the
+// test's own recordings, answered or not, in OwnedUnanswered's order, with
+// the number of the view that shows them, and the list never changes while
+// that number holds (each test's open shows a new one). A parser files them
+// once per number, and reads what is left of a bucket with
+// OwnedUnansweredAt: OwnedUnanswered is OwnedUnansweredAt of every position.
 type SharedReads interface {
 	StagingGenerations
 	SharedGeneration(kind models.Kind) (SharedGen, bool)
 	SharedMocks() (perTest, session []*models.Mock, ok bool)
 	OwnedUnanswered() ([]*models.Mock, bool)
+	// OwnedRecordings is the open test's own recordings and the number of
+	// the view that shows them; the caller never changes the list. False
+	// while no test is open.
+	OwnedRecordings() (view uint64, owned []*models.Mock, ok bool)
+	// OwnedUnansweredAt is the positions of at, in OwnedRecordings of the
+	// view numbered view, whose recordings have not answered, in at's
+	// order. False when that view is not the open test's now.
+	OwnedUnansweredAt(view uint64, at []int) ([]int, bool)
 }
 
 // SharedGenerationOf returns db's SharedGen for kind's reads, and false where

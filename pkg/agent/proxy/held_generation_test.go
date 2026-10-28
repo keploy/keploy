@@ -220,6 +220,11 @@ func TestAHeldStoreReportsNoSharedPartOnceTheStagingMoved(t *testing.T) {
 			if _, ok := sr.OwnedUnanswered(); !ok {
 				t.Fatal("before the staging moved, a held store reports no open test")
 			}
+			if v, owned, ok := sr.OwnedRecordings(); !ok {
+				t.Fatal("before the staging moved, a held store reports no open test's recordings")
+			} else if _, ok := sr.OwnedUnansweredAt(v, make([]int, len(owned))); !ok {
+				t.Fatal("before the staging moved, a held store reads nothing of the open test's view")
+			}
 
 			stage()
 			for _, kind := range []models.Kind{"", models.HTTP} {
@@ -232,6 +237,17 @@ func TestAHeldStoreReportsNoSharedPartOnceTheStagingMoved(t *testing.T) {
 			}
 			if o, ok := sr.OwnedUnanswered(); ok {
 				t.Fatalf("a held store reports the open test's recordings after the staging moved: %v", exactNames(o))
+			}
+			if _, o, ok := sr.OwnedRecordings(); ok {
+				t.Fatalf("a held store reports the open test's view after the staging moved: %v", exactNames(o))
+			}
+			// The store's view now, read through the held store: nothing.
+			v, owned, ok := store.(integrations.SharedReads).OwnedRecordings()
+			if !ok {
+				t.Fatal("the store reports no open test after the staging")
+			}
+			if live, ok := sr.OwnedUnansweredAt(v, make([]int, len(owned))); ok {
+				t.Fatalf("a held store reads positions %v of the open test's view after the staging moved", live)
 			}
 			if !restaged() {
 				t.Fatal("a held call the staging moved under does not say the set was staged again")

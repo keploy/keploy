@@ -2001,6 +2001,27 @@ func (v *exactView) unansweredWithKey(ix *integrations.MockIndex, key string) []
 	return out
 }
 
+// unansweredAt is the positions of at, in owned, whose mocks have not
+// answered and no other test took (unanswered's rule), in at's order: a
+// parser that indexed the view's owned mocks (OwnedRecordings) reads what
+// is left of one bucket, never the whole owned list. Each position of at
+// counts one visit.
+func (v *exactView) unansweredAt(at []int) []int {
+	if len(at) == 0 {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]int, 0, len(at))
+	for _, i := range at {
+		if i >= 0 && i < len(v.owned) && !v.consumed[i] && !v.takenByOther(i) {
+			out = append(out, i)
+		}
+	}
+	unansweredVisited.Add(uint64(len(at)))
+	return out
+}
+
 // ownedKeys is the view's index of its owned copies' keys under ix (keyed),
 // built on its first use.
 func (v *exactView) ownedKeys(ix *integrations.MockIndex) map[string][]int {

@@ -65,6 +65,8 @@ type learnEntry struct {
 type learnIndexes struct {
 	genIndexes[*learnIndex]
 	shared genIndexes[*learnIndex]
+	// owned is the index of the open test's own recordings beside shared.
+	owned ownedIndexes[*learnOwned]
 }
 
 // genIndexes keeps the last index of a store's reads an HTTP parser built at
@@ -226,7 +228,8 @@ func urlNoiseKey(url []*regexp.Regexp) string {
 
 // learnLook is the learn step's indexed read for one call: an index, and for
 // an index of the shared part of an open test's reads, the test's unanswered
-// recordings read for the call (owned), which lead each tier's read
+// recordings the call may be, read for it through the index of the test's
+// own (learnOwned), in recorded order (owned), which lead each tier's read
 // (integrations.SharedReads). gen is the staging generation the read is of.
 type learnLook struct {
 	ix     *learnIndex
@@ -235,13 +238,14 @@ type learnLook struct {
 	gen    uint64
 }
 
-// of is the learn step's indexed read of what db reads now, for base, or
-// false where the call reads the store instead. While a test is open it is
-// the index of the shared part of its reads (genIndexes.sharedOf, built from
-// SharedMocks) beside the test's unanswered recordings read now; otherwise
-// the index of db's staging generation (genIndexes.of), built from read, the
-// store's read.
-func (x *learnIndexes) of(base, db integrations.MockMemDb, n learnNoise, read func() (perTest, session []*models.Mock, err error)) (learnLook, bool) {
+// of is the learn step's indexed read of what db reads now, for base, for a
+// call of method whose masked path is masked, or false where the call reads
+// the store instead. While a test is open it is the index of the shared part
+// of its reads (genIndexes.sharedOf, built from SharedMocks) beside the
+// test's unanswered recordings the call may be, read now through the index
+// of the test's own (ownedIndexes); otherwise the index of db's staging
+// generation (genIndexes.of), built from read, the store's read.
+func (x *learnIndexes) of(base, db integrations.MockMemDb, n learnNoise, method, masked string, read func() (perTest, session []*models.Mock, err error)) (learnLook, bool) {
 	url := urlNoiseKey(n.url)
 	if sr, ok := db.(integrations.SharedReads); ok {
 		var perTest, session []*models.Mock
@@ -255,16 +259,26 @@ func (x *learnIndexes) of(base, db integrations.MockMemDb, n learnNoise, read fu
 			return buildLearnIndex(key, perTest, session, n)
 		})
 		if ok {
-			gen, owned, ok := ownedRead(sr, key)
+			own, view, owned, ok := x.owned.of(base, sr, url, func(owned []*models.Mock) *learnOwned { return buildLearnOwned(owned, n) })
+			if !ok {
+				return learnLook{}, false
+			}
+			ranks := own.ranks(method, masked)
+			at := make([]int, len(ranks))
+			for i, r := range ranks {
+				at[i] = own.pos[r]
+			}
+			gen, live, ok := ownedLive(sr, key, view, at)
 			if !ok {
 				return learnLook{}, false
 			}
 			look := learnLook{ix: ix, shared: true, gen: gen}
-			for _, m := range inRecordedOrder(FilterHTTPMocks(owned)) {
-				if m.Spec.HTTPReq == nil || hasVariables(m) {
-					continue
+			// live is at less the answered ones, in at's order.
+			for i, k := 0, 0; i < len(ranks) && k < len(live); i++ {
+				if at[i] == live[k] {
+					look.owned = append(look.owned, learnEntry{m: owned[at[i]], masked: own.masked[ranks[i]]})
+					k++
 				}
-				look.owned = append(look.owned, learnEntry{m: m, masked: n.maskedPath(recordedParts(m).path)})
 			}
 			return look, true
 		}
@@ -286,22 +300,6 @@ func (x *learnIndexes) of(base, db integrations.MockMemDb, n learnNoise, read fu
 // errNoSharedReads: the store offered no shared part of its reads after its
 // SharedGen said it would (a test closed between the two).
 var errNoSharedReads = errors.New("the store offers no shared reads now")
-
-// ownedRead is the open test's unanswered recordings sr reads now, beside an
-// index of the shared part of its reads at key, and the staging generation
-// they are of: false where no test is open now, or the shared part moved
-// from key's, when the call reads the store instead.
-func ownedRead(sr integrations.SharedReads, key learnIndexKey) (uint64, []*models.Mock, bool) {
-	gen := sr.StagingGenerationByKind(models.HTTP)
-	owned, ok := sr.OwnedUnanswered()
-	if !ok {
-		return 0, nil, false
-	}
-	if again, ok := sr.SharedGeneration(models.HTTP); !ok || again != key.shared {
-		return 0, nil, false
-	}
-	return gen, owned, true
-}
 
 // buildLearnIndex files the recordings learnedMatch's scope would place from
 // the reads perTest and session (scopeReads.scope), in its order.
@@ -349,15 +347,6 @@ func (ix *learnIndex) positions(method, masked string) []int {
 	return slices.Compact(out)
 }
 
-// mayBe reports whether a call of method whose masked path is masked may be
-// e, as positions files it.
-func (e learnEntry) mayBe(method, masked string) bool {
-	if recordedParts(e.m).method != method {
-		return false
-	}
-	return e.masked == masked || learnsWide(e.m) && segmentCount(e.masked) == segmentCount(masked)
-}
-
 // entries are the entries a call of method whose masked path is masked may
 // be, in the scope's order (each tier's in recorded order: inRecordedOrder),
 // less those spent reports the store dropped since the generation began. Of
@@ -377,12 +366,8 @@ func (l learnLook) entries(method, masked string, spent func(string) bool) []lea
 		}
 		return out
 	}
-	var owned []learnEntry
-	for _, e := range l.owned {
-		if e.mayBe(method, masked) {
-			owned = append(owned, e)
-		}
-	}
+	// l.owned is the test's own the call may be already (learnOwned.ranks).
+	owned := l.owned
 	out := make([]learnEntry, 0, 2*len(owned)+len(ps))
 	i := 0
 	for _, perTest := range []bool{true, false} {
@@ -467,8 +452,9 @@ func (h *HTTP) learnedGroupOf(base, db integrations.MockMemDb, tracker *learn.Tr
 	read := func() (scopeReads, error) { return h.learnReads(db, tracker) }
 	var look learnLook
 	indexed := false
+	sieve := n.learnSieveOf(live)
 	if !reread {
-		look, indexed = h.learnIx.of(base, db, n, func() ([]*models.Mock, []*models.Mock, error) {
+		look, indexed = h.learnIx.of(base, db, n, live.method, sieve.masked, func() ([]*models.Mock, []*models.Mock, error) {
 			r, err := read()
 			return r.perTest, r.session, err
 		})
@@ -486,7 +472,7 @@ func (h *HTTP) learnedGroupOf(base, db integrations.MockMemDb, tracker *learn.Tr
 	if verify {
 		r = r.answersOnce()
 	}
-	r.sieve = n.learnSieveOf(live)
+	r.sieve = sieve
 	sc := look.ix.scope(r, look.entries(live.method, r.sieve.masked, mockSpentOf(db)), live, liveShape, n)
 	group, owner := exactGroup(liveShape, sc, false), sc.owner()
 	if verify {
