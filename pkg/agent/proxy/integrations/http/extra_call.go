@@ -14,44 +14,54 @@ import (
 // proven switch), whether it is one call more than the open test recorded:
 // identical, as the matcher judges it, to a call the test's own mocks already
 // answered. It returns how many times that call was recorded for the test,
-// 0 when the request is not such a call or exact serving is off.
+// 0 when the request is not such a call or exact serving is off, and the
+// recording it repeats: of the test's answered recordings of the call, the
+// one recorded last (integrations.RepeatedRecording).
 //
 // The test's answered mocks are matched as the live pool would be, on a view
 // that holds only them and that no match can consume, so one definition of
 // "the same call" serves both the answer and this verdict.
-func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) int {
+func (h *HTTP) extraCall(ctx context.Context, input *req, mockDb integrations.MockMemDb, headerNoise, bodyNoise map[string][]string, urlNoise []string, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, mockCorrelation bool) (int, *models.Mock) {
 	er, ok := mockDb.(integrations.ExactConsumedReader)
 	if !ok {
-		return 0
+		return 0, nil
 	}
 	answered := FilterHTTPMocks(er.ConsumedTestMocks())
 	if len(answered) == 0 {
-		return 0
+		return 0, nil
 	}
 	// The test's bindings, on a copy: a mock that declares a variable is
 	// matched as it was answered, and the dry match binds nothing.
 	vars := variableTable(mockDb)
-	dry := func(mocks []*models.Mock) bool {
+	dry := func(mocks []*models.Mock) *models.Mock {
 		v := vars
 		if v != nil {
 			v = v.Clone()
 		}
 		matched, mk, _, err := h.match(ctx, input, answeredOnly{MockMemDb: mockDb, mocks: mocks, vars: v}, headerNoise, bodyNoise, urlNoise, autoURLDynamic, schemaNoiseDetection, schemaNoiseStrict, false, mockCorrelation)
-		return err == nil && matched && mk != nil && mk.Spec.HTTPReq != nil
+		if err != nil || !matched || mk == nil || mk.Spec.HTTPReq == nil {
+			return nil
+		}
+		return mk
 	}
-	if !dry(answered) {
-		return 0
+	first := dry(answered)
+	if first == nil {
+		return 0, nil
 	}
 	// How often the test recorded the call: each answered mock the call
 	// matches on its own (recordings of one call may differ where its
-	// variables sit).
-	n := 0
+	// variables sit). The match over all of them names one when none
+	// matches alone.
+	var copies []*models.Mock
 	for _, a := range answered {
-		if dry([]*models.Mock{a}) {
-			n++
+		if dry([]*models.Mock{a}) != nil {
+			copies = append(copies, a)
 		}
 	}
-	return max(n, 1)
+	if len(copies) == 0 {
+		return 1, first
+	}
+	return len(copies), integrations.RepeatedRecording(copies)
 }
 
 // backgroundAgain is, for a request no mock answered under exact serving (the
