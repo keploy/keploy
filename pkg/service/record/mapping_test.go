@@ -157,8 +157,8 @@ func TestConsumeMappings_CountsShortPoolTests(t *testing.T) {
 		&shortPoolByTest))
 
 	assert.Empty(t, revoked,
-		"a correlation timeout must NOT revoke: it is an inference, not the known-drop fact, and "+
-			"deleting a recorded test on it turns a latency event into data destruction")
+		"a mock that never came must NOT revoke: it is an inference, not the known-drop fact, and "+
+			"deleting a recorded test on it turns a missing frame into data destruction")
 	tests, mocks := totalShortPool(&shortPoolByTest)
 	assert.Equal(t, 1, tests,
 		"the test persisted with an incomplete mock set was not counted, so the loss stays invisible in aggregate")
@@ -215,7 +215,7 @@ func TestResolveMappingEntries_DroppedAsyncMockDoesNotRevoke(t *testing.T) {
 	var late mappingResolution
 	for _, e := range waits.takeReady() {
 		entry, fate := settleMock(e.tempID, &correlationMap, &asyncMockIDs, &droppedMockIDs)
-		r.addSettled(&late, e.test, e.tempID, entry, fate, &asyncMockIDs)
+		r.addSettled(&late, e.test, e.tempID, entry, fate, e.why, &asyncMockIDs)
 	}
 	lostMock = lostMock || late.lost
 	uncorrelated += late.uncorrelated
@@ -335,7 +335,7 @@ func TestConsumeMappings_ShortPoolCountsDistinctTests(t *testing.T) {
 // The revoke wins — the test is deleted, so it never reaches replay with an
 // incomplete mock set. Leaving the earlier increment standing inflates
 // tests-short-pool and mocks-uncorrelated, and those numbers are the entire
-// stated justification for NOT revoking on a correlation timeout. A metric
+// stated justification for NOT revoking on a mock that never came. A metric
 // that double-counts the cases it excludes cannot support that argument.
 func TestConsumeMappings_RevokeRollsBackShortPoolCounts(t *testing.T) {
 	r := &Recorder{logger: zap.NewNop(), config: &config.Config{}, mappingDb: &countingMappingDB{}}
@@ -348,7 +348,7 @@ func TestConsumeMappings_RevokeRollsBackShortPoolCounts(t *testing.T) {
 	droppedMockIDs.add("really-dropped")
 
 	mappings := make(chan models.TestMockMapping, 2)
-	// Delta 1: only a correlation timeout → looks like a short pool.
+	// Delta 1: only a mock that never came → looks like a short pool.
 	mappings <- models.TestMockMapping{TestName: "t-1", MockIDs: []string{"m1", "ghost"}}
 	// Delta 2: a known drop → the test is revoked and deleted.
 	mappings <- models.TestMockMapping{TestName: "t-1", MockIDs: []string{"m2", "really-dropped"}}

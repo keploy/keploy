@@ -774,10 +774,10 @@ func TestStart_UnencodableMockIsSkippedAndItsTestRevoked(t *testing.T) {
 // for the one data-loss class this change deliberately does NOT revoke.
 //
 // A mock that never correlates leaves its test persisted with an incomplete
-// mock set. Not revoking it is a judgement call — a timeout is an inference,
-// not the known-drop fact — and the ONLY thing that makes that call defensible
-// is that the frequency becomes measurable. The motivating case is a
-// correlation timeout under parallelism with a perfectly healthy encoder, i.e.
+// mock set. Not revoking it is a judgement call — a mock that never came is an
+// inference, not the known-drop fact — and the ONLY thing that makes that call
+// defensible is that the frequency becomes measurable. The motivating case is
+// a mock the agent names but never sends, with a perfectly healthy encoder, i.e.
 // ZERO dropped mocks, so gating the counters behind the drop counter would
 // leave them invisible in exactly the recording they were added to measure.
 func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
@@ -847,12 +847,12 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 		t.Fatal("Start did not return")
 	}
 
-	// Not revoked — the timeout is an inference, so the test still ships.
+	// Not revoked — a mock that never came is an inference, so the test still ships.
 	testDB.mu.Lock()
 	deleted := append([]string(nil), testDB.deleted...)
 	testDB.mu.Unlock()
 	assert.NotContains(t, deleted, "test-1",
-		"a correlation timeout revoked a test; that converts a latency event into data destruction")
+		"a mock that never came revoked a test; that converts a missing frame into data destruction")
 
 	tele.mu.Lock()
 	suite := tele.suite
@@ -874,7 +874,7 @@ func TestStart_ShortPoolReachesTelemetryWithoutAnyDrops(t *testing.T) {
 // A capacity-dropped test is a prime candidate for also having an uncorrelated
 // mock, so counting it would inflate tests-short-pool with exactly the
 // population the metric claims to exclude. Since that metric's credibility is
-// the entire justification for not revoking on a correlation timeout, both
+// the entire justification for not revoking on a mock that never came, both
 // revoke paths have to be subtracted, which is why the totals are computed at
 // teardown instead of accumulated as mappings arrive.
 func TestStart_AgentRevokedTestIsNotCountedAsShortPool(t *testing.T) {

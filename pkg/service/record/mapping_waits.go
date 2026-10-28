@@ -11,10 +11,12 @@ import (
 // test name the mapping already holds, about 100 bytes, so the cap holds the
 // waits under 10 MB. An entry past it is not held: it is settled at once, as an
 // entry still waiting at the end of the mock stream is (counted as an
-// incomplete mock set for its test). The mocks a held entry waits for are the
-// ones the agent has sent and this recorder has not saved yet, so a healthy
-// recording stays far below it however loaded its host is; only a stream that
-// names mocks it never sends can reach it.
+// incomplete mock set for its test), and the first one is said in a Warn that
+// names the cap. The mocks a held entry waits for are the ones the agent has
+// sent and this recorder has not saved yet, so a healthy recording stays far
+// below it however loaded its host is; only a stream that names mocks it never
+// sends can reach it. A revoked test's entries are not held (revoke), so the
+// tests the agent revokes over a mock it never sent do not count toward it.
 //
 // A package-level var, not a const, only so a test can shrink it. Never
 // reassigned in production code.
@@ -35,10 +37,40 @@ const (
 	fateLost
 )
 
-// heldEntry is one mapping entry waiting for its mock.
+// lossReason is why an entry settled with no mock (fateUnknown): what its
+// "Failed to correlate" line says.
+type lossReason int
+
+const (
+	// reasonEnded: the mock stream ended with no mock left for the entry.
+	// Either the agent never sent it, or another entry naming the same
+	// tempID took it (a tempID is mapped once, and a mock the consumer took
+	// is not remembered, so the two cannot be told apart here).
+	reasonEnded lossReason = iota
+	// reasonTaken: the mock's outcome came while the entry was held, and
+	// another entry naming the same tempID, held beside it, took the mock.
+	reasonTaken
+	// reasonUntrackedDrop: the recorder failed to save the mock while the
+	// dropped-mock set was full (maxLiveDroppedMockIDs), so the test cannot be
+	// revoked over it.
+	reasonUntrackedDrop
+	// reasonCapFull: maxHeldMappingEntries entries were already waiting, so
+	// this one was not held.
+	reasonCapFull
+	// reasonRevoked: the entry's test is revoked (deleted at the recording's
+	// end), so its mock is no longer waited for.
+	reasonRevoked
+	// reasonAbandoned: the recording's teardown gave the mock loop up (its
+	// drain timed out) before the mock's outcome was told.
+	reasonAbandoned
+)
+
+// heldEntry is one mapping entry waiting for its mock, or handed back.
 type heldEntry struct {
 	test   string
 	tempID string
+	// why it was handed back: what its loss is if it finds no mock.
+	why lossReason
 }
 
 // mappingWaits holds the mapping entries whose mock the mock loop has not
@@ -52,7 +84,8 @@ type heldEntry struct {
 // arrived once a mock's outcome (saved, dropped or skipped) is published, and
 // end once its stream is over. An entry still held at end has a mock that never
 // came: that, and only that, is counted as a test recorded with an incomplete
-// mock set.
+// mock set. A teardown that gave the mock loop up (it never ends) takes what is
+// still held instead (abandon).
 //
 // The consumer never blocks on a held entry: it goes on draining the mapping
 // stream (the agent drops mappings it cannot hand over), and applies the held
@@ -71,43 +104,92 @@ type mappingWaits struct {
 	wake chan struct{}
 	// ended is set once the mock stream is over: no outcome comes any more.
 	ended bool
+	// revoked are the tests revoked so far: their entries are not held. One
+	// name per revoked test, as the recording's own revoke set keeps.
+	revoked map[string]struct{}
+	// capSaid is set once the cap has turned an entry away.
+	capSaid bool
 	// limit is maxHeldMappingEntries, read once.
 	limit int
+	// changed, when set (a test, before the waits are used), is signalled
+	// after every change of held or ready; capacity 1, never blocks.
+	changed chan struct{}
 }
 
 func newMappingWaits() *mappingWaits {
 	return &mappingWaits{
-		held:  map[string][]string{},
-		wake:  make(chan struct{}, 1),
-		limit: maxHeldMappingEntries,
+		held:    map[string][]string{},
+		wake:    make(chan struct{}, 1),
+		revoked: map[string]struct{}{},
+		limit:   maxHeldMappingEntries,
 	}
+}
+
+// claimed is what claim made of one entry.
+type claimed struct {
+	entry models.MockEntry
+	fate  mockFate
+	// held: the entry waits for its mock; entry and fate say nothing yet.
+	held bool
+	// why the entry was not held, for one that settled fateUnknown.
+	why lossReason
+	// capFirst: the first entry the cap turned away in this recording.
+	capFirst bool
 }
 
 // claim settles the entry (test, tempID) now, or holds it until its mock's
 // outcome arrives. settle is called under the waits' lock, so a mock whose
 // outcome is published (before its arrived call) while the entry is being
 // claimed is either seen by settle or finds the entry held: never neither.
-// held reports the entry was held; otherwise fate says what it settled as
-// (fateUnknown: it never will, it is lost to the test's mock set).
-func (w *mappingWaits) claim(test, tempID string, settle func() (models.MockEntry, mockFate)) (entry models.MockEntry, fate mockFate, held bool) {
+func (w *mappingWaits) claim(test, tempID string, settle func() (models.MockEntry, mockFate)) claimed {
 	if w == nil {
-		entry, fate = settle()
-		return entry, fate, false
+		entry, fate := settle()
+		return claimed{entry: entry, fate: fate, why: reasonEnded}
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	entry, fate = settle()
-	if fate != fateUnknown || w.ended || w.nHeld >= w.limit {
-		return entry, fate, false
+	var c claimed
+	c.entry, c.fate = settle()
+	switch {
+	case c.fate != fateUnknown:
+	case w.ended:
+		c.why = reasonEnded
+	case w.isRevoked(test):
+		c.why = reasonRevoked
+	case w.nHeld >= w.limit:
+		c.why = reasonCapFull
+		c.capFirst = !w.capSaid
+		w.capSaid = true
+	default:
+		w.held[tempID] = append(w.held[tempID], test)
+		w.nHeld++
+		c.held = true
 	}
-	w.held[tempID] = append(w.held[tempID], test)
-	w.nHeld++
-	return entry, fate, true
+	w.mu.Unlock()
+	if c.held {
+		w.notify()
+	}
+	return c
+}
+
+func (w *mappingWaits) isRevoked(test string) bool {
+	_, ok := w.revoked[test]
+	return ok
 }
 
 // arrived tells the waits that tempID's mock has an outcome, published before
 // this call. The entries held for it are handed back to the consumer.
 func (w *mappingWaits) arrived(tempID string) {
+	w.handBack(tempID, reasonTaken)
+}
+
+// droppedUntracked tells the waits that tempID's mock was dropped while the
+// dropped-mock set was full: there is nothing for an entry to settle on, so
+// the entries held for it are handed back as lost for that reason.
+func (w *mappingWaits) droppedUntracked(tempID string) {
+	w.handBack(tempID, reasonUntrackedDrop)
+}
+
+func (w *mappingWaits) handBack(tempID string, why lossReason) {
 	if w == nil {
 		return
 	}
@@ -117,11 +199,49 @@ func (w *mappingWaits) arrived(tempID string) {
 		delete(w.held, tempID)
 		w.nHeld -= len(tests)
 		for _, tn := range tests {
-			w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID})
+			w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID, why: why})
 		}
 	}
 	w.mu.Unlock()
 	if ok {
+		w.signal()
+	}
+}
+
+// revoke tells the waits these tests are revoked: they are deleted at the
+// recording's end, so nothing waits for their mocks any more. Their held
+// entries are handed back (they settle as reasonRevoked, unless their mock
+// came meanwhile), and a later entry of theirs is not held. It walks the held
+// entries once per call; revokes are rare (a capacity drop) and come a batch
+// of names per call.
+func (w *mappingWaits) revoke(tests []string) {
+	if w == nil || len(tests) == 0 {
+		return
+	}
+	w.mu.Lock()
+	for _, tn := range tests {
+		w.revoked[tn] = struct{}{}
+	}
+	moved := false
+	for tempID, names := range w.held {
+		kept := names[:0]
+		for _, tn := range names {
+			if w.isRevoked(tn) {
+				w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID, why: reasonRevoked})
+				w.nHeld--
+				moved = true
+				continue
+			}
+			kept = append(kept, tn)
+		}
+		if len(kept) == 0 {
+			delete(w.held, tempID)
+		} else {
+			w.held[tempID] = kept
+		}
+	}
+	w.mu.Unlock()
+	if moved {
 		w.signal()
 	}
 }
@@ -141,7 +261,7 @@ func (w *mappingWaits) end() {
 	moved := w.nHeld > 0
 	for tempID, tests := range w.held {
 		for _, tn := range tests {
-			w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID})
+			w.ready = append(w.ready, heldEntry{test: tn, tempID: tempID, why: reasonEnded})
 		}
 	}
 	clear(w.held)
@@ -152,9 +272,46 @@ func (w *mappingWaits) end() {
 	}
 }
 
+// abandon is the teardown's, when its drain gave the mock loop up: that loop
+// may never end, so the entries it would have settled are taken here, held
+// and ready alike, under the lock, so the consumer cannot apply one of them
+// as well. A parked consumer is woken, finds nothing, and returns once its
+// stream is closed. After a clean drain it finds nothing: the consumer
+// returned only once nothing waited.
+func (w *mappingWaits) abandon() []heldEntry {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	w.ended = true
+	out := w.ready
+	w.ready = nil
+	for tempID, tests := range w.held {
+		for _, tn := range tests {
+			out = append(out, heldEntry{test: tn, tempID: tempID, why: reasonAbandoned})
+		}
+	}
+	clear(w.held)
+	w.nHeld = 0
+	w.mu.Unlock()
+	w.signal()
+	return out
+}
+
 func (w *mappingWaits) signal() {
 	select {
 	case w.wake <- struct{}{}:
+	default:
+	}
+	w.notify()
+}
+
+func (w *mappingWaits) notify() {
+	if w.changed == nil {
+		return
+	}
+	select {
+	case w.changed <- struct{}{}:
 	default:
 	}
 }
@@ -165,9 +322,12 @@ func (w *mappingWaits) takeReady() []heldEntry {
 		return nil
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	r := w.ready
 	w.ready = nil
+	w.mu.Unlock()
+	if len(r) > 0 {
+		w.notify()
+	}
 	return r
 }
 

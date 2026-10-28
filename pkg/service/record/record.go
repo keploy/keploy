@@ -609,7 +609,7 @@ func (r *Recorder) consumeMappingsFor(ctx context.Context, testSetID string, map
 				order = append(order, e.test)
 			}
 			entry, fate := settleMock(e.tempID, correlationMap, asyncMockIDs, droppedMockIDs)
-			r.addSettled(res, e.test, e.tempID, entry, fate, asyncMockIDs)
+			r.addSettled(res, e.test, e.tempID, entry, fate, e.why, asyncMockIDs)
 		}
 		for _, tn := range order {
 			apply(tn, *byTest[tn])
@@ -685,6 +685,9 @@ type Recorder struct {
 	// drainClock is the clock the stop's drains measure a stall on: nil,
 	// keploy's own runnable time; a test drives its own.
 	drainClock stall.Clock
+	// mappingWaitsMade, when set (a test), is handed each recording's mapping
+	// waits as Start makes them, before anything uses them.
+	mappingWaitsMade func(*mappingWaits)
 	// captureLost is set when a frame drain stopped waiting for what the
 	// agent still held from before the stop, or the mock store could not
 	// write mocks the recording captured (mocksNotWritten): the recording is
@@ -1143,9 +1146,10 @@ func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 // maps — a background egress whose owning test never completes — has no
 // consumer, so an unbounded set would grow for the life of the recording.
 //
-// Past the cap we stop tracking, and further drops lose their revoke: the
-// mapping entry naming one settles when the mock loop reports its outcome, as
-// a mock that was never saved, so its test is counted as recorded with an
+// Past the cap we stop tracking, and further drops lose their revoke: a
+// mapping entry already held for one settles at once, and one whose mapping
+// comes after the drop waits until the mock stream ends; either way it settles
+// as a mock that was never saved, so its test is counted as recorded with an
 // incomplete mock set instead of revoked. That is the deliberate trade — a
 // recording with 10k dropped mocks is systematically broken and the teardown
 // Warn plus the mocks-dropped telemetry still report the true scale — but it is
@@ -1284,9 +1288,9 @@ type mappingResolution struct {
 	uncorrelated int
 }
 
-// add folds one settled entry into res. An entry still fateUnknown here will
-// never be saved: its mock stream ended without it (or the waits were full).
-func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry models.MockEntry, fate mockFate, asyncMockIDs *sync.Map) {
+// addSettled folds one settled entry into res. An entry still fateUnknown
+// here has no mock for its test, and why says why (lossReason).
+func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry models.MockEntry, fate mockFate, why lossReason, asyncMockIDs *sync.Map) {
 	if fate == fateUnknown {
 		// An async mock that never correlates is not an incomplete mock set
 		// for anyone — async-egress mocks are never part of a per-test
@@ -1308,10 +1312,34 @@ func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry
 		// short pool, and counted: the count is reported at teardown and in
 		// telemetry.
 		res.uncorrelated++
+		if why == reasonRevoked {
+			// The test is deleted at the recording's end (and counted short
+			// there only if its delete fails): no loss to report per mock.
+			r.logger.Debug("not waiting for a revoked test's mock",
+				zap.String("test", test),
+				zap.String("tempMockID", tempID))
+			return
+		}
 		r.logger.Error("Failed to correlate mock mapping",
 			zap.String("test", test),
 			zap.String("tempMockID", tempID),
-			zap.String("next_step", "the agent named this mock in the test's mapping but the mock stream ended without it; re-record the test set"))
+			zap.String("next_step", lossNextStep(why)))
+	}
+}
+
+// lossNextStep is what a "Failed to correlate" line says of why.
+func lossNextStep(why lossReason) string {
+	switch why {
+	case reasonTaken:
+		return "another mapping entry naming the same mock took it first (a mock is mapped to one entry), so this test is recorded without it; re-record the test set"
+	case reasonUntrackedDrop:
+		return fmt.Sprintf("the recorder failed to save this mock while more than %d dropped mocks were tracked, so its test is recorded without it instead of revoked; re-record the test set", maxLiveDroppedMockIDs)
+	case reasonCapFull:
+		return fmt.Sprintf("%d mapping entries were already waiting for their mocks, so this one was not held; re-record the test set", maxHeldMappingEntries)
+	case reasonAbandoned:
+		return "the recording's teardown gave the mock loop up before it said what became of this mock; re-record the test set"
+	default:
+		return "the agent named this mock in the test's mapping but the mock stream ended with no mock left for it: the agent never sent it, or another mapping entry naming the same mock took it (a mock is mapped to one entry); re-record the test set"
 	}
 }
 
@@ -1323,13 +1351,19 @@ func (r *Recorder) addSettled(res *mappingResolution, test, tempID string, entry
 func (r *Recorder) resolveMappingEntries(mapping models.TestMockMapping, correlationMap, asyncMockIDs *sync.Map, droppedMockIDs *droppedMockSet, waits *mappingWaits) ([]models.MockEntry, bool, int) {
 	var res mappingResolution
 	for _, tempID := range mapping.MockIDs {
-		entry, fate, held := waits.claim(mapping.TestName, tempID, func() (models.MockEntry, mockFate) {
+		c := waits.claim(mapping.TestName, tempID, func() (models.MockEntry, mockFate) {
 			return settleMock(tempID, correlationMap, asyncMockIDs, droppedMockIDs)
 		})
-		if held {
+		if c.held {
 			continue
 		}
-		r.addSettled(&res, mapping.TestName, tempID, entry, fate, asyncMockIDs)
+		if c.capFirst {
+			r.logger.Warn("too many mapping entries are waiting for their mocks: entries past the cap are not held, and each test that names one is recorded without that mock",
+				zap.Int("maxHeldMappingEntries", maxHeldMappingEntries),
+				zap.String("test", mapping.TestName),
+				zap.String("next_step", "the agent is naming mocks it does not send; re-record the test set and report it"))
+		}
+		r.addSettled(&res, mapping.TestName, tempID, c.entry, c.fate, c.why, asyncMockIDs)
 	}
 	return res.entries, res.lost, res.uncorrelated
 }
@@ -1587,6 +1621,24 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 	// agent's RevokedTests control frame revokes tests consumeMappings never
 	// sees, and a revoked test is deleted rather than shipped short.
 	var shortPoolByTest sync.Map
+	// correlationMap, asyncMockIDs, droppedMockIDs and mappingHolds are what
+	// the mock loop publishes of each mock for the mapping consumer; declared
+	// here so the teardown can settle what a mock loop it gave up still holds.
+	var correlationMap sync.Map
+	// asyncMockIDs holds tempIDs of async mocks (Spec.Async set); resolveMappingEntries uses it
+	// to keep async-egress mocks out of the per-test mappings (see its doc).
+	var asyncMockIDs sync.Map
+	// droppedMockIDs holds tempIDs of mocks the recorder gave up persisting,
+	// so the mapping consumer revokes the owning test rather than replay it
+	// with a short mock pool.
+	var droppedMockIDs droppedMockSet
+	// mappingHolds holds the mapping entries whose mock the mock loop has not
+	// reported yet (see mappingWaits); the mock loop reports each outcome to
+	// it, and ends it with its stream.
+	mappingHolds := newMappingWaits()
+	if r.mappingWaitsMade != nil {
+		r.mappingWaitsMade(mappingHolds)
+	}
 	var droppedMockKinds = make(map[string]int)
 	// mockCountMap is written by the mock-consumer goroutine and read at
 	// teardown for telemetry. Guard both with a mutex so that if teardown
@@ -1823,6 +1875,27 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		} else if timedOut {
 			recordDrainedCleanly = false
 		}
+		// A drain that gave the mock loop up (wedged in a save or a hook) left
+		// the mapping entries it would have settled waiting: the consumer
+		// parked on them never counts them. Take them here, before the totals,
+		// as the tests' incomplete mock sets they are; the totals subtract a
+		// deleted test as they do for every other entry. After a clean drain
+		// there are none.
+		for _, e := range mappingHolds.abandon() {
+			entry, fate := settleMock(e.tempID, &correlationMap, &asyncMockIDs, &droppedMockIDs)
+			if fate == fateMapped || fate == fateLost {
+				// Its outcome came, but the consumer will not apply it now:
+				// the test is recorded without it.
+				fate = fateUnknown
+			}
+			var res mappingResolution
+			r.addSettled(&res, e.test, e.tempID, entry, fate, reasonAbandoned, &asyncMockIDs)
+			if res.uncorrelated > 0 {
+				prev, _ := shortPoolByTest.Load(e.test)
+				n, _ := prev.(int64)
+				shortPoolByTest.Store(e.test, n+int64(res.uncorrelated))
+			}
+		}
 		// Every drain is over: nothing still selects on utils.StopNow, which
 		// a press at this wait's offer closes, but what a drain abandoned on
 		// a stall (already counted as cut). The record drain joined the
@@ -2029,7 +2102,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					zap.Int("testsWithShortMockPool", shortPoolTests),
 					zap.Int("mocksUncorrelated", shortPoolMocks),
 					zap.String("testSetID", newTestSetID),
-					zap.String("next_step", "ensure the mapping store is enabled and reduce recording parallelism; re-record the test set if this count is non-trivial"))
+					zap.String("next_step", "ensure the mapping store is enabled; each test's \"Failed to correlate mock mapping\" line says why its mock is missing; re-record the test set if this count is non-trivial"))
 			}
 			if droppedSnapshot > 0 {
 				r.logger.Warn("recording finished with mocks dropped; the tests that owned them were revoked rather than recorded with a short mock pool",
@@ -2049,8 +2122,8 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				suiteMeta["mocks-dropped-by-kind"] = droppedKindSnapshot
 			}
 			// Gated separately from the drops. The motivating case for these two
-			// is a correlation timeout under parallelism with a perfectly
-			// healthy encoder — zero drops — which is exactly the recording the
+			// is a mock the agent names in a mapping but never sends, with a
+			// perfectly healthy encoder — zero drops — which is exactly the recording the
 			// drop gate excludes, so folding them in there would leave the
 			// frequency invisible in the one case they were added to measure.
 			if shortPoolTests > 0 {
@@ -2357,18 +2430,6 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 
 	r.logger.Debug("Agent is ready. Starting to fetch test cases and mocks...")
 
-	var correlationMap sync.Map
-	// asyncMockIDs holds tempIDs of async mocks (Spec.Async set); resolveMappingEntries uses it
-	// to keep async-egress mocks out of the per-test mappings (see its doc).
-	var asyncMockIDs sync.Map
-	// droppedMockIDs holds tempIDs of mocks the recorder gave up persisting,
-	// so the mapping consumer revokes the owning test rather than replay it
-	// with a short mock pool.
-	var droppedMockIDs droppedMockSet
-	// mappingHolds holds the mapping entries whose mock the mock loop has not
-	// reported yet (see mappingWaits); the mock loop reports each outcome to
-	// it, and ends it with its stream.
-	mappingHolds := newMappingWaits()
 	// A stop before the agent's streams open finds nothing captured: end here
 	// rather than open them only to drain them.
 	if ctx.Err() != nil {
@@ -2640,6 +2701,18 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 		// No mock comes after this loop: a mapping entry still waiting for
 		// one is settled as never arrived.
 		defer mappingHolds.end()
+		// dropMock publishes that the recorder failed to save tempID's mock,
+		// then tells the waits. It reports whether the drop is tracked (its
+		// test revocable): past maxLiveDroppedMockIDs it is not, and an entry
+		// held for it is settled as lost for that reason.
+		dropMock := func(tempID string) bool {
+			if droppedMockIDs.add(tempID) {
+				mappingHolds.arrived(tempID)
+				return true
+			}
+			mappingHolds.droppedUntracked(tempID)
+			return false
+		}
 		for mock := range frames.Outgoing {
 			r.frameProgress.Add(1)
 			// Deferred-orphan revoke: a reserved-Kind control frame, NOT a mock.
@@ -2647,15 +2720,21 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			// domain-extraction / hook / InsertMock / correlation work — it
 			// carries no traffic and must never be persisted.
 			if mock.GetKind() == string(models.RevokedTests) {
+				var revoked []string
 				if mock.Spec.Metadata != nil {
 					for _, n := range strings.Split(mock.Spec.Metadata["revoked_tests"], ",") {
 						if n = strings.TrimSpace(n); n != "" {
 							revokedMu.Lock()
 							revokedNames[n] = struct{}{}
 							revokedMu.Unlock()
+							revoked = append(revoked, n)
 						}
 					}
 				}
+				// A revoked test is deleted at the end: its mapping still names
+				// the mock the agent dropped and never sends, so nothing of it
+				// may wait for that mock (and count toward the waits' cap).
+				mappingHolds.revoke(revoked)
 				continue
 			}
 			domainSet.AddAll(telemetry.ExtractDomainsFromMock(mock))
@@ -2708,8 +2787,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					droppedMockCount++
 					droppedMockKinds[mock.GetKind()]++
 					mockCountMapMu.Unlock()
-					droppedMockIDs.add(tempID)
-					mappingHolds.arrived(tempID)
+					dropMock(tempID)
 					utils.LogError(r.logger, err, "failed to record mock during shutdown",
 						zap.String("mockName", mock.Name),
 						zap.String("mockKind", mock.GetKind()),
@@ -2731,8 +2809,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 					mockCountMapMu.Unlock()
 					// Tell the mapping consumer so it revokes the owning test
 					// instead of recording it short.
-					tracked := droppedMockIDs.add(tempID)
-					mappingHolds.arrived(tempID)
+					tracked := dropMock(tempID)
 					// Loud on the first, then sampled: a recording that quietly
 					// grows holes is worse than one that dies, so this must stay
 					// visible without drowning the log on a systematic failure.
@@ -2760,8 +2837,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				droppedMockKinds[mock.GetKind()]++
 				dropped := droppedMockCount
 				mockCountMapMu.Unlock()
-				droppedMockIDs.add(tempID)
-				mappingHolds.arrived(tempID)
+				dropMock(tempID)
 				if dropped == 1 || dropped%100 == 0 {
 					utils.LogError(r.logger, err, "failed to record mock (environmental); stopping the session",
 						zap.String("mockName", mock.Name),
@@ -2825,6 +2901,7 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 				revokedMu.Lock()
 				revokedNames[testName] = struct{}{}
 				revokedMu.Unlock()
+				mappingHolds.revoke([]string{testName})
 			}, &shortPoolByTest, capWatch.mapped)
 	})
 
