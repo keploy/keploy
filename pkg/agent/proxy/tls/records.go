@@ -42,6 +42,13 @@ type recordConn struct {
 	// own close of the connection.
 	silent     func(error)
 	silentOnce sync.Once
+	// release, when set, releases the hold on the client's hang-up
+	// (HangUpHolder), once: at the first byte after the handshake, which
+	// leaves no silent hang-up to tell; at the first read after it that
+	// fails with nothing read, once silent is told of it if it is the
+	// client's; or at the close.
+	release     func()
+	releaseOnce sync.Once
 }
 
 func newRecordConn(conn net.Conn) *recordConn {
@@ -53,11 +60,27 @@ func newRecordConn(conn net.Conn) *recordConn {
 // crypto/tls reads from one goroutine at a time.
 func (c *recordConn) Read(b []byte) (int, error) {
 	n, err := c.read(b)
-	if n == 0 && err != nil && c.silent != nil && c.done.Load() && c.after.Load() == 0 &&
-		IsClientGiveUp(err) && !errors.Is(err, net.ErrClosed) {
-		c.silentOnce.Do(func() { c.silent(err) })
+	if n == 0 && err != nil && c.done.Load() && c.after.Load() == 0 {
+		if c.silent != nil && IsClientGiveUp(err) && !errors.Is(err, net.ErrClosed) {
+			c.silentOnce.Do(func() { c.silent(err) })
+		}
+		c.releaseHangUp()
 	}
 	return n, err
+}
+
+// Close releases the hold on the client's hang-up (release), then closes
+// the connection beneath.
+func (c *recordConn) Close() error {
+	c.releaseHangUp()
+	return c.Conn.Close()
+}
+
+// releaseHangUp releases the hold on the client's hang-up, once.
+func (c *recordConn) releaseHangUp() {
+	if c.release != nil {
+		c.releaseOnce.Do(c.release)
+	}
 }
 
 func (c *recordConn) read(b []byte) (int, error) {
@@ -89,6 +112,7 @@ func (c *recordConn) count(n int) {
 	if n > 0 && c.done.Load() {
 		c.after.Add(uint64(n))
 		c.pass = true
+		c.releaseHangUp()
 	}
 }
 

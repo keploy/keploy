@@ -129,6 +129,9 @@ type trackedConn struct {
 	fmu      sync.Mutex
 	flight   *learn.Flight
 	grounded bool
+	// hangUps counts the holds on a client's hang-up on a TLS handshake
+	// keploy makes over it, not yet told (HoldHangUp).
+	hangUps atomic.Int32
 }
 
 // track keeps conn, and returns it wrapped so its reads are seen.
@@ -220,8 +223,13 @@ func (t *inflight) Pending(answers bool) int {
 // pending reports whether c still holds work (Pending): its counts at one
 // instant (view), then its socket (untaken), as State reads it.
 func (c *trackedConn) pending(answers bool) bool {
-	v := c.view()
-	return busy(c.untaken(v), answers, v.reading, v.held, v.idle, c.closing.Load())
+	return c.busyAt(c.view(), answers)
+}
+
+// busyAt is busy for c's counts at one instant (v), read before its socket
+// (untaken, hungUp).
+func (c *trackedConn) busyAt(v connView, answers bool) bool {
+	return busy(c.untaken(v), answers, v.reading, v.held, v.idle, c.closing.Load()) || c.hungUp(v)
 }
 
 // busy is the rule Pending, State and PendingProgress read a connection by:
@@ -262,7 +270,7 @@ func (t *inflight) State(answers bool) (pending int, unknown []string) {
 		// it. Then the parser the proxy noted, which it notes before that
 		// parser's first read (servedBy).
 		v := tc.view()
-		if busy(tc.untaken(v), answers, v.reading, v.held, v.idle, tc.closing.Load()) {
+		if tc.busyAt(v, answers) {
 			pending++
 		}
 		if answers {
@@ -489,6 +497,8 @@ type connView struct {
 	// returned the end of the stream.
 	delivered uint64
 	eof       bool
+	// hangUps are its holds on a client's hang-up not yet told (HoldHangUp).
+	hangUps int32
 }
 
 // view is c's counts, read at one instant.
@@ -497,8 +507,45 @@ func (c *trackedConn) view() connView {
 	defer c.mu.Unlock()
 	return connView{
 		reading: c.reading.Load(), held: c.held.Load(), marks: c.unknownFor.Load(), idle: c.idle.Load(),
-		delivered: c.delivered.Load(), eof: c.eof.Load(),
+		delivered: c.delivered.Load(), eof: c.eof.Load(), hangUps: c.hangUps.Load(),
 	}
+}
+
+// HoldHangUp implements pTls.HangUpHolder: until release, c holds work
+// whenever its client is gone and the hang-up is not yet told (hungUp), in a
+// record as in a replay. A test's end waits for it by events: release, as
+// every change of c's, wakes whoever waits on Changed.
+func (c *trackedConn) HoldHangUp() (release func()) {
+	c.count(&c.hangUps, 1)
+	c.t.changed()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.count(&c.hangUps, -1)
+			c.moved()
+		})
+	}
+}
+
+// hungUp reports whether c, holding a client's hang-up not yet told (v's
+// hangUps), shows its client gone: a read returned the end of the stream
+// (v's eof), or its socket, read after v, has received the client's FIN or
+// a reset (clientGone) -- one a read in progress may already have taken,
+// its goroutine not run since. The socket not to be asked (its handler has
+// closed it) shows nothing: that close follows the hang-up's telling, or is
+// keploy's own.
+func (c *trackedConn) hungUp(v connView) bool {
+	if v.hangUps == 0 {
+		return false
+	}
+	if v.eof {
+		return true
+	}
+	if c.raw == nil {
+		return false
+	}
+	_, state, ok := socketReceived(c.raw)
+	return ok && clientGone(state)
 }
 
 // moved is a change that moved c's own work: progress for c, and for all.

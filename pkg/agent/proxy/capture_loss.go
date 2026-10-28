@@ -115,6 +115,13 @@ func (p *Proxy) teeDropped(mark func(reason string), dst func() string, stopping
 // the scope the application's stop closes it in -- after the last test, or
 // in keploy record, whose tests the proxy does not see -- is charged, and
 // reads as not verified (or, in keploy record, a WARN), the safe direction.
+//
+// The scope a hang-up is told in is the one it happened in, whatever the
+// load: a test's end waits, by events, for a hang-up its connection's socket
+// shows and its handler has not yet told (pTls.HangUpHolder), before it reads
+// what the test lost and closes its scope. A handler the host had not run
+// since the client hung up used to be outrun by the end, and dropped the
+// abandon as one after the test.
 type clientTLS struct {
 	p   *Proxy
 	ctx context.Context
