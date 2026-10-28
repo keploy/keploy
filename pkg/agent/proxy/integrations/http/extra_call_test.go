@@ -257,6 +257,19 @@ func TestACallMoreThanRecordedIsNamedAsTheRecordingItRepeats(t *testing.T) {
 			strings.Contains(r.Diff+r.NextSteps, "mock-5") {
 			t.Fatalf("an extra call with mock-5 in view was diagnosed against it: %+v", r)
 		}
+		if r.Write != "" {
+			t.Fatalf("a GET made once more is named a write: %q", r.Write)
+		}
+	}
+
+	// A POST made once more says it writes (callWrite), which judging reads
+	// to mark the recording it repeats.
+	post := copyOf("mock-7", at)
+	post.Spec.HTTPReq.Method = "POST"
+	post.Spec.HTTPReq.Header["Content-Length"] = "0"
+	rawPost := "POST " + path + " HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\nContent-Length: 0\r\n\r\n"
+	if _, _, r := answerOf(t, store(post), addr, rawPost); r.MissKind != models.MissExtraCall || r.ClosestMock != "mock-7" || r.Write != "HTTP POST" {
+		t.Fatalf("a POST recorded once made twice reported %+v; want the extra-call miss naming mock-7, a write", r)
 	}
 
 	// Recorded once: it names that recording.
