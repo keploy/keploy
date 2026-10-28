@@ -244,16 +244,21 @@ func sink(args []string) {
 					// The probe's own name counts as dns-udp; any other name
 					// (keploy's or the runtime's own lookups) as dns-other, so a
 					// count names who leaked. Every name goes to dns-names.txt.
-					// The sink answers NXDOMAIN, so no lookup waits on a timeout.
+					// The sink answers the probe's names NXDOMAIN and every
+					// other name REFUSED, so no lookup waits on a timeout, and a
+					// resolver that lists the sink before the runner's own (the
+					// docker phases) moves on to it for the runner's lookups.
 					name := qname(buf[:n])
+					rcode := byte(3) // NXDOMAIN
 					if !strings.Contains(name, "replay-isolation") {
 						p = "dns-other"
+						rcode = 5 // REFUSED
 					}
 					appendLine(filepath.Join(*dir, "dns-names.txt"), name)
 					if n >= 12 {
 						r := append([]byte(nil), buf[:n]...)
-						r[2] |= 0x80                // QR: a response
-						r[3] = (r[3] & 0x70) | 0x83 // RA, RCODE 3 (NXDOMAIN)
+						r[2] |= 0x80                        // QR: a response
+						r[3] = (r[3] & 0x70) | 0x80 | rcode // RA and the RCODE
 						_, _ = pc.WriteTo(r, from)
 					}
 				}

@@ -27,10 +27,14 @@
 # so the runner's own resolver is left alone. Under docker the app shares the
 # agent container's netns (docker refuses an app --dns there: "conflicting
 # options"), whose only resolver is docker's 127.0.0.11. That resolver answers
-# the network's own names and forwards every other one to the resolvers dockerd
-# reads when a container starts (docker_resolv), so for the docker phases the
-# lane binds the sink's resolv.conf over that file: whatever 127.0.0.11
-# forwards is then counted at the sink too.
+# the network's own names and forwards every other one to the nameservers of
+# the host's /etc/resolv.conf, read when a container starts and asked from the
+# host's netns, a loopback stub such as systemd-resolved's 127.0.0.53 included
+# (moby 26 and later, for a user-defined network such as keploy-network). So for
+# the docker phases the lane binds over /etc/resolv.conf a copy that lists the
+# sink first: whatever 127.0.0.11 forwards is then counted at the sink too. The
+# sink answers REFUSED to every other name, so the runner's own lookups, and
+# 127.0.0.11's for them, move on to the runner's resolver listed after it.
 #
 # Per mode: baseline (no keploy: each path must reach the sink, so a zero in
 # replay means keploy kept it in), record, replay, and the opt-in rows.
@@ -86,18 +90,14 @@ waitfor() {
 	done
 }
 
-# The file dockerd reads a new container's upstream resolvers from, as libnetwork
-# picks it: systemd-resolved's real list when /etc/resolv.conf names only its
-# 127.0.0.53 stub (a CI runner), else /etc/resolv.conf. Binding over the
-# former leaves the runner's own lookups alone; they go through the stub.
-docker_resolv() {
-	local ns
-	ns=$(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf | sort -u)
-	if [ "$ns" = 127.0.0.53 ] && [ -f /run/systemd/resolve/resolv.conf ]; then
-		echo /run/systemd/resolve/resolv.conf
-	else
-		echo /etc/resolv.conf
-	fi
+# The host's resolv.conf with the sink listed first, for the docker phases (see
+# the top). systemd-resolved's real list (/run/systemd/resolve/resolv.conf) is
+# what dockerd reads for the legacy default bridge only, which these phases do
+# not use: binding over it left 127.0.0.11 forwarding to the stub, so on a CI
+# runner nothing reached the sink.
+docker_resolv_conf() {
+	echo "nameserver 198.18.0.10"
+	cat /etc/resolv.conf
 }
 
 # A port-only bypass rule for 7002 (the sink's bypass port), in keploy.yml.
@@ -239,9 +239,10 @@ for mode in "${MODES[@]}"; do
 		cd "$W" || die cd
 		;;
 	docker)
-		DOCKER_RESOLV=$(docker_resolv)
-		$S mount --bind "$W/resolv.conf" "$DOCKER_RESOLV" || die "bind the sink's resolv.conf over $DOCKER_RESOLV"
-		log "docker's 127.0.0.11 forwards to the sink ($DOCKER_RESOLV)"
+		docker_resolv_conf > "$W/resolv-docker.conf" || die "read /etc/resolv.conf"
+		$S mount --bind "$W/resolv-docker.conf" /etc/resolv.conf || die "bind the sink-first resolv.conf over /etc/resolv.conf"
+		DOCKER_RESOLV=/etc/resolv.conf
+		log "docker's 127.0.0.11 forwards to the sink first ($(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf | paste -sd' '))"
 		log "baseline-docker"
 		sink_start base-docker
 		docker run -d --name riso-base -p 18082:8080 --net keploy-network riso-probe:local $APPARGS >/dev/null || die "baseline container"
