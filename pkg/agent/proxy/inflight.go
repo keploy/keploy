@@ -891,10 +891,11 @@ func (c *trackedConn) NetConn() net.Conn { return c.Conn }
 // application. They are what the socket has received in all (the kernel's
 // count, tcpi_bytes_received, read after v, so a read that returns between
 // the two counts as untaken, never as neither) less what v says the reads
-// returned. That count takes the application's FIN as one: it is taken off
-// once the socket is in a state only a FIN it received leads to, or in
-// TCP_CLOSE (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK ended)
-// after a read returned the stream's end (finReceived). In
+// returned. On Linux that count takes the application's FIN as one: it is
+// taken off once the socket is in a state only a FIN it received leads to, or
+// in TCP_CLOSE (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK ended)
+// after a read returned the stream's end (finCounted); macOS's counts no FIN,
+// and nothing is taken off. In
 // TCP_CLOSE with no end returned the kernel's counts do not tell the FIN from
 // a byte (a TLS layer stops reading at the close_notify before it), so it
 // counts as one until a read returns it or the handler closes the
@@ -917,7 +918,7 @@ func (c *trackedConn) received(v connView) uint64 {
 	if !ok {
 		return v.delivered
 	}
-	if finReceived(state, v.eof) && received > 0 {
+	if finCounted(state, v.eof) && received > 0 {
 		received--
 	}
 	return max(received, v.delivered)
