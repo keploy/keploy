@@ -843,7 +843,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			if dc.searchedTokens(x, keep)[i][t] {
 				note := x.atNote(at)
 				place := x.mock + "'s payload"
-				if f := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
+				if f, _ := dc.fieldOf(x, dc.searched(x, keep), t); f != "" {
 					place = x.mock + " at " + f
 				}
 				place += note
@@ -863,7 +863,7 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// (follows.excusedLive).
 			if !recorded && x.Live() && dc.searchedTokens(*x.live, keep)[i][t] {
 				place := x.mock + "'s payload, as record's full round gave it"
-				if f := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
+				if f, _ := dc.fieldOf(*x.live, dc.searched(*x.live, keep), t); f != "" {
 					place = x.mock + " at " + f + ", as record's full round gave it"
 				}
 				why := word(t, recorded) + " appears in an earlier recording, in " + place + x.atNote(at) + ", where the recording did not give the application that word: keploy cannot tell whether it came from there; " + notClock(v) + ". " + correction(x.mock, false)

@@ -386,7 +386,7 @@ func (f *follows) tookElsewhere(v *valueDrift, t string) string {
 			}
 			for _, y := range []Raw{x, f.liveOf(x, recorded)} {
 				if y.read && f.dc.searchedTokens(y, keep)[i][w] {
-					if fd := f.dc.fieldOf(y, f.dc.searched(y, keep), w); fd != "" {
+					if fd, _ := f.dc.fieldOf(y, f.dc.searched(y, keep), w); fd != "" {
 						return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + " at " + fd
 					}
 					return lacks + v.wordOf(w, recorded) + " stands in " + x.mock + "'s payload"
@@ -712,7 +712,7 @@ func (dc *DriftCache) recordedTook(x Raw, v *valueDrift) string {
 		if !recorded || i >= len(tokens) || !tokens[i][w] {
 			return ""
 		}
-		if f := dc.fieldOf(x, dc.searched(x, true), w); f != "" {
+		if f, _ := dc.fieldOf(x, dc.searched(x, true), w); f != "" {
 			return v.wordOf(w, true) + " stands in " + x.mock + " at " + f + ", as the recording gave it"
 		}
 		return v.wordOf(w, true) + " stands in " + x.mock + "'s payload, as the recording gave it"
