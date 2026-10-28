@@ -824,10 +824,14 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		}
 	}
 	dir := a.proven.dir
+	claimer := a.proven.claim.pid
 	a.provenMu.Unlock()
 	if a.replaying() && gated {
 		a.noteScopeNotRun(id, 0, at, outcome)
 		return models.ScopeBeginResp{V: models.ScopeProtocolVersion, Status: "ok", Action: models.ScopeActionSkip, Reason: reason}, nil
+	}
+	if serr := a.shimRefusal(id, claimer); serr != nil {
+		return models.ScopeBeginResp{}, serr
 	}
 
 	// What judging the test at its end needs is checked before anything is
@@ -958,6 +962,32 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 // process, and the agent stamps each test's begin and end with its own
 // clock, so a pid, a runner's clock, a folder or a suite scope would decide
 // nothing, and a harness that sends them predates the protocol.
+// shimRefusal refuses test id's begin when the hooks intercept through a
+// library each process loads (coreAgent.ShimReporter: macOS's shim) and the
+// test process pid that claimed the run does not carry it: its calls are not
+// captured or mocked, and on a frozen run (TimeFile) it reads another clock
+// than the run's. nil with any other hooks, whose kernel hooks see every
+// process.
+func (a *Agent) shimRefusal(id string, pid int) *models.ScopeError {
+	h, ok := a.Hooks.(coreAgent.ShimReporter)
+	if !ok {
+		return nil
+	}
+	timeFile := TimeFile()
+	armed, why := h.ShimArmed(pid, timeFile)
+	if armed {
+		return nil
+	}
+	if timeFile != "" {
+		return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrClockNotFrozen,
+			fmt.Sprintf("%s: keploy cannot tell that its test process %d runs on this keploy run's clock: %s", id, pid, why),
+			"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
+	}
+	return scopeErr(http.StatusUnprocessableEntity, models.ScopeErrNotInRun,
+		fmt.Sprintf("%s: keploy cannot capture or mock the calls of its test process %d: %s", id, pid, why),
+		"run the tests through keploy mock record or keploy mock replay with a test binary that loads keploy's shim (not hardened-runtime or restricted)")
+}
+
 func oldWireFields(req models.ScopeReq) *models.ScopeError {
 	var sent []string
 	if req.Pid != 0 {
