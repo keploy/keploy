@@ -201,7 +201,9 @@ type Raw struct {
 	// value F gave the application at each field of the payload, by the
 	// field's path. nil where F gave no such view (not served, served
 	// unchanged, or an adapter that does not say), and keploy then reads that
-	// F gave nothing there (fail closed).
+	// F gave nothing there (fail closed); where F served r and no adapter said
+	// what it gave there (viewUnstated), a word a value holds now that may
+	// stand there is refused too (unaccounted).
 	live *Raw
 	// unseen: F served r changed in ways keploy keeps no one view of
 	// (ServedChanged), or with a view it could not read (ServedLive); views
@@ -353,6 +355,17 @@ func (r Raw) ServedAsRecorded() Raw {
 
 // AsRecorded reports whether F served r unchanged (ServedAsRecorded).
 func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
+
+// viewUnstated reports whether F served r and no adapter said what F gave
+// the application there: not as recorded (ServedAsRecorded), with no view
+// (ServedLive) and none it keeps no one view of (ServedChanged). keploy
+// cannot tell what F gave the application there, so a word a value holds now
+// that may stand there is refused, as where a serve's view could not be read
+// (unaccounted): fail closed. Every other rule reads that F gave nothing
+// there. Of a Raw F did not serve it is false: it needs no view.
+func (r Raw) viewUnstated() bool {
+	return r.served && !r.asRecorded && r.live == nil && !r.unseen
+}
 
 // ServedLive is r, which F served (ServedIn, WithServed) changed, with F's
 // view of it: live is RawOf of the mock as F's application sent its request
