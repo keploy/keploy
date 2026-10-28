@@ -246,3 +246,59 @@ func TestAKeyedReadOfAStatementTheTestRanThousandsOfTimesCostsTheSameAtAnySize(t
 		t.Fatalf("with the links off a keyed read looked at up to %d owned positions: the row cannot tell the walk from the links", visited)
 	}
 }
+
+// TestAnIndexWithOwnedKeysFilesTheOpenTestsMocksByThoseAlone: a MockIndex
+// that sets OwnedKeys files the open test's own mocks under exact serving by
+// OwnedKeys alone, never by Keys (MySQL's indexes file them under no key:
+// its matcher reads them through the per-test tier). A keyed read then hands
+// the owned mocks OwnedKeys files under the key, in recorded order, past the
+// answered ones, and none that only Keys files there; OwnedKeys is called
+// once per owned mock per view. Before, the view keyed its copies by Keys,
+// so the read of "even" handed the test's 20 even mocks, and the row fails.
+// The reads run under the verify mode, which recomputes each by the same
+// keys, and again with it off for the count.
+func TestAnIndexWithOwnedKeysFilesTheOpenTestsMocksByThoseAlone(t *testing.T) {
+	ownedCalls := 0
+	firstTen := func(mk *models.Mock) []string {
+		ownedCalls++
+		var i int
+		if _, err := fmt.Sscanf(strings.TrimPrefix(mk.Name, "mock-"), "%d", &i); err != nil {
+			t.Errorf("OwnedKeys was asked for the keys of %q, which keyedSet did not make: %v", mk.Name, err)
+		}
+		if i < 10 {
+			return []string{"first", "first"}
+		}
+		return nil
+	}
+	reads := func(mm *MockManager, mocks []*models.Mock, ix *integrations.MockIndex) {
+		t.Helper()
+		if got := keyedWalk(t, mm, ix, "even"); len(got) != 0 {
+			t.Fatalf("a keyed read of \"even\" handed %d of the open test's mocks (%v); want none: OwnedKeys files them under no such key", len(got), got)
+		}
+		var want []string
+		for _, mk := range mocks[:10] {
+			want = append(want, mk.Name)
+		}
+		if got := keyedWalk(t, mm, ix, "first"); !slices.Equal(got, want) {
+			t.Fatalf("a keyed read of \"first\" handed %v; want %v (OwnedKeys' mocks, in recorded order, each once)", got, want)
+		}
+		if got := mm.exactConsume(mocks[0], true); got != exactServed {
+			t.Fatalf("consume of %s gave %v, want served", mocks[0].Name, got)
+		}
+		if got := keyedWalk(t, mm, ix, "first"); !slices.Equal(got, want[1:]) {
+			t.Fatalf("after %s answered, a keyed read of \"first\" handed %v; want %v", mocks[0].Name, got, want[1:])
+		}
+	}
+	// The reads, under the verify mode.
+	mm, mocks, keyed, _ := keyedSet(t, 40)
+	reads(mm, mocks, &integrations.MockIndex{Keys: keyed.Keys, OwnedKeys: firstTen})
+	// The count, with the verify mode off: it computes keys again on each read.
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false)
+	mm, mocks, keyed, _ = keyedSet(t, 40)
+	ownedCalls = 0
+	reads(mm, mocks, &integrations.MockIndex{Keys: keyed.Keys, OwnedKeys: firstTen})
+	if ownedCalls != len(mocks) {
+		t.Fatalf("OwnedKeys was called %d times over three reads of a view of %d mocks; want %d (once per mock per view)", ownedCalls, len(mocks), len(mocks))
+	}
+}
