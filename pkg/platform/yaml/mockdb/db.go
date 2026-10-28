@@ -421,6 +421,8 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 			}
 			continue
 		}
+		// A document decodes to one mock (nextDoc), so a pass that copies
+		// what it keeps as read (pruneVerdict.asRead) copies the document.
 		for _, mock := range doc.mocks {
 			st.total++
 			keep, err := verdict.judge(mock)
@@ -428,7 +430,12 @@ func (ys *MockYaml) prunePass(ctx context.Context, path, mockFileName string, fo
 				return st, err
 			}
 			if keep {
-				if err := rw.write(mock); err != nil {
+				if verdict.asRead {
+					err = rw.copyDoc(doc)
+				} else {
+					err = rw.write(mock)
+				}
+				if err != nil {
 					return st, err
 				}
 				st.kept++
@@ -572,7 +579,13 @@ func (ys *MockYaml) prunePassGob(ctx context.Context, gobPath string, verdict *p
 
 // DeleteMocks takes the named mocks out of the set's mock file, in the
 // format it is stored in (yaml, json or gob), and keeps every other mock as
-// it is. As UpdateMocks does, it keeps a named mock that a kept mock requires
+// it is: in a yaml or json file each kept document is copied byte for byte
+// (pruneVerdict.asRead), so a mock saved by hand, by another keploy or with
+// fields this keploy does not know is left exactly as it was, and what is
+// read from the file for the mocks that stay (a recording's hash) does not
+// change. The yaml file's first line becomes this keploy's version comment,
+// as on every rewrite. mocks.gob is written again from the decoded mocks,
+// as every gob rewrite is. As UpdateMocks does, it keeps a named mock that a kept mock requires
 // or that a replay serves as an async epoch (prune_deps.go): taking it out
 // would break a recording that stays. It returns, sorted, the named mocks it
 // took out. A set with no mock file, or one it takes none of names out of,
@@ -594,7 +607,7 @@ func (ys *MockYaml) DeleteMocks(ctx context.Context, testSetID string, names []s
 	lock.Lock()
 	defer lock.Unlock()
 
-	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool { return !named[m.Name] }, track: true}
+	verdict := &pruneVerdict{keeps: func(m *models.Mock) bool { return !named[m.Name] }, track: true, asRead: true}
 	gobPath := filepath.Join(path, mockFileName+".gob")
 	var err error
 	if _, statErr := os.Stat(gobPath); statErr == nil {
