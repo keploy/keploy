@@ -181,14 +181,28 @@ func TestACutClockReadIsLearnedAndCheckedAtItsCut(t *testing.T) {
 		}
 	}
 	// An offset learned at a millisecond, against a value written in
-	// nanoseconds: refused up front, naming both resolutions, whatever the
-	// value, never read as a plain read's cut.
+	// nanoseconds: checked at the millisecond (a clock read plus an offset,
+	// then cut, is a clock read, 2026-10-28), as standing for its whole
+	// millisecond: one in the span plus the offset passes, whatever its
+	// nanoseconds; one 395 ms before the span's start plus the offset is
+	// refused, naming the cut.
 	off := models.ClockOffset{Min: 30 * time.Minute, Max: 30*time.Minute + time.Millisecond, Res: time.Millisecond}
-	for _, v := range []time.Time{from.Add(30*time.Minute + 5*time.Millisecond + 7), from.Add(30*time.Minute + 5*time.Millisecond)} {
-		want := "at a resolution of 1ms (both of the learn step's values were whole multiples of it), coarser than the 1ns this value's encoding writes"
-		if ok, why := CheckClockRead("expiresAt", off, ns(v), span, true); ok || !strings.Contains(why, want) {
-			t.Errorf("an offset learned at 1ms, a nanosecond value %s: %v %q; want refused naming 1ms and 1ns", ns(v).Value, ok, why)
+	for _, v := range []time.Time{from.Add(30*time.Minute + 500*time.Millisecond + 7), from.Add(30*time.Minute + 500*time.Millisecond)} {
+		if ok, why := CheckClockRead("expiresAt", off, ns(v), span, true); !ok {
+			t.Errorf("FALSE RED: an offset learned at 1ms, a nanosecond value in the span %s: %v %q; want passed", ns(v).Value, ok, why)
 		}
+	}
+	for _, v := range []time.Time{from.Add(30*time.Minute + 5*time.Millisecond + 7), from.Add(30*time.Minute + 5*time.Millisecond)} {
+		if ok, why := CheckClockRead("expiresAt", off, ns(v), span, true); ok || !strings.HasSuffix(why, "it changed (checked as standing for the whole 1ms the learn step read it cut to)") {
+			t.Errorf("an offset learned at 1ms, a nanosecond value %s: %v %q; want refused naming the 1ms cut", ns(v).Value, ok, why)
+		}
+	}
+	// A window too wide to tell a time to live changed by a minute: refused
+	// saying so, never that the value changed.
+	secOff := models.ClockOffset{Min: 30*time.Minute - 155*time.Millisecond, Max: 30*time.Minute + 368*time.Millisecond, Res: time.Second}
+	wide := Span{From: from, To: from.Add(57 * time.Second)}
+	if ok, why := CheckClockRead("expiresAt", secOff, typed(from.Add(30*time.Minute)), wide, true); ok || !strings.Contains(why, "but this call's window (57s) with the offset's range and three of its cut is no narrower than the minute the offset reads in") || strings.Contains(why, "it changed") {
+		t.Errorf("an offset at a second's cut, a window 57 s wide: %v %q; want refused naming the window", ok, why)
 	}
 }
 
