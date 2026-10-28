@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -221,7 +222,7 @@ func (p *Proxy) logReplayDNSForwarding() {
 		knob = "--global-passthrough"
 	}
 	if knob != "" {
-		p.logger.Info("real egress opened by "+knob+": a DNS mock miss is forwarded to the resolvers in resolv.conf",
+		agent.LogRealEgress(p.logger, knob, "a DNS mock miss is forwarded to the resolvers in resolv.conf",
 			zap.Strings("resolvers", p.dnsUpstreamServers))
 		return
 	}
