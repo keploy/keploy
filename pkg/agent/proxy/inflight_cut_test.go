@@ -79,6 +79,46 @@ func TestAStreamInTheReadThatSpansTheWindowsBeginHoldsTheTestsEnd(t *testing.T) 
 	}
 }
 
+// The floor at that read is the holds taken as it began, not zero: a
+// long-lived stream opened and held in an earlier window, whose DATA keeps
+// arriving while the frame reader is busy, is read in the read that spans
+// the begin together with the test's own stream. The test's end weighs and
+// waits for its own stream only, and once that is answered it is settled
+// though the long-lived stream is still held.
+func TestAReadSpanningTheWindowsBeginLeavesAStreamHeldBeforeItOut(t *testing.T) {
+	const more, call = "DATA stream 1 b", "HEADERS stream 3"
+	p := newStreamParser(t)
+	longLived := p.open("HEADERS stream 1", false) // an earlier window's stream
+	defer longLived()
+	p.send("DATA stream 1 a")
+	if r := <-p.got; r != "DATA stream 1 a" {
+		t.Fatalf("read %q", r)
+	}
+	p.send(more)
+	waitInq(t, p.proxy, len(more))
+	p.tr.beginWindow()
+	p.send(call)
+	waitInq(t, p.proxy, len(more)+len(call))
+	go readOnce(p.proxy, p.got)
+	if r := <-p.got; r != more+call {
+		t.Fatalf("one read returned %q, want %q", r, more+call)
+	}
+	own := p.proxy.Hold() // the test's own stream
+	go readOnce(p.proxy, p.got)
+	waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
+	sc := p.tr.scope() // the test's end
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's own stream held: scope pending %d, want 1", n)
+	}
+	if got := sc.PendingProgress(true)[p.proxy.id]; got != 1 {
+		t.Fatalf("the end weighs %d hold(s), want 1 (the test's own, not the long-lived stream held before its window)", got)
+	}
+	own()
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("the test's own stream answered, the long-lived one from before its window still held: scope pending %d, want 0", n)
+	}
+}
+
 // The same read spanning an end's cut: the test's last request is in the
 // socket as its end cuts, a later stream (the next test's, or a background
 // one) arrives before the reader reads, and one read returns both. The end's

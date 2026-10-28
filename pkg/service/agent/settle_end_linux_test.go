@@ -181,6 +181,7 @@ func TestABeginDoesNotWaitForTheCallsMadeSinceThePreviousEnd(t *testing.T) {
 // case's, never this one's (the application gets the test case's request
 // only once its view is installed).
 func TestKeployTestsOpenWaitsForTheCallsMadeBefore(t *testing.T) {
+	w := stallWake(t)
 	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
 	ctx := context.Background()
 	for _, open := range []struct {
@@ -198,7 +199,12 @@ func TestKeployTestsOpenWaitsForTheCallsMadeBefore(t *testing.T) {
 			select {
 			case err := <-opened:
 				t.Fatalf("opened while a call made before was in flight: %v", err)
-			case <-time.After(50 * time.Millisecond):
+			case <-w.blocked: // the open's settle waits for that call
+			}
+			select {
+			case err := <-opened:
+				t.Fatalf("opened while a call made before was in flight: %v", err)
+			default:
 			}
 			p.set(0, 0)
 			require.NoError(t, <-opened)
