@@ -188,6 +188,46 @@ type ClientEvents interface {
 	SilentHangUp(err error)
 }
 
+// HangUpHolder is a connection keploy's proxy keeps (its accepted ones)
+// that a test's end waits on, by events, while a client's hang-up on a TLS
+// handshake keploy makes over it is not yet told: from the handshake's
+// beginning until its failure is told (ClientEvents.HandshakeFailed), or,
+// under the proven switch, until the client's first byte after it, or its
+// silent hang-up is told (SilentHangUp); without the switch, until the
+// handshake is done. While held, a socket that shows the client gone (its
+// end of the stream, or a reset, received and not yet told) holds work: a
+// handler that has not run since the client hung up -- on a loaded host, as
+// long as the scheduler makes it -- is waited for before the test's scope
+// ends, so the hang-up is told in the scope it happened in and charged to
+// that test, never dropped as one after it, nor counted in the next.
+type HangUpHolder interface {
+	HoldHangUp() (release func())
+}
+
+// holdHangUp holds conn's hang-up (HangUpHolder) for ev, on the first
+// connection of conn's wrapper chain that holds one; a release that does
+// nothing when none does, or ev is nil.
+func holdHangUp(conn net.Conn, ev ClientEvents) (release func()) {
+	if ev == nil {
+		return func() {}
+	}
+	c := conn
+	for i := 0; c != nil && i < 16; i++ { // a wrapper chain, never a cycle
+		if h, ok := c.(HangUpHolder); ok {
+			return h.HoldHangUp()
+		}
+		switch u := c.(type) {
+		case interface{ NetConn() net.Conn }:
+			c = u.NetConn()
+		case interface{ Unwrap() net.Conn }:
+			c = u.Unwrap()
+		default:
+			return func() {}
+		}
+	}
+	return func() {}
+}
+
 // clientEventsKey carries WithClientEvents's events.
 type clientEventsKey struct{}
 
@@ -263,6 +303,15 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	if ev != nil {
 		ev.HandshakeBegin()
 	}
+	// The client's hang-up holds the connection's work until it is told
+	// (HangUpHolder): released as this returns, after a failure is told,
+	// or handed to the record-at-a-time reads below.
+	release := holdHangUp(conn, ev)
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 	ca := getActiveCA(logger)
 	if ca == nil {
 		err := fmt.Errorf("no MITM CA available for this run")
@@ -328,6 +377,7 @@ func HandleTLSConnection(ctx context.Context, logger *zap.Logger, conn net.Conn,
 	if records != nil {
 		if ev != nil {
 			records.silent = ev.SilentHangUp
+			records.release, release = release, nil
 		}
 		records.handshakeDone()
 	}
