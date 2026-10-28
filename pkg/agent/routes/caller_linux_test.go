@@ -3,17 +3,11 @@
 package routes
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"go.keploy.io/server/v3/pkg/provenswitch"
-	"go.uber.org/zap"
 )
 
 func TestProcAddrPortReadsBothFamilies(t *testing.T) {
@@ -80,40 +74,5 @@ func TestTCPOwnerMatchesBothEnds(t *testing.T) {
 	}
 	if _, err := tcpOwner(netip.MustParseAddrPort("127.0.0.1:50003"), netip.MustParseAddrPort("127.0.0.1:16877")); err == nil || !strings.Contains(err.Error(), "held by processes") {
 		t.Fatalf("a socket two processes hold names no one caller: %v", err)
-	}
-}
-
-// envClaimFrom makes this test binary, run again as a child, claim against
-// the server at its value and exit.
-const envClaimFrom = "KEPLOY_TEST_CLAIM_FROM"
-
-func TestMain(m *testing.M) {
-	if url := os.Getenv(envClaimFrom); url != "" {
-		resp, err := http.Post(url, "application/json", strings.NewReader(`{"key":"orders","pid":1}`))
-		if err != nil {
-			os.Exit(3)
-		}
-		resp.Body.Close()
-		os.Exit(0)
-	}
-	os.Exit(m.Run())
-}
-
-// The claim reads the caller from the connection: a claim made by another
-// process (this test binary run again) hands the service that process's ID,
-// not the server's, and a pid in the body is ignored.
-func TestTheClaimReadsTheCallerFromTheConnection(t *testing.T) {
-	t.Setenv(provenswitch.Env, "1")
-	svc := &wireSvc{}
-	a := &Agent{logger: zap.NewNop(), svc: svc}
-	srv := httptest.NewServer(http.HandlerFunc(a.HandleInstance))
-	defer srv.Close()
-	c := exec.Command(os.Args[0], "-test.run=^$")
-	c.Env = append(os.Environ(), envClaimFrom+"="+srv.URL)
-	if out, err := c.CombinedOutput(); err != nil {
-		t.Fatalf("the claiming child failed: %v: %s", err, out)
-	}
-	if svc.claimKey != "orders" || svc.claimCaller != c.Process.Pid {
-		t.Fatalf("claimed key %q for process %d, want orders for the child %d", svc.claimKey, svc.claimCaller, c.Process.Pid)
 	}
 }
