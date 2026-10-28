@@ -157,6 +157,23 @@ type ProxyConnsReporter interface {
 	WaitAppConnsSettled(ctx context.Context, n uint64) error
 }
 
+// ShimReporter is the optional extension implemented by hooks whose
+// interception is a library each process of the run loads (macOS's shim,
+// which says HELLO from every process it arms in). Under the proven switch the
+// agent asks it at each begin whether the test process carries the shim: one
+// that does not is neither captured nor on the run's clock, and its tests are
+// refused rather than judged. With hooks that do not implement it (Linux,
+// whose kernel hooks see every process), nothing is asked.
+type ShimReporter interface {
+	// ShimArmed reports whether the program process pid runs now announced
+	// keploy's shim, and, when timeFile is not "", that the shim reads the
+	// clock of the run whose clock record timeFile is; why not, otherwise.
+	// It never waits: the shim announces itself before the program's own
+	// code runs, so a process that has begun a test has announced itself or
+	// never will.
+	ShimArmed(pid int, timeFile string) (bool, string)
+}
+
 // ListenerCountTaker is the optional extension implemented by proxies that can
 // have their listener counted by the hooks. The agent hands it the hooks
 // (ListenerCounter), under the proven switch only, before StartProxy; the

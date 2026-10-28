@@ -123,6 +123,10 @@ const (
 	ScopeErrNoCaller = "caller_unknown"
 	// ScopeErrInternal: the agent failed to act on a valid call.
 	ScopeErrInternal = "internal"
+	// ScopeErrClockNotFrozen: the test process runs without keploy's clock
+	// on a run whose clock keploy froze (macOS: the shim is not in it), so
+	// its tests would read another clock than the recordings were made on.
+	ScopeErrClockNotFrozen = "clock_not_frozen"
 )
 
 // ScopeEvidence is what keploy saw of one replayed test that fails it: the
