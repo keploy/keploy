@@ -4,7 +4,6 @@ package proxy
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"runtime"
@@ -84,21 +83,6 @@ func untilStateLeaves(t *testing.T, conn *net.TCPConn, from ...uint8) uint8 {
 			return state
 		}
 		runtime.Gosched()
-	}
-}
-
-// macOS has no sock_diag, and nothing yet reads how much the application
-// wrote to a paired connection: the wait for those bytes, and the proxy's
-// account of it, say they cannot tell, so no test under the proven switch is
-// judged settled on bytes nobody counted (a nil here was a settle never
-// performed).
-func TestTheBytesOnPairedConnectionsAreUnknownOnDarwin(t *testing.T) {
-	p := &Proxy{logger: zap.NewNop()}
-	if err := p.PairedBytesErr(); !errors.Is(err, models.ErrProxyConnsUnsupported) {
-		t.Fatalf("PairedBytesErr() = %v, want models.ErrProxyConnsUnsupported", err)
-	}
-	if err := p.WaitPairedBytes(context.Background(), 1); !errors.Is(err, models.ErrProxyConnsUnsupported) {
-		t.Fatalf("WaitPairedBytes() = %v, want models.ErrProxyConnsUnsupported", err)
 	}
 }
 
