@@ -236,8 +236,13 @@ func TestACutLearnedInTheApplicationsZoneIsCheckedInItOnAnyMachine(t *testing.T)
 	}
 	oldU := u
 	oldU.AppZone = ""
-	if ok, why := CheckClockRead(wp, oldU, istHour, s, true); !ok {
-		t.Errorf("the old file, replayed in IST: the IST hour refused (%s); want it read in the replay's zone, as before", why)
+	if ok, why := CheckClockRead(wp, oldU, istHour, s, true); ok || !strings.Contains(why, "keploy could not read the zone of the process that made this call, and the learn step named none") {
+		t.Errorf("the old file, replayed where the agent is in IST and the application's zone is unread: the IST hour %v %q; want refused, saying neither zone is known", ok, why)
+	}
+	own := s
+	own.Own = true
+	if ok, why := CheckClockRead(wp, oldU, istHour, own, true); !ok {
+		t.Errorf("the old file, replayed where the application's own zone is IST: the IST hour refused (%s); want it read in the application's zone", why)
 	}
 
 	// A minute's cut is one in every zone: no zone named.
