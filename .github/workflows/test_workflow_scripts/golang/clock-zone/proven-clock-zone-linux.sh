@@ -14,15 +14,30 @@
 #
 # Recorded under KEPLOY_PROVEN=1 with the app in Asia/Kolkata (+05:30). An
 # OSS keploy has no learn round (only a record with auto-replay learns), so
-# the script writes the `clocks` block into each charge mock as learn writes
-# it for a recording made past 05:30 IST: plain reads (min and max 0s),
-# learned with the application in +05:30 (app_zone), of a wall clock of no
-# zone; body.day cut to a day (iso-date) and read in either UTC or the
-# application's zone (zone: either: the call's day is one in both there),
-# body.hour cut to an hour (iso-hour) and read in the application's zone
-# alone (zone: app: its hour is another in UTC). Before 05:30 IST learn
-# names the day's zone app too, and in the hour of midnight it cuts the
-# hour to a day (its value T00 shows no finer cut). Replayed with the
+# the `clocks` block of each charge mock is learned by the learn step's code
+# and written onto the mocks by the code that writes what record's full
+# round learned (learnclocks/main.go, built from the keploy module as one
+# file; its header lists what of the HTTP learn step it does not run). It
+# plays record's full round for each charge: the body's day and hour, in
+# the app's layouts as typed below from the app's main.go (and checked
+# against each recorded call's own reading in its zone), read at 23:59:30
+# IST on the mock's day and a FullRoundLead later, learned in the zone
+# keploy reads from the app's TZ. So a change to what learn learns of a
+# read of the clock, how it merges it or how the block is written changes
+# what this lane replays and breaks it, where a block typed here would not.
+# It is the block learn writes for a recording made at 23:59:30 IST, not for
+# this one (the lead moves this recording's day and hour only within 61.5 s
+# of their end). Today: plain reads (min and max 0s), learned with the
+# application in +05:30 (app_zone), of a wall clock of no zone; body.day cut
+# to a day (iso-date) and read in either UTC or the application's zone
+# (zone: either: the call's day is one in both there), body.hour cut to an
+# hour (iso-hour) and read in the application's zone alone (zone: app: its
+# hour is another in UTC). A recording before 05:30 IST would name the day's
+# zone app, and one in the hour after midnight cuts the hour to a day: this
+# lane exercises neither. Learning itself, end to end (record, auto-replay
+# learns the clocks, replay with the app's TZ varied), is proven in
+# enterprise's end-to-end lane, which lands with its run clock's
+# AppClockRunBegan; this lane is the replay side's contract. Replayed with the
 # payments service down:
 #   1. KEPLOY_PROVEN=1, the app in Asia/Kolkata: the set passes. The clock
 #      call is the set's first test's, so it also shows the call has a
@@ -58,7 +73,8 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP=8092
 DEP=9098
 REC_ZONE=Asia/Kolkata
-REC_ZONE_NAME=+05:30
+# The keploy module's root, from which learn's own code runs.
+ROOT="$(cd "$SRC/../../../../.." && pwd)"
 FAIL=0
 fail() {
     echo "::error::$*"
@@ -68,6 +84,8 @@ fail() {
 WORK="$(mktemp -d)"
 echo "work dir: $WORK"
 (cd "$SRC" && go build -o "$WORK/order-app" ./app && go build -o "$WORK/payments-svc" ./payments) || { echo "::error::build failed"; exit 1; }
+(cd "$ROOT" && go build -o "$WORK/learnclocks" ./.github/workflows/test_workflow_scripts/golang/clock-zone/learnclocks/main.go) ||
+    { echo "::error::cannot build learn's clocks writer (learnclocks) from the keploy module at $ROOT"; exit 1; }
 cd "$WORK" || exit 1
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -187,15 +205,13 @@ own
 MOCKS=keploy/test-set-0/mocks.yaml
 [ "$(grep -c '^kind: Http$' "$MOCKS" 2>/dev/null)" -ge 2 ] || { echo "::error::the charge calls were not recorded"; exit 1; }
 
-# OSS learns nothing at record: a clocks block record wrote would be
-# overwritten below, hiding that it learned.
-grep -q '^clocks:' "$MOCKS" && fail "keploy record wrote a clocks block, which OSS never learns: the fixture below would overwrite it"
-# What learn writes for the two places past 05:30 IST, learned with the app
-# in +05:30.
-REC_ZONE_NAME="$REC_ZONE_NAME" yq -i 'with(select(.kind == "Http"); .clocks = {
-  "body.day": {"min": "0s", "max": "0s", "res": "24h0m0s", "zone": "either", "layout": "iso-date", "app_zone": strenv(REC_ZONE_NAME)},
-  "body.hour": {"min": "0s", "max": "0s", "res": "1h0m0s", "zone": "app", "layout": "iso-hour", "app_zone": strenv(REC_ZONE_NAME)}})' "$MOCKS" ||
-    { echo "::error::cannot write the clocks block"; exit 1; }
+# OSS learns nothing at record: a clocks block record wrote would be met
+# with what learnclocks writes below, hiding that it learned.
+grep -q '^clocks:' "$MOCKS" && fail "keploy record wrote a clocks block, which OSS never learns: what learnclocks writes below would be met with it"
+# What learn learns of the two places and writes onto the mocks, in the
+# app's layouts (its main.go writes now.Format of these, in its TZ).
+KEPLOY_PROVEN=1 ./learnclocks -path keploy -set test-set-0 -zone "$REC_ZONE" -place body.day=2006-01-02 -place body.hour=2006-01-02T15 ||
+    { echo "::error::learnclocks wrote no clocks block (its reason above)"; exit 1; }
 [ "$(grep -c '^clocks:$' "$MOCKS")" -ge 2 ] || { echo "::error::the clocks block is not on the charge mocks"; cat "$MOCKS"; exit 1; }
 grep -m1 -A14 '^clocks:$' "$MOCKS"
 
