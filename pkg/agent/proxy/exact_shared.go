@@ -149,9 +149,34 @@ func (m *MockManager) OwnedUnanswered() ([]*models.Mock, bool) {
 	return v.unanswered(""), true
 }
 
+// OwnedRecordings is the open test's own recordings, answered or not, in
+// OwnedUnanswered's order, and the number of the view that shows them
+// (exactView.gen): the list is the view's own and never changes while the
+// view lasts, and each test's open installs a view with a new number. The
+// caller reads it and never changes it. False while no test is open.
+func (m *MockManager) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	v := m.exactView()
+	if v == nil || v.test == "" {
+		return 0, nil, false
+	}
+	return v.gen, v.owned, true
+}
+
+// OwnedUnansweredAt is the positions of at, in OwnedRecordings of the view
+// numbered view, whose recordings have not answered, in at's order: what
+// OwnedUnanswered reads of them now. False when that view is not the open
+// test's now.
+func (m *MockManager) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	v := m.exactView()
+	if v == nil || v.test == "" || v.gen != view {
+		return nil, false
+	}
+	return v.unansweredAt(at), true
+}
+
 var _ integrations.SharedReads = (*MockManager)(nil)
 
-// SharedGeneration, SharedMocks and OwnedUnanswered are the manager's while
+// SharedGeneration, SharedMocks and the owned reads are the manager's while
 // the staging is still h's call's after they were read, and report false
 // once it moved, when h reads nothing (heldScope.held).
 func (h *heldScope) SharedGeneration(kind models.Kind) (integrations.SharedGen, bool) {
@@ -178,9 +203,25 @@ func (h *heldScope) OwnedUnanswered() ([]*models.Mock, bool) {
 	return owned, true
 }
 
+func (h *heldScope) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	view, owned, ok := h.MockManager.OwnedRecordings()
+	if !ok || h.moved() {
+		return 0, nil, false
+	}
+	return view, owned, true
+}
+
+func (h *heldScope) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	live, ok := h.MockManager.OwnedUnansweredAt(view, at)
+	if !ok || h.moved() {
+		return nil, false
+	}
+	return live, true
+}
+
 var _ integrations.SharedReads = (*heldScope)(nil)
 
-// SharedGeneration, SharedMocks and OwnedUnanswered are the store's. They
+// SharedGeneration, SharedMocks and the owned reads are the store's. They
 // report something only while a test is open, when the view passes through
 // to the store (exact serving, passThrough) and narrows no read by its
 // worker's names.
@@ -201,6 +242,20 @@ func (s *scopedMockDb) SharedMocks() (perTest, session []*models.Mock, ok bool) 
 func (s *scopedMockDb) OwnedUnanswered() ([]*models.Mock, bool) {
 	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok {
 		return sr.OwnedUnanswered()
+	}
+	return nil, false
+}
+
+func (s *scopedMockDb) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok {
+		return sr.OwnedRecordings()
+	}
+	return 0, nil, false
+}
+
+func (s *scopedMockDb) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	if sr, ok := s.MockMemDb.(integrations.SharedReads); ok {
+		return sr.OwnedUnansweredAt(view, at)
 	}
 	return nil, false
 }

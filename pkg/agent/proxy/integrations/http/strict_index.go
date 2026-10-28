@@ -113,14 +113,17 @@ func strictKey(m *models.Mock, n strictNoise) string {
 type strictIndexes struct {
 	genIndexes[*strictIndex]
 	shared genIndexes[*strictIndex]
+	// owned is the index of the open test's own recordings beside shared.
+	owned ownedIndexes[*strictOwned]
 }
 
 // strictLook is the strict pass's indexed read for one call (learnLook's
 // kind): an index, and for an index of the shared part of an open test's
-// reads, the test's unanswered HTTP recordings of a request read for the
-// call (owned), in their order, which lead each read; ownedVars are those
-// of them that declare variables (strictIndex.vars). gen is the staging
-// generation the read is of.
+// reads, the test's unanswered HTTP recordings the call of the sieve's
+// method and path may be, read for the call through the index of the test's
+// own (strictOwned), in their order, which lead each read (owned);
+// ownedVars are the test's unanswered ones that declare variables
+// (strictIndex.vars). gen is the staging generation the read is of.
 type strictLook struct {
 	ix        *strictIndex
 	shared    bool
@@ -129,9 +132,10 @@ type strictLook struct {
 	gen       uint64
 }
 
-// of is the strict pass's indexed read of what db reads now, for base, or
-// false where the call reads the store instead (learnIndexes.of's rule).
-func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise) (strictLook, bool) {
+// of is the strict pass's indexed read of what db reads now, for base, for a
+// call of the sieve's method and path, or false where the call reads the
+// store instead (learnIndexes.of's rule).
+func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise, s strictSieve) (strictLook, bool) {
 	url := urlNoiseKey(n.url)
 	if sr, ok := db.(integrations.SharedReads); ok {
 		var perTest, session []*models.Mock
@@ -145,17 +149,19 @@ func (x *strictIndexes) of(base, db integrations.MockMemDb, n strictNoise) (stri
 			return buildStrictIndex(key.gen, perTest, session, n)
 		})
 		if ok {
-			gen, owned, ok := ownedRead(sr, key)
+			own, view, owned, ok := x.owned.of(base, sr, url, func(owned []*models.Mock) *strictOwned { return buildStrictOwned(owned, n) })
+			if !ok {
+				return strictLook{}, false
+			}
+			gen, live, ok := ownedLive(sr, key, view, own.at(s))
 			if !ok {
 				return strictLook{}, false
 			}
 			look := strictLook{ix: ix, shared: true, gen: gen}
-			for _, m := range FilterHTTPMocks(owned) {
-				if hasVariables(m) {
+			for _, p := range live {
+				if m := owned[p]; hasVariables(m) {
 					look.ownedVars = append(look.ownedVars, m)
-					continue
-				}
-				if m.Spec.HTTPReq != nil {
+				} else {
 					look.owned = append(look.owned, m)
 				}
 			}
@@ -213,11 +219,9 @@ func (l strictLook) candidates(s strictSieve, n strictNoise, mockSpent func(stri
 	ps := l.ix.positions(s)
 	var owned []*models.Mock
 	if l.shared {
+		// l.owned is the test's own the call may be already (strictOwned.at).
 		for _, m := range l.owned {
-			if string(m.Spec.HTTPReq.Method) != s.method || spent(m) {
-				continue
-			}
-			if learnsURL(m) || strictKey(m, n) == s.method+" "+s.masked {
+			if !spent(m) {
 				owned = append(owned, m)
 			}
 		}
@@ -290,7 +294,8 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 		return nil, false, nil
 	}
 	scope := readVarScope(db)
-	look, ok := h.strictIx.of(base, db, n)
+	sieve := newStrictSieve(input, n)
+	look, ok := h.strictIx.of(base, db, n, sieve)
 	if !ok {
 		return nil, false, nil
 	}
@@ -327,7 +332,6 @@ func (h *HTTP) strictIndexed(ctx context.Context, input *req, db, base integrati
 		}
 	}
 	live := liveDestination(ctx, input)
-	sieve := newStrictSieve(input, n)
 	cands := look.candidates(sieve, n, mockSpent, spent)
 	strictVisits.Add(int64(len(cands)))
 	var fits []*models.Mock

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -489,6 +490,37 @@ func (d *sharedVarDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 
 func (d *sharedVarDb) OwnedUnanswered() ([]*models.Mock, bool) { return slices.Clone(d.perTest), true }
 
+func (d *sharedVarDb) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	return fakeOwnedView(d.OwnedUnanswered())
+}
+
+func (d *sharedVarDb) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	return fakeOwnedAt(view, at)
+}
+
+// fakeViews numbers the views of the fake stores' owned reads.
+var fakeViews atomic.Uint64
+
+// fakeOwnedView is a fake store's OwnedRecordings (integrations.SharedReads)
+// from what its OwnedUnanswered reads now: each read is a view of its own,
+// holding only unanswered recordings, so a parser files the test's own
+// afresh on each call, and reads it at once (fakeOwnedAt).
+func fakeOwnedView(owned []*models.Mock, ok bool) (uint64, []*models.Mock, bool) {
+	if !ok {
+		return 0, nil, false
+	}
+	return fakeViews.Add(1), owned, true
+}
+
+// fakeOwnedAt is a fake store's OwnedUnansweredAt of a view fakeOwnedView
+// gave: every position of it, which the call read just before.
+func fakeOwnedAt(view uint64, at []int) ([]int, bool) {
+	if view == 0 {
+		return nil, false
+	}
+	return slices.Clone(at), true
+}
+
 func (d *sharedVarDb) GetSessionMocks() ([]*models.Mock, error) {
 	out := slices.Clone(d.perTest)
 	for _, m := range d.session {
@@ -768,16 +800,16 @@ type racedSharedDb struct {
 	ownedReads int
 }
 
-func (d *racedSharedDb) OwnedUnanswered() ([]*models.Mock, bool) {
+func (d *racedSharedDb) OwnedRecordings() (uint64, []*models.Mock, bool) {
 	d.ownedReads++
 	if d.ownedReads == 1 && d.closeOnce {
-		return nil, false
+		return 0, nil, false
 	}
-	owned, ok := d.sharedVarDb.OwnedUnanswered()
+	view, owned, ok := d.sharedVarDb.OwnedRecordings()
 	if d.ownedReads == 1 && d.restage != nil {
 		d.session, d.gen = d.restage, d.gen+1
 	}
-	return owned, ok
+	return view, owned, ok
 }
 
 // A call whose read of the open test's recordings meets the test's close, or
@@ -835,6 +867,14 @@ func (d *sharedOwnDb) SharedMocks() (perTest, session []*models.Mock, ok bool) {
 }
 
 func (d *sharedOwnDb) OwnedUnanswered() ([]*models.Mock, bool) { return slices.Clone(d.perTest), true }
+
+func (d *sharedOwnDb) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	return fakeOwnedView(d.OwnedUnanswered())
+}
+
+func (d *sharedOwnDb) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	return fakeOwnedAt(view, at)
+}
 
 func (d *sharedOwnDb) GetSessionMocks() ([]*models.Mock, error) {
 	return append(slices.Clone(d.perTest), d.shared...), nil

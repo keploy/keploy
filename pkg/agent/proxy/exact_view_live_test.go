@@ -94,7 +94,8 @@ func liveMock(name string, kind models.Kind, at time.Time, session bool) *models
 // shares), claims of shared recordings by another test, and stagings that
 // give those claims back, every per-test read of every kind and tier
 // (unanswered, rangeUnanswered whole and stopped early, the manager's walk)
-// gives what a walk of every owned position gives, with the verify mode on;
+// gives what a walk of every owned position gives, with the verify mode on,
+// as does the owned read of random positions (OwnedUnansweredAt) of them;
 // and the manager's walk, which reads the staged tier after the test's own,
 // gives what its whole read gives.
 func TestPerTestReadsGiveTheWalksAnswerOverRandomConsumesAndClaims(t *testing.T) {
@@ -175,6 +176,29 @@ func TestPerTestReadsGiveTheWalksAnswerOverRandomConsumesAndClaims(t *testing.T)
 						t.Fatalf("%s: rangeUnanswered reported %v stopping after %d of %d", what, whole, len(early), len(want))
 					}
 				}
+			}
+			// The owned read of positions (OwnedUnansweredAt) of random
+			// positions, in random order: those of them whose recordings
+			// the walk gives, in that order.
+			view, list, ok := mm.OwnedRecordings()
+			if !ok || len(list) != len(v.owned) {
+				t.Fatalf("round %d step %d: the open test's recordings read %d (%v); want its %d", round, step, len(list), ok, len(v.owned))
+			}
+			at := rng.Perm(len(list))[:rng.Intn(len(list)+1)]
+			v.mu.Lock()
+			unanswered := v.unansweredWalkLocked("", false, 0, len(v.owned))
+			v.mu.Unlock()
+			var wantAt []int
+			for _, i := range at {
+				if slices.Contains(unanswered, list[i]) {
+					wantAt = append(wantAt, i)
+				}
+			}
+			if gotAt, ok := mm.OwnedUnansweredAt(view, at); !ok || !slices.Equal(gotAt, wantAt) {
+				t.Fatalf("round %d step %d: the owned read of positions %v gave %v (%v); want %v", round, step, at, gotAt, ok, wantAt)
+			}
+			if _, ok := mm.OwnedUnansweredAt(view+1, at); ok {
+				t.Fatalf("round %d step %d: the owned read of another view's positions was answered", round, step)
 			}
 			all, err := mm.GetPerTestMocksInWindow()
 			if err != nil {

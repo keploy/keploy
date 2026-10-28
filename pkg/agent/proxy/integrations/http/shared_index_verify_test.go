@@ -58,6 +58,14 @@ func (d *tierDb) OwnedUnanswered() ([]*models.Mock, bool) {
 	return out, true
 }
 
+func (d *tierDb) OwnedRecordings() (uint64, []*models.Mock, bool) {
+	return fakeOwnedView(d.OwnedUnanswered())
+}
+
+func (d *tierDb) OwnedUnansweredAt(view uint64, at []int) ([]int, bool) {
+	return fakeOwnedAt(view, at)
+}
+
 func (d *tierDb) GetSessionMocks() ([]*models.Mock, error) {
 	owned, _ := d.OwnedUnanswered()
 	return append(owned, d.session...), nil
