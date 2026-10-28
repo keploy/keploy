@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/pkg"
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // These rows run keploy mock replay's staging against the agent's on-disk
@@ -74,7 +76,7 @@ func (p *diskServingProxy) callSettled(t *testing.T, path string) (int, string) 
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	acc := make(chan net.Conn, 1)
 	go func() { c, _ := ln.Accept(); acc <- c }()
 	app, err := net.Dial("tcp", ln.Addr().String())
@@ -91,10 +93,10 @@ func (p *diskServingProxy) callSettled(t *testing.T, path string) (int, string) 
 	resp, err := nethttp.ReadResponse(bufio.NewReader(app), nil)
 	require.NoError(t, err)
 	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	app.Close()
+	_ = resp.Body.Close()
+	_ = app.Close()
 	<-done
-	prox.Close()
+	_ = prox.Close()
 	return resp.StatusCode, string(b)
 }
 
@@ -127,7 +129,7 @@ func storeStream(t *testing.T, a *Agent, n int, mock func(i int) *models.Mock) *
 				return
 			}
 		}
-		pw.Close()
+		_ = pw.Close()
 	}()
 	dec := gob.NewDecoder(pr)
 	var header models.MockStreamHeader
@@ -249,6 +251,24 @@ func TestMockReplayStagesOnlyWhatNoTestOwns(t *testing.T) {
 	code, body = p.call(t, "/late")
 	require.Equal(t, 200, code)
 	require.Equal(t, "late", body)
+}
+
+// keploy mock replay's staging asks for the strict window's staging load (the
+// pool and what came before the set's first test), but it is no user's strict
+// window: it prints nothing of the strict window or of its opt-out
+// (KEPLOY_STRICT_MOCK_WINDOW=0), whose advice is keploy test's.
+func TestMockReplayStagingPrintsNoStrictWindowNotice(t *testing.T) {
+	require.True(t, pkg.IsStrictMockWindow(true), "precondition: the strict window is on in this process")
+	a, _ := diskReplayAgent(t)
+	core, logs := observer.New(zap.InfoLevel)
+	a.logger = zap.New(core)
+	take := decodes(replaySet(t, a))
+	ctx := context.Background()
+	require.NoError(t, a.SetRecordedWindows(ctx, replayWindows))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"boot", "gap", "late"}}))
+	claimSelf(t, a)
+	require.Equal(t, []string{"boot", "gap", "late"}, take(), "the staging decoded a test's own recordings")
+	require.Zero(t, logs.FilterMessageSnippet("strict mock-window").Len(), "mock replay's staging printed the strict window's notice")
 }
 
 // A pool slice the CLI sends after the set is staged, naming a recording the

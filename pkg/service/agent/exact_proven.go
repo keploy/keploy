@@ -116,6 +116,7 @@ func (a *Agent) stageForExactServing(ctx context.Context) (bool, error) {
 		AfterTime:              models.BaseTime,
 		BeforeTime:             time.Now(),
 		StrictMockWindow:       true,
+		ExactStaging:           true,
 		FirstRecordedTestStart: first,
 	}
 	if err := a.stageMocks(ctx, params, names, nil); err != nil {

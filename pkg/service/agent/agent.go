@@ -2099,7 +2099,11 @@ func (a *Agent) mocksForParams(ctx context.Context, params models.MockFilterPara
 	// agent logs for "strict mock window enabled" find hits regardless of
 	// which route they used — previously the log fired only on the per-call
 	// flag, making env-only opt-ins invisible.
-	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled {
+	//
+	// keploy mock replay's own staging (params.ExactStaging) is no user's
+	// strict window: the notice, about keploy test's per-test windows, is
+	// not printed for it.
+	if strictEnabled := pkg.IsStrictMockWindow(params.StrictMockWindow); strictEnabled && !params.ExactStaging {
 		// Fire the activation message at most once per agent process
 		// (sync.Once). Info (project logging policy disallows Warn for
 		// expected-default state); the escape-hatch names are embedded
