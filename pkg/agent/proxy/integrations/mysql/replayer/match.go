@@ -131,6 +131,10 @@ func getQueryStructureCached(sql string) (string, error) {
 // drifted outside known noise (strictGate.allowsDrift).
 const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark it under test.globalNoise.requestBody or let an auto-replay learn it; otherwise the call changed since it was recorded: re-record the test."
 
+// exactLiteralNextSteps is the same, for a COM_QUERY whose inline literals
+// drifted (strictGate.allowsLiterals).
+const exactLiteralNextSteps = "Each recording of this statement was made with other inline literals (the listed fields, by position), which are not noise: keploy does not answer a call with another call's rows. If the application inlines a value that changes on every run, mark it under test.globalNoise.requestBody or let an auto-replay learn it; otherwise the call changed since it was recorded: re-record the test."
+
 // sameQueryStructure reports whether two statements parse to the same tree
 // shape (getQueryStructure: identifier-blind). Neither parsing is no.
 func sameQueryStructure(a, b string) bool {
@@ -475,7 +479,14 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// parameter answers it only when it ran the command's own statement.
 	// For a COM_QUERY or COM_STMT_PREPARE that is the same text once inline
 	// literals are masked (maskSQLLiterals: a COM_QUERY's literals are its
-	// parameters). For a COM_STMT_EXECUTE it is the same prepared statement
+	// parameters), and a COM_QUERY's recording answers only when every
+	// literal that differs, by position, and every query attribute the
+	// statement reads, is configured or learned noise, comments aside
+	// (strictGate.allowsLiterals): with another literal it is the rows of
+	// another call. A PREPARE's recording answers with
+	// another literal: its answer is the statement's metadata, and each
+	// EXECUTE of the statement is matched on the live text. For a
+	// COM_STMT_EXECUTE it is the same prepared statement
 	// (queryExact: sqlStatementIdentity, case-insensitive), which the FIFO
 	// candidate is, so no EXECUTE is answered by score; and the FIFO
 	// candidate answers only when every parameter that differs is
@@ -1365,6 +1376,13 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							if qp, qok := mockReq.PacketBundle.Message.(*mysql.QueryPacket); qok {
 								bestPartialQuery = qp.Query
 							}
+							// Under exact serving a recording of the statement
+							// made with other inline literals answers only when
+							// every literal that differs is noise
+							// (sameStatementOnly, allowsLiterals).
+							if sameStatementOnly && !gate.allowsLiterals(mock) {
+								continue
+							}
 							// Structure-matched-but-text-drifted candidate: under
 							// strict it may only be served when the drift (body.query
 							// / attribute values) is covered by learned/user noise.
@@ -2132,6 +2150,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		}
 		if miss.nextSteps == "" && gate.exactRejected > 0 {
 			miss.nextSteps = exactDriftNextSteps
+			if req.Header.Type == sCOM_QUERY {
+				miss.nextSteps = exactLiteralNextSteps
+			}
 		}
 		return nil, false, miss, nil
 	}

@@ -176,16 +176,19 @@ type strictGate struct {
 	closestMock string
 	fieldDiffs  []models.MockFieldDiff
 
-	// exactRejected is how many of rejected allowsDrift ruled out without
-	// strict enforcement: under exact serving, recordings of the command's
-	// statement whose parameters drifted outside known noise.
+	// exactRejected is how many of rejected the rule of exact serving ruled
+	// out (allowsDrift without strict enforcement, allowsLiterals):
+	// recordings of the command's statement whose parameters, or inline
+	// literals, drifted outside known noise.
 	exactRejected int
 
-	// driftEngine compares a candidate for allowsDrift as strict
-	// enforcement does, when the engine the gate was given does not
-	// (driftVerdicts keeps its answers, as verdicts keeps the engine's).
-	driftEngine   *mocknoise.Engine
-	driftVerdicts map[*models.Mock]gateVerdict
+	// driftEngine compares a candidate for allowsDrift and allowsLiterals as
+	// strict enforcement does, when the engine the gate was given does not
+	// (driftVerdicts and literalVerdicts keep their answers, as verdicts
+	// keeps the engine's).
+	driftEngine     *mocknoise.Engine
+	driftVerdicts   map[*models.Mock]gateVerdict
+	literalVerdicts map[*models.Mock]gateVerdict
 
 	// verdicts keeps StrictReject's answer per candidate. The verdict depends
 	// only on the candidate and the live body, both fixed for the command, so a
@@ -311,20 +314,67 @@ func (g *strictGate) allowsDrift(mock *models.Mock) bool {
 	if !g.liveBodyOK {
 		return false
 	}
-	if g.driftEngine == nil {
-		g.driftEngine = mocknoise.New(mysqlNoiseAdapter{}, false, true)
-	}
-	if g.compare(g.driftEngine, &g.driftVerdicts, mock) {
+	if g.compare(g.strictEngine(), &g.driftVerdicts, mock) {
 		return true
 	}
 	g.exactRejected++
 	return false
 }
 
+// literalsLeftOut are the paths of a COM_QUERY's body allowsLiterals does
+// not compare: the statement's comments (computeQueryShape keeps a comment
+// after the statement's keyword there; the parser drops the others).
+var literalsLeftOut = []string{"query.comments"}
+
+// allowsLiterals is the rule, under exact serving, for a recording of a live
+// COM_QUERY's statement made with other inline literals (matchQueryLive's
+// literal tiers: the same text once its literals are masked): it answers
+// only when every literal that differs, compared by position
+// (body.query.literals.N), is noise, configured
+// (test.globalNoise.requestBody) or learned on the recording
+// (req_body_noise), compared as strict enforcement compares, whether or not
+// strict enforcement is on. A COM_QUERY's literals are its parameters:
+// served with another one, the recording answered the command with the rows
+// of another call (a read of id 5 got id 7's). So are the query attributes
+// the statement reads (readsQueryAttributes: only those are in its body).
+// The statement's comments are left out (a traceparent changes on every
+// run). A statement that does not parse is compared whole (body.query).
+func (g *strictGate) allowsLiterals(mock *models.Mock) bool {
+	if !g.liveBodyOK {
+		return false
+	}
+	if g.compare(g.strictEngine(), &g.literalVerdicts, mock, literalsLeftOut...) {
+		return true
+	}
+	g.exactRejected++
+	return false
+}
+
+// strictEngine is the engine allowsDrift and allowsLiterals compare with:
+// one that compares as strict enforcement does, made on first use.
+func (g *strictGate) strictEngine() *mocknoise.Engine {
+	if g.driftEngine == nil {
+		g.driftEngine = mocknoise.New(mysqlNoiseAdapter{}, false, true)
+	}
+	return g.driftEngine
+}
+
 // compare is strict enforcement's verdict on mock by engine, cached in
-// verdicts, recording the rejection diagnostics when it is no.
-func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock) bool {
+// verdicts, recording the rejection diagnostics when it is no. The paths in
+// leftOut are not compared, whatever their values.
+func (g *strictGate) compare(engine *mocknoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock, leftOut ...string) bool {
 	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
+	if len(leftOut) > 0 {
+		out := make(map[string][]string, len(noise)+len(leftOut))
+		for k, v := range noise {
+			out[k] = v
+		}
+		for _, p := range leftOut {
+			// An empty list ignores the field whatever its value.
+			out[p] = []string{}
+		}
+		noise = out
+	}
 	body, _ := g.bodyFor(mock)
 	v, seen := (*verdicts)[mock]
 	recorded, recordedOK := g.recordedBody(mock)

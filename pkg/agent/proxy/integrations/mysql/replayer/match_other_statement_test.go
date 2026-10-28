@@ -179,25 +179,105 @@ func TestAnExecuteWithOtherParametersSaysWhichDrifted(t *testing.T) {
 	}
 }
 
+// Datadog DBM's prologues of two requests: the traceparent changes on every
+// run (match_dbmcomment_test.go).
+const (
+	traceWriter = "/*dddb='appdb',traceparent='00-1111111111111111aaaaaaaaaaaaaaaa-1111111111111111-01'*/ "
+	traceReader = "/*dddb='appdb',traceparent='00-2222222222222222bbbbbbbbbbbbbbbb-2222222222222222-01'*/ "
+)
+
 // A COM_QUERY, and a PREPARE, is answered by a recording of its own
 // statement: the same text but for its inline literals (a COM_QUERY's
-// parameters). Under exact serving that is all; the identifier-blind DML
-// tier (the same parse tree: another table, other columns) answered an
-// UPDATE of kv with the recording of an UPDATE of users. Without exact
-// serving that tier is kept, as before.
+// parameters). Under exact serving that is all, and tighter: the
+// identifier-blind DML tier (the same parse tree: another table, other
+// columns) answered an UPDATE of kv with the recording of an UPDATE of
+// users; and a recording of a COM_QUERY's own statement made with other
+// literals answers only when every literal that differs, by position, is
+// configured or learned noise (body.query.literals.N): a read of id 5 got
+// id 7's row. Comments are left out (a traceparent changes on every run).
+// A PREPARE's recording still answers with other literals: its answer is
+// the statement's metadata, and each EXECUTE is matched on the live text.
+// Without exact serving both tiers are kept, as before.
 func TestAQueryOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
 	ts := diffBase.Add(time.Millisecond)
 	update := diffMock("query-update-users", "c1", []mysql.Request{queryReq("UPDATE users SET name = 'a' WHERE id = 3")}, ts, models.LifetimePerTest, "mocks")
 	read := diffMock("query-read-small", "c1", []mysql.Request{queryReq("SELECT id, name FROM small WHERE id = 7")}, ts.Add(time.Millisecond), models.LifetimePerTest, "mocks")
 	prepUpdate := diffPrepareMock("prep-update-users", "c1", "UPDATE users SET name = ? WHERE id = ?", 4, ts.Add(2*time.Millisecond))
-	all := []*models.Mock{update, read, prepUpdate}
+	prepRead := diffPrepareMock("prep-read-live", "c1", "SELECT id FROM small WHERE id = ? AND live = 1", 5, ts.Add(3*time.Millisecond))
+	all := []*models.Mock{update, read, prepUpdate, prepRead}
 	runOtherStatementCases(t, all, all, []otherStatementCase{
 		{name: "an UPDATE of another table", req: queryReq("UPDATE kv SET v = 'b' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
-		{name: "its own UPDATE with other literals", req: queryReq("UPDATE users SET name = 'b' WHERE id = 4"), exact: "query-update-users", notExact: "query-update-users"},
+		{name: "its own UPDATE with other literals", req: queryReq("UPDATE users SET name = 'b' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
+		{name: "its own UPDATE with one other literal", req: queryReq("UPDATE users SET name = 'a' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
 		{name: "a SELECT of another statement", req: queryReq("SELECT code FROM other WHERE ref = 5 AND live = 1")},
-		{name: "its own SELECT with another literal", req: queryReq("SELECT id, name FROM small WHERE id = 5"), exact: "query-read-small", notExact: "query-read-small"},
+		{name: "its own SELECT with another literal", req: queryReq("SELECT id, name FROM small WHERE id = 5"), notExact: "query-read-small", nearest: "query-read-small"},
+		{name: "its own SELECT with a comment", req: queryReq(traceReader + "SELECT id, name FROM small WHERE id = 7"), exact: "query-read-small", notExact: "query-read-small"},
+		{name: "its own SELECT with a comment and another literal", req: queryReq(traceReader + "SELECT id, name FROM small WHERE id = 5"), notExact: "query-read-small", nearest: "query-read-small"},
 		{name: "a PREPARE of an UPDATE of another table", req: prepareReq("UPDATE kv SET v = ? WHERE id = ?"), exact: synthesized, notExact: "prep-update-users"},
+		{name: "a PREPARE of its own SELECT with another literal", req: prepareReq("SELECT id FROM small WHERE id = ? AND live = 0"), exact: "prep-read-live", notExact: "prep-read-live"},
 	})
+	// A literal that differs is noise: configured, or learned on the
+	// recording (req_body_noise). Under exact serving that recording of the
+	// statement answers, whatever its comments; a literal the noise does not
+	// name still misses.
+	t.Run("a recording whose literal is learned noise", func(t *testing.T) {
+		// The comment after SELECT is the one the body keeps
+		// (body.query.comments); vitess drops the others.
+		noisy := diffMock("query-read-noisy", "c1", []mysql.Request{queryReq("SELECT /* traceparent=00-1111-01 */ id, name FROM small WHERE id = 7")}, ts, models.LifetimePerTest, "mocks")
+		noisy.Spec.ReqBodyNoise = map[string][]string{"body.query.literals.0": {}}
+		runOtherStatementCases(t, []*models.Mock{noisy}, []*models.Mock{noisy}, []otherStatementCase{
+			{name: "its own SELECT with another value there", req: queryReq("SELECT id, name FROM small WHERE id = 5"), exact: "query-read-noisy", notExact: "query-read-noisy"},
+			{name: "its own SELECT with another value there and another comment", req: queryReq(traceReader + "SELECT id, name FROM small WHERE id = 5"), exact: "query-read-noisy", notExact: "query-read-noisy"},
+			{name: "its own SELECT with another value there and a comment inside", req: queryReq("SELECT /* traceparent=00-3333-01 */ id, name FROM small WHERE id = 5"), exact: "query-read-noisy", notExact: "query-read-noisy"},
+		})
+		// A query attribute the statement reads is compared as a literal
+		// is: another value of it is another call.
+		const readsAttr = "SELECT mysql_query_attribute_string('tenant') AS t, name FROM small WHERE id = "
+		attr := diffMock("query-read-attr", "c1", []mysql.Request{withTenant(queryReq(readsAttr+"7"), "a")}, ts, models.LifetimePerTest, "mocks")
+		attr.Spec.ReqBodyNoise = map[string][]string{"body.query.literals.1": {}}
+		runOtherStatementCases(t, []*models.Mock{attr}, []*models.Mock{attr}, []otherStatementCase{
+			{name: "a statement reading its attribute, another value of the noise literal", req: withTenant(queryReq(readsAttr+"5"), "a"), exact: "query-read-attr", notExact: "query-read-attr"},
+			{name: "a statement reading its attribute, another value of it too", req: withTenant(queryReq(readsAttr+"5"), "b"), notExact: "query-read-attr", nearest: "query-read-attr"},
+		})
+		other := diffMock("query-update-other-noise", "c1", []mysql.Request{queryReq("UPDATE users SET name = 'a' WHERE id = 3")}, ts, models.LifetimePerTest, "mocks")
+		other.Spec.ReqBodyNoise = map[string][]string{"body.query.literals.1": {}}
+		runOtherStatementCases(t, []*models.Mock{other}, []*models.Mock{other}, []otherStatementCase{
+			{name: "its own UPDATE with another value there", req: queryReq("UPDATE users SET name = 'a' WHERE id = 4"), exact: "query-update-other-noise", notExact: "query-update-other-noise"},
+			{name: "its own UPDATE with another value elsewhere too", req: queryReq("UPDATE users SET name = 'b' WHERE id = 4"), notExact: "query-update-other-noise", nearest: "query-update-other-noise"},
+		})
+	})
+}
+
+// withTenant is r, a COM_QUERY, sent with the query attribute tenant.
+func withTenant(r mysql.Request, tenant string) mysql.Request {
+	qp := r.Message.(*mysql.QueryPacket)
+	qp.ParameterCount, qp.NewParamsBindFlag, qp.NullBitmap = 1, 1, []byte{0}
+	qp.Parameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: tenant}}
+	return r
+}
+
+// Under exact serving, a miss on a recording of the COM_QUERY's statement
+// made with other inline literals names the literal that drifted, by
+// position, and says it is not noise, instead of asking to re-record a
+// statement whose text did not change.
+func TestAQueryWithOtherLiteralsSaysWhichDrifted(t *testing.T) {
+	read := diffMock("query-read-small", "c1", []mysql.Request{queryReq("SELECT /* traceparent=00-1111-01 */ id, name FROM small WHERE id = 7 AND live = 1")}, diffBase.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+	mm := stageOwn(t, []*models.Mock{read}, []*models.Mock{read}, true)
+	ctx, dctx := poolConn("c1")
+	_, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), queryReq(traceReader+"SELECT /* traceparent=00-2222-01 */ id, name FROM small WHERE id = 5 AND live = 1"), mm, dctx)
+	if err != nil || ok {
+		t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
+	}
+	for _, want := range []string{"closestMock:query-read-small ", "body.query.literals.0", "inline literals", "not noise"} {
+		if !strings.Contains(miss, want) {
+			t.Errorf("the miss (%s) does not say %q", miss, want)
+		}
+	}
+	for _, unwanted := range []string{"body.query.literals.1", "body.query.comments"} {
+		if strings.Contains(miss, unwanted) {
+			t.Errorf("the miss (%s) names %q, which did not drift or is left out", miss, unwanted)
+		}
+	}
 }
 
 // A PREPARE no recording answers gets the PREPARE_OK the matcher makes,
