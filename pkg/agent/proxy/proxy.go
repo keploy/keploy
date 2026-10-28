@@ -2869,6 +2869,35 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		return nil
 	}
+	// keploy test of a connection to a port a bypassRule with a host or a
+	// path names: one whose server speaks first, which shows keploy no host
+	// and which keploy record passed through, is passed through before its
+	// client's bytes are read (lookUndecidedReplay). Not listed mocked.
+	looked := false
+	if rule.Mode == models.MODE_TEST {
+		look, err := p.lookUndecidedReplay(parserCtx, p.logger, srcConn, dstAddr, predialed, uint(destInfo.Port), outgoingOpts.Rules)
+		srcConn = look.Src
+		if look.Predialed != nil {
+			predialed, looked = look.Predialed, true
+			defer predialed.CloseIfUnused()
+		}
+		if look.Dst != nil {
+			dstConn = look.Dst
+			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, nil, look.Undecided, dstAddr, "")
+		}
+		if err != nil {
+			switch {
+			case refusedLocally(err):
+				p.logger.Debug("nothing is listening at the destination yet; the caller sees the connection refused", zap.String("server address", dstAddr))
+			case errors.Is(err, errLookIncomplete):
+				utils.LogError(p.logger, err, "keploy could not tell whether this connection's server speaks first, and closed it", zap.String("server address", dstAddr), zap.String("next_step", "a recovered panic is logged above this line: report both to keploy"))
+			default:
+				utils.LogError(p.logger, err, "failed to dial the server of a port a bypassRule names, to see whether it speaks first", zap.String("server address", dstAddr), zap.String("next_step", util.NextStepDialDestination))
+			}
+			return err
+		}
+	}
+
 	// From here the connection is recorded, or answered from mocks: under
 	// the proven switch a local destination is listed mocked (design v14
 	// §3.1). In a replay, now; in a record, once the probe has said what
@@ -2929,7 +2958,22 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.String("reason", probe.Reason),
 		zap.Uint32("destPort", destInfo.Port))
 
-	if rule.Mode != models.MODE_TEST && (probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept) {
+	// A server-first connection, and a MySQL one, shows no host or path: a
+	// bypassRule with one for this port passes it through
+	// (bypassRulesUndecided), as the kernel passed the rule's whole port
+	// before, and not as a protocol keploy cannot record (no loss is
+	// charged). keploy refuses one at start for a port listed in mysqlPorts.
+	// In a record, the probe's connection (dstConn, or the one it handed
+	// back) replays what it read of the server.
+	serverFirst := probe.Reason == reasonServerFirst || probe.Reason == reasonRefusedAtAccept
+	if serverFirst || probe.IsMySQL {
+		if undecided := bypassRulesUndecided(p.logger, outgoingOpts.Rules, uint(destInfo.Port), "", false); len(undecided) > 0 {
+			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, func() (net.Conn, error) {
+				return util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
+			}, undecided, dstAddr, "")
+		}
+	}
+	if rule.Mode != models.MODE_TEST && serverFirst {
 		// The destination spoke first with a server-first protocol's
 		// greeting (on a port already learned, the probe looked again at a
 		// destination marked as one), whose client waits to be greeted; or,
@@ -2939,9 +2983,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if probe.IsMySQL {
-		// MySQL shows no host or path: a bypassRule with one, for this port,
-		// cannot pass its calls through (see warnBypassRulesUnseen below).
-		warnBypassRulesUnseen(p.logger, outgoingOpts.Rules, uint(destInfo.Port), dstAddr, false, false)
 		if rule.Mode != models.MODE_TEST {
 			// probeMysql already dialed when it had to read the
 			// upstream greeting; dstConn then replays those bytes.
@@ -3202,8 +3243,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	var clientSNI string
 	isTLS := pTls.IsTLSHandshake(testBuffer)
 	// Whether a bypassRule names the TLS server the client asked for
-	// (bypassByServerName), which passes the connection through.
+	// (bypassByServerName), which passes the connection through, and that
+	// name: its SNI, else its CONNECT target ("" when not TLS, or none).
 	var passTLSThrough bool
+	var serverName string
 
 	if isTLS {
 		probeProxy(p.logger, "tls-handshake-start", clientConnID,
@@ -3408,7 +3451,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// passes the connection through, in every mode: keploy dials the
 		// server below, as it does to record, and relays the call.
 		bypassRule, bypassed := bypassByServerName(logger, outgoingOpts.Rules, dstURL, uint(destInfo.Port))
-		passTLSThrough = bypassed
+		passTLSThrough, serverName = bypassed, dstURL
 		if bypassed {
 			logger.Debug("a bypassRule names this TLS server; passing the connection through",
 				zap.String("serverName", dstURL), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
@@ -3610,12 +3653,43 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	)
 
 	// A bypassRule with a host or a path is applied by the HTTP parser (each
-	// call's Host and path) and above (a TLS connection's server name). On a
-	// connection that shows neither, the rule cannot pass the call through,
-	// and keploy says so instead of passing the whole port.
+	// call's Host and path) and above (a TLS connection's server name). A
+	// connection that shows keploy no host or path for one is passed
+	// through, as the kernel passed the rule's whole port before, and keploy
+	// says so once for each rule (bypassRulesUndecided). In keploy test the
+	// server is dialled here, as the HTTP parser dials it for a call.
+	// A plain CONNECT tunnel shows its target's host.
+	if serverName == "" {
+		serverName = connectTargetHost
+	}
 	httpParsed := !generic && parserType == integrations.HTTP
-	warnBypassRulesUnseen(logger, outgoingOpts.Rules, uint(destInfo.Port), dstAddr,
-		httpParsed || (isTLS && (clientSNI != "" || connectTargetHost != "")), httpParsed)
+	// A plain CONNECT tunnel that is not HTTP inside, to a host a rule with
+	// no path names, is passed through whole, as a TLS one is
+	// (bypassByServerName): no parser sees a host in it.
+	if !httpParsed && !isTLS && connectTargetHost != "" {
+		if _, ok := bypassByServerName(logger, outgoingOpts.Rules, connectTargetHost, uint(destInfo.Port)); ok {
+			return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, func() (net.Conn, error) {
+				return util.DialDestination(parserCtx, logger, "tcp", util.DialTarget{Addr: dstCfg.Addr, Predialed: predialed})
+			}, nil, dstAddr, connectTargetHost)
+		}
+	}
+	if undecided := bypassRulesUndecided(logger, outgoingOpts.Rules, uint(destInfo.Port), serverName, httpParsed); len(undecided) > 0 {
+		return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, func() (net.Conn, error) {
+			target := util.DialTarget{Addr: dstCfg.Addr, Predialed: predialed}
+			if dstCfg.TLSCfg != nil {
+				return util.DialDestinationTLS(parserCtx, logger, "tcp", target, dstCfg.TLSCfg)
+			}
+			return util.DialDestination(parserCtx, logger, "tcp", target)
+		}, undecided, dstAddr, serverName)
+	}
+	if looked {
+		// Nothing below dials with it in keploy test: a call a bypassRule
+		// passes through dials its own (util.PassThrough). So the server
+		// lookUndecidedReplay reached for this connection is let go now, not
+		// held open, unused, while the connection lasts, where it would keep
+		// a server that serves one connection at a time from serving it.
+		predialed.CloseIfUnused()
+	}
 
 	// Record-mode parsing kill switch: if record-time parsing has been
 	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin

@@ -543,6 +543,18 @@ func (r *mysqlPortRegistry) recordedNotMysql(port uint32) bool {
 	return other && !mysql && !r.portless
 }
 
+// recordedAt reports whether the recording may hold a mock at port: one of its
+// MySQL mocks names the port, a mock of another dependency reached it
+// (otherDependencyPort), or a MySQL mock names no port (portless), and so may
+// be at any.
+func (r *mysqlPortRegistry) recordedAt(port uint32) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, other := r.otherPorts[port]
+	_, mysql := r.fromMocks[port]
+	return other || mysql || r.portless
+}
+
 // derivedSignal is closed once DeriveFromMocks has run: a replay connection
 // that arrives before its mocks are stored waits on it, or on its client
 // speaking first (probeMysqlReplay).
@@ -679,14 +691,24 @@ func (p *Proxy) probeMysql(
 	// speak a server-first protocol (serverFirstDests) is looked at again
 	// instead: the address may be another service's by now (a container's
 	// port reused), and a client-first one is dispatched as on main.
-	if p.mysqlPorts.IsKnownNotMysql(port) && (mode == models.MODE_TEST || !p.serverFirstDests.has(dstAddr)) {
+	//
+	// A record connection to a port a bypassRule with a host or a path names
+	// is looked at whatever was learned of the port, and with detection
+	// turned off: one whose server speaks first shows keploy no host, and is
+	// passed through (bypassRulesUndecided), as the kernel passed the rule's
+	// whole port before. Dispatched on its client's bytes, it would wait for
+	// a greeting that never comes, as a second server of the rule's host (a
+	// name with more than one address) on a port learned not to speak MySQL
+	// would. Its verdict leads there and nowhere else: a MySQL one too.
+	ruled := mode != models.MODE_TEST && len(bypassRulesUndecided(zap.NewNop(), opts.Rules, uint(port), "", false)) > 0
+	if p.mysqlPorts.IsKnownNotMysql(port) && !ruled && (mode == models.MODE_TEST || !p.serverFirstDests.has(dstAddr)) {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "known-not-mysql"}, nil
 	}
 
 	// Auto-detection is opt-out: when disabled we behave exactly as
 	// before — unknown ports fall through to generic dispatch (and, for
 	// a real MySQL server, deadlock as they always did).
-	if opts.DisableMysqlAutoDetect {
+	if opts.DisableMysqlAutoDetect && !ruled {
 		return &mysqlProbe{SrcConn: srcConn, Reason: "auto-detect-disabled"}, nil
 	}
 

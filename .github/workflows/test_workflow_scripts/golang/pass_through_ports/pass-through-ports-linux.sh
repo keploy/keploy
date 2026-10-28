@@ -28,14 +28,23 @@
 #      the rule's port did, and every host's calls on it passed through), one
 #      for its host passes its call through in the proxy, in record and test,
 #      and one on a mysqlPorts port, where no call shows a host, stops keploy
-#      record at start, naming the rule.
+#      record at start, naming the rule. One with a host on a plain TCP port
+#      (9096, not HTTP, so its connections show keploy no host) passes them
+#      through, as the kernel passed the rule's whole port before (older test
+#      sets keep replaying): keploy record records no mock of them and warns
+#      once, naming the rule and that it passes every such connection to the
+#      port through, and keploy test sends both calls to the real service.
+#      The same again with a service that greets its client first, as SMTP
+#      and MySQL do, whose client waits to be greeted: keploy test reaches
+#      it for its client, which never speaks first (before, it waited for
+#      the client's bytes, and the call hung).
 #   5. Control, no flag: the dependency's call is recorded as a mock and the
 #      telemetry call is not; keploy test, both services down, passes.
 #
 # Readiness is each port listening, keploy's test files, and keploy's own
 # probe of the app (--health-path) while replaying. The script stops only the
 # processes it started. Ports: 8094 (app), 9094 (dependency), 9095
-# (telemetry). Env: RECORD_BIN, REPLAY_BIN.
+# (telemetry), 9096 (the plain TCP service). Env: RECORD_BIN, REPLAY_BIN.
 set -uo pipefail
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -43,6 +52,7 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP=8094
 DEP=9094
 TEL=9095
+RAW=9096
 FAIL=0
 fail() {
     echo "::error::$*"
@@ -89,7 +99,7 @@ newest_run() { ls -1d keploy/reports/test-run-* 2>/dev/null | sort -t- -k3 -n | 
 REPORT() { echo "$(newest_run)/test-set-0-report.yaml"; }
 set_status() { grep -m1 '^status:' "$(REPORT)" 2>/dev/null | awk '{print $2}'; }
 
-for p in "$APP" "$DEP" "$TEL"; do
+for p in "$APP" "$DEP" "$TEL" "$RAW"; do
     if listening "$p"; then echo "::error::port $p is in use"; exit 1; fi
 done
 
@@ -114,8 +124,30 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 PY
+# raw.py PORT [greet]: a plain TCP service, not HTTP: a line answers "pong:"
+# and the line, and is counted; "count" says the count. With greet, each
+# connection is greeted first ("220 raw ready").
+cat >raw.py <<'PY'
+import socketserver, sys
+port, greet, hits = int(sys.argv[1]), len(sys.argv) > 2, 0
+class H(socketserver.StreamRequestHandler):
+    def handle(self):
+        global hits
+        if greet:
+            self.wfile.write(b"220 raw ready\n")
+        line = self.rfile.readline()
+        if line.strip() == b"count":
+            self.wfile.write(b"%d\n" % hits)
+            return
+        hits += 1
+        self.wfile.write(b"pong:" + line)
+socketserver.TCPServer.allow_reuse_address = True
+socketserver.TCPServer(("127.0.0.1", port), H).serve_forever()
+PY
 DEP_PID=""
 TEL_PID=""
+RAW_PID=""
+RAW_GREET=""
 REC_PID=""
 start_srv() { # start_srv ROLE PORT: sets SRV_PID
     python3 -u srv.py "$1" "$2" >"$1.out" 2>&1 &
@@ -127,9 +159,20 @@ cleanup() {
     [ -n "$REC_PID" ] && stop_pid "$REC_PID"
     stop_srv "$DEP_PID"
     stop_srv "$TEL_PID"
+    stop_srv "$RAW_PID"
 }
 trap cleanup EXIT
 dep_hits() { curl -s "http://127.0.0.1:$DEP/count"; }
+raw_hits() {
+    local n
+    exec 3<>"/dev/tcp/127.0.0.1/$RAW" || return 1
+    # -t: a stalled service fails the leg instead of hanging it.
+    [ -z "$RAW_GREET" ] || read -r -t 10 _ <&3
+    printf 'count\n' >&3
+    read -r -t 10 n <&3
+    exec 3<&-
+    echo "$n"
+}
 
 cat >keploy.yml <<YML
 record:
@@ -138,7 +181,9 @@ record:
       mode: skip
 YML
 
-# record NAME [FLAG...]: keploy record of two GET /n, both services up.
+# record NAME [FLAG...]: keploy record of two GET /n, both services up, each
+# answering WANT_N.
+WANT_N='{"dep":{"n":7},"telemetry":"200"}'
 record() {
     local name="$1"
     shift
@@ -157,7 +202,7 @@ record() {
     fi
     for _ in 1 2; do
         out="$(curl -s "http://127.0.0.1:$APP/n")"
-        [ "$out" = '{"dep":{"n":7},"telemetry":"200"}' ] || fail "$name: GET /n answered '$out' while recording"
+        [ "$out" = "$WANT_N" ] || fail "$name: GET /n answered '$out' while recording, want '$WANT_N'"
     done
     wait_tests 2 "$REC_PID" || fail "$name: keploy record wrote $(test_files) test cases, want 2"
     stop_pid "$REC_PID"
@@ -297,6 +342,50 @@ else
 fi
 REC_PID=""
 own
+
+# A rule with a host on a port whose connections show keploy no host (a plain
+# TCP service, not HTTP) passes them through, as the kernel passed the rule's
+# whole port before, so a test set recorded then still replays; keploy warns
+# once that it does, naming the rule. rawhost: the client speaks first;
+# greethost: the service greets first, and its client waits for it.
+cat >keploy.yml <<YML
+$BASE_YML
+bypassRules:
+  - host: raw.internal
+    port: $RAW
+YML
+APP_CMD_BASE="$APP_CMD"
+WANT_N='{"dep":{"n":7},"telemetry":"200","raw":"pong:ping"}'
+RAW_WARN="passes every such connection to port $RAW through"
+for leg in rawhost greethost; do
+    RAW_GREET=""
+    [ "$leg" = greethost ] && RAW_GREET=1
+    python3 -u raw.py "$RAW" ${RAW_GREET:+greet} >"raw-$leg.out" 2>&1 &
+    RAW_PID=$!
+    wait_listen "$RAW" "$RAW_PID" || { echo "::error::$leg: the plain TCP service did not start"; cat "raw-$leg.out"; exit 1; }
+    APP_CMD="env RAW_ADDR=127.0.0.1:$RAW RAW_GREET=$RAW_GREET $APP_CMD_BASE"
+    before="$(raw_hits)"
+    if record "$leg"; then
+        [ "$(($(raw_hits) - before))" -eq 2 ] || fail "$leg: keploy record sent $(($(raw_hits) - before)) calls to the plain TCP service, want 2"
+        ! grep -qs '^kind: Generic' keploy/test-set-0/mocks.yaml ||
+            { fail "$leg: keploy record recorded the plain TCP calls a bypassRule with a host for port $RAW passes through"; show_mocks; }
+        n="$(grep -acF "$RAW_WARN" "record-$leg.log")"
+        [ "$n" -eq 1 ] && grep -a "$RAW_WARN" "record-$leg.log" | grep -aqF "{host: \"raw.internal\", path: \"\", port: $RAW}" ||
+            fail "$leg: keploy record warned $n times that the rule passes port $RAW's connections through, want once, naming the rule"
+        stop_srv "$TEL_PID"
+        TEL_PID=""
+        before="$(raw_hits)"
+        replay "$leg"
+        [ "$(($(raw_hits) - before))" -eq 2 ] ||
+            fail "$leg: keploy test sent $(($(raw_hits) - before)) calls to the plain TCP service, want 2 (the rule passes them through)"
+        grep -aqF "$RAW_WARN" "test-$leg.log" || fail "$leg: keploy test passed port $RAW's connections through without a warning"
+    fi
+    stop_srv "$RAW_PID"
+    RAW_PID=""
+done
+RAW_GREET=""
+APP_CMD="$APP_CMD_BASE"
+WANT_N='{"dep":{"n":7},"telemetry":"200"}'
 printf '%s\n' "$BASE_YML" >keploy.yml
 
 # Control: without the flag, the dependency's call is mocked, and the replay

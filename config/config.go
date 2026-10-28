@@ -740,14 +740,15 @@ func GetByPassPorts(conf *Config) []uint {
 // with no host or path in them. Those are the mysqlPorts ports, pinned to the
 // MySQL parser: MySQL names no host, and its TLS starts after the server's
 // greeting, past the point where the proxy reads a server name. Such a rule
-// would match none of its port's calls, so they would be recorded or mocked,
-// and widening it to the whole port would pass through calls it does not name.
+// would decide none of its port's calls, and passing them all through would
+// pass through calls it does not name.
 // The error names each such rule and the port-only rule that passes the whole
 // port through.
 //
 // On any other port the protocol shows only in each connection, so the proxy
 // says, once for each rule, when it meets a connection to the rule's port in
-// which it can see no host or path (pkg/agent/proxy, warnBypassRuleUnseen).
+// which it can see no host or path, and passes it through (pkg/agent/proxy,
+// bypassRulesUndecided).
 func CheckBypassRules(conf *Config) error {
 	mysql := make(map[uint]bool, len(conf.MysqlPorts))
 	for _, p := range conf.MysqlPorts {
@@ -763,7 +764,7 @@ func CheckBypassRules(conf *Config) error {
 	if len(bad) == 0 {
 		return nil
 	}
-	return fmt.Errorf("keploy cannot apply the bypassRules %s: their ports are in mysqlPorts, and a MySQL connection shows keploy no host or path to match, so these rules would pass none of its calls through. To pass every call to such a port through, use a rule with the port alone ({port: N}); to record or mock them, remove the rule", strings.Join(bad, ", "))
+	return fmt.Errorf("keploy cannot apply the bypassRules %s: their ports are in mysqlPorts, and a MySQL connection shows keploy no host or path to match them by. To pass every call to such a port through, use a rule with the port alone ({port: N}); to record or mock them, remove the rule", strings.Join(bad, ", "))
 }
 
 // SetSelectedTests selects the test sets testSets names for a run. A
