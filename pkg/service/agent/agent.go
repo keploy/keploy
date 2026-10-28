@@ -1355,10 +1355,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 			return failStream(fmt.Errorf("storemocks stream: read the statement catalog from the on-disk store: %w", err))
 		}
 		storage.statements = statements
+		// diskBytes are the store's records in its file, residentBytes those
+		// it keeps in memory (up to its resident budget): together, every
+		// per-test mock the store holds, as encoded.
 		a.logger.Info("agent mock residency: per-test mocks parked on disk (windowed)",
 			zap.Int("onDisk", disk.Len()),
 			zap.Int("spilledResponses", disk.SpilledResponses()),
 			zap.Int64("diskBytes", disk.DiskBytes()),
+			zap.Int64("residentBytes", disk.ResidentBytes()),
 			zap.Int("residentPerTest", len(storage.filtered)),
 			zap.Int("residentConfig", len(storage.unfiltered)))
 	}
