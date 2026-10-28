@@ -52,9 +52,16 @@ type derivedEntry struct {
 	fields                [][]moment
 	extra                 string
 	searched              [2][2]string // by keep, where not plain
+	stamps                []string
+	answer                [2][]map[string]bool // by keep
+	answerAt              []givenMoment
+	forms                 [][]moment
 	hasMoments, hasPlaces bool
 	hasTokens, hasWords   [2]bool
 	hasFields, hasExtra   bool
+	hasStamps, hasAt      bool
+	hasAnswer             [2]bool
+	hasForms              bool
 	// hasSearched: searched is kept, or plain says the payload's searched
 	// texts are its own text and extra (no stamp or clock read to blank).
 	hasSearched, plain [2]bool
@@ -217,17 +224,137 @@ func (dc *DriftCache) setTokens(x Raw, keep bool) (out []map[string]bool, ok boo
 	if e, ok := s.find(x.id, has); ok {
 		return e.tokens[k], true
 	}
-	read := tokensIn(x, keep)
-	out = make([]map[string]bool, len(read))
+	out, size := copyWords(tokensIn(x, keep))
+	s.keep(x.id, size, has, func(e *derivedEntry) { e.tokens[k], e.hasTokens[k] = out, true })
+	return out, true
+}
+
+// copyWords is words, by reading, with each word a copy, and about the
+// bytes the copy holds.
+func copyWords(words []map[string]bool) ([]map[string]bool, int64) {
+	out := make([]map[string]bool, len(words))
 	size := int64(headerBytes)
-	for i, words := range read {
-		out[i] = make(map[string]bool, len(words))
-		for w, v := range words {
+	for i, read := range words {
+		out[i] = make(map[string]bool, len(read))
+		for w, v := range read {
 			out[i][strings.Clone(w)] = v
 		}
 		size += wordsBytes(out[i])
 	}
-	s.keep(x.id, size, has, func(e *derivedEntry) { e.tokens[k], e.hasTokens[k] = out, true })
+	return out, size
+}
+
+// stampTexts are the texts of x's answer's stamps (Raw: an HTTP-date its
+// answer holds), as stampsEchoed reads them, each a copy, read once for the
+// set where dc keeps x's (setOf), from x's payload otherwise.
+func (dc *DriftCache) stampTexts(x Raw) []string {
+	read := func() []string {
+		xb := x.payload()
+		out := make([]string, len(xb.stamps))
+		for i, f := range xb.stamps {
+			out[i] = xb.text[f.start:f.end]
+		}
+		return out
+	}
+	s := dc.setOf(x)
+	if s == nil {
+		return read()
+	}
+	has := func(e *derivedEntry) bool { return e.hasStamps }
+	if e, ok := s.find(x.id, has); ok {
+		return e.stamps
+	}
+	out := read()
+	size := int64(headerBytes)
+	for i := range out {
+		out[i] = strings.Clone(out[i])
+		size += headerBytes + int64(len(out[i]))
+	}
+	s.keep(x.id, size, has, func(e *derivedEntry) { e.stamps, e.hasStamps = out, true })
+	return out
+}
+
+// answerWords are readAnswerWords(x, keep), read once for the set where dc
+// keeps x's (setOf), each word a copy; once per call otherwise.
+func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
+	s := dc.setOf(x)
+	if s == nil {
+		return dc.readAnswerWords(x, keep)
+	}
+	k := keepIndex(keep)
+	has := func(e *derivedEntry) bool { return e.hasAnswer[k] }
+	if e, ok := s.find(x.id, has); ok {
+		return e.answer[k]
+	}
+	out, size := copyWords(dc.readAnswerWords(x, keep))
+	s.keep(x.id, size, has, func(e *derivedEntry) { e.answer[k], e.hasAnswer[k] = out, true })
+	return out
+}
+
+// answerMoments are readAnswerMoments(x), its instants and their places
+// read once for the set where dc keeps x's (setOf), each name a copy, with
+// what x itself says of when it was recorded (late, noTime); once per call
+// otherwise.
+func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
+	s := dc.setOf(x)
+	if s == nil {
+		return dc.readAnswerMoments(x)
+	}
+	has := func(e *derivedEntry) bool { return e.hasAt }
+	var kept []givenMoment
+	if e, ok := s.find(x.id, has); ok {
+		kept = e.answerAt
+	} else {
+		kept = dc.readAnswerMoments(x)
+		size := int64(headerBytes)
+		for i := range kept {
+			a := &kept[i]
+			a.mock, a.where = strings.Clone(a.mock), strings.Clone(a.where)
+			size += momentBytes + int64(len(a.mock)+len(a.where))
+		}
+		s.keep(x.id, size, has, func(e *derivedEntry) { e.answerAt, e.hasAt = kept, true })
+	}
+	out := make([]givenMoment, len(kept))
+	for i, a := range kept {
+		a.mock, a.at, a.late, a.noTime = x.mock, x.at, x.late, x.noTime
+		out[i] = a
+	}
+	return out
+}
+
+// fieldForms are the keyed instants each field of x holds in its text and
+// in its other forms (as heldAt reads a field; none of a key's), by the
+// field's index, read once for the set where dc keeps x's (setOf); ok is
+// false where it does not.
+func (dc *DriftCache) fieldForms(x Raw) (out [][]moment, ok bool) {
+	s := dc.setOf(x)
+	if s == nil {
+		return nil, false
+	}
+	has := func(e *derivedEntry) bool { return e.hasForms }
+	if e, ok := s.find(x.id, has); ok {
+		return e.forms, true
+	}
+	xb := x.payload()
+	out = make([][]moment, len(xb.fields))
+	for i, f := range xb.fields {
+		if f.key {
+			continue
+		}
+		text := xb.text[f.start:f.end]
+		for _, form := range []string{text, extraOf(text)} {
+			for _, sp := range instantSpans(form) {
+				if sp.keyed {
+					out[i] = append(out[i], sp.moment())
+				}
+			}
+		}
+	}
+	size := int64(headerBytes)
+	for _, f := range out {
+		size += headerBytes + momentBytes*int64(len(f))
+	}
+	s.keep(x.id, size, has, func(e *derivedEntry) { e.forms, e.hasForms = out, true })
 	return out, true
 }
 

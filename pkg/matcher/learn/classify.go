@@ -2785,10 +2785,12 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
-	xb := x.payload()
 	if fields, ok := dc.fieldMoments(x); ok {
-		for i, f := range xb.fields {
-			if !f.key && holdsRecordedIn(fields[i], echoed) {
+		// A key's moments are none (fieldMoments): x's payload is read
+		// only to name the field that holds one.
+		for i := range fields {
+			if holdsRecordedIn(fields[i], echoed) {
+				f := x.payload().fields[i]
 				return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
 			}
 		}
@@ -2797,6 +2799,7 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 		}
 		return Place{}, false
 	}
+	xb := x.payload()
 	for _, f := range xb.fields {
 		if own := xb.text[f.start:f.end]; !f.key && (dc.holdsRecorded(own, echoed) || dc.holdsRecorded(dc.rawExtra(own), echoed)) {
 			return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
@@ -2832,6 +2835,20 @@ func (dc *DriftCache) heldAt(echoed []echoMatch, at time.Time, served []Earlier,
 			continue
 		}
 		note := x.atNote(at)
+		// The instants of x's fields and payload, as holds reads them, are
+		// read once for the set where dc keeps x's: its payload is read
+		// only to name the field that holds one.
+		if forms, ok := dc.fieldForms(x); ok {
+			for i := range forms {
+				if holdsLiveIn(forms[i], echoed) {
+					return "in " + x.mock + " at " + x.payload().fields[i].describe() + note
+				}
+			}
+			if holdsLiveIn(dc.payloadMoments(x), echoed) {
+				return "in " + x.mock + "'s payload" + note
+			}
+			continue
+		}
 		xb := x.payload()
 		for _, f := range xb.fields {
 			if !f.key && holds(xb.text[f.start:f.end]) {
