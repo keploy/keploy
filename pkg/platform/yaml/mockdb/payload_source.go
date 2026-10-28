@@ -34,6 +34,10 @@ type payloadSource struct {
 	// in its place since by os.SameFile.
 	info   os.FileInfo
 	mutate atomic.Pointer[models.PayloadMutator]
+	// spill holds the mocks as the read decoded them, so most are read back
+	// without decoding the file again (see payloadSpill). nil when none
+	// could be made.
+	spill *payloadSpill
 }
 
 var _ models.PayloadSource = (*payloadSource)(nil)
@@ -43,7 +47,9 @@ func newPayloadSource(reader *yaml.MockReader) (*payloadSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat the mock file %s: %w", reader.Path(), err)
 	}
-	return &payloadSource{path: reader.Path(), format: reader.Format(), info: info}, nil
+	s := &payloadSource{path: reader.Path(), format: reader.Format(), info: info}
+	s.spill = newPayloadSpill(s, s.path, info.Size())
+	return s, nil
 }
 
 func (s *payloadSource) SetPayloadMutator(mutate models.PayloadMutator) {
@@ -57,8 +63,10 @@ func (s *payloadSource) PayloadMutator() models.PayloadMutator {
 	return nil
 }
 
-// LoadPayload decodes the document at at again, as the read that left its
-// payload decoded it.
+// LoadPayload reads back the mock of the document at at, as the read that left
+// its payload decoded it: from the spill when it holds the mock of that very
+// document (the file's bytes there are still the ones decoded), else by
+// decoding the document again.
 func (s *payloadSource) LoadPayload(ctx context.Context, at models.PayloadAt) (*models.Mock, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -84,6 +92,9 @@ func (s *payloadSource) LoadPayload(ctx context.Context, at models.PayloadAt) (*
 			err = io.ErrUnexpectedEOF
 		}
 		return nil, fmt.Errorf("failed to read back mock %q from the mock file %s: %w", at.Name, s.path, err)
+	}
+	if mock, ok := s.spill.load(at, data); ok {
+		return mock, nil
 	}
 
 	// The read that left the payload logged what it had to say about the

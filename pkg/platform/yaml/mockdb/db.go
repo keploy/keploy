@@ -1798,6 +1798,11 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 		if len(doc.mocks) == 0 {
 			addSkippedDoc(&out, doc.raw, readerIsJSON, doc.incomplete, doc.name, doc.kind)
 		}
+		if src != nil && len(doc.mocks) == 1 {
+			// Before routing, which changes the mock: the spill keeps it as
+			// a read back of its document would decode it.
+			src.spill.add(doc.off, doc.raw[:doc.n], doc.mocks[0])
+		}
 		for _, mock := range doc.mocks {
 			if mock.Kind == models.ConnectionFailure {
 				connFailures++
@@ -1812,6 +1817,9 @@ func (ys *MockYaml) readMockPools(ctx context.Context, testSetID string, afterTi
 	}
 	warnConnFailuresNotReplayed(logger, testSetID, connFailures)
 	warnUnmetRequirements(logger, testSetID, reader.Path(), deps.Unmet())
+	if src != nil {
+		src.spill.finish()
+	}
 
 	if want&poolPerTest != 0 {
 		if !hasContent {
