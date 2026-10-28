@@ -2,9 +2,12 @@ package replayer
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
@@ -255,6 +258,86 @@ func TestMatchCommand_StrictComparesTheAttributesAnExecuteReads(t *testing.T) {
 	}
 	if miss == nil || len(miss.fieldDiffs) != 1 || miss.fieldDiffs[0].Path != "body.parameters.1.value" {
 		t.Errorf("the miss %+v does not name the attribute's drift", miss)
+	}
+}
+
+// Strict compares, of a prepared statement's attributes, only the ones it
+// reads, by name: a traceparent sent with it changes on every call, and the
+// client may send it before the read one.
+func TestMatchCommand_StrictComparesOnlyTheAttributesAnExecuteReadsByName(t *testing.T) {
+	const reads = "SELECT ? AS k, mysql_query_attribute_string('tenant') AS t"
+	tenant := func(v string) mysql.Parameter {
+		return mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: "tenant", Value: v}
+	}
+	cases := []struct {
+		name   string
+		attrs  []mysql.Parameter
+		served bool
+		drift  string
+	}{
+		{name: "the same tenant, another traceparent", attrs: []mysql.Parameter{tenant("a"), traceparentAttr(replayTraceparent)}, served: true},
+		{name: "the same tenant after another traceparent", attrs: []mysql.Parameter{traceparentAttr(replayTraceparent), tenant("a")}, served: true},
+		{name: "the same tenant, no traceparent", attrs: []mysql.Parameter{tenant("a")}, served: true},
+		{name: "another tenant, the same traceparent", attrs: []mysql.Parameter{tenant("b"), traceparentAttr(recordedTraceparent)}, drift: "body.parameters.1.value"},
+		{name: "another tenant after the same traceparent", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent), tenant("b")}, drift: "body.parameters.1.value"},
+		{name: "no tenant", attrs: []mysql.Parameter{traceparentAttr(recordedTraceparent)}, drift: "body.parameters.1.value"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			at := stmtT0.Add(time.Second)
+			m := executedMock("mock-reads", 1, at, "row", reads, "k1")
+			withAttrs(m.Spec.MySQLRequests[0].Message.(*mysql.StmtExecutePacket), tenant("a"), traceparentAttr(recordedTraceparent))
+			db := &fakeMockDb{session: []*models.Mock{m}, winStart: at.Add(-time.Second), winEnd: at.Add(time.Second)}
+			req := liveExecute("k1")
+			withAttrs(req.Message.(*mysql.StmtExecutePacket), c.attrs...)
+			dctx := newDecodeCtx()
+			dctx.StmtIDToQuery[33] = reads
+			dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 1}
+			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
+			resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, false, true), nil)
+			if err != nil || ok != c.served {
+				t.Fatalf("served=%v (%v, %v, miss %+v); want served=%v", ok, resp, err, miss, c.served)
+			}
+			if c.served {
+				return
+			}
+			// Only the read attribute's fields: its value, and its type
+			// when it was not sent (a NULL).
+			named := false
+			for _, d := range miss.fieldDiffs {
+				named = named || d.Path == c.drift
+				if !strings.HasPrefix(d.Path, "body.parameters.1.") {
+					t.Errorf("the miss names %s: only the read attribute is compared", d.Path)
+				}
+			}
+			if !named {
+				t.Errorf("the miss %+v does not name the read attribute's drift (%s)", miss, c.drift)
+			}
+		})
+	}
+}
+
+// The names a statement reads, in the order it first names them; not known
+// when it reads one it does not name with a string literal.
+func TestAttributesRead(t *testing.T) {
+	for _, c := range []struct {
+		query string
+		names []string
+		ok    bool
+	}{
+		{query: "SELECT 1", ok: true},
+		{query: "SELECT mysql_query_attribute_string('tenant')", names: []string{"tenant"}, ok: true},
+		{query: `SELECT MYSQL_QUERY_ATTRIBUTE_STRING ( "Tenant" ), mysql_query_attribute_string('a''b'), mysql_query_attribute_string('tenant')`, names: []string{"Tenant", "a'b", "tenant"}, ok: true},
+		{query: "SELECT mysql_query_attribute_string('x'), mysql_query_attribute_string('x')", names: []string{"x"}, ok: true},
+		{query: `SELECT mysql_query_attribute_string("a""b")`, names: []string{`a"b`}, ok: true},
+		{query: `SELECT mysql_query_attribute_string('a\'b')`, names: []string{"a'b"}, ok: true},
+		{query: "SELECT mysql_query_attribute_string('tenant'), mysql_query_attribute_string(@name)", ok: false},
+		{query: "SELECT mysql_query_attribute_string(CONCAT('ten', 'ant'))", ok: false},
+	} {
+		names, ok := attributesRead(c.query)
+		if ok != c.ok || (ok && !reflect.DeepEqual(names, c.names)) {
+			t.Errorf("attributesRead(%q) = %q, %v; want %q, %v", c.query, names, ok, c.names, c.ok)
+		}
 	}
 }
 

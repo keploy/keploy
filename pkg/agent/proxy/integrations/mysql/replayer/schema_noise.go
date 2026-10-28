@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -53,7 +54,7 @@ func (mysqlNoiseAdapter) RecordedBody(m *models.Mock) ([]byte, bool) {
 		return nil, false
 	}
 	bundle := &m.Spec.MySQLRequests[0].PacketBundle
-	return mysqlRequestBody(bundle, recordedStatementParams(bundle, nil, bundle.StoredQuery(), "", -1))
+	return mysqlRequestBody(bundle, recordedStatementParams(bundle, nil, bundle.StoredQuery(), "", -1), "")
 }
 
 // recordedStatementParams is how many of a recorded COM_STMT_EXECUTE's
@@ -285,7 +286,13 @@ func (g *strictGate) recordedBody(mock *models.Mock) ([]byte, bool) {
 	if g.live != nil {
 		live, _ = g.live.Message.(*mysql.StmtExecutePacket)
 	}
-	return mysqlRequestBody(bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams))
+	// A recording of the live statement, when that reads its query
+	// attributes, holds the ones it reads by name, as the live body does
+	// (executeBodyParameters): split by the live statement's count.
+	if e := sqlStatementIdentity(q); live != nil && g.liveParams >= 0 && readsQueryAttributes(g.liveQuery) && e != "" && strings.EqualFold(e, sqlStatementIdentity(g.liveQuery)) {
+		return mysqlRequestBody(bundle, g.liveParams, g.liveQuery)
+	}
+	return mysqlRequestBody(bundle, recordedStatementParams(bundle, live, q, g.liveQuery, g.liveParams), "")
 }
 
 // allows reports whether the candidate mock survives strict enforcement,
@@ -336,7 +343,8 @@ var literalsLeftOut = []string{"query.comments"}
 // strict enforcement is on. A COM_QUERY's literals are its parameters:
 // served with another one, the recording answered the command with the rows
 // of another call (a read of id 5 got id 7's). So are the query attributes
-// the statement reads (readsQueryAttributes: only those are in its body).
+// the statement reads, by name (readAttributes: only those are in its body,
+// whatever others the client sends with it).
 // The statement's comments are left out (a traceparent changes on every
 // run). A statement that does not parse is compared whole (body.query).
 func (g *strictGate) allowsLiterals(mock *models.Mock) bool {
@@ -616,17 +624,21 @@ func maskAttributeDiffs(diffs []models.MockFieldDiff, mock *models.Mock, live *m
 // (protocol plumbing already scored by matchStmtExecutePacketQueryAware, not
 // user data), and a COM_QUERY's or COM_STMT_EXECUTE's query attributes
 // (executeAttributesFrom) unless the statement reads one
-// (readsQueryAttributes): an EXECUTE's packet does not name its statement, so
+// (readsQueryAttributes), and then only the ones it reads, by name
+// (readAttributes): an EXECUTE's packet does not name its statement, so
 // matchCommand and strictGate.recordedBody give the count of its parameters
-// to keep (mysqlRequestBody, recordedStatementParams).
+// to keep, and its statement (mysqlRequestBody, recordedStatementParams).
 func mysqlRequestBodyJSON(bundle *mysql.PacketBundle) ([]byte, bool) {
-	return mysqlRequestBody(bundle, -1)
+	return mysqlRequestBody(bundle, -1, "")
 }
 
 // mysqlRequestBody is mysqlRequestBodyJSON with a COM_STMT_EXECUTE's
 // statement's own parameter count when known (a live packet's), -1 when not
-// (executeAttributesFrom).
-func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int) ([]byte, bool) {
+// (executeAttributesFrom), and its statement (query, empty when not known):
+// when that reads its attributes and the count is known, the body holds
+// the statement's own parameters and then the attributes it reads, by name
+// (executeBodyParameters).
+func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int, query string) ([]byte, bool) {
 	if bundle == nil || bundle.Header == nil {
 		return nil, false
 	}
@@ -637,8 +649,13 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int) ([]byte, 
 			return nil, false
 		}
 		doc = map[string]any{"query": queryBodyValue(msg.Query)}
-		if len(msg.Parameters) > 0 && readsQueryAttributes(msg.Query) {
-			doc["parameters"] = parametersByIndex(msg.Parameters)
+		if readsQueryAttributes(msg.Query) {
+			// A COM_QUERY's parameters are all query attributes.
+			if names, ok := attributesRead(msg.Query); ok {
+				doc["parameters"] = parametersByIndex(readAttributes(msg.Parameters, names))
+			} else if len(msg.Parameters) > 0 {
+				doc["parameters"] = parametersByIndex(msg.Parameters)
+			}
 		}
 	case *mysql.StmtPreparePacket:
 		if msg == nil {
@@ -649,7 +666,7 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int) ([]byte, 
 		if msg == nil {
 			return nil, false
 		}
-		doc = map[string]any{"parameters": parametersByIndex(executeOwnParameters(msg, statementParams))}
+		doc = map[string]any{"parameters": parametersByIndex(executeBodyParameters(msg, statementParams, query))}
 	case *mysql.StmtSendLongDataPacket:
 		if msg == nil {
 			return nil, false
@@ -685,7 +702,104 @@ func mysqlRequestBody(bundle *mysql.PacketBundle, statementParams int) ([]byte, 
 // (CALL) or function (SELECT f()), a view, a trigger, or EXECUTE of a
 // statement prepared from a variable.
 func readsQueryAttributes(query string) bool {
-	return strings.Contains(strings.ToLower(query), "mysql_query_attribute_string")
+	return strings.Contains(strings.ToLower(query), attributeFunction)
+}
+
+const attributeFunction = "mysql_query_attribute_string"
+
+// attributeCall is a call of mysql_query_attribute_string with a string
+// literal for its argument: the name of the attribute it reads.
+var attributeCall = regexp.MustCompile(`(?i)mysql_query_attribute_string\s*\(\s*(?:'((?:[^'\\]|\\.|'')*)'|"((?:[^"\\]|\\.|"")*)")\s*\)`)
+
+// attributesRead is the names of the query attributes a statement reads
+// (readsQueryAttributes), in the order it first names them. ok is false when
+// it reads one whose name it does not spell as a string literal
+// (mysql_query_attribute_string(@name)): then which it reads is not known,
+// and every attribute sent with it is compared.
+func attributesRead(query string) (names []string, ok bool) {
+	calls := attributeCall.FindAllStringSubmatchIndex(query, -1)
+	if len(calls) != strings.Count(strings.ToLower(query), attributeFunction) {
+		return nil, false
+	}
+	seen := make(map[string]bool, len(calls))
+	for _, c := range calls {
+		// c[2:4] is a single-quoted name, c[4:6] a double-quoted one.
+		var name string
+		if c[2] >= 0 {
+			name = unquoteSQLString(query[c[2]:c[3]], "'")
+		} else {
+			name = unquoteSQLString(query[c[4]:c[5]], `"`)
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names, true
+}
+
+// unquoteSQLString is the value of a SQL string literal's body s, quoted
+// with quote: a doubled quote and a backslash escape stand for the
+// character.
+func unquoteSQLString(s, quote string) string {
+	if !strings.ContainsAny(s, `\`+quote) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			i++
+		case s[i] == quote[0] && i+1 < len(s) && s[i+1] == quote[0]:
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// readAttributes is, of the query attributes a client sent (attrs), the
+// ones a statement reads (names, attributesRead), by name: for each name, in
+// that order, the first attribute sent with it, or, when none was, a NULL
+// of that name (mysql_query_attribute_string reads NULL then). The others
+// cannot change the statement's answer: a client sends ones that differ on
+// every call (Connector/J 8.1+, the caller's OpenTelemetry traceparent), so
+// compared, a statement that reads only 'tenant' never matched its
+// recording. By name, so the order the client sends them in, and the
+// others it sends, do not move a read one's field
+// (body.parameters.N.value: the Nth name the statement reads).
+func readAttributes(attrs []mysql.Parameter, names []string) []mysql.Parameter {
+	out := make([]mysql.Parameter, 0, len(names))
+	for _, name := range names {
+		read := mysql.Parameter{Type: uint16(mysql.FieldTypeNULL), Name: name}
+		for _, a := range attrs {
+			if a.Name == name {
+				read = a
+				break
+			}
+		}
+		out = append(out, read)
+	}
+	return out
+}
+
+// executeBodyParameters is the parameters of a COM_STMT_EXECUTE (p) its body
+// holds: its statement's own (executeOwnParameters), and when the statement
+// (query) reads its query attributes, the ones it reads, by name
+// (readAttributes). That needs where its own end, its statement's count
+// (statementParams), and the names it reads (attributesRead), and a packet
+// sent with its types (the one that sends their names); without them every
+// one of its parameters is held.
+func executeBodyParameters(p *mysql.StmtExecutePacket, statementParams int, query string) []mysql.Parameter {
+	own := executeOwnParameters(p, statementParams)
+	if !readsQueryAttributes(query) {
+		return own
+	}
+	names, ok := attributesRead(query)
+	if !ok || statementParams < 0 || p.NewParamsBindFlag != 1 {
+		return p.Parameters
+	}
+	return append(append(make([]mysql.Parameter, 0, len(own)+len(names)), own...), readAttributes(p.Parameters[len(own):], names)...)
 }
 
 // parametersByIndex converts a parameter slice to an index-keyed map (see

@@ -190,10 +190,36 @@ func TestAnExecuteWithOtherParametersSaysWhichDrifted(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
 	}
-	for _, want := range []string{"closestMock:exec-small-7 ", "body.parameters.0.value", "not noise"} {
+	for _, want := range []string{"closestMock:exec-small-7 ", "body.parameters.0.value", "not noise", "other parameters (the listed fields)"} {
 		if !strings.Contains(miss, want) {
 			t.Errorf("the miss (%s) does not say %q", miss, want)
 		}
+	}
+	if strings.Contains(miss, "inline literals") {
+		t.Errorf("the miss (%s) gives an EXECUTE the advice of a COM_QUERY's literals", miss)
+	}
+	checkHowToMarkNoise(t, miss, "body.parameters.0.value")
+}
+
+// checkHowToMarkNoise checks a drift miss's advice: configured noise in
+// keploy.yml first, the field written as listed (example), which a shipped
+// keploy loads (-tags=viper_bind_struct) and which covers every recording
+// of the statement; then the one recording's noise.req in mocks.yaml.
+// Nothing learns MySQL noise under exact serving, so it does not say an
+// auto-replay will.
+func checkHowToMarkNoise(t *testing.T, miss, example string) {
+	t.Helper()
+	configured := "in keploy.yml, under test.globalNoise.global.requestBody: {"
+	for _, want := range []string{configured, example + `": []}`, "add it to the noise.req list of the recording's document in mocks.yaml", "re-record the test"} {
+		if !strings.Contains(miss, want) {
+			t.Errorf("the miss (%s) does not say %q", miss, want)
+		}
+	}
+	if i, j := strings.Index(miss, configured), strings.Index(miss, "mocks.yaml"); i < 0 || j < i {
+		t.Errorf("the miss (%s) does not name configured noise in keploy.yml before the recording's mocks.yaml", miss)
+	}
+	if strings.Contains(miss, "auto-replay") {
+		t.Errorf("the miss (%s) says an auto-replay learns the field: nothing learns MySQL noise under exact serving", miss)
 	}
 }
 
@@ -289,6 +315,27 @@ func TestAQueryReadingItsAttributeWithAnotherValueIsAMiss(t *testing.T) {
 	runOtherStatementCases(t, []*models.Mock{plain}, []*models.Mock{plain}, []otherStatementCase{
 		{name: "a statement that does not read it, another value", req: withTenant(queryReq("SELECT id, name FROM small WHERE id = 7"), "b"), exact: "query-read-plain", notExact: "query-read-plain"},
 	})
+	// A comment after the statement's keyword (sqlcommenter's shape) is
+	// left out too: the body keeps it (body.query.comments).
+	const pre, post = "SELECT /* traceparent=00-1111-01 */ ", "SELECT /* traceparent=00-2222-01 */ "
+	const rest = "mysql_query_attribute_string('tenant') AS t, name FROM small WHERE id = 7"
+	inline := diffMock("query-read-attr-c", "c1", []mysql.Request{withTenant(queryReq(pre+rest), "a")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{inline}, []*models.Mock{inline}, []otherStatementCase{
+		{name: "an inline comment changed, the same value", req: withTenant(queryReq(post+rest), "a"), exact: "query-read-attr-c", notExact: "query-read-attr-c"},
+		{name: "an inline comment changed, another value", req: withTenant(queryReq(post+rest), "b"), notExact: "query-read-attr-c", nearest: "query-read-attr-c"},
+	})
+	// Only the attributes the statement reads are compared, by name: a
+	// client sends others that change on every call (Connector/J 8.1+, the
+	// caller's traceparent), in any order.
+	traced := diffMock("query-read-attr-t", "c1", []mysql.Request{withAttributes(queryReq(readsAttr), "tenant", "a", "traceparent", "00-1111-01")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{traced}, []*models.Mock{traced}, []otherStatementCase{
+		{name: "the same value, another traceparent", req: withAttributes(queryReq(readsAttr), "tenant", "a", "traceparent", "00-2222-01"), exact: "query-read-attr-t", notExact: "query-read-attr-t"},
+		{name: "the same value sent after another traceparent", req: withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "tenant", "a"), exact: "query-read-attr-t", notExact: "query-read-attr-t"},
+		{name: "the same value, no traceparent", req: withAttributes(queryReq(readsAttr), "tenant", "a"), exact: "query-read-attr-t", notExact: "query-read-attr-t"},
+		{name: "another value, the same traceparent", req: withAttributes(queryReq(readsAttr), "tenant", "b", "traceparent", "00-1111-01"), notExact: "query-read-attr-t", nearest: "query-read-attr-t"},
+		{name: "another value sent after another traceparent", req: withAttributes(queryReq(readsAttr), "traceparent", "00-2222-01", "tenant", "b"), notExact: "query-read-attr-t", nearest: "query-read-attr-t"},
+		{name: "the value not sent", req: withAttributes(queryReq(readsAttr), "traceparent", "00-1111-01"), notExact: "query-read-attr-t", nearest: "query-read-attr-t"},
+	})
 	t.Run("a recording whose attribute is learned noise", func(t *testing.T) {
 		noisy := diffMock("query-read-attr-noisy", "c1", []mysql.Request{withTenant(queryReq(readsAttr), "a")}, ts, models.LifetimePerTest, "mocks")
 		noisy.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
@@ -345,6 +392,18 @@ func TestConfiguredNoiseLetsTheStatementsRecordingAnswer(t *testing.T) {
 	})
 }
 
+// withAttributes is r, a COM_QUERY, sent with the query attributes kv
+// (name, value, ...), in that order.
+func withAttributes(r mysql.Request, kv ...string) mysql.Request {
+	qp := r.Message.(*mysql.QueryPacket)
+	qp.ParameterCount, qp.NewParamsBindFlag, qp.NullBitmap = len(kv)/2, 1, []byte{0}
+	qp.Parameters = nil
+	for i := 0; i+1 < len(kv); i += 2 {
+		qp.Parameters = append(qp.Parameters, mysql.Parameter{Type: uint16(mysql.FieldTypeString), Name: kv[i], Value: kv[i+1]})
+	}
+	return r
+}
+
 // withTenant is r, a COM_QUERY, sent with the query attribute tenant.
 func withTenant(r mysql.Request, tenant string) mysql.Request {
 	qp := r.Message.(*mysql.QueryPacket)
@@ -370,11 +429,12 @@ func TestAQueryWithOtherLiteralsSaysWhichDrifted(t *testing.T) {
 			t.Errorf("the miss (%s) does not say %q", miss, want)
 		}
 	}
-	for _, unwanted := range []string{"body.query.literals.1", "body.query.comments"} {
+	for _, unwanted := range []string{"body.query.literals.1", "body.query.comments", "other parameters (the listed fields)"} {
 		if strings.Contains(miss, unwanted) {
 			t.Errorf("the miss (%s) names %q, which did not drift or is left out", miss, unwanted)
 		}
 	}
+	checkHowToMarkNoise(t, miss, "body.query.literals.0")
 }
 
 // A PREPARE no recording answers gets the PREPARE_OK the matcher makes,

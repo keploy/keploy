@@ -128,18 +128,24 @@ func getQueryStructureCached(sql string) (string, error) {
 
 // exactDriftNextSteps is what a miss says when, under exact serving,
 // recordings of the command's statement were turned away because a parameter
-// drifted outside known noise (strictGate.allowsDrift). The way it names to
-// mark a field is the one that works under exact serving: the recording's
-// learned noise (noise.req of its document, MockSpec.ReqBodyNoise), the
-// field written as listed. Nothing learns MySQL noise there: the drifted
-// recording is never served, so detect-on-serve never sees it, and the
-// proven switch's learn round does not cover MySQL.
-const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise on the recording: add it, as listed, to the noise.req list of the recording's document in mocks.yaml (noise: {req: [body.parameters.0.value]}); otherwise the call changed since it was recorded: re-record the test."
+// drifted outside known noise (strictGate.allowsDrift). It names the two ways
+// to mark a field that work under exact serving, the field written as
+// listed. First configured noise in keploy.yml
+// (test.globalNoise.global.requestBody, requestBodyNoise): it covers every
+// recording of the statement and survives a re-record. A shipped keploy
+// (built with -tags=viper_bind_struct, as goreleaser, the Dockerfile and
+// the release script build it) loads a dotted key there whole. Then the
+// recording's own noise (the noise.req list of its document in mocks.yaml,
+// MockSpec.ReqBodyNoise): one recording, which a re-record discards. Nothing
+// learns MySQL noise there: the drifted recording is never served, so
+// detect-on-serve never sees it, and the proven switch's learn round does
+// not cover MySQL.
+const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise, written as listed, in keploy.yml, under test.globalNoise.global.requestBody: {\"body.parameters.0.value\": []}. Or, for one recording, add it to the noise.req list of the recording's document in mocks.yaml. Otherwise the call changed since it was recorded: re-record the test."
 
 // exactLiteralNextSteps is the same, for a COM_QUERY whose inline literals,
 // or the query attributes its statement reads, drifted
 // (strictGate.allowsLiterals).
-const exactLiteralNextSteps = "Each recording of this statement was made with other inline literals or query attributes (the listed fields; literals by position), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise on the recording: add it, as listed, to the noise.req list of the recording's document in mocks.yaml (noise: {req: [body.query.literals.0]}); otherwise the call changed since it was recorded: re-record the test."
+const exactLiteralNextSteps = "Each recording of this statement was made with other inline literals or query attributes (the listed fields; literals by position), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise, written as listed, in keploy.yml, under test.globalNoise.global.requestBody: {\"body.query.literals.0\": []}. Or, for one recording, add it to the noise.req list of the recording's document in mocks.yaml. Otherwise the call changed since it was recorded: re-record the test."
 
 // sameQueryStructure reports whether two statements parse to the same tree
 // shape (getQueryStructure: identifier-blind). Neither parsing is no.
@@ -487,7 +493,8 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// literals are masked (maskSQLLiterals: a COM_QUERY's literals are its
 	// parameters), and a COM_QUERY's recording answers only when every
 	// literal that differs, by position, and every query attribute the
-	// statement reads, is configured or learned noise, comments aside
+	// statement reads, by name (readAttributes: the others it is sent with
+	// are not compared), is configured or learned noise, comments aside
 	// (strictGate.allowsLiterals): with another literal it is the rows of
 	// another call. That holds for a recording of the same text too when
 	// the statement reads its query attributes (liveReadsAttributes): the
@@ -1065,24 +1072,21 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// liveStatementParams is how many of a live COM_STMT_EXECUTE's
 	// parameters are its statement's own (its PREPARE_OK's num_params), the
 	// rest being query attributes (executeAttributesFrom); -1 when not known.
-	// liveBodyParams is how many of them its strict body holds: all of
-	// them when its statement reads its attributes (readsQueryAttributes).
-	liveStatementParams, liveBodyParams, liveStmtQuery := -1, -1, ""
+	// Its strict body holds its own and, when its statement (liveStmtQuery)
+	// reads its attributes, the ones it reads, by name
+	// (executeBodyParameters).
+	liveStatementParams, liveStmtQuery := -1, ""
 	if act, _ := req.Message.(*mysql.StmtExecutePacket); act != nil && decodeCtx != nil {
 		if prep := decodeCtx.PreparedStatements[act.StatementID]; prep != nil {
 			liveStatementParams = int(prep.NumParams)
 		}
 		liveStmtQuery = strings.TrimSpace(decodeCtx.StmtIDToQuery[act.StatementID])
-		liveBodyParams = liveStatementParams
-		if readsQueryAttributes(liveStmtQuery) {
-			liveBodyParams = len(act.Parameters)
-		}
 	}
 
 	// Canonical JSON body of the live request for the schema-noise engine.
 	// liveBodyOK is false for packets with no drift-capable body (utility
 	// commands, CLOSE/RESET) — the engine no-ops for those.
-	liveBody, liveBodyOK := mysqlRequestBody(&req.PacketBundle, liveBodyParams)
+	liveBody, liveBodyOK := mysqlRequestBody(&req.PacketBundle, liveStatementParams, liveStmtQuery)
 
 	// Strict-enforcement gate (see strictGate in schema_noise.go): consulted
 	// before a mock may become a match candidate, and accumulates the
@@ -1359,7 +1363,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						// text and may still drift. Under exact serving, with
 						// or without strict, a statement that reads them is
 						// answered only by a recording made with the same
-						// values, or whose differing ones are noise
+						// values of the ones it reads, by name (the others
+						// are not in its body: readAttributes), or whose
+						// differing ones are noise
 						// (sameStatementOnly, allowsLiterals; the literals of
 						// the same text are equal, its comments left out): it
 						// read tenant a's rows for tenant b. One that does not

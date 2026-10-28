@@ -93,6 +93,10 @@
 #      and so does get-quote-1 (test-3), which reads it again (a failed read
 #      is not cached). A replayer that answered the read with the recording
 #      made with the other key served the rate recorded, and both passed.
+#      Last, the miss's advice followed: the same replay with the listed
+#      literal (body.query.literals.0, then root-relative) configured as
+#      noise in keploy.yml (test.globalNoise.global.requestBody). The read
+#      is then answered by its recording, and every test passes.
 #  11. A prepared read the app makes before any test, or between two tests,
 #      is answered with a recording of its own request, and a test's with its
 #      own: recorded with SHOP_SETTINGS_BY_KEY=1, the app reads two settings
@@ -312,7 +316,9 @@ between_read() {
 # recording, with MySQL and the auth service down. fresh replays it as
 # recorded, its first replay (no mappings.yaml); mapped keeps the mappings an
 # earlier replay wrote. only runs one test; declare declares the token call in
-# keploy.yaml. RC is its exit code.
+# keploy.yaml; NOISE_KEY, when set, marks that request-body field as
+# configured noise there (test.globalNoise.global.requestBody). RC is its
+# exit code.
 replay() {
     local name="$1" mapping="$2" only="${3:-}" declare="${4:-}" before
     local switch=()
@@ -320,8 +326,14 @@ replay() {
     [ "$mapping" = fresh ] && rm -f keploy/test-set-0/mappings.yaml
     rm -f keploy.yml
     {
+        if [ -n "$only" ] || [ -n "${NOISE_KEY:-}" ]; then
+            printf 'test:\n'
+        fi
         if [ -n "$only" ]; then
-            printf 'test:\n    selectedTests:\n        test-set-0: ["%s"]\n' "$only"
+            printf '    selectedTests:\n        test-set-0: ["%s"]\n' "$only"
+        fi
+        if [ -n "${NOISE_KEY:-}" ]; then
+            printf '    globalNoise:\n        global:\n            requestBody:\n                "%s": []\n' "$NOISE_KEY"
         fi
         if [ -n "$declare" ]; then
             printf 'sessionCalls:\n    - host: "127.0.0.1:%s"\n      method: POST\n      pathPrefix: /oauth/token\n' "$UP"
@@ -541,6 +553,19 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
     unset SHOP_ITEM_ID_SHIFT
     export SHOP_RATE_KEY=tax_rate_v2
     changed_read proven-changed-literal "the tax rate's read inlining another key" "COM_QUERY SELECT v FROM settings WHERE k = '$SHOP_RATE_KEY'" test-1 test-3
+    # The miss's advice, followed: the listed field as configured noise in
+    # keploy.yml, written as listed or root-relative. The inlined key is
+    # then noise, so the recording of the read answers and every test
+    # passes.
+    for key in body.query.literals.0 query.literals.0; do
+        cp mappings.step9 keploy/test-set-0/mappings.yaml
+        PROVEN_REPLAY=1 NOISE_KEY="$key" replay "proven-changed-literal-noise-$key" mapped
+        [ "$RC" -eq 0 ] || fail "under the proven switch, the tax rate's read inlining another key, with '$key' configured as noise: keploy test exited $RC"
+        for t in test-1 test-2 test-3 test-4 test-5; do
+            [ "$(test_status "$t")" = PASSED ] ||
+                fail "under the proven switch, the tax rate's read inlining another key, with '$key' configured as noise: $t must pass (status $(test_status "$t"))"
+        done
+    done
     unset SHOP_RATE_KEY
     cd "$WORK" || exit 1
 fi
