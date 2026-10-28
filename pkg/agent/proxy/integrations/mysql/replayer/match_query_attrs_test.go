@@ -74,7 +74,7 @@ func TestMatchCommand_AQueryAttributeCountsOnlyForAStatementThatReadsIt(t *testi
 	for name, eng := range modes {
 		t.Run(name, func(t *testing.T) {
 			db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{attrQueryMock("q1", recordedTraceparent, sql, "row-1")}}}
-			resp, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, replayTraceparent, sql), db, newDecodeCtx(), eng(), nil)
+			resp, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, replayTraceparent, sql), db, newDecodeCtx(), "", eng(), nil)
 			if err != nil || !ok || resp.Payload != "row-1" {
 				t.Fatalf("a traceparent that differs kept the recording from matching (ok=%v err=%v miss=%+v)", ok, err, miss)
 			}
@@ -88,7 +88,7 @@ func TestMatchCommand_AQueryAttributeCountsOnlyForAStatementThatReadsIt(t *testi
 		const reads = "SELECT mysql_query_attribute_string('traceparent') AS v"
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{attrQueryMock("q1", recordedTraceparent, reads, "row-1")}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, replayTraceparent, reads), db, newDecodeCtx(), eng, nil)
+		_, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, replayTraceparent, reads), db, newDecodeCtx(), "", eng, nil)
 		if err == nil && ok {
 			t.Fatal("strict served the answer to another traceparent of a statement that reads it")
 		}
@@ -122,7 +122,7 @@ func TestMatchCommand_AnOlderKeployRecordingOfAQueryWithAttributesStillMatches(t
 				legacyAttrQueryMock("q1", recordedTraceparent, "SELECT 1 AS v", "row-1"),
 				legacyAttrQueryMock("q2", recordedTraceparent, "SELECT 2 AS v", "row-2"),
 			}}}
-			resp, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, recordedTraceparent, "SELECT 2 AS v"), db, newDecodeCtx(), eng(), nil)
+			resp, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, recordedTraceparent, "SELECT 2 AS v"), db, newDecodeCtx(), "", eng(), nil)
 			if err != nil || !ok || resp.Payload != "row-2" {
 				t.Fatalf("the older keploy's recording did not match (ok=%v err=%v miss=%+v)", ok, err, miss)
 			}
@@ -143,7 +143,7 @@ func TestMatchCommand_AnOlderKeployRecordingOfAQueryWithAttributesStillMatches(t
 		m := readbackMock("q1", "SELECT 1 AS v", "row-1", zeroTime())
 		m.Spec.MySQLRequests[0].PacketBundle.Message.(*mysql.QueryPacket).Parameters = []mysql.Parameter{{Type: uint16(mysql.FieldTypeString), Value: "x"}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
-		resp, ok, miss, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), nil, nil)
+		resp, ok, miss, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok || resp.Payload != "row-1" {
 			t.Fatalf("its recording did not match (ok=%v err=%v miss=%+v)", ok, err, miss)
 		}
@@ -156,7 +156,7 @@ func TestMatchCommand_AnOlderKeployRecordingOfAQueryWithAttributesStillMatches(t
 			legacyAttrQueryMock("q1", recordedTraceparent, "SELECT 1 AS v", "row-1"),
 			attrQueryMock("q2", recordedTraceparent, "SELECT 2 AS v", "row-2"),
 		}}}
-		resp, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, replayTraceparent, "SELECT 2 AS v"), db, newDecodeCtx(), nil, nil)
+		resp, ok, miss, err := matchCommand(context.Background(), logger, attrQueryReq(t, replayTraceparent, "SELECT 2 AS v"), db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok || resp.Payload != "row-2" {
 			t.Fatalf("this keploy's recording did not match (ok=%v err=%v miss=%+v)", ok, err, miss)
 		}
