@@ -1271,8 +1271,14 @@ func (a *Agent) StoreMocksStream(ctx context.Context, header models.MockStreamHe
 	// promotes out-of-window mocks, needing the whole per-test set every test, so
 	// windowing to disk would only add reload cost. Best-effort — fall back to
 	// full-resident if the store can't be created.
+	//
+	// keploy mock replay under the proven switch keeps the on-disk store
+	// whatever the window mode (stagesMockReplay): its staging reads, of the
+	// store, only what no test owns, and each test reads its own as it opens.
+	// That bounds the agent's memory, which the opt-out of the strict window,
+	// a matching choice, must not undo.
 	var disk *proxyPkg.DiskMocks
-	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) {
+	if pkg.IsStrictMockWindow(a.config != nil && a.config.Test.StrictMockWindow) || a.stagesMockReplay() {
 		d, diskErr := proxyPkg.NewDiskMocks(a.logger)
 		if diskErr != nil {
 			a.logger.Warn("on-disk mock store unavailable; keeping per-test mocks resident", zap.Error(diskErr))
@@ -1760,15 +1766,27 @@ const (
 // the residency decision and the filtering decision have to come from one
 // source. IsStrictMockWindow folds in the env override, so
 // KEPLOY_STRICT_MOCK_WINDOW still opts out either way.
+//
+// keploy mock replay's own staging (params.ExactStaging) is the one call the
+// opt-out does not reach: it is no user's window. Its load is the strict
+// window's staging load (the band before the set's first test, the pool by
+// name), so the opt-out cannot make it read the whole on-disk store.
 func perTestLoadMode(params models.MockFilterParams) string {
 	switch {
 	case params.UseMappingBased && (len(params.MockMapping) > 0 || params.ExactMapping):
 		// An exact empty mapping names no per-test mock: nothing is read.
 		return loadModeMapping
-	case pkg.IsStrictMockWindow(params.StrictMockWindow) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
+	case (params.ExactStaging || pkg.IsStrictMockWindow(params.StrictMockWindow)) && !params.AfterTime.IsZero() && !params.BeforeTime.IsZero():
 		return loadModeStrictWindow
 	}
 	return loadModeLaxAll
+}
+
+// stagesMockReplay reports whether this agent serves keploy mock replay
+// under the proven switch, whose staging reads the on-disk store by what no
+// test owns (stageForExactServing), whatever the strict window says.
+func (a *Agent) stagesMockReplay() bool {
+	return provenswitch.On() && a.config != nil && a.config.Agent.MockMode && a.config.Agent.Mode == models.MODE_TEST
 }
 
 // loadCarryOverLookahead loads the carry-over mocks (models.IsCarryOver: a
