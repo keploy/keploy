@@ -57,7 +57,8 @@ type roundState struct {
 	log roundLog
 	// learn is what the learn tracker's boundaries (LearnBoundary) last
 	// said; bound the test view bound to the tracker's current test number
-	// (nil: none since the number last moved). One view per number: a
+	// while that test is open (nil: none since the number last moved, or
+	// the tracker ended the test). One view per number: a
 	// test's view installed while the tracker's open test is another
 	// view's is not that test's (the previous test's end never reached the
 	// tracker), and the tracker's next begin binds it.
@@ -517,6 +518,11 @@ func (m *MockManager) LearnBoundary(t *learn.Tracker, step func(*learn.Tracker))
 	}
 	r.learn = learnBinding{routed: true, number: n, open: open, set: t.SetAt()}
 	if !open {
+		// The bound view is read only while its test is open
+		// (endedLocked), and a number the tracker ended never opens
+		// again (each begin moves it): let the ended test's view, and
+		// the recordings it holds, go now, not at the next begin.
+		r.bound = nil
 		r.boundary("the learn tracker ended its test")
 		return
 	}
@@ -550,8 +556,8 @@ func (r *roundState) bindLocked(v *exactView) {
 // (integrations.RoundSnapshot.Ended). nil otherwise. It is the view last
 // bound to that number (roundState.bound): an older test's view where a view
 // was opened and ended without its test's begin reaching the tracker, and
-// one that survives a staging of the set again until the tracker's next
-// number. Held as a call's own, it fails closed either way.
+// one that survives a staging of the set again until the tracker ends that
+// test. Held as a call's own, it fails closed either way.
 func (r *roundState) endedLocked(v *exactView, number uint64, open bool) *exactView {
 	if b := r.bound; open && b != nil && !v.learnBound && b.learnNumber == number {
 		return b
