@@ -914,7 +914,8 @@ const procZoneCap = 4096
 // PID namespace of its own (utils.KernelPidsLocalIn: a container without
 // --pid=host, keploy's own docker and compose modes), where a kernel pid
 // names another process or none: every zone is then unknown, never another
-// process's.
+// process's (keploy's docker-mode agent reads the zone of the app container
+// that made a connection instead: containerkey.ConnZone).
 type ProcZones struct {
 	root  string
 	local bool
@@ -934,9 +935,10 @@ func NewProcZones(procRoot string) *ProcZones {
 	return &ProcZones{root: procRoot, local: utils.KernelPidsLocalIn(procRoot), read: ReadProcZone, m: map[uint32]procZone{}}
 }
 
-// errPIDNamespace is ProcZones.Of's error where keploy runs in a PID
-// namespace of its own.
-var errPIDNamespace = errors.New("keploy runs in a PID namespace of its own, where the kernel's process numbers name other processes or none, so it reads no process's zone by one; run keploy in the host PID namespace (--pid=host, or hostPID in Kubernetes) to have it read")
+// ErrPIDNamespace is ProcZones.Of's error where keploy runs in a PID
+// namespace of its own (where keploy's docker-mode agent reads the zone of
+// the app container that made a connection: containerkey.ConnZone).
+var ErrPIDNamespace = errors.New("keploy runs in a PID namespace of its own, where the kernel's process numbers name other processes or none, so it reads no process's zone by one; run keploy in the host PID namespace (--pid=host, or hostPID in Kubernetes) to have it read")
 
 // Of is the zone pid writes its wall clock in (ReadProcZone); unknown, with
 // an error, on a nil c.
@@ -945,7 +947,7 @@ func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
 		return ProcZone{}, errors.New("no process zones are read")
 	}
 	if !c.local {
-		return ProcZone{}, errPIDNamespace
+		return ProcZone{}, ErrPIDNamespace
 	}
 	id, _, ok := procIdent(c.root, pid)
 	if !ok {

@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,9 +41,21 @@ func (z zoneParser) MockOutgoing(ctx context.Context, _ net.Conn, _ *models.Cond
 // the parser's learn step reads its calls in.
 func zoneThrough(t *testing.T, proc string, pid uint32) *time.Location {
 	t.Helper()
+	z, _, _ := zoneThroughAgent(t, proc, pid, false)
+	return z
+}
+
+// zoneThroughAgent is zoneThrough on a docker-mode agent (one that takes
+// its CLI's container lists) where pushed is set, with the app's end of the
+// connection and the proxy's, as the app's socket has them.
+func zoneThroughAgent(t *testing.T, proc string, pid uint32, pushed bool) (z *time.Location, appEnd, proxyEnd netip.AddrPort) {
+	t.Helper()
 	saved := containerkey.Default
 	containerkey.Default = containerkey.NewKeyer(containerAt{addr: "none"})
 	t.Cleanup(func() { containerkey.Default = saved })
+	if pushed {
+		containerkey.UsePushed()
+	}
 	cfg := config.New()
 	cfg.Agent.Mode = models.MODE_TEST
 	dest := ipv4Dest(t, "127.0.0.1:50051")
@@ -59,11 +73,11 @@ func zoneThrough(t *testing.T, proc string, pid uint32) *time.Location {
 	if _, err := io.WriteString(app, "hello\n"); err != nil {
 		t.Fatal(err)
 	}
-	z := awaitEvent(t, w.saw, "the parser being handed the connection")
+	z = awaitEvent(t, w.saw, "the parser being handed the connection")
 	if err := awaitEvent(t, done, "handleConnection returning"); err != nil {
 		t.Fatalf("handleConnection: %v", err)
 	}
-	return z
+	return z, app.LocalAddr().(*net.TCPAddr).AddrPort(), app.RemoteAddr().(*net.TCPAddr).AddrPort()
 }
 
 // Under the proven switch, the zone of the process that made a connection,
@@ -118,5 +132,83 @@ func TestAConnectionsCallsAreLearnedInTheZoneOfTheProcessThatMadeIt(t *testing.T
 	}
 	if _, off := at.In(z).Zone(); off != 0 {
 		t.Errorf("the learn step of a connection of a process keploy cannot read reads %v (offset %d); want the agent's UTC", z, off)
+	}
+}
+
+// A docker-mode agent runs in a PID namespace of its own, where it reads no
+// process's zone by the connection's kernel PID: it takes the zone keploy's
+// CLI read of the app container that made the connection, asked by the
+// accepted connection's two ends (the app's socket, the proxy's), and the
+// connection's calls are learned in it. One it cannot place is learned in
+// the agent's own zone; an agent that takes no container lists (keploy in a
+// container of its own, not docker mode) asks none.
+func TestADockerModeAgentLearnsAConnectionInItsAppContainersZone(t *testing.T) {
+	kolkata, err := os.ReadFile("/usr/share/zoneinfo/Asia/Kolkata")
+	if err != nil {
+		t.Skipf("no host zone files: %v", err)
+	}
+	ist, err := learn.ZoneOfFile("Asia/Kolkata", kolkata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KEPLOY_PROVEN", "1")
+	t.Setenv("TZ", "UTC")
+	// keploy in a PID namespace of its own (utils.KernelPidsLocalIn).
+	proc := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proc, "self", "ns"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("pid:[4026532999]", filepath.Join(proc, "self", "ns", "pid")); err != nil {
+		t.Fatal(err)
+	}
+	type ends struct{ app, proxy netip.AddrPort }
+	asked := make(chan ends, 1)
+	answer := func(z learn.ProcZone, err error) {
+		connZone = func(_ context.Context, app, proxy netip.AddrPort) (learn.ProcZone, error) {
+			asked <- ends{app, proxy}
+			return z, err
+		}
+	}
+	t.Cleanup(func() { connZone = containerkey.ConnZone })
+	at := time.Date(2026, 10, 28, 7, 30, 0, 0, time.UTC)
+
+	// asked holds what a call asked once the connection reached its
+	// parser, which it does after the zone is read.
+	askedBy := func() (ends, bool) {
+		select {
+		case e := <-asked:
+			return e, true
+		default:
+			return ends{}, false
+		}
+	}
+	answer(ist, nil)
+	z, appEnd, proxyEnd := zoneThroughAgent(t, proc, 4242, true)
+	if z == nil {
+		t.Fatal("a docker-mode agent's connection of an app container in IST is learned in no zone; want IST")
+	}
+	if _, off := at.In(z).Zone(); off != 19800 {
+		t.Errorf("a docker-mode agent's connection of an app container in IST is learned in %v (offset %d); want 19800", z, off)
+	}
+	if e, ok := askedBy(); !ok || e.app != appEnd || e.proxy != proxyEnd {
+		t.Errorf("the container was asked by %+v (%v); want the app's end %s and the proxy's %s", e, ok, appEnd, proxyEnd)
+	}
+
+	answer(learn.ProcZone{}, errors.New("keploy cannot tell which app container made the connection: a test's"))
+	z, _, _ = zoneThroughAgent(t, proc, 4242, true)
+	if _, off := at.In(z).Zone(); z == nil || off != 0 {
+		t.Errorf("a docker-mode agent's connection it cannot place is learned in %v; want the agent's UTC", z)
+	}
+	if _, ok := askedBy(); !ok {
+		t.Error("a docker-mode agent asked for no app container's zone")
+	}
+
+	answer(ist, nil)
+	z, _, _ = zoneThroughAgent(t, proc, 4242, false)
+	if _, off := at.In(z).Zone(); z == nil || off != 0 {
+		t.Errorf("an agent that takes no container lists learned a connection in %v; want the agent's UTC", z)
+	}
+	if e, ok := askedBy(); ok {
+		t.Errorf("an agent that takes no container lists asked for the container at %+v", e)
 	}
 }
