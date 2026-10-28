@@ -1124,7 +1124,15 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 			}
 			if pr := placeRank(e, s, whole); pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
-				best.givenWhole = exact && s.Side == Response
+				// Never marked a whole copy of an answer (Place.givenWhole):
+				// this search takes the leaf as recorded, with no check that
+				// F's view of it held the instant F saw in the value. Where
+				// it did, the copy rule's second classification, without the
+				// source searches (skipBoth), takes the leaf again as the
+				// echo, which keeps the variable; where it did not, the full
+				// round refutes the copy, and the copy rule learns the read
+				// of the clock since the test began that both runs hold.
+				best.givenWhole = false
 			}
 		}
 	}
@@ -1311,7 +1319,12 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 			whole := s.Leaf.Value == r.Value
 			if pr := placeRank(e, s, whole); pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
-				best.givenWhole = s.Side == Response
+				// Never marked a whole copy of an answer (Place.givenWhole):
+				// the echo comes first, so a leaf F saw hold the instant F
+				// saw in the value is never this search's. One it reaches is
+				// a copy the full round refutes, and the copy rule learns the
+				// read of the clock since the test began that both runs hold.
+				best.givenWhole = false
 			}
 		}
 	}
