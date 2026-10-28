@@ -533,7 +533,10 @@ type Place struct {
 	// in another layout or at another resolution (Echo, an exact instant):
 	// never a part of it (a word held by chance) nor a value the
 	// application sent. A replay serves that answer as recorded, so the
-	// copy rule leaves a variable of it the answer's (classify).
+	// copy rule leaves a variable of it the answer's (classify). A typed
+	// instant's source searches never mark it (instantServedFrom,
+	// instantLeafFrom): they do not check that F's view held the value too,
+	// and the echo keeps a copy F's view holds.
 	givenWhole bool
 }
 

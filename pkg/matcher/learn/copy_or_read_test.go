@@ -1160,3 +1160,87 @@ func TestAClientTestKeepsAWholeCopyOfAnAnswersStampInAnyLayoutOrFormAsThatAnswer
 		})
 	}
 }
+
+func TestAClientTestLearnsACopyOfAnAnswersTypedStampTheFullRoundRefutesAsAReadSinceItsTestBegan(t *testing.T) {
+	// One run of the app's own previous call, an exchange F served leaf by
+	// leaf, and of the call copying its stamp: the stamp read at
+	// began+created, the call's window from began+insert to began+audit.
+	type run struct {
+		began                  time.Time
+		created, insert, audit time.Duration
+	}
+	at := func(r run, d time.Duration) time.Time { return r.began.Add(d) }
+	span := func(r run) Span { return Span{From: at(r, r.insert), To: at(r, r.audit), Began: r.began} }
+	rec := run{began: time.Date(2026, 10, 26, 1, 41, 6, 300_000_000, time.UTC), created: time.Millisecond, insert: 2 * time.Millisecond, audit: 4 * time.Millisecond}
+	full := run{began: time.Date(2026, 10, 26, 1, 42, 15, 0, time.UTC), created: 100 * time.Millisecond, insert: 150 * time.Millisecond, audit: 400 * time.Millisecond}
+	const src, copy = "body.createdAt", "body.cmd.documents.0.app.createdAt"
+	insertAt := at(rec, rec.insert)
+	insert := RawOf(&models.Mock{Name: "mock-app", Spec: models.MockSpec{ReqTimestampMock: insertAt, ResTimestampMock: insertAt.Add(time.Millisecond)}}, true)
+	recAt, fullAt := at(rec, rec.created), at(full, full.created)
+	seconds := func(p string, a time.Time) Leaf { return InstantLeaf(p, p, a, time.Second) }
+	millis := func(p string, a time.Time) Leaf { return InstantLeaf(p, p, a, time.Millisecond) }
+	wall := func(p string, a time.Time) Leaf { return WallClockLeaf(p, p, a.UTC(), time.Second) }
+	iso := func(p string, a time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: a.UTC().Truncate(time.Second).Format(time.RFC3339)}
+	}
+	for _, c := range []struct {
+		name string
+		leaf func(p string, a time.Time) Leaf
+		seen func(mk func(p string, a time.Time) Leaf) []Seen
+		read bool
+	}{
+		// The full round refutes the copy: F's answer held another moment,
+		// or the recorded one again, while the call sent its own clock.
+		{"the answer held it as recorded and F's another moment", seconds, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, fullAt.Add(5*time.Second)).Value}}
+		}, true},
+		{"the answer held it in both runs", seconds, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, recAt).Value}}
+		}, true},
+		{"a wall clock the answer held as recorded and F's another moment", wall, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, fullAt.Add(5*time.Second)).Value}}
+		}, true},
+		{"a wall clock the answer held in both runs", wall, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, recAt).Value}}
+		}, true},
+		{"the request held it in both runs", seconds, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Request, Leaf: mk(src, recAt), Live: mk(src, recAt).Value}}
+		}, true},
+		// The echo's place is what the app sent (a constant), F's moment
+		// held by an answer that recorded another: no answer's whole copy.
+		{"a text whose echo stands in what the app sent", iso, func(func(string, time.Time) Leaf) []Seen {
+			return []Seen{
+				{Side: Request, Leaf: seconds("body.sent", recAt), Live: seconds("body.sent", recAt).Value},
+				{Side: Response, Leaf: seconds("body.other", recAt.Add(-7*time.Second)), Live: seconds("body.other", fullAt).Value},
+			}
+		}, true},
+		// Controls: F's answer held the instant F saw in the value too, a
+		// whole copy in both runs, which stays the answer's variable.
+		{"the answer held it in both runs' values", seconds, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, fullAt).Value}}
+		}, false},
+		{"a wall clock the answer held in both runs' values", wall, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, fullAt).Value}}
+		}, false},
+		{"a millisecond instant the answer held in both runs' values", millis, func(mk func(string, time.Time) Leaf) []Seen {
+			return []Seen{{Side: Response, Leaf: mk(src, recAt), Live: mk(src, fullAt).Value}}
+		}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			earlier := []Earlier{{Mock: "mock-app", At: insertAt, Own: true, Payload: insert.ServedAs(1), Seen: c.seen(c.leaf)}}
+			shape := func(r run) Shape { return Shape{Leaves: map[string]Leaf{copy: c.leaf(copy, at(r, r.created))}} }
+			w := &Window{Rec: span(rec), F: span(full)}
+			ln := ClassifyFollowing(clientTestCache(), []string{copy}, shape(full), shape(rec), at(rec, rec.audit), earlier, nil, nil, w, nil)[0]
+			o, ok := ln.Clock()
+			if !c.read {
+				if ln.Kind != KindVariable || ln.From.Mock != "mock-app" || ln.From.Side != Response {
+					t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-app's answer, which held the value in both runs", ln.Kind, o, ln.From, ln.Why)
+				}
+				return
+			}
+			if ln.Kind != KindClockRead || !ok || o.Since != models.SinceTestBegin {
+				t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want a read of the clock since the test began: the full round refutes the copy, and the read holds in both runs", ln.Kind, o, ln.From, ln.Why)
+			}
+		})
+	}
+}
