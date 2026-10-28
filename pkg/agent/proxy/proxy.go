@@ -4929,6 +4929,18 @@ func (p *Proxy) SetRecordedOfKind(src func(kind models.Kind, visit func(name str
 
 var _ agent.RecordedOfKindSetter = (*Proxy)(nil)
 
+// SetRecordingTimes implements agent.RecordingTimesSetter (exact.go).
+func (p *Proxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetRecordingTimes(src)
+	return nil
+}
+
+var _ agent.RecordingTimesSetter = (*Proxy)(nil)
+
 // SetRecordedBefore implements agent.RecordedBeforeSetter (exact.go).
 func (p *Proxy) SetRecordedBefore(src func(t time.Time, visit func(*models.Mock) bool) error) error {
 	m := p.getMockManager()

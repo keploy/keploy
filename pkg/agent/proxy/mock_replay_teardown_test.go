@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
+	"go.uber.org/zap"
 )
 
 // keploy mock replay sends, with the pool's names (SetPoolNames), the
@@ -144,5 +146,102 @@ func TestUnderMockReplayTheRecordedWindowsKeepEachTestProcessesTeardown(t *testi
 	perTestReads(t, mm, "after b's last test", "b-end")
 	if !mm.DeleteFilteredMock(*bEnd) {
 		t.Fatal("b's call after its last test was not answered by its own recording of it")
+	}
+}
+
+// keploy mock replay stages, of the agent's on-disk store, what was recorded
+// before the set's first test and the pool, never a test's own: the trees
+// then hold no recording of a test that has not opened, and a teardown bound
+// read from them alone falls at the last test's recording they hold, or is
+// none (api-server's full round: the endSessions after its last test
+// missed). Here the trees hold a test's early call, made before the set's
+// first test, so the bound from them alone would make the gap's recording
+// the teardown. The bound reads every recording on disk instead, by its
+// times, decoding none: the pool's recording made after every test's own is
+// the teardown; one before a test's own, and a protocol-phase recording made
+// later, are not. Each set's store is read again, and a store that cannot be
+// read gives no teardown (fail closed), never the trees' early bound.
+func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
+	// The store notes protocol-phase recordings under the proven switch,
+	// keploy mock replay's.
+	t.Setenv(provenswitch.Env, "1")
+	early := exactMongo("owned-early", 100*time.Millisecond, models.LifetimePerTest)
+	boot := exactMongo("boot", 200*time.Millisecond, models.LifetimePerTest)
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	gap := exactMongo("gap", 1600*time.Millisecond, models.LifetimePerTest)
+	owned2 := exactMongo("owned-2", 2*time.Second, models.LifetimePerTest)
+	end := exactMongo("end-sessions", 3*time.Second, models.LifetimePerTest)
+	dns := exactMock("dns-late", 3500*time.Millisecond, models.LifetimePerTest)
+	dns.Kind = models.DNS
+	slice := []string{"boot", "gap", "end-sessions"}
+
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, mk := range []*models.Mock{early, boot, owned, gap, owned2, end, dns} {
+		if err := disk.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+
+	// What the staging reads: the startup band (the test's early call, the
+	// app's start) and the pool, never a test's own made in its window.
+	mm := stagedManager(t, []*models.Mock{early, boot, gap, end}, nil)
+	mm.SetPoolOwners(map[string]string{"owned-early": "k", "owned": "k", "owned-2": "k"})
+	mm.SetPoolNames(slice)
+	if after := mm.teardownAfter("k"); after == nil || !after(gap.Spec.ReqTimestampMock) {
+		t.Fatal("precondition: the staged trees alone did not put the bound at the test's early call")
+	}
+	mm.SetRecordingTimes(disk.RangeTimes)
+	after := mm.teardownAfter("k")
+	if after == nil || !after(end.Spec.ReqTimestampMock) {
+		t.Fatal("end-sessions, sent after every test's recording on disk, is not the set's teardown")
+	}
+	for _, mk := range []*models.Mock{boot, gap} {
+		if after(mk.Spec.ReqTimestampMock) {
+			t.Errorf("FALSE GREEN? %s, sent before a test's recording on disk, reads as the set's teardown", mk.Name)
+		}
+	}
+	mm.ServeExactPool("k", slice)
+	mm.ServeExactTest("T", []*models.Mock{early, owned})
+	if !mm.DeleteFilteredMock(*early) || !mm.DeleteFilteredMock(*owned) {
+		t.Fatal("precondition: the test's own recording did not answer it")
+	}
+	mm.ServeExactTest("T2", []*models.Mock{owned2})
+	if !mm.DeleteFilteredMock(*owned2) {
+		t.Fatal("precondition: the second test's own recording did not answer it")
+	}
+	mm.ServeExactPool("k", slice)
+	perTestReads(t, mm, "after the last test", "end-sessions")
+
+	// Another set's store, without the second test's recording: read again,
+	// not the bound cached for the first.
+	other, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	for _, mk := range []*models.Mock{early, boot, owned, gap, end} {
+		if err := other.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other.Finalize()
+	mm.SetRecordingTimes(other.RangeTimes)
+	if after := mm.teardownAfter("k"); after == nil || !after(gap.Spec.ReqTimestampMock) {
+		t.Fatal("a new set's store was not read again: its bound is the first set's")
+	}
+
+	// A store that cannot be read tells no bound: the call after the last
+	// test misses rather than pairing with a recording made between tests.
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mm.SetRecordingTimes(other.RangeTimes)
+	if mm.teardownAfter("k") != nil {
+		t.Fatal("FALSE GREEN? a store that cannot be read told a teardown bound from the trees alone")
 	}
 }

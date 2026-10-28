@@ -50,6 +50,20 @@ func (p *diskServingProxy) SetRecordedOfKind(src func(kind models.Kind, visit fu
 	return nil
 }
 
+// SetPoolNames installs the pool's names and the key of each test's
+// recordings on the manager, as the agent's proxy does (Proxy.SetPoolNames):
+// they bound the set's teardown (MockManager.teardownAfter).
+func (p *diskServingProxy) SetPoolNames(names []string, owners map[string]string) error {
+	p.mm.SetPoolOwners(owners)
+	p.mm.SetPoolNames(names)
+	return nil
+}
+
+func (p *diskServingProxy) SetRecordingTimes(src func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error) error {
+	p.mm.SetRecordingTimes(src)
+	return nil
+}
+
 func (p *diskServingProxy) SeedStartupCutoff(start time.Time)          { p.mm.SeedStartupCutoff(start) }
 func (p *diskServingProxy) SeedRecordedWindows(ws []models.TestWindow) { p.mm.SeedRecordedWindows(ws) }
 
@@ -357,4 +371,81 @@ func TestMockReplayHoldsOneTestsRecordingsAtATime(t *testing.T) {
 		require.Equal(t, 200, code, body)
 		require.Equal(t, fmt.Sprintf("gap %d", k), body)
 	}
+}
+
+// perTestNames is the names a per-test read of kind shows now: what a parser
+// that reads only the per-test tier for a call (Mongo's index, after the
+// first test fired) can be answered with.
+func perTestNames(t *testing.T, p *diskServingProxy, kind models.Kind) []string {
+	t.Helper()
+	mocks, err := p.mm.GetFilteredMocksByKind(kind)
+	require.NoError(t, err)
+	names := make([]string, 0, len(mocks))
+	for _, mk := range mocks {
+		names = append(names, mk.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// After a set's last test, a per-test read shows the pool's recording made
+// after every test's own (a Go mongo-driver's endSessions at
+// client.Disconnect), and it answers once. What tells "after every test" is
+// the whole recording on disk, not what the staging read: the staging reads
+// no test's own, and with the bound read from the trees no recording was
+// after every test (api-server's full round: the endSessions after its last
+// test missed, and CI would be red).
+func TestMockReplayAnswersTheCallAfterTheLastTest(t *testing.T) {
+	a, p := diskReplayAgent(t)
+	replaySet(t, a)
+	ctx := context.Background()
+	require.NoError(t, a.SetRecordedWindows(ctx, replayWindows))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"boot", "gap", "late"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p.servingProxy, "TestA", "/a", "/a2")
+	require.Equal(t, []string{"200 a", "200 a2"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	got, e = runTest(t, a, p.servingProxy, "TestB", "/b")
+	require.Equal(t, []string{"200 b"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"late"}, perTestNames(t, p, models.HTTP),
+		"after the last test a per-test read does not show the recording made after every test's own")
+	late := ownMock("late", "/late", "late", t0.Add(5*time.Second))
+	require.True(t, p.mm.DeleteFilteredMock(*late), "the recording made after the last test did not answer the call after it")
+	require.Empty(t, perTestNames(t, p, models.HTTP), "the call after the last test, made once more, is shown the recording that answered it")
+	require.False(t, p.mm.DeleteFilteredMock(*late), "FALSE GREEN: the call after the last test, made once more, was answered again")
+}
+
+// A recording made between two tests is never the set's teardown, though the
+// staging read a test's own recording made before the set's first test (an
+// early call of the test's, in the startup band): the bound is the last
+// recording of every test, read from the whole recording on disk. Shown
+// after the last test, the gap's recording would answer a late call made
+// before another test's own, and the learn step would learn as noise a value
+// that test's answer gave the application.
+func TestARecordingBetweenTestsIsNeverAfterTheLastTest(t *testing.T) {
+	a, p := diskReplayAgent(t)
+	storeOnDisk(t, a,
+		ownMock("boot", "/boot", "boot", t0.Add(-time.Second)),
+		ownMock("mock-a0", "/a0", "a0", t0.Add(-500*time.Millisecond)),
+		ownMock("mock-a", "/a", "a", t0.Add(time.Second)),
+		ownMock("gap", "/gap", "gap", t0.Add(2500*time.Millisecond)),
+		ownMock("mock-b", "/b", "b", t0.Add(3*time.Second)),
+		ownMock("late", "/late", "late", t0.Add(5*time.Second)))
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeTable(ctx, map[string][]string{
+		"o::TestA": {"mock-a0", "mock-a"},
+		"o::TestB": {"mock-b"},
+	}))
+	require.NoError(t, a.SetRecordedWindows(ctx, replayWindows))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"boot", "gap", "late"}}))
+	claimSelf(t, a)
+	got, e := runTest(t, a, p.servingProxy, "TestA", "/a0", "/a")
+	require.Equal(t, []string{"200 a0", "200 a"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	got, e = runTest(t, a, p.servingProxy, "TestB", "/b")
+	require.Equal(t, []string{"200 b"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"late"}, perTestNames(t, p, models.HTTP),
+		"FALSE GREEN? after the last test a per-test read shows a recording made before a test's own")
 }
