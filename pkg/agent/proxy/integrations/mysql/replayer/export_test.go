@@ -66,6 +66,17 @@ func MatchWithNoiseConfigForTest(ctx context.Context, logger *zap.Logger, req my
 	return resp, ok, missText, err
 }
 
+// MissReportForTest is MatchForTest whose miss comes back as the report the
+// command phase files for it (commandMissReport): nil when the command was
+// answered or the match failed.
+func MissReportForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext) (*mysql.Response, *models.MockMismatchReport, error) {
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, "", nil, nil)
+	if ok || err != nil || miss == nil {
+		return resp, nil, err
+	}
+	return nil, commandMissReport(req, dctx, "", miss), nil
+}
+
 // StrictEngineForTest is the schema-noise engine matchCommand runs with under
 // strict enforcement.
 func StrictEngineForTest() *mocknoise.Engine {
