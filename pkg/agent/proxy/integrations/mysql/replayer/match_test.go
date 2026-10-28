@@ -131,7 +131,7 @@ func TestAnEmptyPoolAnswersAsAPoolWithNoMatchingMock(t *testing.T) {
 	}}
 
 	t.Run("a query is the no_mocks miss", func(t *testing.T) {
-		resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), comQueryReq("SELECT 1"), &fakeMockDb{}, newDecodeCtx(), nil, nil)
+		resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), comQueryReq("SELECT 1"), &fakeMockDb{}, newDecodeCtx(), "", nil, nil)
 		if err != nil || ok || resp != nil || miss == nil || miss.matchPhase != models.MatchPhaseNoMocks || miss.candidateCount != 0 {
 			t.Fatalf("matchCommand on an empty pool: resp=%v ok=%v miss=%+v err=%v; want the no_mocks miss, and no answer or error", resp, ok, miss, err)
 		}
@@ -141,7 +141,7 @@ func TestAnEmptyPoolAnswersAsAPoolWithNoMatchingMock(t *testing.T) {
 		"a SEND_LONG_DATA is accepted":    sld,
 	} {
 		t.Run(name, func(t *testing.T) {
-			resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, &fakeMockDb{}, newDecodeCtx(), nil, nil)
+			resp, ok, miss, err := matchCommand(context.Background(), zap.NewNop(), req, &fakeMockDb{}, newDecodeCtx(), "", nil, nil)
 			if err != nil || !ok || resp == nil || miss != nil {
 				t.Fatalf("matchCommand on an empty pool: resp=%v ok=%v miss=%+v err=%v; want it answered, as a pool with no matching mock answers it", resp, ok, miss, err)
 			}
