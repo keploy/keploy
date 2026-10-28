@@ -1852,7 +1852,13 @@ func (v *exactView) rangeUnansweredWithKey(ix *integrations.MockIndex, key strin
 	if len(v.owned) == 0 {
 		return true
 	}
-	v.ownedKeys(ix) // built outside mu: the first keyed read of a view keys every copy
+	// Built outside mu: the first keyed read of a view keys every copy. No
+	// copy filed under key (an index whose OwnedKeys files none, MySQL's)
+	// reads nothing: no lock, no list kept for it. The verify mode still
+	// reads it, so a copy the index lost is caught by the walk.
+	if len(v.ownedKeys(ix)[key]) == 0 && !exactViewVerify.Load() {
+		return true
+	}
 	return v.rangeLive(liveKey{ix: ix, key: key}, fn)
 }
 
