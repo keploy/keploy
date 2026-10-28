@@ -322,6 +322,13 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 			meta["passthrough"] = string(models.PassThroughRecordOne)
 		}
 	}
+	// A CORS preflight the server allowed, under the proven switch, is a
+	// phase of the call it guards (corsPreflightPhase): protocol-phase, served
+	// to any test as often as asked, owned by none.
+	preflight := corsPreflightPhase(req, respParsed.StatusCode)
+	if preflight {
+		meta["type"] = "config"
+	}
 
 	// The digest headers the body matched as the server sent it, which a
 	// replay recomputes over the body it sends (models.MetadataBodyDigestsKey),
@@ -332,10 +339,11 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 
 	// The lifetime the mock is stated (models.MetadataLifetimeKey), beside the
 	// type tag older replayers read: an exchange is the data of the test it
-	// was made in, a recordOne representative is served to every test.
+	// was made in, a recordOne representative and an allowed CORS preflight
+	// (corsPreflightPhase) are served to every test.
 	ptLifetime := models.LifetimePerTest
 	meta[models.MetadataLifetimeKey] = models.MetadataLifetimePerTest
-	if ptRecordOne {
+	if ptRecordOne || preflight {
 		ptLifetime = models.LifetimeSession
 		meta[models.MetadataLifetimeKey] = models.MetadataLifetimeSession
 	}
@@ -375,7 +383,9 @@ func (h *HTTP) parseFinalHTTP(ctx context.Context, mock *FinalHTTP, destPort uin
 		// window-filtered). Stamp the lifetime authoritatively here and mark
 		// LifetimeDerived so DeriveLifetime is a no-op at ingest (its config-tag
 		// branch is short-circuited by LifetimeDerived, so the in-process value
-		// must already be correct — hence keying it off ptRecordOne, not the tag).
+		// must already be correct — hence keying it off ptRecordOne and preflight,
+		// not the tag). An allowed CORS preflight under the proven switch is
+		// session-lifetime too (corsPreflightPhase).
 		TestModeInfo: models.TestModeInfo{
 			Lifetime:        ptLifetime,
 			LifetimeDerived: true,
