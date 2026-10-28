@@ -1957,17 +1957,23 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, errMsg)
 				return errors.New(errMsg)
 			}
-			c.cfg.Test.DisableIdentityAliasing, err = cmd.Flags().GetBool("disableIdentityAliasing")
-			if err != nil {
-				errMsg := "failed to read the --disableIdentityAliasing flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			// Guarded like schema-noise-detection below: an unguarded read puts
+			// the flag's default over a keploy.yml value.
+			if cmd.Flags().Changed("disableIdentityAliasing") || !viper.IsSet("test.disableIdentityAliasing") {
+				c.cfg.Test.DisableIdentityAliasing, err = cmd.Flags().GetBool("disableIdentityAliasing")
+				if err != nil {
+					errMsg := "failed to read the --disableIdentityAliasing flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
-			c.cfg.Test.IdentityAliasResponses, err = cmd.Flags().GetBool("identityAliasResponses")
-			if err != nil {
-				errMsg := "failed to read the --identityAliasResponses flag; check the flag name with --help and confirm this command supports it"
-				utils.LogError(c.logger, err, errMsg)
-				return errors.New(errMsg)
+			if cmd.Flags().Changed("identityAliasResponses") || !viper.IsSet("test.identityAliasResponses") {
+				c.cfg.Test.IdentityAliasResponses, err = cmd.Flags().GetBool("identityAliasResponses")
+				if err != nil {
+					errMsg := "failed to read the --identityAliasResponses flag; check the flag name with --help and confirm this command supports it"
+					utils.LogError(c.logger, err, errMsg)
+					return errors.New(errMsg)
+				}
 			}
 
 			// Both spellings are read and OR-ed. --schema-noise-* is the

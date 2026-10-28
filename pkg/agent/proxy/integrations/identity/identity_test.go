@@ -65,6 +65,29 @@ func TestRewriterReplacesWholeTokensOnly(t *testing.T) {
 	}
 }
 
+// A UID is matched without case in bytes whose lower-casing changes their
+// length (an invalid UTF-8 byte, 'İ'): the offsets found are the body's own,
+// so a binary body does not panic and a JSON one is not cut at the wrong place.
+// A value that repeats itself across a '.' is not found again inside the text
+// that replaced it.
+func TestRewriterKeepsOffsetsInBodiesItDoesNotLowerAlike(t *testing.T) {
+	r := New([]models.PodIdentity{recorded}, live)
+	cases := map[string]string{
+		"\x0a\xff\xfe" + live.UID + "\x12":             "\x0a\xff\xfe" + recorded.UID + "\x12",
+		`{"city":"İstanbul","uid":"` + live.UID + `"}`: `{"city":"İstanbul","uid":"` + recorded.UID + `"}`,
+		"\xff7E6D5C4B-3A29-4817-A6F5-E4D3C2B1A0F9":     "\xff" + recorded.UID,
+	}
+	for in, want := range cases {
+		if got := r.String(in); got != want {
+			t.Errorf("String(%q)\n got %q\nwant %q", in, got, want)
+		}
+	}
+	node := New([]models.PodIdentity{{Name: "api-rec-1", Node: "worker-1"}}, models.PodIdentity{Name: "api-live-1", Node: "k8s.edge.k8s"})
+	if got, want := node.String("node=k8s.edge.k8s.edge.k8s"), "node=worker-1.edge.k8s"; got != want {
+		t.Errorf("a self-overlapping value\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestRewriterReverseRestoresTheLiveIdentity(t *testing.T) {
 	r := New([]models.PodIdentity{recorded}, live)
 	rev := r.Reverse()

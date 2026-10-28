@@ -150,9 +150,19 @@ func (k kind) startsAt(hay string, start int) bool {
 	switch k {
 	case kindIPv4:
 		// 110.244.2.4 and 1.10.244.2.4 continue a number; "ip=" does not.
-		return !(c >= '0' && c <= '9') && !(c == '.' && start >= 2 && hay[start-2] >= '0' && hay[start-2] <= '9')
+		switch {
+		case c >= '0' && c <= '9', c == '.' && start >= 2 && hay[start-2] >= '0' && hay[start-2] <= '9':
+			return false
+		default:
+			return true
+		}
 	case kindIPv4Dashed:
-		return !(c >= '0' && c <= '9') && c != '-'
+		switch {
+		case c >= '0' && c <= '9', c == '-':
+			return false
+		default:
+			return true
+		}
 	case kindIPv6:
 		return !isHex(c) && c != ':' && c != '.'
 	case kindUID, kindUIDCgroup:
@@ -174,9 +184,19 @@ func (k kind) endsAt(hay string, end int) bool {
 	switch k {
 	case kindIPv4:
 		// "10.244.2.4.5" continues a number; "10.244.2.4." ends a sentence.
-		return !(c >= '0' && c <= '9') && !(c == '.' && end+1 < len(hay) && hay[end+1] >= '0' && hay[end+1] <= '9')
+		switch {
+		case c >= '0' && c <= '9', c == '.' && end+1 < len(hay) && hay[end+1] >= '0' && hay[end+1] <= '9':
+			return false
+		default:
+			return true
+		}
 	case kindIPv4Dashed:
-		return !(c >= '0' && c <= '9') && c != '-'
+		switch {
+		case c >= '0' && c <= '9', c == '-':
+			return false
+		default:
+			return true
+		}
 	case kindIPv6:
 		return !isHex(c) && c != ':' && c != '.'
 	case kindUID, kindUIDCgroup:
@@ -418,7 +438,7 @@ func (r *Rewriter) Bytes(b []byte) []byte {
 func (rule rule) apply(s string) string {
 	hay := s
 	if rule.fold {
-		hay = strings.ToLower(s)
+		hay = lowerASCII(s)
 	}
 	var b strings.Builder
 	last := 0
@@ -432,6 +452,11 @@ func (rule rule) apply(s string) string {
 			b.WriteString(s[last:start])
 			b.WriteString(rule.to)
 			last = end
+			// Past the value replaced: a value that repeats itself across a
+			// boundary (k8s.edge.k8s in k8s.edge.k8s.edge.k8s) is not found
+			// again inside it.
+			i = end
+			continue
 		}
 		i = start + 1
 	}
@@ -440,6 +465,26 @@ func (rule rule) apply(s string) string {
 	}
 	b.WriteString(s[last:])
 	return b.String()
+}
+
+// lowerASCII is s with its ASCII letters lower-cased and every other byte as
+// it is: the same length, so an offset found in it is the same offset in s. A
+// fold rule's values are hex (a UID, an IPv6 address). strings.ToLower does
+// not keep the length: an invalid UTF-8 byte becomes U+FFFD (1 byte to 3) and
+// 'İ' becomes 'i' (2 bytes to 1), which shifted every offset after them.
+func lowerASCII(s string) string {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= 'A' && c <= 'Z' {
+			b := []byte(s)
+			for j := i; j < len(b); j++ {
+				if b[j] >= 'A' && b[j] <= 'Z' {
+					b[j] += 'a' - 'A'
+				}
+			}
+			return string(b)
+		}
+	}
+	return s
 }
 
 var (

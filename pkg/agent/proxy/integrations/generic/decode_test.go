@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,15 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
+
+// TestMain fixes the replay pod's own name (identity.PodNameEnv) before any
+// row reads it: without it the name is the test machine's hostname, which a
+// CI container may name localhost or too short to alias, and the identity
+// rows would rewrite nothing.
+func TestMain(m *testing.M) {
+	_ = os.Setenv(identity.PodNameEnv, "keploy-test-live-pod")
+	os.Exit(m.Run())
+}
 
 // clocklessConn is a connection on which a deadline still to come is not set
 // (none is, instead): a read waits for data, the close, or a deadline already
@@ -113,7 +123,7 @@ func TestTheGenericParserAliasesEachReadToTheTestSetArmedThen(t *testing.T) {
 	ctx, cancel := context.WithCancel(identity.WithCurrent(context.Background(), func() (*models.IdentityAliasing, bool) { return armed.Load(), true }))
 	defer cancel()
 	app, proxySide := net.Pipe()
-	defer app.Close()
+	defer func() { _ = app.Close() }()
 	done := make(chan error, 1)
 	go func() {
 		done <- decodeGeneric(ctx, zap.NewNop(), []byte("WHO "+live), proxySide, nil, store, models.OutgoingOptions{Identity: set1})
