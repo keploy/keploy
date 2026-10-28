@@ -471,6 +471,10 @@ func CheckFileExists(path string) bool {
 }
 
 var Version string
+
+// DevVersion is the version of a build that was not given one.
+const DevVersion = "3-dev"
+
 var VersionIdentifier string
 var LogFile *os.File
 
@@ -509,11 +513,16 @@ func attachLogFileToSentry(logFile *os.File) error {
 
 // HandleRecovery handles the common logic for recovering from a panic.
 func HandleRecovery(logger *zap.Logger, r interface{}, errMsg string) {
-	err := attachLogFileToSentry(LogFile)
-	if err != nil {
-		LogError(logger, err, "failed to attach log file to sentry")
+	// With no crash-report client (telemetry off, or not yet resolved: see
+	// ResolveCrashReports) nothing is reported, so the log is not read into
+	// memory for a report that goes nowhere.
+	if sentry.CurrentHub().Client() != nil {
+		err := attachLogFileToSentry(LogFile)
+		if err != nil {
+			LogError(logger, err, "failed to attach log file to sentry")
+		}
+		sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	}
-	sentry.CaptureException(errors.New(fmt.Sprint(r)))
 	// Get the stack trace
 	stackTrace := debug.Stack()
 	LogError(logger, nil, errMsg, zap.String("stack trace", string(stackTrace)))
@@ -823,16 +832,6 @@ func Keys(m map[string][]string) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
-
-func SentryInit(logger *zap.Logger, dsn string) {
-	err := sentry.Init(sentry.ClientOptions{
-		Dsn:              dsn,
-		TracesSampleRate: 1.0,
-	})
-	if err != nil {
-		logger.Debug("Could not initialise sentry.", zap.Error(err))
-	}
 }
 
 //func FetchHomeDirectory(isNewConfigPath bool) string {

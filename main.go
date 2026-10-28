@@ -53,7 +53,7 @@ func main() {
 
 func setVersion() {
 	if version == "" {
-		version = "3-dev"
+		version = utils.DevVersion
 	}
 	utils.Version = version
 	utils.VersionIdentifier = "version"
@@ -234,10 +234,10 @@ func start(ctx context.Context) {
 	oldMask := utils.SetUmask()
 	defer utils.RestoreUmask(oldMask)
 
-	if dsn != "" {
-		utils.SentryInit(logger, dsn)
-		//logger = utils.ModifyToSentryLogger(ctx, logger, sentry.CurrentHub().Client(), configDb)
-	}
+	// Armed only: the crash-report client starts once the command has read
+	// --disable-tele and keploy.yml, and only with telemetry on
+	// (utils.ResolveCrashReports, from ValidateFlags).
+	utils.ArmCrashReports(dsn)
 	conf := config.New()
 	conf.APIServerURL = apiServerURI
 	conf.GitHubClientID = gitHubClientID

@@ -236,6 +236,10 @@ var IsConfigFileFound = true
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
+	// configRead is set once PreProcessFlags has filled cfg from the flags
+	// and keploy.yml. Only then is DisableTele the user's answer: a command
+	// that runs ValidateFlags alone (config) holds the default.
+	configRead bool
 }
 
 // pinProvenSwitch is what the agent's --proven flag decides: the agent's
@@ -910,6 +914,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
+	c.configRead = true
 	return nil
 }
 
@@ -1391,6 +1396,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		c.cfg.DisableTele = true
+	}
+	// DisableTele is final here: the flag over keploy.yml over the default,
+	// and --enable-testing. A crash report is telemetry and carries this
+	// run's whole log, so its client starts only now, and only with telemetry
+	// on; in the agent too, which runs this with the --disable-tele its
+	// launcher handed it. A command that read neither (config runs
+	// ValidateFlags alone) holds the default, not the user's answer, and
+	// starts none.
+	if c.configRead {
+		utils.ResolveCrashReports(c.logger, c.cfg.DisableTele)
 	}
 
 	if c.cfg.DisableANSI {

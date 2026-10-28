@@ -583,8 +583,12 @@ jobs:
       # never got the CLI's --disable-tele, so telemetry.keploy.io was still
       # resolved and posted to. A watcher counts the DNS queries of the
       # runner's network namespace (resolv.conf untouched); a control leg
-      # without the flag must show keploy's lookup.
-      - name: Run disable-tele e2e (native, no telemetry lookup under --disable-tele)
+      # without the flag must show keploy's lookup. Then a crash build of this
+      # checkout (-tags keploy_e2e_crash) panics in the CLI and in the agent:
+      # under --disable-tele its crash report resolves no sentry.io host (the
+      # client started before the flags were read and sent the run's whole
+      # log), and without the flag it does.
+      - name: Run disable-tele e2e (native, no telemetry or crash-report lookup under --disable-tele)
         if: ${{ !cancelled() }}
         env:
           RECORD_BIN: ${{ steps.record.outputs.path }}
