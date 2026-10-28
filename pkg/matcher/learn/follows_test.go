@@ -236,9 +236,14 @@ func eRows(rows []models.PostgresV3Cells) Raw {
 }
 
 // jobsServed is eJobs(id, n) served by F as the 6th serve, after eStartup's,
-// changed, with F's view of it (live; the zero Raw: none).
+// with F's view of it (live; the zero Raw: an adapter that states no view,
+// which never calls ServedLive).
 func jobsServed(id, n string, live Raw) []Raw {
-	return append(eStartup(), eJobs(id, n).ServedAs(6).ServedLive(live))
+	x := eJobs(id, n).ServedAs(6)
+	if live.mock != "" {
+		x = x.ServedLive(live)
+	}
+	return append(eStartup(), x)
 }
 
 // A word of the value at a place F gave the application another value at
@@ -308,7 +313,10 @@ func TestAWordAtAPlaceTheFullRoundGaveAnotherValueAtIsNoCopyWhereTheValueTookNon
 		{"payload, F's view gave the word the value took at two columns", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("9999", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
 		{"payload, F's view gave the word the value took at a column besides the one both gave it at", "k-zzzz", "k-6c7d", nil, append(eStartup(), eRow("qqqq", "6c7d", "aaaa").ServedAs(6).ServedLive(eRow("qqqq", "6c7d", "6c7d"))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[0][2]" + other, ""},
 		{"payload, F's view grew a row holding the word the value took", "k-48d1", "k-6c7d", nil, append(eStartup(), eRows([]models.PostgresV3Cells{{{Value: "48d1"}, {Value: "6c7d"}}}).ServedAs(6).ServedLive(eRows([]models.PostgresV3Cells{{{Value: "9999"}, {Value: "6c7d"}}, {{Value: "6c7d"}, {Value: "1"}}}))), KindUnaccounted, "record's full round gave the application that word at spec.postgresV3.query.response.rows[1][0]" + other, ""},
-		// A view of another mock is no view of this one.
+		// A view of another mock is no view of this one: one keploy could
+		// not read (ServedLive), so a word only F's serve may have given is
+		// refused; a value copied where the recording gave it is still bound
+		// there, checked at replay.
 		{"payload, a view of another mock", chanceValRec, chanceCopy, nil, jobsServed(chanceSrcRec, "5", ePg("mock-7", 100*time.Millisecond, "SELECT name FROM users", []models.PostgresV3Cells{{{Value: "zzzz"}, {Value: "5"}}}, "SELECT 1")), KindVariable, "", "mock-6"},
 		// F gave 48d1's place a longer word that holds what the value took.
 		{"payload, F's view, the value took a part of a longer word F gave", "k-48d1", "k-6c7d", nil, append(eStartup(), eRow("48d1 aaaa", "x", "y").ServedAs(6).ServedLive(eRow("6c7daaaa", "x", "y"))), KindVariable, "", "mock-6"},
