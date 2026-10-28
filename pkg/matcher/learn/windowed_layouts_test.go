@@ -122,7 +122,7 @@ func TestEachAnchorFindsOnlyItsShape(t *testing.T) {
 		{"digit T digit", digitTDigit, "1T2 1t2", [][2]int{{0, 3}, {4, 7}}},
 		{"digit T digit", digitTDigit, "T2 1T aTb xT2 1X2", nil},
 		{"uuid version", uuidVersionGroup, "-1abc- -7ABC-", [][2]int{{0, 6}, {7, 13}}},
-		{"uuid version", uuidVersionGroup, "-2abc- -1abg- -1ab- -1abcx -1abc", nil},
+		{"uuid version", uuidVersionGroup, "-2abc- -1abg- -1gbc- -1agc- -1ab- -1abcx -1abc", nil},
 		{"digit runs", digitRuns(10), "a12345678901b 1234567890", [][2]int{{1, 12}, {14, 24}}},
 		{"digit runs", digitRuns(10), "123456789 12345.67890", nil},
 	} {
