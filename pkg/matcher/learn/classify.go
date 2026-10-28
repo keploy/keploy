@@ -203,6 +203,13 @@ type Raw struct {
 	// unchanged, or an adapter that does not say), and keploy then reads that
 	// F gave nothing there (fail closed).
 	live *Raw
+	// unseen: F served r changed in ways keploy keeps no one view of
+	// (ServedChanged); views are the views its serves gave the application,
+	// read as live is, none where one of them could not be read. A word a
+	// value holds now that may stand in what F gave the application there is
+	// refused (unaccounted).
+	unseen bool
+	views  []*Raw
 	// unread, of a Raw that was not read, says why where the place it stands
 	// for says more than rawUnread can (Earlier.lateOf: payloadUnread).
 	unread string
@@ -323,6 +330,7 @@ func (r Raw) WithServed(served bool) Raw {
 	r.served = served
 	if !served {
 		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
+		r.unseen, r.views = false, nil
 	}
 	return r
 }
@@ -361,9 +369,49 @@ func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
 // view: keploy then reads that F gave nothing there (fail closed).
 // ServedAsRecorded, where an adapter also says it, reads first.
 func (r Raw) ServedLive(live Raw) Raw {
-	if !r.served || live.mock != r.mock || live.call != r.call {
-		r.live = nil
+	r.live, r.unseen, r.views = nil, false, nil
+	if r.served {
+		r.live, _ = r.viewOf(live)
+	}
+	return r
+}
+
+// ServedChanged is r, which F served (ServedIn, WithServed), as served
+// changed in ways keploy keeps no one view of: serves of it in the running
+// set gave the application different views (views, each RawOf of the mock
+// as F's application sent its request and F answered it, as ServedLive
+// takes one), or a serve's view could not be read (none). keploy cannot
+// tell which of them a later call read, nor what an unread one gave, so a
+// word a value holds now that stands in any of the views and not in the
+// recorded text is refused, under ClassifyGiven too (unaccounted), never
+// learned as noise; where a view could not be read, so is every word a
+// value holds now. Every other rule reads that F gave nothing there (Live is
+// false): fail closed. A view that was not read from its mock, or of another
+// mock or call than r's, is one that could not be read. Of a Raw F did not
+// serve it says nothing.
+func (r Raw) ServedChanged(views ...Raw) Raw {
+	r.live, r.asRecorded, r.unseen, r.views = nil, false, r.served, nil
+	if !r.served {
 		return r
+	}
+	read := make([]*Raw, 0, len(views))
+	for _, v := range views {
+		lv, ok := r.viewOf(v)
+		if !ok {
+			return r
+		}
+		read = append(read, lv)
+	}
+	r.views = read
+	return r
+}
+
+// viewOf is live read as F's view of r (ServedLive, ServedChanged); false
+// where it is none: a Raw of another mock or call than r's, or one that
+// could not be read from its mock.
+func (r Raw) viewOf(live Raw) (*Raw, bool) {
+	if live.mock != r.mock || live.call != r.call {
+		return nil, false
 	}
 	// The view is what F served, not its recording's payload, yet it bears
 	// the recording's identity (MockID: one name and the same times), and
@@ -378,13 +426,11 @@ func (r Raw) ServedLive(live Raw) Raw {
 		b = live.payload()
 	}
 	if !b.read {
-		r.live = nil
-		return r
+		return nil, false
 	}
-	live.live, live.src, live.id = nil, nil, ""
+	live.live, live.src, live.id, live.unseen, live.views = nil, nil, "", false, nil
 	live.rText, live.rClock, live.rFields, live.rStamps, live.rRead = b.text, b.answerClock, b.fields, b.stamps, true
-	r.live = &live
-	return r
+	return &live, true
 }
 
 // Live reports whether r carries F's view of what F served there

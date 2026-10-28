@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -873,9 +874,43 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 				}
 				return why
 			}
+			// A word the value holds now, where F served x changed in ways
+			// keploy keeps no one view of (ServedChanged): one that stands
+			// in a view of a serve of it, and not in what the recording gave
+			// there, or any word where a serve's view could not be read. F
+			// may have given it there, and keploy cannot tell which view the
+			// application read: no rule lets it go.
+			if !recorded && x.unseen {
+				if why := unseenWhy(dc, x, held.of(j).unseen[changedWord{i, t}], keep, word(t, recorded), t, at); why != "" {
+					return why + "; " + notClock(v) + ". " + correction(x.mock, false)
+				}
+			}
 		}
 		return ""
 	})
+}
+
+// unseenWhy says where a word t the value holds now (named), which F may
+// have given the application in x, a recording it served changed in ways
+// keploy keeps no one view of (Raw.ServedChanged), stands: in a view of
+// one of its serves (held), or, where a serve's view could not be read, in
+// what F gave there unread. "" where neither: every view was read, and none
+// holds the word.
+func unseenWhy(dc *DriftCache, x Raw, held, keep bool, named, t string, at time.Time) string {
+	if len(x.views) == 0 {
+		return named + " may stand in " + x.mock + x.atNote(at) + ", an earlier recording record's full round served changed, where keploy could not read what it gave the application: keploy cannot tell whether it came from there"
+	}
+	if !held {
+		return ""
+	}
+	place := x.mock + "'s payload"
+	for _, view := range x.views {
+		if f := dc.fieldOf(*view, dc.searched(*view, keep), t); f != "" {
+			place = x.mock + " at " + f
+			break
+		}
+	}
+	return named + " appears in an earlier recording, in " + place + x.atNote(at) + ", as record's full round gave it in one of " + strconv.Itoa(len(x.views)) + " serves that gave the application different views of it, where the recording did not give the application that word: keploy cannot tell which of them the application read, nor whether it came from there"
 }
 
 // givenWhy says why a drifted value (v) that no earlier place of the call's
@@ -986,9 +1021,10 @@ type heldWords struct {
 	of func(j int) wordsIn
 }
 
-// wordsIn are the changed words a payload holds, as recorded (raw) and as
-// F gave it (live: its ServedLive view).
-type wordsIn struct{ raw, live map[changedWord]bool }
+// wordsIn are the changed words a payload holds, as recorded (raw), as F
+// gave it (live: its ServedLive view), and as any of the views F's serves
+// of it gave where they differ (unseen: its ServedChanged views).
+type wordsIn struct{ raw, live, unseen map[changedWord]bool }
 
 // wordsHeld are which of v's changed words each of raw holds, searched as
 // keep says (stampsEchoed). Each payload's words are read once for the
@@ -1021,6 +1057,14 @@ func (dc *DriftCache) wordsHeld(v *valueDrift, keep bool, raw []Raw) heldWords {
 			h := wordsIn{raw: in(dc.searchedTokens(x, keep))}
 			if x.Live() {
 				h.live = in(dc.searchedTokens(*x.live, keep))
+			}
+			if len(x.views) > 0 {
+				h.unseen = map[changedWord]bool{}
+				for _, view := range x.views {
+					for w := range in(dc.searchedTokens(*view, keep)) {
+						h.unseen[w] = true
+					}
+				}
 			}
 			read[j] = &h
 		}
