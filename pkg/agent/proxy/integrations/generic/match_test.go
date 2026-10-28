@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/relay"
@@ -33,16 +35,26 @@ func exchange(name string, req ...string) *models.Mock {
 // An exchange the open test's own mocks already answered, as often as it
 // was recorded, is one exchange more than recorded; any other unanswered
 // exchange is not, and nothing is one without exact serving.
+//
+// The exchange repeats the test's copy of it recorded last, whatever order
+// they answered in or are named in: a mark on it leaves the earlier copies
+// required.
 func TestAnExchangeMoreThanRecordedIsAnExtraCall(t *testing.T) {
-	db := answered{mocks: []*models.Mock{exchange("mock-1", "PING"), exchange("mock-2", "PING"), exchange("mock-3", "GET k")}}
-	if n := extraCall([][]byte{[]byte("PING")}, db); n != 2 {
-		t.Fatalf("PING was recorded twice for the test, got %d", n)
+	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	early, late := exchange("mock-9", "PING"), exchange("mock-2", "PING")
+	early.Spec.ReqTimestampMock, late.Spec.ReqTimestampMock = at, at.Add(time.Second)
+	for _, order := range [][]*models.Mock{{late, early}, {early, late}} {
+		db := answered{mocks: append(order, exchange("mock-3", "GET k"))}
+		if n, repeats := extraCall([][]byte{[]byte("PING")}, db); n != 2 || repeats != late {
+			t.Fatalf("PING was recorded twice for the test, mock-2 last, answered %s first: got %d, repeating %v", order[0].Name, n, repeats)
+		}
 	}
-	if n := extraCall([][]byte{[]byte("SET k v")}, db); n != 0 {
-		t.Fatalf("an exchange the test never recorded is an extra call: %d", n)
+	db := answered{mocks: []*models.Mock{late, early, exchange("mock-3", "GET k")}}
+	if n, repeats := extraCall([][]byte{[]byte("SET k v")}, db); n != 0 || repeats != nil {
+		t.Fatalf("an exchange the test never recorded is an extra call: %d, repeating %v", n, repeats)
 	}
-	if n := extraCall([][]byte{[]byte("PING")}, struct{ integrations.MockMemDb }{}); n != 0 {
-		t.Fatalf("without exact serving: %d", n)
+	if n, repeats := extraCall([][]byte{[]byte("PING")}, struct{ integrations.MockMemDb }{}); n != 0 || repeats != nil {
+		t.Fatalf("without exact serving: %d, repeating %v", n, repeats)
 	}
 }
 
@@ -98,8 +110,18 @@ func TestAChangedExchangeIsComparedWithTheTestsAnsweredOnes(t *testing.T) {
 	if r.MissKind != models.MissExtraCall || r.Recorded != 1 {
 		t.Fatalf("an exact repeat: kind %q, recorded %d; want an extra call recorded once", r.MissKind, r.Recorded)
 	}
-	if r.ClosestMock != "" || r.MatchPhase != models.MatchPhaseNoMocks {
-		t.Fatalf("an extra call was compared with what the test answered: closest %q, phase %q", r.ClosestMock, r.MatchPhase)
+	if r.ClosestMock != "mock-1" || r.MatchPhase != models.MatchPhaseNoMocks {
+		t.Fatalf("an extra call is named as the recording it repeats and compared with nothing else: closest %q, phase %q; want mock-1, %q", r.ClosestMock, r.MatchPhase, models.MatchPhaseNoMocks)
+	}
+
+	// Another exchange in view, however like the call, is not named: its
+	// difference would read as noise to declare, which would answer the
+	// call with that exchange's answer.
+	near := exchange("mock-0", "SET k x")
+	r = missReport(t, answeredStore{pingStore: pingStore{mocks: []*models.Mock{near}}, answered: store.answered}, "SET k v")
+	if r.MissKind != models.MissExtraCall || r.ClosestMock != "mock-1" || len(r.FieldDiffs)+len(r.Differs) != 0 ||
+		!strings.Contains(r.Diff, "repeats mock-1") || !strings.Contains(r.NextSteps, "repeats mock-1") || strings.Contains(r.Diff+r.NextSteps, "mock-0") {
+		t.Fatalf("an extra call with mock-0 in view: %+v; want it named as mock-1, the recording it repeats, and mock-0 nowhere", r)
 	}
 }
 
