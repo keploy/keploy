@@ -147,6 +147,12 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 			t.Errorf("%s: %q at %d; want %q at %d", row.what, z.Name, off, row.want, row.off)
 		}
 	}
+	// A link loop on a TZ's path is in the process's own files, as the C
+	// library reads them: its reason says the TZ names no zone file, never
+	// that keploy could not read one.
+	if _, err := ReadProcZone(proc, 106); err == nil || err.Error() != "TZ=Asia/Kolkata names no zone file under the process's root" {
+		t.Errorf("a TZ through a link loop: %v; want a TZ naming no zone file", err)
+	}
 
 	// No process is read where keploy runs in a PID namespace of its own
 	// (no initial namespace's entry at self/ns/pid): a kernel pid there
