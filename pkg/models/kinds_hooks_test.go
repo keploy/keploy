@@ -39,6 +39,7 @@ func TestKindRegistriesNameARegisteredKindsMocks(t *testing.T) {
 		one      bool
 	}{
 		{"RegisterWriteKind", RegisterWriteKind, WriteKindOf, true},
+		{"RegisterCallWrite", RegisterCallWrite, CallWriteOf, true},
 		{"RegisterExactKey", RegisterExactKey, ExactKeyOf, false},
 	} {
 		t.Run(reg.name, func(t *testing.T) {
@@ -84,12 +85,32 @@ func TestKindRegistriesNameARegisteredKindsMocks(t *testing.T) {
 	// A function that says ok but names nothing names no write kind, and
 	// keys nothing.
 	defer RegisterWriteKind(Mongo, func(*Mock) (string, bool) { return "", true })()
+	defer RegisterCallWrite(Mongo, func(*Mock) (string, bool) { return "", true })()
 	defer RegisterExactKey(Mongo, func(*Mock) (string, bool) { return "", true })()
 	if got, ok := WriteKindOf(mongoWrite("insert")); ok || got != "" {
 		t.Fatalf("an empty write kind is %q, %v; want none", got, ok)
 	}
 	if got, ok := ExactKeyOf(mongoWrite("insert")); ok || got != "" {
 		t.Fatalf("an empty exact key is %q, %v; want none", got, ok)
+	}
+	if got, ok := CallWriteOf(mongoWrite("insert")); ok || got != "" {
+		t.Fatalf("an empty call write is %q, %v; want none", got, ok)
+	}
+}
+
+// A write kind and a call write are two registries: a kind's registration
+// in one names nothing in the other.
+func TestAWriteKindAndACallWriteAreSeparateRegistries(t *testing.T) {
+	defer RegisterWriteKind(Mongo, func(*Mock) (string, bool) { return "Mongo insert keploy.events", true })()
+	if got, ok := CallWriteOf(mongoWrite("insert")); ok || got != "" {
+		t.Fatalf("a write kind's registration named a call write %q", got)
+	}
+	defer RegisterCallWrite(Mongo, func(*Mock) (string, bool) { return "Mongo update keploy.keys", true })()
+	if got, _ := WriteKindOf(mongoWrite("insert")); got != "Mongo insert keploy.events" {
+		t.Fatalf("a call write's registration changed the write kind to %q", got)
+	}
+	if got, _ := CallWriteOf(mongoWrite("insert")); got != "Mongo update keploy.keys" {
+		t.Fatalf("the call write is %q", got)
 	}
 }
 
