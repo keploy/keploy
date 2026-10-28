@@ -167,6 +167,7 @@ func TestReadBeforeUnmadeWrite_NeverFromBeforeAWriteTheReplayHasMade(t *testing.
 		{name: "a write the replay has not made bounds nothing", db: store(nil, nil, r0, m, write), answer: "r0"},
 		{name: "a made recording that cannot change the read bounds nothing", db: store(nil, []string{"m-elsewhere"}, r0, elsewhere, write), answer: "r0"},
 		{name: "a made write of another kind bounds nothing", db: store(nil, []string{"m-http"}, r0, other, write), answer: "r0"},
+		{name: "a recording of another kind does not end the set's read: the made write after it still bounds", db: store(nil, []string{"m"}, r0, other, m, write), made: "m"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ReadBeforeUnmadeWrite(tc.db, chosen, isWriteRec, sameRead)
