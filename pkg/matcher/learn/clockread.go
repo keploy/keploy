@@ -691,12 +691,17 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // value of .4 s is checked at 100 ms). An offset whose Res is a cut is
 // never learned (learn's clockOffset), and a value against one is refused
 // as before.
-// The application's zone is the one the learn step named, where it did
-// (models.ClockOffset.AppZone: a wall clock of no zone read in it, a value
-// that names its moment cut coarser than a minute), on any machine, never the replay's own (a recording
-// learned on a laptop in IST is read in IST on a CI machine in UTC), and a
-// name this keploy cannot read refuses the value, naming it; an o of no
-// name (an old file) is read in s.Zone, as before.
+// The application's zone is the one its process writes its clock in in
+// this run, where the agent read it from the process that made the call
+// (s.Own: a wall clock of no zone is the application's own, so a recording
+// learned on a laptop in IST is checked in UTC where the application now
+// runs in UTC). Where keploy could not read it, it is the one the learn
+// step named (models.ClockOffset.AppZone: a wall clock of no zone read in
+// it, a value that names its moment cut coarser than a minute), on any
+// machine, never the agent's own, and a name this keploy cannot read
+// refuses the value, naming it. Where neither is known, a plain read cut to
+// an hour or coarser, whose cut the zone moves, is refused, saying so; any
+// other o of no name (an old file) is read in s.Zone, as before.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they
 // share no offset, or read it in different zones) is refused whatever the
 // call carries, saying so, and so is one of a Zone this keploy does not
@@ -718,15 +723,27 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 		return false, learned + ", which a replay checks against its call's window on the application's clock, but keploy cannot tell the application's clock at this call (no time hooks report it, or they could not tell it here), so it refuses the value rather than pass it unchecked"
 	}
 	hint := ""
-	if o.AppZone != "" {
+	switch {
+	case s.Own:
+		// The zone the application writes its clock in in this run, read
+		// from the process that made the call, wins over the one the learn
+		// step named: a wall clock of no zone is the application's own.
+		if o.AppZone != "" {
+			loc, _ := models.ZoneLocation(o.AppZone)
+			hint = appZoneHint(o.AppZone, loc, s)
+		}
+	case o.AppZone != "":
 		// The zone the learn step read the application's in, on any machine
-		// (models.ClockOffset.AppZone), never this replay's own.
+		// (models.ClockOffset.AppZone), where keploy cannot read the
+		// application's own in this run.
 		loc, err := models.ZoneLocation(o.AppZone)
 		hint = appZoneHint(o.AppZone, loc, s)
 		if err != nil {
 			return false, learned + ", which a replay reads in " + o.AppZone + ", the application's zone the learn step read it in, but this keploy cannot read that zone (" + err.Error() + "), so it refuses the value rather than read it in another zone. Record the test again with this keploy"
 		}
 		s.Zone = loc
+	case o.AppZoneMatters() && o.Plain() && o.Res >= time.Hour:
+		return false, learned + ", cut to " + models.ShortDuration(o.Res) + ", which a replay checks in the application's zone, but keploy could not read the zone of the process that made this call, and the learn step named none, so it refuses the value rather than check its cut in another zone. Record the test again where keploy reads the application's zone (keploy in the host PID namespace, the application's process and its files readable; the agent's debug log says why it could not)"
 	}
 	ats, res, why := clockReadIn(o, live, s)
 	if why != "" {
@@ -786,6 +803,9 @@ func appZoneHint(name string, learned *time.Location, s Span) string {
 	if own == "" || own == "Local" || own[0] == '+' || own[0] == '-' {
 		own = "a zone at UTC" + a.Format("-07:00")
 	}
+	if s.Own {
+		return ". The application writes its clock in " + own + " in this run, not in " + name + ", the zone the test was recorded in, and keploy checked the value in " + own
+	}
 	run := "with TZ=" + name
 	if name[0] == '+' || name[0] == '-' {
 		// A fixed offset is no TZ value: the zone the application ran in
@@ -843,7 +863,9 @@ func zoneName(at time.Time) string {
 
 // ClockSpanFrom is the span on the application's clock in which the call
 // that reached keploy at the real instant arrival made its clock reads in
-// this run (Tracker.LiveSpan), by the tracker on ctx (WithTracker). It reads
+// this run (Tracker.LiveSpan), by the tracker on ctx (WithTracker), in the
+// zone of the process that made the call where the agent read it
+// (WithProcZone; Span.Own). It reads
 // the tracker whether or not the set's learn step has ended (TrackerFrom
 // gives none then): a replay checks every learned clock read, in every cycle.
 // ok is false where ctx holds no tracker, or the tracker cannot tell the
@@ -853,5 +875,9 @@ func ClockSpanFrom(ctx context.Context, arrival time.Time) (Span, bool) {
 		return Span{}, false
 	}
 	t, _ := ctx.Value(trackerKey{}).(*Tracker)
-	return t.LiveSpan(arrival)
+	s, ok := t.LiveSpan(arrival)
+	if z, has := procZoneFrom(ctx); ok && has && z.Loc != nil {
+		s.Zone, s.Own = z.Loc, true
+	}
+	return s, ok
 }

@@ -2,12 +2,20 @@ package learn
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/utils"
 )
 
 // ReadZone is the zone a process writes its wall clock in, as the C library
@@ -25,8 +33,23 @@ import (
 // ("IST-5:30"), which keploy does not read (Go reads UTC there, and the C
 // library the rule), or no zone file (a link to nothing).
 func ReadZone(root, tz string, set bool) (*time.Location, error) {
+	return readZone(root, tz, set, true)
+}
+
+// readZone is ReadZone; a TZ naming a zone root holds no file of is read
+// from keploy's own zone files (or the ones built into it) only where own
+// is set (keploy's own zone), and is an error otherwise: an application
+// reads UTC there, or a copy of the zone built into it, and keploy cannot
+// tell which.
+func readZone(root, tz string, set, own bool) (*time.Location, error) {
 	if !set {
-		return zoneFile(root, "/etc/localtime")
+		loc, err := zoneFile(root, "/etc/localtime")
+		if err != nil && localtimeAbsent(root) {
+			// No /etc/localtime at all (an Alpine or distroless image):
+			// the C library, Go, Python and Node read UTC.
+			return time.UTC, nil
+		}
+		return loc, err
 	}
 	tz = strings.TrimPrefix(tz, ":")
 	switch {
@@ -35,10 +58,156 @@ func ReadZone(root, tz string, set bool) (*time.Location, error) {
 	case strings.HasPrefix(tz, "/"):
 		return zoneFile(root, tz)
 	}
-	if _, err := os.Lstat(under(root, "/usr/share/zoneinfo/"+tz)); err == nil && !strings.Contains(tz, "..") {
+	if _, err := resolveUnder(root, "/usr/share/zoneinfo/"+tz); err == nil && !strings.Contains(tz, "..") {
 		return zoneFile(root, "/usr/share/zoneinfo/"+tz)
 	}
+	if !own {
+		return nil, fmt.Errorf("TZ=%s names no zone file under the process's root", tz)
+	}
 	return time.LoadLocation(tz)
+}
+
+// ProcZone is the zone one process writes a wall clock of no zone in, as
+// the agent read it from the process (ReadProcZone, ProcZones): Loc nil
+// where keploy could not read it; Name its name (models.ZoneNameOf), ""
+// where it has none keploy can write.
+type ProcZone struct {
+	Loc  *time.Location
+	Name string
+}
+
+// ReadProcZone is the zone the process pid writes its wall clock in, read
+// under procRoot ("/proc"): TZ from the environment it started with
+// (<pid>/environ), else its /etc/localtime, both read in its own root
+// (<pid>/root, so a container's files, never keploy's), as ReadZone reads
+// them, except that a TZ naming a zone its root holds no file of is an
+// error. An error where keploy cannot read the process's files (another
+// user's process, one gone, a pid of none) or its zone.
+func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
+	if pid == 0 {
+		return ProcZone{}, errors.New("no process is known for the call")
+	}
+	dir := filepath.Join(procRoot, strconv.FormatUint(uint64(pid), 10))
+	env, err := os.ReadFile(filepath.Join(dir, "environ"))
+	if err != nil {
+		return ProcZone{}, err
+	}
+	tz, set := "", false
+	for _, kv := range bytes.Split(env, []byte{0}) {
+		if v, ok := bytes.CutPrefix(kv, []byte("TZ=")); ok {
+			tz, set = string(v), true
+			break
+		}
+	}
+	loc, err := readZone(filepath.Join(dir, "root"), tz, set, false)
+	if err != nil {
+		return ProcZone{}, err
+	}
+	return ProcZone{Loc: loc, Name: models.ZoneNameOf(loc, time.Now())}, nil
+}
+
+// procZoneCap bounds ProcZones: a cache holding it starts again.
+const procZoneCap = 4096
+
+// ProcZones reads each process's zone once (ReadProcZone), at its first
+// call: a pid another process has since taken, which its start time tells
+// apart, is read again. A process keploy cannot read is read again at each
+// call. It holds at most procZoneCap processes. It reads none where keploy
+// runs in a PID namespace of its own (utils.KernelPidsLocalIn: a container
+// without --pid=host, keploy's own docker and compose modes), where a
+// kernel pid names another process or none: every zone is then unknown,
+// never another process's.
+type ProcZones struct {
+	root  string
+	local bool
+	mu    sync.Mutex
+	m     map[uint32]procZone
+}
+
+type procZone struct {
+	start string
+	z     ProcZone
+}
+
+// NewProcZones reads processes under procRoot ("/proc").
+func NewProcZones(procRoot string) *ProcZones {
+	return &ProcZones{root: procRoot, local: utils.KernelPidsLocalIn(procRoot), m: map[uint32]procZone{}}
+}
+
+// errPIDNamespace is ProcZones.Of's error where keploy runs in a PID
+// namespace of its own.
+var errPIDNamespace = errors.New("keploy runs in a PID namespace of its own, where the kernel's process numbers name other processes or none, so it reads no process's zone by one; run keploy in the host PID namespace (--pid=host, or hostPID in Kubernetes) to have it read")
+
+// Of is the zone pid writes its wall clock in (ReadProcZone); unknown, with
+// an error, on a nil c.
+func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
+	if c == nil {
+		return ProcZone{}, errors.New("no process zones are read")
+	}
+	if !c.local {
+		return ProcZone{}, errPIDNamespace
+	}
+	start := procStart(c.root, pid)
+	if start != "" {
+		c.mu.Lock()
+		e, ok := c.m[pid]
+		c.mu.Unlock()
+		if ok && e.start == start {
+			return e.z, nil
+		}
+	}
+	z, err := ReadProcZone(c.root, pid)
+	if err != nil || start == "" || procStart(c.root, pid) != start {
+		return z, err
+	}
+	c.mu.Lock()
+	if len(c.m) >= procZoneCap {
+		c.m = map[uint32]procZone{}
+	}
+	c.m[pid] = procZone{start: start, z: z}
+	c.mu.Unlock()
+	return z, nil
+}
+
+// procStart is pid's start time (field 22 of <pid>/stat, after its name,
+// which may hold spaces and parentheses), "" where it cannot be read.
+func procStart(root string, pid uint32) string {
+	if pid == 0 {
+		return ""
+	}
+	b, err := os.ReadFile(filepath.Join(root, strconv.FormatUint(uint64(pid), 10), "stat"))
+	if err != nil {
+		return ""
+	}
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 {
+		return ""
+	}
+	f := strings.Fields(string(b[i+1:]))
+	if len(f) < 20 {
+		return ""
+	}
+	return f[19]
+}
+
+type procZoneKey struct{}
+
+// WithProcZone is ctx carrying z, the zone of the process that made the
+// connection ctx serves (ProcZones.Of; a zero z where keploy could not read
+// it): its calls are learned in it (Tracker.DriftsOf) and a replay checks
+// their clock reads in it (ClockSpanFrom).
+func WithProcZone(ctx context.Context, z ProcZone) context.Context {
+	return context.WithValue(ctx, procZoneKey{}, z)
+}
+
+// procZoneFrom is the zone ctx carries (WithProcZone), ok where it carries
+// one, known or not.
+func procZoneFrom(ctx context.Context) (ProcZone, bool) {
+	if ctx == nil {
+		return ProcZone{}, false
+	}
+	z, ok := ctx.Value(procZoneKey{}).(ProcZone)
+	return z, ok
 }
 
 // zoneFile is ReadZone of the zone file at name, a path in the process's
@@ -58,10 +227,10 @@ func zoneFile(root, name string) (*time.Location, error) {
 			return time.LoadLocationFromTZData(zn, data)
 		}
 	}
-	if b, err := os.ReadFile(under(root, "/etc/timezone")); err == nil {
+	if b, err := readUnder(root, "/etc/timezone"); err == nil {
 		zn := strings.TrimSpace(string(b))
 		if zn != "" && !strings.Contains(zn, "..") {
-			if same, err := os.ReadFile(under(root, "/usr/share/zoneinfo/"+zn)); err == nil && bytes.Equal(same, data) {
+			if same, err := readUnder(root, "/usr/share/zoneinfo/"+zn); err == nil && bytes.Equal(same, data) {
 				return time.LoadLocationFromTZData(zn, data)
 			}
 		}
@@ -76,23 +245,78 @@ func under(root, p string) string {
 }
 
 // readZoneFile reads the zone file at p, a path in the process's own view,
-// under root, following its links there (a link's target, absolute or
-// relative, is a path of the process's view, never keploy's): its bytes
-// and the path, in that view, of the file they were read from.
+// under root, each link on it resolved in that view (resolveUnder): its
+// bytes and the path, in that view, of the file they were read from.
 func readZoneFile(root, p string) ([]byte, string, error) {
-	p = path.Clean("/" + p)
-	for range 8 {
-		target, err := os.Readlink(under(root, p))
-		if err != nil {
-			data, err := os.ReadFile(under(root, p))
-			return data, p, err
-		}
-		if !path.IsAbs(target) {
-			target = path.Join(path.Dir(p), target)
-		}
-		p = path.Clean("/" + target)
+	real, err := resolveUnder(root, p)
+	if err != nil {
+		return nil, "", err
 	}
-	return nil, "", errors.New("too many links to the zone file " + p)
+	data, err := os.ReadFile(under(root, real))
+	return data, real, err
+}
+
+// readUnder reads the file at p, a path in the process's own view, under
+// root (readZoneFile).
+func readUnder(root, p string) ([]byte, error) {
+	data, _, err := readZoneFile(root, p)
+	return data, err
+}
+
+// localtimeAbsent reports whether root holds no /etc/localtime at all (not
+// a link to nothing, which the C library reads as UTC too, but keploy
+// refuses as a zone it cannot tell).
+func localtimeAbsent(root string) bool {
+	etc, err := resolveUnder(root, "/etc")
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(under(root, path.Join(etc, "localtime")))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// resolveUnder is p, a path in the process's own view, with each link on
+// it, at any of its components, resolved in that view, never keploy's: an
+// absolute link's target is read from root, and ".." stops at root. The
+// path it gives names no link, so the kernel follows none reading it under
+// root (under), where it would read an absolute link of a directory on the
+// way from keploy's own /. An error where a link names nothing, or there
+// are too many.
+func resolveUnder(root, p string) (string, error) {
+	rest := strings.Split(path.Clean("/"+p), "/")
+	cur, links := "/", 0
+	for len(rest) > 0 {
+		c := rest[0]
+		rest = rest[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			cur = path.Dir(cur)
+			continue
+		}
+		next := path.Join(cur, c)
+		fi, err := os.Lstat(under(root, next))
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			cur = next
+			continue
+		}
+		if links++; links > 40 {
+			return "", errors.New("too many links on the path " + p)
+		}
+		target, err := os.Readlink(under(root, next))
+		if err != nil {
+			return "", err
+		}
+		if path.IsAbs(target) {
+			cur = "/"
+		}
+		rest = append(strings.Split(target, "/"), rest...)
+	}
+	return cur, nil
 }
 
 // zoneinfoName is the IANA name a zone file's path names, after its

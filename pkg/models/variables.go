@@ -197,8 +197,8 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // learn step learned a wall clock of no zone there (a text, or a type of its
 // protocol, that names no zone: "2026-10-27 09:00:00", a Postgres
 // timestamp): ZoneUTC in UTC, ZoneApp in the application's own zone, the
-// one AppZone names, else as the replay's tracker knows it
-// (learn.Span.Zone); ZoneEither in either of
+// one the replay reads from the application's process, else the one
+// AppZone names, else as the replay's tracker knows it (learn.Span); ZoneEither in either of
 // the two, where the recording could not tell them apart at the value's
 // resolution (a date whose day is one in both zones at its call, or an
 // application whose zone is UTC there); "" for a value that names its
@@ -239,13 +239,18 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // fixed offset ("+05:30") of a zone with no change of offset ahead, else
 // an IANA name ("Europe/Berlin"), as ZoneNameOf names it (ZoneLocation
 // reads each). A replay reads the application's zone as
-// AppZone, on any machine, never as its own (learn's CheckClockRead): a
-// recording learned on a laptop in IST checks the same cut in IST on a CI
-// machine in UTC, and one learned in UTC checks it in UTC on the laptop.
-// "" in a recording learned before AppZone was, or where keploy could not
-// name the zone (a zone file copied with no name, whose offset changes):
-// a replay reads the application's zone as its tracker knows it, as
-// before. Two learnings of one place in different named zones meet as
+// the one its process writes its clock in in that run, where keploy reads
+// it from the process (a wall clock of no zone is the application's own),
+// else as AppZone, on any machine, never as the agent's own (learn's
+// CheckClockRead): a recording learned on a laptop in IST checks the same
+// cut in IST on a CI machine in UTC whose application's zone keploy cannot
+// read, and in UTC where it reads the application now writing in UTC.
+// "" in a recording learned before AppZone was, where keploy could not read
+// the zone of the process that made the call, or where it could not name
+// the zone (a zone file copied with no name, whose offset changes): a
+// replay that cannot read the application's zone either refuses a plain
+// read cut to an hour or coarser, and reads any other as its tracker knows
+// the zone, as before. Two learnings of one place in different named zones meet as
 // ZoneApart (Meet), which holds nothing.
 type ClockOffset struct {
 	Min     time.Duration `json:"min" yaml:"min" bson:"min"`

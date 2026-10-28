@@ -156,6 +156,11 @@ func (w *Window) ComparesOffsets() *Window {
 type Span struct {
 	From, To time.Time
 	Zone     *time.Location
+	// Own: Zone was read from the process that made the call (ProcZone,
+	// ClockSpanFrom): the zone the application writes its clock in in this
+	// run, in which a replay checks a learned read whatever zone the learn
+	// step named (CheckClockRead). false where Zone is the agent's own.
+	Own bool
 }
 
 // holds reports whether t, an instant read at resolution res, is a read of
