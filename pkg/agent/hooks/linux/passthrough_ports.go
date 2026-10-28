@@ -19,9 +19,11 @@ const kernelPassThroughSlots = len(structs.ClientInfo{}.PassThroughPorts)
 // ports come first, so they always get a slot: a connect to one of them that
 // is redirected into the proxy breaks keploy itself (in mock mode, the test
 // runner's calls to the agent's scope API). The user's ports follow, each port
-// once. The agent gets those as --pass-through-ports, one for each bypassRule
-// (config.GetByPassPorts takes every rule's port, host- and path-scoped rules'
-// too). The slots after the last port hold -1, where the kernel stops reading.
+// once. The agent gets those as --pass-through-ports: the ports of the
+// port-only bypassRules (config.GetByPassPorts). A rule with a host or a path
+// is applied in the proxy, never here, where it would pass every call to its
+// port through. The slots after the last port hold -1, where the kernel stops
+// reading.
 //
 // When the ports do not all fit, or one is not a port, it returns an error that
 // names them, and no list: a port the kernel does not hold is recorded or

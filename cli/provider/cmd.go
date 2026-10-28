@@ -2178,6 +2178,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if cmd.Name() == "test" {
 			dropHealthPollTimeout(c.logger, c.cfg)
 		}
+		// The bypassRules are final here: keploy.yml's, the flag's ports, and
+		// what the proven switch dropped.
+		if err := config.CheckBypassRules(c.cfg); err != nil {
+			utils.LogError(c.logger, nil, err.Error())
+			return err
+		}
 
 	case "normalize":
 		var err error
@@ -2913,6 +2919,10 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 	} else {
 		config.SetByPassPorts(c.cfg, bypassPorts)
+	}
+	if err := config.CheckBypassRules(c.cfg); err != nil {
+		utils.LogError(c.logger, nil, err.Error())
+		return err
 	}
 
 	// Mock-set name.

@@ -2939,6 +2939,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if probe.IsMySQL {
+		// MySQL shows no host or path: a bypassRule with one, for this port,
+		// cannot pass its calls through (see warnBypassRulesUnseen below).
+		warnBypassRulesUnseen(p.logger, outgoingOpts.Rules, uint(destInfo.Port), dstAddr, false, false)
 		if rule.Mode != models.MODE_TEST {
 			// probeMysql already dialed when it had to read the
 			// upstream greeting; dstConn then replays those bytes.
@@ -3198,6 +3201,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// MITM below; "" when it sent none.
 	var clientSNI string
 	isTLS := pTls.IsTLSHandshake(testBuffer)
+	// Whether a bypassRule names the TLS server the client asked for
+	// (bypassByServerName), which passes the connection through.
+	var passTLSThrough bool
 
 	if isTLS {
 		probeProxy(p.logger, "tls-handshake-start", clientConnID,
@@ -3398,6 +3404,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if dstURL == "" {
 			dstURL = connectTargetHost
 		}
+		// A bypassRule with a host and no path that names this server
+		// passes the connection through, in every mode: keploy dials the
+		// server below, as it does to record, and relays the call.
+		bypassRule, bypassed := bypassByServerName(logger, outgoingOpts.Rules, dstURL, uint(destInfo.Port))
+		passTLSThrough = bypassed
+		if bypassed {
+			logger.Debug("a bypassRule names this TLS server; passing the connection through",
+				zap.String("serverName", dstURL), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
+		}
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
@@ -3439,10 +3454,17 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			KeyLogWriter:       pTls.KeyLogWriter(),
 		}
 
-		if isMTLS && rule.Mode != models.MODE_TEST && clientPeerCert != nil {
+		// In keploy test the server is dialled only for calls a bypassRule
+		// passes through: the whole connection (passTLSThrough), or an HTTP
+		// call the HTTP parser matches by its Host and path, with this cfg.
+		scopedRules := len(outgoingOpts.Rules) > 0
+		if isMTLS && (rule.Mode != models.MODE_TEST || passTLSThrough || scopedRules) && clientPeerCert != nil {
 			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
-			if err != nil {
+			if err != nil && (rule.Mode != models.MODE_TEST || passTLSThrough) {
 				return err
+			}
+			if err != nil {
+				logger.Debug("no client certificate for a call a bypassRule may pass through", zap.Error(err))
 			}
 		}
 
@@ -3452,7 +3474,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			predialed.Alias(addr) // the connection dialled while the handshake was held, if it was
 		}
 
-		if rule.Mode != models.MODE_TEST {
+		if rule.Mode != models.MODE_TEST || passTLSThrough {
 			if connectResult != nil && dstConn != nil {
 				// CONNECT tunnel: dstConn is already connected through the
 				// corporate proxy tunnel. If the proxyReader has buffered
@@ -3550,6 +3572,10 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Start the shutdown goroutine now that dstConn is established.
 	startConnCloser()
 
+	if passTLSThrough {
+		return p.globalPassThrough(parserCtx, srcConn, dstConn)
+	}
+
 	// get the mock manager for the current app
 	m := p.getMockManager()
 	if m == nil {
@@ -3582,6 +3608,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		zap.String("parser", string(parserType)),
 		zap.Bool("generic", generic),
 	)
+
+	// A bypassRule with a host or a path is applied by the HTTP parser (each
+	// call's Host and path) and above (a TLS connection's server name). On a
+	// connection that shows neither, the rule cannot pass the call through,
+	// and keploy says so instead of passing the whole port.
+	httpParsed := !generic && parserType == integrations.HTTP
+	warnBypassRulesUnseen(logger, outgoingOpts.Rules, uint(destInfo.Port), dstAddr,
+		httpParsed || (isTLS && (clientSNI != "" || connectTargetHost != "")), httpParsed)
 
 	// Record-mode parsing kill switch: if record-time parsing has been
 	// disabled via env var (KEPLOY_DISABLE_PARSING), SIGUSR1, or admin

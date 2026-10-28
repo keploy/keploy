@@ -23,7 +23,13 @@
 #      Eleven: keploy record refuses to start, naming the dependency's port as
 #      the one the kernel's 10-port list cannot hold (before, it was dropped
 #      from the list without a word, and its calls recorded).
-#   4. Control, no flag: the dependency's call is recorded as a mock and the
+#   4. bypassRules with a host on the dependency's port: one for another host
+#      leaves its call recorded (only port-only rules reach the kernel; before,
+#      the rule's port did, and every host's calls on it passed through), one
+#      for its host passes its call through in the proxy, in record and test,
+#      and one on a mysqlPorts port, where no call shows a host, stops keploy
+#      record at start, naming the rule.
+#   5. Control, no flag: the dependency's call is recorded as a mock and the
 #      telemetry call is not; keploy test, both services down, passes.
 #
 # Readiness is each port listening, keploy's test files, and keploy's own
@@ -228,6 +234,66 @@ else
 fi
 REC_PID=""
 own
+
+# bypassRules with a host. A rule for another host on the dependency's port
+# leaves the dependency's call recorded: only port-only rules go to the
+# kernel. Before, every rule's port did, and the kernel passed every host's
+# calls on it through.
+BASE_YML="$(cat keploy.yml)"
+cat >keploy.yml <<YML
+$BASE_YML
+bypassRules:
+  - host: elsewhere.example
+    port: $DEP
+YML
+if record otherhost; then
+    mocked '"n":7' || { fail "otherhost: a bypassRule for another host on port $DEP passed the dependency's call through"; show_mocks; }
+fi
+# A rule for the dependency's host passes its call through in the proxy (its
+# HTTP Host), in record and in test: keploy test, the telemetry service down,
+# sends both calls to the real dependency.
+cat >keploy.yml <<YML
+$BASE_YML
+bypassRules:
+  - host: '^127\.0\.0\.1:'
+    port: $DEP
+YML
+if record samehost; then
+    ! mocked '"n":7' || { fail "samehost: keploy record recorded the call a bypassRule names by its host"; show_mocks; }
+    stop_srv "$TEL_PID"
+    TEL_PID=""
+    before="$(dep_hits)"
+    replay samehost
+    after="$(dep_hits)"
+    [ "$((after - before))" -eq 2 ] ||
+        fail "samehost: keploy test sent $((after - before)) calls to the real dependency, want 2 (the rule passes them through)"
+fi
+# A rule with a host on a mysqlPorts port can match no call (MySQL shows no
+# host), so keploy record refuses it at start, naming it.
+cat >keploy.yml <<YML
+$BASE_YML
+mysqlPorts: [$DEP]
+bypassRules:
+  - host: db.internal
+    port: $DEP
+YML
+rm -rf keploy
+sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" \
+    --generateGithubActions=false --disable-tele >record-mysqlhost.log 2>&1 </dev/null &
+REC_PID=$!
+if wait_listen "$APP" "$REC_PID"; then
+    fail "mysqlhost: keploy record started with a host bypassRule on a mysqlPorts port"
+    stop_pid "$REC_PID"
+else
+    wait "$REC_PID"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "mysqlhost: keploy record refused the rule but exited 0"
+    grep -aqF "{host: \"db.internal\", path: \"\", port: $DEP}" record-mysqlhost.log ||
+        { fail "mysqlhost: keploy record stopped without naming the rule it cannot apply"; tail -n 5 record-mysqlhost.log; }
+fi
+REC_PID=""
+own
+printf '%s\n' "$BASE_YML" >keploy.yml
 
 # Control: without the flag, the dependency's call is mocked, and the replay
 # needs neither service.

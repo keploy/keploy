@@ -715,12 +715,55 @@ func SetByPassPorts(conf *Config, ports []uint) {
 	}
 }
 
+// GetByPassPorts is the ports keploy passes through whole, in the kernel: the
+// ports of the port-only bypassRules (no host, no path). The agent gets them as
+// --pass-through-ports, and the kernel leaves every connect to them alone.
+//
+// A rule with a host or a path is not one of them. It names some of a port's
+// calls, not all, so only keploy's proxy can tell them apart (an HTTP call's
+// Host and path, a TLS connection's server name), and the proxy gets the rules
+// themselves (OutgoingOptions.Rules). Before, every rule's port went to the
+// kernel, so a rule for one host on port 443 passed every host's calls on 443
+// through, unrecorded and unmocked.
 func GetByPassPorts(conf *Config) []uint {
 	var ports []uint
 	for _, rule := range conf.BypassRules {
-		ports = append(ports, rule.Port)
+		if rule.Host == "" && rule.Path == "" && rule.Port != 0 {
+			ports = append(ports, rule.Port)
+		}
 	}
 	return ports
+}
+
+// CheckBypassRules refuses a bypassRule that keploy could not apply as it is
+// written: one with a host or a path on a port whose calls keploy's proxy reads
+// with no host or path in them. Those are the mysqlPorts ports, pinned to the
+// MySQL parser: MySQL names no host, and its TLS starts after the server's
+// greeting, past the point where the proxy reads a server name. Such a rule
+// would match none of its port's calls, so they would be recorded or mocked,
+// and widening it to the whole port would pass through calls it does not name.
+// The error names each such rule and the port-only rule that passes the whole
+// port through.
+//
+// On any other port the protocol shows only in each connection, so the proxy
+// says, once for each rule, when it meets a connection to the rule's port in
+// which it can see no host or path (pkg/agent/proxy, warnBypassRuleUnseen).
+func CheckBypassRules(conf *Config) error {
+	mysql := make(map[uint]bool, len(conf.MysqlPorts))
+	for _, p := range conf.MysqlPorts {
+		mysql[uint(p)] = true
+	}
+	var bad []string
+	for _, rule := range conf.BypassRules {
+		if (rule.Host == "" && rule.Path == "") || !mysql[rule.Port] {
+			continue
+		}
+		bad = append(bad, fmt.Sprintf("{host: %q, path: %q, port: %d}", rule.Host, rule.Path, rule.Port))
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("keploy cannot apply the bypassRules %s: their ports are in mysqlPorts, and a MySQL connection shows keploy no host or path to match, so these rules would pass none of its calls through. To pass every call to such a port through, use a rule with the port alone ({port: N}); to record or mock them, remove the rule", strings.Join(bad, ", "))
 }
 
 // SetSelectedTests selects the test sets testSets names for a run. A

@@ -225,6 +225,9 @@ func IsPassThrough(logger *zap.Logger, req *http.Request, destPort uint, opts mo
 			regex, err := regexp.Compile(bypass.Path)
 			if err != nil {
 				LogError(logger, err, "failed to compile the path regex", zap.Any("metadata", GetReqMeta(req)))
+				// The rule's host may have matched; a path that does not
+				// compile matches no call.
+				passThrough = false
 				continue
 			}
 			passThrough = regex.MatchString(req.URL.String())
