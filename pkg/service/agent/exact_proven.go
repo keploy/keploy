@@ -264,6 +264,8 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 		if err != nil && !errors.Is(err, errHoldsUnknown) {
 			return err
 		}
+		// Its end waits only for the requests opened from here.
+		a.beginWindow()
 		a.markDrops(drops)
 	default:
 		// A test case that ends is served the pool whatever its settling

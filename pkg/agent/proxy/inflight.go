@@ -95,6 +95,13 @@ type trackedConn struct {
 	began, beganSeq uint64
 	hasBegun        bool
 	waiting         []boundWait
+	// floor is the holds its parser had taken by the time its reads passed
+	// the cut of the latest test window's begin (inflight.beginWindow):
+	// requests whose opening it read before that window began (an HTTP/2
+	// or gRPC stream held from its opening frame), which a scope cut later
+	// leaves out (holdBound.floor). nil: no window began while it was kept,
+	// so each of its holds is of a request opened since. Under mu.
+	floor *holdBound
 	// delivered counts the bytes its reads have returned, and eof says one
 	// returned the end of the stream: changed with reading as a read
 	// returns, under mu (returned), so a view never sees a read done whose
@@ -640,9 +647,17 @@ func (c *trackedConn) hungUp(v connView) bool {
 // bytes received after the cut: a request the application made after the
 // settle began, on a connection that answers several at once (HTTP/2's
 // streams), which the settle does not wait for. Under the connection's mu.
+//
+// floor, when set, is the connection's bound at the latest window's begin
+// as the scope was cut (trackedConn.floor): the holds numbered floor.seq or
+// lower are of requests opened before the test's window began, which are
+// not the test's, and the scope leaves them out. It is fixed by the time
+// the scope's own bound is (its cut is no later), and while it is not, none
+// is left out.
 type holdBound struct {
 	seq   uint64
 	fixed bool
+	floor *holdBound
 }
 
 // boundWait is a bound its connection fixes as a read begins past cut.
@@ -659,25 +674,55 @@ func (c *trackedConn) cutNow() (cut uint64, b *holdBound) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cut = c.received(c.viewLocked())
-	b = &holdBound{}
+	b = c.boundLocked(cut)
+	b.floor = c.floor
+	return cut, b
+}
+
+// boundLocked is, under c.mu, the bound of the holds that cover what c's
+// socket had received at cut (cutNow).
+func (c *trackedConn) boundLocked(cut uint64) *holdBound {
+	b := &holdBound{}
 	if c.hasBegun && c.began >= cut {
 		b.seq, b.fixed = c.beganSeq, true
 	} else {
 		c.waiting = append(c.waiting, boundWait{cut: cut, b: b})
 	}
-	return cut, b
+	return b
+}
+
+// beginWindow cuts, on every connection kept now, where a test's window
+// begins (trackedConn.floor): a scope cut from now on leaves out the holds
+// its parser had taken by the time its reads passed what its socket has
+// received now, until the next window begins.
+func (t *inflight) beginWindow() {
+	t.mu.Lock()
+	conns := make([]*trackedConn, 0, len(t.conns))
+	for tc := range t.conns {
+		conns = append(conns, tc)
+	}
+	t.mu.Unlock()
+	for _, c := range conns {
+		c.mu.Lock()
+		c.floor = c.boundLocked(c.received(c.viewLocked()))
+		c.mu.Unlock()
+	}
 }
 
 // scopedView is c's counts at one instant, its held count only the holds b
-// covers once b is fixed.
+// covers once b is fixed: those above its floor (holdBound.floor).
 func (c *trackedConn) scopedView(b *holdBound) connView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v := c.viewLocked()
 	if b != nil && b.fixed {
+		var lo uint64
+		if f := b.floor; f != nil && f.fixed {
+			lo = f.seq
+		}
 		var n int32
 		for seq := range c.holding {
-			if seq <= b.seq {
+			if lo < seq && seq <= b.seq {
 				n++
 			}
 		}
@@ -854,7 +899,10 @@ func (c *trackedConn) received(v connView) uint64 {
 // soon the application's next request arrived. On one that answers several
 // requests at once (HTTP/2's streams), they are the requests its parser held
 // by the time a read of it began past its cut (holdBound), each until it is
-// answered, whatever later requests it holds. So a settle waits for work
+// answered, whatever later requests it holds, less those it had held by the
+// time its reads passed the latest test window's begin (holdBound.floor:
+// streams opened before the test began, still sending or not, are not the
+// test's). So a settle waits for work
 // that only shrinks, never for an application that keeps calling, on new
 // connections or on the ones it kept.
 type scope struct {
@@ -1111,6 +1159,9 @@ func (s *scope) PendingProgress(answers bool) map[uint64]uint64 {
 // InFlightScope implements agent.InFlightScoper.
 func (p *Proxy) InFlightScope() agent.InFlightScope { return p.inflight.scope() }
 
+// InFlightBeginWindow implements agent.InFlightWindower.
+func (p *Proxy) InFlightBeginWindow() { p.inflight.beginWindow() }
+
 // InFlightChanged implements agent.InFlightReader.
 func (p *Proxy) InFlightChanged() <-chan struct{} { return p.inflight.Changed() }
 
@@ -1127,6 +1178,7 @@ func (p *Proxy) InFlightPendingProgress(answers bool) map[uint64]uint64 {
 var (
 	_ agent.InFlightReader       = (*Proxy)(nil)
 	_ agent.InFlightScoper       = (*Proxy)(nil)
+	_ agent.InFlightWindower     = (*Proxy)(nil)
 	_ integrations.RequestHolder = (*trackedConn)(nil)
 	_ integrations.UnknownMarker = (*trackedConn)(nil)
 	_ integrations.IdleMarker    = (*trackedConn)(nil)

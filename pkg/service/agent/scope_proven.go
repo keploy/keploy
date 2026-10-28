@@ -546,6 +546,8 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 		return models.ScopeBeginResp{}, scopeErr(http.StatusInternalServerError, models.ScopeErrInternal,
 			"keploy cannot judge "+id+": "+err.Error(), "check the agent's log")
 	}
+	// The test's end waits only for the requests opened from here.
+	a.beginWindow()
 	// The test's end compares the listener's drops with these.
 	a.markDrops(drops)
 	a.NoteScope(id, 0, dir, false)

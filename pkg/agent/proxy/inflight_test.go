@@ -572,6 +572,110 @@ func TestARequestReceivedBeforeTheCutAndHeldAfterItHoldsTheScope(t *testing.T) {
 	later()
 }
 
+// A stream opened before a test's window began is not the test's, whether it
+// is still held (a long-lived one that keeps sending) or not: the test's end
+// waits for the streams opened since, still sending or not, and only until
+// they are answered, and its watchdog weighs and names only those. A
+// connection accepted after the window began holds the end with each of its
+// requests.
+func TestAStreamOpenedBeforeTheWindowBeganDoesNotHoldTheTestsEnd(t *testing.T) {
+	p := newStreamParser(t)
+	before := p.open("HEADERS stream 1", false)
+	p.tr.beginWindow()
+	test := p.open("HEADERS stream 3", false)
+	// The stream opened before keeps sending.
+	for i := 0; i < 3; i++ {
+		p.send("DATA stream 1")
+		if r := <-p.got; r != "DATA stream 1" {
+			t.Fatalf("read %q", r)
+		}
+		go readOnce(p.proxy, p.got)
+		waitSettled(t, p.tr, func() bool { return p.proxy.reading.Load() == 1 })
+	}
+	sc := p.tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's stream held: scope pending %d, want 1", n)
+	}
+	if got := sc.PendingProgress(true)[p.proxy.id]; got != 1 {
+		t.Fatalf("the watchdog weighs %d of the connection's holds, want 1 (the test's)", got)
+	}
+	if words := sc.GiveUp([]uint64{p.proxy.id}, true); len(words) != 1 || !strings.Contains(words[0], "which held 1 request(s)") {
+		t.Fatalf("give-up words %q: want the test's 1 request", words)
+	}
+	test()
+	// The give-up ends with the test's stream: a scope cut now waits for
+	// nothing, the stream opened before the window still held.
+	if n, _ := p.tr.scope().State(true); n != 0 {
+		t.Fatalf("the test's stream answered, one opened before its window still held: scope pending %d, want 0", n)
+	}
+	// One opened in the window and still sending holds a scope cut now.
+	next := p.open("HEADERS stream 5", false)
+	again := p.tr.scope()
+	if n, _ := again.State(true); n != 1 {
+		t.Fatalf("a stream opened in the window: scope pending %d, want 1", n)
+	}
+	if b, _ := again.Behind(); len(b) != 0 {
+		t.Fatalf("nothing left out: behind %q", b)
+	}
+	next()
+	if n, _ := again.State(true); n != 0 {
+		t.Fatalf("the window's stream answered: scope pending %d, want 0", n)
+	}
+	before()
+	// A connection accepted after the window began: each request it holds
+	// is of the window.
+	app, proxy := acceptedPair(t, p.tr)
+	got := make(chan string, 1)
+	go readOnce(proxy, got)
+	if _, err := io.WriteString(app, "HEADERS stream 1"); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	release := proxy.Hold()
+	go readOnce(proxy, got)
+	waitSettled(t, p.tr, func() bool { return proxy.reading.Load() == 1 })
+	late := p.tr.scope()
+	if n, _ := late.State(true); n != 1 {
+		t.Fatalf("a request on a connection accepted in the window: scope pending %d, want 1", n)
+	}
+	release()
+	if n, _ := late.State(true); n != 0 {
+		t.Fatalf("it answered: scope pending %d, want 0", n)
+	}
+}
+
+// A stream whose opening frame was in the socket as the test's window began
+// is opened before it, though the frame reader holds it only after: the
+// test's end does not wait for it, only for the stream opened after, and
+// neither does an end cut before the frame reader read it.
+func TestAStreamInTheSocketAsTheWindowBeganIsNotTheTests(t *testing.T) {
+	const before, call = "HEADERS stream 1", "HEADERS stream 3"
+	p := newStreamParser(t)
+	// The frame reader is busy (not reading) as the stream arrives.
+	if r := func() string { p.send("PING"); return <-p.got }(); r != "PING" {
+		t.Fatalf("read %q", r)
+	}
+	p.send(before)
+	waitInq(t, p.proxy, len(before))
+	p.tr.beginWindow()
+	early := p.tr.scope()
+	go readOnce(p.proxy, p.got)
+	held := p.open(before, true)
+	if n, _ := early.State(true); n != 0 {
+		t.Fatalf("an end cut as the window began, the stream in the socket then held: scope pending %d, want 0", n)
+	}
+	test := p.open(call, false)
+	sc := p.tr.scope()
+	if n, _ := sc.State(true); n != 1 {
+		t.Fatalf("the test's stream held: scope pending %d, want 1", n)
+	}
+	test()
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("the test's stream answered, the one in the socket as its window began held: scope pending %d, want 0", n)
+	}
+	held()
+}
+
 // A settle that gives up on a multiplexed connection names the requests its
 // cut covers that its parser holds, not the later request its frame reader
 // is busy with.

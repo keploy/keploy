@@ -4,11 +4,13 @@ package agent
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 )
 
 // A test's end waits until its calls are settled: a call the application
@@ -202,4 +204,42 @@ func TestKeployTestsOpenWaitsForTheCallsMadeBefore(t *testing.T) {
 			require.NoError(t, <-opened)
 		})
 	}
+}
+
+// windowsProxy is servingProxy counting the test windows the agent begins on
+// its connections (coreAgent.InFlightWindower).
+type windowsProxy struct {
+	*servingProxy
+	windows atomic.Int32
+}
+
+func (w *windowsProxy) InFlightBeginWindow() { w.windows.Add(1) }
+
+// A test's window begins on the proxy's connections at the wire's begin and
+// at keploy test's open of a test case, once the calls before are settled,
+// and at neither end: the end waits only for the requests opened since. With
+// the switch off no window begins.
+func TestATestsWindowBeginsAtItsBeginOnly(t *testing.T) {
+	ctx := context.Background()
+	a, p := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	w := &windowsProxy{servingProxy: p}
+	a.Proxy = w
+	_, serr := a.ProvenBegin(ctx, begin("TestA"))
+	require.Nil(t, serr)
+	require.EqualValues(t, 1, w.windows.Load(), "the wire's begin begins the test's window")
+	_, serr = a.ProvenEnd(ctx, models.ScopeReq{Name: "TestA", CanSkip: true, Outcome: models.ScopeOutcomePassed})
+	require.Nil(t, serr)
+	require.EqualValues(t, 1, w.windows.Load(), "the test's end begins none")
+
+	b, q := exactAgent(t, nil, map[string][]string{"o::TestA": {}}, map[string][]string{})
+	k := &windowsProxy{servingProxy: q}
+	b.Proxy = k
+	require.NoError(t, b.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{Test: "test-1"}}, nil))
+	require.EqualValues(t, 1, k.windows.Load(), "keploy test's open begins the test case's window")
+	require.NoError(t, b.serveKeployTestExactly(ctx, models.MockFilterParams{Exact: &models.ExactServing{}}, nil))
+	require.EqualValues(t, 1, k.windows.Load(), "the test case's end begins none")
+
+	t.Setenv(provenswitch.Env, "0")
+	b.beginWindow()
+	require.EqualValues(t, 1, k.windows.Load(), "with the switch off no window begins")
 }

@@ -251,6 +251,18 @@ type InFlightScoper interface {
 	InFlightScope() InFlightScope
 }
 
+// InFlightWindower is the optional extension of an InFlightScoper whose
+// scopes can leave out the requests opened before a test's window began.
+type InFlightWindower interface {
+	// InFlightBeginWindow cuts, on every connection kept now, what its
+	// socket has received: an InFlightScope cut from then on leaves out the
+	// requests its parser held by the time its reads passed that cut (an
+	// HTTP/2 or gRPC stream is held from its opening frame, so one opened
+	// before the window began, still sending or not, is not the test's),
+	// until the next InFlightBeginWindow.
+	InFlightBeginWindow()
+}
+
 // InFlightScope is InFlightState and InFlightPendingProgress over the
 // connections kept when it began, each with the bytes it had received then,
 // until they are taken and, in a replay, answered: a connection accepted

@@ -502,6 +502,21 @@ func (a *Agent) settleBegin(ctx context.Context, answers bool) (uint64, error) {
 	return c.ListenDrops, nil
 }
 
+// beginWindow, under the proven switch, cuts where a test's window begins on
+// the proxy's connections (coreAgent.InFlightWindower), once the calls
+// before it are settled: the test's end then waits only for the requests
+// opened since (an HTTP/2 or gRPC stream opened before the test began, a
+// long-lived one that keeps sending, is not the test's and never holds its
+// end). With the switch off it cuts nothing.
+func (a *Agent) beginWindow() {
+	if !provenswitch.On() {
+		return
+	}
+	if w, ok := a.Proxy.(coreAgent.InFlightWindower); ok {
+		w.InFlightBeginWindow()
+	}
+}
+
 // settleOwned waits until sc, a previous end's scope, holds no work, its
 // watchdog weighing each connection that still holds some. One the watchdog
 // finds stuck is given up on, and the wait goes on for the others.
