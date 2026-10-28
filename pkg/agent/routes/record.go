@@ -146,6 +146,9 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		// per test. See pkg/agent/routes/scope.go.
 		r.Post("/scope/begin", a.HandleScopeBegin)
 		r.Post("/scope/end", a.HandleScopeEnd)
+		// A value the open test gave the application (scope_proven.go).
+		// Any method: with the proven switch off the plain 404.
+		r.HandleFunc("/scope/given", a.HandleScopeGiven)
 		r.Get("/scope/windows", a.HandleScopeWindows)
 		r.Post("/scope/table", a.HandleScopeTable)
 		r.Post("/replay/gate", a.HandleScopeGate)

@@ -433,6 +433,31 @@ func (t *Table) start(given, carried []Binding) {
 	}
 }
 
+// Give binds b, a value the open scope's test gave (models.GivenReq), as a
+// given value (Binding.Given) of the scope, under the table's lock, without
+// beginning a new scope: what the scope bound before stays, and a call
+// checked in it binds on (Gen does not move). It refuses, binding nothing,
+// when no scope has begun (the value would be the run's, which every later
+// scope reads) and when b's name is already bound, and returns the binding
+// in force of b's name then. A given's name is the test's own
+// (models.GivenPrefix): no learned variable takes it.
+func (t *Table) Give(b Binding) (Binding, bool) {
+	from := t.lock()
+	defer t.unlock(from)
+	if !t.began {
+		return Binding{}, false
+	}
+	if have, ok := t.lookup(from, b.Name); ok {
+		return have, false
+	}
+	b.Given = true
+	if t.vals == nil {
+		t.vals = make(map[string]Binding)
+	}
+	t.vals[b.Name] = b
+	return b, true
+}
+
 // Reset forgets every binding of the scope: a new scope begins. The run's
 // stay.
 func (t *Table) Reset() {
