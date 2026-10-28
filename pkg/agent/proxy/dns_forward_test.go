@@ -80,10 +80,14 @@ func newProxyWithUpstream(t *testing.T, addr string, timeout time.Duration) *Pro
 		IP6:                "::1",
 		EnableIPv6Redirect: false,
 		dnsUpstreamServers: []string{host},
-		dnsUpstreamPort:    port,
-		dnsForwardTimeout:  timeout,
-		dnsCache:           newDNSCache(),
-		recordedDNSMocks:   newRecordedDNSMocksCache(),
+		// The fake upstream stands for an in-cluster agent's cluster DNS,
+		// the case forward-on-miss exists for: a resolver inside the
+		// replay's own network (inNetworkResolvers).
+		dnsInNetworkServers: []string{host},
+		dnsUpstreamPort:     port,
+		dnsForwardTimeout:   timeout,
+		dnsCache:            newDNSCache(),
+		recordedDNSMocks:    newRecordedDNSMocksCache(),
 	}
 }
 

@@ -448,6 +448,7 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().Lookup("enable-sampling").NoOptDefVal = "5"
 		cmd.Flags().Uint64("memory-limit", c.cfg.Agent.MemoryLimit, "Memory limit for the keploy-agent container in MB")
 		cmd.Flags().Bool("global-passthrough", c.cfg.Agent.GlobalPassthrough, "Allow all outgoing calls to be mocked if set to true")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Agent.AllowEgress, "What a replay may reach on the real network, forwarded from keploy test's test.allowEgress")
 		cmd.Flags().Bool("disable-handshake-hold", c.cfg.Agent.DisableHandshakeHold, "Accept every outgoing connection at once instead of holding its handshake until the real destination answers")
 		cmd.Flags().Bool("capture-packets", c.cfg.Agent.CapturePackets, "Capture raw network packets on the proxy ports and write a pcap file into each test-set directory")
 		cmd.Flags().Bool("opportunistic-tls-intercept", c.cfg.Agent.OpportunisticTLSIntercept, "Sniff and hijack TLS connections in passthrough mode; the captured pcap is decryptable via the keylog")
@@ -598,6 +599,7 @@ func (c *CmdConfigurator) AddUncommonFlags(cmd *cobra.Command) {
 		cmd.Flags().Bool("update-template", c.cfg.Test.UpdateTemplate, "[DEPRECATED] This flag is ignored. config.yaml keeps the recorded template values; {{capture ...}} placeholders take each run's values as it goes.")
 		_ = cmd.Flags().MarkDeprecated("update-template", "keploy test no longer writes a run's template values into config.yaml; this flag is ignored")
 		cmd.Flags().Bool("mocking", true, "enable/disable mocking for the testcases")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated). \"dns\" forwards a DNS mock miss to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
 		cmd.Flags().Bool("disable-line-coverage", c.cfg.Test.DisableLineCoverage, "Disable line coverage generation.")
 		cmd.Flags().Bool("must-pass", c.cfg.Test.MustPass, "enforces that the tests must pass, if it doesn't, remove failing testcases")
 		cmd.Flags().Uint32Var(&c.cfg.Test.MaxFailAttempts, "max-fail-attempts", 5, "maximum number of testset failure that can be allowed during must-pass mode")
@@ -1724,6 +1726,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 				utils.LogError(c.logger, err, "refusing a deleted readiness flag")
 				return err
 			}
+			allowEgress, err := models.NormalizeAllowEgress(c.cfg.Test.AllowEgress)
+			if err != nil {
+				utils.LogError(c.logger, err, "refusing test.allowEgress")
+				return err
+			}
+			c.cfg.Test.AllowEgress = allowEgress
 		}
 
 		// Before the command type: refusing an engine does not depend on it,
@@ -2227,6 +2235,17 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			return errors.New(errMsg)
 		}
 		c.cfg.Agent.GlobalPassthrough = globalPassthrough
+
+		allowEgress, err := cmd.Flags().GetStringSlice("allow-egress")
+		if err != nil {
+			errMsg := "failed to read the allow-egress flag"
+			utils.LogError(c.logger, err, errMsg)
+			return errors.New(errMsg)
+		}
+		if c.cfg.Agent.AllowEgress, err = models.NormalizeAllowEgress(allowEgress); err != nil {
+			utils.LogError(c.logger, err, "refusing --allow-egress")
+			return err
+		}
 
 		disableHandshakeHold, err := cmd.Flags().GetBool("disable-handshake-hold")
 		if err != nil {

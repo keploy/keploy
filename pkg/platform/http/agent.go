@@ -2222,6 +2222,9 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	if opts.GlobalPassthrough {
 		args = append(args, "--global-passthrough")
 	}
+	for _, e := range opts.AllowEgress {
+		args = append(args, "--allow-egress="+e)
+	}
 	if opts.DisableHandshakeHold {
 		args = append(args, "--disable-handshake-hold")
 	}

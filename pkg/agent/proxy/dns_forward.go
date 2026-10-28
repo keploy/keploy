@@ -3,11 +3,14 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -112,10 +115,129 @@ func (p *Proxy) captureDNSUpstream() {
 	}
 	p.dnsUpstreamServers = filtered
 	p.dnsUpstreamPort = nsPort
+	// The same test routes/auth.go's inClusterAgent makes: a container
+	// (--is-docker) the kubelet started, which is the only kind that carries
+	// KUBERNETES_SERVICE_HOST.
+	inCluster := p.IsDocker && os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+	p.dnsInNetworkServers = inNetworkResolvers(filtered, p.IsDocker, inCluster, localNetworks())
 	p.logger.Debug("captured upstream DNS resolvers for forward-on-miss",
 		zap.Strings("servers", p.dnsUpstreamServers),
+		zap.Strings("in_network", p.dnsInNetworkServers),
 		zap.String("port", p.dnsUpstreamPort),
 		zap.Strings("search", p.dnsSearch))
+	p.logReplayDNSForwarding()
+}
+
+// dockerEmbeddedDNS is the resolver docker writes into the resolv.conf of a
+// container on a user-defined network: keploy's own keploy-network, and every
+// compose network. It answers the network's container names itself.
+var dockerEmbeddedDNS = net.IPv4(127, 0, 0, 11)
+
+// inNetworkResolvers picks, from the resolv.conf servers, the ones inside the
+// replay's own network: the only resolvers a replay's DNS mock miss is
+// forwarded to unless test.allowEgress names models.AllowEgressDNS.
+//
+//   - An in-cluster agent (a sidecar or a replay pod): every server. The pod's
+//     resolv.conf is the cluster's DNS, which answers the cluster's own
+//     services (mysql.svc.cluster.local) that are never recorded as mocks.
+//   - An agent in a container: docker's embedded resolver, and a resolver
+//     on one of the container's own networks (podman's aardvark-dns answers
+//     at the network's gateway). A server docker copied from the host's
+//     resolv.conf, as it does on the default bridge, is the host's.
+//   - A native agent: none. Its resolv.conf is the host's, so a miss is
+//     answered by keploy alone.
+func inNetworkResolvers(servers []string, isDocker, inCluster bool, localNets []*net.IPNet) []string {
+	if inCluster {
+		return append([]string(nil), servers...)
+	}
+	if !isDocker {
+		return nil
+	}
+	var out []string
+	for _, s := range servers {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			continue
+		}
+		if ip.Equal(dockerEmbeddedDNS) || onNetwork(ip, localNets) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// localNetworks lists the networks of this network namespace's own
+// non-loopback addresses. An error leaves the list empty, which only narrows
+// what a miss may be forwarded to.
+func localNetworks() []*net.IPNet {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var nets []*net.IPNet
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.IsLoopback() || n.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}
+
+func onNetwork(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// replayMissServers are the resolvers a replay's DNS mock miss is forwarded
+// to. Real egress beyond the replay's own network is opened only by a named
+// knob: test.allowEgress "dns", --global-passthrough, or mocking turned off,
+// which asks for real traffic by definition.
+func (p *Proxy) replayMissServers(mockingEnabled bool) []string {
+	if !mockingEnabled || p.GlobalPassthrough || p.allowEgressDNS {
+		return p.dnsUpstreamServers
+	}
+	return p.dnsInNetworkServers
+}
+
+// logReplayDNSForwarding says once, at a replay agent's start, which resolvers
+// a DNS mock miss is forwarded to and which it is not, and how to open the
+// rest. Mocking turned off is a per-session choice the agent does not know yet
+// at its start, so only the agent-wide knobs are named here.
+func (p *Proxy) logReplayDNSForwarding() {
+	if p.agentMode != models.MODE_TEST || len(p.dnsUpstreamServers) == 0 {
+		return
+	}
+	knob := ""
+	switch {
+	case p.allowEgressDNS:
+		knob = "test.allowEgress (" + models.AllowEgressDNS + ")"
+	case p.GlobalPassthrough:
+		knob = "--global-passthrough"
+	}
+	if knob != "" {
+		p.logger.Info("real egress opened by "+knob+": a DNS mock miss is forwarded to the resolvers in resolv.conf",
+			zap.Strings("resolvers", p.dnsUpstreamServers))
+		return
+	}
+	var notAsked []string
+	for _, s := range p.dnsUpstreamServers {
+		if !slices.Contains(p.dnsInNetworkServers, s) {
+			notAsked = append(notAsked, s)
+		}
+	}
+	if len(notAsked) == 0 {
+		return
+	}
+	p.logger.Info("a DNS mock miss in this replay is forwarded only to a resolver inside the replay's own network; the host's and public resolvers are not asked",
+		zap.Strings("in_network_resolvers", p.dnsInNetworkServers),
+		zap.Strings("not_asked", notAsked),
+		zap.String("opt_in", "test.allowEgress: ["+models.AllowEgressDNS+"] (or --allow-egress "+models.AllowEgressDNS+")"))
 }
 
 // hasDNSUpstream reports whether the forwarder has any real upstream
@@ -146,6 +268,15 @@ func (p *Proxy) hasDNSUpstream() bool {
 func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	if !p.hasDNSUpstream() {
 		return nil, fmt.Errorf("no upstream DNS resolver configured")
+	}
+	return p.forwardDNS(question, p.dnsUpstreamServers)
+}
+
+// forwardDNS is forwardDNSUpstream against the given subset of the upstream
+// servers (replayMissServers).
+func (p *Proxy) forwardDNS(question dns.Question, servers []string) (*dns.Msg, error) {
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no upstream DNS resolver this replay may forward to")
 	}
 
 	// Only forward types we know how to relay sensibly. Everything
@@ -179,7 +310,7 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	m.RecursionDesired = true
 
 	var lastErr error
-	for _, server := range p.dnsUpstreamServers {
+	for _, server := range servers {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			lastErr = fmt.Errorf("dns forward deadline exceeded before trying %s", server)

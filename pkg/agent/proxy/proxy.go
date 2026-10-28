@@ -485,6 +485,14 @@ type Proxy struct {
 	// dnsUpstreamPort is the port read alongside dnsUpstreamServers.
 	// Defaults to "53" when resolv.conf does not specify one.
 	dnsUpstreamPort string
+	// dnsInNetworkServers are the dnsUpstreamServers inside the replay's own
+	// network (inNetworkResolvers), the only ones a replay's DNS mock miss is
+	// forwarded to without an opt-in. Captured with dnsUpstreamServers.
+	dnsInNetworkServers []string
+	// allowEgressDNS is test.allowEgress naming models.AllowEgressDNS: a
+	// replay's DNS mock miss may then be forwarded to every dnsUpstreamServers
+	// entry, the host's and public resolvers included.
+	allowEgressDNS bool
 	// dnsSearch is the resolv.conf search list, kept so a query can be
 	// recognised as a redundant search expansion without asking upstream.
 	// A resolver probes name.S for each search domain S — before the name
@@ -1052,6 +1060,7 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		clientClose:               make(chan bool, 1),
 		Integrations:              make(map[integrations.IntegrationType]integrations.Integrations),
 		GlobalPassthrough:         opts.Agent.GlobalPassthrough,
+		allowEgressDNS:            models.AllowsEgress(opts.Agent.AllowEgress, models.AllowEgressDNS),
 		DisableHandshakeHold:      opts.Agent.DisableHandshakeHold,
 		OpportunisticTLSIntercept: opts.Agent.OpportunisticTLSIntercept,
 		errChannel:                make(chan error, 100), // buffered channel to prevent blocking
