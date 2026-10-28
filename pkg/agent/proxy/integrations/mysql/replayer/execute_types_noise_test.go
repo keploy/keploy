@@ -80,7 +80,7 @@ func TestMatchCommand_LearnsNoNoiseFromTypesAPacketDidNotSend(t *testing.T) {
 	dctx := newDecodeCtx()
 	dctx.StmtIDToQuery[33] = ordersInsert
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, true, false), nil)
+	resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", mocknoise.New(mysqlNoiseAdapter{}, true, false), nil)
 	if err != nil || !ok || resp.Payload != "row" {
 		t.Fatalf("served %v (ok %v, %v), want the recorded row", resp, ok, err)
 	}
@@ -114,7 +114,7 @@ func TestMatchCommand_LearnsNoNoiseFromAnOlderKeploysReading(t *testing.T) {
 	dctx := newDecodeCtx()
 	dctx.StmtIDToQuery[33] = ordersInsert
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, mocknoise.New(mysqlNoiseAdapter{}, true, false), nil)
+	resp, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", mocknoise.New(mysqlNoiseAdapter{}, true, false), nil)
 	if err != nil || !ok || resp.Payload != "row" {
 		t.Fatalf("served %v (ok %v, %v), want the recorded row", resp, ok, err)
 	}
