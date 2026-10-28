@@ -390,7 +390,10 @@ type matchOptions struct {
 // application's background work and that already answered in its window, is
 // answered again with that recording, unchecked, and reported to dst's
 // report as such (backgroundAgain): not a miss. matchCommandWith asks it
-// before every miss a COM_QUERY or COM_STMT_EXECUTE can end in.
+// before every miss a COM_QUERY or COM_STMT_EXECUTE can end in. A command
+// that misses and repeats a recording of the open test that answered already
+// is one command more than the test recorded (extraCall): its miss names
+// that recording.
 func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, dst string, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
@@ -451,6 +454,13 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	}
 	if miss != nil {
 		miss.call = call
+		// Under exact serving: one command more than the test recorded?
+		// Asked of the store held to the command's round, as the match
+		// was, and never for a command a restage caught: its matcher read
+		// nothing, and its miss says so.
+		if !ok && err == nil && !miss.restaged {
+			miss.recorded, miss.repeats = extraCall(logger, req, db, decodeCtx)
+		}
 	}
 	return resp, ok, miss, err
 }
