@@ -107,7 +107,11 @@ func childLevel(level, key string) (string, bool) {
 }
 
 // identityKeys are the keys an item at level is matched by, between the old
-// file and the new encoding.
+// file and the new encoding. A boot's are its folder and its key, and its key
+// names the test it started in and its order among that program's starts
+// there (starts.KeyOf: program#n@test), so two tests' boots of one binary in
+// one folder never pair with each other; boots of one key (a test run twice
+// in one recording) pair in order (list).
 func identityKeys(level string) []string {
 	switch level {
 	case models.MappingLevelTest, models.MappingLevelGroup:

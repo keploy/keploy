@@ -572,3 +572,89 @@ func entryNotes(t *testing.T, data []byte) map[string]string {
 	}
 	return notes
 }
+
+// bootFields is the owner field each boot of the mappings file data holds,
+// in the file's order, as "key owner".
+func bootFields(t *testing.T, data []byte) []string {
+	t.Helper()
+	var doc struct {
+		Boots []struct {
+			Key   string `yaml:"key"`
+			Owner string `yaml:"owner"`
+		} `yaml:"boots"`
+	}
+	must(t, yamlLib.Unmarshal(data, &doc))
+	var out []string
+	for _, b := range doc.Boots {
+		out = append(out, b.Key+" "+b.Owner)
+	}
+	return out
+}
+
+// A boot is matched by its folder and its key, and a boot's key names the
+// test it started in and its order there (starts.KeyOf: program#n@test).
+// So two tests that each start one binary in one folder keep each boot's
+// hand field on its own boot, whatever order the old file lists them in:
+// here the old file lists TestB's boot first, and the rewrite writes a
+// fresh TestA's boot before a carried TestB's. One test run twice in one
+// recording (go test -count=2) starts boots of one key; they pair in order.
+func TestEachBootKeepsItsHandFieldsOnItsOwnBoot(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	boot := func(key, place, owner string) string {
+		b := "    - dir: o\n      key: " + key + "\n      program: app\n      place: " + place + "\n      n: 1\n      ready: true\n      mocks: []\n"
+		if owner != "" {
+			b += "      owner: " + owner + "\n"
+		}
+		return b
+	}
+	head := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: s\ntests:\n    - id: o::TestA\n      mock_entries: []\n    - id: o::TestB\n      mock_entries: []\nboots:\n"
+	spec := func(key, place string) models.BootSpec {
+		return models.BootSpec{Dir: "o", Key: key, Program: "app", Place: place, N: 1, Ready: true}
+	}
+	cases := []struct {
+		name  string
+		old   string
+		boots []models.BootSpec
+		want  []string
+	}{
+		{
+			name:  "two tests, old order crosswise",
+			old:   head + boot("app#1@o::TestB", "o::TestB", "team-b") + boot("app#1@o::TestA", "o::TestA", "team-a"),
+			boots: []models.BootSpec{spec("app#1@o::TestA", "o::TestA"), spec("app#1@o::TestB", "o::TestB")},
+			want:  []string{"app#1@o::TestA team-a", "app#1@o::TestB team-b"},
+		},
+		{
+			name:  "one test run twice",
+			old:   head + boot("app#1@o::TestA", "o::TestA", "first-run") + boot("app#1@o::TestA", "o::TestA", "second-run"),
+			boots: []models.BootSpec{spec("app#1@o::TestA", "o::TestA"), spec("app#1@o::TestA", "o::TestA")},
+			want:  []string{"app#1@o::TestA first-run", "app#1@o::TestA second-run"},
+		},
+		{
+			name:  "a test's second start",
+			old:   head + boot("app#2@o::TestA", "o::TestA", "restart") + boot("app#1@o::TestA", "o::TestA", "boot"),
+			boots: []models.BootSpec{spec("app#1@o::TestA", "o::TestA"), spec("app#2@o::TestA", "o::TestA")},
+			want:  []string{"app#1@o::TestA boot", "app#2@o::TestA restart"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/UpsertBoots", func(t *testing.T) {
+			dir := writeSet(t, tc.old)
+			must(t, NewWithFormat(zap.NewNop(), dir, "mappings", yaml.FormatYAML).UpsertBoots(context.Background(), "s", tc.boots))
+			if got := bootFields(t, []byte(readSet(t, dir))); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("boots = %q, want %q", got, tc.want)
+			}
+		})
+		t.Run(tc.name+"/EncodeOver", func(t *testing.T) {
+			m := &models.Mapping{Version: "api.keploy.io/v1beta1", Kind: "TestMocksMapping", TestSetID: "s",
+				TestCases: []models.MappedTestCase{{ID: "o::TestA"}, {ID: "o::TestB"}}, Boots: tc.boots}
+			data, unkept, err := EncodeOver(m, []byte(tc.old), map[string]string{})
+			must(t, err)
+			if got := bootFields(t, data); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Errorf("boots = %q, want %q", got, tc.want)
+			}
+			if len(unkept.Dropped) != 0 || len(unkept.Fields) != 0 {
+				t.Errorf("EncodeOver reports %+v, want nothing unkept", unkept)
+			}
+		})
+	}
+}
