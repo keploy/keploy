@@ -555,8 +555,12 @@ func keepIndex(keep bool) int {
 // (searched(x, keep): its text and its other forms), read by letters and
 // digits alone (isWord), once for the set where dc keeps x's (setOf); ok is
 // false where it does not, or where the set keeps no more (heldBudget). It
-// tells which values the search can find in x without reading its text
-// (mayHold).
+// tells which values the search can find in x, and which words x's words
+// (searchedTokens) cannot hold, without reading its text or its words
+// (mayHold, mayHoldWords): searchedTokens reads the same forms, each blanked
+// by itself where searched blanks the other forms joined by a line break,
+// which no instant's layout holds and no word byte is, so each form holds
+// the same instants and the same words of letters and digits either way.
 func (dc *DriftCache) searchWords(x Raw, keep bool) (out wordFilter, ok bool) {
 	s := dc.setOf(x)
 	if s == nil {
@@ -569,26 +573,58 @@ func (dc *DriftCache) searchWords(x Raw, keep bool) (out wordFilter, ok bool) {
 			// texts, as with no set, rather than its words each call.
 			return nil
 		}
-		texts := dc.searched(x, keep)
+		pair := dc.searched(x, keep)
+		texts := pair[:]
 		n := 0
 		for _, text := range texts {
-			for _, seg := range segmentsBy(text, isWord) {
-				if seg.word {
-					n++
-				}
-			}
+			eachWord(text, func(string) { n++ })
 		}
 		f := newWordFilter(n)
 		for _, text := range texts {
-			for _, seg := range segmentsBy(text, isWord) {
-				if seg.word {
-					f.add(seg.text)
-				}
-			}
+			eachWord(text, f.add)
 		}
 		return f
 	}, func(e *heldParts, v wordFilter) { e.filter[k] = v }, func(v wordFilter) int64 { return headerBytes + 8*int64(len(v)) })
 	return out, out != nil
+}
+
+// eachWord hands each word of s as isWord reads it (segmentsBy), in order,
+// keeping none of them.
+func eachWord(s string, each func(string)) {
+	for i := 0; i < len(s); {
+		if !isWord(s[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(s) && isWord(s[j]) {
+			j++
+		}
+		each(s[i:j])
+		i = j
+	}
+}
+
+// mayHoldWords reports whether x's words (searchedTokens(x, keep)) may hold
+// any of words, each by its runs of letters and digits (runs[i]:
+// wordsBy(words[i], isWord)), as x's filter tells (searchWords): a word of
+// any reading (readings) is a run of bytes that each continue a word of
+// letters and digits or a wider one, with none beside it, so each of its
+// runs of letters and digits is a word of letters and digits of the same
+// form, which the filter holds. A word no run of which the filter lacks,
+// one of no letter or digit among them, and any word of an x the set keeps
+// no filter of, may.
+func (dc *DriftCache) mayHoldWords(x Raw, keep bool, runs [][]string) bool {
+	words, ok := dc.searchWords(x, keep)
+	if !ok {
+		return true
+	}
+	for _, r := range runs {
+		if mayHold(words, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // mayHold reports whether a text whose words' filter (searchWords) is words

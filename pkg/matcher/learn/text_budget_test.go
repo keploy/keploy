@@ -95,7 +95,9 @@ func TestATestsCacheKeepsNoEarlierPayloadsText(t *testing.T) {
 // again, and a call's cost grew with its value's words times the earlier
 // payloads. Each payload's words are now read once for the value
 // (wordsHeld): a value of six changed words reads the earlier payloads as
-// often as a value of one.
+// often as a value of one. The set keeps no filter of their words here
+// (keepsNoMoreHeld), which would tell the rule not to read them at all
+// (they hold none of the value's words: mayHoldWords).
 func TestAValuesWordsReadEachEarlierPayloadOnce(t *testing.T) {
 	defer func(d, x int64, f func([]string) []map[string]bool) {
 		derivedBudget, textBudget, tokensOfForms = d, x, f
@@ -115,6 +117,7 @@ func TestAValuesWordsReadEachEarlierPayloadOnce(t *testing.T) {
 		reads = 0
 		tr := NewTracker()
 		tr.NewSet()
+		keepsNoMoreHeld(tr)
 		tr.Begin()
 		dc := tr.Drifts()
 		raw := make([]Raw, n)

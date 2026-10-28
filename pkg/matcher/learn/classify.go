@@ -550,17 +550,33 @@ func (r Raw) OfAnotherTest() Raw {
 // rule alone read (OfAnotherTest).
 func (r Raw) AnotherTests() bool { return r.elsewhere }
 
-// ownPlaces splits raw into the places every rule reads and those the offset
-// rule and the word rule alone read (OfAnotherTest), each in raw's order.
-func ownPlaces(raw []Raw) (own, elsewhere []Raw) {
-	for _, x := range raw {
-		if x.elsewhere {
-			elsewhere = append(elsewhere, x)
+// ownPlaces are the places of raw every rule reads, in raw's order: raw
+// without those the offset rule and the word rule alone read
+// (OfAnotherTest). It is raw itself where there are none, and a part of it
+// where they all stand after the rest (leafedAfterCall): a call reads every
+// earlier recording of the set, and a copy of them per call was a call's
+// largest part of the heap on api-server's round (277 MB at once over its
+// handlers). The rules read raw and never write it.
+func ownPlaces(raw []Raw) []Raw {
+	n := len(raw)
+	for n > 0 && raw[n-1].elsewhere {
+		n--
+	}
+	own := raw[:n:n]
+	for i, x := range own {
+		if !x.elsewhere {
 			continue
 		}
-		own = append(own, x)
+		out := make([]Raw, i, n-1)
+		copy(out, own[:i])
+		for _, y := range own[i+1:] {
+			if !y.elsewhere {
+				out = append(out, y)
+			}
+		}
+		return out
 	}
-	return own, elsewhere
+	return own
 }
 
 // Kind is what a drifted leaf is learned as.
@@ -1252,7 +1268,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 	// rule (givenWhy): another recorded test's too (OfAnotherTest), and
 	// those F gave earlier in the set (given), which no other rule reads.
 	all := raw
-	raw, _ = ownPlaces(raw)
+	raw = ownPlaces(raw)
 	var op *offsetPlaces
 	places := func() *offsetPlaces {
 		if op == nil {
