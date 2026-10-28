@@ -198,13 +198,17 @@ func (s *bodyStore) get(id, name string, load func() (*models.Mock, error)) rawB
 }
 
 // loadBody reads the payload load gives of the recording named name; one
-// it cannot give is an unread body that says why (rawUnread's reason).
+// it cannot give is an unread body that says why (rawUnread's reason),
+// naming it, or one of no name as rawUnread does.
 func loadBody(name string, load func() (*models.Mock, error)) rawBody {
 	m, err := load()
 	if err == nil && m == nil {
 		err = errors.New("no recording was given")
 	}
 	if err != nil {
+		if name == "" {
+			name = "a recording of the test"
+		}
 		return rawBody{unread: "keploy could not read back " + name + ", an earlier place of the call, with its recorded answer (" + err.Error() +
 			"), so it cannot tell whether what changed came from there: a fault of keploy's, which keploy reports rather than learn anything"}
 	}
