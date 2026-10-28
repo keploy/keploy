@@ -374,6 +374,14 @@ var itemQuery = getenv("SHOP_ITEM_QUERY", `SELECT id, name, price FROM items WHE
 
 func item(id int) string { return fmt.Sprintf("%d:item-%d:%d", id, id, id*100+7) }
 
+// itemShift is added to the id the sequential read binds, not to the id
+// whose row it must read (SHOP_ITEM_ID_SHIFT, 0 by default): the lane
+// replays a recording with it, as an app that now sends another parameter
+// to the statement it recorded. A replayer that answers such a read with a
+// recording of the statement made with another parameter serves the row
+// the app wants, so the test passes: a false green.
+var itemShift, _ = strconv.Atoi(getenv("SHOP_ITEM_ID_SHIFT", "0"))
+
 const poolConns = 8
 
 // pool serves GET /pool: itemQuery, a prepared statement, on a pool of eight
@@ -487,7 +495,7 @@ func sequential(ctx context.Context, db *sql.DB, ids []int) ([]string, []error) 
 	}
 	defer stmt.Close()
 	for i, id := range ids {
-		got[i], errs[i] = scanItem(stmt.QueryRowContext(ctx, id))
+		got[i], errs[i] = scanItem(stmt.QueryRowContext(ctx, id+itemShift))
 	}
 	return got, errs
 }

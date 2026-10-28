@@ -106,7 +106,12 @@ func runOtherStatementCases(t *testing.T, all, own []*models.Mock, cases []other
 // The rule: an EXECUTE is answered only by a recording of its own statement
 // (the same prepared text: sqlStatementIdentity, case-insensitive), or, when
 // the recording lost its statement, by one with every parameter equal.
-// Under exact serving that is all. Without it, a recording of another
+// Under exact serving that is all, and tighter: a recording of its own
+// statement with other parameters answers only when every parameter that
+// differs is configured or learned noise (it is another call's rows: a read
+// of 5 got 7's), and a recording that lost its statement answers only a
+// command whose statement is unknown too (against a known one it may be
+// another statement's rows). Without exact serving, a recording of another
 // statement of the same shape (the same parse tree, other identifiers), and
 // any recording when the live statement is unknown, still scores, as before:
 // that is keploy test's lenient tier, kept; a recording of another statement
@@ -126,15 +131,52 @@ func TestAnExecuteOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
 		{name: "a statement the connection did not prepare", stmts: stmts(otherQuery), req: executeReq(3, "5"), notExact: "exec-small-7"},
 		// The rule's other side: the statement's own recording answers.
 		{name: "its own statement", stmts: stmts(otherQuery), req: executeReq(1, "7"), exact: "exec-small-7", notExact: "exec-small-7"},
-		{name: "its own statement with other parameters", stmts: stmts(otherQuery), req: executeReq(1, "5"), exact: "exec-small-7", notExact: "exec-small-7"},
-		{name: "its own statement in another case", stmts: map[uint32]string{1: strings.ToLower(poolQuery)}, req: executeReq(1, "5"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "its own statement with other parameters", stmts: stmts(otherQuery), req: executeReq(1, "5"), notExact: "exec-small-7", nearest: "exec-small-7"},
+		{name: "its own statement in another case", stmts: map[uint32]string{1: strings.ToLower(poolQuery)}, req: executeReq(1, "7"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "its own statement in another case with other parameters", stmts: map[uint32]string{1: strings.ToLower(poolQuery)}, req: executeReq(1, "5"), notExact: "exec-small-7", nearest: "exec-small-7"},
 	})
 	t.Run("a recording whose statement is lost", func(t *testing.T) {
 		runOtherStatementCases(t, []*models.Mock{lost}, []*models.Mock{lost}, []otherStatementCase{
 			{name: "other parameters", stmts: stmts(otherQuery), req: executeReq(2, "5"), notExact: "exec-lost-8"},
-			{name: "its parameters", stmts: stmts(otherQuery), req: executeReq(2, "8"), exact: "exec-lost-8", notExact: "exec-lost-8"},
+			{name: "its parameters", stmts: stmts(otherQuery), req: executeReq(2, "8"), notExact: "exec-lost-8", nearest: "exec-lost-8"},
+			{name: "its parameters, the command's statement unknown too", stmts: stmts(otherQuery), req: executeReq(3, "8"), exact: "exec-lost-8", notExact: "exec-lost-8"},
 		})
 	})
+	// A parameter that differs is noise: configured, or learned on the
+	// recording (req_body_noise). Under exact serving that recording of the
+	// statement answers; a parameter the noise does not name still misses.
+	t.Run("a recording whose parameter is learned noise", func(t *testing.T) {
+		noisy := diffMock("exec-small-noisy", "c1", []mysql.Request{executeReq(1, "7")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+		noisy.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
+		runOtherStatementCases(t, []*models.Mock{prep, noisy}, []*models.Mock{noisy}, []otherStatementCase{
+			{name: "its own statement with another value there", stmts: stmts(otherQuery), req: executeReq(1, "5"), exact: "exec-small-noisy", notExact: "exec-small-noisy"},
+		})
+		other := diffMock("exec-small-other-noise", "c1", []mysql.Request{executeReq(1, "7")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+		other.Spec.ReqBodyNoise = map[string][]string{"body.parameters.1.value": {}}
+		runOtherStatementCases(t, []*models.Mock{prep, other}, []*models.Mock{other}, []otherStatementCase{
+			{name: "its own statement with another value elsewhere", stmts: stmts(otherQuery), req: executeReq(1, "5"), notExact: "exec-small-other-noise", nearest: "exec-small-other-noise"},
+		})
+	})
+}
+
+// Under exact serving, a miss on a recording of the command's statement made
+// with other parameters names the parameter that drifted and says it is not
+// noise, instead of asking to re-record a statement that did not change.
+func TestAnExecuteWithOtherParametersSaysWhichDrifted(t *testing.T) {
+	prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(time.Millisecond))
+	own := diffMock("exec-small-7", "c1", []mysql.Request{executeReq(1, "7")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	mm := stageOwn(t, []*models.Mock{prep, own}, []*models.Mock{own}, true)
+	ctx, dctx := poolConn("c1")
+	dctx.StmtIDToQuery = map[uint32]string{1: poolQuery}
+	_, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), executeReq(1, "5"), mm, dctx)
+	if err != nil || ok {
+		t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
+	}
+	for _, want := range []string{"closestMock:exec-small-7 ", "body.parameters.0.value", "not noise"} {
+		if !strings.Contains(miss, want) {
+			t.Errorf("the miss (%s) does not say %q", miss, want)
+		}
+	}
 }
 
 // A COM_QUERY, and a PREPARE, is answered by a recording of its own

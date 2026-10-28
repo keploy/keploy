@@ -78,7 +78,13 @@
 #      replayer that answered an EXECUTE with another statement's recording
 #      (scored on the packet's header and parameters, or on the statement's
 #      shape) served each call the row recorded for its id, and test-5
-#      passed: a false green.
+#      passed: a false green. Then the same recording replayed by an app
+#      whose GET /pool binds another id to its own statement in its
+#      sequential read (SHOP_ITEM_ID_SHIFT), while it still wants the row
+#      of the id it recorded: each of those EXECUTEs is a miss too, and
+#      test-5 fails. A replayer that answered them with the recording of
+#      the statement made with another parameter (its next one, in recorded
+#      order) served the rows the app wants, and test-5 passed.
 #  11. A prepared read the app makes before any test, or between two tests,
 #      is answered with a recording of its own request, and a test's with its
 #      own: recorded with SHOP_SETTINGS_BY_KEY=1, the app reads two settings
@@ -486,28 +492,37 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
     [ "$refused" -eq 0 ] || fail "under the proven switch the MySQL matcher failed $refused command(s) with a consume the store refused (failed to update matched mock)"
 
     # 12. The pool's prepared read changed since it was recorded. Each replay
-    #     starts from the mappings step 9 replayed with.
+    #     starts from the mappings step 9 replayed with. changed_read NAME
+    #     WHAT STMT replays as NAME, with the app's change (WHAT) in the
+    #     environment, and checks test-5 failed on an unmatched EXECUTE of
+    #     STMT while the other tests passed.
     cp keploy/test-set-0/mappings.yaml mappings.step9
+    changed_read() {
+        cp mappings.step9 keploy/test-set-0/mappings.yaml
+        PROVEN_REPLAY=1 replay "$1" mapped
+        # Under the proven switch a miss is logged at debug only: the report
+        # names it, as test-5's unmatched call.
+        [ "$(test_status test-5)" = FAILED ] ||
+            fail "under the proven switch, GET /pool $2: test-5 must be FAILED (exit $RC, status $(test_status test-5))"
+        [ "$RC" -ne 0 ] || fail "under the proven switch, GET /pool $2: keploy test exited 0"
+        T=test-5 S="COM_STMT_EXECUTE $3" yq -e '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary] | any_c(contains(strenv(S)))' "$(REPORT)" >/dev/null ||
+            fail "under the proven switch, GET /pool $2: the report names no unmatched call of test-5 running '$3' ($(T=test-5 yq -N -o=json -I=0 '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary]' "$(REPORT)" 2>/dev/null))"
+        for t in test-1 test-2 test-3 test-4; do
+            [ "$(test_status "$t")" = PASSED ] ||
+                fail "under the proven switch, with GET /pool $2, $t must still pass (status $(test_status "$t"))"
+        done
+    }
     n=0
     for changed in 'SELECT id, name, price FROM items_v2 WHERE id = ?' \
         'SELECT id, name, price FROM items WHERE id = ? AND price > 0'; do
         n=$((n + 1))
-        cp mappings.step9 keploy/test-set-0/mappings.yaml
         export SHOP_ITEM_QUERY="$changed"
-        PROVEN_REPLAY=1 replay "proven-changed-$n" mapped
+        changed_read "proven-changed-$n" "running '$changed'" "$changed"
         unset SHOP_ITEM_QUERY
-        # Under the proven switch a miss is logged at debug only: the report
-        # names it, as test-5's unmatched call.
-        [ "$(test_status test-5)" = FAILED ] ||
-            fail "under the proven switch, GET /pool running '$changed': test-5 must be FAILED (exit $RC, status $(test_status test-5))"
-        [ "$RC" -ne 0 ] || fail "under the proven switch, GET /pool running '$changed': keploy test exited 0"
-        T=test-5 S="COM_STMT_EXECUTE $changed" yq -e '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary] | any_c(contains(strenv(S)))' "$(REPORT)" >/dev/null ||
-            fail "under the proven switch, GET /pool running '$changed': the report names no unmatched call of test-5 running it ($(T=test-5 yq -N -o=json -I=0 '[.tests[] | select(.test_case_id == strenv(T)) | .failure_info.unmatched_calls[]?.actual_summary]' "$(REPORT)" 2>/dev/null))"
-        for t in test-1 test-2 test-3 test-4; do
-            [ "$(test_status "$t")" = PASSED ] ||
-                fail "under the proven switch, with GET /pool's read changed, $t must still pass (status $(test_status "$t"))"
-        done
     done
+    export SHOP_ITEM_ID_SHIFT=100
+    changed_read proven-changed-param "binding another id to its statement" 'SELECT id, name, price FROM items WHERE id = ?'
+    unset SHOP_ITEM_ID_SHIFT
     cd "$WORK" || exit 1
 fi
 

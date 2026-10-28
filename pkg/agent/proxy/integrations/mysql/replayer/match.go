@@ -126,6 +126,11 @@ func getQueryStructureCached(sql string) (string, error) {
 	return sig, err
 }
 
+// exactDriftNextSteps is what a miss says when, under exact serving,
+// recordings of the command's statement were turned away because a parameter
+// drifted outside known noise (strictGate.allowsDrift).
+const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark it under test.globalNoise.requestBody or let an auto-replay learn it; otherwise the call changed since it was recorded: re-record the test."
+
 // sameQueryStructure reports whether two statements parse to the same tree
 // shape (getQueryStructure: identifier-blind). Neither parsing is no.
 func sameQueryStructure(a, b string) bool {
@@ -472,16 +477,21 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// literals are masked (maskSQLLiterals: a COM_QUERY's literals are its
 	// parameters). For a COM_STMT_EXECUTE it is the same prepared statement
 	// (queryExact: sqlStatementIdentity, case-insensitive), which the FIFO
-	// candidate is, so no EXECUTE is answered by score. A recording of
-	// another statement of the same shape (getQueryStructure is
-	// identifier-blind: another table, other columns), or, for an EXECUTE,
-	// of a statement unknown on either side, never answers there: it was
-	// served by score, and the app read rows its statement never returned.
-	// An EXECUTE recorded without its statement still answers with every
-	// parameter equal (paramsOnlyMock), as before. Without exact serving
-	// those still score, as before: keploy test's lenient tier. A recording
-	// of another statement of another shape never scores, in either mode
-	// (matchStmtExecutePacketQueryAware, matchQueryLive).
+	// candidate is, so no EXECUTE is answered by score; and the FIFO
+	// candidate answers only when every parameter that differs is
+	// configured or learned noise (strictGate.allowsDrift): with another
+	// parameter it is the rows of another call. A recording of another
+	// statement of the same shape (getQueryStructure is identifier-blind:
+	// another table, other columns), or, for an EXECUTE, of a statement
+	// unknown on either side, never answers there: it was served by score,
+	// and the app read rows its statement never returned. An EXECUTE
+	// recorded without its statement answers with every parameter equal
+	// (paramsOnlyMock) only when the command's statement is unknown too:
+	// against a known one it may be another statement's rows. Without
+	// exact serving those still answer, as before: keploy test's lenient
+	// tier. A recording of another statement of another shape never
+	// scores, in either mode (matchStmtExecutePacketQueryAware,
+	// matchQueryLive).
 	sameStatementOnly := exactServing
 	testsOwn := func(mk *models.Mock) bool {
 		if exactServing {
@@ -1491,6 +1501,16 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						}
 						inWindow := testsOwn(mock)
 						switch {
+						case expectedQuery == "" && sameStatementOnly && liveStmtQuery != "":
+							// Under exact serving a recording whose
+							// statement is lost does not answer a command
+							// whose statement is known: equal parameters
+							// do not make it the same statement
+							// (sameStatementOnly). It is the nearest for
+							// the miss report.
+							if bestPartialMock == nil {
+								bestPartialMock, bestPartialQuery = mock, ""
+							}
 						case expectedQuery == "" && inWindow:
 							if paramsOnlyMockWindow == nil {
 								paramsOnlyRespWindow, paramsOnlyMockWindow = &mock.Spec.MySQLResponses[0], mock
@@ -1541,6 +1561,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						// covered by learned/user noise. One gate call covers both
 						// the FIFO and score branches below.
 						if (queryExact || c > maxMatchedCount) && !gate.allows(mock) {
+							continue
+						}
+						if queryExact && sameStatementOnly && !gate.allowsDrift(mock) {
 							continue
 						}
 						if queryExact {
@@ -2106,6 +2129,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			if miss.strictRejected == 0 {
 				miss.nextSteps = unknown.nextSteps
 			}
+		}
+		if miss.nextSteps == "" && gate.exactRejected > 0 {
+			miss.nextSteps = exactDriftNextSteps
 		}
 		return nil, false, miss, nil
 	}

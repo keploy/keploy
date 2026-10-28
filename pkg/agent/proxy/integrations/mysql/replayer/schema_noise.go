@@ -176,6 +176,17 @@ type strictGate struct {
 	closestMock string
 	fieldDiffs  []models.MockFieldDiff
 
+	// exactRejected is how many of rejected allowsDrift ruled out without
+	// strict enforcement: under exact serving, recordings of the command's
+	// statement whose parameters drifted outside known noise.
+	exactRejected int
+
+	// driftEngine compares a candidate for allowsDrift as strict
+	// enforcement does, when the engine the gate was given does not
+	// (driftVerdicts keeps its answers, as verdicts keeps the engine's).
+	driftEngine   *schemanoise.Engine
+	driftVerdicts map[*models.Mock]gateVerdict
+
 	// verdicts keeps StrictReject's answer per candidate. The verdict depends
 	// only on the candidate and the live body, both fixed for the command, so a
 	// candidate the scan meets again (another of its packets, or the full scan
@@ -280,16 +291,49 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 	if !g.engine.StrictEnabled() || !g.liveBodyOK {
 		return true
 	}
+	return g.compare(g.engine, &g.verdicts, mock)
+}
+
+// allowsDrift is the rule, under exact serving, for a recording of a live
+// COM_STMT_EXECUTE's statement whose parameters are not all equal (the FIFO
+// candidate): it answers only when every parameter that differs is noise,
+// configured (test.globalNoise.requestBody) or learned on the recording
+// (req_body_noise), compared as strict enforcement compares, whether or
+// not strict enforcement is on. A MySQL recording that declares variables
+// never reaches the matcher there (the agent's followable: the MySQL parser
+// follows none). Served with another parameter, the recording answered the
+// command with the rows of another call: a read of order 5 got order 7's.
+// A command with no diffable body cannot show its drift is noise: no.
+func (g *strictGate) allowsDrift(mock *models.Mock) bool {
+	if g.engine.StrictEnabled() {
+		return g.allows(mock)
+	}
+	if !g.liveBodyOK {
+		return false
+	}
+	if g.driftEngine == nil {
+		g.driftEngine = schemanoise.New(mysqlNoiseAdapter{}, false, true)
+	}
+	if g.compare(g.driftEngine, &g.driftVerdicts, mock) {
+		return true
+	}
+	g.exactRejected++
+	return false
+}
+
+// compare is strict enforcement's verdict on mock by engine, cached in
+// verdicts, recording the rejection diagnostics when it is no.
+func (g *strictGate) compare(engine *schemanoise.Engine, verdicts *map[*models.Mock]gateVerdict, mock *models.Mock) bool {
 	noise := executeBodyNoise(g.userBodyNoise, mock, g.live)
 	body, _ := g.bodyFor(mock)
-	v, seen := g.verdicts[mock]
+	v, seen := (*verdicts)[mock]
 	recorded, recordedOK := g.recordedBody(mock)
 	if !seen {
-		v.allowed, v.drift = g.engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
-		if g.verdicts == nil {
-			g.verdicts = make(map[*models.Mock]gateVerdict)
+		v.allowed, v.drift = engine.StrictRejectRecorded(mock, recorded, recordedOK, body, noise)
+		if *verdicts == nil {
+			*verdicts = make(map[*models.Mock]gateVerdict)
 		}
-		g.verdicts[mock] = v
+		(*verdicts)[mock] = v
 	}
 	if v.allowed {
 		return true
@@ -300,7 +344,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 		if recordedOK {
 			// KnownNoise is root-relative (user ∪ learned); JSONFieldDiffs
 			// skips those paths so the report shows only non-noise drift.
-			known := g.engine.KnownNoise(mock, noise)
+			known := engine.KnownNoise(mock, noise)
 			g.fieldDiffs = maskAttributeDiffs(matcher.JSONFieldDiffs(string(recorded), string(body), known, "body.", 96), mock, g.live)
 		}
 	}
@@ -320,7 +364,7 @@ func (g *strictGate) allows(mock *models.Mock) bool {
 // resetDiagnostics clears the rejection diagnostics for a scan that starts over
 // on the same command, keeping the verdicts: they still hold.
 func (g *strictGate) resetDiagnostics() {
-	g.rejected, g.closestMock, g.fieldDiffs = 0, "", nil
+	g.rejected, g.closestMock, g.fieldDiffs, g.exactRejected = 0, "", nil, 0
 }
 
 // queryShape is the literal-split view of a SQL text: the query with every
