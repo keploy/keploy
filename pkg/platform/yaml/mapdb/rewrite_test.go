@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -209,6 +210,78 @@ func TestInsertKeepsASectionEntrysFields(t *testing.T) {
 	must(t, err)
 	if !strings.Contains(string(raw), "note: flaky boot call") {
 		t.Fatalf("the start-up entry's note was lost:\n%s", raw)
+	}
+}
+
+// Insert, keploy test's whole-file write, rebuilds the file from each test's
+// mocks; under the proven switch it keeps every entry's fields beside the
+// mocks (cases, case_mocks, case_steps, dir, starts, at, real) and the boots
+// and suites sections, those of a test it writes again too. A field the
+// caller sets replaces the file's; one it leaves unset keeps it.
+func TestInsertKeepsWhatItDoesNotWrite(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	file := `version: api.keploy.io/v1beta1
+kind: TestMocksMapping
+test_set_id: s
+tests:
+    - id: o::TestA
+      mock_entries:
+        - name: mock-0
+      cases: [test-1, test-2]
+      case_mocks:
+        test-1: [mock-0]
+      case_steps:
+        test-2: step
+      dir: o
+      starts: 2
+      at: 2026-10-22T09:00:00Z
+      real: [mock-3]
+    - id: o::TestB
+      mock_entries:
+        - name: mock-1
+      dir: o
+      cases: [test-3]
+suites:
+    - dir: o
+      start: 2026-10-22T08:59:00Z
+      end: 2026-10-22T09:01:00Z
+boots:
+    - dir: o
+      key: k
+      program: p
+      mocks: [{name: mock-9}]
+`
+	dir := writeSet(t, file)
+	db := NewWithFormat(zap.NewNop(), dir, "mappings", yaml.FormatYAML)
+	must(t, db.Insert(context.Background(), &models.Mapping{TestSetID: "s", TestCases: []models.MappedTestCase{
+		{ID: "o::TestA", Mocks: []models.MockEntry{{Name: "mock-5"}}, Dir: "o2"},
+		{ID: "o::TestC", Mocks: []models.MockEntry{{Name: "mock-6"}}, Dir: "p", Cases: []string{"test-4"}},
+	}}))
+	got, err := db.GetMapping(context.Background(), "s")
+	must(t, err)
+	byID := map[string]models.MappedTestCase{}
+	for _, e := range got.TestCases {
+		byID[e.ID] = e
+	}
+	a, b, c := byID["o::TestA"], byID["o::TestB"], byID["o::TestC"]
+	if len(a.Mocks) != 1 || a.Mocks[0].Name != "mock-5" {
+		t.Errorf("TestA's mocks = %+v, want the written mock-5", a.Mocks)
+	}
+	if a.Dir != "o2" {
+		t.Errorf("TestA's dir = %q, want the written o2", a.Dir)
+	}
+	if strings.Join(a.Cases, ",") != "test-1,test-2" || strings.Join(a.CaseMocks["test-1"], ",") != "mock-0" || a.CaseSteps["test-2"] != "step" ||
+		a.Starts != 2 || !a.At.Equal(time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)) || strings.Join(a.Real, ",") != "mock-3" {
+		t.Errorf("TestA lost what the write left unset: %+v", a)
+	}
+	if b.Dir != "o" || strings.Join(b.Cases, ",") != "test-3" || len(b.Mocks) != 1 || b.Mocks[0].Name != "mock-1" {
+		t.Errorf("TestB, which the write does not name, changed: %+v", b)
+	}
+	if c.Dir != "p" || strings.Join(c.Cases, ",") != "test-4" {
+		t.Errorf("TestC lost what the write set: %+v", c)
+	}
+	if len(got.Suites) != 1 || got.Suites[0].Dir != "o" || len(got.Boots) != 1 || got.Boots[0].Program != "p" || len(got.Boots[0].Mocks) != 1 || got.Boots[0].Mocks[0].Name != "mock-9" {
+		t.Errorf("the suites or boots were lost: suites %+v, boots %+v", got.Suites, got.Boots)
 	}
 }
 

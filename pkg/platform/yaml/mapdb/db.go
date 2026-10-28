@@ -49,6 +49,7 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	var existingGroups []models.ConcurrencyGroup
 	var existingSource string
 	var existingRecordedWith []string
+	var existingConfig models.Mapping
 	var old []byte
 
 	// Detect whether a mappings file already exists in either format,
@@ -69,7 +70,6 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		}
 		old = data
 
-		var existingConfig models.Mapping
 		if err := yaml.UnmarshalGeneric(effFormat, data, &existingConfig); err != nil {
 			utils.LogError(db.logger, err, "failed to unmarshal existing mappings", zap.String("path", mappingPath))
 			return err
@@ -150,6 +150,29 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 	if len(mapping.RecordedWith) > 0 {
 		newMapping.RecordedWith = mapping.RecordedWith
 	}
+	// Under the proven switch the rebuild loses nothing it does not write:
+	// each test entry keeps what it holds beside its mocks (its cases, dir,
+	// starts...), and the app starts, suites and runner sections are kept,
+	// replace-or-keep as the startup section. Without the switch the file is
+	// written as before (TestEachWriterWritesAsBeforeWithoutTheSwitch).
+	if provenswitch.On() {
+		keepEntries(newMapping, existingConfig.TestCases, mapping.TestCases)
+		if len(mapping.Suites) == 0 {
+			newMapping.Suites = existingConfig.Suites
+		} else {
+			newMapping.Suites = mapping.Suites
+		}
+		if len(mapping.Boots) == 0 {
+			newMapping.Boots = existingConfig.Boots
+		} else {
+			newMapping.Boots = mapping.Boots
+		}
+		if len(mapping.Runner) == 0 {
+			newMapping.Runner = existingConfig.Runner
+		} else {
+			newMapping.Runner = mapping.Runner
+		}
+	}
 
 	encodedData, err := db.encodeOver(newMapping, effFormat, old, headerAlways, testSetID)
 	if err != nil {
@@ -167,6 +190,63 @@ func (db *MappingDb) Insert(ctx context.Context, mapping *models.Mapping) error 
 		zap.Int("totalTests", len(finalMappings)))
 
 	return nil
+}
+
+// keepEntries gives each test entry Insert rebuilt from the tests' mocks
+// alone the rest of its entry (models.MappedTestCase): what the caller wrote
+// for it, else what the file held for it, so a write of a test's mocks keeps
+// its cases, dir, starts, at and real. The mocks stay the rebuild's.
+func keepEntries(rebuilt *models.Mapping, onDisk, written []models.MappedTestCase) {
+	before := make(map[string]models.MappedTestCase, len(onDisk))
+	for _, e := range onDisk {
+		before[e.ID] = e
+	}
+	now := make(map[string]models.MappedTestCase, len(written))
+	for _, e := range written {
+		now[e.ID] = e
+	}
+	for i := range rebuilt.TestCases {
+		e := &rebuilt.TestCases[i]
+		mocks := e.Mocks
+		o, wasThere := before[e.ID]
+		w, isWritten := now[e.ID]
+		switch {
+		case isWritten && wasThere:
+			*e = entryOver(o, w)
+		case isWritten:
+			*e = w
+		case wasThere:
+			*e = o
+		}
+		e.Mocks = mocks
+	}
+}
+
+// entryOver is the test entry w written over o: each field w sets, else
+// o's.
+func entryOver(o, w models.MappedTestCase) models.MappedTestCase {
+	if len(w.Cases) > 0 {
+		o.Cases = w.Cases
+	}
+	if len(w.CaseMocks) > 0 {
+		o.CaseMocks = w.CaseMocks
+	}
+	if len(w.CaseSteps) > 0 {
+		o.CaseSteps = w.CaseSteps
+	}
+	if w.Dir != "" {
+		o.Dir = w.Dir
+	}
+	if w.Starts != 0 {
+		o.Starts = w.Starts
+	}
+	if !w.At.IsZero() {
+		o.At = w.At
+	}
+	if len(w.Real) > 0 {
+		o.Real = w.Real
+	}
+	return o
 }
 
 // Upsert writes a single test's mock entries, creating the file if absent. It is a one-entry UpsertBatch —

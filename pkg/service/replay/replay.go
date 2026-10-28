@@ -9293,7 +9293,10 @@ func buildActualMockInfos(consumed []models.MockState, known bool) []models.Mock
 // passing tests' entries, pass --update-test-mapping").
 //
 // With TestCases empty, Insert's seed-from-existing loop carries every
-// on-disk entry through untouched and only the section is added.
+// on-disk entry's mocks through and only the section is added. Under the
+// proven switch the rest of each entry (cases, dir, starts...) and the boots,
+// suites and runner sections are kept too; without it Insert drops them, as
+// it always has (mapdb.TestInsertKeepsWhatItDoesNotWrite).
 //
 // Fires at most once per test set (gated on the section being genuinely
 // absent), so it cannot churn the file. A read failure costs the section,
