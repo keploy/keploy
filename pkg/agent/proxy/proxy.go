@@ -5763,6 +5763,7 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 					ReceivedReq:      parserErr.MismatchReport.ReceivedReq,
 					Kind:             parserErr.MissKind,
 					Recorded:         parserErr.Recorded,
+					Write:            parserErr.Write,
 					Differs:          parserErr.MismatchReport.Differs,
 					FieldReasons:     parserErr.MismatchReport.FieldReasons,
 					VariablePlaces:   parserErr.MismatchReport.VariablePlaces,
@@ -6007,7 +6008,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 	// in the open test, outside every test, or, as its matcher found, as one
 	// call more than the test recorded.
 	if r := proxyErr.MismatchReport; r != nil {
-		proxyErr.Recorded = r.Recorded
+		proxyErr.Recorded, proxyErr.Write = r.Recorded, r.Write
 	}
 	if m := p.getMockManager(); m != nil {
 		if proxyErr.MissKind = m.exactMissKind(proxyErr.MismatchReport); proxyErr.MissKind != "" {
@@ -6019,7 +6020,7 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.Con
 			if r := proxyErr.MismatchReport; r != nil && r.MissKind == models.MissExtraCall {
 				proxyErr.MissKind = models.MissExtraCall
 			} else {
-				proxyErr.Recorded = 0
+				proxyErr.Recorded, proxyErr.Write = 0, ""
 			}
 			// A miss made while the replay was staging the set's mocks says
 			// so (stagingMissNote), told where its call was decided.

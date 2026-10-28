@@ -42,9 +42,35 @@ func TestAnExtraCallsReportNamesOnlyTheRecordingItRepeats(t *testing.T) {
 		strings.Contains(r.Diff+r.NextSteps, "mock-5") || strings.Contains(r.NextSteps, "declare") || !strings.Contains(r.NextSteps, "2 time(s)") {
 		t.Fatalf("got %+v", r)
 	}
+	if r.Write != "" {
+		t.Fatalf("a recording of a kind no parser tells a write of is named one: %q", r.Write)
+	}
 	MarkExtraCall(nil, &models.Mock{Name: "mock-2"}, 1)
 	kept := &models.MockMismatchReport{ClosestMock: "mock-5"}
 	if MarkExtraCall(kept, nil, 1); kept.MissKind != "" || kept.ClosestMock != "mock-5" {
 		t.Fatalf("no recording to name changed the report: %+v", kept)
+	}
+}
+
+// An extra call says what the recording it repeats writes, by that
+// recording's kind's registration (models.CallWriteOf), so judging marks a
+// repeated write and sets a repeated read aside; a read says nothing.
+func TestAnExtraCallSaysWhatTheRecordingItRepeatsWrites(t *testing.T) {
+	kind := models.Kind("extra-call-write-test")
+	defer models.RegisterCallWrite(kind, func(m *models.Mock) (string, bool) {
+		if m.Spec.Metadata["op"] == "update" {
+			return "Test update keys", true
+		}
+		return "", false
+	})()
+	write := &models.MockMismatchReport{}
+	MarkExtraCall(write, &models.Mock{Name: "mock-4", Kind: kind, Spec: models.MockSpec{Metadata: map[string]string{"op": "update"}}}, 1)
+	if write.MissKind != models.MissExtraCall || write.ClosestMock != "mock-4" || write.Write != "Test update keys" {
+		t.Fatalf("a repeated write is filed %+v", write)
+	}
+	read := &models.MockMismatchReport{Write: "stale"}
+	MarkExtraCall(read, &models.Mock{Name: "mock-5", Kind: kind, Spec: models.MockSpec{Metadata: map[string]string{"op": "find"}}}, 1)
+	if read.MissKind != models.MissExtraCall || read.Write != "" {
+		t.Fatalf("a repeated read is filed %+v", read)
 	}
 }

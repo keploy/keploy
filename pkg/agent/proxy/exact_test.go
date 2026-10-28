@@ -1391,10 +1391,12 @@ func TestAConsumeOfAReplacedViewIsRefused(t *testing.T) {
 
 // A miss says where it was made, only under exact serving: in the open test,
 // as one call more than recorded when its matcher says so, or outside every
-// test.
+// test. Only an extra call says how often it was recorded and what the
+// recording it repeats writes (models.UnmatchedCall.Write, which judging
+// reads to mark it): a report that says so of another miss is filed without.
 func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
-	report := func(kind string, recorded int) *models.MockMismatchReport {
-		return &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "GET /n", MissKind: kind, Recorded: recorded}
+	report := func(kind string, recorded int, write string) *models.MockMismatchReport {
+		return &models.MockMismatchReport{Protocol: "HTTP", ActualSummary: "POST /n", MissKind: kind, Recorded: recorded, Write: write}
 	}
 	cases := []struct {
 		name         string
@@ -1402,17 +1404,21 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 		report       *models.MockMismatchReport
 		wantKind     string
 		wantRecorded int
+		wantWrite    string
 	}{
-		{"off", func(*MockManager) {}, report("", 0), "", 0},
-		{"in test", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report("", 0), models.MissInTest, 0},
-		{"extra call", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report(models.MissExtraCall, 2), models.MissExtraCall, 2},
-		{"outside", func(mm *MockManager) { mm.ServeExactPool("-", nil) }, report("", 0), models.MissOutsideTest, 0},
+		{"off", func(*MockManager) {}, report("", 0, ""), "", 0, ""},
+		{"in test", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report("", 0, ""), models.MissInTest, 0, ""},
+		{"in test, the report naming a write", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report("", 2, "HTTP POST"), models.MissInTest, 0, ""},
+		{"extra call", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report(models.MissExtraCall, 2, "HTTP POST"), models.MissExtraCall, 2, "HTTP POST"},
+		{"extra call of a read", func(mm *MockManager) { mm.ServeExactTest("T", nil) }, report(models.MissExtraCall, 2, ""), models.MissExtraCall, 2, ""},
+		{"outside", func(mm *MockManager) { mm.ServeExactPool("-", nil) }, report("", 0, ""), models.MissOutsideTest, 0, ""},
+		{"outside, the report naming a write", func(mm *MockManager) { mm.ServeExactPool("-", nil) }, report("", 1, "HTTP POST"), models.MissOutsideTest, 0, ""},
 		// The matcher found it one more than the test recorded while the
 		// test was open; it is filed once the test's end has served the pool.
 		{"extra call filed as its test ended", func(mm *MockManager) {
 			mm.ServeExactTest("T", nil)
 			mm.ServeExactPool("-", nil)
-		}, report(models.MissExtraCall, 2), models.MissExtraCall, 2},
+		}, report(models.MissExtraCall, 2, "HTTP POST"), models.MissExtraCall, 2, "HTTP POST"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1427,8 +1433,8 @@ func TestAMissIsFiledByWhereItWasMade(t *testing.T) {
 			if err != nil || len(got) != 1 {
 				t.Fatalf("want the one miss, got %+v (%v)", got, err)
 			}
-			if got[0].Kind != tc.wantKind || got[0].Recorded != tc.wantRecorded {
-				t.Fatalf("filed %q/%d, want %q/%d", got[0].Kind, got[0].Recorded, tc.wantKind, tc.wantRecorded)
+			if got[0].Kind != tc.wantKind || got[0].Recorded != tc.wantRecorded || got[0].Write != tc.wantWrite {
+				t.Fatalf("filed %q/%d/%q, want %q/%d/%q", got[0].Kind, got[0].Recorded, got[0].Write, tc.wantKind, tc.wantRecorded, tc.wantWrite)
 			}
 		})
 	}
