@@ -223,7 +223,7 @@ func TestMatchCommand_ExecStrict(t *testing.T) {
 
 	t.Run("lenient serves the drifted candidate", func(t *testing.T) {
 		db := newDb(execMock("m1", "recorded-uuid"))
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), nil, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok {
 			t.Fatalf("lenient path must serve the score-based candidate (ok=%v err=%v)", ok, err)
 		}
@@ -232,7 +232,7 @@ func TestMatchCommand_ExecStrict(t *testing.T) {
 	t.Run("strict rejects unmarked param drift", func(t *testing.T) {
 		db := newDb(execMock("m1", "recorded-uuid"))
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true /*strict*/)
-		_, ok, miss, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, miss, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err == nil && ok {
 			t.Fatal("strict must reject a candidate whose param drifted outside noise")
 		}
@@ -258,7 +258,7 @@ func TestMatchCommand_ExecStrict(t *testing.T) {
 		m.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
 		db := newDb(m)
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true /*strict*/)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("strict must serve a candidate whose only drift is learned noise (ok=%v err=%v)", ok, err)
 		}
@@ -268,7 +268,7 @@ func TestMatchCommand_ExecStrict(t *testing.T) {
 		db := newDb(execMock("m1", "recorded-uuid"))
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true /*strict*/)
 		user := map[string][]string{"parameters.0.value": {}}
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, user)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, user)
 		if err != nil || !ok {
 			t.Fatalf("strict must honour user-configured request-body noise (ok=%v err=%v)", ok, err)
 		}
@@ -284,7 +284,7 @@ func TestMatchCommand_ExecDetectionLearns(t *testing.T) {
 	db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{execMock("m1", "recorded-uuid")}}}
 	eng := schemanoise.New(mysqlNoiseAdapter{}, true /*detection*/, false)
 
-	_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+	_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 	if err != nil || !ok {
 		t.Fatalf("detection replay must still serve leniently (ok=%v err=%v)", ok, err)
 	}
@@ -310,7 +310,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 
 	t.Run("lenient serves structure-matched candidate", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", recorded, "row-1", zeroTime())}}}
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), nil, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok {
 			t.Fatalf("lenient path must serve the structure-matched candidate (ok=%v err=%v)", ok, err)
 		}
@@ -319,7 +319,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 	t.Run("strict rejects literal drift, reports closest mock", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", recorded, "row-1", zeroTime())}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, miss, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, miss, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err == nil && ok {
 			t.Fatal("strict must reject unmarked literal drift in COM_QUERY text")
 		}
@@ -354,7 +354,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 			[]mysql.Parameter{{Type: 254, Name: "tenant", Value: "replay-attr"}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, miss, err := matchCommand(context.Background(), logger, exactReq, db, newDecodeCtx(), eng, nil)
+		_, ok, miss, err := matchCommand(context.Background(), logger, exactReq, db, newDecodeCtx(), "", eng, nil)
 		if err == nil && ok {
 			t.Fatal("strict must reject unmarked query-attribute drift even on an exact-text match")
 		}
@@ -374,7 +374,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 		m.Spec.ReqBodyNoise = map[string][]string{"body.query": {}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("strict must serve when body.query is learned noise (ok=%v err=%v)", ok, err)
 		}
@@ -383,7 +383,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 	t.Run("detection learns only the drifting literal position", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", recorded, "row-1", zeroTime())}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, true, false)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("detection replay must serve leniently (ok=%v err=%v)", ok, err)
 		}
@@ -406,7 +406,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 		m.Spec.ReqBodyNoise = map[string][]string{"body.query.literals.0": {}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("strict must serve when only the noised literal drifts (ok=%v err=%v)", ok, err)
 		}
@@ -415,7 +415,7 @@ func TestMatchCommand_ComQueryStrict(t *testing.T) {
 	t.Run("strict keeps serving an exact match", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", live, "row-1", zeroTime())}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("strict must not affect an exact-text match (ok=%v err=%v)", ok, err)
 		}
@@ -434,7 +434,7 @@ func TestMatchCommand_SendLongDataStrict(t *testing.T) {
 	t.Run("lenient consumes and detection learns field path inside chunk", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{sldMockOf("sld1", recorded)}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, true, false)
-		_, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("lenient SLD must be accepted (ok=%v err=%v)", ok, err)
 		}
@@ -447,7 +447,7 @@ func TestMatchCommand_SendLongDataStrict(t *testing.T) {
 	t.Run("strict rejects unmarked chunk drift", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{sldMockOf("sld1", recorded)}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, miss, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
+		_, ok, miss, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), "", eng, nil)
 		if err == nil && ok {
 			t.Fatal("strict must reject SLD data drift outside noise")
 		}
@@ -470,7 +470,7 @@ func TestMatchCommand_SendLongDataStrict(t *testing.T) {
 		m.Spec.ReqBodyNoise = map[string][]string{"body.data.id": {}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("strict must consume when the chunk drift is learned noise (ok=%v err=%v)", ok, err)
 		}
@@ -479,7 +479,7 @@ func TestMatchCommand_SendLongDataStrict(t *testing.T) {
 	t.Run("no recorded SLD mocks stays a graceful accept even under strict", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", "SELECT 1", "row", zeroTime())}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("SLD with no recorded candidates must stay a graceful no-response accept (ok=%v err=%v)", ok, err)
 		}
@@ -559,7 +559,7 @@ func TestMatchCommand_TraceCommentDrift(t *testing.T) {
 	t.Run("detection learns body.query.comments only", func(t *testing.T) {
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{readbackMock("q1", recorded, "row-1", zeroTime())}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, true, false)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("detection replay must serve leniently (ok=%v err=%v)", ok, err)
 		}
@@ -577,7 +577,7 @@ func TestMatchCommand_TraceCommentDrift(t *testing.T) {
 		m.Spec.ReqBodyNoise = map[string][]string{"body.query.comments": {}}
 		db := &noiseCapturingDb{fakeMockDb: &fakeMockDb{session: []*models.Mock{m}}}
 		eng := schemanoise.New(mysqlNoiseAdapter{}, false, true)
-		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), eng, nil)
+		_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", eng, nil)
 		if err != nil || !ok {
 			t.Fatalf("strict must serve when only the noised comment drifts (ok=%v err=%v)", ok, err)
 		}
