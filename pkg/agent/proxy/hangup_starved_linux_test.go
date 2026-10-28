@@ -14,6 +14,7 @@ import (
 
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 )
@@ -48,8 +49,21 @@ func (c *starvedConn) Read(b []byte) (int, error) {
 // the client, so the end read the counts and closed the scope first; the
 // handler, run later, found itself outside the scope the handshake began in
 // and dropped the abandon: the test was judged on a call keploy lost.
+//
+// The handshake is handed the tracked connection itself, and, as the proxy
+// hands it (handleConnection, the CONNECT path, opportunistic TLS), in its
+// util.Conn wrapper: the hold is found through the wrapper's NetConn.
 func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
+	hands := []struct {
+		name string
+		conn func(tracked net.Conn) net.Conn
+	}{
+		{"", func(c net.Conn) net.Conn { return c }},
+		{", handed in the proxy's util.Conn wrapper", func(c net.Conn) net.Conn {
+			return &util.Conn{Conn: c, Reader: c, Logger: zap.NewNop()}
+		}},
+	}
 	for _, tc := range []struct {
 		name string
 		// hangUp is the client: it hangs up without a word.
@@ -72,69 +86,71 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 		}},
 	} {
 		for _, answers := range []bool{false, true} {
-			name := tc.name + map[bool]string{false: ", in a record", true: ", in a replay"}[answers]
-			t.Run(name, func(t *testing.T) {
-				ck := containerkey.Default
-				ck.Reset()
-				t.Cleanup(ck.Reset)
-				p := &Proxy{logger: zap.NewNop()}
-				app, side := tcpPair(t)
-				starved := &starvedConn{TCPConn: side, eof: make(chan struct{}), run: make(chan struct{})}
-				var runOnce sync.Once
-				run := func() { runOnce.Do(func() { close(starved.run) }) }
-				t.Cleanup(run)
-				tracked := p.inflight.track(starved)
+			for _, hand := range hands {
+				name := tc.name + map[bool]string{false: ", in a record", true: ", in a replay"}[answers] + hand.name
+				t.Run(name, func(t *testing.T) {
+					ck := containerkey.Default
+					ck.Reset()
+					t.Cleanup(ck.Reset)
+					p := &Proxy{logger: zap.NewNop()}
+					app, side := tcpPair(t)
+					starved := &starvedConn{TCPConn: side, eof: make(chan struct{}), run: make(chan struct{})}
+					var runOnce sync.Once
+					run := func() { runOnce.Do(func() { close(starved.run) }) }
+					t.Cleanup(run)
+					tracked := p.inflight.track(starved)
 
-				ck.BeginTest() // the test the client's call is made in
-				handled := make(chan struct{})
-				go func() {
-					defer close(handled)
-					defer p.inflight.forget(tracked)
-					defer func() { _ = tracked.Close() }()
-					c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443"), zap.NewNop(), tracked, time.Time{})
-					if err == nil {
-						_, _ = c.Read(make([]byte, 1)) // the client's first request
-					}
-				}()
-				tc.hangUp(t, app)
-				_ = app.Close() // no alert, no close_notify
-				<-starved.eof   // the handler's read took the hang-up; it is not run since
+					ck.BeginTest() // the test the client's call is made in
+					handled := make(chan struct{})
+					go func() {
+						defer close(handled)
+						defer p.inflight.forget(tracked)
+						defer func() { _ = tracked.Close() }()
+						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443"), zap.NewNop(), hand.conn(tracked), time.Time{})
+						if err == nil {
+							_, _ = c.Read(make([]byte, 1)) // the client's first request
+						}
+					}()
+					tc.hangUp(t, app)
+					_ = app.Close() // no alert, no close_notify
+					<-starved.eof   // the handler's read took the hang-up; it is not run since
 
-				// The test's end, as the agent's (endTest, closeOpen):
-				// its calls settled, by events, then what it lost read,
-				// then its scope closed.
-				waiting := make(chan struct{})
-				lost := make(chan uint64, 1)
-				go func() {
-					first := true
-					for {
-						changed := p.inflight.Changed()
-						if p.inflight.Pending(answers) == 0 {
-							break
+					// The test's end, as the agent's (endTest, closeOpen):
+					// its calls settled, by events, then what it lost read,
+					// then its scope closed.
+					waiting := make(chan struct{})
+					lost := make(chan uint64, 1)
+					go func() {
+						first := true
+						for {
+							changed := p.inflight.Changed()
+							if p.inflight.Pending(answers) == 0 {
+								break
+							}
+							if first {
+								first = false
+								close(waiting)
+							}
+							<-changed
 						}
-						if first {
-							first = false
-							close(waiting)
-						}
-						<-changed
+						lost <- lossesOf(p, models.CaptureLossTLSAbandoned)
+						ck.EndTest()
+					}()
+					select {
+					case <-waiting:
+					case n := <-lost:
+						t.Fatalf("the test's end did not wait for a hang-up its handler had not told: it read %d abandoned, and closed the test's scope", n)
 					}
-					lost <- lossesOf(p, models.CaptureLossTLSAbandoned)
-					ck.EndTest()
-				}()
-				select {
-				case <-waiting:
-				case n := <-lost:
-					t.Fatalf("the test's end did not wait for a hang-up its handler had not told: it read %d abandoned, and closed the test's scope", n)
-				}
-				run() // the host runs the handler at last
-				if n := <-lost; n != 1 {
-					t.Fatalf("the test's end read %d tls_handshake_abandoned, want 1: the hang-up is the test's", n)
-				}
-				<-handled
-				if n := lossesOf(p, models.CaptureLossTLSAbandoned); n != 1 {
-					t.Fatalf("%d tls_handshake_abandoned in all, want 1", n)
-				}
-			})
+					run() // the host runs the handler at last
+					if n := <-lost; n != 1 {
+						t.Fatalf("the test's end read %d tls_handshake_abandoned, want 1: the hang-up is the test's", n)
+					}
+					<-handled
+					if n := lossesOf(p, models.CaptureLossTLSAbandoned); n != 1 {
+						t.Fatalf("%d tls_handshake_abandoned in all, want 1", n)
+					}
+				})
+			}
 		}
 	}
 }
