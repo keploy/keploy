@@ -1414,9 +1414,13 @@ func (a *AgentClient) storeMocksStream(ctx context.Context, filtered []*models.M
 		if encoding == models.MockStreamEncodingZstd {
 			var err error
 			// One encoder goroutine: the link, not the CPU, bounds a remote
-			// upload, and a local one is fast either way.
+			// upload, and a local one is fast either way. SpeedFastest: on a
+			// replayer held to one core (a k8s-proxy pod's limit), a 1 GB
+			// set's stream cost 4.4 CPU-seconds of zstd at SpeedDefault and
+			// 3.1 at SpeedFastest, for 2.4% more bytes (382.6 MB against
+			// 373.6 MB). The agent decodes either at the same cost.
 			zw, err = zstd.NewWriter(out,
-				zstd.WithEncoderLevel(zstd.SpeedDefault),
+				zstd.WithEncoderLevel(zstd.SpeedFastest),
 				zstd.WithWindowSize(models.MockStreamZstdWindow),
 				zstd.WithEncoderConcurrency(1))
 			if err != nil {
