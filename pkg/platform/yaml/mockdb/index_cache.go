@@ -260,6 +260,10 @@ func (p *fileProbe) hashEdges() error {
 	return nil
 }
 
+// hashAllHook, when set, runs as hashAll starts its pass over the file: a
+// test changes the file there.
+var hashAllHook func()
+
 // hashAll sets p.sum: xxhash64 of the file's probed size, read once.
 func (p *fileProbe) hashAll() error {
 	if p.hasSum {
@@ -267,6 +271,9 @@ func (p *fileProbe) hashAll() error {
 	}
 	if err := p.hashEdges(); err != nil {
 		return err
+	}
+	if hashAllHook != nil {
+		hashAllHook()
 	}
 	f, err := p.openSame()
 	if err != nil {
@@ -330,7 +337,7 @@ func (c *indexCache) lookup(p *fileProbe) *indexedFile {
 	var found *indexedFile
 	for e := c.lru.Front(); e != nil; e = e.Next() {
 		f := e.Value.(*indexedFile)
-		if f.format == p.format && f.size == p.info.Size() && f.gen == p.gen && f.sum == p.sum && f.edges == p.edges {
+		if f.format == p.format && f.size == p.info.Size() && f.gen == p.gen && f.sum == p.sum {
 			found = f
 			break
 		}
@@ -377,7 +384,7 @@ func (c *indexCache) keep(f *indexedFile, p *fileProbe) {
 	}
 	for e := c.lru.Front(); e != nil; e = e.Next() {
 		o := e.Value.(*indexedFile)
-		if o.format == f.format && o.size == f.size && o.gen == f.gen && o.sum == f.sum && o.edges == f.edges {
+		if o.format == f.format && o.size == f.size && o.gen == f.gen && o.sum == f.sum {
 			// Another read kept the same content first.
 			c.lru.Remove(e)
 			c.used -= o.bytes
@@ -440,9 +447,10 @@ func (b *indexBuilder) add(mocks []*models.Mock, skipped *skippedEntry) {
 }
 
 // finish keeps the index when the read was whole and the file is as it was
-// when the read began.
+// when the read began. The check comes after the hash: only a file still as
+// probed once hashed was hashed with the content the read decoded.
 func (b *indexBuilder) finish(p *fileProbe, hasContent bool, connFailures int, unmet []models.UnmetRequirement) {
-	if b.full || !p.unchanged() || p.hashAll() != nil || !p.unchanged() {
+	if b.full || p.hashAll() != nil || !p.unchanged() {
 		return
 	}
 	b.f.hasContent, b.f.connFailures = hasContent, connFailures

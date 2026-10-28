@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
@@ -140,6 +141,14 @@ func TestIndexCacheAnswersAsAWholeReadDoes(t *testing.T) {
 						t.Fatalf("the copy's read: %+v; want it answered from the same content", d)
 					}
 					sameAsRead(t, fromCopy, whole)
+					// The copy is now a file the index was read from: its next
+					// read is answered as the same file, without a pass over it.
+					if _, err := copied.IndexTestSetMocks(ctx, "set-0", c.after, c.before, c.mapped, c.needed); err != nil {
+						t.Fatal(err)
+					}
+					if d := indexCacheDelta(before); d.SameFileHits != 2 || d.ContentHits != 1 || d.Misses != 1 {
+						t.Fatalf("the copy's second read: %+v; want it answered from the same file", d)
+					}
 					// The copy's payloads come from the copy: gone, they cannot
 					// be read back, though the original is still there.
 					if err := os.RemoveAll(filepath.Join(copyDir, "set-0")); err != nil {
@@ -226,11 +235,34 @@ func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 		return read(t, ys)
 	}
 	for _, c := range []struct {
-		name   string
+		name string
+		// big pads the file past two edgeBytes, so its middle is in
+		// neither end the same-file check hashes.
+		big    bool
 		change func(t *testing.T, ys *MockYaml)
 	}{
-		{"appended", func(t *testing.T, ys *MockYaml) { appendDoc(t, ys, "yaml", "Acme-Queue", "late-mock") }},
-		{"replaced, same size", func(t *testing.T, ys *MockYaml) {
+		{"appended", false, func(t *testing.T, ys *MockYaml) { appendDoc(t, ys, "yaml", "Acme-Queue", "late-mock") }},
+		{"edited in place mid-file, the size kept", true, func(t *testing.T, ys *MockYaml) {
+			p := mockFilePath(t, ys)
+			info, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			editMiddle(t, p, p)
+			// A write moves the modification time on, but within one tick
+			// of the clock the file system stamps with it may not.
+			if err := os.Chtimes(p, info.ModTime().Add(time.Second), info.ModTime().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"replaced by a file of the same size and ends, other bytes mid-file", true, func(t *testing.T, ys *MockYaml) {
+			p := mockFilePath(t, ys)
+			editMiddle(t, p, p+".tmp")
+			if err := os.Rename(p+".tmp", p); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"replaced, same size", false, func(t *testing.T, ys *MockYaml) {
 			p := mockFilePath(t, ys)
 			data, err := os.ReadFile(p)
 			if err != nil {
@@ -248,7 +280,7 @@ func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{"edited in place at its end, size and time kept", func(t *testing.T, ys *MockYaml) {
+		{"edited in place at its end, size and time kept", false, func(t *testing.T, ys *MockYaml) {
 			p := mockFilePath(t, ys)
 			info, err := os.Stat(p)
 			if err != nil {
@@ -274,12 +306,15 @@ func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{"a registration since", func(t *testing.T, _ *MockYaml) {
+		{"a registration since", false, func(t *testing.T, _ *MockYaml) {
 			models.RegisterIdleAnswer("Acme-Queue", func(*models.Mock) bool { return false })()
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+			if c.big {
+				padTestSet(t, ys)
+			}
 			withIndexCache(t, 64<<20)
 			read(t, ys)
 			c.change(t, ys)
@@ -290,6 +325,51 @@ func TestIndexCacheRereadsWhatChanged(t *testing.T) {
 			}
 			sameAsRead(t, got, whole(t, ys))
 		})
+	}
+}
+
+// padTestSet appends a document of a kind this keploy cannot read, big
+// enough that the middle of the file is in it and neither end of the file
+// edgeBytes long reaches it.
+func padTestSet(t *testing.T, ys *MockYaml) {
+	t.Helper()
+	pad := "---\nversion: api.keploy.io/v1beta1\nkind: Acme-Queue\nname: pad\nspec:\n    metadata:\n        type: mocks\n        pad: " + strings.Repeat("x", 6*edgeBytes) + "\n"
+	f, err := os.OpenFile(mockFilePath(t, ys), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(pad); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// editMiddle writes src with its middle byte, in padTestSet's pad, changed,
+// to dst.
+func editMiddle(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid := len(data) / 2
+	if len(data) <= 2*edgeBytes+2 || data[mid] != 'x' {
+		t.Fatalf("precondition: the middle of the %d-byte file is %q, not the pad", len(data), data[mid])
+	}
+	if src != dst {
+		data[mid] = 'y'
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	f, err := os.OpenFile(dst, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteAt([]byte("y"), int64(mid)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -391,54 +471,70 @@ func TestIndexCacheStaysWithinItsBudget(t *testing.T) {
 }
 
 // The budget counts what a kept index holds: the estimate is within 0.8x to
-// 1.5x of the heap the index takes.
+// 1.5x of the heap the index takes. The second case's URLs are long, so each
+// mock's own summary and target (each kept up to 256 bytes, models'
+// maxKeptDisplay) are most of what its entry holds.
 func TestIndexCacheCountsTheHeapItHolds(t *testing.T) {
 	t.Setenv("KEPLOY_MOCK_FORMAT", "")
 	ctx := context.Background()
-	dir := t.TempDir()
-	ys := New(zap.NewNop(), dir, "mocks")
-	base := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
-	for i := 0; i < 3000; i++ {
-		typ := "mocks"
-		if i%3 == 0 {
-			typ = "config"
-		}
-		m := &models.Mock{Version: models.GetVersion(), Kind: models.HTTP, Spec: models.MockSpec{
-			Metadata:         map[string]string{"type": typ, "operation": "GET", "connID": fmt.Sprint(i % 7)},
-			HTTPReq:          &models.HTTPReq{Method: "GET", URL: fmt.Sprintf("http://svc/items/%d", i), ProtoMajor: 1, ProtoMinor: 1},
-			HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: strings.Repeat("x", 512)},
-			ReqTimestampMock: base.Add(time.Duration(i) * time.Second),
-			ResTimestampMock: base.Add(time.Duration(i)*time.Second + time.Millisecond),
-		}}
-		if err := ys.InsertMock(ctx, m, "set-0"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := ys.Close(); err != nil {
-		t.Fatal(err)
-	}
-	withIndexCache(t, 1<<30)
-	held := heapHeld(t, func() any {
-		set, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return set
-	})
-	// What the read returned is as big as what it kept; dropping it leaves
-	// the index.
-	SetIndexCacheBudget(0)
-	withIndexCache(t, 1<<30)
-	kept := heapHeld(t, func() any {
-		if _, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
-			t.Fatal(err)
-		}
-		return nil
-	})
-	counted := MockIndexCacheStats().Bytes
-	t.Logf("3000 mocks: the read and its index hold %d bytes; the index alone %d; counted %d", held, kept, counted)
-	if kept == 0 || float64(counted) < 0.8*float64(kept) || float64(counted) > 1.5*float64(kept) {
-		t.Fatalf("the index is counted as %d bytes; it holds %d", counted, kept)
+	long := strings.Repeat("p", 200)
+	for _, tc := range []struct {
+		name string
+		url  func(i int) string
+	}{
+		{"short urls", func(i int) string { return fmt.Sprintf("http://svc/items/%d", i) }},
+		{"long urls", func(i int) string { return fmt.Sprintf("http://svc/%s/%d", long, i) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ys := New(zap.NewNop(), dir, "mocks")
+			base := time.Date(2024, 1, 2, 10, 0, 0, 0, time.UTC)
+			for i := 0; i < 3000; i++ {
+				typ := "mocks"
+				if i%3 == 0 {
+					typ = "config"
+				}
+				m := &models.Mock{Version: models.GetVersion(), Kind: models.HTTP, Spec: models.MockSpec{
+					Metadata:         map[string]string{"type": typ, "operation": "GET", "connID": fmt.Sprint(i % 7)},
+					HTTPReq:          &models.HTTPReq{Method: "GET", URL: tc.url(i), ProtoMajor: 1, ProtoMinor: 1},
+					HTTPResp:         &models.HTTPResp{StatusCode: 200, Body: strings.Repeat("x", 512)},
+					ReqTimestampMock: base.Add(time.Duration(i) * time.Second),
+					ResTimestampMock: base.Add(time.Duration(i)*time.Second + time.Millisecond),
+				}}
+				if s := models.MockSummaryFromSpec(m); len(s) > 256 {
+					t.Fatalf("precondition: the summary %q is longer than a mock keeps", s)
+				}
+				if err := ys.InsertMock(ctx, m, "set-0"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+			withIndexCache(t, 1<<30)
+			held := heapHeld(t, func() any {
+				set, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return set
+			})
+			// What the read returned is as big as what it kept; dropping it
+			// leaves the index.
+			SetIndexCacheBudget(0)
+			withIndexCache(t, 1<<30)
+			kept := heapHeld(t, func() any {
+				if _, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			})
+			counted := MockIndexCacheStats().Bytes
+			t.Logf("3000 mocks, %s: the read and its index hold %d bytes; the index alone %d; counted %d", tc.name, held, kept, counted)
+			if kept == 0 || float64(counted) < 0.8*float64(kept) || float64(counted) > 1.5*float64(kept) {
+				t.Fatalf("the index is counted as %d bytes; it holds %d", counted, kept)
+			}
+		})
 	}
 }
 
@@ -485,5 +581,454 @@ func TestIndexCacheLogsWhatTheReadLogged(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("a read answered from the cache logged\n%s\nthe whole read logged\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// whileDecoding has do run once, the first time the read now under way
+// decodes an Http mock, and returns a func that ends the hook. The hook is a
+// registered idle-answer predicate that answers false, so the mocks are
+// derived as without it; registering it starts a new rules generation, so it
+// is registered before the reads it is for.
+func whileDecoding(t *testing.T, do func()) {
+	t.Helper()
+	var done bool
+	unregister := models.RegisterIdleAnswer(models.HTTP, func(*models.Mock) bool {
+		if !done {
+			done = true
+			do()
+		}
+		return false
+	})
+	t.Cleanup(unregister)
+}
+
+// A read the file changed under, in place and after the read began, keeps
+// no index: what it decoded is not what the file now holds, so the file's
+// next read is whole, and returns what the file now holds. That holds for a
+// change while the read decodes, and for one after it decoded, before the
+// pass that hashes the file: the hash is of the new bytes, not of those
+// decoded.
+func TestIndexCacheKeepsNoIndexOfAFileChangedAsItWasRead(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	for _, c := range []struct {
+		name string
+		// when has change run once, at its moment of the read.
+		when func(t *testing.T, change func())
+	}{
+		{"while it decodes", func(t *testing.T, change func()) { whileDecoding(t, change) }},
+		{"before it hashes", func(t *testing.T, change func()) {
+			hashAllHook = change
+			t.Cleanup(func() { hashAllHook = nil })
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+			p := mockFilePath(t, ys)
+			var changed bool
+			c.when(t, func() {
+				if changed {
+					return
+				}
+				changed = true
+				info, err := os.Stat(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				at := strings.LastIndex(string(data), "config-again")
+				if at < 0 {
+					t.Fatal("precondition: nothing to edit")
+				}
+				f, err := os.OpenFile(p, os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.WriteAt([]byte("CONFIG"), int64(at)); err != nil {
+					t.Fatal(err)
+				}
+				_ = f.Close()
+				if err := os.Chtimes(p, info.ModTime().Add(time.Second), info.ModTime().Add(time.Second)); err != nil {
+					t.Fatal(err)
+				}
+			})
+			withIndexCache(t, 64<<20)
+			before := MockIndexCacheStats()
+			if _, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if d := indexCacheDelta(before); !changed || d.Misses != 1 || d.Files != 0 {
+				t.Fatalf("the read the file changed under (changed %v): %+v; want it read whole and nothing kept", changed, d)
+			}
+			got, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := indexCacheDelta(before); d.Misses != 2 || d.SameFileHits+d.ContentHits != 0 {
+				t.Fatalf("the next read: %+v; want it read whole", d)
+			}
+			SetIndexCacheBudget(0)
+			want, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sameAsRead(t, got, want)
+		})
+	}
+}
+
+// Two reads of one content that both found no index keep one: the one that
+// ends last replaces the other's, and the budget counts it once.
+func TestIndexCacheKeepsOneIndexOfOneContent(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+	copyDir := t.TempDir()
+	copyTestSet(t, ys, copyDir)
+	copied := NewWithFormat(zap.NewNop(), copyDir, "mocks", ys.Format)
+	read := func(ys *MockYaml) {
+		t.Helper()
+		if _, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withIndexCache(t, 64<<20)
+	read(copied)
+	one := MockIndexCacheStats().Bytes
+	whileDecoding(t, func() { read(copied) })
+	withIndexCache(t, 64<<20)
+	before := MockIndexCacheStats()
+	// The copy is read whole, and kept, while the original is decoded.
+	read(ys)
+	if d := indexCacheDelta(before); d.Misses != 2 || d.Files != 1 || d.Bytes != one {
+		t.Fatalf("%+v; want two reads whole and one index of %d bytes kept", d, one)
+	}
+}
+
+// The least recently used index goes first: a read answered from an index
+// makes it the most recently used.
+func TestIndexCacheEvictsTheLeastRecentlyUsed(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	sets := map[string]*MockYaml{}
+	for _, name := range []string{"a", "b", "c"} {
+		ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+		appendDoc(t, ys, "yaml", "Acme-Queue", "only-in-"+name)
+		sets[name] = ys
+	}
+	read := func(name string) {
+		t.Helper()
+		if _, err := sets[name].IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withIndexCache(t, 64<<20)
+	read("a")
+	one := MockIndexCacheStats().Bytes
+	// Room for two.
+	withIndexCache(t, 2*one+one/2)
+	before := MockIndexCacheStats()
+	read("a")
+	read("b")
+	read("a") // a is now the most recently used, b the least
+	read("c") // so b goes
+	if d := indexCacheDelta(before); d.Misses != 3 || d.SameFileHits != 1 || d.Evictions != 1 || d.Files != 2 {
+		t.Fatalf("%+v; want a answered again, and one evicted for c", d)
+	}
+	read("a")
+	if d := indexCacheDelta(before); d.SameFileHits != 2 {
+		t.Fatalf("%+v; want a still kept", d)
+	}
+	read("b")
+	if d := indexCacheDelta(before); d.Misses != 4 {
+		t.Fatalf("%+v; want b evicted, read whole", d)
+	}
+}
+
+// An index bigger than the whole budget is not kept, and evicts nothing for
+// room: the indexes kept stay.
+func TestIndexCacheKeepsNoIndexBiggerThanItsBudget(t *testing.T) {
+	c := &indexCache{budget: 100}
+	probe := func(name string) *fileProbe {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &fileProbe{path: p, format: yaml.FormatYAML, info: info, sum: uint64(len(name)), hasSum: true}
+	}
+	c.keep(&indexedFile{bytes: 60}, probe("a"))
+	c.keep(&indexedFile{bytes: 101}, probe("bb"))
+	if c.lru.Len() != 1 || c.used != 60 {
+		t.Fatalf("%d indexes of %d bytes kept; want the first, of 60", c.lru.Len(), c.used)
+	}
+}
+
+// A read's index builder gives up, holding nothing, once what it collected
+// outgrows its budget, and on a mock whose payload is not left in the file.
+func TestIndexBuilderGivesUp(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+	SetIndexCacheBudget(0)
+	set, err := ys.IndexTestSetMocks(context.Background(), "set-0", models.BaseTime, time.Now(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mocks := append(append([]*models.Mock(nil), set.Filtered...), set.Unfiltered...)
+	if len(mocks) < 2 {
+		t.Fatalf("precondition: %d mocks", len(mocks))
+	}
+	whole := newIndexBuilder(1 << 30)
+	for _, m := range mocks {
+		whole.add([]*models.Mock{m}, nil)
+	}
+	if whole.full || len(whole.f.docs) != len(mocks) {
+		t.Fatalf("a builder with room gave up, or kept %d of %d", len(whole.f.docs), len(mocks))
+	}
+	short := newIndexBuilder(whole.f.bytes - 1)
+	for _, m := range mocks {
+		short.add([]*models.Mock{m}, nil)
+	}
+	if !short.full || short.f.docs != nil {
+		t.Fatalf("a builder %d bytes short of the set holds %d documents, full %v", 1, len(short.f.docs), short.full)
+	}
+	inMemory := newIndexBuilder(1 << 30)
+	inMemory.add([]*models.Mock{{Name: "held", Kind: models.HTTP}}, nil)
+	if !inMemory.full {
+		t.Fatal("a builder kept a mock whose payload is in memory")
+	}
+}
+
+// What the read that made an index logged as it decoded is kept up to
+// maxIndexLogs entries; a read the index answers logs those, and how many
+// more there were.
+func TestIndexCacheLogsAgainAtMostMaxIndexLogs(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	dir := t.TempDir()
+	ys := writeTestSetMocks(t, dir, "yaml")
+	const more = 6
+	for i := 0; i < maxIndexLogs+more; i++ {
+		// A document with no kind is reported at ERROR.
+		appendDoc(t, ys, "yaml", "", fmt.Sprintf("q-%03d", i))
+	}
+	logged := func() []observer.LoggedEntry {
+		t.Helper()
+		core, logs := observer.New(zapcore.InfoLevel)
+		reader := NewWithFormat(zap.New(core), dir, "mocks", yaml.FormatYAML)
+		if _, err := reader.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return logs.All()
+	}
+	withIndexCache(t, 64<<20)
+	whole := logged()
+	if len(whole) < maxIndexLogs+more {
+		t.Fatalf("precondition: the whole read logged %d entries", len(whole))
+	}
+	before := MockIndexCacheStats()
+	again := logged()
+	if d := indexCacheDelta(before); d.SameFileHits != 1 {
+		t.Fatalf("precondition: %+v; want the read answered from the cache", d)
+	}
+	if len(again) != maxIndexLogs+1 {
+		t.Fatalf("the answered read logged %d entries; want the %d kept and one saying %d more were not", len(again), maxIndexLogs, more)
+	}
+	for i := 0; i < maxIndexLogs; i++ {
+		if again[i].Message != whole[i].Message || !reflect.DeepEqual(again[i].ContextMap(), whole[i].ContextMap()) {
+			t.Fatalf("entry %d is %q %v; the whole read logged %q %v", i, again[i].Message, again[i].ContextMap(), whole[i].Message, whole[i].ContextMap())
+		}
+	}
+	last := again[maxIndexLogs]
+	if last.Level != zapcore.WarnLevel || last.ContextMap()["not_logged_again"] != int64(more) {
+		t.Fatalf("the last entry is %s %q %v; want a warning that %d were not logged again", last.Level, last.Message, last.ContextMap(), more)
+	}
+}
+
+// The recorder keeps an entry with the fields of the logger it was logged
+// through (With) before its own, and nothing below Info.
+func TestIndexLogRecorderKeepsTheLoggersFields(t *testing.T) {
+	sink := &logSink{}
+	logger := zap.New(&logRecorder{sink: sink}).With(zap.String("mock_file", "f"))
+	logger.Debug("not kept")
+	logger.Info("kept", zap.Int("n", 1))
+	entries, dropped := sink.take()
+	if len(entries) != 1 || dropped != 0 || entries[0].entry.Message != "kept" {
+		t.Fatalf("kept %+v, dropped %d", entries, dropped)
+	}
+	if f := entries[0].fields; len(f) != 2 || f[0].Key != "mock_file" || f[1].Key != "n" {
+		t.Fatalf("the entry's fields are %+v; want mock_file then n", f)
+	}
+}
+
+// A read the index answers warns as the whole read of its file does: of the
+// requirements no mock of the set meets, of the connection failures it does
+// not replay, and of a file with no documents.
+func TestIndexCacheWarnsAsAWholeReadDoes(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	prev := models.RegisterMockDeps(models.HTTP, depsByMetadata)
+	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, prev) })
+	ctx := context.Background()
+	for _, c := range []struct {
+		name  string
+		write func(t *testing.T, dir string)
+		warns []string
+	}{
+		{"unmet requirements and connection failures", func(t *testing.T, dir string) {
+			ys := New(zap.NewNop(), dir, "mocks")
+			if err := ys.InsertMock(ctx, linkedHTTPMock(1, "", "stmt-nowhere"), "set-0"); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.InsertMock(ctx, cfCorpus()[0], "set-0"); err != nil {
+				t.Fatal(err)
+			}
+			if err := ys.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"stmt-nowhere", "connection-failure mock"}},
+		{"no documents", func(t *testing.T, dir string) {
+			if err := os.MkdirAll(filepath.Join(dir, "set-0"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "set-0", "mocks.yaml"), []byte("# Generated by Keploy (2.0.0)\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"mock file contains no mocks"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// Each read is of its own copy: a warning of unmet requirements is
+			// said once per file.
+			logged := func() string {
+				t.Helper()
+				dir := t.TempDir()
+				c.write(t, dir)
+				core, logs := observer.New(zapcore.WarnLevel)
+				reader := NewWithFormat(zap.New(core), dir, "mocks", yaml.FormatYAML)
+				if _, err := reader.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				var out []string
+				for _, e := range logs.All() {
+					m := e.ContextMap()
+					for k, v := range m {
+						if s, ok := v.(string); ok && strings.Contains(s, dir) {
+							m[k] = strings.ReplaceAll(s, dir, "DIR")
+						}
+					}
+					out = append(out, fmt.Sprintf("%s %s %v", e.Level, strings.ReplaceAll(e.Message, dir, "DIR"), m))
+				}
+				return strings.Join(out, "\n")
+			}
+			SetIndexCacheBudget(0)
+			want := logged()
+			for _, w := range c.warns {
+				if !strings.Contains(want, w) {
+					t.Fatalf("precondition: the whole read does not warn of %q:\n%s", w, want)
+				}
+			}
+			withIndexCache(t, 64<<20)
+			logged()
+			before := MockIndexCacheStats()
+			got := logged()
+			if d := indexCacheDelta(before); d.ContentHits != 1 {
+				t.Fatalf("precondition: %+v; want the read answered from the cache", d)
+			}
+			if got != want {
+				t.Fatalf("a read answered from the cache warned\n%s\nthe whole read\n%s", got, want)
+			}
+		})
+	}
+}
+
+// An index is of one format: the same bytes in a file of the other format
+// are read whole, whether that file is a copy (the content key) or the same
+// file under the other name, a hard link (the same-file key).
+func TestIndexCacheIsPerFormat(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		link  bool
+		place func(src, dst string) error
+	}{
+		{"a copy", false, func(src, dst string) error {
+			data, err := os.ReadFile(src)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(dst, data, 0o644)
+		}},
+		{"a hard link", true, os.Link},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			js := writeTestSetMocks(t, t.TempDir(), "json")
+			src := mockFilePath(t, js)
+			// One json document a line is yaml too: a flow mapping per
+			// document.
+			yamlDir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(yamlDir, "set-0"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dst := filepath.Join(yamlDir, "set-0", "mocks.yaml")
+			if err := tc.place(src, dst); err != nil {
+				t.Fatal(err)
+			}
+			a, errA := os.Stat(src)
+			b, errB := os.Stat(dst)
+			if errA != nil || errB != nil || os.SameFile(a, b) != tc.link {
+				t.Fatalf("precondition: %s and %s one file: %v, want %v (%v, %v)", src, dst, !tc.link, tc.link, errA, errB)
+			}
+			ys := NewWithFormat(zap.NewNop(), yamlDir, "mocks", yaml.FormatYAML)
+			withIndexCache(t, 64<<20)
+			for i := 0; i < 2; i++ {
+				before := MockIndexCacheStats()
+				if _, err := js.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				if d := indexCacheDelta(before); i == 1 && d.SameFileHits != 1 {
+					t.Fatalf("precondition: the json file read again: %+v; want it answered as the same file", d)
+				}
+			}
+			before := MockIndexCacheStats()
+			_, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil)
+			if d := indexCacheDelta(before); d.Misses != 1 || d.ContentHits+d.SameFileHits != 0 {
+				t.Fatalf("the yaml read of the json file as %s: %+v (%v); want it read whole", tc.name, d, err)
+			}
+		})
+	}
+}
+
+// The budget counts the log entries an index keeps: the index of a file
+// whose documents each logged an ERROR as they were skipped counts at least
+// maxIndexLogs entries more than that of a file of as many documents skipped
+// at Debug, which keeps none.
+func TestIndexCacheCountsTheLogsItKeeps(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "")
+	ctx := context.Background()
+	const docs, kind = 300, "Acme-Que"
+	counted := func(kind string) IndexCacheStats {
+		t.Helper()
+		ys := writeTestSetMocks(t, t.TempDir(), "yaml")
+		for i := 0; i < docs; i++ {
+			appendDoc(t, ys, "yaml", kind, fmt.Sprintf("q-%03d", i))
+		}
+		withIndexCache(t, 1<<30)
+		if _, err := ys.IndexTestSetMocks(ctx, "set-0", models.BaseTime, time.Now(), nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return MockIndexCacheStats()
+	}
+	logged, quiet := counted(""), counted(kind)
+	// The quiet file's documents name their kind, which the other's do not.
+	more := logged.Bytes - quiet.Bytes + docs*int64(len(kind))
+	if least := int64(maxIndexLogs) * int64(unsafe.Sizeof(loggedEntry{})); logged.Files != 1 || quiet.Files != 1 || more < least {
+		t.Fatalf("the index that kept %d log entries counts %d bytes more than one that kept none; want at least %d (%+v, %+v)", maxIndexLogs, more, least, logged, quiet)
 	}
 }
