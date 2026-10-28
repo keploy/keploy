@@ -192,6 +192,62 @@ func TestUnmadeWrite_AReadBetweenTwoWritesIsAnsweredFromBetweenThem(t *testing.T
 	}
 }
 
+// Two writes of the open test, neither made by the replay: the read is held
+// to the first of them, in recorded order, and answered from before it. A
+// read of the same request the background recorded between the two writes
+// holds the state of the first write, which the replay has not made: it
+// never answers, with an earlier test's read before the first write or
+// without one (then the read is a miss that names the first write).
+func TestUnmadeWrite_TwoUnmadeWritesHoldTheReadToTheFirst(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block1 := unmadeRecording("block-c1", models.Mongo, 1000, "write", "block")
+	polled := unmadeRecording("bg-list", models.Mongo, 1500, "read", "list")
+	polled.TestModeInfo.Lifetime = models.LifetimeSession
+	block2 := unmadeRecording("block-c2", models.Mongo, 2000, "write", "block")
+	list2 := unmadeRecording("list-t2", models.Mongo, 2010, "read", "list")
+	for _, tc := range []struct {
+		name   string
+		staged []*models.Mock
+		answer string
+	}{
+		{"an earlier test's read, and the background's between the writes", []*models.Mock{list1, block1, polled, block2, list2}, "list-t1"},
+		{"only the background's read between the writes", []*models.Mock{block1, polled, block2, list2}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mm := unmadeStage(t, tc.staged, "test-2", block1, block2, list2)
+			got := answer(t, mm, viewCopy(t, mm, "list-t2"), "list")
+			if got.Write == nil || got.Write.Name != "block-c1" {
+				t.Fatalf("held by %v; want block-c1, the first write the replay has not made", got.Write)
+			}
+			if answerName(got) != tc.answer {
+				t.Fatalf("answered by %q; want %q: bg-list holds block c1, which the replay has not made", answerName(got), tc.answer)
+			}
+			if tc.answer == "" && !strings.Contains(got.Note(), "an extra read before block-c1") {
+				t.Fatalf("the miss says %q; want it to name block-c1", got.Note())
+			}
+		})
+	}
+}
+
+// Another test's recording chosen for a read (by the pairing, or the
+// background's exact read) is held to the first of the open test's unmade
+// writes recorded before it, and answered from before that write, never by
+// the background's read between the two writes.
+func TestUnmadeWrite_AnotherTestsRecordingAfterTwoUnmadeWritesIsHeldToTheFirst(t *testing.T) {
+	list1 := unmadeRecording("list-t1", models.Mongo, 0, "read", "list")
+	block1 := unmadeRecording("block-c1", models.Mongo, 1000, "write", "block")
+	polled := unmadeRecording("bg-list", models.Mongo, 1500, "read", "list")
+	polled.TestModeInfo.Lifetime = models.LifetimeSession
+	block2 := unmadeRecording("block-c2", models.Mongo, 2000, "write", "block")
+	other := unmadeRecording("users-t2", models.Mongo, 2005, "read", "users")
+	list3 := unmadeRecording("list-t3", models.Mongo, 3010, "read", "list")
+	mm := unmadeStage(t, []*models.Mock{list1, block1, polled, block2, other, list3}, "test-2", block1, block2, other)
+	got := answer(t, mm, list3, "list")
+	if got.Write == nil || got.Write.Name != "block-c1" || answerName(got) != "list-t1" {
+		t.Fatalf("held by %v answered by %q; want block-c1 and list-t1", got.Write, answerName(got))
+	}
+}
+
 // What is no read before one of the open test's own unmade writes keeps its
 // choice.
 // Only a write that can change what the read reads holds it: the parser
