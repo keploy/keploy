@@ -16,8 +16,8 @@ func TestAZoneFileThatIsNoRegularFileIsNotRead(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(proc, "700", "root", "etc", "localtime"), 0o644); err != nil {
 		t.Skipf("no FIFO: %v", err)
 	}
-	if z, err := ReadProcZone(proc, 700); err == nil || z.Loc != nil {
-		t.Fatalf("a FIFO /etc/localtime: %v %v; want an error and no zone", z.Loc, err)
+	if z, err := ReadProcZone(proc, 700); err == nil || z.Loc != nil || !isLasting(err) {
+		t.Fatalf("a FIFO /etc/localtime: %v %v (lasting %v); want an error and no zone, kept for the process's life", z.Loc, err, isLasting(err))
 	}
 	if _, err := os.Stat(filepath.Join(proc, "700", "root", "etc", "localtime")); err != nil {
 		t.Fatal(err)

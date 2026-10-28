@@ -36,8 +36,8 @@
 # zone app, and one in the hour after midnight cuts the hour to a day: this
 # lane exercises neither. Learning itself, end to end (record, auto-replay
 # learns the clocks, replay with the app's TZ varied), is proven in
-# enterprise's end-to-end lane, which lands with its run clock's
-# AppClockRunBegan; this lane is the replay side's contract. Replayed with the
+# enterprise's learning lane, which lands with the keploy release that
+# carries this lane; this lane is the replay side's contract. Replayed with the
 # payments service down:
 #   1. KEPLOY_PROVEN=1, the app in Asia/Kolkata: the set passes. The clock
 #      call is the set's first test's, so it also shows the call has a

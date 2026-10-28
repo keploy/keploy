@@ -62,11 +62,15 @@ func readZone(root, tz string, set, own bool) (*time.Location, error) {
 	case strings.HasPrefix(tz, "/"):
 		return zoneFile(root, tz)
 	}
-	if _, err := resolveUnder(root, "/usr/share/zoneinfo/"+tz); err == nil && !strings.Contains(tz, "..") {
+	_, rerr := resolveUnder(root, "/usr/share/zoneinfo/"+tz)
+	if rerr == nil && !strings.Contains(tz, "..") {
 		return zoneFile(root, "/usr/share/zoneinfo/"+tz)
 	}
 	if !own {
-		return nil, fmt.Errorf("TZ=%s names no zone file under the process's root", tz)
+		if rerr != nil && !absent(rerr) && !isLasting(rerr) {
+			return nil, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
+		}
+		return nil, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
 	}
 	return time.LoadLocation(tz)
 }
@@ -78,6 +82,42 @@ func readZone(root, tz string, set, own bool) (*time.Location, error) {
 type ProcZone struct {
 	Loc  *time.Location
 	Name string
+}
+
+// lastingError is an error of a process's zone that the process's own
+// environment, command line or files give (a user.timezone Java does not
+// know, an /etc/timezone and an /etc/localtime that disagree, a TZ naming
+// no zone file, a link to nothing), so a read gives it again for as long
+// as the process runs its program: ProcZones keeps it for the process, as
+// it keeps a zone, never reading the process again at each call. An error
+// of keploy's own reads (a file it cannot read, a process exiting or gone)
+// is not lasting: it is read again. Lasting only where the process still
+// runs that program after the read (ProcZones.Of checks it): a gone
+// process's files read as absent.
+type lastingError struct{ error }
+
+func (e lastingError) Unwrap() error { return e.error }
+
+// lasting is err, kept for the process's life (lastingError); nil for nil.
+func lasting(err error) error {
+	if err == nil {
+		return nil
+	}
+	return lastingError{err}
+}
+
+// absent reports whether err says a path names nothing, as the process's
+// own files give it: no such file (ENOENT), or a component on its way that
+// is no directory (ENOTDIR).
+func absent(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// isLasting reports whether err, or an error it wraps, is lasting
+// (lastingError).
+func isLasting(err error) bool {
+	var l lastingError
+	return errors.As(err, &l)
 }
 
 // ReadProcZone is the zone the process pid writes its wall clock in, read
@@ -210,8 +250,13 @@ func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) 
 	}
 	for _, v := range []string{"OPENJ9_JAVA_OPTIONS", "IBM_JAVA_OPTIONS"} {
 		if add(v, javaOptions(env[v])); len(sets) > 0 {
-			if j, err := isJVM(); err != nil || j {
-				return "", false, j, errors.Join(fmt.Errorf("%s sets a JVM's user.timezone, which keploy does not read (OpenJ9's options' order)", v), err)
+			j, err := isJVM()
+			refused := fmt.Errorf("%s sets a JVM's user.timezone, which keploy does not read (OpenJ9's options' order)", v)
+			switch {
+			case err != nil:
+				return "", false, j, errors.Join(refused, err)
+			case j:
+				return "", false, j, lasting(refused)
 			}
 			sets = nil
 		}
@@ -330,9 +375,6 @@ func splitJava(v string, file bool) []string {
 	return out
 }
 
-// argfileCap bounds an argfile keploy reads.
-const argfileCap = 1 << 20
-
 // readArgfile is the arguments of the java launcher's argfile name (an
 // @argfile's path) of the process under dir, read in its own view: an
 // absolute path under its root, a relative one under its working
@@ -348,10 +390,13 @@ func readArgfile(dir, name string) ([]string, error) {
 	}
 	data, err := readUnder(filepath.Join(dir, "root"), p)
 	if err != nil {
-		return nil, fmt.Errorf("keploy cannot read the JVM's argfile @%s, which may set its zone: %w", name, err)
-	}
-	if len(data) > argfileCap {
-		return nil, fmt.Errorf("the JVM's argfile @%s is larger than keploy reads (%d bytes)", name, argfileCap)
+		err = fmt.Errorf("keploy cannot read the JVM's argfile @%s, which may set its zone: %w", name, err)
+		if absent(err) {
+			// None there (a build tool's argfile, removed once the JVM
+			// read it): none there at the next read either.
+			err = lasting(err)
+		}
+		return nil, err
 	}
 	return splitJava(string(data), true), nil
 }
@@ -454,7 +499,7 @@ func javaZone(id string) (*time.Location, error) {
 	if r, ok := strings.CutPrefix(id, "GMT"); ok {
 		off, ok := javaCustomOffset(r)
 		if !ok {
-			return nil, fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads", id)
+			return nil, lasting(fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads", id))
 		}
 		if off == 0 {
 			return time.UTC, nil
@@ -464,11 +509,11 @@ func javaZone(id string) (*time.Location, error) {
 	switch {
 	case id == "localtime" || id == "posixrules" || id == "Factory" || strings.HasPrefix(id, "posix/") || strings.HasPrefix(id, "right/") || strings.Contains(id, ".."),
 		!javaRegionID(id):
-		return nil, fmt.Errorf("a JVM's user.timezone %q is no zone a JVM reads", id)
+		return nil, lasting(fmt.Errorf("a JVM's user.timezone %q is no zone a JVM reads", id))
 	}
 	loc, err := models.ZoneLocation(id)
 	if err != nil {
-		return nil, fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads: %w", id, err)
+		return nil, lasting(fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads: %w", id, err))
 	}
 	return loc, nil
 }
@@ -533,6 +578,7 @@ func javaPlatformZone(root, tz string, set bool) (*time.Location, error) {
 	id = javaStrip(id)
 	loc, err := javaZone(id)
 	if err != nil {
+		// Lasting, as javaZone's err is.
 		return nil, fmt.Errorf("a JVM with no user.timezone reads its zone from %s, %q, which Java does not know, so it reads the C library's offset at its start, which keploy does not: %w", from, id, err)
 	}
 	return loc, nil
@@ -576,7 +622,7 @@ func javaPlatformID(root string) (id, from string, err error) {
 		if from == "" {
 			other = "GMT"
 		}
-		return "", "", fmt.Errorf("the process's /etc/timezone names %q, which JDKs before JDK-8345213 read as its zone, and its /etc/localtime %q, which later ones read; keploy does not read which JDK the process runs", tzid, other)
+		return "", "", lasting(fmt.Errorf("the process's /etc/timezone names %q, which JDKs before JDK-8345213 read as its zone, and its /etc/localtime %q, which later ones read; keploy does not read which JDK the process runs", tzid, other))
 	}
 	return id, from, nil
 }
@@ -598,8 +644,10 @@ func javaTimezoneLine(root string) (string, bool, error) {
 	}
 	if r, err := resolveUnder(root, "/etc/timezone"); err != nil {
 		return "", false, err
-	} else if fi, err := os.Stat(under(root, r)); err != nil || fi.Mode().Perm()&0o004 == 0 {
-		return "", false, errors.New("the process's /etc/timezone, which a JVM may read its zone from, is not readable by every user, so keploy cannot tell whether the JVM reads it")
+	} else if fi, err := os.Stat(under(root, r)); err != nil {
+		return "", false, fmt.Errorf("keploy cannot read the process's /etc/timezone, which a JVM may read its zone from: %w", err)
+	} else if fi.Mode().Perm()&0o004 == 0 {
+		return "", false, lasting(errors.New("the process's /etc/timezone, which a JVM may read its zone from, is not readable by every user, so keploy cannot tell whether the JVM reads it"))
 	}
 	line := b[:min(len(b), 255)]
 	if i := bytes.IndexByte(line, '\n'); i >= 0 {
@@ -640,7 +688,7 @@ func javaLocaltimeID(root string) (id, from string, err error) {
 		case rawOK && cleanOK && raw == clean:
 			return clean, "the /etc/localtime link", nil
 		case rawOK || cleanOK:
-			return "", "", fmt.Errorf("the process's /etc/localtime links to %q, which JDK 21 and later read as zone %q and older ones as %q; keploy does not read which JDK the process runs", target, clean, raw)
+			return "", "", lasting(fmt.Errorf("the process's /etc/localtime links to %q, which JDK 21 and later read as zone %q and older ones as %q; keploy does not read which JDK the process runs", target, clean, raw))
 		}
 	}
 	data, err := readUnder(root, "/etc/localtime")
@@ -657,7 +705,7 @@ func javaLocaltimeID(root string) (id, from string, err error) {
 }
 
 // javaZoneinfoMatchCap bounds the entries javaZoneinfoMatch lists.
-const javaZoneinfoMatchCap = 20000
+var javaZoneinfoMatchCap = 20000 // a var, which a test lowers
 
 // javaZoneinfoMatch is the zone id the JDK finds for a copied
 // /etc/localtime holding data (findZoneinfoFile): the name, after
@@ -738,7 +786,7 @@ func javaZoneinfoMatch(root string, data []byte) (string, error) {
 				continue
 			}
 			if files++; files > javaZoneinfoMatchCap {
-				return fmt.Errorf("the process's %s holds more than %d files, so keploy does not search it for the zone its /etc/localtime copies", dir, javaZoneinfoMatchCap)
+				return lasting(fmt.Errorf("the process's %s holds more than %d files, so keploy does not search it for the zone its /etc/localtime copies", dir, javaZoneinfoMatchCap))
 			}
 			q := p + "/" + n
 			ok, isDir, err := same(q)
@@ -759,10 +807,11 @@ func javaZoneinfoMatch(root string, data []byte) (string, error) {
 		return "", err
 	}
 	if aliased && len(found) > 0 {
-		return "", fmt.Errorf("the process's %s links a directory to one a JVM lists already, so the name it finds first for the zone its /etc/localtime copies (%s) turns on its directory listing's order", dir, found[0])
+		return "", lasting(fmt.Errorf("the process's %s links a directory to one a JVM lists already, so the name it finds first for the zone its /etc/localtime copies (%s) turns on its directory listing's order", dir, found[0]))
 	}
 	for _, n := range found {
 		if _, err := javaZone(strings.TrimPrefix(n, "posix/")); err != nil {
+			// Lasting, as javaZone's err is.
 			return "", fmt.Errorf("the process's /etc/localtime copies its zone file %s, which Java does not know, and a JVM may find that one first: %w", n, err)
 		}
 	}
@@ -833,28 +882,33 @@ func isDigitsOnly(s string) bool {
 const procZoneCap = 4096
 
 // ProcZones reads each process's zone once (ReadProcZone), at its first
-// call: a pid another process has since taken, which its start time tells
-// apart, is read again. A process keploy cannot read is read again at each
-// call. It holds at most procZoneCap processes. It reads none where keploy
-// runs in a PID namespace of its own (utils.KernelPidsLocalIn: a container
-// without --pid=host, keploy's own docker and compose modes), where a
-// kernel pid names another process or none: every zone is then unknown,
-// never another process's.
+// call, as a JVM and the C library read their zone once: a pid that has
+// since run another program (procID: another process took its number, or
+// it exec'd one) is read again. An error the process's own files give
+// (lastingError) is kept as a zone is; one keploy could not read (a file it
+// cannot read, a process exiting or gone) is read again at each call. It
+// holds at most procZoneCap processes. It reads none where keploy runs in a
+// PID namespace of its own (utils.KernelPidsLocalIn: a container without
+// --pid=host, keploy's own docker and compose modes), where a kernel pid
+// names another process or none: every zone is then unknown, never another
+// process's.
 type ProcZones struct {
 	root  string
 	local bool
+	read  func(procRoot string, pid uint32) (ProcZone, error) // ReadProcZone
 	mu    sync.Mutex
 	m     map[uint32]procZone
 }
 
 type procZone struct {
-	start string
-	z     ProcZone
+	id  procID
+	z   ProcZone
+	err error // lasting (lastingError); z is then unknown
 }
 
 // NewProcZones reads processes under procRoot ("/proc").
 func NewProcZones(procRoot string) *ProcZones {
-	return &ProcZones{root: procRoot, local: utils.KernelPidsLocalIn(procRoot), m: map[uint32]procZone{}}
+	return &ProcZones{root: procRoot, local: utils.KernelPidsLocalIn(procRoot), read: ReadProcZone, m: map[uint32]procZone{}}
 }
 
 // errPIDNamespace is ProcZones.Of's error where keploy runs in a PID
@@ -870,50 +924,71 @@ func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
 	if !c.local {
 		return ProcZone{}, errPIDNamespace
 	}
-	start := procStart(c.root, pid)
-	if start != "" {
-		c.mu.Lock()
-		e, ok := c.m[pid]
-		c.mu.Unlock()
-		if ok && e.start == start {
-			return e.z, nil
-		}
+	id, _, ok := procIdent(c.root, pid)
+	if !ok {
+		return ProcZone{}, errors.New("keploy cannot tell which program the process runs: its stat cannot be read (it exited) or shows no field 51 (a kernel before 3.5)")
 	}
-	z, err := ReadProcZone(c.root, pid)
-	if err != nil {
+	c.mu.Lock()
+	e, hit := c.m[pid]
+	c.mu.Unlock()
+	if hit && e.id == id {
+		return e.z, e.err
+	}
+	z, err := c.read(c.root, pid)
+	if err != nil && !isLasting(err) {
+		return ProcZone{}, err
+	}
+	after, exiting, okAfter := procIdent(c.root, pid)
+	if !okAfter || after != id {
+		// The process exited, ran another program or another took its
+		// number as keploy read it: what it read may be either's, or
+		// none's.
+		return ProcZone{}, errors.New("the process exited, ran another program or another took its number while keploy read its zone")
+	}
+	if exiting {
+		// It lets go of its files as it exits, so an error keploy read may
+		// be their absence: never kept. A zone it read is its own (an
+		// absence read as a zone, no /etc/localtime, is read in a root
+		// keploy could still read after it: localtimeAbsent,
+		// javaPlatformID), so it is this call's, never kept either: the
+		// pid is soon another's.
 		return z, err
-	}
-	if start == "" || procStart(c.root, pid) != start {
-		// The process exited, or another took its number, as keploy read
-		// it: what it read may be either's, or none's.
-		return ProcZone{}, errors.New("the process exited or another took its number while keploy read its zone")
 	}
 	c.mu.Lock()
 	if len(c.m) >= procZoneCap {
 		c.m = map[uint32]procZone{}
 	}
-	c.m[pid] = procZone{start: start, z: z}
+	c.m[pid] = procZone{id: id, z: z, err: err}
 	c.mu.Unlock()
-	return z, nil
+	return z, err
 }
 
 // pfExiting is the kernel's PF_EXITING, a process's flag (field 9 of
 // <pid>/stat) from the moment it starts to exit.
 const pfExiting = 0x4
 
-// procExiting reports whether pid is exiting or gone as <pid>/stat shows
-// it: a zombie (state Z) or a dead one (X), one flagged PF_EXITING, or one
-// whose stat cannot be read.
-func procExiting(root string, pid uint32) bool {
+// procStat is the fields of pid's <pid>/stat after its name (which may hold
+// spaces and parentheses): field n of proc(5) at [n-3]; ok false where it
+// cannot be read.
+func procStat(root string, pid uint32) ([]string, bool) {
+	if pid == 0 {
+		return nil, false
+	}
 	b, err := os.ReadFile(filepath.Join(root, strconv.FormatUint(uint64(pid), 10), "stat"))
 	if err != nil {
-		return true
+		return nil, false
 	}
 	i := bytes.LastIndexByte(b, ')')
 	if i < 0 {
-		return true
+		return nil, false
 	}
-	f := strings.Fields(string(b[i+1:]))
+	return strings.Fields(string(b[i+1:])), true
+}
+
+// statExiting reports whether the stat fields f (procStat) show a process
+// exiting or gone: a zombie (state Z) or a dead one (X), one flagged
+// PF_EXITING, or fields too few to tell.
+func statExiting(f []string) bool {
 	if len(f) < 7 {
 		return true
 	}
@@ -924,25 +999,37 @@ func procExiting(root string, pid uint32) bool {
 	return err != nil || flags&pfExiting != 0
 }
 
-// procStart is pid's start time (field 22 of <pid>/stat, after its name,
-// which may hold spaces and parentheses), "" where it cannot be read.
-func procStart(root string, pid uint32) string {
-	if pid == 0 {
-		return ""
+// procExiting reports whether pid is exiting or gone as <pid>/stat shows
+// it (statExiting), or its stat cannot be read.
+func procExiting(root string, pid uint32) bool {
+	f, ok := procStat(root, pid)
+	return !ok || statExiting(f)
+}
+
+// procID tells apart the programs a pid has run, for ProcZones: its start
+// time (field 22 of <pid>/stat), which another process taking the pid
+// changes; where its arguments and environment lie in its memory (fields
+// 48-51, arg_start to env_end, which the kernel shows a reader that may
+// trace the process, as keploy reading its environment may), which an
+// exec lays out anew, at a random place (ASLR), while the pid and its start
+// stay (a wrapper that execs the JVM: berglas, chamber, a shell's exec);
+// and the program it runs (the <pid>/exe link). A program that execs
+// itself again with ASLR off (setarch -R) and arguments and an environment
+// of the same sizes is not told apart: a stated limit.
+type procID struct {
+	start, mem, exe string
+}
+
+// procIdent is pid's procID, and whether it is exiting (statExiting); ok
+// false where its stat cannot be read or holds no field 51 (a kernel
+// before 3.5).
+func procIdent(root string, pid uint32) (id procID, exiting, ok bool) {
+	f, ok := procStat(root, pid)
+	if !ok || len(f) < 49 {
+		return procID{}, false, false
 	}
-	b, err := os.ReadFile(filepath.Join(root, strconv.FormatUint(uint64(pid), 10), "stat"))
-	if err != nil {
-		return ""
-	}
-	i := bytes.LastIndexByte(b, ')')
-	if i < 0 {
-		return ""
-	}
-	f := strings.Fields(string(b[i+1:]))
-	if len(f) < 20 {
-		return ""
-	}
-	return f[19]
+	exe, _ := os.Readlink(filepath.Join(root, strconv.FormatUint(uint64(pid), 10), "exe"))
+	return procID{start: f[19], mem: strings.Join(f[45:49], " "), exe: exe}, statExiting(f), true
 }
 
 type procZoneKey struct{}
@@ -974,7 +1061,10 @@ func procZoneFrom(ctx context.Context) (ProcZone, bool) {
 // UTC there, never the zone its link names.
 func zoneFile(root, name string) (*time.Location, error) {
 	data, final, err := readZoneFile(root, name)
-	if err != nil {
+	if absent(err) {
+		// A link to nothing: lasting (lastingError).
+		return nil, lasting(err)
+	} else if err != nil {
 		return nil, err
 	}
 	for _, p := range []string{final, name} {
@@ -1024,7 +1114,8 @@ func loadZone(name string, data []byte) (*time.Location, error) {
 	}
 	loc, err := time.LoadLocationFromTZData(name, data)
 	if err != nil {
-		return nil, err
+		// Bytes that are no zone file's: lasting (lastingError).
+		return nil, lasting(err)
 	}
 	zoneLocs.mu.Lock()
 	if len(zoneLocs.m) >= zoneLocCap {
@@ -1078,11 +1169,11 @@ func readRegular(name string) ([]byte, error) {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, errNotRegular{fi.Mode()}
+		return nil, lasting(errNotRegular{fi.Mode()})
 	}
 	data, err := io.ReadAll(io.LimitReader(f, zoneFileCap+1))
 	if err == nil && len(data) > zoneFileCap {
-		err = fmt.Errorf("more than %d bytes, which no zone file holds", zoneFileCap)
+		err = lasting(fmt.Errorf("more than %d bytes, more than keploy reads of a zone file, an /etc/timezone or an argfile", zoneFileCap))
 	}
 	return data, err
 }
@@ -1103,7 +1194,13 @@ func localtimeAbsent(root string) bool {
 		return false
 	}
 	_, err = os.Lstat(under(root, path.Join(etc, "localtime")))
-	return errors.Is(err, fs.ErrNotExist)
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	// An absence read in a root keploy can still read: an exited
+	// process's root reads as absent everywhere.
+	_, err = os.Stat(root)
+	return err == nil
 }
 
 // resolveUnder is p, a path in the process's own view, with each link on
@@ -1136,7 +1233,7 @@ func resolveUnder(root, p string) (string, error) {
 			continue
 		}
 		if links++; links > 40 {
-			return "", errors.New("too many links on the path " + p)
+			return "", lasting(errors.New("too many links on the path " + p))
 		}
 		target, err := os.Readlink(under(root, next))
 		if err != nil {

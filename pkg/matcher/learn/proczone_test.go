@@ -30,8 +30,7 @@ func fakeProc(t *testing.T, root string, pid, start string, env []string, files 
 	write(filepath.Join(dir, "environ"), []byte(strings.Join(env, "\x00")+"\x00"))
 	write(filepath.Join(dir, "cmdline"), []byte("/app/server\x00"))
 	write(filepath.Join(dir, "maps"), []byte("5600-5610 r-xp 00000000 08:01 7 /app/server\n"))
-	stat := pid + " (my app) (x) S 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 " + start + " 1000 100 18446744073709551615"
-	write(filepath.Join(dir, "stat"), []byte(stat))
+	write(filepath.Join(dir, "stat"), []byte(statLine(pid, "my app) (x", "S", "4194560", start, statMem)))
 	for name, data := range files {
 		write(filepath.Join(dir, "root", name), data)
 	}
@@ -44,6 +43,19 @@ func fakeProc(t *testing.T, root string, pid, start string, env []string, files 
 			t.Fatal(err)
 		}
 	}
+}
+
+// statMem is the addresses of a process's arguments and environment in its
+// memory (stat fields 48-51: arg_start, arg_end, env_start, env_end).
+const statMem = "140737488351000 140737488351100 140737488351100 140737488352000"
+
+// statLine is a /proc/<pid>/stat line of all 52 fields, as a kernel from
+// 3.5 writes it: the process named name, in state, of flags (field 9),
+// started at start (field 22), its arguments and environment at mem
+// (fields 48-51).
+func statLine(pid, name, state, flags, start, mem string) string {
+	return pid + " (" + name + ") " + state + " 1 1 1 0 -1 " + flags + " 100 0 0 0 1 2 0 0 20 0 4 0 " + start +
+		" 1000 100 18446744073709551615 4194304 4227072 140737488350000 0 0 0 0 0 0 0 0 0 17 1 0 0 0 0 0 4239360 4239600 4243456 " + mem + " 0"
 }
 
 // The agent reads the zone of the process that made a call from the
@@ -84,30 +96,34 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 		fakeProc(t, proc, pid, "500", nil, map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
 	}
 	for pid, stat := range map[string]string{
-		"113": "113 (my app) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615",
-		"115": "115 (my app) R 1 1 1 0 -1 4194564 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615",
+		"113": statLine("113", "my app", "Z", "4194560", "500", statMem),
+		"115": statLine("115", "my app", "R", "4194564", "500", statMem),
 	} {
 		if err := os.WriteFile(filepath.Join(proc, pid, "stat"), []byte(stat), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// A TZ through a zone file as if it were a directory (ENOTDIR): the
+	// process's own files, lasting.
+	fakeProc(t, proc, "116", "500", []string{"TZ=Asia/Kolkata/x"}, map[string][]byte{zi + "Asia/Kolkata": kolkata}, nil)
 	// No /etc/localtime at all, no TZ: UTC.
 	fakeProc(t, proc, "109", "500", []string{"PATH=/bin"}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
 	for _, row := range []struct {
 		what string
 		pid  uint32
-		want string // the zone's name; "!" an error
+		want string // the zone's name; "!" an error read again, "!!" one lasting the process's life (lastingError)
 		off  int
 	}{
 		{"TZ in its environment (the first, as getenv reads it), over its /etc/localtime", 101, "+05:30", 19800},
 		{"no TZ: its /etc/localtime, in its own root", 102, "Europe/Berlin", 3600},
-		{"a TZ naming a zone its root holds no file of: unknown, never keploy's own", 103, "!", 0},
+		{"a TZ naming a zone its root holds no file of: unknown, never keploy's own", 103, "!!", 0},
 		{"an empty TZ: UTC", 104, "UTC", 0},
-		{"no TZ, a link to no file in its root: unknown", 105, "!", 0},
-		{"TZ naming a zone through an absolute link of its zoneinfo directory to itself: unknown, never keploy's file", 106, "!", 0},
-		{"/etc/localtime through an absolute link of a directory to itself: unknown, never keploy's file", 107, "!", 0},
+		{"no TZ, a link to no file in its root: unknown", 105, "!!", 0},
+		{"TZ naming a zone through an absolute link of its zoneinfo directory to itself: unknown, never keploy's file", 106, "!!", 0},
+		{"/etc/localtime through an absolute link of a directory to itself: unknown, never keploy's file", 107, "!!", 0},
 		{"TZ naming a zone through an absolute link of its zoneinfo directory, read in its root", 108, "+05:30", 19800},
 		{"no /etc/localtime at all and no TZ: UTC", 109, "UTC", 0},
+		{"a TZ naming a zone file as a directory: unknown", 116, "!!", 0},
 		{"an empty environment of a zombie: unknown, never its /etc/localtime", 113, "!", 0},
 		{"an empty environment of a live process (env -i): no TZ, its /etc/localtime", 114, "Europe/Berlin", 3600},
 		{"an empty environment of a process flagged PF_EXITING: unknown, never its /etc/localtime", 115, "!", 0},
@@ -115,9 +131,11 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 		{"no process", 0, "!", 0},
 	} {
 		z, err := ReadProcZone(proc, row.pid)
-		if row.want == "!" {
+		if strings.HasPrefix(row.want, "!") {
 			if err == nil || z.Loc != nil {
 				t.Errorf("%s: %v %v; want an error and no zone", row.what, z.Loc, err)
+			} else if isLasting(err) != (row.want == "!!") {
+				t.Errorf("%s: lasting %v (%v); want %v", row.what, isLasting(err), err, row.want == "!!")
 			}
 			continue
 		}
@@ -198,8 +216,218 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 	if _, off := at.In(z111.Loc).Zone(); off != 19800 {
 		t.Errorf("a Berlin-named file holding Kolkata's bytes: offset %d; want its own bytes' 19800", off)
 	}
-	if got := procStart(proc, 101); got != "500" {
-		t.Errorf("the start of a process whose name holds spaces and parentheses: %q; want 500", got)
+	if id, exiting, ok := procIdent(proc, 101); !ok || exiting || id.start != "500" || id.mem != statMem {
+		t.Errorf("the start and memory of a process whose name holds spaces and parentheses: %+v %v %v; want 500 and %s", id, exiting, ok, statMem)
+	}
+}
+
+// ProcZones reads a process's zone once for each program it runs, as a JVM
+// and the C library read their zone once: the zone, or an error the
+// process's own files give (lastingError: a TZ naming no zone file, a
+// user.timezone Java does not know), is kept, so the process is not read
+// again at each call (a JVM's zone directory walked at each); an error of
+// keploy's own read (a file it cannot read) is read again, as is a process
+// exiting as keploy read it, which lets go of its files. A pid that runs
+// another program is read again: another process taking it (a new start
+// time), or an exec, which keeps the pid and its start time but lays its
+// arguments and environment out anew (stat fields 48-51) and may run
+// another executable.
+func TestAProcessZoneIsReadOnceForEachProgramItRuns(t *testing.T) {
+	proc := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proc, "self", "ns"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("pid:[4026531836]", filepath.Join(proc, "self", "ns", "pid")); err != nil {
+		t.Fatal(err)
+	}
+	write := func(pid, name string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(proc, pid, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := func(pid, tz string) { write(pid, "environ", []byte("PATH=/bin\x00TZ="+tz+"\x00")) }
+	stat := func(pid, flags, start, mem string) {
+		write(pid, "stat", []byte(statLine(pid, "app", "S", flags, start, mem)))
+	}
+	// The zone's name, "!!" an error kept for the process's life, "!" one
+	// read again.
+	of := func(zs *ProcZones, pid uint32) (string, string) {
+		z, err := zs.Of(pid)
+		switch {
+		case err != nil && isLasting(err):
+			return "!!", err.Error()
+		case err != nil:
+			return "!", err.Error()
+		}
+		return z.Name, ""
+	}
+	const noZone = "Mars/Olympus" // a TZ naming no zone file: lasting
+	zs := NewProcZones(proc)
+
+	// A lasting error is kept: a TZ the process could not have changed
+	// is not read again, nor its zone directory.
+	fakeProc(t, proc, "801", "500", []string{"TZ=" + noZone}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+	got, first := of(zs, 801)
+	if got != "!!" {
+		t.Fatalf("a TZ naming no zone file: %q %s; want an error kept for the process's life", got, first)
+	}
+	env("801", "UTC")
+	if got, msg := of(zs, 801); got != "!!" || msg != first {
+		t.Errorf("the same program again, its files changed: %q %s; want the error read at its first call, %s", got, msg, first)
+	}
+	stat("801", "4194560", "777", statMem)
+	if got, msg := of(zs, 801); got != "UTC" {
+		t.Errorf("a pid another process took (a new start): %q %s; want it read again", got, msg)
+	}
+
+	// An error of keploy's own read is read again.
+	fakeProc(t, proc, "802", "500", nil, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+	if err := os.Remove(filepath.Join(proc, "802", "environ")); err != nil {
+		t.Fatal(err)
+	}
+	if got, msg := of(zs, 802); got != "!" {
+		t.Fatalf("an environment keploy cannot read: %q %s; want an error read again", got, msg)
+	}
+	env("802", "UTC")
+	if got, msg := of(zs, 802); got != "UTC" {
+		t.Errorf("the environment readable at the next call: %q %s; want it read again", got, msg)
+	}
+
+	// A process exiting (PF_EXITING) as keploy read it: what it read is
+	// not kept, lasting or not. A JVM's, whose maps name its libjvm.so (an
+	// exiting process's that name none may have let go of them).
+	fakeProc(t, proc, "803", "500", []string{"JAVA_TOOL_OPTIONS=-Duser.timezone=" + noZone}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+	write("803", "maps", []byte("7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so\n"))
+	stat("803", "4194564", "500", statMem)
+	if got, msg := of(zs, 803); got != "!!" {
+		t.Fatalf("an exiting JVM's user.timezone Java does not know: %q %s; want the error", got, msg)
+	}
+	env("803", "UTC")
+	stat("803", "4194560", "500", statMem)
+	if got, msg := of(zs, 803); got != "UTC" {
+		t.Errorf("a process exiting as keploy read it, again: %q %s; want it read again, nothing kept", got, msg)
+	}
+
+	// An exec keeps the pid and its start time: its arguments and
+	// environment laid out anew, or another executable, is another
+	// program, read again; the same, the same program, not.
+	fakeProc(t, proc, "804", "500", []string{"TZ=UTC"}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+	if got, msg := of(zs, 804); got != "UTC" {
+		t.Fatalf("a wrapper (berglas, chamber) before its exec: %q %s", got, msg)
+	}
+	env("804", noZone)
+	if got, msg := of(zs, 804); got != "UTC" {
+		t.Errorf("the same program again: %q %s; want the zone read at its first call", got, msg)
+	}
+	stat("804", "4194560", "500", "140737488355000 140737488355100 140737488355100 140737488356000")
+	if got, msg := of(zs, 804); got != "!!" {
+		t.Errorf("an exec, its arguments and environment at new addresses (ASLR): %q %s; want it read again", got, msg)
+	}
+	env("804", "UTC")
+	if err := os.Symlink("/opt/java/openjdk/bin/java", filepath.Join(proc, "804", "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if got, msg := of(zs, 804); got != "UTC" {
+		t.Errorf("an exec of another executable, its arguments and environment at the same addresses (ASLR off): %q %s; want it read again", got, msg)
+	}
+	env("804", noZone)
+	if got, msg := of(zs, 804); got != "UTC" {
+		t.Errorf("the exec'd program again: %q %s; want the zone read at its first call", got, msg)
+	}
+
+	// A process that runs another program as keploy reads it (an exec, or
+	// it exits and another takes its number): what keploy read may be
+	// either's, so it is an error, never kept; the next call reads the new
+	// program.
+	for _, row := range []struct {
+		what, start, mem string
+	}{
+		{"an exec as keploy reads it", "500", "140737488357000 140737488357100 140737488357100 140737488358000"},
+		{"another process taking its number as keploy reads it", "901", statMem},
+	} {
+		fakeProc(t, proc, "806", "500", []string{"TZ=UTC"}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+		mid := NewProcZones(proc)
+		mid.read = func(root string, pid uint32) (ProcZone, error) {
+			z, err := ReadProcZone(root, pid)
+			env("806", noZone)
+			stat("806", "4194560", row.start, row.mem)
+			return z, err
+		}
+		if got, msg := of(mid, 806); got != "!" || !strings.Contains(msg, "ran another program") {
+			t.Errorf("%s: %q %s; want an error read again", row.what, got, msg)
+		}
+		mid.read = ReadProcZone
+		if got, msg := of(mid, 806); got != "!!" {
+			t.Errorf("%s, the next call: %q %s; want the new program's read, nothing kept", row.what, got, msg)
+		}
+	}
+
+	// Errors of the process's own files that no other row reads: lasting.
+	big := make([]byte, zoneFileCap+1)
+	defer func(n int) { javaZoneinfoMatchCap = n }(javaZoneinfoMatchCap)
+	javaZoneinfoMatchCap = 3
+	for i, row := range []struct {
+		what  string
+		argv  string // a JVM's command line; "" no JVM
+		files map[string][]byte
+		mode  map[string]os.FileMode
+	}{
+		{"a JVM's /etc/timezone that not every user can read", "java\x00Main\x00", map[string][]byte{"etc/timezone": []byte("UTC\n")}, map[string]os.FileMode{"etc/timezone": 0o600}},
+		{"an /etc/localtime of bytes that are no zone file's", "", map[string][]byte{"etc/localtime": []byte("no zone\n")}, nil},
+		{"an /etc/localtime larger than any zone file", "", map[string][]byte{"etc/localtime": big}, nil},
+		{"a JVM's argfile larger than keploy reads", "java\x00@/app/big.args\x00Main\x00", map[string][]byte{"app/big.args": big}, nil},
+		{"a JVM's copied /etc/localtime in a zone directory of more files than keploy searches", "java\x00Main\x00", map[string][]byte{"etc/localtime": []byte("x"), "usr/share/zoneinfo/A": nil, "usr/share/zoneinfo/B": nil, "usr/share/zoneinfo/C": nil, "usr/share/zoneinfo/D": nil}, nil},
+	} {
+		pid := strconv.Itoa(820 + i)
+		fakeProc(t, proc, pid, "500", []string{"PATH=/bin"}, row.files, nil)
+		for name, mode := range row.mode {
+			if err := os.Chmod(filepath.Join(proc, pid, "root", name), mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if row.argv != "" {
+			write(pid, "cmdline", []byte(row.argv))
+			write(pid, "maps", []byte("7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so\n"))
+		}
+		if z, err := ReadProcZone(proc, uint32(820+i)); err == nil || z.Loc != nil || !isLasting(err) {
+			t.Errorf("%s: %v %v (lasting %v); want an error kept for the process's life", row.what, z.Loc, err, isLasting(err))
+		}
+	}
+
+	// A zone read as the process exits is this call's, never kept.
+	fakeProc(t, proc, "831", "500", []string{"TZ=UTC"}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+	write("831", "maps", []byte("7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so\n"))
+	stat("831", "4194564", "500", statMem)
+	if got, msg := of(zs, 831); got != "UTC" {
+		t.Errorf("a JVM exiting as keploy read its zone: %q %s; want its zone", got, msg)
+	}
+	env("831", noZone)
+	stat("831", "4194560", "500", statMem)
+	if got, msg := of(zs, 831); got != "!!" {
+		t.Errorf("a JVM exiting as keploy read its zone, again: %q %s; want it read again, nothing kept", got, msg)
+	}
+
+	// A file keploy cannot read (EACCES, which root never meets) is an
+	// error of keploy's own read, read again: never the process's own.
+	if os.Geteuid() != 0 {
+		fakeProc(t, proc, "830", "500", []string{"TZ=Europe/Berlin"}, map[string][]byte{"usr/share/zoneinfo/Europe/Berlin": nil}, nil)
+		dir := filepath.Join(proc, "830", "root", "usr", "share", "zoneinfo", "Europe")
+		if err := os.Chmod(dir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+		if got, msg := of(zs, 830); got != "!" || !strings.Contains(msg, "cannot read") {
+			t.Errorf("a TZ whose zone file keploy cannot read: %q %s; want an error read again", got, msg)
+		}
+	}
+
+	// A stat of no field 51 (a kernel before 3.5) tells no program apart:
+	// nothing is kept, and the read is an error.
+	fakeProc(t, proc, "805", "500", []string{"TZ=UTC"}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
+	write("805", "stat", []byte("805 (app) S 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615"))
+	if got, msg := of(zs, 805); got != "!" {
+		t.Errorf("a stat of no field 51: %q %s; want an error read again", got, msg)
 	}
 }
 
@@ -233,7 +461,7 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 		cmdline := ""
 		if len(argv) > 0 {
 			cmdline = strings.Join(argv, "\x00") + "\x00"
-		} else if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(pid+" (java) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615"), 0o644); err != nil {
+		} else if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(statLine(pid, "java", "Z", "4194560", "500", statMem)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o644); err != nil {
@@ -245,7 +473,7 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 				t.Fatal(err)
 			}
 		case "=":
-			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(pid+" (java) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615"), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(statLine(pid, "java", "Z", "4194560", "500", statMem)), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.WriteFile(filepath.Join(dir, "maps"), nil, 0o644); err != nil {
@@ -268,7 +496,7 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 		what      string
 		env, argv []string
 		exe, maps string
-		want      string // the zone's name; "!" an error
+		want      string // the zone's name; "!" an error read again, "!!" one lasting the process's life (lastingError)
 		off       int
 	}{
 		{"the command line's option, over TZ", []string{"TZ=UTC"}, jar, launcher, libjvm, "+05:30", 19800},
@@ -290,7 +518,7 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 		{"an IANA link of no slash", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=CET", "Main"}, launcher, libjvm, "CET", 3600},
 		{"an old three-letter id, as Java maps it", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=IST", "Main"}, launcher, libjvm, "+05:30", 19800},
 		{"an old three-letter id of a fixed offset", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=EST", "Main"}, launcher, libjvm, "-05:00", -18000},
-		{"an id keploy does not read: unknown, never TZ's", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=Mars/Olympus", "Main"}, launcher, libjvm, "!", 0},
+		{"an id keploy does not read: unknown, never TZ's", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=Mars/Olympus", "Main"}, launcher, libjvm, "!!", 0},
 		{"no = sets it empty: none, so TZ", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "-Duser.timezone", "Main"}, launcher, libjvm, "UTC", 0},
 		{"an argfile's option, read in its place, its comments skipped", []string{"TZ=UTC"}, []string{"java", "@/app/jvm.args", "-jar", "/app/app.jar"}, launcher, libjvm, "+05:30", 19800},
 		{"an argfile of the working directory", []string{"TZ=UTC"}, []string{"java", "@jvm.args", "Main"}, launcher, libjvm, "+05:30", 19800},
@@ -298,26 +526,28 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 		{"an argfile's commented option: none", []string{"TZ=UTC"}, []string{"java", "@/app/jvm-commented.args", "Main"}, launcher, libjvm, "UTC", 0},
 		{"a main class in an argfile (Jib) ends the options", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "-cp", "@/app/jib-classpath-file", "@/app/jib-main-class-file", "-Duser.timezone=Asia/Kolkata"}, launcher, libjvm, "Europe/Berlin", 3600},
 		{"an argfile in a value's place, read before the value is taken", []string{"TZ=UTC"}, []string{"java", "-cp", "@/app/cp-and-opts.args", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
-		{"an argfile keploy cannot read: unknown", []string{"TZ=UTC"}, []string{"java", "@/app/missing.args", "Main"}, launcher, libjvm, "!", 0},
+		{"an argfile that is not there: unknown", []string{"TZ=UTC"}, []string{"java", "@/app/missing.args", "Main"}, launcher, libjvm, "!!", 0},
 		{"another program's @ argument: no argfile", []string{"TZ=UTC"}, []string{"/app/server", "@/app/missing.args"}, "/app/server", "", "UTC", 0},
 		{"a JVM exiting, its command line read empty: unknown", []string{"TZ=UTC"}, nil, launcher, libjvm, "!", 0},
 		{"a JVM exiting, its maps read empty: unknown", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, "=", "!", 0},
 		{"a libjvm.so deleted under it (an upgrade in place): still a JVM", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher + " (deleted)", "7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so (deleted)\n", "Europe/Berlin", 3600},
 		{"JDK_JAVA_OPTIONS in Java 8's launcher: not read", []string{"TZ=UTC", "JDK_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, "/usr/lib/jvm/java-8/jre/bin/java", "7f00-7f80 r-xp 00000000 08:01 42 /usr/lib/jvm/java-8/jre/lib/amd64/server/libjvm.so\n", "UTC", 0},
-		{"OpenJ9's option variable setting it: unknown (its order is not read)", []string{"TZ=UTC", "OPENJ9_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, libjvm, "!", 0},
+		{"OpenJ9's option variable setting it: unknown (its order is not read)", []string{"TZ=UTC", "OPENJ9_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, libjvm, "!!", 0},
 		{"another program's OpenJ9 variable: not its zone", []string{"TZ=UTC", "OPENJ9_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"/app/server"}, "/app/server", "", "UTC", 0},
 		{"the first of a variable set twice, as getenv reads it", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin", "JAVA_TOOL_OPTIONS=-Duser.timezone=Asia/Kolkata"}, []string{"java", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
-		{"a name of a host's zone directory a JVM does not know: unknown", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=posix/Asia/Kolkata", "Main"}, launcher, libjvm, "!", 0},
-		{"a custom id Java does not read: unknown", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=GMT+24:00", "Main"}, launcher, libjvm, "!", 0},
+		{"a name of a host's zone directory a JVM does not know: unknown", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=posix/Asia/Kolkata", "Main"}, launcher, libjvm, "!!", 0},
+		{"a custom id Java does not read: unknown", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=GMT+24:00", "Main"}, launcher, libjvm, "!!", 0},
 		{"another program's JAVA_TOOL_OPTIONS: not its zone", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"/app/server"}, "/app/server", "", "UTC", 0},
 		{"an option that sets it, where keploy cannot read whether the process is a JVM: unknown", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, "-", "!", 0},
 	} {
 		pid := 200 + i
 		java(strconv.Itoa(pid), row.env, row.argv, row.exe, row.maps)
 		z, err := ReadProcZone(proc, uint32(pid))
-		if row.want == "!" {
+		if strings.HasPrefix(row.want, "!") {
 			if err == nil || z.Loc != nil {
 				t.Errorf("%s: %v %v; want an error and no zone", row.what, z.Loc, err)
+			} else if isLasting(err) != (row.want == "!!") {
+				t.Errorf("%s: lasting %v (%v); want %v", row.what, isLasting(err), err, row.want == "!!")
 			}
 			continue
 		}
@@ -389,11 +619,11 @@ func TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes(t *testing.T) {
 		argv  []string
 		files map[string][]byte
 		links map[string]string
-		want  string // the zone's name; "!" an error
+		want  string // the zone's name; "!" an error read again, "!!" one lasting the process's life (lastingError)
 		off   int
 	}{
 		{"TZ, in Java's own zone data: an image with no zone files", true, []string{"TZ=Asia/Kolkata"}, nil, nil, nil, "+05:30", 19800},
-		{"another program's TZ of no zone file: unknown, as before", false, []string{"TZ=Asia/Kolkata"}, nil, nil, nil, "!", 0},
+		{"another program's TZ of no zone file: unknown, as before", false, []string{"TZ=Asia/Kolkata"}, nil, nil, nil, "!!", 0},
 		{"TZ with a leading colon", true, []string{"TZ=:Europe/Berlin"}, nil, nil, nil, "Europe/Berlin", 3600},
 		{"TZ under posix/, dropped", true, []string{"TZ=posix/Europe/Berlin"}, nil, nil, nil, "Europe/Berlin", 3600},
 		{"TZ's colon dropped before posix/", true, []string{"TZ=:posix/Europe/Berlin"}, nil, nil, nil, "Europe/Berlin", 3600},
@@ -401,18 +631,18 @@ func TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes(t *testing.T) {
 		{"another program's empty TZ: UTC", false, []string{"TZ="}, nil, nil, toBerlin, "UTC", 0},
 		{"an /etc/timezone that names the zone /etc/localtime gives", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Asia/Kolkata\n")), toKolkata, "+05:30", 19800},
 		{"an /etc/timezone line read to a NUL", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Asia/Kolkata\x00Europe/Berlin\n")), toKolkata, "+05:30", 19800},
-		{"an /etc/timezone that disagrees with /etc/localtime: unknown (older JDKs read one, newer the other)", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Europe/Berlin\n")), toKolkata, "!", 0},
-		{"an /etc/timezone of no /etc/localtime: unknown (GMT to newer JDKs)", true, nil, nil, map[string][]byte{"etc/timezone": []byte("Europe/Berlin\n")}, nil, "!", 0},
+		{"an /etc/timezone that disagrees with /etc/localtime: unknown (older JDKs read one, newer the other)", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Europe/Berlin\n")), toKolkata, "!!", 0},
+		{"an /etc/timezone of no /etc/localtime: unknown (GMT to newer JDKs)", true, nil, nil, map[string][]byte{"etc/timezone": []byte("Europe/Berlin\n")}, nil, "!!", 0},
 		{"another program reads /etc/localtime, not /etc/timezone", false, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Europe/Berlin\n")), toKolkata, "+05:30", 19800},
 		{"an empty /etc/timezone line: /etc/localtime", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("\nEurope/Berlin\n")), toKolkata, "+05:30", 19800},
 		{"an /etc/timezone directory (docker's bind of a missing file): /etc/localtime", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone/x", nil), toKolkata, "+05:30", 19800},
 		{"the /etc/localtime link's name, to a file the image lacks", true, nil, nil, nil, toKolkata, "+05:30", 19800},
-		{"another program's /etc/localtime link to nothing: unknown, as before", false, nil, nil, nil, toKolkata, "!", 0},
+		{"another program's /etc/localtime link to nothing: unknown, as before", false, nil, nil, nil, toKolkata, "!!", 0},
 		{"a relative /etc/localtime link", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share/zoneinfo/Europe/Berlin"}, "Europe/Berlin", 3600},
-		{"a link newer JDKs clean and older do not: unknown", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share//zoneinfo/./Europe/Berlin"}, "!", 0},
-		{"a link's name after its first zoneinfo/", true, nil, nil, nil, map[string]string{"etc/localtime": "/opt/zoneinfo/usr/share/zoneinfo/Europe/Berlin"}, "!", 0},
+		{"a link newer JDKs clean and older do not: unknown", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share//zoneinfo/./Europe/Berlin"}, "!!", 0},
+		{"a link's name after its first zoneinfo/", true, nil, nil, nil, map[string]string{"etc/localtime": "/opt/zoneinfo/usr/share/zoneinfo/Europe/Berlin"}, "!!", 0},
 		{"a link to nothing that names no zoneinfo/: GMT", true, nil, nil, etc(nil), map[string]string{"etc/localtime": "/etc/missing"}, "UTC", 0},
-		{"a copy in a zone directory that links a directory to itself: unknown (the JDK's listing order picks)", true, nil, nil, with(zi("Europe/Berlin"), "etc/localtime", berlin), map[string]string{"usr/share/zoneinfo/posix": "."}, "!", 0},
+		{"a copy in a zone directory that links a directory to itself: unknown (the JDK's listing order picks)", true, nil, nil, with(zi("Europe/Berlin"), "etc/localtime", berlin), map[string]string{"usr/share/zoneinfo/posix": "."}, "!!", 0},
 		{"a copy matching a dot file the JDK skips", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/.cache", kolkata), "etc/localtime", kolkata), nil, "+05:30", 19800},
 		{"a copied /etc/localtime: the zone file of its bytes, the JDK's skipped names skipped", true, nil, nil, with(with(with(zi("Europe/Berlin", "Asia/Kolkata", "Asia/Calcutta", "posix/Asia/Kolkata"), "usr/share/zoneinfo/posixrules", kolkata), "usr/share/zoneinfo/localtime", kolkata), "etc/localtime", kolkata), nil, "+05:30", 19800},
 		{"a link naming no zoneinfo/: the zone file of its bytes", true, nil, nil, with(zi("Europe/Berlin", "Asia/Kolkata"), "etc/static/localtime", berlin), map[string]string{"etc/localtime": "/etc/static/localtime"}, "Europe/Berlin", 3600},
@@ -422,11 +652,11 @@ func TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes(t *testing.T) {
 		{"no /etc/localtime and no /etc/timezone: GMT", true, nil, nil, etc(nil), nil, "UTC", 0},
 		{"a root keploy cannot read (an exited process's): unknown, never GMT", true, nil, nil, nil, nil, "!", 0},
 		{"an empty user.timezone: the platform's zone, as the JDK reads it", true, []string{"TZ="}, []string{"java", "-Duser.timezone=", "Main"}, nil, toBerlin, "Europe/Berlin", 3600},
-		{"an id spelt as no region of Java's", true, []string{"TZ=Europe//Berlin"}, nil, zi("Europe/Berlin"), nil, "!", 0},
-		{"a TZ of a POSIX rule: unknown", true, []string{"TZ=IST-5:30"}, nil, nil, nil, "!", 0},
-		{"a TZ of a path: unknown", true, []string{"TZ=/usr/share/zoneinfo/Asia/Kolkata"}, nil, zi("Asia/Kolkata"), nil, "!", 0},
-		{"an /etc/timezone Java does not know: unknown", true, nil, nil, map[string][]byte{"etc/timezone": []byte("Mars/Olympus\n")}, nil, "!", 0},
-		{"a copy of a zone file Java does not know too: unknown", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/Mars/Olympus", kolkata), "etc/localtime", kolkata), nil, "!", 0},
+		{"an id spelt as no region of Java's", true, []string{"TZ=Europe//Berlin"}, nil, zi("Europe/Berlin"), nil, "!!", 0},
+		{"a TZ of a POSIX rule: unknown", true, []string{"TZ=IST-5:30"}, nil, nil, nil, "!!", 0},
+		{"a TZ of a path: unknown", true, []string{"TZ=/usr/share/zoneinfo/Asia/Kolkata"}, nil, zi("Asia/Kolkata"), nil, "!!", 0},
+		{"an /etc/timezone Java does not know: unknown", true, nil, nil, map[string][]byte{"etc/timezone": []byte("Mars/Olympus\n")}, nil, "!!", 0},
+		{"a copy of a zone file Java does not know too: unknown", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/Mars/Olympus", kolkata), "etc/localtime", kolkata), nil, "!!", 0},
 		{"a copy of UTC's file: UTC, found first", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/UTC", kolkata), "etc/localtime", kolkata), nil, "UTC", 0},
 	} {
 		pid := strconv.Itoa(600 + i)
@@ -448,9 +678,11 @@ func TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes(t *testing.T) {
 			}
 		}
 		z, err := ReadProcZone(proc, uint32(600+i))
-		if row.want == "!" {
+		if strings.HasPrefix(row.want, "!") {
 			if err == nil || z.Loc != nil {
 				t.Errorf("%s: %v %v; want an error and no zone", row.what, z.Loc, err)
+			} else if isLasting(err) != (row.want == "!!") {
+				t.Errorf("%s: lasting %v (%v); want %v", row.what, isLasting(err), err, row.want == "!!")
 			}
 			continue
 		}
