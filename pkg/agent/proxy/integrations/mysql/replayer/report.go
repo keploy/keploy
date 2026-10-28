@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mismatch"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 )
@@ -149,6 +151,62 @@ type mockMiss struct {
 	// call is the command's first read of the round (matchCommand), for its
 	// report to say whether that read found a staging (integrations.StampMark).
 	call integrations.CallRound
+	// repeats is, under exact serving, the recording of the open test the
+	// command repeats when it is one command more than the test recorded
+	// (extraCall), and recorded how often the test recorded it: its report is
+	// that miss (integrations.MarkExtraCall). nil for any other miss.
+	repeats  *models.Mock
+	recorded int
+}
+
+// commandMissReport is the mismatch report of a command-phase miss: the live
+// command (req, its statement read through decodeCtx), the upstream it was
+// sent to (dst) and what the matcher found (miss). A command made once more
+// than its test recorded it (miss.repeats) is reported as that miss, naming
+// the recording it repeats and no other (integrations.MarkExtraCall).
+func commandMissReport(req mysql.Request, decodeCtx *wire.DecodeContext, dst string, miss *mockMiss) *models.MockMismatchReport {
+	actualQuery := commandStatement(req, decodeCtx)
+	closestQuery := sqlStatementIdentity(miss.closestQuery)
+	diff := ""
+	if actualQuery != "" || closestQuery != "" {
+		diff = fmt.Sprintf("actual: %s\nclosest: %s", truncate(actualQuery, 200), truncate(closestQuery, 200))
+	}
+	if miss.why != "" {
+		diff = strings.TrimSpace(diff + "\n" + miss.why)
+	}
+	// Under schemaNoiseStrict a rejection is a drift verdict, not a
+	// missing recording — say WHICH fields drifted (FieldDiffs) and
+	// how to mark them, instead of the generic re-record hint.
+	nextSteps := "Re-record mocks if the SQL query has changed."
+	switch {
+	case miss.nextSteps != "":
+		nextSteps = miss.nextSteps
+	case miss.strictRejected > 0:
+		nextSteps = fmt.Sprintf("schema-noise strict rejected %d candidate mock(s): the listed request fields drifted outside configured/learned noise. Mark them under test.globalNoise.requestBody, run once with --schema-noise-detection to learn them, or re-record.", miss.strictRejected)
+	}
+	report := &models.MockMismatchReport{
+		At:            time.Now(),
+		Protocol:      "MySQL",
+		ActualSummary: commandSummary(req, decodeCtx),
+		Destination:   dst,
+		ClosestMock:   miss.closestMock,
+		Diff:          diff,
+		FieldDiffs:    miss.fieldDiffs,
+		NextSteps:     nextSteps,
+		MatchPhase:    miss.matchPhase,
+		// Both of these used to be left at their zero value while the
+		// log printed them as if measured, so every MySQL miss
+		// reported "match_phase":"" and "candidates":0 — indistinguishable
+		// from an empty mock pool.
+		CandidateCount: miss.candidateCount,
+	}
+	// The miss was decided where the command first read the
+	// round: whether that read found a staging is told from it.
+	integrations.StampMark(report, miss.call)
+	if miss.repeats != nil {
+		integrations.MarkExtraCall(report, miss.repeats, miss.recorded)
+	}
+	return report
 }
 
 // maxUnknownStatementsNamed caps how many mocks a miss of an unknown statement
