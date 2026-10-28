@@ -2132,22 +2132,37 @@ func mergeCaptureLosses(a, b models.CaptureLosses) models.CaptureLosses {
 // withEvidence puts on each test's line the evidence the proven wire charged
 // to it at its end (models.ScopeWindow.Evidence). A test that ran more than
 // once keeps the evidence of every attempt: one failed attempt fails it.
+//
+// Two parts are the test's across its attempts rather than any one's. Its
+// unused background recordings (ScopeEvidence.Background) are those every
+// attempt left unused: one attempt that called a recording used it, and
+// judging takes out only a recording no replay called. A test that passed
+// with nothing else on its window keeps its line for them. What it reported
+// (ScopeEvidence.Reported), when keploy failed an attempt, is passed only
+// when every attempt ended passed before keploy's evidence, else the first
+// other verdict: a retry that passed does not hide an attempt that failed
+// its own assertions.
 func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestReceipt {
 	var byName map[string]*models.ScopeEvidence
+	evidenceOf := func(name string, reason string) *models.ScopeEvidence {
+		if byName == nil {
+			byName = map[string]*models.ScopeEvidence{}
+		}
+		ev := byName[name]
+		if ev == nil {
+			ev = &models.ScopeEvidence{Reason: reason}
+			byName[name] = ev
+		}
+		return ev
+	}
+	unused, reported := testsAcrossAttempts(windows)
 	for _, w := range windows {
 		// Evidence with only a reason (a test whose process exited, or
 		// whose evidence could not be read) is keploy's verdict too.
 		if w.Evidence == nil || (w.Evidence.Empty() && w.Evidence.Reason == "") {
 			continue
 		}
-		if byName == nil {
-			byName = map[string]*models.ScopeEvidence{}
-		}
-		ev := byName[w.Name]
-		if ev == nil {
-			ev = &models.ScopeEvidence{Reason: w.Evidence.Reason}
-			byName[w.Name] = ev
-		}
+		ev := evidenceOf(w.Name, w.Evidence.Reason)
 		ev.Misses = append(ev.Misses, w.Evidence.Misses...)
 		ev.Unconsumed = append(ev.Unconsumed, w.Evidence.Unconsumed...)
 		ev.Incomplete = append(ev.Incomplete, w.Evidence.Incomplete...)
@@ -2164,6 +2179,14 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		// never failed: a line that dropped it would read as keploy's
 		// failure with no call to name.
 		ev.CannotCapture = mergeCaptureLosses(ev.CannotCapture, w.Evidence.CannotCapture)
+	}
+	for name, r := range reported {
+		if ev := byName[name]; ev != nil {
+			ev.Reported = r
+		}
+	}
+	for name, bg := range unused {
+		evidenceOf(name, "").Background = bg
 	}
 	for i := range tests {
 		if ev := byName[tests[i].Name]; ev != nil {
@@ -2195,6 +2218,65 @@ func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
 		}
 	}
 	return named
+}
+
+// testsAcrossAttempts is, by test, what withEvidence keeps of all its
+// attempts (windows) together: unused, the background recordings every
+// attempt left unused, in the first attempt's order (none when one attempt
+// left none: it called them, or skipped itself and was not read); and
+// reported, for a test keploy failed in an attempt (ScopeEvidence.Reported),
+// what its attempts ended with before keploy's evidence: passed when every
+// one did, else the first other verdict ("" when an attempt reported none,
+// which judging reads as not passed).
+func testsAcrossAttempts(windows []models.ScopeWindow) (unused map[string][]string, reported map[string]string) {
+	attempts := map[string][]models.ScopeWindow{}
+	var order []string
+	for _, w := range windows {
+		if w.Name == "" {
+			continue
+		}
+		if _, seen := attempts[w.Name]; !seen {
+			order = append(order, w.Name)
+		}
+		attempts[w.Name] = append(attempts[w.Name], w)
+	}
+	for _, name := range order {
+		ws := attempts[name]
+		var bg []string
+		if ev := ws[0].Evidence; ev != nil {
+			bg = slices.Clone(ev.Background)
+		}
+		failed, verdict := false, models.ScopeOutcomePassed
+		for i, w := range ws {
+			if i > 0 {
+				var left []string
+				if w.Evidence != nil {
+					left = w.Evidence.Background
+				}
+				bg = slices.DeleteFunc(bg, func(n string) bool { return !slices.Contains(left, n) })
+			}
+			got := w.Outcome
+			if w.Evidence != nil && w.Evidence.Reported != "" {
+				failed, got = true, w.Evidence.Reported
+			}
+			if verdict == models.ScopeOutcomePassed && got != models.ScopeOutcomePassed {
+				verdict = got
+			}
+		}
+		if len(bg) > 0 {
+			if unused == nil {
+				unused = map[string][]string{}
+			}
+			unused[name] = bg
+		}
+		if failed {
+			if reported == nil {
+				reported = map[string]string{}
+			}
+			reported[name] = verdict
+		}
+	}
+	return unused, reported
 }
 
 // testReceipts is each test's line in the receipt: its verdict and what it
