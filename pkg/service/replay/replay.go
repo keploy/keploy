@@ -632,6 +632,9 @@ type Replayer struct {
 	// answered and that are the set's, no test's (proven switch): those made
 	// before its first test (before_set_calls.go).
 	setCalls setCalls
+	// keptInside is each destination the app called that no mock answered,
+	// over the whole run, for the run's report of them (kept_inside.go).
+	keptInside keptInside
 	// requestsUnread are the test cases of the set RunTestSet is running
 	// whose request the agent did not say its learn step took
 	// (test_request_read.go).
@@ -1424,6 +1427,7 @@ func (r *Replayer) Start(ctx context.Context) (err error) {
 	if !abortTestRun {
 		r.printSummary(ctx, testRunResult)
 		r.sayUnattributed()
+		r.sayKeptInside()
 
 		// Print the mismatch table whenever there ARE mock mismatches — not
 		// only when the run as a whole failed. A green run with mock misses
@@ -8961,6 +8965,7 @@ func (r *Replayer) readMockErrors(ctx context.Context) testMisses {
 		return testMisses{}
 	}
 	calls, err := r.instrumentation.GetMockErrors(ctx)
+	r.keptInside.add(calls)
 	// What was missed before the set's first test is the set's, not this
 	// test's (before_set_calls.go).
 	calls = r.setCalls.take(calls)
