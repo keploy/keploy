@@ -1969,14 +1969,27 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 				newStmtID := decodeCtx.NextStmtID
 				decodeCtx.NextStmtID++
 
+				seq := byte(1)
+				if req.Header != nil && req.Header.Header != nil {
+					seq = req.Header.Header.SequenceID + 1
+				}
 				var paramDefs []*mysql.ColumnDefinition41
+				// eofAfterParams ends the parameter definitions for a
+				// connection that did not negotiate CLIENT_DEPRECATE_EOF:
+				// such a client (go-sql-driver) reads them up to an EOF
+				// packet. Without one it waited for the rest of the
+				// PREPARE_OK forever, so the app hung in PREPARE and never
+				// sent the EXECUTE that is the miss to report. A connection
+				// that negotiated it reads no EOF there (its next packet is
+				// the answer to its next command).
+				eofAfterParams := []byte{}
 				if numParams > 0 {
 					paramDefs = make([]*mysql.ColumnDefinition41, 0, numParams)
 					for i := uint16(0); i < numParams; i++ {
 						paramDefs = append(paramDefs, &mysql.ColumnDefinition41{
 							Header: mysql.Header{
 								PayloadLength: 22,
-								SequenceID:    byte(2 + i),
+								SequenceID:    seq + 1 + byte(i),
 							},
 							Catalog:      "def",
 							FixedLength:  0x0c,
@@ -1987,6 +2000,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							Decimals:     0,
 							Filler:       []byte{0x00, 0x00},
 						})
+					}
+					if !decodeCtx.DeprecateEOF() {
+						// EOF: 0xfe, no warnings, SERVER_STATUS_AUTOCOMMIT.
+						eofAfterParams = []byte{5, 0, 0, seq + 1 + byte(numParams), mysql.EOF, 0x00, 0x00, 0x02, 0x00}
 					}
 				}
 
@@ -1999,15 +2016,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 					WarningAvailable:   true,
 					WarningCount:       0,
 					ParamDefs:          paramDefs,
-					EOFAfterParamDefs:  []byte{},
+					EOFAfterParamDefs:  eofAfterParams,
 					ColumnDefs:         nil,
 					EOFAfterColumnDefs: []byte{},
 				}
 
-				seq := byte(1)
-				if req.PacketBundle.Header != nil && req.PacketBundle.Header.Header != nil {
-					seq = req.PacketBundle.Header.Header.SequenceID + 1
-				}
 				synthetic := &mysql.Response{
 					PacketBundle: mysql.PacketBundle{
 						Header: &mysql.PacketInfo{

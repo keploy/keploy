@@ -2,12 +2,14 @@ package replayer_test
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
 	"go.uber.org/zap"
@@ -154,4 +156,75 @@ func TestAQueryOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
 		{name: "its own SELECT with another literal", req: queryReq("SELECT id, name FROM small WHERE id = 5"), exact: "query-read-small", notExact: "query-read-small"},
 		{name: "a PREPARE of an UPDATE of another table", req: prepareReq("UPDATE kv SET v = ? WHERE id = ?"), exact: synthesized, notExact: "prep-update-users"},
 	})
+}
+
+// A PREPARE no recording answers gets the PREPARE_OK the matcher makes,
+// framed as the connection negotiated. A client without
+// CLIENT_DEPRECATE_EOF (go-sql-driver) reads the parameter definitions up
+// to an EOF packet; the made answer carried none, so such a client waited
+// for the rest of it forever: an app whose prepared statement changed since
+// it was recorded hung in PREPARE, and never sent the EXECUTE whose miss
+// fails its test. A client that negotiated it reads no EOF there.
+func TestAPrepareNoRecordingAnswersIsFramedAsTheConnectionNegotiated(t *testing.T) {
+	ts := diffBase.Add(time.Millisecond)
+	all := []*models.Mock{diffPrepareMock("prep-update-users", "c1", "UPDATE users SET name = ? WHERE id = ?", 4, ts)}
+	const serverCaps = uint32(mysql.CLIENT_PROTOCOL_41|mysql.CLIENT_PLUGIN_AUTH|mysql.CLIENT_SECURE_CONNECTION) | wire.CLIENT_DEPRECATE_EOF
+	for _, deprecateEOF := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deprecateEOF=%v", deprecateEOF), func(t *testing.T) {
+			mm := stageOwn(t, all, all, true)
+			ctx, dctx := poolConn("c1")
+			clientCaps := serverCaps
+			if !deprecateEOF {
+				clientCaps &^= wire.CLIENT_DEPRECATE_EOF
+			}
+			dctx.ServerCaps, dctx.ClientCaps = serverCaps, clientCaps
+			resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), prepareReq("UPDATE kv SET v = ? WHERE id = ?"), mm, dctx)
+			if err != nil || !ok {
+				t.Fatalf("match: ok %v, miss %q, err %v; want the PREPARE_OK the matcher makes", ok, miss, err)
+			}
+			conn, peer := net.Pipe()
+			t.Cleanup(func() { _ = conn.Close(); _ = peer.Close() })
+			dctx.LastOp, dctx.ServerGreetings = wire.NewLastOpMap(), wire.NewGreetings()
+			dctx.ServerGreetings.Store(conn, &mysql.HandshakeV10Packet{CapabilityFlags: serverCaps})
+			b, err := wire.EncodeToBinary(ctx, zap.NewNop(), &resp.PacketBundle, conn, dctx)
+			if err != nil {
+				t.Fatalf("encode the PREPARE_OK: %v", err)
+			}
+			// The packets a client reads: the PREPARE_OK, a definition per
+			// parameter, and, without CLIENT_DEPRECATE_EOF, the EOF.
+			var payloads [][]byte
+			for seq := byte(1); len(b) > 0; seq++ {
+				if len(b) < 4 {
+					t.Fatalf("%d bytes after %d packets: not a packet", len(b), len(payloads))
+				}
+				n := int(b[0]) | int(b[1])<<8 | int(b[2])<<16
+				if len(b) < 4+n || b[3] != seq {
+					t.Fatalf("packet %d: length %d of %d bytes left, sequence %d; want sequence %d", len(payloads), n, len(b)-4, b[3], seq)
+				}
+				payloads = append(payloads, b[4:4+n])
+				b = b[4+n:]
+			}
+			want := 3
+			if !deprecateEOF {
+				want = 4
+			}
+			if len(payloads) != want {
+				t.Fatalf("the PREPARE_OK is %d packets; want %d (PREPARE_OK, 2 parameter definitions%s)", len(payloads), want,
+					map[bool]string{false: ", EOF", true: ""}[deprecateEOF])
+			}
+			if p := payloads[0]; len(p) < 9 || p[0] != 0x00 || p[7] != 2 || p[8] != 0 {
+				t.Fatalf("the first packet %x is not a PREPARE_OK of 2 parameters", p)
+			}
+			for i, p := range payloads[1:3] {
+				if len(p) == 0 || p[0] == mysql.EOF {
+					t.Fatalf("parameter definition %d is %x", i, p)
+				}
+			}
+			if !deprecateEOF {
+				if p := payloads[3]; len(p) != 5 || p[0] != mysql.EOF {
+					t.Fatalf("the last packet %x is not the EOF that ends the parameter definitions", p)
+				}
+			}
+		})
+	}
 }
