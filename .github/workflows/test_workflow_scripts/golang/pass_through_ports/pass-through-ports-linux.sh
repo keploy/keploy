@@ -19,7 +19,11 @@
 #      service down: the set passes, its two dependency calls reaching the
 #      real dependency (the flag), its telemetry calls answered by keploy (the
 #      rule).
-#   3. Control, no flag: the dependency's call is recorded as a mock and the
+#   3. Ten pass-through ports, the dependency's the 10th: it is not recorded.
+#      Eleven: keploy record refuses to start, naming the dependency's port as
+#      the one the kernel's 10-port list cannot hold (before, it was dropped
+#      from the list without a word, and its calls recorded).
+#   4. Control, no flag: the dependency's call is recorded as a mock and the
 #      telemetry call is not; keploy test, both services down, passes.
 #
 # Readiness is each port listening, keploy's test files, and keploy's own
@@ -190,6 +194,40 @@ for spelling in pass-through-ports passThroughPorts; do
             fail "$spelling: keploy test --$spelling $DEP sent $((after - before)) calls to the real dependency, want 2"
     fi
 done
+
+# The kernel's pass-through list holds 10 ports. Ten port-only rules fit: the
+# dependency's port, the 10th, is passed through and not recorded.
+NINE=9001,9002,9003,9004,9005,9006,9007,9008,9009
+if record ten --pass-through-ports "$NINE,$DEP"; then
+    ! mocked '"n":7' || { fail "ten: keploy record recorded the dependency's call, the 10th pass-through port"; show_mocks; }
+fi
+
+# Eleven are refused at start, naming the one that does not fit. Before, the
+# 11th was left out of the kernel's list without a word, and its calls were
+# recorded.
+rm -rf keploy
+sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" --pass-through-ports "$NINE,9010,$DEP" \
+    --generateGithubActions=false --disable-tele >record-eleven.log 2>&1 </dev/null &
+REC_PID=$!
+if wait_listen "$APP" "$REC_PID"; then
+    fail "eleven: keploy record started with 11 pass-through ports, one more than the kernel holds"
+    for _ in 1 2; do curl -s "http://127.0.0.1:$APP/n" >/dev/null; done
+    wait_tests 2 "$REC_PID" || echo "eleven: keploy record wrote $(test_files) test cases"
+    stop_pid "$REC_PID"
+    own
+    if mocked '"n":7'; then
+        fail "eleven: the 11th pass-through port's calls were recorded"
+        show_mocks
+    fi
+else
+    wait "$REC_PID"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "eleven: keploy record refused the ports but exited 0"
+    grep -a "do not fit" record-eleven.log | grep -aqF "instead: $DEP." ||
+        { fail "eleven: keploy record stopped without naming port $DEP as the one that does not fit"; tail -n 5 record-eleven.log; }
+fi
+REC_PID=""
+own
 
 # Control: without the flag, the dependency's call is mocked, and the replay
 # needs neither service.
