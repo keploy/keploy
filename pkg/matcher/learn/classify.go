@@ -204,8 +204,9 @@ type Raw struct {
 	// F gave nothing there (fail closed).
 	live *Raw
 	// unseen: F served r changed in ways keploy keeps no one view of
-	// (ServedChanged); views are the views its serves gave the application,
-	// read as live is, none where one of them could not be read. A word a
+	// (ServedChanged), or with a view it could not read (ServedLive); views
+	// are the views its serves gave the application, read as live is, none
+	// where one of them could not be read. A word a
 	// value holds now that may stand in what F gave the application there is
 	// refused (unaccounted).
 	unseen bool
@@ -365,14 +366,23 @@ func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
 // came from. A word the value holds now that stands in the view and not in
 // the recorded text is refused, under ClassifyGiven too (unaccounted): the
 // recording did not give it there. A live that was not read from its mock,
-// or of another mock or call than r's, or a Raw F did not serve, gives no
-// view: keploy then reads that F gave nothing there (fail closed).
-// ServedAsRecorded, where an adapter also says it, reads first.
+// or of another mock or call than r's, is a view keploy could not read, as
+// ServedChanged reads one: F served r changed and keploy cannot tell what
+// it gave the application there, so every word a value holds now that may
+// stand there is refused (fail closed), never read as F having given
+// nothing there. Of a Raw F did not serve it says nothing. ServedAsRecorded,
+// where an adapter also says it, reads first, except past a view that could
+// not be read.
 func (r Raw) ServedLive(live Raw) Raw {
 	r.live, r.unseen, r.views = nil, false, nil
-	if r.served {
-		r.live, _ = r.viewOf(live)
+	if !r.served {
+		return r
 	}
+	if lv, ok := r.viewOf(live); ok {
+		r.live = lv
+		return r
+	}
+	r.asRecorded, r.unseen = false, true
 	return r
 }
 
@@ -408,7 +418,8 @@ func (r Raw) ServedChanged(views ...Raw) Raw {
 
 // viewOf is live read as F's view of r (ServedLive, ServedChanged); false
 // where it is none: a Raw of another mock or call than r's, or one that
-// could not be read from its mock.
+// could not be read from its mock. Both callers read false as a view that
+// could not be read (unseen, no views): fail closed.
 func (r Raw) viewOf(live Raw) (*Raw, bool) {
 	if live.mock != r.mock || live.call != r.call {
 		return nil, false

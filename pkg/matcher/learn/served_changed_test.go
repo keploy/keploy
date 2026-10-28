@@ -136,11 +136,14 @@ func TestServedChangedSaysNothingOfARecordingFDidNotServe(t *testing.T) {
 // the serve gave, so beside the other serves of a recording served in
 // differing ways (ServedChanged) a word only it gave would stand in none of
 // the views and pass as noise: a value the application copied from that
-// serve, unchecked at replay (FALSE GREEN). With ServedChanged, as the only
-// view or beside views that were read, every word the value holds now is
-// refused as one keploy could not read; with ServedLive the value is
-// learned as with no view. Under ClassifyGiven and ClassifyFollowing, in a
-// tracker's test and with a cache of no tracker.
+// serve, unchecked at replay (FALSE GREEN). As the one view (ServedLive),
+// read as no view, F would have given nothing there and the word would pass
+// as noise too (FALSE GREEN). With ServedChanged, as the only view or beside
+// views that were read, and with ServedLive, every word the value holds now
+// is refused as one keploy could not read. So is a view of another mock or
+// call than the recording's, which an adapter hands only by mistake: it is
+// no view keploy can read there. Under ClassifyGiven and ClassifyFollowing,
+// in a tracker's test and with a cache of no tracker.
 func TestAViewThatCouldNotBeReadIsNoView(t *testing.T) {
 	const path = "bind.$8"
 	// "6c7d" stands in chanceSrcLive alone: neither the recording
@@ -150,6 +153,11 @@ func TestAViewThatCouldNotBeReadIsNoView(t *testing.T) {
 	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
 	const unread = "where keploy could not read what it gave the application"
 	gone := func() (*models.Mock, error) { return nil, errors.New("the parked answer is gone") }
+	// Handed a view it could not read, a Raw says F served it changed, with
+	// no view: never as recorded, whatever the adapter said before.
+	if x := RawOf(jobsMock(chanceSrcRec, "5"), true).ServedAs(6).ServedAsRecorded().ServedLive(noSet(clockedDrifts()).LazyRawOf(jobsMock(chanceSrcLive, "5"), true, gone)); !x.unseen || x.views != nil || x.Live() || x.AsRecorded() {
+		t.Fatalf("served with a view keploy could not read: unseen %v, %d views, live %v, as recorded %v; want unseen, no view, not as recorded", x.unseen, len(x.views), x.Live(), x.AsRecorded())
+	}
 	for _, cl := range []struct {
 		name string
 		run  func(dc *DriftCache, raw []Raw) []Learned
@@ -168,11 +176,29 @@ func TestAViewThatCouldNotBeReadIsNoView(t *testing.T) {
 		for _, c := range []struct {
 			name  string
 			serve func(dc *DriftCache, x Raw) Raw
-			want  string // the refusal's words; "" learns as with no view
+			want  string // the refusal's words
 		}{
 			{"the one view (ServedLive)", func(dc *DriftCache, x Raw) Raw {
 				return x.ServedLive(dc.LazyRawOf(jobsMock(chanceSrcLive, "5"), true, gone))
-			}, ""},
+			}, unread},
+			{"the one view, where the adapter said too that F served the recording as recorded", func(dc *DriftCache, x Raw) Raw {
+				return x.ServedAsRecorded().ServedLive(dc.LazyRawOf(jobsMock(chanceSrcLive, "5"), true, gone))
+			}, unread},
+			{"the one view, read from a recording of another mock (ServedLive)", func(dc *DriftCache, x Raw) Raw {
+				m := jobsMock(chanceSrcLive, "5")
+				m.Name = "mock-7"
+				return x.ServedLive(dc.RawOf(m, true))
+			}, unread},
+			{"the one view, read from a recording of another call (ServedLive)", func(dc *DriftCache, x Raw) Raw {
+				m := jobsMock(chanceSrcLive, "5")
+				m.Kind = models.Kind("another call")
+				return x.ServedLive(dc.RawOf(m, true))
+			}, unread},
+			{"the only view of differing serves, read from a recording of another mock", func(dc *DriftCache, x Raw) Raw {
+				m := jobsMock(chanceSrcLive, "5")
+				m.Name = "mock-7"
+				return x.ServedChanged(dc.RawOf(m, true))
+			}, unread},
 			{"the only view of differing serves", func(dc *DriftCache, x Raw) Raw {
 				return x.ServedChanged(dc.LazyRawOf(jobsMock(chanceSrcLive, "5"), true, gone))
 			}, unread},
@@ -204,10 +230,7 @@ func TestAViewThatCouldNotBeReadIsNoView(t *testing.T) {
 				if tracked {
 					at += ", in a tracker's test"
 				}
-				switch {
-				case c.want == "" && !reflect.DeepEqual(got, noView):
-					t.Errorf("FALSE GREEN? %s: an unread view learned %s (%q), want as with no view: %s (%q)", at, got[0].Kind, got[0].Why, noView[0].Kind, noView[0].Why)
-				case c.want != "" && (got[0].Kind != KindUnaccounted || !strings.Contains(got[0].Why, c.want)):
+				if got[0].Kind != KindUnaccounted || !strings.Contains(got[0].Why, c.want) {
 					t.Errorf("FALSE GREEN? %s: an unread view learned %s (%q), want refused: %q", at, got[0].Kind, got[0].Why, c.want)
 				}
 			}
