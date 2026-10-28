@@ -15,9 +15,9 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mocknoise"
 	mysqlutils "go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/utils"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/wire"
-	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/schemanoise"
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/models/mysql"
@@ -354,12 +354,13 @@ type matchOptions struct {
 // store that marks the command's round but cannot hold it reads nothing for
 // it, and the miss says why (integrations.UnheldWhy).
 //
-// A command the matcher answered nothing for, under exact serving, that
+// A command no recording matched exactly, under exact serving, that
 // repeats a recording of the open test that judging marked as the
 // application's background work and that already answered in its window, is
 // answered again with that recording, unchecked, and reported to dst's
-// report as such (backgroundAgain): not a miss.
-func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, dst string, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
+// report as such (backgroundAgain): not a miss. matchCommandWith asks it
+// before every miss a COM_QUERY or COM_STMT_EXECUTE can end in.
+func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, dst string, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string) (*mysql.Response, bool, *mockMiss, error) {
 	call := integrations.MarkCallRound(mockDb)
 	db, restaged := integrations.HoldToRound(mockDb, call)
 	var opts matchOptions
@@ -405,13 +406,6 @@ func matchCommand(ctx context.Context, logger *zap.Logger, req mysql.Request, mo
 	// nothing for it (integrations.HoldToRound fails closed): the miss says
 	// why.
 	unheld := integrations.UnheldWhy(db)
-	// A miss the matcher decided before its answers by score (no candidate
-	// left, say) is asked the same.
-	if !ok && err == nil {
-		if again := opts.again(); again != nil {
-			return answerAgain(again), true, nil, nil
-		}
-	}
 	if !ok && (err == nil || errors.Is(err, errConsumeRefused)) && (restaged() || unheld != "") {
 		// A consume the hold refused is the restage's miss too.
 		err = nil
@@ -448,7 +442,7 @@ func (e *refusedConsume) Unwrap() error { return errConsumeRefused }
 const restagedCommandNote = "keploy replay staged a test set again while it decided this command, so keploy answered it with no recording: a command is never answered with, nor compared with, a recording of a staging made after it began."
 
 // matchCommandWith is matchCommand with test options.
-func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *schemanoise.Engine, userBodyNoise map[string][]string, opts matchOptions) (*mysql.Response, bool, *mockMiss, error) {
+func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request, mockDb integrations.MockMemDb, decodeCtx *wire.DecodeContext, noiseEngine *mocknoise.Engine, userBodyNoise map[string][]string, opts matchOptions) (*mysql.Response, bool, *mockMiss, error) {
 	// Precompute string constants once (avoid frequent map lookups)
 	var (
 		sCOM_QUIT       = mysql.CommandStatusToString(mysql.COM_QUIT)
@@ -3301,7 +3295,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 	updatedMock.TestModeInfo.IsFiltered = false
 	updatedMock.TestModeInfo.SortOrder = pkg.GetNextSortNum()
 	if len(detectedNoise) > 0 {
-		updatedMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
+		updatedMock.Spec.ReqBodyNoise = mocknoise.MergeLearned(updatedMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 
 	lifetime := updatedMock.TestModeInfo.Lifetime
@@ -3326,7 +3320,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 		}
 		used := *matchedMock
 		if len(detectedNoise) > 0 {
-			used.Spec.ReqBodyNoise = schemanoise.MergeLearned(used.Spec.ReqBodyNoise, detectedNoise)
+			used.Spec.ReqBodyNoise = mocknoise.MergeLearned(used.Spec.ReqBodyNoise, detectedNoise)
 		}
 		return mockDb.MarkMockAsUsed(used)
 	}
@@ -3354,7 +3348,7 @@ func updateMock(ctx context.Context, logger *zap.Logger, matchedMock *models.Moc
 	// the noise gets reported on the consumed per-test mock (mirrors HTTP).
 	deleteMock := *matchedMock
 	if len(detectedNoise) > 0 {
-		deleteMock.Spec.ReqBodyNoise = schemanoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
+		deleteMock.Spec.ReqBodyNoise = mocknoise.MergeLearned(deleteMock.Spec.ReqBodyNoise, detectedNoise)
 	}
 	if mockDb.DeleteFilteredMock(deleteMock) {
 		return true

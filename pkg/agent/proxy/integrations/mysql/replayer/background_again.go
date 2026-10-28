@@ -30,9 +30,11 @@ import (
 //
 // Such a command is answered again with the marked recording it repeats,
 // unchecked, and reported as such (models.AnswerBackgroundAgain, naming the
-// recording): it counts against no test. It is asked only after the matcher
-// answered nothing, so whatever answered the command before a mark still
-// does.
+// recording): it counts against no test. It is asked only once the
+// matcher's exact matches found nothing, so whatever answered the command
+// exactly before a mark still does; and before its answers by score or by
+// another parameter's recording, which would spend a recording of the
+// test's own that a later command needs.
 //
 // What repeats a recording is what the matcher's exact match reads, never
 // its scores: a COM_QUERY with the same statement (matchQueryLive: the
@@ -88,7 +90,10 @@ func backgroundAgain(logger *zap.Logger, req mysql.Request, mockDb integrations.
 // recorded, as backgroundAgain reads it.
 func repeats(logger *zap.Logger, mk *models.Mock, req mysql.Request, decodeCtx *wire.DecodeContext) bool {
 	recorded := mk.Spec.MySQLRequests[0].PacketBundle
-	if recorded.Header == nil || req.Header == nil || recorded.Header.Type != req.Header.Type {
+	// Which command each side is, is its message's type (only a COM_QUERY
+	// decodes to a QueryPacket, only a COM_STMT_EXECUTE to a
+	// StmtExecutePacket), and both matchers compare the header's type too.
+	if recorded.Header == nil || req.Header == nil {
 		return false
 	}
 	switch act := req.Message.(type) {
