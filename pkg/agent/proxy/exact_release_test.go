@@ -1,14 +1,18 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/matcher/learn"
 	"go.keploy.io/server/v3/pkg/models"
@@ -97,6 +101,107 @@ func TestASetsHTTPRecordingsGoWhenTheNextSetIsStaged(t *testing.T) {
 			if code, body := send(fmt.Sprintf("/between/%d", i)); code != http.StatusOK || body != fmt.Sprintf(`{"between":"%d-%d"}`, k, i) {
 				t.Fatalf("set %d: pool call %d between tests got %d %s", k, i, code, body)
 			}
+		}
+	}
+	if misses, _ := p.GetMockErrors(context.Background()); len(misses) != 0 {
+		t.Fatalf("misses %+v", misses)
+	}
+}
+
+// sendSettled is r3SendVia, returning once the parser that answered the call
+// has returned too: a parser that saw the app hang up retries its empty
+// read for a while (util.ReadBytes), holding what it served until then.
+func sendSettled(t *testing.T, h integrations.Integrations, p *Proxy, mm *MockManager, request string) (int, string) {
+	t.Helper()
+	app, agentEnd := net.Pipe()
+	ctx := models.WithMockMismatchReporter(context.Background(), p.sendMockNotFoundError)
+	ctx = learn.WithTracker(ctx, p.learnTracker)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = h.MockOutgoing(ctx, agentEnd, &models.ConditionalDstCfg{}, mm, models.OutgoingOptions{})
+		_ = agentEnd.Close()
+	}()
+	if _, err := app.Write([]byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(app), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	_ = app.Close()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the parser that answered the call never returned")
+	}
+	return resp.StatusCode, string(b)
+}
+
+// An ended test's recordings go with the learn tracker's end of the test,
+// not at its next begin: keploy mock replay reads each test's own as the
+// test opens, and between two tests nothing needs the ended test's view.
+// Four tests of 64 MiB of their own recordings each are served in turn on one
+// manager, with the learn tracker the agent's proxy steps at each test's
+// begin and end. Each test makes one call, of its small recording; its big
+// ones answer none (a test that failed early), so neither the tracker nor
+// the staging's take log holds them. Then the pool's view is served and the
+// tracker ends the test, as the agent ends one. The live heap then holds under
+// half a test's recordings above where the run began. It held the whole test
+// where the round kept the ended test's view bound to the tracker's test
+// number until the tracker's next begin (roundState.bound). Run it on a box.
+func TestAnEndedTestsRecordingsGoWithTheTrackersEnd(t *testing.T) {
+	const tests, pieces, piece = 4, 4, 16 << 20
+	const testSize = pieces * piece
+	t.Setenv(provenswitch.Env, "1")
+	p := startedDrainProxy(t, 100)
+	p.learnTracker = learn.NewTracker()
+	h := httpint.New(zap.NewNop())
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p.setMockManager(mm)
+	t.Cleanup(func() { p.setMockManager(nil) })
+	now := time.Now()
+	start := func(k int) time.Time { return now.Add(time.Duration(k+1) * time.Minute) }
+	// The pool: one call between each test and the next.
+	var pool []*models.Mock
+	var poolNames []string
+	var windows []models.TestWindow
+	for k := 0; k < tests; k++ {
+		windows = append(windows, models.TestWindow{TestCase: fmt.Sprintf("test-%d", k), Start: start(k), End: start(k).Add(30 * time.Second)})
+		pool = append(pool, r3Mock(fmt.Sprintf("mock-pool-%d", k), start(k).Add(45*time.Second), "GET", fmt.Sprintf("/pool/%d", k), "", fmt.Sprintf(`{"pool":%d}`, k)))
+		poolNames = append(poolNames, fmt.Sprintf("mock-pool-%d", k))
+	}
+	mm.SeedRecordedWindows(windows)
+	mm.SetMocksWithWindow(nil, pool, models.BaseTime, now.Add(time.Hour))
+	mm.ServeExactPool(models.PoolKeyNone, poolNames)
+	// open serves test k its own recordings, read as the test opens: its
+	// small one, then its big ones, slices of one backing array, so a big
+	// recording of the test kept anywhere keeps the whole test's bytes.
+	open := func(k int) {
+		backing := strings.Repeat(string(rune('a'+k)), testSize)
+		owned := []*models.Mock{r3Mock(fmt.Sprintf("mock-%d-own", k), start(k).Add(time.Second), "GET", fmt.Sprintf("/own/%d", k), "", fmt.Sprintf(`{"own":%d}`, k))}
+		for i := 0; i < pieces; i++ {
+			owned = append(owned, r3Mock(fmt.Sprintf("mock-%d-%d", k, i), start(k).Add(time.Duration(i+2)*time.Second), "GET", fmt.Sprintf("/big/%d/%d", k, i), "", backing[i*piece:(i+1)*piece]))
+		}
+		mm.ServeExactTest(fmt.Sprintf("test-%d", k), owned)
+	}
+	begin := liveHeap()
+	for k := 0; k < tests; k++ {
+		p.ContinueTestErrorCapture()
+		open(k)
+		if code, body := sendSettled(t, h, p, mm, httpGet(fmt.Sprintf("/own/%d", k))); code != http.StatusOK || body != fmt.Sprintf(`{"own":%d}`, k) {
+			t.Fatalf("test %d: its own call got %d %s", k, code, body)
+		}
+		mm.ServeExactPool(models.PoolKeyNone, poolNames)
+		p.EndTestErrorCapture()
+		if held := float64(liveHeap()) - float64(begin); held > testSize/2 {
+			t.Fatalf("test %d ended: the live heap holds %d MiB over the run's start, %.2f tests' recordings of %d MiB: an ended test's are kept", k, int64(held)>>20, held/testSize, testSize>>20)
+		}
+		if code, body := sendSettled(t, h, p, mm, httpGet(fmt.Sprintf("/pool/%d", k))); code != http.StatusOK || body != fmt.Sprintf(`{"pool":%d}`, k) {
+			t.Fatalf("after test %d: the pool's call got %d %s", k, code, body)
 		}
 	}
 	if misses, _ := p.GetMockErrors(context.Background()); len(misses) != 0 {
