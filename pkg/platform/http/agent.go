@@ -4428,6 +4428,13 @@ func (a *AgentClient) MakeAgentReadyForDockerCompose(ctx context.Context) (retEr
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				a.logger.Debug("Successfully marked agent as ready")
+				// A docker-mode agent is given the names its replay's
+				// networks answer once it takes its release, not only at a
+				// test set's start (MockOutgoing): a launcher that never
+				// calls MockOutgoing, as enterprise's in-Pod replay stack
+				// (whose agent k8s-proxy drives), would otherwise leave it
+				// answering its own network's names itself.
+				a.pushNetworkNames(parent)
 				return nil
 			}
 			// A CA setup failure is latched in the agent (pTls.MarkCAFailed):
