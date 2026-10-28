@@ -1448,6 +1448,23 @@ func TestAMissNamesWhatDiffersWithoutValues(t *testing.T) {
 		Differs: []string{"body.users.kqzx9w.role"}}}}, nil, time.Time{}, "")
 	require.Contains(t, raw, "POST /charge had no recorded answer (body.users.{}.role differs)")
 
+	// A call that differs in more than maxDiffersInline fields names that
+	// many, and how many more the report names, when the reason names the
+	// report; without one, every field.
+	var many []string
+	for i := 0; i < maxDiffersInline+3; i++ {
+		name := string(rune('a' + i%26))
+		if i >= 26 {
+			name += name
+		}
+		many = append(many, "body."+name)
+	}
+	wide := models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: many}
+	bounded := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{wide}}, nil, time.Time{}, "keploy/reports/r/replay.yaml")
+	require.Contains(t, bounded, "body.y and 3 more differ; all in Details). Details: keploy/reports/r/replay.yaml")
+	require.NotContains(t, bounded, "body.z")
+	require.Contains(t, evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{wide}}, nil, time.Time{}, ""), "body.aa and body.bb differ)")
+
 	one := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "POST /charge", Differs: []string{"body.amount"}}}}, nil, time.Time{}, "")
 	require.Contains(t, one, "POST /charge had no recorded answer (body.amount differs)")
 	two := evidenceReason("t", &models.ScopeEvidence{Misses: []models.UnmatchedCall{{Protocol: "HTTP", ActualSummary: "GET /x", Differs: []string{"host", "header.accept"}}}}, nil, time.Time{}, "")

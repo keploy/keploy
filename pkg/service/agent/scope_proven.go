@@ -1420,7 +1420,7 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		if before(m) {
 			// Where it was made is not known: a miss is filed by the view
 			// served when it is filed, which may be after its own test.
-			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs), report))
 			continue
 		}
 		switch m.Kind {
@@ -1432,12 +1432,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
-				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+				what = append(what, missText(m)+", made as this test ended, had no recorded answer"+differsText(models.FieldShapes(m.Differs), report))
 				continue
 			}
-			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+", made outside every test before this one began, had no recorded answer"+differsText(models.FieldShapes(m.Differs), report))
 		default:
-			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs)))
+			what = append(what, missText(m)+" had no recorded answer"+differsText(models.FieldShapes(m.Differs), report))
 		}
 	}
 	unmade := append([]string(nil), ev.Unconsumed...)
@@ -1492,13 +1492,21 @@ func missText(m models.UnmatchedCall) string {
 	return s
 }
 
+// maxDiffersInline is how many differing fields a miss's reason names when
+// the run's report, which names every one, is named after it (Details:).
+const maxDiffersInline = 25
+
 // differsText names, for a miss's reason, every field in which the call
 // differed from its closest recording: " (body.amount differs)", " (host and
 // header.accept differ)", " (a, b, c and d differ)"; "" for none. None is
 // left out: when two changes are in one call, the one left out could be the
-// one that matters.
-func differsText(fields []string) string {
+// one that matters. A call that differs in more than maxDiffersInline
+// fields, of a run whose report is named, names that many and how many more
+// the report has, so the line stays bounded.
+func differsText(fields []string, report string) string {
 	switch n := len(fields); {
+	case report != "" && n > maxDiffersInline:
+		return fmt.Sprintf(" (%s and %d more differ; all in Details)", strings.Join(fields[:maxDiffersInline], ", "), n-maxDiffersInline)
 	case n == 0:
 		return ""
 	case n == 1:
