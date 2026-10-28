@@ -534,7 +534,9 @@ func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAs
 
 // eui's role binding (eui-t2 GAPS.md G7), in a layout to the second: a
 // GraphQL expiresAt the application builds as its call's clock plus thirty
-// days, cut to the second, beside a login answer (mock-1; record's full round
+// days, cut to the second (written to the second, or to the millisecond with
+// the milliseconds zeroed, "2026-11-26T16:59:10.000Z", as a web app's
+// GraphQL role binding writes it), beside a login answer (mock-1; record's full round
 // gave mock-9 in its place) whose Set-Cookie Expires is the login's clock
 // plus thirty days, six seconds earlier. A word of the value (the minute
 // "59") stands in the cookie, so the value read as a variable of mock-1 at
@@ -560,8 +562,9 @@ func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffs
 			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
 		}}
 	}
+	layout := time.RFC3339
 	leaf := func(at time.Time) Leaf {
-		return Leaf{Path: p, Noise: p, Type: String, Value: at.Truncate(time.Second).UTC().Format(time.RFC3339)}
+		return Leaf{Path: p, Noise: p, Type: String, Value: at.Truncate(time.Second).UTC().Format(layout)}
 	}
 	// A run: its test began at began, logged in at began+900ms, and made the
 	// call at began+7s, its window from 300ms before; the app read its clock
@@ -590,59 +593,66 @@ func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffs
 		}
 		return classify(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: leaf(value(f))}}, Shape{Leaves: map[string]Leaf{p: leaf(value(r))}}, call(r), earlier, raw, nil, w, nil)[0]
 	}
-	for _, f := range []struct {
-		name string
-		run  run
-	}{
-		{"a full round in one minute", run{began: time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}},
-		{"a full round across a minute", run{began: time.Date(2026, 10, 27, 17, 1, 56, 300_000_000, time.UTC)}},
+	for _, lay := range []struct{ name, layout string }{
+		{"to the second", time.RFC3339},
+		{"to the millisecond, the milliseconds zeroed", "2006-01-02T15:04:05.000Z"},
 	} {
-		t.Run(f.name, func(t *testing.T) {
-			ln := learn(rec, f.run, true, true)
-			o, ok := ln.Clock()
-			if ln.Kind != KindClockOffset || !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
-				t.Fatalf("%s Offset=%+v from %+v held %q (%s); want the clock plus thirty days, checked since the test began", ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
-			}
-			for _, c := range []struct {
-				name string
-				at   func(x run) time.Time
-				want bool
-			}{
-				{"replay inside its test", value, true},
-				{"replay that keeps the recorded value", func(run) time.Time { return value(rec) }, false},
-				{"replay with a time to live a day longer", func(x run) time.Time { return value(x).Add(24 * time.Hour) }, false},
-				{"replay thirty days after a read a day before its test", func(x run) time.Time { return x.began.Add(month - 24*time.Hour) }, false},
-			} {
-				for _, base := range []time.Duration{0, 800 * time.Millisecond} {
-					x := run{began: time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC).Add(base)}
-					if ok, why := CheckClockRead(p, o, leaf(c.at(x)), span(x, true), true); ok != c.want {
-						t.Fatalf("%s (%v past a second): CheckClockRead = %v (%s); want %v", c.name, base, ok, why, c.want)
+		layout = lay.layout
+		for _, f := range []struct {
+			name string
+			run  run
+		}{
+			{"a full round in one minute", run{began: time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}},
+			{"a full round across a minute", run{began: time.Date(2026, 10, 27, 17, 1, 56, 300_000_000, time.UTC)}},
+		} {
+			t.Run(lay.name+"/"+f.name, func(t *testing.T) {
+				ln := learn(rec, f.run, true, true)
+				o, ok := ln.Clock()
+				if ln.Kind != KindClockOffset || !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
+					t.Fatalf("%s Offset=%+v from %+v held %q (%s); want the clock plus thirty days, checked since the test began", ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+				}
+				for _, c := range []struct {
+					name string
+					at   func(x run) time.Time
+					want bool
+				}{
+					{"replay inside its test", value, true},
+					{"replay that keeps the recorded value", func(run) time.Time { return value(rec) }, false},
+					{"replay with a time to live a day longer", func(x run) time.Time { return value(x).Add(24 * time.Hour) }, false},
+					{"replay thirty days after a read a day before its test", func(x run) time.Time { return x.began.Add(month - 24*time.Hour) }, false},
+				} {
+					for _, base := range []time.Duration{0, 800 * time.Millisecond} {
+						x := run{began: time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC).Add(base)}
+						if ok, why := CheckClockRead(p, o, leaf(c.at(x)), span(x, true), true); ok != c.want {
+							t.Fatalf("%s (%v past a second): CheckClockRead = %v (%s); want %v", c.name, base, ok, why, c.want)
+						}
 					}
 				}
-			}
-			for _, c := range []struct {
-				name             string
-				r, f             run
-				began, following bool
-			}{
-				{"the rule's absence (ClassifyGiven)", rec, f.run, true, false},
-				{"a call whose window knows no test begin", rec, f.run, false, true},
-				{"a value its own window does not hold", run{began: rec.began, read: -2 * time.Second}, run{began: f.run.began, read: -2 * time.Second}, true, true},
-			} {
-				if ln := learn(c.r, c.f, c.began, c.following); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "59" {
-					t.Fatalf("%s: %s Offset=%+v from %+v held %q (%s); want the variable of mock-1 holding \"59\", as before", c.name, ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+				for _, c := range []struct {
+					name             string
+					r, f             run
+					began, following bool
+				}{
+					{"the rule's absence (ClassifyGiven)", rec, f.run, true, false},
+					{"a call whose window knows no test begin", rec, f.run, false, true},
+					{"a value its own window does not hold", run{began: rec.began, read: -2 * time.Second}, run{began: f.run.began, read: -2 * time.Second}, true, true},
+				} {
+					if ln := learn(c.r, c.f, c.began, c.following); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "59" {
+						t.Fatalf("%s: %s Offset=%+v from %+v held %q (%s); want the variable of mock-1 holding \"59\", as before", c.name, ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+					}
 				}
-			}
-			// The re-read sets aside the searches for a source only: a
-			// refusal of the request's checks stands there (a test case's
-			// own request keploy could not read, which the value may have
-			// come from), and the copy stays the variable.
-			unread := Earlier{Mock: givenPlace(""), Given: true, Unread: unsentRequest, At: rec.began}
-			if ln := learn(rec, f.run, true, true, unread); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "59" {
-				t.Fatalf("a test case's request keploy could not read: %s Offset=%+v from %+v held %q (%s); want the variable of mock-1 holding \"59\", as before", ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
-			}
-		})
+				// The re-read sets aside the searches for a source only: a
+				// refusal of the request's checks stands there (a test case's
+				// own request keploy could not read, which the value may have
+				// come from), and the copy stays the variable.
+				unread := Earlier{Mock: givenPlace(""), Given: true, Unread: unsentRequest, At: rec.began}
+				if ln := learn(rec, f.run, true, true, unread); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "59" {
+					t.Fatalf("a test case's request keploy could not read: %s Offset=%+v from %+v held %q (%s); want the variable of mock-1 holding \"59\", as before", ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+				}
+			})
+		}
 	}
+	layout = time.RFC3339
 	// Only the copy rule's re-read sets those searches aside. A word of the
 	// value that only record's full round's login holds (the recording's
 	// gave another expiry) binds no copy, so no re-read: the first reading's
