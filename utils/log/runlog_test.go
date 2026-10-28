@@ -22,7 +22,7 @@ func TestRouteToRunLogKeepsInfoOffTheConsole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	routed, undo := RouteToRunLog(logger, f, true)
 	routed.Info("Proxy started at port:16789")
 	routed.Warn("no recorded mock matched an outgoing call")
@@ -60,7 +60,7 @@ func TestRunLogWriterSplitsAnAgentsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, undo := RouteToRunLog(zap.NewNop(), f, true)
 	defer undo()
 	var console bytes.Buffer
@@ -95,7 +95,7 @@ func TestARunLogThatIsNotQuietKeepsTheConsole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	routed, undo := RouteToRunLog(logger, f, false)
 	routed.Info("Proxy started at port:16789")
 	undo()
@@ -105,5 +105,47 @@ func TestARunLogThatIsNotQuietKeepsTheConsole(t *testing.T) {
 	}
 	if RunLogWriter(&console) != &console {
 		t.Fatal("an agent's output is split only under a quiet run log")
+	}
+}
+
+// An agent's crash reaches the console, even right after an info line: a
+// line with no level that is not indented (a panic, a signal, a goroutine's
+// header) goes to console, and the indented frames under it follow it. An
+// info entry's indented next line still follows the entry. A last line with
+// no line break ("fatal error: …" as the process dies) is written once the
+// agent has exited (FlushRunLogWriter).
+func TestRunLogWriterKeepsACrashOnTheConsole(t *testing.T) {
+	LogCfg = defaultLogCfg()
+	f, err := os.Create(filepath.Join(t.TempDir(), "keploy.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	_, undo := RouteToRunLog(zap.NewNop(), f, true)
+	defer undo()
+	var console bytes.Buffer
+	w := RunLogWriter(&console)
+	info := "🐰 Keploy(agent): 2026-10-27T10:30:33Z\tINFO\tProxy started at port:16789\n\t{\"port\": 16789}\n"
+	crash := "panic: runtime error: invalid memory address or nil pointer dereference\n" +
+		"[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x4a5b6c]\n" +
+		"\n" +
+		"goroutine 42 [running]:\n" +
+		"main.serve(0x0)\n" +
+		"\t/src/agent.go:12 +0x1d\n"
+	if _, err := w.Write([]byte(info + crash + "fatal error: unexpected signal")); err != nil {
+		t.Fatal(err)
+	}
+	if err := FlushRunLogWriter(w); err != nil {
+		t.Fatal(err)
+	}
+	if err := FlushRunLogWriter(&console); err != nil {
+		t.Fatal(err)
+	}
+	if console.String() != crash+"fatal error: unexpected signal\n" {
+		t.Fatalf("the console holds %q", console.String())
+	}
+	raw, _ := os.ReadFile(f.Name())
+	if string(raw) != info {
+		t.Fatalf("the run log holds %q", raw)
 	}
 }

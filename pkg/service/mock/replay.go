@@ -797,7 +797,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 	if isolated {
 		m.logger.Info("this replay ran with every dependency answered from the recording",
 			zap.String("mock-set", name), zap.Int("served", counts.consumed))
-	} else if !(provenswitch.On() && replaysJudged.Load()) {
+	} else if !provenswitch.On() || !replaysJudged.Load() {
 		m.logger.Info("this replay did not prove the tests run with the dependencies off",
 			zap.String("mock-set", name), zap.String("reason", isolationNote))
 	}
@@ -1921,10 +1921,12 @@ func logMiss(logger *zap.Logger, miss models.UnmatchedCall) {
 		msg = "a connection ended with nothing sent: if its client was waiting for its server to speak first, no recorded mock answered it"
 	}
 	if provenswitch.On() {
-		logger.Warn(msg,
-			zap.String("protocol", miss.Protocol),
-			zap.String("call", models.CallShape(miss.Protocol, miss.ActualSummary)),
-			zap.String("destination", miss.Destination))
+		// A protocol CallShape has no shape for is told without a call.
+		fields := []zap.Field{zap.String("protocol", miss.Protocol)}
+		if call := models.CallShape(miss.Protocol, miss.ActualSummary); call != "" {
+			fields = append(fields, zap.String("call", call))
+		}
+		logger.Warn(msg, append(fields, zap.String("destination", miss.Destination))...)
 		return
 	}
 	next := miss.NextSteps
