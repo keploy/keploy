@@ -2,15 +2,21 @@ package mockdb
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml"
+	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
+	yamlLib "gopkg.in/yaml.v3"
 )
 
 // DeleteMocks takes the named mocks out of the set's mock file in the format
@@ -185,4 +191,160 @@ func TestDeleteMocks_HeapDoesNotScaleWithTheMockFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// DeleteMocks copies every mock it keeps as it was read: a mock saved by hand
+// (its own indent, key order, quoting and comments, a field this keploy does
+// not know) stays byte-identical, in yaml and in json, so what a recording's
+// hash reads for the mocks that stay does not change when another is taken
+// out. Encoded again, neither hand-written mock would read the same. Both
+// passes copy: taking out mock-b alone is one pass; asking for mock-a too,
+// which the kept mock-c requires, is a second pass that keeps it.
+func TestDeleteMocksLeavesAHandWrittenMockByteIdentical(t *testing.T) {
+	prev := models.RegisterMockDeps(models.HTTP, depsByMetadata)
+	t.Cleanup(func() { models.RegisterMockDeps(models.HTTP, prev) })
+	handA := `kind: Http
+# written by hand: key order, indent and quoting are its own
+version: api.keploy.io/v1beta1
+name: mock-a
+spec:
+  futureField: kept as written
+  metadata: {name: Http, note: "hand-written", provides: lease}
+  req: {method: GET, url: 'http://svc/a', header: {Accept: "*/*"}, body: ""}
+  resp:
+    status_code: 200
+    header: {}
+    body: |
+      {"a": 1}
+`
+	auto := "version: api.keploy.io/v1beta1\nkind: Http\nname: mock-b\nspec:\n    metadata: {}\n    req:\n        method: GET\n        url: http://svc/b\n        header: {}\n        body: \"\"\n    resp:\n        status_code: 204\n        header: {}\n        body: \"\"\n"
+	handC := "kind: Http\nname: mock-c # trailing comment\nversion: api.keploy.io/v1beta1\nspec:\n  metadata: {requires: lease}\n  req: {method: POST, url: \"http://svc/c\", header: {}, body: \"x=1\"}\n  resp: {status_code: 201, header: {}, body: \"\"}\n"
+	jsonA := `{"name":"mock-a", "kind":"Http","version":"api.keploy.io/v1beta1","spec":{"futureField":"kept as written","metadata":{"name":"Http","provides":"lease"},"req":{"method":"GET","url":"http://svc/a","header":{"Accept":"*/*"},"body":""},"resp":{"status_code":200,"header":{},"body":"{\"a\": 1}\n"}}}`
+	jsonB := `{"version":"api.keploy.io/v1beta1","kind":"Http","name":"mock-b","spec":{"metadata":{},"req":{"method":"GET","url":"http://svc/b","header":{},"body":""},"resp":{"status_code":204,"header":{},"body":""}}}`
+	jsonC := `{"kind":"Http", "name":"mock-c","version":"api.keploy.io/v1beta1","spec":{"metadata":{"requires":"lease"},"req":{"method":"POST","url":"http://svc/c","header":{},"body":"x=1"},"resp":{"status_code":201,"header":{},"body":""}}}`
+	cases := []struct {
+		format           yaml.Format
+		file, want       string
+		handWritten      []string
+		handWrittenNames []string
+	}{
+		{
+			format:           yaml.FormatYAML,
+			file:             "# my own mocks\n" + handA + "---\n" + auto + "---\n" + handC,
+			want:             utils.GetVersionAsComment() + handA + "---\n" + handC,
+			handWritten:      []string{handA, handC},
+			handWrittenNames: []string{"mock-a", "mock-c"},
+		},
+		{
+			format:           yaml.FormatJSON,
+			file:             jsonA + "\n" + jsonB + "\n" + jsonC + "\n",
+			want:             jsonA + "\n" + jsonC + "\n",
+			handWritten:      []string{jsonA, jsonC},
+			handWrittenNames: []string{"mock-a", "mock-c"},
+		},
+	}
+	for _, c := range cases {
+		for _, names := range [][]string{{"mock-b"}, {"mock-a", "mock-b"}} {
+			t.Run(fmt.Sprintf("%s/%v", c.format, names), func(t *testing.T) {
+				t.Setenv("KEPLOY_MOCK_FORMAT", "")
+				dir := t.TempDir()
+				path := filepath.Join(dir, pruneSet, "mocks."+c.format.FileExtension())
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(c.file), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				ys := NewWithFormat(zap.NewNop(), dir, "mocks", c.format)
+				// The row holds only if this keploy's encoder writes each
+				// hand-written mock differently.
+				byName := map[string]*models.Mock{}
+				for _, m := range readSetMocks(t, ys) {
+					byName[m.Name] = m
+				}
+				for i, name := range c.handWrittenNames {
+					m := byName[name]
+					if m == nil {
+						t.Fatalf("the fixture's %s does not decode", name)
+					}
+					if enc := encodedAgain(t, m, c.format); enc == c.handWritten[i] {
+						t.Fatalf("the fixture's %s is what the encoder writes; it must differ:\n%s", name, enc)
+					}
+				}
+				got, err := ys.DeleteMocks(context.Background(), pruneSet, names)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, []string{"mock-b"}) {
+					t.Fatalf("took out %v, want [mock-b]", got)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(after) != c.want {
+					t.Fatalf("the file after taking mock-b out:\n%s\nwant (the hand-written mocks as written):\n%s", after, c.want)
+				}
+				var left []string
+				for _, m := range readSetMocks(t, ys) {
+					left = append(left, m.Name)
+				}
+				if !reflect.DeepEqual(left, c.handWrittenNames) {
+					t.Fatalf("the file reads as %v, want %v", left, c.handWrittenNames)
+				}
+			})
+		}
+	}
+}
+
+// readSetMocks is every mock of pruneSet's mock file, decoded as a rewrite
+// reads it (nextDoc), by name.
+func readSetMocks(t *testing.T, ys *MockYaml) []*models.Mock {
+	t.Helper()
+	reader, err := yaml.NewMockReaderF(context.Background(), zap.NewNop(), filepath.Join(ys.MockPath, pruneSet), "mocks", ys.Format)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	var mocks []*models.Mock
+	for {
+		doc, readErr, decodeErr := nextDoc(reader, zap.NewNop(), false)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil || decodeErr != nil {
+			t.Fatalf("read the mock file: %v, %v", readErr, decodeErr)
+		}
+		if doc.verbatim {
+			t.Fatalf("the fixture's %q is not one keploy decodes", doc.name)
+		}
+		mocks = append(mocks, doc.mocks...)
+	}
+	sort.Slice(mocks, func(i, j int) bool { return mocks[i].Name < mocks[j].Name })
+	return mocks
+}
+
+// encodedAgain is m as this keploy's rewrite encodes one document of format.
+func encodedAgain(t *testing.T, m *models.Mock, format yaml.Format) string {
+	t.Helper()
+	if format == yaml.FormatJSON {
+		doc, handled, err := EncodeMockJSON(m, zap.NewNop())
+		if err != nil || !handled {
+			t.Fatalf("encode %s as json: handled %v, %v", m.Name, handled, err)
+		}
+		b, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	doc, err := EncodeMock(m, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := yamlLib.Marshal(&doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
