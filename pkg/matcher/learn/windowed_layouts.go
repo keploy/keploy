@@ -182,13 +182,14 @@ func digitRuns(n int) func(string) [][2]int {
 
 // maxMatchLen is the most bytes a match of re spans, -1 where it is
 // unbounded or re holds an empty-width assertion (a window could then read a
-// match its text's context decides).
+// match its text's context decides). It reads the parsed tree as written, so
+// a counted repetition keeps its count (OpRepeat).
 func maxMatchLen(re *regexp.Regexp) int {
 	p, err := syntax.Parse(re.String(), syntax.Perl)
 	if err != nil {
 		return -1
 	}
-	return syntaxMaxLen(p.Simplify())
+	return syntaxMaxLen(p)
 }
 
 func syntaxMaxLen(r *syntax.Regexp) int {
