@@ -718,11 +718,14 @@ func TestALateWakeUpComesOutOfTheNextWait(t *testing.T) {
 	}
 }
 
-// The TCP retry of a truncated answer may take what is left of the whole
-// exchange, not only the wait of the send it answers; when that budget runs
-// out the exchange moves on to its next send. The UDP answer is truncated and
-// the TCP server accepts but never answers.
-func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
+// truncatingUpstreamWithTCP is a fake upstream that answers every UDP query
+// truncated and accepts TCP on the same port. Each TCP connection's first
+// query is read, and read closes then (an event); the connection is then
+// answered with answer(query) when answer is set, and otherwise held open,
+// never answered. The row's cleanup closes every connection, so an exchange
+// a failed row left blocked on one ends.
+func truncatingUpstreamWithTCP(t *testing.T, answer func(q *dns.Msg) *dns.Msg) (host, port string, read <-chan struct{}) {
+	t.Helper()
 	u := startLossyUpstream(t, "127.0.0.1", func(u *lossyUpstream, seq int, q lossyQuery) {
 		m := new(dns.Msg)
 		m.SetReply(q.msg)
@@ -730,13 +733,16 @@ func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
 		wire, _ := m.Pack()
 		_, _ = u.pc.WriteTo(wire, q.from)
 	})
-	host, port, _ := net.SplitHostPort(u.addr)
+	host, port, _ = net.SplitHostPort(u.addr)
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		t.Skipf("the UDP port's TCP twin is taken: %v", err)
 	}
-	var held []net.Conn // accepted, held open, never answered
-	var heldMu sync.Mutex
+	gotRead := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var held []net.Conn
+	var serving sync.WaitGroup
 	accepting := make(chan struct{})
 	go func() {
 		defer close(accepting)
@@ -745,25 +751,58 @@ func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
 			if err != nil {
 				return
 			}
-			heldMu.Lock()
+			mu.Lock()
 			held = append(held, c)
-			heldMu.Unlock()
+			mu.Unlock()
+			serving.Add(1)
+			go func() {
+				defer serving.Done()
+				co := &dns.Conn{Conn: c}
+				q, err := co.ReadMsg()
+				if err != nil {
+					return
+				}
+				once.Do(func() { close(gotRead) })
+				if answer != nil {
+					_ = co.WriteMsg(answer(q))
+				}
+			}()
 		}
 	}()
-	defer func() {
+	t.Cleanup(func() {
 		_ = ln.Close()
 		<-accepting
+		mu.Lock()
 		for _, c := range held {
 			_ = c.Close()
 		}
-	}()
+		mu.Unlock()
+		serving.Wait()
+	})
+	return host, port, gotRead
+}
 
+// awaitTCPQueryRead waits until the fake upstream's TCP server has read the
+// exchange's query, or fails the row if the exchange ended first.
+func awaitTCPQueryRead(t *testing.T, read, ended <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-read:
+	case <-ended:
+		t.Fatalf("the exchange ended before the TCP server read its query")
+	}
+}
+
+// The TCP retry of a truncated answer may take what is left of the whole
+// exchange, not only the wait of the send it answers; when that budget runs
+// out the exchange moves on to its next send. The UDP answer is truncated and
+// the TCP server reads the query but never answers, and the budget runs out
+// only once the server has read the query (an event), so the retry is blocked
+// reading its answer when it does.
+func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
+	host, port, read := truncatingUpstreamWithTCP(t, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// Only an exchange whose TCP retry never ends meets the backstop: it
-	// then fails below instead of hanging.
-	backstop := time.AfterFunc(time.Minute, cancel)
-	defer backstop.Stop()
 	clock := newStepClock()
 	res, ended := runExchange(ctx, clock, "big.example.", []string{host}, port, []time.Duration{time.Second, 2 * time.Second})
 
@@ -774,13 +813,73 @@ func TestTheTCPRetryHasWhatIsLeftOfTheExchange(t *testing.T) {
 	if want := 3 * time.Second; tcp.d != want {
 		t.Fatalf("the TCP retry's budget is %s, want %s: what is left of the exchange, not the first send's wait", tcp.d, want)
 	}
+	awaitTCPQueryRead(t, read, ended)
 	tcp.fire <- time.Time{}
-	if send1 := clock.next(t, ended); send1.d != 3*time.Second {
-		t.Errorf("after the TCP budget ran out the next send waits %s, want 3s (until the schedule's end)", send1.d)
+	// Only a budget that does not end the blocked read meets the backstop:
+	// the row then fails instead of hanging.
+	backstop := time.NewTimer(time.Minute)
+	defer backstop.Stop()
+	select {
+	case send1 := <-clock.timers:
+		if send1.d != 3*time.Second {
+			t.Errorf("after the TCP budget ran out the next send waits %s, want 3s (until the schedule's end)", send1.d)
+		}
+	case <-ended:
+		t.Fatalf("the exchange ended when the TCP budget ran out, want its next send: %v", (<-res).err)
+	case <-backstop.C:
+		t.Fatalf("the TCP budget ran out while the retry was blocked reading, and the read did not end")
 	}
 	cancel()
 	if got := <-res; !errors.Is(got.err, context.Canceled) {
 		t.Errorf("exchange ended with %v, want the context's end", got.err)
+	}
+}
+
+// The agent's stop, while the TCP retry of a truncated answer is blocked
+// reading (the server has read the query, an event, and never answers), ends
+// the exchange at once: the retry neither outlives the stop nor waits out
+// what is left of its budget. The exchange's clock never fires, so only the
+// stop can end the read.
+func TestAStopEndsATCPRetryBlockedReading(t *testing.T) {
+	host, port, read := truncatingUpstreamWithTCP(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := newStepClock()
+	res, ended := runExchange(ctx, clock, "big.example.", []string{host}, port, []time.Duration{10 * time.Second, 20 * time.Second})
+	clock.next(t, ended) // the first send's wait, never fired
+	clock.next(t, ended) // the TCP retry's budget, never fired
+	awaitTCPQueryRead(t, read, ended)
+	cancel()
+	// Only a stop that does not end the blocked read meets the backstop:
+	// the row then fails instead of hanging.
+	backstop := time.NewTimer(time.Minute)
+	defer backstop.Stop()
+	select {
+	case got := <-res:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Errorf("exchange ended with %v, want the context's end", got.err)
+		}
+	case <-backstop.C:
+		t.Fatalf("the stop came while the TCP retry was blocked reading, and the exchange did not end")
+	}
+}
+
+// Only the TCP answer to this query counts: an answer over TCP with another
+// ID is not taken, as on the UDP path.
+func TestATCPAnswerToAnotherQueryDoesNotCount(t *testing.T) {
+	host, port, _ := truncatingUpstreamWithTCP(t, func(q *dns.Msg) *dns.Msg {
+		r := new(dns.Msg)
+		r.SetReply(q)
+		r.Id = q.Id + 1
+		r.Answer = append(r.Answer, &dns.A{Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("10.6.6.6")})
+		return r
+	})
+	clock := newStepClock()
+	res, ended := runExchange(context.Background(), clock, "big.example.", []string{host}, port, []time.Duration{time.Second})
+	clock.next(t, ended) // the first send's wait, never fired
+	clock.next(t, ended) // the TCP retry's budget, never fired: the answer with another ID ends the retry
+	if got := <-res; got.err == nil {
+		t.Fatalf("the exchange took a TCP answer to another query: %v", got.msg)
 	}
 }
 
