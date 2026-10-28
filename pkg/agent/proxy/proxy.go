@@ -489,6 +489,11 @@ type Proxy struct {
 	// network (inNetworkResolvers), the only ones a replay's DNS mock miss is
 	// forwarded to without an opt-in. Captured with dnsUpstreamServers.
 	dnsInNetworkServers []string
+	// dnsClusterDomain is an in-cluster agent's cluster DNS domain
+	// (clusterDomain, e.g. cluster.local), empty elsewhere: names under it
+	// are the replay network's own (networkOwnsName). Captured with
+	// dnsUpstreamServers.
+	dnsClusterDomain string
 	// allowEgressDNS is test.allowEgress naming models.AllowEgressDNS: a
 	// replay's DNS mock miss may then be forwarded to every dnsUpstreamServers
 	// entry, the host's and public resolvers included.

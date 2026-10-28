@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -116,17 +117,28 @@ func (p *Proxy) captureDNSUpstream() {
 	}
 	p.dnsUpstreamServers = filtered
 	p.dnsUpstreamPort = nsPort
-	// The same test routes/auth.go's inClusterAgent makes: a container
-	// (--is-docker) the kubelet started, which is the only kind that carries
-	// KUBERNETES_SERVICE_HOST.
-	inCluster := p.IsDocker && os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+	inCluster := agentInCluster(p.IsDocker, os.Getenv)
 	p.dnsInNetworkServers = inNetworkResolvers(filtered, p.IsDocker, inCluster, localNetworks())
+	p.dnsClusterDomain = ""
+	if inCluster {
+		p.dnsClusterDomain = clusterDomain(p.dnsSearch)
+	}
 	p.logger.Debug("captured upstream DNS resolvers for forward-on-miss",
 		zap.Strings("servers", p.dnsUpstreamServers),
 		zap.Strings("in_network", p.dnsInNetworkServers),
+		zap.String("cluster_domain", p.dnsClusterDomain),
 		zap.String("port", p.dnsUpstreamPort),
 		zap.Strings("search", p.dnsSearch))
 	p.logReplayDNSForwarding()
+}
+
+// agentInCluster is the test routes/auth.go's inClusterAgent makes: a
+// container (--is-docker) the kubelet started, which is the only kind that
+// carries KUBERNETES_SERVICE_HOST. A native agent on a machine that also has
+// it set (a CI runner pod, a shell inside a pod) is not in-cluster: its
+// resolv.conf is the machine's, so nothing there is inside the replay.
+func agentInCluster(isDocker bool, getenv func(string) string) bool {
+	return isDocker && getenv("KUBERNETES_SERVICE_HOST") != ""
 }
 
 // dockerEmbeddedDNS is the resolver docker writes into the resolv.conf of a
@@ -168,13 +180,21 @@ func inNetworkResolvers(servers []string, isDocker, inCluster bool, localNets []
 }
 
 // localNetworks lists the networks of this network namespace's own
-// non-loopback addresses. An error leaves the list empty, which only narrows
-// what a miss may be forwarded to.
+// non-loopback addresses (networksOf). An error leaves the list empty, which
+// only narrows what a miss may be forwarded to.
 func localNetworks() []*net.IPNet {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return nil
 	}
+	return networksOf(addrs)
+}
+
+// networksOf keeps the networks of addrs that a resolver inside the replay's
+// own network can sit on. Loopback is not one: a host-network agent's
+// resolv.conf naming 127.0.0.53 is the host's systemd-resolved, which
+// recurses to the host's upstreams. Link-local is not one either.
+func networksOf(addrs []net.Addr) []*net.IPNet {
 	var nets []*net.IPNet
 	for _, a := range addrs {
 		n, ok := a.(*net.IPNet)
@@ -195,13 +215,62 @@ func onNetwork(ip net.IP, nets []*net.IPNet) bool {
 	return false
 }
 
-// replayMissServers are the resolvers a replay's DNS mock miss is forwarded
-// to. Real egress beyond the replay's own network is opened only by a named
-// knob: test.allowEgress "dns", --global-passthrough, or mocking turned off,
-// which asks for real traffic by definition.
-func (p *Proxy) replayMissServers(mockingEnabled bool) []string {
+// clusterDomain reads the cluster's DNS domain from a pod's search list, whose
+// entries the kubelet writes as <namespace>.svc.<domain>, svc.<domain> and
+// <domain>. Empty when no entry names it (a pod whose dnsPolicy is not
+// ClusterFirst): no name is then known to be the cluster's own.
+func clusterDomain(search []string) string {
+	for _, s := range search {
+		s = strings.ToLower(strings.Trim(s, "."))
+		if d, ok := strings.CutPrefix(s, "svc."); ok && d != "" {
+			return d
+		}
+		if i := strings.Index(s, ".svc."); i >= 0 && i+len(".svc.") < len(s) {
+			return s[i+len(".svc."):]
+		}
+	}
+	return ""
+}
+
+// networkOwnsName reports whether name is one the replay's own network
+// answers itself, the only kind a DNS mock miss is forwarded to an in-network
+// resolver for. Docker's embedded resolver (127.0.0.11) and cluster DNS answer
+// their own names and recurse to the host's or public resolvers for every
+// other one, so forwarding any other name would still send it off the machine.
+//
+//   - A single-label name: a container, compose service or network alias, or
+//     a service in the pod's own namespace.
+//   - In a cluster, a name under the cluster's domain (clusterDomain), which
+//     cluster DNS answers itself: every service and pod name, and every
+//     search expansion under it (mysql.ns.svc.cluster.local).
+//
+// Every other name is answered as a native replay answers it. That includes
+// the dotted names docker also answers (<container>.<network>, a dotted
+// network alias): record them, or name "dns" in test.allowEgress.
+func (p *Proxy) networkOwnsName(name string) bool {
+	q := strings.ToLower(strings.TrimSuffix(dns.Fqdn(name), "."))
+	if q == "" {
+		return false
+	}
+	if !strings.Contains(q, ".") {
+		return true
+	}
+	d := p.dnsClusterDomain
+	return d != "" && (q == d || strings.HasSuffix(q, "."+d))
+}
+
+// replayMissServers are the resolvers a replay's DNS mock miss for name is
+// forwarded to: the in-network resolvers, and only for a name the replay's
+// own network owns (networkOwnsName). Real egress beyond the replay's own
+// network is opened only by a named knob: test.allowEgress "dns",
+// --global-passthrough, or mocking turned off, which asks for real traffic by
+// definition.
+func (p *Proxy) replayMissServers(mockingEnabled bool, name string) []string {
 	if !mockingEnabled || p.GlobalPassthrough || p.allowEgressDNS {
 		return p.dnsUpstreamServers
+	}
+	if !p.networkOwnsName(name) {
+		return nil
 	}
 	return p.dnsInNetworkServers
 }
@@ -232,11 +301,9 @@ func (p *Proxy) logReplayDNSForwarding() {
 			notAsked = append(notAsked, s)
 		}
 	}
-	if len(notAsked) == 0 {
-		return
-	}
-	p.logger.Info("a DNS mock miss in this replay is forwarded only to a resolver inside the replay's own network; the host's and public resolvers are not asked",
+	p.logger.Info("a DNS mock miss in this replay is forwarded only to a resolver inside the replay's own network, and only for a name that network owns (a single-label name, or one under the cluster domain); keploy answers every other name itself, and the host's and public resolvers are not asked",
 		zap.Strings("in_network_resolvers", p.dnsInNetworkServers),
+		zap.String("cluster_domain", p.dnsClusterDomain),
 		zap.Strings("not_asked", notAsked),
 		zap.String("opt_in", "test.allowEgress: ["+models.AllowEgressDNS+"] (or --allow-egress "+models.AllowEgressDNS+")"))
 }

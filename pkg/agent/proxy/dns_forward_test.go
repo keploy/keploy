@@ -84,10 +84,12 @@ func newProxyWithUpstream(t *testing.T, addr string, timeout time.Duration) *Pro
 		// the case forward-on-miss exists for: a resolver inside the
 		// replay's own network (inNetworkResolvers).
 		dnsInNetworkServers: []string{host},
-		dnsUpstreamPort:     port,
-		dnsForwardTimeout:   timeout,
-		dnsCache:            newDNSCache(),
-		recordedDNSMocks:    newRecordedDNSMocksCache(),
+		// The cluster's own names are the ones forwarded (networkOwnsName).
+		dnsClusterDomain:  "cluster.local",
+		dnsUpstreamPort:   port,
+		dnsForwardTimeout: timeout,
+		dnsCache:          newDNSCache(),
+		recordedDNSMocks:  newRecordedDNSMocksCache(),
 	}
 }
 
@@ -345,7 +347,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamTimeoutFallback(t *testing.
 	t.Cleanup(emptyMgr.Close)
 	p.mockManager = emptyMgr
 
-	q := dns.Question{Name: "unreachable.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "unreachable.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
 
 	// On fallback we expect the synthetic A response pointing at
@@ -559,7 +561,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty(t *testing
 	p.mockManager = emptyMgr
 
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		q := dns.Question{Name: "ipv-less.svc.", Qtype: qtype, Qclass: dns.ClassINET}
+		q := dns.Question{Name: "ipv-less.default.svc.cluster.local.", Qtype: qtype, Qclass: dns.ClassINET}
 		entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
 		if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
 			t.Fatalf("%s: expected relayed empty NOERROR, got %+v", dns.TypeToString[qtype], entry.Msg)
@@ -590,7 +592,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP
 	t.Cleanup(emptyMgr.Close)
 	p.mockManager = emptyMgr
 
-	q := dns.Question{Name: "flaky.svc.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dns.Question{Name: "flaky.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
 
 	if entry.Msg == nil {

@@ -133,6 +133,7 @@ func TestDNSMockMiss_UpstreamNXDOMAIN_IsNotReportedAsAMockMiss(t *testing.T) {
 		errChannel:          make(chan error, 4),
 		dnsUpstreamServers:  []string{host},
 		dnsInNetworkServers: []string{host}, // cluster DNS: in the replay's own network
+		dnsClusterDomain:    "cluster.local",
 		dnsUpstreamPort:     port,
 		dnsForwardTimeout:   2 * time.Second,
 		// Without this the synthesised A record carries a nil address, and an
@@ -177,6 +178,7 @@ func TestDNSMockMiss_UpstreamUnreachable_IsStillReported(t *testing.T) {
 		errChannel:          make(chan error, 4),
 		dnsUpstreamServers:  []string{"127.0.0.1"},
 		dnsInNetworkServers: []string{"127.0.0.1"},
+		dnsClusterDomain:    "cluster.local",
 		dnsUpstreamPort:     "1",
 		dnsForwardTimeout:   200 * time.Millisecond,
 	}
@@ -226,6 +228,7 @@ func TestDNSMockMiss_UpstreamSERVFAILOrREFUSED_IsStillReported(t *testing.T) {
 				errChannel:          make(chan error, 4),
 				dnsUpstreamServers:  []string{host},
 				dnsInNetworkServers: []string{host}, // cluster DNS: in the replay's own network
+				dnsClusterDomain:    "cluster.local",
 				dnsUpstreamPort:     port,
 				dnsForwardTimeout:   2 * time.Second,
 			}
@@ -258,6 +261,7 @@ func TestDNSMockMiss_UpstreamNODATA_IsRelayedAndNotReported(t *testing.T) {
 		errChannel:          make(chan error, 4),
 		dnsUpstreamServers:  []string{host},
 		dnsInNetworkServers: []string{host}, // cluster DNS: in the replay's own network
+		dnsClusterDomain:    "cluster.local",
 		dnsUpstreamPort:     port,
 		dnsForwardTimeout:   2 * time.Second,
 	}

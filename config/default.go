@@ -93,10 +93,13 @@ test:
   # legacy lax behaviour, opt out with strictMockWindow: false here or
   # export KEPLOY_STRICT_MOCK_WINDOW=0 — the env var wins.
   strictMockWindow: true
-  # allowEgress names what a replay may reach on the real network. A
-  # replay's DNS mock miss is forwarded only to a resolver inside its own
-  # network (docker's, the container network's, or the cluster's); add
-  # "dns" to forward misses to the host's and public resolvers too.
+  # allowEgress names what a replay may reach on the real network. keploy
+  # answers a replay's DNS mock miss itself. Only a name the replay's own
+  # network owns (a single-label container or service name, or a name under
+  # the cluster domain) goes to that network's resolver (docker's, the
+  # container network's, or the cluster's), since those resolvers send every
+  # other name to the host's and public resolvers. Add "dns" to forward every
+  # miss to the host's and public resolvers.
   allowEgress: []
 record:
   recordTimer: 0s
