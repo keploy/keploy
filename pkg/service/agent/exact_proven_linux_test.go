@@ -97,8 +97,9 @@ func (p *servingProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, e
 
 // noteMiss files a miss the matcher reported, as the proxy does
 // (sendMockNotFoundError, GetMockErrors): by the view served when it is
-// filed, an extra call as its matcher found it, with the fields its report
-// says differ, and stamped with when its report was built.
+// filed, an extra call as its matcher found it, with its closest recording
+// and the fields its report says differ, and stamped with when its report
+// was built.
 func (p *servingProxy) noteMiss(err error) {
 	uc := models.UnmatchedCall{Protocol: "HTTP", Kind: models.MissOutsideTest, At: time.Now()}
 	if p.mm.WindowSnapshot().Active {
@@ -109,7 +110,7 @@ func (p *servingProxy) noteMiss(err error) {
 	}
 	if errors.As(err, &r) && r.MismatchReport() != nil {
 		rep := r.MismatchReport()
-		uc.ActualSummary, uc.Destination, uc.Differs = rep.ActualSummary, rep.Destination, rep.Differs
+		uc.ActualSummary, uc.Destination, uc.Differs, uc.ClosestMock = rep.ActualSummary, rep.Destination, rep.Differs, rep.ClosestMock
 		if !rep.At.IsZero() {
 			uc.At = rep.At
 		}
@@ -237,6 +238,20 @@ func TestIdenticalCallsReplayedOutOfOrderAreEachAnsweredByTheirOwn(t *testing.T)
 	}
 }
 
+// Two calls of one shape, each made more often than recorded, are each said
+// with the recording it repeats and their own counts, never summed as one
+// call: a timer's call and the test's own may share a route.
+func TestCallsOfOneShapeMadeAgainAreEachSaidWithTheRecordingTheyRepeat(t *testing.T) {
+	a, p := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/items/1001", "a", t0), pingMock("mock-2", "/items/1002", "b", t0.Add(time.Second))},
+		map[string][]string{"o::TestItems": {"mock-1", "mock-2"}}, map[string][]string{})
+	got, e := runTest(t, a, p, "TestItems", "/items/1001", "/items/1002", "/items/1001", "/items/1002", "/items/1002")
+	require.Equal(t, []string{"200 a", "200 b"}, got[:2])
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Contains(t, e.Reason, "was called 2 times, recorded 1 (it repeats mock-1)")
+	require.Contains(t, e.Reason, "was called 3 times, recorded 1 (it repeats mock-2)")
+}
+
 // Each test mock answers at most one request, in recorded order; one more
 // identical call is a miss of its own kind, and the test fails saying how
 // often it called and recorded it.
@@ -249,11 +264,12 @@ func TestOneCallMoreThanRecordedIsAnExtraCall(t *testing.T) {
 	require.Equal(t, "200 two", got[1])
 	require.True(t, strings.HasPrefix(got[2], "502"), "the third call has no recorded answer: %s", got[2])
 	require.Equal(t, models.ScopeActionFail, e.Action)
-	require.Contains(t, e.Reason, "GET /n to 127.0.0.1:18093 was called 3 times, recorded 2")
+	require.Contains(t, e.Reason, "GET /n to 127.0.0.1:18093 was called 3 times, recorded 2 (it repeats mock-2)", "the miss names the copy recorded last")
 	ev := windowOf(t, a, "o::TestCounter").Evidence
 	require.NotNil(t, ev)
 	require.Len(t, ev.Misses, 1)
 	require.Equal(t, models.MissExtraCall, ev.Misses[0].Kind)
+	require.Equal(t, "mock-2", ev.Misses[0].ClosestMock, "judging reads the recording an extra call repeats off its evidence")
 	require.Equal(t, 2, ev.Misses[0].Recorded)
 	require.Empty(t, ev.Unconsumed)
 }

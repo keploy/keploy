@@ -545,7 +545,8 @@ type UnmatchedCall struct {
 	At time.Time `json:"at,omitzero" yaml:"at,omitempty"`
 	// Kind is where the call was made, under the proven switch (MissInTest,
 	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
-	// extra call, how many times the test recorded that call.
+	// extra call, how many times the test recorded that call, and ClosestMock
+	// the recording it repeats (of those copies the one recorded last).
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before

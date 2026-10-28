@@ -269,8 +269,10 @@ type MockMismatchReport struct {
 	// MissKind is MissExtraCall when the matcher found the call identical to
 	// one the open test's own mocks had already answered (exact serving,
 	// under the proven switch), and Recorded is how many times that call was
-	// recorded for the test. The proxy files every other miss by where it was
-	// made. Empty without the switch.
+	// recorded for the test; ClosestMock then names the recording it repeats
+	// (of those copies the one recorded last), never another recording. The
+	// proxy files every other miss by where it was made. Empty without the
+	// switch.
 	MissKind string
 	Recorded int
 	// Differs names the compared fields in which the call differs from the
