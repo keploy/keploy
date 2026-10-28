@@ -258,8 +258,9 @@ func ReadBeforeUnmadeWrite(db MockMemDb, chosen *models.Mock, gates, same func(*
 		return out, errNoEarlierRecordings
 	}
 	// newestOf keeps, in *kept, the newest recording made before the write
-	// that is the read's request; the first of equal request times, as
-	// recorded order files them.
+	// that is the read's request; of equal request times, the first it is
+	// given: the first recorded for the set's recordings, the first to have
+	// answered for the test's own.
 	newestOf := func(kept **models.Mock, mk *models.Mock) {
 		if mk == nil || mk.Kind != chosen.Kind || !mk.Spec.ReqTimestampMock.Before(before) || !same(mk) {
 			return

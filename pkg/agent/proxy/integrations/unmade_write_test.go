@@ -145,6 +145,7 @@ func TestReadBeforeUnmadeWrite_NeverFromBeforeAWriteTheReplayHasMade(t *testing.
 	elsewhere := unmadeRec("m-elsewhere", 50, "write-elsewhere")
 	other := unmadeRec("m-http", 50, "write")
 	other.Kind = models.HTTP
+	twin := unmadeRec("r1-twin", 60, "read")
 	store := func(consumed []*models.Mock, made []string, before ...*models.Mock) MockMemDb {
 		s := unmadeStore{exactStore: exactStore{exact: true}, write: write, consumed: consumed, before: before, made: map[string]bool{}}
 		for _, n := range made {
@@ -168,6 +169,8 @@ func TestReadBeforeUnmadeWrite_NeverFromBeforeAWriteTheReplayHasMade(t *testing.
 		{name: "a made recording that cannot change the read bounds nothing", db: store(nil, []string{"m-elsewhere"}, r0, elsewhere, write), answer: "r0"},
 		{name: "a made write of another kind bounds nothing", db: store(nil, []string{"m-http"}, r0, other, write), answer: "r0"},
 		{name: "a recording of another kind does not end the set's read: the made write after it still bounds", db: store(nil, []string{"m"}, r0, other, m, write), made: "m"},
+		{name: "of two reads recorded at one instant, the first recorded answers", db: store(nil, nil, r0, r1, twin, write), answer: "r1"},
+		{name: "of two of the test's own reads at one instant, the first to have answered answers", db: store([]*models.Mock{twin, r1}, nil, r0, r1, twin, write), answer: "r1-twin"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := ReadBeforeUnmadeWrite(tc.db, chosen, isWriteRec, sameRead)
