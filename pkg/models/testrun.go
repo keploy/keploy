@@ -518,8 +518,15 @@ type UnmatchedCall struct {
 	// MissExtraCall, MissOutsideTest); empty without it. Recorded is, for an
 	// extra call, how many times the test recorded that call, and ClosestMock
 	// the recording it repeats (of those copies the one recorded last).
+	// Write is, for an extra call, what that recording's call writes by its
+	// parser's reading (CallWriteOf: "HTTP POST", "Mongo update keploy.keys");
+	// empty for a read and for a call its parser cannot tell. Judging marks
+	// the recording an extra call repeats as the application's background
+	// work only when the call writes: a read made once more is a cached copy
+	// expiring on the application's clock, set aside instead.
 	Kind     string `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Recorded int    `json:"recorded,omitempty" yaml:"recorded,omitempty"`
+	Write    string `json:"write,omitempty" yaml:"write,omitempty"`
 	// BeforeSet says, under the proven switch, that the call was made before
 	// its test set's first test began, with no test's window open: the
 	// application's startup. Its Kind is MissOutsideTest. It is the set's,

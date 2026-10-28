@@ -8,10 +8,11 @@ import (
 	"sync"
 )
 
-// WRITE KINDS AND EXACT KEYS.
+// WRITE KINDS, EXACT KEYS AND CALL WRITES.
 //
-// Two declarations a parser makes about its kind's recordings, for a test
-// set's background (the worker scope and the pool), under the proven switch:
+// Three declarations a parser makes about its kind's recordings, under the
+// proven switch. The first two are for a test set's background (the worker
+// scope and the pool):
 //
 //   - a write kind (RegisterWriteKind): the recorded writes that may be
 //     answered by their kind alone, whatever the background recording they
@@ -21,9 +22,20 @@ import (
 //     siblings under the kind's exact-serving comparator, so that a
 //     background recording with no sibling may answer from the set's start.
 //
-// A kind nobody registers has neither: none of its writes is answered by
-// kind, and its background recordings keep today's Place gating whole. A
-// write kind is one registration per kind, from the parser's init function.
+// The third is for judging a test's calls:
+//
+//   - a call write (RegisterCallWrite): the recordings whose call changes
+//     what its dependency holds, told from a read. A call a test makes once
+//     more than it recorded names, as its miss, the write it repeats
+//     (models.UnmatchedCall.Write); judging marks such a recording as the
+//     application's background work only when it is a write: a read made
+//     once more is a cached copy expiring on the application's clock, which
+//     judging sets aside instead.
+//
+// A kind nobody registers has none of them: none of its writes is answered
+// by kind, its background recordings keep today's Place gating whole, and
+// none of its calls is told to be a write. A write kind and a call write are
+// each one registration per kind, from the parser's init function.
 // A kind may have several exact keys, each for the recordings its parser
 // owns (enterprise's SQS keys the HTTP recordings it serves, and another
 // HTTP parser may key its own): they are tried in registration order, and
@@ -45,6 +57,25 @@ func RegisterWriteKind(kind Kind, of func(*Mock) (writeKind string, ok bool)) (u
 // names a write "" names none.
 func WriteKindOf(m *Mock) (string, bool) {
 	return writeKinds.of(m)
+}
+
+// RegisterCallWrite declares how kind's parser tells a recorded call that
+// writes (changes what its dependency holds) from one that reads it. of
+// returns what the call writes ("HTTP POST", "Mongo update keploy.keys":
+// protocol, operation, and a collection's name where the kind has one; names,
+// never a value) and true for a write; false for a read and for a call the
+// parser cannot tell. It reads the mock alone and must be cheap. Call it from
+// an init function. One registration per kind: a second panics, as does a
+// nil of. The returned function removes it (tests).
+func RegisterCallWrite(kind Kind, of func(*Mock) (write string, ok bool)) (unregister func()) {
+	return callWrites.register("RegisterCallWrite", kind, of)
+}
+
+// CallWriteOf is what m's call writes, by its kind's registration: false
+// when none is registered, or when m is a read or a call the registration
+// cannot tell. A registration that names a write "" names none.
+func CallWriteOf(m *Mock) (string, bool) {
+	return callWrites.of(m)
 }
 
 // RegisterExactKey declares one of kind's exact keys: two recordings of kind
@@ -118,11 +149,12 @@ func ExactSiblingClaims(m *Mock) []string {
 
 var (
 	writeKinds mockNamers
+	callWrites mockNamers
 	exactKeys  exactKeyRegistry
 )
 
 // mockNamers is a registry of one naming function per kind: the
-// RegisterWriteKind registry.
+// RegisterWriteKind and RegisterCallWrite registries.
 type mockNamers struct {
 	mu     sync.RWMutex
 	byKind map[Kind]*mockNamer
