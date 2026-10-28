@@ -25,10 +25,12 @@
 # (the sink answers NXDOMAIN and logs each name). That holds natively, where
 # keploy and the app run in a mount namespace whose resolv.conf names the sink,
 # so the runner's own resolver is left alone. Under docker the app shares the
-# agent container's netns (keploy refuses an app --dns there: "conflicting
-# options"), whose only resolver is docker's 127.0.0.11 forwarding to the
-# runner's: docker DNS is asserted by its opt-in rows here and by
-# pkg/agent/proxy's tests, not by sink counts.
+# agent container's netns (docker refuses an app --dns there: "conflicting
+# options"), whose only resolver is docker's 127.0.0.11. That resolver answers
+# the network's own names and forwards every other one to the resolvers dockerd
+# reads when a container starts (docker_resolv), so for the docker phases the
+# lane binds the sink's resolv.conf over that file: whatever 127.0.0.11
+# forwards is then counted at the sink too.
 #
 # Per mode: baseline (no keploy: each path must reach the sink, so a zero in
 # replay means keploy kept it in), record, replay, and the opt-in rows.
@@ -48,6 +50,7 @@ rm -rf "$W" && mkdir -p "$W/out"
 S=""; [ "$(id -u)" = 0 ] || S="sudo -E"
 MODES=("$@"); [ ${#MODES[@]} -gt 0 ] || MODES=(native docker)
 SINKPID=""
+DOCKER_RESOLV=""
 FAILED=0
 PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-other dns-tcp tcp6 udp6"
 APPARGS="app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11"
@@ -63,6 +66,7 @@ die() { echo "FATAL: $*"; FAILED=1; exit 1; }
 
 cleanup() {
 	[ -n "$SINKPID" ] && $S kill "$SINKPID" 2>/dev/null
+	[ -z "$DOCKER_RESOLV" ] || $S umount "$DOCKER_RESOLV" 2>/dev/null
 	docker rm -f riso-app riso-base riso-int-c >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
@@ -80,6 +84,20 @@ waitfor() {
 		n=$((n - 1)); [ "$n" -gt 0 ] || return 1
 		sleep 1
 	done
+}
+
+# The file dockerd reads a new container's upstream resolvers from, as libnetwork
+# picks it: systemd-resolved's real list when /etc/resolv.conf names only its
+# 127.0.0.53 stub (a CI runner), else /etc/resolv.conf. Binding over the
+# former leaves the runner's own lookups alone; they go through the stub.
+docker_resolv() {
+	local ns
+	ns=$(awk '$1 == "nameserver" {print $2}' /etc/resolv.conf | sort -u)
+	if [ "$ns" = 127.0.0.53 ] && [ -f /run/systemd/resolve/resolv.conf ]; then
+		echo /run/systemd/resolve/resolv.conf
+	else
+		echo /etc/resolv.conf
+	fi
 }
 
 # A port-only bypass rule for 7002 (the sink's bypass port), in keploy.yml.
@@ -221,6 +239,9 @@ for mode in "${MODES[@]}"; do
 		cd "$W" || die cd
 		;;
 	docker)
+		DOCKER_RESOLV=$(docker_resolv)
+		$S mount --bind "$W/resolv.conf" "$DOCKER_RESOLV" || die "bind the sink's resolv.conf over $DOCKER_RESOLV"
+		log "docker's 127.0.0.11 forwards to the sink ($DOCKER_RESOLV)"
 		log "baseline-docker"
 		sink_start base-docker
 		docker run -d --name riso-base -p 18082:8080 --net keploy-network riso-probe:local $APPARGS >/dev/null || die "baseline container"
@@ -249,6 +270,7 @@ for mode in "${MODES[@]}"; do
 		RUNNER=($S)
 		replay replay-docker -c "$RUN" --containerName riso-app --delay 10
 		replay replay-docker-dns -c "$RUN" --containerName riso-app --delay 10 --allow-egress dns
+		$S umount "$DOCKER_RESOLV" && DOCKER_RESOLV=""
 		cd "$W" || die cd
 		;;
 	internal)
@@ -323,14 +345,21 @@ for mode in "${MODES[@]}"; do
 		row_log "refuse-native says why" "$W/out/refuse-native/keploy.log" 'entry \\?"imds\\?" is not one keploy can open'
 		;;
 	docker)
-		rows_reach base-docker tcp fork-tcp tfo imds-tcp
+		# dns-udp: docker's 127.0.0.11 forwards the probe's unrecorded outside
+		# name to its upstream, the sink, so the DNS rows below can count.
+		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp
 		row "replay-docker passes" "$([ "$(cat "$W/out/replay-docker/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker/exit" 2>/dev/null)"
-		rows_zero replay-docker tcp fork-tcp tfo imds-tcp
+		# keploy answers that name itself: 127.0.0.11 gets only the network's
+		# own names, so the name never reaches its upstream.
+		rows_zero replay-docker tcp fork-tcp tfo imds-tcp dns-udp dns-tcp
+		row_log "replay-docker reports the DNS name it answered itself" "$W/out/replay-docker/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
 		row_nolog "replay-docker opens no DNS egress" "$W/out/replay-docker/keploy.log" "$EGRESS_DNS"
 		row_log "replay-docker names the port-only bypass rule" "$W/out/replay-docker/keploy.log" 'real egress opened by bypassRules.*7002'
 		row_log "replay-docker reports the IMDS call it kept inside" "$W/out/replay-docker/keploy.log" "${KEPT}HTTP 198\.18\.0\.11"
 		row "replay-docker-dns passes" "$([ "$(cat "$W/out/replay-docker-dns/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker-dns/exit" 2>/dev/null)"
 		row_log "replay-docker-dns: the agent gets the opt-in" "$W/out/replay-docker-dns/keploy.log" "$EGRESS_DNS"
+		# The opt-in sends the miss on, through 127.0.0.11 to its upstream.
+		rows_reach replay-docker-dns dns-udp
 		;;
 	esac
 done
