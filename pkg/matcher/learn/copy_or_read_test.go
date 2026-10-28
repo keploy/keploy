@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -1018,5 +1019,144 @@ func TestAClientTestKeepsAWholeCopyOfAStampAnEarlierAnswerGaveItAsThatAnswersVar
 				}
 			})
 		}
+	}
+}
+
+func TestAClientTestKeepsAWholeCopyOfAnAnswersStampInAnyLayoutOrFormAsThatAnswersVariable(t *testing.T) {
+	const month = 30 * 24 * time.Hour
+	// One run: the test began at began; the earlier exchange was made at
+	// began+1.2 s and holds a stamp to the second; the call copying it has
+	// its window from 25 ms after it.
+	type run struct{ began time.Time }
+	ans := func(r run) time.Time { return r.began.Add(1200 * time.Millisecond) }
+	span := func(r run) Span {
+		from := ans(r).Add(25 * time.Millisecond)
+		return Span{From: from, To: from.Add(200 * time.Millisecond), Began: r.began}
+	}
+	stamp := func(r run) time.Time { return ans(r).Truncate(time.Second) }
+	rec := run{time.Date(2026, 10, 27, 16, 59, 3, 100_000_000, time.UTC)}
+	full := run{time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	iso := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	mock := func(name string, at time.Time, reqBody, respBody string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/items", Body: reqBody, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: respBody},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	type form struct {
+		name string
+		js   func(at time.Time) string // the stamp as a JSON value
+		leaf func(p string, at time.Time) Leaf
+	}
+	isoF := form{"an ISO instant", func(at time.Time) string { return `"` + iso(at) + `"` }, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: iso(at)} }}
+	epochF := form{"epoch seconds", secs, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }}
+	textF := form{"epoch seconds as text", func(at time.Time) string { return `"` + secs(at) + `"` }, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: secs(at)} }}
+	typedF := form{"typed to the second", isoF.js, func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at, time.Second) }}
+	const p = "body.variables.createdAt"
+	encoded := func(at time.Time) string { return `{"q":"` + url.QueryEscape("c="+secs(at)+"&x=1") + `"}` }
+	// A recorded payload holds the stamp: in its answer (a dependency's
+	// createdAt), or in its request (what the app sent in its previous
+	// call); in a field as the copy's form, or as epoch seconds inside a
+	// URL-encoded field (a declared form of its text). The payload record's
+	// full round made is given too (F's), or not.
+	for _, c := range []struct {
+		name   string
+		answer bool
+		body   func(fm form, at time.Time) string
+		forms  []form
+		both   []bool
+	}{
+		{"its answer's field", true, func(fm form, at time.Time) string { return `{"createdAt":` + fm.js(at) + `}` }, []form{isoF, epochF, textF, typedF}, []bool{true, false}},
+		{"its request's field", false, func(fm form, at time.Time) string { return `{"createdAt":` + fm.js(at) + `}` }, []form{isoF, epochF, textF}, []bool{true, false}},
+		{"its request's field", false, func(fm form, at time.Time) string { return `{"createdAt":` + fm.js(at) + `}` }, []form{typedF}, []bool{false}},
+		{"its answer's URL-encoded field", true, func(_ form, at time.Time) string { return encoded(at) }, []form{epochF, textF, typedF}, []bool{true, false}},
+		// An ISO copy of the epoch only F's payload beside it leads keploy to.
+		{"its answer's URL-encoded field", true, func(_ form, at time.Time) string { return encoded(at) }, []form{isoF}, []bool{true}},
+		{"its request's URL-encoded field", false, func(_ form, at time.Time) string { return encoded(at) }, []form{epochF, textF}, []bool{true, false}},
+	} {
+		for _, fm := range c.forms {
+			for _, both := range c.both {
+				t.Run("a recorded payload/"+c.name+"/"+fm.name+"/F's too="+strconv.FormatBool(both), func(t *testing.T) {
+					dc := clientTestCache()
+					payload := func(name string, r run) *models.Mock {
+						if c.answer {
+							return mock(name, ans(r), `{"n":"a"}`, c.body(fm, stamp(r)))
+						}
+						return mock(name, ans(r), c.body(fm, stamp(r)), `{"ok":1}`)
+					}
+					raw := []Raw{dc.RawOf(payload("mock-1", rec), true)}
+					if both {
+						raw = append(raw, dc.RawOf(payload("mock-9", full), true))
+					}
+					w := (&Window{Rec: span(rec), F: span(full)}).ComparesOffsets()
+					ln := ClassifyFollowing(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: fm.leaf(p, stamp(full))}}, Shape{Leaves: map[string]Leaf{p: fm.leaf(p, stamp(rec))}}, span(rec).To, nil, raw, nil, w, nil)[0]
+					o, _ := ln.Clock()
+					if c.answer && (ln.Kind != KindVariable || ln.From.Mock != "mock-1") {
+						t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-1, the answer a replay serves as recorded", ln.Kind, o, ln.From, ln.Why)
+					}
+					if !c.answer && ln.Kind != KindClockRead {
+						t.Fatalf("%s Clock=%+v from %+v (%s); want a read of the clock: the app sent the stamp, and reads its clock again at replay", ln.Kind, o, ln.From, ln.Why)
+					}
+				})
+			}
+		}
+	}
+	// An exchange served leaf by leaf, the stamp at a leaf of its answer or
+	// its request, in any layout, copied in any layout.
+	for _, side := range []Side{Response, Request} {
+		for _, sf := range []form{isoF, epochF, textF, typedF} {
+			for _, cf := range []form{isoF, epochF, textF, typedF} {
+				t.Run("an exchange served leaf by leaf/its "+string(side)+"/"+sf.name+" copied as "+cf.name, func(t *testing.T) {
+					earlier := []Earlier{{Mock: "mock-app", At: ans(rec), Payload: RawOf(mock("mock-app", ans(rec), `{}`, `{}`), true).ServedAs(1), Seen: []Seen{
+						{Side: side, Leaf: sf.leaf("body.createdAt", stamp(rec)), Live: sf.leaf("body.createdAt", stamp(full)).Value},
+					}}}
+					w := (&Window{Rec: span(rec), F: span(full)}).ComparesOffsets()
+					ln := ClassifyFollowing(clientTestCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: cf.leaf(p, stamp(full))}}, Shape{Leaves: map[string]Leaf{p: cf.leaf(p, stamp(rec))}}, span(rec).To, earlier, nil, nil, w, nil)[0]
+					o, _ := ln.Clock()
+					if side == Response && (ln.Kind != KindVariable || ln.From.Mock != "mock-app") {
+						t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-app's answer", ln.Kind, o, ln.From, ln.Why)
+					}
+					if side == Request && ln.Kind != KindClockRead {
+						t.Fatalf("%s Clock=%+v from %+v (%s); want a read of the clock: the app sent the stamp", ln.Kind, o, ln.From, ln.Why)
+					}
+				})
+			}
+		}
+	}
+	// A login served leaf by leaf, its Set-Cookie's Expires holding words
+	// of the value by chance (a part of the answer, never the value whole):
+	// the expiry (the clock plus thirty days) or the clock alone is learned
+	// as that read since the test began, as from a recorded payload.
+	cookie := func(at time.Time) string {
+		return "refresh_token_staging=abc; Path=/; Expires=" + at.Add(month).UTC().Format(time.RFC1123) + "; HttpOnly"
+	}
+	call := func(r run) time.Time { return r.began.Add(7 * time.Second) }
+	cspan := func(r run) Span { return Span{From: call(r).Add(-300 * time.Millisecond), To: call(r), Began: r.began} }
+	login := func(r run) time.Time { return r.began.Add(900 * time.Millisecond) }
+	for _, off := range []time.Duration{month, 0} {
+		t.Run("a login served leaf by leaf/the clock plus "+off.String(), func(t *testing.T) {
+			const hp = "header.Set-Cookie"
+			m := mock("mock-1", login(rec), `{"u":"a"}`, `{}`)
+			m.Spec.HTTPResp.Header["Set-Cookie"] = cookie(login(rec))
+			earlier := []Earlier{{Mock: "mock-1", At: login(rec), Payload: RawOf(m, true).ServedAs(1), Seen: []Seen{
+				{Side: Response, Leaf: Leaf{Path: hp, Noise: hp, Type: String, Value: cookie(login(rec))}, Live: cookie(login(full))},
+			}}}
+			lf := func(r run) Leaf {
+				return Leaf{Path: p, Noise: p, Type: String, Value: call(r).Add(off).Truncate(time.Second).UTC().Format(time.RFC3339)}
+			}
+			w := (&Window{Rec: cspan(rec), F: cspan(full)}).ComparesOffsets()
+			ln := ClassifyFollowing(clientTestCache(), []string{p}, Shape{Leaves: map[string]Leaf{p: lf(full)}}, Shape{Leaves: map[string]Leaf{p: lf(rec)}}, call(rec), earlier, nil, nil, w, nil)[0]
+			o, ok := ln.Clock()
+			want := KindClockOffset
+			if off == 0 {
+				want = KindClockRead
+			}
+			if ln.Kind != want || !ok || o.Since != models.SinceTestBegin {
+				t.Fatalf("%s Clock=%+v from %+v held %q (%s); want %s since the test began: the cookie holds words of it by chance", ln.Kind, o, ln.From, ln.From.Held, ln.Why, want)
+			}
+		})
 	}
 }

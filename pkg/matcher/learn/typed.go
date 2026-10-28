@@ -1212,6 +1212,15 @@ func (dc *DriftCache) instantSource(s Seen, v *valueDrift) bool {
 	return dc.instantCoDrifted(v.rec, v.live, rt.moment(0), lt.moment(0))
 }
 
+// instantWhole reports whether recorded, a value's text as recorded, is in
+// one of its declared forms the instant leaf s, its protocol's typed
+// instant, was recorded with, whole (isInstant): a whole copy of it in
+// another layout (epoch seconds of a typed createdAt).
+func (dc *DriftCache) instantWhole(s Leaf, recorded string) bool {
+	rt, ok := readTyped(s)
+	return ok && dc.isInstant(recorded, rt.moment(rt.res))
+}
+
 // isInstant reports whether text, in one of its declared forms (textForms),
 // is one instant and nothing else, of moment m to the nanosecond: of a time
 // of day too, where m is one (a typed time of day), as holdsExact reads it.
@@ -1253,7 +1262,10 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 			whole := s.Leaf.Value == r.Value
 			if pr := placeRank(e, s, whole); pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
-				best.Echo, best.givenWhole = true, s.Side == Response
+				// No givenWhole here: classifyInstant's re-read without the
+				// source rules (skipBoth, the copy rule's) takes this echo
+				// again, so the copy rule never reads it as a clock read.
+				best.Echo = true
 			}
 		}
 	}
@@ -1266,7 +1278,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		}
 		for _, f := range x.fields {
 			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
-				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served, givenWhole: answerPath(f.path)}, true
+				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served}, true
 			}
 		}
 		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
