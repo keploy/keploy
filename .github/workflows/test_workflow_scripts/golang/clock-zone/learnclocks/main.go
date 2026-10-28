@@ -21,7 +21,7 @@
 //     in the app's zone (that of its instant, or of a minute before);
 //   - the place is written as read at R, 23:59:30 in the app's zone on the
 //     mock's day, for the recording, and at R + FullRoundLead for F. The
-//     recording's own values are not used: a 61.5 s lead moves a day or an
+//     recording's own values are not used: a 61.545 s lead moves a day or an
 //     hour only across its boundary, so record's learn step learns such a
 //     place only from a recording made in the lead's reach of one, and this
 //     is the block it writes for one made at R. At R the day is one in UTC

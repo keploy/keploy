@@ -26,7 +26,7 @@
 # read of the clock, how it merges it or how the block is written changes
 # what this lane replays and breaks it, where a block typed here would not.
 # It is the block learn writes for a recording made at 23:59:30 IST, not for
-# this one (the lead moves this recording's day and hour only within 61.5 s
+# this one (the lead moves this recording's day and hour only within 61.545 s
 # of their end). Today: plain reads (min and max 0s), learned with the
 # application in +05:30 (app_zone), of a wall clock of no zone; body.day cut
 # to a day (iso-date) and read in either UTC or the application's zone
