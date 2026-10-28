@@ -1078,7 +1078,7 @@ func TestADateOfNoZoneIsCheckedAtEveryHourWhicheverZoneItIsWrittenIn(t *testing.
 						}
 						for rh := 0; rh < 24; rh++ {
 							now := time.Date(2026, 11, 3, rh, 10, 0, 0, time.UTC)
-							s := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: app.zone}
+							s := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: app.zone, Own: true}
 							at := now.Add(5 * time.Millisecond)
 							if ok, why := CheckClockRead(p, o, form.leaf(at, write), s, true); !ok {
 								t.Errorf("%s: the application's own date at %02d:10Z refused (%s)", what, rh, why)
@@ -1113,7 +1113,7 @@ func TestADateOfNoZoneIsCheckedAtEveryHourWhicheverZoneItIsWrittenIn(t *testing.
 							// An old file names no zone (models.ClockOffset.AppZone).
 							oldFile := o
 							oldFile.AppZone = ""
-							if ok, why := CheckClockRead(p, oldFile, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy cannot tell the application's zone") {
+							if ok, why := CheckClockRead(p, oldFile, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy could not read the zone of the process that made this call, and the learn step named none") {
 								t.Errorf("%s: an old file, the application's zone not told at replay: %v %q; want refused, saying so", what, ok, why)
 							}
 							if ok, why := CheckClockRead(p, o, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); o.AppZone == "" || !ok {
