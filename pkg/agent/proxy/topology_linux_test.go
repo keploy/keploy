@@ -3,7 +3,9 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +20,8 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql"
 	"go.keploy.io/server/v3/pkg/agent/proxy/internal/testnet"
 	syncMock "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
@@ -826,7 +830,10 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			defer cancel()
 			done := make(chan error, 1)
 			go func() { done <- p.handleConnection(ctx, src) }()
-			if _, err := app.Write([]byte("ping")); err != nil {
+			// A line: keploy decides what the connection is (TLS or not,
+			// and so whether a bypassRule passes it through) from its first
+			// five bytes, and lists it only then.
+			if _, err := app.Write([]byte("ping\n")); err != nil {
 				t.Fatal(err)
 			}
 			if tc.passthrough {
@@ -861,7 +868,7 @@ func TestHandleConnectionListsAMockedLocalDestinationOnlyWhenItIsMocked(t *testi
 			}
 			_ = app.Close()
 			cancel()
-			awaitEvent(t, done, "handleConnection returning")
+			_ = awaitEvent(t, done, "handleConnection returning")
 		})
 	}
 }
@@ -922,7 +929,7 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 				t.Fatalf("the REAL relay carried %q, want the real echo %q", got, "ping")
 			}
 			_ = app.Close()
-			awaitEvent(t, done, "handleConnection returning")
+			_ = awaitEvent(t, done, "handleConnection returning")
 			select {
 			case r := <-sink.mocked:
 				t.Fatalf("a REAL destination was listed mocked: %+v", r)
@@ -930,6 +937,140 @@ func TestHandleConnectionNeverListsARealDestinationMocked(t *testing.T) {
 			}
 			if got := p.RealRun().Reached; len(got) != 1 {
 				t.Fatalf("the REAL destination was not reached: %v", got)
+			}
+		})
+	}
+}
+
+// Under the proven switch a local destination a bypassRule passes through is
+// reached for real, so it is never listed mocked, in a record as in a replay:
+// a plain connection that shows no host for a host rule on its port, a
+// server-first (MySQL, in a replay) one, and a TLS one to the server a host
+// rule names. A connection on the same port that no rule passes through is
+// still listed (keploy test, a rule for another port).
+func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t *testing.T) {
+	tlsWrap := func(ln net.Listener) net.Listener {
+		return tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{selfSignedForDispatch(t)}})
+	}
+	type kind int
+	const (
+		plain kind = iota
+		greeted
+		overTLS
+	)
+	for _, tc := range []struct {
+		mode    models.Mode
+		kind    kind
+		rule    func(port uint) models.BypassRule
+		through bool
+	}{
+		{models.MODE_TEST, plain, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_TEST, greeted, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_TEST, overTLS, func(port uint) models.BypassRule { return models.BypassRule{Host: "^localhost$", Port: port} }, true},
+		{models.MODE_TEST, plain, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port + 1} }, false},
+		{models.MODE_RECORD, plain, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_RECORD, greeted, func(port uint) models.BypassRule { return models.BypassRule{Host: "db.internal", Port: port} }, true},
+		{models.MODE_RECORD, overTLS, func(port uint) models.BypassRule { return models.BypassRule{Host: "^localhost$", Port: port} }, true},
+	} {
+		t.Run(fmt.Sprintf("%s/kind=%d/through=%v", tc.mode, tc.kind, tc.through), func(t *testing.T) {
+			recorded.reset()
+			t.Cleanup(recorded.reset)
+			resetBypassRulesWarned(t)
+			t.Setenv("KEPLOY_PROVEN", "1")
+			var wrap func(net.Listener) net.Listener
+			if tc.kind == overTLS {
+				wrap = tlsWrap
+			}
+			upstream, _ := lineServer(t, tc.kind == greeted, wrap)
+			_, portText, _ := net.SplitHostPort(upstream)
+			port, _ := strconv.Atoi(portText)
+			saved := containerkey.Default
+			t.Cleanup(func() { containerkey.Default = saved })
+			containerkey.Default = containerkey.NewKeyer(containerAt{})
+			cfg := config.New()
+			cfg.Agent.Mode = tc.mode
+			cfg.Agent.MockMode = true
+			// The run's tree is another process's, so this test process's
+			// listener is outside it.
+			cfg.Agent.ClientNSPID = uint32(hold(t).Process.Pid)
+			p := New(zap.NewNop(), fakeDestInfo{dest: ipv4Dest(t, upstream)}, cfg)
+			p.nsswitchData = []byte("preseeded-by-test") // see testProxy
+			// A record looks at a greeting with the MySQL parser's probe.
+			p.Integrations = map[integrations.IntegrationType]integrations.Integrations{
+				integrations.MYSQL: mysql.New(zap.NewNop()),
+			}
+			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
+			p.SetTopologySink(sink)
+			opts := models.OutgoingOptions{Rules: []models.BypassRule{tc.rule(uint(port))}}
+			if tc.mode == models.MODE_RECORD {
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { syncMock.Get().SetOutputChannel(nil) })
+			} else {
+				opts.Mocking, opts.DisableMysqlAutoDetect = true, true
+				if err := p.Mock(context.Background(), opts); err != nil {
+					t.Fatal(err)
+				}
+				if tc.kind == greeted {
+					p.mysqlPorts.Learn(uint32(port))
+				}
+			}
+			app, src := acceptedConn(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(ctx, src) }()
+			var client net.Conn = app
+			if tc.kind == overTLS {
+				c := tls.Client(app, &tls.Config{ServerName: "localhost", InsecureSkipVerify: true}) //nolint:gosec // the server's leaf is not under test
+				if err := c.Handshake(); err != nil {
+					t.Fatalf("client handshake: %v", err)
+				}
+				client = c
+			}
+			if !tc.through {
+				if _, err := client.Write([]byte("ping\n")); err != nil {
+					t.Fatal(err)
+				}
+				r := awaitEvent(t, sink.mocked, "the mocked-local row of a connection no rule passes through")
+				if int(r.Port) != port {
+					t.Fatalf("listed %+v, want port %d", r, port)
+				}
+				_ = client.Close()
+				cancel()
+				_ = awaitEvent(t, done, "handleConnection returning")
+				return
+			}
+			got := make(chan string, 1)
+			go func() {
+				r := bufio.NewReader(client)
+				var lines string
+				if tc.kind == greeted {
+					line, _ := r.ReadString('\n')
+					lines += line
+				}
+				if _, err := client.Write([]byte("ping\n")); err != nil {
+					got <- lines + err.Error()
+					return
+				}
+				line, _ := r.ReadString('\n')
+				got <- lines + line
+			}()
+			want := "pong:ping\n"
+			if tc.kind == greeted {
+				want = "hello\n" + want
+			}
+			if a := awaitEvent(t, got, "the client's answer"); a != want {
+				t.Fatalf("the client got %q, want the server's %q", a, want)
+			}
+			_ = client.Close()
+			cancel()
+			_ = awaitEvent(t, done, "handleConnection returning")
+			select {
+			case r := <-sink.mocked:
+				t.Fatalf("a destination a bypassRule passed through was listed mocked: %+v", r)
+			default:
 			}
 		})
 	}

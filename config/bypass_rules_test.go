@@ -70,3 +70,40 @@ func TestBypassRulesKeployCannotApplyAreRefused(t *testing.T) {
 		})
 	}
 }
+
+// A rule whose host or path is not a regular expression names no call: keploy
+// refuses it at start, naming the rule and the pattern's error, instead of
+// skipping it and logging the error on each connection.
+func TestBypassRulesWhosePatternDoesNotCompileAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rules []models.BypassRule
+		named []string
+	}{
+		{"good patterns", []models.BypassRule{{Host: `^api\.example\.com$`, Path: "/v1/.*", Port: 443}, {Port: 7003}}, nil},
+		{"a host that does not compile", []models.BypassRule{{Port: 7003}, {Host: "api.(example", Port: 443}},
+			[]string{`{host: "api.(example", path: "", port: 443}`, "host", "missing closing )"}},
+		{"a path that does not compile", []models.BypassRule{{Host: "a.example", Path: "/v1/[", Port: 80}},
+			[]string{`{host: "a.example", path: "/v1/[", port: 80}`, "path", "missing closing ]"}},
+		{"a host on any port", []models.BypassRule{{Host: "*.example.com"}},
+			[]string{`{host: "*.example.com", path: "", port: 0}`, "missing argument to repetition operator"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckBypassRules(&Config{BypassRules: tc.rules})
+			if len(tc.named) == 0 {
+				if err != nil {
+					t.Fatalf("refused: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("not refused; want %v named", tc.named)
+			}
+			for _, w := range append(tc.named, "regular expression") {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("the error does not name %q: %v", w, err)
+				}
+			}
+		})
+	}
+}

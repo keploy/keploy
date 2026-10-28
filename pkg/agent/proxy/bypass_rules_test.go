@@ -2,16 +2,24 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
+	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
@@ -366,11 +374,23 @@ func TestKeployTestPassesATLSConnectionARuleNamesThrough(t *testing.T) {
 	for _, tc := range []struct {
 		name, ruleHost string
 		through        bool
+		helloUnread    bool
 	}{
-		{"the rule names the server", "^localhost$", true},
-		{"the rule names another server", `^other\.example$`, false},
+		{"the rule names the server", "^localhost$", true, false},
+		{"the rule names another server", `^other\.example$`, false, false},
+		// keploy could not read the ClientHello whole before its TLS (or
+		// answered a Postgres SSLRequest): the rule passes the connection
+		// through after keploy's TLS, as before, never records or mocks it.
+		{"the rule names the server, its ClientHello unread before keploy's TLS", "^localhost$", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.helloUnread {
+				serverNameOf = func(r io.Reader) (string, []byte, error) {
+					name, hello, _ := pTls.ServerNameOf(r)
+					return name, hello, errors.New("the ClientHello could not be read whole")
+				}
+				t.Cleanup(func() { serverNameOf = pTls.ServerNameOf })
+			}
 			app, src := acceptedConn(t)
 			p := replayProxyTo(t, ln.Addr().String(), models.OutgoingOptions{Rules: []models.BypassRule{{Host: tc.ruleHost}}})
 			done := make(chan error, 1)
@@ -544,10 +564,18 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 		passed     = "passed through"
 		failed     = "failed"
 	)
+	type mockAt int
+	const (
+		noMock mockAt = iota
+		atThePort
+		// a mock of a client-first protocol that names no port (recorded
+		// before mocks carried their destination): it may be at any port.
+		portless
+	)
 	for _, tc := range []struct {
 		name      string
 		serve     func(c net.Conn) // nil: nothing listens
-		mocked    bool             // the recording holds a mock at the port
+		mocked    mockAt           // where the recording holds a mock
 		otherPort bool             // the rule names another port
 		late      bool             // the mocks are stored after the connection came
 		speak     bool             // the client speaks once the server has accepted
@@ -555,14 +583,15 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 		wantConns int32
 		wantFirst string // what the server's connection gives first
 	}{
-		{"the server greets", greetThenRead("220 ready\r\n"), false, false, false, false, passed, 1, "220 ready\r\n"},
-		{"the server greets, the mocks stored later", greetThenRead("220 ready\r\n"), false, false, true, false, passed, 1, "220 ready\r\n"},
-		{"the server closes without a word", func(c net.Conn) { _ = c.Close() }, false, false, false, false, passed, 1, ""},
-		{"the client speaks first", silentUntilAsked, false, false, false, true, dispatched, 1, ""},
-		{"an idle HTTP server's 408 first", greetThenRead("HTTP/1.1 408 Request Timeout\r\n"), false, false, false, true, dispatched, 1, "HTTP/1.1 408 Request Timeout\r\n"},
-		{"a mock at the port", greetThenRead("220 ready\r\n"), true, false, false, false, dispatched, 0, ""},
-		{"a rule for another port", greetThenRead("220 ready\r\n"), false, true, false, false, dispatched, 0, ""},
-		{"the server cannot be reached", nil, false, false, false, false, failed, 0, ""},
+		{"the server greets", greetThenRead("220 ready\r\n"), noMock, false, false, false, passed, 1, "220 ready\r\n"},
+		{"the server greets, the mocks stored later", greetThenRead("220 ready\r\n"), noMock, false, true, false, passed, 1, "220 ready\r\n"},
+		{"the server closes without a word", func(c net.Conn) { _ = c.Close() }, noMock, false, false, false, passed, 1, ""},
+		{"the client speaks first", silentUntilAsked, noMock, false, false, true, dispatched, 1, ""},
+		{"an idle HTTP server's 408 first", greetThenRead("HTTP/1.1 408 Request Timeout\r\n"), noMock, false, false, true, dispatched, 1, "HTTP/1.1 408 Request Timeout\r\n"},
+		{"a mock at the port", greetThenRead("220 ready\r\n"), atThePort, false, false, false, dispatched, 0, ""},
+		{"a port-less client-first mock", greetThenRead("220 ready\r\n"), portless, false, false, false, dispatched, 0, ""},
+		{"a rule for another port", greetThenRead("220 ready\r\n"), noMock, true, false, false, dispatched, 0, ""},
+		{"the server cannot be reached", nil, noMock, false, false, false, failed, 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var (
@@ -592,8 +621,15 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 			rules := []models.BypassRule{{Host: "mail.internal", Port: rulePort}}
 			p := replayProxyTo(t, addr, models.OutgoingOptions{Rules: rules})
 			var mocks []*models.Mock
-			if tc.mocked {
+			switch tc.mocked {
+			case atThePort:
 				mocks = append(mocks, &models.Mock{Kind: models.HTTP, Spec: models.MockSpec{Metadata: map[string]string{"destAddr": addr}}})
+			case portless:
+				// An HTTP mock with no destAddr whose request names a host
+				// with no port; a DNS mock with no port names no dependency.
+				mocks = append(mocks,
+					&models.Mock{Kind: models.HTTP, Spec: models.MockSpec{HTTPReq: &models.HTTPReq{URL: "http://api.internal/v1", Header: map[string]string{"Host": "api.internal"}}}},
+					&models.Mock{Kind: models.DNS})
 			}
 			if !tc.late {
 				p.deriveMysqlPorts(mocks)
@@ -605,6 +641,16 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 				err  error
 			}
 			got := make(chan result, 1)
+			// A server that speaks at accept: its client speaks only once
+			// the look, having read that, waits for it, so the look sees
+			// the server's bytes first.
+			preamble := tc.speak && tc.wantFirst != ""
+			waiting := make(chan struct{})
+			if preamble {
+				var once sync.Once
+				testHookLookWaitsForClient = func() { once.Do(func() { close(waiting) }) }
+				t.Cleanup(func() { testHookLookWaitsForClient = nil })
+			}
 			go func() {
 				look, err := p.lookUndecidedReplay(context.Background(), zap.NewNop(), src, addr, nil, uint(port), rules)
 				got <- result{look, err}
@@ -613,7 +659,15 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 				p.deriveMysqlPorts(mocks)
 			}
 			if tc.speak {
-				awaitEvent(t, accepted, "the server accepting the look's connection")
+				if preamble {
+					select {
+					case <-waiting:
+					case r := <-got:
+						t.Fatalf("the look ended (%+v, %v) without waiting for the client after the server's %q", r.look, r.err, tc.wantFirst)
+					}
+				} else {
+					awaitEvent(t, accepted, "the server accepting the look's connection")
+				}
 				if _, err := io.WriteString(app, "ping\n"); err != nil {
 					t.Fatal(err)
 				}
@@ -679,5 +733,347 @@ func readFirst(t *testing.T, conn net.Conn, want string) {
 	}
 	if err != nil || string(buf[:n]) != want {
 		t.Fatalf("the server gave %q, %v; want %q", buf[:n], err, want)
+	}
+}
+
+// A TLS connection to the server a bypassRule with a host names (by its SNI)
+// is passed through before keploy's TLS, in keploy record and keploy test: the
+// client's handshake is its server's, so a server that requires a client
+// certificate gets the client's own (mTLS), and the client gets the server's
+// own certificate, which it may pin. Through keploy's MITM the server would
+// get keploy's certificate, or none, and the client keploy's leaf.
+func TestATLSConnectionARuleNamesKeepsItsHandshakeWithItsServer(t *testing.T) {
+	serverCert, clientCert := selfSignedForDispatch(t), selfSignedForDispatch(t)
+	pool := x509.NewCertPool()
+	clientLeaf, err := x509.ParseCertificate(clientCert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.AddCert(clientLeaf)
+	ln, err := tls.Listen("tcp4", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    pool,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				line, err := bufio.NewReader(conn).ReadString('\n')
+				if err != nil {
+					return
+				}
+				peers := conn.(*tls.Conn).ConnectionState().PeerCertificates
+				_, _ = fmt.Fprintf(conn, "pong:%d:%s", len(peers), line)
+			}()
+		}
+	}()
+	for _, mode := range []models.Mode{models.MODE_RECORD, models.MODE_TEST} {
+		t.Run(string(mode), func(t *testing.T) {
+			rules := []models.BypassRule{{Host: "^localhost$"}}
+			var p *Proxy
+			if mode == models.MODE_RECORD {
+				p = recordingProxy(t, ln.Addr().String(), zap.NewNop())
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{Rules: rules}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				p = replayProxyTo(t, ln.Addr().String(), models.OutgoingOptions{Rules: rules})
+			}
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			client := tls.Client(app, &tls.Config{
+				ServerName:   "localhost",
+				Certificates: []tls.Certificate{clientCert},
+				// The pin: only the server's own certificate is taken.
+				InsecureSkipVerify: true, //nolint:gosec // VerifyPeerCertificate pins the server's certificate
+				VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
+					if len(raw) == 0 || !bytes.Equal(raw[0], serverCert.Certificate[0]) {
+						return errors.New("not the server's own certificate")
+					}
+					return nil
+				},
+			})
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("the client's handshake with its server, through keploy: %v", err)
+			}
+			if _, err := client.Write([]byte("ping\n")); err != nil {
+				t.Fatal(err)
+			}
+			got := make(chan string, 1)
+			go func() {
+				b, _ := io.ReadAll(client)
+				got <- string(b)
+			}()
+			if a := awaitEvent(t, got, "the server's answer"); a != "pong:1:ping\n" {
+				t.Fatalf("the client got %q, want the server's answer to a client with its certificate, pong:1:ping", a)
+			}
+			_ = client.Close()
+			_ = awaitEvent(t, done, "handleConnection returning after the client left")
+		})
+	}
+}
+
+// A plain CONNECT tunnel (no TLS inside, and not HTTP) to a host a bypassRule
+// with no path names is passed through whole, as a TLS one to that host is:
+// no parser sees a host in its bytes, so its CONNECT target is the host it
+// shows. In keploy test the target is dialled for it; in keploy record the
+// tunnel through the corporate proxy carries it. A tunnel to a host no rule
+// names is left to the mocks: with none, it gets no answer, and its target is
+// never dialled.
+func TestAPlainConnectTunnelToAHostARuleNamesIsPassedThrough(t *testing.T) {
+	// The target: in keploy test keploy dials it; in keploy record it is the
+	// corporate proxy too, which answers the CONNECT and then the line.
+	target, dials := lineServer(t, false, func(ln net.Listener) net.Listener { return connectAnswering{ln} })
+	_, portStr, _ := net.SplitHostPort(target)
+	for _, tc := range []struct {
+		mode     models.Mode
+		ruleHost string
+		through  bool
+	}{
+		{models.MODE_TEST, `^127\.0\.0\.1$`, true},
+		{models.MODE_TEST, `^other\.example$`, false},
+		{models.MODE_RECORD, `^127\.0\.0\.1$`, true},
+	} {
+		t.Run(fmt.Sprintf("%s/%s", tc.mode, tc.ruleHost), func(t *testing.T) {
+			resetBypassRulesWarned(t)
+			before := dials(t)
+			rules := []models.BypassRule{{Host: tc.ruleHost}}
+			var p *Proxy
+			if tc.mode == models.MODE_RECORD {
+				p = recordingProxy(t, target, zap.NewNop())
+				if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{Rules: rules}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				p = replayProxyTo(t, target, models.OutgoingOptions{Rules: rules})
+			}
+			app, src := acceptedConn(t)
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			connect := "127.0.0.1:" + portStr
+			if _, err := fmt.Fprintf(app, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connect, connect); err != nil {
+				t.Fatal(err)
+			}
+			r := bufio.NewReader(app)
+			resp, err := http.ReadResponse(r, nil)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				t.Fatalf("the CONNECT got %v, %v; want 200", resp, err)
+			}
+			if _, err := app.Write([]byte("ping\n")); err != nil {
+				t.Fatal(err)
+			}
+			type answer struct {
+				line string
+				err  error
+			}
+			got := make(chan answer, 1)
+			go func() {
+				line, err := r.ReadString('\n')
+				got <- answer{line, err}
+			}()
+			a := awaitEvent(t, got, "the client's read ending")
+			if tc.through && (a.err != nil || a.line != "pong:ping\n") {
+				t.Fatalf("the client got %q, %v; want the target's pong:ping", a.line, a.err)
+			}
+			if !tc.through && a.err == nil {
+				t.Fatalf("the client got %q through a tunnel no rule names; want no answer", a.line)
+			}
+			_ = app.Close()
+			_ = awaitEvent(t, done, "handleConnection returning after the client left")
+			want := 0
+			if tc.through {
+				want = 1
+			}
+			if n := dials(t) - before; n != want {
+				t.Fatalf("the target was dialled %d times, want %d", n, want)
+			}
+		})
+	}
+}
+
+// connectAnswering is a listener whose connections answer a CONNECT request
+// with 200 first, as a corporate proxy does, and give what follows to the
+// server's reads; a connection that does not start with CONNECT reads as it
+// is. The CONNECT is read at the first read, so Accept never waits on a
+// client.
+type connectAnswering struct{ net.Listener }
+
+func (l connectAnswering) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &connectConn{Conn: conn, r: bufio.NewReader(conn)}, nil
+}
+
+// connectConn is a connection of connectAnswering's.
+type connectConn struct {
+	net.Conn
+	r    *bufio.Reader
+	once sync.Once
+}
+
+func (c *connectConn) Read(b []byte) (int, error) {
+	c.once.Do(func() {
+		// One byte first: a line shorter than "CONNECT " is not one, and
+		// its client waits for the answer.
+		if first, err := c.r.Peek(1); err != nil || first[0] != 'C' {
+			return
+		}
+		if head, err := c.r.Peek(8); err != nil || string(head) != "CONNECT " {
+			return
+		}
+		req, err := http.ReadRequest(c.r)
+		if err != nil {
+			return
+		}
+		_ = req.Body.Close()
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	})
+	return c.r.Read(b)
+}
+
+// The server a keploy test look reached through the connection's pre-dialled
+// one is handed back to it, and handBackLooked returns it, so the connection
+// lets it go when nothing dials it rather than holding it open, unused, while
+// the connection lasts.
+func TestALookHandsThePreDialledServerBackForTheConnectionToRelease(t *testing.T) {
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = server.Close() })
+	pre := util.Adopt("10.0.0.5:5432", client)
+	conn := pre.Look("10.0.0.5:5432")
+	if conn == nil {
+		t.Fatal("the look took no pre-dialled connection")
+	}
+	if got := handBackLooked(pre, conn, nil, "10.0.0.5:5432", zap.NewNop()); got != pre {
+		t.Fatalf("handBackLooked = %p, want the pre-dialled one %p, for the connection to release", got, pre)
+	}
+	pre.CloseIfUnused()
+	closed := make(chan error, 1)
+	go func() {
+		_, err := server.Read(make([]byte, 1))
+		closed <- err
+	}()
+	if err := awaitEvent(t, closed, "the pre-dialled server closing"); err == nil {
+		t.Fatal("the pre-dialled server read a byte; want it closed by the connection's release")
+	}
+}
+
+// keploy record through a corporate proxy: what the proxy sends past its 200
+// in the same write (the server's first bytes) reaches the client of a tunnel
+// a rule passes through, ahead of the server's answer, not dropped.
+func TestAPassedThroughConnectTunnelKeepsWhatTheServerSentPastThe200(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				r := bufio.NewReader(conn)
+				if _, err := http.ReadRequest(r); err != nil {
+					return
+				}
+				if _, err := conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\nhello\n")); err != nil {
+					return
+				}
+				line, err := r.ReadString('\n')
+				if err != nil {
+					return
+				}
+				_, _ = conn.Write([]byte("pong:" + line))
+			}()
+		}
+	}()
+	resetBypassRulesWarned(t)
+	p := recordingProxy(t, ln.Addr().String(), zap.NewNop())
+	if err := p.Record(context.Background(), make(chan *models.Mock, 16), models.OutgoingOptions{Rules: []models.BypassRule{{Host: `^127\.0\.0\.1$`}}}); err != nil {
+		t.Fatal(err)
+	}
+	app, src := acceptedConn(t)
+	done := make(chan error, 1)
+	go func() { done <- p.handleConnection(context.Background(), src) }()
+	connect := ln.Addr().String()
+	if _, err := fmt.Fprintf(app, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connect, connect); err != nil {
+		t.Fatal(err)
+	}
+	r := bufio.NewReader(app)
+	resp, err := http.ReadResponse(r, nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("the CONNECT got %v, %v; want 200", resp, err)
+	}
+	if _, err := app.Write([]byte("ping\n")); err != nil {
+		t.Fatal(err)
+	}
+	type answer struct {
+		lines string
+		err   error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		first, err := r.ReadString('\n')
+		if err != nil {
+			got <- answer{first, err}
+			return
+		}
+		second, err := r.ReadString('\n')
+		got <- answer{first + second, err}
+	}()
+	if a := awaitEvent(t, got, "the client's reads ending"); a.err != nil || a.lines != "hello\npong:ping\n" {
+		t.Fatalf("the client got %q, %v; want the server's hello, then pong:ping", a.lines, a.err)
+	}
+	_ = app.Close()
+	_ = awaitEvent(t, done, "handleConnection returning after the client left")
+}
+
+// A rule with a path alone names every host on its port: its warning says so,
+// not only the host the first connection showed.
+func TestAPathOnlyBypassRuleWarnsOfEveryHostOnItsPort(t *testing.T) {
+	resetBypassRulesWarned(t)
+	core, logs := observer.New(zap.WarnLevel)
+	warnBypassRulesUndecided(zap.New(core), []models.BypassRule{{Path: "/v1", Port: 8443}}, "10.0.0.5:8443", "a.internal")
+	entries := logs.All()
+	if len(entries) != 1 {
+		t.Fatalf("warnings = %d, want 1: %v", len(entries), entries)
+	}
+	msg := entries[0].Message
+	for _, part := range []string{`{host: "", path: "/v1", port: 8443}`, "to port 8443 through whole", "whichever host", "a.internal", "{port: 8443}"} {
+		if !strings.Contains(msg, part) {
+			t.Errorf("warning = %q, want it to say %q", msg, part)
+		}
+	}
+	if strings.Contains(msg, "connection to a.internal through") {
+		t.Errorf("warning = %q, names one host, but the rule passes every host on its port", msg)
+	}
+}
+
+// A rule's host pattern is compiled once, its error kept with it.
+func TestABypassRuleHostPatternIsCompiledOnce(t *testing.T) {
+	a, errA := compileRuleHost(`^once\.example$`)
+	b, errB := compileRuleHost(`^once\.example$`)
+	if errA != nil || errB != nil || a == nil || a != b {
+		t.Fatalf("compileRuleHost twice = %p %v, %p %v; want one compiled pattern", a, errA, b, errB)
+	}
+	if _, err := compileRuleHost("*.example"); err == nil {
+		t.Fatal("compileRuleHost(*.example) = nil error, want the pattern's")
+	}
+	if _, err := compileRuleHost("*.example"); err == nil {
+		t.Fatal("compileRuleHost(*.example) again = nil error, want the pattern's, kept")
 	}
 }

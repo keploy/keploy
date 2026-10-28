@@ -148,6 +148,7 @@ DEP_PID=""
 TEL_PID=""
 RAW_PID=""
 RAW_GREET=""
+MTLS_PID=""
 REC_PID=""
 start_srv() { # start_srv ROLE PORT: sets SRV_PID
     python3 -u srv.py "$1" "$2" >"$1.out" 2>&1 &
@@ -160,6 +161,7 @@ cleanup() {
     stop_srv "$DEP_PID"
     stop_srv "$TEL_PID"
     stop_srv "$RAW_PID"
+    stop_srv "$MTLS_PID"
 }
 trap cleanup EXIT
 dep_hits() { curl -s "http://127.0.0.1:$DEP/count"; }
@@ -386,6 +388,104 @@ done
 RAW_GREET=""
 APP_CMD="$APP_CMD_BASE"
 WANT_N='{"dep":{"n":7},"telemetry":"200"}'
+printf '%s\n' "$BASE_YML" >keploy.yml
+
+# mtlshost: a TLS service that requires its client's certificate, and whose
+# client trusts only the service's own certificate (a pin). A rule with the
+# host the client asks for (its SNI) passes its connections through before
+# keploy's TLS, so each side gets the other's real certificate, in keploy
+# record and keploy test, and nothing of them is recorded. Through keploy's
+# TLS the client refuses keploy's leaf, and the service gets no certificate.
+MTLS=9097
+mkdir -p mtls
+for who in server:mtls.internal client:ptp-client; do
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj "/CN=${who#*:}" \
+        -addext "subjectAltName=DNS:${who#*:}" -keyout "mtls/${who%%:*}-key.pem" -out "mtls/${who%%:*}.pem" 2>/dev/null ||
+        { echo "::error::mtlshost: openssl could not make the ${who%%:*} certificate"; exit 1; }
+done
+# mtls.py PORT DIR: the TLS service: a line answers "pong:" and the client
+# certificate's name; DIR/hits counts the lines answered.
+cat >mtls.py <<'PY'
+import socket, ssl, sys, threading
+port, d, hits, lock = int(sys.argv[1]), sys.argv[2], 0, threading.Lock()
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(d + "/server.pem", d + "/server-key.pem")
+ctx.verify_mode = ssl.CERT_REQUIRED
+ctx.load_verify_locations(d + "/client.pem")
+def serve(c):
+    global hits
+    try:
+        with ctx.wrap_socket(c, server_side=True) as s:
+            f = s.makefile("rwb")
+            f.readline()
+            name = dict(x[0] for x in s.getpeercert()["subject"])["commonName"]
+            with lock:
+                hits += 1
+                open(d + "/hits", "w").write("%d\n" % hits)
+            f.write(b"pong:" + name.encode() + b"\n")
+            f.flush()
+    except Exception as e:
+        print("mtls:", repr(e), flush=True)
+        c.close()
+srv = socket.create_server(("127.0.0.1", port))
+while True:
+    c, _ = srv.accept()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+PY
+mtls_hits() { cat mtls/hits 2>/dev/null || echo 0; }
+python3 -u mtls.py "$MTLS" "$PWD/mtls" >mtls.out 2>&1 &
+MTLS_PID=$!
+wait_listen "$MTLS" "$MTLS_PID" || { echo "::error::mtlshost: the TLS service did not start"; cat mtls.out; exit 1; }
+cat >keploy.yml <<YML
+$BASE_YML
+bypassRules:
+  - host: '^mtls\.internal$'
+    port: $MTLS
+YML
+APP_CMD="env MTLS_ADDR=127.0.0.1:$MTLS MTLS_NAME=mtls.internal MTLS_DIR=$PWD/mtls $APP_CMD_BASE"
+WANT_N='{"dep":{"n":7},"telemetry":"200","mtls":"pong:ptp-client"}'
+before="$(mtls_hits)"
+if record mtlshost; then
+    [ "$(($(mtls_hits) - before))" -eq 2 ] || { fail "mtlshost: the TLS service answered $(($(mtls_hits) - before)) calls in keploy record, want 2"; cat mtls.out; }
+    ! grep -qs '^kind: Generic' keploy/test-set-0/mocks.yaml ||
+        { fail "mtlshost: keploy record recorded the TLS calls a bypassRule with their server's name passes through"; show_mocks; }
+    stop_srv "$TEL_PID"
+    TEL_PID=""
+    before="$(mtls_hits)"
+    replay mtlshost
+    [ "$(($(mtls_hits) - before))" -eq 2 ] ||
+        { fail "mtlshost: keploy test sent $(($(mtls_hits) - before)) calls to the TLS service, want 2 (the rule passes them through)"; cat mtls.out; }
+fi
+stop_srv "$MTLS_PID"
+MTLS_PID=""
+APP_CMD="$APP_CMD_BASE"
+WANT_N='{"dep":{"n":7},"telemetry":"200"}'
+
+# badregex: a rule whose host is not a regular expression names no call, so
+# keploy record refuses it at start, naming the rule and the pattern's error.
+cat >keploy.yml <<YML
+$BASE_YML
+bypassRules:
+  - host: '*.example.com'
+    port: $DEP
+YML
+rm -rf keploy
+# shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
+sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" \
+    --generateGithubActions=false --disable-tele >record-badregex.log 2>&1 </dev/null &
+REC_PID=$!
+if wait_listen "$APP" "$REC_PID"; then
+    fail "badregex: keploy record started with a bypassRule whose host is not a regular expression"
+    stop_pid "$REC_PID"
+else
+    wait "$REC_PID"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "badregex: keploy record refused the rule but exited 0"
+    grep -aF "{host: \"*.example.com\", path: \"\", port: $DEP}" record-badregex.log | grep -aqF "missing argument to repetition operator" ||
+        { fail "badregex: keploy record stopped without naming the rule and its pattern's error"; tail -n 5 record-badregex.log; }
+fi
+REC_PID=""
+own
 printf '%s\n' "$BASE_YML" >keploy.yml
 
 # Control: without the flag, the dependency's call is mocked, and the replay

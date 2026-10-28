@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/utils"
@@ -30,7 +31,7 @@ func bypassByServerName(logger *zap.Logger, rules []models.BypassRule, serverNam
 		if rule.Host == "" || rule.Path != "" || (rule.Port != 0 && rule.Port != port) {
 			continue
 		}
-		re, err := regexp.Compile(rule.Host)
+		re, err := compileRuleHost(rule.Host)
 		if err != nil {
 			utils.LogError(logger, err, "failed to compile the host regex of a bypassRule", zap.String("host", rule.Host))
 			continue
@@ -40,6 +41,43 @@ func bypassByServerName(logger *zap.Logger, rules []models.BypassRule, serverNam
 		}
 	}
 	return models.BypassRule{}, false
+}
+
+// ruleHostRegexps holds each bypassRule host pattern compiled, with its error:
+// a session's rules are fixed, so each is compiled once, not on every
+// connection.
+var ruleHostRegexps sync.Map // pattern -> ruleHostRegexp
+
+type ruleHostRegexp struct {
+	re  *regexp.Regexp
+	err error
+}
+
+// compileRuleHost is regexp.Compile(pattern), compiled once per pattern.
+func compileRuleHost(pattern string) (*regexp.Regexp, error) {
+	if v, ok := ruleHostRegexps.Load(pattern); ok {
+		c := v.(ruleHostRegexp)
+		return c.re, c.err
+	}
+	re, err := regexp.Compile(pattern)
+	ruleHostRegexps.Store(pattern, ruleHostRegexp{re: re, err: err})
+	return re, err
+}
+
+// serverNameOf is pTls.ServerNameOf: a variable so a test can stand in a
+// ClientHello keploy could not read whole before its TLS.
+var serverNameOf = pTls.ServerNameOf
+
+// hostRulesAt reports whether a bypassRule with a host and no path applies to
+// a connection to port (it names the port, or any port): one that
+// bypassByServerName may find.
+func hostRulesAt(rules []models.BypassRule, port uint) bool {
+	for _, rule := range rules {
+		if rule.Host != "" && rule.Path == "" && (rule.Port == 0 || rule.Port == port) {
+			return true
+		}
+	}
+	return false
 }
 
 // bypassRulesUndecided is the rules for this port (the rules that name it, not
@@ -66,7 +104,7 @@ func bypassRulesUndecided(logger *zap.Logger, rules []models.BypassRule, port ui
 			continue
 		}
 		if rule.Host != "" {
-			re, err := regexp.Compile(rule.Host)
+			re, err := compileRuleHost(rule.Host)
 			if err != nil {
 				utils.LogError(logger, err, "failed to compile the host regex of a bypassRule", zap.String("host", rule.Host))
 				continue
@@ -104,6 +142,13 @@ func warnBypassRulesUndecided(logger *zap.Logger, rules []models.BypassRule, dst
 		if host == "" {
 			logger.Warn(fmt.Sprintf("the bypassRule %s names a host or a path, and a connection to port %d shows keploy neither (this one, to %s, is not an HTTP/1 call), so keploy passes every such connection to port %d through, unrecorded and unmocked, whichever host it is for. %s",
 				ruleText, rule.Port, dst, rule.Port, fix))
+			continue
+		}
+		if rule.Host == "" {
+			// A rule with a path alone names every host on its port: the
+			// next connection's host is another's.
+			logger.Warn(fmt.Sprintf("the bypassRule %s names a path, and a connection to port %d shows keploy none (this one, to %s at %s, is not an HTTP/1 call), so keploy passes every such connection to port %d through whole, unrecorded and unmocked, whichever host it is for. %s",
+				ruleText, rule.Port, host, dst, rule.Port, fix))
 			continue
 		}
 		logger.Warn(fmt.Sprintf("the bypassRule %s names a path, and a connection to %s on port %d shows keploy none (this one, to %s, is not an HTTP/1 call), so keploy passes every such connection to %s through whole, unrecorded and unmocked. %s",
@@ -199,6 +244,9 @@ func (p *Proxy) lookUndecidedReplay(ctx context.Context, logger *zap.Logger, src
 		case <-up.done:
 			if up.err == nil && up.dialErr == nil && clientFirstPreamble(up.first) {
 				// Its client speaks anyway.
+				if testHookLookWaitsForClient != nil {
+					testHookLookWaitsForClient()
+				}
 				select {
 				case <-client.done:
 				case <-ctx.Done():
@@ -242,6 +290,12 @@ func (p *Proxy) lookUndecidedReplay(ctx context.Context, logger *zap.Logger, src
 	return look, nil
 }
 
+// testHookLookWaitsForClient, set only by a test, is called when
+// lookUndecidedReplay, having read what a client-first protocol's server sends
+// at accept (clientFirstPreamble), waits for the client: the point after which
+// the client's bytes cannot decide the look before the server's did.
+var testHookLookWaitsForClient func()
+
 // ended reports whether ch is closed.
 func ended(ch <-chan struct{}) bool {
 	select {
@@ -254,8 +308,10 @@ func ended(ch <-chan struct{}) bool {
 
 // handBackLooked gives conn, the server lookUndecidedReplay reached, to the
 // connection's first dial of it, with what the look read of it: back to pre
-// when it was pre's, else as a Predialed of its own (util.Adopt). nil when the
-// look reached none, or handed it back to pre.
+// when it was pre's (and pre is returned), else as a Predialed of its own
+// (util.Adopt). Either way the connection lets it go when nothing dials it
+// (handleConnection). nil when the look reached none, or pre could not take
+// it back (it is closed then).
 func handBackLooked(pre *util.Predialed, conn net.Conn, read []byte, dstAddr string, logger *zap.Logger) *util.Predialed {
 	if conn == nil {
 		return nil
@@ -267,8 +323,9 @@ func handBackLooked(pre *util.Predialed, conn net.Conn, read []byte, dstAddr str
 	if pre.Is(conn) {
 		if !pre.Return(conn, replay) {
 			_ = conn.Close()
+			return nil
 		}
-		return nil
+		return pre
 	}
 	if replay == nil {
 		replay = conn

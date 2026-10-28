@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -736,7 +737,10 @@ func GetByPassPorts(conf *Config) []uint {
 }
 
 // CheckBypassRules refuses a bypassRule that keploy could not apply as it is
-// written: one with a host or a path on a port whose calls keploy's proxy reads
+// written. One whose host or path is not a regular expression Go reads names
+// no call, and the proxy would meet the error on each connection; the error
+// names the rule and what is wrong with its pattern. And one with a host or a
+// path on a port whose calls keploy's proxy reads
 // with no host or path in them. Those are the mysqlPorts ports, pinned to the
 // MySQL parser: MySQL names no host, and its TLS starts after the server's
 // greeting, past the point where the proxy reads a server name. Such a rule
@@ -753,6 +757,20 @@ func CheckBypassRules(conf *Config) error {
 	mysql := make(map[uint]bool, len(conf.MysqlPorts))
 	for _, p := range conf.MysqlPorts {
 		mysql[uint(p)] = true
+	}
+	var broken []string
+	for _, rule := range conf.BypassRules {
+		for _, f := range []struct{ name, pattern string }{{"host", rule.Host}, {"path", rule.Path}} {
+			if f.pattern == "" {
+				continue
+			}
+			if _, err := regexp.Compile(f.pattern); err != nil {
+				broken = append(broken, fmt.Sprintf("{host: %q, path: %q, port: %d}, whose %s is not a regular expression: %v", rule.Host, rule.Path, rule.Port, f.name, err))
+			}
+		}
+	}
+	if len(broken) > 0 {
+		return fmt.Errorf("keploy cannot apply the bypassRules %s. A rule's host and path are regular expressions (Go's syntax): fix the pattern, or escape its special characters (a dot as \\.)", strings.Join(broken, "; "))
 	}
 	var bad []string
 	for _, rule := range conf.BypassRules {

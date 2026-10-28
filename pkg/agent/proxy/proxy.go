@@ -2898,13 +2898,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 	}
 
-	// From here the connection is recorded, or answered from mocks: under
-	// the proven switch a local destination is listed mocked (design v14
-	// §3.1). In a replay, now; in a record, once the probe has said what
-	// the connection is (below).
-	if proven && rule.Mode == models.MODE_TEST {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
-	}
 	if p.synchronous {
 		outgoingOpts.Synchronous = true
 	}
@@ -2935,12 +2928,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			predialed = probe.Predialed
 			defer predialed.CloseIfUnused()
 		}
-	}
-	// A record's local destination is listed mocked, except a server-first
-	// one keploy relays (relayServerFirst): it is reached for real, and
-	// nothing of it is recorded.
-	if proven && rule.Mode != models.MODE_TEST && (probe == nil || probe.Reason != reasonServerFirst && probe.Reason != reasonRefusedAtAccept) {
-		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
 	}
 	if err != nil {
 		switch {
@@ -2983,6 +2970,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 
 	if probe.IsMySQL {
+		// Recorded, or answered from mocks: under the proven switch a
+		// local destination is listed mocked (design v14 §3.1), once
+		// nothing passes it through (above): a destination keploy relays
+		// is reached for real, so listing it would claim an isolation that
+		// did not happen. The other connections are listed below, past
+		// the last pass-through.
+		if proven {
+			p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
+		}
 		if rule.Mode != models.MODE_TEST {
 			// probeMysql already dialed when it had to read the
 			// upstream greeting; dstConn then replays those bytes.
@@ -3094,7 +3090,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		}
 		testBuffer = sslBuf
 	}
+	// keploy answered the client's Postgres SSLRequest itself: its server
+	// has not seen it, so the client's TLS cannot be handed to the server
+	// as it is (the pass-through before keploy's TLS, below).
+	answeredSSLRequest := false
 	if agent.InterceptPostgresSSLRequest && isPostgresSSLRequest(testBuffer) {
+		answeredSSLRequest = true
 		p.logger.Debug("Postgres SSLRequest detected, accepting and upgrading to TLS",
 			zap.Int("sourcePort", sourcePort),
 			zap.String("dstAddr", dstAddr),
@@ -3186,6 +3187,13 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			return err
 		}
 		connectTargetHost = connectResult.TargetHost
+		if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
+			// keploy record: what the corporate proxy's reader holds past its
+			// 200 is the server's (a greeting), so every reader of the tunnel
+			// below (keploy's TLS dial, a parser, a pass-through) reads it
+			// first.
+			dstConn = &util.Conn{Conn: dstConn, Reader: connectResult.DstReader, Logger: p.logger}
+		}
 		// A parser that terminates TLS on this connection later (a STARTTLS
 		// upgrade) names its leaf for the target too.
 		parserCtx = pTls.WithConnectTarget(parserCtx, connectTargetHost)
@@ -3242,11 +3250,35 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// MITM below; "" when it sent none.
 	var clientSNI string
 	isTLS := pTls.IsTLSHandshake(testBuffer)
-	// Whether a bypassRule names the TLS server the client asked for
-	// (bypassByServerName), which passes the connection through, and that
-	// name: its SNI, else its CONNECT target ("" when not TLS, or none).
-	var passTLSThrough bool
+	// The TLS server the client asked for: its SNI, else its CONNECT target
+	// ("" when not TLS, or none).
 	var serverName string
+
+	if isTLS && !answeredSSLRequest && hostRulesAt(outgoingOpts.Rules, uint(destInfo.Port)) {
+		// A bypassRule with a host and no path that names the server the
+		// client's ClientHello asks for (its SNI, else its CONNECT target)
+		// passes the connection through before keploy's TLS, in every mode:
+		// the client's handshake reaches its server untouched, so a client
+		// certificate (mTLS) and a pinned server certificate work as they
+		// do without keploy, and nothing of the connection is recorded or
+		// mocked. A ClientHello that names no server, on a port such a rule
+		// names, goes on to keploy's TLS, and then to the rules it cannot
+		// decide (bypassRulesUndecided). What was read of the client is
+		// handed on ahead of the rest, for whichever reads it next.
+		name, hello, helloErr := serverNameOf(srcConn)
+		read := srcConn
+		srcConn = &util.Conn{Conn: stripUtilConn(read), Reader: io.MultiReader(bytes.NewReader(hello), read), Logger: p.logger}
+		if name == "" {
+			name = connectTargetHost
+		}
+		if bypassRule, ok := bypassByServerName(p.logger, outgoingOpts.Rules, name, uint(destInfo.Port)); ok && helloErr == nil {
+			p.logger.Debug("a bypassRule names the TLS server the client asks for; passing the connection through before keploy's TLS",
+				zap.String("serverName", name), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
+			return p.passBypassRulesUndecided(parserCtx, p.logger, srcConn, &dstConn, func() (net.Conn, error) {
+				return util.DialDestination(parserCtx, p.logger, "tcp", util.DialTarget{Addr: dstAddr, Predialed: predialed})
+			}, nil, dstAddr, name)
+		}
+	}
 
 	if isTLS {
 		probeProxy(p.logger, "tls-handshake-start", clientConnID,
@@ -3448,14 +3480,8 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			dstURL = connectTargetHost
 		}
 		// A bypassRule with a host and no path that names this server
-		// passes the connection through, in every mode: keploy dials the
-		// server below, as it does to record, and relays the call.
-		bypassRule, bypassed := bypassByServerName(logger, outgoingOpts.Rules, dstURL, uint(destInfo.Port))
-		passTLSThrough, serverName = bypassed, dstURL
-		if bypassed {
-			logger.Debug("a bypassRule names this TLS server; passing the connection through",
-				zap.String("serverName", dstURL), zap.String("ruleHost", bypassRule.Host), zap.Uint("rulePort", bypassRule.Port))
-		}
+		// passed the connection through before keploy's TLS (above).
+		serverName = dstURL
 
 		logger.Debug("the external call is tls-encrypted", zap.Bool("isTLS", isTLS))
 
@@ -3497,13 +3523,14 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			KeyLogWriter:       pTls.KeyLogWriter(),
 		}
 
-		// In keploy test the server is dialled only for calls a bypassRule
-		// passes through: the whole connection (passTLSThrough), or an HTTP
-		// call the HTTP parser matches by its Host and path, with this cfg.
+		// In keploy test the server is dialled only for a call a bypassRule
+		// passes through, with this cfg: an HTTP call the HTTP parser
+		// matches by its Host and path, or a connection keploy cannot
+		// decide (bypassRulesUndecided).
 		scopedRules := len(outgoingOpts.Rules) > 0
-		if isMTLS && (rule.Mode != models.MODE_TEST || passTLSThrough || scopedRules) && clientPeerCert != nil {
+		if isMTLS && (rule.Mode != models.MODE_TEST || scopedRules) && clientPeerCert != nil {
 			err = p.applyMTLSClientCert(cfg, clientPeerCert, outgoingOpts.TLSPrivateKey)
-			if err != nil && (rule.Mode != models.MODE_TEST || passTLSThrough) {
+			if err != nil && rule.Mode != models.MODE_TEST {
 				return err
 			}
 			if err != nil {
@@ -3517,20 +3544,12 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			predialed.Alias(addr) // the connection dialled while the handshake was held, if it was
 		}
 
-		if rule.Mode != models.MODE_TEST || passTLSThrough {
+		if rule.Mode != models.MODE_TEST {
 			if connectResult != nil && dstConn != nil {
 				// CONNECT tunnel: dstConn is already connected through the
-				// corporate proxy tunnel. If the proxyReader has buffered
-				// bytes beyond the 200 response, wrap dstConn to preserve them.
-				var tlsTransport net.Conn = dstConn
-				if connectResult.DstReader != nil && connectResult.DstReader.Buffered() > 0 {
-					tlsTransport = &util.Conn{
-						Conn:   dstConn,
-						Reader: connectResult.DstReader,
-						Logger: p.logger,
-					}
-				}
-				tlsConn := tls.Client(tlsTransport, cfg)
+				// corporate proxy tunnel, and reads first what the proxy's
+				// reader holds past its 200 (above).
+				tlsConn := tls.Client(dstConn, cfg)
 				if err := tlsConn.Handshake(); err != nil {
 					utils.LogError(logger, err, "failed TLS handshake over CONNECT tunnel; verify the corporate proxy allows CONNECT to this target, check proxy auth/egress rules, and confirm the target hostname is reachable",
 						zap.String("target", addr))
@@ -3615,10 +3634,6 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	// Start the shutdown goroutine now that dstConn is established.
 	startConnCloser()
 
-	if passTLSThrough {
-		return p.globalPassThrough(parserCtx, srcConn, dstConn)
-	}
-
 	// get the mock manager for the current app
 	m := p.getMockManager()
 	if m == nil {
@@ -3663,24 +3678,27 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		serverName = connectTargetHost
 	}
 	httpParsed := !generic && parserType == integrations.HTTP
-	// A plain CONNECT tunnel that is not HTTP inside, to a host a rule with
-	// no path names, is passed through whole, as a TLS one is
-	// (bypassByServerName): no parser sees a host in it.
-	if !httpParsed && !isTLS && connectTargetHost != "" {
-		if _, ok := bypassByServerName(logger, outgoingOpts.Rules, connectTargetHost, uint(destInfo.Port)); ok {
-			return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, func() (net.Conn, error) {
-				return util.DialDestination(parserCtx, logger, "tcp", util.DialTarget{Addr: dstCfg.Addr, Predialed: predialed})
-			}, nil, dstAddr, connectTargetHost)
+	dialServer := func() (net.Conn, error) {
+		target := util.DialTarget{Addr: dstCfg.Addr, Predialed: predialed}
+		if dstCfg.TLSCfg != nil {
+			return util.DialDestinationTLS(parserCtx, logger, "tcp", target, dstCfg.TLSCfg)
+		}
+		return util.DialDestination(parserCtx, logger, "tcp", target)
+	}
+	// A connection to a server a rule with a host and no path names
+	// (bypassByServerName) that is still here is passed through whole: a
+	// plain CONNECT tunnel that is not HTTP inside (no parser sees a host
+	// in it), or a TLS one that could not be passed through before keploy's
+	// TLS (keploy answered its client's Postgres SSLRequest, or its
+	// ClientHello could not be read whole), passed through after it, as
+	// before. An HTTP call in a plain tunnel is the HTTP parser's to decide.
+	if serverName != "" && (isTLS || !httpParsed) {
+		if _, ok := bypassByServerName(logger, outgoingOpts.Rules, serverName, uint(destInfo.Port)); ok {
+			return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, dialServer, nil, dstAddr, serverName)
 		}
 	}
 	if undecided := bypassRulesUndecided(logger, outgoingOpts.Rules, uint(destInfo.Port), serverName, httpParsed); len(undecided) > 0 {
-		return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, func() (net.Conn, error) {
-			target := util.DialTarget{Addr: dstCfg.Addr, Predialed: predialed}
-			if dstCfg.TLSCfg != nil {
-				return util.DialDestinationTLS(parserCtx, logger, "tcp", target, dstCfg.TLSCfg)
-			}
-			return util.DialDestination(parserCtx, logger, "tcp", target)
-		}, undecided, dstAddr, serverName)
+		return p.passBypassRulesUndecided(parserCtx, logger, srcConn, &dstConn, dialServer, undecided, dstAddr, serverName)
 	}
 	if looked {
 		// Nothing below dials with it in keploy test: a call a bypassRule
@@ -3689,6 +3707,15 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		// held open, unused, while the connection lasts, where it would keep
 		// a server that serves one connection at a time from serving it.
 		predialed.CloseIfUnused()
+	}
+	// From here the connection is recorded, or answered from mocks: under
+	// the proven switch a local destination is listed mocked (design v14
+	// §3.1). Not before: a connection a bypassRule passes through (above),
+	// or a server-first one a record relays (relayServerFirst), is reached
+	// for real, and listing it would claim an isolation that did not
+	// happen.
+	if proven {
+		p.noteMockedLocal(dstAddr, destInfo.Port, outside, ctrKey)
 	}
 
 	// Record-mode parsing kill switch: if record-time parsing has been

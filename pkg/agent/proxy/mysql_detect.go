@@ -174,6 +174,12 @@ type mysqlPortRegistry struct {
 	// Swapped with fromMocks at a session's derive.
 	otherPorts map[uint32]struct{}
 	portless   bool
+	// otherPortless says a mock of a dependency other than MySQL names no
+	// port either (otherDependencyPort): a recording made before mocks
+	// carried their destination (#4928) may hold such a mock for any port,
+	// of a protocol whose client speaks first (keploy records nothing of a
+	// server-first one but MySQL). Only recordedAt reads it.
+	otherPortless bool
 	// sessionStale is set when a new replay session begins and consumed by the
 	// next DeriveFromMocks. See MarkSessionStale for why the swap is deferred
 	// to derive time rather than done eagerly.
@@ -443,6 +449,7 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 		r.containerHosts = make(map[netip.Addr]struct{})
 		r.otherPorts = make(map[uint32]struct{})
 		r.portless = false
+		r.otherPortless = false
 		r.sessionStale = false
 	}
 	for _, mocks := range mockSets {
@@ -453,6 +460,8 @@ func (r *mysqlPortRegistry) DeriveFromMocks(mockSets ...[]*models.Mock) []uint32
 			if m.Kind != models.MySQL {
 				if port, ok := otherDependencyPort(m); ok {
 					r.otherPorts[port] = struct{}{}
+				} else if m.Kind != models.DNS && m.Kind != models.ConnectionFailure {
+					r.otherPortless = true
 				}
 				continue
 			}
@@ -545,14 +554,14 @@ func (r *mysqlPortRegistry) recordedNotMysql(port uint32) bool {
 
 // recordedAt reports whether the recording may hold a mock at port: one of its
 // MySQL mocks names the port, a mock of another dependency reached it
-// (otherDependencyPort), or a MySQL mock names no port (portless), and so may
-// be at any.
+// (otherDependencyPort), or a mock names no port (portless, otherPortless),
+// and so may be at any.
 func (r *mysqlPortRegistry) recordedAt(port uint32) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	_, other := r.otherPorts[port]
 	_, mysql := r.fromMocks[port]
-	return other || mysql || r.portless
+	return other || mysql || r.portless || r.otherPortless
 }
 
 // derivedSignal is closed once DeriveFromMocks has run: a replay connection

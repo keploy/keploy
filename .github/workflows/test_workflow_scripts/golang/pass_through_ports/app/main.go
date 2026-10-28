@@ -3,15 +3,23 @@
 // the telemetry call's status: {"dep":{"n":7},"telemetry":"200"}. With
 // RAW_ADDR, it also sends "ping" to that plain TCP service, which is not HTTP,
 // and adds its answer: {"dep":{"n":7},"telemetry":"200","raw":"pong:ping"}.
+// With MTLS_ADDR, it also sends "ping" over TLS to that service, asking for
+// the server MTLS_NAME, with the client certificate in MTLS_DIR and trusting
+// only the server's own certificate there (a pin), and adds its answer:
+// ..."mtls":"pong:ptp-client"}.
 package main
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -38,6 +46,42 @@ func rawCall(addr string, greet bool) (string, error) {
 		return "", err
 	}
 	line, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// mtlsCall sends "ping" over TLS to addr, asking for the server name, with the
+// client certificate in dir (client.pem, client-key.pem), and trusting only
+// the server certificate there (server.pem): keploy's MITM leaf is refused, and
+// the server refuses a client without its certificate.
+func mtlsCall(addr, name, dir string) (string, error) {
+	cert, err := tls.LoadX509KeyPair(filepath.Join(dir, "client.pem"), filepath.Join(dir, "client-key.pem"))
+	if err != nil {
+		return "", err
+	}
+	pin, err := os.ReadFile(filepath.Join(dir, "server.pem"))
+	if err != nil {
+		return "", err
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pin) {
+		return "", errors.New("server.pem holds no certificate")
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
+		&tls.Config{ServerName: name, RootCAs: roots, Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return "", err
+	}
+	if _, err := io.WriteString(conn, "ping\n"); err != nil {
+		return "", err
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		return "", err
 	}
@@ -73,6 +117,14 @@ func main() {
 				return
 			}
 			rawPart = fmt.Sprintf(`,"raw":%q`, line)
+		}
+		if addr := os.Getenv("MTLS_ADDR"); addr != "" {
+			line, err := mtlsCall(addr, os.Getenv("MTLS_NAME"), os.Getenv("MTLS_DIR"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
+			rawPart += fmt.Sprintf(`,"mtls":%q`, line)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"dep":%s,"telemetry":"%s"%s}`, body, status, rawPart)
