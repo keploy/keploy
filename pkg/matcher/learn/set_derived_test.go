@@ -150,8 +150,19 @@ func TestASetKeepsEachRecordingsOwnReads(t *testing.T) {
 					want[w] = true
 				}
 			}
-			if got, ok := dc.searchWords(x, keep); ok && !reflect.DeepEqual(got, want) {
-				t.Errorf("%s at %s, stamps kept %v: the set's search words differ from the recording's own", m.Name, m.Spec.ReqTimestampMock, keep)
+			got, ok := dc.searchWords(x, keep)
+			if !ok {
+				// A payload that is not all of its recording's (parked,
+				// read without its answer) is read by no set.
+				continue
+			}
+			for w := range want {
+				if !got.has(w) {
+					t.Errorf("%s at %s, stamps kept %v: the set's filter of its search words does not hold %q, a word of the recording's own", m.Name, m.Spec.ReqTimestampMock, keep, w)
+				}
+			}
+			if len(got)*8 > filterMaxBytes {
+				t.Errorf("%s: the set's filter of its search words takes %d bytes, past %d", m.Name, len(got)*8, filterMaxBytes)
 			}
 		}
 		if got, want := dc.keyedPlaces(x), own.keyedPlaces(x); !reflect.DeepEqual(got, want) {
@@ -413,15 +424,21 @@ func TestTheWordSearchFindsWhatReadingEveryPayloadFinds(t *testing.T) {
 	}
 }
 
-// What a set keeps derived of its payloads is within derivedBudget: a
-// payload's words take more memory than its text, so a set that kept every
-// recording's words whole grew with its payloads (api-server's agent: 1.8 GB
-// over 256 recordings of 1 MiB, integrations' pool-call bound row). Past the
-// budget the recording read least recently is let go and derived again
-// where a rule next reads it, and the learn step learns what it learns with
-// every part kept, with none kept (budget 0), and with a cache of no
-// tracker's.
+// What a set keeps of its payloads' words and texts is within
+// derivedBudget: a payload's words take more memory than its text, so a set
+// that kept every recording's words whole grew with its payloads
+// (api-server's agent: 1.8 GB over 256 recordings of 1 MiB, integrations'
+// pool-call bound row). Past the budget the recording read least recently is
+// let go and derived again where a rule next reads it, and the learn step
+// learns what it learns with every part kept, with none kept (budget 0), and
+// with a cache of no tracker's. What it keeps for the set whatever its words
+// take (held: instants, places, stamps, a filter of its words) is the same
+// small size whatever a payload's words take: within a recording's slot and
+// its filters' fixed size each.
 func TestTheSetsDerivedDataIsKeptWithinABudget(t *testing.T) {
+	// A recording of no instant holds its slot, its id, an empty moments'
+	// slice and its search words' filters, of a fixed size each.
+	const heldPerRecording = slotBytes + 64 + 4*headerBytes + 2*filterMaxBytes
 	defer func(b int64) { derivedBudget = b }(derivedBudget)
 	at := eRecAt
 	mocks := fillers(60, at)
@@ -462,6 +479,9 @@ func TestTheSetsDerivedDataIsKeptWithinABudget(t *testing.T) {
 				whole = kept
 			} else if kept > budget {
 				t.Errorf("budget %d, test %d: the set keeps %d bytes derived of its payloads, past its budget", budget, test, kept)
+			}
+			if held, bound := tr.derived.heldBytes(), int64(len(mocks))*heldPerRecording; held > bound {
+				t.Errorf("budget %d, test %d: the set holds %d bytes of its %d payloads' instants and word filters, past %d (%d each): they grew with the payloads' words", budget, test, held, len(mocks), bound, heldPerRecording)
 			}
 			tr.End()
 		}
