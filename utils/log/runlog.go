@@ -20,13 +20,17 @@ import (
 var runLog struct {
 	sync.Mutex
 	file *os.File
+	// tee: the console keeps every line too (a run log that is not quiet).
+	tee bool
 }
 
 // RouteToRunLog returns logger with every entry at InfoLevel or above also
 // written to file, without colour, and, when quiet, raises the console's
-// level to WarnLevel, and splits a keploy agent's output started while it
-// holds the same way (RunLogWriter). undo puts the console's level back and
-// stops routing the agent's output; the caller closes file after it.
+// level to WarnLevel. A keploy agent's output started while it holds goes the
+// same way (RunLogWriter): its info and debug lines to file, and, when not
+// quiet, to console too, so file holds the same lines either way. undo puts
+// the console's level back and stops routing the agent's output; the caller
+// closes file after it.
 func RouteToRunLog(logger *zap.Logger, file *os.File, quiet bool) (routed *zap.Logger, undo func()) {
 	ensureLogCfg()
 	cfg := LogCfg
@@ -37,39 +41,36 @@ func RouteToRunLog(logger *zap.Logger, file *os.File, quiet bool) (routed *zap.L
 		return zapcore.NewTee(c, fileCore)
 	}))
 	was := LogCfg.Level.Level()
-	if !quiet {
-		return routed, func() {}
-	}
-	if was < zapcore.WarnLevel {
+	if quiet && was < zapcore.WarnLevel {
 		LogCfg.Level.SetLevel(zapcore.WarnLevel)
 	}
 	runLog.Lock()
-	runLog.file = file
+	runLog.file, runLog.tee = file, !quiet
 	runLog.Unlock()
 	return routed, func() {
 		LogCfg.Level.SetLevel(was)
 		runLog.Lock()
-		runLog.file = nil
+		runLog.file, runLog.tee = nil, false
 		runLog.Unlock()
 	}
 }
 
 // RunLogWriter is where a keploy agent's output goes: console, but while a
 // run log holds (RouteToRunLog), a writer that sends the agent's info and
-// debug lines to the run log and the rest (warnings, errors, anything not a
-// log line) to console. An indented line with no level (a log entry's next
+// debug lines to the run log (and, when it is not quiet, to console too) and
+// the rest (warnings, errors, anything not a log line) to console. An indented line with no level (a log entry's next
 // line, a stack frame) goes where the line before it went; any other line
 // with no level (a panic, a fatal error, a goroutine's header) goes to
 // console. FlushRunLogWriter writes out a last line with no line break, once
 // the agent has exited.
 func RunLogWriter(console io.Writer) io.Writer {
 	runLog.Lock()
-	f := runLog.file
+	f, tee := runLog.file, runLog.tee
 	runLog.Unlock()
 	if f == nil {
 		return console
 	}
-	return &levelSplitter{console: console, file: f}
+	return &levelSplitter{console: console, file: f, tee: tee}
 }
 
 // ansiCode is a terminal colour code, which the run log is written without.
@@ -86,6 +87,8 @@ type levelSplitter struct {
 	file    io.Writer
 	partial []byte
 	toFile  bool
+	// tee: a line to file goes to console too.
+	tee bool
 }
 
 func (s *levelSplitter) Write(p []byte) (int, error) {
@@ -117,12 +120,12 @@ func (s *levelSplitter) writeLine(line []byte) error {
 	case len(bytes.TrimRight(line, "\r\n")) > 0 && line[0] != ' ' && line[0] != '\t':
 		s.toFile = false
 	}
-	var err error
 	if s.toFile {
-		_, err = s.file.Write(ansiCode.ReplaceAll(line, nil))
-	} else {
-		_, err = s.console.Write(line)
+		if _, err := s.file.Write(ansiCode.ReplaceAll(line, nil)); err != nil || !s.tee {
+			return err
+		}
 	}
+	_, err := s.console.Write(line)
 	return err
 }
 

@@ -98,13 +98,26 @@ func TestARunLogThatIsNotQuietKeepsTheConsole(t *testing.T) {
 	defer func() { _ = f.Close() }()
 	routed, undo := RouteToRunLog(logger, f, false)
 	routed.Info("Proxy started at port:16789")
+	// An agent's info line goes to both too, so the run log holds the same
+	// lines whether or not the console is quiet; a warning to console.
+	var agentConsole bytes.Buffer
+	w := RunLogWriter(&agentConsole)
+	if _, err := w.Write([]byte("🐰 Keploy(agent): 2026-10-27T10:30:33Z\tINFO\tDNS server started\n🐰 Keploy(agent): 2026-10-27T10:30:33Z\tWARN\tslow\n")); err != nil {
+		t.Fatal(err)
+	}
 	undo()
 	raw, _ := os.ReadFile(f.Name())
 	if !strings.Contains(string(raw), "Proxy started") || !strings.Contains(console.String(), "Proxy started") {
 		t.Fatalf("file %q, console %q; want the line in both", raw, console.String())
 	}
+	if !strings.Contains(string(raw), "DNS server started") || strings.Contains(string(raw), "slow") {
+		t.Fatalf("the run log holds %q; want the agent's info line, not its warning", raw)
+	}
+	if !strings.Contains(agentConsole.String(), "DNS server started") || !strings.Contains(agentConsole.String(), "slow") {
+		t.Fatalf("the console holds %q; want both of the agent's lines", agentConsole.String())
+	}
 	if RunLogWriter(&console) != &console {
-		t.Fatal("an agent's output is split only under a quiet run log")
+		t.Fatal("an agent's output is routed only while a run log holds")
 	}
 }
 
