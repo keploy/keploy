@@ -72,6 +72,21 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 	// An absolute link of a directory that names a directory in the
 	// process's root.
 	fakeProc(t, proc, "108", "500", []string{"TZ=Asia/Kolkata"}, map[string][]byte{"opt/zi/Asia/Kolkata": kolkata}, map[string]string{"usr/share/zoneinfo": "/opt/zi"})
+	// An environment that reads empty: of a process exiting (a zombie, or
+	// one flagged PF_EXITING, which the kernel sets before the process lets
+	// go of its memory) unknown, never its /etc/localtime, which a TZ it
+	// set may have overridden; of a live process (env -i) no TZ.
+	for _, pid := range []string{"113", "114", "115"} {
+		fakeProc(t, proc, pid, "500", nil, map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	}
+	for pid, stat := range map[string]string{
+		"113": "113 (my app) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615",
+		"115": "115 (my app) R 1 1 1 0 -1 4194564 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615",
+	} {
+		if err := os.WriteFile(filepath.Join(proc, pid, "stat"), []byte(stat), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// No /etc/localtime at all, no TZ: UTC.
 	fakeProc(t, proc, "109", "500", []string{"PATH=/bin"}, map[string][]byte{"etc/hostname": []byte("app")}, nil)
 	for _, row := range []struct {
@@ -89,6 +104,9 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 		{"/etc/localtime through an absolute link of a directory to itself: unknown, never keploy's file", 107, "!", 0},
 		{"TZ naming a zone through an absolute link of its zoneinfo directory, read in its root", 108, "+05:30", 19800},
 		{"no /etc/localtime at all and no TZ: UTC", 109, "UTC", 0},
+		{"an empty environment of a zombie: unknown, never its /etc/localtime", 113, "!", 0},
+		{"an empty environment of a live process (env -i): no TZ, its /etc/localtime", 114, "Europe/Berlin", 3600},
+		{"an empty environment of a process flagged PF_EXITING: unknown, never its /etc/localtime", 115, "!", 0},
 		{"a process that is gone", 999, "!", 0},
 		{"no process", 0, "!", 0},
 	} {
@@ -153,6 +171,28 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 	}
 	if z, err := zs.Of(103); err == nil || z.Loc != nil {
 		t.Errorf("a process whose zone keploy cannot read, through the cache: %v %v; want unknown", z.Loc, err)
+	}
+	// Processes that share a zone file share one parsed zone, whatever
+	// pid reads it; a file of the same name another image ships with other
+	// bytes is its own zone.
+	fakeProc(t, proc, "110", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	fakeProc(t, proc, "112", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": berlin}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	fakeProc(t, proc, "111", "500", []string{"PATH=/bin"}, map[string][]byte{zi + "Europe/Berlin": kolkata}, map[string]string{"etc/localtime": "/" + zi + "Europe/Berlin"})
+	shared := NewProcZones(proc)
+	z110, err110 := shared.Of(110)
+	z112, err112 := shared.Of(112)
+	z111, err111 := shared.Of(111)
+	if err110 != nil || err112 != nil || err111 != nil {
+		t.Fatalf("shared zone files: %v %v %v", err110, err112, err111)
+	}
+	if z110.Loc != z112.Loc {
+		t.Errorf("one zone file read for two processes: two parsed zones; want one shared")
+	}
+	if z110.Loc == z111.Loc {
+		t.Errorf("two zone files of one name and different bytes: one parsed zone; want each its own")
+	}
+	if _, off := at.In(z111.Loc).Zone(); off != 19800 {
+		t.Errorf("a Berlin-named file holding Kolkata's bytes: offset %d; want its own bytes' 19800", off)
 	}
 	if got := procStart(proc, 101); got != "500" {
 		t.Errorf("the start of a process whose name holds spaces and parentheses: %q; want 500", got)
@@ -264,6 +304,48 @@ func TestTheReplayApplicationsOwnZoneWinsOverTheOneLearned(t *testing.T) {
 	sec := models.ClockOffset{Res: time.Second, Zone: models.ZoneApp, Layout: "iso-second-space"}
 	if ok, why := CheckClockRead(wp, sec, wall(ist, now), Span{From: now, To: now.Add(20 * time.Millisecond), Zone: ist}, true); !ok {
 		t.Errorf("a second's cut, neither zone known: refused (%s); want read in the agent's zone, as before", why)
+	}
+
+	// Learned with the application's zone read as two zones (one pairing
+	// read IST, another could not read the process's: models.AppZoneApart):
+	// checked in the replay application's own zone, as each learning would
+	// be, and refused where keploy cannot read it, saying what to do, never
+	// read in a zone the learn step did not read it in.
+	apart := o.Meet(models.ClockOffset{Res: time.Hour, Zone: models.ZoneApp, Layout: "iso-second-space"})
+	if apart.AppZone != models.AppZoneApart {
+		t.Fatalf("a named and an unnamed learning met as %+v; want AppZoneApart", apart)
+	}
+	if ok, why := CheckClockRead(wp, apart, utcHour, own, true); !ok {
+		t.Errorf("learned in two zones, the application now writing in UTC: its UTC hour refused (%s); want checked in UTC", why)
+	}
+	if ok, _ := CheckClockRead(wp, apart, istHour, own, true); ok {
+		t.Errorf("learned in two zones, the application now writing in UTC: its IST hour passed; want checked in UTC")
+	}
+	if ok, why := CheckClockRead(wp, apart, istHour, agent, true); ok || !strings.Contains(why, "the learn step read the application's zone as no one zone") || !strings.Contains(why, "--pid=host") {
+		t.Errorf("learned in two zones, the application's zone unread: %v %q; want refused, saying why and what to do", ok, why)
+	}
+	// A wall clock either zone held, learned in two zones: both held it in
+	// UTC, where it is checked when the application's zone is unread.
+	either := models.ClockOffset{Res: time.Second, Zone: models.ZoneEither, Layout: "iso-second-space", AppZone: "+05:30"}.Meet(models.ClockOffset{Res: time.Second, Zone: models.ZoneEither, Layout: "iso-second-space"})
+	if either.AppZone != models.AppZoneApart || either.Empty() {
+		t.Fatalf("two wall clocks either zone held, named and unnamed, met as %+v; want AppZoneApart", either)
+	}
+	inIST := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: ist}
+	if ok, why := CheckClockRead(wp, either, wall(time.UTC, now), inIST, true); !ok {
+		t.Errorf("either zone, learned in two zones, the application's zone unread: its UTC second refused (%s); want checked in UTC", why)
+	}
+	if ok, _ := CheckClockRead(wp, either, wall(ist, now), inIST, true); ok {
+		t.Errorf("either zone, learned in two zones, the application's zone unread: its IST second passed; want checked in UTC alone")
+	}
+	// One cut to an hour is refused where the application's zone is unread,
+	// as one of no name is (2026-10-28 QH): the meet cannot tell two named
+	// zones from a named and an unnamed one.
+	eHour := models.ClockOffset{Res: time.Hour, Zone: models.ZoneEither, Layout: "iso-second-space", AppZone: "+05:30"}.Meet(models.ClockOffset{Res: time.Hour, Zone: models.ZoneEither, Layout: "iso-second-space"})
+	if ok, why := CheckClockRead(wp, eHour, utcHour, inIST, true); ok || !strings.Contains(why, "the learn step read the application's zone as no one zone") {
+		t.Errorf("either zone, an hour's cut learned in two zones, neither zone known: %v %q; want refused, saying why", ok, why)
+	}
+	if ok, why := CheckClockRead(wp, apart, istHour, agent, true); ok || !strings.Contains(why, "docker and compose modes") {
+		t.Errorf("learned in two zones, the application's zone unread: %v %q; want the refusal to say what works in docker and compose modes", ok, why)
 	}
 
 	// ClockSpanFrom carries the process's zone where the agent read it.

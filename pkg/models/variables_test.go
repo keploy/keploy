@@ -879,21 +879,60 @@ func TestAClockOffsetNamesTheApplicationsZoneItWasLearnedIn(t *testing.T) {
 		t.Errorf("JSON %s; want app_zone", j)
 	}
 
+	// A learning of no name was read in a zone keploy could not name (the
+	// process's, or the agent's own where it could not read the process's),
+	// which may be any: met with a named one it names no zone
+	// (AppZoneApart), rather than carry a name it was never read in. A
+	// replay checks it only in the application's own zone (learn's
+	// CheckClockRead).
 	unnamed := o
 	unnamed.AppZone = ""
-	if m := unnamed.Meet(o); m.AppZone != "Asia/Kolkata" || m.Empty() {
-		t.Errorf("an old learning meets a named one: %+v; want the named zone", m)
+	if m := unnamed.Meet(o); m.AppZone != AppZoneApart || m.Empty() {
+		t.Errorf("a learning of no name meets a named one: %+v; want AppZoneApart", m)
 	}
-	if m := o.Meet(unnamed); m.AppZone != "Asia/Kolkata" || m.Empty() {
-		t.Errorf("a named learning meets an old one: %+v; want the named zone", m)
+	if m := o.Meet(unnamed); m.AppZone != AppZoneApart || m.Empty() {
+		t.Errorf("a named learning meets one of no name: %+v; want AppZoneApart", m)
+	}
+	if s := unnamed.Meet(o).String(); !strings.Contains(s, "unknown to keploy") {
+		t.Errorf("String %q; want it to say the zone was unknown at one call", s)
+	}
+	if m := unnamed.Meet(unnamed); m != unnamed {
+		t.Errorf("two learnings of no name meet as %+v; want %+v", m, unnamed)
+	}
+	// One whose learning read no zone of the application's (a cut to the
+	// second) carries no name and takes the other's.
+	second, hour := ClockOffset{Res: time.Second}, ClockOffset{Res: time.Hour, AppZone: "Asia/Kolkata"}
+	if m := second.Meet(hour); m != hour {
+		t.Errorf("a second's cut meets a named hour's: %+v; want the named zone", m)
+	}
+	if m := hour.Meet(second); m != hour {
+		t.Errorf("a named hour's cut meets a second's: %+v; want the named zone", m)
 	}
 	utc := o
 	utc.AppZone = "UTC"
-	if m := o.Meet(utc); !m.Empty() || m.Zone != ZoneApart {
-		t.Errorf("learnings in IST and UTC meet as %+v; want ZoneApart", m)
+	if m := o.Meet(utc); m.AppZone != AppZoneApart {
+		t.Errorf("learnings in IST and UTC meet as %+v; want AppZoneApart", m)
 	}
-	if m := MergeClocks(map[string]ClockOffset{"body.at": o}, map[string]ClockOffset{"body.at": utc})["body.at"]; !m.Empty() {
-		t.Errorf("merged learnings in IST and UTC: %+v; want one that holds nothing", m)
+	// Meet is the same however a place's learnings are grouped: a wall
+	// clock either zone held, in IST and in UTC, met with one in UTC.
+	eIST := ClockOffset{Res: time.Millisecond, Zone: ZoneEither, AppZone: "Asia/Kolkata"}
+	eUTC := ClockOffset{Res: time.Millisecond, Zone: ZoneEither, AppZone: "UTC"}
+	eNone := ClockOffset{Res: time.Millisecond, Zone: ZoneEither}
+	inUTC := ClockOffset{Res: time.Millisecond, Zone: ZoneUTC}
+	for _, three := range [][3]ClockOffset{{eIST, eUTC, inUTC}, {eIST, eNone, inUTC}} {
+		a, b, c := three[0], three[1], three[2]
+		want := a.Meet(b).Meet(c)
+		for i, got := range []ClockOffset{a.Meet(b.Meet(c)), a.Meet(c).Meet(b), b.Meet(c).Meet(a), c.Meet(a).Meet(b), b.Meet(a).Meet(c)} {
+			if got != want {
+				t.Errorf("%v, %v, %v grouped %d: %+v; want %+v", a, b, c, i, got, want)
+			}
+		}
+		if want != inUTC {
+			t.Errorf("%v, %v, %v meet as %+v; want %+v, read in UTC alone", a, b, c, want, inUTC)
+		}
+	}
+	if m := MergeClocks(map[string]ClockOffset{"body.at": o}, map[string]ClockOffset{"body.at": utc})["body.at"]; m.AppZone != AppZoneApart {
+		t.Errorf("merged learnings in IST and UTC: %+v; want one that names no zone", m)
 	}
 	if m := o.Meet(o); m != o {
 		t.Errorf("a learning meets itself as %+v", m)

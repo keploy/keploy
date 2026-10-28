@@ -3,6 +3,7 @@ package learn
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -82,7 +83,16 @@ type ProcZone struct {
 // (<pid>/root, so a container's files, never keploy's), as ReadZone reads
 // them, except that a TZ naming a zone its root holds no file of is an
 // error. An error where keploy cannot read the process's files (another
-// user's process, one gone, a pid of none) or its zone.
+// user's process, one gone, a pid of none), its zone, or its environment
+// (an exiting process's reads empty: procExiting). An empty environment of
+// a live process (env -i) names no TZ. It is the zone the process started
+// with, as its environment and files name it: a zone the application sets
+// as it runs (Django's TIME_ZONE, process.env.TZ in Node, Java's
+// TimeZone.setDefault) is not read, nor a JVM's -Duser.timezone (a flag of
+// its command line, which Java reads over TZ), nor a TZ an environment
+// overwritten in place (setproctitle: gunicorn, celery) no longer holds.
+// That is a stated limit: a value such an application writes in its own
+// zone is read in the one it started with, and fails where the two differ.
 func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
 	if pid == 0 {
 		return ProcZone{}, errors.New("no process is known for the call")
@@ -91,6 +101,13 @@ func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
 	env, err := os.ReadFile(filepath.Join(dir, "environ"))
 	if err != nil {
 		return ProcZone{}, err
+	}
+	if len(bytes.Trim(env, "\x00")) == 0 && procExiting(procRoot, pid) {
+		// A process that is exiting has let go of its memory, so its
+		// environment reads empty whatever TZ it started with. Read after
+		// the environment: the kernel marks the process exiting before it
+		// lets go.
+		return ProcZone{}, errors.New("the process is exiting, so its environment reads empty and keploy cannot tell whether it set TZ")
 	}
 	tz, set := "", false
 	for _, kv := range bytes.Split(env, []byte{0}) {
@@ -169,6 +186,33 @@ func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
 	return z, nil
 }
 
+// pfExiting is the kernel's PF_EXITING, a process's flag (field 9 of
+// <pid>/stat) from the moment it starts to exit.
+const pfExiting = 0x4
+
+// procExiting reports whether pid is exiting or gone as <pid>/stat shows
+// it: a zombie (state Z) or a dead one (X), one flagged PF_EXITING, or one
+// whose stat cannot be read.
+func procExiting(root string, pid uint32) bool {
+	b, err := os.ReadFile(filepath.Join(root, strconv.FormatUint(uint64(pid), 10), "stat"))
+	if err != nil {
+		return true
+	}
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 {
+		return true
+	}
+	f := strings.Fields(string(b[i+1:]))
+	if len(f) < 7 {
+		return true
+	}
+	if st := f[0]; st == "Z" || st == "X" || st == "x" {
+		return true
+	}
+	flags, err := strconv.ParseUint(f[6], 10, 64)
+	return err != nil || flags&pfExiting != 0
+}
+
 // procStart is pid's start time (field 22 of <pid>/stat, after its name,
 // which may hold spaces and parentheses), "" where it cannot be read.
 func procStart(root string, pid uint32) string {
@@ -224,18 +268,60 @@ func zoneFile(root, name string) (*time.Location, error) {
 	}
 	for _, p := range []string{final, name} {
 		if zn := zoneinfoName(p); zn != "" {
-			return time.LoadLocationFromTZData(zn, data)
+			return loadZone(zn, data)
 		}
 	}
 	if b, err := readUnder(root, "/etc/timezone"); err == nil {
 		zn := strings.TrimSpace(string(b))
 		if zn != "" && !strings.Contains(zn, "..") {
 			if same, err := readUnder(root, "/usr/share/zoneinfo/"+zn); err == nil && bytes.Equal(same, data) {
-				return time.LoadLocationFromTZData(zn, data)
+				return loadZone(zn, data)
 			}
 		}
 	}
-	return time.LoadLocationFromTZData("", data)
+	return loadZone("", data)
+}
+
+// zoneLocCap bounds zoneLocs: a cache holding it starts again.
+const zoneLocCap = 256
+
+// zoneLocs are the zones zoneFile loaded, by their name and their file's
+// bytes, so the processes that share a zone file (every process of one
+// image, or of one host) share one *time.Location (ProcZones holds up to
+// procZoneCap processes), never one parsed each. Bytes and name alike give
+// one zone, so a zone file another image ships differently (other rules)
+// is its own.
+var zoneLocs = struct {
+	mu sync.Mutex
+	m  map[zoneLocKey]*time.Location
+}{m: map[zoneLocKey]*time.Location{}}
+
+type zoneLocKey struct {
+	name string
+	sum  [sha256.Size]byte
+}
+
+// loadZone is time.LoadLocationFromTZData(name, data), the one zoneLocs
+// holds where it holds one of that name and bytes.
+func loadZone(name string, data []byte) (*time.Location, error) {
+	k := zoneLocKey{name: name, sum: sha256.Sum256(data)}
+	zoneLocs.mu.Lock()
+	loc, ok := zoneLocs.m[k]
+	zoneLocs.mu.Unlock()
+	if ok {
+		return loc, nil
+	}
+	loc, err := time.LoadLocationFromTZData(name, data)
+	if err != nil {
+		return nil, err
+	}
+	zoneLocs.mu.Lock()
+	if len(zoneLocs.m) >= zoneLocCap {
+		zoneLocs.m = map[zoneLocKey]*time.Location{}
+	}
+	zoneLocs.m[k] = loc
+	zoneLocs.mu.Unlock()
+	return loc, nil
 }
 
 // under is p, a path in the process's own view, as keploy reaches it under

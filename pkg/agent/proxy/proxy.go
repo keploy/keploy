@@ -2807,7 +2807,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 		if p.procZones != nil {
 			z, zerr := p.procZones.Of(destInfo.KernelPid)
 			if zerr != nil {
-				p.logger.Debug("keploy cannot read the zone of the process that made the connection; its calls are learned naming no zone, and a replay reads the zone the learn step named", zap.Uint32("pid", destInfo.KernelPid), zap.Error(zerr))
+				p.logger.Debug("keploy cannot read the zone of the process that made the connection; its calls are learned in the agent's zone, naming no zone, and a replay here checks a learned clock read in the zone its learn step named, else in the agent's, refusing one cut to an hour or coarser", zap.Uint32("pid", destInfo.KernelPid), zap.Error(zerr))
 			}
 			parserCtx = learn.WithProcZone(parserCtx, z)
 		}

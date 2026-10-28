@@ -196,7 +196,7 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // protocol, that names no zone: "2026-10-27 09:00:00", a Postgres
 // timestamp): ZoneUTC in UTC, ZoneApp in the application's own zone, the
 // one the replay reads from the application's process, else the one
-// AppZone names, else as the replay's tracker knows it (learn.Span); ZoneEither in either of
+// AppZone names, else in the agent's own (learn.Span); ZoneEither in either of
 // the two, where the recording could not tell them apart at the value's
 // resolution (a date whose day is one in both zones at its call, or an
 // application whose zone is UTC there); "" for a value that names its
@@ -239,17 +239,22 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // reads each). A replay reads the application's zone as
 // the one its process writes its clock in in that run, where keploy reads
 // it from the process (a wall clock of no zone is the application's own),
-// else as AppZone, on any machine, never as the agent's own (learn's
-// CheckClockRead): a recording learned on a laptop in IST checks the same
-// cut in IST on a CI machine in UTC whose application's zone keploy cannot
-// read, and in UTC where it reads the application now writing in UTC.
-// "" in a recording learned before AppZone was, where keploy could not read
-// the zone of the process that made the call, or where it could not name
-// the zone (a zone file copied with no name, whose offset changes): a
-// replay that cannot read the application's zone either refuses a plain
-// read cut to an hour or coarser, and reads any other as its tracker knows
-// the zone, as before. Two learnings of one place in different named zones meet as
-// ZoneApart (Meet), which holds nothing.
+// else as AppZone, on any machine (learn's CheckClockRead): a recording
+// learned on a laptop in IST checks the same cut in IST on a CI machine in
+// UTC whose application's zone keploy cannot read, and in UTC where it
+// reads the application now writing in UTC. Either is the zone the process
+// started with, as its environment (TZ) and its files (/etc/localtime)
+// name it, never one it sets later (learn's ProcZones).
+// "" where keploy could not read the zone of the process that made the
+// call, or could not name it (a zone file copied with no name, whose offset
+// changes): the learn step read the value in the process's zone where it
+// read one it could not name, else in the agent's own, either of which may
+// be any zone; a replay that cannot read the application's zone either
+// reads it in the agent's own, except that it refuses a plain read cut to
+// an hour or coarser, whose cut the zone moves. A recording learned before
+// AppZone was reads the same. Two learnings of one place read with the
+// application's zone as two zones, two named ones or a named one and one
+// of no name, meet as AppZoneApart (Meet), which names none.
 type ClockOffset struct {
 	Min     time.Duration `json:"min" yaml:"min" bson:"min"`
 	Max     time.Duration `json:"max" yaml:"max" bson:"max"`
@@ -483,6 +488,17 @@ const (
 	ZoneApart = "apart"
 )
 
+// AppZoneApart is the AppZone of the Meet of two learnings of one place
+// that depend on the application's zone (ClockOffset.AppZoneMatters) and
+// read it as two zones: two named ones, or one named and one keploy could
+// not name. No zone is named so. A replay that reads the application's own
+// zone from its process checks the place in it, as it does either
+// learning; one that cannot names no zone both learnings were read in, so
+// it refuses the value (learn's CheckClockRead), except a wall clock either
+// zone held (ZoneEither) cut finer than an hour, which both held in UTC and
+// it checks there.
+const AppZoneApart = "apart"
+
 // ZoneKnown reports whether o's Zone is one a replay reads a value in: ""
 // (as the value names its moment), ZoneUTC, ZoneApp or ZoneEither. Holds
 // holds nothing for any other: ZoneApart, or a Zone this keploy does not
@@ -681,26 +697,42 @@ func (o ClockOffset) Plain() bool { return o.Min == 0 && o.Max == 0 }
 // value holds it only where both do; a coarser Res is a cut (or an
 // encoding's resolution), at which a replay checks a value, of a Plain read
 // one that shows it, of an offset any (Holds), a read within one cut of its
-// span on either side (CheckClockRead in learn). Two that
-// share no offset (a Plain and one with an offset, or
-// two offsets apart), or that read it in zones no one zone holds (UTC and
-// the application's: ZoneApart, meetZones), meet as an Empty one, which
-// holds nothing; ZoneEither meets UTC or the application's zone as that
-// one, the zone both hold. So do two that saw it written in different
-// layouts (LayoutApart, meetLayouts); a Layout of "" (learned before Layout
-// was) meets another as that one. Meet is the
+// span on either side (CheckClockRead in learn). Two that share no offset
+// (a Plain and one with an offset, or two offsets apart), that read it in
+// zones no one zone holds (UTC and the application's: ZoneApart,
+// meetZones), or that saw it written in different layouts (LayoutApart,
+// meetLayouts) meet as an Empty one, which holds nothing; ZoneEither meets
+// UTC or the application's zone as that one, the zone both hold, and a
+// Layout of "" (learned before Layout was) meets another as that one. Two
+// that read the application's zone as two zones (AppZoneApart: two named
+// ones, or one named and one keploy could not name) meet as one that names
+// no zone: a replay checks it in the application's own zone where it reads
+// that from the process, a wall clock either zone held cut finer than an
+// hour in UTC, and refuses any other (learn's CheckClockRead). Meet is the
 // same in either order and however a place's learnings are grouped, so a
 // recording paired many times keeps one answer whatever order its
 // pairings came in.
 func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
-	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout), AppZone: o.AppZone}
+	m := ClockOffset{Min: max(o.Min, p.Min), Max: min(o.Max, p.Max), Res: max(o.Res, p.Res), Zone: meetZones(o.Zone, p.Zone), Layout: meetLayouts(o.Layout, p.Layout)}
 	switch {
-	case o.AppZone == "":
+	case !o.AppZoneMatters():
+		// o's learning read no zone of the application's (a read cut to
+		// the second, a wall clock in UTC), so p's reading says which.
 		m.AppZone = p.AppZone
-	case p.AppZone != "" && p.AppZone != o.AppZone:
-		// Read in two named zones (recordings learned on two machines): no
-		// one zone holds both readings.
-		m.Zone, m.AppZone = ZoneApart, ""
+	case !p.AppZoneMatters() || p.AppZone == o.AppZone:
+		m.AppZone = o.AppZone
+	default:
+		// Read with the application's zone as two zones (two named ones,
+		// recordings learned on two machines), or as one keploy named and
+		// one it could not name (read in a zone of no name, which may be
+		// any): no one zone is known to hold both readings. A replay that
+		// reads the application's own zone checks the place in it, as it
+		// would each learning; one that cannot refuses it (learn's
+		// CheckClockRead). The conflict stays in AppZone, not Zone, so a
+		// meet that then reads no zone of the application's (UTC with a
+		// wall clock either zone held) holds, as it does met in any other
+		// order.
+		m.AppZone = AppZoneApart
 	}
 	if !m.AppZoneMatters() {
 		// A meet that reads no zone of the application's (a wall clock
@@ -711,9 +743,9 @@ func (o ClockOffset) Meet(p ClockOffset) ClockOffset {
 }
 
 // Empty reports whether o is the Meet of learnings of one place that share
-// no offset: a Min above zero and a Max not above it; or that read it in
-// zones no one zone holds (ZoneApart). Holds holds nothing for it, and String says
-// why.
+// no offset: a Min above zero and a Max not above it; that read it in
+// zones no one zone holds (ZoneApart); or that saw it written in different
+// layouts (LayoutApart). Holds holds nothing for it, and String says why.
 func (o ClockOffset) Empty() bool {
 	return o.Min > 0 && o.Max <= o.Min || o.Zone == ZoneApart || o.Layout == LayoutApart
 }
@@ -906,7 +938,7 @@ func WallNanos(t time.Time, loc *time.Location) int64 {
 func (o ClockOffset) String() string {
 	switch {
 	case o.Zone == ZoneApart:
-		return "clock reads in no one zone (one place learned as a wall clock of no zone in UTC, in the application's zone, or as a value that names its zone, at different calls, or with the application's zone read as two different zones)"
+		return "clock reads in no one zone (one place learned as a wall clock of no zone in UTC, in the application's zone, or as a value that names its zone, at different calls)"
 	case !o.ZoneKnown():
 		return "clock read in a zone this keploy does not read (" + strconv.Quote(o.Zone) + ")"
 	case o.Layout == LayoutApart:
@@ -915,7 +947,11 @@ func (o ClockOffset) String() string {
 		return "clock read written in a layout this keploy does not read (" + strconv.Quote(o.Layout) + ")"
 	}
 	s := o.offsetString() + o.zoneString() + o.layoutString()
-	if o.AppZone != "" {
+	switch o.AppZone {
+	case "":
+	case AppZoneApart:
+		s += ", read with the application's zone as no one zone (learned at different calls with the application's zone read as two zones, or named at one and unknown to keploy at another)"
+	default:
 		s += ", read with the application's zone as " + o.AppZone
 	}
 	return s
