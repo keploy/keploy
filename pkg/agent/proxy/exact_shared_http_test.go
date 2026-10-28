@@ -186,9 +186,19 @@ func httpGet(target string) string {
 func TestTheHTTPIndexOfASharedPartIsTheReadUnderRandomTests(t *testing.T) {
 	defer exactViewVerify.Store(exactViewVerify.Load())
 	exactViewVerify.Store(true)
-	for seed := int64(1); seed <= 6; seed++ {
+	for seed := int64(1); seed <= sharedHTTPWalkSeeds(); seed++ {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) { walkSharedHTTP(t, seed) })
 	}
+}
+
+// sharedHTTPWalkSeeds is how many random sets walkSharedHTTP draws: six, or
+// two under -race, where the six take several seconds of the race step; the
+// plain run (go test ./...) draws all six.
+func sharedHTTPWalkSeeds() int64 {
+	if raceOn {
+		return 2
+	}
+	return 6
 }
 
 func walkSharedHTTP(t *testing.T, seed int64) {

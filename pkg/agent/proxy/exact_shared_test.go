@@ -372,10 +372,21 @@ func walkSharedIndex(t *testing.T, w sharedWalk) {
 
 var sharedWalkSeeds = []int64{20261027, 1, 2, 3}
 
+// walkSeeds is the seeds walkSharedIndex draws: all four, or the first under
+// -race, where a walk starts no goroutine of its own and the four walks of
+// each row take several seconds of the race step; the plain run (go test
+// ./...) draws all four.
+func walkSeeds() []int64 {
+	if raceOn {
+		return sharedWalkSeeds[:1]
+	}
+	return sharedWalkSeeds
+}
+
 // TestASharedIndexIsTheReadUnderRandomChanges: walkSharedIndex with neither
 // the background rules nor kept learning.
 func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
-	for _, seed := range sharedWalkSeeds {
+	for _, seed := range walkSeeds() {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) { walkSharedIndex(t, sharedWalk{seed: seed}) })
 	}
 }
@@ -386,7 +397,7 @@ func TestASharedIndexIsTheReadUnderRandomChanges(t *testing.T) {
 // order that drops what the view spent, or an ident that leaves out the
 // rules, leaves an index that misses or keeps serving the pool.
 func TestASharedIndexIsTheReadUnderTheBackgroundRules(t *testing.T) {
-	for _, seed := range sharedWalkSeeds {
+	for _, seed := range walkSeeds() {
 		t.Run(fmt.Sprint(seed), func(t *testing.T) { walkSharedIndex(t, sharedWalk{seed: seed, background: true}) })
 	}
 }
@@ -397,7 +408,7 @@ func TestASharedIndexIsTheReadUnderTheBackgroundRules(t *testing.T) {
 // hands out now, never one the learning before handed out.
 func TestASharedIndexIsTheReadUnderKeptLearning(t *testing.T) {
 	for _, background := range []bool{false, true} {
-		for _, seed := range sharedWalkSeeds {
+		for _, seed := range walkSeeds() {
 			name := fmt.Sprint(seed)
 			if background {
 				name += " under the background rules"
