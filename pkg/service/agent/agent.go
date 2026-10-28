@@ -1198,7 +1198,9 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 
 // wireAppClock hands the proxy the clock keploy knows the app reads, when
 // the proxy takes one (coreAgent.AppClockSetter): the hooks' reading of it
-// (AppClockReader), or, under the proven switch, the real clock where the
+// (AppClockReader), with where its run to an instant began where the hooks
+// tell it (AppClockRunReader, coreAgent.AppClockRunSetter; none otherwise),
+// or, under the proven switch, the real clock where the
 // hooks are this build's own (AgentHook), which move no clock: with no time
 // hooks the app reads the real clock (realAppClock). Other hooks that report
 // no app clock may move it, so keploy cannot tell which clock the app reads,
@@ -1209,7 +1211,15 @@ func (a *Agent) wireAppClock() {
 	if !ok {
 		return
 	}
-	if r, ok := ActiveHooks.(AppClockReader); ok {
+	r, reads := ActiveHooks.(AppClockReader)
+	if rs, ok := a.Proxy.(coreAgent.AppClockRunSetter); ok {
+		var run func(time.Time) (time.Time, bool)
+		if rr, tells := ActiveHooks.(AppClockRunReader); tells && reads {
+			run = rr.AppClockRunBegan
+		}
+		rs.SetAppClockRun(run)
+	}
+	if reads {
 		s.SetAppClock(r.AppClock)
 		return
 	}

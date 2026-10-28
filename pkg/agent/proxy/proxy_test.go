@@ -1104,4 +1104,20 @@ func TestSetAppClockIsTheLearnStepsClock(t *testing.T) {
 	if w == nil || !w.F.From.Equal(served.Add(21*time.Second)) || !w.F.To.Equal(served.Add(21*time.Second+time.Millisecond)) {
 		t.Fatalf("window %+v; want F read on the app clock the agent handed the proxy", w)
 	}
+	// A move of the clock after the serve: the span starts where the run
+	// the agent handed the proxy began.
+	moved := served.Add(500 * time.Microsecond)
+	p.SetAppClock(func(real time.Time) (time.Time, bool) {
+		if real.Before(moved) {
+			return real.Add(21 * time.Second), true
+		}
+		return real.Add(time.Hour), true
+	})
+	if s, ok := p.learnTracker.LiveSpan(served.Add(time.Millisecond)); ok {
+		t.Fatalf("span %+v across the move with no run handed", s)
+	}
+	p.SetAppClockRun(func(time.Time) (time.Time, bool) { return moved, true })
+	if s, ok := p.learnTracker.LiveSpan(served.Add(time.Millisecond)); !ok || !s.From.Equal(moved.Add(time.Hour)) {
+		t.Fatalf("span %+v,%v; want it from the run the agent handed the proxy", s, ok)
+	}
 }

@@ -632,7 +632,9 @@ func (a *Agent) ProvenBegin(ctx context.Context, req models.ScopeReq) (models.Sc
 			// reads its window on the app's clock from the tracker's begin
 			// (learn.Tracker.CallWindowFrom), and a begin stamped before the
 			// move would give the test's first call a span the clock did not
-			// run as one, so no window. It opens before the test's view is
+			// run as one, so no window (unless the hooks tell where the
+			// clock's run began, AppClockRunReader: then it starts at the
+			// move). It opens before the test's view is
 			// installed, as keploy test's loops open it: a tracker that
 			// began after the view was installed would file what the view
 			// served before it as the previous test's, so the store's

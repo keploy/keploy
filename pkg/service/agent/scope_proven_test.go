@@ -1632,6 +1632,58 @@ func TestStoredMocksHandTheProxyTheHooksAppClock(t *testing.T) {
 	require.Equal(t, at.Add(21*time.Second), got)
 }
 
+// runClockHook is clockHook that also tells where the app's clock's run to
+// an instant began (AppClockRunReader).
+type runClockHook struct {
+	clockHook
+	began time.Time
+}
+
+func (h *runClockHook) AppClockRunBegan(time.Time) (time.Time, bool) { return h.began, true }
+
+// runProxy is a wireProxy that takes the run's begin
+// (coreAgent.AppClockRunSetter).
+type runProxy struct {
+	*wireProxy
+	set bool
+	run func(time.Time) (time.Time, bool)
+}
+
+func (p *runProxy) SetAppClockRun(f func(time.Time) (time.Time, bool)) { p.set, p.run = true, f }
+
+// Once the mocks are stored, the proxy is handed where the app's clock's
+// run began, from hooks that report the app's clock and tell it; hooks that
+// do not tell it, or report no app clock, hand it none, replacing any
+// handed before.
+func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
+	prev := ActiveHooks
+	t.Cleanup(func() { ActiveHooks = prev })
+	t.Setenv(provenswitch.Env, "1")
+	at := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+
+	ActiveHooks = &runClockHook{clockHook: clockHook{offset: time.Second}, began: at}
+	a, wp := wireAgent(t, models.MODE_TEST)
+	p := &runProxy{wireProxy: wp}
+	a.Proxy = p
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, wp.appClock, "the hooks' clock")
+	require.NotNil(t, p.run, "the hooks' run of the clock")
+	got, ok := p.run(at.Add(time.Minute))
+	require.True(t, ok)
+	require.Equal(t, at, got)
+
+	ActiveHooks = &clockHook{offset: time.Second}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, wp.appClock)
+	require.True(t, p.set)
+	require.Nil(t, p.run, "hooks that tell no run: none, replacing the earlier")
+
+	p.run = (&runClockHook{began: at}).AppClockRunBegan
+	ActiveHooks = &otherHooks{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.run, "hooks that report no app clock: no run")
+}
+
 // recBeginProxy is a wireProxy that takes a test's recorded begin
 // (coreAgent.RecordedBeginTaker), and says in which order it was given it and
 // opened the test's capture window.
@@ -1752,7 +1804,9 @@ func (p *trackerProxy) ContinueTestErrorCapture() {
 // app's clock from the tracker's begin, so a test that stamps its own time
 // (pg-learn-e2e's TestStampAnEvent) is read as a read of the app's clock.
 // A tracker begun before the move gives that call a span the clock did not
-// run as one, so no window, and keploy mock record refuses the test.
+// run as one, so no window, and keploy mock record refuses the test (unless
+// the hooks tell where the clock's run began, AppClockRunReader: then the
+// window starts at the move).
 func TestAClientTestsFirstCallHasAWindowOnTheClockItsBeginMoved(t *testing.T) {
 	prev := ActiveHooks
 	t.Cleanup(func() { ActiveHooks = prev })

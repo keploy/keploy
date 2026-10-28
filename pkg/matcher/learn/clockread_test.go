@@ -313,6 +313,204 @@ func TestALiveSpanNeedsTheAppsClockAndAServeBeforeTheCall(t *testing.T) {
 	}
 }
 
+// runClock is a clock the hooks move the way enterprise's run clock is
+// moved: by writes, each from its begin to its end (to), after which the
+// app's clock shows the real instant plus its offset. A past instant is
+// told by the writes made by then, none while one was being written, and
+// the real clock before the first.
+type runClock struct{ writes []runWrite }
+
+type runWrite struct {
+	from, to time.Time
+	offset   time.Duration
+}
+
+func (c *runClock) at(r time.Time) (time.Time, bool) {
+	b, ok := c.began(r)
+	if !ok {
+		return time.Time{}, false
+	}
+	off := time.Duration(0)
+	for _, w := range c.writes {
+		if !b.Before(w.to) {
+			off = w.offset
+		}
+	}
+	return r.Add(off), true
+}
+
+// began is where the clock's run to r began (Tracker.SetAppClockRun): the
+// end of the last write begun by r; zero before the first.
+func (c *runClock) began(r time.Time) (time.Time, bool) {
+	var b time.Time
+	for _, w := range c.writes {
+		if r.Before(w.from) {
+			break
+		}
+		if r.Before(w.to) {
+			return time.Time{}, false
+		}
+		b = w.to
+	}
+	return b, true
+}
+
+// A server test's begin moves the app's clock (the enterprise run clock)
+// after the previous test's last serve, so the clock did not run as one
+// from that serve to the test's first call. Where the hooks tell where the
+// clock's run began (SetAppClockRun), the call's span starts there, the
+// move's write's end, and a replay checks the call's learned read of the
+// clock in it: a read of the moved clock passes, one of the clock before
+// the move does not. Of two moves the later starts it; the next test's move
+// changes nothing, however late the call is checked; a call that reaches
+// keploy while a move is written has none; and a server test's call with
+// no serve before it has none. Hooks that tell no runs leave it none.
+func TestALiveSpanStartsWhereTheAppsClocksRunBegan(t *testing.T) {
+	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	back := -30 * 24 * time.Hour // the run clock goes back to the test's recorded day
+	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: back}
+	clock := &runClock{writes: []runWrite{move}}
+	arrival := base.Add(3 * time.Second)
+	tr := NewTracker()
+	tr.SetAppClock(clock.at)
+	tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base.Add(time.Second))
+	if s, ok := tr.LiveSpan(arrival); ok {
+		t.Fatalf("span = %+v across the move with no run told; want none", s)
+	}
+	tr.SetAppClockRun(clock.began)
+	want := Span{From: move.to.Add(back), To: arrival.Add(back)}
+	if s, ok := tr.LiveSpan(arrival); !ok || s != want {
+		t.Fatalf("span = %+v,%v; want %+v: from where the clock's run began", s, ok, want)
+	}
+
+	const p = "body.since"
+	read := models.ClockOffset{Res: time.Millisecond}
+	at := func(v time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: v.UTC().Format("2006-01-02T15:04:05.000Z")}
+	}
+	s, ok := ClockSpanFrom(WithTracker(context.Background(), tr), arrival)
+	if !ok {
+		t.Fatal("no span for the test's first call")
+	}
+	if ok, why := CheckClockRead(p, read, at(arrival.Add(back-time.Millisecond)), s, true); !ok {
+		t.Fatalf("a read of the moved clock as the call was made: refused (%s)", why)
+	}
+	if ok, _ := CheckClockRead(p, read, at(arrival.Add(-time.Millisecond)), s, true); ok {
+		t.Fatal("a read of the clock before its move passed the moved clock's span")
+	}
+	if ok, _ := CheckClockRead(p, read, at(move.from.Add(back)), s, true); ok {
+		t.Fatal("a read the moved clock shows before the move's write ended passed")
+	}
+
+	// The next test's move, after the call, however late the call is checked.
+	clock.writes = append(clock.writes, runWrite{from: arrival.Add(time.Millisecond), to: arrival.Add(2 * time.Millisecond), offset: back + time.Hour})
+	if s, ok := tr.LiveSpan(arrival); !ok || s != want {
+		t.Fatalf("span = %+v,%v after the next test's move; want %+v", s, ok, want)
+	}
+
+	// Of two moves after the serve, the later starts the span.
+	second := runWrite{from: base.Add(2500 * time.Millisecond), to: base.Add(2500*time.Millisecond + 1), offset: back + time.Minute}
+	clock.writes = []runWrite{move, second}
+	if s, ok := tr.LiveSpan(arrival); !ok || s != (Span{From: second.to.Add(second.offset), To: arrival.Add(second.offset)}) {
+		t.Fatalf("span = %+v,%v; want it from the later move's end %v", s, ok, second.to)
+	}
+
+	// A call that reaches keploy while a move is written has none.
+	if s, ok := tr.LiveSpan(second.from); ok {
+		t.Fatalf("span = %+v for a call that reached keploy mid-write; want none", s)
+	}
+
+	// A server test's call with no serve before it has none, moved or not.
+	tr = NewTracker()
+	tr.SetAppClock(clock.at)
+	tr.SetAppClockRun(clock.began)
+	if s, ok := tr.LiveSpan(arrival); ok {
+		t.Fatalf("span = %+v with no serve before the call; want none", s)
+	}
+}
+
+// A clock put back on real time, frozen, and put back again (a real test,
+// then a frozen one, then a real one): the clock reads the same offset at a
+// serve in the first real stretch and at the call in the last, but its run
+// began at the last move, so the span starts there, wherever the call lands
+// in it, and a read made in the first stretch is refused. Without the run
+// told, the span from that serve runs across the frozen stretch, as before.
+func TestALiveSpanDoesNotRunAcrossAStretchTheClockLeftAndCameBackTo(t *testing.T) {
+	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	w := func(at time.Duration, off time.Duration) runWrite {
+		return runWrite{from: base.Add(at), to: base.Add(at + time.Millisecond), offset: off}
+	}
+	last := w(3500*time.Millisecond, 0)
+	clock := &runClock{writes: []runWrite{w(0, time.Hour), w(1500*time.Millisecond, 0), w(2500*time.Millisecond, 2*time.Hour), last}}
+	const p = "body.since"
+	read := models.ClockOffset{Res: time.Millisecond}
+	stale := Leaf{Path: p, Noise: p, Type: String, Value: base.Add(1600 * time.Millisecond).Format("2006-01-02T15:04:05.000Z")}
+	for _, serve := range []time.Duration{time.Second, 1600 * time.Millisecond} {
+		for _, arrival := range []time.Duration{3900 * time.Millisecond, 4 * time.Second, 5 * time.Second} {
+			tr := NewTracker()
+			tr.SetAppClock(clock.at)
+			tr.SetAppClockRun(clock.began)
+			tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base.Add(serve))
+			s, ok := tr.LiveSpan(base.Add(arrival))
+			if want := (Span{From: last.to, To: base.Add(arrival)}); !ok || s != want {
+				t.Fatalf("serve %v, arrival %v: span = %+v,%v; want %+v", serve, arrival, s, ok, want)
+			}
+			if ok, _ := CheckClockRead(p, read, stale, s, true); ok {
+				t.Fatalf("serve %v, arrival %v: a read made before the frozen stretch passed", serve, arrival)
+			}
+		}
+	}
+	tr := NewTracker()
+	tr.SetAppClock(clock.at)
+	tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base.Add(1600*time.Millisecond))
+	if s, ok := tr.LiveSpan(base.Add(3900 * time.Millisecond)); !ok || !s.From.Equal(base.Add(1600*time.Millisecond)) {
+		t.Fatalf("span = %+v,%v with no run told; want it from the serve, read at its two ends", s, ok)
+	}
+	// Hooks that cannot tell the run where they tell the clock: none.
+	tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, false })
+	if s, ok := tr.LiveSpan(base.Add(3900 * time.Millisecond)); ok {
+		t.Fatalf("span = %+v where the run cannot be told; want none", s)
+	}
+}
+
+// In a client test the test's begin bounds a span where the clock's run
+// began before it; where the run began after the begin, the span starts at
+// the run, with or without a serve before the call.
+func TestAClientTestsSpanStartsAtTheLaterOfItsBeginAndTheClocksRun(t *testing.T) {
+	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: time.Hour}
+	clock := &runClock{writes: []runWrite{move}}
+	arrival := base.Add(3 * time.Second)
+	for _, tc := range []struct {
+		name   string
+		served bool
+		began  time.Time
+		from   time.Time // on the real clock
+	}{
+		{"a begin after the move", true, move.to.Add(10 * time.Millisecond), move.to.Add(10 * time.Millisecond)},
+		{"a begin before the move", true, move.from.Add(-time.Millisecond), move.to},
+		{"no serve, a begin before the move", false, move.from.Add(-time.Millisecond), move.to},
+		{"no serve, a begin after the move", false, move.to.Add(10 * time.Millisecond), move.to.Add(10 * time.Millisecond)},
+		// A begin after the arrival (read after the call came) bounds nothing.
+		{"a begin after the arrival", true, arrival.Add(500 * time.Millisecond), move.to},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTracker()
+			tr.SetClientTests(true)
+			tr.SetAppClock(clock.at)
+			tr.SetAppClockRun(clock.began)
+			if tc.served {
+				tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, base.Add(time.Second))
+			}
+			tr.BeginAt(tc.began)
+			want := Span{From: tc.from.Add(time.Hour), To: arrival.Add(time.Hour)}
+			if s, ok := tr.LiveSpan(arrival); !ok || s != want {
+				t.Fatalf("span = %+v,%v; want %+v", s, ok, want)
+			}
+		})
+	}
+}
+
 // clockedDrifts is an empty cache of a tracker that knows which clock the
 // application reads (DriftCache.appClock), as the agent's own hooks tell it
 // (Tracker.SetAppClock): the learn step's every row but those of a run

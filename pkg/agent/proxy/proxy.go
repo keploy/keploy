@@ -4831,6 +4831,14 @@ func (p *Proxy) SetAppClock(f func(real time.Time) (time.Time, bool)) {
 
 var _ agent.AppClockSetter = (*Proxy)(nil)
 
+// SetAppClockRun makes the learn step read, through f, where the app's
+// clock's run to a real instant began (agent.AppClockRunSetter).
+func (p *Proxy) SetAppClockRun(f func(real time.Time) (time.Time, bool)) {
+	p.learnTracker.SetAppClockRun(f)
+}
+
+var _ agent.AppClockRunSetter = (*Proxy)(nil)
+
 // ServeExactTestConcurrent implements agent.ExactConcurrentServer (exact.go).
 func (p *Proxy) ServeExactTestConcurrent(test string, owned, cands []*models.Mock) error {
 	return p.openExact(func(m *MockManager) { m.ServeExactTestConcurrent(test, owned, cands) })
