@@ -879,8 +879,10 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 			// in a view of a serve of it, and not in what the recording gave
 			// there, or any word where a serve's view could not be read. F
 			// may have given it there, and keploy cannot tell which view the
-			// application read: no rule lets it go.
-			if !recorded && x.unseen {
+			// application read: no rule lets it go. So is any word where F
+			// served x and its adapter stated no view of it (viewUnstated):
+			// keploy cannot tell what F gave the application there either.
+			if !recorded && (x.unseen || x.viewUnstated()) {
 				if why := unseenWhy(dc, x, held.of(j).unseen[changedWord{i, t}], keep, word(t, recorded), t, at); why != "" {
 					return why + "; " + notClock(v) + ". " + correction(x.mock, false)
 				}
@@ -893,10 +895,13 @@ func unaccounted(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, 
 // unseenWhy says where a word t the value holds now (named), which F may
 // have given the application in x, a recording it served changed in ways
 // keploy keeps no one view of (Raw.ServedChanged), stands: in a view of
-// one of its serves (held), or, where a serve's view could not be read, in
-// what F gave there unread. "" where neither: every view was read, and none
-// holds the word.
+// one of its serves (held), or, where a serve's view could not be read, or
+// x's adapter stated none (Raw.viewUnstated), in what F gave there unread.
+// "" where neither: every view was read, and none holds the word.
 func unseenWhy(dc *DriftCache, x Raw, held, keep bool, named, t string, at time.Time) string {
+	if x.viewUnstated() {
+		return named + " may stand in " + x.mock + x.atNote(at) + ", an earlier recording record's full round served, where its adapter did not say what it gave the application there: keploy cannot tell whether it came from there"
+	}
 	if len(x.views) == 0 {
 		return named + " may stand in " + x.mock + x.atNote(at) + ", an earlier recording record's full round served changed, where keploy could not read what it gave the application: keploy cannot tell whether it came from there"
 	}

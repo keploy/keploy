@@ -966,7 +966,7 @@ func TestUnaccounted(t *testing.T) {
 	earlier := []Earlier{{Mock: "mock-1", At: at.Add(-time.Second), Seen: []Seen{
 		{Side: Request, Leaf: Leaf{Path: "body.kind", Type: String, Value: "batch-7"}, Live: "batch-7"},
 	}}}
-	raw := []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, rText: "INSERT INTO jobs (shard) VALUES ('s3')"}}
+	raw := []Raw{{rRead: true, mock: "pg-0", at: at.Add(-2 * time.Second), served: true, asRecorded: true, rText: "INSERT INTO jobs (shard) VALUES ('s3')"}}
 	for _, tc := range []struct {
 		name, recorded, now string
 		refused             bool
@@ -1698,7 +1698,7 @@ func TestAReasonIsOneTextForOneInput(t *testing.T) {
 			dc := clockedDrifts()
 			var raw []Raw
 			for _, m := range tc.mocks {
-				raw = append(raw, dc.RawOf(m, true))
+				raw = append(raw, dc.RawOf(m, true).ServedAsRecorded())
 			}
 			ln := ClassifyIn(dc, []string{p}, shape(tc.live), shape(tc.rec), at, nil, raw, nil, nil)[0]
 			seen[string(ln.Kind)+" | "+ln.From.Mock+" | "+ln.From.Field+" | "+ln.From.Held+" | "+ln.Why]++

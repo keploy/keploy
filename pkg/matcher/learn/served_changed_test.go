@@ -17,7 +17,9 @@ import (
 // replay (FALSE GREEN). A word the value holds now that stands in any of the
 // views, and not in the recorded text, is refused; where a view could not be
 // read, so is every word the value holds now. A word no view holds is no
-// copy of what F gave there: the value is learned as with no view. So under
+// copy of what F gave there: the value is learned as served as recorded
+// (Raw.ServedAsRecorded; with no view stated it is refused:
+// TestAWordARecordingServedWithNoViewStatedMayHaveGivenIsRefused). So under
 // ClassifyGiven and ClassifyFollowing, read whole or lazily, in a tracker's
 // test (the views bear the recording's identity, MockID, and the set's
 // caches by recording must not hand them the recording's payload) and with
@@ -45,14 +47,14 @@ func TestAWordAServeOfARecordingMayHaveGivenIsRefusedWhereItsServesDiffer(t *tes
 			return ClassifyFollowing(dc, []string{path}, live, rec, eRecAt, nil, raw, nil, nil, nil)
 		}},
 	} {
-		noView := cl.run(noSet(clockedDrifts()), jobsServed(chanceSrcRec, "5", Raw{}))
+		noView := cl.run(noSet(clockedDrifts()), jobsServedAsRecorded(chanceSrcRec, "5"))
 		if noView[0].Kind == KindUnaccounted {
-			t.Fatalf("%s: with no view the value is refused (%q): the row pins nothing", cl.name, noView[0].Why)
+			t.Fatalf("%s: served as recorded the value is refused (%q): the row pins nothing", cl.name, noView[0].Why)
 		}
 		for _, c := range []struct {
 			name  string
 			views []*models.Mock
-			want  string // the refusal's words; "" learns as with no view
+			want  string // the refusal's words; "" learns as served as recorded
 		}{
 			{"the first of two views holds the word", []*models.Mock{jobsMock(chanceSrcLive, "5"), jobsMock(chanceSrcRec, "5")}, inView + "2 serves"},
 			{"the second of two views holds the word", []*models.Mock{jobsMock(other, "5"), jobsMock(chanceSrcLive, "5")}, inView + "2 serves"},
@@ -101,7 +103,7 @@ func TestAWordAServeOfARecordingMayHaveGivenIsRefusedWhereItsServesDiffer(t *tes
 					}
 					switch {
 					case c.want == "" && !reflect.DeepEqual(got, noView):
-						t.Errorf("%s: learned %s (%q), want as with no view: %s (%q)", at, got[0].Kind, got[0].Why, noView[0].Kind, noView[0].Why)
+						t.Errorf("%s: learned %s (%q), want as served as recorded: %s (%q)", at, got[0].Kind, got[0].Why, noView[0].Kind, noView[0].Why)
 					case c.want != "" && (got[0].Kind != KindUnaccounted || !strings.Contains(got[0].Why, c.want)):
 						t.Errorf("FALSE GREEN? %s: learned %s (%q), want refused: %q", at, got[0].Kind, got[0].Why, c.want)
 					}
@@ -169,9 +171,9 @@ func TestAViewThatCouldNotBeReadIsNoView(t *testing.T) {
 			return ClassifyFollowing(dc, []string{path}, live, rec, eRecAt, nil, raw, nil, nil, nil)
 		}},
 	} {
-		noView := cl.run(noSet(clockedDrifts()), jobsServed(chanceSrcRec, "5", Raw{}))
+		noView := cl.run(noSet(clockedDrifts()), jobsServedAsRecorded(chanceSrcRec, "5"))
 		if noView[0].Kind == KindUnaccounted {
-			t.Fatalf("%s: with no view the value is refused (%q): the row pins nothing", cl.name, noView[0].Why)
+			t.Fatalf("%s: served as recorded the value is refused (%q): the row pins nothing", cl.name, noView[0].Why)
 		}
 		for _, c := range []struct {
 			name  string
@@ -232,6 +234,93 @@ func TestAViewThatCouldNotBeReadIsNoView(t *testing.T) {
 				}
 				if got[0].Kind != KindUnaccounted || !strings.Contains(got[0].Why, c.want) {
 					t.Errorf("FALSE GREEN? %s: an unread view learned %s (%q), want refused: %q", at, got[0].Kind, got[0].Why, c.want)
+				}
+			}
+		}
+	}
+}
+
+// jobsServedAsRecorded is jobsServed with no view, the jobs recording stated
+// as served as recorded (Raw.ServedAsRecorded): F gave the application the
+// recorded answer there.
+func jobsServedAsRecorded(id, n string) []Raw {
+	raw := jobsServed(id, n, Raw{})
+	raw[len(raw)-1] = raw[len(raw)-1].ServedAsRecorded()
+	return raw
+}
+
+// A recording F served whose adapter stated no view of it: not as recorded
+// (Raw.ServedAsRecorded), no view (Raw.ServedLive), none it keeps no one
+// view of (Raw.ServedChanged). keploy cannot tell what F gave the
+// application there (a template value, a variable F rendered into the
+// answer). Read as F having given nothing there, a word the application
+// copied from what F served passed as noise, unchecked at replay (FALSE
+// GREEN). A word the value holds now that the recording does not hold is
+// refused there, naming it, as where a serve's view could not be read: fail
+// closed. The same recording stated as served as recorded learns the value
+// (no word of it stands there), and so does one F did not serve, which
+// needs no view. So under ClassifyGiven and ClassifyFollowing, read whole or
+// lazily, with a cache of no tracker and with a set's.
+func TestAWordARecordingServedWithNoViewStatedMayHaveGivenIsRefused(t *testing.T) {
+	const path = "bind.$8"
+	rec := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "82"}}}
+	live := Shape{Leaves: map[string]Leaf{path: {Path: path, Type: String, Value: "6c7d"}}}
+	const unstated = "may stand in mock-6, an earlier recording record's full round served, where its adapter did not say what it gave the application there: keploy cannot tell whether it came from there"
+	for _, cl := range []struct {
+		name string
+		run  func(dc *DriftCache, raw []Raw) []Learned
+	}{
+		{"ClassifyGiven", func(dc *DriftCache, raw []Raw) []Learned {
+			return ClassifyGiven(dc, []string{path}, live, rec, eRecAt, nil, raw, nil, nil, nil)
+		}},
+		{"ClassifyFollowing", func(dc *DriftCache, raw []Raw) []Learned {
+			return ClassifyFollowing(dc, []string{path}, live, rec, eRecAt, nil, raw, nil, nil, nil)
+		}},
+	} {
+		for _, lazy := range []bool{false, true} {
+			for _, set := range []bool{false, true} {
+				at := cl.name
+				if lazy {
+					at += ", lazy"
+				}
+				if set {
+					at += ", a set's cache"
+				}
+				dcOf := func() *DriftCache {
+					if set {
+						return clockedDrifts()
+					}
+					return noSet(clockedDrifts())
+				}
+				jobs := func(dc *DriftCache, served bool) []Raw {
+					x := eJobs(chanceSrcRec, "5")
+					if lazy {
+						x = dc.LazyRawOf(jobsMock(chanceSrcRec, "5"), served, nil)
+					}
+					if served {
+						x = x.ServedAs(6)
+					} else {
+						x = x.WithServed(false)
+					}
+					return append(eStartup(), x)
+				}
+				dc := dcOf()
+				raw := jobs(dc, true)
+				if !raw[len(raw)-1].viewUnstated() {
+					t.Fatalf("%s: a served Raw no adapter stated a view of reads as stated", at)
+				}
+				if got := cl.run(dc, raw); got[0].Kind != KindUnaccounted || !strings.Contains(got[0].Why, unstated) {
+					t.Errorf("%s, no view stated: %s (%q); want refused: %q", at, got[0].Kind, got[0].Why, unstated)
+				}
+				dc = dcOf()
+				raw = jobs(dc, true)
+				raw[len(raw)-1] = raw[len(raw)-1].ServedAsRecorded()
+				if got := cl.run(dc, raw); got[0].Kind == KindUnaccounted {
+					t.Errorf("%s, served as recorded: refused (%q); want learned: no word of it stands in what F gave", at, got[0].Why)
+				}
+				dc = dcOf()
+				if got := cl.run(dc, jobs(dc, false)); got[0].Kind == KindUnaccounted {
+					t.Errorf("%s, not served: refused (%q); want learned: a recording F did not serve needs no view", at, got[0].Why)
 				}
 			}
 		}
