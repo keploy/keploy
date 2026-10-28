@@ -364,7 +364,9 @@ func (c *runClock) began(r time.Time) (time.Time, bool) {
 // the move does not. Of two moves the later starts it; the next test's move
 // changes nothing, however late the call is checked; a call that reaches
 // keploy while a move is written has none; and a server test's call with
-// no serve before it has none. Hooks that tell no runs leave it none.
+// no serve before it, on a tracker that began no set, has none
+// (TestASetsFirstServerCallStartsItsSpanAtTheSetsBegin has a set's). Hooks
+// that tell no runs leave it none.
 func TestALiveSpanStartsWhereTheAppsClocksRunBegan(t *testing.T) {
 	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
 	back := -30 * 24 * time.Hour // the run clock goes back to the test's recorded day
@@ -420,12 +422,154 @@ func TestALiveSpanStartsWhereTheAppsClocksRunBegan(t *testing.T) {
 		t.Fatalf("span = %+v for a call that reached keploy mid-write; want none", s)
 	}
 
-	// A server test's call with no serve before it has none, moved or not.
+	// A server test's call with no serve before it, on a tracker that began
+	// no set, has none, moved or not.
 	tr = NewTracker()
 	tr.SetAppClock(clock.at)
 	tr.SetAppClockRun(clock.began)
 	if s, ok := tr.LiveSpan(arrival); ok {
-		t.Fatalf("span = %+v with no serve before the call; want none", s)
+		t.Fatalf("span = %+v with no serve before the call and no set begun; want none", s)
+	}
+}
+
+// A set's first server test whose app made no start-up call: the store
+// served nothing before the test's first call in the set, so no serve
+// bounds the call's span. The app reads its clock for a call of the set
+// after the set began, so where the hooks tell where the app's clock's run
+// began, the span starts at the later of the set's begin (NewSetAt) and the
+// run's: at the move where the test's begin moved the clock after the set
+// began, at the set's begin where the clock last moved before it, and at
+// the set's begin on the real clock, whose run began nowhere keploy reads
+// (this build's own hooks, which move no clock). A replay checks the call's
+// learned read in it: a read of the clock as the call was made passes, one
+// of the clock before the move, or from before the set began, does not.
+// Hooks that tell no run leave it none, as before (the clock may have left
+// and come back to the same offset since the set began), and so do a
+// client test (whose span starts at its own begin), a call that reached
+// keploy before the set began, and a tracker that began no set. A serve
+// before the call still bounds it, a serve filed in the set of a call that
+// reached keploy before the set began does not bound it before the set's
+// begin, and the next set starts at its own begin.
+func TestASetsFirstServerCallStartsItsSpanAtTheSetsBegin(t *testing.T) {
+	base := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	back := -30 * 24 * time.Hour // the run clock goes back to the test's recorded day
+	setAt := base.Add(time.Second)
+	move := runWrite{from: base.Add(2 * time.Second), to: base.Add(2*time.Second + 5*time.Millisecond), offset: back}
+	clock := &runClock{writes: []runWrite{move}}
+	arrival := base.Add(3 * time.Second)
+	tracker := func(at func(time.Time) (time.Time, bool), run func(time.Time) (time.Time, bool)) *Tracker {
+		tr := NewTracker()
+		tr.SetAppClock(at)
+		tr.SetAppClockRun(run)
+		tr.NewSetAt(setAt)
+		return tr
+	}
+	const p = "body.since"
+	read := models.ClockOffset{Res: time.Millisecond}
+	leaf := func(v time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: v.UTC().Format("2006-01-02T15:04:05.000Z")}
+	}
+
+	if s, ok := tracker(clock.at, nil).LiveSpan(arrival); ok {
+		t.Fatalf("span = %+v with no serve before the call and no run told; want none", s)
+	}
+	// The clock left and came back between the set's begin and the call (a
+	// real test, a frozen one, a real one): it reads the same offset at both,
+	// yet ran as one only from its last move. Told no run, keploy cannot tell
+	// that, so none; told it, the span starts at that move.
+	away := &runClock{writes: []runWrite{
+		{from: base.Add(1500 * time.Millisecond), to: base.Add(1501 * time.Millisecond), offset: time.Hour},
+		{from: base.Add(2500 * time.Millisecond), to: base.Add(2501 * time.Millisecond)},
+	}}
+	if s, ok := tracker(away.at, nil).LiveSpan(arrival); ok {
+		t.Fatalf("span = %+v across a stretch the clock left and came back to, no run told; want none", s)
+	}
+	if s, ok := tracker(away.at, away.began).LiveSpan(arrival); !ok || s != (Span{From: base.Add(2501 * time.Millisecond), To: arrival}) {
+		t.Fatalf("span = %+v,%v; want it from the clock's last move %v", s, ok, base.Add(2501*time.Millisecond))
+	}
+
+	// The test's begin moved the clock after the set began: from the move.
+	tr := tracker(clock.at, clock.began)
+	want := Span{From: move.to.Add(back), To: arrival.Add(back)}
+	if s, ok := tr.LiveSpan(arrival); !ok || s != want {
+		t.Fatalf("span = %+v,%v; want %+v: from the move after the set's begin", s, ok, want)
+	}
+	s, ok := ClockSpanFrom(WithTracker(context.Background(), tr), arrival)
+	if !ok {
+		t.Fatal("no span for the set's first call")
+	}
+	if ok, why := CheckClockRead(p, read, leaf(arrival.Add(back-time.Millisecond)), s, true); !ok {
+		t.Fatalf("a read of the moved clock as the call was made: refused (%s)", why)
+	}
+	if ok, _ := CheckClockRead(p, read, leaf(arrival.Add(-time.Millisecond)), s, true); ok {
+		t.Fatal("a read of the clock before its move passed the moved clock's span")
+	}
+
+	// The clock last moved before the set began: from the set's begin.
+	clock.writes = []runWrite{{from: base, to: base.Add(time.Millisecond), offset: back}}
+	want = Span{From: setAt.Add(back), To: arrival.Add(back)}
+	if s, ok = tr.LiveSpan(arrival); !ok || s != want {
+		t.Fatalf("span = %+v,%v; want %+v: from the set's begin, after the clock's last move", s, ok, want)
+	}
+	if ok, why := CheckClockRead(p, read, leaf(setAt.Add(back)), s, true); !ok {
+		t.Fatalf("a read as the set began: refused (%s)", why)
+	}
+	if ok, _ := CheckClockRead(p, read, leaf(setAt.Add(back-5*time.Millisecond)), s, true); ok {
+		t.Fatal("a read from before the set began passed")
+	}
+
+	// A client test's span starts at its own begin, never the set's.
+	tr.SetClientTests(true)
+	if s, ok := tr.LiveSpan(arrival); ok {
+		t.Fatalf("span = %+v for a client test that has not begun; want none", s)
+	}
+
+	// The real clock, whose run began nowhere keploy reads: from the set's
+	// begin. A serve before the call still bounds it; a call that reached
+	// keploy before the set began has none; the next set starts at its own
+	// begin, its serves forgotten.
+	realClock := func(r time.Time) (time.Time, bool) { return r, true }
+	tr = tracker(realClock, func(time.Time) (time.Time, bool) { return time.Time{}, true })
+	if s, ok := tr.LiveSpan(arrival); !ok || s != (Span{From: setAt, To: arrival}) {
+		t.Fatalf("span = %+v,%v on the real clock; want it from the set's begin %v", s, ok, setAt)
+	}
+	served := base.Add(2 * time.Second)
+	tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, served)
+	if s, ok := tr.LiveSpan(arrival); !ok || s != (Span{From: served, To: arrival}) {
+		t.Fatalf("span = %+v,%v; want it from the serve before the call %v", s, ok, served)
+	}
+	if s, ok := tr.LiveSpan(base.Add(500 * time.Millisecond)); ok {
+		t.Fatalf("span = %+v for a call that reached keploy before the set began; want none", s)
+	}
+	next := base.Add(10 * time.Second)
+	tr.NewSetAt(next)
+	if s, ok := tr.LiveSpan(next.Add(time.Second)); !ok || s != (Span{From: next, To: next.Add(time.Second)}) {
+		t.Fatalf("span = %+v,%v in the next set; want it from that set's begin %v", s, ok, next)
+	}
+	// A call of the set before reached keploy before this set began and was
+	// served after: its serve, filed at its arrival, is no bound before the
+	// set's begin, whether the hooks tell the run or not.
+	late := next.Add(-time.Second)
+	for _, run := range []func(time.Time) (time.Time, bool){nil, func(time.Time) (time.Time, bool) { return time.Time{}, true }} {
+		tr.SetAppClockRun(run)
+		tr.ServedMockAt(&models.Mock{Name: "mock-1", Kind: models.Mongo}, late)
+		if s, ok := tr.LiveSpan(next.Add(2 * time.Second)); !ok || s != (Span{From: next, To: next.Add(2 * time.Second)}) {
+			t.Fatalf("span = %+v,%v (run told: %v) after a serve before the set began; want it from the set's begin %v", s, ok, run != nil, next)
+		}
+		if ok, _ := CheckClockRead(p, read, leaf(late.Add(500*time.Millisecond)), Span{From: next, To: next.Add(2 * time.Second)}, true); ok {
+			t.Fatal("a read made before the set began passed")
+		}
+	}
+
+	// NewSet begins the set now.
+	tr = NewTracker()
+	tr.SetAppClock(realClock)
+	tr.SetAppClockRun(func(time.Time) (time.Time, bool) { return time.Time{}, true })
+	before := time.Now()
+	tr.NewSet()
+	now := time.Now()
+	if s, ok := tr.LiveSpan(now); !ok || s.From.Before(before) || s.From.After(now) || !s.To.Equal(now) {
+		t.Fatalf("span = %+v,%v at %v after NewSet at or after %v; want one from the set's begin to the call", s, ok, now, before)
 	}
 }
 

@@ -1202,7 +1202,8 @@ func (a *Agent) finalizeClientMocks(ctx context.Context, storage *ClientMockStor
 // tell it (AppClockRunReader, coreAgent.AppClockRunSetter; none otherwise),
 // or, under the proven switch, the real clock where the
 // hooks are this build's own (AgentHook), which move no clock: with no time
-// hooks the app reads the real clock (realAppClock). Other hooks that report
+// hooks the app reads the real clock (realAppClock), whose run never began
+// anywhere keploy reads (realAppClockRun). Other hooks that report
 // no app clock may move it, so keploy cannot tell which clock the app reads,
 // and hands the proxy none: a replay then refuses every learned read of the
 // clock rather than check it against the wrong clock (learn.CheckClockRead).
@@ -1212,10 +1213,14 @@ func (a *Agent) wireAppClock() {
 		return
 	}
 	r, reads := ActiveHooks.(AppClockReader)
+	_, own := ActiveHooks.(*AgentHook)
+	realClock := !reads && own && provenswitch.On()
 	if rs, ok := a.Proxy.(coreAgent.AppClockRunSetter); ok {
 		var run func(time.Time) (time.Time, bool)
 		if rr, tells := ActiveHooks.(AppClockRunReader); tells && reads {
 			run = rr.AppClockRunBegan
+		} else if realClock {
+			run = realAppClockRun
 		}
 		rs.SetAppClockRun(run)
 	}
@@ -1223,13 +1228,19 @@ func (a *Agent) wireAppClock() {
 		s.SetAppClock(r.AppClock)
 		return
 	}
-	if _, own := ActiveHooks.(*AgentHook); own && provenswitch.On() {
+	if realClock {
 		s.SetAppClock(realAppClock)
 	}
 }
 
 // realAppClock is the app's clock where no hooks move it: the real clock.
 func realAppClock(real time.Time) (time.Time, bool) { return real, true }
+
+// realAppClockRun is where realAppClock's run to an instant began: nothing
+// moves the real clock, so it has run as one from before any instant keploy
+// reads (the zero instant), and a span starts at its own bound (a set's
+// first server test's call at the set's begin: learn.Tracker.LiveSpan).
+func realAppClockRun(time.Time) (time.Time, bool) { return time.Time{}, true }
 
 // StoreMocksStream decodes the mock corpus one frame at a time from dec (header
 // counts split it into filtered then unfiltered), runs DeriveLifetime per mock,

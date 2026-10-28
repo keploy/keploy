@@ -1652,9 +1652,10 @@ type runProxy struct {
 func (p *runProxy) SetAppClockRun(f func(time.Time) (time.Time, bool)) { p.set, p.run = true, f }
 
 // Once the mocks are stored, the proxy is handed where the app's clock's
-// run began, from hooks that report the app's clock and tell it; hooks that
-// do not tell it, or report no app clock, hand it none, replacing any
-// handed before.
+// run began, from hooks that report the app's clock and tell it, and under
+// the proven switch from this build's own hooks, whose real clock's run
+// began nowhere keploy reads; hooks that do not tell it, or report no app
+// clock, hand it none, replacing any handed before.
 func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
 	prev := ActiveHooks
 	t.Cleanup(func() { ActiveHooks = prev })
@@ -1682,6 +1683,22 @@ func TestStoredMocksHandTheProxyWhereTheAppsClocksRunBegan(t *testing.T) {
 	ActiveHooks = &otherHooks{}
 	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
 	require.Nil(t, p.run, "hooks that report no app clock: no run")
+
+	// This build's own hooks move no clock: the real clock's run began
+	// nowhere keploy reads, so a span starts at its own bound (a set's
+	// first server test's call at the set's begin). The switch off hands
+	// none, as it hands no clock.
+	ActiveHooks = &AgentHook{}
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.NotNil(t, wp.appClock, "the real clock")
+	require.NotNil(t, p.run, "the real clock's run")
+	got, ok = p.run(at)
+	require.True(t, ok)
+	require.True(t, got.IsZero(), "the real clock's run began at %v; want the zero instant", got)
+
+	t.Setenv(provenswitch.Env, "")
+	a.finalizeClientMocks(context.Background(), &ClientMockStorage{})
+	require.Nil(t, p.run, "the switch off: no run")
 }
 
 // recBeginProxy is a wireProxy that takes a test's recorded begin
