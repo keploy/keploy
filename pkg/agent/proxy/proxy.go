@@ -1363,7 +1363,8 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	// The replayer makes the client's TLS handshake itself, on its
 	// SSLRequest: charged as the proxy's own client handshakes are.
 	reportCtx := p.withClientTLS(parserCtx, dstAddr, outgoingOpts.SrcPid)
-	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, &models.ConditionalDstCfg{Addr: dstAddr}, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
+	mysqlDst := &models.ConditionalDstCfg{Addr: dstAddr}
+	err := mysqlMocker.MockOutgoing(reportCtx, srcConn, mysqlDst, p.scopedFor(outgoingOpts.SrcPid, m), outgoingOpts)
 	p.countParserPanic(err, integrations.MYSQL, dstAddr)
 	if errors.Is(err, util.ErrParserPanicked) {
 		// Counted as a capture loss just above; no miss (mockFailed).
@@ -1372,7 +1373,7 @@ func (p *Proxy) mockMySQLOutgoing(parserCtx context.Context, srcConn net.Conn, d
 	}
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		p.logger.Debug("mysql mock outgoing finished with error", zap.Error(err))
-		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid)
+		p.sendMockNotFoundErrorFrom(err, outgoingOpts.SrcPid, mysqlDst)
 		if provenswitch.On() && isMockMiss(err) {
 			return reportedMiss{err}
 		}
@@ -3809,7 +3810,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			// The reporter names the process the connection came from on
 			// each miss and answer it takes (UnmatchedCall.Source).
 			srcPid := outgoingOpts.SrcPid
-			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid) })
+			testCtx := models.WithMockMismatchReporter(parserCtx, func(err error) { p.sendMockNotFoundErrorFrom(err, srcPid, dstCfg) })
 			// A test's end tells this connection's requests apart only if its
 			// parser answers before it reads again, or marks what it holds
 			// (inflight.go).
@@ -3820,7 +3821,7 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 			p.countParserPanic(err, parserType, dstAddr)
 			if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 				// Send specific error type to error channel for external monitoring
-				return p.mockFailedFrom(logger, err, srcPid)
+				return p.mockFailedFrom(logger, err, srcPid, dstCfg)
 			}
 		}
 	}
@@ -3931,7 +3932,7 @@ func (p *Proxy) mockGenericOutgoing(
 	p.countParserPanic(err, integrations.GENERIC, dstCfg.Addr)
 	if err != nil && err != io.EOF && !errors.Is(err, context.Canceled) && !isNetworkClosedErr(err) {
 		// Send specific error type to error channel for external monitoring
-		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid)
+		return p.mockFailedFrom(logger, err, outgoingOpts.SrcPid, dstCfg)
 	}
 	return nil
 }
@@ -5814,12 +5815,14 @@ func isMockMiss(err error) bool {
 // and returned as reportedMiss; anything else, and every run with the switch
 // off, keeps the error log it always had.
 func (p *Proxy) mockFailed(logger *zap.Logger, err error) error {
-	return p.mockFailedFrom(logger, err, 0)
+	return p.mockFailedFrom(logger, err, 0, nil)
 }
 
 // mockFailedFrom is mockFailed for a connection from process pid (0 when the
-// redirect gave none), whom its miss names (sendMockNotFoundErrorFrom).
-func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32) error {
+// redirect gave none), whom its miss names, dialled at dst (nil when none is
+// known), which its miss names when its parser named no destination
+// (sendMockNotFoundErrorFrom).
+func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32, dst *models.ConditionalDstCfg) error {
 	if errors.Is(err, util.ErrParserPanicked) {
 		// keploy's failure, counted as a capture loss where the parser
 		// returned it (countParserPanic): no miss, so neither the mismatch
@@ -5837,7 +5840,7 @@ func (p *Proxy) mockFailedFrom(logger *zap.Logger, err error, pid uint32) error 
 	// queued for its test already; queued again it would count twice, the
 	// second time possibly against the next test.
 	if !models.IsMismatchReported(err) {
-		p.sendMockNotFoundErrorFrom(err, pid)
+		p.sendMockNotFoundErrorFrom(err, pid, dst)
 	}
 	if quiet {
 		return reportedMiss{err}
@@ -5859,7 +5862,7 @@ func (p *Proxy) mismatchLog() func(string, ...zap.Field) {
 // sendMockNotFoundError builds a ParserError from a mock-miss error,
 // extracting the MismatchReport if the error carries one.
 func (p *Proxy) sendMockNotFoundError(err error) {
-	p.sendMockNotFoundErrorFrom(err, 0)
+	p.sendMockNotFoundErrorFrom(err, 0, nil)
 }
 
 // sendMockNotFoundErrorFrom is sendMockNotFoundError for a call from process
@@ -5869,7 +5872,14 @@ func (p *Proxy) sendMockNotFoundError(err error) {
 // answered call (models.ErrAnswered) is stamped as a miss is, and kept for
 // the test's read with the misses, but it is no miss: it is not logged as
 // one.
-func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
+//
+// dst is where the connection was dialled (nil when that is not known). A
+// report whose parser named no destination names dst's address: an HTTP call
+// with no Host header (an HTTP/1.0 client, an instance-metadata probe) has no
+// authority of its own, and its miss said nothing of where the call went. A
+// fabricated address (models.ConditionalDstCfg.AddrFabricated) names no
+// server, so it is not named either.
+func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32, dst *models.ConditionalDstCfg) {
 	proxyErr := models.ParserError{
 		ParserErrorType: models.ErrMockNotFound,
 		Err:             err,
@@ -5888,6 +5898,14 @@ func (p *Proxy) sendMockNotFoundErrorFrom(err error, pid uint32) {
 	if r := proxyErr.MismatchReport; r != nil && r.At.IsZero() {
 		stamped := *r
 		stamped.At = proxyErr.At
+		proxyErr.MismatchReport = &stamped
+	}
+	// The address the call was dialled at, when its parser named none. A
+	// copy, as above; the report's destination scope was settled by its
+	// parser, on what the parser saw.
+	if r := proxyErr.MismatchReport; r != nil && r.Destination == "" && dst != nil && dst.Addr != "" && !dst.AddrFabricated {
+		stamped := *r
+		stamped.Destination = dst.Addr
 		proxyErr.MismatchReport = &stamped
 	}
 	// The process that made the call (proven switch): its comm and argv[0],

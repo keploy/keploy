@@ -162,6 +162,10 @@ jobs:
   # (resolv.conf untouched); a control leg without the flag must show keploy's
   # lookup. Only the PR's binary and image: the published ones are what this
   # guards against.
+  # The same job then records a `docker run --dns ... --dns-search ...
+  # --dns-option ...` app: docker refuses an app's own --dns under the agent's
+  # network mode, so keploy hands the settings to the agent container, whose
+  # resolv.conf the app shares; the app must start and see them.
   disable_tele_docker:
     timeout-minutes: 20
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
@@ -191,3 +195,10 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/disable_tele/disable-tele-linux.sh" docker
+
+      - name: Run docker --dns e2e (the app's resolver settings reach it under keploy record)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/docker_dns/docker-dns-linux.sh"

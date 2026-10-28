@@ -297,6 +297,14 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
 		return "", err
 	}
+	// The app's own resolver settings likewise: it reads this container's
+	// /etc/resolv.conf (app_dns.go).
+	appDNSStr, err := agentDNSFlags(opts.AppDNS)
+	if err != nil {
+		utils.LogError(logger, err, "failed to build the keploy agent docker alias")
+		return "", err
+	}
+	appHostsStr += appDNSStr
 
 	tlsVolumeMount := fmt.Sprintf("-v %s:%s ", KeployTLSVolumeName, KeployTLSMountPath)
 	agentMemoryLimitFlag := ""

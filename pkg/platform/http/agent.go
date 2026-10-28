@@ -3195,13 +3195,14 @@ func (a *AgentClient) fetchAgentCA(ctx context.Context) ([]byte, error) {
 // directory's project instead of the one they named, and every tool that
 // resolved the project from the command, the user's own `docker compose -p`
 // included, then missed the stack keploy started.
-func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string) {
+func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks, hosts []string, dns models.AppDNS) {
 	if kind == utils.DockerCompose {
-		return cmd, nil, nil, nil
+		return cmd, nil, nil, nil, models.AppDNS{}
 	}
 	cmd, ports, networks = agentUtils.ExtractDockerFlags(cmd)
 	cmd, hosts = agentUtils.ExtractAddHosts(cmd)
-	return cmd, ports, networks, hosts
+	cmd, dns = agentUtils.ExtractDNSFlags(cmd)
+	return cmd, ports, networks, hosts, dns
 }
 
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
@@ -3289,6 +3290,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		}
 
 		var appPorts, appNetworks, appHosts []string
+		var appDNS models.AppDNS
 		if utils.CmdType(opts.CommandType) == utils.FromContainer {
 			// No command to scrape. The container itself is the source of
 			// truth, and it answers with published ports and networks the
@@ -3296,7 +3298,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 			// space-separated spelling, so `--network=foo` and `-p=8080:80`
 			// slip past it today and then collide with the `--network=container:`
 			// keploy splices in.
-			appPorts, appNetworks, appHosts, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
+			appPorts, appNetworks, appHosts, appDNS, err = a.appNetworkingFromContainer(ctx, opts.FromContainer)
 			if err != nil {
 				return fmt.Errorf("failed to read the networking of %q: %w", opts.FromContainer, err)
 			}
@@ -3332,9 +3334,10 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 				}
 			}()
 		} else {
-			cmd, appPorts, appNetworks, appHosts = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
+			cmd, appPorts, appNetworks, appHosts, appDNS = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
 		}
 		opts.AppExtraHosts = appHosts
+		opts.AppDNS = appDNS
 
 		opts.AppPorts = appPorts
 		if len(appNetworks) > 0 {
@@ -4857,7 +4860,8 @@ const fromContainerRestoreBudget = 90 * time.Second
 // appNetworkingFromContainer reads the published ports, user networks and host
 // entries off an already-running container, in the shapes GenerateDockerCommand
 // expects: AppPorts as whole `-p …` flags, AppNetworks as bare names,
-// AppExtraHosts as NAME:ADDRESS.
+// AppExtraHosts as NAME:ADDRESS, AppDNS as the container's own resolver
+// settings.
 //
 // The agent publishes on the app's behalf, because the app shares the agent's
 // network namespace and therefore cannot publish anything itself. That is true
@@ -4868,15 +4872,21 @@ const fromContainerRestoreBudget = 90 * time.Second
 // Network ALIASES are not carried over yet - they are attached per-network with
 // a separate flag - so a dependency that resolves the app by alias rather than
 // by container name still needs that alias set by hand.
-func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, err error) {
+func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name string) (ports, networks, hosts []string, dns models.AppDNS, err error) {
 	inspect, err := a.dockerClient.ContainerInspect(ctx, name)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, models.AppDNS{}, err
 	}
-	// Its host entries, which its replacement cannot carry under the agent's
-	// network mode: the agent container carries them (AppExtraHosts).
+	// Its host entries and resolver settings, which its replacement cannot
+	// carry under the agent's network mode (replicaConfig): the agent
+	// container carries them (AppExtraHosts, AppDNS).
 	if inspect.HostConfig != nil {
 		hosts = append(hosts, inspect.HostConfig.ExtraHosts...)
+		dns = models.AppDNS{
+			Servers: append([]string(nil), inspect.HostConfig.DNS...),
+			Search:  append([]string(nil), inspect.HostConfig.DNSSearch...),
+			Options: append([]string(nil), inspect.HostConfig.DNSOptions...),
+		}
 	}
 
 	// PortBindings is the REQUEST ("-p 8080" -> HostPort ""), which is what to
@@ -4926,7 +4936,7 @@ func (a *AgentClient) appNetworkingFromContainer(ctx context.Context, name strin
 		}
 	}
 	sort.Strings(networks)
-	return ports, networks, hosts, nil
+	return ports, networks, hosts, dns, nil
 }
 
 // RestoreFromContainer removes keploy's copy of the user's container and starts

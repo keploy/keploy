@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
 
@@ -50,6 +51,37 @@ func ExtractAddHosts(cmd string) (cleanedCmd string, hosts []string) {
 		hosts = append(hosts, strings.Trim(m[1], `"'`))
 	}
 	return addHostRegex.ReplaceAllString(cmd, ""), hosts
+}
+
+// dnsFlagRegex matches a `docker run` resolver flag, --dns, --dns-search,
+// --dns-option or its older spelling --dns-opt, with its value after a space
+// or an =, quoted or not.
+var dnsFlagRegex = regexp.MustCompile(`\s+--(dns|dns-search|dns-option|dns-opt)(?:=|\s+)("[^"]*"|'[^']*'|[^\s]+)`)
+
+// ExtractDNSFlags takes the app's resolver settings (--dns, --dns-search,
+// --dns-option) out of its `docker run` command: under keploy the app joins
+// the agent container's network namespace, where Docker refuses DNS servers
+// of the app's own ("conflicting options: dns and the network mode") and
+// ignores its search list and options, as the app shares the agent
+// container's /etc/resolv.conf. So the agent container carries them
+// (models.SetupOptions.AppDNS).
+//
+// Like ExtractDockerFlags and ExtractAddHosts it reads the whole command, so
+// an argument of the app's own spelled as one of these flags, after the
+// image, is taken too.
+func ExtractDNSFlags(cmd string) (cleanedCmd string, dns models.AppDNS) {
+	for _, m := range dnsFlagRegex.FindAllStringSubmatch(cmd, -1) {
+		v := strings.Trim(m[2], `"'`)
+		switch m[1] {
+		case "dns":
+			dns.Servers = append(dns.Servers, v)
+		case "dns-search":
+			dns.Search = append(dns.Search, v)
+		default:
+			dns.Options = append(dns.Options, v)
+		}
+	}
+	return dnsFlagRegex.ReplaceAllString(cmd, ""), dns
 }
 
 func GenerateRandomContainerName(logger *zap.Logger, prefix string) string {
