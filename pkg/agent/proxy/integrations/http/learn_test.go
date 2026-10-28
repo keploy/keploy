@@ -3414,6 +3414,8 @@ func TestLearnMatchAClientTestLearnsTheAppsStampInItsWindowOnly(t *testing.T) {
 				tr.SetAppClock(appClock)
 			}
 			tr.ServedMockAt(boot, base)
+			// Served as recorded, as its adapter says.
+			tr.ServedMockAsRecorded(boot)
 			if tc.begun {
 				tr.RecordedBegin(recBegin)
 			}
@@ -4456,17 +4458,21 @@ func TestLearnMatchAServedRecordingAtTheCallsOwnInstantGetsTheVerdictOfOneAMomen
 					case "in the test":
 						tr.Begin()
 						tr.ServedMock(other)
+						tr.ServedMockAsRecorded(other)
 					case "at the start-up":
 						tr.ServedMock(other)
+						tr.ServedMockAsRecorded(other)
 						tr.Begin()
 					case "in the previous test":
 						tr.Begin()
 						tr.ServedMock(other)
+						tr.ServedMockAsRecorded(other)
 						tr.End()
 						tr.Begin()
 					case "two tests back":
 						tr.Begin()
 						tr.ServedMock(other)
+						tr.ServedMockAsRecorded(other)
 						tr.End()
 						tr.Begin()
 						tr.End()
