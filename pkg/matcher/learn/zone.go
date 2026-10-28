@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.keploy.io/server/v3/pkg/models"
@@ -90,7 +92,10 @@ type ProcZone struct {
 // reads over TZ, is its zone where one of its options sets it
 // (javaZoneID: -Duser.timezone= in JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS,
 // its command line or _JAVA_OPTIONS, the last the JVM reads winning), read
-// as Java reads it (javaZone), and an error where keploy cannot read it. It
+// as Java reads it (javaZone), and an error where keploy cannot read it; a
+// JVM whose options set none reads its zone as the JDK does, not as the C
+// library: TZ, else /etc/timezone, else the zone /etc/localtime links to or
+// copies, in Java's own zone data (javaPlatformZone). It
 // is the zone the process started with, as its environment, command line
 // and files name it: a zone the application sets as it runs (Django's
 // TIME_ZONE, process.env.TZ in Node, Java's TimeZone.setDefault) is not
@@ -134,14 +139,17 @@ func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
 			}
 		}
 	}
-	id, java, err := javaZoneID(procRoot, pid, dir, opts)
+	id, javaSet, jvm, err := javaZoneID(procRoot, pid, dir, opts)
 	if err != nil {
 		return ProcZone{}, err
 	}
 	var loc *time.Location
-	if java {
+	switch {
+	case javaSet:
 		loc, err = javaZone(id)
-	} else {
+	case jvm:
+		loc, err = javaPlatformZone(filepath.Join(dir, "root"), tz, set)
+	default:
 		loc, err = readZone(filepath.Join(dir, "root"), tz, set, false)
 	}
 	if err != nil {
@@ -158,24 +166,25 @@ func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
 // before its command line), then its command line's options (before its
 // main class, -jar or -m: what follows is the application's; an @argfile
 // among them read in its place, from the process's own files), then
-// _JAVA_OPTIONS. false where none sets one, where the last sets it empty
-// (-Duser.timezone= or -Duser.timezone: Java then reads TZ, as it does one
-// unset), or where the process is no JVM (it maps no libjvm.so: another
-// program's options are no JVM's). An error where an option sets it and
+// _JAVA_OPTIONS. set false where none sets one, where the last sets it
+// empty (-Duser.timezone= or -Duser.timezone: Java then reads its
+// platform's zone, as it does one unset: javaPlatformZone), or where the
+// process is no JVM (it maps no libjvm.so: another program's options are
+// no JVM's). jvm reports whether the process is a JVM. An error where
 // keploy cannot read whether the process is a JVM, its command line, an
 // argfile, or an OpenJ9 option variable (OPENJ9_JAVA_OPTIONS,
 // IBM_JAVA_OPTIONS) that sets it, whose order keploy does not read; and
 // where the process is exiting (its command line or its maps read empty).
-func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) (string, bool, error) {
+func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) (id string, set, jvm bool, err error) {
 	cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
 	if err != nil {
-		return "", false, fmt.Errorf("keploy cannot read the process's command line, which may set a JVM's zone: %w", err)
+		return "", false, false, fmt.Errorf("keploy cannot read the process's command line, which may set a JVM's zone: %w", err)
 	}
 	if len(cmdline) == 0 && procExiting(procRoot, pid) {
-		return "", false, errors.New("the process is exiting, so its command line reads empty and keploy cannot tell whether it sets a JVM's zone")
+		return "", false, false, errors.New("the process is exiting, so its command line reads empty and keploy cannot tell whether it sets a JVM's zone")
 	}
 	lib, jvmRead := "", false
-	jvm := func() (bool, error) {
+	isJVM := func() (bool, error) {
 		if !jvmRead {
 			l, err := mapsJVM(dir)
 			if err != nil {
@@ -188,21 +197,21 @@ func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) 
 		}
 		return lib != "", nil
 	}
-	type set struct{ from, id string }
-	var sets []set
+	type option struct{ from, id string }
+	var sets []option
 	add := func(from string, args []string) {
 		for _, a := range args {
 			if v, ok := strings.CutPrefix(a, "-Duser.timezone="); ok {
-				sets = append(sets, set{from, v})
+				sets = append(sets, option{from, v})
 			} else if a == "-Duser.timezone" {
-				sets = append(sets, set{from, ""})
+				sets = append(sets, option{from, ""})
 			}
 		}
 	}
 	for _, v := range []string{"OPENJ9_JAVA_OPTIONS", "IBM_JAVA_OPTIONS"} {
 		if add(v, javaOptions(env[v])); len(sets) > 0 {
-			if j, err := jvm(); err != nil || j {
-				return "", false, errors.Join(fmt.Errorf("%s sets a JVM's user.timezone, which keploy does not read (OpenJ9's options' order)", v), err)
+			if j, err := isJVM(); err != nil || j {
+				return "", false, j, errors.Join(fmt.Errorf("%s sets a JVM's user.timezone, which keploy does not read (OpenJ9's options' order)", v), err)
 			}
 			sets = nil
 		}
@@ -213,7 +222,7 @@ func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) 
 	args, err := jvmArgs(argv, func(file string) ([]string, error) {
 		// An argfile is read only of a JVM: "@..." is no file to any other
 		// program.
-		if j, err := jvm(); err != nil {
+		if j, err := isJVM(); err != nil {
 			return nil, err
 		} else if !j {
 			return nil, errNoJVM
@@ -222,23 +231,20 @@ func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) 
 	})
 	switch {
 	case errors.Is(err, errNoJVM):
-		return "", false, nil
+		return "", false, false, nil
 	case err != nil:
-		return "", false, err
+		return "", false, jvmRead && lib != "", err
 	}
 	add("the command line", args)
 	add("_JAVA_OPTIONS", javaOptions(env["_JAVA_OPTIONS"]))
-	if len(sets) == 0 {
-		return "", false, nil
-	}
-	if j, err := jvm(); err != nil || !j {
-		return "", false, err
+	if j, err := isJVM(); err != nil || !j || len(sets) == 0 {
+		return "", false, j, err
 	}
 	for i := len(sets) - 1; i >= 0; i-- {
 		if sets[i].from == "JDK_JAVA_OPTIONS" {
 			exe, err := os.Readlink(filepath.Join(dir, "exe"))
 			if err != nil {
-				return "", false, fmt.Errorf("JDK_JAVA_OPTIONS sets a JVM's user.timezone, which the java launcher alone reads, but keploy cannot read the process's executable: %w", err)
+				return "", false, true, fmt.Errorf("JDK_JAVA_OPTIONS sets a JVM's user.timezone, which the java launcher alone reads, but keploy cannot read the process's executable: %w", err)
 			}
 			// The java launcher reads it from Java 9; Java 8's libjvm.so
 			// sits under jre/lib.
@@ -246,9 +252,9 @@ func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) 
 				continue
 			}
 		}
-		return sets[i].id, sets[i].id != "", nil
+		return sets[i].id, sets[i].id != "", true, nil
 	}
-	return "", false, nil
+	return "", false, true, nil
 }
 
 // errNoJVM: the process is no JVM, so its arguments are no JVM's.
@@ -417,7 +423,7 @@ func mapsJVM(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		l := strings.TrimSuffix(sc.Text(), " (deleted)")
@@ -456,7 +462,8 @@ func javaZone(id string) (*time.Location, error) {
 		return time.FixedZone("", off), nil
 	}
 	switch {
-	case id == "localtime" || id == "posixrules" || id == "Factory" || strings.HasPrefix(id, "posix/") || strings.HasPrefix(id, "right/") || strings.Contains(id, ".."):
+	case id == "localtime" || id == "posixrules" || id == "Factory" || strings.HasPrefix(id, "posix/") || strings.HasPrefix(id, "right/") || strings.Contains(id, ".."),
+		!javaRegionID(id):
 		return nil, fmt.Errorf("a JVM's user.timezone %q is no zone a JVM reads", id)
 	}
 	loc, err := models.ZoneLocation(id)
@@ -464,6 +471,305 @@ func javaZone(id string) (*time.Location, error) {
 		return nil, fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads: %w", id, err)
 	}
 	return loc, nil
+}
+
+// javaRegionID reports whether id is spelt as a region of Java's zone data
+// is: names joined by "/", each a letter and then letters, digits, "_",
+// "-" or "+" ("America/Port-au-Prince", "Etc/GMT+5"). A spelling the
+// host's zone files read too ("Europe//Berlin", "./UTC") is no id Java
+// knows, nor an offset with no "GMT" before it ("+05:30"), which is no
+// custom id to Java's TimeZone.
+func javaRegionID(id string) bool {
+	letter := func(r rune) bool { return 'A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' }
+	for _, n := range strings.Split(id, "/") {
+		if n == "" || !letter(rune(n[0])) {
+			return false
+		}
+		for _, r := range n {
+			if ok := letter(r) || '0' <= r && r <= '9' || r == '_' || r == '-' || r == '+'; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// javaPlatformZone is the zone a JVM whose options set no user.timezone
+// reads, under root (its /proc/<pid>/root, so a container's files are
+// read, never keploy's), as the JDK reads it on Linux (TimeZone_md.c:
+// findJavaTZ_md, getPlatformTimeZoneID), not as the C library does: TZ
+// where it is set and not empty (an empty TZ is unset to Java, where the C
+// library reads UTC); else the zone /etc/localtime's own link names, after
+// its first "zoneinfo/" (read as a name, so a link to a file the image
+// lacks names it too); else, of a copy (or a link naming no zoneinfo/),
+// the zone file under /usr/share/zoneinfo of the same bytes
+// (javaZoneinfoMatch); else GMT, which Java reads as UTC: no
+// /etc/localtime, or a copy of no zone file there (an image that copied
+// one in without its zone directory). JDK 8 and 11, and 17, 21 and 22-24
+// before JDK-8345213 (JDK 25; 17 and 21 updates from late 2025), read the
+// first line of Debian's /etc/timezone before /etc/localtime; keploy does
+// not read which JDK the process runs, so where /etc/timezone names a zone
+// it must be the one /etc/localtime gives, else an error. Likewise JDK 21
+// and later clean a link's "//", "." and ".." before reading its name and
+// older ones do not, so a link those change is an error. The id, a leading
+// ":" and then "posix/" dropped, is read as Java reads it (javaZone), in
+// keploy's zone data, which stands for Java's own (an id one knows and the
+// other does not, a zone newer than the JVM's, is read in keploy's). An
+// error where keploy cannot read one of those files or the process's root
+// (an exited process's reads nothing), and where Java does not know the id
+// (a POSIX rule "IST-5:30", a path, an empty one): Java then reads the C
+// library's offset at its start, a fixed one, which keploy does not.
+func javaPlatformZone(root, tz string, set bool) (*time.Location, error) {
+	id, from := tz, "TZ"
+	if !set || tz == "" {
+		var err error
+		if id, from, err = javaPlatformID(root); err != nil {
+			return nil, err
+		}
+		if from == "" {
+			return time.UTC, nil
+		}
+	}
+	id = javaStrip(id)
+	loc, err := javaZone(id)
+	if err != nil {
+		return nil, fmt.Errorf("a JVM with no user.timezone reads its zone from %s, %q, which Java does not know, so it reads the C library's offset at its start, which keploy does not: %w", from, id, err)
+	}
+	return loc, nil
+}
+
+// javaStrip is a platform zone id as the JDK reads it: a leading ":" and
+// then "posix/" dropped.
+func javaStrip(id string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(id, ":"), "posix/")
+}
+
+// javaPlatformID is the zone id a JVM reads where TZ names none
+// (javaPlatformZone), and the file it is read from; from "" where Java
+// reads GMT.
+func javaPlatformID(root string) (id, from string, err error) {
+	// Each absence below is read in a root keploy can read: an exited
+	// process's root reads as absent everywhere, never GMT.
+	alive := func() error {
+		if _, err := os.Stat(root); err != nil {
+			return fmt.Errorf("keploy cannot read the process's root, where a JVM reads its zone: %w", err)
+		}
+		return nil
+	}
+	if err := alive(); err != nil {
+		return "", "", err
+	}
+	id, from, err = javaLocaltimeID(root)
+	if err == nil && from == "" {
+		err = alive()
+	}
+	tzid, ok, tzerr := javaTimezoneLine(root)
+	switch {
+	case tzerr != nil:
+		return "", "", tzerr
+	case !ok:
+		return id, from, err
+	case err != nil:
+		return "", "", fmt.Errorf("the process's /etc/timezone names %q, which JDKs before JDK-8345213 read as its zone, and keploy cannot read the zone later ones read from /etc/localtime: %w", tzid, err)
+	case javaStrip(tzid) != javaStrip(id):
+		other := id
+		if from == "" {
+			other = "GMT"
+		}
+		return "", "", fmt.Errorf("the process's /etc/timezone names %q, which JDKs before JDK-8345213 read as its zone, and its /etc/localtime %q, which later ones read; keploy does not read which JDK the process runs", tzid, other)
+	}
+	return id, from, nil
+}
+
+// javaTimezoneLine is the first line of root's /etc/timezone, as fgets
+// reads it into 256 bytes, to its newline, then as strlen reads it, to a
+// NUL; false where there is none, it is empty, or it is no file (a
+// directory, which docker makes of a bind of a host file that is not
+// there: fgets reads nothing of it). An error where keploy cannot read it,
+// or a JVM may not (other users cannot read it).
+func javaTimezoneLine(root string) (string, bool, error) {
+	b, err := readUnder(root, "/etc/timezone")
+	var nr errNotRegular
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.As(err, &nr) && nr.mode.IsDir():
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("keploy cannot read the process's /etc/timezone, which a JVM may read its zone from: %w", err)
+	}
+	if r, err := resolveUnder(root, "/etc/timezone"); err != nil {
+		return "", false, err
+	} else if fi, err := os.Stat(under(root, r)); err != nil || fi.Mode().Perm()&0o004 == 0 {
+		return "", false, errors.New("the process's /etc/timezone, which a JVM may read its zone from, is not readable by every user, so keploy cannot tell whether the JVM reads it")
+	}
+	line := b[:min(len(b), 255)]
+	if i := bytes.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	if i := bytes.IndexByte(line, 0); i >= 0 {
+		line = line[:i]
+	}
+	return string(line), len(line) > 0, nil
+}
+
+// javaLocaltimeID is the zone id a JVM reads from root's /etc/localtime
+// (javaPlatformZone), and where it read it; from "" where Java reads GMT.
+func javaLocaltimeID(root string) (id, from string, err error) {
+	etc, err := resolveUnder(root, "/etc")
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", "", nil
+	} else if err != nil {
+		return "", "", fmt.Errorf("keploy cannot read the process's /etc, where a JVM reads its zone: %w", err)
+	}
+	lt := under(root, path.Join(etc, "localtime"))
+	fi, err := os.Lstat(lt)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", "", nil
+	} else if err != nil {
+		return "", "", fmt.Errorf("keploy cannot read the process's /etc/localtime, which a JVM reads its zone from: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(lt)
+		if err != nil {
+			return "", "", fmt.Errorf("keploy cannot read the process's /etc/localtime link, which a JVM reads its zone from: %w", err)
+		}
+		// The part after the first "zoneinfo/", as JDK 21 and later read
+		// it (its "//", "." and ".." cleaned) and as older ones do (not).
+		_, raw, rawOK := strings.Cut(target, "zoneinfo/")
+		_, clean, cleanOK := strings.Cut(path.Clean(target), "zoneinfo/")
+		switch {
+		case rawOK && cleanOK && raw == clean:
+			return clean, "the /etc/localtime link", nil
+		case rawOK || cleanOK:
+			return "", "", fmt.Errorf("the process's /etc/localtime links to %q, which JDK 21 and later read as zone %q and older ones as %q; keploy does not read which JDK the process runs", target, clean, raw)
+		}
+	}
+	data, err := readUnder(root, "/etc/localtime")
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", "", nil
+	} else if err != nil {
+		return "", "", fmt.Errorf("keploy cannot read the process's /etc/localtime, which a JVM reads its zone from: %w", err)
+	}
+	n, err := javaZoneinfoMatch(root, data)
+	if err != nil || n == "" {
+		return "", "", err
+	}
+	return n, "the zone file /etc/localtime copies", nil
+}
+
+// javaZoneinfoMatchCap bounds the entries javaZoneinfoMatch lists.
+const javaZoneinfoMatchCap = 20000
+
+// javaZoneinfoMatch is the zone id the JDK finds for a copied
+// /etc/localtime holding data (findZoneinfoFile): the name, after
+// "zoneinfo/", of a file under root's /usr/share/zoneinfo holding the same
+// bytes, its UTC and then its GMT first, then each file its directories
+// list, links followed, names starting with "." and ROC, posixrules and
+// localtime skipped; "" where none does (Java then reads GMT). The JDK
+// takes the first its directory listing gives, in an order keploy does not
+// read, so where another file holds the same bytes too, each must be a zone
+// Java knows (javaZone, a "posix/" dropped), else an error: of the same
+// bytes, they are one zone's rules. Where a directory links to one already
+// listed (posix -> ., in some images' zone directories), the JDK lists it
+// again under the link's name, deeper each time, and which name it finds
+// first turns on that order too: an error where anything matched. An error,
+// too, where keploy cannot read an entry for any reason but its absence.
+func javaZoneinfoMatch(root string, data []byte) (string, error) {
+	const dir = "/usr/share/zoneinfo"
+	if _, err := resolveUnder(root, dir); errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("keploy cannot read the process's %s, where a JVM finds the zone its /etc/localtime copies: %w", dir, err)
+	}
+	unread := func(p string, err error) error {
+		return fmt.Errorf("keploy cannot read %s in the process's zone directory, where a JVM finds the zone its /etc/localtime copies: %w", p, err)
+	}
+	same := func(p string) (ok, isDir bool, err error) {
+		r, err := resolveUnder(root, p)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, false, nil
+		} else if err != nil {
+			return false, false, unread(p, err)
+		}
+		fi, err := os.Stat(under(root, r))
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, false, nil
+		} else if err != nil {
+			return false, false, unread(p, err)
+		}
+		if fi.IsDir() {
+			return false, true, nil
+		}
+		if !fi.Mode().IsRegular() || fi.Size() != int64(len(data)) {
+			return false, false, nil
+		}
+		b, err := readUnder(root, r)
+		if err != nil {
+			return false, false, unread(p, err)
+		}
+		return bytes.Equal(b, data), false, nil
+	}
+	for _, n := range []string{"UTC", "GMT"} {
+		if ok, _, err := same(dir + "/" + n); err != nil {
+			return "", err
+		} else if ok {
+			return n, nil
+		}
+	}
+	var found []string
+	seen, files, aliased := map[string]bool{}, 0, false
+	var walk func(p string) error
+	walk = func(p string) error {
+		r, err := resolveUnder(root, p)
+		if err != nil {
+			return unread(p, err)
+		}
+		if seen[r] {
+			aliased = true
+			return nil
+		}
+		seen[r] = true
+		ents, err := os.ReadDir(under(root, r))
+		if err != nil {
+			return unread(p, err)
+		}
+		for _, e := range ents {
+			n := e.Name()
+			if strings.HasPrefix(n, ".") || n == "ROC" || n == "posixrules" || n == "localtime" {
+				continue
+			}
+			if files++; files > javaZoneinfoMatchCap {
+				return fmt.Errorf("the process's %s holds more than %d files, so keploy does not search it for the zone its /etc/localtime copies", dir, javaZoneinfoMatchCap)
+			}
+			q := p + "/" + n
+			ok, isDir, err := same(q)
+			switch {
+			case err != nil:
+				return err
+			case isDir:
+				if err := walk(q); err != nil {
+					return err
+				}
+			case ok:
+				found = append(found, strings.TrimPrefix(q, dir+"/"))
+			}
+		}
+		return nil
+	}
+	if err := walk(dir); err != nil {
+		return "", err
+	}
+	if aliased && len(found) > 0 {
+		return "", fmt.Errorf("the process's %s links a directory to one a JVM lists already, so the name it finds first for the zone its /etc/localtime copies (%s) turns on its directory listing's order", dir, found[0])
+	}
+	for _, n := range found {
+		if _, err := javaZone(strings.TrimPrefix(n, "posix/")); err != nil {
+			return "", fmt.Errorf("the process's /etc/localtime copies its zone file %s, which Java does not know, and a JVM may find that one first: %w", n, err)
+		}
+	}
+	if len(found) == 0 {
+		return "", nil
+	}
+	return found[0], nil
 }
 
 // javaShortIDs is how Java reads its old three-letter ids (ZoneId.SHORT_IDS,
@@ -574,8 +880,13 @@ func (c *ProcZones) Of(pid uint32) (ProcZone, error) {
 		}
 	}
 	z, err := ReadProcZone(c.root, pid)
-	if err != nil || start == "" || procStart(c.root, pid) != start {
+	if err != nil {
 		return z, err
+	}
+	if start == "" || procStart(c.root, pid) != start {
+		// The process exited, or another took its number, as keploy read
+		// it: what it read may be either's, or none's.
+		return ProcZone{}, errors.New("the process exited or another took its number while keploy read its zone")
 	}
 	c.mu.Lock()
 	if len(c.m) >= procZoneCap {
@@ -738,8 +1049,42 @@ func readZoneFile(root, p string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	data, err := os.ReadFile(under(root, real))
+	data, err := readRegular(under(root, real))
 	return data, real, err
+}
+
+// zoneFileCap bounds the bytes readRegular reads: a zone file holds a few
+// KiB.
+const zoneFileCap = 1 << 20
+
+// errNotRegular is readRegular's error of a file that is no regular one.
+type errNotRegular struct{ mode fs.FileMode }
+
+func (e errNotRegular) Error() string {
+	return "no regular file (" + e.mode.Type().String() + ")"
+}
+
+// readRegular reads the regular file at name, of at most zoneFileCap
+// bytes: an error of any other (a FIFO, which would hold the read, a
+// device, a directory), never read, or a longer one.
+func readRegular(name string) ([]byte, error) {
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegular{fi.Mode()}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, zoneFileCap+1))
+	if err == nil && len(data) > zoneFileCap {
+		err = fmt.Errorf("more than %d bytes, which no zone file holds", zoneFileCap)
+	}
+	return data, err
 }
 
 // readUnder reads the file at p, a path in the process's own view, under

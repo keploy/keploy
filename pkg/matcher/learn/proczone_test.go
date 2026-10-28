@@ -13,8 +13,9 @@ import (
 )
 
 // fakeProc writes a process's /proc entry under root: its environ, its
-// command line (a program of no options), its stat (with a name of spaces
-// and parentheses, which hold no field) and the files of its own root.
+// command line (a program of no options), its maps (no JVM's), its stat
+// (with a name of spaces and parentheses, which hold no field) and the files
+// of its own root.
 func fakeProc(t *testing.T, root string, pid, start string, env []string, files map[string][]byte, links map[string]string) {
 	t.Helper()
 	dir := filepath.Join(root, pid)
@@ -28,6 +29,7 @@ func fakeProc(t *testing.T, root string, pid, start string, env []string, files 
 	}
 	write(filepath.Join(dir, "environ"), []byte(strings.Join(env, "\x00")+"\x00"))
 	write(filepath.Join(dir, "cmdline"), []byte("/app/server\x00"))
+	write(filepath.Join(dir, "maps"), []byte("5600-5610 r-xp 00000000 08:01 7 /app/server\n"))
 	stat := pid + " (my app) (x) S 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 " + start + " 1000 100 18446744073709551615"
 	write(filepath.Join(dir, "stat"), []byte(stat))
 	for name, data := range files {
@@ -239,6 +241,9 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 		}
 		switch maps {
 		case "-":
+			if err := os.Remove(filepath.Join(dir, "maps")); err != nil {
+				t.Fatal(err)
+			}
 		case "=":
 			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(pid+" (java) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615"), 0o644); err != nil {
 				t.Fatal(err)
@@ -326,9 +331,135 @@ func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
 	}
 	// A name only a host's zone directory holds is refused as no zone a JVM
 	// reads, whatever the host holds, never read from the host's files.
-	for _, id := range []string{"localtime", "posixrules", "Factory", "posix/Asia/Kolkata", "right/UTC"} {
+	for _, id := range []string{"localtime", "posixrules", "Factory", "posix/Asia/Kolkata", "right/UTC", "+05:30", "-08:00"} {
 		if loc, err := javaZone(id); err == nil || loc != nil || !strings.Contains(err.Error(), "is no zone a JVM reads") {
 			t.Errorf("user.timezone %q: %v %v; want refused as no zone a JVM reads", id, loc, err)
+		}
+	}
+}
+
+// A JVM whose options set no user.timezone reads its zone as the JDK does,
+// not as the C library: TZ where it is set and not empty, read in Java's
+// zone data; else the zone /etc/localtime links to, by its link's name;
+// else the zone file of the bytes it copies; else GMT. All in the process's
+// own root. Where JDKs differ (older ones read /etc/timezone first, and
+// read a link uncleaned) and the files make them disagree, and where Java
+// does not know the id (it reads the C library's offset, which keploy does
+// not), the zone is unknown. Another program with the same files reads them
+// as the C library does, as before.
+func TestAJVMWithNoZoneOptionReadsItsZoneAsTheJDKDoes(t *testing.T) {
+	kolkata, err := os.ReadFile("/usr/share/zoneinfo/Asia/Kolkata")
+	if err != nil {
+		t.Skipf("no host zone files: %v", err)
+	}
+	berlin, err := os.ReadFile("/usr/share/zoneinfo/Europe/Berlin")
+	if err != nil {
+		t.Skipf("no host zone files: %v", err)
+	}
+	at := time.Date(2026, 1, 28, 7, 30, 0, 0, time.UTC)
+	proc := t.TempDir()
+	const libjvm = "5600-5610 r-xp 00000000 08:01 7 /opt/java/openjdk/bin/java\n7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so\n"
+	zi := func(names ...string) map[string][]byte {
+		m := map[string][]byte{}
+		for _, n := range names {
+			b := kolkata
+			if strings.Contains(n, "Berlin") {
+				b = berlin
+			}
+			m["usr/share/zoneinfo/"+n] = b
+		}
+		return m
+	}
+	with := func(m map[string][]byte, name string, b []byte) map[string][]byte {
+		m[name] = b
+		return m
+	}
+	toKolkata := map[string]string{"etc/localtime": "/usr/share/zoneinfo/Asia/Kolkata"}
+	toBerlin := map[string]string{"etc/localtime": "/usr/share/zoneinfo/Europe/Berlin"}
+	etc := func(m map[string][]byte) map[string][]byte {
+		if m == nil {
+			m = map[string][]byte{}
+		}
+		return with(m, "etc/hostname", []byte("app\n"))
+	}
+	for i, row := range []struct {
+		what  string
+		jvm   bool
+		env   []string
+		argv  []string
+		files map[string][]byte
+		links map[string]string
+		want  string // the zone's name; "!" an error
+		off   int
+	}{
+		{"TZ, in Java's own zone data: an image with no zone files", true, []string{"TZ=Asia/Kolkata"}, nil, nil, nil, "+05:30", 19800},
+		{"another program's TZ of no zone file: unknown, as before", false, []string{"TZ=Asia/Kolkata"}, nil, nil, nil, "!", 0},
+		{"TZ with a leading colon", true, []string{"TZ=:Europe/Berlin"}, nil, nil, nil, "Europe/Berlin", 3600},
+		{"TZ under posix/, dropped", true, []string{"TZ=posix/Europe/Berlin"}, nil, nil, nil, "Europe/Berlin", 3600},
+		{"TZ's colon dropped before posix/", true, []string{"TZ=:posix/Europe/Berlin"}, nil, nil, nil, "Europe/Berlin", 3600},
+		{"TZ empty: unset to Java, so /etc/localtime", true, []string{"TZ="}, nil, nil, toBerlin, "Europe/Berlin", 3600},
+		{"another program's empty TZ: UTC", false, []string{"TZ="}, nil, nil, toBerlin, "UTC", 0},
+		{"an /etc/timezone that names the zone /etc/localtime gives", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Asia/Kolkata\n")), toKolkata, "+05:30", 19800},
+		{"an /etc/timezone line read to a NUL", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Asia/Kolkata\x00Europe/Berlin\n")), toKolkata, "+05:30", 19800},
+		{"an /etc/timezone that disagrees with /etc/localtime: unknown (older JDKs read one, newer the other)", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Europe/Berlin\n")), toKolkata, "!", 0},
+		{"an /etc/timezone of no /etc/localtime: unknown (GMT to newer JDKs)", true, nil, nil, map[string][]byte{"etc/timezone": []byte("Europe/Berlin\n")}, nil, "!", 0},
+		{"another program reads /etc/localtime, not /etc/timezone", false, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("Europe/Berlin\n")), toKolkata, "+05:30", 19800},
+		{"an empty /etc/timezone line: /etc/localtime", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone", []byte("\nEurope/Berlin\n")), toKolkata, "+05:30", 19800},
+		{"an /etc/timezone directory (docker's bind of a missing file): /etc/localtime", true, nil, nil, with(zi("Asia/Kolkata"), "etc/timezone/x", nil), toKolkata, "+05:30", 19800},
+		{"the /etc/localtime link's name, to a file the image lacks", true, nil, nil, nil, toKolkata, "+05:30", 19800},
+		{"another program's /etc/localtime link to nothing: unknown, as before", false, nil, nil, nil, toKolkata, "!", 0},
+		{"a relative /etc/localtime link", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share/zoneinfo/Europe/Berlin"}, "Europe/Berlin", 3600},
+		{"a link newer JDKs clean and older do not: unknown", true, nil, nil, nil, map[string]string{"etc/localtime": "../usr/share//zoneinfo/./Europe/Berlin"}, "!", 0},
+		{"a link's name after its first zoneinfo/", true, nil, nil, nil, map[string]string{"etc/localtime": "/opt/zoneinfo/usr/share/zoneinfo/Europe/Berlin"}, "!", 0},
+		{"a link to nothing that names no zoneinfo/: GMT", true, nil, nil, etc(nil), map[string]string{"etc/localtime": "/etc/missing"}, "UTC", 0},
+		{"a copy in a zone directory that links a directory to itself: unknown (the JDK's listing order picks)", true, nil, nil, with(zi("Europe/Berlin"), "etc/localtime", berlin), map[string]string{"usr/share/zoneinfo/posix": "."}, "!", 0},
+		{"a copy matching a dot file the JDK skips", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/.cache", kolkata), "etc/localtime", kolkata), nil, "+05:30", 19800},
+		{"a copied /etc/localtime: the zone file of its bytes, the JDK's skipped names skipped", true, nil, nil, with(with(with(zi("Europe/Berlin", "Asia/Kolkata", "Asia/Calcutta", "posix/Asia/Kolkata"), "usr/share/zoneinfo/posixrules", kolkata), "usr/share/zoneinfo/localtime", kolkata), "etc/localtime", kolkata), nil, "+05:30", 19800},
+		{"a link naming no zoneinfo/: the zone file of its bytes", true, nil, nil, with(zi("Europe/Berlin", "Asia/Kolkata"), "etc/static/localtime", berlin), map[string]string{"etc/localtime": "/etc/static/localtime"}, "Europe/Berlin", 3600},
+		{"a copied /etc/localtime with no zone directory: GMT", true, nil, nil, map[string][]byte{"etc/localtime": kolkata}, nil, "UTC", 0},
+		{"another program reads the copy's own rules", false, nil, nil, map[string][]byte{"etc/localtime": kolkata}, nil, "+05:30", 19800},
+		{"a copy of no zone file there: GMT", true, nil, nil, with(zi("Europe/Berlin"), "etc/localtime", kolkata), nil, "UTC", 0},
+		{"no /etc/localtime and no /etc/timezone: GMT", true, nil, nil, etc(nil), nil, "UTC", 0},
+		{"a root keploy cannot read (an exited process's): unknown, never GMT", true, nil, nil, nil, nil, "!", 0},
+		{"an empty user.timezone: the platform's zone, as the JDK reads it", true, []string{"TZ="}, []string{"java", "-Duser.timezone=", "Main"}, nil, toBerlin, "Europe/Berlin", 3600},
+		{"an id spelt as no region of Java's", true, []string{"TZ=Europe//Berlin"}, nil, zi("Europe/Berlin"), nil, "!", 0},
+		{"a TZ of a POSIX rule: unknown", true, []string{"TZ=IST-5:30"}, nil, nil, nil, "!", 0},
+		{"a TZ of a path: unknown", true, []string{"TZ=/usr/share/zoneinfo/Asia/Kolkata"}, nil, zi("Asia/Kolkata"), nil, "!", 0},
+		{"an /etc/timezone Java does not know: unknown", true, nil, nil, map[string][]byte{"etc/timezone": []byte("Mars/Olympus\n")}, nil, "!", 0},
+		{"a copy of a zone file Java does not know too: unknown", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/Mars/Olympus", kolkata), "etc/localtime", kolkata), nil, "!", 0},
+		{"a copy of UTC's file: UTC, found first", true, nil, nil, with(with(zi("Asia/Kolkata"), "usr/share/zoneinfo/UTC", kolkata), "etc/localtime", kolkata), nil, "UTC", 0},
+	} {
+		pid := strconv.Itoa(600 + i)
+		fakeProc(t, proc, pid, "500", row.env, row.files, row.links)
+		dir := filepath.Join(proc, pid)
+		if row.jvm {
+			argv := row.argv
+			if argv == nil {
+				argv = []string{"java", "Main"}
+			}
+			if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(strings.Join(argv, "\x00")+"\x00"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "maps"), []byte(libjvm), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/opt/java/openjdk/bin/java", filepath.Join(dir, "exe")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		z, err := ReadProcZone(proc, uint32(600+i))
+		if row.want == "!" {
+			if err == nil || z.Loc != nil {
+				t.Errorf("%s: %v %v; want an error and no zone", row.what, z.Loc, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", row.what, err)
+			continue
+		}
+		if _, off := at.In(z.Loc).Zone(); z.Name != row.want || off != row.off {
+			t.Errorf("%s: %q at %d; want %q at %d", row.what, z.Name, off, row.want, row.off)
 		}
 	}
 }
