@@ -1210,6 +1210,22 @@ type SessionKeyReader interface {
 	RangeSessionMocksWithKey(ix *MockIndex, key string, fn func(*models.Mock) bool) error
 }
 
+// PerTestRanger is an optional MockMemDb extension: the
+// GetPerTestMocksInWindow read handed one mock at a time, in its order, until
+// the caller stops. Under exact serving the open test's own unanswered mocks
+// come first, read a few at a time, and the tier only after them: a matcher
+// that stops at the test's next recording reads neither the mocks the test
+// answered nor the rest of the tier, so a test that owns many recordings
+// costs each call the same as one that owns few.
+type PerTestRanger interface {
+	// RangePerTestMocksInWindow calls fn with each mock
+	// GetPerTestMocksInWindow would return, in its order, until fn
+	// returns false. fn is called without the store's locks held, so it
+	// may call back into the store; the walk then sees the tier as it is
+	// by the time it gets there, as successive reads would.
+	RangePerTestMocksInWindow(fn func(*models.Mock) bool) error
+}
+
 // MockReader is the read-only facet of MockMemDb. Parsers that need
 // to enumerate mocks from the in-memory pool but never mutate or
 // consume on match should take this interface directly. Includes both
