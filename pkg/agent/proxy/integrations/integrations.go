@@ -1184,6 +1184,16 @@ type SessionWindowReader interface {
 // once, at package level.
 type MockIndex struct {
 	Keys func(*models.Mock) []string
+	// OwnedKeys, when set, gives the open test's own mocks their keys under
+	// exact serving, in place of Keys: the mocks a SessionKeyReader's walk
+	// reads ahead of the staged ones. Under exact serving the per-test tier
+	// (GetPerTestMocksInWindow) leads with every one of those mocks, in that
+	// walk's order. A matcher that walks the per-test tier whole before each
+	// keyed walk has read them all there already, so it files them only
+	// under the keys it looks up without that read, and a test that owns
+	// thousands of mocks has none of their other keys computed. The same
+	// rules as for Keys hold.
+	OwnedKeys func(*models.Mock) []string
 }
 
 // SessionKeyReader is an optional MockMemDb extension: the GetSessionMocks

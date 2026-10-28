@@ -1950,7 +1950,7 @@ type liveKey struct {
 // tier when session is set, by mk's fields and keys alone (no index).
 func (k liveKey) reads(mk *models.Mock, session bool) bool {
 	if k.ix != nil {
-		return slices.Contains(k.ix.Keys(mk), k.key)
+		return slices.Contains(ownedKeysOf(k.ix, mk), k.key)
 	}
 	return (k.kind == "" || mk.Kind == k.kind) && (!k.session || session)
 }
@@ -2048,8 +2048,8 @@ func (v *exactView) unansweredAt(at []int) []int {
 	return out
 }
 
-// ownedKeys is the view's index of its owned copies' keys under ix (keyed),
-// built on its first use.
+// ownedKeys is the view's index of its owned copies' keys under ix (keyed,
+// ownedKeysOf), built on its first use.
 func (v *exactView) ownedKeys(ix *integrations.MockIndex) map[string][]int {
 	v.keyedMu.Lock()
 	defer v.keyedMu.Unlock()
@@ -2058,7 +2058,7 @@ func (v *exactView) ownedKeys(ix *integrations.MockIndex) map[string][]int {
 	}
 	lists := map[string][]int{}
 	for i, mk := range v.owned {
-		for _, k := range distinctKeys(ix, mk) {
+		for _, k := range ownedKeysOf(ix, mk) {
 			lists[k] = append(lists[k], i)
 		}
 	}
@@ -2067,6 +2067,22 @@ func (v *exactView) ownedKeys(ix *integrations.MockIndex) map[string][]int {
 	}
 	v.keyed[ix] = lists
 	return lists
+}
+
+// ownedKeysOf returns, each once, the keys ix files the open test's own mock
+// mk under: OwnedKeys when ix sets it, Keys otherwise. The staged mocks are
+// filed by Keys alone (the trees' key indexes).
+func ownedKeysOf(ix *integrations.MockIndex, mk *models.Mock) []string {
+	if ix.OwnedKeys == nil {
+		return distinctKeys(ix, mk)
+	}
+	var out []string
+	for _, k := range ix.OwnedKeys(mk) {
+		if !slices.Contains(out, k) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // shows reports whether the view shows mk among the staged mocks: a
