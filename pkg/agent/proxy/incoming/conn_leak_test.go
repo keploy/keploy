@@ -93,3 +93,61 @@ func TestIngressHandlersLeaveNothingBehindAClosedConnection(t *testing.T) {
 		t.Errorf("%d registrations on the ingress's context outlive the %d connections (%d after the HTTP/1.1 half)", live, 2*conns, httpLive)
 	}
 }
+
+// The close on shutdown is still registered while a connection is served,
+// and it still runs when the ingress stops: a connection stuck on a hung
+// backend, or idle, would otherwise keep its handler blocked for good after
+// StopIngress. The leak row above passes with no close on shutdown at all, so
+// these pin it. Each waits until the handler has forwarded the client's bytes
+// to the backend, which it does after registering the close, then checks the
+// registration is live, stops the ingress and waits for the handler to
+// return. Nothing reads a clock: go test's -timeout is the hang guard.
+func TestZeroCopyHTTPOnAHungBackendReturnsWhenTheIngressStops(t *testing.T) {
+	stubCaptureHook(t, func(ctx context.Context, logger *zap.Logger, tc chan *models.TestCase,
+		req *http.Request, resp *http.Response, reqTS, respTS time.Time,
+		opts models.IncomingOptions, sync bool, mapping bool, appPort uint16) {
+	})
+	pm := &IngressProxyManager{logger: zap.NewNop(), tcChan: make(chan *models.TestCase, 64)}
+	ctx := leakcheck.NewContext(syncMock.NewContext(context.Background(), syncMock.New(zap.NewNop())))
+	backend, upConn := tcpPair(t) // a backend that reads the request and never answers
+	server, client := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pm.handleHttp1ZeroCopy(ctx, server, upConn, pm.logger, pm.tcChan, 8080, false, func() {})
+	}()
+	if _, err := fmt.Fprintf(client, "GET /hung HTTP/1.1\r\nHost: app\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("the request never reached the backend: %v", err)
+	}
+	if live := ctx.Live(); live != 1 {
+		t.Fatalf("the handler, blocked on a hung backend, has %d closes registered on the ingress's context, want 1", live)
+	}
+	ctx.Cancel()
+	<-done
+}
+
+func TestRawPassthroughOfAnIdleConnectionReturnsWhenTheIngressStops(t *testing.T) {
+	ctx := leakcheck.NewContext(context.Background())
+	appSide, clientSide := tcpPair(t)
+	upSide, appPeer := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		forwardRawTCP(ctx, appSide, upSide)
+	}()
+	// One byte through, then both ends stay open and idle.
+	if _, err := clientSide.Write([]byte{'x'}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appPeer.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("the byte never reached the app: %v", err)
+	}
+	if live := ctx.Live(); live != 1 {
+		t.Fatalf("the passthrough of an idle connection has %d closes registered on the ingress's context, want 1", live)
+	}
+	ctx.Cancel()
+	<-done
+}
