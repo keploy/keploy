@@ -742,7 +742,7 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 			loc, _ := models.ZoneLocation(o.AppZone)
 			hint = appZoneHint(o.AppZone, loc, s)
 		}
-	case o.AppZone == models.AppZoneApart && o.Zone == models.ZoneEither && !(o.Plain() && o.Res >= time.Hour):
+	case o.AppZone == models.AppZoneApart && o.Zone == models.ZoneEither && (!o.Plain() || o.Res < time.Hour):
 		// A wall clock either zone held, learned with the application's
 		// zone read as two zones: every learning held it in UTC, where it
 		// is checked. One cut to an hour or coarser is refused below, as one

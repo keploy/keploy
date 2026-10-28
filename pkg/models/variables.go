@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+
 	// A replay reads a ClockOffset's AppZone on any machine, one with no
 	// zone files too (ZoneLocation).
 	_ "time/tzdata"

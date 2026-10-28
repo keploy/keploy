@@ -60,7 +60,9 @@ func zoneThrough(t *testing.T, proc string, pid uint32) *time.Location {
 		t.Fatal(err)
 	}
 	z := awaitEvent(t, w.saw, "the parser being handed the connection")
-	awaitEvent(t, done, "handleConnection returning")
+	if err := awaitEvent(t, done, "handleConnection returning"); err != nil {
+		t.Fatalf("handleConnection: %v", err)
+	}
 	return z
 }
 
