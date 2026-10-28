@@ -507,12 +507,19 @@ func testSettleWatchdogNotFed(t *testing.T, proven bool) {
 			h.mu.Unlock()
 			p.set(1, 0)
 			ctx, cancel := context.WithCancel(context.Background())
-			t.Cleanup(cancel)
-			done := make(chan error, 1)
+			done, exited := make(chan error, 1), make(chan struct{})
 			go func() {
+				defer close(exited)
 				_, err := a.settle(ctx, true)
 				done <- err
 			}()
+			// The settle still waiting as the row ends (with the switch
+			// off, a wait that moves) is ended and waited for before the
+			// watchdog's hooks are put back: none outlives the row.
+			t.Cleanup(func() {
+				cancel()
+				<-exited
+			})
 			for i := 0; i < 10*settleStallLimit; i++ {
 				select {
 				case err := <-done:
