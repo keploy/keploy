@@ -511,7 +511,7 @@ func MocksDigest(keployDir, set string) string {
 // receiptHeader opens last-replay.yaml: what wrote it, that it stays on this
 // machine, and what each field means.
 const receiptHeader = "# Written by `keploy mock replay`: the last replay of this set on this machine, rewritten by\n" +
-	"# every replay. Local: keploy/.gitignore keeps it out of git. Tools read it instead of replaying again.\n" +
+	"# every replay. Local to this machine and git-ignored. Tools read it instead of replaying again.\n" +
 	"# report: this replay's report, each failed test's calls as keploy saw them (keploy mock report prints it).\n" +
 	"# exitCode: keploy's exit; runnerExitCode: the test command's (-1: it never exited on its own);\n" +
 	"#   failedBy: what failed the run, when something did; error: why keploy did not complete it.\n" +
