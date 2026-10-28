@@ -112,12 +112,21 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 			// rest, here in keploy test as the recorder does in keploy record.
 			if dstCfg != nil && utils.IsPassThrough(h.Logger, request, dstCfg.Port, opts) {
 				h.Logger.Debug("a bypassRule names this call; passing it through to its server", zap.Any("metadata", utils.GetReqMeta(request)))
-				if perr := passOneCallThrough(ctx, h.Logger, clientConn, dstCfg, reqBuf, request.Method); perr != nil {
+				ended, perr := passOneCallThrough(ctx, h.Logger, clientConn, dstCfg, reqBuf, request.Method)
+				if perr != nil {
 					if ctx.Err() != nil {
 						return
 					}
 					utils.LogError(h.Logger, perr, "failed to pass a call a bypassRule names through to its server", zap.Any("metadata", utils.GetReqMeta(request)))
 					errCh <- perr
+					return
+				}
+				if ended || request.Close {
+					// The call ended the connection: the client said
+					// Connection: close, or the server's answer closes it
+					// (or upgraded it, and the upgrade is over). No next
+					// call comes on it.
+					errCh <- nil
 					return
 				}
 				reqBuf, err = pUtil.ReadBytes(ctx, h.Logger, clientConn)
@@ -854,46 +863,55 @@ func mockNameOf(m *models.Mock) string {
 // passOneCallThrough sends one HTTP call, raw as the client sent it, to its
 // server (dstCfg: its address, and its TLS config when the call came over TLS),
 // and streams the server's answer to the client. The server's connection is
-// closed after the answer; the client's stays open for its next call.
-func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, raw []byte, method string) error {
+// closed after the answer. ended is whether the answer ended the client's
+// connection too: the server closes after it (Connection: close, or a body
+// that runs to the close), or upgraded it (101) and the upgraded connection is
+// over, both closed here. Otherwise the client's stays open for its
+// next call.
+func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.Conn, dstCfg *models.ConditionalDstCfg, raw []byte, method string) (ended bool, err error) {
 	if dstCfg.Addr == "" {
-		return errors.New("the call has no destination address to pass it through to")
+		return false, errors.New("the call has no destination address to pass it through to")
 	}
 	target := pUtil.DialTarget{Addr: dstCfg.Addr, Fabricated: dstCfg.AddrFabricated}
 	var conn net.Conn
-	var err error
 	if dstCfg.TLSCfg != nil {
 		conn, err = pUtil.DialDestinationTLS(ctx, logger, "tcp", target, dstCfg.TLSCfg)
 	} else {
 		conn, err = pUtil.DialDestination(ctx, logger, "tcp", target)
 	}
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", dstCfg.Addr, err)
+		return false, fmt.Errorf("dial %s: %w", dstCfg.Addr, err)
 	}
 	defer func() { _ = conn.Close() }()
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	if _, err := conn.Write(raw); err != nil {
-		return fmt.Errorf("write the call to %s: %w", dstCfg.Addr, err)
+		return false, fmt.Errorf("write the call to %s: %w", dstCfg.Addr, err)
 	}
 	br := bufio.NewReader(conn)
 	for {
 		resp, err := http.ReadResponse(br, &http.Request{Method: method})
 		if err != nil {
-			return fmt.Errorf("read the answer of %s: %w", dstCfg.Addr, err)
+			return false, fmt.Errorf("read the answer of %s: %w", dstCfg.Addr, err)
 		}
 		switch {
 		case resp.StatusCode == http.StatusSwitchingProtocols:
 			// An upgrade (a WebSocket): the connection is the server's from
-			// here on, both ways, until either side closes it.
+			// here on, both ways, until either side ends it. Then both are
+			// closed, as a reverse proxy does, so neither copy outlives the
+			// call: a server that neither reads nor writes once the client
+			// has gone would otherwise hold it open.
 			if err := resp.Write(clientConn); err != nil {
-				return fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, err)
+				return false, fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, err)
 			}
-			done := make(chan struct{}, 2)
-			go func() { _, _ = io.Copy(conn, clientConn); done <- struct{}{} }()
-			go func() { _, _ = io.Copy(clientConn, br); done <- struct{}{} }()
-			<-done
-			return nil
+			copied := make(chan struct{}, 2)
+			go func() { _, _ = io.Copy(conn, clientConn); copied <- struct{}{} }()
+			go func() { _, _ = io.Copy(clientConn, br); copied <- struct{}{} }()
+			<-copied
+			_ = conn.Close()
+			_ = clientConn.Close()
+			<-copied
+			return true, nil
 		case resp.StatusCode >= 100 && resp.StatusCode < 200:
 			// An interim answer (100 Continue): the decode loop has
 			// answered the client's Expect itself, so it is not relayed.
@@ -902,8 +920,10 @@ func passOneCallThrough(ctx context.Context, logger *zap.Logger, clientConn net.
 		werr := resp.Write(clientConn)
 		_ = resp.Body.Close()
 		if werr != nil {
-			return fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, werr)
+			return false, fmt.Errorf("write the answer of %s to the client: %w", dstCfg.Addr, werr)
 		}
-		return nil
+		// resp.Close: the server said Connection: close, or its body ran to
+		// the close, which resp.Write tells the client as Connection: close.
+		return resp.Close, nil
 	}
 }

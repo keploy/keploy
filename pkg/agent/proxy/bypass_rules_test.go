@@ -1,6 +1,10 @@
 package proxy
 
 import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"net"
 	"strings"
 	"testing"
 
@@ -87,5 +91,106 @@ func TestABypassRuleAConnectionCannotApplyIsWarnedOfOnce(t *testing.T) {
 		if !strings.Contains(msg, want) || !strings.Contains(msg, "{port: 5432}") || !strings.Contains(msg, "10.0.0.5:5432") {
 			t.Errorf("warning %d = %q, want it to name %s, the port-only rule and the destination", i, msg, want)
 		}
+	}
+}
+
+// keploy test passes a TLS connection through to its server when a rule with
+// a host names the server the client asked for (its SNI), whatever the
+// protocol inside: the proxy dials the server, as it does to record, and
+// relays both ways. A connection to a server no rule names is not passed
+// through: with no mock for it, it gets no answer and the server is never
+// dialled.
+func TestKeployTestPassesATLSConnectionARuleNamesThrough(t *testing.T) {
+	ln, err := tls.Listen("tcp4", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{selfSignedForDispatch(t)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	// Each connection the server accepts, by its client's address, in the
+	// order the kernel queued them.
+	accepted := make(chan string, 16)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- conn.RemoteAddr().String()
+			go func() {
+				defer func() { _ = conn.Close() }()
+				line, err := bufio.NewReader(conn).ReadString('\n')
+				if err != nil {
+					return
+				}
+				_, _ = conn.Write([]byte("pong:" + line))
+			}()
+		}
+	}()
+	// dials is how many connections reached the server before a marker the
+	// test dials now: the server accepts in the order the connections came.
+	dials := func(t *testing.T) int {
+		marker, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = marker.Close() }()
+		for n := 0; ; n++ {
+			if awaitEvent(t, accepted, "the server accepting the marker") == marker.LocalAddr().String() {
+				return n
+			}
+		}
+	}
+
+	// The client asks for localhost, which resolves, so a connection passed
+	// through by mistake would reach the server too.
+	for _, tc := range []struct {
+		name, ruleHost string
+		through        bool
+	}{
+		{"the rule names the server", "^localhost$", true},
+		{"the rule names another server", `^other\.example$`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, src := acceptedConn(t)
+			p := replayProxyTo(t, ln.Addr().String(), models.OutgoingOptions{Rules: []models.BypassRule{{Host: tc.ruleHost}}})
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+
+			client := tls.Client(app, &tls.Config{ServerName: "localhost", InsecureSkipVerify: true}) //nolint:gosec // keploy's MITM leaf is not under test
+			if err := client.Handshake(); err != nil {
+				t.Fatalf("client handshake: %v", err)
+			}
+			// Not HTTP, so only the server-name rule can pass it through.
+			if _, err := client.Write([]byte("ping\n")); err != nil {
+				t.Fatal(err)
+			}
+			// With no mock, keploy ends a connection it does not pass
+			// through, so the read ends either way.
+			type answer struct {
+				line string
+				err  error
+			}
+			got := make(chan answer, 1)
+			go func() {
+				line, err := bufio.NewReader(client).ReadString('\n')
+				got <- answer{line, err}
+			}()
+			a := awaitEvent(t, got, "the client's read ending")
+			if tc.through && (a.err != nil || a.line != "pong:ping\n") {
+				t.Fatalf("the client got %q, %v; want the server's answer pong:ping", a.line, a.err)
+			}
+			if !tc.through && a.err == nil {
+				t.Fatalf("the client got %q from a server no rule names; want no answer", a.line)
+			}
+			_ = client.Close()
+			_ = awaitEvent(t, done, "handleConnection returning after the client left")
+			want := 0
+			if tc.through {
+				want = 1
+			}
+			if n := dials(t); n != want {
+				t.Fatalf("the server was dialled %d times, want %d", n, want)
+			}
+		})
 	}
 }

@@ -145,6 +145,7 @@ record() {
     rm -rf keploy
     [ -n "$DEP_PID" ] || { start_srv dep "$DEP"; DEP_PID=$SRV_PID; }
     [ -n "$TEL_PID" ] || { start_srv tel "$TEL"; TEL_PID=$SRV_PID; }
+    # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
     sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" "$@" \
         --generateGithubActions=false --disable-tele >"record-$name.log" 2>&1 </dev/null &
     REC_PID=$!
@@ -173,6 +174,7 @@ replay() {
     local name="$1" before
     shift
     before="$(newest_run)"
+    # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
     sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$REPLAY_BIN" test -c "$APP_CMD" "$@" \
         --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >"test-$name.log" 2>&1 </dev/null
     RC=$?
@@ -212,6 +214,7 @@ fi
 # 11th was left out of the kernel's list without a word, and its calls were
 # recorded.
 rm -rf keploy
+# shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
 sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" --pass-through-ports "$NINE,9010,$DEP" \
     --generateGithubActions=false --disable-tele >record-eleven.log 2>&1 </dev/null &
 REC_PID=$!
@@ -278,6 +281,7 @@ bypassRules:
     port: $DEP
 YML
 rm -rf keploy
+# shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
 sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$RECORD_BIN" record -c "$APP_CMD" \
     --generateGithubActions=false --disable-tele >record-mysqlhost.log 2>&1 </dev/null &
 REC_PID=$!
