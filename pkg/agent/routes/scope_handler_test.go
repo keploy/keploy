@@ -410,6 +410,50 @@ func (s *poolSvc) SetScopePool(_ context.Context, p map[string][]string) error {
 	return nil
 }
 
+// backgroundSvc is a poolSvc that also takes the tests' background marks.
+type backgroundSvc struct {
+	poolSvc
+	marks models.BackgroundMarks
+	calls int
+}
+
+func (s *backgroundSvc) SetScopeBackground(_ context.Context, m models.BackgroundMarks) error {
+	s.marks, s.calls = m, s.calls+1
+	return nil
+}
+
+// Under the switch the scope table's background marks reach the agent (a
+// table without marks clears them); with the switch off they are not read.
+func TestScopeTableCarriesTheBackgroundMarks(t *testing.T) {
+	post := func(svc agent.Service, body string) int {
+		rec := httptest.NewRecorder()
+		(&Agent{logger: zap.NewNop(), svc: svc}).HandleScopeTable(rec, httptest.NewRequest(http.MethodPost, "/agent/scope/table", strings.NewReader(body)))
+		return rec.Code
+	}
+	t.Setenv(provenswitch.Env, "1")
+	svc := &backgroundSvc{}
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"],"o::TestB":["mock-3"]},"pool":{},"background_by_test":{"o::TestA":{"mock-3":"a timer's call"}}}`); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	// The mark is TestA's entry's: TestB, listing the same recording, has none.
+	if svc.calls != 1 || svc.marks.Len() != 1 || svc.marks.Of("o::TestA")["mock-3"] != "a timer's call" || svc.marks.Of("o::TestB") != nil {
+		t.Fatalf("marks %v after %d calls", svc.marks, svc.calls)
+	}
+	// The per-name shape of an earlier build of this branch is not read: no
+	// test is marked, so every test mock is required (never looser).
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{},"background":{"mock-3":"a timer's call"}}`); code != http.StatusOK || svc.marks != nil {
+		t.Fatalf("per-name marks: status %d, marks %v", code, svc.marks)
+	}
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"]},"pool":{}}`); code != http.StatusOK || svc.calls != 3 || svc.marks != nil {
+		t.Fatalf("a table without marks: status %d, marks %v after %d calls, want them cleared", code, svc.marks, svc.calls)
+	}
+	t.Setenv(provenswitch.Env, "")
+	svc = &backgroundSvc{}
+	if code := post(svc, `{"mappings":{"o::TestA":["mock-3"]},"background_by_test":{"o::TestA":{"mock-3":"a timer's call"}}}`); code != http.StatusOK || svc.calls != 0 {
+		t.Fatalf("switch off: status %d, %d calls", code, svc.calls)
+	}
+}
+
 // tableOnlySvc takes the per-test table and no pool slices.
 type tableOnlySvc struct{ agent.Service }
 

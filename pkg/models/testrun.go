@@ -256,6 +256,16 @@ type FailureInfo struct {
 	// Empty with the switch off, and for a test that owned none or whose
 	// consumption was not read (TestMocksUnread).
 	UnconsumedMocks []UnconsumedMock `json:"unconsumed_mocks,omitempty" yaml:"unconsumed_mocks,omitempty"`
+	// UnusedBackground are, under KEPLOY_PROVEN=1, the recordings of this
+	// test's mapping that keploy's judging marked as the application's own
+	// background work (MockEntry.Background) that no call of this test
+	// used: the test is served each in its window and never required to
+	// make it, so none of them fails it. Each names, in ConsumedBy, another
+	// test of the set that consumed it, when one did (the call was made).
+	// Judging takes a mark its confirming round left unused, by every test,
+	// out of the recording. In recorded order. Empty with the switch off,
+	// and for a test whose consumption was not read.
+	UnusedBackground []UnconsumedMock `json:"unused_background,omitempty" yaml:"unused_background,omitempty"`
 	// CaptureIncomplete is, under KEPLOY_PROVEN=1, what keploy's agent could
 	// not capture that is charged to this test, each of which fails it:
 	//   - an agent-life kind (pid_map_refused, app_subtree_untracked, and any
@@ -548,8 +558,10 @@ type UnmatchedCall struct {
 	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
 	// drifted, Differs naming the leaves learned as noise.
 	// AnswerByKind: a background write answered by its kind, unchecked;
-	// Reused says the kind's recordings were used up. An answer never counts
-	// against a test and never lands in a miss list.
+	// Reused says the kind's recordings were used up. AnswerBackgroundAgain:
+	// a background call made again in its test's window, answered again with
+	// ClosestMock, the marked recording it repeated, unchecked. An answer
+	// never counts against a test and never lands in a miss list.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`
 	Drift     bool   `json:"drift,omitempty" yaml:"drift,omitempty"`
 	Reused    bool   `json:"reused,omitempty" yaml:"reused,omitempty"`
@@ -705,6 +717,11 @@ const (
 	AnswerProvisional = "provisional"
 	// AnswerByKind: a background write answered by its write kind, unchecked.
 	AnswerByKind = "by_kind"
+	// AnswerBackgroundAgain: a call identical to a recording of the open
+	// test that judging marked as the application's background work
+	// (MockEntry.Background), made again after that recording answered in
+	// the test's window, answered again with it (ClosestMock), unchecked.
+	AnswerBackgroundAgain = "background_again"
 )
 
 // The reasons a miss of record's full round carries (UnmatchedCall.Reason),

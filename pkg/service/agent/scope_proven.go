@@ -402,6 +402,30 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	return a.applyPool(ctx)
 }
 
+// SetScopeBackground installs, for a replay, per test, the recordings of its
+// own list judging marked as the application's own background work
+// (models.MockEntry.Background), each with why: the test is served one in its
+// window when it makes the call, and is never failed for not making it
+// (coreAgent.UnrequiredSetter); another test listing the same recording
+// without a mark still must. nil clears the previous table's marks. A proxy
+// that cannot take them requires every test mock, which is never looser.
+func (a *Agent) SetScopeBackground(ctx context.Context, marks models.BackgroundMarks) error {
+	if err := a.wire.lock(ctx); err != nil {
+		return err
+	}
+	defer a.wire.unlock()
+	us, ok := a.Proxy.(coreAgent.UnrequiredSetter)
+	if !ok {
+		if n := marks.Len(); n > 0 {
+			a.logger.Info("this keploy agent's proxy cannot serve a test's background recordings without requiring them: each test is required to make them",
+				zap.Int("background recordings", n),
+				zap.String("next_step", "replay with a keploy agent of the same release as this keploy"))
+		}
+		return nil
+	}
+	return us.SetUnrequired(marks)
+}
+
 // applyPool serves the current key's pool slice exactly (servePoolExactly),
 // unless a test is open: its end serves it.
 func (a *Agent) applyPool(ctx context.Context) error {
@@ -789,6 +813,9 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
 		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt)
+		// What the test ended with before this evidence failed it: judging
+		// tells from it whether the test's own assertions passed.
+		ev.Reported = outcome
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
@@ -826,7 +853,10 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	}
 	a.NoteScopeOutcome(id, 0, outcome)
-	if ev != nil && (ev.Reason != "" || !ev.Empty()) {
+	// A test that passed keeps the background recordings it did not call on
+	// its window too: never a failure, they tell judging which ones a replay
+	// did not use.
+	if ev != nil && (ev.Reason != "" || !ev.Empty() || len(ev.Background) > 0) {
 		a.noteScopeEvidence(id, ev)
 	}
 	if err := a.EndScopeAt(ctx, id, 0, at); err != nil {
@@ -1080,6 +1110,13 @@ func (a *Agent) testEvidence(ctx context.Context, id string, unmade bool) (*mode
 	unservable := append([]string(nil), a.proven.unservable...)
 	a.provenMu.Unlock()
 	ev.Unconsumed = append(unconsumed, unservable...)
+	// The test's recordings judging marked as the application's background
+	// work that it did not call: never a failure, said for judging.
+	if r, ok := es.(coreAgent.UnusedBackgroundReader); ok {
+		if bt, unused, ok := r.ExactTestUnusedBackground(); ok && bt == id {
+			ev.Background = unused
+		}
+	}
 	return ev, nil
 }
 

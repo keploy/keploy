@@ -218,10 +218,31 @@ type pruneVerdict struct {
 	// them, and asTimelineNames names the first maxPrunedMocksLogged.
 	asTimeline      int
 	asTimelineNames []string
+	// track, set by DeleteMocks, has each pass name every mock it drops, in
+	// dropped (the last pass's are what the file loses), and leave a file
+	// it drops nothing of unwritten.
+	track   bool
+	dropped []string
+	// asRead, set by DeleteMocks, says the pass changes no mock it keeps,
+	// so the yaml/json pass copies each kept document as it was read, byte
+	// for byte (prunePass), rather than encoding the decoded mock again:
+	// what this keploy's encoder would write differs from a mock saved by
+	// hand, by another keploy or with fields this keploy does not know, and
+	// taking one mock out must not change another.
+	asRead bool
 }
 
 // judge reports whether the pass keeps m, the next mock of the file.
 func (v *pruneVerdict) judge(m *models.Mock) (bool, error) {
+	keep, err := v.judgeAt(m)
+	if err == nil && !keep && v.track {
+		v.dropped = append(v.dropped, m.Name)
+	}
+	return keep, err
+}
+
+// judgeAt is judge before tracking.
+func (v *pruneVerdict) judgeAt(m *models.Mock) (bool, error) {
 	place := v.place
 	v.place++
 	kept := v.keeps(m)
@@ -264,7 +285,7 @@ func (v *pruneVerdict) secondPass() bool {
 	if also == nil {
 		return false
 	}
-	*v = pruneVerdict{keeps: v.keeps, keepAlso: also, firstPass: v.place}
+	*v = pruneVerdict{keeps: v.keeps, keepAlso: also, firstPass: v.place, track: v.track, asRead: v.asRead}
 	return true
 }
 

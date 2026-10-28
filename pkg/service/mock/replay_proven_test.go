@@ -168,6 +168,75 @@ func TestWithEvidence(t *testing.T) {
 	require.False(t, read.Tests[1].Evidence.Unread)
 }
 
+// A test's line keeps the background recordings it left unused even when it
+// passed with nothing else on its window: judging reads them from the
+// receipt to take out a recording no replay called. Across attempts only
+// what every attempt left unused is kept: an attempt that called one used
+// it.
+func TestTheReceiptKeepsUnusedBackgroundEveryAttemptLeft(t *testing.T) {
+	bg := func(names ...string) *models.ScopeEvidence { return &models.ScopeEvidence{Background: names} }
+	got := withEvidence([]TestReceipt{
+		{Name: "o::Only", Outcome: "passed"},
+		{Name: "o::Retried", Outcome: "passed"},
+		{Name: "o::CalledOnce", Outcome: "passed"},
+		{Name: "o::Failed", Outcome: "failed"},
+		{Name: "o::None", Outcome: "passed"},
+	}, []models.ScopeWindow{
+		{Name: "o::Only", Outcome: "passed", Evidence: bg("mock-7", "mock-8")},
+		{Name: "o::Retried", Outcome: "passed", Evidence: bg("mock-1", "mock-2", "mock-3")},
+		{Name: "o::Retried", Outcome: "passed", Evidence: bg("mock-3", "mock-1")},
+		{Name: "o::CalledOnce", Outcome: "passed", Evidence: bg("mock-4")},
+		{Name: "o::CalledOnce", Outcome: "passed"},
+		{Name: "o::Failed", Outcome: "failed", Evidence: &models.ScopeEvidence{Reason: "keploy: x", Unconsumed: []string{"mock-5"}, Background: []string{"mock-6"}, Reported: "passed"}},
+		{Name: "o::None", Outcome: "passed"},
+	})
+	require.Equal(t, []string{"mock-7", "mock-8"}, got[0].Evidence.Background, "a passed test with only unused background keeps its line")
+	require.Empty(t, got[0].Evidence.Reason)
+	require.True(t, got[0].Evidence.Empty(), "unused background is no failure")
+	require.Equal(t, []string{"mock-1", "mock-3"}, got[1].Evidence.Background, "what both attempts left unused, in the first's order")
+	require.Nil(t, got[2].Evidence, "an attempt that called the recording used it")
+	require.Equal(t, []string{"mock-6"}, got[3].Evidence.Background)
+	require.Equal(t, []string{"mock-5"}, got[3].Evidence.Unconsumed)
+	require.Nil(t, got[4].Evidence)
+
+	k := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(k, "set"), 0o755))
+	writeTestsReceipt(zap.NewNop(), k, TestsReceipt{Set: "set", Tests: got})
+	read, err := ReadTestsReceipt(k, "set")
+	require.NoError(t, err)
+	require.Equal(t, []string{"mock-7", "mock-8"}, read.Tests[0].Evidence.Background, "the file the CLI reads keeps them")
+	require.Equal(t, "passed", read.Tests[3].Evidence.Reported)
+}
+
+// A test's line says what it ended with before keploy failed it: passed only
+// when every attempt did, so a retry that passed never hides an attempt that
+// failed its own assertions. A line keploy failed nothing on says nothing.
+func TestTheReceiptKeepsWhatATestReportedBeforeKeployFailedIt(t *testing.T) {
+	failed := func(reported string) *models.ScopeEvidence {
+		return &models.ScopeEvidence{Reason: "keploy: x", Unconsumed: []string{"mock-1"}, Reported: reported}
+	}
+	for name, tc := range map[string]struct {
+		windows []models.ScopeWindow
+		want    string
+	}{
+		"its assertions passed":            {windows: []models.ScopeWindow{{Outcome: "failed", Evidence: failed("passed")}}, want: "passed"},
+		"its assertions failed":            {windows: []models.ScopeWindow{{Outcome: "failed", Evidence: failed("failed")}}, want: "failed"},
+		"a retry passed after it failed":   {windows: []models.ScopeWindow{{Outcome: "failed", Evidence: failed("failed")}, {Outcome: "passed"}}, want: "failed"},
+		"an earlier attempt failed itself": {windows: []models.ScopeWindow{{Outcome: "failed"}, {Outcome: "failed", Evidence: failed("passed")}}, want: "failed"},
+		"every attempt passed itself":      {windows: []models.ScopeWindow{{Outcome: "passed"}, {Outcome: "failed", Evidence: failed("passed")}}, want: "passed"},
+		"keploy failed nothing":            {windows: []models.ScopeWindow{{Outcome: "failed", Evidence: &models.ScopeEvidence{Reason: "keploy: the test process exited while the test was open"}}}, want: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for i := range tc.windows {
+				tc.windows[i].Name = "o::A"
+			}
+			got := withEvidence([]TestReceipt{{Name: "o::A", Outcome: "failed"}}, tc.windows)
+			require.NotNil(t, got[0].Evidence)
+			require.Equal(t, tc.want, got[0].Evidence.Reported)
+		})
+	}
+}
+
 // The receipt counts the run's misses that count against a test
 // (models.UnmatchedCall.CountsAgainstTest) under the proven switch only: a
 // receipt written with the switch off is what it was before the switch.
@@ -517,6 +586,62 @@ func TestTheReplayPushesThePoolSlices(t *testing.T) {
 	require.NoError(t, New(zap.NewNop(), instr, named("mock-0", "mock-1", "mock-2", "mock-3", "mock-4"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background()))
 	require.Equal(t, map[string][]string{"o": {"mock-1"}, models.PoolKeyNone: {"mock-2", "mock-4"}, "users": {"mock-3"}}, instr.pool, "a mock no test lists and no startup entry keys is the keyless slice's")
 	require.NotNil(t, instr.begins, "the replay sends the agent the tests' recorded begins")
+}
+
+// Under the switch the replay hands the agent, with the per-test table, per
+// test, the entries of its own list judging marked as the application's
+// background work, each with why (models.MockEntry.Background): only those
+// the agent holds, and none of an unmarked entry, even when another test's
+// entry of the same recording is marked. A set with no mark sends none.
+func TestTheReplayHandsTheAgentTheBackgroundMarks(t *testing.T) {
+	provenOn(t)
+	testB := "    - id: o::TestB\n      dir: o\n      mocks:\n        - name: mock-1\n"
+	for _, tc := range []struct {
+		name    string
+		entries string
+		more    string
+		table   map[string][]string
+		want    models.BackgroundMarks
+	}{
+		{
+			name:    "marked",
+			entries: "        - name: mock-0\n        - name: mock-1\n          background: a timer's call landed here\n        - name: mock-9\n          background: a connection failure the agent never holds\n",
+			want:    models.BackgroundMarks{"o::TestA": {"mock-1": "a timer's call landed here"}},
+		},
+		{name: "unmarked", entries: "        - name: mock-0\n        - name: mock-1\n"},
+		{
+			name:    "marked on one test, unmarked on another",
+			entries: "        - name: mock-0\n        - name: mock-1\n          background: a timer's call landed here\n",
+			more:    testB,
+			table:   map[string][]string{"o::TestA": {"mock-0", "mock-1"}, "o::TestB": {"mock-1"}},
+			want:    models.BackgroundMarks{"o::TestA": {"mock-1": "a timer's call landed here"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			t.Chdir(repo)
+			keployDir := filepath.Join(repo, "keploy")
+			require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: Http\nname: mock-0\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte("version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mocks:\n"+tc.entries+tc.more), 0o644))
+			instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+			instr.consumedMocks = []models.MockState{{Name: "mock-0"}, {Name: "mock-1"}}
+			cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+			cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+			utils.ErrCode = 0
+			t.Cleanup(func() { utils.ErrCode = 0 })
+			// mock-9 is a connection failure: decoded, never handed to the agent.
+			db := named("mock-0", "mock-1", "mock-9")
+			db.mocks[2].Kind = models.ConnectionFailure
+			_ = New(zap.NewNop(), instr, db, mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+			table := tc.table
+			if table == nil {
+				table = map[string][]string{"o::TestA": {"mock-0", "mock-1"}}
+			}
+			require.Equal(t, table, instr.table)
+			require.Equal(t, tc.want, instr.background)
+		})
+	}
 }
 
 // Under the switch the replay never arms the whole pool before its run: the

@@ -305,8 +305,10 @@ type MockMismatchReport struct {
 	// judging reads ClosestMock's owner off mappings.yaml. Drift says it
 	// drifted, Differs naming the leaves learned as noise.
 	// AnswerByKind: a background write answered by its kind, unchecked;
-	// Reused says the kind's recordings were used up. An answer never counts
-	// against a test and never lands in a miss list. The proxy's sink copies
+	// Reused says the kind's recordings were used up. AnswerBackgroundAgain:
+	// a background call made again in its test's window, answered again with
+	// ClosestMock, the marked recording it repeated, unchecked. An answer
+	// never counts against a test and never lands in a miss list. The proxy's sink copies
 	// these to the UnmatchedCall it makes of the report, as it copies the
 	// miss fields.
 	Answer    string `json:"answer,omitempty" yaml:"answer,omitempty"`

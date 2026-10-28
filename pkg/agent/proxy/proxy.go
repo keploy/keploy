@@ -4575,6 +4575,28 @@ func (p *Proxy) SetPoolNames(names []string) error {
 	return nil
 }
 
+// SetUnrequired implements agent.UnrequiredSetter: per test of the staged
+// set, the recordings of its own list it is served but never required to make
+// (MockManager.SetUnrequired).
+func (p *Proxy) SetUnrequired(marks models.BackgroundMarks) error {
+	m := p.getMockManager()
+	if m == nil {
+		return errNoMockManager
+	}
+	m.SetUnrequired(marks)
+	return nil
+}
+
+// ExactTestUnusedBackground implements agent.UnusedBackgroundReader
+// (MockManager.ExactTestUnusedBackground).
+func (p *Proxy) ExactTestUnusedBackground() (string, []string, bool) {
+	m := p.getMockManager()
+	if m == nil {
+		return "", nil, false
+	}
+	return m.ExactTestUnusedBackground()
+}
+
 // learnBoundary runs step (the learn tracker's Begin, End or NewSet) on the
 // proxy's learn tracker through the mock manager it holds
 // (MockManager.LearnBoundary): holding the manager's round lock, so a learn

@@ -85,6 +85,14 @@ type exactPlan struct {
 	// (models.ExactServing.Ahead): the replayed app may ask in the gap, as
 	// it did at record.
 	ahead map[string][]string
+	// unrequired is, per test case, the held mocks of its own list judging
+	// marked as the application's own background work
+	// (models.MockEntry.Background), each with why: the staging call hands
+	// them to the agent (models.ExactServing.Unrequired), which serves each in
+	// that test case's window and never requires it of that test case; one
+	// listing the same mock without a mark still must make it. nil when none
+	// is marked.
+	unrequired models.BackgroundMarks
 	// answerPlaced names the held mocks placed at their answer
 	// (models.IsAnswerPlaced): their place is their recorded answer.
 	answerPlaced map[string]bool
@@ -653,6 +661,12 @@ func newExactPlan(mappings map[string][]models.MockEntry, worker []models.MockEn
 			}
 			names = append(names, e.Name)
 			p.ownsTestMocks = p.ownsTestMocks || dataPlane
+			if e.Background != "" {
+				if p.unrequired == nil {
+					p.unrequired = models.BackgroundMarks{}
+				}
+				p.unrequired.Add(test, e.Name, e.Background)
+			}
 		}
 		p.owned[test] = names
 	}
