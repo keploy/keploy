@@ -71,3 +71,38 @@ func TestWhatAParserAskedToRunRunsOnceWhenTheManagerLetsItsRecordingsGo(t *testi
 		t.Fatalf("asked after Close, it ran %d times", ran["closed"])
 	}
 }
+
+// A parser's release runs only once the staging moved every generation, so a
+// parser that samples a generation from its release, or builds again and asks
+// again there, files what it builds under the set staged, never under the
+// generation of the set the staging replaced (that index would then be kept,
+// and served from, until the next move).
+func TestAParsersReleaseRunsOnceTheStagingMovedTheGenerations(t *testing.T) {
+	now := time.Now()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	stage := func() {
+		mm.SetMocksWithWindow(nil, []*models.Mock{r3Mock("mock-0", now, "GET", "/a", "", "{}")}, models.BaseTime, now.Add(time.Hour))
+	}
+	stage()
+	type gens struct{ all, http, rev uint64 }
+	sample := func() gens {
+		return gens{mm.StagingGeneration(), mm.StagingGenerationByKind(models.HTTP), mm.Revision()}
+	}
+	before := sample()
+	var atRelease gens
+	ran := 0
+	if !integrations.WhenRestaged(mm, "a", func() { ran++; atRelease = sample() }) {
+		t.Fatal("the manager does not tell when it lets its recordings go")
+	}
+	stage()
+	after := sample()
+	if ran != 1 {
+		t.Fatalf("the staging ran the release %d times, want once", ran)
+	}
+	if atRelease.all == before.all || atRelease.http == before.http || atRelease.rev == before.rev {
+		t.Fatalf("the release ran before the staging moved the generations: at the release %+v, before the staging %+v, after it %+v", atRelease, before, after)
+	}
+	if atRelease != after {
+		t.Fatalf("the release saw %+v, not the staging's final generations %+v", atRelease, after)
+	}
+}
