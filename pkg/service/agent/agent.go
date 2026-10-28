@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.keploy.io/server/v3/pkg/agent/captureloss"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
 
 	"go.keploy.io/server/v3/config"
@@ -209,6 +210,11 @@ type Agent struct {
 	// taking scopeMu.
 	provenMu sync.Mutex
 	proven   provenWire
+	// listenerDrops counts what the kernel dropped at the proxy's listener
+	// that the tests' ends charged them (settledSince), as their own capture
+	// loss, for the agent's life: CaptureLosses reads it with every other
+	// count.
+	listenerDrops captureloss.Counter
 	// wire is held across every operation of the wire (a claim, a begin,
 	// an end, the final reap) so they never interleave; taken before
 	// provenMu.
@@ -918,8 +924,8 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			// waits for calls that can never settle.
 			settleErr = lost
 		} else {
-			// keploy test reads a test case's misses after its end: what the
-			// listener dropped since is no test's, and is not compared here.
+			// The settle's own read of the listener's drops is not used:
+			// closeDropsGap, below, reads them after it.
 			_, settleErr = a.settle(ctx, true)
 			// A read whose watchdog gave up on connections it found stuck
 			// (only the proven switch's settle gives up per connection)
@@ -943,6 +949,13 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			}
 		}
 	}
+	// What the listener dropped since the last test case's end, the settle
+	// included, is counted now (closeDropsGap), just before the misses are
+	// read: a drop goes where a miss made at the same moment goes, to the
+	// test case whose misses this read takes (keploy test reads its losses
+	// after it), and after the last test case to the run, as every loss
+	// after it is: this read may be the run's last.
+	a.closeDropsGap(ctx)
 	errs, err := a.Proxy.GetMockErrors(ctx)
 	if settleErr != nil && err == nil {
 		err = fmt.Errorf("%w: keploy could not tell that every call reached it: %v", models.ErrUnmatchedCallsUnread, settleErr)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 )
@@ -48,11 +49,18 @@ import (
 // whose calls keploy cannot count (models.ErrProxyConnsUnsupported, or hooks
 // not loaded) is not settled: "unknown" is never "none in flight". Nor is one
 // with a connection whose parser reads ahead and does not say what it holds,
-// or says that for now it cannot tell (holdsUnknown), or one during which
-// the kernel dropped packets at the proxy's listener (dropped): its end
-// leaves it not verified. The run's read
-// of its misses settles the same way, so a call after the last test's end is
-// read, never filed after it.
+// or says that for now it cannot tell (holdsUnknown): its end leaves it not
+// verified. A test during which the kernel dropped, at the proxy's listener,
+// what can lose a connection (chargeDrops) is charged that as a capture loss
+// of its own (models.CaptureLossListenerDropped), so it alone is not judged,
+// and the tests around it are; one dropped between two tests is the next
+// test's, as a miss there is (markDrops); one before a test process's claim,
+// or after the run's last test, is the run's, where every loss there is
+// (closeDropsGapHeld, closeDropsGap). An agent that counts no
+// capture losses leaves the end of the test charged not verified instead
+// (dropped). The run's read of its misses
+// settles the same way, so a call after the last test's end is read, never
+// filed after it.
 //
 // The wait has a minimal watchdog (design v14 §8.4): it wakes once a second
 // and counts, for each thing the wait waits on, the wake-ups in a row at which
@@ -157,9 +165,9 @@ func (h holdsUnknown) Is(target error) bool { return target == errHoldsUnknown }
 // settle waits until the test's calls are all in the proxy's hands, and, in a
 // replay (answers), answered. It returns the proxy listener's drops read once
 // settled (models.ProxyConnCounts.ListenDrops), which a test's end compares
-// with its begin's (settledDrops). An error says keploy cannot tell: the test
+// with its begin's (windowDrops). An error says keploy cannot tell: the test
 // is not judged. holdsUnknown comes with the drops.
-func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
+func (a *Agent) settle(ctx context.Context, answers bool) (models.ListenDrops, error) {
 	return a.settleKeeping(ctx, answers, nil)
 }
 
@@ -169,7 +177,8 @@ func (a *Agent) settle(ctx context.Context, answers bool) (uint64, error) {
 // proven switch a settle that fails before its cut cuts as it fails: the
 // work its connections then held is still the window's, and a call of it
 // answered later is never the next test's.
-func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreAgent.InFlightScope)) (uint64, error) {
+func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreAgent.InFlightScope)) (models.ListenDrops, error) {
+	none := models.ListenDrops{}
 	cut := false
 	if keep != nil && provenswitch.On() {
 		defer func() {
@@ -180,11 +189,11 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreA
 	}
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
 	if !ok || a.Proxy == nil {
-		return 0, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
+		return none, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
 	}
 	counts, err := a.ProxyConns(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
+		return none, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
 	}
 	// The scope, the give-up and the watchdog's own counts are the proven
 	// switch's: with it off, a settle (a read's, for an agent that settles
@@ -252,9 +261,9 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreA
 	defer stop()
 	if err := a.waitProxySettled(ctx, counts, accepts.Store); err != nil {
 		if cause := context.Cause(ctx); cause != nil {
-			return 0, cause
+			return none, cause
 		}
-		return 0, err
+		return none, err
 	}
 	// Every connection and byte the wait waits for is in the proxy's hands:
 	// what can hold them is the bytes each connection kept now has
@@ -282,7 +291,7 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreA
 		if pending == 0 {
 			c, err := a.ProxyConns(ctx)
 			if err != nil {
-				return 0, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
+				return none, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
 			}
 			// Settled, but for a connection whose parser reads ahead and does
 			// not say which requests it holds, or says that for now it cannot
@@ -318,10 +327,10 @@ func (a *Agent) settleKeeping(ctx context.Context, answers bool, keep func(coreA
 					}
 				}
 				if held := (*sc).GiveUp(ids, answers); len(held) > 0 {
-					return 0, gaveUp{held: held}
+					return none, gaveUp{held: held}
 				}
 			}
-			return 0, cause
+			return none, cause
 		}
 	}
 }
@@ -336,33 +345,136 @@ type scopeView struct{ coreAgent.InFlightScope }
 
 func (v scopeView) InFlightState(answers bool) (int, []string) { return v.State(answers) }
 
-// droppedWhile is the error for a test (or a run's tail) during which the
-// kernel dropped packets at the proxy's listener: from its drops at the start,
-// was, to those at its end, now. A SYN or final ACK it dropped is a
-// connection in neither of the proxy's counts until the client retransmits
-// it, so a call of the test may not have reached keploy; nil when none was.
-func droppedWhile(what string, was, now uint64) error {
-	if now == was {
-		return nil
+// dropCarry is what the windows before left unpaired of their two drop
+// counts (chargeDrops).
+type dropCarry struct{ listener, net uint64 }
+
+// chargeDrops is how many drops that can lose a connection the kernel made
+// at the proxy's listener in a window, from its counts at the start, was, to
+// those at its end, now (models.ListenDrops), with carry what the windows
+// before left unpaired, and what this one leaves unpaired for the next. gap
+// says the window is no test's: the gap from a test's end, or the session's
+// start, to the next begin, whose charge is counted as the gap closes
+// (countDrops: the next test's, as a miss in the gap is; at a test
+// process's claim or the run's last read, the run's).
+//
+//   - Such a drop raises both counts; one that loses nothing (a client's
+//     reset of a connect it gave up, a retransmitted SYN) raises the
+//     listener's alone, and a drop at another listener of the namespace
+//     raises the namespace's alone. The window is charged the smaller rise:
+//     never fewer than the drops that can lose a connection, though a drop
+//     at another listener in the same window can make it more (the test is
+//     then not verified, never wrongly verified).
+//   - The two counts are read one after the other and the kernel raises
+//     them one after the other, so one drop can land its two rises on either
+//     side of a window's end, or, its second rise late, on either side of the
+//     whole gap. What a window leaves unpaired is carried into the next one,
+//     and pairs there: the drop is charged to the window in which both its
+//     rises are seen. A test's window carries its own rises' unpaired part
+//     one window, the gap after it; what it was carried and could not pair
+//     pairs with nothing later. The gap passes what it leaves unpaired on
+//     whole, what it was carried included, so a drop whose rises land on
+//     either side of the gap is charged to the next test's window, never to
+//     none.
+//   - With the namespace's count unread at either end, every rise of the
+//     listener's is charged, as keploy did before it read both.
+//   - A count that went back (another listener, or a count lost) charges at
+//     least one: keploy cannot tell what it missed.
+func chargeDrops(was, now models.ListenDrops, carry dropCarry, gap bool) (uint64, dropCarry) {
+	own, ownBack := rise(was.Listener, now.Listener)
+	if !was.NetKnown || !now.NetKnown {
+		if ownBack {
+			return max(own, 1), dropCarry{}
+		}
+		return own + carry.listener, dropCarry{}
 	}
-	return dropped{what: what, n: now - was}
+	net, netBack := rise(was.Net, now.Net)
+	if ownBack || netBack {
+		return max(own, net, 1), dropCarry{}
+	}
+	l, n := own+carry.listener, net+carry.net
+	charged := min(l, n)
+	if gap {
+		return charged, dropCarry{listener: l - charged, net: n - charged}
+	}
+	return charged, dropCarry{listener: min(l-charged, own), net: min(n-charged, net)}
 }
 
-// errDropped: packets were dropped at the proxy's listener while a window
-// was open (droppedWhile).
-var errDropped = errors.New("packets were dropped at keploy's proxy listener")
+// rise is how much a count grew from was to now; back says it went back, and
+// the rise is then now's count.
+func rise(was, now uint64) (n uint64, back bool) {
+	if now < was {
+		return now, true
+	}
+	return now - was, false
+}
 
-// dropped is errDropped for one window.
+// windowDrops ends the drops' window that the read now closes, and opens the
+// next one at now: it returns what chargeDrops charges the window, and
+// whether a window was open (its start read). The start is a test's begin,
+// keploy test's open of a test case, the session's start, or the end of the
+// window before; gap says the window closing is no test's (a begin closes
+// it, or the run's last read), test that the one it opens is a test's.
+func (a *Agent) windowDrops(now models.ListenDrops, gap, test bool) (charged uint64, why string, open bool) {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	was, open := a.proven.drops, a.proven.dropsKnown
+	carry := dropCarry{}
+	if open {
+		charged, carry = chargeDrops(was, now, a.proven.dropCarry, gap)
+	}
+	a.proven.drops, a.proven.dropsKnown, a.proven.dropCarry = now, true, carry
+	a.proven.dropsInTest = test
+	switch {
+	case !was.NetKnown && open:
+		why = was.NetUnread
+	case !now.NetKnown:
+		why = now.NetUnread
+	}
+	return charged, why, open
+}
+
+// errDropped: the kernel dropped, at the proxy's listener, what can lose a
+// connection while a window was open (chargeDrops).
+var errDropped = errors.New("connection attempts were dropped at keploy's proxy listener")
+
+// dropped is errDropped for one window: n drops while what ran. A SYN or
+// final ACK the kernel dropped there is a connection in neither of the
+// proxy's counts until the client retransmits it, so a call of the window
+// may not have reached keploy. netUnread, when set, is why keploy could not
+// read its network namespace's count, so that every drop at the listener
+// counted.
 type dropped struct {
-	what string
-	n    uint64
+	what      string
+	n         uint64
+	netUnread string
+	// gap says n includes the gap's before the test (countDrops).
+	gap bool
 }
 
 func (d dropped) Error() string {
-	return fmt.Sprintf("the kernel dropped %d packet(s) at keploy's proxy listener while %s ran (its accept queue full among the causes), so a call may not have reached keploy", d.n, d.what)
+	when := "while " + d.what + " ran"
+	if d.gap {
+		when += ", or before it while no test was open"
+	}
+	if d.netUnread != "" {
+		return fmt.Sprintf("the kernel dropped %d packet(s) at keploy's proxy listener %s (a full SYN or accept queue, or a client that gave up its connect: keploy could not read its network namespace's ListenDrops, which tell those apart, so every drop counts: %s), so a call may not have reached keploy", d.n, when, d.netUnread)
+	}
+	return fmt.Sprintf("the kernel dropped %d connection attempt(s) at keploy's proxy listener %s (its SYN or accept queue full: the listener's drops and its network namespace's ListenDrops both rose), so a call may not have reached keploy", d.n, when)
 }
 
 func (d dropped) Is(target error) bool { return target == errDropped }
+
+// why is what the drops' capture loss says of them
+// (models.CaptureLoss.What): that every drop at the listener counted, and
+// why, when keploy could not read its network namespace's count; "" when it
+// could.
+func (d dropped) why() string {
+	if d.netUnread == "" {
+		return ""
+	}
+	return "every packet the listener dropped counted: keploy could not read its network namespace's ListenDrops, which tell a drop that can lose a connection from a client that gave up its connect: " + d.netUnread
+}
 
 // watchSettle is the settle wait's watchdog. progress gives, at each
 // wake-up, a count for each thing the wait is waiting on (the counts of the
@@ -424,22 +536,139 @@ func (a *Agent) watchSettle(ctx context.Context, cancel context.CancelCauseFunc,
 	}
 }
 
-// markDrops notes the proxy listener's drops read as a window began (a
-// test's begin, or the settling that ended the window before).
-func (a *Agent) markDrops(drops uint64) {
-	a.provenMu.Lock()
-	a.proven.drops, a.proven.dropsKnown = drops, true
-	a.provenMu.Unlock()
+// markDrops opens the drops' window at the proxy listener's drops read as a
+// test, or keploy test's test case, begins, and closes the gap before it:
+// what can lose a connection that the kernel dropped there is counted now
+// (countDrops), so the test beginning is charged it at its end, as it is a
+// miss of the gap. The gap starts at the test before it's end, its process's
+// claim (which counts what came before it as the run's: closeDropsGapHeld),
+// or the session's start (openDrops). What the gap left unpaired, what the
+// test before it left included, is carried on whole (chargeDrops).
+func (a *Agent) markDrops(ctx context.Context, drops models.ListenDrops) {
+	n, why, _ := a.windowDrops(drops, true, true)
+	a.countDrops(ctx, n, why)
 }
 
-// settledSince settles (settle) the window what ends, and fails it when the
-// kernel dropped packets at the proxy's listener while it was open
-// (droppedWhile): a test whose drops differ between its begin and its end is
-// not verified. The drops read now begin the next window.
-func (a *Agent) settledSince(ctx context.Context, answers bool, what string) error {
+// countDrops counts n drops that can lose a connection, the charge of a
+// window closing now (chargeDrops), as the agent's capture loss
+// (models.CaptureLossListenerDropped): it is then where every capture loss
+// counted now is, charged by the next read of the losses that charges one
+// (a test's end, keploy test's read of a test case's losses after its end:
+// the window's own test, or, for the gap, the test that begins). why is
+// windowDrops'. An agent whose capture losses cannot be read
+// (countsCaptureLosses) has no such read: there a gap's count is kept for
+// the next test's end, which fails with it (settledSince).
+func (a *Agent) countDrops(ctx context.Context, n uint64, why string) {
+	if n == 0 {
+		return
+	}
+	d := dropped{n: n, netUnread: why}
+	if a.countsCaptureLosses(ctx) {
+		a.listenerDrops.AddN(models.CaptureLossListenerDropped, n, d.why())
+		return
+	}
 	a.provenMu.Lock()
-	was, known := a.proven.drops, a.proven.dropsKnown
-	a.provenMu.Unlock()
+	defer a.provenMu.Unlock()
+	a.proven.dropsUncounted += n
+	if a.proven.dropsUncountedWhy == "" {
+		a.proven.dropsUncountedWhy = why
+	}
+}
+
+// closeDropsGap closes the drops' window no test holds -- from the last
+// test's end, or the session's start -- at the run's last read
+// (UnchargedCaptureLosses: a record's, and mock record's and mock test's
+// read just before their read of the run's losses; GetMockErrors, keploy
+// test's, which it makes after each test case and test set, after its settle
+// and just before it reads the misses): what can lose a connection that the
+// kernel dropped there is counted now (countDrops), as every capture loss
+// after the last test is, so that read and the next take it where they take
+// those. That is the one place the drops after a run's last test go: the
+// losses charged to no test (UnchargedCaptureLosses) and the run's own count
+// of its losses, read after it, which are what the run is judged by (a kind
+// that leaves its tests not judged leaves the run not judged, as a TLS
+// handshake abandoned there does); keploy test's next test set counts its
+// losses from after them, and its next test case from them, as it does any
+// loss. A test process's claim closes the gap too (closeDropsGapHeld): a
+// drop before it is the run's. A test's window still open (a test that has
+// not ended) is not closed: its end charges it. An agent that counts no
+// capture losses keeps them for a next test's end, and with none they are
+// counted by nothing, as every loss of such an agent is. The wire is taken,
+// so a begin or an end does not read the drops between this read and its
+// close.
+func (a *Agent) closeDropsGap(ctx context.Context) {
+	if !a.dropsGapOpen() {
+		return
+	}
+	if err := a.wire.lock(ctx); err != nil {
+		return
+	}
+	defer a.wire.unlock()
+	a.closeDropsGapHeld(ctx)
+}
+
+// closeDropsGapHeld is closeDropsGap for a caller that holds the wire
+// already: a test process's claim (ClaimInstance), which counts the drops
+// before it as the run's, as it does a failed TLS handshake or a miss there,
+// before it marks the losses its first test counts from.
+func (a *Agent) closeDropsGapHeld(ctx context.Context) {
+	if !a.dropsGapOpen() {
+		return
+	}
+	_, p, err := a.proxyConnSides()
+	if err != nil {
+		return
+	}
+	now, err := p.ListenDrops()
+	if err != nil {
+		// Not read, the gap stays open: the next begin, or read, closes it.
+		return
+	}
+	n, why, _ := a.windowDrops(now, true, false)
+	a.countDrops(ctx, n, why)
+}
+
+// dropsGapOpen says the drops' window open is the gap no test holds.
+func (a *Agent) dropsGapOpen() bool {
+	a.provenMu.Lock()
+	defer a.provenMu.Unlock()
+	return a.proven.dropsKnown && !a.proven.dropsInTest
+}
+
+// openDrops opens the session's first drops' window, a gap, at its start.
+// On the scope API a drop before a test process's claim is the run's: the
+// claim counts it (closeDropsGapHeld). One after the claim and before its
+// first begin is its first test's, as a miss there is; in keploy test, one
+// before a set's first test case is that test case's, as a failed TLS
+// handshake there is (a miss there is the set's). When the count cannot be
+// read here, no window is open, so nothing counts a drop before the first
+// begin, as before keploy kept this count: the first begin's read opens the
+// first window.
+func (a *Agent) openDrops() {
+	_, p, err := a.proxyConnSides()
+	if err != nil {
+		return
+	}
+	now, err := p.ListenDrops()
+	if err != nil {
+		return
+	}
+	a.windowDrops(now, true, false)
+}
+
+// settledSince settles (settle) the window what ends, and charges it what
+// the kernel dropped, at the proxy's listener, that can lose a connection
+// while it was open (chargeDrops). The drops read now begin the next window.
+//
+// The drops are the window's own capture loss
+// (models.CaptureLossListenerDropped), counted in the agent's capture losses
+// before the end's read of them (chargeCaptureLosses; keploy test's read of a
+// test case's losses after its end): that read charges them to this test
+// alone, which is not judged, and leaves every other test judged. An agent
+// whose capture losses cannot be read (countsCaptureLosses) would have no
+// reader take them, so there the window fails instead, with errDropped: not
+// verified, never charged to nothing.
+func (a *Agent) settledSince(ctx context.Context, answers bool, what string) error {
 	// What the window owned at its cut is what the next begin waits for
 	// (settleBegin).
 	var owned coreAgent.InFlightScope
@@ -448,6 +677,11 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	a.proven.owned = owned
 	a.provenMu.Unlock()
 	if err != nil && !errors.Is(err, errHoldsUnknown) {
+		// Not read: the test's window goes on as the gap's, which the next
+		// begin, or the run's last read, closes. The test is not judged.
+		a.provenMu.Lock()
+		a.proven.dropsInTest = false
+		a.provenMu.Unlock()
 		return err
 	}
 	// A window's end charges it the calls queued behind lost work.
@@ -455,13 +689,28 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 	if errors.As(err, &bl) {
 		bl.charge()
 	}
-	a.markDrops(drops)
-	if known {
-		if dropped := droppedWhile(what, was, drops); dropped != nil && err == nil {
-			return dropped
-		}
+	n, why, open := a.windowDrops(drops, false, false)
+	if !open {
+		return err
 	}
-	return err
+	if a.countsCaptureLosses(ctx) {
+		a.countDrops(ctx, n, why)
+		return err
+	}
+	// No read of the losses would take them: the window, and the gaps
+	// before it (countDrops), fail.
+	a.provenMu.Lock()
+	gap := a.proven.dropsUncounted
+	n += gap
+	if why == "" {
+		why = a.proven.dropsUncountedWhy
+	}
+	a.proven.dropsUncounted, a.proven.dropsUncountedWhy = 0, ""
+	a.provenMu.Unlock()
+	if n == 0 || err != nil {
+		return err
+	}
+	return dropped{what: what, n: n, netUnread: why, gap: gap > 0}
 }
 
 // settleBegin settles, before a test's begin (or a test case's open) opens
@@ -478,26 +727,26 @@ func (a *Agent) settledSince(ctx context.Context, answers bool, what string) err
 // waits for it) and logged, and the begin goes on: it was the previous
 // test's, whose end has already failed. With the switch off a begin
 // settles as it always did (settle). It returns the proxy listener's drops,
-// read once settled, which the test's end compares.
-func (a *Agent) settleBegin(ctx context.Context, answers bool) (uint64, error) {
+// read once settled, which open the test's drops' window (markDrops).
+func (a *Agent) settleBegin(ctx context.Context, answers bool) (models.ListenDrops, error) {
 	if !provenswitch.On() {
 		return a.settle(ctx, answers)
 	}
 	ir, ok := a.Proxy.(coreAgent.InFlightReader)
 	if !ok || a.Proxy == nil {
-		return 0, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
+		return models.ListenDrops{}, errors.New("this keploy agent's proxy cannot tell which calls it still holds")
 	}
 	a.provenMu.Lock()
 	owned := a.proven.owned
 	a.provenMu.Unlock()
 	if owned != nil {
 		if err := a.settleOwned(ctx, ir, owned, answers); err != nil {
-			return 0, err
+			return models.ListenDrops{}, err
 		}
 	}
 	c, err := a.ProxyConns(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
+		return models.ListenDrops{}, fmt.Errorf("keploy cannot count the calls still waiting for its proxy: %w", err)
 	}
 	return c.ListenDrops, nil
 }

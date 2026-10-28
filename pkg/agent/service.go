@@ -178,19 +178,21 @@ type AcceptCounter interface {
 	// ctx ends first, or with Accepted's error, at once or when it comes.
 	// It has no deadline of its own; each accept wakes it.
 	WaitAccepted(ctx context.Context, n uint64) error
-	// ListenDrops is the marked listener's count of the packets the kernel
-	// dropped at it (models.ProxyConnCounts' ListenDrops). It fails as
-	// Accepted does.
-	ListenDrops() (uint64, error)
+	// ListenDrops are the kernel's counts of what it dropped at the marked
+	// listener (models.ListenDrops). It fails as Accepted does; its
+	// namespace's count it cannot read is said in it (NetUnread), not failed.
+	ListenDrops() (models.ListenDrops, error)
 }
 
 // ProxyConnCounter is what the agent offers a test's begin and end: the
 // connections to the proxy, numbered on both sides, and a wait for every call
 // the application had started by a read to be in the proxy's hands. begin and
 // end read ProxyConns, then WaitProxySettled(ctx, counts), then go on to the
-// bytes and requests the proxy holds; a test whose ListenDrops differ between
-// its begin and its end is not verified, and an application connection lost
-// before the proxy got it is a capture loss (CaptureLossAppConnLost).
+// bytes and requests the proxy holds; a test during which the kernel dropped,
+// at the proxy's listener, what can lose a connection (models.ListenDrops) is
+// charged it as its own capture loss (CaptureLossListenerDropped: not
+// judged), and an application connection lost before the proxy got it is a
+// capture loss (CaptureLossAppConnLost).
 //
 // The counts only ever grow for the life of the agent process. An agent that
 // cannot count answers an error wrapping models.ErrProxyConnsUnsupported
