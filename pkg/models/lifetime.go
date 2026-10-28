@@ -786,6 +786,7 @@ func (r *mockPredicates) storeLocked(edit func(map[Kind][]mockPredicate)) {
 	}
 	edit(next)
 	r.byKnd.Store(&next)
+	mockRulesChanged()
 }
 
 // match reports whether any predicate registered for m.Kind accepts m.
