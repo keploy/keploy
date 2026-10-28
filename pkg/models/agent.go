@@ -268,6 +268,10 @@ type ScopeWindow struct {
 	// used while it was open (design v14 §4): its REAL rows, and in a
 	// record, the REAL list its recording carries.
 	Real []RealUse `json:"real,omitempty"`
+	// Given is, under the proven wire, the values the test gave while it
+	// was open (POST /agent/scope/given), in the order it gave them: in a
+	// record, the givens its mapping keeps (MappedTestCase.Given).
+	Given []GivenValue `json:"given,omitempty"`
 	// Claim, under the proven wire, makes this no test's window but a claim:
 	// from Start on, the run's test process is the one that claimed it with
 	// this key (POST /agent/instance), until the next claim. A call made
@@ -310,6 +314,11 @@ type ScopeTableReq struct {
 	// another test's (integrations.TestWindows). Absent from an older CLI
 	// and from a set with no test: the agent then knows none.
 	Windows []TestWindow `json:"windows,omitempty"`
+	// Given is, under the proven switch, the values each test gave when it
+	// was recorded (MappedTestCase.Given), by test ID: a replay's given is
+	// bound with the recorded value of its variable, so the learn step and
+	// the replay pair the two. Absent when no test gave any.
+	Given map[string][]GivenValue `json:"given,omitempty"`
 }
 
 // TestBeginsReq is the body of POST /agent/replay/clock, which only the keploy
