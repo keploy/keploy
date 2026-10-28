@@ -2113,7 +2113,7 @@ func encodeGeomVec2s(enc *gob.Encoder, ps []pgtype.Vec2) error {
 
 // decodeGeomVec2s reads a length-prefixed Vec2 sequence written by
 // encodeGeomVec2s. Symmetric inverse.
-func decodeGeomVec2s(dec *gob.Decoder) ([]pgtype.Vec2, error) {
+func decodeGeomVec2s(dec *cellStream) ([]pgtype.Vec2, error) {
 	var n int32
 	if err := dec.Decode(&n); err != nil {
 		return nil, err
@@ -2920,7 +2920,9 @@ func (c *PostgresV3Cell) GobDecode(data []byte) error {
 		return fmt.Errorf("PostgresV3Cell.GobDecode: empty buffer")
 	}
 	tag := data[0]
-	dec := gob.NewDecoder(bytes.NewReader(data[1:]))
+	// Read as a gob decoder over data[1:] reads it, with no decoder built
+	// for a value gob needs no type definition for (cellStream).
+	dec := &cellStream{b: data[1:]}
 	switch tag {
 	case cellTagNull:
 		c.Value = nil
