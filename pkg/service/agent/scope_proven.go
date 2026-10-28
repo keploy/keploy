@@ -813,6 +813,9 @@ func (a *Agent) endTest(ctx context.Context, id, outcome string, at time.Time, w
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty() && a.replaying():
 		ev.Reason = evidenceReason(id, ev, a.mocksFound(ev.Unconsumed), beganAt)
+		// What the test ended with before this evidence failed it: judging
+		// tells from it whether the test's own assertions passed.
+		ev.Reported = outcome
 		outcome = models.ScopeOutcomeFailed
 	case !ev.Empty():
 		// A record never fails a test: what keploy could not capture is
