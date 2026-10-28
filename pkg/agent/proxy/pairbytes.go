@@ -47,8 +47,12 @@ type pairedConn struct {
 
 // proxySide is what the wait reads of the proxy's side of a connection.
 type proxySide struct {
-	received uint64 // tcpi_bytes_received
-	state    uint8  // tcpi_state
+	received uint64 // tcpi_bytes_received (Linux)
+	// rcvNxt is, on darwin, the next sequence number the socket expects
+	// (tcpi_rcv_nxt): XNU's received count (tcpi_rxbytes) also counts
+	// payload that arrived twice, so the wait compares sequence numbers.
+	rcvNxt uint32
+	state  uint8 // tcpi_state
 	// err is why the socket could not be read.
 	err error
 }
