@@ -64,6 +64,9 @@ type setDerived struct {
 	// bodies are the set's lazy Raws' payloads, loaded within a fixed
 	// budget (bodyStore), made at the first lazy Raw.
 	bodies *bodyStore
+	// offsets are the set's places the offset rule reads, by place and
+	// moment (offsetIndex), within offsetBudget: its handlers share them.
+	offsets *offsetIndex
 }
 
 // heldParts are what setDerived keeps of a recording for the set (held).
@@ -293,7 +296,7 @@ func wordsBytes(words map[string]bool) int64 {
 }
 
 func newSetDerived() *setDerived {
-	return &setDerived{held: newTier[heldParts](heldBudget, false), words: newTier[wordParts](derivedBudget, true), reading: map[readingKey]chan struct{}{}}
+	return &setDerived{held: newTier[heldParts](heldBudget, false), words: newTier[wordParts](derivedBudget, true), reading: map[readingKey]chan struct{}{}, offsets: newOffsetIndex(offsetBudget)}
 }
 
 // keptBytes is the bytes setDerived counts as kept of the set's words and
@@ -392,13 +395,7 @@ func (dc *DriftCache) setPlaces(x Raw) (out []keyedPlace, ok bool) {
 			k.k.path, k.k.label, k.where = strings.Clone(k.k.path), strings.Clone(k.k.label), strings.Clone(k.where)
 		}
 		return out
-	}, func(e *heldParts, v []keyedPlace) { e.places = v }, func(v []keyedPlace) int64 {
-		size := int64(headerBytes)
-		for _, k := range v {
-			size += placeBytes + int64(len(k.k.path)+len(k.k.label)+len(k.where))
-		}
-		return size
-	}), true
+	}, func(e *heldParts, v []keyedPlace) { e.places = v }, placesBytes), true
 }
 
 // setTokens is searchedTokens(x, keep), read once for the set where dc
