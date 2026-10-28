@@ -549,15 +549,13 @@ func testSettleWatchdogNotFed(t *testing.T, proven bool) {
 
 // The accepts the end waits for are the wait's progress: the watchdog counts
 // each one, so a proxy that accepts the end's connections one by one, slower
-// than settleStallLimit wake-ups in all, is no stuck wait.
+// than settleStallLimit wake-ups in all, is no stuck wait. Each wake-up is
+// sent once the settle is blocked waiting for the next accept (stallWake),
+// so it is weighed against the accepts the wait waits for.
 func TestTheSettleWatchdogWeighsTheAcceptsTheEndWaitsFor(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	wake, woken := make(chan struct{}), make(chan struct{})
-	prevWake, prevWoken, prevLimit := settleWake, settleWoken, settleStallLimit
-	settleWake = func(context.Context) (<-chan struct{}, func()) { return wake, func() {} }
-	settleWoken = func() { woken <- struct{}{} }
-	settleStallLimit = 3
-	t.Cleanup(func() { settleWake, settleWoken, settleStallLimit = prevWake, prevWoken, prevLimit })
+	w := stallWake(t)
+	wake, woken := w.wake, w.woken
 	a, h, p := settleAgent()
 	// The kernel completed 5 connections to the proxy; it has accepted 1.
 	h.mu.Lock()
@@ -572,6 +570,12 @@ func TestTheSettleWatchdogWeighsTheAcceptsTheEndWaitsFor(t *testing.T) {
 		done <- err
 	}()
 	for acc := uint64(2); acc <= 5; acc++ {
+		select {
+		case err := <-done:
+			require.NoError(t, err, "the proxy accepted one more of the end's connections at every wake-up")
+			t.Fatalf("the end settled with %d of the 5 connections it waited for accepted", acc-1)
+		case <-w.blocked:
+		}
 		select {
 		case err := <-done:
 			require.NoError(t, err, "the proxy accepted one more of the end's connections at every wake-up")
