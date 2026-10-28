@@ -114,7 +114,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 			}
 
 			// Match the request with the mock
-			resp, ok, miss, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, noiseEngine, userBodyNoise)
+			resp, ok, miss, err := matchCommand(ctx, logger, req, mockDb, decodeCtx, dst, noiseEngine, userBodyNoise)
 			if err != nil {
 				if err == io.EOF {
 					logger.Debug("Connection closing due to EOF from matchCommand",
@@ -138,39 +138,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 					// path cannot masquerade as an empty mock pool.
 					miss = &mockMiss{matchPhase: models.MatchPhaseExhausted}
 				}
-				// Report the STATEMENT, not the wire text. A Datadog DBM /
-				// sqlcommenter comment runs to a couple of hundred bytes in front
-				// of the SQL, so every truncation below would otherwise clip
-				// inside it and the report would name no SQL at all — which is how
-				// this class of miss gets read as "the mock was never recorded"
-				// instead of "this query drifted".
-				//
-				// The comment stripper is applied to SQL ONLY, never to the
-				// rendered bound parameters appended below: those are arbitrary
-				// user data, and a value containing "#" or "-- " would have the
-				// rest of the parameter list silently deleted from the report.
-				actualQuery := ""
-				switch msg := req.Message.(type) {
-				case *mysql.QueryPacket:
-					actualQuery = sqlStatementIdentity(msg.Query)
-				case *mysql.StmtPreparePacket:
-					actualQuery = sqlStatementIdentity(msg.Query)
-				case *mysql.StmtExecutePacket:
-					// EXECUTE carries no SQL text of its own — resolve the
-					// prepared query via the runtime stmtID map and show the
-					// bound parameter values, so the report isn't a blank
-					// "COM_STMT_EXECUTE".
-					if msg != nil {
-						if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
-							actualQuery = sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID])
-						}
-						actualQuery = strings.TrimSpace(actualQuery + " " + formatExecParams(msg.Parameters))
-					}
-				case *mysql.StmtSendLongDataPacket:
-					if msg != nil {
-						actualQuery = fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
-					}
-				}
+				actualQuery := commandStatement(req, decodeCtx)
 				closestQuery := sqlStatementIdentity(miss.closestQuery)
 				diff := ""
 				if actualQuery != "" || closestQuery != "" {
@@ -192,7 +160,7 @@ func simulateCommandPhase(ctx context.Context, logger *zap.Logger, clientConn ne
 				report := &models.MockMismatchReport{
 					At:            time.Now(),
 					Protocol:      "MySQL",
-					ActualSummary: strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(actualQuery, 160))),
+					ActualSummary: commandSummary(req, decodeCtx),
 					Destination:   dst,
 					ClosestMock:   miss.closestMock,
 					Diff:          diff,
@@ -341,4 +309,47 @@ func requestBodyNoise(cfg map[string]map[string][]string) map[string][]string {
 		out[strings.TrimPrefix(strings.ToLower(k), "body.")] = []string{}
 	}
 	return out
+}
+
+// commandStatement is what a report names a live command by: its STATEMENT,
+// not the wire text. A Datadog DBM / sqlcommenter comment runs to a couple
+// of hundred bytes in front of the SQL, so every truncation would otherwise
+// clip inside it and the report would name no SQL at all, which is how a
+// miss gets read as "the mock was never recorded" instead of "this query
+// drifted".
+//
+// The comment stripper is applied to SQL ONLY, never to the rendered bound
+// parameters appended for an EXECUTE: those are arbitrary user data, and a
+// value containing "#" or "-- " would have the rest of the parameter list
+// silently deleted from the report.
+func commandStatement(req mysql.Request, decodeCtx *wire.DecodeContext) string {
+	switch msg := req.Message.(type) {
+	case *mysql.QueryPacket:
+		return sqlStatementIdentity(msg.Query)
+	case *mysql.StmtPreparePacket:
+		return sqlStatementIdentity(msg.Query)
+	case *mysql.StmtExecutePacket:
+		// EXECUTE carries no SQL text of its own: the prepared query is
+		// resolved via the runtime stmtID map and shown with the bound
+		// parameter values, so the report isn't a blank "COM_STMT_EXECUTE".
+		if msg == nil {
+			return ""
+		}
+		q := ""
+		if decodeCtx != nil && decodeCtx.StmtIDToQuery != nil {
+			q = sqlStatementIdentity(decodeCtx.StmtIDToQuery[msg.StatementID])
+		}
+		return strings.TrimSpace(q + " " + formatExecParams(msg.Parameters))
+	case *mysql.StmtSendLongDataPacket:
+		if msg != nil {
+			return fmt.Sprintf("(param %d, %d streamed bytes)", msg.ParameterID, len(msg.Data))
+		}
+	}
+	return ""
+}
+
+// commandSummary is a report's one-line summary of a live command: its type
+// and its statement (commandStatement), cut to a line.
+func commandSummary(req mysql.Request, decodeCtx *wire.DecodeContext) string {
+	return strings.TrimSpace(fmt.Sprintf("%s %s", req.Header.Type, truncate(commandStatement(req, decodeCtx), 160)))
 }

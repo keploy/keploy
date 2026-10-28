@@ -169,7 +169,7 @@ func TestMatchCommand_OrphanPrepareSynthesizesPrepareOk(t *testing.T) {
 	db := &fakeMockDb{session: []*models.Mock{filler}}
 	dctx := newDecodeCtx()
 
-	resp, ok, _, err := matchCommand(context.Background(), logger, stmtPrepareReq(sql), db, dctx, nil, nil)
+	resp, ok, _, err := matchCommand(context.Background(), logger, stmtPrepareReq(sql), db, dctx, "", nil, nil)
 	if err != nil || !ok || resp == nil {
 		t.Fatalf("orphaned PREPARE must synthesize a PREPARE_OK, got ok=%v err=%v resp=%v", ok, err, resp)
 	}
@@ -215,7 +215,7 @@ func TestMatchCommand_SendLongDataAcceptedGracefully(t *testing.T) {
 			Message: &mysql.StmtSendLongDataPacket{StatementID: 3, ParameterID: 0},
 		},
 	}
-	_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), nil, nil)
+	_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", nil, nil)
 	if err != nil {
 		t.Fatalf("unmocked COM_STMT_SEND_LONG_DATA must not error, got %v", err)
 	}
@@ -254,7 +254,7 @@ func TestMatchCommand_SendLongDataConsumesRecordedMock(t *testing.T) {
 		Header:  &mysql.PacketInfo{Header: &mysql.Header{PayloadLength: 12, SequenceID: 0}, Type: "COM_STMT_SEND_LONG_DATA"},
 		Message: &mysql.StmtSendLongDataPacket{StatementID: 3},
 	}}
-	_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), nil, nil)
+	_, ok, _, err := matchCommand(context.Background(), logger, req, db, newDecodeCtx(), "", nil, nil)
 	if err != nil || !ok {
 		t.Fatalf("SLD must be accepted, got ok=%v err=%v", ok, err)
 	}
@@ -298,7 +298,7 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 			winStart: base.Add(5 * time.Second),  // [t1 < winStart < t2 < winEnd < t3]
 			winEnd:   base.Add(15 * time.Second), // only readback-2 is in-window
 		}
-		resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), nil, nil)
+		resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("expected a match, got ok=%v err=%v resp=%v", ok, err, resp)
 		}
@@ -309,7 +309,7 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 
 	t.Run("no active window falls back to first-recorded (no behavior change)", func(t *testing.T) {
 		db := &fakeMockDb{session: mocks} // zero window => windowActive == false
-		resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), nil, nil)
+		resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("expected a match, got ok=%v err=%v resp=%v", ok, err, resp)
 		}
@@ -327,7 +327,7 @@ func TestMatchCommand_ComQueryStatefulReadInWindow(t *testing.T) {
 			winStart: base.Add(100 * time.Second),
 			winEnd:   base.Add(200 * time.Second),
 		}
-		resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), nil, nil)
+		resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(sql), db, newDecodeCtx(), "", nil, nil)
 		if err != nil || !ok || resp == nil {
 			t.Fatalf("expected the reusable recording to still match, got ok=%v err=%v", ok, err)
 		}

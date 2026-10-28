@@ -67,7 +67,7 @@ func matchOrderOn(t *testing.T, db integrations.MockMemDb, params ...string) (*m
 	dctx.StmtIDToQuery[33] = ordersInsert
 	dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 2}
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, nil, nil)
+	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", nil, nil)
 	if err != nil {
 		t.Fatalf("matchCommand: %v", err)
 	}
