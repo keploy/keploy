@@ -46,7 +46,7 @@ func MatchForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db
 // MatchWithEngineForTest is MatchForTest with the schema-noise engine eng
 // (StrictEngineForTest: strict enforcement).
 func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, eng *mocknoise.Engine) (*mysql.Response, bool, string, error) {
-	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, eng, nil)
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, "", eng, nil)
 	missText := ""
 	if miss != nil {
 		missText = fmt.Sprintf("%+v", *miss)
@@ -58,7 +58,7 @@ func MatchWithEngineForTest(ctx context.Context, logger *zap.Logger, req mysql.R
 // configuration (test.globalNoise), its requestBody bucket read as the
 // command phase reads it (requestBodyNoise).
 func MatchWithNoiseConfigForTest(ctx context.Context, logger *zap.Logger, req mysql.Request, db integrations.MockMemDb, dctx *wire.DecodeContext, cfg map[string]map[string][]string) (*mysql.Response, bool, string, error) {
-	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, nil, requestBodyNoise(cfg))
+	resp, ok, miss, err := matchCommand(ctx, logger, req, db, dctx, "", nil, requestBodyNoise(cfg))
 	missText := ""
 	if miss != nil {
 		missText = fmt.Sprintf("%+v", *miss)

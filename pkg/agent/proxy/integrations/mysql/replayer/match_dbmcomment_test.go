@@ -415,7 +415,7 @@ func TestMatchCommand_AnsiQuotedIdentifierIsNeverCrossServed(t *testing.T) {
 				readbackMock("orders", tc.recorded, "ROWS=orders", base),
 			}}
 
-			resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(tc.live), db, newDecodeCtx(), nil, nil)
+			resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(tc.live), db, newDecodeCtx(), "", nil, nil)
 			if err != nil {
 				t.Fatalf("matchCommand: %v", err)
 			}
@@ -430,7 +430,7 @@ func TestMatchCommand_AnsiQuotedIdentifierIsNeverCrossServed(t *testing.T) {
 		readbackMock("orders", `SELECT id FROM "orders" WHERE ref = 'aaa'`, "ROWS=orders", base),
 	}}
 	resp, ok, _, err := matchCommand(context.Background(), logger,
-		comQueryReq(`SELECT id FROM "orders" WHERE ref = 'bbb'`), db, newDecodeCtx(), nil, nil)
+		comQueryReq(`SELECT id FROM "orders" WHERE ref = 'bbb'`), db, newDecodeCtx(), "", nil, nil)
 	if err != nil || !ok || resp == nil {
 		t.Fatalf("a drifted single-quoted literal on the SAME table must still resolve, got ok=%v err=%v", ok, err)
 	}
