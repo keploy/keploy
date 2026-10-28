@@ -212,6 +212,58 @@ func TestRemoveBackgroundTakesOnlyAMarkedEntryOffItsTestsList(t *testing.T) {
 	}
 }
 
+// Two tests both mark one recording, and judging names it for only one of
+// them (the other test called it in the confirming round, so its mark
+// stands): the recording comes off the named test's list only. The other
+// test keeps its marked entry, so its next replay still serves its own call,
+// and the mock file keeps the recording.
+func TestRemoveBackgroundTakesASharedMarkOffOnlyTheNamedTest(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := New(zap.NewNop(), dir, "mappings")
+	if err := db.UpsertBatch(ctx, "test-set-0", map[string][]models.MockEntry{
+		"test-1": {{Name: "mock-1", Kind: "Http"}, {Name: "shared", Kind: "Mongo"}},
+		"test-2": {{Name: "shared", Kind: "Mongo"}, {Name: "mock-2", Kind: "Http"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.MarkBackground(ctx, "test-set-0", map[string]map[string]string{
+		"test-1": {"shared": "a timer"},
+		"test-2": {"shared": "a timer"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	removed, unlisted, err := db.RemoveBackground(ctx, "test-set-0", map[string]map[string]string{
+		"test-1": {"shared": "no round called it"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(removed, map[string][]string{"test-1": {"shared"}}) || unlisted != nil {
+		t.Fatalf("removed %v, unlisted %v; want only test-1's [shared], and nothing unlisted (test-2 still lists it)", removed, unlisted)
+	}
+	m, err := db.GetMapping(ctx, "test-set-0")
+	if err != nil || m == nil {
+		t.Fatalf("GetMapping = %v, %v", m, err)
+	}
+	got := map[string][]string{}
+	for _, tc := range m.TestCases {
+		for _, e := range tc.Mocks {
+			got[tc.ID] = append(got[tc.ID], e.Name+"|"+e.Background)
+		}
+		if tc.ID == "test-2" && len(tc.Removed) > 0 {
+			t.Fatalf("test-2 was not named, yet carries removal notes %+v", tc.Removed)
+		}
+	}
+	want := map[string][]string{
+		"test-1": {"mock-1|"},
+		"test-2": {"shared|a timer", "mock-2|"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("after removing: %v, want %v", got, want)
+	}
+}
+
 // A marked recording taken off its test's list stays in the mock file while
 // any other list of mappings.yaml names it: the startup, runner, worker or
 // shared list, or a boot's (keploy mock record writes boots). Without that a
