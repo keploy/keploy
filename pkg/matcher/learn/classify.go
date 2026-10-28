@@ -1120,6 +1120,8 @@ const (
 	// skipOffset: as a value no moved place builds by an offset (no offset
 	// rule: offsetOfValue, offsetFrom).
 	skipOffset
+	// skipBoth: as a value with neither (the copy rule's re-read).
+	skipBoth = skipSource | skipOffset
 )
 
 // classifyRead is classifyGiven of raw as handed: each Raw read as the one
@@ -1193,7 +1195,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// echo is answered, never asserted against a source.
 		if ln.Kind == KindNoise || ln.Kind == KindEcho {
 			v := dc.ofIn(r.Value, l.Value, w, at)
-			why := ""
+			why, sourced := "", false
 			if unreadReq != "" {
 				why = unreadRequestWhy(unreadReq)
 			} else if where, asRecorded := dc.requestHolds(lostMoments(v), v.liveMoments, served); where != "" {
@@ -1203,6 +1205,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 				// any lead or window excuses its words (offset.go).
 				why = offsetWhy(m)
 			} else if why = unaccounted(dc, v, at, served, raw, fol); why != "" {
+				sourced = true
 				if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
 				}
@@ -1216,6 +1219,26 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 					why = dc.echoedElsewhere(v.instants, at, served, raw, places)
 				} else if fol != nil && fol.refused != "" {
 					why += "; " + fol.refused
+				}
+				sourced = why != ""
+			}
+			// Read as a value no earlier place is the source of and no moved
+			// place builds by an offset (the copy rule's re-read, below:
+			// skipSource and skipOffset), in keploy mock's client tests, a
+			// text that is one instant whole (readClockTextWall: an epoch's
+			// digits, a time with its zone) that its call's window holds as
+			// a read of each run's clock plus one constant offset
+			// (textClockOffset: an expiresAt thirty days after the call's
+			// now, as its text) is that offset, where only the searches of
+			// the places a word or an instant of it stands in refused it
+			// (sourced: unaccounted, givenWhy, echoedElsewhere; the minute
+			// "59" of a login's Set-Cookie Expires): those searches look
+			// for its source, which this reading sets aside. A refusal of
+			// the request's checks stands, and so does a value that reads
+			// as no such offset.
+			if sourced && skip&skipBoth == skipBoth && dc.clientTests {
+				if off, ok := dc.textClockOffset(r, l, v, w, resp); ok {
+					return off
 				}
 			}
 			// In keploy mock's client tests, a changed instant only where the
@@ -1429,8 +1452,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// as a value with no source (noise, an echo, a read plus an offset
 		// of its own, a refusal).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil {
-			if own := leaf(r, l, w, skipSource|skipOffset); own.Kind == KindClockRead && own.Read != nil {
-				own.Read.Since = models.SinceTestBegin
+			if own, ok := sinceTestBegin(leaf(r, l, w, skipBoth)); ok {
 				ln = own
 			}
 		}
@@ -1454,14 +1476,34 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// reads as without the rule (noise, a read plus an offset of its
 		// own, another refusal).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
-			if own := leaf(r, l, w, skipOffset); own.Kind == KindClockRead && own.Read != nil {
-				own.Read.Since = models.SinceTestBegin
+			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
 				ln = own
 			}
 		}
 		out = append(out, ln)
 	}
 	return out
+}
+
+// sinceTestBegin is ln, a value its own call's window holds as a read of the
+// clock (KindClockRead) or as a read of the clock plus one constant offset
+// in both runs (KindClockOffset: an expiry thirty days after the call's
+// now), checked since its test began (models.SinceTestBegin): the reading
+// the two rules a copy follows its source by learn a value as where another
+// explanation holds in the rounds too (a copy of an earlier place, an
+// offset of a given instant), which holds under both. ok is false for any
+// other ln (noise, a variable, an echo, a refusal), which those rules leave
+// as the first classification learned it.
+func sinceTestBegin(ln Learned) (Learned, bool) {
+	switch {
+	case ln.Kind == KindClockRead && ln.Read != nil:
+		ln.Read.Since = models.SinceTestBegin
+	case ln.Kind == KindClockOffset && ln.Offset != nil:
+		ln.Offset.Since = models.SinceTestBegin
+	default:
+		return ln, false
+	}
+	return ln, true
 }
 
 // rawUnread says why the classifier refuses raw: one of them was not read

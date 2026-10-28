@@ -433,3 +433,225 @@ func TestAClientTestLearnsACopyThatIsAlsoAnOffsetOfAGivenInstantAsAReadSinceItsT
 		t.Fatalf("a copy its own window does not hold: createdAt %s Read=%+v from %+v (%s); want a variable of mock-app", ln.Kind, ln.Read, ln.From, ln.Why)
 	}
 }
+
+// A value built by an offset on what the application was given (a start-up
+// recording's stamp: the recording's mock-3, and the one record's full round
+// gave in its place, mock-11, each the same span before it) that is a read of
+// its own call's clock plus one constant offset in both runs (an expiry
+// thirty days after the audit's now) is learned as that offset, checked since
+// its test began: both explanations hold in the rounds, and that reading
+// holds under both, as for a plain read (the row above). Replays inside their
+// test and at its begin pass, for epoch seconds and a typed instant to the
+// second; one a day before its test, one that keeps the recorded value, and
+// one a day longer miss. A value its own window does not hold, a window with
+// no test begin, and ClassifyGiven stay refused by the offset rule.
+func TestAClientTestLearnsAnOffsetOfAGivenInstantThatIsItsOwnClockPlusAnOffsetAsThatOffsetSinceItsTestBegan(t *testing.T) {
+	const p = "body.cmd.documents.0.app.expiresAt"
+	const month = 30 * 24 * time.Hour
+	const gap = month + 5*time.Minute + 23*time.Second
+	const offsetRule = "a value built on what the application was given by an offset moves so"
+	secs := func(t time.Time) string { return strconv.FormatInt(t.Unix(), 10) }
+	rec := copyOrReadRun{began: time.Date(2026, 10, 26, 1, 41, 6, 300_000_000, time.UTC), insert: 150 * time.Millisecond, audited: 300 * time.Millisecond, audit: 400 * time.Millisecond}
+	f := copyOrReadRun{began: time.Date(2026, 10, 26, 1, 42, 15, 0, time.UTC), insert: 150 * time.Millisecond, audited: 300 * time.Millisecond, audit: 400 * time.Millisecond}
+	stamp := func(name string, sent, at time.Time) *models.Mock {
+		m := r1Receive(`{"SentTimestamp": "` + strconv.FormatInt(sent.UnixMilli(), 10) + `"}`)
+		m.Name = name
+		m.Spec.HTTPResp.Header["Date"] = "Thu, 22 Oct 2026 03:02:51 GMT"
+		m.Spec.ReqTimestampMock, m.Spec.ResTimestampMock = at, at.Add(200*time.Millisecond)
+		return m
+	}
+	type fm = struct {
+		name string
+		leaf func(at time.Time) Leaf
+	}
+	forms := []fm{
+		{"epoch seconds", func(at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }},
+		{"a typed instant to the second", func(at time.Time) Leaf { return InstantLeaf(p, p, at.Truncate(time.Second), time.Second) }},
+	}
+	value := func(x copyOrReadRun) time.Time { return x.at(x.audited).Add(month) }
+	learn := func(fm fm, r, f copyOrReadRun, began, following bool) Learned {
+		dc := clientTestCache()
+		raw := []Raw{
+			dc.RawOf(stamp("mock-3", value(r).Add(-gap), r.began.Add(-6*time.Minute)), true),
+			dc.RawOf(stamp("mock-11", value(f).Add(-gap), r.began.Add(-5*time.Minute)), true),
+		}
+		w := (&Window{Rec: r.window(began), F: f.window(began)}).ComparesOffsets()
+		classify := ClassifyGiven
+		if following {
+			classify = ClassifyFollowing
+		}
+		shape := func(x copyOrReadRun) Shape { return Shape{Leaves: map[string]Leaf{p: fm.leaf(value(x))}} }
+		return classify(dc, []string{p}, shape(f), shape(r), r.at(r.audit), nil, raw, nil, w, nil)[0]
+	}
+	rp := func(base time.Duration) copyOrReadRun {
+		return copyOrReadRun{began: time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC).Add(base), insert: 150 * time.Millisecond, audited: 300 * time.Millisecond, audit: 400 * time.Millisecond}
+	}
+	for _, fm := range forms {
+		t.Run(fm.name, func(t *testing.T) {
+			ln := learn(fm, rec, f, true, true)
+			o, ok := ln.Clock()
+			if ln.Kind != KindClockOffset || !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
+				t.Fatalf("%s Offset=%+v from %+v (%s); want the clock plus thirty days, checked since the test began", ln.Kind, ln.Offset, ln.From, ln.Why)
+			}
+			for _, r := range []struct {
+				name string
+				at   func(r copyOrReadRun) time.Time
+				want bool
+			}{
+				{"replay inside its test", value, true},
+				{"replay at its test's begin", func(r copyOrReadRun) time.Time { return r.began.Add(month) }, true},
+				{"replay with the value a day before its test", func(r copyOrReadRun) time.Time { return r.began.Add(month - 24*time.Hour) }, false},
+				{"replay with a time to live a day longer", func(r copyOrReadRun) time.Time { return value(r).Add(24 * time.Hour) }, false},
+				{"replay that keeps the recorded value", func(copyOrReadRun) time.Time { return value(rec) }, false},
+			} {
+				for _, base := range []time.Duration{0, 800 * time.Millisecond} {
+					x := rp(base)
+					if ok, why := CheckClockRead(p, o, fm.leaf(r.at(x)), x.window(true), true); ok != r.want {
+						t.Fatalf("%s (%v past a second): CheckClockRead = %v (%s); want %v", r.name, base, ok, why, r.want)
+					}
+				}
+			}
+			early := func(x copyOrReadRun) copyOrReadRun {
+				x.insert, x.audit = x.audited+2*time.Second, x.audited+2100*time.Millisecond
+				return x
+			}
+			for _, c := range []struct {
+				name             string
+				r, f             copyOrReadRun
+				began, following bool
+			}{
+				{"a value its own window does not hold", early(rec), early(f), true, true},
+				{"a call whose window knows no test begin", rec, f, false, true},
+				{"the rule's absence (ClassifyGiven)", rec, f, true, false},
+			} {
+				if ln := learn(fm, c.r, c.f, c.began, c.following); ln.Kind != KindUnaccounted || !strings.Contains(ln.Why, offsetRule) || !strings.Contains(ln.Why, "mock-3") || !strings.Contains(ln.Why, "mock-11") {
+					t.Fatalf("%s: %s Offset=%+v (%s); want refused by the offset rule, naming mock-3 and mock-11", c.name, ln.Kind, ln.Offset, ln.Why)
+				}
+			}
+		})
+	}
+}
+
+// eui's role binding (eui-t2 GAPS.md G7), in a layout to the second: a
+// GraphQL expiresAt the application builds as its call's clock plus thirty
+// days, cut to the second, beside a login answer (mock-1; record's full round
+// gave mock-9 in its place) whose Set-Cookie Expires is the login's clock
+// plus thirty days, six seconds earlier. A word of the value (the minute
+// "59") stands in the cookie, so the value read as a variable of mock-1 at
+// Set-Cookie, a part of two characters a replay's login can never give it;
+// it is a read of its own call's clock plus thirty days in both runs too, so
+// it is learned as that offset, checked since its test began, in both
+// timings of the full round (in one minute, and across one, where no word of
+// the full round's value stands in its cookie). Replays a second apart pass;
+// a value that keeps the recorded one, a day longer, or thirty days after a
+// read a day before its test miss. ClassifyGiven, a window with no test
+// begin, and a value its own window does not hold stay the variable of
+// mock-1; and a word of two characters the value really copies from an
+// earlier answer (a region code) stays a variable of that answer, never an
+// offset, a read, or noise.
+func TestAClientTestLearnsAnExpiryALoginsCookieHoldsAWordOfAsTheClockPlusItsOffsetSinceItsTestBegan(t *testing.T) {
+	const p = "body.variables.expiresAt"
+	const month = 30 * 24 * time.Hour
+	login := func(name string, at time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/auth/login", Body: `{"u":"a"}`, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Set-Cookie": "refresh_token_staging=abc; Path=/; Expires=" + at.Add(month).UTC().Format(time.RFC1123) + "; HttpOnly"}, Body: `{}`},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	leaf := func(at time.Time) Leaf {
+		return Leaf{Path: p, Noise: p, Type: String, Value: at.Truncate(time.Second).UTC().Format(time.RFC3339)}
+	}
+	// A run: its test began at began, logged in at began+900ms, and made the
+	// call at began+7s, its window from 300ms before; the app read its clock
+	// for the value at began+7s+read.
+	type run struct {
+		began time.Time
+		read  time.Duration
+	}
+	call := func(x run) time.Time { return x.began.Add(7 * time.Second) }
+	value := func(x run) time.Time { return call(x).Add(x.read + month) }
+	span := func(x run, began bool) Span {
+		s := Span{From: call(x).Add(-300 * time.Millisecond), To: call(x)}
+		if began {
+			s.Began = x.began
+		}
+		return s
+	}
+	rec := run{began: time.Date(2026, 10, 27, 16, 59, 3, 100_000_000, time.UTC)}
+	learn := func(r, f run, began, following bool) Learned {
+		dc := clientTestCache()
+		raw := []Raw{dc.RawOf(login("mock-1", r.began.Add(900*time.Millisecond)), true), dc.RawOf(login("mock-9", f.began.Add(900*time.Millisecond)), true)}
+		w := (&Window{Rec: span(r, began), F: span(f, began)}).ComparesOffsets()
+		classify := ClassifyGiven
+		if following {
+			classify = ClassifyFollowing
+		}
+		return classify(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: leaf(value(f))}}, Shape{Leaves: map[string]Leaf{p: leaf(value(r))}}, call(r), nil, raw, nil, w, nil)[0]
+	}
+	for _, f := range []struct {
+		name string
+		run  run
+	}{
+		{"a full round in one minute", run{began: time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}},
+		{"a full round across a minute", run{began: time.Date(2026, 10, 27, 17, 1, 56, 300_000_000, time.UTC)}},
+	} {
+		t.Run(f.name, func(t *testing.T) {
+			ln := learn(rec, f.run, true, true)
+			o, ok := ln.Clock()
+			if ln.Kind != KindClockOffset || !ok || o.Plain() || o.Min > month || o.Max <= month || o.Since != models.SinceTestBegin {
+				t.Fatalf("%s Offset=%+v from %+v held %q (%s); want the clock plus thirty days, checked since the test began", ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+			}
+			for _, c := range []struct {
+				name string
+				at   func(x run) time.Time
+				want bool
+			}{
+				{"replay inside its test", value, true},
+				{"replay that keeps the recorded value", func(run) time.Time { return value(rec) }, false},
+				{"replay with a time to live a day longer", func(x run) time.Time { return value(x).Add(24 * time.Hour) }, false},
+				{"replay thirty days after a read a day before its test", func(x run) time.Time { return x.began.Add(month - 24*time.Hour) }, false},
+			} {
+				for _, base := range []time.Duration{0, 800 * time.Millisecond} {
+					x := run{began: time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC).Add(base)}
+					if ok, why := CheckClockRead(p, o, leaf(c.at(x)), span(x, true), true); ok != c.want {
+						t.Fatalf("%s (%v past a second): CheckClockRead = %v (%s); want %v", c.name, base, ok, why, c.want)
+					}
+				}
+			}
+			for _, c := range []struct {
+				name             string
+				r, f             run
+				began, following bool
+			}{
+				{"the rule's absence (ClassifyGiven)", rec, f.run, true, false},
+				{"a call whose window knows no test begin", rec, f.run, false, true},
+				{"a value its own window does not hold", run{began: rec.began, read: -2 * time.Second}, run{began: f.run.began, read: -2 * time.Second}, true, true},
+			} {
+				if ln := learn(c.r, c.f, c.began, c.following); ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "59" {
+					t.Fatalf("%s: %s Offset=%+v from %+v held %q (%s); want the variable of mock-1 holding \"59\", as before", c.name, ln.Kind, ln.Offset, ln.From, ln.From.Held, ln.Why)
+				}
+			}
+		})
+	}
+	// The control: a word of two characters the value really copies from an
+	// earlier answer (its region) stays a variable of that answer.
+	const q = "body.variables.lane"
+	geo := func(name, region string, at time.Time) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "GET", URL: "http://localhost:8083/geo", Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: `{"region":"` + region + `","zone":"north"}`},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	r0, f0 := rec.began, rec.began.Add(2*time.Minute)
+	dc := clientTestCache()
+	raw := []Raw{dc.RawOf(geo("mock-1", "us", r0), true), dc.RawOf(geo("mock-9", "eu", f0), true)}
+	w := (&Window{Rec: Span{From: r0.Add(time.Second), To: r0.Add(2 * time.Second), Began: r0.Add(-time.Second)}, F: Span{From: f0.Add(time.Second), To: f0.Add(2 * time.Second), Began: f0.Add(-time.Second)}}).ComparesOffsets()
+	ln := ClassifyFollowing(dc, []string{q}, Shape{Leaves: map[string]Leaf{q: {Path: q, Noise: q, Type: String, Value: "lane eu-7"}}}, Shape{Leaves: map[string]Leaf{q: {Path: q, Noise: q, Type: String, Value: "lane us-7"}}}, r0.Add(2*time.Second), nil, raw, nil, w, nil)[0]
+	if ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != "us" {
+		t.Fatalf("FALSE GREEN? a region really copied from an earlier answer: %s from %+v held %q (%s); want the variable of mock-1 holding \"us\"", ln.Kind, ln.From, ln.From.Held, ln.Why)
+	}
+}
