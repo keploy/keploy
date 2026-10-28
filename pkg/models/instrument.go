@@ -431,7 +431,7 @@ type SetupOptions struct {
 	SettleReads       bool
 	GlobalPassthrough bool
 	// AllowEgress mirrors config.Test.AllowEgress: what a replay may reach for
-	// real, by the entries models.ValidateAllowEgress accepts. Forwarded to the
+	// real, by the entries models.NormalizeAllowEgress accepts. Forwarded to the
 	// agent as --allow-egress; record ignores it.
 	AllowEgress []string
 	// DisableHandshakeHold turns off holding each redirected connection's
