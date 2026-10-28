@@ -905,7 +905,7 @@ func unseenWhy(dc *DriftCache, x Raw, held, keep bool, named, t string, at time.
 	}
 	place := x.mock + "'s payload"
 	for _, view := range x.views {
-		if f := dc.fieldOf(*view, dc.searched(*view, keep), t); f != "" {
+		if f, _ := dc.fieldOf(*view, dc.searched(*view, keep), t); f != "" {
 			place = x.mock + " at " + f
 			break
 		}

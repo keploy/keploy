@@ -81,7 +81,7 @@ func TestATestsCacheKeepsNoEarlierPayloadsText(t *testing.T) {
 	if loads := dc.Loads(); loads < n {
 		t.Fatalf("the call's rules loaded %d of the %d earlier payloads: the row reads too few to tell", loads, n)
 	}
-	budgets := bodyBudget + derivedBudget + textBudget
+	budgets := bodyBudget + derivedBudget + textBudget + tr.derived.heldBytes()
 	if bound := budgets + 1<<20; kept > bound {
 		t.Errorf("the test keeps %d MiB of heap after reading %d payloads of %d KiB (%d KiB): past the budgets' %d MiB and 1 MiB besides (text cache %d bytes, set %d bytes)",
 			kept>>20, n, size>>10, n*size>>10, budgets>>20, dc.text.keptBytes(), tr.derived.keptBytes())
@@ -210,9 +210,12 @@ func TestATestsTextCacheKeepsWithinItsBudget(t *testing.T) {
 		if want := noSet(NewDriftCache()).searched(RawOf(m, true), keep); got != want {
 			t.Errorf("keep %v: searched %q, want %q (a cache of no tracker's)", keep, got, want)
 		}
-		e := tr.derived.by[x.id]
-		if k := keepIndex(keep); e == nil || !e.plain[k] || e.searched[k] != [2]string{} {
-			t.Errorf("keep %v: the set keeps the plain payload's searched texts %v, not only that it is plain", keep, e)
+		k := keepIndex(keep)
+		if h := tr.derived.held.by[x.id]; h == nil || h.has&byKeep(partPlain, keep) == 0 || !h.p.plain[k] {
+			t.Errorf("keep %v: the set does not keep that the plain payload is plain", keep)
+		}
+		if w := tr.derived.words.by[x.id]; w != nil && (w.has&byKeep(partSearched, keep) != 0 || w.p.searched[k] != [2]string{}) {
+			t.Errorf("keep %v: the set keeps the plain payload's searched texts %v, not only that it is plain", keep, w.p.searched[k])
 		}
 	}
 	tr.End()
