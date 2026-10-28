@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.keploy.io/server/v3/config"
 	coreAgent "go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // countHooks are hooks that count, in the kernel, the connections completed
@@ -765,6 +767,39 @@ func TestAnEndThatGivesUpOnAConnectionCarriesItAndTheNextBeginGoesOn(t *testing.
 	wakes, err = w.run(func() error { _, err := a.settleBegin(context.Background(), true); return err }, nil)
 	require.NoError(t, err)
 	require.Zero(t, wakes, "a begin with nothing to wait for needs no wake-up")
+}
+
+// missesProxy is scopedProxy with a read of the misses that finds none.
+type missesProxy struct{ *scopedProxy }
+
+func (missesProxy) GetMockErrors(context.Context) ([]models.UnmatchedCall, error) {
+	return nil, nil
+}
+
+// A read of the misses (GetMockErrors: keploy test's after a test case, the
+// run's last) settles the application's calls as a test's end does. One
+// whose watchdog gives up on a stuck connection cannot vouch for every miss,
+// and says at WARN which connections it gave up on and what each held: its
+// caller reports the misses unknown and points to the agent's log for why.
+func TestAMissesReadThatGivesUpSaysWhichConnectionsAtWarn(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	w := stallWake(t)
+	a, h, p := settleAgent()
+	core, logs := observer.New(zap.WarnLevel)
+	a.logger = zap.New(core)
+	a.config = config.New()
+	a.config.Agent.Mode = models.MODE_TEST
+	sp := &scopedProxy{settleProxy: p, stuck: map[uint64]uint64{7: 1}}
+	sp.scopePending.Store(1)
+	a.Proxy = missesProxy{sp}
+	h.established = 1
+	p.set(1, 0)
+	wakes, err := w.run(func() error { _, err := a.GetMockErrors(context.Background()); return err }, nil)
+	require.ErrorIs(t, err, models.ErrUnmatchedCallsUnread, "a read that gave up cannot vouch for every miss")
+	require.GreaterOrEqual(t, wakes, settleStallLimit, "its watchdog gave up")
+	warns := logs.FilterMessageSnippet("before reading the misses").All()
+	require.Len(t, warns, 1, "the give-up is said once at WARN: %v", logs.All())
+	require.Equal(t, []interface{}{"connection 7 held 1 request(s) its parser had read and not answered"}, warns[0].ContextMap()["connections"], "it names the connection and what it held")
 }
 
 // Calls the application queued behind work a settle gave up on cannot be
