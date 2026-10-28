@@ -105,7 +105,9 @@ func app(args []string) {
 		outcome("udp-quic", dialWrite("udp", at(portQUIC), "quic"))
 		outcome("icmp-raw", icmpEcho(*sinkIP, syscall.SOCK_RAW))
 		outcome("icmp-dgram", icmpEcho(*sinkIP, syscall.SOCK_DGRAM))
-		outcome("imds-tcp", dialWrite("tcp", net.JoinHostPort(*imds, strconv.Itoa(portIMDS)), "GET /latest/meta-data/ HTTP/1.0\r\n\r\n"))
+		// As a metadata client sends it (an AWS SDK names the address it
+		// dials in Host), so a replay's report can name the destination.
+		outcome("imds-tcp", dialWrite("tcp", net.JoinHostPort(*imds, strconv.Itoa(portIMDS)), "GET /latest/meta-data/ HTTP/1.1\r\nHost: "+*imds+"\r\nConnection: close\r\n\r\n"))
 		outcome("tfo", fastOpen(*sinkIP, portTFO))
 		_, err := net.DefaultResolver.LookupHost(context.Background(), "leak-probe.invalid-replay-isolation.test")
 		outcome("dns-lookup", err)
