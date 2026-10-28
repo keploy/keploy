@@ -15,6 +15,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.keploy.io/server/v3/pkg/platform/yaml/mapdb"
+	"go.keploy.io/server/v3/pkg/platform/yaml/mockdb"
 	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
@@ -730,4 +731,41 @@ func TestARefusalNamesTheMappingFileTheSetHas(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "/set/mappings.json names mocks") || !strings.Contains(err.Error(), "If you edited mappings.json") || strings.Contains(err.Error(), "mappings.yaml") {
 		t.Fatalf("refusal: %v", err)
 	}
+}
+
+// A mock a hand edit gave a kind this keploy has no reader for (Http ->
+// HTTP) is skipped when the set's mocks are read (mockdb logs it), so the
+// test that lists it would own nothing: the replay refuses the set, and the
+// refusal names the document in the mocks file, with its kind, as the edit
+// to correct, not the name in mappings.yaml, which is right. A name the
+// mocks file does not have is still named as one.
+func TestARefusalNamesAMockOfAKindKeployCannotRead(t *testing.T) {
+	provenOn(t)
+	repo := t.TempDir()
+	t.Chdir(repo)
+	keployDir := filepath.Join(repo, "keploy")
+	require.NoError(t, os.MkdirAll(filepath.Join(keployDir, "set"), 0o755))
+	mocks := "version: api.keploy.io/v1beta1\nkind: HTTP\nname: mock-0\nspec:\n    req:\n        method: GET\n        url: http://h/a\n---\nversion: api.keploy.io/v1beta1\nkind: Http\nname: mock-1\nspec:\n    req:\n        method: GET\n        url: http://h/b\n"
+	maps := "version: api.keploy.io/v1beta1\nkind: TestMocksMapping\ntest_set_id: set\ntests:\n    - id: o::TestA\n      dir: o\n      mock_entries:\n        - name: mock-0\n    - id: o::TestB\n      dir: o\n      mock_entries:\n        - name: mock-1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mocks.yaml"), []byte(mocks), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(keployDir, "set", "mappings.yaml"), []byte(maps), 0o644))
+	instr := newInstr(t, agentUpFromSetup, false, models.AppError{AppErrorType: models.ErrAppStopped})
+	cfg := instrConfig(instr, utils.Native, "go test -p 1 -json ./...")
+	cfg.Path, cfg.Mock.OnMiss = keployDir, "fail"
+	utils.ErrCode = 0
+	t.Cleanup(func() { utils.ErrCode = 0 })
+	err := New(zap.NewNop(), instr, mockdb.New(zap.NewNop(), keployDir, "mocks"), mapdb.New(zap.NewNop(), keployDir, ""), nil, nil, cfg).Replay(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `keploy/set/mocks.yaml has mocks keploy/set/mappings.yaml names that this keploy cannot read, so it skipped them (it logged why for each): mock-0 (under test o::TestA), of kind "HTTP"`)
+	require.Contains(t, err.Error(), "If you edited mocks.yaml, give each of those back the kind and spec keploy wrote")
+	require.NotContains(t, err.Error(), "correct those names")
+	runs, _ := instr.counts()
+	require.Zero(t, runs, "a refused set runs no test")
+
+	// With a name the mocks file does not have beside it, both are named.
+	m := &mockService{config: &config.Config{Path: keployDir}}
+	err = m.refuseUnknownMocks("set", &models.Mapping{}, []string{"mock-9", "mock-0"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `skipped them (it logged why for each): mock-0, of kind "HTTP"; keploy/set/mappings.yaml names mocks keploy/set/mocks.yaml does not have: mock-9.`)
+	require.Contains(t, err.Error(), "give each of those back the kind and spec keploy wrote. If you edited mappings.yaml, correct those names; otherwise")
 }

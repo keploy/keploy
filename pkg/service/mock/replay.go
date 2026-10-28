@@ -23,6 +23,7 @@ import (
 	"go.keploy.io/server/v3/utils"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
+	"gopkg.in/yaml.v3"
 )
 
 // Replay runs the wrapped test command with the configured named mock set
@@ -1209,17 +1210,11 @@ func unknownBesideTests(mp *models.Mapping, decoded []*models.Mock, seen []strin
 func (m *mockService) refuseUnknownMocks(name string, mp *models.Mapping, unknown []string) error {
 	places := mp.MockPlaces()
 	sort.Strings(unknown)
-	named := make([]string, 0, len(unknown))
-	for _, n := range unknown {
-		if where := places[n]; len(where) > 0 {
-			n += " (under " + strings.Join(where, ", ") + ")"
-		}
-		named = append(named, n)
-	}
 	dir := filepath.Base(m.config.Path)
 	mocks := "mocks.yaml"
-	if f := MocksFile(m.config.Path, name); f != "" {
-		mocks = filepath.Base(f)
+	file := MocksFile(m.config.Path, name)
+	if file != "" {
+		mocks = filepath.Base(file)
 	}
 	mappings := "mappings.yaml"
 	for _, f := range []string{"mappings.yaml", "mappings.json"} {
@@ -1228,8 +1223,77 @@ func (m *mockService) refuseUnknownMocks(name string, mp *models.Mapping, unknow
 			break
 		}
 	}
-	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s/%s/%s names mocks %s/%s/%s does not have: %s. If you edited %s, correct those names; otherwise record the set again with keploy mock record",
-		name, dir, name, mappings, dir, name, mocks, strings.Join(named, ", "), mappings)
+	// A name whose document the mocks file has, under a kind keploy skips
+	// (mockdb logs each), is not a wrong name: the edit to correct is in the
+	// mocks file.
+	unread := unreadDocs(file, unknown)
+	var absent, skipped []string
+	for _, n := range unknown {
+		where := ""
+		if w := places[n]; len(w) > 0 {
+			where = " (under " + strings.Join(w, ", ") + ")"
+		}
+		kind, ok := unread[n]
+		switch {
+		case !ok:
+			absent = append(absent, n+where)
+		case kind == "":
+			skipped = append(skipped, n+where+", which has no kind")
+		default:
+			skipped = append(skipped, fmt.Sprintf("%s%s, of kind %q", n, where, kind))
+		}
+	}
+	var why, fix []string
+	if len(skipped) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s has mocks %s/%s/%s names that this keploy cannot read, so it skipped them (it logged why for each): %s",
+			dir, name, mocks, dir, name, mappings, strings.Join(skipped, "; ")))
+		fix = append(fix, fmt.Sprintf("If you edited %s, give each of those back the kind and spec keploy wrote", mocks))
+	}
+	if len(absent) > 0 {
+		why = append(why, fmt.Sprintf("%s/%s/%s names mocks %s/%s/%s does not have: %s",
+			dir, name, mappings, dir, name, mocks, strings.Join(absent, ", ")))
+		fix = append(fix, fmt.Sprintf("If you edited %s, correct those names", mappings))
+	}
+	return fmt.Errorf("keploy cannot judge each test of mock set %q: %s. %s; otherwise record the set again with keploy mock record",
+		name, strings.Join(why, "; "), strings.Join(fix, ". "))
+}
+
+// unreadDocs is, for each of names that a document of the YAML mocks file
+// at path has, that document's kind ("" when it has none): the documents
+// mockdb skips when the set's mocks are read. Nil for no file, or one not
+// YAML; a document it cannot parse as YAML ends the scan.
+func unreadDocs(path string, names []string) map[string]string {
+	if path == "" || filepath.Ext(path) != ".yaml" || len(names) == 0 {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	out := map[string]string{}
+	dec := yaml.NewDecoder(f)
+	for len(out) < len(want) {
+		var doc struct {
+			Name string `yaml:"name"`
+			Kind string `yaml:"kind"`
+		}
+		if err := dec.Decode(&doc); err != nil {
+			var typed *yaml.TypeError
+			if errors.As(err, &typed) {
+				continue // a document that is no mapping
+			}
+			break
+		}
+		if _, seen := out[doc.Name]; want[doc.Name] && !seen {
+			out[doc.Name] = doc.Kind
+		}
+	}
+	return out
 }
 
 // ownsTestMocks reports whether a test of table owns a test mock: a
