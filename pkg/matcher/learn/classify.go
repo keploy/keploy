@@ -538,7 +538,9 @@ type Place struct {
 	// instantLeafFrom): they do not check that F's view held the value too,
 	// and the echo keeps a copy F's view holds. A raw mock's field is marked
 	// only where the full round does not refute the copy (copiedInBoth: F's
-	// view held the value F saw there, or there is no view).
+	// view held the value F saw there, or there is no view), and never for
+	// a value holding an escape (appearedIn's decoded site), which the copy
+	// rule never reads as a clock read.
 	givenWhole bool
 }
 
@@ -2649,7 +2651,11 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				// A whole copy of a stamp x's answer gave the application is
 				// marked so (Place.givenWhole) only where the full round does
 				// not refute it (copiedInBoth): where F's view of x held the
-				// value F saw, or x has none.
+				// value F saw, or x has none. The decoded value's twin below
+				// marks nothing: it is reached only where the value holds an
+				// escape, which no clock layout reads, so the copy rule's
+				// second classification never learns that value as a read,
+				// and a mark there would never be read.
 				if containsWholeClock(text, recorded) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
 					field, given := dc.wholeFieldOf(x, texts, recorded, v.live)
@@ -2657,8 +2663,8 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
-					field, given := dc.wholeFieldOf(x, texts, v.decRec, v.decLive)
-					return Place{Mock: x.mock, Field: field, Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}, true
+					field, _ := dc.fieldOf(x, texts, v.decRec)
+					return Place{Mock: x.mock, Field: field, Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap}, true
 				}
 			}
 		}

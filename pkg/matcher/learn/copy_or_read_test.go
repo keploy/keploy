@@ -1360,3 +1360,60 @@ func TestAClientTestLearnsACopyOfARecordingsAnswerStampTheFullRoundRefutesAsARea
 		}
 	}
 }
+
+func TestAClientTestKeepsAnEscapedCopyOfARecordingsAnswerStampAsThatAnswersVariable(t *testing.T) {
+	// The call sends, URL-encoded, the stamp a recording's answer gave the
+	// application, and the full round's answer held the value it sent too,
+	// or keploy has no view of it: a whole copy in both runs, which stays
+	// the answer's variable. The decoded value's source site marks no copy
+	// (Place.givenWhole): the copy rule's second classification reads no
+	// escaped text as a read, so the variable stands without the mark. A
+	// change that reads one as a read must mark this copy there again.
+	type run struct{ began time.Time }
+	ans := func(r run) time.Time { return r.began.Add(1200 * time.Millisecond) }
+	span := func(r run) Span {
+		from := ans(r).Add(25 * time.Millisecond)
+		return Span{From: from, To: from.Add(200 * time.Millisecond), Began: r.began}
+	}
+	stamp := func(r run) time.Time { return ans(r).Truncate(time.Second) }
+	rec := run{time.Date(2026, 10, 27, 16, 59, 3, 100_000_000, time.UTC)}
+	full := run{time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
+	iso := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	mock := func(at time.Time, body string) *models.Mock {
+		return &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/items", Body: `{"n":"a"}`, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: body},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	hold := func(at time.Time) string { return `{"createdAt":"` + iso(at) + `"}` }
+	const p = "body.variables.since"
+	sent := func(at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: url.QueryEscape(iso(at))} }
+	for _, c := range []struct {
+		name string
+		view func(x Raw) Raw
+	}{
+		{"the full round's answer held the value", func(x Raw) Raw {
+			return x.ServedAs(1).ServedLive(RawOf(mock(ans(full), hold(stamp(full))), true))
+		}},
+		{"the full round gave no view of the answer", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dc := clientTestCache()
+			x := dc.RawOf(mock(ans(rec), hold(stamp(rec))), true)
+			if c.view != nil {
+				x = c.view(x)
+			}
+			if v := sent(stamp(rec)).Value; !strings.Contains(v, "%3A") {
+				t.Fatalf("the call's value %q holds no escape", v)
+			}
+			w := (&Window{Rec: span(rec), F: span(full)}).ComparesOffsets()
+			ln := ClassifyFollowing(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: sent(stamp(full))}}, Shape{Leaves: map[string]Leaf{p: sent(stamp(rec))}}, span(rec).To, nil, []Raw{x}, nil, w, nil)[0]
+			if ln.Kind != KindVariable || ln.From.Mock != "mock-1" || ln.From.Held != iso(stamp(rec)) {
+				o, _ := ln.Clock()
+				t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-1's answer, holding %s: the call copies it whole in both runs", ln.Kind, o, ln.From, ln.Why, iso(stamp(rec)))
+			}
+		})
+	}
+}
