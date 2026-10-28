@@ -527,6 +527,14 @@ type Place struct {
 	// whose words never vary, so a drifted value found there is refused
 	// (startUpWhy).
 	startUp bool
+	// givenWhole: the place stands in an answer the application was given
+	// (a leaf of an earlier exchange's response, or a field of a raw mock's
+	// answer: answerPath) and holds the value whole, or its instant whole
+	// in another layout or at another resolution (Echo, an exact instant):
+	// never a part of it (a word held by chance) nor a value the
+	// application sent. A replay serves that answer as recorded, so the
+	// copy rule leaves a variable of it the answer's (classify).
+	givenWhole bool
 }
 
 // atCallNote is what a reason says of a recording it names that was made at
@@ -1434,12 +1442,13 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// variable of an earlier place (a copy of what the test's earlier
 		// call sent, which held it in both runs) that, read as a value no
 		// earlier place is the source of and no moved place builds by an
-		// offset, is a plain read of the clock its call's window holds in
-		// both runs, is learned as a read of the clock since its test began
-		// (models.SinceTestBegin), never as the variable. Both explanations
-		// hold in the rounds, and that read holds under both: the earlier
-		// place's read was made after the test began too. Learned as a
-		// variable, a full round that made the two reads in one second
+		// offset, is a read of the clock, or of the clock plus one constant
+		// offset, its call's window holds in both runs (sinceTestBegin), is
+		// learned as that read since its test began (models.SinceTestBegin),
+		// never as the variable. Both explanations hold in the rounds, and
+		// that read holds under both: the earlier place's read was made
+		// after the test began too, and the application makes it again at
+		// replay. Learned as a variable, a full round that made the two reads in one second
 		// would bind the value to the earlier place, and one that made them
 		// a second apart would learn a read, so a replay whose reads land a
 		// second apart would miss, or not, by the full round's timing. The
@@ -1450,8 +1459,15 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// timing. A copy its own window does not hold stays the variable
 		// (the copy alone explains it), and so does anything else learned
 		// as a value with no source (noise, an echo, a read plus an offset
-		// of its own, a refusal).
-		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil {
+		// of its own, a refusal). So does a whole copy of what an earlier
+		// answer gave the application (Place.givenWhole: a dependency's
+		// createdAt, or its expiresAt), which the application does not make
+		// again: a replay serves that answer as recorded, so the copy then
+		// holds the recorded stamp, which the variable passes and a read
+		// since the test began refuses. A part of an answer held by chance
+		// (a word of a login's cookie) and a copy of what the application
+		// sent are no such place.
+		if wb := w.sinceBegin(); follow && ln.Kind == KindVariable && wb != nil && !ln.From.givenWhole {
 			if own, ok := sinceTestBegin(leaf(r, l, w, skipBoth)); ok {
 				ln = own
 			}
@@ -2617,17 +2633,20 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			for _, text := range texts {
 				if containsWholeClock(text, recorded) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, recorded), Held: recorded, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap}, true
+					field, given := dc.fieldOf(x, texts, recorded)
+					return Place{Mock: x.mock, Field: field, Held: recorded, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
-					return Place{Mock: x.mock, Field: dc.fieldOf(x, texts, v.decRec), Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap}, true
+					field, given := dc.fieldOf(x, texts, v.decRec)
+					return Place{Mock: x.mock, Field: field, Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}, true
 				}
 			}
 		}
 		for _, w := range searched {
 			if ContainsToken(texts[0], w) || ContainsToken(texts[1], w) {
-				p := Place{Mock: x.mock, Field: dc.fieldOf(x, texts, w), Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served}
+				field, given := dc.fieldOf(x, texts, w)
+				p := Place{Mock: x.mock, Field: field, Held: w, AtCall: atCall, noTime: x.noTime, unserved: !x.served, givenWhole: given && w == recorded}
 				p.startUp = x.swapHolds(texts[0], raw, func(own string) bool { return holdsToken(own, w) })
 				// A word of a connection's start-up a swap can change is
 				// never set aside as a source the value moved away from: F
@@ -2676,7 +2695,7 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 			whole := s.Leaf.Value == recorded
 			if r := placeRank(e, s, whole); r < rank {
 				best, rank = seenPlace(e, s, whole), r
-				best.Echo = true
+				best.Echo, best.givenWhole = true, s.Side == Response
 			}
 		}
 	}
@@ -2692,7 +2711,7 @@ func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 	}
 	for _, f := range x.fields {
 		if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
-			return Place{Mock: x.mock, Field: f.describe(), Echo: true}, true
+			return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
 		}
 	}
 	if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
@@ -2867,7 +2886,8 @@ func placeRank(e Earlier, s Seen, whole bool) int {
 // seenPlace is the place s of e is.
 func seenPlace(e Earlier, s Seen, whole bool) Place {
 	return Place{Mock: e.Mock, Side: s.Side, Path: s.Leaf.Path, Noise: s.Leaf.Noise,
-		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name}
+		Var: s.Place, Live: s.Live, Whole: whole, Own: e.Own, Run: e.Run, Given: e.Given, Name: s.Name,
+		givenWhole: s.Side == Response && whole}
 }
 
 // echoedIn are v's changed instants the echo takes for a copy of what the
@@ -3172,15 +3192,17 @@ func textFields(v interface{}) (string, []rawField) {
 // fieldOf is the field of x's text, as searched (texts: its text and its
 // other forms, a stamp and an answer clock read blanked), that holds word w
 // as a token, in its own text or in a declared form of it; "" when none
-// does (w stands across two fields).
-func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) string {
+// does (w stands across two fields). answer: that field stands in x's
+// answer, a value of it, not a key (answerPath): what x gave the
+// application, not what the application sent.
+func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) (field string, answer bool) {
 	for _, f := range x.fields {
 		if f.end > len(texts[0]) {
 			break
 		}
 		own := texts[0][f.start:f.end]
 		if ContainsToken(own, w) {
-			return f.describe()
+			return f.describe(), !f.key && answerPath(f.path)
 		}
 	}
 	for _, f := range x.fields {
@@ -3189,11 +3211,11 @@ func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) string {
 		}
 		for _, form := range textForms(texts[0][f.start:f.end])[1:] {
 			if ContainsToken(form, w) {
-				return f.describe()
+				return f.describe(), !f.key && answerPath(f.path)
 			}
 		}
 	}
-	return ""
+	return "", false
 }
 
 // holdsToken reports whether a field's text own holds word w as a token, in

@@ -877,3 +877,136 @@ func TestAClientTestLearnsATextCopyOfATypedExpiryAnotherTestsAnswerHoldsAWordOfA
 		}
 	}
 }
+
+// A whole copy of a stamp an earlier answer of its own test gave the
+// application (a dependency's createdAt, or its expiresAt thirty days after
+// its now) stays that answer's variable, in a client test whose call's own
+// window holds the stamp at the second's cut in both runs too, never a read
+// of the clock (or the clock plus thirty days) since the test began. A
+// replay serves the answer as recorded, so a correct application copies the
+// recorded stamp there, which the variable passes and a read of the clock
+// refuses ("it changed"): learned as the read, the test would fail its
+// confirming round and be set aside, a false red. The copy rule's "holds
+// under both explanations" holds only for an earlier place the application
+// makes again at replay (a value it sent: the rows above); for one it was
+// given, the copy explanation predicts the recorded stamp at replay. The
+// earlier answer is a recording the call's payload search finds (in text, an
+// ISO instant, epoch seconds as a number or as text) or an exchange F served
+// leaf by leaf, whose answer's leaf holds the stamp (in epoch seconds, or
+// typed to the second); where that leaf is a value the application sent at
+// that exchange, the rule above learns a read since the test began.
+func TestAClientTestKeepsAWholeCopyOfAStampAnEarlierAnswerGaveItAsThatAnswersVariable(t *testing.T) {
+	const month = 30 * 24 * time.Hour
+	// One run: the test began at began; the dependency answered the app's
+	// previous call at began+1.2 s, with its own stamp to the second; the
+	// call copying it has its window from 25 ms after that answer.
+	type run struct{ began time.Time }
+	ans := func(r run) time.Time { return r.began.Add(1200 * time.Millisecond) }
+	span := func(r run) Span {
+		from := ans(r).Add(25 * time.Millisecond)
+		return Span{From: from, To: from.Add(200 * time.Millisecond), Began: r.began}
+	}
+	stamp := func(r run) time.Time { return ans(r).Truncate(time.Second) }
+	rec := run{time.Date(2026, 10, 27, 16, 59, 3, 100_000_000, time.UTC)}
+	full := run{time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
+	if stamp(rec).Before(span(rec).From.Truncate(time.Second)) || stamp(full).Before(span(full).From.Truncate(time.Second)) {
+		t.Fatal("the row needs each run's window to hold the answer's stamp at the second's cut")
+	}
+	answer := func(name, url string, at time.Time, body string) *models.Mock {
+		return &models.Mock{Name: name, Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: url, Body: `{"n":"a"}`, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: map[string]string{}, Body: body},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	secs := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	iso := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	type form struct {
+		name string
+		typ  Type
+		body func(key string, at time.Time) string
+		val  func(at time.Time) string
+	}
+	forms := []form{
+		{"an ISO instant", String, func(k string, at time.Time) string { return `{"` + k + `":"` + iso(at) + `"}` }, iso},
+		{"epoch seconds", Number, func(k string, at time.Time) string { return `{"` + k + `":` + secs(at) + `}` }, secs},
+		{"epoch seconds as text", String, func(k string, at time.Time) string { return `{"` + k + `":"` + secs(at) + `"}` }, secs},
+	}
+	for _, c := range []struct {
+		name, key, url string
+		forms          []form
+		value          func(r run) time.Time
+	}{
+		{"a dependency's createdAt", "createdAt", "http://localhost:8083/items", forms, stamp},
+		{"a dependency's expiresAt", "expiresAt", "http://localhost:8083/tokens", forms[:2], func(r run) time.Time { return stamp(r).Add(month) }},
+	} {
+		p := "body.variables." + c.key
+		for _, fm := range c.forms {
+			for _, following := range []bool{true, false} {
+				t.Run(c.name+"/"+fm.name+"/following="+strconv.FormatBool(following), func(t *testing.T) {
+					dc := clientTestCache()
+					raw := []Raw{dc.RawOf(answer("mock-1", c.url, ans(rec), fm.body(c.key, c.value(rec))), true), dc.RawOf(answer("mock-9", c.url, ans(full), fm.body(c.key, c.value(full))), true)}
+					w := (&Window{Rec: span(rec), F: span(full)}).ComparesOffsets()
+					classify := ClassifyGiven
+					if following {
+						classify = ClassifyFollowing
+					}
+					lf := func(at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: fm.typ, Value: fm.val(at)} }
+					ln := classify(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: lf(c.value(full))}}, Shape{Leaves: map[string]Leaf{p: lf(c.value(rec))}}, span(rec).To, nil, raw, nil, w, nil)[0]
+					if ln.Kind != KindVariable || ln.From.Mock != "mock-1" {
+						o, _ := ln.Clock()
+						t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-1, the answer a replay serves as recorded", ln.Kind, o, ln.From, ln.Why)
+					}
+				})
+			}
+		}
+	}
+	// The earlier exchange as F served it, leaf by leaf: the app's own
+	// previous call, whose request (a value the app sent) or answer (a
+	// dependency's findAndModify returning the document) holds the stamp the
+	// call copies whole.
+	const (
+		src  = "body.createdAt"
+		copy = "body.cmd.documents.0.app.createdAt"
+	)
+	type leafRun struct {
+		began                           time.Time
+		created, insert, audited, audit time.Duration
+	}
+	at := func(r leafRun, d time.Duration) time.Time { return r.began.Add(d) }
+	lspan := func(r leafRun) Span { return Span{From: at(r, r.insert), To: at(r, r.audit), Began: r.began} }
+	lrec := leafRun{began: time.Date(2026, 10, 26, 1, 41, 6, 300_000_000, time.UTC), created: time.Millisecond, insert: 2 * time.Millisecond, audited: 3 * time.Millisecond, audit: 4 * time.Millisecond}
+	lone := leafRun{began: time.Date(2026, 10, 26, 1, 42, 15, 0, time.UTC), created: 100 * time.Millisecond, insert: 150 * time.Millisecond, audited: 300 * time.Millisecond, audit: 400 * time.Millisecond}
+	insertAt := at(lrec, lrec.insert)
+	insert := RawOf(&models.Mock{Name: "mock-app", Spec: models.MockSpec{ReqTimestampMock: insertAt, ResTimestampMock: insertAt.Add(time.Millisecond)}}, true)
+	for _, fm := range []struct {
+		name string
+		leaf func(p string, at time.Time) Leaf
+	}{
+		{"epoch seconds", func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: secs(at)} }},
+		{"typed to the second", func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at.Truncate(time.Second), time.Second) }},
+	} {
+		for _, side := range []Side{Response, Request} {
+			t.Run("an exchange served leaf by leaf/"+fm.name+"/its "+string(side), func(t *testing.T) {
+				earlier := []Earlier{{Mock: "mock-app", At: insertAt, Own: true, Payload: insert.ServedAs(1), Seen: []Seen{
+					{Side: side, Leaf: fm.leaf(src, at(lrec, lrec.created)), Live: fm.leaf(src, at(lone, lone.created)).Value},
+				}}}
+				shape := func(r leafRun) Shape { return Shape{Leaves: map[string]Leaf{copy: fm.leaf(copy, at(r, r.created))}} }
+				w := &Window{Rec: lspan(lrec), F: lspan(lone)}
+				ln := ClassifyFollowing(clientTestCache(), []string{copy}, shape(lone), shape(lrec), at(lrec, lrec.audit), earlier, nil, nil, w, nil)[0]
+				o, ok := ln.Clock()
+				switch side {
+				case Response:
+					if ln.Kind != KindVariable || ln.From.Mock != "mock-app" {
+						t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-app's answer", ln.Kind, o, ln.From, ln.Why)
+					}
+				default:
+					if ln.Kind != KindClockRead || !ok || o.Since != models.SinceTestBegin {
+						t.Fatalf("%s Clock=%+v from %+v (%s); want a read of the clock since the test began: the app sent the stamp", ln.Kind, o, ln.From, ln.Why)
+					}
+				}
+			})
+		}
+	}
+}

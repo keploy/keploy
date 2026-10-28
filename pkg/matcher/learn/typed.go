@@ -1118,11 +1118,13 @@ func (dc *DriftCache) instantServedFrom(r Leaf, rec, live moment, served []Earli
 				continue
 			}
 			whole := s.Leaf.Value == r.Value
-			if !whole && !dc.isInstant(s.Leaf.Value, rec) && !seenIs(s.Leaf, s.Leaf.Value, rec) && !dc.instantCoDrifted(s.Leaf.Value, s.Live, rec, live) {
+			exact := whole || dc.isInstant(s.Leaf.Value, rec) || seenIs(s.Leaf, s.Leaf.Value, rec)
+			if !exact && !dc.instantCoDrifted(s.Leaf.Value, s.Live, rec, live) {
 				continue
 			}
 			if pr := placeRank(e, s, whole); pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
+				best.givenWhole = exact && s.Side == Response
 			}
 		}
 	}
@@ -1251,7 +1253,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 			whole := s.Leaf.Value == r.Value
 			if pr := placeRank(e, s, whole); pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
-				best.Echo = true
+				best.Echo, best.givenWhole = true, s.Side == Response
 			}
 		}
 	}
@@ -1264,7 +1266,7 @@ func (dc *DriftCache) instantEchoFrom(r Leaf, echoed []echoMatch, at time.Time, 
 		}
 		for _, f := range x.fields {
 			if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
-				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served}, true
+				return Place{Mock: x.mock, Field: f.describe(), Echo: true, unserved: !x.served, givenWhole: answerPath(f.path)}, true
 			}
 		}
 		if dc.holdsRecorded(x.text, echoed) || dc.holdsRecorded(dc.rawExtra(x.text), echoed) {
@@ -1297,6 +1299,7 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 			whole := s.Leaf.Value == r.Value
 			if pr := placeRank(e, s, whole); pr < rank {
 				best, rank = seenPlace(e, s, whole), pr
+				best.givenWhole = s.Side == Response
 			}
 		}
 	}
@@ -1319,18 +1322,18 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw
 		if !dc.holdsExact(texts[0], rec) && !dc.holdsExact(texts[1], rec) {
 			continue
 		}
-		field := ""
+		field, given := "", false
 		for _, f := range x.fields {
 			if f.key || f.end > len(texts[0]) {
 				continue
 			}
 			own := texts[0][f.start:f.end]
 			if dc.holdsExact(own, rec) || dc.holdsExact(dc.rawExtra(own), rec) {
-				field = f.describe()
+				field, given = f.describe(), answerPath(f.path)
 				break
 			}
 		}
-		return Place{Mock: x.mock, Field: field, Held: r.Value, unserved: !x.served}, true
+		return Place{Mock: x.mock, Field: field, Held: r.Value, unserved: !x.served, givenWhole: given}, true
 	}
 	return Place{}, false
 }
