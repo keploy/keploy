@@ -59,8 +59,8 @@ MODES=("$@"); [ ${#MODES[@]} -gt 0 ] || MODES=(native docker)
 SINKPID=""
 DOCKER_RESOLV=""
 FAILED=0
-PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-other dns-tcp tcp6 udp6"
-APPARGS="app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11"
+PATHS="tcp bypass-tcp fork-tcp tfo imds-tcp udp-connected udp-sendto udp-quic icmp-raw icmp-dgram dns-udp dns-bare dns-other dns-tcp tcp6 udp6"
+APPARGS="app -sink 198.18.0.10 -sink6 fd00::10 -imds 198.18.0.11 -peer riso-peer"
 # Native runs: as root, in a mount namespace of their own whose resolv.conf
 # names the sink and whose nsswitch.conf asks files then DNS (a runner's image
 # may list systemd-resolved first, which answers from outside the namespace).
@@ -76,7 +76,7 @@ cleanup() {
 	[ -z "$DOCKER_RESOLV" ] || $S umount "$DOCKER_RESOLV" 2>/dev/null
 	[ ! -f "$W/compose/docker-compose.yml" ] || (cd "$W/compose" && docker compose down --remove-orphans >/dev/null 2>&1)
 	[ ! -f "$W/compose-base/docker-compose.yml" ] || (cd "$W/compose-base" && docker compose down --remove-orphans >/dev/null 2>&1)
-	docker rm -f riso-app riso-base riso-int-c >/dev/null 2>&1
+	docker rm -f riso-app riso-base riso-int-c riso-peer >/dev/null 2>&1
 	docker network rm riso-int >/dev/null 2>&1
 	$S ip netns del riso-sink 2>/dev/null
 	$S ip link del riso-h 2>/dev/null
@@ -114,8 +114,9 @@ docker_resolv_bind() {
 }
 docker_resolv_unbind() { $S umount "$DOCKER_RESOLV" && DOCKER_RESOLV=""; }
 
-# compose_yml NAME HOSTPORT: a compose file whose one service is the probe,
-# container NAME, its 8080 published on HOSTPORT.
+# compose_yml NAME HOSTPORT [peer]: a compose file whose service is the probe,
+# container NAME, its 8080 published on HOSTPORT; with "peer", also riso-peer,
+# a container the probe resolves by name.
 compose_yml() {
 	cat > docker-compose.yml <<YML
 services:
@@ -124,6 +125,12 @@ services:
     container_name: $1
     command: [$(printf '"%s", ' $APPARGS | sed 's/, $//')]
     ports: ["$2:8080"]
+YML
+	[ "${3:-}" != peer ] || cat >> docker-compose.yml <<YML
+  riso-peer:
+    image: riso-probe:local
+    container_name: riso-peer
+    command: ["app"]
 YML
 }
 
@@ -171,14 +178,30 @@ replay() {
 	local phase=$1; shift
 	log "$phase"
 	sink_start "$phase"
+	# The peer's address while the replay runs (compose starts it), for
+	# peer_row: once it has one (a container created and not yet started
+	# has none, which docker prints as "invalid IP").
+	waitfor 300 sh -c "docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' riso-peer 2>/dev/null | grep -E '^[0-9]+([.][0-9]+){3}\$' > '$W/out/$phase/peer-ip'" &
+	local peerwatch=$!
 	"${RUNNER[@]}" "$KEPLOY" test "$@" --apiTimeout 60 --disable-tele --disableANSI --generate-github-actions=false > "$W/out/$phase/keploy.log" 2>&1
 	echo $? > "$W/out/$phase/exit"
 	echo "$phase exit $(cat "$W/out/$phase/exit")"
 	waitfor 15 grep -q 'probe fork-tcp' "$W/out/$phase/keploy.log"
 	grep -h 'status:' keploy/reports/test-run-*/*.yaml 2>/dev/null | sort | uniq -c
+	kill $peerwatch 2>/dev/null; wait $peerwatch 2>/dev/null
 	docker rm -f riso-app >/dev/null 2>&1
 	[ ! -f docker-compose.yml ] || docker compose down --remove-orphans >/dev/null 2>&1
 	sink_stop
+}
+
+# peer_row PHASE: the probe resolved riso-peer, a container the replay's
+# network holds, to that container's own address, which only docker's
+# resolver knows: keploy still forwards the network's own names to it.
+peer_row() {
+	local got want
+	got=$(grep -o 'probe dns-peer: [0-9.]*$' "$W/out/$1/keploy.log" | tail -1 | awk '{print $3}')
+	want=$(cat "$W/out/$1/peer-ip" 2>/dev/null)
+	row "$1 resolves a container on its network through docker's resolver" "$([ -n "$got" ] && [ "$got" = "$want" ] && echo 1)" "got ${got:-none}, riso-peer at ${want:-unknown}"
 }
 
 log "builds"
@@ -293,9 +316,14 @@ for mode in "${MODES[@]}"; do
 		docker rm -f riso-app >/dev/null 2>&1
 		sink_stop
 
+		# A container keploy-network holds, which the probe resolves by name.
+		# Started after the recording, so no DNS mock answers it: the replay's
+		# miss must go to docker's resolver, which alone knows its address.
+		docker run -d --name riso-peer --net keploy-network riso-probe:local app >/dev/null || die "peer container"
 		RUNNER=($S)
 		replay replay-docker -c "$RUN" --containerName riso-app --delay 10
 		replay replay-docker-dns -c "$RUN" --containerName riso-app --delay 10 --allow-egress dns
+		docker rm -f riso-peer >/dev/null 2>&1
 		docker_resolv_unbind
 		cd "$W" || die cd
 		;;
@@ -306,7 +334,7 @@ for mode in "${MODES[@]}"; do
 		log "baseline-compose"
 		sink_start base-compose
 		mkdir -p "$W/compose-base" && cd "$W/compose-base" || die cd
-		compose_yml riso-cbase 18083
+		compose_yml riso-cbase 18083 peer
 		docker compose up -d >/dev/null 2>&1 || die "baseline compose"
 		waitfor 30 curl -sf localhost:18083/health || echo "baseline compose app not up"
 		curl -s --max-time 120 localhost:18083/fire > /dev/null
@@ -333,6 +361,9 @@ for mode in "${MODES[@]}"; do
 		docker compose down --remove-orphans >/dev/null 2>&1
 		sink_stop
 
+		# The peer service joins only now, after the recording, so no DNS
+		# mock answers it (as in the docker phase).
+		compose_yml riso-app 8080 peer
 		RUNNER=($S)
 		replay replay-compose -c "docker compose up" --containerName riso-app --delay 10
 		replay replay-compose-dns -c "docker compose up" --containerName riso-app --delay 10 --allow-egress dns
@@ -395,7 +426,7 @@ for mode in "${MODES[@]}"; do
 		rows_reach base-native tcp tfo imds-tcp dns-udp
 		row "replay-native passes" "$([ "$(cat "$W/out/replay-native/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-native/exit" 2>/dev/null)"
 		# A DNS miss is answered by keploy: native has no in-network resolver.
-		rows_zero replay-native tcp tfo imds-tcp dns-udp dns-other dns-tcp
+		rows_zero replay-native tcp tfo imds-tcp dns-udp dns-bare dns-other dns-tcp
 		row_log "replay-native names the resolvers it does not ask" "$W/out/replay-native/keploy.log" 'forwarded only to a resolver inside the replay.s own network.*not_asked.*198\.18\.0\.10'
 		row_nolog "replay-native opens no DNS egress" "$W/out/replay-native/keploy.log" "$EGRESS_DNS"
 		row_log "replay-native names the port-only bypass rule" "$W/out/replay-native/keploy.log" 'real egress opened by bypassRules.*7002'
@@ -413,11 +444,15 @@ for mode in "${MODES[@]}"; do
 	docker)
 		# dns-udp: docker's 127.0.0.11 forwards the probe's unrecorded outside
 		# name to its upstream, the sink, so the DNS rows below can count.
-		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp
+		# dns-bare: it recurses an unrecorded single-label name there too.
+		rows_reach base-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare
 		row "replay-docker passes" "$([ "$(cat "$W/out/replay-docker/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-docker/exit" 2>/dev/null)"
 		# keploy answers that name itself: 127.0.0.11 gets only the network's
 		# own names, so the name never reaches its upstream.
-		rows_zero replay-docker tcp fork-tcp tfo imds-tcp dns-udp dns-tcp
+		rows_zero replay-docker tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-tcp
+		# ... and every name it does hold still goes to it: the peer resolves
+		# to its own address, which keploy could not have made up.
+		peer_row replay-docker
 		row_log "replay-docker reports the DNS name it answered itself" "$W/out/replay-docker/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
 		row_nolog "replay-docker opens no DNS egress" "$W/out/replay-docker/keploy.log" "$EGRESS_DNS"
 		row_log "replay-docker names the port-only bypass rule" "$W/out/replay-docker/keploy.log" 'real egress opened by bypassRules.*7002'
@@ -430,10 +465,14 @@ for mode in "${MODES[@]}"; do
 	compose)
 		# dns-udp at the baseline: the project network's 127.0.0.11 forwards
 		# the unrecorded outside name to its upstream, the sink.
-		rows_reach base-compose tcp fork-tcp tfo imds-tcp dns-udp
+		rows_reach base-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare
+		row_log "base-compose resolves the peer service" "$W/out/base-compose/app.log" 'probe dns-peer: [0-9]'
 		row "replay-compose passes" "$([ "$(cat "$W/out/replay-compose/exit" 2>/dev/null)" = 0 ] && echo 1)" "exit $(cat "$W/out/replay-compose/exit" 2>/dev/null)"
 		# keploy answers that name itself, so it never reaches 127.0.0.11's upstream.
-		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-tcp
+		rows_zero replay-compose tcp fork-tcp tfo imds-tcp dns-udp dns-bare dns-tcp
+		# The peer service resolves to its address on the project network,
+		# as docker's resolver answers it, not to keploy's own answer.
+		peer_row replay-compose
 		row_log "replay-compose reports the DNS name it answered itself" "$W/out/replay-compose/keploy.log" "${KEPT}DNS leak-probe\.invalid-replay-isolation\.test"
 		row_nolog "replay-compose opens no DNS egress" "$W/out/replay-compose/keploy.log" "$EGRESS_DNS"
 		row_log "replay-compose names the port-only bypass rule" "$W/out/replay-compose/keploy.log" 'real egress opened by bypassRules.*7002'

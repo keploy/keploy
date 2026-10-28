@@ -509,7 +509,9 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSte
 	t.Cleanup(emptyMgr.Close)
 	p.mockManager = emptyMgr
 
-	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	// A name under the cluster domain, the in-cluster agent's own: a bare
+	// one is not forwarded at all (networkOwnsName).
+	q := dns.Question{Name: "localstack.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
 
 	if entry.Msg == nil {

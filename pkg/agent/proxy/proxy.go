@@ -28,6 +28,7 @@ import (
 	"go.keploy.io/server/v3/config"
 	"go.keploy.io/server/v3/pkg/agent"
 	"go.keploy.io/server/v3/pkg/agent/containerkey"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
 	"golang.org/x/sync/errgroup"
 
 	"go.keploy.io/server/v3/pkg/agent/acceptcount"
@@ -494,6 +495,10 @@ type Proxy struct {
 	// are the replay network's own (networkOwnsName). Captured with
 	// dnsUpstreamServers.
 	dnsClusterDomain string
+	// netNames holds the names a docker-mode replay's networks answer
+	// themselves (networkOwnsName); nil is the agent process's own
+	// (netnames.Default), which its routes fill.
+	netNames *netnames.Store
 	// allowEgressDNS is test.allowEgress naming models.AllowEgressDNS: a
 	// replay's DNS mock miss may then be forwarded to every dnsUpstreamServers
 	// entry, the host's and public resolvers included.

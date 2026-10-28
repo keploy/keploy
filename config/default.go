@@ -95,10 +95,11 @@ test:
   strictMockWindow: true
   # allowEgress names what a replay may reach on the real network. keploy
   # answers a replay's DNS mock miss itself. Only a name the replay's own
-  # network owns (a single-label container or service name, or a name under
-  # the cluster domain) goes to that network's resolver (docker's, the
-  # container network's, or the cluster's), since those resolvers send every
-  # other name to the host's and public resolvers. Add "dns" to forward every
+  # network owns goes to that network's resolver: in docker, a container,
+  # compose service or alias name docker's resolver holds for the replay's
+  # networks (keploy lists them); in a cluster, a name under the cluster
+  # domain. Those resolvers send every other name, single-label ones
+  # included, to the host's and public resolvers. Add "dns" to forward every
   # miss to the host's and public resolvers.
   allowEgress: []
 record:

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/miekg/dns"
 	"go.keploy.io/server/v3/pkg/agent"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -236,27 +238,55 @@ func clusterDomain(search []string) string {
 // answers itself, the only kind a DNS mock miss is forwarded to an in-network
 // resolver for. Docker's embedded resolver (127.0.0.11) and cluster DNS answer
 // their own names and recurse to the host's or public resolvers for every
-// other one, so forwarding any other name would still send it off the machine.
+// other one, single-label names included, so forwarding any other name would
+// still send it off the machine.
 //
-//   - A single-label name: a container, compose service or network alias, or
-//     a service in the pod's own namespace.
-//   - In a cluster, a name under the cluster's domain (clusterDomain), which
+//   - In a cluster: a name under the cluster's domain (clusterDomain), which
 //     cluster DNS answers itself: every service and pod name, and every
-//     search expansion under it (mysql.ns.svc.cluster.local).
+//     search expansion under it (mysql.ns.svc.cluster.local). A bare name is
+//     not one: CoreDNS forwards it upstream. The pod's resolver asks the
+//     search expansions first (ndots:5), so a service in the pod's own
+//     namespace is still found.
+//   - In a container: a name docker's resolver holds for the networks the
+//     agent's container is on, as the keploy CLI lists them (netnames): a
+//     container's name, its compose service name and network aliases, its
+//     short ID, each also qualified by the network's name. A miss for a name
+//     the list may hold but does not (netnames.Store.MayOwn) asks the CLI once
+//     for a fresh list, waiting no longer than a forward would.
 //
-// Every other name is answered as a native replay answers it. That includes
-// the dotted names docker also answers (<container>.<network>, a dotted
-// network alias): record them, or name "dns" in test.allowEgress.
+// Every other name is answered as a native replay answers it: record it, or
+// name "dns" in test.allowEgress.
 func (p *Proxy) networkOwnsName(name string) bool {
-	q := strings.ToLower(strings.TrimSuffix(dns.Fqdn(name), "."))
+	q := netnames.Canon(name)
 	if q == "" {
 		return false
 	}
-	if !strings.Contains(q, ".") {
+	if d := p.dnsClusterDomain; d != "" {
+		return q == d || strings.HasSuffix(q, "."+d)
+	}
+	if !p.IsDocker {
+		return false
+	}
+	names := p.networkNames()
+	if names.Owns(q) {
 		return true
 	}
-	d := p.dnsClusterDomain
-	return d != "" && (q == d || strings.HasSuffix(q, "."+d))
+	if !names.MayOwn(q) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), p.dnsForwardTimeout)
+	defer cancel()
+	names.Refresh(ctx)
+	return names.Owns(q)
+}
+
+// networkNames is the Store of the names the replay's docker networks answer:
+// the agent process's own, which its routes fill, unless one was set.
+func (p *Proxy) networkNames() *netnames.Store {
+	if p.netNames != nil {
+		return p.netNames
+	}
+	return netnames.Default()
 }
 
 // replayMissServers are the resolvers a replay's DNS mock miss for name is
@@ -301,7 +331,7 @@ func (p *Proxy) logReplayDNSForwarding() {
 			notAsked = append(notAsked, s)
 		}
 	}
-	p.logger.Info("a DNS mock miss in this replay is forwarded only to a resolver inside the replay's own network, and only for a name that network owns (a single-label name, or one under the cluster domain); keploy answers every other name itself, and the host's and public resolvers are not asked",
+	p.logger.Info("a DNS mock miss in this replay is forwarded only to a resolver inside the replay's own network, and only for a name that network owns (one docker's resolver holds for the replay's networks, as the keploy CLI lists them, or one under the cluster domain); keploy answers every other name itself, and the host's and public resolvers are not asked",
 		zap.Strings("in_network_resolvers", p.dnsInNetworkServers),
 		zap.String("cluster_domain", p.dnsClusterDomain),
 		zap.Strings("not_asked", notAsked),

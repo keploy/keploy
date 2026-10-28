@@ -93,6 +93,7 @@ func app(args []string) {
 	sinkIP := fs.String("sink", "198.18.0.10", "the sink's IPv4 address")
 	sink6 := fs.String("sink6", "", "the sink's IPv6 address (empty: skip IPv6)")
 	imds := fs.String("imds", "169.254.169.254", "the metadata address the sink owns")
+	peer := fs.String("peer", "", "a container name the network holds, resolved through it (empty: skip)")
 	listen := fs.String("listen", ":8080", "")
 	_ = fs.Parse(args)
 	at := func(p int) string { return net.JoinHostPort(*sinkIP, strconv.Itoa(p)) }
@@ -111,6 +112,21 @@ func app(args []string) {
 		outcome("tfo", fastOpen(*sinkIP, portTFO))
 		_, err := net.DefaultResolver.LookupHost(context.Background(), "leak-probe.invalid-replay-isolation.test")
 		outcome("dns-lookup", err)
+		// An unrecorded single-label name: docker's 127.0.0.11 recurses one
+		// it does not hold to its upstream like any other name.
+		_, err = net.DefaultResolver.LookupHost(context.Background(), "leak-probe-bare-replay-isolation")
+		outcome("dns-bare-lookup", err)
+		// A container the network holds: its address, which only docker's
+		// resolver knows, says that resolver still answers the network's
+		// own names.
+		if *peer != "" {
+			addrs, err := net.DefaultResolver.LookupHost(context.Background(), *peer)
+			if err != nil {
+				outcome("dns-peer", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "probe dns-peer: %s\n", strings.Join(addrs, ","))
+			}
+		}
 		if *sink6 != "" {
 			outcome("tcp6", dialWrite("tcp6", net.JoinHostPort(*sink6, strconv.Itoa(portTCP6)), "tcp6"))
 			outcome("udp6", dialWrite("udp6", net.JoinHostPort(*sink6, strconv.Itoa(portUDP)), "udp6"))
@@ -241,7 +257,8 @@ func sink(args []string) {
 					p = string(buf[:n]) // udp-connected, udp-sendto, udp6
 				}
 				if path == "dns-udp" {
-					// The probe's own name counts as dns-udp; any other name
+					// The probe's own dotted name counts as dns-udp, its
+					// single-label one as dns-bare; any other name
 					// (keploy's or the runtime's own lookups) as dns-other, so a
 					// count names who leaked. Every name goes to dns-names.txt.
 					// The sink answers the probe's names NXDOMAIN and every
@@ -250,9 +267,12 @@ func sink(args []string) {
 					// docker phases) moves on to it for the runner's lookups.
 					name := qname(buf[:n])
 					rcode := byte(3) // NXDOMAIN
-					if !strings.Contains(name, "replay-isolation") {
+					switch {
+					case !strings.Contains(name, "replay-isolation"):
 						p = "dns-other"
 						rcode = 5 // REFUSED
+					case !strings.Contains(strings.TrimSuffix(name, "."), "."):
+						p = "dns-bare"
 					}
 					appendLine(filepath.Join(*dir, "dns-names.txt"), name)
 					if n >= 12 {

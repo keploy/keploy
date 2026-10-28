@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
 )
@@ -166,7 +168,8 @@ func TestCaptureDNSUpstream_ContainerKeepsOnlyDockerResolverInNetwork(t *testing
 	defer func() { resolvConfPath = orig }()
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 
-	p := &Proxy{logger: zap.NewNop(), DNSPort: 26789, IsDocker: true, agentMode: models.MODE_TEST}
+	p := &Proxy{logger: zap.NewNop(), DNSPort: 26789, IsDocker: true, agentMode: models.MODE_TEST, netNames: netnames.New()}
+	p.netNames.Apply(netnames.List{Networks: []string{"keploy-network"}, Names: []string{"db", "db.keploy-network"}})
 	p.captureDNSUpstream()
 
 	if !slices.Equal(p.dnsUpstreamServers, []string{"127.0.0.11", "8.8.8.8"}) {
@@ -175,8 +178,10 @@ func TestCaptureDNSUpstream_ContainerKeepsOnlyDockerResolverInNetwork(t *testing
 	if got := p.replayMissServers(true, "db."); !slices.Equal(got, []string{"127.0.0.11"}) {
 		t.Fatalf("a replay miss for the service name db goes to %v, want only docker's 127.0.0.11", got)
 	}
-	if got := p.replayMissServers(true, askedName); got != nil {
-		t.Fatalf("a replay miss for %s goes to %v; docker's resolver would recurse it to the host's, want none", askedName, got)
+	for _, name := range []string{askedName, "riso-unrecorded."} {
+		if got := p.replayMissServers(true, name); got != nil {
+			t.Fatalf("a replay miss for %s goes to %v; docker's resolver would recurse it to the host's, want none", name, got)
+		}
 	}
 }
 
@@ -225,18 +230,23 @@ func TestReplayDNSMiss_InNetworkResolverGetsOnlyTheNetworksOwnNames(t *testing.T
 		answered      []string
 	}{
 		{
-			name:      "container network",
-			forwarded: []string{"db.", "keploy-agent.", "Riso-App."},
-			answered: []string{askedName, "sqs.us-east-1.amazonaws.com.", "db.keploy-network.",
-				"db.corp.example.com.", "mysql.default.svc.cluster.local."},
+			// The names docker's resolver holds, as the keploy CLI lists
+			// them (listNetworkNames): a single-label name it does not hold
+			// is recursed to the host's resolvers like any other.
+			name: "container network",
+			forwarded: []string{"db.", "keploy-agent.", "Riso-App.", "db.keploy-network.",
+				"4e14c014c7c4."},
+			answered: []string{askedName, "riso-unrecorded.", "metadata.", "sqs.us-east-1.amazonaws.com.",
+				"nope.keploy-network.", "db.corp.example.com.", "mysql.default.svc.cluster.local."},
 		},
 		{
+			// A bare name is not the cluster's: CoreDNS forwards it upstream.
 			name:          "cluster network",
 			clusterDomain: "cluster.local",
-			forwarded: []string{"db.", "mysql.default.svc.cluster.local.", "MySQL.Default.SVC.Cluster.Local.",
+			forwarded: []string{"mysql.default.svc.cluster.local.", "MySQL.Default.SVC.Cluster.Local.",
 				"sqs.us-east-1.amazonaws.com.default.svc.cluster.local.", "cluster.local."},
-			answered: []string{askedName, "sqs.us-east-1.amazonaws.com.", "sqs.us-east-1.amazonaws.com.ec2.internal.",
-				"cluster.local.evil.example.", "notcluster.local."},
+			answered: []string{askedName, "db.", "riso-unrecorded.", "sqs.us-east-1.amazonaws.com.",
+				"sqs.us-east-1.amazonaws.com.ec2.internal.", "cluster.local.evil.example.", "notcluster.local."},
 		},
 	}
 	for _, tc := range cases {
@@ -248,6 +258,10 @@ func TestReplayDNSMiss_InNetworkResolverGetsOnlyTheNetworksOwnNames(t *testing.T
 			p.IsDocker = true
 			p.dnsInNetworkServers = append([]string(nil), p.dnsUpstreamServers...)
 			p.dnsClusterDomain = tc.clusterDomain
+			p.netNames = netnames.New()
+			p.netNames.Apply(netnames.List{Networks: []string{"keploy-network"}, Names: []string{
+				"db", "db.keploy-network", "keploy-agent", "keploy-agent.keploy-network",
+				"riso-app", "riso-app.keploy-network", "4e14c014c7c4", "4e14c014c7c4.keploy-network"}})
 
 			for _, name := range tc.forwarded {
 				q := dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}
@@ -333,6 +347,9 @@ func TestCaptureDNSUpstream_InClusterAgentForwardsTheClustersNames(t *testing.T)
 	if got := p.replayMissServers(true, "mysql.shop.svc.cluster.local."); !slices.Equal(got, []string{"10.96.0.10"}) {
 		t.Fatalf("a miss for a cluster service goes to %v, want the cluster DNS", got)
 	}
+	if got := p.replayMissServers(true, "db."); got != nil {
+		t.Fatalf("a replay miss for the bare name db goes to %v; CoreDNS forwards a bare name upstream, want none", got)
+	}
 	if got := p.replayMissServers(true, "sqs.us-east-1.amazonaws.com."); got != nil {
 		t.Fatalf("a miss for an outside name goes to %v; cluster DNS would recurse it, want none", got)
 	}
@@ -375,5 +392,73 @@ func TestNetworksOfLeavesOutLoopbackAndLinkLocal(t *testing.T) {
 	got := inNetworkResolvers([]string{"127.0.0.53", "127.0.0.11", "172.18.0.1", "169.254.0.53"}, true, false, nets)
 	if !slices.Equal(got, []string{"127.0.0.11", "172.18.0.1"}) {
 		t.Fatalf("inNetworkResolvers = %v, want docker's 127.0.0.11 and the network's 172.18.0.1 only", got)
+	}
+}
+
+// A container started after the CLI's last list is found by the one fresh list
+// its first miss asks for; a single-label name no container holds still gets
+// keploy's own answer, after one ask, and never reaches docker's resolver,
+// which would recurse it to the host's resolvers.
+func TestReplayDNSMiss_ContainerNameListRefreshedOnceOnAMiss(t *testing.T) {
+	addr, asked, stop := ownNameUpstream(t)
+	defer stop()
+	p := hostResolverProxy(t, addr)
+	p.errChannel = make(chan error, 64)
+	p.IsDocker = true
+	p.dnsClusterDomain = ""
+	p.dnsInNetworkServers = append([]string(nil), p.dnsUpstreamServers...)
+	p.netNames = netnames.New()
+	p.netNames.Apply(netnames.List{Networks: []string{"keploy-network"}, Names: []string{"db"}})
+
+	// The keploy CLI: each ask is answered with the network's names now.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var lists atomic.Int32
+	go func() {
+		var after uint64
+		for {
+			ask, ok := p.netNames.AwaitAsk(ctx, after)
+			if !ok {
+				return
+			}
+			lists.Add(1)
+			p.netNames.Apply(netnames.List{Answers: ask.Asked, Networks: []string{"keploy-network"},
+				Names: []string{"db", "late-svc", "late-svc.keploy-network"}})
+			after = ask.Asked
+		}
+	}()
+	for {
+		present, changed := p.netNames.Present()
+		if present {
+			break
+		}
+		<-changed
+	}
+	// The wait for a list ends on the list; the forward's deadline only
+	// bounds a CLI that never sends one, so a loaded box cannot cut it.
+	p.dnsForwardTimeout = time.Minute
+
+	resolve := func(name string) dnsCacheEntry {
+		q := dns.Question{Name: name, Qtype: dns.TypeA, Qclass: dns.ClassINET}
+		return p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	}
+	if e := resolve("late-svc."); asked("late-svc.") != 1 || !e.FromUpstream {
+		t.Fatalf("late-svc, started after the last list, was forwarded %d time(s) (FromUpstream=%v); want 1, true", asked("late-svc."), e.FromUpstream)
+	}
+	if n := lists.Load(); n != 1 {
+		t.Fatalf("the miss asked for %d list(s), want 1", n)
+	}
+	if e := resolve("riso-unrecorded."); asked("riso-unrecorded.") != 0 || e.FromUpstream {
+		t.Fatalf("riso-unrecorded, which no container holds, was forwarded %d time(s) (FromUpstream=%v); want 0, false", asked("riso-unrecorded."), e.FromUpstream)
+	}
+	if n := lists.Load(); n != 2 {
+		t.Fatalf("the two misses asked for %d list(s), want 2 (one each)", n)
+	}
+	// A dotted name no network qualifies is never a container's: no ask.
+	if e := resolve("riso-unrecorded.example.com."); asked("riso-unrecorded.example.com.") != 0 || e.FromUpstream {
+		t.Fatalf("riso-unrecorded.example.com was forwarded %d time(s); want 0", asked("riso-unrecorded.example.com."))
+	}
+	if n := lists.Load(); n != 2 {
+		t.Fatalf("a dotted outside name asked for a list (%d lists); want none", n)
 	}
 }

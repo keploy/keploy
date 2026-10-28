@@ -151,6 +151,11 @@ func (d DefaultRoutes) New(r chi.Router, agent agent.Service, logger *zap.Logger
 		r.HandleFunc("/real/run", a.HandleRealRun)
 		r.HandleFunc("/real/test", a.HandleRealTest)
 		r.Post("/app/start", a.HandleAppStart)
+		// The names the replay's docker networks answer themselves, from
+		// the keploy CLI (a docker-mode agent has no Docker socket), and the
+		// agent's held ask for a fresh list (netnames).
+		r.Post(models.NetworkNamesPath, a.HandleNetworkNames)
+		r.Get(models.NetworkNamesAskPath, a.HandleNetworkNamesAsk)
 		r.Get("/mock/stats", a.HandleMockStats)
 		// The refused inserts into the hooks' PID maps, each a process they
 		// could not track; a session during which one was refused is capture

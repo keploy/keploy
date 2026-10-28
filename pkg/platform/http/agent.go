@@ -947,6 +947,7 @@ func (a *AgentClient) MockOutgoing(ctx context.Context, opts models.OutgoingOpti
 		}
 	}()
 	a.pushContainers(ctx)
+	a.pushNetworkNames(ctx)
 	// Only a successful answer that says so (models.ClientTestsReadHeader)
 	// sets it again below.
 	a.clientTestsRead.Store(false)
@@ -3271,6 +3272,7 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 	a.conf.DNSPort = dnsPort
 	a.conf.Agent.AgentURI = opts.AgentURI
 	forgetContainers(opts.AgentURI)
+	forgetNetworkNames(opts.AgentURI)
 
 	a.logger.Debug("Using available ports",
 		zap.Uint32("agent-port", agentPort),
