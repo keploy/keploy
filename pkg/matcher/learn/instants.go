@@ -564,6 +564,19 @@ func holdsRecordedIn(held []moment, ms []echoMatch) bool {
 	return false
 }
 
+// holdsLiveIn is holdsLive of a text whose keyed instants are held
+// (payloadMoments, fieldForms).
+func holdsLiveIn(held []moment, ms []echoMatch) bool {
+	for _, m := range ms {
+		for _, h := range held {
+			if namesMomentApart(h, m.live, m.rec, m.rules) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // holdsLive reports whether text holds the moment F saw of one of ms, by one
 // of its rules (any, where it has none), by which it does not name the
 // recorded moment too.
@@ -1339,9 +1352,7 @@ func stamped(s Seen) bool { return s.Stamp && s.Live == s.Leaf.Value }
 func (dc *DriftCache) stampsEchoed(v *valueDrift, served []Earlier, raw []Raw) bool {
 	var given, all []string
 	for _, x := range raw {
-		xb := x.payload()
-		for _, f := range xb.stamps {
-			text := xb.text[f.start:f.end]
+		for _, text := range dc.stampTexts(x) {
 			all = append(all, text)
 			if x.served {
 				given = append(given, text)

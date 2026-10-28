@@ -490,7 +490,7 @@ type givenMoment struct {
 	late, noTime bool
 }
 
-// answerMoments are the instants of x's answer as F gave the application
+// readAnswerMoments are the instants of x's answer as F gave the application
 // them (givenMoment): of each field of its answer (of a kind whose spec holds
 // its request and its answer in one field, or a recording with no fields
 // read, its whole text: answerApart), in its text and its other declared
@@ -499,7 +499,7 @@ type givenMoment struct {
 // value F's run copied from it moved as F's clock did. What F gives the
 // application is an answer, never a request the application sent in another
 // test.
-func (dc *DriftCache) answerMoments(x Raw) []givenMoment {
+func (dc *DriftCache) readAnswerMoments(x Raw) []givenMoment {
 	var out []givenMoment
 	add := func(t, where string) {
 		for _, form := range []string{t, dc.rawExtra(t)} {
@@ -689,7 +689,7 @@ func (dc *DriftCache) wordsOf(x Raw) givenWords {
 	g := givenWords{mock: strings.Clone(x.mock), at: x.at, late: x.late, noTime: x.noTime, answered: x.answered, conn: strings.Clone(x.conn), pos: x.pos, first: x.first, last: x.last}
 	plain := dc.answerWords(x, false)
 	kept := plain
-	if len(x.payload().stamps) > 0 {
+	if len(dc.stampTexts(x)) > 0 {
 		kept = dc.answerWords(x, true)
 	}
 	for i := range plain {
@@ -845,7 +845,7 @@ func (g givenWords) inAnswer(i int, t string) string {
 	return ""
 }
 
-// answerWords are the words of x's answer in every declared form, by
+// readAnswerWords are the words of x's answer in every declared form, by
 // reading, where the word rule reads a recording F gave the application
 // (givenWords): of each field of its answer, its keys too (of a kind whose
 // spec holds its request and its answer in one field, or a recording with
@@ -854,7 +854,7 @@ func (g givenWords) inAnswer(i int, t string) string {
 // payload (rules 2 and 3). What F gives the application is an answer, never
 // a request the application sent in another test: a recording that holds no
 // answer apart from its request has no words here.
-func (dc *DriftCache) answerWords(x Raw, keep bool) []map[string]bool {
+func (dc *DriftCache) readAnswerWords(x Raw, keep bool) []map[string]bool {
 	if !answerApart(x.payload().fields) {
 		return dc.searchedTokens(x, keep)
 	}
