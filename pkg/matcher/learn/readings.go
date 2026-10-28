@@ -1055,11 +1055,24 @@ func (dc *DriftCache) wordsHeld(v *valueDrift, keep bool, raw []Raw) heldWords {
 		}
 		return out
 	}
+	// A recording whose filter of words, kept for the set, holds no run of
+	// letters and digits of any changed word (mayHoldWords) holds none of
+	// them: its words are not read. A set's words are more than its budget
+	// keeps (api-server's round: 14 813 recordings, 335 MB of payloads), and
+	// each call read every earlier recording's words anew, holding them
+	// while it read.
+	runs := make([][]string, len(words))
+	for k, w := range words {
+		runs[k] = wordsBy(w.t, isWord)
+	}
 	read := make([]*wordsIn, len(raw))
 	return heldWords{of: func(j int) wordsIn {
 		if read[j] == nil {
 			x := raw[j]
-			h := wordsIn{raw: in(dc.searchedTokens(x, keep))}
+			var h wordsIn
+			if dc.mayHoldWords(x, keep, runs) {
+				h.raw = in(dc.searchedTokens(x, keep))
+			}
 			if x.Live() {
 				h.live = in(dc.searchedTokens(*x.live, keep))
 			}
