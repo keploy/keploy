@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	nethttp "net/http"
+	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	proxyPkg "go.keploy.io/server/v3/pkg/agent/proxy"
 	httpparser "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/provenswitch"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 )
@@ -100,11 +103,13 @@ func (p *diskServingProxy) callSettled(t *testing.T, path string) (int, string) 
 	return resp.StatusCode, string(b)
 }
 
-// diskReplayAgent is a replaying agent on a real mock manager whose
-// per-test mocks the store keeps on disk (strict mock window, the default).
+// diskReplayAgent is keploy mock replay's agent on a real mock manager,
+// whose per-test mocks the store keeps on disk (strict mock window, the
+// default).
 func diskReplayAgent(t *testing.T) (*Agent, *diskServingProxy) {
 	t.Helper()
 	a, _ := wireAgent(t, models.MODE_TEST)
+	a.config.Agent.MockMode = true
 	a.config.Test.StrictMockWindow = true
 	p := &diskServingProxy{servingProxy: newServingProxy()}
 	a.Proxy = p
@@ -269,6 +274,103 @@ func TestMockReplayStagingPrintsNoStrictWindowNotice(t *testing.T) {
 	claimSelf(t, a)
 	require.Equal(t, []string{"boot", "gap", "late"}, take(), "the staging decoded a test's own recordings")
 	require.Zero(t, logs.FilterMessageSnippet("strict mock-window").Len(), "mock replay's staging printed the strict window's notice")
+}
+
+// The strict window's opt-outs (test.strictMockWindow: false, and
+// KEPLOY_STRICT_MOCK_WINDOW=0, which wins over every flag) choose how keploy
+// test matches. They do not choose how much keploy mock replay's agent holds:
+// its store keeps the per-test mocks on disk, the staging decodes only what no
+// test owns, and each test decodes its own as it opens. With either opt-out
+// the agent kept no on-disk store and held the whole recording; with the env
+// one, the staging would have decoded the whole store too. The env is read as
+// the process starts, so that half runs in a process of its own.
+func TestMockReplayHoldsAsMuchWithTheStrictWindowOff(t *testing.T) {
+	const child = "KEPLOY_TEST_STRICT_OFF_CHILD"
+	if os.Getenv(child) == "1" {
+		require.False(t, pkg.IsStrictMockWindow(true), "precondition: KEPLOY_STRICT_MOCK_WINDOW=0 turns the strict window off in this process")
+		replaysOneTestsRecordingsAtATime(t, true)
+		return
+	}
+	t.Run("config", func(t *testing.T) {
+		replaysOneTestsRecordingsAtATime(t, false)
+	})
+	// Only keploy mock replay's agent under the switch keeps the store with
+	// the strict window off: keploy test's lax filter reads every per-test
+	// mock for each test, and with the switch off the agent is main's.
+	t.Run("only mock replay's agent", func(t *testing.T) {
+		for _, c := range []struct {
+			name           string
+			proven, mockMd bool
+			mode           models.Mode
+			wantDisk       bool
+		}{
+			{"mock replay", true, true, models.MODE_TEST, true},
+			{"keploy test", true, false, models.MODE_TEST, false},
+			{"mock record", true, true, models.MODE_RECORD, false},
+			{"switch off", false, true, models.MODE_TEST, false},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				if c.proven {
+					t.Setenv(provenswitch.Env, "1")
+				} else {
+					t.Setenv(provenswitch.Env, "0")
+				}
+				a := strictAgent(false)
+				a.config.Agent.MockMode = c.mockMd
+				a.config.Agent.Mode = c.mode
+				header, dec := readHeaderAndDecoder(t, encodeStreamBody(t, []*models.Mock{diskEligibleMock("pt-1", t0)}, nil))
+				require.NoError(t, a.StoreMocksStream(context.Background(), header, dec))
+				disk := loadStorage(t, a).diskMocks
+				if disk != nil {
+					t.Cleanup(func() { _ = disk.Close() })
+				}
+				// An enabling KEPLOY_STRICT_MOCK_WINDOW keeps it for every agent.
+				require.Equal(t, c.wantDisk || pkg.IsStrictMockWindow(false), disk != nil, "on-disk store kept")
+			})
+		}
+	})
+	t.Run("env", func(t *testing.T) {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMockReplayHoldsAsMuchWithTheStrictWindowOff$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), child+"=1", "KEPLOY_STRICT_MOCK_WINDOW=0")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		// A child that ran no row would exit 0 as well.
+		require.Contains(t, string(out), "--- PASS: TestMockReplayHoldsAsMuchWithTheStrictWindowOff", "%s", out)
+	})
+}
+
+// replaysOneTestsRecordingsAtATime replays replaySet on keploy mock replay's
+// agent with the strict window turned off by the user (byEnv: by the
+// process's env, which is already so; else by config): the store keeps every
+// per-test mock on disk (storeStream asserts it), the staging decodes what no
+// test owns, each test its own, and every call is answered as recorded.
+func replaysOneTestsRecordingsAtATime(t *testing.T, byEnv bool) {
+	t.Helper()
+	a, p := diskReplayAgent(t)
+	if !byEnv {
+		a.config.Test.StrictMockWindow = false
+	}
+	disk := replaySet(t, a)
+	take := decodes(disk)
+	ctx := context.Background()
+	require.NoError(t, a.SetRecordedWindows(ctx, replayWindows))
+	require.NoError(t, a.SetScopePool(ctx, map[string][]string{"o": {"boot", "gap", "late"}}))
+	claimSelf(t, a)
+	require.Equal(t, []string{"boot", "gap", "late"}, take(), "the staging decoded a test's own recordings")
+	code, body := p.call(t, "/boot")
+	require.Equal(t, 200, code)
+	require.Equal(t, "boot", body)
+	got, e := runTest(t, a, p.servingProxy, "TestA", "/a", "/a2")
+	require.Equal(t, []string{"200 a", "200 a2"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"mock-a", "mock-a2"}, take(), "test A's open decoded more than its own")
+	got, e = runTest(t, a, p.servingProxy, "TestB", "/b")
+	require.Equal(t, []string{"200 b"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	require.Equal(t, []string{"mock-b"}, take(), "test B's open decoded more than its own")
+	code, body = p.call(t, "/late")
+	require.Equal(t, 200, code)
+	require.Equal(t, "late", body)
 }
 
 // A pool slice the CLI sends after the set is staged, naming a recording the
