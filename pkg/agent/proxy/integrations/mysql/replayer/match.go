@@ -128,12 +128,18 @@ func getQueryStructureCached(sql string) (string, error) {
 
 // exactDriftNextSteps is what a miss says when, under exact serving,
 // recordings of the command's statement were turned away because a parameter
-// drifted outside known noise (strictGate.allowsDrift).
-const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark it under test.globalNoise.requestBody or let an auto-replay learn it; otherwise the call changed since it was recorded: re-record the test."
+// drifted outside known noise (strictGate.allowsDrift). The way it names to
+// mark a field is the one that works under exact serving: the recording's
+// learned noise (noise.req of its document, MockSpec.ReqBodyNoise), the
+// field written as listed. Nothing learns MySQL noise there: the drifted
+// recording is never served, so detect-on-serve never sees it, and the
+// proven switch's learn round does not cover MySQL.
+const exactDriftNextSteps = "Each recording of this statement was made with other parameters (the listed fields), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise on the recording: add it, as listed, to the noise.req list of the recording's document in mocks.yaml (noise: {req: [body.parameters.0.value]}); otherwise the call changed since it was recorded: re-record the test."
 
-// exactLiteralNextSteps is the same, for a COM_QUERY whose inline literals
-// drifted (strictGate.allowsLiterals).
-const exactLiteralNextSteps = "Each recording of this statement was made with other inline literals (the listed fields, by position), which are not noise: keploy does not answer a call with another call's rows. If the application inlines a value that changes on every run, mark it under test.globalNoise.requestBody or let an auto-replay learn it; otherwise the call changed since it was recorded: re-record the test."
+// exactLiteralNextSteps is the same, for a COM_QUERY whose inline literals,
+// or the query attributes its statement reads, drifted
+// (strictGate.allowsLiterals).
+const exactLiteralNextSteps = "Each recording of this statement was made with other inline literals or query attributes (the listed fields; literals by position), which are not noise: keploy does not answer a call with another call's rows. If the application sends a value that changes on every run, mark the listed field as noise on the recording: add it, as listed, to the noise.req list of the recording's document in mocks.yaml (noise: {req: [body.query.literals.0]}); otherwise the call changed since it was recorded: re-record the test."
 
 // sameQueryStructure reports whether two statements parse to the same tree
 // shape (getQueryStructure: identifier-blind). Neither parsing is no.
@@ -483,7 +489,10 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// literal that differs, by position, and every query attribute the
 	// statement reads, is configured or learned noise, comments aside
 	// (strictGate.allowsLiterals): with another literal it is the rows of
-	// another call. A PREPARE's recording answers with
+	// another call. That holds for a recording of the same text too when
+	// the statement reads its query attributes (liveReadsAttributes): the
+	// text does not hold them, and with another value of one it is another
+	// call's rows (another tenant's). A PREPARE's recording answers with
 	// another literal: its answer is the statement's metadata, and each
 	// EXECUTE of the statement is matched on the live text. For a
 	// COM_STMT_EXECUTE it is the same prepared statement
@@ -727,10 +736,15 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// comment — the same identity matchQueryLive compares on. It is the
 	// yardstick for nearestMock below, and a live PREPARE's key in
 	// preparedIndex.
-	liveStatement := ""
+	// liveReadsAttributes is whether a live COM_QUERY's statement reads its
+	// query attributes (readsQueryAttributes): then a recording of its very
+	// text answers under exact serving only when they are equal, or noise
+	// (sameStatementOnly).
+	liveStatement, liveReadsAttributes := "", false
 	switch m := req.Message.(type) {
 	case *mysql.QueryPacket:
 		liveStatement = sqlStatementIdentity(m.Query)
+		liveReadsAttributes = readsQueryAttributes(m.Query)
 	case *mysql.StmtPreparePacket:
 		liveStatement = sqlStatementIdentity(m.Query)
 	case *mysql.StmtExecutePacket:
@@ -1342,8 +1356,18 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						//
 						// Even an exact-text match is strict-gated: the query
 						// attributes (CLIENT_QUERY_ATTRIBUTES) live outside the
-						// text and may still drift.
-						if !gate.allows(mock) {
+						// text and may still drift. Under exact serving, with
+						// or without strict, a statement that reads them is
+						// answered only by a recording made with the same
+						// values, or whose differing ones are noise
+						// (sameStatementOnly, allowsLiterals; the literals of
+						// the same text are equal, its comments left out): it
+						// read tenant a's rows for tenant b. One that does not
+						// read them answers whatever they are (its rows do not
+						// depend on them), so it is not compared: a statement
+						// vitess cannot parse is compared whole, and a changed
+						// leading comment would refuse it.
+						if !gate.allows(mock) || (sameStatementOnly && liveReadsAttributes && !gate.allowsLiterals(mock)) {
 							// A strict-rejected exact-text candidate is still the
 							// closest mock for the mismatch report (parity with
 							// the EXECUTE branch) — without this the miss diff

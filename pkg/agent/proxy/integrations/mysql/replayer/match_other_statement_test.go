@@ -52,7 +52,18 @@ type otherStatementCase struct {
 	exact    string // the answer under exact serving
 	notExact string // the answer under keploy test
 	nearest  string // the recording a miss names as the nearest
+	// noise is the user's noise configuration (test.globalNoise).
+	noise map[string]map[string][]string
+	// noDriftAdvice: a miss of it, under exact serving, does not say that
+	// a recording of its statement was made with other parameters or
+	// literals: none was.
+	noDriftAdvice bool
 }
+
+// driftAdvice is what only the miss of a command whose statement's
+// recordings were turned away for drift says (exactDriftNextSteps,
+// exactLiteralNextSteps).
+var driftAdvice = []string{"which are not noise", "other parameters (the listed fields)", "other inline literals"}
 
 func runOtherStatementCases(t *testing.T, all, own []*models.Mock, cases []otherStatementCase) {
 	t.Helper()
@@ -68,9 +79,16 @@ func runOtherStatementCases(t *testing.T, all, own []*models.Mock, cases []other
 				if c.stmts != nil {
 					dctx.StmtIDToQuery = c.stmts
 				}
-				resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), c.req, mm, dctx)
+				resp, ok, miss, err := replayer.MatchWithNoiseConfigForTest(ctx, zap.NewNop(), c.req, mm, dctx, c.noise)
 				if err != nil {
 					t.Fatalf("match: %v", err)
+				}
+				if !ok && exact && c.noDriftAdvice {
+					for _, advice := range driftAdvice {
+						if strings.Contains(miss, advice) {
+							t.Errorf("the miss (%s) says %q: no recording of its statement was turned away", miss, advice)
+						}
+					}
 				}
 				switch {
 				case want == synthesized:
@@ -125,10 +143,10 @@ func TestAnExecuteOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
 	all := []*models.Mock{prep, own}
 	stmts := func(q string) map[uint32]string { return map[uint32]string{1: poolQuery, 2: q} }
 	runOtherStatementCases(t, all, []*models.Mock{own}, []otherStatementCase{
-		{name: "another statement", stmts: stmts(otherQuery), req: executeReq(2, "5"), nearest: "exec-small-7"},
-		{name: "another statement with the recording's parameters", stmts: stmts(otherQuery), req: executeReq(2, "7"), nearest: "exec-small-7"},
-		{name: "another statement of the same shape", stmts: stmts(otherShapeTwin), req: executeReq(2, "5"), notExact: "exec-small-7", nearest: "exec-small-7"},
-		{name: "a statement the connection did not prepare", stmts: stmts(otherQuery), req: executeReq(3, "5"), notExact: "exec-small-7"},
+		{name: "another statement", stmts: stmts(otherQuery), req: executeReq(2, "5"), nearest: "exec-small-7", noDriftAdvice: true},
+		{name: "another statement with the recording's parameters", stmts: stmts(otherQuery), req: executeReq(2, "7"), nearest: "exec-small-7", noDriftAdvice: true},
+		{name: "another statement of the same shape", stmts: stmts(otherShapeTwin), req: executeReq(2, "5"), notExact: "exec-small-7", nearest: "exec-small-7", noDriftAdvice: true},
+		{name: "a statement the connection did not prepare", stmts: stmts(otherQuery), req: executeReq(3, "5"), notExact: "exec-small-7", noDriftAdvice: true},
 		// The rule's other side: the statement's own recording answers.
 		{name: "its own statement", stmts: stmts(otherQuery), req: executeReq(1, "7"), exact: "exec-small-7", notExact: "exec-small-7"},
 		{name: "its own statement with other parameters", stmts: stmts(otherQuery), req: executeReq(1, "5"), notExact: "exec-small-7", nearest: "exec-small-7"},
@@ -206,10 +224,10 @@ func TestAQueryOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
 	prepRead := diffPrepareMock("prep-read-live", "c1", "SELECT id FROM small WHERE id = ? AND live = 1", 5, ts.Add(3*time.Millisecond))
 	all := []*models.Mock{update, read, prepUpdate, prepRead}
 	runOtherStatementCases(t, all, all, []otherStatementCase{
-		{name: "an UPDATE of another table", req: queryReq("UPDATE kv SET v = 'b' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
+		{name: "an UPDATE of another table", req: queryReq("UPDATE kv SET v = 'b' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users", noDriftAdvice: true},
 		{name: "its own UPDATE with other literals", req: queryReq("UPDATE users SET name = 'b' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
 		{name: "its own UPDATE with one other literal", req: queryReq("UPDATE users SET name = 'a' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
-		{name: "a SELECT of another statement", req: queryReq("SELECT code FROM other WHERE ref = 5 AND live = 1")},
+		{name: "a SELECT of another statement", req: queryReq("SELECT code FROM other WHERE ref = 5 AND live = 1"), noDriftAdvice: true},
 		{name: "its own SELECT with another literal", req: queryReq("SELECT id, name FROM small WHERE id = 5"), notExact: "query-read-small", nearest: "query-read-small"},
 		{name: "its own SELECT with a comment", req: queryReq(traceReader + "SELECT id, name FROM small WHERE id = 7"), exact: "query-read-small", notExact: "query-read-small"},
 		{name: "its own SELECT with a comment and another literal", req: queryReq(traceReader + "SELECT id, name FROM small WHERE id = 5"), notExact: "query-read-small", nearest: "query-read-small"},
@@ -245,6 +263,85 @@ func TestAQueryOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
 			{name: "its own UPDATE with another value there", req: queryReq("UPDATE users SET name = 'a' WHERE id = 4"), exact: "query-update-other-noise", notExact: "query-update-other-noise"},
 			{name: "its own UPDATE with another value elsewhere too", req: queryReq("UPDATE users SET name = 'b' WHERE id = 4"), notExact: "query-update-other-noise", nearest: "query-update-other-noise"},
 		})
+	})
+}
+
+// Under exact serving a COM_QUERY whose statement reads a query attribute
+// (mysql_query_attribute_string) was answered by the recording of its very
+// text made with another value of the attribute: the identity compares the
+// text alone, and only strict enforcement compared the attributes. Tenant
+// b's read got tenant a's rows. The rule: the same text answers there only
+// when every attribute the statement reads is equal, or noise (configured
+// or learned on the recording); its comments are left out. A statement
+// that does not read them answers whatever they are. Without exact
+// serving it is answered, as before (keploy test's lenient tier).
+func TestAQueryReadingItsAttributeWithAnotherValueIsAMiss(t *testing.T) {
+	const readsAttr = "SELECT mysql_query_attribute_string('tenant') AS t, name FROM small WHERE id = 7"
+	ts := diffBase.Add(time.Millisecond)
+	attr := diffMock("query-read-attr", "c1", []mysql.Request{withTenant(queryReq(readsAttr), "a")}, ts, models.LifetimePerTest, "mocks")
+	plain := diffMock("query-read-plain", "c1", []mysql.Request{withTenant(queryReq("SELECT id, name FROM small WHERE id = 7"), "a")}, ts, models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{attr}, []*models.Mock{attr}, []otherStatementCase{
+		{name: "the same text, another value of its attribute", req: withTenant(queryReq(readsAttr), "b"), notExact: "query-read-attr", nearest: "query-read-attr"},
+		{name: "the same text, the same value", req: withTenant(queryReq(readsAttr), "a"), exact: "query-read-attr", notExact: "query-read-attr"},
+		{name: "the same text with a comment, the same value", req: withTenant(queryReq(traceReader+readsAttr), "a"), exact: "query-read-attr", notExact: "query-read-attr"},
+		{name: "the same text, another value of its attribute, configured noise", req: withTenant(queryReq(readsAttr), "b"), noise: requestBody("parameters.0.value"), exact: "query-read-attr", notExact: "query-read-attr"},
+	})
+	runOtherStatementCases(t, []*models.Mock{plain}, []*models.Mock{plain}, []otherStatementCase{
+		{name: "a statement that does not read it, another value", req: withTenant(queryReq("SELECT id, name FROM small WHERE id = 7"), "b"), exact: "query-read-plain", notExact: "query-read-plain"},
+	})
+	t.Run("a recording whose attribute is learned noise", func(t *testing.T) {
+		noisy := diffMock("query-read-attr-noisy", "c1", []mysql.Request{withTenant(queryReq(readsAttr), "a")}, ts, models.LifetimePerTest, "mocks")
+		noisy.Spec.ReqBodyNoise = map[string][]string{"body.parameters.0.value": {}}
+		runOtherStatementCases(t, []*models.Mock{noisy}, []*models.Mock{noisy}, []otherStatementCase{
+			{name: "the same text, another value of its attribute", req: withTenant(queryReq(readsAttr), "b"), exact: "query-read-attr-noisy", notExact: "query-read-attr-noisy"},
+		})
+	})
+	t.Run("the miss", func(t *testing.T) {
+		mm := stageOwn(t, []*models.Mock{attr}, []*models.Mock{attr}, true)
+		ctx, dctx := poolConn("c1")
+		_, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), withTenant(queryReq(readsAttr), "b"), mm, dctx)
+		if err != nil || ok {
+			t.Fatalf("match: ok=%v err=%v; want a miss", ok, err)
+		}
+		for _, want := range []string{"closestMock:query-read-attr ", "body.parameters.0.value", "query attributes", "not noise"} {
+			if !strings.Contains(miss, want) {
+				t.Errorf("the miss (%s) does not say %q", miss, want)
+			}
+		}
+	})
+}
+
+// requestBody is a noise configuration whose requestBody bucket
+// (test.globalNoise.requestBody) names fields.
+func requestBody(fields ...string) map[string]map[string][]string {
+	bucket := make(map[string][]string, len(fields))
+	for _, f := range fields {
+		bucket[f] = []string{}
+	}
+	return map[string]map[string][]string{"requestbody": bucket}
+}
+
+// Under exact serving, a recording of the command's statement made with
+// another parameter, or inline literal, answers when that field is
+// configured noise (test.globalNoise.requestBody): root-relative
+// (parameters.0.value) or written as the miss lists it
+// (body.parameters.0.value), in any case. A configured field that is not
+// the one that differs changes nothing.
+func TestConfiguredNoiseLetsTheStatementsRecordingAnswer(t *testing.T) {
+	prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(time.Millisecond))
+	exec := diffMock("exec-small-7", "c1", []mysql.Request{executeReq(1, "7")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	stmts := map[uint32]string{1: poolQuery}
+	runOtherStatementCases(t, []*models.Mock{prep, exec}, []*models.Mock{exec}, []otherStatementCase{
+		{name: "an EXECUTE, its parameter root-relative", stmts: stmts, req: executeReq(1, "5"), noise: requestBody("parameters.0.value"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "an EXECUTE, its parameter as listed", stmts: stmts, req: executeReq(1, "5"), noise: requestBody("body.parameters.0.value"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "an EXECUTE, its parameter as listed in another case", stmts: stmts, req: executeReq(1, "5"), noise: requestBody("Body.Parameters.0.Value"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "an EXECUTE, another parameter", stmts: stmts, req: executeReq(1, "5"), noise: requestBody("parameters.1.value", "body.parameters.1.value"), notExact: "exec-small-7", nearest: "exec-small-7"},
+	})
+	read := diffMock("query-read-small", "c1", []mysql.Request{queryReq("SELECT id, name FROM small WHERE id = 7 AND live = 1")}, diffBase.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+	runOtherStatementCases(t, []*models.Mock{read}, []*models.Mock{read}, []otherStatementCase{
+		{name: "a COM_QUERY, its literal root-relative", req: queryReq("SELECT id, name FROM small WHERE id = 5 AND live = 1"), noise: requestBody("query.literals.0"), exact: "query-read-small", notExact: "query-read-small"},
+		{name: "a COM_QUERY, its literal as listed", req: queryReq("SELECT id, name FROM small WHERE id = 5 AND live = 1"), noise: requestBody("body.query.literals.0"), exact: "query-read-small", notExact: "query-read-small"},
+		{name: "a COM_QUERY, another literal", req: queryReq("SELECT id, name FROM small WHERE id = 5 AND live = 1"), noise: requestBody("query.literals.1", "body.query.literals.1"), notExact: "query-read-small", nearest: "query-read-small"},
 	})
 }
 
