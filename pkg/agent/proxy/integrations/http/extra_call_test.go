@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -218,5 +219,53 @@ func TestAMissIsDiagnosedWhereItsRequestCame(t *testing.T) {
 	k.Name(zap.NewNop(), "c2", otherAddr)
 	if _, st := containerkey.StateFromContext(containerkey.WithConn(context.Background(), k, "c2")); st != containerkey.Keyed {
 		t.Fatalf("the next test's call to its own container was %v, want keyed: the miss used its connection's container in the next test", st)
+	}
+}
+
+// A call the test makes once more than it recorded is named as the
+// recording it repeats, so judging can tell which recording the
+// application's own clock made more often: of the test's copies of the
+// call, the one recorded last, whatever order they answered in or are named
+// in. Another recording in view, however like the call, is not named, nor
+// diffed against it: its difference would read as noise to declare, which
+// would answer the call with that recording's answer.
+func TestACallMoreThanRecordedIsNamedAsTheRecordingItRepeats(t *testing.T) {
+	const addr, host, path = "127.0.0.1:8099", "localhost:8099", "/internal/ordinals/recompute"
+	raw := "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\n\r\n"
+	at := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	copyOf := func(name string, recorded time.Time) *models.Mock {
+		m := onHost(name, path, host)
+		m.Spec.ReqTimestampMock = recorded
+		m.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "ok", Header: map[string]string{"Content-Length": "2"}}
+		return m
+	}
+	early, late := copyOf("mock-9", at), copyOf("mock-2", at.Add(time.Second))
+	inView := onHost("mock-5", path+"/all", host)
+	inView.Spec.HTTPResp = &models.HTTPResp{StatusCode: 200, Body: "all", Header: map[string]string{"Content-Length": "3"}}
+	store := func(answered ...*models.Mock) againDb {
+		return againDb{gateDb: gateDb{earlierDb: earlierDb{mockMemDb: &mockMemDb{mocks: []*models.Mock{inView}}}, consumed: answered}}
+	}
+
+	t.Setenv(provenswitch.Env, "1")
+	for _, answered := range [][]*models.Mock{{late, early}, {early, late}} {
+		status, _, r := answerOf(t, store(answered...), addr, raw)
+		if status != 502 || r.MissKind != models.MissExtraCall || r.Recorded != 2 || r.ClosestMock != "mock-2" {
+			t.Fatalf("answered %s then %s: got %d, reported %+v; want the extra-call miss of a call recorded twice, naming mock-2, recorded last",
+				answered[0].Name, answered[1].Name, status, r)
+		}
+		if len(r.FieldDiffs)+len(r.Differs) != 0 || r.ClosestMockReq != "" || !strings.Contains(r.NextSteps, "repeats mock-2") ||
+			strings.Contains(r.Diff+r.NextSteps, "mock-5") {
+			t.Fatalf("an extra call with mock-5 in view was diagnosed against it: %+v", r)
+		}
+	}
+
+	// Recorded once: it names that recording.
+	if _, _, r := answerOf(t, store(early), addr, raw); r.MissKind != models.MissExtraCall || r.Recorded != 1 || r.ClosestMock != "mock-9" {
+		t.Fatalf("a call recorded once made twice reported %+v; want the extra-call miss naming mock-9", r)
+	}
+	// A call the test never recorded is no extra call.
+	other := "GET /internal/leases/sweep HTTP/1.1\r\nHost: " + host + "\r\nAccept: application/json\r\n\r\n"
+	if _, _, r := answerOf(t, store(early, late), addr, other); r.MissKind == models.MissExtraCall || r.Recorded != 0 {
+		t.Fatalf("a call the test never recorded reported %+v; want a miss that is no extra call", r)
 	}
 }

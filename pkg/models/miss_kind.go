@@ -9,7 +9,9 @@ const (
 	MissInTest = "in_test"
 	// MissExtraCall is a call made while a test was open that is identical
 	// to a call the test's own mocks have already answered as many times as
-	// it was recorded: each test mock answers at most one request.
+	// it was recorded: each test mock answers at most one request. Its
+	// closest mock names the recording it repeats, of the test's copies of
+	// the call the one recorded last, and no other recording.
 	MissExtraCall = "extra_call"
 	// MissOutsideTest is a call made while no test was open that the pool
 	// slice served then does not answer. It is charged to the next test that
