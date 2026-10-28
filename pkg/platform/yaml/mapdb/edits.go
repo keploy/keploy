@@ -142,30 +142,35 @@ func (m *merger) mapping(old, cur *yamlLib.Node, level, where string) bool {
 
 // list brings old's hand edits into the items of cur, the list at itemLevel
 // old was, matching an old item to the new one with its identity
-// (identityKeys); an item the rewrite dropped takes its edits with it.
+// (identityKeys): the n-th old item of an identity to the n-th new one, so
+// an identity the list holds twice (a mock a test lists twice) keeps each
+// item's edits on its own item. An item the rewrite dropped takes its edits
+// with it.
 func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 	if old == nil || cur == nil || old.Kind != yamlLib.SequenceNode || cur.Kind != yamlLib.SequenceNode {
 		return false
 	}
 	keys := identityKeys(itemLevel)
-	byID := map[string]*yamlLib.Node{}
-	twice := map[string]bool{}
+	byID := map[string][]*yamlLib.Node{}
 	for _, item := range cur.Content {
 		if id := identity(item, keys); id != "" {
-			if byID[id] != nil {
-				twice[id] = true
-			}
-			byID[id] = item
+			byID[id] = append(byID[id], item)
 		}
 	}
 	changed := false
+	nth := map[string]int{}
 	for _, item := range old.Content {
 		item = resolved(item)
 		id := identity(item, keys)
-		c := byID[id]
-		if id == "" || c == nil || twice[id] {
+		if id == "" {
 			continue
 		}
+		n := nth[id]
+		nth[id]++
+		if n >= len(byID[id]) {
+			continue
+		}
+		c := byID[id][n]
 		if keepComments(item, c) {
 			changed = true
 		}
