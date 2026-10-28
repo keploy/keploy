@@ -241,6 +241,49 @@ type InFlightReader interface {
 	InFlightState(answers bool) (pending int, unknown []string)
 }
 
+// InFlightScoper is the optional extension of an InFlightReader whose wait
+// can be kept to the connections a settle began with (InFlightScope), so
+// that an application that keeps calling cannot hold a test's end.
+type InFlightScoper interface {
+	// InFlightScope keeps the accepted connections now: once every
+	// connection and byte a settle waits for is in the proxy's hands, the
+	// connections that can hold its calls.
+	InFlightScope() InFlightScope
+}
+
+// InFlightWindower is the optional extension of an InFlightScoper whose
+// scopes can leave out the requests opened before a test's window began.
+type InFlightWindower interface {
+	// InFlightBeginWindow cuts, on every connection kept now, what its
+	// socket has received: an InFlightScope cut from then on leaves out the
+	// requests its parser held by the time its reads passed that cut (an
+	// HTTP/2 or gRPC stream is held from its opening frame, so one opened
+	// before the window began, still sending or not, is not the test's),
+	// until the next InFlightBeginWindow.
+	InFlightBeginWindow()
+}
+
+// InFlightScope is InFlightState and InFlightPendingProgress over the
+// connections kept when it began, each with the bytes it had received then,
+// until they are taken and, in a replay, answered: a connection accepted
+// later never counts, nor bytes one receives later (the application's next
+// call on it). unknown names every protocol whose parser, as its connection
+// was seen done, could not say what it held.
+//
+// GiveUp is a settle's watchdog giving up on the connections it found stuck
+// (PendingProgress's ids): the work each still holds is charged to that
+// settle, with words, one per connection, saying what it held, and no later
+// scope waits for it while its handler has not passed it. Behind names each
+// connection a scope so left out that has received bytes since they were
+// last charged (calls the application queued behind the lost work); its
+// charge charges them.
+type InFlightScope interface {
+	State(answers bool) (pending int, unknown []string)
+	PendingProgress(answers bool) map[uint64]uint64
+	GiveUp(ids []uint64, answers bool) []string
+	Behind() (conns []string, charge func())
+}
+
 // PairedBytesWaiter is the optional extension of a proxy that holds the
 // connections the kernel paired with the application's (under the proven
 // switch) and can wait for the bytes on them: WaitPairedBytes returns once

@@ -921,6 +921,15 @@ func (a *Agent) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 			// keploy test reads a test case's misses after its end: what the
 			// listener dropped since is no test's, and is not compared here.
 			_, settleErr = a.settle(ctx, true)
+			// A read whose watchdog gave up on connections it found stuck
+			// (only the proven switch's settle gives up per connection)
+			// says which, and what each held, as a test's end does: the
+			// read's caller reports its misses unknown and points to
+			// this log for why.
+			var g gaveUp
+			if errors.As(settleErr, &g) {
+				a.logger.Warn("keploy's agent made no progress settling the application's calls before reading the misses; it gave up on them, so this read cannot vouch for every miss", zap.Strings("connections", g.held))
+			}
 			if lost := a.countingLost(); settleErr == nil && lost != nil {
 				// Dropped while it settled: a call accepted since is not
 				// kept, so the settle could not have seen it.
