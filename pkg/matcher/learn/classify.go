@@ -113,6 +113,32 @@ type Earlier struct {
 	// application its earlier answers in reads (recordedOrder). Nothing else
 	// reads it: the leaves are the exchange's.
 	Payload Raw
+	// AsRecorded: the adapter that served the exchange says F served it as
+	// recorded, byte for byte: the application sent its request as
+	// recorded, every part of it, and F gave it the recorded answer, every
+	// part of it (no variable, template value or clock stamp of F's own),
+	// as Raw.ServedAsRecorded says it. Every Seen then holds its leaf's
+	// recorded value (servedAsRecorded). false says nothing: what F gave
+	// the application there is read from Seen alone, and a later call reads
+	// the recording as one whose view no adapter stated (Raw.viewUnstated).
+	AsRecorded bool
+}
+
+// servedAsRecorded reports whether e's adapter said F served it as recorded
+// (AsRecorded) and every leaf it saw bears it out: a Seen whose live value
+// is not its recorded one says the adapter was wrong, and nothing is read as
+// served as recorded (fail closed). The test case's own request (Given) is
+// no serve.
+func (e Earlier) servedAsRecorded() bool {
+	if !e.AsRecorded || e.Given {
+		return false
+	}
+	for _, s := range e.Seen {
+		if s.Live != s.Leaf.Value {
+			return false
+		}
+	}
+	return true
 }
 
 // Raw is any other mock of the test's recording, of any kind: served earlier
@@ -977,7 +1003,13 @@ func leafedAtCall(earlier []Earlier, at time.Time) (kept []Earlier, late []Raw) 
 // there counts. An exchange whose payload could not be read, or that came
 // with none, is a recording whose text cannot be told: every drift is
 // refused with payloadUnread's reason (rawUnread), never learned on the
-// strength of its absence.
+// strength of its absence. Where its adapter said F served it as recorded
+// (Earlier.servedAsRecorded), both are read so (Raw.ServedAsRecorded): what
+// F served at its leaves is then its recording's own text. Otherwise F's
+// view of the payload is one no adapter stated (Raw.viewUnstated), and so is
+// that of what F served at its answer's leaves, which says nothing of the
+// parts of the answer that are no leaf: a word a value holds now that may
+// stand there is refused (fail closed).
 func (e Earlier) lateOf(late bool) []Raw {
 	x := e.Payload
 	if !x.isRead() {
@@ -988,9 +1020,13 @@ func (e Earlier) lateOf(late bool) []Raw {
 	if a, ok := e.servedAnswer(); ok {
 		out = append(out, a)
 	}
+	asRecorded := e.servedAsRecorded()
 	for i := range out {
 		out[i] = out[i].OfAnotherTest()
 		out[i].late = late
+		if asRecorded {
+			out[i] = out[i].ServedAsRecorded()
+		}
 	}
 	return out
 }

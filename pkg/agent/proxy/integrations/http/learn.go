@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"mime/multipart"
 	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1058,10 +1060,14 @@ func earlierRaw(dc *learn.DriftCache, paired *models.Mock, served, given, visibl
 		read[id] = true
 		return true
 	}
+	// A mock F served is read with the view its adapters stated of its
+	// serves (learn.Order.ServedView): as recorded where every serve of it
+	// was told so; otherwise a view no adapter stated, refused where it may
+	// have given a word (fail closed).
 	add := func(m *models.Mock, servedByF bool, span [2]int) {
 		r := lazyRaw(dc, m, servedByF)
 		if servedByF {
-			r = r.ServedIn(span[0], span[1])
+			r = order.ServedView(m, r.ServedIn(span[0], span[1]))
 		}
 		out = append(out, r)
 	}
@@ -2305,7 +2311,45 @@ func earlierOf(dc *learn.DriftCache, m, recorded *models.Mock, rec, live learn.S
 		}
 		return e.Seen[i].Leaf.Path < e.Seen[j].Leaf.Path
 	})
+	// F served it as recorded where the application sent the recorded
+	// request, every part the learn step reads of it (requestAsRecorded; the
+	// headers the comparison excuses are Seen too: withExcused), and F gave
+	// it the recorded answer whole (answerAsRecorded): the view a later call of
+	// the set reads the recording with (learn.Earlier.AsRecorded,
+	// learn.Order.ServedView). Anything else is a view keploy does not
+	// state, and fails closed there.
+	e.AsRecorded = served != nil && requestAsRecorded(rec, live) && answerAsRecorded(m.Spec.HTTPResp, served.Spec.HTTPResp)
 	return e
+}
+
+// requestAsRecorded reports whether a request read as live is the one
+// recorded as rec, every part its shape reads: its operation key, the parts
+// compared whole and each leaf, by path, type and value.
+func requestAsRecorded(rec, live learn.Shape) bool {
+	if rec.Key != live.Key || !maps.Equal(rec.Fixed, live.Fixed) || len(rec.Leaves) != len(live.Leaves) {
+		return false
+	}
+	for p, r := range rec.Leaves {
+		l, ok := live.Leaves[p]
+		if !ok || l.Type != r.Type || l.Value != r.Value {
+			return false
+		}
+	}
+	return true
+}
+
+// answerAsRecorded reports whether the answer F served is the recorded one,
+// byte for byte where the application reads it: its status, protocol,
+// headers and body, streamed or not. false where either is missing.
+func answerAsRecorded(rec, served *models.HTTPResp) bool {
+	if rec == nil || served == nil {
+		return false
+	}
+	return rec.StatusCode == served.StatusCode && rec.StatusMessage == served.StatusMessage &&
+		rec.ProtoMajor == served.ProtoMajor && rec.ProtoMinor == served.ProtoMinor &&
+		maps.Equal(rec.Header, served.Header) && rec.Body == served.Body && rec.Binary == served.Binary &&
+		rec.BodySkipped == served.BodySkipped && rec.BodySize == served.BodySize &&
+		reflect.DeepEqual(rec.StreamBody, served.StreamBody)
 }
 
 // paramNames are the names of a request's parameters, as its shape reads
