@@ -254,6 +254,8 @@ type TestReceipt struct {
 	// its misses, the recorded calls of its mapping it never made, and the
 	// connections keploy could not capture; or what left it not judged
 	// (CannotCapture: a call keploy cannot capture at all, a Unix socket).
+	// A miss that is a recording another test owns names that test
+	// (recorded_in, withRecordedIn).
 	Evidence *models.ScopeEvidence `yaml:"evidence,omitempty" json:"evidence,omitempty"`
 	// Real is, under the proven wire, the mock.real destinations the test
 	// used while it was open: its REAL rows (design v14 §4).

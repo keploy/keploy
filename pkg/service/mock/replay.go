@@ -1167,6 +1167,7 @@ func (m *mockService) pushProvenTable(ctx context.Context, name string, loaded, 
 	if err := pp.PushProvenTable(ctx, table, pool); err != nil {
 		return refuse("its agent refused the per-test table: " + err.Error())
 	}
+	m.mockOwners = models.MockOwners(table)
 	m.logger.Info("per-test scoping enabled", zap.Int("tests", len(table)), zap.Int("pool slices", len(pool)), zap.String("mock-set", name))
 	return nil
 }
@@ -2023,6 +2024,15 @@ func (m *mockService) reportOutcome(ctx context.Context, loaded int, detail repl
 		counts.missesUnread = models.UnreadCause(missesErr)
 	}
 	counts.tests = withRealListed(withReal(withEvidence(testReceipts(flows, consumedErr == nil, missesErr == nil), detail.windows), detail.windows), m.realListed)
+	// Under the proven switch a miss whose closest recording another test
+	// owns names that test, as keploy test's replay does (markRecordedIn):
+	// judging lists it as the root of the test's entry.
+	if named := withRecordedIn(counts.tests, m.mockOwners); len(named) > 0 {
+		m.logger.Warn("tests made a call that another test recorded: likely, at record time that test made it on a connection it opened, whose handshake was recorded there (KEPLOY_PROVEN=1); each is named under evidence.misses.recorded_in in "+TestsReceiptFile,
+			zap.String("mock-set", m.setName()),
+			zap.Strings("calls", named[:min(len(named), 20)]),
+			zap.String("next_step", "record the set again with keploy mock record so each test opens the connections it uses, or keep the application's connection reuse as it was when recording"))
+	}
 	for i := range counts.tests {
 		counts.tests[i].Learned = learned[counts.tests[i].Name]
 	}
@@ -2134,6 +2144,30 @@ func withEvidence(tests []TestReceipt, windows []models.ScopeWindow) []TestRecei
 		}
 	}
 	return tests
+}
+
+// withRecordedIn names, on each miss of tests' evidence that is a recording
+// its test does not own (NotOwned, ClosestMock), the other test that owns it
+// (owners: models.MockOwners of the table the replay pushed), as keploy
+// test's replay does (models.UnmatchedCall.NameRecordedIn). The evidence is
+// withEvidence's own copy, never the windows'. It returns
+// "test: call (closest mock, recorded in test)" for each it named. With the
+// switch off owners is nil and no miss is NotOwned: nothing changes.
+func withRecordedIn(tests []TestReceipt, owners map[string][]string) []string {
+	var named []string
+	for i := range tests {
+		ev := tests[i].Evidence
+		if ev == nil {
+			continue
+		}
+		for j := range ev.Misses {
+			c := &ev.Misses[j]
+			if c.NameRecordedIn(tests[i].Name, owners) {
+				named = append(named, fmt.Sprintf("%s: %s (%s, recorded in %s)", tests[i].Name, c.ActualSummary, c.ClosestMock, c.RecordedIn))
+			}
+		}
+	}
+	return named
 }
 
 // testReceipts is each test's line in the receipt: its verdict and what it
