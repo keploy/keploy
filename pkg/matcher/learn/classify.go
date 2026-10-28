@@ -1458,8 +1458,7 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// read with the rule, it would stay the variable by the same
 		// timing. A copy its own window does not hold stays the variable
 		// (the copy alone explains it), and so does anything else learned
-		// as a value with no source (noise, an echo, a read plus an offset
-		// of its own, a refusal). So does a whole copy of what an earlier
+		// as a value with no source (noise, an echo, a refusal). So does a whole copy of what an earlier
 		// answer gave the application (Place.givenWhole: a dependency's
 		// createdAt, or its expiresAt), which the application does not make
 		// again: a replay serves that answer as recorded, so the copy then
@@ -1479,18 +1478,18 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 		// offset rule refuses (offset.go: an instant the recording gave the
 		// application, and the one record's full round gave it in its place,
 		// each that offset before the value) that, read without that rule,
-		// is a plain read of the clock its call's window holds in both runs,
-		// is learned as a read of the clock since its test began
-		// (models.SinceTestBegin), never refused. Both explanations hold in
-		// the rounds (a start-up recording's stamp, minutes before the test
-		// began, that F's start-up wrote as many minutes before F's), and
+		// is a read of the clock, or of the clock plus one constant offset,
+		// its call's window holds in both runs (sinceTestBegin), is learned
+		// as that read since its test began (models.SinceTestBegin), never
+		// refused. Both explanations hold in the rounds (a start-up
+		// recording's stamp, minutes before the test began, that record's
+		// full round's start-up wrote as many minutes before its own), and
 		// that read holds under both: a replay passes the value only inside
 		// its test's span on the application's clock, whichever it was built
 		// on. Refused, the test would be set aside for a place a replay can
 		// check. A value its own window does not hold stays refused (the
 		// offset alone explains it), and so does anything else the value
-		// reads as without the rule (noise, a read plus an offset of its
-		// own, another refusal).
+		// reads as without the rule (noise, another refusal).
 		if wb := w.sinceBegin(); follow && ln.Kind == KindUnaccounted && wb != nil {
 			if own, ok := sinceTestBegin(leaf(r, l, w, skipOffset)); ok {
 				ln = own
