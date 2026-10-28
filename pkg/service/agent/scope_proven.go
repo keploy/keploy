@@ -1625,11 +1625,12 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		return !beganAt.IsZero() && !m.At.IsZero() && m.At.Before(beganAt)
 	}
 	// One call made more often than recorded is said once: how often the
-	// test made it, and how often it was recorded.
+	// test made it, how often it was recorded, and the recording it repeats
+	// (its miss's closest, models.MissExtraCall).
 	extra := map[string]int{}
 	for _, m := range ev.Misses {
 		if m.Kind == models.MissExtraCall && !before(m) {
-			extra[missText(m)]++
+			extra[extraKey(m)]++
 		}
 	}
 	for _, m := range ev.Misses {
@@ -1641,10 +1642,10 @@ func evidenceReason(id string, ev *models.ScopeEvidence, mocks map[string]*model
 		}
 		switch m.Kind {
 		case models.MissExtraCall:
-			call := missText(m)
-			if n, ok := extra[call]; ok {
-				what = append(what, fmt.Sprintf("%s was called %d times, recorded %d", call, m.Recorded+n, m.Recorded))
-				delete(extra, call)
+			key := extraKey(m)
+			if n, ok := extra[key]; ok {
+				what = append(what, fmt.Sprintf("%s was called %d times, recorded %d%s", missText(m), m.Recorded+n, m.Recorded, repeatsText(m)))
+				delete(extra, key)
 			}
 		case models.MissOutsideTest:
 			if !beganAt.IsZero() && !m.At.IsZero() {
@@ -1782,6 +1783,22 @@ func missDiffersText(m models.UnmatchedCall) string {
 		return " (" + strings.Join(whys, "; ") + ")"
 	}
 	return strings.TrimSuffix(t, ")") + ": " + strings.Join(whys, "; ") + ")"
+}
+
+// extraKey is one call made more often than recorded (models.MissExtraCall),
+// as a reason says it once: the call, and the recording it repeats.
+func extraKey(m models.UnmatchedCall) string {
+	return missText(m) + "\x00" + m.ClosestMock
+}
+
+// repeatsText names, for a reason's line of one call made more often than
+// recorded, the recording it repeats (its miss's closest,
+// models.MissExtraCall): " (it repeats mock-2)"; "" when the miss names none.
+func repeatsText(m models.UnmatchedCall) string {
+	if m.ClosestMock == "" {
+		return ""
+	}
+	return " (it repeats " + m.ClosestMock + ")"
 }
 
 // differsText names, for a miss's reason, the fields in which the call

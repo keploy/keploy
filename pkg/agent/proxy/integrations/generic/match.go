@@ -126,23 +126,25 @@ func fuzzyMatch(ctx context.Context, logger *zap.Logger, reqBuff [][]byte, mockD
 // matches the pool (fuzzyMatch): exactly. An exchange merely like one the
 // test answered is a changed exchange, not one more. It returns how many
 // times the test recorded that exchange, 0 when it is not one or exact
-// serving is off.
-func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) int {
+// serving is off, and the recording it repeats: of the test's answered
+// recordings of the exchange, the one recorded last
+// (integrations.RepeatedRecording).
+func extraCall(reqBuffs [][]byte, mockDb integrations.MockMemDb) (int, *models.Mock) {
 	answered := answeredExchanges(mockDb)
 	if len(answered) == 0 {
-		return 0
+		return 0, nil
 	}
 	idx := findExactMatch(answered, reqBuffs, true)
 	if idx == -1 {
-		return 0
+		return 0, nil
 	}
-	n := 0
+	var copies []*models.Mock
 	for _, mk := range answered {
 		if sameRequests(mk.Spec.GenericRequests, answered[idx].Spec.GenericRequests) {
-			n++
+			copies = append(copies, mk)
 		}
 	}
-	return max(n, 1)
+	return len(copies), integrations.RepeatedRecording(copies)
 }
 
 // backgroundAgain is, for an exchange no mock answered under exact serving
