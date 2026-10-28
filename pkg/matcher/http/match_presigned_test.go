@@ -295,6 +295,37 @@ func TestMatch_PresignedURLStillComparesEverythingButTheSignature(t *testing.T) 
 	}
 }
 
+// Only a URL that reads as a SigV4 presigned URL has its signature and token
+// skipped. One whose signature is not 64 lowercase hex characters, or whose
+// X-Amz-Date does not parse, is compared whole, so two such URLs that differ
+// only in those values do not match.
+func TestMatch_APresignedURLOutsideTheGrammarIsComparedWhole(t *testing.T) {
+	sig := func(u, s string) string { return u[:strings.LastIndex(u, "=")+1] + s }
+	badDate := func(u string) string {
+		out := strings.Replace(u, "X-Amz-Date="+psAt.Format("20060102T150405Z"), "X-Amz-Date=20261328T120000Z", 1)
+		if out == u {
+			t.Fatal("precondition: the URL has no X-Amz-Date to replace")
+		}
+		return out
+	}
+	rec, live := presign(psDefaults(psSecret, psToken)), presign(psDefaults(psStandIn, psTokenAlt))
+	rows := map[string][2]string{
+		"a 64-character signature that is not hex": {sig(rec, strings.Repeat("g", 64)), sig(rec, strings.Repeat("h", 64))},
+		"a short hex signature":                    {sig(rec, "0123456789abcdef"), sig(rec, "fedcba9876543210")},
+		"an X-Amz-Date that does not parse":        {badDate(rec), badDate(live)},
+	}
+	for name, urls := range rows {
+		t.Run(name, func(t *testing.T) {
+			eachSwitch(t, func(t *testing.T) {
+				tc, actual := psCase(jsonBody(t, map[string]string{"url": urls[0]}), jsonBody(t, map[string]string{"url": urls[1]}), nil, nil, 200)
+				if psMatch(tc, actual) {
+					t.Fatalf("two URLs with %s, differing only in their signature and token, matched", name)
+				}
+			})
+		})
+	}
+}
+
 // Another algorithm (SigV4A) is no SigV4 presigned URL: compared whole.
 func TestMatch_ASigV4APresignedURLIsComparedWhole(t *testing.T) {
 	sigV4A := func(u string) string {
