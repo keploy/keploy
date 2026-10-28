@@ -13,12 +13,12 @@ import "errors"
 //     waiting in the accept queue.
 //   - Accepted: every connection numbered up to it has been accepted by the
 //     proxy's listener. Read before Established, it is never higher.
-//   - ListenDrops: the packets the kernel's TCP layer dropped at the proxy's
-//     listener (its sk_drops): a SYN or a final ACK it could not take, its
-//     accept queue full among the causes. A connection dropped so is in
-//     neither proxy-side count until the client's retransmission completes
-//     it, so a test during which this grew is not verified: any change
-//     between two reads is a drop.
+//   - ListenDrops: what the kernel's TCP layer dropped at the proxy's
+//     listener (models.ListenDrops): a SYN or a final ACK it could not take,
+//     its SYN or accept queue full among the causes. A connection dropped so
+//     is in neither proxy-side count until the client's retransmission
+//     completes it, so a test during which such a drop happened is charged
+//     it as its own capture loss (CaptureLossListenerDropped): not judged.
 //   - AppConns: the application's own connections to the proxy (the ones
 //     keploy redirected) whose connect() has returned, numbered by the
 //     kernel as they do. One is in this count before its final ACK reaches
@@ -33,11 +33,38 @@ import "errors"
 // is in the proxy's hands before the test is judged (design v14 §5.2,
 // verify-v14 M1).
 type ProxyConnCounts struct {
-	Established uint64 `json:"established"`
-	Accepted    uint64 `json:"accepted"`
-	ListenDrops uint64 `json:"listen_drops"`
-	AppConns    uint64 `json:"app_conns"`
-	AppSettled  uint64 `json:"app_settled"`
+	Established uint64      `json:"established"`
+	Accepted    uint64      `json:"accepted"`
+	ListenDrops ListenDrops `json:"listen_drops"`
+	AppConns    uint64      `json:"app_conns"`
+	AppSettled  uint64      `json:"app_settled"`
+}
+
+// ListenDrops are the kernel's two counts of what it dropped at the proxy's
+// listener, each only ever growing:
+//
+//   - Listener: the listener's own sk_drops. Every drop that can lose a
+//     connection is in it (tcp_listendrop: a SYN or final ACK the listener's
+//     SYN or accept queue had no room for, a child socket it could not
+//     make), but so are packets that lose nothing: a client that closed its
+//     connect before the handshake finished (it resets the half-open
+//     connection: the process exited, or gave up on a slow handshake), a
+//     SYN retransmitted to a handshake already under way, a packet out of
+//     its window.
+//   - Net: the network namespace's TcpExtListenDrops (/proc/net/netstat),
+//     which only those that can lose a connection raise, at any listener of
+//     the namespace. NetKnown says it was read; NetUnread says why not.
+//
+// A drop that can lose a connection raises both, so a window charges the
+// smaller of the two rises (the agent's chargeDrops): a client that gave up its connect
+// raises the listener's count alone and is charged nothing, and a drop at
+// another listener of the namespace raises Net alone. With Net unread every
+// rise of the listener's count is charged.
+type ListenDrops struct {
+	Listener  uint64 `json:"listener"`
+	Net       uint64 `json:"net,omitempty"`
+	NetKnown  bool   `json:"net_known,omitempty"`
+	NetUnread string `json:"net_unread,omitempty"`
 }
 
 // Waiting is how many of the counted connections the proxy has not accepted

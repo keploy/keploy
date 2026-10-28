@@ -259,14 +259,15 @@ func (a *Agent) serveKeployTestExactly(ctx context.Context, params models.MockFi
 	case ex.Test != "":
 		// A test case opens all the same with a connection whose held
 		// requests cannot be told: its end finds it. The listener's drops
-		// read now are what its end compares.
+		// read now close the gap's window, whose drops are this test case's
+		// (markDrops), and open its own: they are what its end compares.
 		drops, err := a.settle(ctx, true)
 		if err != nil && !errors.Is(err, errHoldsUnknown) {
 			return err
 		}
 		// Its end waits only for the requests opened from here.
 		a.beginWindow()
-		a.markDrops(drops)
+		a.markDrops(ctx, drops)
 	default:
 		// A test case that ends is served the pool whatever its settling
 		// found, and told it is not verified when keploy cannot tell its

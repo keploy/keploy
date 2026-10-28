@@ -13,8 +13,10 @@ import (
 // only ever growing for its life (models.CaptureLosses): the processes the
 // kernel refused a place in the PID maps (the hooks), the calls the proxy
 // intercepted and could not record or mock (a TLS client that rejected
-// keploy's certificate, a TLS upgrade it could not make), and a downstream
-// build's own (coreAgent.RegisterCaptureLossReporter). Each later source
+// keploy's certificate, a TLS upgrade it could not make), what the kernel
+// dropped at the proxy's listener that the tests' ends charged them
+// (settledSince), and a downstream build's own
+// (coreAgent.RegisterCaptureLossReporter). Each later source
 // (design v14 §3.2) adds its kind here. With neither source able to
 // count it gives models.ErrCaptureLossesUnsupported, "unknown"; a count that
 // could not be read is its own error.
@@ -40,6 +42,9 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 	if proxyCounts && a.Proxy != nil {
 		out = append(out, proxy.CaptureLosses()...)
 	}
+	// What the kernel dropped at the proxy's listener in the windows the
+	// tests' ends closed (settledSince), each test's own.
+	out = append(out, a.listenerDrops.Snapshot()...)
 	// The hooks' own: the application's connections lost before the proxy
 	// got them, and its AF_UNIX connects to sockets no member of it owns
 	// (under the proven switch; none otherwise).
@@ -86,6 +91,20 @@ func (a *Agent) CaptureLosses(ctx context.Context) (models.CaptureLosses, error)
 		}
 	}
 	return mergeKinds(out), nil
+}
+
+// countsCaptureLosses says the agent's capture losses can be read: CaptureLosses
+// gives no models.ErrCaptureLossesUnsupported, as its proxy counts them, a
+// downstream build's capture does, or its hooks count the PID maps' refusals.
+func (a *Agent) countsCaptureLosses(ctx context.Context) bool {
+	if _, ok := a.Proxy.(coreAgent.CaptureLossReporter); ok && a.Proxy != nil {
+		return true
+	}
+	if len(coreAgent.CaptureLossReporters()) > 0 {
+		return true
+	}
+	_, err := a.PIDMapRefusals(ctx)
+	return !errors.Is(err, models.ErrPIDMapRefusalsUnsupported)
 }
 
 // mergeKinds is l with one entry per kind, in the order each kind first comes:
@@ -151,6 +170,9 @@ func (a *Agent) markCaptureLosses(ctx context.Context) captureLossMark {
 // run on it (design v14 §7.5: evidence charged to no test). A standing state
 // (unix_unseen) is kept by every mark and is in it whatever was charged.
 func (a *Agent) UnchargedCaptureLosses(ctx context.Context) (models.CaptureLosses, error) {
+	// What the listener dropped after the last test is counted first
+	// (closeDropsGap), as every loss after it is.
+	a.closeDropsGap(ctx)
 	a.provenMu.Lock()
 	mark, charged, outside := a.proven.losses, a.proven.lossesCharged, a.proven.unreadOutside
 	a.provenMu.Unlock()

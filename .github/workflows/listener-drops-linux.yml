@@ -1,0 +1,80 @@
+name: Listener Drops (Linux)
+# Guard: keploy charges a test for what the kernel dropped at its proxy's
+# listener only when the drop can lose a connection (a SYN or final ACK its
+# SYN or accept queue had no room for): such a drop raises both the
+# listener's sk_drops and its network namespace's TcpExtListenDrops. A client
+# that closed its connect before the handshake finished (its process exited
+# mid-connect, as go test's -timeout does) raises the listener's count alone,
+# and must leave the test judged.
+#
+# The rows run as root, each in a network namespace of its own, on amd64 and
+# arm64: an abandoned connect (a raw SYN whose SYN-ACK only a reset meets)
+# raises the listener's drops and not the namespace's; a full accept queue
+# raises both; a listener in another network namespace than the agent's has
+# its namespace's count unread (so its drops are never charged as none); and
+# a namespace count whose netstat cannot be read is unread with why, never 0
+# (as root the listener's namespace is told, so CI reaches that check; a
+# normal user is refused SIOCGSKNS first). The rule that charges a window
+# (chargeDrops) is unit-tested in pkg/service/agent.
+#
+# Then the e2e row, under the proven switch, of an app whose test abandons a
+# connect mid-handshake (a child killed while the proxy's SYN-ACK to it is
+# held), as a process killed in a connect on a loaded host does: the
+# listener's drops rise, the namespace's do not. In an SDK-driven keploy mock
+# record (each test in its window on keploy's scope API), every window closes
+# passed with nothing charged; in keploy test, every test is judged and
+# passes (test_workflow_scripts/golang/listener-drop/proven-abandoned-connect-linux.sh).
+on:
+  workflow_call:
+
+jobs:
+  listener_drops:
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    name: listener-drops (root, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install dependencies
+        run: |
+          source "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/go-retry.sh"
+          go_retry mod download
+
+      # Compiled as the runner user, run as root: each row makes a network
+      # namespace and sends a SYN through a raw socket.
+      - name: Build the listener drops integration test
+        run: go test -c -race -tags listendrops_integration -o /tmp/listendrops.test ./pkg/agent/proxy/
+
+      # A -run that matches nothing exits 0, so each row's PASS line is
+      # required explicitly.
+      - name: Run the listener drops integration test (root)
+        run: |
+          set -o pipefail
+          uname -r
+          sudo /tmp/listendrops.test -test.run 'TestAConnectAbandonedMidHandshakeRaisesTheListenersDropsAlone|TestAFullAcceptQueueRaisesBothDropCounts|TestAListenerInAnotherNamespaceHasItsNamespaceCountUnread|TestANamespaceCountNotReadIsUnreadNeverNone' -test.v -test.timeout 5m | tee /tmp/listendrops.out
+          for t in TestAConnectAbandonedMidHandshakeRaisesTheListenersDropsAlone TestAFullAcceptQueueRaisesBothDropCounts TestAListenerInAnotherNamespaceHasItsNamespaceCountUnread TestANamespaceCountNotReadIsUnreadNeverNone; do
+            grep -q -- "^--- PASS: $t" /tmp/listendrops.out || { echo "::error::$t did not pass"; exit 1; }
+          done
+
+      # keploy itself, from this commit (race, as the native lanes run it).
+      - name: Build keploy
+        env:
+          CGO_ENABLED: "1"
+        run: go build -race -tags=viper_bind_struct -o /tmp/keploy-bin .
+
+      - name: Run the abandoned connect e2e (mock record's windows and keploy test stay judged)
+        env:
+          RECORD_BIN: /tmp/keploy-bin
+          REPLAY_BIN: /tmp/keploy-bin
+        run: |
+          uname -r
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/listener-drop/proven-abandoned-connect-linux.sh"

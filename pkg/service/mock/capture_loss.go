@@ -96,12 +96,28 @@ func (m *mockService) runLosses(ctx context.Context, base lossBase, lost models.
 // failed handshake, which is only its own test's; this is the run's own
 // verdict, which also covers a loss outside every test. An error is a count
 // that could not be read, at the start or now.
+//
+// What the kernel dropped at keploy's proxy listener after the last test is
+// counted only when the agent closes the drops' window no test holds, which
+// its read of the losses no test was charged with does (the agent's
+// closeDropsGap). That read is made first, so this one has those drops,
+// where every other loss after the last test is: a record's warning and its
+// per-test file's CannotCapture say them, as they do a TLS handshake
+// abandoned at the same moment. A test still open (its process went away;
+// the record's read of the windows ends it) keeps its drops to its end.
+// If that read fails, this one goes on without those drops, as runLosses
+// goes on without it (an agent older than it has no such drops).
 func (m *mockService) captureLossesDuring(ctx context.Context, base lossBase) (models.CaptureLosses, error) {
 	if !base.checked {
 		return nil, nil
 	}
 	if base.err != nil {
 		return nil, fmt.Errorf("before the test command ran: %w", base.err)
+	}
+	if un, ok := m.instrumentation.(UnchargedLossReader); ok {
+		if _, err := un.GetUnchargedCaptureLosses(ctx); err != nil {
+			m.logger.Debug("keploy's agent could not count what its proxy listener dropped after the last test before its read of the run's capture losses", zap.Error(err))
+		}
 	}
 	reader := m.instrumentation.(CaptureLossReader)
 	now, err := reader.GetCaptureLosses(ctx)

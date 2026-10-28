@@ -109,8 +109,10 @@ type settledProxy struct {
 	sig      chan struct{}
 	// unknown: protocols whose held requests cannot be told.
 	unknown []string
-	// drops: the packets the kernel dropped at the listener.
-	drops uint64
+	// drops: the packets the kernel dropped at the listener; netDrops: its
+	// network namespace's ListenDrops, and netUnread why they cannot be read.
+	drops, netDrops uint64
+	netUnread       string
 	// bytesWait, when set, is WaitPairedBytes; bytesProgress its progress.
 	bytesWait     func(context.Context, uint64) error
 	bytesProgress atomic.Uint64
@@ -139,10 +141,10 @@ func (s *settledProxy) Accepted() (uint64, error) {
 	return s.accepted, nil
 }
 
-func (s *settledProxy) ListenDrops() (uint64, error) {
+func (s *settledProxy) ListenDrops() (models.ListenDrops, error) {
 	s.smu.Lock()
 	defer s.smu.Unlock()
-	return s.drops, nil
+	return models.ListenDrops{Listener: s.drops, Net: s.netDrops, NetKnown: s.netUnread == "", NetUnread: s.netUnread}, nil
 }
 
 func (s *settledProxy) WaitAccepted(ctx context.Context, n uint64) error {
@@ -452,6 +454,68 @@ func TestTheSettleWatchdogFiresForTheOneThatDoesNotMove(t *testing.T) {
 	}
 	wake()
 	require.ErrorIs(t, context.Cause(ctx), errNoProgress, "a stuck connection beside a busy one")
+}
+
+// chargeDrops charges a window the drops that can lose a connection: those
+// that raised both the listener's count and its namespace's, never one that
+// raised the listener's alone (an abandoned connect, a retransmitted SYN) or
+// the namespace's alone (another listener). A drop whose two rises land on
+// either side of a window's end is charged to the next window, never to
+// none; what a window leaves unpaired is carried one window only. With the
+// namespace's count unread, or a count that went back, every rise counts.
+func TestChargeDropsChargesWhatCanLoseAConnection(t *testing.T) {
+	known := func(l, n uint64) models.ListenDrops { return models.ListenDrops{Listener: l, Net: n, NetKnown: true} }
+	unread := func(l uint64) models.ListenDrops { return models.ListenDrops{Listener: l, NetUnread: "no"} }
+	// A step is a window to its end's counts, now, and what it is charged;
+	// gap says it is no test's (the gap from a test's end to the next begin).
+	type step struct {
+		now  models.ListenDrops
+		want uint64
+		gap  bool
+	}
+	for _, c := range []struct {
+		name  string
+		start models.ListenDrops
+		steps []step
+	}{
+		{"an accept queue full at a SYN", known(3, 9), []step{{known(4, 10), 1, false}}},
+		{"an accept queue full at the final ACK: two at the listener, one in the namespace", known(0, 0), []step{{known(2, 1), 1, false}}},
+		{"five abandoned connects", known(0, 0), []step{{known(5, 0), 0, false}}},
+		{"another listener of the namespace", known(0, 0), []step{{known(0, 3), 0, false}}},
+		{"abandoned connects beside a real drop", known(0, 0), []step{{known(7, 1), 1, false}}},
+		{"a real drop beside another listener's: more, never fewer", known(0, 0), []step{{known(2, 3), 2, false}}},
+		{"the listener's rise first, the namespace's after the end", known(0, 0), []step{{known(1, 0), 0, false}, {known(1, 1), 1, false}}},
+		{"the namespace's rise first, the listener's after the end", known(0, 0), []step{{known(0, 1), 0, false}, {known(1, 1), 1, false}}},
+		{"what a test's own rises leave unpaired is carried one window only", known(0, 0), []step{{known(1, 0), 0, false}, {known(1, 0), 0, false}, {known(1, 1), 0, false}}},
+		{"the listener's rise in a test, the namespace's after the next begin: the next test's", known(0, 0), []step{{known(1, 0), 0, false}, {known(1, 0), 0, true}, {known(1, 1), 1, false}}},
+		{"the namespace's rise in a test, the listener's after the next begin: the next test's", known(0, 0), []step{{known(0, 1), 0, false}, {known(0, 1), 0, true}, {known(1, 1), 1, false}}},
+		{"one rise in the gap, the other after the begin: the test's", known(0, 0), []step{{known(0, 1), 0, true}, {known(1, 1), 1, false}}},
+		{"the listener's rise in a test, the namespace's in the gap after it: the gap's, which the next test is charged", known(0, 0), []step{{known(1, 0), 0, false}, {known(1, 1), 1, true}, {known(1, 1), 0, false}}},
+		{"the namespace's rise in a test, the listener's in the gap after it: the gap's", known(0, 0), []step{{known(0, 1), 0, false}, {known(1, 1), 1, true}, {known(1, 1), 0, false}}},
+		{"a drop in the gap: the gap's", known(0, 0), []step{{known(0, 0), 0, false}, {known(1, 1), 1, true}, {known(1, 1), 0, false}}},
+		{"what a test left unpaired passes the gap and pairs with nothing after the next test", known(0, 0), []step{{known(1, 0), 0, false}, {known(1, 0), 0, true}, {known(1, 0), 0, false}, {known(1, 0), 0, true}, {known(1, 1), 0, false}}},
+		{"the gap passes on what it was carried and its own, whole", known(0, 0), []step{{known(2, 0), 0, false}, {known(3, 0), 0, true}, {known(3, 3), 3, false}}},
+		{"a charged drop leaves nothing to pair again", known(0, 0), []step{{known(1, 1), 1, false}, {known(1, 1), 0, false}}},
+		{"the namespace unread at the start", unread(0), []step{{known(1, 0), 1, false}}},
+		{"the namespace unread at the end", known(0, 0), []step{{unread(2), 2, false}}},
+		{"the namespace unread after a window left the listener's rise unpaired", known(0, 0), []step{{known(1, 0), 0, false}, {unread(1), 1, false}}},
+		{"the listener's count went back", known(5, 5), []step{{known(0, 5), 1, false}}},
+		{"the namespace's count went back", known(5, 5), []step{{known(5, 0), 1, false}}},
+		{"the listener's count went back, the namespace unread", unread(5), []step{{unread(2), 2, false}}},
+		{"the listener's count went back to none, the namespace unread: at least one", unread(5), []step{{unread(0), 1, false}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			was, carry := c.start, dropCarry{}
+			for i, s := range c.steps {
+				var got uint64
+				got, carry = chargeDrops(was, s.now, carry, s.gap)
+				if got != s.want {
+					t.Fatalf("window %d, %+v to %+v: charged %d, want %d", i+1, was, s.now, got, s.want)
+				}
+				was = s.now
+			}
+		})
+	}
 }
 
 // A test's end waits for what the application had sent before it began: an
@@ -825,6 +889,34 @@ func TestCallsQueuedBehindLostWorkAreTheNextEndsLoss(t *testing.T) {
 	require.Equal(t, 1, sp.charged, "the end charges them")
 	sp.fmu.Unlock()
 	require.NoError(t, a.settledSince(context.Background(), true, "TestAfter"), "charged once")
+}
+
+// An end whose settle found calls queued behind lost work (behindLost) is
+// not verified, but it read the listener's drops when it settled, and that
+// read closes the test's drops' window: the next window opens at it, so
+// abandoned connects (the listener's count alone) after it charge nothing.
+func TestAnEndWithCallsBehindLostWorkStillClosesItsDropsWindow(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	_ = manualWake(t)
+	a, h, p := settleAgent()
+	sp := &scopedProxy{settleProxy: p, behind: []string{"connection 7 received 20 byte(s) after keploy gave up on it"}}
+	a.Proxy = sp
+	h.established = 1
+	p.set(1, 0)
+	p.smu.Lock()
+	p.drops = 5 // abandoned connects
+	p.smu.Unlock()
+	d, err := a.settleBegin(context.Background(), true)
+	require.NoError(t, err)
+	a.windowDrops(d, true, true)
+	err = a.settledSince(context.Background(), true, "TestNext")
+	require.Error(t, err, "the end is not verified")
+	a.provenMu.Lock()
+	got := a.proven.drops
+	a.provenMu.Unlock()
+	require.Equal(t, models.ListenDrops{Listener: 5, NetKnown: true}, got, "the end's read closes the window")
+	n, _, _ := a.windowDrops(models.ListenDrops{Listener: 8, NetKnown: true}, true, true)
+	require.Zero(t, n, "abandoned connects after it charge nothing")
 }
 
 // settleBlocked, when set, is told by the doubles that a settle is blocked
