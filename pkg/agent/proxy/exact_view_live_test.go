@@ -146,7 +146,7 @@ func TestPerTestReadsGiveTheWalksAnswerOverRandomConsumesAndClaims(t *testing.T)
 			for _, kind := range append([]models.Kind{""}, kinds...) {
 				for _, only := range []bool{false, true} {
 					v.mu.Lock()
-					want := v.unansweredWalkLocked(kind, only, 0, len(v.owned))
+					want := v.unansweredWalkLocked(liveKey{kind: kind, session: only}, 0, len(v.owned))
 					v.mu.Unlock()
 					what := fmt.Sprintf("round %d step %d kind %q session %v", round, step, kind, only)
 					var got []*models.Mock
@@ -186,7 +186,7 @@ func TestPerTestReadsGiveTheWalksAnswerOverRandomConsumesAndClaims(t *testing.T)
 			}
 			at := rng.Perm(len(list))[:rng.Intn(len(list)+1)]
 			v.mu.Lock()
-			unanswered := v.unansweredWalkLocked("", false, 0, len(v.owned))
+			unanswered := v.unansweredWalkLocked(liveKey{}, 0, len(v.owned))
 			v.mu.Unlock()
 			var wantAt []int
 			for _, i := range at {

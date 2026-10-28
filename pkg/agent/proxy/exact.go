@@ -197,7 +197,8 @@ type exactView struct {
 	keyedMu sync.Mutex
 	keyed   map[*integrations.MockIndex]map[string][]int
 	// live is, for each kind (every kind for "") and session filter a
-	// per-test read used (unanswered, rangeUnanswered), the positions in
+	// per-test read used (unanswered, rangeUnanswered), and each MockIndex
+	// and key a keyed read used (rangeUnansweredWithKey), the positions in
 	// owned it reads, with links forward past the consumed ones
 	// (liveList). Built on the first read of each, under mu.
 	live map[liveKey]*liveList
@@ -1812,7 +1813,8 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 	only := len(sessionOnly) > 0 && sessionOnly[0]
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	l := v.liveListLocked(kind, only)
+	k := liveKey{kind: kind, session: only}
+	l := v.liveListLocked(k)
 	var out []*models.Mock
 	visited := 0
 	for j := l.firstLive(0, v.consumed, &visited); j < len(l.at); j = l.firstLive(j+1, v.consumed, &visited) {
@@ -1823,7 +1825,7 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 	}
 	unansweredVisited.Add(uint64(visited))
 	if exactViewVerify.Load() {
-		verifyExactRead("the open test's unanswered mocks of kind "+strconv.Quote(string(kind)), v.unansweredWalkLocked(kind, only, 0, len(v.owned)), out)
+		verifyExactRead(k.what(), v.unansweredWalkLocked(k, 0, len(v.owned)), out)
 	}
 	return out
 }
@@ -1836,51 +1838,82 @@ func (v *exactView) unanswered(kind models.Kind, sessionOnly ...bool) []*models.
 // unanswered mock visits only it: the consumed ones before it are skipped by
 // their links (liveList), not walked.
 func (v *exactView) rangeUnanswered(kind models.Kind, only bool, fn func(*models.Mock) bool) bool {
+	return v.rangeLive(liveKey{kind: kind, session: only}, fn)
+}
+
+// rangeUnansweredWithKey is rangeUnanswered("") narrowed to the owned mocks
+// ix files under key, in the same order, read the same way: a few at a time,
+// past the answered ones by their links. The positions come from the view's
+// own index of its copies' keys (ownedKeys), so a keyed read never calls Keys
+// on a call, and a read that stops at the key's next unanswered mock visits
+// only it, however many of the key's mocks answered before it (a statement
+// the test ran thousands of times).
+func (v *exactView) rangeUnansweredWithKey(ix *integrations.MockIndex, key string, fn func(*models.Mock) bool) bool {
+	if len(v.owned) == 0 {
+		return true
+	}
+	v.ownedKeys(ix) // built outside mu: the first keyed read of a view keys every copy
+	return v.rangeLive(liveKey{ix: ix, key: key}, fn)
+}
+
+// rangeLive calls fn with each unanswered mock of the liveList k names, in
+// its order, until fn returns false, and reports whether fn never did
+// (rangeUnanswered, rangeUnansweredWithKey).
+func (v *exactView) rangeLive(k liveKey, fn func(*models.Mock) bool) bool {
 	if len(v.owned) == 0 {
 		return true
 	}
 	var buf [unansweredChunk]*models.Mock
 	j, size := 0, 1
 	for {
-		got := buf[:0]
-		visited := 0
-		v.mu.Lock()
-		l := v.liveListLocked(kind, only)
-		from := 0
-		if j < len(l.at) {
-			from = l.at[j]
-		}
-		for len(got) < size {
-			if j = l.firstLive(j, v.consumed, &visited); j >= len(l.at) {
-				break
-			}
-			visited++
-			if i := l.at[j]; !v.takenByOther(i) {
-				got = append(got, v.owned[i])
-			}
-			j++
-		}
-		if exactViewVerify.Load() {
-			// What a walk of these positions gives, in the same hold
-			// of the lock: no consume falls between the two.
-			to := len(v.owned)
-			if j < len(l.at) {
-				to = l.at[j]
-			}
-			verifyExactRead("the open test's unanswered mocks of kind "+strconv.Quote(string(kind))+" read a few at a time", v.unansweredWalkLocked(kind, only, from, to), got)
-		}
-		v.mu.Unlock()
-		unansweredVisited.Add(uint64(visited))
+		got, next, end := v.liveChunk(k, j, size, buf[:0])
 		for _, mk := range got {
 			if !fn(mk) {
 				return false
 			}
 		}
-		if j >= len(l.at) {
+		if end {
 			return true
 		}
-		size = min(2*size, len(buf))
+		j, size = next, min(2*size, len(buf))
 	}
+}
+
+// liveChunk appends to got, under mu, up to size unanswered mocks of the
+// liveList k names, read from its position j on, and returns them, the
+// position after the last one it looked at, and whether that is the list's
+// end. The lock is released however it returns: a verify-mode panic leaves
+// the view readable.
+func (v *exactView) liveChunk(k liveKey, j, size int, got []*models.Mock) ([]*models.Mock, int, bool) {
+	visited := 0
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	l := v.liveListLocked(k)
+	from := 0
+	if j < len(l.at) {
+		from = l.at[j]
+	}
+	for len(got) < size {
+		if j = l.firstLive(j, v.consumed, &visited); j >= len(l.at) {
+			break
+		}
+		visited++
+		if i := l.at[j]; !v.takenByOther(i) {
+			got = append(got, v.owned[i])
+		}
+		j++
+	}
+	unansweredVisited.Add(uint64(visited))
+	if exactViewVerify.Load() {
+		// What a walk of these positions gives, in the same hold of the
+		// lock: no consume falls between the two.
+		to := len(v.owned)
+		if j < len(l.at) {
+			to = l.at[j]
+		}
+		verifyExactRead(k.what()+" read a few at a time", v.unansweredWalkLocked(k, from, to), got)
+	}
+	return got, j, j >= len(l.at)
 }
 
 // unansweredChunk is the most unanswered mocks rangeUnanswered reads in one
@@ -1889,13 +1922,14 @@ func (v *exactView) rangeUnanswered(kind models.Kind, only bool, fn func(*models
 // lock once per unansweredChunk.
 const unansweredChunk = 64
 
-// unansweredWalkLocked is unanswered's answer for the owned positions in
-// [from, to), by a walk of each: what the verify mode compares the kept
-// read with. Under v.mu.
-func (v *exactView) unansweredWalkLocked(kind models.Kind, only bool, from, to int) []*models.Mock {
+// unansweredWalkLocked is the answer of the read k names for the owned
+// positions in [from, to), by a walk of each, the keys of a keyed read
+// computed again: what the verify mode compares the kept read with. Under
+// v.mu.
+func (v *exactView) unansweredWalkLocked(k liveKey, from, to int) []*models.Mock {
 	var out []*models.Mock
 	for i := from; i < to; i++ {
-		if mk := v.owned[i]; !v.consumed[i] && (kind == "" || mk.Kind == kind) && (!only || v.session[i]) && !v.takenByOther(i) {
+		if mk := v.owned[i]; !v.consumed[i] && k.reads(mk, v.session[i]) && !v.takenByOther(i) {
 			out = append(out, mk)
 		}
 	}
@@ -1903,10 +1937,30 @@ func (v *exactView) unansweredWalkLocked(kind models.Kind, only bool, from, to i
 }
 
 // liveKey names one of a view's liveLists: the kind (every kind for "") and
-// whether the session tier's alone.
+// whether the session tier's alone; or, with ix set, the owned mocks ix files
+// under key (a keyed read, rangeUnansweredWithKey), of every kind and tier.
 type liveKey struct {
 	kind    models.Kind
 	session bool
+	ix      *integrations.MockIndex
+	key     string
+}
+
+// reads reports whether the read k names reads mk, staged in the session
+// tier when session is set, by mk's fields and keys alone (no index).
+func (k liveKey) reads(mk *models.Mock, session bool) bool {
+	if k.ix != nil {
+		return slices.Contains(k.ix.Keys(mk), k.key)
+	}
+	return (k.kind == "" || mk.Kind == k.kind) && (!k.session || session)
+}
+
+// what names the read k names, for the verify mode's report.
+func (k liveKey) what() string {
+	if k.ix != nil {
+		return "the open test's mocks under key " + strconv.Quote(k.key)
+	}
+	return "the open test's unanswered mocks of kind " + strconv.Quote(string(k.kind))
 }
 
 // liveList is the positions in a view's owned that one per-test read reads
@@ -1921,17 +1975,21 @@ type liveList struct {
 	skip []int32
 }
 
-// liveListLocked is v's liveList for kind and only, built on its first use.
-// Under v.mu.
-func (v *exactView) liveListLocked(kind models.Kind, only bool) *liveList {
-	k := liveKey{kind: kind, session: only}
+// liveListLocked is v's liveList for k, built on its first use. A keyed
+// one's positions are the view's index of its copies' keys under k.key
+// (ownedKeys), shared, not copied. Under v.mu.
+func (v *exactView) liveListLocked(k liveKey) *liveList {
 	if l, ok := v.live[k]; ok {
 		return l
 	}
 	l := &liveList{}
-	for i, mk := range v.owned {
-		if (kind == "" || mk.Kind == kind) && (!only || v.session[i]) {
-			l.at = append(l.at, i)
+	if k.ix != nil {
+		l.at = v.ownedKeys(k.ix)[k.key]
+	} else {
+		for i, mk := range v.owned {
+			if k.reads(mk, v.session[i]) {
+				l.at = append(l.at, i)
+			}
 		}
 	}
 	l.skip = make([]int32, len(l.at))
@@ -1967,38 +2025,6 @@ func (l *liveList) firstLive(from int, consumed []bool, visited *int) int {
 		x = next
 	}
 	return r
-}
-
-// unansweredWithKey is unanswered("") narrowed to the owned mocks ix files
-// under key, in the same order. The positions come from the view's own index
-// of its copies' keys (ownedKeys), so a keyed read visits the mocks filed
-// under key, never one Keys call per owned mock.
-func (v *exactView) unansweredWithKey(ix *integrations.MockIndex, key string) []*models.Mock {
-	if len(v.owned) == 0 {
-		return nil
-	}
-	at := v.ownedKeys(ix)[key]
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	var out []*models.Mock
-	for _, i := range at {
-		if !v.consumed[i] && !v.takenByOther(i) {
-			out = append(out, v.owned[i])
-		}
-	}
-	if exactViewVerify.Load() {
-		// What a keyed read gave before the view kept its keys: every
-		// unanswered owned mock keyed on the call. Read in the same hold
-		// of the lock, so no consume falls between the two.
-		var want []*models.Mock
-		for i, mk := range v.owned {
-			if !v.consumed[i] && !v.takenByOther(i) && slices.Contains(ix.Keys(mk), key) {
-				want = append(want, mk)
-			}
-		}
-		verifyExactRead("the open test's mocks under key "+strconv.Quote(key), want, out)
-	}
-	return out
 }
 
 // unansweredAt is the positions of at, in owned, whose mocks have not

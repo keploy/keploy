@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"math/rand"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -172,5 +173,76 @@ func TestTheVerifyModeRefusesAStaleKeptKey(t *testing.T) {
 	exactViewVerify.Store(false)
 	if got := keyedWalk(t, mm, ix, "mock-1"); !slices.Equal(got, []string{"mock-1", "mock-2"}) {
 		t.Fatalf("precondition: the stale read gives %v", got)
+	}
+}
+
+// keyedReadCost answers, in recorded order, every mock of one test that owns
+// n, all filed under one key (one statement the test ran n times), one call
+// at a time, as the MySQL matcher's keyed pass does: a keyed read of the
+// session tier (RangeSessionMocksWithKey) that stops at the key's first
+// mock. It returns the most owned positions one read looked at, and the
+// bytes the n reads allocated, per read.
+func keyedReadCost(t *testing.T, n int) (maxVisited int, bytesPerRead float64) {
+	t.Helper()
+	mm, mocks, _, _ := keyedSet(t, n)
+	ix := &integrations.MockIndex{Keys: func(mk *models.Mock) []string { return []string{"stmt", mk.Name} }}
+	var ms runtime.MemStats
+	var allocated uint64
+	for k := 0; k < n; k++ {
+		var first *models.Mock
+		read := func(mk *models.Mock) bool {
+			first = mk
+			return false
+		}
+		before := unansweredVisited.Load()
+		runtime.ReadMemStats(&ms)
+		from := ms.TotalAlloc
+		err := mm.RangeSessionMocksWithKey(ix, "stmt", read)
+		runtime.ReadMemStats(&ms)
+		allocated += ms.TotalAlloc - from
+		maxVisited = max(maxVisited, int(unansweredVisited.Load()-before))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first == nil || first.Name != mocks[k].Name {
+			t.Fatalf("call %d: the keyed read handed %v first, want %s (the key's next in recorded order)", k, first, mocks[k].Name)
+		}
+		if got := mm.exactConsume(first, true); got != exactServed {
+			t.Fatalf("call %d: consume of %s gave %v, want served", k, first.Name, got)
+		}
+	}
+	return maxVisited, float64(allocated) / float64(n)
+}
+
+// TestAKeyedReadOfAStatementTheTestRanThousandsOfTimesCostsTheSameAtAnySize:
+// under keploy mock replay one test can own a whole set, and run one
+// statement thousands of times. The MySQL matcher reads the open test's
+// mocks of the live statement on every call (a keyed read). A read that
+// stops at the statement's next recording looks at the same few owned
+// positions, and allocates the same, whether the test ran it 300 or 3,000
+// times: the answered ones are skipped by their links, and nothing is copied
+// out. Counted, not timed. Before, each read copied every unanswered mock of
+// the key into a new slice, its bytes growing with the set (the 3,000 reads
+// allocated ten times more per read than the 300), so the row fails there;
+// with the links off (liveReadsWalk) a read looks at every mock the test
+// answered, and the row fails too.
+func TestAKeyedReadOfAStatementTheTestRanThousandsOfTimesCostsTheSameAtAnySize(t *testing.T) {
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false) // the verify mode computes keys and walks: counted alone
+	const bound = 4
+	visitedSmall, bytesSmall := keyedReadCost(t, 300)
+	visitedLarge, bytesLarge := keyedReadCost(t, 3000)
+	if visitedSmall > bound || visitedLarge > bound {
+		t.Fatalf("a keyed read stopped at the key's next recording looked at up to %d owned positions of 300, %d of 3,000; want at most %d at any size", visitedSmall, visitedLarge, bound)
+	}
+	// 3,000 reads allocate no more per read than 300 do, give or take what
+	// the runtime allocates beside them.
+	if bytesLarge > 2*bytesSmall+512 {
+		t.Fatalf("a keyed read stopped at the key's next recording allocated %.0f bytes per read at 3,000, %.0f at 300; want the same at any size", bytesLarge, bytesSmall)
+	}
+	liveReadsWalk.Store(true)
+	defer liveReadsWalk.Store(false)
+	if visited, _ := keyedReadCost(t, 3000); visited <= bound {
+		t.Fatalf("with the links off a keyed read looked at up to %d owned positions: the row cannot tell the walk from the links", visited)
 	}
 }
