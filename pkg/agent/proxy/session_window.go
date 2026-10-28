@@ -221,11 +221,12 @@ func (m *MockManager) RangeSessionMocksWithKey(ix *integrations.MockIndex, key s
 		// What GetSessionMocks shows under exact serving: the open test's
 		// unanswered mocks first, then the staged ones the view shows,
 		// which the view's walk reaches without examining the open
-		// test's own recordings the trees file under the key too.
-		for _, mk := range v.unansweredWithKey(ix, key) {
-			if !fn(mk) {
-				return nil
-			}
+		// test's own recordings the trees file under the key too. The
+		// open test's are read past the ones that answered by their
+		// links, so a read that stops at the key's next one visits only
+		// it.
+		if !v.rangeUnansweredWithKey(ix, key, fn) {
+			return nil
 		}
 		walk = func(db *TreeDb, fn func(*models.Mock) bool) { v.rangeShownKeyed(db, ix, key, fn) }
 	}
