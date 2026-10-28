@@ -367,8 +367,10 @@ func (a *app) count(w http.ResponseWriter, r *http.Request) {
 }
 
 // itemQuery is the statement /pool prepares; item is the row it must read
-// for id, as itemRows seeds it.
-const itemQuery = `SELECT id, name, price FROM items WHERE id = ?`
+// for id, as itemRows seeds it. SHOP_ITEM_QUERY puts another statement in
+// its place: the lane replays a recording with it, as an app whose query
+// changed since it was recorded.
+var itemQuery = getenv("SHOP_ITEM_QUERY", `SELECT id, name, price FROM items WHERE id = ?`)
 
 func item(id int) string { return fmt.Sprintf("%d:item-%d:%d", id, id, id*100+7) }
 

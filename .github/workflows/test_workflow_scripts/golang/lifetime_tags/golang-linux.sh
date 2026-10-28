@@ -66,6 +66,16 @@
 #      answers 500, naming the call, for a row of another id or a call that
 #      failed, so a recording served to the wrong call fails the test.
 #  10. No data race in any log.
+#  12. Under the proven switch, the recording of step 9 replayed by an app
+#      whose GET /pool prepares another statement in place of the one it
+#      recorded (SHOP_ITEM_QUERY): one of the same shape (another table),
+#      then one of another (a condition more). No recording ran it, so each
+#      EXECUTE of it is a miss, reported with its statement, and test-5
+#      fails, keploy test exiting non-zero; the other tests still pass. A
+#      replayer that answered an EXECUTE with another statement's recording
+#      (scored on the packet's header and parameters, or on the statement's
+#      shape) served each call the row recorded for its id, and test-5
+#      passed: a false green.
 #  11. A prepared read the app makes before any test, or between two tests,
 #      is answered with a recording of its own request, and a test's with its
 #      own: recorded with SHOP_SETTINGS_BY_KEY=1, the app reads two settings
@@ -471,6 +481,25 @@ if is_build "$RECORD_BIN" && [ "$judged" = true ]; then
     fi
     refused=$(grep -ac 'failed to update matched mock' proven-all.log)
     [ "$refused" -eq 0 ] || fail "under the proven switch the MySQL matcher failed $refused command(s) with a consume the store refused (failed to update matched mock)"
+
+    # 12. The pool's prepared read changed since it was recorded. Each replay
+    #     starts from the mappings step 9 replayed with.
+    cp keploy/test-set-0/mappings.yaml mappings.step9
+    n=0
+    for changed in 'SELECT id, name, price FROM items_v2 WHERE id = ?' \
+        'SELECT id, name, price FROM items WHERE id = ? AND price > 0'; do
+        n=$((n + 1))
+        cp mappings.step9 keploy/test-set-0/mappings.yaml
+        export SHOP_ITEM_QUERY="$changed"
+        PROVEN_REPLAY=1 replay "proven-changed-$n" mapped
+        unset SHOP_ITEM_QUERY
+        expect_miss "under the proven switch, GET /pool running '$changed'" test-5 FAILED "proven-changed-$n.log" \
+            "no matching mock for outgoing call.*COM_STMT_EXECUTE $(printf '%s' "$changed" | sed 's/[]?*+.()[]/\\&/g')"
+        for t in test-1 test-2 test-3 test-4; do
+            [ "$(test_status "$t")" = PASSED ] ||
+                fail "under the proven switch, with GET /pool's read changed, $t must still pass (status $(test_status "$t"))"
+        done
+    done
     cd "$WORK" || exit 1
 fi
 
