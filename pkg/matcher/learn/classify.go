@@ -536,7 +536,9 @@ type Place struct {
 	// copy rule leaves a variable of it the answer's (classify). A typed
 	// instant's source searches never mark it (instantServedFrom,
 	// instantLeafFrom): they do not check that F's view held the value too,
-	// and the echo keeps a copy F's view holds.
+	// and the echo keeps a copy F's view holds. A raw mock's field is marked
+	// only where the full round does not refute the copy (copiedInBoth: F's
+	// view held the value F saw there, or there is no view).
 	givenWhole bool
 }
 
@@ -2639,14 +2641,18 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 		texts := dc.searched(x, keep)
 		if v.clock.whole {
 			for _, text := range texts {
+				// A whole copy of a stamp x's answer gave the application is
+				// marked so (Place.givenWhole) only where the full round does
+				// not refute it (copiedInBoth): where F's view of x held the
+				// value F saw, or x has none.
 				if containsWholeClock(text, recorded) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, recorded) })
-					field, given := dc.fieldOf(x, texts, recorded)
+					field, given := dc.wholeFieldOf(x, texts, recorded, v.live)
 					return Place{Mock: x.mock, Field: field, Held: recorded, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}, true
 				}
 				if v.decoded && containsWholeClock(text, v.decRec) {
 					swap := x.swapHolds(text, raw, func(own string) bool { return containsWholeClock(own, v.decRec) })
-					field, given := dc.fieldOf(x, texts, v.decRec)
+					field, given := dc.wholeFieldOf(x, texts, v.decRec, v.decLive)
 					return Place{Mock: x.mock, Field: field, Held: v.decRec, AtCall: atCall, noTime: x.noTime, unserved: !x.served, startUp: swap, givenWhole: given}, true
 				}
 			}
@@ -3205,13 +3211,21 @@ func textFields(v interface{}) (string, []rawField) {
 // answer, a value of it, not a key (answerPath): what x gave the
 // application, not what the application sent.
 func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) (field string, answer bool) {
+	if f, ok := fieldWith(x, texts, w); ok {
+		return f.describe(), !f.key && answerPath(f.path)
+	}
+	return "", false
+}
+
+// fieldWith is the field fieldOf names; ok is false when none holds w.
+func fieldWith(x Raw, texts [2]string, w string) (rawField, bool) {
 	for _, f := range x.fields {
 		if f.end > len(texts[0]) {
 			break
 		}
 		own := texts[0][f.start:f.end]
 		if ContainsToken(own, w) {
-			return f.describe(), !f.key && answerPath(f.path)
+			return f, true
 		}
 	}
 	for _, f := range x.fields {
@@ -3220,11 +3234,51 @@ func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) (field string, a
 		}
 		for _, form := range textForms(texts[0][f.start:f.end])[1:] {
 			if ContainsToken(form, w) {
-				return f.describe(), !f.key && answerPath(f.path)
+				return f, true
 			}
 		}
 	}
-	return "", false
+	return rawField{}, false
+}
+
+// wholeFieldOf is fieldOf of a drifted value's whole clock read (rec as
+// recorded, live as F saw it) found in x: given only where the full round
+// does not refute the copy too (copiedInBoth).
+func (dc *DriftCache) wholeFieldOf(x Raw, texts [2]string, rec, live string) (field string, given bool) {
+	f, ok := fieldWith(x, texts, rec)
+	if !ok {
+		return "", false
+	}
+	return f.describe(), !f.key && answerPath(f.path) && dc.copiedInBoth(x, f, func(own string) bool { return containsWholeClock(own, live) })
+}
+
+// copiedInBoth reports whether record's full round leaves field f of x, a
+// field of x's answer that holds a drifted value's recorded value whole,
+// the source of a whole copy (Place.givenWhole): F gave the application
+// there what in finds (the value as F saw it), in its own text or a
+// declared form of it, so the copy moved with its source; or x has no view
+// by F (not served, or served changed with no view: ServedLive), and keploy
+// cannot tell. False where F served x as recorded (Raw.AsRecorded) while
+// the value moved, or gave the application, at the field of f's path in its
+// view, another value, or no such field: the full round refutes the copy (a
+// copy moves with its source), and the copy rule learns the read of the
+// clock since the test began that both runs hold (classify).
+func (dc *DriftCache) copiedInBoth(x Raw, f rawField, in func(own string) bool) bool {
+	text, fields := x.text, x.fields
+	switch {
+	case x.AsRecorded():
+	case x.Live():
+		text, fields = x.live.text, x.live.fields
+	default:
+		return true
+	}
+	for _, g := range fields {
+		if g.path == f.path && g.key == f.key && g.end <= len(text) {
+			own := text[g.start:g.end]
+			return in(own) || in(dc.rawExtra(own))
+		}
+	}
+	return false
 }
 
 // holdsToken reports whether a field's text own holds word w as a token, in

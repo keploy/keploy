@@ -1244,3 +1244,119 @@ func TestAClientTestLearnsACopyOfAnAnswersTypedStampTheFullRoundRefutesAsAReadSi
 		})
 	}
 }
+
+func TestAClientTestLearnsACopyOfARecordingsAnswerStampTheFullRoundRefutesAsAReadSinceItsTestBegan(t *testing.T) {
+	// One run of a recording whose answer holds a stamp, read at ans, and of
+	// the call that sends a value recorded equal to it: the call's window
+	// holds the value at the second's cut in both runs.
+	type run struct{ began time.Time }
+	ans := func(r run) time.Time { return r.began.Add(1200 * time.Millisecond) }
+	span := func(r run) Span {
+		from := ans(r).Add(25 * time.Millisecond)
+		return Span{From: from, To: from.Add(200 * time.Millisecond), Began: r.began}
+	}
+	stamp := func(r run) time.Time { return ans(r).Truncate(time.Second) }
+	rec := run{time.Date(2026, 10, 27, 16, 59, 3, 100_000_000, time.UTC)}
+	full := run{time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
+	// answer is the recording's answer: its body and its headers.
+	type answer struct {
+		body   string
+		header map[string]string
+	}
+	mock := func(at time.Time, a answer) *models.Mock {
+		if a.header == nil {
+			a.header = map[string]string{}
+		}
+		return &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/items", Body: `{"n":"a"}`, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: a.header, Body: a.body},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	type form struct {
+		name string
+		// text is the stamp's text; quoted: a JSON string.
+		text   func(at time.Time) string
+		quoted bool
+		leaf   func(p string, at time.Time) Leaf
+	}
+	isoText := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	epochText := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	iso := form{"an ISO instant", isoText, true, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: isoText(at)} }}
+	epoch := form{"epoch seconds", epochText, false, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: epochText(at)} }}
+	typed := form{"an instant typed to the second", isoText, true, func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at, time.Second) }}
+	// in is where the answer holds the stamp: its body as a field of its
+	// own, or inside a URL-encoded field (a declared form of its text), or a
+	// header of its own.
+	type in struct {
+		name string
+		hold func(f form, at time.Time) answer
+	}
+	plain := in{"", func(f form, at time.Time) answer {
+		if f.quoted {
+			return answer{body: `{"createdAt":"` + f.text(at) + `"}`}
+		}
+		return answer{body: `{"createdAt":` + f.text(at) + `}`}
+	}}
+	encoded := in{" inside a URL-encoded field", func(f form, at time.Time) answer {
+		return answer{body: `{"next":"` + url.QueryEscape("at="+f.text(at)) + `"}`}
+	}}
+	header := in{" in a header", func(f form, at time.Time) answer {
+		return answer{body: `{"id":"a"}`, header: map[string]string{"X-Created-At": f.text(at)}}
+	}}
+	const p = "body.variables.createdAt"
+	for _, c := range []struct {
+		name string
+		// view is what record's full round gave the application at the
+		// recording, x as recorded; nil where it gave no view.
+		view func(x Raw, hold func(at time.Time) answer) Raw
+		read bool
+	}{
+		// The full round refutes the copy: its view of the answer held
+		// another moment, or the recorded one again, while the call sent its
+		// own clock, or no stamp (in a header: it lacked the field).
+		{"the full round's answer held another moment", func(x Raw, hold func(time.Time) answer) Raw {
+			return x.ServedAs(1).ServedLive(RawOf(mock(ans(full), hold(stamp(full).Add(-7*time.Second))), true))
+		}, true},
+		{"the full round served the answer as recorded", func(x Raw, _ func(time.Time) answer) Raw {
+			return x.ServedAs(1).ServedAsRecorded()
+		}, true},
+		{"the full round's answer held no stamp", func(x Raw, _ func(time.Time) answer) Raw {
+			return x.ServedAs(1).ServedLive(RawOf(mock(ans(full), answer{body: `{"id":"a"}`}), true))
+		}, true},
+		// Controls: the full round's answer held the value it sent too (a
+		// whole copy in both runs), or keploy has no view of it: the
+		// answer's variable.
+		{"the full round's answer held the value", func(x Raw, hold func(time.Time) answer) Raw {
+			return x.ServedAs(1).ServedLive(RawOf(mock(ans(full), hold(stamp(full))), true))
+		}, false},
+		{"the full round gave no view of the answer", nil, false},
+	} {
+		for _, pair := range [][2]form{{iso, iso}, {epoch, epoch}, {iso, typed}, {epoch, typed}} {
+			for _, lay := range []in{plain, encoded, header} {
+				src, cp := pair[0], pair[1]
+				t.Run(c.name+"/"+src.name+lay.name+" copied as "+cp.name, func(t *testing.T) {
+					dc := clientTestCache()
+					hold := func(a time.Time) answer { return lay.hold(src, a) }
+					x := dc.RawOf(mock(ans(rec), hold(stamp(rec))), true)
+					if c.view != nil {
+						x = c.view(x, hold)
+					}
+					w := (&Window{Rec: span(rec), F: span(full)}).ComparesOffsets()
+					ln := ClassifyFollowing(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: cp.leaf(p, stamp(full))}}, Shape{Leaves: map[string]Leaf{p: cp.leaf(p, stamp(rec))}}, span(rec).To, nil, []Raw{x}, nil, w, nil)[0]
+					o, ok := ln.Clock()
+					if !c.read {
+						if ln.Kind != KindVariable || ln.From.Mock != "mock-1" {
+							t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-1's answer: no run refutes the copy", ln.Kind, o, ln.From, ln.Why)
+						}
+						return
+					}
+					if ln.Kind != KindClockRead || !ok || o.Since != models.SinceTestBegin {
+						t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want a read of the clock since the test began: the full round refutes the copy, and the read holds in both runs", ln.Kind, o, ln.From, ln.Why)
+					}
+				})
+			}
+		}
+	}
+}

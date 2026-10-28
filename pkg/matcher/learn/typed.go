@@ -514,7 +514,7 @@ func (dc *DriftCache) classifyInstant(r, l Leaf, at time.Time, served []Earlier,
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 		return ln
 	}
-	if from, ok := dc.instantRawFrom(r, rec, at, raw); ok && skip&skipSource == 0 {
+	if from, ok := dc.instantRawFrom(r, rec, live, at, raw); ok && skip&skipSource == 0 {
 		ln.Kind, ln.From, ln.Why = KindVariable, from, instantEvidence(from)
 		return ln
 	}
@@ -1337,8 +1337,8 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 // day, nor a finer instant cut to it: those are the echo's, which F's moment
 // gates), in any form, with a protocol-phase answer's own clock reads and an
 // HTTP answer's stamp blanked (searched: rules 2 and 3), and the field that
-// holds it.
-func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw) (Place, bool) {
+// holds it. live is the moment F saw in r (copiedInBoth).
+func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
 		if !x.earlierThan(at) {
 			continue
@@ -1354,7 +1354,12 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec moment, at time.Time, raw []Raw
 			}
 			own := texts[0][f.start:f.end]
 			if dc.holdsExact(own, rec) || dc.holdsExact(dc.rawExtra(own), rec) {
-				field, given = f.describe(), answerPath(f.path)
+				// Marked a whole copy of x's answer (Place.givenWhole) only
+				// where the full round does not refute it (copiedInBoth):
+				// F's view of x held, at that field, the instant F saw in
+				// the value, or x has no view.
+				field = f.describe()
+				given = answerPath(f.path) && dc.copiedInBoth(x, f, func(own string) bool { return dc.holdsExact(own, live) })
 				break
 			}
 		}
