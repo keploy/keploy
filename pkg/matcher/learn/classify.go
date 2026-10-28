@@ -2570,6 +2570,12 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			}
 			if r := placeRank(e, s, whole); r < rank {
 				best, rank = seenPlace(e, s, whole), r
+				// A leaf its protocol types as one instant, its instant whole
+				// in the value's own layout (a findAndModify's createdAt
+				// copied as epoch seconds): a whole copy too.
+				if s.Leaf.Type == Instant && !whole {
+					best.givenWhole = s.Side == Response && dc.instantWhole(s.Leaf, recorded)
+				}
 			}
 			if rank == 0 {
 				return best, true
@@ -2707,14 +2713,15 @@ func (dc *DriftCache) echoServed(echoed []echoMatch, recorded string, served []E
 }
 
 // echoRaw is the place of payload x that holds the recorded moment of one of
-// echoed (echoServed): the field that does, else the payload, in every form.
+// echoed (echoServed): the field that does, in every form (a token's
+// base64 or URL-encoded text), else the payload, in every form.
 // ok is false when x holds none.
 func (dc *DriftCache) echoRaw(x Raw, echoed []echoMatch) (Place, bool) {
 	if len(echoed) == 0 {
 		return Place{}, false
 	}
 	for _, f := range x.fields {
-		if !f.key && dc.holdsRecorded(x.text[f.start:f.end], echoed) {
+		if own := x.text[f.start:f.end]; !f.key && (dc.holdsRecorded(own, echoed) || dc.holdsRecorded(dc.rawExtra(own), echoed)) {
 			return Place{Mock: x.mock, Field: f.describe(), Echo: true, givenWhole: answerPath(f.path)}, true
 		}
 	}
