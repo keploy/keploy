@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -85,14 +86,19 @@ type ProcZone struct {
 // error. An error where keploy cannot read the process's files (another
 // user's process, one gone, a pid of none), its zone, or its environment
 // (an exiting process's reads empty: procExiting). An empty environment of
-// a live process (env -i) names no TZ. It is the zone the process started
-// with, as its environment and files name it: a zone the application sets
-// as it runs (Django's TIME_ZONE, process.env.TZ in Node, Java's
-// TimeZone.setDefault) is not read, nor a JVM's -Duser.timezone (a flag of
-// its command line, which Java reads over TZ), nor a TZ an environment
-// overwritten in place (setproctitle: gunicorn, celery) no longer holds.
-// That is a stated limit: a value such an application writes in its own
-// zone is read in the one it started with, and fails where the two differ.
+// a live process (env -i) names no TZ. A JVM's user.timezone, which Java
+// reads over TZ, is its zone where one of its options sets it
+// (javaZoneID: -Duser.timezone= in JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS,
+// its command line or _JAVA_OPTIONS, the last the JVM reads winning), read
+// as Java reads it (javaZone), and an error where keploy cannot read it. It
+// is the zone the process started with, as its environment, command line
+// and files name it: a zone the application sets as it runs (Django's
+// TIME_ZONE, process.env.TZ in Node, Java's TimeZone.setDefault) is not
+// read, nor a JVM option in a file it names (@argfiles,
+// -XX:VMOptionsFile), nor a TZ an environment overwritten in place
+// (setproctitle: gunicorn, celery) no longer holds. That is a stated limit:
+// a value such an application writes in its own zone is read in the one it
+// started with, and fails where the two differ.
 func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
 	if pid == 0 {
 		return ProcZone{}, errors.New("no process is known for the call")
@@ -109,18 +115,412 @@ func ReadProcZone(procRoot string, pid uint32) (ProcZone, error) {
 		// lets go.
 		return ProcZone{}, errors.New("the process is exiting, so its environment reads empty and keploy cannot tell whether it set TZ")
 	}
+	// The first of each, as getenv reads it.
 	tz, set := "", false
+	opts := map[string]string{}
 	for _, kv := range bytes.Split(env, []byte{0}) {
-		if v, ok := bytes.CutPrefix(kv, []byte("TZ=")); ok {
-			tz, set = string(v), true
-			break
+		k, v, ok := bytes.Cut(kv, []byte("="))
+		if !ok {
+			continue
+		}
+		switch name := string(k); name {
+		case "TZ":
+			if !set {
+				tz, set = string(v), true
+			}
+		case "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "OPENJ9_JAVA_OPTIONS", "IBM_JAVA_OPTIONS":
+			if _, seen := opts[name]; !seen {
+				opts[name] = string(v)
+			}
 		}
 	}
-	loc, err := readZone(filepath.Join(dir, "root"), tz, set, false)
+	id, java, err := javaZoneID(procRoot, pid, dir, opts)
+	if err != nil {
+		return ProcZone{}, err
+	}
+	var loc *time.Location
+	if java {
+		loc, err = javaZone(id)
+	} else {
+		loc, err = readZone(filepath.Join(dir, "root"), tz, set, false)
+	}
 	if err != nil {
 		return ProcZone{}, err
 	}
 	return ProcZone{Loc: loc, Name: models.ZoneNameOf(loc, time.Now())}, nil
+}
+
+// javaZoneID is the user.timezone the JVM process under dir (a /proc/<pid>
+// entry) starts with, where one of its options sets it: the last
+// -Duser.timezone in the order the JVM reads them, a later one overriding
+// an earlier: JAVA_TOOL_OPTIONS (env, the opts of its environment), then
+// JDK_JAVA_OPTIONS (which the java launcher alone reads, from Java 9,
+// before its command line), then its command line's options (before its
+// main class, -jar or -m: what follows is the application's; an @argfile
+// among them read in its place, from the process's own files), then
+// _JAVA_OPTIONS. false where none sets one, where the last sets it empty
+// (-Duser.timezone= or -Duser.timezone: Java then reads TZ, as it does one
+// unset), or where the process is no JVM (it maps no libjvm.so: another
+// program's options are no JVM's). An error where an option sets it and
+// keploy cannot read whether the process is a JVM, its command line, an
+// argfile, or an OpenJ9 option variable (OPENJ9_JAVA_OPTIONS,
+// IBM_JAVA_OPTIONS) that sets it, whose order keploy does not read; and
+// where the process is exiting (its command line or its maps read empty).
+func javaZoneID(procRoot string, pid uint32, dir string, env map[string]string) (string, bool, error) {
+	cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+	if err != nil {
+		return "", false, fmt.Errorf("keploy cannot read the process's command line, which may set a JVM's zone: %w", err)
+	}
+	if len(cmdline) == 0 && procExiting(procRoot, pid) {
+		return "", false, errors.New("the process is exiting, so its command line reads empty and keploy cannot tell whether it sets a JVM's zone")
+	}
+	lib, jvmRead := "", false
+	jvm := func() (bool, error) {
+		if !jvmRead {
+			l, err := mapsJVM(dir)
+			if err != nil {
+				return false, fmt.Errorf("keploy cannot tell whether the process is a JVM, whose options may set its zone: %w", err)
+			}
+			if l == "" && procExiting(procRoot, pid) {
+				return false, errors.New("the process is exiting, so its maps read empty and keploy cannot tell whether it is a JVM")
+			}
+			lib, jvmRead = l, true
+		}
+		return lib != "", nil
+	}
+	type set struct{ from, id string }
+	var sets []set
+	add := func(from string, args []string) {
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "-Duser.timezone="); ok {
+				sets = append(sets, set{from, v})
+			} else if a == "-Duser.timezone" {
+				sets = append(sets, set{from, ""})
+			}
+		}
+	}
+	for _, v := range []string{"OPENJ9_JAVA_OPTIONS", "IBM_JAVA_OPTIONS"} {
+		if add(v, javaOptions(env[v])); len(sets) > 0 {
+			if j, err := jvm(); err != nil || j {
+				return "", false, errors.Join(fmt.Errorf("%s sets a JVM's user.timezone, which keploy does not read (OpenJ9's options' order)", v), err)
+			}
+			sets = nil
+		}
+	}
+	add("JAVA_TOOL_OPTIONS", javaOptions(env["JAVA_TOOL_OPTIONS"]))
+	add("JDK_JAVA_OPTIONS", javaOptions(env["JDK_JAVA_OPTIONS"]))
+	argv := strings.Split(strings.TrimSuffix(string(cmdline), "\x00"), "\x00")
+	args, err := jvmArgs(argv, func(file string) ([]string, error) {
+		// An argfile is read only of a JVM: "@..." is no file to any other
+		// program.
+		if j, err := jvm(); err != nil {
+			return nil, err
+		} else if !j {
+			return nil, errNoJVM
+		}
+		return readArgfile(dir, file)
+	})
+	switch {
+	case errors.Is(err, errNoJVM):
+		return "", false, nil
+	case err != nil:
+		return "", false, err
+	}
+	add("the command line", args)
+	add("_JAVA_OPTIONS", javaOptions(env["_JAVA_OPTIONS"]))
+	if len(sets) == 0 {
+		return "", false, nil
+	}
+	if j, err := jvm(); err != nil || !j {
+		return "", false, err
+	}
+	for i := len(sets) - 1; i >= 0; i-- {
+		if sets[i].from == "JDK_JAVA_OPTIONS" {
+			exe, err := os.Readlink(filepath.Join(dir, "exe"))
+			if err != nil {
+				return "", false, fmt.Errorf("JDK_JAVA_OPTIONS sets a JVM's user.timezone, which the java launcher alone reads, but keploy cannot read the process's executable: %w", err)
+			}
+			// The java launcher reads it from Java 9; Java 8's libjvm.so
+			// sits under jre/lib.
+			if path.Base(strings.TrimSuffix(exe, " (deleted)")) != "java" || strings.Contains(lib, "/jre/lib/") {
+				continue
+			}
+		}
+		return sets[i].id, sets[i].id != "", nil
+	}
+	return "", false, nil
+}
+
+// errNoJVM: the process is no JVM, so its arguments are no JVM's.
+var errNoJVM = errors.New("the process is no JVM")
+
+// javaOptions splits a JVM options variable (JAVA_TOOL_OPTIONS,
+// _JAVA_OPTIONS, JDK_JAVA_OPTIONS) into its options as the JVM does: at
+// white space outside quotes, a pair of ' or " quoting the space it holds,
+// the quotes themselves dropped.
+func javaOptions(v string) []string {
+	return splitJava(v, false)
+}
+
+// splitJava splits v at white space outside quotes, a pair of ' or "
+// quoting the space it holds, the quotes dropped; of an argfile (file), a
+// # that starts an argument comments out the rest of its line, and a
+// backslash in quotes escapes the next character (\n, \t, \r, \f as
+// they name).
+func splitJava(v string, file bool) []string {
+	var (
+		out     []string
+		cur     strings.Builder
+		quote   rune
+		in, esc bool
+		comment bool
+	)
+	for _, r := range v {
+		switch {
+		case comment:
+			if r == '\n' || r == '\r' {
+				comment = false
+			}
+		case esc:
+			esc = false
+			switch r {
+			case 'n':
+				r = '\n'
+			case 't':
+				r = '\t'
+			case 'r':
+				r = '\r'
+			case 'f':
+				r = '\f'
+			}
+			cur.WriteRune(r)
+		case quote != 0:
+			switch {
+			case r == quote:
+				quote = 0
+			case file && r == '\\':
+				esc = true
+			default:
+				cur.WriteRune(r)
+			}
+		case file && r == '#' && !in:
+			comment = true
+		case r == '\'' || r == '"':
+			quote, in = r, true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\f' || r == '\v':
+			if in {
+				out = append(out, cur.String())
+				cur.Reset()
+				in = false
+			}
+		default:
+			cur.WriteRune(r)
+			in = true
+		}
+	}
+	if in {
+		out = append(out, cur.String())
+	}
+	return out
+}
+
+// argfileCap bounds an argfile keploy reads.
+const argfileCap = 1 << 20
+
+// readArgfile is the arguments of the java launcher's argfile name (an
+// @argfile's path) of the process under dir, read in its own view: an
+// absolute path under its root, a relative one under its working
+// directory (splitJava).
+func readArgfile(dir, name string) ([]string, error) {
+	p := name
+	if !path.IsAbs(p) {
+		cwd, err := os.Readlink(filepath.Join(dir, "cwd"))
+		if err != nil {
+			return nil, fmt.Errorf("keploy cannot read the JVM's working directory, where its argfile @%s is: %w", name, err)
+		}
+		p = path.Join(cwd, p)
+	}
+	data, err := readUnder(filepath.Join(dir, "root"), p)
+	if err != nil {
+		return nil, fmt.Errorf("keploy cannot read the JVM's argfile @%s, which may set its zone: %w", name, err)
+	}
+	if len(data) > argfileCap {
+		return nil, fmt.Errorf("the JVM's argfile @%s is larger than keploy reads (%d bytes)", name, argfileCap)
+	}
+	return splitJava(string(data), true), nil
+}
+
+// javaArgOptions are the java launcher's options whose value is the next
+// argument (its own -cp, -p, --add-modules and the like).
+var javaArgOptions = map[string]bool{
+	"-cp": true, "-classpath": true, "--class-path": true,
+	"-p": true, "--module-path": true, "--upgrade-module-path": true,
+	"--add-modules": true, "--enable-native-access": true, "--limit-modules": true,
+	"--add-exports": true, "--add-opens": true, "--add-reads": true, "--patch-module": true,
+	"--source": true,
+}
+
+// jvmArgs is the JVM's own options of argv, a process's command line: the
+// arguments after argv[0] up to its main class, its source file, -jar or
+// -m (--module, --module=<module>), past which they are the application's,
+// never the JVM's, the value of an option that takes the next argument
+// (javaArgOptions) skipped. An @argfile among them (until
+// --disable-@files; @@ is a literal @) is the arguments argfile reads of
+// it, in its place, as the java launcher expands it; an error where it
+// cannot read one.
+func jvmArgs(argv []string, argfile func(string) ([]string, error)) ([]string, error) {
+	var out []string
+	q := append([]string(nil), argv...)
+	files := true
+	// expand puts the arguments of the argfile at i in its place, as the
+	// launcher does before it reads them, a value's place too (-cp @file).
+	expand := func(i int) error {
+		if i >= len(q) || !files || !strings.HasPrefix(q[i], "@") || strings.HasPrefix(q[i], "@@") {
+			return nil
+		}
+		more, err := argfile(q[i][1:])
+		if err != nil {
+			return err
+		}
+		q = append(q[:i:i], append(more, q[i+1:]...)...)
+		return nil
+	}
+	for i := 1; i < len(q); i++ {
+		if err := expand(i); err != nil {
+			return nil, err
+		}
+		if i >= len(q) {
+			break
+		}
+		a := q[i]
+		switch {
+		case a == "--disable-@files":
+			files = false
+		case a == "-jar" || a == "-m" || a == "--module" || strings.HasPrefix(a, "--module=") || !strings.HasPrefix(a, "-"):
+			return out, nil
+		case javaArgOptions[a]:
+			if err := expand(i + 1); err != nil {
+				return nil, err
+			}
+			i++
+		default:
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+// mapsJVM is the path of the JVM's libjvm.so the process under dir maps
+// (HotSpot's and OpenJ9's), read from its maps; "" where it maps none.
+func mapsJVM(dir string) (string, error) {
+	f, err := os.Open(filepath.Join(dir, "maps"))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		l := strings.TrimSuffix(sc.Text(), " (deleted)")
+		if strings.HasSuffix(l, "/libjvm.so") {
+			return l[strings.IndexByte(l, '/'):], nil
+		}
+	}
+	return "", sc.Err()
+}
+
+// javaZone is the zone a JVM reads its user.timezone id in: UTC of "UTC"
+// and "GMT"; a fixed offset of a custom id ("GMT+05:30", "GMT-8",
+// "GMT+0530"), as Java parses it; else an IANA name or link ("Asia/Kolkata",
+// "CET", "Japan"), read as keploy reads a stored zone (models.ZoneLocation:
+// Java reads its own zone data, never the process's files). An error for
+// any other id, never another zone (an old three-letter id is the region
+// or offset Java maps it to, javaShortIDs: IST is Asia/Kolkata), such as a name
+// only a host's zone directory holds (localtime, posixrules, Factory,
+// posix/ and right/ ones), which Java does not know and reads at the
+// platform's offset.
+func javaZone(id string) (*time.Location, error) {
+	if id == "UTC" || id == "GMT" {
+		return time.UTC, nil
+	}
+	if r, ok := javaShortIDs[id]; ok {
+		id = r
+	}
+	if r, ok := strings.CutPrefix(id, "GMT"); ok {
+		off, ok := javaCustomOffset(r)
+		if !ok {
+			return nil, fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads", id)
+		}
+		if off == 0 {
+			return time.UTC, nil
+		}
+		return time.FixedZone("", off), nil
+	}
+	switch {
+	case id == "localtime" || id == "posixrules" || id == "Factory" || strings.HasPrefix(id, "posix/") || strings.HasPrefix(id, "right/") || strings.Contains(id, ".."):
+		return nil, fmt.Errorf("a JVM's user.timezone %q is no zone a JVM reads", id)
+	}
+	loc, err := models.ZoneLocation(id)
+	if err != nil {
+		return nil, fmt.Errorf("a JVM's user.timezone %q is no zone keploy reads: %w", id, err)
+	}
+	return loc, nil
+}
+
+// javaShortIDs is how Java reads its old three-letter ids (ZoneId.SHORT_IDS,
+// which TimeZone reads too): each a region, or a fixed offset for EST, MST
+// and HST.
+var javaShortIDs = map[string]string{
+	"ACT": "Australia/Darwin", "AET": "Australia/Sydney", "AGT": "America/Argentina/Buenos_Aires",
+	"ART": "Africa/Cairo", "AST": "America/Anchorage", "BET": "America/Sao_Paulo", "BST": "Asia/Dhaka",
+	"CAT": "Africa/Harare", "CNT": "America/St_Johns", "CST": "America/Chicago", "CTT": "Asia/Shanghai",
+	"EAT": "Africa/Addis_Ababa", "ECT": "Europe/Paris", "IET": "America/Indiana/Indianapolis",
+	"IST": "Asia/Kolkata", "JST": "Asia/Tokyo", "MIT": "Pacific/Apia", "NET": "Asia/Yerevan",
+	"NST": "Pacific/Auckland", "PLT": "Asia/Karachi", "PNT": "America/Phoenix", "PRT": "America/Puerto_Rico",
+	"PST": "America/Los_Angeles", "SST": "Pacific/Guadalcanal", "VST": "Asia/Ho_Chi_Minh",
+	"EST": "GMT-05:00", "MST": "GMT-07:00", "HST": "GMT-10:00",
+}
+
+// javaCustomOffset is the offset, in seconds east of UTC, of the part of a
+// custom zone id after "GMT", as Java's TimeZone parses it: a sign, then
+// hours of one or two digits and minutes of two after a colon, or one to
+// four digits with no colon (hours, or hours and minutes, HHMM); hours up
+// to 23, minutes up to 59. false for any other.
+func javaCustomOffset(r string) (int, bool) {
+	if len(r) < 2 || r[0] != '+' && r[0] != '-' {
+		return 0, false
+	}
+	sign := 1
+	if r[0] == '-' {
+		sign = -1
+	}
+	hs, ms, colon := strings.Cut(r[1:], ":")
+	if !isDigitsOnly(hs) || colon && (len(hs) > 2 || len(ms) != 2 || !isDigitsOnly(ms)) || !colon && len(hs) > 4 {
+		return 0, false
+	}
+	n, _ := strconv.Atoi(hs)
+	h, m := n, 0
+	if colon {
+		m, _ = strconv.Atoi(ms)
+	} else if len(hs) > 2 {
+		h, m = n/100, n%100
+	}
+	if h > 23 || m > 59 {
+		return 0, false
+	}
+	return sign * (h*3600 + m*60), true
+}
+
+// isDigitsOnly reports whether s is one or more ASCII digits.
+func isDigitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // procZoneCap bounds ProcZones: a cache holding it starts again.

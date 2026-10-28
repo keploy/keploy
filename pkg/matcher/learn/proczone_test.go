@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +12,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// fakeProc writes a process's /proc entry under root: its environ, its stat
-// (with a name of spaces and parentheses, which hold no field) and the files
-// of its own root.
+// fakeProc writes a process's /proc entry under root: its environ, its
+// command line (a program of no options), its stat (with a name of spaces
+// and parentheses, which hold no field) and the files of its own root.
 func fakeProc(t *testing.T, root string, pid, start string, env []string, files map[string][]byte, links map[string]string) {
 	t.Helper()
 	dir := filepath.Join(root, pid)
@@ -26,6 +27,7 @@ func fakeProc(t *testing.T, root string, pid, start string, env []string, files 
 		}
 	}
 	write(filepath.Join(dir, "environ"), []byte(strings.Join(env, "\x00")+"\x00"))
+	write(filepath.Join(dir, "cmdline"), []byte("/app/server\x00"))
 	stat := pid + " (my app) (x) S 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 " + start + " 1000 100 18446744073709551615"
 	write(filepath.Join(dir, "stat"), []byte(stat))
 	for name, data := range files {
@@ -199,6 +201,138 @@ func TestReadProcZoneReadsTheZoneOfTheProcessThatMadeTheCall(t *testing.T) {
 	}
 }
 
+// A JVM writes its clock in its user.timezone, which Java reads over TZ, so
+// the agent reads a JVM's zone from the option that sets it, in the order
+// the JVM reads them, the last winning: JAVA_TOOL_OPTIONS, then
+// JDK_JAVA_OPTIONS (the java launcher's alone), then the command line's own
+// options (none after the main class, -jar or -m), then _JAVA_OPTIONS; an
+// empty one is none (TZ then). Another program's options are no JVM's (it
+// maps no libjvm.so); an id keploy cannot read, and a JVM it cannot tell is
+// one, are unknown, never another zone.
+func TestAJVMsZoneIsReadFromTheOptionThatSetsIt(t *testing.T) {
+	at := time.Date(2026, 1, 28, 7, 30, 0, 0, time.UTC)
+	proc := t.TempDir()
+	const libjvm = "7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so\n"
+	// java writes a process: argv its command line (none: empty, as an
+	// exiting one's reads), maps after its executable's line ("-": no maps
+	// file, "=": an empty one), files in its root, its working directory
+	// /app; a zombie where it is exiting.
+	files := map[string][]byte{
+		"app/jvm.args":            []byte("# the JVM's options\n-Xmx1g\n\"-Duser.timezone=Asia/Kolkata\" # its zone\n"),
+		"app/jib-classpath-file":  []byte("/app/libs/*:/app/classes\n"),
+		"app/jib-main-class-file": []byte("com.example.Main\n"),
+		"app/cp-and-opts.args":    []byte("/app/classes -Duser.timezone=Europe/Berlin\n"),
+		"app/jvm-commented.args":  []byte("-Xmx1g\n# -Duser.timezone=Asia/Kolkata\n"),
+	}
+	java := func(pid string, env, argv []string, exe, maps string) {
+		t.Helper()
+		fakeProc(t, proc, pid, "500", env, files, nil)
+		dir := filepath.Join(proc, pid)
+		cmdline := ""
+		if len(argv) > 0 {
+			cmdline = strings.Join(argv, "\x00") + "\x00"
+		} else if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(pid+" (java) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		switch maps {
+		case "-":
+		case "=":
+			if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(pid+" (java) Z 1 1 1 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 4 0 500 1000 100 18446744073709551615"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "maps"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			if err := os.WriteFile(filepath.Join(dir, "maps"), []byte("5600-5610 r-xp 00000000 08:01 7 "+exe+"\n"+maps), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, target := range map[string]string{"exe": exe, "cwd": "/app"} {
+			if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	const launcher = "/opt/java/openjdk/bin/java"
+	jar := []string{"java", "-Xmx1g", "-cp", "/app/lib/*", "-Duser.timezone=Asia/Kolkata", "-jar", "/app/app.jar"}
+	for i, row := range []struct {
+		what      string
+		env, argv []string
+		exe, maps string
+		want      string // the zone's name; "!" an error
+		off       int
+	}{
+		{"the command line's option, over TZ", []string{"TZ=UTC"}, jar, launcher, libjvm, "+05:30", 19800},
+		{"the command line's, over JAVA_TOOL_OPTIONS", []string{"JAVA_TOOL_OPTIONS=-Xss1m -Duser.timezone=America/New_York"}, jar, launcher, libjvm, "+05:30", 19800},
+		{"JAVA_TOOL_OPTIONS, over TZ", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Xss1m -Duser.timezone=America/New_York"}, []string{"java", "Main"}, launcher, libjvm, "America/New_York", -18000},
+		{"_JAVA_OPTIONS, over the command line", []string{"_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, jar, launcher, libjvm, "Europe/Berlin", 3600},
+		{"JDK_JAVA_OPTIONS, over JAVA_TOOL_OPTIONS, in the java launcher", []string{"JDK_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin", "JAVA_TOOL_OPTIONS=-Duser.timezone=America/New_York"}, []string{"java", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
+		{"the command line's, over JDK_JAVA_OPTIONS", []string{"JDK_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, jar, launcher, libjvm, "+05:30", 19800},
+		{"JDK_JAVA_OPTIONS in a JVM another program starts: not read", []string{"TZ=UTC", "JDK_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"/app/bin/server", "Main"}, "/app/bin/server", libjvm, "UTC", 0},
+		{"a quoted option", []string{"TZ=UTC", `JAVA_TOOL_OPTIONS=-Dname="a b" '-Duser.timezone=Europe/Berlin'`}, []string{"java", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
+		{"a quoted option holding another: not one of its own", []string{"TZ=UTC", `JAVA_TOOL_OPTIONS="-Dname=x -Duser.timezone=Europe/Berlin"`}, []string{"java", "Main"}, launcher, libjvm, "UTC", 0},
+		{"the application's argument after -jar: not the JVM's", []string{"TZ=UTC"}, []string{"java", "-jar", "/app/app.jar", "-Duser.timezone=Asia/Kolkata"}, launcher, libjvm, "UTC", 0},
+		{"the application's argument after --module=: not the JVM's", []string{"TZ=UTC"}, []string{"java", "--module=app/com.example.Main", "-Duser.timezone=Asia/Kolkata"}, launcher, libjvm, "UTC", 0},
+		{"the application's argument after its main class: not the JVM's", []string{"TZ=UTC"}, []string{"java", "-cp", "-Duser.timezone=Asia/Kolkata", "Main", "-Duser.timezone=Asia/Kolkata"}, launcher, libjvm, "UTC", 0},
+		{"the last set empty: none, so TZ", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "-Duser.timezone=", "Main"}, launcher, libjvm, "UTC", 0},
+		{"a custom id", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=GMT+0530", "Main"}, launcher, libjvm, "+05:30", 19800},
+		{"a custom id west of UTC", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=GMT-3", "Main"}, launcher, libjvm, "-03:00", -10800},
+		{"GMT", []string{"JAVA_TOOL_OPTIONS=-Duser.timezone=GMT"}, []string{"java", "Main"}, launcher, libjvm, "UTC", 0},
+		{"an IANA link of no slash", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=CET", "Main"}, launcher, libjvm, "CET", 3600},
+		{"an old three-letter id, as Java maps it", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=IST", "Main"}, launcher, libjvm, "+05:30", 19800},
+		{"an old three-letter id of a fixed offset", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=EST", "Main"}, launcher, libjvm, "-05:00", -18000},
+		{"an id keploy does not read: unknown, never TZ's", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=Mars/Olympus", "Main"}, launcher, libjvm, "!", 0},
+		{"no = sets it empty: none, so TZ", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "-Duser.timezone", "Main"}, launcher, libjvm, "UTC", 0},
+		{"an argfile's option, read in its place, its comments skipped", []string{"TZ=UTC"}, []string{"java", "@/app/jvm.args", "-jar", "/app/app.jar"}, launcher, libjvm, "+05:30", 19800},
+		{"an argfile of the working directory", []string{"TZ=UTC"}, []string{"java", "@jvm.args", "Main"}, launcher, libjvm, "+05:30", 19800},
+		{"the command line's after an argfile, over it", []string{"TZ=UTC"}, []string{"java", "@/app/jvm.args", "-Duser.timezone=Europe/Berlin", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
+		{"an argfile's commented option: none", []string{"TZ=UTC"}, []string{"java", "@/app/jvm-commented.args", "Main"}, launcher, libjvm, "UTC", 0},
+		{"a main class in an argfile (Jib) ends the options", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "-cp", "@/app/jib-classpath-file", "@/app/jib-main-class-file", "-Duser.timezone=Asia/Kolkata"}, launcher, libjvm, "Europe/Berlin", 3600},
+		{"an argfile in a value's place, read before the value is taken", []string{"TZ=UTC"}, []string{"java", "-cp", "@/app/cp-and-opts.args", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
+		{"an argfile keploy cannot read: unknown", []string{"TZ=UTC"}, []string{"java", "@/app/missing.args", "Main"}, launcher, libjvm, "!", 0},
+		{"another program's @ argument: no argfile", []string{"TZ=UTC"}, []string{"/app/server", "@/app/missing.args"}, "/app/server", "", "UTC", 0},
+		{"a JVM exiting, its command line read empty: unknown", []string{"TZ=UTC"}, nil, launcher, libjvm, "!", 0},
+		{"a JVM exiting, its maps read empty: unknown", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, "=", "!", 0},
+		{"a libjvm.so deleted under it (an upgrade in place): still a JVM", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher + " (deleted)", "7f00-7f80 r-xp 00000000 08:01 42 /opt/java/openjdk/lib/server/libjvm.so (deleted)\n", "Europe/Berlin", 3600},
+		{"JDK_JAVA_OPTIONS in Java 8's launcher: not read", []string{"TZ=UTC", "JDK_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, "/usr/lib/jvm/java-8/jre/bin/java", "7f00-7f80 r-xp 00000000 08:01 42 /usr/lib/jvm/java-8/jre/lib/amd64/server/libjvm.so\n", "UTC", 0},
+		{"OpenJ9's option variable setting it: unknown (its order is not read)", []string{"TZ=UTC", "OPENJ9_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, libjvm, "!", 0},
+		{"another program's OpenJ9 variable: not its zone", []string{"TZ=UTC", "OPENJ9_JAVA_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"/app/server"}, "/app/server", "", "UTC", 0},
+		{"the first of a variable set twice, as getenv reads it", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin", "JAVA_TOOL_OPTIONS=-Duser.timezone=Asia/Kolkata"}, []string{"java", "Main"}, launcher, libjvm, "Europe/Berlin", 3600},
+		{"a name of a host's zone directory a JVM does not know: unknown", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=posix/Asia/Kolkata", "Main"}, launcher, libjvm, "!", 0},
+		{"a custom id Java does not read: unknown", []string{"TZ=UTC"}, []string{"java", "-Duser.timezone=GMT+24:00", "Main"}, launcher, libjvm, "!", 0},
+		{"another program's JAVA_TOOL_OPTIONS: not its zone", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"/app/server"}, "/app/server", "", "UTC", 0},
+		{"an option that sets it, where keploy cannot read whether the process is a JVM: unknown", []string{"TZ=UTC", "JAVA_TOOL_OPTIONS=-Duser.timezone=Europe/Berlin"}, []string{"java", "Main"}, launcher, "-", "!", 0},
+	} {
+		pid := 200 + i
+		java(strconv.Itoa(pid), row.env, row.argv, row.exe, row.maps)
+		z, err := ReadProcZone(proc, uint32(pid))
+		if row.want == "!" {
+			if err == nil || z.Loc != nil {
+				t.Errorf("%s: %v %v; want an error and no zone", row.what, z.Loc, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", row.what, err)
+			continue
+		}
+		if _, off := at.In(z.Loc).Zone(); z.Name != row.want || off != row.off {
+			t.Errorf("%s: %q at %d; want %q at %d", row.what, z.Name, off, row.want, row.off)
+		}
+	}
+	// A name only a host's zone directory holds is refused as no zone a JVM
+	// reads, whatever the host holds, never read from the host's files.
+	for _, id := range []string{"localtime", "posixrules", "Factory", "posix/Asia/Kolkata", "right/UTC"} {
+		if loc, err := javaZone(id); err == nil || loc != nil || !strings.Contains(err.Error(), "is no zone a JVM reads") {
+			t.Errorf("user.timezone %q: %v %v; want refused as no zone a JVM reads", id, loc, err)
+		}
+	}
+}
+
 // A call is learned in the zone of the process that made it (WithProcZone,
 // Tracker.DriftsOf), never the agent's: a learning that depends on it names
 // the process's zone. Where keploy could not read the process's zone, the
@@ -258,7 +392,9 @@ func TestACallIsLearnedInTheZoneOfItsOwnProcess(t *testing.T) {
 // process (Span.Own: a wall clock of no zone is the application's own),
 // over the zone the learn step named; the named zone where it could not;
 // and where neither is known, a plain read cut to an hour or coarser is
-// refused, saying so, while a finer one is read as before.
+// refused, saying so, while a finer one is read as before, and so is a wall
+// clock either zone held (models.ZoneEither) whatever its cut: checked at
+// its cut in UTC and the agent's zone (2026-10-28), never refused for it.
 func TestTheReplayApplicationsOwnZoneWinsOverTheOneLearned(t *testing.T) {
 	ist, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
@@ -337,12 +473,22 @@ func TestTheReplayApplicationsOwnZoneWinsOverTheOneLearned(t *testing.T) {
 	if ok, _ := CheckClockRead(wp, either, wall(ist, now), inIST, true); ok {
 		t.Errorf("either zone, learned in two zones, the application's zone unread: its IST second passed; want checked in UTC alone")
 	}
-	// One cut to an hour is refused where the application's zone is unread,
-	// as one of no name is (2026-10-28 QH): the meet cannot tell two named
-	// zones from a named and an unnamed one.
+	// One cut to an hour is checked at its cut the same, in UTC alone, never
+	// refused for its cut (a cut read is checked, 2026-10-28): the meet
+	// cannot tell two named zones from a named and an unnamed one, so UTC is
+	// the one zone every learning held it in.
 	eHour := models.ClockOffset{Res: time.Hour, Zone: models.ZoneEither, Layout: "iso-second-space", AppZone: "+05:30"}.Meet(models.ClockOffset{Res: time.Hour, Zone: models.ZoneEither, Layout: "iso-second-space"})
-	if ok, why := CheckClockRead(wp, eHour, utcHour, inIST, true); ok || !strings.Contains(why, "the learn step read the application's zone as no one zone") {
-		t.Errorf("either zone, an hour's cut learned in two zones, neither zone known: %v %q; want refused, saying why", ok, why)
+	if eHour.AppZone != models.AppZoneApart || eHour.Empty() {
+		t.Fatalf("two hours' cuts either zone held, named and unnamed, met as %+v; want AppZoneApart", eHour)
+	}
+	if ok, why := CheckClockRead(wp, eHour, utcHour, inIST, true); !ok {
+		t.Errorf("FALSE RED: either zone, an hour's cut learned in two zones, neither zone known: its UTC hour refused (%s); want checked at its cut in UTC, and passed", why)
+	}
+	if ok, why := CheckClockRead(wp, eHour, istHour, inIST, true); ok || !strings.Contains(why, "it changed") {
+		t.Errorf("either zone, an hour's cut learned in two zones, neither zone known: its IST hour %v %q; want refused as changed, checked in UTC alone", ok, why)
+	}
+	if ok, why := CheckClockRead(wp, eHour, wall(time.UTC, hourIn(time.UTC, now.Add(-3*time.Hour))), inIST, true); ok || !strings.Contains(why, "it changed") {
+		t.Errorf("either zone, an hour's cut learned in two zones, neither zone known: a UTC hour three hours stale %v %q; want refused as changed", ok, why)
 	}
 	if ok, why := CheckClockRead(wp, apart, istHour, agent, true); ok || !strings.Contains(why, "docker and compose modes") {
 		t.Errorf("learned in two zones, the application's zone unread: %v %q; want the refusal to say what works in docker and compose modes", ok, why)

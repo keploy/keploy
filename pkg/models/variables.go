@@ -244,15 +244,19 @@ func (r ClockRead) inOneSecond(o ClockRead) bool {
 // learned on a laptop in IST checks the same cut in IST on a CI machine in
 // UTC whose application's zone keploy cannot read, and in UTC where it
 // reads the application now writing in UTC. Either is the zone the process
-// started with, as its environment (TZ) and its files (/etc/localtime)
-// name it, never one it sets later (learn's ProcZones).
+// started with, as its options (a JVM's user.timezone), its environment
+// (TZ) and its files (/etc/localtime) name it, never one it sets later
+// (learn's ProcZones).
 // "" where keploy could not read the zone of the process that made the
 // call, or could not name it (a zone file copied with no name, whose offset
 // changes): the learn step read the value in the process's zone where it
 // read one it could not name, else in the agent's own, either of which may
 // be any zone; a replay that cannot read the application's zone either
 // reads it in the agent's own, except that it refuses a plain read cut to
-// an hour or coarser, whose cut the zone moves. A recording learned before
+// an hour or coarser, whose cut the zone moves, read in the application's
+// zone alone (ZoneApp, or an instant that names its moment); one in either
+// zone (ZoneEither) it checks at its cut in UTC and the agent's own. A
+// recording learned before
 // AppZone was reads the same. Two learnings of one place read with the
 // application's zone as two zones, two named ones or a named one and one
 // of no name, meet as AppZoneApart (Meet), which names none.
@@ -496,8 +500,8 @@ const (
 // zone from its process checks the place in it, as it does either
 // learning; one that cannot names no zone both learnings were read in, so
 // it refuses the value (learn's CheckClockRead), except a wall clock either
-// zone held (ZoneEither) cut finer than an hour, which both held in UTC and
-// it checks there.
+// zone held (ZoneEither), which both held in UTC and it checks there, at its
+// cut, whatever the cut.
 const AppZoneApart = "apart"
 
 // ZoneKnown reports whether o's Zone is one a replay reads a value in: ""

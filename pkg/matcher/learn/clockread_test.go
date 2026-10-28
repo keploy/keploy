@@ -113,7 +113,9 @@ func TestAnEmptyClockReadIsRefusedAtReplaySayingTheLearningsDisagree(t *testing.
 // was read at. A value that is no whole second is checked at its own
 // nanosecond. A cut of a millisecond is learned and checked at the cut the
 // same. An offset whose Res is coarser than the replay's encoding is
-// refused up front, naming both resolutions.
+// checked at its Res the same (a clock read plus an offset, then cut, is a
+// clock read, 2026-10-28), never refused for the cut; only a window too
+// wide to tell the offset's minute is refused, saying so.
 func TestACutClockReadIsLearnedAndCheckedAtItsCut(t *testing.T) {
 	ns := func(at time.Time) Leaf { return Leaf{Type: String, Value: strconv.FormatInt(at.UnixNano(), 10)} }
 	from := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
@@ -1469,8 +1471,18 @@ func TestADateOfNoZoneIsCheckedAtEveryHourWhicheverZoneItIsWrittenIn(t *testing.
 							// An old file names no zone (models.ClockOffset.AppZone).
 							oldFile := o
 							oldFile.AppZone = ""
-							if ok, why := CheckClockRead(p, oldFile, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy could not read the zone of the process that made this call, and the learn step named none") {
-								t.Errorf("%s: an old file, the application's zone not told at replay: %v %q; want refused, saying so", what, ok, why)
+							// Its application's zone unread, the agent's in
+							// the application's: checked at its cut in either
+							// zone, never refused for its cut (2026-10-28).
+							agent := Span{From: now, To: now.Add(20 * time.Millisecond), Zone: app.zone}
+							if ok, why := CheckClockRead(p, oldFile, form.leaf(now, write), agent, true); !ok {
+								t.Errorf("FALSE RED: %s: an old file, the application's zone unread at replay: refused (%s); want checked at its cut in either zone, and passed", what, why)
+							}
+							if ok, why := CheckClockRead(p, oldFile, form.leaf(now.AddDate(0, 0, 3), write), agent, true); ok || !strings.Contains(why, "it changed") {
+								t.Errorf("%s: an old file, the application's zone unread at replay, a date three days off: %v %q; want refused as changed", what, ok, why)
+							}
+							if ok, why := CheckClockRead(p, oldFile, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); ok || !strings.Contains(why, "keploy cannot tell the application's zone at this call") {
+								t.Errorf("%s: an old file, no zone told at replay at all: %v %q; want refused, saying so", what, ok, why)
 							}
 							if ok, why := CheckClockRead(p, o, form.leaf(now, write), Span{From: now, To: now.Add(20 * time.Millisecond)}, true); o.AppZone == "" || !ok {
 								t.Errorf("%s: learned naming %q, the application's zone not told at replay: %v %q; want read in it", what, o.AppZone, ok, why)

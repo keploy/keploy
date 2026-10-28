@@ -704,13 +704,16 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // it, a value that names its moment cut coarser than a minute), on any
 // machine, never the agent's own, and a name this keploy cannot read
 // refuses the value, naming it. Where neither is known, a plain read cut to
-// an hour or coarser, whose cut the zone moves, is refused, saying so; any
+// an hour or coarser, whose cut the zone moves, is refused, saying so,
+// except a wall clock either zone held (models.ZoneEither), which is
+// checked at its cut in UTC and in s.Zone, passing where either reading
+// holds (a cut read is checked, never refused for its cut, 2026-10-28); any
 // other o of no name (an old file) is read in s.Zone, as before.
 // One whose learnings read the application's zone as two zones
 // (models.AppZoneApart) names no zone to read it in: where keploy cannot
 // read the application's own, it is refused, saying so, except a wall
 // clock either zone held (models.ZoneEither), which every learning held in
-// UTC and which is checked there where its cut is finer than an hour.
+// UTC and which is checked there, at its cut whatever the cut.
 // An o two learnings of path met as Empty (models.ClockOffset.Meet: they
 // share no offset, read it in zones no one zone holds, models.ZoneApart, or
 // saw it in two layouts) is refused whatever the call carries, saying so,
@@ -742,12 +745,13 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 			loc, _ := models.ZoneLocation(o.AppZone)
 			hint = appZoneHint(o.AppZone, loc, s)
 		}
-	case o.AppZone == models.AppZoneApart && o.Zone == models.ZoneEither && (!o.Plain() || o.Res < time.Hour):
+	case o.AppZone == models.AppZoneApart && o.Zone == models.ZoneEither:
 		// A wall clock either zone held, learned with the application's
 		// zone read as two zones: every learning held it in UTC, where it
-		// is checked. One cut to an hour or coarser is refused below, as one
-		// of no name is where neither zone is known (2026-10-28 QH): the
-		// meet cannot tell two named zones from a named and an unnamed one.
+		// is checked, at its cut, an hour's or a day's too (a cut read is
+		// checked, never refused for its cut, 2026-10-28). UTC alone: the
+		// meet cannot tell two named zones from a named and an unnamed one,
+		// so it names no other zone every learning held it in.
 		o.Zone, o.AppZone = models.ZoneUTC, ""
 	case o.AppZone == models.AppZoneApart:
 		return false, learned + ": the learn step read the application's zone as no one zone, so a replay checks the value only in the zone it reads from the application's own process, but keploy could not read the zone of the process that made this call, so it refuses the value rather than check it in a zone the learn step never read it in. Run keploy where it reads the application's zone (keploy in the host PID namespace, --pid=host or hostPID, the application's process and its files readable; the agent's debug log says why it could not). Where it cannot (keploy's own docker and compose modes), record the test set again where every learning reads one zone, or declare the field noise in keploy.yml"
@@ -761,7 +765,14 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 			return false, learned + ", which a replay reads in " + o.AppZone + ", the application's zone the learn step read it in, but this keploy cannot read that zone (" + err.Error() + "), so it refuses the value rather than read it in another zone. Record the test again with this keploy"
 		}
 		s.Zone = loc
-	case o.AppZoneMatters() && o.Plain() && o.Res >= time.Hour:
+	case o.Zone == models.ZoneEither && o.Plain() && o.Res >= time.Hour && s.Zone != nil:
+		// A wall clock either zone held, cut to an hour or coarser, neither
+		// zone known: checked, never refused for its cut. clockReadIn reads
+		// it in UTC and in s.Zone, the agent's own, and it passes where
+		// either reading holds at its cut, as it does at a finer one; a
+		// refusal says where it was read.
+		hint = ". keploy could not read the zone of the process that made this call and the learn step named none, so it checked the value in UTC and in the agent's own zone (" + s.Zone.String() + ")"
+	case o.AppZoneMatters() && o.Zone != models.ZoneEither && o.Plain() && o.Res >= time.Hour:
 		return false, learned + ", cut to " + models.ShortDuration(o.Res) + ", which a replay checks in the application's zone, but keploy could not read the zone of the process that made this call, and the learn step named none, so it refuses the value rather than check its cut in another zone. Record the test again where keploy reads the application's zone (keploy in the host PID namespace, the application's process and its files readable; the agent's debug log says why it could not)"
 	}
 	ats, res, why := clockReadIn(o, live, s)

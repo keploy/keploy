@@ -236,8 +236,18 @@ func TestACutLearnedInTheApplicationsZoneIsCheckedInItOnAnyMachine(t *testing.T)
 	}
 	oldU := u
 	oldU.AppZone = ""
-	if ok, why := CheckClockRead(wp, oldU, istHour, s, true); ok || !strings.Contains(why, "keploy could not read the zone of the process that made this call, and the learn step named none") {
-		t.Errorf("the old file, replayed where the agent is in IST and the application's zone is unread: the IST hour %v %q; want refused, saying neither zone is known", ok, why)
+	// Neither zone known: a wall clock either zone held is checked at its
+	// cut in UTC and in the agent's zone, and passes where either reading
+	// holds, never refused for its cut (2026-10-28: a cut read is checked).
+	for _, h := range []Leaf{istHour, wall(time.UTC)(now.Truncate(time.Hour))} {
+		if ok, why := CheckClockRead(wp, oldU, h, s, true); !ok {
+			t.Errorf("FALSE RED: the old file, replayed where the agent is in IST and the application's zone is unread: the hour %s refused (%s); want checked at its cut in either zone, and passed", h.Value, why)
+		}
+	}
+	for _, h := range []Leaf{wall(ist)(hourIn(ist, now.Add(-3*time.Hour))), wall(time.UTC)(now.Add(-3 * time.Hour).Truncate(time.Hour))} {
+		if ok, why := CheckClockRead(wp, oldU, h, s, true); ok || !strings.Contains(why, "it changed") || !strings.Contains(why, "so it checked the value in UTC and in the agent's own zone (Asia/Kolkata)") {
+			t.Errorf("the old file, replayed where the agent is in IST and the application's zone is unread: the hour %s, three hours stale in both zones: %v %q; want refused as changed, saying where it was read", h.Value, ok, why)
+		}
 	}
 	own := s
 	own.Own = true
