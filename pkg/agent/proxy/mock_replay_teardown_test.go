@@ -245,3 +245,77 @@ func TestUnderMockReplayTheTeardownBoundReadsTheRecordingOnDisk(t *testing.T) {
 		t.Fatal("FALSE GREEN? a store that cannot be read told a teardown bound from the trees alone")
 	}
 }
+
+// onDisk is an on-disk store holding ms, finalized, as the agent keeps a set
+// for keploy mock replay.
+func onDisk(t *testing.T, ms ...*models.Mock) *DiskMocks {
+	t.Helper()
+	disk, err := NewDiskMocks(zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = disk.Close() })
+	for _, mk := range ms {
+		if err := disk.Add(mk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Finalize()
+	return disk
+}
+
+// Under keploy mock replay each test process's teardown is bounded by its
+// own tests' recordings on disk, as from the trees: the staging holds no
+// test's own, so the bound reads them from the store, and a recording only
+// another key's tests list is no bound of this key there either. So a's
+// teardown, recorded before b's tests, is a's, and b's is b's; neither is
+// the other's.
+func TestUnderMockReplayEachProcessesTeardownIsBoundedByItsOwnTestsOnDisk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	aBoot := exactMongo("a-boot", 100*time.Millisecond, models.LifetimePerTest)
+	a1 := exactMongo("a1", time.Second, models.LifetimePerTest)
+	aEnd := exactMongo("a-end", 2*time.Second, models.LifetimePerTest)
+	bBoot := exactMongo("b-boot", 2500*time.Millisecond, models.LifetimePerTest)
+	b1 := exactMongo("b1", 3*time.Second, models.LifetimePerTest)
+	bEnd := exactMongo("b-end", 3500*time.Millisecond, models.LifetimePerTest)
+	disk := onDisk(t, aBoot, a1, aEnd, bBoot, b1, bEnd)
+	// The staging: the pool's slices, never a test's own.
+	mm := stagedManager(t, []*models.Mock{aBoot, aEnd, bBoot, bEnd}, nil)
+	mm.SetPoolOwners(map[string]string{"a1": "a", "b1": "b"})
+	mm.SetPoolNames([]string{"a-boot", "a-end", "b-boot", "b-end"})
+	mm.SetRecordingTimes(disk.RangeTimes)
+	for _, tc := range []struct {
+		key  string
+		mk   *models.Mock
+		want bool
+	}{{"a", aEnd, true}, {"b", bEnd, true}, {"b", aEnd, false}, {"a", aBoot, false}} {
+		after := mm.teardownAfter(tc.key)
+		if got := after != nil && after(tc.mk.Spec.ReqTimestampMock); got != tc.want {
+			t.Errorf("key %s: %s is the teardown = %v, want %v", tc.key, tc.mk.Name, got, tc.want)
+		}
+	}
+}
+
+// The bound a test's recording on disk sets is its answer's time, not its
+// request's: a pool recording sent while the test's last call waited for its
+// answer is no teardown (the test was still running), one sent after the
+// answer is.
+func TestUnderMockReplayTheTeardownIsAfterTheTestsLastAnswerOnDisk(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	owned := exactMongo("owned", time.Second, models.LifetimePerTest)
+	owned.Spec.ResTimestampMock = exactT0.Add(2 * time.Second)
+	mid := exactMongo("mid", 1500*time.Millisecond, models.LifetimePerTest)
+	end := exactMongo("end", 3*time.Second, models.LifetimePerTest)
+	disk := onDisk(t, owned, mid, end)
+	mm := stagedManager(t, []*models.Mock{mid, end}, nil)
+	mm.SetPoolOwners(map[string]string{"owned": "k"})
+	mm.SetPoolNames([]string{"mid", "end"})
+	mm.SetRecordingTimes(disk.RangeTimes)
+	after := mm.teardownAfter("k")
+	if after == nil || !after(end.Spec.ReqTimestampMock) {
+		t.Fatal("end, sent after the test's last answer, is not the teardown")
+	}
+	if after(mid.Spec.ReqTimestampMock) {
+		t.Fatal("FALSE GREEN? mid, sent before the test's last call was answered, reads as the teardown")
+	}
+}

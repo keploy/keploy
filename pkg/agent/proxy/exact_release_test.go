@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
+	"weak"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
@@ -148,10 +150,12 @@ func sendSettled(t *testing.T, h integrations.Integrations, p *Proxy, mm *MockMa
 // begin and end. Each test makes one call, of its small recording; its big
 // ones answer none (a test that failed early), so neither the tracker nor
 // the staging's take log holds them. Then the pool's view is served and the
-// tracker ends the test, as the agent ends one. The live heap then holds under
-// half a test's recordings above where the run began. It held the whole test
-// where the round kept the ended test's view bound to the tracker's test
-// number until the tracker's next begin (roundState.bound). Run it on a box.
+// tracker ends the test, as the agent ends one. The test's recordings are
+// then unreachable: a weak pointer to their backing array is nil after a GC.
+// They stayed reachable where the round kept the ended test's view bound to
+// the tracker's test number until the tracker's next begin
+// (roundState.bound). Reachability, not the live heap's size, which memory
+// earlier rows of the package free meanwhile can hide. Run it on a box.
 func TestAnEndedTestsRecordingsGoWithTheTrackersEnd(t *testing.T) {
 	const tests, pieces, piece = 4, 4, 16 << 20
 	const testSize = pieces * piece
@@ -179,26 +183,29 @@ func TestAnEndedTestsRecordingsGoWithTheTrackersEnd(t *testing.T) {
 	mm.ServeExactPool(models.PoolKeyNone, poolNames)
 	// open serves test k its own recordings, read as the test opens: its
 	// small one, then its big ones, slices of one backing array, so a big
-	// recording of the test kept anywhere keeps the whole test's bytes.
-	open := func(k int) {
+	// recording of the test kept anywhere keeps the whole test's bytes. It
+	// returns a weak pointer to that array.
+	open := func(k int) weak.Pointer[byte] {
 		backing := strings.Repeat(string(rune('a'+k)), testSize)
 		owned := []*models.Mock{r3Mock(fmt.Sprintf("mock-%d-own", k), start(k).Add(time.Second), "GET", fmt.Sprintf("/own/%d", k), "", fmt.Sprintf(`{"own":%d}`, k))}
 		for i := 0; i < pieces; i++ {
 			owned = append(owned, r3Mock(fmt.Sprintf("mock-%d-%d", k, i), start(k).Add(time.Duration(i+2)*time.Second), "GET", fmt.Sprintf("/big/%d/%d", k, i), "", backing[i*piece:(i+1)*piece]))
 		}
 		mm.ServeExactTest(fmt.Sprintf("test-%d", k), owned)
+		return weak.Make(unsafe.StringData(backing))
 	}
-	begin := liveHeap()
 	for k := 0; k < tests; k++ {
 		p.ContinueTestErrorCapture()
-		open(k)
+		recordings := open(k)
 		if code, body := sendSettled(t, h, p, mm, httpGet(fmt.Sprintf("/own/%d", k))); code != http.StatusOK || body != fmt.Sprintf(`{"own":%d}`, k) {
 			t.Fatalf("test %d: its own call got %d %s", k, code, body)
 		}
 		mm.ServeExactPool(models.PoolKeyNone, poolNames)
 		p.EndTestErrorCapture()
-		if held := float64(liveHeap()) - float64(begin); held > testSize/2 {
-			t.Fatalf("test %d ended: the live heap holds %d MiB over the run's start, %.2f tests' recordings of %d MiB: an ended test's are kept", k, int64(held)>>20, held/testSize, testSize>>20)
+		runtime.GC()
+		runtime.GC()
+		if recordings.Value() != nil {
+			t.Fatalf("test %d ended: its %d MiB of recordings are still reachable: an ended test's are kept", k, testSize>>20)
 		}
 		if code, body := sendSettled(t, h, p, mm, httpGet(fmt.Sprintf("/pool/%d", k))); code != http.StatusOK || body != fmt.Sprintf(`{"pool":%d}`, k) {
 			t.Fatalf("after test %d: the pool's call got %d %s", k, code, body)

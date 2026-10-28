@@ -1353,6 +1353,25 @@ func TestASessionResetEndsTheSessionsExactServing(t *testing.T) {
 	equalNames(t, "without exact serving", sess, "a")
 }
 
+// A session reset forgets the outcome of the session's last ended test too,
+// as it does the open one's: until the next session opens a test, the
+// outcome names no test. The outcome is trusted by its test's name, so one
+// left over would report the previous session's test as this one's.
+func TestASessionResetForgetsTheLastEndedTestsOutcome(t *testing.T) {
+	a := exactMock("a", 0, models.LifetimePerTest)
+	mm := stagedManager(t, []*models.Mock{a}, nil)
+	mm.ServeExactPool("-", nil)
+	mm.ServeExactTest("T", []*models.Mock{a})
+	mm.ServeExactPool("-", nil)
+	if test, _, unconsumed, ok := mm.ExactTestOutcome(); !ok || test != "T" || len(unconsumed) != 1 {
+		t.Fatalf("before the reset the outcome is %q %v (ok %v); want test T's, with a unconsumed", test, unconsumed, ok)
+	}
+	mm.ResetForReplaySession()
+	if test, consumed, unconsumed, ok := mm.ExactTestOutcome(); !ok || test != "" || len(consumed)+len(unconsumed) != 0 {
+		t.Fatalf("after the reset the outcome is %q %v %v (ok %v); want no test's", test, consumed, unconsumed, ok)
+	}
+}
+
 // A consume that read a view before another replaced it settles nothing in
 // the view it read: that view is closed, and what it says it consumed is
 // final. It is settled against the view in force instead (closedWait), here
