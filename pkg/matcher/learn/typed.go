@@ -1337,7 +1337,9 @@ func (dc *DriftCache) instantLeafFrom(r Leaf, rec moment, served []Earlier) (Pla
 // day, nor a finer instant cut to it: those are the echo's, which F's moment
 // gates), in any form, with a protocol-phase answer's own clock reads and an
 // HTTP answer's stamp blanked (searched: rules 2 and 3), and the field that
-// holds it. live is the moment F saw in r (copiedInBoth).
+// holds it: the one, of its answer's fields that hold it, that the full round
+// does not refute the copy of, else the first. live is the moment F saw in r
+// (copiedInBoth).
 func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw []Raw) (Place, bool) {
 	for _, x := range raw {
 		if !x.earlierThan(at) {
@@ -1347,19 +1349,28 @@ func (dc *DriftCache) instantRawFrom(r Leaf, rec, live moment, at time.Time, raw
 		if !dc.holdsExact(texts[0], rec) && !dc.holdsExact(texts[1], rec) {
 			continue
 		}
-		field, given := "", false
+		field, given, found := "", false, false
+		in := func(own string) bool { return dc.holdsExact(own, live) }
 		for _, f := range x.fields {
 			if f.key || f.end > len(texts[0]) {
 				continue
 			}
 			own := texts[0][f.start:f.end]
-			if dc.holdsExact(own, rec) || dc.holdsExact(dc.rawExtra(own), rec) {
-				// Marked a whole copy of x's answer (Place.givenWhole) only
-				// where the full round does not refute it (copiedInBoth):
-				// F's view of x held, at that field, the instant F saw in
-				// the value, or x has no view.
-				field = f.describe()
-				given = answerPath(f.path) && dc.copiedInBoth(x, f, func(own string) bool { return dc.holdsExact(own, live) })
+			if !dc.holdsExact(own, rec) && !dc.holdsExact(dc.rawExtra(own), rec) {
+				continue
+			}
+			// Marked a whole copy of x's answer (Place.givenWhole) only
+			// where the full round does not refute it (copiedInBoth): F's
+			// view of x held, at a field of its answer that holds rec, the
+			// instant F saw in the value, or x has no view; and then that
+			// field. Else the first field that holds rec, unmarked (an
+			// upsert's createdAt, older in F's view, before its updatedAt,
+			// which held the value F saw: the copy is the updatedAt's).
+			if !found {
+				field, found = f.describe(), true
+			}
+			if answerPath(f.path) && dc.copiedInBoth(x, f, in) {
+				field, given = f.describe(), true
 				break
 			}
 		}

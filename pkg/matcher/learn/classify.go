@@ -538,7 +538,10 @@ type Place struct {
 	// instantLeafFrom): they do not check that F's view held the value too,
 	// and the echo keeps a copy F's view holds. A raw mock's field is marked
 	// only where the full round does not refute the copy (copiedInBoth: F's
-	// view held the value F saw there, or there is no view), and never for
+	// view held the value F saw there, or there is no view), at any field of
+	// its answer that holds the value, which the place then names (an
+	// upsert's createdAt and updatedAt, of which F's view holds the value F
+	// saw at the second only: the second's copy), and never for
 	// a value holding an escape (appearedIn's decoded site), which the copy
 	// rule never reads as a clock read.
 	givenWhole bool
@@ -3224,14 +3227,26 @@ func (dc *DriftCache) fieldOf(x Raw, texts [2]string, w string) (field string, a
 }
 
 // fieldWith is the field fieldOf names; ok is false when none holds w.
-func fieldWith(x Raw, texts [2]string, w string) (rawField, bool) {
+func fieldWith(x Raw, texts [2]string, w string) (f rawField, ok bool) {
+	eachFieldWith(x, texts, w, func(g rawField) bool {
+		f, ok = g, true
+		return false
+	})
+	return f, ok
+}
+
+// eachFieldWith calls yield on each field of x, its text as searched in
+// texts[0], that holds word w as a token: first those that hold it in their
+// own text, then those that hold it in a declared form of it (a field can
+// come in both), each in x's order, until yield returns false. fieldWith is
+// the first.
+func eachFieldWith(x Raw, texts [2]string, w string, yield func(rawField) bool) {
 	for _, f := range x.fields {
 		if f.end > len(texts[0]) {
 			break
 		}
-		own := texts[0][f.start:f.end]
-		if ContainsToken(own, w) {
-			return f, true
+		if ContainsToken(texts[0][f.start:f.end], w) && !yield(f) {
+			return
 		}
 	}
 	for _, f := range x.fields {
@@ -3240,22 +3255,40 @@ func fieldWith(x Raw, texts [2]string, w string) (rawField, bool) {
 		}
 		for _, form := range textForms(texts[0][f.start:f.end])[1:] {
 			if ContainsToken(form, w) {
-				return f, true
+				if !yield(f) {
+					return
+				}
+				break
 			}
 		}
 	}
-	return rawField{}, false
 }
 
 // wholeFieldOf is fieldOf of a drifted value's whole clock read (rec as
-// recorded, live as F saw it) found in x: given only where the full round
-// does not refute the copy too (copiedInBoth).
+// recorded, live as F saw it) found in x: given where any field of x's
+// answer that holds rec is one the full round does not refute the copy of
+// (copiedInBoth), and then that field; else the first field that holds rec,
+// unmarked. An answer can hold the recorded stamp at two fields (an
+// upsert's createdAt and updatedAt, equal when record made the entity)
+// while F's view holds the value F saw at the second only: the copy is the
+// second's in both runs, and stays that answer's variable.
 func (dc *DriftCache) wholeFieldOf(x Raw, texts [2]string, rec, live string) (field string, given bool) {
-	f, ok := fieldWith(x, texts, rec)
+	first, ok := fieldWith(x, texts, rec)
 	if !ok {
 		return "", false
 	}
-	return f.describe(), !f.key && answerPath(f.path) && dc.copiedInBoth(x, f, func(own string) bool { return containsWholeClock(own, live) })
+	in := func(own string) bool { return containsWholeClock(own, live) }
+	eachFieldWith(x, texts, rec, func(f rawField) bool {
+		if !f.key && answerPath(f.path) && dc.copiedInBoth(x, f, in) {
+			field, given = f.describe(), true
+			return false
+		}
+		return true
+	})
+	if !given {
+		field = first.describe()
+	}
+	return field, given
 }
 
 // copiedInBoth reports whether record's full round leaves field f of x, a

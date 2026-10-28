@@ -1417,3 +1417,146 @@ func TestAClientTestKeepsAnEscapedCopyOfARecordingsAnswerStampAsThatAnswersVaria
 		})
 	}
 }
+
+func TestAClientTestKeepsAWholeCopyOfAnAnswersSecondFieldHoldingTheStampAsThatAnswersVariable(t *testing.T) {
+	// A recording's answer holds the recorded stamp at two fields, an
+	// upsert's pair (createdAt and updatedAt, equal where record made the
+	// entity), and the call sends a value recorded equal to it: the call's
+	// window holds the value at the second's cut in both runs. Where record's
+	// full round found the entity, its view holds an older moment at the
+	// first field and the value the call sent at the second: the call copies
+	// the second field whole in both runs, which stays the answer's variable
+	// (a replay serves the answer as recorded, and the copy holds it), named
+	// at the second field (in headers; an HTTP body is one field, named the
+	// body). Where no field of the answer that held the stamp held, in the
+	// full round, the value it sent, the full round refutes the copy, and
+	// the read of the clock since the test began holds in both runs.
+	type run struct{ began time.Time }
+	ans := func(r run) time.Time { return r.began.Add(1200 * time.Millisecond) }
+	span := func(r run) Span {
+		from := ans(r).Add(25 * time.Millisecond)
+		return Span{From: from, To: from.Add(200 * time.Millisecond), Began: r.began}
+	}
+	stamp := func(r run) time.Time { return ans(r).Truncate(time.Second) }
+	rec := run{time.Date(2026, 10, 27, 16, 59, 3, 100_000_000, time.UTC)}
+	full := run{time.Date(2026, 10, 27, 17, 1, 19, 300_000_000, time.UTC)}
+	old := time.Date(2026, 10, 27, 16, 40, 0, 0, time.UTC)
+	type answer struct {
+		body   string
+		header map[string]string
+	}
+	mock := func(at time.Time, a answer) *models.Mock {
+		if a.header == nil {
+			a.header = map[string]string{}
+		}
+		return &models.Mock{Name: "mock-1", Kind: models.HTTP, Spec: models.MockSpec{
+			Metadata:         map[string]string{"type": "HTTP_CLIENT"},
+			HTTPReq:          &models.HTTPReq{Method: "POST", URL: "http://localhost:8083/items", Body: `{"n":"a"}`, Header: map[string]string{}},
+			HTTPResp:         &models.HTTPResp{StatusCode: 200, Header: a.header, Body: a.body},
+			ReqTimestampMock: at, ResTimestampMock: at.Add(20 * time.Millisecond),
+		}}
+	}
+	type form struct {
+		name   string
+		text   func(at time.Time) string
+		quoted bool
+		leaf   func(p string, at time.Time) Leaf
+	}
+	isoText := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	epochText := func(at time.Time) string { return strconv.FormatInt(at.Unix(), 10) }
+	iso := form{"an ISO instant", isoText, true, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: String, Value: isoText(at)} }}
+	epoch := form{"epoch seconds", epochText, false, func(p string, at time.Time) Leaf { return Leaf{Path: p, Noise: p, Type: Number, Value: epochText(at)} }}
+	typed := form{"an instant typed to the second", isoText, true, func(p string, at time.Time) Leaf { return InstantLeaf(p, p, at, time.Second) }}
+	// in is where the answer holds the pair (first, second); second is the
+	// end of the name of the field that holds the second. Two headers are
+	// two fields of a recording. An HTTP body is one field, its text whole:
+	// a body that holds the pair holds both in that field.
+	type in struct {
+		name   string
+		second string
+		hold   func(f form, first, second time.Time) answer
+	}
+	headers := in{"two headers", "X-Updated-At", func(f form, a, b time.Time) answer {
+		return answer{body: `{"id":"a"}`, header: map[string]string{"X-Created-At": f.text(a), "X-Updated-At": f.text(b)}}
+	}}
+	body := in{"a body's two fields", "spec.resp.body", func(f form, a, b time.Time) answer {
+		q := func(at time.Time) string {
+			if f.quoted {
+				return `"` + f.text(at) + `"`
+			}
+			return f.text(at)
+		}
+		return answer{body: `{"createdAt":` + q(a) + `,"updatedAt":` + q(b) + `}`}
+	}}
+	const p = "body.variables.lastModified"
+	for _, c := range []struct {
+		name string
+		// recorded is the pair record's answer held; view the pair record's
+		// full round gave the application, nil where it gave no view.
+		recorded func() (time.Time, time.Time)
+		view     func() (time.Time, time.Time)
+		read     bool
+		// fields: only where the pair stands in two fields of the
+		// recording (headers).
+		fields bool
+	}{
+		{"the full round's answer held an older moment first and the value second",
+			func() (time.Time, time.Time) { return stamp(rec), stamp(rec) },
+			func() (time.Time, time.Time) { return old, stamp(full) }, false, false},
+		// The full round refutes the copy: no field of its answer held the
+		// value it sent at a field that held it at record.
+		{"the full round's answer held older moments at both",
+			func() (time.Time, time.Time) { return stamp(rec), stamp(rec) },
+			func() (time.Time, time.Time) { return old, old }, true, false},
+		// The full round's view is read field by field, never whole: its
+		// value at another field than the one that held the stamp at record
+		// is no copy in both runs. (In a body, one field, it is read at that
+		// field: a stated limit.)
+		{"the recording held the stamp first only and the full round's answer the value second only",
+			func() (time.Time, time.Time) { return stamp(rec), old },
+			func() (time.Time, time.Time) { return old, stamp(full) }, true, true},
+		// Controls: the full round's answer held the value at both, or
+		// keploy has no view of it: the answer's variable.
+		{"the full round's answer held the value at both",
+			func() (time.Time, time.Time) { return stamp(rec), stamp(rec) },
+			func() (time.Time, time.Time) { return stamp(full), stamp(full) }, false, false},
+		{"the full round gave no view of the answer",
+			func() (time.Time, time.Time) { return stamp(rec), stamp(rec) }, nil, false, false},
+	} {
+		for _, pair := range [][2]form{{iso, iso}, {epoch, epoch}, {iso, typed}, {epoch, typed}} {
+			for _, lay := range []in{headers, body} {
+				if c.fields && lay.name != headers.name {
+					continue
+				}
+				src, cp := pair[0], pair[1]
+				t.Run(c.name+"/"+lay.name+" of "+src.name+" copied as "+cp.name, func(t *testing.T) {
+					dc := clientTestCache()
+					a, b := c.recorded()
+					x := dc.RawOf(mock(ans(rec), lay.hold(src, a, b)), true)
+					if c.view != nil {
+						a, b := c.view()
+						x = x.ServedAs(1).ServedLive(RawOf(mock(ans(full), lay.hold(src, a, b)), true))
+					}
+					w := (&Window{Rec: span(rec), F: span(full)}).ComparesOffsets()
+					ln := ClassifyFollowing(dc, []string{p}, Shape{Leaves: map[string]Leaf{p: cp.leaf(p, stamp(full))}}, Shape{Leaves: map[string]Leaf{p: cp.leaf(p, stamp(rec))}}, span(rec).To, nil, []Raw{x}, nil, w, nil)[0]
+					o, ok := ln.Clock()
+					if c.read {
+						if ln.Kind != KindClockRead || !ok || o.Since != models.SinceTestBegin {
+							t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want a read of the clock since the test began: the full round refutes the copy, and the read holds in both runs", ln.Kind, o, ln.From, ln.Why)
+						}
+						return
+					}
+					if ln.Kind != KindVariable || ln.From.Mock != "mock-1" {
+						t.Fatalf("FALSE RED: %s Clock=%+v from %+v (%s); want the variable of mock-1's answer: no run refutes the copy", ln.Kind, o, ln.From, ln.Why)
+					}
+					if c.view == nil {
+						return
+					}
+					if va, vb := c.view(); va != vb && !strings.HasSuffix(ln.From.Field, lay.second) {
+						t.Fatalf("the variable of %s; want it named at the field that held the value in both runs, %s", ln.From.Field, lay.second)
+					}
+				})
+			}
+		}
+	}
+}
