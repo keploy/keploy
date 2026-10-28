@@ -342,7 +342,7 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 						// (HoldToRound), and none for a call one more than
 						// the test recorded (repeatNoteOf).
 						held, _ := integrations.HoldToRound(mockDb, call)
-						extra := h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+						extra, _ := h.extraCall(reqCtx, input, held, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 						a, repeat := repeatNoteOf(reqCtx, input, held, strict, extra)
 						reportPairing(reqCtx, input, x, a, repeat)
 						stub, ok, lmiss = answer, true, nil
@@ -420,14 +420,16 @@ func (h *HTTP) decodeHTTP(ctx context.Context, reqBuf []byte, clientConn net.Con
 				// Both read the request's destination as it came (reqCtx): a
 				// reading now would be a use of its connection's container in
 				// the scope open now, the next test's once a test ended.
-				n := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
+				n, repeats := h.extraCall(reqCtx, input, db, headerNoise, bodyNoise, urlNoise, !opts.DisableAutoURLDynamic, opts.NoiseDetection(), opts.NoiseStrict(), !opts.DisableMockCorrelation)
 				if n == 0 && lmiss == nil {
 					// (A learn-step miss names the candidate it refused.)
 					diag = h.answeredDiag(reqCtx, input, db, diag, headerNoise, bodyNoise, urlNoise)
 				}
 				report := h.buildHTTPMismatchReport(request, input.body, db, nil, headerNoise, bodyNoise, diag)
-				if n > 0 && report != nil {
-					report.MissKind, report.Recorded = models.MissExtraCall, n
+				if n > 0 {
+					// Named as the recording it repeats, never another in
+					// view (integrations.MarkExtraCall).
+					integrations.MarkExtraCall(report, repeats, n)
 				}
 				// The miss was decided where the request first read the
 				// round: whether that read found a staging is told from it.
