@@ -489,10 +489,17 @@ type Proxy struct {
 	// name.S.S. That shape is decidable from the name alone, whatever
 	// upstream says, and nothing answers it, so capture never recorded it.
 	dnsSearch []string
-	// dnsForwardTimeout caps how long a single upstream Exchange is
-	// allowed to block. Short by design — a flaky resolver must never
-	// stall the app's DNS lookup. On timeout we fall through to the
-	// legacy default/NXDOMAIN behaviour with a clear log line.
+	// dnsUpstreamPolicy is resolv.conf's timeout and attempts, read with
+	// dnsUpstreamServers: keploy asks the upstream as the app's stub
+	// resolver would (see exchangeDNSUpstream). Zero means the defaults.
+	dnsUpstreamPolicy dnsStubPolicy
+	// dnsRotateNext counts the upstream queries asked under resolv.conf's
+	// "options rotate": query n starts at server n mod the server count.
+	dnsRotateNext atomic.Uint32
+	// dnsForwardTimeout caps the test-mode forward on a mock miss, resends
+	// included. Short by design — a flaky resolver must never stall the
+	// app's DNS lookup. On timeout we fall through to the legacy
+	// default/NXDOMAIN behaviour with a clear log line.
 	dnsForwardTimeout time.Duration
 
 	// isGracefulShutdown indicates the application is shutting down gracefully
@@ -1063,9 +1070,9 @@ func New(logger *zap.Logger, info agent.DestInfo, opts *config.Config) *Proxy {
 		nodataRelayLogged:         newNodataRelayLogCache(),
 		mysqlPorts:                newMysqlPortRegistry(),
 		// dnsForwardTimeout is the per-forward deadline for upstream DNS
-		// exchanges. 2 s is long enough to absorb a single UDP retransmit
-		// against CoreDNS (~500 ms default) while keeping app-side lookup
-		// latency bounded if the upstream is hard-down. Tuned to match the
+		// exchanges, resends included. 2 s keeps app-side lookup latency
+		// bounded if the upstream is hard-down, under the app resolver's
+		// own 5 s wait. Tuned to match the
 		// task spec ("~2s"). Tests override by assigning to this field
 		// directly on the Proxy struct; see
 		// pkg/agent/proxy/dns_forward_test.go (newProxyWithUpstream). The

@@ -1,11 +1,11 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"runtime"
 	"strconv"
-	"time"
 
 	"github.com/miekg/dns"
 	"go.uber.org/zap"
@@ -78,6 +78,11 @@ func (p *Proxy) captureDNSUpstream() {
 		return
 	}
 
+	// The resolver options (timeout, attempts) are how the app's own stub
+	// resolver would ask these servers; keploy asks them the same way.
+	p.dnsUpstreamPolicy = stubPolicyFromConfig(config)
+	p.dnsUpstreamPolicy.rotate = resolvConfRotates(resolvConfPath)
+
 	// Keep the search list: it is what makes a redundant expansion
 	// recognisable without a round trip. Captured even when every
 	// nameserver is filtered out below, since the two are independent.
@@ -115,7 +120,9 @@ func (p *Proxy) captureDNSUpstream() {
 	p.logger.Debug("captured upstream DNS resolvers for forward-on-miss",
 		zap.Strings("servers", p.dnsUpstreamServers),
 		zap.String("port", p.dnsUpstreamPort),
-		zap.Strings("search", p.dnsSearch))
+		zap.Strings("search", p.dnsSearch),
+		zap.Duration("timeout", p.dnsStub().timeout),
+		zap.Int("attempts", p.dnsStub().attempts))
 }
 
 // hasDNSUpstream reports whether the forwarder has any real upstream
@@ -125,27 +132,32 @@ func (p *Proxy) hasDNSUpstream() bool {
 	return p != nil && len(p.dnsUpstreamServers) > 0
 }
 
-// forwardDNSUpstream performs a single DNS Exchange against each
-// snapshotted upstream server in turn, returning the first non-nil
+// forwardDNSUpstream asks the snapshotted upstream servers for question
+// as a stub resolver does (exchangeDNSUpstream: resends on loss, every
+// server in turn, TCP when the answer is truncated) and returns the first
 // response regardless of rcode (NOERROR, NXDOMAIN, SERVFAIL, …) — the
-// caller discriminates on Rcode/Answer count (a valid answer vs NODATA
-// vs a genuinely negative rcode). On timeout or transport error we
-// advance to the next server; if all fail we return an error so the
-// caller can fall through to the legacy default response.
+// caller discriminates on Rcode/Answer count (a valid answer vs NODATA vs a
+// genuinely negative rcode). If no server answers it returns an error so
+// the caller can fall through to the legacy default response.
 //
-// Transport rules:
-//   - Start on UDP (cheapest).
-//   - If a UDP response is truncated, retry on TCP against the same
-//     server to pull the full answer.
-//   - All exchanges share a per-call deadline of p.dnsForwardTimeout.
+// The whole exchange, resends included, lasts at most p.dnsForwardTimeout:
+// the resolver's schedule is compressed into it, so the app's resolver hears
+// keploy's answer or fallback before it gives up on keploy.
 //
 // No caching is done here — the outer ServeDNS handler already caches
 // "FromUpstream" responses via p.dnsCache, and recording-mode mocks are
 // emitted by the caller. Keeping this function stateless makes it
 // trivially safe to call concurrently from the UDP and TCP DNS servers.
 func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
+	resp, _, err := p.forwardDNSUpstreamVia(question)
+	return resp, err
+}
+
+// forwardDNSUpstreamVia is forwardDNSUpstream, with the address (host:port)
+// of the resolver whose answer it returns.
+func (p *Proxy) forwardDNSUpstreamVia(question dns.Question) (*dns.Msg, string, error) {
 	if !p.hasDNSUpstream() {
-		return nil, fmt.Errorf("no upstream DNS resolver configured")
+		return nil, "", fmt.Errorf("no upstream DNS resolver configured")
 	}
 
 	// Only forward types we know how to relay sensibly. Everything
@@ -160,76 +172,24 @@ func (p *Proxy) forwardDNSUpstream(question dns.Question) (*dns.Msg, error) {
 	// accidentally start answering DNSSEC queries we can't sign.
 	if !isForwardableQType(question.Qtype) {
 		if qtypeName, ok := dns.TypeToString[question.Qtype]; ok && qtypeName != "" {
-			return nil, fmt.Errorf("qtype %s not forwarded", qtypeName)
+			return nil, "", fmt.Errorf("qtype %s not forwarded", qtypeName)
 		}
-		return nil, fmt.Errorf("qtype %d not forwarded", question.Qtype)
+		return nil, "", fmt.Errorf("qtype %d not forwarded", question.Qtype)
 	}
-
-	// dns.Client.Timeout is the per-exchange wall-clock cap. We also
-	// derive a loop-wide deadline so the worst case across all
-	// servers is still bounded by dnsForwardTimeout, not
-	// N*dnsForwardTimeout. This matters when all upstreams are
-	// black-holed: without the outer deadline, three servers would
-	// each burn 2 s before we fall back.
-	deadline := time.Now().Add(p.dnsForwardTimeout)
 
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(question.Name), question.Qtype)
 	m.Question[0].Qclass = nonZeroQclass(question.Qclass)
 	m.RecursionDesired = true
 
-	var lastErr error
-	for _, server := range p.dnsUpstreamServers {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			lastErr = fmt.Errorf("dns forward deadline exceeded before trying %s", server)
-			break
-		}
-		addr := net.JoinHostPort(server, p.dnsUpstreamPort)
-
-		c := &dns.Client{Net: "udp", Timeout: remaining}
-		resp, _, err := c.Exchange(m, addr)
-		if err != nil {
-			p.logger.Debug("upstream DNS forward failed (udp); trying next server",
-				zap.String("server", addr),
-				zap.String("question", question.Name),
-				zap.Error(err))
-			lastErr = err
-			continue
-		}
-
-		if resp != nil && resp.Truncated {
-			// Upstream said "answer too big for UDP" — retry on TCP
-			// against the same server using whatever is left of the
-			// loop-wide deadline.
-			tcpRemaining := time.Until(deadline)
-			if tcpRemaining <= 0 {
-				lastErr = fmt.Errorf("dns forward deadline exceeded before TCP retry to %s", server)
-				break
-			}
-			tc := &dns.Client{Net: "tcp", Timeout: tcpRemaining}
-			tcpResp, _, terr := tc.Exchange(m, addr)
-			if terr != nil {
-				p.logger.Debug("upstream DNS forward failed (tcp); trying next server",
-					zap.String("server", addr),
-					zap.String("question", question.Name),
-					zap.Error(terr))
-				lastErr = terr
-				continue
-			}
-			resp = tcpResp
-		}
-
-		if resp == nil {
-			continue
-		}
-		return resp, nil
+	waits := p.dnsStub().waitsWithin(len(p.dnsUpstreamServers), p.dnsForwardTimeout)
+	// Not ended by the proxy's stop: dnsForwardTimeout bounds it, as it
+	// did before the exchange resent, so a stop waits no longer than that.
+	resp, resolver, err := exchangeDNSUpstream(context.Background(), p.logger, m, p.askOrder(p.dnsUpstreamServers), p.dnsUpstreamPort, waits)
+	if err != nil {
+		return nil, "", fmt.Errorf("no upstream DNS server answered %s: %w", question.Name, err)
 	}
-
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no upstream DNS server returned a response for %s", question.Name)
-	}
-	return nil, lastErr
+	return resp, resolver, nil
 }
 
 // isForwardableQType is the allowlist of DNS query types the

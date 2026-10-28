@@ -45,13 +45,16 @@ type dnsServer struct {
 }
 
 // newDNSServer builds the DNS server for network ("tcp" or "udp") on
-// p.DNSPort. Nothing is bound until serve.
-func (p *Proxy) newDNSServer(network string) *dnsServer {
+// p.DNSPort. Nothing is bound until serve. Its queries are answered under
+// ctx, the context it is served until: an upstream exchange in flight ends
+// with it, so the server's shutdown, which waits for its handlers, never
+// waits out an exchange's resend schedule.
+func (p *Proxy) newDNSServer(ctx context.Context, network string) *dnsServer {
 	s := &dnsServer{logger: p.logger, settled: make(chan struct{})}
 	s.srv = &dns.Server{
 		Addr:      fmt.Sprintf(":%v", p.DNSPort),
 		Net:       network,
-		Handler:   p,
+		Handler:   dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) { p.serveDNSQuery(ctx, w, r) }),
 		ReusePort: true,
 		// miekg/dns calls it once the socket is bound, just before it serves,
 		// on the goroutine that called ListenAndServe. A failed bind never
@@ -147,7 +150,7 @@ func (s *dnsServer) stop() error {
 // p.tcpDNS and p.udpDNS are set here, before the goroutines that serve and
 // stop them start, and each goroutine is handed its server.
 func (p *Proxy) startDNSServers(ctx context.Context, g *errgroup.Group) error {
-	p.tcpDNS, p.udpDNS = p.newDNSServer("tcp"), p.newDNSServer("udp")
+	p.tcpDNS, p.udpDNS = p.newDNSServer(ctx, "tcp"), p.newDNSServer(ctx, "udp")
 	for _, s := range []*dnsServer{p.tcpDNS, p.udpDNS} {
 		g.Go(func() error {
 			defer utils.Recover(p.logger)
@@ -327,7 +330,14 @@ func mergeRcode(cur, next int) int {
 	return cur
 }
 
+// ServeDNS answers r as keploy's DNS servers do, for a caller that serves
+// keploy's answers itself and has no stop to end an upstream exchange with.
 func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	p.serveDNSQuery(context.Background(), w, r)
+}
+
+// serveDNSQuery answers r. An upstream exchange it starts ends when ctx does.
+func (p *Proxy) serveDNSQuery(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 
@@ -364,7 +374,7 @@ func (p *Proxy) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			// Diagnostic value is captured downstream — by upstream
 			// failure logs in record mode, by mock-not-found SendError
 			// in test mode, and by the deduped "Recording new DNS mock".
-			resp = p.resolveUncachedDNSResponse(question, mode, mockingEnabled, reqTimestamp, session)
+			resp = p.resolveUncachedDNSResponse(ctx, question, mode, mockingEnabled, reqTimestamp, session)
 
 			if shouldCacheDNSResponse(mode, resp) {
 				cached := dnsCacheEntry{Msg: resp.Msg.Copy(), FromUpstream: resp.FromUpstream}
@@ -458,7 +468,7 @@ func (p *Proxy) isRedundantSearchExpansion(name string) bool {
 	return false
 }
 
-func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
+func (p *Proxy) resolveUncachedDNSResponse(ctx context.Context, question dns.Question, mode models.Mode, mockingEnabled bool, reqTime time.Time, session *agent.Session) dnsCacheEntry {
 	switch mode {
 	case models.MODE_TEST:
 		// Use recorded DNS mocks only.
@@ -666,8 +676,10 @@ func (p *Proxy) resolveUncachedDNSResponse(question dns.Question, mode models.Mo
 		return p.defaultDNSResponse(question)
 
 	case models.MODE_RECORD:
-		resp, err := p.recordDNSMock(question, reqTime, session)
+		resp, err := p.recordDNSMock(ctx, question, reqTime, session)
 		if err != nil {
+			// An exchange the proxy's stop ended wraps context.Canceled,
+			// which LogError does not log: the upstream did not fail.
 			utils.LogError(p.logger, err, "DNS resolution failed in record mode",
 				dnsQuestionFields(question)...,
 			)
@@ -912,7 +924,7 @@ func generateDNSDedupeKey(question dns.Question) string {
 	)
 }
 
-func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
+func (p *Proxy) recordDNSMock(ctx context.Context, question dns.Question, reqTime time.Time, session *agent.Session) (dnsCacheEntry, error) {
 	// Prefer the upstream resolver list captured once at proxy
 	// startup (see captureDNSUpstream). This is critical in sidecar
 	// deployments where the app-container resolv.conf has been
@@ -940,69 +952,16 @@ func (p *Proxy) recordDNSMock(question dns.Question, reqTime time.Time, session 
 		servers = []string{"8.8.8.8", "1.1.1.1"}
 	}
 
-	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
-
 	m := new(dns.Msg)
 	m.SetQuestion(question.Name, question.Qtype)
 	m.RecursionDesired = true
 
-	var (
-		in         *dns.Msg
-		resolveErr error
-	)
-
-	for _, server := range servers {
-		addr := net.JoinHostPort(server, port)
-
-		// Per-server-attempt logs fire on every cache miss (worst case, multiple
-		// servers per miss) so we keep only the diagnostic ones — silent success
-		// path, log the rare failure / truncation / TCP-retry transitions.
-		c.Net = "udp"
-		resp, _, err := c.Exchange(m, addr)
-		if err != nil {
-			resolveErr = err
-			p.logger.Debug("upstream DNS exchange failed",
-				append(dnsQuestionFields(question),
-					zap.String("upstream_addr", addr),
-					zap.String("transport", c.Net),
-					zap.Error(err),
-				)...,
-			)
-			continue
-		}
-
-		if resp != nil && resp.Truncated {
-			p.logger.Debug("upstream DNS response truncated; retrying over TCP",
-				append(dnsQuestionFields(question), zap.String("upstream_addr", addr))...,
-			)
-			c.Net = "tcp"
-			resp, _, err = c.Exchange(m, addr)
-			if err != nil {
-				resolveErr = err
-				p.logger.Debug("upstream DNS TCP retry failed",
-					append(dnsQuestionFields(question),
-						zap.String("upstream_addr", addr),
-						zap.String("transport", c.Net),
-						zap.Error(err),
-					)...,
-				)
-				continue
-			}
-		}
-
-		if resp != nil {
-			in = resp
-			resolveErr = nil
-			break
-		}
-	}
-
-	if resolveErr != nil {
-		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, resolveErr)
-	}
-	if in == nil {
-		return dnsCacheEntry{}, fmt.Errorf("nil DNS response for %s", question.Name)
+	// Asked as the app's stub resolver would have asked: resends on loss,
+	// every server in turn, TCP when the answer is truncated. A lost packet
+	// must not become a SERVFAIL the app sees while the upstream answers.
+	in, _, err := exchangeDNSUpstream(ctx, p.logger, m, p.askOrder(servers), port, p.dnsStub().waits(len(servers)))
+	if err != nil {
+		return dnsCacheEntry{}, fmt.Errorf("failed to resolve DNS query for %s: %w", question.Name, err)
 	}
 
 	resp := dnsCacheEntry{

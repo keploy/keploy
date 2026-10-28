@@ -73,7 +73,7 @@ func serveDNSOnFreePort(t *testing.T, network string, before func(port int)) (*d
 func serveDNSServerForTest(t *testing.T, network string, port int) (*dnsServer, <-chan error) {
 	t.Helper()
 	p := &Proxy{logger: zap.NewNop(), DNSPort: uint32(port)}
-	s := p.newDNSServer(network)
+	s := p.newDNSServer(context.Background(), network)
 	served := make(chan error, 1)
 	go func() { served <- s.serve() }()
 	t.Cleanup(func() { _ = s.stop() })
@@ -131,7 +131,7 @@ func TestADNSServerThatCannotBindSettlesWithItsError(t *testing.T) {
 	t.Cleanup(func() { _ = held.Close() })
 	core, logs := observer.New(zap.InfoLevel)
 	p := &Proxy{logger: zap.New(core), DNSPort: uint32(held.Addr().(*net.TCPAddr).Port)}
-	s := p.newDNSServer("tcp")
+	s := p.newDNSServer(context.Background(), "tcp")
 
 	if err := s.serve(); err == nil {
 		t.Fatal("serve bound a port another socket holds")

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -145,7 +146,7 @@ func TestDNSMockMiss_UpstreamNXDOMAIN_IsNotReportedAsAMockMiss(t *testing.T) {
 		Qclass: dns.ClassINET,
 	}
 
-	got := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	got := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	// The app must still get a USABLE answer — steering it at the proxy rather
 	// than relaying NXDOMAIN is deliberate (issue #2006).
@@ -180,7 +181,7 @@ func TestDNSMockMiss_UpstreamUnreachable_IsStillReported(t *testing.T) {
 	}
 
 	q := dns.Question{Name: "some-service.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	_ = p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	_ = p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	assertReportedOnce(t, p, q, "upstream was unreachable, so the miss is unexplained "+
 		"and MUST still be reported")
@@ -196,7 +197,7 @@ func TestDNSMockMiss_NoUpstreamConfigured_IsStillReported(t *testing.T) {
 	}
 
 	q := dns.Question{Name: "some-service.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	_ = p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	_ = p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	assertReportedOnce(t, p, q, "no upstream to consult, so the miss is unexplained "+
 		"and MUST still be reported")
@@ -227,7 +228,7 @@ func TestDNSMockMiss_UpstreamSERVFAILOrREFUSED_IsStillReported(t *testing.T) {
 				dnsForwardTimeout:  2 * time.Second,
 			}
 			q := dns.Question{Name: "some-service.default.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-			_ = p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+			_ = p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 			assertReportedOnce(t, p, q, fmt.Sprintf("%s means the resolver failed, "+
 				"not that the name is absent; the miss MUST still be reported", tc.name))
@@ -259,7 +260,7 @@ func TestDNSMockMiss_UpstreamNODATA_IsRelayedAndNotReported(t *testing.T) {
 	}
 
 	q := dns.Question{Name: "postgres.checkr.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
-	got := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	got := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	// FromUpstream is the assertion that actually separates a relay from a
 	// synthetic answer, so it goes first. Rcode and answer count cannot: for an

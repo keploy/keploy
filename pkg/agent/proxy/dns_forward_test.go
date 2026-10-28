@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -250,7 +251,7 @@ func TestServeDNS_LocalMockHit_NoForward(t *testing.T) {
 	// Belt-and-braces: ensure the surrounding resolveUncachedDNSResponse
 	// path also returns the mock without touching upstream. We run
 	// through it with mockingEnabled=true and mode=MODE_TEST.
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 	if entry.Msg == nil || len(entry.Msg.Answer) != 1 {
 		t.Fatalf("resolveUncachedDNSResponse did not return the mocked answer")
 	}
@@ -291,7 +292,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamForwardSuccess(t *testing.T
 	p.mockManager = emptyMgr
 
 	q := dns.Question{Name: "mysql.sap-demo.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	if entry.Msg == nil {
 		t.Fatalf("expected forwarded response, got nil Msg")
@@ -342,7 +343,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamTimeoutFallback(t *testing.
 	p.mockManager = emptyMgr
 
 	q := dns.Question{Name: "unreachable.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	// On fallback we expect the synthetic A response pointing at
 	// p.IP4 (127.0.0.1). FromUpstream must be false because this is
@@ -402,7 +403,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNXDOMAIN_FallsBackToProxyIP
 	// "localstack" is the bare service name from the issue — no FQDN,
 	// so Docker DNS returns NXDOMAIN for it.
 	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	// The result MUST be the proxy's synthetic A record (127.0.0.1), not
 	// NXDOMAIN. eBPF intercepts all TCP regardless of dest IP, so any
@@ -461,7 +462,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_RelayedAsIs(t *testi
 	p.mockManager = emptyMgr
 
 	q := dns.Question{Name: "postgres.checkr.svc.cluster.local.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
 
 	if entry.Msg == nil {
 		t.Fatal("expected the relayed NODATA response, got nil Msg (ErrMockNotFound path?)")
@@ -504,7 +505,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_AQuery_RelayedNotSte
 	p.mockManager = emptyMgr
 
 	q := dns.Question{Name: "localstack.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true /*mockingEnabled*/, time.Now(), nil)
 
 	if entry.Msg == nil {
 		t.Fatal("expected the relayed NODATA response, got nil Msg")
@@ -556,7 +557,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamNODATA_DualEmpty(t *testing
 
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		q := dns.Question{Name: "ipv-less.svc.", Qtype: qtype, Qclass: dns.ClassINET}
-		entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+		entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 		if entry.Msg == nil || entry.Msg.Rcode != dns.RcodeSuccess || len(entry.Msg.Answer) != 0 {
 			t.Fatalf("%s: expected relayed empty NOERROR, got %+v", dns.TypeToString[qtype], entry.Msg)
 		}
@@ -587,7 +588,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamSERVFAIL_FallsBackToProxyIP
 	p.mockManager = emptyMgr
 
 	q := dns.Question{Name: "flaky.svc.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	if entry.Msg == nil {
 		t.Fatal("expected synthetic proxy-IP fallback, got nil Msg")
@@ -637,7 +638,7 @@ func TestResolveUncachedDNSResponse_TestMode_UpstreamSuccessPassesThrough(t *tes
 	p.mockManager = emptyMgr
 
 	q := dns.Question{Name: "mysql.sap-demo.svc.cluster.local.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
-	entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	entry := p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 
 	if entry.Msg == nil {
 		t.Fatalf("expected forwarded response, got nil Msg")

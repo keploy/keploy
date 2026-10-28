@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,7 +49,7 @@ func TestDNSMockMiss_RedundantSearchExpansion_IsNotReported(t *testing.T) {
 			Qtype:  qtype,
 			Qclass: dns.ClassINET,
 		}
-		_ = p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+		_ = p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 		select {
 		case err := <-p.errChannel:
 			t.Fatalf("%s: a doubled search suffix can never have a mock, so it must not be "+
@@ -75,7 +76,7 @@ func TestDNSMockMiss_SingleSearchExpansion_IsStillReported(t *testing.T) {
 		Qtype:  dns.TypeA,
 		Qclass: dns.ClassINET,
 	}
-	_ = p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+	_ = p.resolveUncachedDNSResponse(context.Background(), q, models.MODE_TEST, true, time.Now(), nil)
 	select {
 	case <-p.errChannel:
 		// expected: a legitimately-expanded name that missed is still a miss.
