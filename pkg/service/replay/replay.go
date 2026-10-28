@@ -1945,7 +1945,8 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			CmdUsed:   r.config.Test.CmdUsed,
 			Proven:    provenswitch.On(),
 		}
-		// Under the proven switch the report names each skipped test, with its
+		// Under the proven switch, or when the run's caller gave a reason for
+		// the set's tests, the report names each skipped test, with its
 		// reason, instead of counting them.
 		if rows := r.ignoredSetResults(testSetID, testCases); rows != nil {
 			for i := range rows {
