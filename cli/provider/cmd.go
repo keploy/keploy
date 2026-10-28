@@ -2730,7 +2730,32 @@ func (c *CmdConfigurator) addMockFlags(cmd *cobra.Command) error {
 		cmd.Flags().Float64("min-coverage", c.cfg.Mock.MinCoverage, "Fail the replay when the test run covers less than this percentage of the code, from the coverage report the test command writes (0 disables)")
 		cmd.Flags().String("coverage-report", c.cfg.Mock.CoverageReport, "Coverage report the test command writes, when it is not a default location (coverage.out, coverage/lcov.info, coverage.xml, jacoco.xml, ...)")
 		cmd.Flags().StringArray("run-only", c.cfg.Mock.RunOnly, "Run only this test (repeat the flag for more; the name as the test runner's harness reports it, and a subtest runs with its test); the harness skips the rest")
+		cmd.Flags().StringSlice("allow-egress", c.cfg.Test.AllowEgress, "What the replay may reach on the real network (repeat or comma-separated), the same list as keploy test's test.allowEgress. \"dns\" forwards a DNS mock miss to the host's and public resolvers too; without it a miss is forwarded only to a resolver inside the replay's own network (docker's, the container network's or the cluster's)")
 	}
+	return nil
+}
+
+// readMockAllowEgress resolves `keploy mock replay`'s opt-in to real egress.
+// It is keploy test's list, not a mock.* one: keploy.yml's test.allowEgress
+// opens the same egress for both replays, and --allow-egress replaces it for
+// this run. An entry keploy does not act on stops the run before anything
+// starts, as it does for keploy test.
+func (c *CmdConfigurator) readMockAllowEgress(cmd *cobra.Command) error {
+	entries := c.cfg.Test.AllowEgress
+	if cmd.Flags().Changed("allow-egress") {
+		flagEntries, err := cmd.Flags().GetStringSlice("allow-egress")
+		if err != nil {
+			utils.LogError(c.logger, err, "failed to read the allow-egress flag")
+			return errors.New("failed to read the allow-egress flag")
+		}
+		entries = flagEntries
+	}
+	allowEgress, err := models.NormalizeAllowEgress(entries)
+	if err != nil {
+		utils.LogError(c.logger, err, "refusing test.allowEgress")
+		return err
+	}
+	c.cfg.Test.AllowEgress = allowEgress
 	return nil
 }
 
@@ -3028,6 +3053,9 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 			return err
 		}
 		if err := c.readMockRunOnly(cmd); err != nil {
+			return err
+		}
+		if err := c.readMockAllowEgress(cmd); err != nil {
 			return err
 		}
 	}

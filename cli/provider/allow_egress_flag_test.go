@@ -109,3 +109,58 @@ func TestTheAgentReadsAllowEgress(t *testing.T) {
 		}
 	}
 }
+
+// keploy mock replay reads the same opt-in: keploy.yml's test.allowEgress,
+// replaced by --allow-egress when given, and refuses an entry keploy does not
+// act on before anything starts.
+func TestKeployMockReplayReadsAllowEgress(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	t.Setenv(provenswitch.Env, "")
+	for _, tc := range []struct {
+		name    string
+		yml     string
+		args    []string
+		want    []string
+		refused bool
+	}{
+		{name: "neither"},
+		{name: "keploy.yml", yml: "test:\n  allowEgress: [\" DNS \"]\n", want: []string{models.AllowEgressDNS}},
+		{name: "flag", args: []string{"--allow-egress", "dns"}, want: []string{models.AllowEgressDNS}},
+		{name: "unknown entry in keploy.yml", yml: "test:\n  allowEgress: [\"sqs.us-east-1.amazonaws.com:443\"]\n", refused: true},
+		{name: "unknown entry on the flag", args: []string{"--allow-egress", "0.0.0.0/0"}, refused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			cfg := &config.Config{}
+			c := NewCmdConfigurator(zap.NewNop(), cfg)
+			root := &cobra.Command{Use: "keploy"}
+			root.PersistentFlags().String("config-path", writeKeployYML(t, tc.yml), "")
+			mock := &cobra.Command{Use: "mock"}
+			replay := &cobra.Command{Use: "replay"}
+			mock.AddCommand(replay)
+			root.AddCommand(mock)
+			if err := c.addMockFlags(replay); err != nil {
+				t.Fatal(err)
+			}
+			if err := replay.ParseFlags(tc.args); err != nil {
+				t.Fatalf("ParseFlags(%q): %v", tc.args, err)
+			}
+			if err := c.PreProcessFlags(replay); err != nil {
+				t.Fatalf("PreProcessFlags: %v", err)
+			}
+			err := c.readMockAllowEgress(replay)
+			if tc.refused {
+				if err == nil || !strings.Contains(err.Error(), "allowEgress") {
+					t.Fatalf("readMockAllowEgress = %v, want the test.allowEgress refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readMockAllowEgress: %v", err)
+			}
+			if !slices.Equal(cfg.Test.AllowEgress, tc.want) {
+				t.Fatalf("cfg.Test.AllowEgress = %q, want %q", cfg.Test.AllowEgress, tc.want)
+			}
+		})
+	}
+}

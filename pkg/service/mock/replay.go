@@ -207,6 +207,7 @@ func (m *mockService) Replay(ctx context.Context) (err error) {
 		RecordRequests:   requests,
 		ConfigPath:       m.config.ConfigPath,
 		PassThroughPorts: config.GetByPassPorts(m.config),
+		AllowEgress:      m.config.Test.AllowEgress,
 
 		DisableHandshakeHold: m.config.Record.DisableHandshakeHold,
 	}
