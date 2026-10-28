@@ -236,6 +236,10 @@ var IsConfigFileFound = true
 type CmdConfigurator struct {
 	logger *zap.Logger
 	cfg    *config.Config
+	// configRead is set once PreProcessFlags has filled cfg from the flags
+	// and keploy.yml. Only then is DisableTele the user's answer: a command
+	// that runs ValidateFlags alone (config) holds the default.
+	configRead bool
 }
 
 // pinProvenSwitch is what the agent's --proven flag decides: the agent's
@@ -363,6 +367,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		// ValidateFlags adds these ports to bypassRules. record.passThroughPorts,
+		// the key of the flag's own name, holds telemetry rules.
+		if err := cmd.Flags().SetAnnotation("pass-through-ports", utils.ConfigKeyAnnotation, []string{"bypassRules"}); err != nil {
+			return err
+		}
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")
@@ -905,6 +914,7 @@ func (c *CmdConfigurator) PreProcessFlags(cmd *cobra.Command) error {
 
 	// 8) Persist the path used
 	c.cfg.ConfigPath = configPath
+	c.configRead = true
 	return nil
 }
 
@@ -1386,6 +1396,16 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 			}
 		}
 		c.cfg.DisableTele = true
+	}
+	// DisableTele is final here: the flag over keploy.yml over the default,
+	// and --enable-testing. A crash report is telemetry and carries this
+	// run's whole log, so its client starts only now, and only with telemetry
+	// on; in the agent too, which runs this with the --disable-tele its
+	// launcher handed it. A command that read neither (config runs
+	// ValidateFlags alone) holds the default, not the user's answer, and
+	// starts none.
+	if c.configRead {
+		utils.ResolveCrashReports(c.logger, c.cfg.DisableTele)
 	}
 
 	if c.cfg.DisableANSI {
@@ -2158,6 +2178,12 @@ func (c *CmdConfigurator) ValidateFlags(ctx context.Context, cmd *cobra.Command)
 		if cmd.Name() == "test" {
 			dropHealthPollTimeout(c.logger, c.cfg)
 		}
+		// The bypassRules are final here: keploy.yml's, the flag's ports, and
+		// what the proven switch dropped.
+		if err := config.CheckBypassRules(c.cfg); err != nil {
+			utils.LogError(c.logger, nil, err.Error())
+			return err
+		}
 
 	case "normalize":
 		var err error
@@ -2911,6 +2937,10 @@ func (c *CmdConfigurator) validateMockFlags(ctx context.Context, cmd *cobra.Comm
 		}
 	} else {
 		config.SetByPassPorts(c.cfg, bypassPorts)
+	}
+	if err := config.CheckBypassRules(c.cfg); err != nil {
+		utils.LogError(c.logger, nil, err.Error())
+		return err
 	}
 
 	// Mock-set name.

@@ -2052,6 +2052,40 @@ func TestAnAgentUpRunCountsAUnixConnectionOpenedBeforeIt(t *testing.T) {
 	}
 }
 
+// Under the proven switch, a connection attempt the kernel dropped at
+// keploy's proxy listener while a test ran (the agent counts it as that
+// test's own loss, at its end) leaves that test without a verdict -- never
+// FAILED -- and the others with theirs; the set's reason names the test, the
+// drop and where to look.
+func TestUnderTheSwitchAListenerDropLeavesOnlyItsTestNotJudged(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	dropped := models.CaptureLosses{{Kind: models.CaptureLossListenerDropped, Count: 1}}
+	h := newPartialRunHarness(t, 3, 0)
+	h.replayer.config.Test.Mocking = true
+	// The mark, then a read as each test ends (the last repeating): while
+	// test-2 ran.
+	h.replayer.instrumentation = &prLossInstr{prInstr: h.instr, answers: []models.CaptureLosses{nil, nil, dropped}}
+	h.replayer.markPIDMaps(context.Background())
+	if status := h.run(t); status != models.TestSetStatusInternalErr || !h.replayer.notJudged("test-set-0") {
+		t.Fatalf("status %q, not judged %v; want %q and not judged", status, h.replayer.notJudged("test-set-0"), models.TestSetStatusInternalErr)
+	}
+	for _, r := range h.report.report.Tests {
+		if r.Status == models.TestStatusFailed || len(r.FailureInfo.CaptureIncomplete) != 0 {
+			t.Fatalf("%s: %s %+v: a listener's drop never fails a test", r.TestCaseID, r.Status, r.FailureInfo.CaptureIncomplete)
+		}
+		want := models.CaptureLosses(nil)
+		if r.TestCaseID == "test-2" {
+			want = dropped
+		}
+		if fmt.Sprint(r.FailureInfo.CannotCapture) != fmt.Sprint(want) || (len(r.FailureInfo.NotJudged()) > 0) != (want != nil) {
+			t.Fatalf("%s: not judged %+v (%v), want %+v", r.TestCaseID, r.FailureInfo.CannotCapture, r.FailureInfo.NotJudged(), want)
+		}
+	}
+	if reason := h.report.report.FailureReason; !strings.Contains(reason, "test-2") || !strings.Contains(reason, "connection attempt(s) at keploy's proxy listener") {
+		t.Fatalf("the set's reason %q does not name the test and the drop", reason)
+	}
+}
+
 // Under the proven switch a TLS handshake a client abandoned without a word
 // once keploy's certificate was out (Node.js's rejection reads so) leaves the
 // test it happened in without a verdict -- never FAILED, never PASSED -- and

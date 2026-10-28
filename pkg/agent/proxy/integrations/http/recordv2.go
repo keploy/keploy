@@ -17,6 +17,7 @@ import (
 	"github.com/andybalholm/brotli"
 	"go.keploy.io/server/v3/pkg"
 	"go.keploy.io/server/v3/pkg/agent/proxy/fakeconn"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
 	"go.keploy.io/server/v3/pkg/agent/proxy/supervisor"
 	pUtil "go.keploy.io/server/v3/pkg/agent/proxy/util"
 	"go.keploy.io/server/v3/pkg/bodydigest"
@@ -247,6 +248,10 @@ func (h *HTTP) recordV2(ctx context.Context, sess *supervisor.Session) error {
 			return err
 		}
 		if mock != nil {
+			// Recorded, not passed through: under the proven switch the
+			// connection's local destination is listed mocked
+			// (integrations.CallServed).
+			integrations.CallServed(ctx)
 			// EmitMock takes the incomplete-mock flag itself. Clearing it
 			// again here would wipe a mark set while EmitMock delivered
 			// (on another goroutine, meanwhile): that mark is the
