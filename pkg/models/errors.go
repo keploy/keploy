@@ -270,11 +270,13 @@ type MockMismatchReport struct {
 	// one the open test's own mocks had already answered (exact serving,
 	// under the proven switch), and Recorded is how many times that call was
 	// recorded for the test; ClosestMock then names the recording it repeats
-	// (of those copies the one recorded last), never another recording. The
-	// proxy files every other miss by where it was made. Empty without the
-	// switch.
+	// (of those copies the one recorded last), never another recording, and
+	// Write what that recording's call writes (CallWriteOf; "" for a read and
+	// for a call its parser cannot tell). The proxy files every other miss by
+	// where it was made. Empty without the switch.
 	MissKind string
 	Recorded int
+	Write    string
 	// Differs names the compared fields in which the call differs from the
 	// closest recording (host, header.<name>, body.<path>, ...), never a
 	// value: the reason keploy gives for a failed test names them (proven
@@ -415,8 +417,10 @@ type ParserError struct {
 	// the proven switch.
 	MissKind string
 	// Recorded is, for MissExtraCall, how many times the call was recorded
-	// for the test.
+	// for the test, and Write what the recording it repeats writes
+	// (MockMismatchReport.Write).
 	Recorded int
+	Write    string
 	// Staging is, under exact serving, that the miss was made while the
 	// replay was staging a test set's mocks, which then answer no call: its
 	// read says so in the call's next steps.

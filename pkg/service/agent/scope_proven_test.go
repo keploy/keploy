@@ -951,6 +951,14 @@ func TestSanitizedMissKeepsTheShapeAndTheAdvice(t *testing.T) {
 	require.Empty(t, m.ClosestMockReq)
 	require.Empty(t, m.ReceivedReq)
 
+	// An extra call keeps what the recording it repeats writes: names that
+	// judging reads to mark it, no value.
+	extra := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /keys/7/stamp",
+		Kind: models.MissExtraCall, Recorded: 1, ClosestMock: "mock-3", Write: "HTTP POST"})
+	require.Equal(t, models.MissExtraCall, extra.Kind)
+	require.Equal(t, 1, extra.Recorded)
+	require.Equal(t, "HTTP POST", extra.Write)
+
 	// The matcher's next step names the fields that differed; a map's keys
 	// can be values, so a path keeps its shape.
 	drift := sanitizedMiss(models.UnmatchedCall{Protocol: "HTTP", ActualSummary: "POST /x",
