@@ -8,19 +8,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// macOS TCP states (netinet/tcp_fsm.h). These differ from Linux's numbering
-// (include/net/tcp_states.h) — macOS starts ESTABLISHED at 4, Linux at 1.
-const (
-	darwinTCPSClosed    = 0
-	darwinTCPSEstab     = 4
-	darwinTCPSCloseWait = 5
-	darwinTCPSFinWait1  = 6
-	darwinTCPSClosing   = 7
-	darwinTCPSLastAck   = 8
-	darwinTCPSFinWait2  = 9
-	darwinTCPSTimeWait  = 10
-)
-
 // socketReceived reads the TCP state and bytes received from a darwin socket
 // via getsockopt(TCP_CONNECTION_INFO). This is the macOS equivalent of Linux's
 // getsockopt(TCP_INFO): it gives the settlement watchdog visibility into
@@ -57,28 +44,12 @@ func socketReceived(raw syscall.RawConn) (received uint64, state uint8, ok bool)
 	return received, state, ok
 }
 
-// finReceived reports whether the remote end sent a FIN. The macOS TCP states
-// that imply a received FIN are CLOSE_WAIT (the common case: the remote
-// closed, the local handler still holds the socket), LAST_ACK and CLOSING.
-// TCPS_CLOSED with an EOF means the full close completed.
-func finReceived(state uint8, eof bool) bool {
-	switch state {
-	case darwinTCPSCloseWait, darwinTCPSLastAck, darwinTCPSClosing:
-		return true
-	case darwinTCPSClosed:
-		return eof
-	}
-	return false
-}
+// finCounted is false on darwin: XNU's tcpi_rxbytes counts the payload a
+// socket received, never the FIN (100 bytes and a FIN read 100, in
+// CLOSE_WAIT), so untaken takes nothing off for the application's FIN, where
+// Linux's tcpi_bytes_received counts it as one.
+func finCounted(uint8, bool) bool { return false }
 
-// clientGone reports whether the remote end has disconnected: it sent a FIN
-// (CLOSE_WAIT, LAST_ACK, CLOSING) or the socket is fully closed (TCPS_CLOSED,
-// which for a socket the handler still holds means a reset or a completed
-// FIN exchange).
-func clientGone(state uint8) bool {
-	switch state {
-	case darwinTCPSCloseWait, darwinTCPSLastAck, darwinTCPSClosing, darwinTCPSClosed:
-		return true
-	}
-	return false
-}
+// clientGone reports whether the client of a socket its handler still holds
+// has gone (xnuClientGone).
+func clientGone(state uint8) bool { return xnuClientGone(state) }
