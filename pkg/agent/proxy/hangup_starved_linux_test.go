@@ -113,7 +113,7 @@ func TestAHangUpItsStarvedHandlerHasNotToldIsChargedToItsTest(t *testing.T) {
 						defer close(handled)
 						defer p.inflight.forget(tracked)
 						defer func() { _ = tracked.Close() }()
-						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443"), zap.NewNop(), hand.conn(tracked), time.Time{})
+						c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", 0), zap.NewNop(), hand.conn(tracked), time.Time{})
 						if err == nil {
 							_, _ = c.Read(make([]byte, 1)) // the client's first request
 						}
@@ -191,7 +191,7 @@ func TestAHangUpHoldHoldsNoWorkWhileItsClientIsThere(t *testing.T) {
 		defer close(read)
 		defer p.inflight.forget(tracked)
 		defer func() { _ = tracked.Close() }()
-		c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443"), zap.NewNop(), tracked, time.Time{})
+		c, _, err := pTls.HandleTLSConnection(p.withClientTLS(context.Background(), "10.0.0.1:443", 0), zap.NewNop(), tracked, time.Time{})
 		close(handshook)
 		if err == nil {
 			_, _ = c.Read(make([]byte, 1))
