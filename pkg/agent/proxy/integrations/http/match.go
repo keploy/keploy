@@ -199,12 +199,13 @@ func (h *HTTP) matchCascade(ctx context.Context, input *req, mockDb, base integr
 			return false, nil, nil, ctx.Err()
 		}
 
-		// Under the proven switch a call the strict pass finds in its bucket
-		// of the staging generation's index is answered from it, as from the
-		// read below (strictIndexed); a miss, and every call of a generation
-		// with variables, reads the store.
+		// Under the proven switch a call the variable pass or the strict
+		// pass finds through the staging generation's index is answered from
+		// it, as from the read below (strictIndexed); a miss, and a call a
+		// recording with variables answers but cannot serve (an answered
+		// stateful walk, a refused render or bind), reads the store.
 		if provenswitch.On() && base != nil && !reread {
-			served, retry, err := h.strictIndexed(ctx, input, mockDb, base, strict, statefulMocks)
+			served, retry, err := h.strictIndexed(ctx, input, mockDb, base, strict, headerNoise, userBodyNoise, urlNoise, statefulMocks)
 			if err != nil {
 				return false, nil, nil, err
 			}
