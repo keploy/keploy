@@ -361,11 +361,28 @@ func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
 // view: keploy then reads that F gave nothing there (fail closed).
 // ServedAsRecorded, where an adapter also says it, reads first.
 func (r Raw) ServedLive(live Raw) Raw {
-	if !r.served || !live.isRead() || live.mock != r.mock || live.call != r.call {
+	if !r.served || live.mock != r.mock || live.call != r.call {
 		r.live = nil
 		return r
 	}
-	live.live = nil
+	// The view is what F served, not its recording's payload, yet it bears
+	// the recording's identity (MockID: one name and the same times), and
+	// the set's caches by recording (setDerived, bodyStore) would hand it
+	// what they keep of the recording's: the view would read as the
+	// recording, and a word only the view holds would pass. It is read now,
+	// through its own loader where it has one, and kept by none of them.
+	var b rawBody
+	if live.src != nil {
+		b = loadBody(live.src.name, live.src.load)
+	} else {
+		b = live.payload()
+	}
+	if !b.read {
+		r.live = nil
+		return r
+	}
+	live.live, live.src, live.id = nil, nil, ""
+	live.rText, live.rClock, live.rFields, live.rStamps, live.rRead = b.text, b.answerClock, b.fields, b.stamps, true
 	r.live = &live
 	return r
 }
