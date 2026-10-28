@@ -1434,7 +1434,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				continue
 			}
 			commit()
-			if e, ok := n.servedExchange(tracker.Drifts(), picked, nil, rec, recordedParts(picked), liveShape, live, out, own); ok {
+			if e, ok := n.servedExchange(tracker.Drifts(), picked, nil, rec, recordedParts(picked), liveShape, input, live, out, own); ok {
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -1570,7 +1570,7 @@ func (h *HTTP) learnMatchIn(ctx context.Context, input *req, mockDb integrations
 				h.Logger.Info("learned a field that changed between record and replay",
 					zap.String("mock", m.Name), zap.String("field", l.Recorded.Path), zap.String("as", string(l.Kind)))
 			}
-			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, live, out, own); ok {
+			if e, ok := n.servedExchange(tracker.Drifts(), m, answered, c.Shape, recordedParts(m), liveShape, input, live, out, own); ok {
 				tracker.Served(test, e)
 			}
 			return out, nil, nil
@@ -2238,7 +2238,15 @@ func leafPaths(ls []learn.Leaf) []string {
 // the exchange is then not kept leaf by leaf, and a later request reads m as
 // a raw mock (earlierRaw), which learns nothing when it cannot read it
 // either. Its payload is m's lazy Raw in dc (earlierOf).
-func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, live httpParts, served *models.Mock, own bool) (learn.Earlier, bool) {
+//
+// Where F gave the application m's recorded answer whole (answerAsRecorded),
+// keploy knows F's view of the exchange: m as the application sent in and F
+// answered it (servedLiveView, learn.Earlier.View), the view a later call of the
+// set reads m with where the request was not the recorded one
+// (learn.Order.ServedView). An answer F gave otherwise (a template value, a
+// variable rendered into it) states no view: a later call refuses a word a
+// value holds now that may stand there (fail closed). A nil in states none.
+func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Mock, rec learn.Shape, rp httpParts, liveShape learn.Shape, in *req, live httpParts, served *models.Mock, own bool) (learn.Earlier, bool) {
 	if recorded == nil {
 		var err error
 		if recorded, err = withResponse(m); err != nil {
@@ -2250,7 +2258,11 @@ func (n learnNoise) servedExchange(dc *learn.DriftCache, m, recorded *models.Moc
 		unmasked.url = nil
 		rec, liveShape = unmasked.shape(rp, destOf(live, rp)), unmasked.shape(live, sameDest)
 	}
-	return withExcused(earlierOf(dc, m, recorded, rec, liveShape, served, own), n, live, rp), true
+	e := withExcused(earlierOf(dc, m, recorded, rec, liveShape, served, own), n, live, rp)
+	if in != nil && served != nil && answerAsRecorded(recorded.Spec.HTTPResp, served.Spec.HTTPResp) {
+		e.View, e.ViewKey = servedLiveView(m, in)
+	}
+	return e, true
 }
 
 // earlierOf is the exchange F just served from m (own: one of the test's own

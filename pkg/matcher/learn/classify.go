@@ -122,6 +122,16 @@ type Earlier struct {
 	// the application there is read from Seen alone, and a later call reads
 	// the recording as one whose view no adapter stated (Raw.viewUnstated).
 	AsRecorded bool
+	// View, where the adapter that served the exchange knows F's view of it
+	// whole and it may be another than the recording (the application sent
+	// another request; F gave it the recorded answer), gives that view: the
+	// recording as F's application sent its request and F answered it
+	// (Tracker.ServedMockLive, read where a later call's rule reads it), and
+	// ViewKey names it among the recording's views. Read only where AsRecorded
+	// is not borne out (servedAsRecorded): the view a later call of the set
+	// reads the recording with (Order.ServedView). nil says nothing.
+	View    func() (*models.Mock, error)
+	ViewKey string
 }
 
 // servedAsRecorded reports whether e's adapter said F served it as recorded

@@ -55,6 +55,13 @@ type Tracker struct {
 	// (Order.ServedView). Made with serves, and replaced with it, so an
 	// Order read before keeps the statements it can count.
 	asRecorded map[string][]int
+	// lives are, of each mock F served in the set (by mockID), the
+	// statements its adapters made that a serve of it gave the application
+	// another view than its recording, which the adapter knows whole
+	// (ServedMockLive, Served of an exchange with a View): each different
+	// view, and each statement's serve number and view (liveViews). Made
+	// with serves and replaced with them, as asRecorded.
+	lives map[string]*liveViews
 	// flights are the request each serve of the set was made in, by its
 	// number (nil: none, or one keploy cannot tell; flightOfLocked). NewSet
 	// replaces it, as serves. aloft are the requests in flight now,
@@ -198,7 +205,7 @@ func (t *Tracker) NewSet() {
 	t.setEpoch = t.epoch
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
-	t.set, t.serves, t.seq, t.asRecorded = nil, nil, 0, nil
+	t.set, t.serves, t.seq, t.asRecorded, t.lives = nil, nil, 0, nil, nil
 	t.flights, t.lifts, t.handshakes = nil, nil, nil
 	t.places, t.derived = newSetPlaces(), newSetDerived()
 	t.outside, t.outsideKept = nil, nil
@@ -694,7 +701,7 @@ func (t *Tracker) Placed() Placed {
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Open: t.open, Begun: t.began, SetAt: t.setEpoch,
 		Set:   t.set[:len(t.set):len(t.set)],
-		Order: Order{t: t, serves: t.serves, asRecorded: t.asRecorded, upTo: t.seq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying},
+		Order: Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying},
 	}
 }
 
@@ -760,7 +767,7 @@ func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind
 	}
 	id := MockID(m)
 	if t.serves == nil {
-		t.serves, t.asRecorded = map[string][]int{}, map[string][]int{}
+		t.serves, t.asRecorded, t.lives = map[string][]int{}, map[string][]int{}, map[string]*liveViews{}
 	}
 	if len(t.serves[id]) == 0 {
 		t.set = append(t.set, m)
@@ -809,8 +816,9 @@ type Order struct {
 	serves map[string][]int
 	// asRecorded are the set's statements that a serve gave the application
 	// its recording byte for byte (Tracker.asRecorded): ServedView counts
-	// them.
+	// them, and lives the views stated of serves (Tracker.lives).
 	asRecorded map[string][]int
+	lives      map[string]*liveViews
 	upTo       int
 	places     *setPlaces
 	// flights, landings and flying are the set's requests of each serve,
@@ -864,44 +872,97 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 
 // ServedView is r, a recording of m that F served in the running set
 // (Raw.ServedIn) and whose view no adapter stated yet, with the view F's
-// serves of it gave the application, as their adapters told it: served as
-// recorded (Raw.ServedAsRecorded) where every serve of m the read saw was
-// told so (Tracker.ServedMockAsRecorded, Tracker.Served of an exchange
-// served as recorded). Anything else stays r: a serve no adapter told so,
-// one made changed (a template value, a learned noise), or one keploy cannot
-// tell from another set's. F's view of r is then one no adapter stated, and
-// a word a value holds now that may stand there is refused (Raw.viewUnstated:
-// fail closed). A Raw with a view already stated (ServedLive, ServedChanged)
-// or not served, or one of another mock, is returned as it is. Every
-// adapter's learn step reads the recordings F served through it, so a
-// statement one adapter made holds for every other's call.
+// serves of it gave the application, as their adapters told it, where every
+// serve of m the read saw was told: served as recorded (Raw.ServedAsRecorded)
+// where each was told so (Tracker.ServedMockAsRecorded, Tracker.Served of an
+// exchange served as recorded); the view they gave (Raw.ServedLive) where
+// each was told with one view of m, the same (Tracker.ServedMockLive,
+// Tracker.Served of an exchange with a View); and, where they gave more than
+// one (two views, or one and the recording), each view (Raw.ServedChanged: a
+// word a value holds now that stands in any of them and not in the recorded
+// text is refused). A view that could not be kept or read stands for any
+// text (Raw.ServedChanged with none). Anything else stays r: a serve no
+// adapter told of, or one keploy cannot tell from another set's. F's view of
+// r is then one no adapter stated, and a word a value holds now that may
+// stand there is refused (Raw.viewUnstated: fail closed). A Raw with a view
+// already stated (ServedLive, ServedChanged) or not served, or one of another
+// mock, is returned as it is. Every adapter's learn step reads the recordings
+// F served through it, so a statement one adapter made holds for every
+// other's call.
 func (o Order) ServedView(m *models.Mock, r Raw) Raw {
 	if o.t == nil || m == nil || r.mock != m.Name || !r.viewUnstated() {
 		return r
 	}
 	o.t.mu.Lock()
-	ok := o.asRecordedLocked(MockID(m))
+	recorded, loads, unread, ok := o.viewsLocked(MockID(m))
 	o.t.mu.Unlock()
-	if ok {
+	switch {
+	case !ok:
+		return r
+	case unread:
+		return r.ServedChanged()
+	case len(loads) == 0:
 		return r.ServedAsRecorded()
 	}
-	return r
+	views := make([]Raw, len(loads))
+	for i, load := range loads {
+		views[i] = viewRaw(m, load)
+	}
+	if !recorded && len(views) == 1 {
+		return r.ServedLive(views[0])
+	}
+	// A serve told as recorded gave the recording itself: one of the
+	// views, which holds no word the recorded text does not.
+	if recorded {
+		views = append(views, r)
+	}
+	return r.ServedChanged(views...)
 }
 
-// asRecordedLocked reports whether every serve of the mock of identity id
-// the read saw (those numbered up to upTo) was told as recorded, and there
-// was one: as many statements numbered up to upTo as serves. A statement
-// follows its serve (statedLocked), so one numbered up to upTo is of a
-// serve the read saw, and one per serve leaves none of them untold. o.t.mu
-// held.
-func (o Order) asRecordedLocked(id string) bool {
+// viewsLocked is what the statements say of the serves of the mock of
+// identity id the read saw (those numbered up to upTo): ok where every one
+// was told, as recorded or with a view, and there was one (as many
+// statements numbered up to upTo as serves: a statement follows its serve,
+// so one numbered up to upTo is of a serve the read saw); recorded where one
+// was told as recorded; the loader of each different view told
+// (ServedMockLive), in the order first told; unread where one was told with
+// a view that could not be kept. o.t.mu held.
+func (o Order) viewsLocked(id string) (recorded bool, loads []func() (*models.Mock, error), unread, ok bool) {
 	n := o.serves[id]
 	k := sort.SearchInts(n, o.upTo+1)
 	if k == 0 {
-		return false
+		return false, nil, false, false
 	}
-	s := o.asRecorded[id]
-	return sort.SearchInts(s, o.upTo+1) == k
+	told := sort.SearchInts(o.asRecorded[id], o.upTo+1)
+	recorded = told > 0
+	if lv := o.lives[id]; lv != nil {
+		var seen map[int]bool
+		for _, s := range lv.stated {
+			if s.seq > o.upTo {
+				break
+			}
+			told++
+			switch {
+			case s.view < 0:
+				unread = true
+			case !seen[s.view]:
+				if seen == nil {
+					seen = map[int]bool{}
+				}
+				seen[s.view] = true
+				loads = append(loads, lv.views[s.view].load)
+			}
+		}
+	}
+	return recorded, loads, unread, told == k
+}
+
+// viewRaw is the view load gives of m, which F served (Tracker.ServedMockLive),
+// as Raw.ServedLive and Raw.ServedChanged take one: read through load where
+// they read it, and kept by none of the set's caches (Raw.viewOf).
+func viewRaw(m *models.Mock, load func() (*models.Mock, error)) Raw {
+	return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: true, call: callOf(m),
+		src: &rawSource{name: m.Name, load: load}}
 }
 
 // ofLocked is Of of the mock of identity id, o.t.mu held (the running set's
@@ -1051,14 +1112,20 @@ func (t *Tracker) Unanswer(n uint64, name string) {
 // Of an exchange its adapter says F served as recorded (Earlier.AsRecorded,
 // every Seen as recorded), Served is also ServedMockAsRecorded of its
 // recording, told in test n of the running set: the view a later call reads
-// it with, in any test of the set (Order.ServedView).
+// it with, in any test of the set (Order.ServedView). Of one it says F
+// gave the application another view of (Earlier.View), it is
+// ServedMockLive of that view.
 func (t *Tracker) Served(n uint64, e Earlier) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
-	if e.servedAsRecorded() && n >= t.setEpoch {
+	switch {
+	case n < t.setEpoch:
+	case e.servedAsRecorded():
 		t.statedLocked(e.Payload.id)
+	case e.View != nil && !e.Given:
+		t.livedLocked(e.Payload.id, e.ViewKey, e.View)
 	}
 	e.StartUp = !t.open && !t.began
 	switch {
@@ -1090,6 +1157,84 @@ func (t *Tracker) ServedMockAsRecorded(m *models.Mock) {
 	t.mu.Lock()
 	t.statedLocked(MockID(m))
 	t.mu.Unlock()
+}
+
+// ServedMockLive says that F's serve of m just told (ServedMock and its
+// forms) gave the application another view of m than its recording, which
+// its adapter knows whole: view gives m as F's application sent its request
+// and F answered it (Raw.ServedLive's live), read where a later call's rule
+// reads it, never kept by the set's caches; key names that view among m's,
+// the same for two serves that gave the same view and another for each
+// other. An adapter tells it once for each such serve, after the serve, in
+// place of ServedMockAsRecorded, and only where it knows the whole view. A
+// later call of the set reads m with the view (Order.ServedView) where every
+// serve of it the call's read saw was told; with each where they differ. A
+// nil view, a key "", or a view past the maxLiveViews different ones a set
+// keeps of m, says F gave a view keploy cannot read: a later call refuses
+// every word a value holds now that may stand there (Raw.ServedChanged with
+// none: fail closed).
+func (t *Tracker) ServedMockLive(m *models.Mock, key string, view func() (*models.Mock, error)) {
+	if t == nil || m == nil {
+		return
+	}
+	t.mu.Lock()
+	t.livedLocked(MockID(m), key, view)
+	t.mu.Unlock()
+}
+
+// maxLiveViews is how many different views of one recording a set keeps
+// (ServedMockLive): a serve that gave another one is read as one whose view
+// could not be read, which fails closed, so a set keeps at most
+// maxLiveViews loaders of each recording, and a later call reads at most
+// as many views of it.
+const maxLiveViews = 4
+
+// liveViews are the views stated of one mock's serves (ServedMockLive): each
+// different one, in the order first stated, and each statement: the last
+// serve number given when it was made and its view (an index in views; -1:
+// one that could not be kept).
+type liveViews struct {
+	views  []liveView
+	stated []liveStated
+}
+
+// liveView is one view stated of a mock's serves: its key and its loader.
+type liveView struct {
+	key  string
+	load func() (*models.Mock, error)
+}
+
+// liveStated is one statement of a view (liveViews): seq the last serve
+// number given when it was made, view its index (-1: could not be kept).
+type liveStated struct{ seq, view int }
+
+// livedLocked notes a statement that a serve of the mock of identity id gave
+// the application the view load gives, named key (ServedMockLive), at the
+// last serve number given, as statedLocked notes one as recorded. Of a mock
+// the set never served, or of an id "", it notes nothing. t.mu is held.
+func (t *Tracker) livedLocked(id, key string, load func() (*models.Mock, error)) {
+	if id == "" || len(t.serves[id]) == 0 {
+		return
+	}
+	lv := t.lives[id]
+	if lv == nil {
+		lv = &liveViews{}
+		t.lives[id] = lv
+	}
+	k := -1
+	if load != nil && key != "" {
+		for i, v := range lv.views {
+			if v.key == key {
+				k = i
+				break
+			}
+		}
+		if k < 0 && len(lv.views) < maxLiveViews {
+			lv.views = append(lv.views, liveView{key: key, load: load})
+			k = len(lv.views) - 1
+		}
+	}
+	lv.stated = append(lv.stated, liveStated{seq: t.seq, view: k})
 }
 
 // statedLocked notes a statement that a serve of the mock of identity id
