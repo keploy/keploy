@@ -3,7 +3,6 @@ package proxy
 import (
 	"fmt"
 	"math/rand"
-	"runtime"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -23,6 +22,8 @@ import (
 // view serves them as its own too. An index with OwnedKeys files the open
 // test's mocks by OwnedKeys alone, and the staged ones by Keys.
 func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false) // the verify mode computes keys again on each read: counted alone
 	base := time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)
 	var computed, ownedKeys, ownedByKeys atomic.Int64
 	ix := &integrations.MockIndex{Keys: func(m *models.Mock) []string {
@@ -167,16 +168,16 @@ func TestExactKeyedWalkReadsTheOpenTestsMocksThroughItsIndex(t *testing.T) {
 	}
 }
 
-// The views' indexes are bounded: lookups in many views, each built once,
-// leave at most ownedIndexCap of them, and a view's index is rebuilt with the
-// same mocks after it is dropped.
+// Each view keys its own mocks: lookups in many views, each keyed once, hand
+// each view its own mock alone. The index lives on the view (exactView.keyed)
+// and goes with it, so nothing outside the views holds one.
 func TestExactOwnedIndexesStayBounded(t *testing.T) {
 	base := time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)
 	ix := &integrations.MockIndex{Keys: func(m *models.Mock) []string { return m.Noise }}
 	mm := NewMockManager(nil, nil, zap.NewNop())
 	defer mm.Close()
 	mm.SetMocksWithWindow(nil, nil, time.Time{}, time.Time{})
-	for i := 0; i < 3*ownedIndexCap; i++ {
+	for i := 0; i < 192; i++ {
 		mk := newMockForTest(fmt.Sprintf("o%d", i), base, models.LifetimePerTest)
 		mk.Noise = []string{"k"}
 		mm.ServeExactTest(fmt.Sprintf("T%d", i), []*models.Mock{mk})
@@ -192,15 +193,6 @@ func TestExactOwnedIndexesStayBounded(t *testing.T) {
 		}
 		if n != 1 {
 			t.Fatalf("view %d: got %d mocks, want 1", i, n)
-		}
-		if i%ownedIndexCap == 0 {
-			runtime.GC()
-		}
-		ownedIndexes.mu.Lock()
-		size := len(ownedIndexes.m)
-		ownedIndexes.mu.Unlock()
-		if size > ownedIndexCap {
-			t.Fatalf("view %d: %d indexes held, want at most %d", i, size, ownedIndexCap)
 		}
 	}
 }
