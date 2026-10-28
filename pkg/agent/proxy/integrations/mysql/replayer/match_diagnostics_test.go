@@ -35,7 +35,7 @@ func TestMatchCommand_MissNamesTheNearestRecordingInsteadOfClaimingNoneExists(t 
 	}}
 	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
 
-	_, ok, miss, err := matchCommand(context.Background(), logger, comQueryReq(live), db, newDecodeCtx(), eng, nil)
+	_, ok, miss, err := matchCommand(context.Background(), logger, comQueryReq(live), db, newDecodeCtx(), "", eng, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestMatchCommand_DBMCommentEndToEnd(t *testing.T) {
 	}}
 	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
 
-	resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(dbmReader+body), db, newDecodeCtx(), eng, nil)
+	resp, ok, _, err := matchCommand(context.Background(), logger, comQueryReq(dbmReader+body), db, newDecodeCtx(), "", eng, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestMatchCommand_NoMocksPhaseStillReachable(t *testing.T) {
 	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
 
 	_, ok, miss, err := matchCommand(context.Background(), zap.NewNop(),
-		comQueryReq("SELECT 1"), db, newDecodeCtx(), eng, nil)
+		comQueryReq("SELECT 1"), db, newDecodeCtx(), "", eng, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestMatchCommand_LiteralDriftPicksTheRightShape(t *testing.T) {
 	eng := schemanoise.New(mysqlNoiseAdapter{}, false, false)
 
 	live := comQueryReq(fmt.Sprintf(shape, "2a22d715-4799-5150-80d6-a0dd935fbda2"))
-	resp, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), eng, nil)
+	resp, ok, _, err := matchCommand(context.Background(), logger, live, db, newDecodeCtx(), "", eng, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

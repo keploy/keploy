@@ -105,7 +105,7 @@ func matchLiveOrder(t *testing.T, db *fakeMockDb, params ...string) (*mysql.Resp
 	dctx.StmtIDToQuery[33] = ordersInsert
 	dctx.PreparedStatements[33] = &mysql.StmtPrepareOkPacket{StatementID: 33, NumParams: 2}
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, nil, nil)
+	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", nil, nil)
 	if err != nil {
 		t.Fatalf("matchCommand: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestMatchCommand_AMissNamesTheTestsUnknownStatements(t *testing.T) {
 			dctx := newDecodeCtx()
 			dctx.StmtIDToQuery[33] = ordersInsert
 			ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-			_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, StrictEngineForTest(), nil)
+			_, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", StrictEngineForTest(), nil)
 			if err != nil || ok || miss == nil {
 				t.Fatalf("ok %v, err %v, miss %v: want a miss", ok, err, miss)
 			}
@@ -292,7 +292,7 @@ func TestMatchCommand_ACloseIsScoredOnTheQueryItKept(t *testing.T) {
 		Message: &mysql.StmtClosePacket{Status: 0x19, StatementID: 33},
 	}}
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	if _, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, nil, nil); err != nil || !ok {
+	if _, ok, _, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", nil, nil); err != nil || !ok {
 		t.Fatalf("matchCommand: ok %v, err %v", ok, err)
 	}
 	if len(db.deletedFil) != 1 || db.deletedFil[0] != "mock-close-insert" {
@@ -366,7 +366,7 @@ func liveRead(t *testing.T, db *fakeMockDb, query, param string) (*mysql.Respons
 	dctx := newDecodeCtx()
 	dctx.StmtIDToQuery[33] = query
 	ctx := context.WithValue(context.Background(), models.ClientConnectionIDKey, "0")
-	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, nil, nil)
+	resp, ok, miss, err := matchCommand(ctx, zap.NewNop(), req, db, dctx, "", nil, nil)
 	if err != nil {
 		t.Fatalf("matchCommand: %v", err)
 	}
