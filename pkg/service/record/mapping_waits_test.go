@@ -589,8 +589,7 @@ func TestStart_AgentRevokeReleasesTheTestsHeldEntries(t *testing.T) {
 	run.mapping(t, "test-1", "never-sent")
 	run.until(t, "test-1's entry held", heldIs(1))
 
-	run.frame(t, &models.Mock{Version: models.GetVersion(), Name: "revoke-frame", Kind: models.RevokedTests,
-		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": "test-1"}}})
+	run.frame(t, revokeFrame("revoke-frame", "test-1"))
 	run.until(t, "the revoke released test-1's entry", settledNow)
 	run.mapping(t, "test-1", "never-sent-2")
 	run.mapping(t, "test-2", "never-sent-3")
@@ -634,6 +633,50 @@ func (c *armedClock) After(d time.Duration) (<-chan time.Time, func() bool) {
 	return ch, stop
 }
 
+// stopGivenUp stops a recording one of whose goroutines is wedged: each look
+// a stop's drain arms is advanced by a quarter of its stall bound, so the
+// record drain gives the wedged goroutine up on that bound with no sleep. It
+// returns the suite telemetry.
+func (run *recRun) stopGivenUp(t *testing.T, clk *armedClock) map[string]interface{} {
+	t.Helper()
+	run.closeStreams()
+	ended := make(chan struct{})
+	defer close(ended)
+	go func() {
+		for {
+			select {
+			case <-ended:
+				return
+			case <-clk.armed:
+				clk.Advance(teardownDrainStall / 4)
+			}
+		}
+	}()
+	select {
+	case err := <-run.done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Minute):
+		t.Fatal("Start did not return")
+	}
+	run.tele.mu.Lock()
+	defer run.tele.mu.Unlock()
+	require.NotNil(t, run.tele.suite)
+	return run.tele.suite
+}
+
+// lossLines maps each "Failed to correlate" line's mock to its next_step.
+func lossLines(t *testing.T, logs *observer.ObservedLogs) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, e := range logs.FilterMessageSnippet("Failed to correlate").All() {
+		id, _ := e.ContextMap()["tempMockID"].(string)
+		_, dup := got[id]
+		require.False(t, dup, "two loss lines for %s", id)
+		got[id], _ = e.ContextMap()["next_step"].(string)
+	}
+	return got
+}
+
 // TestStart_WedgedMockLoopsHeldEntryIsCounted: test-1's mapping names mock-1,
 // whose save never returns (a hung disk, a hook that never returns). The
 // record drain gives the mock loop up on its bound, and that loop never ends
@@ -652,35 +695,162 @@ func TestStart_WedgedMockLoopsHeldEntryIsCounted(t *testing.T) {
 	run.mapping(t, "test-1", "mock-1")
 	run.until(t, "test-1's entry held", heldIs(1))
 
-	run.closeStreams()
-	ended := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-ended:
-				return
-			case <-clk.armed:
-				clk.Advance(teardownDrainStall / 4)
-			}
-		}
-	}()
-	var err error
-	select {
-	case err = <-run.done:
-	case <-time.After(2 * time.Minute):
-		t.Fatal("Start did not return")
-	}
-	close(ended)
-	require.NoError(t, err)
+	suite := run.stopGivenUp(t, clk)
 	require.True(t, gaveUp(logs, "record")(), "the record drain did not give the wedged mock loop up")
-	run.tele.mu.Lock()
-	suite := run.tele.suite
-	run.tele.mu.Unlock()
-	require.NotNil(t, suite)
 	assert.EqualValues(t, 1, suite["tests-short-pool"], "test-1 shipped without mock-1 in its mapping and was not counted short: %v", suite)
 	assert.EqualValues(t, 1, suite["mocks-uncorrelated"])
 	assert.Len(t, logs.FilterMessageSnippet("INCOMPLETE").All(), 1)
-	lost := logs.FilterMessageSnippet("Failed to correlate").All()
-	require.Len(t, lost, 1)
-	assert.Equal(t, lossNextStep(reasonAbandoned), lost[0].ContextMap()["next_step"])
+	assert.Equal(t, map[string]string{"mock-1": lossNextStep(reasonAbandoned)}, lossLines(t, logs))
+}
+
+// gatedBatchMapDB is a mapping store whose batch write waits for gate: the
+// consumer that flushes into it is wedged until the test lets it go.
+type gatedBatchMapDB struct {
+	*recMappingDB
+	gate    chan struct{}
+	entered chan struct{}
+}
+
+func (d *gatedBatchMapDB) UpsertBatch(ctx context.Context, id string, byTest map[string][]models.MockEntry) error {
+	select {
+	case d.entered <- struct{}{}:
+	default:
+	}
+	<-d.gate
+	return d.recMappingDB.UpsertBatch(ctx, id, byTest)
+}
+
+// revokeFrame is the agent's RevokedTests frame for tests.
+func revokeFrame(name string, tests string) *models.Mock {
+	return &models.Mock{Version: models.GetVersion(), Name: name, Kind: models.RevokedTests,
+		Spec: models.MockSpec{Metadata: map[string]string{"revoked_tests": tests}}}
+}
+
+// TestStart_WedgedConsumersReadyEntriesAreCounted: the mapping consumer is
+// wedged (its batch write hangs, so its next apply blocks on the flush lock)
+// while the mock loop goes on and ends normally, so the entries it hands back
+// are never applied. test-1's mock-1 is saved after its entry is held;
+// test-2's never-2 is never sent. The record drain gives the consumer up: the
+// teardown must count both tests short, as the clock-bounded wait did, and
+// each line must say why: mock-1 was saved but never applied, and the mock
+// stream ended without never-2. test-3 (revoked while its entry was held) and
+// test-4 (revoked after its mock-4 was handed back) are deleted: their entries
+// say so in a Debug line, not as a loss, though their mocks were saved.
+func TestStart_WedgedConsumersReadyEntriesAreCounted(t *testing.T) {
+	wedge := make(chan struct{})
+	t.Cleanup(func() { close(wedge) })
+	core, logs := observer.New(zap.DebugLevel)
+	clk := &armedClock{armed: make(chan struct{}, 1)}
+	gdb := &gatedBatchMapDB{gate: wedge, entered: make(chan struct{}, 1)}
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{}},
+		BaseRecordHooks{}, zap.New(core), func(r *Recorder) {
+			r.drainClock = clk
+			gdb.recMappingDB = r.mappingDb.(*recMappingDB)
+			r.mappingDb = gdb
+		})
+	run.mock(t, "mock-0")
+	run.mock(t, "mock-2")
+	for _, tn := range []string{"test-0", "test-1", "test-2", "test-3", "test-4"} {
+		run.test(t, tn)
+	}
+	run.mapping(t, "test-0", "mock-0")
+	select { // the ticker's flush is in the (hung) batch write, holding the flush lock
+	case <-gdb.entered:
+	case <-time.After(hangGuard):
+		t.Fatal("no batch write")
+	}
+	run.mapping(t, "test-1", "mock-1")
+	run.mapping(t, "test-3", "mock-3")
+	run.mapping(t, "test-4", "mock-4")
+	run.until(t, "the entries of test-1, test-3 and test-4 held", heldIs(3))
+	// never-2 held proves the consumer took test-2's mapping (the mapping
+	// stream has a forwarder, so the send alone does not): it is now applying
+	// test-2's mock-2, which blocks on the flush lock.
+	run.mapping(t, "test-2", "mock-2", "never-2")
+	run.until(t, "test-2's entry held", heldIs(4))
+
+	// The mock loop takes its frames in order, so each step below is done
+	// when the next one's entry moves.
+	run.frame(t, revokeFrame("revoke-3", "test-3")) // test-3's held entry is handed back as revoked
+	run.until(t, "the revoke handed test-3's entry back", heldIs(3))
+	run.mock(t, "mock-3") // saved, for a revoked test
+	run.mock(t, "mock-4") // saved: test-4's entry is handed back, never applied
+	run.until(t, "mock-4 handed back", heldIs(2))
+	run.frame(t, revokeFrame("revoke-4", "test-4")) // test-4's entry is already handed back
+	run.mock(t, "mock-1")                           // saved: test-1's entry is handed back, never applied
+	run.until(t, "mock-1 handed back", heldIs(1))
+
+	// The mock stream's end hands never-2 back too, before any drain can give
+	// anything up (the drain clock moves only in stopGivenUp).
+	run.closeStreams()
+	run.until(t, "the mock stream's end handed never-2 back", heldIs(0))
+	suite := run.stopGivenUp(t, clk)
+	require.True(t, gaveUp(logs, "record")(), "the record drain did not give the wedged consumer up")
+	assert.Subset(t, run.deleted(), []string{"test-3", "test-4"})
+	assert.EqualValues(t, 2, suite["tests-short-pool"], "test-1 (mock-1 saved, never applied) and test-2 (never-2) must both count short: %v", suite)
+	assert.EqualValues(t, 2, suite["mocks-uncorrelated"])
+	assert.Len(t, logs.FilterMessageSnippet("INCOMPLETE").All(), 1)
+	assert.Equal(t, map[string]string{
+		"mock-1":  lossNextStep(reasonConsumerGivenUp),
+		"never-2": lossNextStep(reasonEnded),
+	}, lossLines(t, logs))
+	for _, id := range []string{"mock-3", "mock-4"} {
+		assert.Len(t, logs.FilterMessageSnippet("not waiting for a revoked test's mock").
+			FilterField(zap.String("tempMockID", id)).All(), 1, "%s", id)
+	}
+}
+
+// TestStart_RecorderRevokeReleasesTheTestsHeldEntries: test-1's mapping names
+// mock-1, which the recorder fails to save, and never-1, which the agent
+// never sends. The drop revokes test-1 (the recorder's own revoke, not the
+// agent's frame), and that revoke must release never-1's entry at once: it
+// settles while the streams are open, as a revoked test's entry (a Debug
+// line, no "Failed to correlate" Error), and test-1 is deleted, not counted
+// short.
+func TestStart_RecorderRevokeReleasesTheTestsHeldEntries(t *testing.T) {
+	release := make(chan struct{})
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{"mock-1": true}, gate: map[string]chan struct{}{"mock-1": release}},
+		BaseRecordHooks{}, zap.New(core))
+	run.test(t, "test-1")
+	run.mock(t, "mock-1")
+	run.mapping(t, "test-1", "mock-1", "never-1")
+	run.until(t, "test-1's entries held", heldIs(2))
+
+	close(release) // the save fails: the mock cannot be encoded, so test-1 is revoked
+	run.until(t, "the revoke released never-1's entry", settledNow)
+	suite := run.stop(t)
+	assert.Contains(t, run.deleted(), "test-1", "a test that owned a dropped mock was not revoked")
+	assert.NotContains(t, suite, "tests-short-pool", "a revoked test was counted short: %v", suite)
+	assert.Empty(t, lossLines(t, logs), "a revoked test's entry was reported as lost")
+	assert.Len(t, logs.FilterMessageSnippet("not waiting for a revoked test's mock").
+		FilterField(zap.String("tempMockID", "never-1")).All(), 1)
+}
+
+// TestStart_UntrackedDropSettlesAtOnceAndSaysSo: the dropped-mock set is
+// full (shrunk to one, filled by mock-0, which no mapping names), so when the
+// recorder fails to save mock-1 its test cannot be revoked. test-1's held
+// entry must settle on that drop while the streams are open, not wait for
+// the mock stream's end, and its line must say the drop is why.
+func TestStart_UntrackedDropSettlesAtOnceAndSaysSo(t *testing.T) {
+	prev := maxLiveDroppedMockIDs
+	maxLiveDroppedMockIDs = 1
+	t.Cleanup(func() { maxLiveDroppedMockIDs = prev })
+
+	release := make(chan struct{})
+	core, logs := observer.New(zap.DebugLevel)
+	run := startRecording(t, &recMockDB{unencodable: map[string]bool{"mock-0": true, "mock-1": true},
+		gate: map[string]chan struct{}{"mock-1": release}}, BaseRecordHooks{}, zap.New(core))
+	run.mock(t, "mock-0") // dropped and tracked: the set is now full
+	run.test(t, "test-1")
+	run.mock(t, "mock-1")
+	run.mapping(t, "test-1", "mock-1")
+	run.until(t, "test-1's entry held", heldIs(1))
+
+	close(release) // the save fails, past the dropped-mock cap
+	run.until(t, "the untracked drop settled test-1's entry", settledNow)
+	suite := run.stop(t)
+	assert.NotContains(t, run.deleted(), "test-1", "an untracked drop cannot revoke its test")
+	assert.EqualValues(t, 1, suite["tests-short-pool"], "%v", suite)
+	assert.Equal(t, map[string]string{"mock-1": lossNextStep(reasonUntrackedDrop)}, lossLines(t, logs))
 }

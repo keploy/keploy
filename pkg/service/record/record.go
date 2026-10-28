@@ -1154,7 +1154,10 @@ func (r *Recorder) SetRecordHooks(hooks RecordHooks) {
 // recording with 10k dropped mocks is systematically broken and the teardown
 // Warn plus the mocks-dropped telemetry still report the true scale — but it is
 // not free, so the cap is set well above any plausible healthy session.
-const maxLiveDroppedMockIDs = 10000
+//
+// A package-level var, not a const, only so a test can shrink it. Never
+// reassigned in production code.
+var maxLiveDroppedMockIDs = 10000
 
 // droppedMockSet is the set of mock tempIDs the recorder FAILED to persist, so
 // the mapping consumer revokes the test that owns one instead of replaying it
@@ -1338,6 +1341,8 @@ func lossNextStep(why lossReason) string {
 		return fmt.Sprintf("%d mapping entries were already waiting for their mocks, so this one was not held; re-record the test set", maxHeldMappingEntries)
 	case reasonAbandoned:
 		return "the recording's teardown gave the mock loop up before it said what became of this mock; re-record the test set"
+	case reasonConsumerGivenUp:
+		return "the mock loop said what became of this mock, but the recording's teardown gave the mapping consumer up before it applied it, so this test is recorded without it; re-record the test set"
 	default:
 		return "the agent named this mock in the test's mapping but the mock stream ended with no mock left for it: the agent never sent it, or another mapping entry naming the same mock took it (a mock is mapped to one entry); re-record the test set"
 	}
@@ -1876,25 +1881,40 @@ func (r *Recorder) Start(ctx context.Context) (startErr error) {
 			recordDrainedCleanly = false
 		}
 		// A drain that gave the mock loop up (wedged in a save or a hook) left
-		// the mapping entries it would have settled waiting: the consumer
-		// parked on them never counts them. Take them here, before the totals,
-		// as the tests' incomplete mock sets they are; the totals subtract a
-		// deleted test as they do for every other entry. After a clean drain
-		// there are none.
-		for _, e := range mappingHolds.abandon() {
+		// the mapping entries it would have settled held; one that gave the
+		// mapping consumer up (wedged in a write) left those handed back to it
+		// unapplied. Neither is counted by anyone else: take them here, before
+		// the totals, as the tests' incomplete mock sets they are; the totals
+		// subtract a deleted test as they do for every other entry. After a
+		// clean drain there are none.
+		abandonedReady, abandonedHeld := mappingHolds.abandon()
+		foldAbandoned := func(e heldEntry, unapplied lossReason) {
 			entry, fate := settleMock(e.tempID, &correlationMap, &asyncMockIDs, &droppedMockIDs)
+			why := e.why
 			if fate == fateMapped || fate == fateLost {
 				// Its outcome came, but the consumer will not apply it now:
 				// the test is recorded without it.
 				fate = fateUnknown
+				if why != reasonRevoked {
+					why = unapplied
+				}
 			}
 			var res mappingResolution
-			r.addSettled(&res, e.test, e.tempID, entry, fate, reasonAbandoned, &asyncMockIDs)
+			r.addSettled(&res, e.test, e.tempID, entry, fate, why, &asyncMockIDs)
 			if res.uncorrelated > 0 {
 				prev, _ := shortPoolByTest.Load(e.test)
 				n, _ := prev.(int64)
 				shortPoolByTest.Store(e.test, n+int64(res.uncorrelated))
 			}
+		}
+		// A handed-back entry with no mock keeps why it was handed back (the
+		// stream ended without it, another entry took it, an untracked drop);
+		// one whose mock came was the consumer's to apply.
+		for _, e := range abandonedReady {
+			foldAbandoned(e, reasonConsumerGivenUp)
+		}
+		for _, e := range abandonedHeld {
+			foldAbandoned(e, reasonAbandoned)
 		}
 		// Every drain is over: nothing still selects on utils.StopNow, which
 		// a press at this wait's offer closes, but what a drain abandoned on

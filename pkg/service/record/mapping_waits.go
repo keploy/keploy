@@ -63,6 +63,10 @@ const (
 	// reasonAbandoned: the recording's teardown gave the mock loop up (its
 	// drain timed out) before the mock's outcome was told.
 	reasonAbandoned
+	// reasonConsumerGivenUp: the mock's outcome was told, but the recording's
+	// teardown gave the mapping consumer up (its drain timed out) before it
+	// applied the entry.
+	reasonConsumerGivenUp
 )
 
 // heldEntry is one mapping entry waiting for its mock, or handed back.
@@ -84,8 +88,9 @@ type heldEntry struct {
 // arrived once a mock's outcome (saved, dropped or skipped) is published, and
 // end once its stream is over. An entry still held at end has a mock that never
 // came: that, and only that, is counted as a test recorded with an incomplete
-// mock set. A teardown that gave the mock loop up (it never ends) takes what is
-// still held instead (abandon).
+// mock set. A teardown that gave the mock loop up (it never ends), or the
+// consumer (it never applies what was handed back), takes what is left
+// instead (abandon).
 //
 // The consumer never blocks on a held entry: it goes on draining the mapping
 // stream (the agent drops mappings it cannot hand over), and applies the held
@@ -272,30 +277,42 @@ func (w *mappingWaits) end() {
 	}
 }
 
-// abandon is the teardown's, when its drain gave the mock loop up: that loop
-// may never end, so the entries it would have settled are taken here, held
-// and ready alike, under the lock, so the consumer cannot apply one of them
-// as well. A parked consumer is woken, finds nothing, and returns once its
-// stream is closed. After a clean drain it finds nothing: the consumer
-// returned only once nothing waited.
-func (w *mappingWaits) abandon() []heldEntry {
+// abandon is the teardown's, when its drain gave the mock loop or the mapping
+// consumer up: neither may ever settle what is left, so it is taken here, under
+// the lock, so the consumer cannot apply one of these entries as well.
+//
+//   - ready: the entries handed back that the consumer has not applied (a
+//     consumer wedged in a write, while the mock loop ended). Each keeps the
+//     why it was handed back with, but a revoked test's says reasonRevoked.
+//   - held: the entries whose mock was never told (a mock loop wedged in a
+//     save or a hook). Each says reasonAbandoned.
+//
+// A parked consumer is woken, finds nothing, and returns once its stream is
+// closed. After a clean drain both are empty: the consumer returned only once
+// nothing waited.
+func (w *mappingWaits) abandon() (ready, held []heldEntry) {
 	if w == nil {
-		return nil
+		return nil, nil
 	}
 	w.mu.Lock()
 	w.ended = true
-	out := w.ready
+	ready = w.ready
 	w.ready = nil
+	for i := range ready {
+		if w.isRevoked(ready[i].test) {
+			ready[i].why = reasonRevoked
+		}
+	}
 	for tempID, tests := range w.held {
 		for _, tn := range tests {
-			out = append(out, heldEntry{test: tn, tempID: tempID, why: reasonAbandoned})
+			held = append(held, heldEntry{test: tn, tempID: tempID, why: reasonAbandoned})
 		}
 	}
 	clear(w.held)
 	w.nHeld = 0
 	w.mu.Unlock()
 	w.signal()
-	return out
+	return ready, held
 }
 
 func (w *mappingWaits) signal() {

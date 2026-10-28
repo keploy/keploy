@@ -111,7 +111,7 @@ func TestDroppedMockSet_BoundedWhenNothingConsumes(t *testing.T) {
 	for i := 0; i < maxLiveDroppedMockIDs+500; i++ {
 		d.add("orphan-" + strconv.Itoa(i))
 	}
-	if live := d.live.Load(); live > maxLiveDroppedMockIDs {
+	if live := d.live.Load(); live > int64(maxLiveDroppedMockIDs) {
 		t.Fatalf("droppedMockSet grew to %d entries, past the %d cap", live, maxLiveDroppedMockIDs)
 	}
 	// Past the cap add() must say so, so the caller can report that further
