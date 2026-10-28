@@ -166,9 +166,11 @@ func covers(staged map[string]bool, pool map[string][]string) bool {
 // opens) at the on-disk store: a miss on a call that is the recording of a
 // test not begun yet (a worker's call made early) is told from it; the learn
 // step's earlier places of a pool recording are every recording made before
-// it, a test's own on disk too; and record's full round pairs with the
-// recordings of tests not begun yet. A set kept all resident sets none: its
-// trees hold every recording.
+// it, a test's own on disk too; record's full round pairs with the
+// recordings of tests not begun yet; and under keploy mock replay a test
+// process's teardown (the calls after its own last test) is bounded by its
+// tests' recordings, which no staging reads. A set kept all resident sets
+// none: its trees hold every recording.
 func (a *Agent) readUnstagedFromDisk() error {
 	if rs, ok := a.Proxy.(coreAgent.RecordingSourceSetter); ok {
 		if err := rs.SetRecordingSource(a.diskRecordingSource()); err != nil {
@@ -185,7 +187,24 @@ func (a *Agent) readUnstagedFromDisk() error {
 			return fmt.Errorf("set the test set's recordings of a kind: %w", err)
 		}
 	}
+	if rt, ok := a.Proxy.(coreAgent.RecordingTimesSetter); ok {
+		if err := rt.SetRecordingTimes(a.diskRecordingTimes()); err != nil {
+			return fmt.Errorf("set the test set's recording times: %w", err)
+		}
+	}
 	return nil
+}
+
+// diskRecordingTimes visits, of the set staged, every on-disk mock's name,
+// request and answer times and protocol phase (DiskMocks.RangeTimes), nil
+// when the set's mocks are all resident, and so all staged in the proxy's
+// trees.
+func (a *Agent) diskRecordingTimes() func(visit func(name string, req, res time.Time, protocolPhase bool) bool) error {
+	disk := a.stagedDisk()
+	if disk == nil {
+		return nil
+	}
+	return disk.RangeTimes
 }
 
 // restartKey starts key's calls outside every test afresh on the proxy
