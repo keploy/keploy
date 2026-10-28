@@ -153,7 +153,7 @@ func TestUnderExactServingAOneByteChangeIsAMiss(t *testing.T) {
 		}
 	}
 	// Nor is it the answered exchange again: an extra call is an identical one.
-	if n := extraCall([][]byte{booK}, answered{mocks: []*models.Mock{priceMock("mock-book", book, "1250", false)}}); n != 0 {
+	if n, _ := extraCall([][]byte{booK}, answered{mocks: []*models.Mock{priceMock("mock-book", book, "1250", false)}}); n != 0 {
 		t.Fatalf("a one-byte change of the answered exchange is an extra call recorded %d times", n)
 	}
 }
@@ -182,10 +182,10 @@ func TestAnExactServingMissSaysOnlyAnIdenticalExchangeAnswers(t *testing.T) {
 func TestAnExchangeLikeAnAnsweredOneIsNotAnExtraCall(t *testing.T) {
 	book, pens := wireRequest("book"), wireRequest("pens")
 	db := answered{mocks: []*models.Mock{priceMock("mock-book", book, "1250", false)}}
-	if n := extraCall([][]byte{book}, db); n != 1 {
+	if n, _ := extraCall([][]byte{book}, db); n != 1 {
 		t.Fatalf("the answered exchange again: %d, want an extra call recorded once", n)
 	}
-	if n := extraCall([][]byte{pens}, db); n != 0 {
+	if n, _ := extraCall([][]byte{pens}, db); n != 0 {
 		t.Fatalf("a changed exchange, %.2f like the answered one, is an extra call recorded %d times", fuzzyCheck(book, pens), n)
 	}
 }
@@ -264,10 +264,10 @@ func TestUnderExactServingARedactedBufferIsNoExcuse(t *testing.T) {
 func TestAChangedRedactedBufferIsNotAnExtraCall(t *testing.T) {
 	changed := recordedToken[:len(recordedToken)-1] + "B"
 	db := answered{mocks: []*models.Mock{tokenMock("mock-token", false, "OK-USER-42", 1, "HELLO v1", "", "GET balance")}}
-	if n := extraCall([][]byte{[]byte("HELLO v1"), []byte(changed), []byte("GET balance")}, db); n != 0 {
+	if n, _ := extraCall([][]byte{[]byte("HELLO v1"), []byte(changed), []byte("GET balance")}, db); n != 0 {
 		t.Fatalf("an exchange whose redacted token changed is an extra call recorded %d times", n)
 	}
-	if n := extraCall([][]byte{[]byte("HELLO v1"), []byte(redactedToken), []byte("GET balance")}, db); n != 1 {
+	if n, _ := extraCall([][]byte{[]byte("HELLO v1"), []byte(redactedToken), []byte("GET balance")}, db); n != 1 {
 		t.Fatalf("the answered exchange's own bytes again: %d, want an extra call recorded once", n)
 	}
 }
@@ -319,7 +319,7 @@ func TestUnderExactServingBytesAreComparedNotTheirEncoding(t *testing.T) {
 			if err != nil || ok || resp != nil || len(consumed) != 0 {
 				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
 			}
-			if n := extraCall([][]byte{row.live}, answered{mocks: []*models.Mock{m}}); n != 0 {
+			if n, _ := extraCall([][]byte{row.live}, answered{mocks: []*models.Mock{m}}); n != 0 {
 				t.Errorf("%s: an extra call recorded %d times, want none", name, n)
 			}
 			// Switch off: served, as before.
@@ -363,7 +363,7 @@ func TestUnderExactServingBytesAreComparedNotTheirEncoding(t *testing.T) {
 				t.Errorf("%q recorded as %s, read in %d pieces: findExactMatch = %d under exact serving, want 0", req, m.Spec.GenericRequests[0].Message[0].Type, len(reads), got)
 			}
 		}
-		if n := extraCall([][]byte{req}, answered{mocks: []*models.Mock{m}}); n != 1 {
+		if n, _ := extraCall([][]byte{req}, answered{mocks: []*models.Mock{m}}); n != 1 {
 			t.Errorf("%q: the answered exchange again is an extra call recorded %d times, want once", req, n)
 		}
 	}
@@ -401,7 +401,7 @@ func TestUnderExactServingEveryPieceIsComparedAsBytes(t *testing.T) {
 			if err != nil || ok || resp != nil || len(consumed) != 0 {
 				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
 			}
-			if n := extraCall(c.live, answered{mocks: []*models.Mock{m}}); n != 0 {
+			if n, _ := extraCall(c.live, answered{mocks: []*models.Mock{m}}); n != 0 {
 				t.Errorf("%s: an extra call recorded %d times, want none", name, n)
 			}
 			if got := findExactMatch([]*models.Mock{m}, c.live, true); got != -1 {
@@ -449,7 +449,7 @@ func TestUnderExactServingARecordedPieceOfSeveralMessagesDiffers(t *testing.T) {
 			if err != nil || ok || resp != nil || len(consumed) != 0 {
 				t.Errorf("%s: served under exact serving: ok %v, %v, %v, consumed %v; want a miss", name, ok, resp, err, consumed)
 			}
-			if n := extraCall(reqs, answered{mocks: []*models.Mock{m}}); n != 0 {
+			if n, _ := extraCall(reqs, answered{mocks: []*models.Mock{m}}); n != 0 {
 				t.Errorf("%s: an extra call recorded %d times, want none", name, n)
 			}
 			// Switch off: the first message alone is compared, as before.
