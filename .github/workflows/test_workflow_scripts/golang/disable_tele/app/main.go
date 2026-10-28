@@ -40,10 +40,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, http.ListenAndServe(os.Args[2], nil))
 		os.Exit(1)
 	case "dnswatch":
-		if err := dnswatch(os.Args[2]); err != nil {
-			fmt.Fprintln(os.Stderr, "dnswatch:", err)
-			os.Exit(1)
-		}
+		// dnswatch runs until it fails: it returns only an error.
+		fmt.Fprintln(os.Stderr, "dnswatch:", dnswatch(os.Args[2]))
+		os.Exit(1)
 	case "mark":
 		if err := mark(os.Args[2]); err != nil {
 			fmt.Fprintln(os.Stderr, "mark:", err)
@@ -101,7 +100,7 @@ func mark(name string) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	_, err = c.Write(m)
 	return err
 }

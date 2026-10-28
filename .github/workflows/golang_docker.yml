@@ -161,7 +161,8 @@ jobs:
   # network namespace, dockerd's forwards for its containers included
   # (resolv.conf untouched); a control leg without the flag must show keploy's
   # lookup. Only the PR's binary and image: the published ones are what this
-  # guards against.
+  # guards against. It runs once with `docker run` and once with `docker
+  # compose up`, whose agent is the service keploy adds to the compose file.
   # The same job then records a `docker run --dns ... --dns-search ...
   # --dns-option ...` app: docker refuses an app's own --dns under the agent's
   # network mode, so keploy hands the settings to the agent container, whose
@@ -195,6 +196,13 @@ jobs:
           RECORD_BIN: ${{ steps.record.outputs.path }}
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/disable_tele/disable-tele-linux.sh" docker
+
+      - name: Run disable-tele e2e (docker compose, no telemetry lookup under --disable-tele)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/disable_tele/disable-tele-linux.sh" compose
 
       - name: Run docker --dns e2e (the app's resolver settings reach it under keploy record)
         if: ${{ !cancelled() }}
