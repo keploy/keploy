@@ -1,0 +1,157 @@
+package replayer_test
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"go.keploy.io/server/v3/pkg/agent/proxy"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/mysql/replayer"
+	"go.keploy.io/server/v3/pkg/models"
+	"go.keploy.io/server/v3/pkg/models/mysql"
+	"go.uber.org/zap"
+)
+
+// A statement the recording never ran, and one of poolQuery's shape that
+// reads another table: the same parse tree, other identifiers.
+const (
+	otherQuery     = "SELECT code FROM other WHERE ref = ? AND live = 1"
+	otherShapeTwin = "SELECT id, name FROM big WHERE id = ?"
+)
+
+// stageOwn stages mocks as keploy test does (exact false: test 0's window
+// holds own) or as the proven switch serves them (exact: test T's mapping
+// is own).
+func stageOwn(t *testing.T, all, own []*models.Mock, exact bool) *proxy.MockManager {
+	t.Helper()
+	mm := proxy.NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	if exact {
+		mm.SetMocksWithWindow(nil, all, models.BaseTime, time.Now().Add(time.Hour))
+		mm.ServeExactTest("T", own)
+		return mm
+	}
+	start, end := diffWindow(0)
+	mm.SetMocksWithWindow(nil, all, start, end.Add(time.Hour))
+	return mm
+}
+
+// synthesized is the answer to a PREPARE no recording answers: the
+// PREPARE_OK the matcher makes for it, which names no recording.
+const synthesized = "<synthesized PREPARE_OK>"
+
+// otherStatementCase is one command a test's recording holds no recording
+// of, and what answers it: want "" is a miss.
+type otherStatementCase struct {
+	name     string
+	stmts    map[uint32]string // the connection's prepared statements
+	req      mysql.Request
+	exact    string // the answer under exact serving
+	notExact string // the answer under keploy test
+	nearest  string // the recording a miss names as the nearest
+}
+
+func runOtherStatementCases(t *testing.T, all, own []*models.Mock, cases []otherStatementCase) {
+	t.Helper()
+	for _, c := range cases {
+		for _, exact := range []bool{false, true} {
+			want := c.notExact
+			if exact {
+				want = c.exact
+			}
+			t.Run(fmt.Sprintf("%s/exact=%v", c.name, exact), func(t *testing.T) {
+				mm := stageOwn(t, all, own, exact)
+				ctx, dctx := poolConn("c1")
+				if c.stmts != nil {
+					dctx.StmtIDToQuery = c.stmts
+				}
+				resp, ok, miss, err := replayer.MatchForTest(ctx, zap.NewNop(), c.req, mm, dctx)
+				if err != nil {
+					t.Fatalf("match: %v", err)
+				}
+				switch {
+				case want == synthesized:
+					if !ok {
+						t.Fatalf("a miss (%s); want the PREPARE_OK the matcher makes", miss)
+					}
+					if _, prepOK := resp.Message.(*mysql.StmtPrepareOkPacket); !prepOK || resp.Payload != "" {
+						t.Fatalf("answered with %q (%T); want the PREPARE_OK the matcher makes", resp.Payload, resp.Message)
+					}
+				case want == "" && ok:
+					t.Fatalf("answered with %s; want a miss: no recording ran this statement", resp.Payload)
+				case want == "" && miss == "":
+					t.Fatalf("a miss that says nothing; want the miss report")
+				case want == "" && c.nearest != "" && !strings.Contains(miss, "closestMock:"+c.nearest+" "):
+					t.Fatalf("the miss (%s) does not name %s, the nearest recording", miss, c.nearest)
+				case want != "" && !ok:
+					t.Fatalf("a miss (%s); want %s", miss, want)
+				case want != "" && resp.Payload != want:
+					t.Fatalf("answered with %s; want %s", resp.Payload, want)
+				}
+			})
+		}
+	}
+}
+
+// An EXECUTE of a statement the test's recording never ran was answered by
+// the score fallback with another statement's recording, under exact
+// serving as under keploy test: header, status, flags and parameter count
+// alone scored, so any recorded EXECUTE won. "SELECT code FROM other WHERE
+// ref = ? AND live = 1" with 5 got the rows of "SELECT id, name FROM small
+// WHERE id = ?" with 7, and the app read rows its statement never returned.
+//
+// The rule: an EXECUTE is answered only by a recording of its own statement
+// (the same prepared text: sqlStatementIdentity, case-insensitive), or, when
+// the recording lost its statement, by one with every parameter equal.
+// Under exact serving that is all. Without it, a recording of another
+// statement of the same shape (the same parse tree, other identifiers), and
+// any recording when the live statement is unknown, still scores, as before:
+// that is keploy test's lenient tier, kept; a recording of another statement
+// of another shape never answers, in either mode.
+func TestAnExecuteOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
+	prep := diffPrepareMock("prep-c1", "c1", poolQuery, 1, diffBase.Add(time.Millisecond))
+	own := diffMock("exec-small-7", "c1", []mysql.Request{executeReq(1, "7")}, diffBase.Add(2*time.Millisecond), models.LifetimePerTest, "mocks")
+	// lost: an EXECUTE whose PREPARE the recording does not hold (statement
+	// 9 on c2): its statement is unknown.
+	lost := diffMock("exec-lost-8", "c2", []mysql.Request{executeReq(9, "8")}, diffBase.Add(3*time.Millisecond), models.LifetimePerTest, "mocks")
+	all := []*models.Mock{prep, own}
+	stmts := func(q string) map[uint32]string { return map[uint32]string{1: poolQuery, 2: q} }
+	runOtherStatementCases(t, all, []*models.Mock{own}, []otherStatementCase{
+		{name: "another statement", stmts: stmts(otherQuery), req: executeReq(2, "5"), nearest: "exec-small-7"},
+		{name: "another statement with the recording's parameters", stmts: stmts(otherQuery), req: executeReq(2, "7"), nearest: "exec-small-7"},
+		{name: "another statement of the same shape", stmts: stmts(otherShapeTwin), req: executeReq(2, "5"), notExact: "exec-small-7", nearest: "exec-small-7"},
+		{name: "a statement the connection did not prepare", stmts: stmts(otherQuery), req: executeReq(3, "5"), notExact: "exec-small-7"},
+		// The rule's other side: the statement's own recording answers.
+		{name: "its own statement", stmts: stmts(otherQuery), req: executeReq(1, "7"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "its own statement with other parameters", stmts: stmts(otherQuery), req: executeReq(1, "5"), exact: "exec-small-7", notExact: "exec-small-7"},
+		{name: "its own statement in another case", stmts: map[uint32]string{1: strings.ToLower(poolQuery)}, req: executeReq(1, "5"), exact: "exec-small-7", notExact: "exec-small-7"},
+	})
+	t.Run("a recording whose statement is lost", func(t *testing.T) {
+		runOtherStatementCases(t, []*models.Mock{lost}, []*models.Mock{lost}, []otherStatementCase{
+			{name: "other parameters", stmts: stmts(otherQuery), req: executeReq(2, "5"), notExact: "exec-lost-8"},
+			{name: "its parameters", stmts: stmts(otherQuery), req: executeReq(2, "8"), exact: "exec-lost-8", notExact: "exec-lost-8"},
+		})
+	})
+}
+
+// A COM_QUERY, and a PREPARE, is answered by a recording of its own
+// statement: the same text but for its inline literals (a COM_QUERY's
+// parameters). Under exact serving that is all; the identifier-blind DML
+// tier (the same parse tree: another table, other columns) answered an
+// UPDATE of kv with the recording of an UPDATE of users. Without exact
+// serving that tier is kept, as before.
+func TestAQueryOfAStatementNoRecordingRanIsAMiss(t *testing.T) {
+	ts := diffBase.Add(time.Millisecond)
+	update := diffMock("query-update-users", "c1", []mysql.Request{queryReq("UPDATE users SET name = 'a' WHERE id = 3")}, ts, models.LifetimePerTest, "mocks")
+	read := diffMock("query-read-small", "c1", []mysql.Request{queryReq("SELECT id, name FROM small WHERE id = 7")}, ts.Add(time.Millisecond), models.LifetimePerTest, "mocks")
+	prepUpdate := diffPrepareMock("prep-update-users", "c1", "UPDATE users SET name = ? WHERE id = ?", 4, ts.Add(2*time.Millisecond))
+	all := []*models.Mock{update, read, prepUpdate}
+	runOtherStatementCases(t, all, all, []otherStatementCase{
+		{name: "an UPDATE of another table", req: queryReq("UPDATE kv SET v = 'b' WHERE id = 4"), notExact: "query-update-users", nearest: "query-update-users"},
+		{name: "its own UPDATE with other literals", req: queryReq("UPDATE users SET name = 'b' WHERE id = 4"), exact: "query-update-users", notExact: "query-update-users"},
+		{name: "a SELECT of another statement", req: queryReq("SELECT code FROM other WHERE ref = 5 AND live = 1")},
+		{name: "its own SELECT with another literal", req: queryReq("SELECT id, name FROM small WHERE id = 5"), exact: "query-read-small", notExact: "query-read-small"},
+		{name: "a PREPARE of an UPDATE of another table", req: prepareReq("UPDATE kv SET v = ? WHERE id = ?"), exact: synthesized, notExact: "prep-update-users"},
+	})
+}

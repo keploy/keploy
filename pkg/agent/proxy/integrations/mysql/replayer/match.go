@@ -126,6 +126,17 @@ func getQueryStructureCached(sql string) (string, error) {
 	return sig, err
 }
 
+// sameQueryStructure reports whether two statements parse to the same tree
+// shape (getQueryStructure: identifier-blind). Neither parsing is no.
+func sameQueryStructure(a, b string) bool {
+	sigA, errA := getQueryStructureCached(a)
+	if errA != nil {
+		return false
+	}
+	sigB, errB := getQueryStructureCached(b)
+	return errB == nil && sigA == sigB
+}
+
 func matchHeader(expected, actual mysql.Header) bool {
 
 	// Match the payloadlength
@@ -454,6 +465,24 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 	// connections running it at once all picked the same recording, so all
 	// but one were refused.
 	exactServing := integrations.ExactServing(mockDb)
+	// sameStatementOnly is the rule of a fallback under exact serving: a
+	// recording that is not a match on the command's statement and every
+	// parameter answers it only when it ran the command's own statement.
+	// For a COM_QUERY or COM_STMT_PREPARE that is the same text once inline
+	// literals are masked (maskSQLLiterals: a COM_QUERY's literals are its
+	// parameters). For a COM_STMT_EXECUTE it is the same prepared statement
+	// (queryExact: sqlStatementIdentity, case-insensitive), which the FIFO
+	// candidate is, so no EXECUTE is answered by score. A recording of
+	// another statement of the same shape (getQueryStructure is
+	// identifier-blind: another table, other columns), or, for an EXECUTE,
+	// of a statement unknown on either side, never answers there: it was
+	// served by score, and the app read rows its statement never returned.
+	// An EXECUTE recorded without its statement still answers with every
+	// parameter equal (paramsOnlyMock), as before. Without exact serving
+	// those still score, as before: keploy test's lenient tier. A recording
+	// of another statement of another shape never scores, in either mode
+	// (matchStmtExecutePacketQueryAware, matchQueryLive).
+	sameStatementOnly := exactServing
 	testsOwn := func(mk *models.Mock) bool {
 		if exactServing {
 			return integrations.OwnedByOpenTest(mockDb, mk)
@@ -683,6 +712,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 		liveStatement = sqlStatementIdentity(m.Query)
 	case *mysql.StmtPreparePacket:
 		liveStatement = sqlStatementIdentity(m.Query)
+	case *mysql.StmtExecutePacket:
+		// Its prepared statement, for nearestMock only.
+		if decodeCtx != nil {
+			liveStatement = sqlStatementIdentity(decodeCtx.StmtIDToQuery[m.StatementID])
+		}
 	}
 
 	// First pass. A scan can stop at a candidate it may serve without looking
@@ -1209,6 +1243,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 			}
 		}
 		ok, c, id := matchQueryLive(logger, recorded, req.PacketBundle, lq, getQuery)
+		if sameStatementOnly && !ok && c > 0 && maskSQLLiterals(id) != lq.maskedLiterals() {
+			c = 0
+		}
 		if evaluated != nil {
 			evaluated[key] = evalResult{ok: ok, score: c, recorded: id}
 		}
@@ -1399,6 +1436,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						logger.Debug("queries comparison", zap.String("expected_query", expectedQuery), zap.String("actual_query", actualQuery), zap.Uint32("mock_statement_id", expMsg.StatementID), zap.Uint32("actual_statment_id", actMsg.StatementID), zap.Any("connID", mock.Spec.Metadata["connID"]), zap.String("mock_name", mock.Name))
 
 						ev.ok, ev.score, ev.queryExact = matchStmtExecutePacketQueryAware(logger, mockReq.PacketBundle, req.PacketBundle, expectedQuery, actualQuery, liveStatementParams, mock.Name, util.NewNoiseChecker(mock.Noise))
+						if sameStatementOnly && !ev.ok {
+							ev.score = 0
+						}
 						ev.recorded = expectedQuery
 						if evaluated != nil {
 							evaluated[key] = ev
@@ -1490,6 +1530,11 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 						} else if bestPartialMock == nil && c > 0 {
 							bestPartialMock, bestPartialQuery = mock, expectedQuery
 						}
+						// Reporting only: a recording of another statement
+						// scores nothing, but may be the nearest recorded.
+						if !queryExact {
+							trackNearest(mock, expectedQuery, "")
+						}
 						// Strict gate: a query-exact candidate with drifted bound
 						// parameters may only become a FIFO/score candidate when
 						// the drifting params (body.parameters.N.value) are
@@ -1508,7 +1553,9 @@ func matchCommandWith(ctx context.Context, logger *zap.Logger, req mysql.Request
 							}
 						}
 						if c > maxMatchedCount {
-							// fallback score-based candidate (used when no stmt info was available)
+							// fallback score-based candidate: a recording of the
+							// statement's shape, or one whose statement is
+							// unknown, without exact serving (sameStatementOnly)
 							maxMatchedCount, matchedResp, matchedMock = c, &mock.Spec.MySQLResponses[0], mock
 						}
 					}
@@ -2658,9 +2705,14 @@ func sameParameterShape(expected, actual *mysql.StmtExecutePacket, liveStatement
 // query-aware EXEC scoring.
 //   - Keep the existing header/flags/params scoring.
 //   - Do NOT reward raw StatementID equality.
-//   - If both expectedQuery and actualQuery are present, require them to match (exact).
-//     If they don't match, return (false, 0) immediately.
+//   - If both expectedQuery and actualQuery are present, require them to be
+//     the same statement (definitive with every parameter equal) or of the
+//     same shape (sameQueryStructure: scores, never definitive). Otherwise
+//     return (false, 0, false): the recording ran another statement.
 //   - If either query is missing, fall back to best-effort scoring (returns (false, score)).
+//
+// Under exact serving the caller serves by score only a recording of the
+// same statement (see sameStatementOnly in matchCommandWith).
 //
 // Returns (definitive, score, queryExactMatched). queryExactMatched is true
 // when the recorded prepared-statement query text equals the live query text
@@ -2789,17 +2841,24 @@ func matchStmtExecutePacketQueryAware(logger *zap.Logger, expected, actual mysql
 	// If both queries are present, require them to match (exact or structural) for a definitive match.
 	if eq != "" && aq != "" {
 		// If both queries are available, require an exact or structural match to treat this as a definitive match.
-		if strings.EqualFold(eq, aq) {
+		switch {
+		case strings.EqualFold(eq, aq):
 			matchCount += 10
 			queryMatched = true
 			queryExactMatched = true
 			logger.Debug("query matched exactly", zap.String("related stmt-exec mock-name", mockName))
-		} else if sigE, errE := getQueryStructureCached(eq); errE == nil {
-			if sigA, errA := getQueryStructureCached(aq); errA == nil && sigE == sigA {
-				matchCount += 6
-				queryMatched = false
-				logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
-			}
+		case sameQueryStructure(eq, aq):
+			matchCount += 6
+			logger.Debug("query structure matched", zap.String("related stmt-exec mock-name", mockName))
+		default:
+			// The recording ran another statement, of another shape. It
+			// never answers this one, in any mode. Scored on the header,
+			// status, flags and parameters alone, it did: any recorded
+			// EXECUTE answered an EXECUTE of a statement the recording
+			// never ran ("SELECT code FROM other WHERE ref = ? AND live =
+			// 1" with 5 got the rows of "SELECT id, name FROM small WHERE
+			// id = ?" with 7).
+			return false, 0, false
 		}
 	}
 
