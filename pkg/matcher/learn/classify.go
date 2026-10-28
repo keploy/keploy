@@ -1225,21 +1225,26 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			// Read as a value no earlier place is the source of and no moved
 			// place builds by an offset (the copy rule's re-read, below:
 			// skipSource and skipOffset), in keploy mock's client tests, a
-			// text that is one instant whole (readClockTextWall: an epoch's
-			// digits, a time with its zone) that its call's window holds as
-			// a read of each run's clock plus one constant offset
+			// text that is one instant whole in both runs (textClockRead:
+			// an epoch's digits, a time with its zone, a wall clock of no
+			// zone) that only the searches of the places a word or an
+			// instant of it stands in refused (sourced: unaccounted,
+			// givenWhy, echoedElsewhere; the minute "59" of a login's
+			// Set-Cookie Expires) goes on as a value no search refused:
+			// those searches look for its source, which this reading sets
+			// aside. Every check that follows stands: its call's window
+			// must show it a read of each run's clock (clientTestUnread),
+			// or of each run's clock plus one constant offset
 			// (textClockOffset: an expiresAt thirty days after the call's
-			// now, as its text) is that offset, where only the searches of
-			// the places a word or an instant of it stands in refused it
-			// (sourced: unaccounted, givenWhy, echoedElsewhere; the minute
-			// "59" of a login's Set-Cookie Expires): those searches look
-			// for its source, which this reading sets aside. A refusal of
-			// the request's checks stands, and so does a value that reads
-			// as no such offset.
-			if sourced && skip&skipBoth == skipBoth && dc.clientTests {
-				if off, ok := dc.textClockOffset(r, l, v, w, resp); ok {
-					return off
-				}
+			// now, as its text), and the window must hold it in a zone the
+			// application's clock writes (windowHolds: a wall clock of no
+			// zone, "2026-10-27 17:59:10" in Berlin, which the words' own
+			// reading of the clock reads in UTC alone). A refusal of the
+			// request's checks stands too, and anything else the reading
+			// learns (noise, an echo, a refusal) the copy rule does not
+			// take: it takes a read of the clock alone (sinceTestBegin).
+			if sourced && skip&skipBoth == skipBoth && dc.clientTests && textClockRead(r.Value, l.Value) != nil {
+				why = ""
 			}
 			// In keploy mock's client tests, a changed instant only where the
 			// call's window shows it a read of the application's clock.
