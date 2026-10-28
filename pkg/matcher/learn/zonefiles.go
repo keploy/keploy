@@ -93,9 +93,29 @@ func NotRegular(mode fs.FileMode) error {
 // f's /etc/timezone names where its bytes are that zone's file, else
 // unnamed; UTC where f holds no /etc/localtime at all. An error where keploy
 // cannot read it: a TZ of a POSIX rule, a TZ naming a zone f holds no file
-// of, a link to nothing.
-func ReadZoneOf(f ZoneFiles, tz string, set bool) (ProcZone, error) {
-	loc, err := readZoneIn(f, tz, set, false)
+// of, a link to nothing. With it, the bytes of the zone file it read the
+// zone from (none for UTC), which ZoneOfFile reads as the same zone.
+func ReadZoneOf(f ZoneFiles, tz string, set bool) (ProcZone, []byte, error) {
+	loc, data, err := readZoneIn(f, tz, set, false)
+	if err != nil {
+		return ProcZone{}, nil, err
+	}
+	return ProcZone{Loc: loc, Name: models.ZoneNameOf(loc, time.Now())}, data, nil
+}
+
+// ZoneOfFile is the zone ReadZoneOf read, by the name its Loc carries ("" for
+// a zone file of no name) and the zone file's bytes it gave (none for UTC):
+// the zone the keploy CLI read of a container, which a docker-mode agent
+// takes in place of one it cannot read from /proc (ProcZones), as the same
+// rules the container's own zone file holds, never keploy's of that name.
+func ZoneOfFile(name string, data []byte) (ProcZone, error) {
+	if len(data) == 0 {
+		if name != "UTC" {
+			return ProcZone{}, fmt.Errorf("keploy was given the zone %q with no zone file", name)
+		}
+		return ProcZone{Loc: time.UTC, Name: models.ZoneNameOf(time.UTC, time.Now())}, nil
+	}
+	loc, err := loadZone(name, data)
 	if err != nil {
 		return ProcZone{}, err
 	}

@@ -1,10 +1,12 @@
-package docker
+package containerkey
 
 import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/errdefs"
+	"go.keploy.io/server/v3/pkg/matcher/learn"
 )
 
 // zoneFile is one file of a fakeZoneAPI container: a link (link set), a
@@ -186,7 +189,6 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 		{name: "an /etc/timezone that is a directory (a bind of a missing host file) is none", files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}, "/etc/timezone/x": {data: []byte("y")}}), want: "Europe/Berlin", offset: 7200},
 		{name: "an empty TZ with files of a zone other than UTC is unknown", env: []string{"TZ="}, files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}}), err: "TZ is empty"},
 		{name: "an empty TZ with no /etc/localtime is UTC", env: []string{"TZ="}, files: both(nil), want: "UTC"},
-		{name: "a container gone is unknown", gone: true, err: "inspect"},
 		{name: "a container removed as keploy reads it is unknown, never a missing /etc/localtime", vanish: true, files: both(nil), err: "does not exist"},
 		{name: "a container removed as keploy reads its missing /etc/localtime is unknown, never UTC", vanishAt: "/etc/localtime", files: both(nil), err: "does not exist"},
 		{name: "an /etc/timezone replaced by a link as keploy reads it is unknown, never none", files: both(map[string]zoneFile{"/etc/localtime": {link: zi + "Europe/Berlin"}, "/etc/timezone": {data: []byte("Asia/Kolkata\n")}}), swapped: map[string]zoneFile{"/etc/timezone": {link: "/x"}}, err: "/etc/timezone"},
@@ -194,33 +196,78 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			api := &fakeZoneAPI{t: t, env: r.env, cmd: r.cmd, files: r.files, gone: r.gone, vanish: r.vanish, vanishAt: r.vanishAt, swapped: r.swapped}
-			z, err := ContainerZone(context.Background(), api, "app")
+			z, err := zoneOfApp(api)
 			if r.err != "" {
 				if err == nil {
-					t.Fatalf("ContainerZone read %q (%v), want unknown with an error saying %q", z.Name, z.Loc, r.err)
+					t.Fatalf("containerZone read %q (%v), want unknown with an error saying %q", z.Name, z.Loc, r.err)
 				}
 				if !strings.Contains(err.Error(), r.err) {
-					t.Fatalf("ContainerZone's error %q does not say %q", err, r.err)
+					t.Fatalf("containerZone's error %q does not say %q", err, r.err)
 				}
 				if z.Loc != nil {
-					t.Fatalf("ContainerZone gave zone %v with its error", z.Loc)
+					t.Fatalf("containerZone gave zone %v with its error", z.Loc)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("ContainerZone: %v", err)
+				t.Fatalf("containerZone: %v", err)
 			}
 			if z.Loc == nil {
-				t.Fatal("ContainerZone gave no zone and no error")
+				t.Fatal("containerZone gave no zone and no error")
 			}
 			if got := z.Loc.String(); got != r.want {
-				t.Fatalf("ContainerZone read zone %q, want %q", got, r.want)
+				t.Fatalf("containerZone read zone %q, want %q", got, r.want)
 			}
 			if _, off := at.In(z.Loc).Zone(); off != r.offset {
-				t.Fatalf("ContainerZone's zone is %d s east of UTC on %s, want %d", off, at.Format(time.DateOnly), r.offset)
+				t.Fatalf("containerZone's zone is %d s east of UTC on %s, want %d", off, at.Format(time.DateOnly), r.offset)
 			}
 		})
 	}
+}
+
+// zoneOfApp is the zone of the fake's container as the agent takes it: the
+// index's read inspects the container, reads its Zone (readZone) and hands
+// it on, and the agent reads that (learn.ZoneOfFile). The zone read is
+// containerZone's own, whose bytes give the agent the same zone.
+func zoneOfApp(api zoneAPI) (learn.ProcZone, error) {
+	ctx := context.Background()
+	got, err := api.ContainerInspect(ctx, "app")
+	if err != nil {
+		return learn.ProcZone{}, err
+	}
+	z, _, zerr := containerZone(ctx, api, "app", got.Config)
+	handed := readZone(ctx, api, "app", got.Config)
+	if zerr != nil {
+		if handed.Err == "" || handed.Data != nil || handed.Name != "" {
+			return learn.ProcZone{}, fmt.Errorf("containerZone failed (%v), but its Zone is %+v", zerr, handed)
+		}
+		return learn.ProcZone{}, zerr
+	}
+	if handed.Err != "" {
+		return learn.ProcZone{}, fmt.Errorf("containerZone read %v, but its Zone says %s", z.Loc, handed.Err)
+	}
+	b, err := json.Marshal(handed)
+	if err != nil {
+		return learn.ProcZone{}, err
+	}
+	var took Zone
+	if err := json.Unmarshal(b, &took); err != nil {
+		return learn.ProcZone{}, err
+	}
+	agent, err := learn.ZoneOfFile(took.Name, took.Data)
+	if err != nil {
+		return learn.ProcZone{}, fmt.Errorf("the agent cannot take the zone %v containerZone read: %w", z.Loc, err)
+	}
+	if agent.Loc.String() != z.Loc.String() || agent.Name != z.Name {
+		return learn.ProcZone{}, fmt.Errorf("the agent took zone %q (%q), containerZone read %q (%q)", agent.Loc, agent.Name, z.Loc, z.Name)
+	}
+	for _, at := range []time.Time{time.Date(1990, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC), time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)} {
+		_, a := at.In(agent.Loc).Zone()
+		if _, c := at.In(z.Loc).Zone(); a != c {
+			return learn.ProcZone{}, fmt.Errorf("the agent's zone is %d s east of UTC on %s, the container's %d", a, at.Format(time.DateOnly), c)
+		}
+	}
+	return agent, nil
 }
 
 // TestAContainersZoneReadGivesUpOnAFileItCannotRead: a Docker error other
@@ -228,9 +275,9 @@ func TestAContainersZoneIsReadFromItsEnvironmentAndFilesThroughDocker(t *testing
 // unknown, never read as a missing /etc/localtime (UTC).
 func TestAContainersZoneReadGivesUpOnAFileItCannotRead(t *testing.T) {
 	api := &failingStatAPI{fakeZoneAPI{t: t, files: map[string]zoneFile{"/bin/sh": {data: []byte("x")}}}}
-	z, err := ContainerZone(context.Background(), api, "app")
+	z, err := zoneOfApp(api)
 	if err == nil {
-		t.Fatalf("ContainerZone read %v where Docker failed every read of the container's files, want unknown", z.Loc)
+		t.Fatalf("containerZone read %v where Docker failed every read of the container's files, want unknown", z.Loc)
 	}
 }
 

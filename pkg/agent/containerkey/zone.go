@@ -1,4 +1,4 @@
-package docker
+package containerkey
 
 import (
 	"archive/tar"
@@ -15,9 +15,9 @@ import (
 	"go.keploy.io/server/v3/pkg/models"
 )
 
-// ZoneAPI is the part of Docker's API ContainerZone reads a container
-// through.
-type ZoneAPI interface {
+// zoneAPI is the part of Docker's API containerZone reads a container's
+// files through.
+type zoneAPI interface {
 	ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error)
 	ContainerStatPath(ctx context.Context, containerID, path string) (container.PathStat, error)
 	CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, container.PathStat, error)
@@ -27,10 +27,32 @@ type ZoneAPI interface {
 // (learn.javaZoneID reads them of a process).
 var javaOptionEnvs = []string{"JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "OPENJ9_JAVA_OPTIONS", "IBM_JAVA_OPTIONS"}
 
-// ContainerZone is the zone the processes of container id write a wall
-// clock of no zone in, read by the keploy CLI through Docker's API for its
-// docker-mode agent, which runs in a PID namespace of its own and reads no
-// process's zone from /proc (learn.ProcZones): TZ from the container's
+// Zone is the zone an app container's processes write a wall clock of no
+// zone in, as the keploy CLI read it through Docker's API (containerZone)
+// for its docker-mode agent, which runs in a PID namespace of its own and
+// reads no process's zone from /proc (learn.ProcZones): the name the zone's
+// Loc carries ("" for a zone file of no name) and the bytes of the zone file
+// the CLI read it from, none for UTC (learn.ZoneOfFile reads them); or Err,
+// why the CLI could not read it.
+type Zone struct {
+	Name string `json:"name,omitempty"`
+	Data []byte `json:"data,omitempty"`
+	Err  string `json:"err,omitempty"`
+}
+
+// readZone is the Zone of container id, whose configuration Docker's
+// inspect gave as cfg (containerZone).
+func readZone(ctx context.Context, api zoneAPI, id string, cfg *container.Config) Zone {
+	z, data, err := containerZone(ctx, api, id, cfg)
+	if err != nil {
+		return Zone{Err: err.Error()}
+	}
+	return Zone{Name: z.Loc.String(), Data: data}
+}
+
+// containerZone is the zone the processes of container id, of
+// configuration cfg, write a wall clock of no zone in, with the bytes of the
+// zone file it was read from (none for UTC): TZ from the container's
 // environment (its Config.Env, the image's merged in), else its
 // /etc/localtime, read from the container's own files (CopyFromContainer),
 // as the agent reads a process's root (learn.ReadZoneOf): a link into a
@@ -46,45 +68,41 @@ var javaOptionEnvs = []string{"JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OP
 // JVM. An error too where keploy cannot read the zone (a TZ of a POSIX
 // rule, a TZ naming no zone file in the container, a link to nothing, a
 // container gone).
-func ContainerZone(ctx context.Context, api ZoneAPI, id string) (learn.ProcZone, error) {
-	info, err := api.ContainerInspect(ctx, id)
-	if err != nil {
-		return learn.ProcZone{}, fmt.Errorf("keploy cannot inspect the container: %w", err)
+func containerZone(ctx context.Context, api zoneAPI, id string, cfg *container.Config) (learn.ProcZone, []byte, error) {
+	if cfg == nil {
+		return learn.ProcZone{}, nil, errors.New("docker reported no configuration of the container")
 	}
-	if info.Config == nil {
-		return learn.ProcZone{}, errors.New("docker reported no configuration of the container")
-	}
-	tz, set := envValue(info.Config.Env, "TZ")
-	if src, ok := javaZoneOption(info.Config); ok {
-		return learn.ProcZone{}, fmt.Errorf("%s sets a JVM's user.timezone, which a JVM reads over TZ and /etc/localtime; keploy reads a JVM's zone only from its process, and cannot tell from the container's configuration whether its process is a JVM", src)
+	tz, set := envValue(cfg.Env, "TZ")
+	if src, ok := javaZoneOption(cfg); ok {
+		return learn.ProcZone{}, nil, fmt.Errorf("%s sets a JVM's user.timezone, which a JVM reads over TZ and /etc/localtime; keploy reads a JVM's zone only from its process, and cannot tell from the container's configuration whether its process is a JVM", src)
 	}
 	f := containerFiles{ctx: ctx, api: api, id: id}
-	z, err := learn.ReadZoneOf(f, tz, set)
+	z, data, err := learn.ReadZoneOf(f, tz, set)
 	if err != nil {
-		return learn.ProcZone{}, err
+		return learn.ProcZone{}, nil, err
 	}
 	if set && strings.TrimPrefix(tz, ":") != "" {
 		// A JVM reads a TZ that names a zone as the C library does.
-		return z, nil
+		return z, data, nil
 	}
 	if set {
 		// An empty TZ: the C library reads UTC, a JVM the zone of its
 		// files.
-		if fz, ferr := learn.ReadZoneOf(f, "", false); ferr != nil || !sameZoneName(fz.Loc.String(), "UTC") {
-			return learn.ProcZone{}, errors.New("the container's TZ is empty, which the C library reads as UTC, and a JVM as the zone of its /etc/localtime or /etc/timezone, which is not UTC or keploy cannot read it; keploy cannot tell from the container's configuration whether its process is a JVM")
+		if fz, _, ferr := learn.ReadZoneOf(f, "", false); ferr != nil || !sameZoneName(fz.Loc.String(), "UTC") {
+			return learn.ProcZone{}, nil, errors.New("the container's TZ is empty, which the C library reads as UTC, and a JVM as the zone of its /etc/localtime or /etc/timezone, which is not UTC or keploy cannot read it; keploy cannot tell from the container's configuration whether its process is a JVM")
 		}
 	}
 	tzfile, ok, err := learn.TimezoneFileOf(f)
 	if err != nil {
-		return learn.ProcZone{}, err
+		return learn.ProcZone{}, nil, err
 	}
 	if !ok {
-		return z, nil
+		return z, data, nil
 	}
 	if !sameZoneName(tzfile, z.Loc.String()) {
-		return learn.ProcZone{}, fmt.Errorf("the container's /etc/timezone names %q, which JDKs before JDK-8345213 read as a JVM's zone, and its /etc/localtime %q, which the C library reads; keploy cannot tell from the container's configuration which its process reads", tzfile, z.Loc.String())
+		return learn.ProcZone{}, nil, fmt.Errorf("the container's /etc/timezone names %q, which JDKs before JDK-8345213 read as a JVM's zone, and its /etc/localtime %q, which the C library reads; keploy cannot tell from the container's configuration which its process reads", tzfile, z.Loc.String())
 	}
-	return z, nil
+	return z, data, nil
 }
 
 // utcNames are the names of UTC's zone files and of Go's UTC.
@@ -128,13 +146,13 @@ func javaZoneOption(c *container.Config) (string, bool) {
 // (learn.ZoneFiles), each call under ctx.
 type containerFiles struct {
 	ctx context.Context
-	api ZoneAPI
+	api zoneAPI
 	id  string
 }
 
-// notFound is err, wrapping fs.ErrNotExist where Docker says the path, or
+// pathError is err, wrapping fs.ErrNotExist where Docker says the path, or
 // the container, is not there (Readable tells which).
-func notFound(p string, err error) error {
+func pathError(p string, err error) error {
 	if errdefs.IsNotFound(err) {
 		return fmt.Errorf("%s: %w (%v)", p, fs.ErrNotExist, err)
 	}
@@ -144,7 +162,7 @@ func notFound(p string, err error) error {
 func (c containerFiles) Lstat(p string) (fs.FileMode, error) {
 	st, err := c.api.ContainerStatPath(c.ctx, c.id, p)
 	if err != nil {
-		return 0, notFound(p, err)
+		return 0, pathError(p, err)
 	}
 	return st.Mode, nil
 }
@@ -155,7 +173,7 @@ func (c containerFiles) Lstat(p string) (fs.FileMode, error) {
 func (c containerFiles) first(p string) (*tar.Header, *tar.Reader, io.Closer, error) {
 	rc, _, err := c.api.CopyFromContainer(c.ctx, c.id, p)
 	if err != nil {
-		return nil, nil, nil, notFound(p, err)
+		return nil, nil, nil, pathError(p, err)
 	}
 	tr := tar.NewReader(rc)
 	hdr, err := tr.Next()

@@ -53,24 +53,28 @@ func ReadZone(root, tz string, set bool) (*time.Location, error) {
 // reads UTC there, or a copy of the zone built into it, and keploy cannot
 // tell which.
 func readZone(root string, mounts zoneMounts, tz string, set, own bool) (*time.Location, error) {
-	return readZoneIn(dirFiles{root: root, mounts: mounts}, tz, set, own)
+	loc, _, err := readZoneIn(dirFiles{root: root, mounts: mounts}, tz, set, own)
+	return loc, err
 }
 
-// readZoneIn is readZone of the root whose files f gives.
-func readZoneIn(f ZoneFiles, tz string, set, own bool) (*time.Location, error) {
+// readZoneIn is readZone of the root whose files f gives, with the bytes of
+// the zone file it read the zone from: none for UTC, or a zone read from
+// keploy's own zone files.
+func readZoneIn(f ZoneFiles, tz string, set, own bool) (*time.Location, []byte, error) {
 	if !set {
-		loc, err := zoneFileIn(f, "/etc/localtime")
+		loc, data, err := zoneFileIn(f, "/etc/localtime")
 		if err != nil && localtimeAbsentIn(f) {
 			// No /etc/localtime at all (an Alpine or distroless image):
 			// the C library, Go, Python and Node read UTC.
-			return time.UTC, nil
+			return time.UTC, nil, nil
 		}
-		return loc, err
+		return loc, data, err
 	}
 	tz = strings.TrimPrefix(tz, ":")
 	switch {
 	case tz == "" || tz == "UTC":
-		return utcZone(f, tz)
+		loc, err := utcZone(f, tz)
+		return loc, nil, err
 	case strings.HasPrefix(tz, "/"):
 		return zoneFileIn(f, tz)
 	}
@@ -80,11 +84,12 @@ func readZoneIn(f ZoneFiles, tz string, set, own bool) (*time.Location, error) {
 	}
 	if !own {
 		if rerr != nil && !absent(rerr) && !isLasting(rerr) {
-			return nil, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
+			return nil, nil, fmt.Errorf("keploy cannot read the zone file TZ=%s names under the process's root: %w", tz, rerr)
 		}
-		return nil, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
+		return nil, nil, lasting(fmt.Errorf("TZ=%s names no zone file under the process's root", tz))
 	}
-	return time.LoadLocation(tz)
+	loc, err := time.LoadLocation(tz)
+	return loc, nil, err
 }
 
 // ProcZone is the zone one process writes a wall clock of no zone in, as
@@ -1077,35 +1082,43 @@ func procZoneFrom(ctx context.Context) (ProcZone, bool) {
 // under root's /usr/share/zoneinfo; with no name otherwise. A file that is
 // not there (a link to nothing) is an error, as Go and the C library read
 // UTC there, never the zone its link names. So is a file that names its
-// zone by its path but is mounted from another zone's (mountedZone).
-func zoneFileIn(f ZoneFiles, name string) (*time.Location, error) {
+// zone by its path but is mounted from another zone's (mountedZone). With
+// the zone, the zone file's bytes.
+func zoneFileIn(f ZoneFiles, name string) (*time.Location, []byte, error) {
 	data, final, err := readZoneFileIn(f, name)
 	if absent(err) {
 		// A link to nothing: lasting (lastingError).
-		return nil, lasting(err)
+		return nil, nil, lasting(err)
 	} else if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	zn := ""
 	for _, p := range []string{final, name} {
-		if zn := models.ZoneinfoName(p); zn != "" {
+		if zn = models.ZoneinfoName(p); zn != "" {
 			if err := mountedZone(f, final, zn); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return loadZone(zn, data)
+			break
 		}
 	}
-	if b, err := readUnderIn(f, "/etc/timezone"); err == nil {
-		zn := strings.TrimSpace(string(b))
-		if zn != "" && !strings.Contains(zn, "..") {
-			if same, at, err := readZoneFileIn(f, "/usr/share/zoneinfo/"+zn); err == nil && bytes.Equal(same, data) {
-				if err := mountedZone(f, at, zn); err != nil {
-					return nil, err
+	if zn == "" {
+		if b, err := readUnderIn(f, "/etc/timezone"); err == nil {
+			tzn := strings.TrimSpace(string(b))
+			if tzn != "" && !strings.Contains(tzn, "..") {
+				if same, at, err := readZoneFileIn(f, "/usr/share/zoneinfo/"+tzn); err == nil && bytes.Equal(same, data) {
+					if err := mountedZone(f, at, tzn); err != nil {
+						return nil, nil, err
+					}
+					zn = tzn
 				}
-				return loadZone(zn, data)
 			}
 		}
 	}
-	return loadZone("", data)
+	loc, err := loadZone(zn, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return loc, data, nil
 }
 
 // utcZone is the zone of a TZ of "UTC" or "" (tz, its ":" cut), which Go,
