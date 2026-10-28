@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"testing"
 
 	"go.keploy.io/server/v3/pkg/agent/proxy/integrations"
+	"go.keploy.io/server/v3/pkg/agent/proxy/integrations/generic"
 	httpint "go.keploy.io/server/v3/pkg/agent/proxy/integrations/http"
 	"go.keploy.io/server/v3/pkg/models"
 	"go.uber.org/zap"
@@ -87,6 +90,62 @@ func TestAMissKeepsItsParsersDestinationAndNamesNoFabricatedAddress(t *testing.T
 			}
 			if report.Destination != tc.parser {
 				t.Fatalf("the parser's report was changed: %q", report.Destination)
+			}
+		})
+	}
+}
+
+// returnedMiss is a parser that takes every connection, reads its call and
+// returns a miss whose report names no destination: the miss is returned to
+// the proxy, not handed to the test's reporter as the HTTP parser does.
+type returnedMiss struct{ integrations.Integrations }
+
+func (returnedMiss) MatchType(context.Context, []byte) bool { return true }
+
+func (returnedMiss) MockOutgoing(_ context.Context, src net.Conn, _ *models.ConditionalDstCfg, _ integrations.MockMemDb, _ models.OutgoingOptions) error {
+	_, _ = src.Read(make([]byte, 64))
+	report := &models.MockMismatchReport{Protocol: "fake", ActualSummary: "PING"}
+	return models.NewMockMismatchError(fmt.Errorf("fake: %w", models.ErrNoMockMatched), report)
+}
+
+// A miss its parser returns, and that names no destination, is reported by
+// the proxy (mockFailedFrom) with the address the connection was dialled at:
+// the generic parser, which takes every protocol keploy does not parse,
+// builds its reports with no destination, and so may any parser that matched.
+func TestAReturnedMissWithNoDestinationNamesTheAddressItWasDialledAt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		parsers  map[integrations.IntegrationType]integrations.Integrations
+		priority []ParserPriority
+	}{
+		{"the generic parser", map[integrations.IntegrationType]integrations.Integrations{integrations.GENERIC: generic.New(zap.NewNop())}, nil},
+		{"a parser that matched the call", map[integrations.IntegrationType]integrations.Integrations{integrations.HTTP: returnedMiss{}}, []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const dst = "10.96.0.7:7000"
+			app, src := acceptedConn(t)
+			defer func() { _ = app.Close() }()
+			p := replayProxyTo(t, dst, models.OutgoingOptions{})
+			p.errChannel = make(chan error, 4)
+			p.Integrations = tc.parsers
+			p.integrationsPriority = tc.priority
+			done := make(chan error, 1)
+			go func() { done <- p.handleConnection(context.Background(), src) }()
+			if _, err := app.Write([]byte("PING\r\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := awaitEvent(t, done, "handleConnection returning the miss"); !isMockMiss(err) {
+				t.Fatalf("handleConnection = %v, want the parser's miss", err)
+			}
+			var queued []string
+			for len(p.errChannel) > 0 {
+				var pe models.ParserError
+				if err := <-p.errChannel; errors.As(err, &pe) && pe.MismatchReport != nil {
+					queued = append(queued, pe.MismatchReport.Destination)
+				}
+			}
+			if len(queued) != 1 || queued[0] != dst {
+				t.Fatalf("the misses kept for the test name destinations %q, want one naming %q", queued, dst)
 			}
 		})
 	}

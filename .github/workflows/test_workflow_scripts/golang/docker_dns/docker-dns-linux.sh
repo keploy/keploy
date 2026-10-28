@@ -14,7 +14,8 @@
 #
 # One keploy record session of a busybox httpd serving the /etc/resolv.conf
 # it sees, its settings in both spellings docker takes (--flag value,
-# --flag=value): the app must answer, and its resolv.conf must hold them.
+# --flag=value): the app must answer, its resolv.conf must hold them, and
+# keploy must record the call (the app ran under keploy's network setup).
 # The name server is a documentation address (RFC 5737) nothing is asked:
 # the app resolves nothing. Telemetry is off, so keploy asks it nothing
 # either. Readiness is the app's answer. The script stops only the processes
@@ -33,8 +34,9 @@ fail() {
 WORK="$(mktemp -d)"
 echo "work dir: $WORK"
 cd "$WORK" || exit 1
-# No -p in the app's own command: keploy takes every -p of a docker run
-# command for a published port (ExtractDockerFlags), so httpd keeps its port 80.
+# httpd is given no -p of its own (httpd -p sets its port): keploy takes
+# every -p in a docker run command for a published port (ExtractDockerFlags),
+# so httpd listens on its default port 80, which -p $APP:80 publishes.
 APP_CMD="docker run --dns $NS --dns-search=$SEARCH --dns-option ndots:3 --dns-option=timeout:1 -p $APP:80 --rm --name docker-dns-app busybox:1.36 sh -c 'mkdir /www && cp /etc/resolv.conf /www/resolv && exec httpd -f -h /www'"
 
 pid_running() {
@@ -74,6 +76,14 @@ if [ -n "$resolv" ]; then
     grep -qE "^search( .*)? $SEARCH( |$)" <<<"$resolv" || fail "the app's resolv.conf searches no $SEARCH"
     grep -qE '^options( .*)? ndots:3( |$)' <<<"$resolv" || fail "the app's resolv.conf has no option ndots:3"
     grep -qE '^options( .*)? timeout:1( |$)' <<<"$resolv" || fail "the app's resolv.conf has no option timeout:1"
+fi
+# The call was keploy's to record: the app ran in the agent container's
+# network namespace, not on its own.
+if [ -n "$resolv" ]; then
+    until [ -n "$(find keploy -path '*/tests/*.yaml' -size +0c 2>/dev/null | head -n1)" ]; do
+        pid_running "$REC_PID" || { fail "keploy record wrote no test case of the app's call"; break; }
+        sleep 0.5
+    done
 fi
 if grep -a -q 'conflicting options' record.log; then
     fail "docker refused the app's settings under keploy's network mode:"

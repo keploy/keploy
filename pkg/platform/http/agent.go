@@ -3205,6 +3205,22 @@ func runFlagsOf(cmd string, kind utils.CmdType) (cleaned string, ports, networks
 	return cmd, ports, networks, hosts, dns
 }
 
+// withAppRunSettings hands the agent container what keploy took out of the
+// app's own docker command (runFlagsOf) or read off the --from-container
+// container: the app joins the agent container's network namespace, where
+// docker refuses or ignores its own ports, networks, host entries and
+// resolver settings, so the agent container publishes, joins and takes them
+// on its behalf (GetKeployDockerAlias).
+func withAppRunSettings(opts models.SetupOptions, ports, networks, hosts []string, dns models.AppDNS) models.SetupOptions {
+	opts.AppPorts = ports
+	opts.AppExtraHosts = hosts
+	opts.AppDNS = dns
+	if len(networks) > 0 {
+		opts.AppNetworks = networks
+	}
+	return opts
+}
+
 func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOptions) error {
 	isDockerCmd := utils.IsDockerCmd(utils.CmdType(opts.CommandType))
 	opts.IsDocker = isDockerCmd
@@ -3336,12 +3352,8 @@ func (a *AgentClient) Setup(ctx context.Context, cmd string, opts models.SetupOp
 		} else {
 			cmd, appPorts, appNetworks, appHosts, appDNS = runFlagsOf(cmd, utils.CmdType(opts.CommandType))
 		}
-		opts.AppExtraHosts = appHosts
-		opts.AppDNS = appDNS
-
-		opts.AppPorts = appPorts
+		opts = withAppRunSettings(opts, appPorts, appNetworks, appHosts, appDNS)
 		if len(appNetworks) > 0 {
-			opts.AppNetworks = appNetworks
 			a.logger.Debug("Found docker networks", zap.Strings("networks", opts.AppNetworks))
 		}
 

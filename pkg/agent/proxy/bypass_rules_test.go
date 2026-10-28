@@ -578,6 +578,10 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 		portlessRuleHost
 		// one that names neither a port nor a host: it may be anywhere.
 		portlessNoHost
+		// a MySQL mock that names neither: the recording's index reads
+		// MySQL mocks on a path of their own (they also give the MySQL
+		// ports), which must note the port-less host as well.
+		portlessMySQLNoHost
 		// one that names another host: it is not at the rule's port, so a
 		// server-first service there in an older test set does not hang.
 		portlessOtherHost
@@ -604,6 +608,7 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 		{"a mock at the port", greetThenRead("220 ready\r\n"), atThePort, false, false, false, dispatched, 0, ""},
 		{"a port-less mock of the rule's host", greetThenRead("220 ready\r\n"), portlessRuleHost, false, false, false, dispatched, 0, ""},
 		{"a port-less mock with no host", greetThenRead("220 ready\r\n"), portlessNoHost, false, false, false, dispatched, 0, ""},
+		{"a port-less MySQL mock with no host", greetThenRead("220 ready\r\n"), portlessMySQLNoHost, false, false, false, dispatched, 0, ""},
 		{"a port-less mock of another host", greetThenRead("220 ready\r\n"), portlessOtherHost, false, false, false, passed, 1, "220 ready\r\n"},
 		{"a port-less mock of another host, a path rule", greetThenRead("220 ready\r\n"), portlessPathRule, false, false, false, dispatched, 0, ""},
 		{"a rule for another port", greetThenRead("220 ready\r\n"), noMock, true, false, false, dispatched, 0, ""},
@@ -657,6 +662,9 @@ func TestKeployTestLooksAtTheServerOfARulePortWithNoMock(t *testing.T) {
 				// A Postgres mock recorded before mocks carried their
 				// destination: it names neither.
 				mocks = append(mocks, &models.Mock{Kind: models.Postgres})
+			case portlessMySQLNoHost:
+				// A MySQL mock of an older set: no destAddr, no host.
+				mocks = append(mocks, &models.Mock{Kind: models.MySQL})
 			}
 			if !tc.late {
 				p.deriveMysqlPorts(mocks)

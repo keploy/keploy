@@ -40,11 +40,16 @@
 #      the client's bytes, and the call hung).
 #   5. Control, no flag: the dependency's call is recorded as a mock and the
 #      telemetry call is not; keploy test, both services down, passes.
+#   6. An HTTP/1.0 call with no Host header and no mock (the control's
+#      recording, replayed by an app that also calls port 9098): its miss in
+#      the report names the address it was dialled at (before, it named no
+#      destination at all).
 #
 # Readiness is each port listening, keploy's test files, and keploy's own
 # probe of the app (--health-path) while replaying. The script stops only the
 # processes it started. Ports: 8094 (app), 9094 (dependency), 9095
-# (telemetry), 9096 (the plain TCP service). Env: RECORD_BIN, REPLAY_BIN.
+# (telemetry), 9096 (the plain TCP service), 9097 (the TLS service), 9098 (the
+# HTTP/1.0 call's, never recorded). Env: RECORD_BIN, REPLAY_BIN.
 set -uo pipefail
 RECORD_BIN="${RECORD_BIN:-keploy}"
 REPLAY_BIN="${REPLAY_BIN:-$RECORD_BIN}"
@@ -53,6 +58,7 @@ APP=8094
 DEP=9094
 TEL=9095
 RAW=9096
+HOSTLESS=9098
 FAIL=0
 fail() {
     echo "::error::$*"
@@ -498,6 +504,27 @@ if record control; then
     stop_srv "$TEL_PID"
     TEL_PID=""
     replay control
+
+    # hostless: the control's recording, replayed by an app that also sends
+    # port $HOSTLESS an HTTP/1.0 GET /v10 with no Host header, which no mock
+    # answers. Its miss in the report names the address it was dialled at.
+    # The HTTP parser names a call's upstream by its Host, then its URL's
+    # authority; with neither, the miss named no destination, nothing of
+    # where the call went. The set fails on the new call; only the miss's
+    # destination is checked.
+    before="$(newest_run)"
+    # shellcheck disable=SC2024 # the log is the runner's file, opened by this shell
+    sudo -E env -u KEPLOY_PROVEN PATH="$PATH" "$REPLAY_BIN" test -c "env HTTP10_ADDR=127.0.0.1:$HOSTLESS $APP_CMD_BASE" \
+        --delay 1 --health-path /healthz --generateGithubActions=false --disable-tele >test-hostless.log 2>&1 </dev/null
+    rc=$?
+    own
+    if [ "$(newest_run)" = "$before" ] || [ ! -f "$(REPORT)" ]; then
+        fail "hostless: keploy test wrote no report (exit $rc)"
+        grep -a -m3 ERROR test-hostless.log
+    elif ! grep -aqE "^[ -]*destination: \"?127\.0\.0\.1:$HOSTLESS\"?\$" "$(REPORT)"; then
+        fail "hostless: no miss in the report names the address the HTTP/1.0 call was dialled at, 127.0.0.1:$HOSTLESS"
+        grep -a -A8 'unmatched_calls:' "$(REPORT)" | head -24
+    fi
 fi
 
 if [ "$FAIL" -eq 0 ]; then

@@ -1080,21 +1080,30 @@ func TestHandleConnectionNeverListsADestinationABypassRulePassesThroughMocked(t 
 }
 
 // Under the proven switch an HTTP connection whose every call a bypassRule
-// with a path passes through is reached for real, so it is never listed
-// mocked, in a record as in a replay. One with a call the rule does not name
-// (recorded, or answered from mocks) is listed, at that call.
-func TestHandleConnectionListsAnHTTPConnectionAPathRulePassesThroughOnlyForACallItServes(t *testing.T) {
+// with a path or a host passes through is reached for real, so it is never
+// listed mocked, in a record as in a replay. One with a call the rule does
+// not name (recorded, or answered from mocks) is listed, at that call.
+func TestHandleConnectionListsAnHTTPConnectionABypassRulePassesThroughOnlyForACallItServes(t *testing.T) {
 	for _, tc := range []struct {
-		mode   models.Mode
-		paths  []string // the client's calls, in order, on one connection
-		listed bool
+		mode     models.Mode
+		hostRule bool     // the rule names the Host header, not the path
+		paths    []string // the client's calls, in order, on one connection
+		listed   bool
 	}{
-		{models.MODE_TEST, []string{"/health", "/health"}, false},
-		{models.MODE_TEST, []string{"/health", "/orders"}, true},
-		{models.MODE_RECORD, []string{"/health", "/health"}, false},
-		{models.MODE_RECORD, []string{"/health", "/orders"}, true},
+		{models.MODE_TEST, false, []string{"/health", "/health"}, false},
+		{models.MODE_TEST, false, []string{"/health", "/orders"}, true},
+		{models.MODE_RECORD, false, []string{"/health", "/health"}, false},
+		{models.MODE_RECORD, false, []string{"/health", "/orders"}, true},
+		// A host-only rule: the parser decides it per call too, from the
+		// Host header, so the connection is not listed at dispatch.
+		{models.MODE_TEST, true, []string{"/health", "/health"}, false},
+		{models.MODE_RECORD, true, []string{"/health", "/health"}, false},
 	} {
-		t.Run(fmt.Sprintf("%s/%v", tc.mode, tc.paths), func(t *testing.T) {
+		rule := "path"
+		if tc.hostRule {
+			rule = "host"
+		}
+		t.Run(fmt.Sprintf("%s/%s/%v", tc.mode, rule, tc.paths), func(t *testing.T) {
 			recorded.reset()
 			t.Cleanup(recorded.reset)
 			resetBypassRulesWarned(t)
@@ -1123,7 +1132,11 @@ func TestHandleConnectionListsAnHTTPConnectionAPathRulePassesThroughOnlyForACall
 			p.integrationsPriority = []ParserPriority{{Priority: 1, ParserType: integrations.HTTP}}
 			sink := chanSink{mocked: make(chan models.MockedRow, 1)}
 			p.SetTopologySink(sink)
-			opts := models.OutgoingOptions{Rules: []models.BypassRule{{Path: "^/health$", Port: uint(port)}}, DisableMysqlAutoDetect: true}
+			bypass := models.BypassRule{Path: "^/health$", Port: uint(port)}
+			if tc.hostRule {
+				bypass = models.BypassRule{Host: `^api\.internal$`, Port: uint(port)}
+			}
+			opts := models.OutgoingOptions{Rules: []models.BypassRule{bypass}, DisableMysqlAutoDetect: true}
 			if tc.mode == models.MODE_RECORD {
 				if err := p.Record(context.Background(), make(chan *models.Mock, 16), opts); err != nil {
 					t.Fatal(err)
@@ -1172,7 +1185,7 @@ func TestHandleConnectionListsAnHTTPConnectionAPathRulePassesThroughOnlyForACall
 			if !tc.listed {
 				select {
 				case row := <-sink.mocked:
-					t.Fatalf("a connection whose every call a path rule passed through was listed mocked: %+v", row)
+					t.Fatalf("a connection whose every call a %s rule passed through was listed mocked: %+v", rule, row)
 				default:
 				}
 			}

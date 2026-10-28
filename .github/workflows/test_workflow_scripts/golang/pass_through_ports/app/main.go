@@ -6,7 +6,10 @@
 // With MTLS_ADDR, it also sends "ping" over TLS to that service, asking for
 // the server MTLS_NAME, with the client certificate in MTLS_DIR and trusting
 // only the server's own certificate there (a pin), and adds its answer:
-// ..."mtls":"pong:ptp-client"}.
+// ..."mtls":"pong:ptp-client"}. With HTTP10_ADDR, it also sends that address
+// an HTTP/1.0 GET /v10 with no Host header, as an HTTP/1.0 client or an
+// instance-metadata probe does, and adds the answer's status line, or the
+// error: ..."http10":"HTTP/1.0 502 Bad Gateway"}.
 package main
 
 import (
@@ -88,6 +91,27 @@ func mtlsCall(addr, name, dir string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+// http10Call sends addr an HTTP/1.0 GET /v10 with no Host header and returns
+// the answer's status line.
+func http10Call(addr string) (string, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = conn.Close() }()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return "", err
+	}
+	if _, err := io.WriteString(conn, "GET /v10 HTTP/1.0\r\n\r\n"); err != nil {
+		return "", err
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
 func main() {
 	dep, tel, raw := os.Getenv("DEP_URL"), os.Getenv("TEL_URL"), os.Getenv("RAW_ADDR")
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = fmt.Fprint(w, "ok") })
@@ -125,6 +149,13 @@ func main() {
 				return
 			}
 			rawPart += fmt.Sprintf(`,"mtls":%q`, line)
+		}
+		if addr := os.Getenv("HTTP10_ADDR"); addr != "" {
+			line, err := http10Call(addr)
+			if err != nil {
+				line = "error: " + err.Error()
+			}
+			rawPart += fmt.Sprintf(`,"http10":%q`, line)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"dep":%s,"telemetry":"%s"%s}`, body, status, rawPart)

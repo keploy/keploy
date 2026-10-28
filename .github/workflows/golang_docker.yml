@@ -171,7 +171,7 @@ jobs:
     timeout-minutes: 20
     if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
-    name: disable-tele (record_build, image_build)
+    name: disable-tele and docker --dns (record_build, image_build)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
