@@ -152,6 +152,14 @@ type ScopeEvidence struct {
 	CannotCapture CaptureLosses `json:"cannotCapture,omitempty" yaml:"cannotCapture,omitempty"`
 	// Reason is the text the test was failed with at its end.
 	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	// Reported is, in a replay that failed the test for this evidence, the
+	// verdict it ended with before keploy did (models.ScopeOutcome*): its
+	// harness's (ScopeReq.Outcome), or failed when keploy ended it (its
+	// process exited, or another test's end closed it). Judging reads it to
+	// tell a test whose own assertions passed and that only left recordings
+	// unmade from one that failed its own. "" in a record, which never fails
+	// a test, and on evidence that failed nothing. Never part of Empty.
+	Reported string `json:"reported,omitempty" yaml:"reported,omitempty"`
 	// Unread: keploy could not read everything the test did (its misses,
 	// or the mocks it consumed), so the test has no verdict of its own;
 	// keploy's verdict on the run is "not judged", never the test's fault.
