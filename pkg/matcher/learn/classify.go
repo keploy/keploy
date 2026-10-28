@@ -2057,9 +2057,22 @@ func (dc *DriftCache) InstantClockRead(rec, live Leaf, w *Window) bool {
 	return instantClockRead(rec, live, w, !dc.ClientTests(), dc.Zone())
 }
 
+// everyCacheSet, set by the package's tests alone
+// (KEPLOY_LEARN_SET_EVERY_CACHE), gives every NewDriftCache a set cache of
+// its own (setDerived), as a tracker gives each test of a set, so that the
+// package's rows, most of which read a cache no tracker made, run the set's
+// paths too: a part of a recording the set keeps under another part's key,
+// or hands back for another, fails their rows there. false in keploy
+// itself.
+var everyCacheSet bool
+
 // NewDriftCache makes an empty cache.
 func NewDriftCache() *DriftCache {
-	return &DriftCache{driftState: &driftState{m: map[driftKey]*valueDrift{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, text: newTextCache()}}
+	dc := &DriftCache{driftState: &driftState{m: map[driftKey]*valueDrift{}, mockText: map[*models.Mock]Raw{}, readText: map[*models.Mock]Raw{}, text: newTextCache()}}
+	if everyCacheSet {
+		dc.set = newSetDerived()
+	}
+	return dc
 }
 
 // ReadRaw is RawOf(m, served) with m's answer read back first when the agent
