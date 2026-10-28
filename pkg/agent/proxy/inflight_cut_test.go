@@ -1,3 +1,5 @@
+//go:build linux
+
 package proxy
 
 import (
@@ -284,5 +286,25 @@ func TestTheLatchAtExactlyTheCutIgnoresTheNextRequestsMark(t *testing.T) {
 	defer release()
 	if n, unknown := sc.State(true); n != 0 || len(unknown) != 0 {
 		t.Fatalf("the test's request answered at exactly the cut, the next one marked: pending %d unknown %q, want 0 and none", n, unknown)
+	}
+}
+
+// A window's floor is fixed as the window begins when the connection's frame
+// reader is already in a read that began at what its socket had received. A
+// long-lived stream opened and held in an earlier window and quiet through
+// the test (the test makes no call on its connection, so no read begins
+// between the test's begin and its end) is not the test's: the end neither
+// waits for it nor weighs it.
+func TestAQuietLongLivedStreamDoesNotHoldTheEnd(t *testing.T) {
+	p := newStreamParser(t)
+	longLived := p.open("HEADERS stream 1", false) // an earlier window's stream, still held
+	defer longLived()
+	p.tr.beginWindow() // the test begins, the frame reader blocked at what the socket has received
+	sc := p.tr.scope() // the test's end
+	if n, _ := sc.State(true); n != 0 {
+		t.Fatalf("a long-lived stream opened before the test's window and quiet through it holds the test's end: scope pending %d, want 0", n)
+	}
+	if got, ok := sc.PendingProgress(true)[p.proxy.id]; ok {
+		t.Fatalf("the end weighs the long-lived stream held before its window (%d), want nothing", got)
 	}
 }
