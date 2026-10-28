@@ -252,9 +252,24 @@ func kebabToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
+// ConfigKeyAnnotation marks a flag whose value keploy moves into the config
+// itself, under the config key the annotation names, so BindFlagsToViper does
+// not bind it to a key of its own name. Without the mark, record's
+// --pass-through-ports (a port list, which ValidateFlags turns into
+// bypassRules) was bound to record.passThroughPorts, which holds telemetry
+// rules, and the config failed to load whenever the flag was passed.
+const ConfigKeyAnnotation = "keploy.io/config-key"
+
+// BindFlagsToViper binds each flag of cmd to the config key of its own name,
+// at the top level and under viperKeyPrefix (the command's name by default),
+// and that key to its environment variable. A flag marked with
+// ConfigKeyAnnotation is left out.
 func BindFlagsToViper(logger *zap.Logger, cmd *cobra.Command, viperKeyPrefix string) error {
 	var bindErr error
 	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if _, ok := flag.Annotations[ConfigKeyAnnotation]; ok {
+			return
+		}
 		camelCaseName := kebabToCamel(flag.Name)
 		err := viper.BindPFlag(camelCaseName, flag)
 		if err != nil {

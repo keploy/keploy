@@ -363,6 +363,11 @@ func (c *CmdConfigurator) AddFlags(cmd *cobra.Command) error {
 		cmd.Flags().String("container-name", c.cfg.ContainerName, "Name of the application's docker container")
 		cmd.Flags().StringP("network-name", "n", c.cfg.NetworkName, "Name of the application's docker network")
 		cmd.Flags().UintSlice("pass-through-ports", config.GetByPassPorts(c.cfg), "Ports to bypass the proxy server and ignore the traffic")
+		// ValidateFlags adds these ports to bypassRules. record.passThroughPorts,
+		// the key of the flag's own name, holds telemetry rules.
+		if err := cmd.Flags().SetAnnotation("pass-through-ports", utils.ConfigKeyAnnotation, []string{"bypassRules"}); err != nil {
+			return err
+		}
 		cmd.Flags().String("app-name", c.cfg.AppName, "Name of the user's application")
 		cmd.Flags().MarkDeprecated("app-id", "DEPRICATED : was used for unique name for the user's application")
 		cmd.Flags().Bool("generate-github-actions", c.cfg.GenerateGithubActions, "Generate Github Actions workflow file")

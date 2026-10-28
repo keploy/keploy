@@ -566,6 +566,18 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/body-kind/body-kind-linux.sh"
 
+      # keploy record and keploy test take --pass-through-ports (both
+      # spellings) beside keploy.yml's record.passThroughPorts telemetry
+      # rules: from v3.6.13 the flag stopped keploy record at startup, bound
+      # to that key ("expected a map or struct, got uint").
+      - name: Run pass-through-ports e2e (the flag beside keploy.yml's telemetry rules)
+        if: ${{ !cancelled() }}
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+          REPLAY_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/pass_through_ports/pass-through-ports-linux.sh"
+
       # A daemon the app starts (a child that starts it in a session of its
       # own and exits, as pg_ctl start does) stays a member of the run under
       # the proven switch (P146): its call is recorded, and replayed from its
