@@ -2213,6 +2213,14 @@ func (a *AgentClient) nativeAgentArgs(opts models.SetupOptions) []string {
 	// after viper load (e.g. --disable-mapping=false on the test
 	// subcommand path that drove this agent start).
 	args = append(args, fmt.Sprintf("--disable-mapping=%t", a.conf.DisableMapping))
+	// And the operator's --disable-tele. The agent is a keploy process of its
+	// own that pings telemetry at its start from its own config
+	// (provider.GetService), so unless the CLI's resolved value reaches it,
+	// `keploy record --disable-tele` still resolves and contacts the telemetry
+	// host from the agent. Unconditional, as --disable-mapping above: the
+	// agent reads the same keploy.yml, and only an explicit value keeps the
+	// flag > yaml > default the CLI resolved.
+	args = append(args, fmt.Sprintf("--disable-tele=%t", a.conf.DisableTele))
 	if a.conf.Record.EnableSampling > 0 {
 		args = append(args, fmt.Sprintf("--enable-sampling=%d", a.conf.Record.EnableSampling))
 	}
@@ -3675,9 +3683,9 @@ func (a *AgentClient) ComposeDownOnSetupFailure(_ context.Context) error {
 }
 
 func (a *AgentClient) startInDocker(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, run *agentRun) error {
-	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, &config.Config{
-		InstallationID: a.conf.InstallationID,
-	}, opts)
+	// The CLI's own config: the alias forwards the root flags the agent
+	// container must share with the CLI (--debug, --disable-tele) from it.
+	keployAlias, err := kdocker.GetKeployDockerAlias(ctx, logger, a.conf, opts)
 	if err != nil {
 		utils.LogError(logger, err, "failed to prepare docker command and environment")
 		return err

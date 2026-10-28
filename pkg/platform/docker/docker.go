@@ -942,6 +942,11 @@ func (idc *Impl) GenerateKeployAgentService(opts models.SetupOptions) (*yaml.Nod
 	// otherwise default to true and disable record-side mapping
 	// production regardless of the host config.
 	command = append(command, fmt.Sprintf("--disable-mapping=%t", idc.conf.DisableMapping))
+	// And --disable-tele, for the same reason: the agent pings telemetry at
+	// its start from its own config (provider.GetService), so without it
+	// `keploy record --disable-tele` (or keploy.yml's disableTele) still
+	// resolves and contacts the telemetry host from the agent container.
+	command = append(command, fmt.Sprintf("--disable-tele=%t", idc.conf.DisableTele))
 	if idc.conf.Record.EnableSampling > 0 {
 		command = append(command, fmt.Sprintf("--enable-sampling=%d", idc.conf.Record.EnableSampling))
 	}

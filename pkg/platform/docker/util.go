@@ -193,7 +193,7 @@ func GetKeployDockerAlias(ctx context.Context, logger *zap.Logger, conf *config.
 	}
 
 	// Preserves the alias generation
-	keployalias, err := getAlias(ctx, logger, opts, conf.Debug)
+	keployalias, err := getAlias(ctx, logger, opts, conf)
 	if err != nil {
 		return "", err
 	}
@@ -228,9 +228,12 @@ func agentPortPublish(agentPort uint32) string {
 	return fmt.Sprintf(" -p 127.0.0.1:%d:%d", agentPort, agentPort)
 }
 
-func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, debug bool) (string, error) {
+// getAlias's conf is the CLI's config, whose root flags the agent container
+// shares: --debug, and --disable-tele (teleSuffix).
+func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions, conf *config.Config) (string, error) {
 	// Get the name of the operating system.
 	osName := runtime.GOOS
+	debug := conf.Debug
 	//TODO: configure the hardcoded port mapping
 	img := DockerConfig.DockerImage + ":v" + utils.Version
 	logger.Info("Starting keploy in docker with image", zap.String("image:", img))
@@ -390,7 +393,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			proxyPortStr + appPortsStr +
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE" + agentSecurityOptFlags() + " " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
-			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() + " --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + teleSuffix(conf)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -466,7 +469,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + teleSuffix(conf)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -528,7 +531,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + teleSuffix(conf)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -605,7 +608,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 				" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 				" -v /sys/fs/cgroup:/sys/fs/cgroup -v /sys/kernel/debug:/sys/kernel/debug -v /sys/fs/bpf:/sys/fs/bpf " +
 				" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+				" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + teleSuffix(conf)
 
 			if opts.EnableTesting {
 				alias += " --enable-testing"
@@ -666,7 +669,7 @@ func getAlias(ctx context.Context, logger *zap.Logger, opts models.SetupOptions,
 			" --cap-add=BPF --cap-add=PERFMON --cap-add=NET_ADMIN --cap-add=SYS_RESOURCE --cap-add=SYS_PTRACE " + Volumes +
 			" -v /sys/fs/cgroup:/sys/fs/cgroup -v debugfs:/sys/kernel/debug:rw -v /sys/fs/bpf:/sys/fs/bpf " +
 			" --rm " + img + " --client-pid " + fmt.Sprintf("%d", opts.ClientNSPID) + clientPIDNSSuffix() +
-			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix()
+			" --mode " + string(opts.Mode) + " --dns-port " + fmt.Sprintf("%d", opts.DnsPort) + " --is-docker" + mockModeSuffix(opts) + settleReadsSuffix(opts) + provenSuffix() + teleSuffix(conf)
 
 		if opts.EnableTesting {
 			alias += " --enable-testing"
@@ -780,6 +783,15 @@ func provenSuffix() string {
 		return ""
 	}
 	return " " + strings.Join(args, " ")
+}
+
+// teleSuffix carries the CLI's --disable-tele into the agent container,
+// whatever its value. The agent pings telemetry at its start from its own
+// config (provider.GetService) and the container sees no keploy.yml, so
+// without it `keploy record --disable-tele` (or keploy.yml's disableTele)
+// still resolves and contacts the telemetry host from the agent.
+func teleSuffix(conf *config.Config) string {
+	return fmt.Sprintf(" --disable-tele=%t", conf.DisableTele)
 }
 
 // settleReadsSuffix returns " --settle-reads" for a run that learns noise

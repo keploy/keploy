@@ -152,3 +152,42 @@ jobs:
           path: .github/workflows/test_workflow_scripts/golang/agent_restart/*_logs.txt
           if-no-files-found: warn
           retention-days: 7
+
+  # keploy record --disable-tele looks no telemetry host up in Docker: the
+  # agent container, a keploy process of its own that pings telemetry at its
+  # start, never got the CLI's --disable-tele (its alias was built from a
+  # config holding only the installation id), so telemetry.keploy.io was still
+  # resolved and posted to. A watcher counts the DNS queries of the runner's
+  # network namespace, dockerd's forwards for its containers included
+  # (resolv.conf untouched); a control leg without the flag must show keploy's
+  # lookup. Only the PR's binary and image: the published ones are what this
+  # guards against.
+  disable_tele_docker:
+    timeout-minutes: 20
+    if: ${{ (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork) || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: disable-tele (record_build, image_build)
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: .github/workflows/test_workflow_scripts/golang/disable_tele/go.mod
+          cache: false
+
+      - id: image
+        uses: ./.github/actions/download-image
+        with:
+          artifact_name: docker-image-linux-amd64
+
+      - id: record
+        uses: ./.github/actions/download-binary
+        with:
+          src: build
+
+      - name: Run disable-tele e2e (docker, no telemetry lookup under --disable-tele)
+        env:
+          RECORD_BIN: ${{ steps.record.outputs.path }}
+        run: |
+          bash "$GITHUB_WORKSPACE/.github/workflows/test_workflow_scripts/golang/disable_tele/disable-tele-linux.sh" docker
