@@ -79,8 +79,17 @@ type provenWire struct {
 	// models.ScopeTableReq.Pool); nil until the CLI sent one.
 	pool map[string][]string
 	// staged: the replay's mocks are staged on the proxy, which serves them
-	// exactly (exact_proven.go). Once per session.
+	// exactly (exact_proven.go). Once per session, and again when the CLI
+	// sends a pool slice naming a recording the staging did not read.
 	staged bool
+	// stagedPool is every pool name the staging read (stageForExactServing):
+	// a pool slice naming another is served only once it is staged.
+	stagedPool map[string]bool
+	// firstRecorded is when the set's earliest recorded test began
+	// (SetRecordedWindows): the staging reads, of the on-disk store, what was
+	// recorded before it, and the pool by name. Zero when the CLI sent no
+	// window.
+	firstRecorded time.Time
 	// servedSince is when exact serving began serving the open test
 	// (serveTestExactly): a miss made before it is no call of the test's.
 	servedSince time.Time
@@ -431,6 +440,12 @@ func (a *Agent) SetScopePool(ctx context.Context, pool map[string][]string) erro
 	}
 	a.provenMu.Lock()
 	a.proven.pool = cp
+	// A slice naming a recording the staging did not read (it reads the
+	// pool by name) stages the set again before it is served: a name not
+	// staged would serve nothing.
+	if a.proven.staged && !covers(a.proven.stagedPool, cp) {
+		a.proven.staged = false
+	}
 	a.provenMu.Unlock()
 	// Whose a mock is, for the learn steps: the table's pool slices are what
 	// says a mock was recorded while no test was open (the recorded test
@@ -498,13 +513,18 @@ func teardownOwners(table, pool map[string][]string) map[string]string {
 // a test the recording gives no begin (recordedStart).
 func (a *Agent) SetRecordedWindows(_ context.Context, ws []models.TestWindow) error {
 	starts := make(map[string]time.Time, len(ws))
+	var first time.Time
 	for _, w := range ws {
 		if w.TestCase != "" {
 			starts[w.TestCase] = w.Start
 		}
+		if !w.Start.IsZero() && (first.IsZero() || w.Start.Before(first)) {
+			first = w.Start
+		}
 	}
 	a.provenMu.Lock()
 	a.proven.order.starts = starts
+	a.proven.firstRecorded = first
 	a.provenMu.Unlock()
 	if seeder, ok := a.Proxy.(coreAgent.RecordedWindowsSeeder); ok {
 		seeder.SeedRecordedWindows(slices.Clone(ws))
