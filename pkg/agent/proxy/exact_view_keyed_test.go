@@ -247,6 +247,33 @@ func TestAKeyedReadOfAStatementTheTestRanThousandsOfTimesCostsTheSameAtAnySize(t
 	}
 }
 
+// TestAKeyedReadOfAKeyNoOwnedMockIsFiledUnderKeepsNoList: a keyed read of a
+// key the view files none of the open test's own mocks under (every key of
+// an index whose OwnedKeys files none, as MySQL's) reads nothing and keeps
+// nothing: a call per distinct statement adds no list to the view. Counted
+// with the verify mode off, which reads it whole to check it.
+func TestAKeyedReadOfAKeyNoOwnedMockIsFiledUnderKeepsNoList(t *testing.T) {
+	defer exactViewVerify.Store(exactViewVerify.Load())
+	exactViewVerify.Store(false)
+	mm, mocks, keyed, _ := keyedSet(t, 40)
+	ix := &integrations.MockIndex{Keys: keyed.Keys, OwnedKeys: func(*models.Mock) []string { return nil }}
+	v := mm.exact.view.Load()
+	if v == nil || len(v.owned) != len(mocks) {
+		t.Fatal("no test's view holds the set")
+	}
+	for i := 0; i < 500; i++ {
+		if got := keyedWalk(t, mm, ix, fmt.Sprintf("stmt-%d", i)); len(got) != 0 {
+			t.Fatalf("a keyed read of stmt-%d handed %v; want none", i, got)
+		}
+	}
+	v.mu.Lock()
+	kept := len(v.live)
+	v.mu.Unlock()
+	if kept != 0 {
+		t.Fatalf("500 keyed reads of keys no owned mock is filed under kept %d lists in the view; want 0", kept)
+	}
+}
+
 // TestAnIndexWithOwnedKeysFilesTheOpenTestsMocksByThoseAlone: a MockIndex
 // that sets OwnedKeys files the open test's own mocks under exact serving by
 // OwnedKeys alone, never by Keys (MySQL's indexes file them under no key:
