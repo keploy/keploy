@@ -688,9 +688,13 @@ func ClockReadHolds(o models.ClockOffset, live Leaf, s Span) bool {
 // microseconds), or the application cuts its value no coarser than a
 // finer step than o.Res (Python's isoformat over a column of tenths, whose
 // two learned values had no fraction, learned at the second: a replay
-// value of .4 s is checked at 100 ms). An offset whose Res is a cut is
-// never learned (learn's clockOffset), and a value against one is refused
-// as before.
+// value of .4 s is checked at 100 ms). A read plus an offset, then cut, is
+// a clock read too (2026-10-28): its value is checked at the cut its
+// learn step read (o.Res, where it is one coarser than the value's
+// encoding: models.ClockOffset.CheckedAt), within one cut of the span plus the offset on either
+// side (models.ClockOffset.Holds), whatever finer cut the value shows (a
+// time to live of no whole number of cuts), and its cut is no coarser than
+// a minute, the same in every zone (learn's offsetReading).
 // The application's zone is the one its process writes its clock in in
 // this run, where the agent read it from the process that made the call
 // (s.Own: a wall clock of no zone is the application's own, so a recording
@@ -749,14 +753,18 @@ func CheckClockRead(path string, o models.ClockOffset, live Leaf, s Span, known 
 	if why != "" {
 		return false, learned + why + hint
 	}
-	if !o.Plain() && o.CutCoarserThan(res) {
-		return false, learned + ", at a resolution of " + models.ShortDuration(o.Res) + " (both of the learn step's values were whole multiples of it), coarser than the " + models.ShortDuration(res) + " this value's encoding writes: the application cuts its value, and a check at its encoding's resolution would pass or fail by where its read fell in the cut, so keploy refuses it. If the field is a time the application reads from its own clock with no rule, declare it noise in keploy.yml, and keploy stops comparing it"
-	}
 	if !o.Plain() {
 		if holdsAny(o, ats, res, s.From, s.To) {
 			return true, ""
 		}
-		return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed" + hint
+		if !o.Checkable(res, s.From, s.To) {
+			return false, learned + ", which a replay checks against its call's window, but this call's window (" + models.ShortDuration(s.To.Sub(s.From)) + ") with the offset's range and three of its cut is no narrower than the " + unitWord(o.Unit()) + " the offset reads in, so keploy could not tell a time to live changed by " + aUnit(o.Unit()) + " and refuses the value rather than pass it unchecked" + hint
+		}
+		cut := ""
+		if c := o.CheckedAt(res); c > res {
+			cut = " (checked as standing for the whole " + models.ShortDuration(c) + " the learn step read it cut to)"
+		}
+		return false, learned + ", and the value this call carries is not " + read + " made in this call's window: it changed" + cut + hint
 	}
 	// A cut the value shows is checked at that cut, read in the zone it
 	// shows it in; a value that shows none, at its own resolution.

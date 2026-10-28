@@ -129,8 +129,9 @@ func TestAVariablesClockReadsRoundTrip(t *testing.T) {
 }
 
 // A value at the clock plus an offset (ClockOffset) holds where some read of
-// its call's window, plus an offset the learn step bounded, cuts to it: the
-// edges of both ranges hold, a step past either does not, and a changed time
+// its call's window, plus an offset the learn step bounded, cuts to it,
+// within one resolution of it on either side (2026-10-28): one resolution
+// past the edges of both ranges holds, two do not, and a changed time
 // to live (thirty minutes become thirty-one, or an hour) does not. No window,
 // no resolution and an empty offset hold nothing.
 func TestAClockOffsetHoldsOnlyAReadOfItsWindowPlusThatOffset(t *testing.T) {
@@ -151,10 +152,13 @@ func TestAClockOffsetHoldsOnlyAReadOfItsWindowPlusThatOffset(t *testing.T) {
 	}{
 		{"a read in the window plus thirty minutes", from.Add(20*ms + 30*time.Minute), ms, o, from, to, true},
 		{"the earliest read plus the least offset", from.Add(o.Min), ms, o, from, to, true},
-		{"a millisecond before it", from.Add(o.Min - ms), ms, o, from, to, false},
+		{"a millisecond before it (one resolution stale)", from.Add(o.Min - ms), ms, o, from, to, true},
+		{"two milliseconds before it", from.Add(o.Min - 2*ms), ms, o, from, to, false},
 		{"the latest read plus the greatest offset, less a nanosecond", to.Add(o.Max - 1), time.Nanosecond, ns, from, to, true},
-		{"the latest read plus the greatest offset", to.Add(o.Max), time.Nanosecond, ns, from, to, false},
-		{"a value at a nanosecond's encoding, the offset learned at a millisecond's (a cut coarser than it)", to.Add(o.Max - 1), time.Nanosecond, o, from, to, false},
+		{"the latest read plus the greatest offset, plus a nanosecond (one resolution ahead)", to.Add(o.Max + 1), time.Nanosecond, ns, from, to, true},
+		{"the latest read plus the greatest offset, plus two nanoseconds", to.Add(o.Max + 2), time.Nanosecond, ns, from, to, false},
+		{"a value at a nanosecond's encoding, the offset learned at a millisecond's, checked at the millisecond", to.Add(o.Max + ms), time.Nanosecond, o, from, to, true},
+		{"a nanosecond value more than a millisecond past the greatest", to.Add(o.Max + ms + 1), time.Nanosecond, o, from, to, false},
 		{"a millisecond value whose millisecond holds that edge", to.Add(o.Max - 1).Truncate(ms), ms, o, from, to, true},
 		{"thirty-one minutes", from.Add(20*ms + 31*time.Minute), ms, o, from, to, false},
 		{"an hour", from.Add(20*ms + time.Hour), ms, o, from, to, false},
@@ -183,7 +187,7 @@ func TestAClockOffsetHoldsOnlyWhereItsWindowIsNarrowerThanItsUnit(t *testing.T) 
 	ms := time.Millisecond
 	o := ClockOffset{Min: 30*time.Minute - 10*ms, Max: 30*time.Minute + 5*ms, Res: ms}
 	from := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
-	widest := time.Minute - (o.Max - o.Min) - ms - 1
+	widest := time.Minute - (o.Max - o.Min) - 3*ms - 1
 	to := from.Add(widest)
 	for _, read := range []time.Time{from, to} {
 		if !o.Holds(read.Add(30*time.Minute).Truncate(ms), ms, from, to) {
@@ -198,7 +202,7 @@ func TestAClockOffsetHoldsOnlyWhereItsWindowIsNarrowerThanItsUnit(t *testing.T) 
 	if o.Holds(from.Add(30*time.Minute), ms, from, to.Add(1)) {
 		t.Errorf("a window a nanosecond wider, adding up to a minute: held, want nothing held")
 	}
-	if !o.Within(widest, o.Max-o.Min, ms) || o.Within(widest+1, o.Max-o.Min, ms) || !o.Within() {
+	if !o.Within(widest, o.Max-o.Min, ms, ms, ms) || o.Within(widest+1, o.Max-o.Min, ms, ms, ms) || !o.Within() {
 		t.Errorf("Within: want the widest window within a minute, a nanosecond more not, and no span within")
 	}
 	// N1 of the review of 8e4346458: an offset the learn step never finds
@@ -219,23 +223,20 @@ func TestAClockOffsetHoldsOnlyWhereItsWindowIsNarrowerThanItsUnit(t *testing.T) 
 	}
 }
 
-// B1 of the offset rule's second and third reviews: Holds counts the
-// coarser of the replay's resolution and the one the learn step read the
-// value at (Res, the granularity both runs' values shared) in its sum, and
-// reads the replay's value at the replay's own, so a grain the two values
-// shared by chance only ever refuses more. With Res half a second, the read
-// plus thirty minutes holds, a value 400 ms before it does not, and
-// thirty-one or twenty-nine minutes never do; a window that with Res adds up
-// to a minute holds nothing. An offset whose Res is a cut coarser than the
-// replay's encoding (a second, 2 s, 31 s or a minute at a millisecond's:
-// CutCoarserThan), which the learn step never learns, holds nothing, not
-// even thirty minutes, so thirty-one minutes read late in its minute, or
-// twenty-nine minutes and fifty-nine seconds at 2 s, never holds. An offset
-// that reads in seconds or finer holds nothing (a cut to the unit makes a
-// time to live changed by one look the same), and neither does one with a
-// Res of none or below, which the learn step never finds: one built without
-// it (from the API, or a hand-edited mock) would have its sums read finer
-// than it was learned at.
+// B1 of the offset rule's second and third reviews: Holds counts three of
+// the coarser of the resolution it checks the value at and the one the
+// learn step read it at (Res) in its sum. With Res half a second (no step:
+// two values shared it by chance, before cuts were learned), the value is
+// read at the replay's own millisecond: the read plus thirty minutes holds,
+// a value 400 ms before it does not, and thirty-one or twenty-nine minutes
+// never do; a window that with three of Res adds up to a minute holds
+// nothing. A cut the learn step read (a second) is checked at the cut,
+// within one of it of the span on either side, at every read position. An
+// offset that reads in seconds or finer holds nothing (a cut to the unit
+// makes a time to live changed by one look the same), and neither does one
+// with a Res of none or below, which the learn step never finds: one built
+// without it (from the API, or a hand-edited mock) would have its sums read
+// finer than it was learned at.
 func TestAClockOffsetHoldsAtTheReplaysOwnResolution(t *testing.T) {
 	ms, sec := time.Millisecond, time.Second
 	base := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
@@ -255,18 +256,51 @@ func TestAClockOffsetHoldsAtTheReplaysOwnResolution(t *testing.T) {
 	if wide := time.Minute - (o.Max - o.Min) - o.Res; o.Holds(base.Add(30*time.Minute), ms, base, base.Add(wide)) {
 		t.Errorf("a window that with Res adds up to a minute: held, want nothing held")
 	}
-	late := base.Add(59*sec + 900*ms)
-	for _, cut := range []ClockOffset{
-		{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: sec},
-		{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: 2 * sec},
-		{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: 31 * sec},
-		{Min: 30*time.Minute - 600*ms, Max: 30*time.Minute + 600*ms, Res: time.Minute},
-	} {
-		for _, at := range []time.Time{late.Add(30 * time.Minute), late.Truncate(sec).Add(30 * time.Minute), late.Truncate(2 * sec).Add(30*time.Minute - sec), late.Truncate(time.Minute).Add(30 * time.Minute), late.Truncate(time.Minute).Add(31 * time.Minute)} {
-			if cut.Holds(at, ms, late.Add(-10*ms), late) {
-				t.Errorf("FALSE GREEN? %+v, a cut coarser than the replay's millisecond, holds %s from its read: want nothing held", cut, at.Sub(late))
+	// A cut the learn step read (a second, a step of cutSteps) is checked at
+	// the second, at every read position in it: a value cut down or rounded
+	// holds, the edges of the widened span hold (from the second that holds
+	// the earliest read plus Min, less a second, up to the latest plus Max,
+	// plus a second), a millisecond past either does not, and thirty-one or
+	// twenty-nine minutes never do. Thirty minutes cut to the minute holds
+	// nothing: three minutes and its width add up to more than the minute it
+	// reads in. A Res of 2 s or 31 s (no step: two values shared it by
+	// chance) is checked at the replay's millisecond.
+	cut := ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: sec}
+	for step := time.Duration(0); step < sec; step += 10 * ms {
+		from := base.Add(step)
+		to, read := from.Add(10*ms), from.Add(5*ms)
+		lo, hi := from.Add(cut.Min).Truncate(sec).Add(-sec), to.Add(cut.Max).Add(sec)
+		for _, row := range []struct {
+			name string
+			at   time.Time
+			want bool
+		}{
+			{"cut down", read.Add(30 * time.Minute).Truncate(sec), true}, {"rounded", read.Add(30 * time.Minute).Round(sec), true},
+			{"the widened span's start", lo, true}, {"its end", hi, true},
+			{"a millisecond before it", lo.Add(-ms), false}, {"a millisecond after it", hi.Add(ms), false},
+			{"thirty-one minutes", read.Add(31 * time.Minute).Truncate(sec), false}, {"twenty-nine", read.Add(29 * time.Minute).Truncate(sec), false},
+		} {
+			if got := cut.Holds(row.at, ms, from, to); got != row.want {
+				t.Errorf("%s: thirty minutes cut to the second, %s, the read %s into its second: holds %v, want %v", map[bool]string{true: "FALSE RED", false: "FALSE GREEN"}[row.want], row.name, read.Sub(read.Truncate(sec)), got, row.want)
 			}
 		}
+	}
+	if cut.Holds(base.Add(30*time.Minute), ms, base, base.Add(57*sec)) {
+		t.Errorf("FALSE GREEN? a window 57 s wide, which with the offset's width and three seconds adds up to more than a minute: held, want nothing held")
+	}
+	if !cut.Holds(base.Add(30*time.Minute), ms, base, base.Add(56*sec)) {
+		t.Errorf("FALSE RED: a window 56 s wide, which with the offset's width and three seconds adds up to less than a minute: not held")
+	}
+	late := base.Add(59*sec + 900*ms)
+	if wide := (ClockOffset{Min: 30*time.Minute - 600*ms, Max: 30*time.Minute + 600*ms, Res: time.Minute}); wide.Holds(late.Truncate(time.Minute).Add(30*time.Minute), ms, late.Add(-10*ms), late) {
+		t.Errorf("FALSE GREEN? thirty minutes cut to the minute held: want nothing held")
+	}
+	chance := ClockOffset{Min: 30*time.Minute - 155*ms, Max: 30*time.Minute + 368*ms, Res: 2 * sec}
+	if !chance.Holds(late.Add(30*time.Minute), ms, late.Add(-10*ms), late) || chance.Holds(late.Truncate(sec).Add(30*time.Minute-sec), ms, late.Add(-10*ms), late) {
+		t.Errorf("%+v, a Res no step: want the read plus thirty minutes held at the millisecond, and a value a second and more before it not", chance)
+	}
+	if chance.Res = 31 * sec; chance.Holds(late.Add(30*time.Minute), ms, late.Add(-10*ms), late) {
+		t.Errorf("%+v: three of a Res of 31 s add up to more than a minute: held, want nothing held", chance)
 	}
 	for _, bad := range []ClockOffset{
 		{Min: 45*sec - 155*ms, Max: 45*sec + 368*ms, Res: 500 * ms},
@@ -286,41 +320,43 @@ func TestAClockOffsetHoldsAtTheReplaysOwnResolution(t *testing.T) {
 	}
 }
 
-// A Res is a cut the application made where it is above the encoding's
-// resolution and a whole number of the unit above it: a second, 2 s, 31 s
-// or a minute above a millisecond; a millisecond above a microsecond; a
-// minute above a second; an hour above a minute. Half a second above a
-// millisecond, 2 s above a second, 30.751 s above a millisecond and the
-// encoding's own resolution are none: an hour's time to live at a minute's
-// encoding (Res a minute) is no cut. Above a day, or any resolution no unit
-// is above, every coarser Res is, and the encoding's own is not.
-func TestAResIsACutWhereItIsAWholeNumberOfTheUnitAboveTheEncoding(t *testing.T) {
+// A replay checks a value of an offset at its Res where that is a step of
+// cutSteps coarser than the value's encoding (a cut the learn step read: a
+// second or a minute above a millisecond, a millisecond above a
+// microsecond, 10 ms above a microsecond), else at the value's own: a Res
+// of the encoding itself, or one learned before cuts were (500 ms or 2 s two
+// values shared by chance), is none. An hour learned at a minute's encoding
+// is checked at the minute at a replay of a millisecond's, as standing for
+// its whole minute: a value read in the window holds wherever its read
+// fell in its minute, and one more than a minute past either side does not.
+func TestAnOffsetIsCheckedAtTheCutItsValuesShowed(t *testing.T) {
 	us, ms, sec, min := time.Microsecond, time.Millisecond, time.Second, time.Minute
 	for _, row := range []struct {
-		res, enc time.Duration
-		want     bool
+		res, enc, want time.Duration
 	}{
-		{sec, ms, true}, {2 * sec, ms, true}, {31 * sec, ms, true}, {min, ms, true},
-		{ms, us, true}, {7 * ms, us, true}, {min, sec, true}, {2 * min, sec, true}, {time.Hour, min, true},
-		{500 * ms, ms, false}, {30751 * ms, ms, false}, {2 * sec, sec, false}, {31 * sec, sec, false},
-		{ms, ms, false}, {sec, sec, false}, {min, min, false}, {2 * min, min, false}, {500 * us, us, false},
-		{sec, 10 * ms, true}, {20 * ms, 10 * ms, false}, {2 * time.Nanosecond, time.Nanosecond, false}, {us, time.Nanosecond, true},
-		{48 * time.Hour, 24 * time.Hour, true}, {24 * time.Hour, 24 * time.Hour, false}, {ms, 2 * ms, false}, {0, ms, false},
+		{sec, ms, sec}, {min, ms, min}, {ms, us, ms}, {10 * ms, us, 10 * ms}, {min, sec, min},
+		{2 * sec, ms, ms}, {500 * ms, ms, ms}, {31 * sec, ms, ms}, {2 * sec, sec, sec},
+		{ms, ms, ms}, {sec, sec, sec}, {ms, sec, sec}, {0, ms, ms},
+		{10 * ms, ms, ms}, {100 * ms, ms, ms}, {100 * ms, 100 * us, 100 * ms}, {10 * us, us, 10 * us},
 	} {
-		if got := (ClockOffset{Res: row.res}).CutCoarserThan(row.enc); got != row.want {
-			t.Errorf("Res %s at an encoding of %s: a cut %v, want %v", row.res, row.enc, got, row.want)
+		if got := (ClockOffset{Res: row.res}).CheckedAt(row.enc); got != row.want {
+			t.Errorf("Res %s at an encoding of %s: checked at %s, want %s", row.res, row.enc, got, row.want)
 		}
 	}
-	// Holds reads it against the replay's resolution: an hour learned at a
-	// minute's encoding holds at a minute's, and nothing at a millisecond's.
 	o := ClockOffset{Min: time.Hour - 17155*ms, Max: time.Hour + 41368*ms, Res: min}
 	from := time.Date(2026, 10, 26, 13, 0, 7, 0, time.UTC)
-	read := from.Add(20 * ms)
-	if !o.Holds(read.Add(time.Hour).Truncate(min), min, from, from.Add(50*ms)) {
-		t.Errorf("FALSE RED: an hour at a minute's encoding, at a replay of a minute's: not held")
-	}
-	if o.Holds(read.Add(time.Hour).Truncate(ms), ms, from, from.Add(50*ms)) {
-		t.Errorf("an hour learned at a minute's encoding held at a replay of a millisecond's: want nothing held")
+	for _, enc := range []time.Duration{min, ms} {
+		for step := time.Duration(0); step < min; step += 250 * ms {
+			read := from.Add(step)
+			if !o.Holds(read.Add(time.Hour).Truncate(enc), enc, read, read.Add(50*ms)) {
+				t.Errorf("FALSE RED: an hour cut to the minute, at a replay of %s's encoding, its read %s into its minute: not held", enc, read.Sub(read.Truncate(min)))
+			}
+			for _, off := range []time.Duration{-2*min - 17200*ms, 2*min + 41500*ms, 2 * time.Hour, 0} {
+				if o.Holds(read.Add(time.Hour+off).Truncate(enc), enc, read, read.Add(50*ms)) != (off == 0) {
+					t.Errorf("an hour cut to the minute plus %s, at a replay of %s's encoding, its read %s into its minute: held %v", off, enc, read.Sub(read.Truncate(min)), off == 0)
+				}
+			}
+		}
 	}
 }
 
