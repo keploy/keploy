@@ -261,6 +261,14 @@ func isEpochText(s string) bool {
 	return dot
 }
 
+// InstantReads is how many texts the learn step has read for their instants
+// in this process (instantSpans: one pass of scanInstants each), the step's
+// costliest read of an earlier payload. A row at the agent's level reads it
+// around a call to tell what the call read of the set's payloads apart from
+// the set's size (proxy: a pooled connection keeps being answered after a
+// test boundary).
+func InstantReads() int64 { return instantScanPasses.Load() }
+
 // instantSpans are the instants s holds: each a match of a layout of
 // clockLayouts, in either case (a case-folded form of a text holds its
 // instants folded), at ASCII word boundaries, that its layout reads as an
