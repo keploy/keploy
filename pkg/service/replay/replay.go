@@ -5382,6 +5382,11 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 		if line := models.UncheckedLine(res.TestCaseID, res.Answers); line != "" {
 			fmt.Println(line)
 		}
+		// Each read it answered from before a write the replay had not made
+		// yet, named with the write and the recording that answered.
+		for _, line := range models.BeforeWriteLines(res.TestCaseID, res.Answers) {
+			fmt.Println(line)
+		}
 	}
 	// A call no mock answered whose closest recording was given back to its
 	// owner (returnStaleMoves): the owner's quarantine no longer applies.

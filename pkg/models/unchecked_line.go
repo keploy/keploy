@@ -64,3 +64,35 @@ func UncheckedLine(test string, answers []UnmatchedCall) string {
 	}
 	return test + ": " + strings.Join(parts, "; ")
 }
+
+// BeforeWriteLines are the report's lines for test's reads answered from
+// before a write the replay had not made yet (AnswerBeforeUnmadeWrite), one
+// per read, in the order they were answered: the call, then the agent's
+// sentence naming the write and the recording that answered (NextSteps);
+// nil when answers holds none. keploy test prints them as each set ends,
+// and keploy report under the test's status, from the test's
+// TestResult.Answers.
+//
+//	post-url-1: MongoDB find oauth.blocklist: an extra read before mock-7, answered from mock-3
+func BeforeWriteLines(test string, answers []UnmatchedCall) []string {
+	var out []string
+	for _, a := range answers {
+		if a.Answer != AnswerBeforeUnmadeWrite {
+			continue
+		}
+		why := a.NextSteps
+		if why == "" {
+			from := a.ClosestMock
+			if from == "" {
+				from = "a recording made before it"
+			}
+			why = "an extra read before a write the replay had not made yet, answered from " + from
+		}
+		line := test + ": "
+		if call := strings.TrimSpace(a.Protocol + " " + a.ActualSummary); call != "" {
+			line += call + ": "
+		}
+		out = append(out, line+why)
+	}
+	return out
+}
