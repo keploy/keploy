@@ -678,6 +678,7 @@ func (m *MockManager) ResetForReplaySession() {
 	m.lockRound()
 	m.exact.fired.Store(false)
 	m.exact.last.Store(nil)
+	m.exact.ended.Store(nil)
 	m.exact.round.bound = nil
 	m.exact.round.mu.Unlock()
 	// Nor any of its worker scope (models.Mapping.Worker), or its recording

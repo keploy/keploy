@@ -283,9 +283,14 @@ type exactState struct {
 	// tells a tier-routing parser (Postgres v3) "between tests" from
 	// "before the first test".
 	fired atomic.Bool
-	// last is the latest test view, open or ended: its outcome is read after
-	// the test stops being served (ExactTestOutcome).
+	// last is the latest test view while it is in force: its outcome is
+	// read after the test stops being served (ExactTestOutcome). Once
+	// another view replaces it, its outcome is kept by name (ended), and
+	// the view goes, with the recordings it holds: kept until the next
+	// test's open, it held a closed test's recordings between tests.
 	last atomic.Pointer[exactView]
+	// ended is the outcome of the latest test view, kept as it was replaced.
+	ended atomic.Pointer[testOutcome]
 	// gen numbers the test views.
 	gen atomic.Uint64
 	// outside is what the calls made outside every test consumed in the
@@ -1539,6 +1544,11 @@ func (m *MockManager) installExactWith(v *exactView, under func(r *roundState)) 
 	if prev != nil {
 		prev.mu.Lock()
 		prev.closed = true
+		// Closed, its outcome is final: no consume reaches it any more.
+		if prev.test != "" && m.exact.last.Load() == prev {
+			m.exact.ended.Store(prev.outcomeLocked())
+			m.exact.last.Store(nil)
+		}
 		prev.mu.Unlock()
 	}
 	r.mu.Unlock()
@@ -1616,24 +1626,39 @@ func (m *MockManager) ExactTestOutcome() (test string, consumed, unconsumed []st
 	if m.exactView() == nil {
 		return "", nil, nil, false
 	}
-	v := m.exact.last.Load()
-	if v == nil {
+	var o *testOutcome
+	if v := m.exact.last.Load(); v != nil {
+		v.mu.Lock()
+		o = v.outcomeLocked()
+		v.mu.Unlock()
+	} else if o = m.exact.ended.Load(); o == nil {
 		return "", nil, nil, true
 	}
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	// Only the test's own: a shared recording is never required of it.
+	return o.test, append([]string(nil), o.consumed...), append([]string(nil), o.unconsumed...), true
+}
+
+// testOutcome is a test view's outcome, by name (ExactTestOutcome).
+type testOutcome struct {
+	test                 string
+	consumed, unconsumed []string
+}
+
+// outcomeLocked is v's outcome, v.mu held: which of its test mocks have
+// answered (in the order they did) and which have not (in recorded order).
+// Only the test's own: a shared recording is never required of it.
+func (v *exactView) outcomeLocked() *testOutcome {
+	o := &testOutcome{test: v.test}
 	for _, i := range v.order {
 		if !v.isCand(i) {
-			consumed = append(consumed, v.owned[i].Name)
+			o.consumed = append(o.consumed, v.owned[i].Name)
 		}
 	}
 	for i, done := range v.consumed {
 		if !done && !v.isCand(i) {
-			unconsumed = append(unconsumed, v.owned[i].Name)
+			o.unconsumed = append(o.unconsumed, v.owned[i].Name)
 		}
 	}
-	return v.test, consumed, unconsumed, true
+	return o
 }
 
 // ConsumedTestMocks implements integrations.ExactConsumedReader: the open
