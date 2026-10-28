@@ -17,7 +17,10 @@ import (
 // answer the call with the other request's answer. Judging reads the name: a
 // test whose only misses are such copies, made on the application's own
 // clock, has the recording it repeats marked as its background work, which
-// keploy then answers again in the test's window (AnsweredBackgroundReader).
+// keploy then answers again in the test's window (AnsweredBackgroundReader),
+// when that recording's call writes (models.CallWriteOf, which the miss
+// carries as its Write): a read made once more is a cached copy expiring on
+// the application's clock, which judging sets aside instead.
 
 // RepeatedRecording is, of copies, the open test's recordings of one call
 // that already answered, the recording a call made once more repeats: the
@@ -56,12 +59,16 @@ func recordedAfter(a, b *models.Mock) bool {
 // report names repeats as its closest and no other: no field differs from
 // it that exact serving reads, so none is named and no noise is suggested,
 // and the closest request rendered for a side-by-side diff, another
-// recording's, is dropped. A nil report or repeats leaves report as it is.
+// recording's, is dropped. It says what repeats's call writes, by its
+// parser's registration (models.CallWriteOf), and nothing for a read or a
+// call its parser cannot tell. A nil report or repeats leaves report as it
+// is.
 func MarkExtraCall(report *models.MockMismatchReport, repeats *models.Mock, recorded int) {
 	if report == nil || repeats == nil {
 		return
 	}
 	report.MissKind, report.Recorded = models.MissExtraCall, max(recorded, 1)
+	report.Write, _ = models.CallWriteOf(repeats)
 	report.ClosestMock = repeats.Name
 	report.FieldDiffs, report.Differs, report.ClosestMockReq = nil, nil, ""
 	report.Diff = fmt.Sprintf("the call repeats %s, which answered it already", repeats.Name)
