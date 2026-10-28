@@ -341,8 +341,8 @@ type Proxy struct {
 	// mock (CaptureLosses).
 	losses captureloss.Counter
 	// caTrust is the client processes that sent a call through keploy's
-	// certificate in this run: their TLS hang-ups are cancels, not losses
-	// (clientTLS).
+	// certificate in this run, whose TLS hang-ups are cancels, not losses,
+	// and the hang-ups held for a call of the others' (clientTLS).
 	caTrust caTrust
 	// accepts counts every connection the listener has accepted
 	// (Accepted). They are the connections the kernel counts only when the
@@ -3300,8 +3300,9 @@ func (p *Proxy) handleConnection(ctx context.Context, srcConn net.Conn) error {
 	}
 	if isTLS && len(initialBuf) > 0 {
 		// The client sent a call through keploy's certificate: its
-		// process trusts keploy's CA (caTrust).
-		p.caTrust.noteCall(outgoingOpts.SrcPid)
+		// process trusts keploy's CA (caTrust), and its hang-ups held in
+		// this test are cancels.
+		p.noteTLSCall(outgoingOpts.SrcPid)
 	}
 
 	if util.IsHTTPReq(initialBuf) && !util.HasCompleteHTTPHeaders(initialBuf) {

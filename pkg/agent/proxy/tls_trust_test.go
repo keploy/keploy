@@ -81,11 +81,18 @@ func trustProxy() *Proxy {
 	return p
 }
 
-// serveFrom has p serve one connection from the process tgid (the eBPF
-// redirect's KernelPid; 0: unknown) on which the client does what client
-// does, and returns p's TLS losses so far: tls_handshake_abandoned, then
-// tls_handshake_failed.
+// serveFrom has p serve one connection from the process tgid (serve) and
+// returns p's TLS losses read then (tlsLosses).
 func serveFrom(t *testing.T, p *Proxy, tgid uint32, client func(*testing.T, net.Conn)) (abandoned, failed uint64) {
+	t.Helper()
+	serve(t, p, tgid, client)
+	return tlsLosses(p)
+}
+
+// serve has p serve one connection from the process tgid (the eBPF
+// redirect's KernelPid; 0: unknown) on which the client does what client
+// does, reading no counts.
+func serve(t *testing.T, p *Proxy, tgid uint32, client func(*testing.T, net.Conn)) {
 	t.Helper()
 	dest := ipv4Dest(t, "127.0.0.1:8443")
 	dest.KernelPid = tgid
@@ -99,7 +106,13 @@ func serveFrom(t *testing.T, p *Proxy, tgid uint32, client func(*testing.T, net.
 	}()
 	_ = p.handleConnection(context.Background(), src)
 	<-done
-	for _, l := range p.losses.Snapshot() {
+}
+
+// tlsLosses reads p's counts as the agent does at a test's end
+// (CaptureLosses) and returns its TLS losses so far:
+// tls_handshake_abandoned, then tls_handshake_failed.
+func tlsLosses(p *Proxy) (abandoned, failed uint64) {
+	for _, l := range p.CaptureLosses() {
 		switch l.Kind {
 		case models.CaptureLossTLSAbandoned:
 			abandoned = l.Count
@@ -149,7 +162,7 @@ func TestAProcessThatSentACallThroughKeploysCertificateCancelsItsHangUps(t *test
 // unknown (tgid 0) trusts no other.
 func TestOnlyACallMakesAProcessTrustedAndOnlyFromThenOn(t *testing.T) {
 	t.Setenv(provenswitch.Env, "1")
-	t.Run("a hang-up before the process's first call", func(t *testing.T) {
+	t.Run("a hang-up decided by a read before the process's first call", func(t *testing.T) {
 		p := trustProxy()
 		if a, _ := serveFrom(t, p, 4242, hangsUpSilent); a != 1 {
 			t.Fatalf("charged %d tls_handshake_abandoned, want 1", a)
@@ -183,13 +196,77 @@ func TestOnlyACallMakesAProcessTrustedAndOnlyFromThenOn(t *testing.T) {
 	})
 }
 
-// Without the proven switch nothing is trusted: a process's handshake given
-// up once keploy's certificate is in is charged after its call, as on main.
+// A hang-up by a process that has not sent a call through keploy's
+// certificate yet is held until the counts are next read, as its test ends:
+// a call of the same process later in that test makes it a cancel -- a
+// browser opens connections ahead of a page's first call and drops those it
+// does not use, the first of the run among them. One whose process sends no
+// call in that test is charged by the read: another process's call, or its
+// own in the next test, cancels nothing. Before, each was charged at once,
+// and its test was not judged.
+func TestAHangUpBeforeTheProcesssFirstCallInTheSameTestIsACancel(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	const browser, other = 4242, 5151
+	t.Run("the process's call later in the same test", func(t *testing.T) {
+		p := trustProxy()
+		serve(t, p, browser, givesUpOnceTheCertificateIsIn)
+		serve(t, p, browser, hangsUpSilent)
+		serve(t, p, browser, sendsACall)
+		if a, f := tlsLosses(p); a != 0 || f != 0 {
+			t.Fatalf("charged %d abandoned and %d failed at the test's end, want none: the process's call in the test makes its hang-ups cancels", a, f)
+		}
+	})
+	t.Run("no call from the process", func(t *testing.T) {
+		p := trustProxy()
+		serve(t, p, browser, hangsUpSilent)
+		serve(t, p, browser, givesUpOnceTheCertificateIsIn)
+		serve(t, p, other, sendsACall)
+		if a, _ := tlsLosses(p); a != 2 {
+			t.Fatalf("charged %d tls_handshake_abandoned at the test's end, want 2: another process's call says nothing of this one", a)
+		}
+	})
+	t.Run("the process's first call in the next test", func(t *testing.T) {
+		p := trustProxy()
+		serve(t, p, browser, hangsUpSilent)
+		nextTest(p)
+		serve(t, p, browser, sendsACall)
+		if a, _ := tlsLosses(p); a != 1 {
+			t.Fatalf("charged %d tls_handshake_abandoned, want 1: a call in the next test does not cancel a hang-up in this one", a)
+		}
+		if a, _ := serveFrom(t, p, browser, hangsUpSilent); a != 1 {
+			t.Fatalf("a hang-up after the process's call: charged %d tls_handshake_abandoned in all, want still 1", a)
+		}
+	})
+	t.Run("an unknown process", func(t *testing.T) {
+		p := trustProxy()
+		serve(t, p, 0, hangsUpSilent)
+		serve(t, p, 0, sendsACall)
+		if a, _ := tlsLosses(p); a != 1 {
+			t.Fatalf("charged %d tls_handshake_abandoned, want 1: an unknown process is no process", a)
+		}
+	})
+}
+
+// nextTest ends p's test and begins the next, as the agent does between two
+// tests: a scope of its own.
+func nextTest(p *Proxy) {
+	p.EndTestErrorCapture()
+	p.BeginTestErrorCapture()
+}
+
+// Without the proven switch nothing is trusted and nothing is held: a
+// process's hang-up before its call in the same test is charged, and so is
+// its handshake given up once keploy's certificate is in after the call, as
+// on main.
 func TestWithoutTheSwitchAProcessCallMakesNoHangUpACancel(t *testing.T) {
 	t.Setenv(provenswitch.Env, "")
 	p := trustProxy()
-	serveFrom(t, p, 4242, sendsACall)
-	if a, _ := serveFrom(t, p, 4242, givesUpOnceTheCertificateIsIn); a != 1 {
-		t.Fatalf("charged %d tls_handshake_abandoned, want 1", a)
+	serve(t, p, 4242, givesUpOnceTheCertificateIsIn)
+	serve(t, p, 4242, sendsACall)
+	if a, _ := tlsLosses(p); a != 1 {
+		t.Fatalf("a hang-up before the process's call in the same test: charged %d tls_handshake_abandoned, want 1", a)
+	}
+	if a, _ := serveFrom(t, p, 4242, givesUpOnceTheCertificateIsIn); a != 2 {
+		t.Fatalf("charged %d tls_handshake_abandoned in all, want 2", a)
 	}
 }
