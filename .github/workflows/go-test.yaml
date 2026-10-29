@@ -144,6 +144,26 @@ jobs:
           KEPLOY_PROVEN=1 KEPLOY_LEARN_SET_EVERY_CACHE=1 go test -count=1 ./pkg/matcher/learn/
           KEPLOY_PROVEN=1 KEPLOY_LEARN_LAZY_EVERY_RAW=1 go test -count=1 ./pkg/matcher/learn/
 
+      # The HTTP learn step's bound row holds its peak heap to the set's
+      # budget, a quarter of the agent's memory limit, at three limits. The
+      # plain run above takes the 256 MiB limit alone, which streams four
+      # times its budget; the 512 MiB and 1 GiB limits' legs run only with
+      # KEPLOY_LARGE_STREAM_MIB set, here, at the same 256 MiB stream, so the
+      # package's own run (and the Windows lane's) stays short. Each leg's
+      # PASS line is grepped, so a leg that skips or is renamed away fails
+      # the step.
+      - name: Running the HTTP learn bound row at its larger memory limits
+        shell: bash
+        run: |
+          set -o pipefail
+          KEPLOY_LARGE_STREAM_MIB=256 go test -count=1 -timeout 20m -v \
+            -run '^TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget$/^(512|1024)_MiB_limit_' \
+            ./pkg/agent/proxy/integrations/http/ | tee /tmp/http-learn-bound.out
+          for leg in 512_MiB_limit_on_disk 512_MiB_limit_staged 1024_MiB_limit_on_disk 1024_MiB_limit_staged; do
+            grep -q -- "--- PASS: TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget/$leg " /tmp/http-learn-bound.out ||
+              { echo "the bound row's $leg leg did not pass"; exit 1; }
+          done
+
       # The hooks package's root tests skip in the run above, which is the
       # runner user's: TestTheHooksLoadOnThisKernel loads the agent's eBPF
       # objects against this kernel's BTF, as the agent does, and
