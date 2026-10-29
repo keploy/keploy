@@ -1008,6 +1008,64 @@ func TestMarkExitSaysWhereItsFilesDidNotSettle(t *testing.T) {
 	}
 }
 
+// A reading of several processes (a stop of the daemons an app left, or of a
+// group) did not settle where the read of one of them did not, whichever is
+// read last: its Fds are no evidence.
+func TestMarkExitOfSeveralSaysWhereOnesFilesDidNotSettle(t *testing.T) {
+	self, ok := ReadProcStat(os.Getpid())
+	if !ok {
+		t.Fatal("premise: this process's stat could not be read")
+	}
+	cmd := exec.Command("sleep", "1000")
+	// A group of its own, killed whole.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reaped := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); <-reaped })
+	child, ok := ReadProcStat(cmd.Process.Pid)
+	if !ok {
+		t.Fatal("premise: the child's stat could not be read")
+	}
+	if _, err := os.ReadDir("/proc/" + strconv.Itoa(cmd.Process.Pid) + "/fd"); err != nil {
+		t.Fatalf("premise: the child's descriptors could not be listed: %v", err)
+	}
+	procs := []Reached{{PID: os.Getpid(), Start: self.StartTime}, {PID: cmd.Process.Pid, Start: child.StartTime}}
+	// The descriptors of task never hold still (closed as each is compared
+	// with another, open as it is with itself); every other's is a file of
+	// its own.
+	var task atomic.Int64
+	cmp := func(of, a, b int) (int, error) {
+		switch {
+		case of == int(task.Load()) && a != b:
+			return 0, syscall.EBADF
+		case a < b:
+			return 1, nil
+		case a > b:
+			return 2, nil
+		}
+		return 0, nil
+	}
+	filesCompared.Store(&cmp)
+	t.Cleanup(func() { filesCompared.Store(nil) })
+	for _, tc := range []struct {
+		name          string
+		task          int
+		wantUnsettled bool
+	}{
+		{"both settled", 0, false},
+		{"the first read unsettled, the last settled", os.Getpid(), true},
+		{"the first read settled, the last unsettled", cmd.Process.Pid, true},
+	} {
+		task.Store(int64(tc.task))
+		if m := MarkExit(procs); m.Running != 2 || m.FilesUnsettled != tc.wantUnsettled {
+			t.Errorf("%s: read as %+v; want 2 running, files unsettled %v", tc.name, m, tc.wantUnsettled)
+		}
+	}
+}
+
 // A kernel that cannot compare files (no kcmp, or keploy may not ask) leaves
 // each descriptor counted; one that stops comparing part way through a read
 // leaves it unsettled, no evidence.
@@ -1190,6 +1248,101 @@ func TestOpenFilesLetGoOfADescriptorClosedAsTheyAreRead(t *testing.T) {
 		}
 		if n, settled := openFilesBy(kcmp, 1, listed); n != tc.want || settled == tc.unsettled {
 			t.Errorf("%s (listed %v): %d open files, settled %v; want %d, settled %v", tc.name, names, n, settled, tc.want, !tc.unsettled)
+		}
+	}
+}
+
+// churnShell is the adopt test's daemon, dash running `exec 3</dev/null;
+// exec 3<&-` (open fd 3 on a new file, dup fd 3 to fd 10, close fd 3, close
+// fd 10), as a fake kcmp: listed (as os.ReadDir lists them: 0 1 10 2 3) with
+// fds 3 and 10 open on its first cycle's file, it takes steps[n] of those
+// steps as the read makes its n+1st comparison, and none past the last.
+// Stdin and stdout (stderr its duplicate) are two files; each cycle's file
+// orders before both or after both, in turn. peak is the most open files it
+// held at any comparison.
+func churnShell(steps []int) (kcmp func(task, a, b int) (int, error), listed []os.DirEntry, peak *int) {
+	const stdin, stdout = 10, 20
+	cycle := []int{1, 30, 2, 40, 3, 50, 4, 60}
+	fds := map[int]int{0: stdin, 1: stdout, 2: stdout, 3: cycle[0], 10: cycle[0]}
+	k, at, calls, most := 1, 2, 0, 0
+	step := func() {
+		switch at {
+		case 0:
+			fds[3] = cycle[k%len(cycle)]
+			k++
+		case 1:
+			fds[10] = fds[3]
+		case 2:
+			delete(fds, 3)
+		case 3:
+			delete(fds, 10)
+		}
+		at = (at + 1) % 4
+	}
+	for _, n := range []string{"0", "1", "10", "2", "3"} {
+		listed = append(listed, fdEntry(n))
+	}
+	return func(_, a, b int) (int, error) {
+		if calls < len(steps) {
+			for range steps[calls] {
+				step()
+			}
+		}
+		calls++
+		files := map[int]bool{}
+		for _, f := range fds {
+			files[f] = true
+		}
+		most = max(most, len(files))
+		fa, okA := fds[a]
+		fb, okB := fds[b]
+		switch {
+		case !okA || !okB:
+			return 0, syscall.EBADF
+		case fa < fb:
+			return 1, nil
+		case fa > fb:
+			return 2, nil
+		}
+		return 0, nil
+	}, listed, &most
+}
+
+// The adopt test's daemon read as it churns, stepping on by 0 or 1 of its
+// syscalls between two of keploy's comparisons, as it does: a settled read
+// counts no more files than the shell held at any comparison, so as a stop's
+// first reading, followed by the true 3, 2, 3, 2, it moves the stop once at
+// most. Both rows read 4, settled, on a read that took one clean check of
+// the files' order for settled (kcmp compares two at a time, never all at
+// one instant):
+//   - fd 10, held at its first file's place, is out of order beside fd 0 a
+//     cycle later; read again alone, fd 10 and fd 3 were never compared at
+//     one instant (both are read again);
+//   - fd 10 passes its check and closes before fd 3, opened on the next
+//     cycle's file, passes its own (the next check finds fd 10 closed, or
+//     out of order on the file it names then).
+func TestOpenFilesOfAChurningShellMoveAStopOnceAtMost(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []int
+	}{
+		{"fd 10 out of order beside fd 0", []int{0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1}},
+		{"fd 10 checked and closed before fd 3 on the next file is checked", []int{1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1}},
+	} {
+		kcmp, listed, peak := churnShell(tc.steps)
+		n, settled := openFilesBy(kcmp, 1, listed)
+		if settled && n > *peak {
+			t.Errorf("%s: a shell that held at most %d open files read as %d, settled", tc.name, *peak, n)
+		}
+		var r ExitRatchet
+		moves := 0
+		for _, m := range []ExitMark{{Running: 1, Fds: n, FilesUnsettled: !settled}, {Running: 1, Fds: 3}, {Running: 1, Fds: 2}, {Running: 1, Fds: 3}, {Running: 1, Fds: 2}} {
+			if r.Advance(m) {
+				moves++
+			}
+		}
+		if moves > 1 {
+			t.Errorf("%s: read as %d (settled %v) first, then 3, 2, 3, 2, a daemon that only churned moved the stop %d times", tc.name, n, settled, moves)
 		}
 	}
 }
