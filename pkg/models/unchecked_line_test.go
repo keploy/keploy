@@ -27,6 +27,12 @@ func TestUncheckedLineCountsWritesAnsweredByKind(t *testing.T) {
 			"post-url-1: 1 background call answered again, unchecked (mock-7)"},
 		{[]UnmatchedCall{{Answer: AnswerBackgroundAgain, ClosestMock: "mock-7"}, byKind("Mongo insert keploy.events", MissInTest), {Answer: AnswerBackgroundAgain, ClosestMock: "mock-3"}, {Answer: AnswerBackgroundAgain, ClosestMock: "mock-7"}},
 			"post-url-1: 1 background write answered inside its window, unchecked (Mongo insert keploy.events); 3 background calls answered again, unchecked (mock-7 x2, mock-3)"},
+		// Calls of a marked background series name the recordings of the
+		// series that answered them, after the calls answered again.
+		{[]UnmatchedCall{{Answer: AnswerBackgroundSeries, ClosestMock: "mock-12", Kind: MissInTest}},
+			"post-url-1: 1 background series call answered on the run's clock, unchecked (mock-12)"},
+		{[]UnmatchedCall{{Answer: AnswerBackgroundSeries, ClosestMock: "mock-12"}, {Answer: AnswerBackgroundAgain, ClosestMock: "mock-7"}, {Answer: AnswerBackgroundSeries, ClosestMock: "mock-12"}, {Answer: AnswerBackgroundSeries, ClosestMock: "mock-9"}},
+			"post-url-1: 1 background call answered again, unchecked (mock-7); 3 background series calls answered on the run's clock, unchecked (mock-12 x2, mock-9)"},
 	} {
 		if got := UncheckedLine("post-url-1", tc.answers); got != tc.want {
 			t.Errorf("UncheckedLine(%+v) =\n %q\nwant\n %q", tc.answers, got, tc.want)
