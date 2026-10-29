@@ -5586,7 +5586,9 @@ func (p *Proxy) openTestErrorCapture(carry, awaits bool) {
 		for _, err := range between {
 			// Made after the previous test was read: outside every test's
 			// window, the application's background work (betweenTestsMiss).
-			if _, before := err.(beforeSetMiss); !before && provenswitch.On() && madeBetweenTests(err, readAt) {
+			// These are raw misses: a beforeSetMiss is only made into a new
+			// window's accumulator, and the read of that window drains it.
+			if provenswitch.On() && madeBetweenTests(err, readAt) {
 				err = betweenTestsMiss{err}
 			}
 			if !acc.addBounded(err, maxPendingMockErrors) {
@@ -5779,8 +5781,10 @@ func (p *Proxy) GetMockErrors(ctx context.Context) ([]models.UnmatchedCall, erro
 		// misses were read is outside every test's window, as one the next
 		// window carries in (betweenTestsMiss). The read of a set's end
 		// takes these: what the application did after its last test.
+		// pendingMockErrors holds only raw misses (a beforeSetMiss is only
+		// ever in a window's accumulator), so the time alone decides.
 		for i, err := range rawErrs {
-			if _, before := err.(beforeSetMiss); !before && madeBetweenTests(err, p.windowReadAt) {
+			if madeBetweenTests(err, p.windowReadAt) {
 				rawErrs[i] = betweenTestsMiss{err}
 			}
 		}
