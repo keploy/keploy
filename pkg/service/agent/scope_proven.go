@@ -1469,7 +1469,7 @@ func sanitizedMiss(m models.UnmatchedCall) models.UnmatchedCall {
 		// An answered call stays one (models.UnmatchedCall.Answer): how it was
 		// answered and by which process, no value.
 		Answer: m.Answer, Drift: m.Drift, Reused: m.Reused, WriteKind: m.WriteKind, Source: m.Source, RecordedIn: m.RecordedIn,
-		Repeat: m.Repeat.Clone(), Background: m.Background}
+		Repeat: m.Repeat.Clone(), Background: m.Background, Clock: m.Clock}
 	// A variable's path places name segments, not values: kept, so a shape
 	// of this miss (models.MissShape) still writes them {}. Any other place
 	// can name a JSON key that is a value.

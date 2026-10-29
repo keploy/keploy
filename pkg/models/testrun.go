@@ -589,6 +589,16 @@ type UnmatchedCall struct {
 	// in Differs, those a replay refused for a reason of its own, and why,
 	// without values.
 	FieldReasons []FieldReason `json:"field_reasons,omitempty" yaml:"field_reasons,omitempty"`
+	// Clock says, under the proven switch, that the call differs from its
+	// closest recording (ClosestMock) only in reads of the application's
+	// clock, by the parser's field diff of the two (learn.ClockOnly: every
+	// field that differs holds an instant in each, and the diff is whole):
+	// the recording with the clock moved, as a timer's "older than now"
+	// filter or a delayed write's stamp makes it. Judging sets such a test
+	// aside on the application's clock (keploy/clock_gated_call), which a
+	// keploy that replays the clock takes back, never as a call keploy did
+	// not record. No value: it is kept where the field diff is not.
+	Clock bool `json:"clock,omitempty" yaml:"clock,omitempty"`
 	// NotOwned mirrors MockMismatchReport.NotOwned: the call is ClosestMock,
 	// a recording the test does not own.
 	NotOwned bool `json:"not_owned,omitempty" yaml:"not_owned,omitempty"`
