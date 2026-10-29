@@ -23,6 +23,18 @@ func wireRequest(item string) []byte {
 	return b
 }
 
+// longWireRequest is wireRequest with 400 fields: long enough that a one-byte
+// change leaves it more than 0.99 like the original, so a row with it pins
+// byte-exactness, not a similarity bar.
+func longWireRequest(item string) []byte {
+	b := []byte{0xfe, 0xff, 0x00, 0x01}
+	b = append(b, "PRICE item="+item+";"...)
+	for i := 0; i < 400; i++ {
+		b = append(b, fmt.Sprintf("field%03d=value%03d;", i, i)...)
+	}
+	return b
+}
+
 // priceMock is a recording of req, answered with answer; filtered, a per-test
 // mock of the switch-off pool, else a session one.
 func priceMock(name string, req []byte, answer string, filtered bool) *models.Mock {
@@ -112,6 +124,37 @@ func TestUnderExactServingOnlyAnIdenticalExchangeIsServed(t *testing.T) {
 		if ok, _, _ = fuzzyMatch(ctx, logger, [][]byte{pens}, exact); ok || len(consumed) != 0 {
 			t.Fatalf("%s: exact serving begun after the store was first read: served %v, consumed %v", name, ok, consumed)
 		}
+	}
+}
+
+// Under exact serving a one-byte change ("book" -> "booK") is a miss, with
+// nothing consumed: the recording answers its own exchange only, not one
+// near enough. Without exact serving the closest recording answers it.
+func TestUnderExactServingAOneByteChangeIsAMiss(t *testing.T) {
+	book, booK := longWireRequest("book"), longWireRequest("booK")
+	if sim := fuzzyCheck(book, booK); sim <= 0.99 {
+		t.Fatalf("the changed request is %.4f like the recording; the row needs one above 0.99", sim)
+	}
+	ctx, logger := context.Background(), zap.NewNop()
+	for _, filtered := range []bool{true, false} {
+		for _, on := range []bool{true, false} {
+			var consumed []string
+			db := switchedStore{servedStore{mocks: []*models.Mock{priceMock("mock-book", book, "1250", filtered)}, consumed: &consumed}, &on}
+			ok, resp, err := fuzzyMatch(ctx, logger, [][]byte{booK}, db)
+			if err != nil {
+				t.Fatalf("filtered=%v exact=%v: %v", filtered, on, err)
+			}
+			if on && (ok || len(consumed) != 0) {
+				t.Fatalf("filtered=%v: a one-byte change was served under exact serving: %v, consumed %v", filtered, resp, consumed)
+			}
+			if !on && (!ok || len(resp) != 1 || resp[0].Message[0].Data != "1250" || len(consumed) != 1) {
+				t.Fatalf("filtered=%v, switch off: ok %v, %v, consumed %v; want the closest recording, as before", filtered, ok, resp, consumed)
+			}
+		}
+	}
+	// Nor is it the answered exchange again: an extra call is an identical one.
+	if n := extraCall([][]byte{booK}, answered{mocks: []*models.Mock{priceMock("mock-book", book, "1250", false)}}); n != 0 {
+		t.Fatalf("a one-byte change of the answered exchange is an extra call recorded %d times", n)
 	}
 }
 
