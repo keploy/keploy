@@ -268,7 +268,7 @@ func closed(ch <-chan struct{}) bool {
 // waiting hung so on a loaded runner, when the answered Refresh returned only
 // after the test had read 3 waiting. Both ways a Refresh returns are checked:
 // its ask answered, and its ctx ended.
-func TestARefreshsReturnWakesTheStoresWaiters(t *testing.T) {
+func TestARefreshReturningWakesTheStoresWaiters(t *testing.T) {
 	s := New()
 	asks := stream(t, s, context.Background(), 0)
 	answered := make(chan struct{})

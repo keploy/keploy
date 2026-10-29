@@ -22,7 +22,7 @@ func (a *Agent) HandleNetworkNames(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid name list: %v", err), http.StatusBadRequest)
 		return
 	}
-	netnames.Default().Apply(l)
+	a.networkNames().Apply(l)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -47,11 +47,20 @@ func (a *Agent) HandleNetworkNamesAsk(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 	enc := json.NewEncoder(w)
-	netnames.Default().Serve(r.Context(), after, func(ask netnames.Ask) error {
+	a.networkNames().Serve(r.Context(), after, func(ask netnames.Ask) error {
 		if err := enc.Encode(ask); err != nil {
 			return err
 		}
 		flusher.Flush()
 		return nil
 	})
+}
+
+// networkNames is the Store of the names the replay's docker networks
+// answer: the agent process's own, which its proxy reads, unless one was set.
+func (a *Agent) networkNames() *netnames.Store {
+	if a.netNames != nil {
+		return a.netNames
+	}
+	return netnames.Default()
 }

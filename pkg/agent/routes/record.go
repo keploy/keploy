@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/render"
 	"go.keploy.io/server/v3/pkg/agent/hooks/conn"
 	"go.keploy.io/server/v3/pkg/agent/memoryguard"
+	"go.keploy.io/server/v3/pkg/agent/netnames"
 	syncmgr "go.keploy.io/server/v3/pkg/agent/proxy/syncMock"
 	pTls "go.keploy.io/server/v3/pkg/agent/proxy/tls"
 	"go.keploy.io/server/v3/pkg/agent/starts"
@@ -40,6 +41,11 @@ type Agent struct {
 	// consumed is the consumed history kept for the client between
 	// /updatemockparams calls (models.ConsumedSync).
 	consumed consumedStore
+	// netNames holds the names a docker-mode replay's networks answer
+	// themselves, which HandleNetworkNames fills and HandleNetworkNamesAsk
+	// serves asks from; nil is the agent process's own (netnames.Default),
+	// the one its proxy reads.
+	netNames *netnames.Store
 }
 
 // agentReadyFilePath is the path MakeAgentReady writes on success. It

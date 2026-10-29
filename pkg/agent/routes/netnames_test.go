@@ -18,13 +18,13 @@ import (
 // the DNS miss that made it. The stream stays open between asks, so the CLI
 // is present while it lists the names.
 func TestNetworkNamesAskStreamsEachAsk(t *testing.T) {
-	a := &Agent{}
+	store := netnames.New()
+	a := &Agent{netNames: store}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+models.NetworkNamesAskPath, a.HandleNetworkNamesAsk)
 	mux.HandleFunc("POST "+models.NetworkNamesPath, a.HandleNetworkNames)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	store := netnames.Default()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
