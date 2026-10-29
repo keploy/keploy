@@ -197,6 +197,12 @@ type offsetPlaces struct {
 	// gave them the application (answerMoments): the echo reads them
 	// (echoedElsewhere).
 	answers []givenMoment
+	// dev are the index's recordings whose places can pair in the offset
+	// rule (deviating), read once for the call; examined counts the places
+	// its searches read, for the rows.
+	dev      []int32
+	devRead  bool
+	examined int
 }
 
 // offsetPlacesOf reads the places the offset rule reads for a call recorded
@@ -1057,11 +1063,19 @@ func offsetOf(rec, live, hr, hf int64, rres, lres time.Duration, mod int64) (tim
 
 // offsetFrom is the first of pairs (a value's changed instants) built on a
 // moved place by an offset (offsetMatch): the test case's request's moved
-// parts first, then the answers' places, in the order the places are read,
-// each place the recording gave the application (recorded) against each
-// another recording of its call F gave it there (given), by moment, where
-// not both are what both runs gave it in the order the recording did
-// (inRecordedOrder). ok is false when none is.
+// parts first, then the answers' places, in the order the places are read
+// (by key, in keyLess's order, then by moment, then in the order the index
+// took them), each place the recording gave the application (recorded)
+// against each another recording of its call F gave it there (given), by
+// moment, where not both are what both runs gave it in the order the
+// recording did (inRecordedOrder). ok is false when none is.
+//
+// A pair holds a place of a recording that deviates (deviating): every
+// other two places the call reads are what both runs gave it, in the
+// recording's order. So the rule searches only from those places, each
+// against its call's places at its key within the value's move (the rest of
+// the set's places it never reads), and keeps the first pair in that order:
+// a call that both runs gave the same recordings in one order reads none.
 func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 	if op == nil {
 		return offsetMatch{}, false
@@ -1069,65 +1083,238 @@ func (op *offsetPlaces) offsetFrom(pairs []driftedInstant) (offsetMatch, bool) {
 	if op.unread != "" && len(pairs) > 0 {
 		return offsetMatch{unread: op.unread}, true
 	}
-	// pass reports whether hf is no place F gave the application in hr's
-	// place: hf given by F, an answer to hr's call, and not both what both
-	// runs gave the application in the order the recording did: two
-	// recordings F gave in the test and the recording gave before the call,
-	// in one order, are no place F gave in another's (and neither is one
-	// recording's two instants). A recording made at the call's own instant
-	// the recording may never have given before the call, so F's serving it
-	// after the other is no order both runs gave: the pair stays.
-	pass := func(hr, hf offsetPlace) bool {
-		return !hf.given || hf.call != hr.call || hr.given && !hr.atCall && hf.recorded && !hf.atCall && inRecordedOrder(hr, hf)
-	}
 	for _, p := range pairs {
 		for _, g := range op.given {
 			if m, ok := offsetBetween(p, g[0], g[1]); ok {
 				return m, true
 			}
 		}
-		for _, l := range op.snap.lists {
-			refs, moved := l.refs, op.moves[l.k]
-			for i := range refs {
-				// refs[i] as the recording gave it, a place of refs or moved
-				// as F did.
-				hr, ok := op.placeOf(refs[i])
-				if !ok || !hr.recorded {
-					continue
+		if m, ok := op.offsetAt(p); ok {
+			return m, true
+		}
+	}
+	return offsetMatch{}, false
+}
+
+// offsetPass reports whether hf is no place F gave the application in hr's
+// place: hf given by F, an answer to hr's call, and not both what both runs
+// gave the application in the order the recording did: two recordings F
+// gave in the test and the recording gave before the call, in one order,
+// are no place F gave in another's (and neither is one recording's two
+// instants). A recording made at the call's own instant the recording may
+// never have given before the call, so F's serving it after the other is no
+// order both runs gave: the pair stays.
+func offsetPass(hr, hf offsetPlace) bool {
+	return !hf.given || hf.call != hr.call || hr.given && !hr.atCall && hf.recorded && !hf.atCall && inRecordedOrder(hr, hf)
+}
+
+// offsetPair is a pair offsetAt found: the place as the recording gave it
+// (hr, at hrAt, of list li), and the place F gave (a place of the index, at
+// hfAt, or the mj-th of the moves at the key: moved), in the order offsetFrom
+// reads them (before).
+type offsetPair struct {
+	li         int
+	hr, hf     offsetRef
+	hrAt, hfAt int64
+	moved      bool
+	mj         int
+	m          offsetMatch
+}
+
+func (a offsetPair) before(b offsetPair) bool {
+	switch {
+	case a.li != b.li:
+		return a.li < b.li
+	case a.hrAt != b.hrAt:
+		return a.hrAt < b.hrAt
+	case a.hr != b.hr:
+		return a.hr.rec < b.hr.rec || a.hr.rec == b.hr.rec && a.hr.i < b.hr.i
+	case a.moved != b.moved:
+		return !a.moved
+	case a.moved:
+		return a.mj < b.mj
+	case a.hfAt != b.hfAt:
+		return a.hfAt < b.hfAt
+	}
+	return a.hf.rec < b.hf.rec || a.hf.rec == b.hf.rec && a.hf.i < b.hf.i
+}
+
+// offsetAt is the first pair of the answers' places built on by p
+// (offsetFrom): from each place of a deviating recording, as the recording
+// gave it against what F gave within p's move of it (the first of them), and
+// as F gave it against what the recording gave (the first), and from each
+// move F served at a late exchange's leaf against what the recording gave.
+func (op *offsetPlaces) offsetAt(p driftedInstant) (offsetMatch, bool) {
+	var best offsetPair
+	found := false
+	keep := func(c offsetPair) {
+		if !found || c.before(best) {
+			best, found = c, true
+		}
+	}
+	dated := !p.rec.key.day
+	d := p.live.key.at - p.rec.key.at
+	rres, lres := int64(p.rec.res), int64(p.live.res)
+	for _, r := range op.deviating() {
+		rec := &op.snap.recs[r]
+		for i := range rec.places {
+			op.examined++
+			kp := &rec.places[i]
+			li, ok := op.snap.listOf(kp.k)
+			if !ok || found && li > best.li {
+				continue
+			}
+			g := op.snap.lists[li].group(rec.call)
+			if g == nil {
+				continue
+			}
+			at, ref := kp.m.key.at, offsetRef{rec: r, i: int32(i)}
+			if hr, _ := op.placeOf(ref); hr.recorded {
+				from, to := g.within(dated, at+d-rres, at+d+lres)
+				pair, ok := op.firstGiven(p, hr, g, from, to)
+				if !ok {
+					moved := op.moves[kp.k]
+					mfrom, mto := 0, len(moved)
+					if dated {
+						mfrom = sort.Search(len(moved), func(j int) bool { return moved[j].m.key.at > at+d-rres })
+						mto = max(mfrom, sort.Search(len(moved), func(j int) bool { return moved[j].m.key.at >= at+d+lres }))
+					}
+					for j := mfrom; j < mto; j++ {
+						op.examined++
+						if offsetPass(hr, moved[j]) {
+							continue
+						}
+						if m, hit := offsetBetween(p, hr, moved[j]); hit {
+							pair, ok = offsetPair{moved: true, mj: j, m: m}, true
+							break
+						}
+					}
 				}
-				// A dated value: only a place F gave the application within
-				// the value's move of hr, give or take a unit of the value
-				// (offsetOf), can be one; each list is sorted by moment.
-				from, to, mfrom, mto := 0, len(refs), 0, len(moved)
-				if !p.rec.key.day {
-					d := p.live.key.at - p.rec.key.at
-					lo, hi := hr.m.key.at+d-int64(p.rec.res), hr.m.key.at+d+int64(p.live.res)
-					from = sort.Search(len(refs), func(j int) bool { return op.snap.momentOf(refs[j]) > lo })
-					to = sort.Search(len(refs), func(j int) bool { return op.snap.momentOf(refs[j]) >= hi })
-					mfrom = sort.Search(len(moved), func(j int) bool { return moved[j].m.key.at > lo })
-					mto = sort.Search(len(moved), func(j int) bool { return moved[j].m.key.at >= hi })
+				if ok {
+					pair.li, pair.hr, pair.hrAt = li, ref, at
+					keep(pair)
 				}
-				for j := from; j < to; j++ {
-					hf, ok := op.placeOf(refs[j])
-					if !ok || pass(hr, hf) {
-						continue
-					}
-					if m, ok := offsetBetween(p, hr, hf); ok {
-						return m, true
-					}
-				}
-				for j := mfrom; j < mto; j++ {
-					if pass(hr, moved[j]) {
-						continue
-					}
-					if m, ok := offsetBetween(p, hr, moved[j]); ok {
-						return m, true
-					}
+			}
+			if hf, _ := op.placeOf(ref); hf.given {
+				from, to := g.within(dated, at-d-lres, at-d+rres)
+				if pair, ok := op.firstRecorded(p, hf, g, from, to); ok {
+					pair.li, pair.hf, pair.hfAt = li, ref, at
+					keep(pair)
 				}
 			}
 		}
 	}
-	return offsetMatch{}, false
+	for k, moved := range op.moves {
+		li, ok := op.snap.listOf(k)
+		if !ok || found && li > best.li {
+			continue
+		}
+		for j, hf := range moved {
+			op.examined++
+			g := op.snap.lists[li].group(hf.call)
+			if g == nil {
+				continue
+			}
+			from, to := g.within(dated, hf.m.key.at-d-lres, hf.m.key.at-d+rres)
+			if pair, ok := op.firstRecorded(p, hf, g, from, to); ok {
+				pair.li, pair.moved, pair.mj = li, true, j
+				keep(pair)
+			}
+		}
+	}
+	return best.m, found
+}
+
+// firstGiven is the first place of g's from-to F gave in hr's place that p
+// is built on with hr (offsetBetween): its ref, moment and match.
+func (op *offsetPlaces) firstGiven(p driftedInstant, hr offsetPlace, g *offsetGroup, from, to int) (offsetPair, bool) {
+	for j := from; j < to; j++ {
+		op.examined++
+		hf, ok := op.placeOf(g.refs[j])
+		if !ok || offsetPass(hr, hf) {
+			continue
+		}
+		if m, ok := offsetBetween(p, hr, hf); ok {
+			return offsetPair{hf: g.refs[j], hfAt: g.at[j], m: m}, true
+		}
+	}
+	return offsetPair{}, false
+}
+
+// firstRecorded is the first place of g's from-to the recording gave the
+// application whose place F gave hf in, that p is built on with hf: its
+// ref, moment and match.
+func (op *offsetPlaces) firstRecorded(p driftedInstant, hf offsetPlace, g *offsetGroup, from, to int) (offsetPair, bool) {
+	for j := from; j < to; j++ {
+		op.examined++
+		hr, ok := op.placeOf(g.refs[j])
+		if !ok || !hr.recorded || offsetPass(hr, hf) {
+			continue
+		}
+		if m, ok := offsetBetween(p, hr, hf); ok {
+			return offsetPair{hr: g.refs[j], hrAt: g.at[j], m: m}, true
+		}
+	}
+	return offsetPair{}, false
+}
+
+// deviating are the index's recordings the call reads whose places can be
+// one of a pair offsetFrom reads (offsetPass), read once for the call from
+// its view: one the recording gave before the call that F did not, one F
+// gave that the recording did not give before it, one recorded at the
+// call's own instant, one both gave that F served in an order keploy cannot
+// tell, and the later recorded of two both gave whose serves F made in an
+// order the recording did not give them in (inRecordedOrder: by when their
+// requests were recorded, byAt), whatever call each answers. Two places of
+// other recordings are both the recording's and F's, in the recording's
+// order: offsetPass passes them.
+func (op *offsetPlaces) deviating() []int32 {
+	if op.devRead {
+		return op.dev
+	}
+	op.devRead = true
+	dev := make([]bool, len(op.view))
+	var both []int32
+	for _, r := range op.snap.byAt {
+		v := op.view[r]
+		if !v.in {
+			continue
+		}
+		at := op.snap.recs[r].at
+		recorded := !at.After(op.at)
+		switch {
+		case at.Equal(op.at), recorded != v.given, v.given && v.first == 0:
+			dev[r] = true
+		case v.given:
+			both = append(both, r)
+		}
+	}
+	// Of two recordings both gave in an order keploy cannot read as the
+	// recording's (two of one instant, or one whose first serve came no
+	// later than the last of one recorded before it), the one recorded
+	// later deviates: the search reads the pair from it, both ways.
+	var lastBefore int32
+	for i := 0; i < len(both); {
+		j := i + 1
+		for j < len(both) && op.snap.recs[both[j]].at.Equal(op.snap.recs[both[i]].at) {
+			j++
+		}
+		for _, r := range both[i:j] {
+			if j-i > 1 || lastBefore >= op.view[r].first {
+				dev[r] = true
+			}
+		}
+		for _, r := range both[i:j] {
+			lastBefore = max(lastBefore, op.view[r].last)
+		}
+		i = j
+	}
+	for r, ok := range dev {
+		if ok {
+			op.dev = append(op.dev, int32(r))
+		}
+	}
+	return op.dev
 }
 
 // offsetBetween reports whether the changed instant p is built on the place

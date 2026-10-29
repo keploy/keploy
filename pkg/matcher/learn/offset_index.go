@@ -29,6 +29,7 @@ type offsetIndex struct {
 	mu     sync.Mutex
 	of     map[string]int32 // by offsetSource.key: recs
 	recs   []offsetRec
+	byAt   []int32      // recs by at, then as taken
 	lists  []offsetList // by key, in keyLess's order
 	pos    map[offsetKey]int
 	bytes  int64
@@ -43,11 +44,11 @@ type offsetIndex struct {
 // and the places of a recording it does not keep.
 var offsetBudget int64 = 64 << 20
 
-// The sizes offsetIndex counts: a place of a list, and a recording's entry
-// past its key.
+// The sizes offsetIndex counts: a place of a list (its ref and its moment),
+// and a recording's entry past its key (with its place in byAt).
 const (
-	offsetRefBytes = 8
-	offsetRecBytes = 112
+	offsetRefBytes = 16
+	offsetRecBytes = 116
 )
 
 // offsetRef is a place of an offsetList: the index's recording (rec) and
@@ -62,17 +63,29 @@ type offsetRec struct {
 	places     []keyedPlace
 }
 
-// offsetList is the index's places at one key, by moment, then in the order
-// the index took them.
+// offsetList is the index's places at one key, by the call their recordings
+// answer (offsetGroup, by call): the offset rule pairs a place only with
+// another of its call's (offsetFrom).
 type offsetList struct {
-	k    offsetKey
-	refs []offsetRef
+	k      offsetKey
+	groups []offsetGroup
 }
 
-// offsetSnap is what a call read of the index: its recordings and lists as
-// they stood, which the index never changes.
+// offsetGroup is a list's places of one call, by moment, then in the order
+// the index took them (by recording, then by place), and their moments, in
+// that order: the offset rule searches a place's move among them.
+type offsetGroup struct {
+	call string
+	refs []offsetRef
+	at   []int64
+}
+
+// offsetSnap is what a call read of the index: its recordings, its
+// recordings by when their requests were recorded (byAt, then as taken), and
+// its lists, as they stood, which the index never changes.
 type offsetSnap struct {
 	recs  []offsetRec
+	byAt  []int32
 	lists []offsetList
 }
 
@@ -173,6 +186,7 @@ func (ix *offsetIndex) take(dc *DriftCache, srcs []offsetSource) (offsetSnap, []
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 	ok := true
+	first := int32(len(ix.recs))
 	added := map[offsetKey][]offsetRef{}
 	for _, i := range missing {
 		s := &srcs[i]
@@ -205,14 +219,47 @@ func (ix *offsetIndex) take(dc *DriftCache, srcs []offsetSource) (offsetSnap, []
 		}
 	}
 	ix.addLists(added)
+	ix.addByAt(first)
 	ix.views++
-	return offsetSnap{recs: ix.recs, lists: ix.lists}, recs, ok
+	return offsetSnap{recs: ix.recs, byAt: ix.byAt, lists: ix.lists}, recs, ok
+}
+
+// addByAt puts the recordings from first on, just added, into byAt,
+// replacing it, never changing the one a call reads.
+func (ix *offsetIndex) addByAt(first int32) {
+	n := int32(len(ix.recs))
+	if first >= n {
+		return
+	}
+	fresh := make([]int32, 0, n-first)
+	for r := first; r < n; r++ {
+		fresh = append(fresh, r)
+	}
+	before := func(a, b int32) bool {
+		if !ix.recs[a].at.Equal(ix.recs[b].at) {
+			return ix.recs[a].at.Before(ix.recs[b].at)
+		}
+		return a < b
+	}
+	sort.SliceStable(fresh, func(i, j int) bool { return before(fresh[i], fresh[j]) })
+	merged := make([]int32, 0, len(ix.byAt)+len(fresh))
+	i, j := 0, 0
+	for i < len(ix.byAt) || j < len(fresh) {
+		if j == len(fresh) || i < len(ix.byAt) && before(ix.byAt[i], fresh[j]) {
+			merged = append(merged, ix.byAt[i])
+			i++
+			continue
+		}
+		merged = append(merged, fresh[j])
+		j++
+	}
+	ix.byAt = merged
 }
 
 // addLists puts added, places of recordings just added, into the index's
-// lists, each by moment after those it holds at the same moment, replacing
-// every list it changes and the lists themselves, never changing one a call
-// reads.
+// lists, each in its call's group by moment after those it holds at the same
+// moment, replacing every group and list it changes and the lists
+// themselves, never changing one a call reads.
 func (ix *offsetIndex) addLists(added map[offsetKey][]offsetRef) {
 	if len(added) == 0 {
 		return
@@ -222,25 +269,36 @@ func (ix *offsetIndex) addLists(added map[offsetKey][]offsetRef) {
 	fresh := false
 	for k, refs := range added {
 		sort.SliceStable(refs, func(a, b int) bool { return snap.momentOf(refs[a]) < snap.momentOf(refs[b]) })
-		p, ok := ix.pos[k]
-		if !ok {
-			lists = append(lists, offsetList{k: k, refs: refs})
-			fresh = true
-			continue
+		var calls []string
+		byCall := map[string][]offsetRef{}
+		for _, r := range refs {
+			c := snap.recs[r.rec].call
+			if _, seen := byCall[c]; !seen {
+				calls = append(calls, c)
+			}
+			byCall[c] = append(byCall[c], r)
 		}
-		old := lists[p].refs
-		merged := make([]offsetRef, 0, len(old)+len(refs))
-		i, j := 0, 0
-		for i < len(old) || j < len(refs) {
-			if j == len(refs) || i < len(old) && snap.momentOf(old[i]) <= snap.momentOf(refs[j]) {
-				merged = append(merged, old[i])
-				i++
+		p, ok := ix.pos[k]
+		var groups []offsetGroup
+		if ok {
+			groups = append([]offsetGroup(nil), lists[p].groups...)
+		}
+		for _, c := range calls {
+			gi := sort.Search(len(groups), func(i int) bool { return groups[i].call >= c })
+			if gi < len(groups) && groups[gi].call == c {
+				groups[gi] = snap.mergeGroup(groups[gi], byCall[c])
 				continue
 			}
-			merged = append(merged, refs[j])
-			j++
+			groups = append(groups, offsetGroup{})
+			copy(groups[gi+1:], groups[gi:])
+			groups[gi] = snap.mergeGroup(offsetGroup{call: c}, byCall[c])
 		}
-		lists[p].refs = merged
+		if ok {
+			lists[p].groups = groups
+			continue
+		}
+		lists = append(lists, offsetList{k: k, groups: groups})
+		fresh = true
 	}
 	if fresh {
 		sort.Slice(lists, func(a, b int) bool { return keyLess(lists[a].k, lists[b].k) })
@@ -249,6 +307,49 @@ func (ix *offsetIndex) addLists(added map[offsetKey][]offsetRef) {
 		}
 	}
 	ix.lists = lists
+}
+
+// mergeGroup is g with refs, by moment, put in after those g holds at the
+// same moment: a new group.
+func (s offsetSnap) mergeGroup(g offsetGroup, refs []offsetRef) offsetGroup {
+	out := offsetGroup{call: g.call, refs: make([]offsetRef, 0, len(g.refs)+len(refs)), at: make([]int64, 0, len(g.refs)+len(refs))}
+	i, j := 0, 0
+	for i < len(g.refs) || j < len(refs) {
+		if j == len(refs) || i < len(g.refs) && g.at[i] <= s.momentOf(refs[j]) {
+			out.refs, out.at = append(out.refs, g.refs[i]), append(out.at, g.at[i])
+			i++
+			continue
+		}
+		out.refs, out.at = append(out.refs, refs[j]), append(out.at, s.momentOf(refs[j]))
+		j++
+	}
+	return out
+}
+
+// listOf is the index in s.lists of k's list, ok false where s holds none.
+func (s offsetSnap) listOf(k offsetKey) (int, bool) {
+	i := sort.Search(len(s.lists), func(i int) bool { return !keyLess(s.lists[i].k, k) })
+	return i, i < len(s.lists) && s.lists[i].k == k
+}
+
+// group is l's group of call, nil where l holds none.
+func (l *offsetList) group(call string) *offsetGroup {
+	i := sort.Search(len(l.groups), func(i int) bool { return l.groups[i].call >= call })
+	if i < len(l.groups) && l.groups[i].call == call {
+		return &l.groups[i]
+	}
+	return nil
+}
+
+// within is the places of g whose moments are in (lo, hi), from-to: all of
+// them where dated is false (a time of day, read around the day).
+func (g *offsetGroup) within(dated bool, lo, hi int64) (from, to int) {
+	if !dated {
+		return 0, len(g.at)
+	}
+	from = sort.Search(len(g.at), func(j int) bool { return g.at[j] > lo })
+	to = sort.Search(len(g.at), func(j int) bool { return g.at[j] >= hi })
+	return from, max(from, to)
 }
 
 // placesBytes is the bytes the held part counts of places (setPlaces).
