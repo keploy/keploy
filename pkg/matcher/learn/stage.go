@@ -1,6 +1,11 @@
 package learn
 
-import "go.keploy.io/server/v3/pkg/models"
+import (
+	"runtime"
+	"sync"
+
+	"go.keploy.io/server/v3/pkg/models"
+)
 
 // WarmSet reads, in the background, what the rules of every call read of
 // each payload of the running set (warm), for each recording src visits,
@@ -13,9 +18,14 @@ import "go.keploy.io/server/v3/pkg/models"
 //
 // It waits on no clock. A call reads what it needs of the set as it did:
 // each recording neither it nor the staging has taken it reads itself, and
-// it waits only for those of its own recordings another is reading (the
-// staging reads one at a time), never for the staging to end. The staging
-// takes no recording a call took. It stops at the set's NewSet (the set
+// it waits only for those of its own recordings another is reading (each
+// of the staging's readers reads one at a time), never for the staging to
+// end. The staging takes no recording a call took. It reads with
+// stageReaders readers at once, half the CPUs Go runs on (GOMAXPROCS), so
+// the set is read before its first heavy test opens while the replay keeps
+// the other half: one reader alone was still reading api-server's set when
+// TestSeeded opened (r3f: about 270 CPU-seconds of the set's reads, its
+// first test about 100 s in). It stops at the set's NewSet (the set
 // keeps nothing more) or where the set's budget is spent (setBudget: the
 // set reads the rest once per test, as before), whichever comes first, and
 // the channel it returns gives then what the set it staged read and kept
@@ -32,39 +42,86 @@ func (t *Tracker) WarmSet(src func(visit func(*models.Mock) bool) error) <-chan 
 	// it ends.
 	dc := t.newDrifts()
 	t.mu.Unlock()
+	readers := stageReaders()
 	go func() {
 		defer close(done)
-		_ = dc.warmSet(src)
-		done <- dc.set.use()
+		_ = dc.warmSet(src, readers)
+		u := dc.set.use()
+		u.Readers = readers
+		done <- u
 	}()
 	return done
 }
 
-// warmSet is WarmSet's read, on dc's set (setOf): each recording src
-// visits is read (warmOne) as the payload it recorded (a lazy Raw of it
-// unserved: LazyRawOf, its answer the agent parked on disk read back first,
-// withAnswer). What is derived of a payload depends on its text alone, the
-// recording's, however a test was served it (setDerived), so the calls'
-// reads of a recording, served or not, find the staging's.
-func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error) error {
+// stageReaders is how many readers a set's staging reads its recordings
+// with (WarmSet): half the CPUs Go runs on (GOMAXPROCS, which follows the
+// agent's CPU limit), at least one. A var for the rows that hold one
+// reader's read.
+var stageReaders = halfTheCPUs
+
+func halfTheCPUs() int {
+	if n := runtime.GOMAXPROCS(0) / 2; n > 1 {
+		return n
+	}
+	return 1
+}
+
+// warmSet is WarmSet's read, on dc's set (setOf), by readers readers at
+// once: each recording src visits is read (warmOne) as the payload it
+// recorded (a lazy Raw of it unserved: LazyRawOf, its answer the agent
+// parked on disk read back first, withAnswer). src visits them one at a
+// time, in recorded order, and each is taken (take) only once a reader is
+// free to read it, so none is taken ahead of the readers: a call reads
+// itself every recording no reader has begun, and a set over (take: past
+// its budget, or after its NewSet) is visited no further. What is derived
+// of a payload depends on its text alone, the recording's, however a test
+// was served it (setDerived), so the calls' reads of a recording, served
+// or not, find the staging's; the readers share dc as one test's handlers
+// do.
+func (dc *DriftCache) warmSet(src func(visit func(*models.Mock) bool) error, readers int) error {
 	if dc == nil || dc.set == nil {
 		return nil
 	}
 	s := dc.set
-	return src(func(m *models.Mock) bool {
+	if readers < 1 {
+		readers = 1
+	}
+	type read struct {
+		x  Raw
+		ch chan struct{}
+	}
+	// free holds a token for each reader not reading; next never holds
+	// more than the readers' count, so a hand-off never waits.
+	free, next := make(chan struct{}, readers), make(chan read, readers)
+	var wg sync.WaitGroup
+	for i := 0; i < readers; i++ {
+		free <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for r := range next {
+				dc.warmOne(s, r.x, r.ch, true)
+				free <- struct{}{}
+			}
+		}()
+	}
+	err := src(func(m *models.Mock) bool {
 		if m == nil {
 			return true
 		}
+		<-free
 		x := dc.LazyRawOf(m, false, withAnswer(m))
 		ch, mine := s.take(x)
-		if ch == nil {
-			return false
+		if !mine {
+			free <- struct{}{}
+			return ch != nil
 		}
-		if mine {
-			dc.warmOne(s, x, ch, true)
-		}
+		next <- read{x, ch}
 		return true
 	})
+	close(next)
+	wg.Wait()
+	return err
 }
 
 // withAnswer loads m with its recorded answer, one the agent parked on disk
@@ -84,11 +141,13 @@ func withAnswer(m *models.Mock) func() (*models.Mock, error) {
 
 // SetUse is what the running set's learn step has read and kept of its
 // payloads (setDerived), for the agent's log: how many its staging read
-// (WarmSet) and its calls read for the set, the bytes each tier keeps, the
-// set's budget (setBudget), and whether the tiers that let none go (held,
-// forms) were full, past which the set's payloads are read once per test.
+// (WarmSet) and its calls read for the set, the readers the staging read
+// with (stageReaders; 0 where no staging read), the bytes each tier keeps,
+// the set's budget (setBudget), and whether the tiers that let none go
+// (held, forms) were full, past which the set's payloads are read once per
+// test.
 type SetUse struct {
-	Staged, Called             int
+	Staged, Called, Readers    int
 	Held, Words, Forms, Budget int64
 	HeldFull, FormsFull        bool
 }

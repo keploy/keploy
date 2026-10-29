@@ -51,6 +51,15 @@ func heldUntil(t *testing.T, raw []Raw, text string) (counts *sync.Map, reading 
 	return counts, reading, begun, release
 }
 
+// oneStageReader has the set's staging read with one reader for the row
+// (stageReaders), so the row holds the staging's one read in progress.
+func oneStageReader(t *testing.T) {
+	t.Helper()
+	was := stageReaders
+	stageReaders = func() int { return 1 }
+	t.Cleanup(func() { stageReaders = was })
+}
+
 // A set staged before its tests (WarmSet) is read there, off the calls'
 // answer path: each of its payloads is decoded and read for its instants
 // once, by the staging, and no call of any of its tests reads one for the
@@ -116,6 +125,7 @@ func TestACallWaitsOnlyForItsOwnPayloadTheStagingIsReading(t *testing.T) {
 	want := row.classify(plain.Drifts())
 	plain.End()
 
+	oneStageReader(t)
 	counts, reading, begun, release := heldUntil(t, raw, raw[0].payload().text)
 	tr := NewTracker()
 	tr.NewSet()
@@ -171,6 +181,7 @@ func TestASetsStagingStopsAtTheNextSet(t *testing.T) {
 	const n = 24
 	row := newHeldRow(n, 4)
 	raw := row.raw()
+	oneStageReader(t)
 	counts, reading, _, release := heldUntil(t, raw, raw[0].payload().text)
 	tr := NewTracker()
 	tr.NewSet()
