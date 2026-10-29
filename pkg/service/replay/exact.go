@@ -111,6 +111,13 @@ type exactPlan struct {
 	// staging says so to the agent, and its end does not require its worker
 	// scope answered (unansweredWorker).
 	background bool
+	// aside is the set's test cases the replay sets aside (skipped as
+	// quarantined under the proven switch), in recorded order; recIdx every
+	// test case's place in that order; asideSent the set-aside ones an
+	// opening already named (exact_aside.go, models.ExactServing.Aside).
+	aside     []string
+	recIdx    map[string]int
+	asideSent map[string]bool
 	// returned is, by mock, the owner a drift move's recording was given
 	// back to (returnStaleMoves): its quarantine no longer applies.
 	returned map[string]string
@@ -805,6 +812,9 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 	// keploy record's full round: the recordings it shares with the tests
 	// that ran beside it, after its own.
 	ex.Concurrent = plan.concurrentServing(name)
+	// The test cases set aside before it, which no earlier opening named:
+	// their recordings answer its calls and the later ones' (exact_aside.go).
+	ex.Aside = plan.asideBefore(name)
 	params := models.MockFilterParams{
 		Variables:   open.vars,
 		TestRequest: open.request,
@@ -816,6 +826,7 @@ func (r *Replayer) serveExactTest(ctx context.Context, plan *exactPlan, name str
 		utils.LogError(r.logger, err, "failed to serve the test case its own mocks", zap.String("testCase", name))
 		return err
 	}
+	plan.sentAside(ex.Aside)
 	return nil
 }
 
