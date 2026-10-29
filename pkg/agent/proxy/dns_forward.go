@@ -289,20 +289,46 @@ func (p *Proxy) networkNames() *netnames.Store {
 	return netnames.Default()
 }
 
-// replayMissServers are the resolvers a replay's DNS mock miss for name is
-// forwarded to: the in-network resolvers, and only for a name the replay's
-// own network owns (networkOwnsName). Real egress beyond the replay's own
-// network is opened only by a named knob: test.allowEgress "dns",
-// --global-passthrough, or mocking turned off, which asks for real traffic by
-// definition.
-func (p *Proxy) replayMissServers(mockingEnabled bool, name string) []string {
+// replayMissServers are the resolvers a replay's DNS mock miss for name, of
+// type qtype, is forwarded to: the in-network resolvers, and only for a name
+// the replay's own network owns (networkOwnsName) and a type that network's
+// resolver answers for it itself (inNetworkAnswersItself). Real egress beyond
+// the replay's own network is opened only by a named knob: test.allowEgress
+// "dns", --global-passthrough, or mocking turned off, which asks for real
+// traffic by definition.
+func (p *Proxy) replayMissServers(mockingEnabled bool, name string, qtype uint16) []string {
 	if !mockingEnabled || p.GlobalPassthrough || p.allowEgressDNS {
 		return p.dnsUpstreamServers
 	}
-	if !p.networkOwnsName(name) {
+	if !p.inNetworkAnswersItself(qtype) || !p.networkOwnsName(name) {
 		return nil
 	}
 	return p.dnsInNetworkServers
+}
+
+// inNetworkAnswersItself reports whether the replay network's resolver
+// answers a query of type qtype for a name the network owns without asking
+// the host's or public resolvers.
+//
+//   - Cluster DNS is authoritative for the cluster's domain: it answers every
+//     type for a name under it, a name it has no record of included.
+//   - Docker's embedded resolver (127.0.0.11) answers only A and AAAA (the
+//     container's address, or no answer for a family it has none of) and MX
+//     (no answer: RFC 5321's implicit MX) for a name it holds. It recurses
+//     every other type (CNAME, TXT, SRV, PTR, NS, SOA, CAA, ANY) to the host's
+//     or public resolvers, even for a name it holds (measured on docker 29).
+//
+// A query of another type for an owned name is answered as a native replay
+// answers it.
+func (p *Proxy) inNetworkAnswersItself(qtype uint16) bool {
+	if p.dnsClusterDomain != "" {
+		return true
+	}
+	switch qtype {
+	case dns.TypeA, dns.TypeAAAA, dns.TypeMX:
+		return true
+	}
+	return false
 }
 
 // logReplayDNSForwarding says once, at a replay agent's start, which resolvers

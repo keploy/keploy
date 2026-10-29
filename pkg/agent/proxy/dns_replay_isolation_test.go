@@ -175,11 +175,11 @@ func TestCaptureDNSUpstream_ContainerKeepsOnlyDockerResolverInNetwork(t *testing
 	if !slices.Equal(p.dnsUpstreamServers, []string{"127.0.0.11", "8.8.8.8"}) {
 		t.Fatalf("dnsUpstreamServers = %v", p.dnsUpstreamServers)
 	}
-	if got := p.replayMissServers(true, "db."); !slices.Equal(got, []string{"127.0.0.11"}) {
+	if got := p.replayMissServers(true, "db.", dns.TypeA); !slices.Equal(got, []string{"127.0.0.11"}) {
 		t.Fatalf("a replay miss for the service name db goes to %v, want only docker's 127.0.0.11", got)
 	}
 	for _, name := range []string{askedName, "riso-unrecorded."} {
-		if got := p.replayMissServers(true, name); got != nil {
+		if got := p.replayMissServers(true, name, dns.TypeA); got != nil {
 			t.Fatalf("a replay miss for %s goes to %v; docker's resolver would recurse it to the host's, want none", name, got)
 		}
 	}
@@ -299,6 +299,89 @@ func TestReplayDNSMiss_InNetworkResolverGetsOnlyTheNetworksOwnNames(t *testing.T
 	}
 }
 
+// A name the replay's network owns is forwarded to its resolver only for a
+// query type that resolver answers for it itself. Docker's 127.0.0.11 answers
+// A, AAAA and MX for a name it holds and recurses every other type to the
+// host's or public resolvers (repro/rv3/docker-owned-name-qtypes.sh, docker
+// 29: NS, CNAME, SOA, PTR, TXT, SRV, CAA and ANY of a container name, an alias
+// and a network-qualified name each reached the outside sink), so those get
+// keploy's own answer. Cluster DNS is authoritative for its domain and answers
+// every type of a name under it.
+func TestReplayDNSMiss_OwnedNameIsForwardedOnlyForTheTypesItsResolverAnswers(t *testing.T) {
+	answered := []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeMX}
+	recursed := []uint16{dns.TypeNS, dns.TypeCNAME, dns.TypeSOA, dns.TypePTR, dns.TypeTXT,
+		dns.TypeSRV, dns.TypeCAA, dns.TypeANY}
+	cases := []struct {
+		name          string
+		clusterDomain string
+		owned         []string
+		forwarded     []uint16
+		kept          []uint16
+	}{
+		{
+			name:      "docker's resolver",
+			owned:     []string{"ownedc.", "owned-alias.", "ownedc.rvnet.", "4e14c014c7c4."},
+			forwarded: answered,
+			kept:      recursed,
+		},
+		{
+			name:          "cluster DNS",
+			clusterDomain: "cluster.local",
+			owned:         []string{"mysql.shop.svc.cluster.local.", "cluster.local."},
+			forwarded:     append(append([]uint16(nil), answered...), recursed...),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, asked, stop := ownNameUpstream(t)
+			defer stop()
+			p := hostResolverProxy(t, addr)
+			p.errChannel = make(chan error, 256) // every kept query is a reported miss
+			p.IsDocker = true
+			p.dnsInNetworkServers = append([]string(nil), p.dnsUpstreamServers...)
+			p.dnsClusterDomain = tc.clusterDomain
+			p.netNames = netnames.New()
+			p.netNames.Apply(netnames.List{Networks: []string{"rvnet"}, Names: []string{
+				"ownedc", "ownedc.rvnet", "owned-alias", "owned-alias.rvnet", "4e14c014c7c4", "4e14c014c7c4.rvnet"}})
+
+			for _, name := range tc.owned {
+				for _, qt := range tc.forwarded {
+					q := dns.Question{Name: name, Qtype: qt, Qclass: dns.ClassINET}
+					before := asked(name)
+					entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+					if n := asked(name) - before; n != 1 {
+						t.Errorf("%s %s, which the network's resolver answers itself, was forwarded %d time(s); want 1", dns.TypeToString[qt], name, n)
+					}
+					if !entry.FromUpstream {
+						t.Errorf("%s %s: want the in-network resolver's answer, got keploy's own %v", dns.TypeToString[qt], name, entry.Msg)
+					}
+				}
+				for _, qt := range tc.kept {
+					q := dns.Question{Name: name, Qtype: qt, Qclass: dns.ClassINET}
+					before := asked(name)
+					entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil)
+					if n := asked(name) - before; n != 0 {
+						t.Errorf("%s %s was forwarded %d time(s) to a resolver that recurses that type off the machine; want 0", dns.TypeToString[qt], name, n)
+					}
+					if entry.FromUpstream || entry.Msg == nil {
+						t.Errorf("%s %s: want keploy's own answer, got FromUpstream=%v %v", dns.TypeToString[qt], name, entry.FromUpstream, entry.Msg)
+					}
+				}
+			}
+
+			// The opt-in still forwards every type of every name.
+			p.allowEgressDNS = true
+			for _, qt := range tc.kept {
+				q := dns.Question{Name: tc.owned[0], Qtype: qt, Qclass: dns.ClassINET}
+				before := asked(q.Name)
+				if entry := p.resolveUncachedDNSResponse(q, models.MODE_TEST, true, time.Now(), nil); asked(q.Name)-before != 1 || !entry.FromUpstream {
+					t.Errorf("with test.allowEgress dns, %s %s was forwarded %d time(s) (FromUpstream=%v); want 1, true", dns.TypeToString[qt], q.Name, asked(q.Name)-before, entry.FromUpstream)
+				}
+			}
+		})
+	}
+}
+
 func TestClusterDomain(t *testing.T) {
 	cases := []struct {
 		search []string
@@ -344,13 +427,13 @@ func TestCaptureDNSUpstream_InClusterAgentForwardsTheClustersNames(t *testing.T)
 	if p.dnsClusterDomain != "cluster.local" {
 		t.Fatalf("dnsClusterDomain = %q, want cluster.local", p.dnsClusterDomain)
 	}
-	if got := p.replayMissServers(true, "mysql.shop.svc.cluster.local."); !slices.Equal(got, []string{"10.96.0.10"}) {
+	if got := p.replayMissServers(true, "mysql.shop.svc.cluster.local.", dns.TypeA); !slices.Equal(got, []string{"10.96.0.10"}) {
 		t.Fatalf("a miss for a cluster service goes to %v, want the cluster DNS", got)
 	}
-	if got := p.replayMissServers(true, "db."); got != nil {
+	if got := p.replayMissServers(true, "db.", dns.TypeA); got != nil {
 		t.Fatalf("a replay miss for the bare name db goes to %v; CoreDNS forwards a bare name upstream, want none", got)
 	}
-	if got := p.replayMissServers(true, "sqs.us-east-1.amazonaws.com."); got != nil {
+	if got := p.replayMissServers(true, "sqs.us-east-1.amazonaws.com.", dns.TypeA); got != nil {
 		t.Fatalf("a miss for an outside name goes to %v; cluster DNS would recurse it, want none", got)
 	}
 }
@@ -369,7 +452,7 @@ func TestCaptureDNSUpstream_NativeAgentInAPodIsNotInCluster(t *testing.T) {
 		t.Fatalf("a native agent got in-network resolvers %v and cluster domain %q; want none", p.dnsInNetworkServers, p.dnsClusterDomain)
 	}
 	for _, name := range []string{"mysql.shop.svc.cluster.local.", "db."} {
-		if got := p.replayMissServers(true, name); got != nil {
+		if got := p.replayMissServers(true, name, dns.TypeA); got != nil {
 			t.Fatalf("a native replay's miss for %s goes to %v; want none", name, got)
 		}
 	}
