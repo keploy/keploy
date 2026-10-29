@@ -170,6 +170,9 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 		logger.Debug("The request is a filtered request")
 		return
 	}
+	// The request body decoded, before it is taken apart below: what
+	// BodiesDecoded is told the test case holds of it, at most.
+	reqDecoded := len(reqBody)
 	var formData []models.FormData
 	sent := false // the test case was handed on t
 	if contentType := req.Header.Get("Content-Type"); strings.HasPrefix(contentType, "multipart/form-data") {
@@ -233,6 +236,13 @@ func Capture(ctx context.Context, logger *zap.Logger, t chan *models.TestCase, r
 			zap.String("url", req.URL.String()),
 			zap.String("method", req.Method))
 		respBody = []byte{} // clear the body — only size is stored
+	}
+
+	// The caller that carried a BodiesDecodedFunc weighs the test case by
+	// its bodies decoded here, and may leave it out; it counts what it
+	// leaves out.
+	if !BodiesDecoded(ctx, reqDecoded, len(respBody)) {
+		return
 	}
 
 	hasBinaryFile := false
