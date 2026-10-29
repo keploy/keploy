@@ -83,6 +83,13 @@ func (p *servingProxy) SetUnrequired(marks models.BackgroundMarks) error {
 func (p *servingProxy) ExactTestUnusedBackground() (string, []string, bool) {
 	return p.mm.ExactTestUnusedBackground()
 }
+func (p *servingProxy) ServeExactAside(from string, mocks []*models.Mock) error {
+	p.mm.ServeExactAside(from, mocks)
+	return nil
+}
+func (p *servingProxy) ExactTestServedAside() (string, []string, bool) {
+	return p.mm.ExactTestServedAside()
+}
 func (p *servingProxy) ResetStatefulCursors()      { p.mm.ResetStatefulCursors() }
 func (p *servingProxy) ContinueTestErrorCapture()  {}
 func (p *servingProxy) WithdrawTestErrorCapture()  {}
@@ -1029,6 +1036,94 @@ func TestCallsBeforeAKeptTestAfterAQuarantinedOneFailNoTest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNonExistentApp's full shape in api-server's acceptance run 3: the
+// quarantined test before the kept one filled a cache at record (vault's PAT
+// read), so at replay, with it set aside, the kept test makes that call in
+// its own window. The set-aside test's recording answers it, unchecked: the
+// kept test passes, its evidence names the serve, and nothing requires the
+// call of it (founder D1, S12 v2: a data-plane call is answered by the
+// recording it is, wherever the replay's timing puts it). The recording
+// answers once: a later test that makes the call again misses. A call that is
+// not exactly the recording still misses, and fails the test it is made in.
+func TestASetAsideTestsRecordingAnswersTheCallAfterIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		served     bool
+	}{
+		{"the same call is served, unchecked", "/pat", true},
+		{"a call that is not exactly it still misses", "/pat?fresh=1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, rp := exactAgent(t,
+				[]*models.Mock{pingMock("mock-1", "/pat", "pat", t0), pingMock("mock-2", "/k", "k", t0.Add(time.Second)), pingMock("mock-3", "/l", "l", t0.Add(2*time.Second))},
+				map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}, "o::TestL": {"mock-3"}}, map[string][]string{})
+			ctx := context.Background()
+			require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
+			b, serr := a.ProvenBegin(ctx, begin("TestQ"))
+			require.Nil(t, serr)
+			require.Equal(t, models.ScopeActionSkip, b.Action)
+			got, e := runTest(t, a, rp, "TestK", "/k", tc.path)
+			if !tc.served {
+				require.Equal(t, []string{"200 k"}, got[:1])
+				require.NotEqual(t, 200, mustCode(got[1]), "a call that is not exactly the set-aside recording is not answered by it")
+				require.Equal(t, models.ScopeActionFail, e.Action)
+				require.Contains(t, e.Reason, "GET /pat to 127.0.0.1:18093 had no recorded answer")
+				require.Empty(t, evidenceOf(t, a, "o::TestK").ServedAside)
+				return
+			}
+			require.Equal(t, []string{"200 k", "200 pat"}, got)
+			require.Empty(t, e.Action, e.Reason)
+			ev := evidenceOf(t, a, "o::TestK")
+			require.NotNil(t, ev)
+			require.Equal(t, []string{"mock-1 served from o::TestQ (set aside)"}, ev.ServedAside)
+			require.Empty(t, ev.Unconsumed, "a set-aside recording is never the test's to make")
+			// Answered once: the next test's same call is no longer it.
+			got, e = runTest(t, a, rp, "TestL", "/l", "/pat")
+			require.Equal(t, "200 l", got[0])
+			require.NotEqual(t, 200, mustCode(got[1]), "a set-aside recording answers once")
+			require.Equal(t, models.ScopeActionFail, e.Action)
+		})
+	}
+}
+
+// mustCode is the status code of a runTest answer ("<code> <body>").
+func mustCode(answer string) int {
+	var code int
+	_, _ = fmt.Sscanf(answer, "%d", &code)
+	return code
+}
+
+// A test with a recording of its own that is exactly a set-aside test's call
+// is answered by its own, which it is required to make: the set-aside
+// recording is filed after it and is not used.
+func TestATestsOwnRecordingAnswersBeforeASetAsideOne(t *testing.T) {
+	a, rp := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/pat", "aside", t0), pingMock("mock-2", "/pat", "own", t0.Add(time.Second))},
+		map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}}, map[string][]string{})
+	ctx := context.Background()
+	require.NoError(t, a.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
+	_, serr := a.ProvenBegin(ctx, begin("TestQ"))
+	require.Nil(t, serr)
+	got, e := runTest(t, a, rp, "TestK", "/pat")
+	require.Equal(t, []string{"200 own"}, got)
+	require.Empty(t, e.Action, e.Reason)
+	ws, err := a.GetScopeWindows(ctx)
+	require.NoError(t, err)
+	for _, w := range ws {
+		require.Nil(t, w.Evidence, "%s: a test served only its own has no evidence", w.Name)
+	}
+	// Not made, the test's own recording is still required of it.
+	a2, rp2 := exactAgent(t,
+		[]*models.Mock{pingMock("mock-1", "/pat", "aside", t0), pingMock("mock-2", "/pat", "own", t0.Add(time.Second))},
+		map[string][]string{"o::TestQ": {"mock-1"}, "o::TestK": {"mock-2"}}, map[string][]string{})
+	require.NoError(t, a2.SetScopeSkips(ctx, map[string]string{"o::TestQ": "flaky/request_changed"}, nil))
+	_, serr = a2.ProvenBegin(ctx, begin("TestQ"))
+	require.Nil(t, serr)
+	_, e = runTest(t, a2, rp2, "TestK")
+	require.Equal(t, models.ScopeActionFail, e.Action)
+	require.Equal(t, []string{"mock-2"}, evidenceOf(t, a2, "o::TestK").Unconsumed)
 }
 
 // lateProxy holds a miss between its report being built and its filing
