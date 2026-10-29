@@ -19,10 +19,11 @@ const maxAliasNodes = 10000
 // the encoding lacks at a level of the file whose keys keploy knows
 // (models.MappingKeys) -- the top, a test entry (matched by its id), a mock
 // entry (by its name in its list), a boot, a concurrency group, a suite --
-// with its comments, in its place among the keys around it; and old's
-// comments on the keys both have. A key keploy knows and left out is
-// keploy's to leave out, and is not brought back. The comment old starts
-// with is its head, which encodeOver keeps (commentHead). renames is how the
+// with its comments, in its place among the keys around it; old's comments
+// on the keys both have (an older test's mocks: is its mock_entries:); and
+// the comment old ends with. A key keploy knows and left out is keploy's to
+// leave out, and is not brought back. The comment old starts with is its
+// head, which encodeOver keeps (commentHead). renames is how the
 // rewrite renamed the mocks old's mock entries name (EncodeOver): nil when
 // each keeps its name. lost names the fields it could not keep (aliases),
 // dropped the hand-added fields of old's items the encoding has no item for
@@ -48,6 +49,11 @@ func keepEdits(old, data []byte, renames map[string]string) (out []byte, lost, d
 	}
 	m := &merger{renames: renames, matched: map[*yamlLib.Node]bool{}, kept: map[*yamlLib.Node]bool{}, seen: map[*yamlLib.Node]bool{}}
 	changed := m.mapping(oroot, nroot, models.MappingLevelTop, "")
+	// YAML hangs the comment a file ends with, after a blank line, on the
+	// document: it stays the file's end.
+	if od.FootComment != "" && nd.FootComment == "" {
+		nd.FootComment, changed = od.FootComment, true
+	}
 	if m.placeMoved(nroot) {
 		changed = true
 	}
@@ -137,7 +143,7 @@ func (m *merger) mapping(old, cur *yamlLib.Node, level, where string) bool {
 		k, v := p[0], p[1]
 		if j := pairIndex(cur, k.Value); j >= 0 {
 			ck, cv := cur.Content[2*j], cur.Content[2*j+1]
-			if keepComments(k, ck) || keepComments(resolved(v), cv) {
+			if keepPairComments(k, resolved(v), ck, cv) {
 				changed = true
 			}
 			if sub, ok := childLevel(level, k.Value); ok && m.list(resolved(v), cv, sub, where+k.Value) {
@@ -152,6 +158,10 @@ func (m *merger) mapping(old, cur *yamlLib.Node, level, where string) bool {
 			// matched in the test's own list.
 			if level == models.MappingLevelTest && k.Value == "mocks" {
 				if j := pairIndex(cur, "mock_entries"); j >= 0 {
+					// mocks:'s comments go to mock_entries:, as its items do.
+					if keepPairComments(k, resolved(v), cur.Content[2*j], cur.Content[2*j+1]) {
+						changed = true
+					}
 					if m.list(resolved(v), cur.Content[2*j+1], models.MappingLevelEntry, where+k.Value) {
 						changed = true
 					}
@@ -196,7 +206,7 @@ func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 		}
 	}
 	changed := false
-	nth := map[string]int{}
+	nth, listed := map[string]int{}, map[string]int{}
 	for i, item := range old.Content {
 		item = resolved(item)
 		id := identity(item, keys)
@@ -204,6 +214,7 @@ func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 			m.lose(item, itemLevel, fmt.Sprintf("%s[%d].", where, i))
 			continue
 		}
+		at := nextListing(where, id, listed)
 		match, ok := id, true
 		if itemLevel == models.MappingLevelEntry {
 			match, ok = m.entryMatch(id)
@@ -211,7 +222,7 @@ func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 		n := nth[match]
 		nth[match]++
 		if !ok || n >= len(byID[match]) {
-			m.lose(item, itemLevel, where+"["+id+"].")
+			m.lose(item, itemLevel, at)
 			continue
 		}
 		c := byID[match][n]
@@ -222,7 +233,7 @@ func (m *merger) list(old, cur *yamlLib.Node, itemLevel, where string) bool {
 		if keepComments(item, c) {
 			changed = true
 		}
-		if m.mapping(item, c, itemLevel, where+"["+id+"].") {
+		if m.mapping(item, c, itemLevel, at) {
 			changed = true
 		}
 	}
@@ -325,13 +336,25 @@ func (m *merger) dropList(old *yamlLib.Node, itemLevel, where string) {
 		return
 	}
 	keys := identityKeys(itemLevel)
+	listed := map[string]int{}
 	for i, item := range old.Content {
 		at := fmt.Sprintf("%s[%d].", where, i)
 		if id := identity(item, keys); id != "" {
-			at = where + "[" + id + "]."
+			at = nextListing(where, id, listed)
 		}
 		m.lose(resolved(item), itemLevel, at)
 	}
+}
+
+// nextListing counts the next listing of identity id in the list at where
+// (in listed), and is where it is, for a report: [id], and [id #n] for its
+// n-th listing there, so a report on a mock a test lists twice says which
+// listing.
+func nextListing(where, id string, listed map[string]int) string {
+	if listed[id]++; listed[id] > 1 {
+		return fmt.Sprintf("%s[%s #%d].", where, id, listed[id])
+	}
+	return where + "[" + id + "]."
 }
 
 // dropItem adds to m.dropped each field a hand edit added to item, an item
@@ -434,6 +457,39 @@ func keepComments(old, cur *yamlLib.Node) bool {
 		if *c.from != "" && *c.to == "" {
 			*c.to, changed = *c.from, true
 		}
+	}
+	return changed
+}
+
+// keepPairComments gives the pair ck: cv the comments of the pair k: v
+// where it has none, the key's and the value's: a comment above a key is
+// on the key, one after a scalar or a flow list ([a, b] # note) on the
+// value, one after "key:" over a block list on the key. YAML writes the
+// comment after a block list or map in its place from the key, and the
+// one after a flow list or map from the value; from the other node it
+// writes it on a later pair (the next key, or another test's, mock's or
+// boot's), or nowhere. A key's comment over a scalar it writes in place
+// only while the scalar has none of its own. So the comment after the pair
+// goes on the key for a block value and on the value otherwise; when the
+// pair had one on each node, the one on the other node is left out, and
+// counted (droppedComments).
+func keepPairComments(k, v, ck, cv *yamlLib.Node) bool {
+	changed := keepComments(k, ck)
+	if keepComments(v, cv) {
+		changed = true
+	}
+	if !changed || ck == nil || cv == nil {
+		return changed
+	}
+	from, to := &ck.LineComment, &cv.LineComment
+	if (cv.Kind == yamlLib.SequenceNode || cv.Kind == yamlLib.MappingNode) && cv.Style&yamlLib.FlowStyle == 0 {
+		from, to = to, from
+	}
+	if *from != "" {
+		if *to == "" {
+			*to = *from
+		}
+		*from = ""
 	}
 	return changed
 }
