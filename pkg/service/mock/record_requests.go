@@ -18,7 +18,8 @@ type caseCapture struct {
 	mu    sync.Mutex
 	cases []capturedMock
 	// handled counts the cases taken off the stream and dealt with (stored,
-	// or failed to be): the capture's progress, which wait bounds.
+	// or failed to be): the capture's progress, said while Record waits for
+	// it (waitConsumers).
 	handled atomic.Uint64
 }
 
@@ -92,16 +93,6 @@ func caseEnd(tc *models.TestCase) time.Time {
 		return tc.HTTPResp.Timestamp
 	}
 	return tc.GrpcResp.Timestamp
-}
-
-// wait blocks until the incoming stream has been drained, or it has stored
-// nothing for bound of the time this process could run (utils/stall), as the
-// mock drain before it does.
-func (c *caseCapture) wait(bound time.Duration) {
-	if c == nil {
-		return
-	}
-	utils.WaitWhileProgressing(c.done, bound, c.handled.Load)
 }
 
 // list is every stored case with the time its request arrived.

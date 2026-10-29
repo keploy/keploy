@@ -25,11 +25,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// mockDrainStall bounds how long Record waits, after capture has stopped, for a
-// consumer that has stopped making progress (it used to wait 5 s in all): one
-// still persisting mocks is waited for however long it takes.
-const mockDrainStall = 5 * time.Second
-
 // mockDrainQuiet is how long the outgoing stream must stay silent before the
 // drain asks the agent whether it still holds anything from before the run
 // ended (drainTrailingMocks).
@@ -340,14 +335,21 @@ func (m *mockService) Record(ctx context.Context) error {
 	// with, and heldBusy is set while it works on one: a consumer persisting
 	// is draining, however long one write takes (a 12 MB mock, a disk stall),
 	// and the drain's quiet bound does not run meanwhile. All are read while
-	// the consumer is still running - hence atomic. mockCount stays a plain
-	// int: it is only read after consumerDone.
-	var mocksSeen, heldSeen, heldDone, drainFrom atomic.Int64
+	// the consumer is still running - hence atomic. mocksDone counts every
+	// mock the consumer has finished with (persisted, or not), for the wait
+	// on it once the capture has stopped (waitConsumers). mockCount and
+	// recorded stay plain: they are only read after consumerDone.
+	var mocksSeen, mocksDone, heldSeen, heldDone, drainFrom atomic.Int64
 	var heldBusy atomic.Bool
 	consumerDone := make(chan struct{})
+	// writeCtx is the consumers' writes': it outlives an interrupt, as
+	// persistCtx does, and ends only when the user gives up the wait for
+	// them (waitConsumers), so a write that waits for room can give up.
+	writeCtx, stopWriting := context.WithCancel(persistCtx)
+	defer stopWriting()
 	// The document the MockDB writes for each mock, for AfterMockInsert. Used
 	// only by persist, which runs on the one consumer goroutine.
-	insertedDoc := rec.NewInsertedMockDoc(persistCtx, m.hooks)
+	insertedDoc := rec.NewInsertedMockDoc(writeCtx, m.hooks)
 	persist := func(mk *models.Mock) {
 		mctx := &rec.MockContext{Mock: mk, TestSetID: staging}
 		if err := m.hooks.BeforeMockInsert(ctx, mctx); err != nil {
@@ -392,6 +394,7 @@ func (m *mockService) Record(ctx context.Context) error {
 				heldSeen.Add(1)
 			}
 			persist(mk)
+			mocksDone.Add(1)
 			if held {
 				heldDone.Add(1)
 				heldBusy.Store(false)
@@ -401,7 +404,7 @@ func (m *mockService) Record(ctx context.Context) error {
 
 	// 4b. With --record-requests, also store the app's incoming requests as test cases.
 	var casesSeen atomic.Int64
-	capture := m.captureCases(captureCtx, persistCtx, name, &casesSeen, requests)
+	capture := m.captureCases(captureCtx, writeCtx, name, &casesSeen, requests)
 
 	// 4c. What the agent had already refused a place in its PID maps before
 	//     the test command runs: the run's own refusals are what it grows by
@@ -512,12 +515,22 @@ func (m *mockService) Record(ctx context.Context) error {
 		lost = m.endRound(round, func() bool { return strict }, streams, recordDrainWords)
 	}
 	stopCapture()
-	if !utils.WaitWhileProgressing(consumerDone, mockDrainStall, func() uint64 { return uint64(mocksSeen.Load()) }) {
-		m.logger.Warn("the mock consumer made no progress after capture stopped; not waiting for it any longer",
-			zap.Int64("mocks_seen", mocksSeen.Load()),
-			zap.Duration("stalledFor", mockDrainStall))
+	// 8''. The capture has stopped: its consumers write what the agent handed
+	//      over to them, however long that takes (waitConsumers), and only
+	//      then is what they wrote read. One the user gives up at a second
+	//      interrupt left mocks unwritten: this recording is not saved, and the
+	//      existing set is kept (the deferred discard and restore).
+	consumers := []streamConsumer{{what: "mocks", done: consumerDone,
+		taken: func() uint64 { return uint64(mocksSeen.Load()) }, handled: func() uint64 { return uint64(mocksDone.Load()) }}}
+	if capture != nil {
+		consumers = append(consumers, streamConsumer{what: "cases", done: capture.done,
+			taken: func() uint64 { return uint64(casesSeen.Load()) }, handled: capture.handled.Load})
 	}
-	capture.wait(mockDrainStall)
+	if !m.waitConsumers(recordDrainWords, consumers...) {
+		// The deferred stopWriting ends the writes still under way, before
+		// the deferred discard of the staging set.
+		return errors.New("the recording was not saved: keploy was stopped before it had written every mock and test case the agent handed over")
+	}
 
 	// 8a. A process the agent could not track -- the kernel refused it a place
 	//     in its PID map -- made calls the agent never saw, so the recording
@@ -1405,6 +1418,11 @@ type drainWords struct {
 	// stalled and stalledNext are said at ERROR when the agent made no
 	// progress through what it said it still held (holdForBacklog).
 	stalled, stalledNext string
+	// Once the capture has stopped, its consumers are waited for
+	// (waitConsumers): writing is what they are still doing, said every
+	// mockDrainNotice; notWritten is said at ERROR, with nextStep, when the
+	// user ends that wait at a second interrupt.
+	writing, notWritten string
 }
 
 // recordDrainWords are keploy mock record's: a recording ended before it has
@@ -1421,6 +1439,9 @@ var recordDrainWords = drainWords{
 
 	stalled:     "stopped waiting for the keploy agent to hand over the mocks it captured before the run ended: it made no progress",
 	stalledNext: "the mocks the agent still held are not saved, and the run ends as failed. Re-record; if the agent was starved of CPU, give it more",
+
+	writing:    "Still writing the mocks and test cases the keploy agent handed over to this recording",
+	notWritten: "the recording was not saved: a second interrupt stopped keploy writing the mocks and test cases the agent had handed over to it",
 }
 
 // composeTailUnconfirmed, with its next step, is said at WARN once keploy mock
@@ -1447,6 +1468,9 @@ var replayDrainWords = drainWords{
 
 	stalled:     "stopped waiting for the keploy agent to hand over the requests it captured before the run ended: it made no progress",
 	stalledNext: "the run fails as keploy's, not the suite's, short of the requests the agent still held. Run it again; if the agent was starved of CPU, give it more",
+
+	writing:    "Still collecting the requests the keploy agent handed over",
+	notWritten: "stopped collecting the requests the agent handed over, at a second interrupt",
 }
 
 // stoppedNow is drainTrailingMocks ended by the user's second interrupt
