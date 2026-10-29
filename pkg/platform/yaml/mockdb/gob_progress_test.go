@@ -276,3 +276,164 @@ func TestClose_SaysWhatTheFileLeftForAnotherTestSetCouldNotTake(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(b []byte) (int, error) { return f(b) }
+
+// Close says a mock handed to the writer that the file never took as not
+// written even when nothing failed: a recording that is not complete never
+// looks complete. (A mock counted as handed over that the writer never saw
+// stands in for any such mock.)
+func TestClose_SaysAMockTheWriterNeverWroteWhenNothingFailed(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	ys := New(zap.NewNop(), t.TempDir(), "mocks")
+	insertGobMocks(t, ys, 3)
+	ys.gobQueued.Add(1)
+	err := ys.Close()
+	want := "1 of the 4 mocks handed to the gob mock writer were not written: the gob mock writer ended without writing them"
+	if !errors.Is(err, models.ErrMocksNotWritten) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Close returned %v, want models.ErrMocksNotWritten saying %q", err, want)
+	}
+}
+
+// insertTinyGobMock hands ys one mock of a few hundred bytes for set.
+func insertTinyGobMock(t *testing.T, ys *MockYaml, set string) {
+	t.Helper()
+	m := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+		HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://x/y"},
+		HTTPResp: &models.HTTPResp{StatusCode: 200},
+	}}
+	if err := ys.InsertMock(context.Background(), m, set); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fillGobQueue fills ys's gob queue with set-0 mocks while the caller holds
+// gobMu: the writer holds the first, waiting for gobMu, and the queue the
+// rest, so the next insert finds it full. It returns how many it handed.
+func fillGobQueue(t *testing.T, ys *MockYaml) int {
+	t.Helper()
+	insertTinyGobMock(t, ys, "set-0")
+	for len(ys.gobQueue) > 0 { // until the writer took it
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < cap(ys.gobQueue); i++ {
+		insertTinyGobMock(t, ys, "set-0")
+	}
+	return 1 + cap(ys.gobQueue)
+}
+
+// overflowGobQueue fills ys's gob queue (fillGobQueue) and hands it one more
+// mock, for set, then lets the writer write: it returns once that insert
+// did, with how many mocks it handed in all.
+func overflowGobQueue(t *testing.T, ys *MockYaml, set string) int {
+	t.Helper()
+	ys.gobMu.Lock()
+	n := fillGobQueue(t, ys)
+	inserted := make(chan error, 1)
+	go func() {
+		m := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://x/y"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200},
+		}}
+		inserted <- ys.InsertMock(context.Background(), m, set)
+	}()
+	for ys.gobOverflows.Load() == 0 { // until it found the queue full
+		time.Sleep(time.Millisecond)
+	}
+	ys.gobMu.Unlock()
+	if err := <-inserted; err != nil {
+		t.Fatalf("the insert that found the queue full: %v", err)
+	}
+	return n + 1
+}
+
+// mockNamesIn are the names of the mocks in a test set's gob file, in the
+// file's order.
+func mockNamesIn(t *testing.T, dir, set string) []string {
+	t.Helper()
+	got, err := readGobMocks(filepath.Join(dir, set, "mocks.gob"))
+	if err != nil {
+		t.Fatalf("reading %s: %v", set, err)
+	}
+	names := make([]string, len(got))
+	for i, m := range got {
+		names[i] = m.Name
+	}
+	return names
+}
+
+// An insert that finds the queue full waits for room, in its turn: the file
+// holds the mocks in the order they were handed over. It used to write its
+// mock itself, ahead of the thousands queued before it.
+func TestInsertMock_AFullQueueKeepsTheMocksInTheOrderTheyCame(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	n := overflowGobQueue(t, ys, "set-0")
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	names := mockNamesIn(t, dir, "set-0")
+	if len(names) != n {
+		t.Fatalf("set-0 holds %d mocks, want the %d handed", len(names), n)
+	}
+	for i, name := range names {
+		if want := fmt.Sprint("mock-", i); name != want {
+			t.Fatalf("set-0's mock %d is %s, want %s: the file is not in the order the mocks came", i, name, want)
+		}
+	}
+}
+
+// An insert for another test set that finds the queue full does not move the
+// writer to that set's file ahead of the first set's queued mocks: the first
+// set's file keeps every mock. Writing it ahead made the writer reopen the
+// first set's file for the rest, which truncated it under the mocks it had
+// written there and counted as written.
+func TestInsertMock_AFullQueueAtATestSetSwitchKeepsTheFirstSetsMocks(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	n := overflowGobQueue(t, ys, "set-1")
+	if err := ys.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := mockNamesIn(t, dir, "set-0"); len(got) != n-1 {
+		t.Fatalf("set-0 holds %d mocks, want the %d handed for it", len(got), n-1)
+	}
+	if got := mockNamesIn(t, dir, "set-1"); len(got) != 1 || got[0] != fmt.Sprint("mock-", n-1) {
+		t.Fatalf("set-1 holds %v, want mock-%d alone", got, n-1)
+	}
+}
+
+// An insert waiting for room that its caller gives up on (its context ends)
+// says so, and its mock is not counted as handed over: Close then says the
+// rest were all written. The caller has the error for it.
+func TestInsertMock_AFullQueueGivesUpAtTheCallersCancel(t *testing.T) {
+	t.Setenv("KEPLOY_MOCK_FORMAT", "gob")
+	dir := t.TempDir()
+	ys := New(zap.NewNop(), dir, "mocks")
+	ys.gobMu.Lock()
+	n := fillGobQueue(t, ys)
+	ctx, cancel := context.WithCancel(context.Background())
+	inserted := make(chan error, 1)
+	go func() {
+		m := &models.Mock{Version: "api.keploy.io/v1beta1", Kind: models.HTTP, Spec: models.MockSpec{
+			HTTPReq:  &models.HTTPReq{Method: "GET", URL: "http://x/y"},
+			HTTPResp: &models.HTTPResp{StatusCode: 200},
+		}}
+		inserted <- ys.InsertMock(ctx, m, "set-0")
+	}()
+	for ys.gobOverflows.Load() == 0 { // until it waits for room
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	err := <-inserted
+	ys.gobMu.Unlock()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("the insert given up on returned %v, want context.Canceled", err)
+	}
+	if err := ys.Close(); err != nil {
+		t.Fatalf("Close after the cancelled insert: %v", err)
+	}
+	if got := mockNamesIn(t, dir, "set-0"); len(got) != n {
+		t.Fatalf("set-0 holds %d mocks, want the %d handed before the cancelled one", len(got), n)
+	}
+}

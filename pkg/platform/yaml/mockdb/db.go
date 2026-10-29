@@ -110,8 +110,9 @@ type MockYaml struct {
 	// original re-record bug (gobLifecycleInit only makes the lock).
 	//
 	// The lock is a one-slot channel, not a mutex, so Close can stop
-	// waiting for it: an insert on the overflow path holds it while it
-	// writes, and on a stuck disk waits for as long as the disk does.
+	// waiting for it: an insert that found the queue full holds it while
+	// it waits for room, and on a stuck disk waits for as long as the disk
+	// does.
 	gobLifecycle     chan struct{}
 	gobLifecycleInit sync.Once
 	gobRunning       bool
@@ -141,9 +142,9 @@ type MockYaml struct {
 	// Guarded by gobMu, as every write to the file is.
 	gobFileW *gobFileWriter
 	// gobQueued counts the session's mocks handed to the store (queued for
-	// the writer, or written at once on the overflow path), and gobWritten
-	// those the mock file took whole: Close says how many of them were not
-	// written, read without the writer's locks, which a stuck writer holds.
+	// the writer), and gobWritten those the mock file took whole: Close
+	// says how many of them were not written, read without the writer's
+	// locks, which a stuck writer holds.
 	gobQueued, gobWritten atomic.Uint64
 	// gobPathSeen is gobFilePath, for a Close that cannot take gobMu.
 	gobPathSeen atomic.Value
@@ -1049,9 +1050,10 @@ func (ys *MockYaml) appendMock(ctx context.Context, mock *models.Mock, mockPath,
 }
 
 // insertMockGob enqueues the mock for async encoding. One background
-// goroutine owns the open file + encoder; parsers never block on
-// disk. Queue-full falls back to synchronous write so mocks are never
-// dropped — tracked via gobOverflows for observability.
+// goroutine owns the open file + encoder; parsers never block on disk
+// while the queue has room. An insert that finds it full waits for room,
+// in its turn, so mocks are never dropped or reordered; gobOverflows
+// counts those inserts for observability.
 //
 // The writer-alive check and the channel send run under the same
 // lifecycle lock Close uses. This makes the "is the writer still
@@ -1107,21 +1109,24 @@ func (ys *MockYaml) insertMockGob(ctx context.Context, mock *models.Mock, mockPa
 		ys.unlockLifecycle()
 		return ctx.Err()
 	default:
-		ys.gobQueued.Add(^uint64(0)) // gobWriteSync counts it
-		ys.gobOverflows.Add(1)
-		// Keep the lifecycle lock held across the sync fallback. If we
-		// released it here, a concurrent Close() could flush+close the
-		// writer (setting gobFile=nil), and then gobWriteSync's
-		// gobWriteOne would call gobReopenLocked — which TRUNCATES
-		// the gob file with O_TRUNC — destroying everything written
-		// earlier in the session. Serializing the sync fallback
-		// against Close() is the cost of the "no dropped mocks"
-		// guarantee on the overflow path; it only kicks in when the
-		// 4096-slot queue is already full, which is already a
-		// degraded-throughput mode.
-		err := ys.gobWriteSync(ctx, gobMock, mockPath, mockFileName)
+	}
+	// The queue is full: the disk is slower than the capture. The insert
+	// waits for room, in its turn, as the writer writes. It used to write
+	// its mock itself, ahead of the thousands queued before it: out of order
+	// in its file, and, for another test set's, the writer then reopened
+	// (truncated) the first set's file under the mocks it had written there.
+	// The lifecycle lock stays held while it waits, so Close cannot stop the
+	// writer under it; a Close told to stop (CloseUnless) does not wait
+	// behind it.
+	ys.gobOverflows.Add(1)
+	select {
+	case ys.gobQueue <- job:
 		ys.unlockLifecycle()
-		return err
+		return nil
+	case <-ctx.Done():
+		ys.gobQueued.Add(^uint64(0))
+		ys.unlockLifecycle()
+		return ctx.Err()
 	}
 }
 
@@ -1306,34 +1311,6 @@ func (ys *MockYaml) gobFinishFileLocked() {
 	ys.gobEnc = nil
 }
 
-// gobWriteSync is the sync fallback when the async queue is full.
-// Reuses the async writer's open file + encoder under the mutex so
-// the type-table in the running gob stream stays consistent — the
-// reader uses a single gob.Decoder for the whole file, and creating
-// a fresh encoder here would emit a second type-table that the
-// / reader cannot resume across.
-func (ys *MockYaml) gobWriteSync(ctx context.Context, mock *models.Mock, mockPath, mockFileName string) error {
-	ys.gobMu.Lock()
-	defer ys.gobMu.Unlock()
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	ys.gobQueued.Add(1)
-	err := ys.gobEncodeLocked(mock, mockPath, mockFileName)
-	if err != nil {
-		err = fmt.Errorf("failed to encode mock gob: %w", err)
-	} else {
-		// Flush immediately so the "sync" semantics hold — by the time
-		// this returns, bytes are in the OS buffer, not just the bufio.
-		err = ys.gobBufw.Flush()
-	}
-	if err != nil {
-		// Close says it too, with the mocks it left unwritten.
-		ys.gobFlushErr = errors.Join(ys.gobFlushErr, err)
-	}
-	return err
-}
-
 // Close drains the async gob writer and flushes the file. Safe to
 // call multiple times, and safe to call between record sessions —
 // the writer goroutine exits after flushing, and the next InsertMock
@@ -1357,8 +1334,8 @@ func (ys *MockYaml) Close() error { return ys.CloseUnless(nil) }
 // second interrupt, a caller giving up on a disk that is stuck): the
 // session's mocks not written yet are then models.ErrMocksNotWritten, said
 // with how many they are, and a later Close waits for them again. That holds
-// for the wait for the writer's lifecycle lock too, which an insert on the
-// overflow path holds while it writes.
+// for the wait for the writer's lifecycle lock too, which an insert that
+// found the queue full holds while it waits for room.
 func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	// Hold the lifecycle lock for the entire teardown. While we wait
 	// for the writer goroutine to drain, no concurrent InsertMock
@@ -1397,7 +1374,7 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	ys.gobQueued.Store(0)
 	ys.gobWritten.Store(0)
 	// Operator visibility: if the async queue filled up during the
-	// session and the sync fallback fired, report the count so disk
+	// session and inserts waited for room, report the count so disk
 	// stalls / undersized queues are caught at post-run review
 	// instead of requiring the user to notice slower rps.
 	// Swap the overflow counter to zero atomically so re-record cycles
@@ -1405,7 +1382,7 @@ func (ys *MockYaml) CloseUnless(stop <-chan struct{}) error {
 	// overflows again on their own Close.
 	if overflows := ys.gobOverflows.Swap(0); overflows > 0 {
 		if ys.Logger != nil {
-			ys.Logger.Info("gob mock writer: synchronous fallback fired during session (queue was full)",
+			ys.Logger.Info("gob mock writer: inserts waited for room in its queue during the session (the disk was slower than the capture)",
 				zap.Uint64("overflowedMocks", overflows),
 				zap.Int("queueCapacity", cap(ys.gobQueue)),
 				zap.String("hint", "queue capacity is the hard-coded channel size inlined in insertMockGob's writer-init block; raise it in code if disk/encoding is the bottleneck"))

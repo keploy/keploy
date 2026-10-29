@@ -159,8 +159,8 @@ func TestClose_SaysWhatAStuckWriterDidNotWrite(t *testing.T) {
 }
 
 // CloseUnless does not wait behind an insert that holds the writer's
-// lifecycle lock once its stop closes: one the full queue sent to the
-// synchronous fallback holds it while it waits for the stuck writer. It says
+// lifecycle lock once its stop closes: one that found the queue full holds
+// it while it waits for room behind the stuck writer. It says
 // what was not written; once the disk takes the rest, a later Close lands
 // every mock.
 func TestClose_DoesNotWaitBehindAnInsertOnAStuckDisk(t *testing.T) {
