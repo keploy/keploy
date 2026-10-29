@@ -99,8 +99,10 @@
 #              call: passes, the app's container read in its own zone.
 #           2. As 1, SKEW_HOURS=-49: fails naming body.day.
 #   keploy's compose rewrite puts only the --container-name service in the
-#   agent's PID namespace, and its CLI reads the zone of those alone, so the
-#   second service's zone is never read and this lane cannot show one
+#   agent's PID namespace, and its CLI reads the zone only of a container in
+#   another container's PID namespace (a user's pid: service:<x> too, whose
+#   calls never reach the agent), so this lane's second service, in a PID
+#   namespace of its own, has no zone read, and this lane cannot show one
 #   container's call taking another's zone: two app containers held in two
 #   zones are proven at unit level only (containerkey's
 #   TestEachAppContainersConnectionsTakeItsOwnZone).
