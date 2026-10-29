@@ -290,6 +290,9 @@ func TestAZoneWhoseFileInKeploysOwnIsAnotherZonesIsRefusedByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(tmp, "usr/share/zoneinfo")
+	// The mount lines below are written by hand with tmp in them as is: a
+	// TMPDIR holding whitespace, which mountinfo writes escaped (\040),
+	// mis-writes them. A stated limit of these rows, not of keploy.
 	if err := os.MkdirAll(filepath.Join(dir, "Europe"), 0o755); err != nil {
 		t.Fatal(err)
 	}

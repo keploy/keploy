@@ -131,6 +131,9 @@ func TestZoneLocationRefusesItsOwnFileMountedFromAnotherZones(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(tmp, "usr/share/zoneinfo")
+	// The mount lines below are written by hand with tmp in them as is: a
+	// TMPDIR holding whitespace, which mountinfo writes escaped (\040),
+	// mis-writes them. A stated limit of these rows, not of keploy.
 	// Etc/UTC and Asia/Kolkata as files, Asia/Calcutta a link to Kolkata's:
 	// the mount check reads these (goZoneDirs), Go the zones from its own
 	// (its zone directories, else time/tzdata), so a row checks the mount
