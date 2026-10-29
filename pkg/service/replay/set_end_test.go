@@ -497,8 +497,13 @@ func TestTheCallsChargedToTheSetAreToldToTheHooks(t *testing.T) {
 	status := h.run(t)
 	h.replayer.tellSetEnd("test-set-0", status, nil)
 	got := rec.last()
-	if len(got) != 2 || got[0].ClosestMock != "mock-6" || !got[0].NotOwned || !got[0].BeforeSet || got[1].ActualSummary != "POST /publish" {
-		t.Fatalf("told %+v; want the delete made before the set, named as mock-6, and the publish after the last test", got)
+	// The delete made before the set, which reached no test, is background
+	// work (item b): listed for the set, not charged to it.
+	if len(got) != 1 || got[0].ActualSummary != "POST /publish" {
+		t.Fatalf("told %+v; want the publish read at the set's end alone", got)
+	}
+	if bg := h.report.report.BackgroundCalls; len(bg) != 1 || bg[0].ClosestMock != "mock-6" || !bg[0].NotOwned || !bg[0].BeforeSet {
+		t.Fatalf("background calls %+v; want the delete made before the set, named as mock-6", bg)
 	}
 
 	h.replayer.tellSetEnd("test-set-0", models.TestSetStatusInternalErr, errors.New("the report could not be written"))
