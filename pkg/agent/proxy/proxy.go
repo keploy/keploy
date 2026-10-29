@@ -4961,7 +4961,9 @@ var lastRecorded = time.Unix(0, math.MaxInt64)
 // while the set's learn step is on (MockManager.learns), the learn tracker
 // reads, in the background, what the learn step reads of each recording of
 // the staged set (learn.Tracker.WarmSet): every one the manager stages and
-// the agent keeps on disk (RangeRecordedBefore), in recorded order. The set's
+// the agent keeps on disk, in recorded order across the two
+// (rangeRecordedInOrder), so the recordings of the set's earlier tests are
+// read first, before the later tests that read them open. The set's
 // calls then find its payloads read, off their answer path, and each waits
 // only for a recording of its own the staging is reading. Any other session
 // reads nothing: no learn step reads the recordings. With no mock manager
@@ -5013,7 +5015,7 @@ func (p *Proxy) warmLearnSet() (<-chan learn.SetUse, error) {
 		return nil, nil
 	}
 	return p.learnTracker.WarmSet(func(visit func(*models.Mock) bool) error {
-		return m.RangeRecordedBefore(lastRecorded, visit)
+		return m.rangeRecordedInOrder(lastRecorded, visit)
 	}), nil
 }
 

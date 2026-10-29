@@ -3,6 +3,8 @@ package proxy
 import (
 	"errors"
 	"fmt"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -205,6 +207,83 @@ func TestAStagedSetIsReadForTheLearnStepInRecordsFullRoundAlone(t *testing.T) {
 			t.Fatalf("with no mock manager WarmLearnSet gave %v: want errNoMockManager", err)
 		}
 	})
+}
+
+// A set's staging reads its recordings in recorded order across the
+// manager's trees and the disk, so with one reader (an agent of one or two
+// CPUs) the first test's recordings are all read before any of a later
+// test's, whichever store holds them, and a test's own are read before the
+// tests after it open. The set here is three tests an hour apart, each with
+// session recordings the manager's tree holds (made through all three
+// tests) and its own on disk, each answer parked so that the staging's read
+// of it is seen as it happens. Visited trees first, the third test's
+// session recordings were read before the first test's own on disk.
+func TestASetsStagingReadsTheFirstTestsRecordingsFirst(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	prev := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	const tests, each = 3, 4
+	p := startedDrainProxy(t, 10)
+	p.learnTracker = learn.NewTracker()
+	mm := NewMockManager(nil, nil, zap.NewNop())
+	t.Cleanup(mm.Close)
+	p.mockManager = mm
+	var mu sync.Mutex
+	var read []int
+	parked := func(name string, test int, at time.Time) *models.Mock {
+		m := r3Mock(name, at, "POST", "/log", fmt.Sprintf(`{"test":%d,"note":"%s words"}`, test, name), "")
+		m.DeriveLifetime()
+		m.Spec.HTTPResp = nil
+		m.SetResponseHydrator(func() (*models.HTTPResp, []models.MongoResponse, error) {
+			mu.Lock()
+			read = append(read, test)
+			mu.Unlock()
+			return &models.HTTPResp{StatusCode: 200, Header: map[string]string{"Content-Type": "application/json"}, Body: `{"ok":true}`}, nil, nil
+		})
+		return m
+	}
+	start := time.Now()
+	var session, disk []*models.Mock
+	for k := 0; k < tests; k++ {
+		for i := 0; i < each; i++ {
+			at := start.Add(time.Duration(k)*time.Hour + time.Duration(2*i+1)*time.Millisecond)
+			s := parked(fmt.Sprintf("session-%d-%d", k, i), k, at)
+			s.TestModeInfo.Lifetime = models.LifetimeSession
+			session = append(session, s)
+			disk = append(disk, parked(fmt.Sprintf("test-%d-%d", k, i), k, at.Add(time.Millisecond)))
+		}
+	}
+	mm.SetMocksWithWindow(nil, session, start, start.Add(time.Second))
+	if n := len(mm.StagedMocks()); n != len(session) {
+		t.Fatalf("the manager's trees hold %d recordings: want the %d session recordings", n, len(session))
+	}
+	mm.SetRecordedBefore(func(before time.Time, visit func(*models.Mock) bool) error {
+		for _, m := range disk {
+			if !m.Spec.ReqTimestampMock.After(before) && !visit(m) {
+				return nil
+			}
+		}
+		return nil
+	})
+	mm.SetPairing(true)
+	done, err := p.warmLearnSet()
+	if err != nil || done == nil {
+		t.Fatalf("the set's staging did not start: %v", err)
+	}
+	u := <-done
+	if u.Readers != 1 || u.Staged != tests*each*2 {
+		t.Fatalf("the staging read %d recordings with %d readers: want all %d, with one reader", u.Staged, u.Readers, tests*each*2)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(read) != tests*each*2 {
+		t.Fatalf("the staging read %d answers: want each of the %d recordings' once", len(read), tests*each*2)
+	}
+	for i := 1; i < len(read); i++ {
+		if read[i] < read[i-1] {
+			t.Fatalf("the staging read the tests' recordings in the order %v: a recording of test %d after one of test %d", read, read[i], read[i-1])
+		}
+	}
 }
 
 func mustLearnEnded(t *testing.T, p *Proxy, ended bool) {
