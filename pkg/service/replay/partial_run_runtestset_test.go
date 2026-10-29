@@ -1202,8 +1202,9 @@ func TestRunTestSetUnreadableResultsBlockThePrune(t *testing.T) {
 
 // TestRunTestSetPruneRefusalNamesTheRule: the one "skipping mock pruning" line a
 // set logs names the rule that refused and, for requests that got no answer,
-// the tests. A set where one test keeps timing out is never pruned again, and
-// this line is the only place that says why.
+// the tests. A set whose unanswered test's request a cancel ended (a stop's),
+// or whose unanswered tests' own mocks could not be read, is not pruned at all,
+// and this line is the only place that says why.
 func TestRunTestSetPruneRefusalNamesTheRule(t *testing.T) {
 	canceled := prCanceledErr(t)
 	refused := prRefusedErr(t)

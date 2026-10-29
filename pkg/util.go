@@ -1082,8 +1082,11 @@ func IsAppConnectionError(err error) bool {
 // context.Canceled), or the connection closed part-way through the answer
 // (isAnswerCutShort). grpc-go turns the end of a call's
 // context into a status and keeps no cause, so a gRPC call's is its code
-// (isGRPCNoAnswer). This is replay's no-answer mark, which holds off the mocks
-// prune and a new mappings.yaml, and replay asks only this to set it.
+// (isGRPCNoAnswer). This is replay's no-answer mark, and replay asks only this
+// to set it. It holds off a new mappings.yaml. The mocks prune runs past it,
+// keeping each marked test's own mocks, unless a cancel ended the request
+// (IsNoAnswerCanceled) or those mocks could not be read: then it holds the
+// whole set.
 //
 // It is not APP_CONNECTION_ERROR: a stop's cancel is not the app being down.
 // An answer that came back whole but does not decode (answerDoesNotDecode) is
@@ -3427,6 +3430,17 @@ type TestSetMocksReader interface {
 // the mock to the agent (models.Mock.WithPayload).
 type TestSetMockIndexReader interface {
 	IndexTestSetMocks(ctx context.Context, testSetID string, afterTime time.Time, beforeTime time.Time, mocksThatHaveMappings map[string]bool, mocksWeNeed map[string]bool) (models.TestSetMocks, error)
+}
+
+// TestSetMockWalker is an optional extension of the mock store: every mock of a
+// test set's mock file, before the mapping prune and the window filter (what
+// TestSetMocks.AllPerTest and AllSession hold), handed to visit one at a time
+// as it is decoded, with the pools it is in (both, for the gob store's
+// PostgresV2 mocks of session or connection lifetime). A reader that keeps a
+// few fields of each mock then holds one decoded mock at a time, never the
+// set. visit must not keep m.
+type TestSetMockWalker interface {
+	WalkTestSetMocks(ctx context.Context, testSetID string, visit func(m *models.Mock, perTest, session bool)) error
 }
 
 // ConsumedScopeReader is an optional extension of the instrumentation a replay

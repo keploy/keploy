@@ -6406,7 +6406,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 	var noAnswerHeld []noAnswerHold
 	var noAnswerHoldErr error
 	if prune && len(noAnswerTests) > 0 {
-		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, expectedTestMockMappings, actualTestMockMappings, consumers, passingTotalConsumedMocks)
+		noAnswerHeld, noAnswerHoldErr = r.holdNoAnswerMocks(runTestSetCtx, testSetID, noAnswerTests, testCases, carryAttr, expectedTestMockMappings, actualTestMockMappings, consumers, passingTotalConsumedMocks)
 		if noAnswerHoldErr != nil {
 			pruneIn.noAnswerUnheld = true
 			prune, pruneRefusal = shouldPrune(r.removeUnusedMocks(), r.instrument, pruneIn)
@@ -6418,7 +6418,7 @@ func (r *Replayer) RunTestSet(ctx context.Context, testSetID string, testRunID s
 			names, kept = append(names, h.test), append(kept, h.kept)
 		}
 		// Capped so an outage does not log every test.
-		r.logger.Info("pruning unused mocks around the tests that got no answer: each one keeps the mocks its next replay is served (its mapping entry, its recorded window, what it consumed)",
+		r.logger.Info("pruning unused mocks around the tests that got no answer: each one keeps its mapping entry's mocks, those the agent serves in its recorded window (placed in it, in flight when it began, carried over into it), and what it consumed",
 			zap.String("testSetID", testSetID),
 			zap.Int("noAnswerCount", len(noAnswerHeld)),
 			zap.Strings("noAnswerTests", names),
@@ -7009,45 +7009,22 @@ type skippedDocs struct {
 
 // readMockLookup reads the report's mock lookup for a test set whose mocks
 // RunTestSet does not load: its per-test and session mocks, in one read when
-// the store can, else in one read per pool. A read that fails leaves its pool
-// out of the lookup.
+// the store can, else in one read per pool (eachSetMock). A read that fails
+// leaves its pool out of the lookup. A name in both pools keeps the session
+// mock's entry, as newMockLookup does.
 func (r *Replayer) readMockLookup(ctx context.Context, testSetID string) map[string]mockDisplayInfo {
+	lookup := map[string]mockDisplayInfo{}
 	if r.mockDB == nil {
-		return map[string]mockDisplayInfo{}
+		return lookup
 	}
-	logFailed := func(pool string, err error) {
-		r.logger.Debug("failed to read the "+pool+" mocks for the report's mock lookup; the report will not describe them",
+	err := r.eachSetMock(ctx, testSetID, false, func(m *models.Mock, _ bool) {
+		addMockDisplayInfo(lookup, []*models.Mock{m})
+	})
+	if err != nil {
+		r.logger.Debug("failed to read mocks for the report's mock lookup; the report will not describe them",
 			zap.String("testSetID", testSetID), zap.Error(err))
 	}
-	if reader, ok := r.mockDB.(pkg.TestSetMockIndexReader); ok {
-		set, err := reader.IndexTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
-		if err != nil {
-			logFailed("per-test and session", err)
-			return map[string]mockDisplayInfo{}
-		}
-		return newMockLookup(set.AllPerTest, set.AllSession)
-	}
-	if reader, ok := r.mockDB.(pkg.TestSetMocksReader); ok {
-		set, err := reader.GetTestSetMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
-		if err != nil {
-			logFailed("per-test and session", err)
-			return map[string]mockDisplayInfo{}
-		}
-		return newMockLookup(set.AllPerTest, set.AllSession)
-	}
-	// No window: the per-test reader then filters nothing out, so the lookup
-	// gets every per-test mock as recorded, as AllPerTest gives it above.
-	perTest, err := r.mockDB.GetFilteredMocks(ctx, testSetID, time.Time{}, time.Time{}, nil, nil)
-	if err != nil {
-		logFailed("per-test", err)
-		perTest = nil
-	}
-	session, err := r.mockDB.GetUnFilteredMocks(ctx, testSetID, models.BaseTime, time.Now(), nil, nil)
-	if err != nil {
-		logFailed("session", err)
-		session = nil
-	}
-	return newMockLookup(perTest, session)
+	return lookup
 }
 
 // newMockLookup builds the report's mock lookup from a test set's per-test and
