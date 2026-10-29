@@ -2,11 +2,13 @@ package containerkey
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"strings"
 	"time"
 
@@ -210,31 +212,64 @@ func (c containerFiles) Lstat(p string) (fs.FileMode, error) {
 	return st.Mode, nil
 }
 
-// first is the first entry of the archive Docker gives of the file at p
-// (its own, never a link's target), and the archive's reader, which the
-// caller closes.
-func (c containerFiles) first(p string) (*tar.Header, *tar.Reader, io.Closer, error) {
+// archived is the one file of the archive Docker gives of the file at p
+// (CopyFromContainer: p's own entry, never a link's target): its header,
+// and of a regular file its bytes, read into memory whole. The archive is
+// the container's, so untrusted, and keploy takes only one of the shape
+// Docker gives of one file: a single entry, of type typ (a regular file, or
+// a link where Readlink asks: never a hard link, a directory or a device in
+// a regular file's place), named p's last name ("../localtime", an absolute
+// name, or another name is another file's), and a regular file of at most
+// learn.ZoneFileCap bytes, refused before any is read. No entry's name, nor
+// a link's target, is ever a path on this host: learn resolves a target in
+// the container's own view and reads it through Docker again.
+func (c containerFiles) archived(p string, typ byte) (hdr *tar.Header, data []byte, err error) {
 	rc, _, err := c.api.CopyFromContainer(c.ctx, c.id, p)
 	if err != nil {
-		return nil, nil, nil, pathError(p, err)
+		return nil, nil, pathError(p, err)
 	}
+	defer func() {
+		if cerr := rc.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("keploy cannot close Docker's archive of %s in the container: %w", p, cerr))
+		}
+		if err != nil {
+			hdr, data = nil, nil
+		}
+	}()
 	tr := tar.NewReader(rc)
-	hdr, err := tr.Next()
-	if err != nil {
-		_ = rc.Close()
-		return nil, nil, nil, fmt.Errorf("keploy cannot read %s in the container: %w", p, err)
+	if hdr, err = tr.Next(); err != nil {
+		return nil, nil, fmt.Errorf("keploy cannot read %s in the container: %w", p, err)
 	}
-	return hdr, tr, rc, nil
+	if base := path.Base(p); path.Clean(hdr.Name) != base {
+		return nil, nil, fmt.Errorf("the archive Docker gives of %s in the container holds %q, not %q: keploy reads no other file", p, hdr.Name, base)
+	}
+	if hdr.Typeflag != typ {
+		switch {
+		case typ == tar.TypeSymlink:
+			return nil, nil, fmt.Errorf("%s in the container is no link", p)
+		case hdr.Typeflag == tar.TypeLink:
+			return nil, nil, fmt.Errorf("the archive Docker gives of %s in the container holds a hard link to %q in its place: %w", p, hdr.Linkname, learn.NotRegular(fs.ModeIrregular))
+		}
+		return nil, nil, learn.NotRegular(hdr.FileInfo().Mode())
+	}
+	if hdr.Size > learn.ZoneFileCap {
+		return nil, nil, fmt.Errorf("%s in the container is %d bytes, more than the %d keploy reads of a zone file, an /etc/timezone or an argfile", p, hdr.Size, learn.ZoneFileCap)
+	}
+	if data, err = io.ReadAll(tr); err != nil {
+		return nil, nil, fmt.Errorf("keploy cannot read %s in the container: %w", p, err)
+	}
+	if next, err := tr.Next(); err == nil {
+		return nil, nil, fmt.Errorf("the archive Docker gives of %s in the container holds %q too: keploy reads an archive of one file alone", p, next.Name)
+	} else if err != io.EOF {
+		return nil, nil, fmt.Errorf("keploy cannot read %s in the container: %w", p, err)
+	}
+	return hdr, data, nil
 }
 
 func (c containerFiles) Readlink(p string) (string, error) {
-	hdr, _, rc, err := c.first(p)
+	hdr, _, err := c.archived(p, tar.TypeSymlink)
 	if err != nil {
 		return "", err
-	}
-	defer func() { _ = rc.Close() }()
-	if hdr.Typeflag != tar.TypeSymlink {
-		return "", fmt.Errorf("%s in the container is no link", p)
 	}
 	return hdr.Linkname, nil
 }
@@ -249,18 +284,11 @@ func (c containerFiles) OpenRegular(p string) (io.ReadCloser, error) {
 	if !mode.IsRegular() {
 		return nil, learn.NotRegular(mode)
 	}
-	hdr, tr, rc, err := c.first(p)
+	_, data, err := c.archived(p, tar.TypeReg)
 	if err != nil {
 		return nil, err
 	}
-	if hdr.Typeflag != tar.TypeReg {
-		_ = rc.Close()
-		return nil, learn.NotRegular(hdr.FileInfo().Mode())
-	}
-	return struct {
-		io.Reader
-		io.Closer
-	}{tr, rc}, nil
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 func (c containerFiles) Readable() error {

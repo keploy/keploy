@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,23 @@ type fakeZoneAPI struct {
 	failAt   string
 	inspects int
 	copies   []string
+	// raw is the archive the daemon gives of a path in place of one of
+	// its file (a container's archive is the container's to shape), and
+	// rawRead how many of its bytes keploy read.
+	raw     map[string][]byte
+	rawRead map[string]*int
+}
+
+// countedReader counts in *n the bytes read from r.
+type countedReader struct {
+	r io.Reader
+	n *int
+}
+
+func (c countedReader) Read(b []byte) (int, error) {
+	k, err := c.r.Read(b)
+	*c.n += k
+	return k, err
 }
 
 func (f *fakeZoneAPI) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
@@ -116,6 +134,14 @@ func (f *fakeZoneAPI) CopyFromContainer(_ context.Context, _, p string) (io.Read
 		f.t.Errorf("keploy asked Docker for an archive of the directory %s, which holds all its files", p)
 	}
 	f.copies = append(f.copies, p)
+	if r, ok := f.raw[p]; ok {
+		if f.rawRead == nil {
+			f.rawRead = map[string]*int{}
+		}
+		n := new(int)
+		f.rawRead[p] = n
+		return io.NopCloser(countedReader{bytes.NewReader(r), n}), container.PathStat{Name: p, Mode: z.mode()}, nil
+	}
 	var buf bytes.Buffer
 	w := tar.NewWriter(&buf)
 	hdr := &tar.Header{Name: p[strings.LastIndex(p, "/")+1:], Mode: int64(z.mode().Perm())}
@@ -327,4 +353,139 @@ type failingStatAPI struct{ fakeZoneAPI }
 
 func (f *failingStatAPI) ContainerStatPath(context.Context, string, string) (container.PathStat, error) {
 	return container.PathStat{}, errors.New("the daemon is busy")
+}
+
+// archiveEntry is one entry of an archive a row hands keploy as Docker's.
+type archiveEntry struct {
+	name, link string
+	typ        byte
+	data       []byte
+}
+
+// archiveOf is an archive of entries, as a container's daemon could give it.
+func archiveOf(t *testing.T, entries ...archiveEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := tar.NewWriter(&buf)
+	for _, e := range entries {
+		if err := w.WriteHeader(&tar.Header{Name: e.name, Linkname: e.link, Typeflag: e.typ, Size: int64(len(e.data)), Mode: 0o644}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(e.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestAContainersArchiveIsReadAsTheOneFileAsked: Docker's archive of a
+// container's file is the container's to shape, so keploy reads only one
+// of the shape Docker gives of that one file, into memory: a single entry
+// of the type asked (a regular file; a link, for its target), named the
+// file's last name, a regular file of at most learn.ZoneFileCap bytes,
+// refused before any is read. Every other is refused, naming why: an entry
+// named to leave the archive ("../localtime") or absolutely, a link or a
+// hard link in a regular file's place, an oversized file, a second entry.
+// No entry's name is a path on this host: the directory the rows run in
+// holds nothing new after each. A link's target is the container's, given
+// as it is ("../usr/share/zoneinfo/...", which learn resolves in the
+// container's own view).
+func TestAContainersArchiveIsReadAsTheOneFileAsked(t *testing.T) {
+	kolkata := zoneData(t, "Asia/Kolkata")
+	top := t.TempDir()
+	cwd := top + "/a/b"
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	const lt = "/etc/localtime"
+	big := make([]byte, learn.ZoneFileCap+1)
+	rows := []struct {
+		name    string
+		link    bool // the row reads lt's link (Readlink), else lt's bytes
+		entries []archiveEntry
+		want    string // the error's text; "" for a read
+	}{
+		{name: "a regular file of its name", entries: []archiveEntry{{name: "localtime", typ: tar.TypeReg, data: kolkata}}},
+		{name: "a regular file of its name, cleaned", entries: []archiveEntry{{name: "./localtime", typ: tar.TypeReg, data: kolkata}}},
+		{name: "an entry named to leave the archive", entries: []archiveEntry{{name: "../localtime", typ: tar.TypeReg, data: kolkata}}, want: `holds "../localtime", not "localtime"`},
+		{name: "an entry of an absolute name", entries: []archiveEntry{{name: "/etc/localtime", typ: tar.TypeReg, data: kolkata}}, want: `holds "/etc/localtime", not "localtime"`},
+		{name: "another file's entry", entries: []archiveEntry{{name: "shadow", typ: tar.TypeReg, data: kolkata}}, want: `holds "shadow", not "localtime"`},
+		{name: "a link in a regular file's place", entries: []archiveEntry{{name: "localtime", typ: tar.TypeSymlink, link: "/etc/shadow"}}, want: "no regular file (L"},
+		{name: "a hard link in a regular file's place", entries: []archiveEntry{{name: "localtime", typ: tar.TypeLink, link: "../../etc/passwd"}}, want: `holds a hard link to "../../etc/passwd" in its place`},
+		{name: "a file over the cap", entries: []archiveEntry{{name: "localtime", typ: tar.TypeReg, data: big}}, want: fmt.Sprintf("is %d bytes, more than the %d keploy reads", len(big), learn.ZoneFileCap)},
+		{name: "a second entry", entries: []archiveEntry{{name: "localtime", typ: tar.TypeReg, data: kolkata}, {name: "../evil", typ: tar.TypeReg, data: []byte("x")}}, want: `holds "../evil" too`},
+		{name: "a link of its name", link: true, entries: []archiveEntry{{name: "localtime", typ: tar.TypeSymlink, link: "../usr/share/zoneinfo/Asia/Kolkata"}}},
+		{name: "a link named to leave the archive", link: true, entries: []archiveEntry{{name: "../localtime", typ: tar.TypeSymlink, link: "/usr/share/zoneinfo/Asia/Kolkata"}}, want: `holds "../localtime", not "localtime"`},
+		{name: "a link and a second entry", link: true, entries: []archiveEntry{{name: "localtime", typ: tar.TypeSymlink, link: "/usr/share/zoneinfo/Asia/Kolkata"}, {name: "../evil", typ: tar.TypeSymlink, link: "/"}}, want: `holds "../evil" too`},
+		{name: "a regular file where a link is read", link: true, entries: []archiveEntry{{name: "localtime", typ: tar.TypeReg, data: kolkata}}, want: "is no link"},
+		{name: "a hard link where a link is read", link: true, entries: []archiveEntry{{name: "localtime", typ: tar.TypeLink, link: "/etc/shadow"}}, want: "is no link"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			f := zoneFile{data: kolkata}
+			if r.link {
+				f = zoneFile{link: "/usr/share/zoneinfo/Asia/Kolkata"}
+			}
+			api := &fakeZoneAPI{t: t, files: map[string]zoneFile{lt: f}, raw: map[string][]byte{lt: archiveOf(t, r.entries...)}}
+			c := containerFiles{ctx: t.Context(), api: api, id: "app"}
+			var got string
+			var err error
+			if r.link {
+				got, err = c.Readlink(lt)
+			} else {
+				var rc io.ReadCloser
+				if rc, err = c.OpenRegular(lt); err == nil {
+					var b []byte
+					b, err = io.ReadAll(rc)
+					if cerr := rc.Close(); err == nil {
+						err = cerr
+					}
+					got = string(b)
+				}
+			}
+			switch {
+			case r.want == "" && err != nil:
+				t.Fatalf("read %s: %v; want it read", lt, err)
+			case r.want == "" && r.link && got != r.entries[0].link:
+				t.Fatalf("read %s's target as %q; want %q, as the link holds it", lt, got, r.entries[0].link)
+			case r.want == "" && !r.link && got != string(kolkata):
+				t.Fatalf("read %d bytes of %s; want Kolkata's %d", len(got), lt, len(kolkata))
+			case r.want != "" && (err == nil || !strings.Contains(err.Error(), r.want)):
+				t.Fatalf("read %s as %d bytes or %q (%v); want refused, saying %q", lt, len(got), got, err, r.want)
+			}
+			if r.want != "" && len(r.entries[0].data) > learn.ZoneFileCap {
+				if n := *api.rawRead[lt]; n > learn.ZoneFileCap {
+					t.Fatalf("keploy read %d bytes of an archive of a file over the cap; want it refused by its header, before its bytes", n)
+				}
+			}
+			var left []string
+			if err := filepath.WalkDir(top, func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if p != top && p != top+"/a" && p != cwd {
+					left = append(left, p)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(left) != 0 {
+				t.Fatalf("reading the archive wrote %v on the host", left)
+			}
+		})
+	}
+
+	// Through the zone read: a zone file whose archive holds a second
+	// entry leaves the zone unknown, saying why.
+	api := &fakeZoneAPI{t: t, files: map[string]zoneFile{"/bin/sh": {data: []byte("x")}, lt: {link: "/usr/share/zoneinfo/Asia/Kolkata"}, "/usr/share/zoneinfo/Asia/Kolkata": {data: kolkata}},
+		raw: map[string][]byte{"/usr/share/zoneinfo/Asia/Kolkata": archiveOf(t, archiveEntry{name: "Kolkata", typ: tar.TypeReg, data: kolkata}, archiveEntry{name: "../../../../tmp/x", typ: tar.TypeReg, data: []byte("x")})}}
+	z, err := zoneOfApp(t, api)
+	if err == nil || !strings.Contains(err.Error(), `holds "../../../../tmp/x" too`) {
+		t.Fatalf("a zone file whose archive holds a second entry read as %v (%v); want unknown, saying why", z.Loc, err)
+	}
 }

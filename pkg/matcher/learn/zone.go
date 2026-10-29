@@ -1390,9 +1390,12 @@ func utcOffset(off int) string {
 }
 
 // under is p, a path in the process's own view, as keploy reaches it under
-// root: never above root, whatever ".." p holds.
+// root: never above root, whatever ".." p holds. p is cleaned as a path of
+// this host (filepath, not path), the separators the kernel reads it by:
+// path.Clean reads a "\" as part of a name, so on Windows "a\..\..\x"
+// would pass it whole and climb above root once filepath.Join reads it.
 func under(root, p string) string {
-	return filepath.Join(root, path.Clean("/"+p))
+	return filepath.Join(root, filepath.Clean("/"+p))
 }
 
 // readZoneFile reads the zone file at p, a path in the process's own view,
@@ -1415,6 +1418,11 @@ func readZoneFileIn(f ZoneFiles, p string) ([]byte, string, error) {
 // zoneFileCap bounds the bytes readRegular reads: a zone file holds a few
 // KiB.
 const zoneFileCap = 1 << 20
+
+// ZoneFileCap is zoneFileCap, for a ZoneFiles that reads a file whole
+// before OpenRegular gives it (containerkey's, from Docker's archive of the
+// file), and refuses a longer one unread.
+const ZoneFileCap = zoneFileCap
 
 // errNotRegular is readRegular's error of a file that is no regular one.
 type errNotRegular struct{ mode fs.FileMode }
