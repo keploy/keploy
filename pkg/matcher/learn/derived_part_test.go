@@ -53,7 +53,7 @@ func TestEachPartATierKeepsIsABitOfItsOwnThatTheTierHolds(t *testing.T) {
 		}
 		seen |= p
 	}
-	tr := newTier[int](1<<20, true)
+	tr := newTier[int](1<<20, &budget{limit: 1 << 20}, true)
 	for name, p := range tierParts() {
 		if p == 0 {
 			continue
