@@ -206,8 +206,8 @@ var errShareSpent = errors.New("the descriptor kept changing as its file was rea
 func (t *fileTally) settle() error {
 	clean := 0
 	for {
+		// Only a check that was not clean leaves descriptors to read again.
 		for len(t.todo) > 0 {
-			clean = 0
 			fd := t.todo[0]
 			t.todo = t.todo[1:]
 			if err := t.hold(fd); errors.Is(err, errShareSpent) {
