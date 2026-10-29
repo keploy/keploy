@@ -228,6 +228,14 @@ type Agent struct {
 	// replay, under the proven switch: the start time of the process that
 	// opened each window in workerOpen (procStartTime), where it is known.
 	openProc map[scopeKey]string
+
+	// record, under the proven switch: the test scope each window in
+	// workerOpen opened on the recording's mock manager (recordScope), which
+	// tells the recorders what test a call was made in while the test is
+	// open (syncMock.TestScope). spanMgr is that manager; nil is the
+	// package global's (syncMock.Get).
+	openScopes map[scopeKey]*syncMock.TestScope
+	spanMgr    *syncMock.SyncMockManager
 }
 
 func New(logger *zap.Logger, hook coreAgent.Hooks, proxy coreAgent.Proxy, client kdocker.Client, ip coreAgent.IncomingProxy, config *config.Config) *Agent {
@@ -647,6 +655,11 @@ const (
 func (a *Agent) resetScopeState() {
 	a.scopeMu.Lock()
 	a.workerOpen, a.openProc = nil, nil
+	// A test a previous session left open is no test case of this one.
+	for _, s := range a.openScopes {
+		s.Abandon()
+	}
+	a.openScopes = nil
 	a.scopeWindows = nil
 	a.scopeMeta = nil
 	// A gate belongs to the replay that installed it; the CLI installs this
