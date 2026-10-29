@@ -70,3 +70,15 @@ func clientGone(state uint8) bool {
 	}
 	return false
 }
+
+// sockBase is nothing on Linux: tcpi_bytes_received counts from the
+// connection's first byte, so there is nothing to read as it is kept.
+type sockBase struct{}
+
+// beginCounts reads nothing on Linux (sockBase).
+func (c *trackedConn) beginCounts() {}
+
+// socketCounts is socketReceived of c's socket.
+func (c *trackedConn) socketCounts(connView) (received uint64, state uint8, ok bool) {
+	return socketReceived(c.raw)
+}

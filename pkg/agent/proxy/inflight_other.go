@@ -15,3 +15,11 @@ func finCounted(uint8, bool) bool { return false }
 
 // clientGone: the kernel's TCP state is not read on this platform.
 func clientGone(uint8) bool { return false }
+
+type sockBase struct{}
+
+func (c *trackedConn) beginCounts() {}
+
+func (c *trackedConn) socketCounts(connView) (received uint64, state uint8, ok bool) {
+	return socketReceived(c.raw)
+}

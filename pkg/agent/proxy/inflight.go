@@ -115,6 +115,11 @@ type trackedConn struct {
 	// raw reads how many bytes the socket has received (untaken); nil for
 	// a conn with no socket under it.
 	raw syscall.RawConn
+	// base is what the platform reads, as c is kept and before its handler
+	// runs, that its later counts of what the socket received are taken
+	// from (beginCounts; on macOS, the application's first sequence
+	// number).
+	base sockBase
 	// forgotten: its handler is done with it (forget).
 	forgotten atomic.Bool
 	// beforeClose, when set (by the accept, before the handler runs), runs
@@ -206,6 +211,7 @@ func (t *inflight) trackTold(conn net.Conn, flights *learn.Tracker) *trackedConn
 	if sc, ok := conn.(syscall.Conn); ok {
 		if raw, err := sc.SyscallConn(); err == nil {
 			tc.raw = raw
+			tc.beginCounts()
 		}
 	}
 	t.mu.Lock()
@@ -682,7 +688,7 @@ func (c *trackedConn) hungUp(v connView) bool {
 	if c.raw == nil {
 		return false
 	}
-	_, state, ok := socketReceived(c.raw)
+	_, state, ok := c.socketCounts(v)
 	return ok && clientGone(state)
 }
 
@@ -916,13 +922,13 @@ func (c *trackedConn) NetConn() net.Conn { return c.Conn }
 // loaded host is as long as the scheduler makes it). The socket alone does not
 // show those, and the counts show their read as one waiting for the
 // application. They are what the socket has received in all (the kernel's
-// count, tcpi_bytes_received, read after v, so a read that returns between
-// the two counts as untaken, never as neither) less what v says the reads
-// returned. On Linux that count takes the application's FIN as one: it is
-// taken off once the socket is in a state only a FIN it received leads to, or
-// in TCP_CLOSE (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK ended)
-// after a read returned the stream's end (finCounted); macOS's counts no FIN,
-// and nothing is taken off. In
+// count, read after v, so a read that returns between the two counts as
+// untaken, never as neither: tcpi_bytes_received on Linux, the distance its
+// next expected sequence number has come on macOS, socketCounts) less what v
+// says the reads returned. Either count takes the application's FIN as one:
+// it is taken off once the socket is in a state only a FIN it received leads
+// to, or closed (reset, or closed as its FIN_WAIT2, CLOSING or LAST_ACK
+// ended) after a read returned the stream's end (finCounted). In
 // TCP_CLOSE with no end returned the kernel's counts do not tell the FIN from
 // a byte (a TLS layer stops reading at the close_notify before it), so it
 // counts as one until a read returns it or the handler closes the
@@ -941,7 +947,7 @@ func (c *trackedConn) received(v connView) uint64 {
 	if c.raw == nil {
 		return v.delivered
 	}
-	received, state, ok := socketReceived(c.raw)
+	received, state, ok := c.socketCounts(v)
 	if !ok {
 		return v.delivered
 	}
