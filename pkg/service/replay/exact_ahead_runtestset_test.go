@@ -70,6 +70,10 @@ type aheadInstr struct {
 	lateInStream bool
 	heldLate     []string
 	untilPool    bool
+	// served is what the next read of what was consumed gives as answered
+	// by a set-aside test's recording (MockState.SetAsideFrom): by mock,
+	// the set-aside test an opening named it with (ExactServing.Aside).
+	served map[string]string
 }
 
 func (a *aheadInstr) BeginTestErrorCapture(context.Context) error {
@@ -113,6 +117,14 @@ func (a *aheadInstr) UpdateMockParams(ctx context.Context, p models.MockFilterPa
 			a.opens = map[string]int{}
 		}
 		a.opens[p.Exact.Test]++
+		for _, s := range p.Exact.Aside {
+			for _, n := range s.Owned {
+				if a.served == nil {
+					a.served = map[string]string{}
+				}
+				a.served[n] = s.Test
+			}
+		}
 		a.mu.Unlock()
 	}
 	err := a.prInstr.UpdateMockParams(ctx, p)
@@ -179,6 +191,10 @@ func (a *aheadInstr) GetConsumedMocks(context.Context) ([]models.MockState, erro
 		out = append(out, st)
 	}
 	a.pending = nil
+	for n, from := range a.served {
+		out = append(out, models.MockState{Name: n, Kind: models.HTTP, Usage: models.Deleted, IsFiltered: true, Lifetime: models.LifetimePerTest, SetAsideFrom: from})
+	}
+	a.served = nil
 	for _, n := range a.gap {
 		out = append(out, models.MockState{Name: n, Kind: models.HTTP, Usage: models.Updated, Lifetime: models.LifetimeSession, ReqBodyNoise: map[string][]string{"body.at": {}}})
 	}
@@ -194,7 +210,11 @@ func exactSends(p []models.MockFilterParams) []string {
 		switch ex := s.Exact; {
 		case ex == nil || ex.Stage:
 		case ex.Test != "":
-			out = append(out, "open "+ex.Test)
+			open := "open " + ex.Test
+			for _, a := range ex.Aside {
+				open += " aside " + a.Test + ":" + strings.Join(a.Owned, ",")
+			}
+			out = append(out, open)
 		default:
 			out = append(out, strings.TrimSpace("pool "+strings.Join(ex.Ahead, ",")))
 		}
@@ -231,6 +251,12 @@ type aheadOpts struct {
 	// reconsumed, unreadAt, lateLearnAt and lateInStream are aheadInstr's.
 	reconsumed, unreadAt, lateLearnAt string
 	lateInStream                      bool
+	// aside is a test case the replay sets aside (quarantined, with a
+	// reason): the stand-in agent answers the next opening's read with its
+	// recording, as served from it. noReason skips it with no reason
+	// (the user's own ignoredTests): it is not set aside.
+	aside    string
+	noReason bool
 }
 
 // aheadMockDB is prMockDB that hands what the full round keeps to persisted.
@@ -334,6 +360,12 @@ func aheadRun(t *testing.T, o aheadOpts) ([]string, *tmplHarness, *aheadInstr) {
 		if unsendable != "" {
 			c.Test.BasePath = "http://" + app.addr
 		}
+		if o.aside != "" {
+			c.Test.IgnoredTests = map[string][]string{"test-set-0": {o.aside}}
+			if !o.noReason {
+				c.Test.SkipReasons = skipReasonsFor("test-set-0", map[string]string{o.aside: "flaky/request_changed"})
+			}
+		}
 	})
 	mocks := []*models.Mock{poll(2), poll(3), poll(4), poll(5)}
 	h.r.mockDB.(*prMockDB).filtered = mocks
@@ -358,7 +390,7 @@ func aheadRun(t *testing.T, o aheadOpts) ([]string, *tmplHarness, *aheadInstr) {
 	// With a failed read what test-2 consumed is not all known: it has no
 	// verdict to check here.
 	switch r := h.result(t, "test-2"); {
-	case o.failAhead != "" || o.failDrainAt != "" || o.unreadAt == "test-2" || o.lateLearnAt == "test-2":
+	case o.failAhead != "" || o.failDrainAt != "" || o.unreadAt == "test-2" || o.lateLearnAt == "test-2" || o.aside == "test-2":
 	case unsendable == "test-2" || refused == "test-2":
 		if r.Status != models.TestStatusFailed {
 			t.Fatalf("precondition: test-2 is %s; it fails unsent", r.Status)
@@ -948,6 +980,55 @@ func TestRunTestSet_TheRetryCyclesAreServedWhatTheFirstCycleLearned(t *testing.T
 			}
 			if !reflect.DeepEqual(got, want) || !slices.Contains(got, "poll-2") || !slices.Contains(got, "hb-1") {
 				t.Fatalf("the retry cycles were served the learning of %v; the round keeps %v (poll-2's and the gap's heartbeats among it)", got, want)
+			}
+		})
+	}
+}
+
+// keploy test under the switch, TestNonExistentApp's shape: test-2 is set
+// aside (quarantined, with a reason), so the next test case's opening names
+// it with its recordings (models.ExactServing.Aside), once for the set: a
+// retry cycle's opening does not name it again, nor does a later test
+// case's. What its recording answered in test-3's window is no consume of
+// test-3's: test-3 passes, and its result names the serve. A test skipped
+// with no reason (the user's own ignoredTests) is not set aside: no opening
+// names it.
+func TestRunTestSet_TheTestAfterASetAsideOneIsServedItsRecordings(t *testing.T) {
+	t.Setenv(provenswitch.Env, "1")
+	for _, tc := range []struct {
+		name     string
+		retry    bool
+		noReason bool
+		want     []string
+	}{
+		{name: "a test ignored with no reason", noReason: true, want: []string{
+			"open test-1", "pool poll-3", "open test-3", "pool",
+			"pool poll-4", "open test-4", "pool poll-5", "open test-5", "pool",
+		}},
+		{name: "one cycle", want: []string{
+			"open test-1", "pool poll-3", "open test-3 aside test-2:poll-2", "pool",
+			"pool poll-4", "open test-4", "pool poll-5", "open test-5", "pool",
+		}},
+		{name: "a retry cycle", retry: true, want: []string{
+			"open test-1", "pool poll-3", "open test-3 aside test-2:poll-2", "pool",
+			"pool poll-3", "open test-3", "pool",
+			"pool poll-4", "open test-4", "pool poll-5", "open test-5", "pool",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, h, _ := aheadRun(t, aheadOpts{aside: "test-2", retry: tc.retry, noReason: tc.noReason})
+			if strings.Join(got, " | ") != strings.Join(tc.want, " | ") {
+				t.Fatalf("exact sends\n got %v\nwant %v", got, tc.want)
+			}
+			if r := h.result(t, "test-2"); r.Status != models.TestStatusIgnored || (r.SkipReason == "") != tc.noReason {
+				t.Fatalf("test-2 is %s (%q); it is skipped, with its reason when it has one", r.Status, r.SkipReason)
+			}
+			r := h.result(t, "test-3")
+			if r.Status != models.TestStatusPassed {
+				t.Fatalf("test-3 is %s; a set-aside recording's serve fails nothing: %+v", r.Status, r.FailureInfo)
+			}
+			if want := []string{"poll-2 served from test-2 (set aside)"}; tc.noReason && len(r.FailureInfo.ServedAside) > 0 || !tc.noReason && !tc.retry && !slices.Equal(r.FailureInfo.ServedAside, want) {
+				t.Fatalf("test-3 names %v; want %v", r.FailureInfo.ServedAside, want)
 			}
 		})
 	}
