@@ -1338,7 +1338,8 @@ func (a *Agent) reapOpenTest(ctx context.Context) error {
 // process that made the call (models.UnmatchedCall.Answer, Source: names,
 // no value), and the call's shape
 // (models.MissShape): for HTTP and gRPC the method and the target's shape,
-// for SQL the statement with its literals written "?". No body, no bound
+// for SQL the statement with its literals written "?", for MongoDB the
+// command, its namespace and its filter's keys. No body, no bound
 // parameter, no SQL literal, no query value, and no path segment that looks
 // like a value (models.PathShape says which do) or that a test variable's
 // place on the call names (VariablePlaces: one the miss names, one the

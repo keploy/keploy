@@ -175,6 +175,15 @@ func TestCallShape(t *testing.T) {
 		{"Postgres", "PostgresV2", "SELECT 1", "SELECT ?"},
 		{"SQL withheld from its first byte", "MySQL", "/* ping */ SELECT 1", "…"},
 		{"another protocol has no shape", "Redis", "GET session:alice", ""},
+		{"MongoDB", "MongoDB", "find on app_config_audits", "find on app_config_audits"},
+		{"MongoDB, a tenant's collection", "MongoDB", "find on orders_tenant42", "find on {}"},
+		{"MongoDB, a namespace", "MongoDB", "find on api.app_config_audits filter appId,name", "find on api.app_config_audits filter appId,name"},
+		{"MongoDB, a key that is a value", "MongoDB", "find on {}.users filter alice@example.com,items.0.sku,…", "find on {}.users filter {}.com,items.{}.sku,…"},
+		{"MongoDB, a handshake", "MongoDB", "hello", "hello"},
+		{"MongoDB, no collection", "MongoDB", "hello on ", "hello"},
+		{"MongoDB, the legacy command collection", "MongoDB", "isMaster on $cmd", "isMaster on $cmd"},
+		{"MongoDB, a cursor's number", "MongoDB", "getMore on 8723648723", "getMore on {}"},
+		{"MongoDB, what else a summary holds is left out", "MongoDB", "find on users where alice", "find on users"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -202,6 +211,49 @@ func TestMissShape(t *testing.T) {
 	// The places the closest mock declares are holed too, with no diff.
 	declared := UnmatchedCall{Protocol: "HTTP", ActualSummary: "GET /orders/kqzxwv/lines/abcd", VariablePlaces: []string{"url.path[1]", "url.path[3]", "body.id"}}
 	require.Equal(t, "GET /orders/{}/lines/{}", MissShape(declared))
+}
+
+// A MongoDB miss's shape names the database its command ran in and its
+// filter's keys, from the request the matcher rendered, each part a name or
+// {}, never a value the filter holds (a key's dots are the steps of a path
+// into the document, as the server reads them, so each step is shaped on its
+// own); a miss with no rendered request, or
+// one that does not read as a command, is shaped by its summary alone. The
+// shape is its own shape, as a report's evidence reads it again.
+func TestMissShape_MongoDB(t *testing.T) {
+	miss := func(summary, req string) UnmatchedCall {
+		return UnmatchedCall{Protocol: "MongoDB", ActualSummary: summary, ReceivedReq: req}
+	}
+	cases := []struct {
+		name string
+		m    UnmatchedCall
+		want string
+	}{
+		{"a find by a test's id, as api-server's app_config_audits read", miss("find on app_config_audits",
+			`{"cmd":{"$db":"api","find":"app_config_audits","filter":{"appId":"6720b1c2e4b0a1b2c3d4e5f6","name":"[E2E] app-crud-1761734400123456789"},"limit":1}}`),
+			"find on api.app_config_audits filter appId,name"},
+		{"a tenant's database and keys that are values", miss("find on users",
+			`{"cmd":{"$db":"tenant_42","find":"users","filter":{"profile.city":"Pune","alice@example.com":1,"items.0.sku":"x","":2}}}`),
+			"find on {}.users filter {},{}.com,items.{}.sku,profile.city"},
+		{"count reads its query", miss("count on orders", `{"cmd":{"$db":"shop","count":"orders","query":{"status":"open"}}}`), "count on shop.orders filter status"},
+		{"switch off renders no database", miss("find on app_config_audits", `{"cmd":{"find":"app_config_audits","filter":{"appId":"x"}}}`), "find on app_config_audits filter appId"},
+		{"no filter", miss("insert on events", `{"cmd":{"$db":"api","insert":"events"},"docs":[{"_id":"x"}]}`), "insert on api.events"},
+		{"more keys than a shape names", miss("find on t", `{"cmd":{"$db":"d","find":"t","filter":{"a":1,"b":1,"c":1,"d":1,"e":1,"f":1,"g":1,"h":1,"i":1}}}`), "find on d.t filter a,b,c,d,e,f,g,h,…"},
+		{"no rendered request", miss("find on app_config_audits", ""), "find on app_config_audits"},
+		{"a request that does not parse", miss("find on app_config_audits", `{"cmd":`), "find on app_config_audits"},
+		{"a cursor's number is no collection", miss("getMore on 8723648723", `{"cmd":{"$db":"api","getMore":8723648723,"collection":"app_config_audits"}}`), "getMore on {}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := MissShape(c.m)
+			require.Equal(t, c.want, got)
+			require.Equal(t, got, CallShape(c.m.Protocol, got), "a shape is its own shape")
+			require.Equal(t, got, MissShape(UnmatchedCall{Protocol: c.m.Protocol, ActualSummary: got}), "a sanitized miss shapes to itself")
+			for _, v := range []string{"6720b1c2", "app-crud", "Pune", "alice", "open", "tenant_42"} {
+				require.NotContains(t, got, v)
+			}
+		})
+	}
 }
 
 // A mock's declared path places: each variable's bind and use places that
