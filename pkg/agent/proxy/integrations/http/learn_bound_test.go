@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"testing"
@@ -106,57 +107,82 @@ func largeStreamMiB(t *testing.T) int {
 	return n
 }
 
-// The HTTP learn step reads the recordings before a call within a fixed
-// bound of memory, however many there are and however large their answers:
-// a recording's answer the agent parked on disk is read back only where a
-// rule reads it, and what is built of it is kept in the set's bounded store
-// (learn.DriftCache.LazyRawOf), never every one at once. Both ways a pool
-// call reaches them: the store's recordings on disk, handed over one at a
-// time (integrations.RecordedBeforeReader), and the recordings it stages in
-// memory with their answers parked (integrations.StagedReader). Either set
-// (256 MiB of answers by default; KEPLOY_LARGE_STREAM_MIB=1100 for the
-// 1 GB+ run on a test box) is learned within the bound with the verdict a
-// small set gives: refused, the token answered earlier, by mock-0.
-func TestLearnMatchReadsTheRecordingsBeforeACallWithinAFixedBound(t *testing.T) {
+// boundLimits are the agent memory limits the bound row runs at, each with
+// the set budget it gives (learn's setBudget: a quarter of the limit), and
+// boundOverhead is what the row lets the heap pass that budget by: the
+// recording read in flight (1 MiB of text, its decoded forms and words) and
+// the tiers' bookkeeping, measured at 3, 4 and 6 MiB at these limits.
+var boundLimits = []struct {
+	limit, budget int64
+}{
+	{256 << 20, 64 << 20},
+	{512 << 20, 128 << 20},
+	{1 << 30, 256 << 20},
+}
+
+const boundOverhead = 16 << 20
+
+// The HTTP learn step reads the recordings before a call within the set's
+// budget of memory, however many there are and however large their
+// answers: a recording's answer the agent parked on disk is read back only
+// where a rule reads it, and what is built of it is kept in the set's store
+// (learn.DriftCache.LazyRawOf) within one budget, a quarter of the agent's
+// memory limit (learn's setBudget), never every one at once. The row runs
+// at three limits, the Go runtime's (GOMEMLIMIT, as the agent's memory
+// guard sets it; a box's or a CI runner's cgroup sets a higher one), and
+// the peak heap follows the budget each gives, within boundOverhead. Both
+// ways a pool call reaches the recordings: the store's on disk, handed
+// over one at a time (integrations.RecordedBeforeReader), and those it
+// stages in memory with their answers parked (integrations.StagedReader).
+// Either set (256 MiB of answers by default, four times the least budget;
+// KEPLOY_LARGE_STREAM_MIB=1100 for the 1 GB+ run on a test box) is learned
+// within the bound with the verdict a small set gives: refused, the token
+// answered earlier, by mock-0.
+func TestLearnMatchReadsTheRecordingsBeforeACallWithinTheSetsBudget(t *testing.T) {
 	if raceOn {
 		t.Skip("a heap bound is the plain run's to check: the race detector's own allocations are no part of the learn step's")
 	}
 	const size = 1 << 20
-	const bound = 128 << 20
 	mib := largeStreamMiB(t)
-	for _, way := range []string{"on disk", "staged"} {
-		t.Run(way, func(t *testing.T) {
-			h, n, opts := learnOn(t)
-			opts.LearnPool = true
-			ctx := learn.WithTracker(context.Background(), learn.NewTracker())
-			login := learnRecorded("mock-0", time.Second, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
-			refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
-			refresh.TestModeInfo.Lifetime = models.LifetimeSession
-			base := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{refresh}}}
-			hp := &heapPeak{}
-			var db integrations.MockMemDb = base
-			switch way {
-			case "on disk":
-				db = &streamedHTTPDisk{learnDb: base, n: mib, size: size, last: login, sample: hp.sample}
-			case "staged":
-				// The staged recordings are in memory as the store keeps
-				// them, their answers parked: the heap is measured from
-				// after they are made.
-				for i := 0; i < mib; i++ {
-					base.staged = append(base.staged, parkedBig(i, time.Duration(i)*time.Microsecond, size, hp.sample))
+	for _, l := range boundLimits {
+		for _, way := range []string{"on disk", "staged"} {
+			t.Run(fmt.Sprintf("%d MiB limit %s", l.limit>>20, way), func(t *testing.T) {
+				prev := debug.SetMemoryLimit(l.limit)
+				defer debug.SetMemoryLimit(prev)
+				bound := l.budget + boundOverhead
+				h, n, opts := learnOn(t)
+				opts.LearnPool = true
+				// The set starts (and reads its budget) here, under the limit.
+				ctx := learn.WithTracker(context.Background(), learn.NewTracker())
+				login := learnRecorded("mock-0", time.Second, "POST", "/v1/login", `{"user":"u-7"}`, nil, `{"token":"tok-0c41b2"}`)
+				refresh := learnRecorded("mock-1", 2*time.Second, "POST", "/v1/sessions/refresh", `{"token":"tok-0c41b2"}`, nil, `{}`)
+				refresh.TestModeInfo.Lifetime = models.LifetimeSession
+				base := &learnDb{mockMemDb: mockMemDb{mocks: []*models.Mock{refresh}}}
+				hp := &heapPeak{}
+				var db integrations.MockMemDb = base
+				switch way {
+				case "on disk":
+					db = &streamedHTTPDisk{learnDb: base, n: mib, size: size, last: login, sample: hp.sample}
+				case "staged":
+					// The staged recordings are in memory as the store keeps
+					// them, their answers parked: the heap is measured from
+					// after they are made.
+					for i := 0; i < mib; i++ {
+						base.staged = append(base.staged, parkedBig(i, time.Duration(i)*time.Microsecond, size, hp.sample))
+					}
+					base.staged = append(base.staged, login)
 				}
-				base.staged = append(base.staged, login)
-			}
-			hp.reset()
-			served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
-			hp.now()
-			t.Logf("%s: %d recordings of %d bytes read; peak heap above the start %d MiB (bound %d MiB)", way, mib, size, hp.peak>>20, bound>>20)
-			if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, "holds earlier (in mock-0)") {
-				t.Fatalf("served %v miss %+v err %v; want refused, the token answered earlier by mock-0", served, miss, err)
-			}
-			if hp.peak > bound {
-				t.Fatalf("the learn step's heap grew %d MiB while reading %d MiB of recordings before the call: it holds them at once, not within the %d MiB bound", hp.peak>>20, mib, bound>>20)
-			}
-		})
+				hp.reset()
+				served, miss, err := h.learnMatch(ctx, live("POST", "/v1/sessions/refresh", `{"token":"tok-9d8e7f"}`, nil), db, n, opts)
+				hp.now()
+				t.Logf("%s at a %d MiB limit: %d recordings of %d bytes read; peak heap above the start %d MiB (budget %d MiB, bound %d MiB)", way, l.limit>>20, mib, size, hp.peak>>20, l.budget>>20, bound>>20)
+				if err != nil || served != nil || miss == nil || !strings.Contains(miss.res.Why, "holds earlier (in mock-0)") {
+					t.Fatalf("served %v miss %+v err %v; want refused, the token answered earlier by mock-0", served, miss, err)
+				}
+				if hp.peak > uint64(bound) {
+					t.Fatalf("the learn step's heap grew %d MiB while reading %d MiB of recordings before the call, past the set's budget of %d MiB at a %d MiB limit and the %d MiB it may pass it by: it holds them at once, not within the budget", hp.peak>>20, mib, l.budget>>20, l.limit>>20, boundOverhead>>20)
+				}
+			})
+		}
 	}
 }
