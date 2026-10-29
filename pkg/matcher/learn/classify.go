@@ -187,6 +187,15 @@ type Raw struct {
 	// (offsetFrom) tells by them whether F gave the application two
 	// recordings both runs gave it in the order the recording did.
 	first, last int
+	// olderTest: F gave the application the mock only in an older test of
+	// the set than the call's (ServedInAnOlderTest; Order.ServedView marks
+	// it by the serves' numbers), never at the start-up, between tests or in
+	// the call's own test. An instant whole its answer holds is then set
+	// aside as a value's source where F's view, stated, shows the value
+	// moved apart from it, as an instant the application sent is
+	// (appearedIn, follows.refute); one F gave the application anywhere else
+	// stays its source whatever F gave there.
+	olderTest bool
 	// call is the call the mock answers, as one recording of it stands in
 	// for another (callOf): only an answer to the same call is given in
 	// another's place (the offset rule, offsetFrom).
@@ -370,7 +379,7 @@ func (r Raw) WithServed(served bool) Raw {
 	r.served = served
 	if !served {
 		r.first, r.last, r.asRecorded, r.live = 0, 0, false, nil
-		r.unseen, r.views = false, nil
+		r.unseen, r.views, r.olderTest = false, nil, false
 	}
 	return r
 }
@@ -392,6 +401,28 @@ func (r Raw) ServedAsRecorded() Raw {
 
 // AsRecorded reports whether F served r unchanged (ServedAsRecorded).
 func (r Raw) AsRecorded() bool { return r.served && r.asRecorded }
+
+// ServedInAnOlderTest is r, which F served (ServedIn, WithServed), as served
+// only in an older test of the set than the call's: never at the set's
+// start-up, between tests or in the call's own test. Under the rule a copy
+// follows its source (ClassifyFollowing) an instant whole that its answer
+// gave the application is then set aside as the source of a value that
+// moved apart from what F gave there, by F's view (ServedAsRecorded,
+// ServedLive), as an instant the application sent at any place is
+// (appearedIn, follows.refute); with no view stated it stays the value's
+// source (a founder ruling, 2026-10-29). An answer given anywhere else
+// stays its source whatever F gave there (a founder decision: a data-plane
+// answer's instant is a variable, which every replay checks).
+// Order.ServedView says it where F's serves of the mock show it; an adapter
+// need not. Of a Raw F did not serve it says nothing.
+func (r Raw) ServedInAnOlderTest() Raw {
+	r.olderTest = true
+	return r
+}
+
+// InAnOlderTest reports whether F served r only in an older test of the set
+// than the call's (ServedInAnOlderTest).
+func (r Raw) InAnOlderTest() bool { return r.served && r.olderTest }
 
 // viewUnstated reports whether F served r and no adapter said what F gave
 // the application there: not as recorded (ServedAsRecorded), with no view
@@ -755,6 +786,15 @@ type Learned struct {
 	// the value is a clock read, and how to correct it (evidence). It never
 	// holds a value: it names a part of one by where it stands.
 	Why string
+	// Refuted, of a value learned as noise or as a read of the clock past
+	// sources the search for it set aside under the rule a copy follows
+	// its source (ClassifyFollowing, follows.refute: a place F gave the
+	// application that the value moved apart from), names them and why
+	// each is none (follows.refutedAll); "" otherwise. Noise's Why names
+	// the first too; a read of the clock's does not (its Why is the
+	// refusal of a caller whose replay checks no read), so a caller that
+	// learns the read names them from here where it says what it learned.
+	Refuted string
 	// Bindable, of a KindUnaccounted leaf of keploy mock's client test
 	// (DriftCache.ClientTests), says the value is one its test gave the
 	// application, first sent at this call: keploy found no source of it
@@ -1629,6 +1669,9 @@ func classifyRead(dc *DriftCache, drift []string, live, rec Shape, at time.Time,
 			if ln = fol.followed(ln, at, served, all); ln.Kind == KindNoise {
 				ln.Why = fol.aside + ", and keploy learns it as varying"
 			}
+		}
+		if ln.Kind == KindNoise || ln.Kind == KindClockRead {
+			ln.Refuted = fol.refutedAll()
 		}
 		return ln
 	}
@@ -2899,7 +2942,13 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 			// are then one value. An instant x's answer gave the
 			// application is followed as the same value whole, as before,
 			// whatever F gave there (a founder decision: a data-plane
-			// answer's instant is a variable, which every replay checks).
+			// answer's instant is a variable, which every replay checks),
+			// but one it gave the application only in an older test of the
+			// set (Raw.InAnOlderTest), which follows the rule as a sent one
+			// does: where F's stated view shows the value moved apart from
+			// it, the value is no copy of it, and the refuted place is named
+			// (a founder ruling, 2026-10-29). With no view stated it stays
+			// the source.
 			for _, text := range texts {
 				// A whole copy of a stamp x's answer gave the application is
 				// marked so (Place.givenWhole) only where the full round does
@@ -2932,7 +2981,7 @@ func appearedIn(dc *DriftCache, v *valueDrift, at time.Time, served []Earlier, r
 					// needs only x and what F gave there.
 					rf = &follows{dc: dc, rec: v.rec, live: v.live, at: at}
 				}
-				if !swap && sentOnly(x, texts, held) && rf.refute(x, texts, keep, v, p) {
+				if !swap && (x.InAnOlderTest() || sentOnly(x, texts, held)) && rf.refute(x, texts, keep, v, p) {
 					break
 				}
 				return p, true

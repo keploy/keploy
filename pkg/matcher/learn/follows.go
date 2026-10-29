@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -113,6 +114,11 @@ type follows struct {
 	// value learned as noise says of it (followed).
 	at      time.Time
 	refuted string
+	// refutes are the further mocks the search went past so after the
+	// first (refuted), each once, in the order it went past them, with
+	// why (refutedAll); refutedOf are the mocks of all of them.
+	refutes   []refutedPlace
+	refutedOf map[string]bool
 	// aside, where the search for the value's source went past a leaf that
 	// held its recorded value whole and that F saw hold another value
 	// (refuteSeen), names the first such leaf: what a value learned as noise
@@ -214,12 +220,21 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 			return false
 		}
 	}
-	if f.refuted == "" {
+	if f.refuted == "" || !f.refutedOf[x.mock] {
 		found := "its recorded value stands whole in " + placeAt(p)
 		if p.Held != v.rec && p.Held != v.decRec {
 			found = "a part of its recorded value (" + partOf(v.rec, p.Held) + ") stands in " + placeAt(p)
 		}
-		f.refuted = found + gave + ": a copy moves with its source, so the value is no copy of it"
+		why := found + gave + ": a copy moves with its source, so the value is no copy of it"
+		if f.refuted == "" {
+			f.refuted = why
+		} else {
+			f.refutes = append(f.refutes, refutedPlace{x.mock, why})
+		}
+		if f.refutedOf == nil {
+			f.refutedOf = map[string]bool{}
+		}
+		f.refutedOf[x.mock] = true
 	}
 	// The word rule reads the same word at the same place on the same terms
 	// and notes it there too (excusedRaw); a source set aside is noted here
@@ -227,6 +242,52 @@ func (f *follows) refute(x Raw, texts [2]string, keep bool, v *valueDrift, p Pla
 	f.source(x.mock)
 	return true
 }
+
+// refutedPlace is a mock the search for a value's source went past
+// (follows.refute), and why.
+type refutedPlace struct {
+	mock, why string
+}
+
+// refutedAll names every mock the search for the value's source went past
+// (follows.refute), what a value learned past them names (Learned.Refuted):
+// the first two more after the first with why, then the rest by name, the
+// first maxRefutedNamed of them and how many more. "" where it went past
+// none.
+func (f *follows) refutedAll() string {
+	if f == nil || f.refuted == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(f.refuted)
+	for i, r := range f.refutes {
+		if i == 2 {
+			rest := f.refutes[i:]
+			b.WriteString("; and so are ")
+			b.WriteString(strconv.Itoa(len(rest)))
+			b.WriteString(" more recordings (")
+			for k, x := range rest {
+				if k == maxRefutedNamed {
+					b.WriteString(", …")
+					break
+				}
+				if k > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(x.mock)
+			}
+			b.WriteString(")")
+			break
+		}
+		b.WriteString("; ")
+		b.WriteString(r.why)
+	}
+	return b.String()
+}
+
+// maxRefutedNamed is how many of the further mocks the search went past
+// refutedAll names after the ones it says why of.
+const maxRefutedNamed = 8
 
 // refuteSeen reports whether s, a leaf of e, an exchange F served before the
 // call, that held v's recorded value whole (whole), is no place the value came

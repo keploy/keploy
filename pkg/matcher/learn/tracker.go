@@ -47,6 +47,17 @@ type Tracker struct {
 	set    []*models.Mock
 	serves map[string][]int
 	seq    int
+	// testFrom is the number the running test's first serve takes (seq + 1
+	// at its Begin), 0 before the set's first test, and outsideSeq the
+	// numbers of the serves made while no test was open (at the start-up,
+	// between tests): a mock every serve of which numbers below testFrom and
+	// none of them outside a test F gave the application only in an older
+	// test of the set (Order.ServedView, Raw.ServedInAnOlderTest). NewSet
+	// forgets them with serves. A serve adds its number to outsideSeq under
+	// the lock, past every number an Order read before holds (upTo), and an
+	// Order reads it under the lock, so it reads what its read saw.
+	testFrom   int
+	outsideSeq map[int]bool
 	// asRecorded are, of each mock F served in the set (by mockID), the
 	// statements its adapters made that a serve of it gave the application
 	// its recording byte for byte (ServedMockAsRecorded, Served of an
@@ -220,6 +231,7 @@ func (t *Tracker) NewSetAt(at time.Time) {
 	t.served = nil
 	t.mocks, t.kept, t.before = nil, nil, nil
 	t.set, t.serves, t.seq, t.asRecorded, t.lives = nil, nil, 0, nil, nil
+	t.testFrom, t.outsideSeq = 0, nil
 	t.flights, t.lifts, t.handshakes = nil, nil, nil
 	t.places, t.derived = newSetPlaces(), newSetDerived()
 	t.outside, t.outsideKept = nil, nil
@@ -541,6 +553,7 @@ func (t *Tracker) beginAt(at time.Time) func() {
 	t.open, t.began = true, true
 	t.beganAt = at
 	t.recBegan, t.nextRecBegan = t.nextRecBegan, time.Time{}
+	t.testFrom = t.seq + 1
 	return say
 }
 
@@ -716,7 +729,7 @@ func (t *Tracker) Placed() Placed {
 		Test: t.epoch, Earlier: earlier, Served: append([]*models.Mock(nil), t.mocks...), Before: before, Awaiting: t.awaiting != nil,
 		Open: t.open, Begun: t.began, SetAt: t.setEpoch,
 		Set:   t.set[:len(t.set):len(t.set)],
-		Order: Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying},
+		Order: Order{t: t, serves: t.serves, asRecorded: t.asRecorded, lives: t.lives, upTo: t.seq, testFrom: t.testFrom, outside: t.outsideSeq, places: t.places, flights: t.flights, handshakes: t.handshakes, set: t.setEpoch, landings: t.landings, flying: t.flying},
 	}
 }
 
@@ -789,6 +802,12 @@ func (t *Tracker) servedIn(m *models.Mock, at time.Time, in *Flight, k serveKind
 	}
 	t.seq++
 	t.serves[id] = append(t.serves[id], t.seq)
+	if !t.open {
+		if t.outsideSeq == nil {
+			t.outsideSeq = map[int]bool{}
+		}
+		t.outsideSeq[t.seq] = true
+	}
 	if k.handshake {
 		if t.handshakes == nil {
 			t.handshakes = map[int]bool{}
@@ -835,7 +854,13 @@ type Order struct {
 	asRecorded map[string][]int
 	lives      map[string]*liveViews
 	upTo       int
-	places     *setPlaces
+	// testFrom is the number the running test's first serve took or takes,
+	// as the read saw it (Tracker.testFrom): 0 where no test had begun in
+	// the set; outside the numbers of the set's serves made while no test
+	// was open (Tracker.outsideSeq).
+	testFrom int
+	outside  map[int]bool
+	places   *setPlaces
 	// flights, landings and flying are the set's requests of each serve,
 	// the landings the read saw and whether F's order is read by flights
 	// (Order.told).
@@ -900,19 +925,36 @@ func (o Order) Spans(ms []*models.Mock) [][2]int {
 // adapter told of, or one keploy cannot tell from another set's. F's view of
 // r is then one no adapter stated, and a word a value holds now that may
 // stand there is refused (Raw.viewUnstated: fail closed). A Raw with a view
-// already stated (ServedLive, ServedChanged) or not served, or one of another
-// mock, is returned as it is. Every adapter's learn step reads the recordings
-// F served through it, so a statement one adapter made holds for every
-// other's call.
+// already stated (ServedLive, ServedChanged) keeps it. Every adapter's learn
+// step reads the recordings F served through it, so a statement one adapter
+// made holds for every other's call.
+//
+// Where F made every serve of m the read saw in an older test of the set
+// (olderTestLocked), r is also marked so (Raw.ServedInAnOlderTest): F gave
+// the application m's answer there, never at the start-up, between tests or
+// in the call's own test. One serve there, or one in an order keploy cannot
+// tell, leaves it unmarked: the answer then stays where a value may have
+// come from, whatever F gave there (fail closed). A Raw not served, or of
+// another mock, is returned as it is.
 func (o Order) ServedView(m *models.Mock, r Raw) Raw {
-	if o.t == nil || m == nil || r.mock != m.Name || !r.viewUnstated() {
+	if o.t == nil || m == nil || r.mock != m.Name || !r.served {
 		return r
 	}
+	id := MockID(m)
+	unstated := r.viewUnstated()
+	var recorded, unread, ok bool
+	var loads []func() (*models.Mock, error)
 	o.t.mu.Lock()
-	recorded, loads, unread, ok := o.viewsLocked(MockID(m))
+	older := o.olderTestLocked(id)
+	if unstated {
+		recorded, loads, unread, ok = o.viewsLocked(id)
+	}
 	o.t.mu.Unlock()
+	if older {
+		r = r.ServedInAnOlderTest()
+	}
 	switch {
-	case !ok:
+	case !unstated, !ok:
 		return r
 	case unread:
 		return r.ServedChanged()
@@ -978,6 +1020,25 @@ func (o Order) viewsLocked(id string) (recorded bool, loads []func() (*models.Mo
 func viewRaw(m *models.Mock, load func() (*models.Mock, error)) Raw {
 	return Raw{mock: m.Name, at: m.Spec.ReqTimestampMock, answered: m.Spec.ResTimestampMock, served: true, call: callOf(m),
 		src: &rawSource{name: m.Name, load: load}}
+}
+
+// olderTestLocked reports whether F made every serve of the mock of
+// identity id the read saw (those numbered up to upTo), and one, in an older
+// test of the set than the running one: while a test was open (none
+// outside), numbered below the running test's first (testFrom), each in an
+// order keploy can tell (told). o.t.mu held.
+func (o Order) olderTestLocked(id string) bool {
+	n := o.serves[id]
+	k := sort.SearchInts(n, o.upTo+1)
+	if k == 0 || n[k-1] >= o.testFrom {
+		return false
+	}
+	for _, s := range n[:k] {
+		if o.outside[s] || !o.told(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // ofLocked is Of of the mock of identity id, o.t.mu held (the running set's
